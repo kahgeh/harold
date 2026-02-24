@@ -115,7 +115,7 @@ fn fetch_new_messages(last_rowid: i64) -> Vec<(i64, String)> {
 // Tag parsing
 // ---------------------------------------------------------------------------
 
-fn parse_tag(text: &str) -> (Option<&str>, &str) {
+pub(crate) fn parse_tag(text: &str) -> (Option<&str>, &str) {
     if let Some(rest) = text.strip_prefix('[')
         && let Some(end) = rest.find(']')
     {
@@ -130,7 +130,7 @@ fn parse_tag(text: &str) -> (Option<&str>, &str) {
 // Live pane discovery
 // ---------------------------------------------------------------------------
 
-fn is_claude_code_process(cmd: &str) -> bool {
+pub(crate) fn is_claude_code_process(cmd: &str) -> bool {
     // Claude Code runs as a node process named like "16.20.1" (the node version)
     // or with the claude binary name. We match process names that look like
     // a semver string (digits.digits.digits) which is how node appears in tmux.
@@ -285,7 +285,7 @@ fn semantic_resolve(body: &str, panes: &[PaneInfo]) -> Option<(usize, String)> {
 // Pane resolution — returns index into panes slice + cleaned body
 // ---------------------------------------------------------------------------
 
-fn resolve_pane<'a>(
+pub(crate) fn resolve_pane<'a>(
     tag: Option<&str>,
     body: &str,
     panes: &'a [PaneInfo],
@@ -321,7 +321,7 @@ fn resolve_pane<'a>(
 // tmux relay
 // ---------------------------------------------------------------------------
 
-fn strip_control(text: &str) -> String {
+pub(crate) fn strip_control(text: &str) -> String {
     // Remove ANSI escape sequences and control characters before sending to tmux.
     // The '-l' flag prevents shell interpretation but raw bytes still reach the pane.
     let mut out = String::with_capacity(text.len());
@@ -457,113 +457,6 @@ pub async fn run_reply_router() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Unit tests
-// ---------------------------------------------------------------------------
-
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parse_tag_with_tag() {
-        let (tag, body) = parse_tag("[main] hello world");
-        assert_eq!(tag, Some("main"));
-        assert_eq!(body, "hello world");
-    }
-
-    #[test]
-    fn parse_tag_without_tag() {
-        let (tag, body) = parse_tag("just a message");
-        assert_eq!(tag, None);
-        assert_eq!(body, "just a message");
-    }
-
-    #[test]
-    fn parse_tag_unclosed_bracket() {
-        let (tag, body) = parse_tag("[unclosed message");
-        assert_eq!(tag, None);
-        assert_eq!(body, "[unclosed message");
-    }
-
-    #[test]
-    fn resolve_pane_exact_match() {
-        let panes = vec![
-            PaneInfo {
-                pane_id: "%1".into(),
-                label: "work:0.0".into(),
-            },
-            PaneInfo {
-                pane_id: "%2".into(),
-                label: "home:0.1".into(),
-            },
-        ];
-        let result = resolve_pane(Some("work:0.0"), "hi", &panes);
-        assert!(result.is_some());
-        assert_eq!(result.unwrap().0.pane_id, "%1");
-    }
-
-    #[test]
-    fn resolve_pane_substring_match() {
-        let panes = vec![
-            PaneInfo {
-                pane_id: "%1".into(),
-                label: "work:0.0".into(),
-            },
-            PaneInfo {
-                pane_id: "%2".into(),
-                label: "home:0.1".into(),
-            },
-        ];
-        let result = resolve_pane(Some("home"), "hi", &panes);
-        assert!(result.is_some());
-        assert_eq!(result.unwrap().0.pane_id, "%2");
-    }
-
-    #[test]
-    fn resolve_pane_no_tag_falls_back_to_my_agent() {
-        let panes = vec![PaneInfo {
-            pane_id: "%1".into(),
-            label: "my-agent:0.0".into(),
-        }];
-        let result = resolve_pane(None, "hi", &panes);
-        assert!(result.is_some());
-        assert_eq!(result.unwrap().0.pane_id, "%1");
-    }
-
-    #[test]
-    fn resolve_pane_no_match_returns_none() {
-        let panes = vec![PaneInfo {
-            pane_id: "%1".into(),
-            label: "work:0.0".into(),
-        }];
-        let result = resolve_pane(Some("nonexistent"), "hi", &panes);
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn strip_control_removes_ansi_and_controls() {
-        // ANSI escape sequences are stripped; \x01 (SOH) is a control char and stripped;
-        // the text "hidden" after it is plain ASCII and passes through.
-        let input = "\x1b[31mred\x1b[0m normal\x01hidden";
-        let output = strip_control(input);
-        assert_eq!(output, "red normalhidden");
-    }
-
-    #[test]
-    fn strip_control_removes_lone_control_chars() {
-        // A lone \x01 with no trailing text is stripped entirely.
-        let input = "clean\x01";
-        let output = strip_control(input);
-        assert_eq!(output, "clean");
-    }
-
-    #[test]
-    fn is_claude_code_process_matches_node_version() {
-        assert!(is_claude_code_process("16.20.1"));
-        assert!(is_claude_code_process("20.11.0"));
-        assert!(!is_claude_code_process("python3.11"));
-        assert!(!is_claude_code_process("bash"));
-        assert!(!is_claude_code_process("node"));
-    }
-}
+#[path = "routing_test.rs"]
+mod tests;
