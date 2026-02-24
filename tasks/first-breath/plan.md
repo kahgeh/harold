@@ -4,7 +4,46 @@ Get Harold working end-to-end, replacing the current Python relay (`imessage_lis
 
 ---
 
-## Step 1 — Proto definition
+## Step 1 — Configuration
+
+No hardcoded values — all tunables loaded from config files and env vars.
+
+- Add dependencies to `Cargo.toml`:
+  - `config = "0.15.19"` — layered config (TOML + env vars)
+  - `dotenvy = "0.15.7"` — `.env` file support
+  - `serde` (with `derive`) — config struct deserialization
+- Create `config/default.toml` with all defaults:
+  - gRPC listen address/port
+  - iMessage recipient
+  - chat.db path
+  - AI CLI path
+  - TTS command
+  - Log level
+- Create `src/settings.rs` with:
+  - `Settings` struct covering all config values
+  - `Settings::load()` — layered: `default.toml` → `{env}.toml` → `HAROLD__` env vars
+  - `OnceLock<Arc<Settings>>` global singleton
+- Environment controlled via `HAROLD_ENV` (default: `local`)
+
+---
+
+## Step 2 — Logging
+
+Set up structured logging from the start so all subsequent steps emit useful output.
+
+- Add dependencies to `Cargo.toml`:
+  - `tracing = "0.1.44"`
+  - `tracing-subscriber = "0.3.22"` (with `env-filter`, `fmt` features)
+  - `tracing-log = "0.2.0"`
+- Create `src/telemetry.rs`:
+  - `init_telemetry()` — sets up `tracing-subscriber` with JSON formatter and env filter
+  - `TelemetryGuard` — ensures flush on shutdown
+- Call `init_telemetry()` after config is loaded in `main()`
+- Log level sourced from `Settings` (configurable via `HAROLD__LOG__LEVEL` env var)
+
+---
+
+## Step 3 — Proto definition
 
 Define the gRPC service contract.
 
@@ -15,7 +54,7 @@ Define the gRPC service contract.
 
 ---
 
-## Step 2 — gRPC server skeleton
+## Step 4 — gRPC server skeleton
 
 Stand up a minimal Harold binary that accepts `TurnComplete` calls.
 
@@ -26,7 +65,7 @@ Stand up a minimal Harold binary that accepts `TurnComplete` calls.
 
 ---
 
-## Step 3 — Event store
+## Step 5 — Event store
 
 Persist `TurnComplete` events using the events crate pattern.
 
@@ -37,7 +76,7 @@ Persist `TurnComplete` events using the events crate pattern.
 
 ---
 
-## Step 4 — Notification: TTS (at desk)
+## Step 6 — Notification: TTS (at desk)
 
 Implement voice announcement for at-desk use.
 
@@ -48,7 +87,7 @@ Implement voice announcement for at-desk use.
 
 ---
 
-## Step 5 — Notification: iMessage (away)
+## Step 7 — Notification: iMessage (away)
 
 Implement iMessage notification for away use.
 
@@ -59,7 +98,7 @@ Implement iMessage notification for away use.
 
 ---
 
-## Step 6 — Reply routing
+## Step 8 — Reply routing
 
 Poll `chat.db` and route incoming iMessage replies to tmux panes.
 
@@ -75,7 +114,7 @@ Poll `chat.db` and route incoming iMessage replies to tmux panes.
 
 ---
 
-## Step 7 — Slim down smart_stop.py
+## Step 9 — Slim down smart_stop.py
 
 Replace the current hook with a thin emitter.
 
@@ -86,7 +125,7 @@ Replace the current hook with a thin emitter.
 
 ---
 
-## Step 8 — Cleanup
+## Step 10 — Cleanup
 
 - Remove `imessage_listener.py` (replaced by Harold)
 - Remove dead code from `smart_stop.py`
