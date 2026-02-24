@@ -19,6 +19,10 @@ Harold is agent-agnostic. The hook is the only part that knows anything about a 
 
 See [tasks/first-breath/architecture.md](tasks/first-breath/architecture.md) for the full architecture.
 
+## Prerequisites
+
+See [docs/prerequisites.md](docs/prerequisites.md).
+
 ## Status
 
 Early development.
