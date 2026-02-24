@@ -3,6 +3,8 @@ use std::process::Command;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicI64, Ordering};
 
+use tokio::sync::watch;
+
 use tracing::info;
 
 use crate::settings::get_settings;
@@ -442,7 +444,7 @@ fn do_poll() {
 // Public entry point
 // ---------------------------------------------------------------------------
 
-pub async fn run_reply_router() {
+pub async fn run_reply_router(mut shutdown: watch::Receiver<()>) {
     let initial = tokio::task::spawn_blocking(get_max_rowid)
         .await
         .unwrap_or(0);
@@ -452,8 +454,16 @@ pub async fn run_reply_router() {
     info!(initial_rowid = initial, "reply router started");
 
     loop {
-        tokio::task::spawn_blocking(do_poll).await.ok();
-        tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+        tokio::select! {
+            _ = shutdown.changed() => {
+                info!("reply router shutting down");
+                break;
+            }
+            _ = async {
+                tokio::task::spawn_blocking(do_poll).await.ok();
+                tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+            } => {}
+        }
     }
 }
 

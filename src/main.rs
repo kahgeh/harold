@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use settings::{get_settings, init_settings};
 use telemetry::init_telemetry;
+use tokio::sync::watch;
 use tonic::{Request, Response, Status, transport::Server};
 use tracing::info;
 
@@ -63,6 +64,16 @@ impl Harold for HaroldService {
     }
 }
 
+async fn shutdown_signal() {
+    use tokio::signal::unix::{SignalKind, signal};
+    let mut sigint = signal(SignalKind::interrupt()).expect("failed to install SIGINT handler");
+    let mut sigterm = signal(SignalKind::terminate()).expect("failed to install SIGTERM handler");
+    tokio::select! {
+        _ = sigint.recv() => info!("received SIGINT"),
+        _ = sigterm.recv() => info!("received SIGTERM"),
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let settings = settings::Settings::load()?;
@@ -77,14 +88,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let addr = cfg.grpc.addr()?;
     info!(address = %addr, "Harold listening");
 
-    // Give the projector its own Arc; the gRPC service keeps the other.
+    // Shutdown channel: sender closes on signal, receivers see the channel close.
+    let (shutdown_tx, shutdown_rx) = watch::channel(());
+
     let projector_store = Arc::clone(&store);
-    tokio::spawn(projector::run_projector(projector_store));
-    tokio::spawn(routing::run_reply_router());
+    tokio::spawn(projector::run_projector(
+        projector_store,
+        shutdown_rx.clone(),
+    ));
+    tokio::spawn(routing::run_reply_router(shutdown_rx));
 
     Server::builder()
         .add_service(HaroldServer::new(HaroldService { store }))
-        .serve(addr)
+        .serve_with_shutdown(addr, async {
+            shutdown_signal().await;
+            info!("shutting down");
+            // Drop the sender to signal all receivers.
+            drop(shutdown_tx);
+        })
         .await?;
 
     Ok(())
