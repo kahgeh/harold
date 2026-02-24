@@ -4,12 +4,16 @@ Harold is a notification and reply routing relay for AI coding agents.
 
 ## The problem
 
-When you're away from your desk, AI coding agents (Claude Code, OpenCode, Codex, etc.) finish turns with no way to reach you — and you have no way to reply back to the right session. You're either staring at your phone waiting, or you come back to find ten sessions paused waiting for input.
+Modern AI coding agents are fast enough that running multiple sessions in parallel is practical — one working on a feature, another fixing a bug, another reviewing docs. But keeping track of which session needs your attention, and when, becomes its own problem.
+
+**At your desk:** You're focused on one session while others run in the background. When one completes and needs your input, you miss it. Harold announces completions via voice so you know to switch panes without constantly checking.
+
+**Away from your desk:** Sessions finish with no way to reach you, and you have no way to reply back to the right one. You come back to find everything paused, waiting. Harold notifies you via iMessage with a smart summary of what was done and what's needed, and routes your replies back to the correct session.
 
 Harold solves this by:
 
-- **Notifying you** via iMessage (with a smart summary) when a turn completes
-- **Routing your replies** back to the correct tmux pane, even when you have multiple sessions running
+- **Announcing completions** via voice (at desk) or iMessage (away) when a turn completes
+- **Routing your replies** back to the correct tmux pane, even across multiple running sessions
 
 ## How it works
 
