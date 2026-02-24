@@ -1,0 +1,16 @@
+[grpc]
+host = "127.0.0.1"
+port = 50060
+
+[imessage]
+
+[chat_db]
+path = "~/Library/Messages/chat.db"
+
+[ai]
+
+[tts]
+command = "say"
+
+[log]
+level = "info"

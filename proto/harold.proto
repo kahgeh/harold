@@ -1,0 +1,18 @@
+syntax = "proto3";
+
+package harold;
+
+service Harold {
+  rpc TurnComplete (TurnCompleteRequest) returns (TurnCompleteResponse);
+}
+
+message TurnCompleteRequest {
+  string pane_id = 1;
+  string pane_label = 2;
+  string transcript = 3;
+  string git_context = 4;
+}
+
+message TurnCompleteResponse {
+  bool accepted = 1;
+}
