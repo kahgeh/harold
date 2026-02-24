@@ -3,8 +3,23 @@ use std::sync::{Arc, OnceLock};
 
 use config::{Config, ConfigError, File, FileFormat};
 use serde::Deserialize;
+use tracing::warn;
 
 static SETTINGS: OnceLock<Arc<Settings>> = OnceLock::new();
+
+fn expand_tilde(path: &str) -> String {
+    if let Some(rest) = path.strip_prefix("~/") {
+        match std::env::var("HOME") {
+            Ok(home) => format!("{home}/{rest}"),
+            Err(_) => {
+                warn!("HOME env var not set; cannot expand tilde in path: {path}");
+                path.to_string()
+            }
+        }
+    } else {
+        path.to_string()
+    }
+}
 
 #[derive(Debug, Deserialize)]
 pub struct GrpcSettings {
@@ -20,25 +35,29 @@ impl GrpcSettings {
 
 #[derive(Debug, Deserialize)]
 pub struct ImessageSettings {
-    #[expect(dead_code, reason = "used in Step 7")]
     pub recipient: Option<String>,
+    pub handle_id: Option<i64>,
+    pub extra_handle_ids: Option<Vec<i64>>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct ChatDbSettings {
-    #[expect(dead_code, reason = "used in Step 8")]
     pub path: String,
+}
+
+impl ChatDbSettings {
+    pub fn resolved_path(&self) -> String {
+        expand_tilde(&self.path)
+    }
 }
 
 #[derive(Debug, Deserialize)]
 pub struct AiSettings {
-    #[expect(dead_code, reason = "used in Steps 6-7")]
     pub cli_path: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct TtsSettings {
-    #[expect(dead_code, reason = "used in Step 6")]
     pub command: String,
 }
 
@@ -48,31 +67,38 @@ pub struct LogSettings {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct StoreSettings {
+    pub path: String,
+}
+
+impl StoreSettings {
+    pub fn resolved_path(&self) -> String {
+        expand_tilde(&self.path)
+    }
+}
+
+#[derive(Debug, Deserialize)]
 pub struct Settings {
     pub grpc: GrpcSettings,
-    #[expect(dead_code, reason = "used in Steps 7-8")]
     pub imessage: ImessageSettings,
-    #[expect(dead_code, reason = "used in Step 8")]
     pub chat_db: ChatDbSettings,
-    #[expect(dead_code, reason = "used in Steps 6-7")]
     pub ai: AiSettings,
-    #[expect(dead_code, reason = "used in Step 6")]
     pub tts: TtsSettings,
     pub log: LogSettings,
+    pub store: StoreSettings,
 }
 
 impl Settings {
     pub fn load() -> Result<Arc<Self>, ConfigError> {
         let env = std::env::var("HAROLD_ENV").unwrap_or_else(|_| "local".into());
-
-        let config_dir = std::env::var("HAROLD_CONFIG_DIR")
-            .unwrap_or_else(|_| "config".into());
+        let config_dir = std::env::var("HAROLD_CONFIG_DIR").unwrap_or_else(|_| "config".into());
 
         let config = Config::builder()
-            .add_source(File::new(&format!("{config_dir}/default"), FileFormat::Toml))
-            .add_source(
-                File::new(&format!("{config_dir}/{env}"), FileFormat::Toml).required(false),
-            )
+            .add_source(File::new(
+                &format!("{config_dir}/default"),
+                FileFormat::Toml,
+            ))
+            .add_source(File::new(&format!("{config_dir}/{env}"), FileFormat::Toml).required(false))
             .add_source(
                 config::Environment::with_prefix("HAROLD")
                     .separator("__")

@@ -14,3 +14,6 @@ command = "say"
 
 [log]
 level = "info"
+
+[store]
+path = "~/.harold/events"
