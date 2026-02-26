@@ -6,7 +6,9 @@
 
 ## References
 
-- [Features](references/features.md)
+- [Notification](references/notification/README.md)
+- [Reply Routing](references/reply-routing/README.md)
+- [Operation](references/operation/README.md)
 
 ## Explanations
 
