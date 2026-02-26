@@ -329,15 +329,6 @@ fn pane_session(pane_id: &str) -> Option<String> {
 pub fn notify(turn: &TurnCompleted) {
     let cfg = get_settings();
 
-    if cfg.notify.skip_if_pane_active {
-        if let Some(active) = active_tmux_pane_id() {
-            if active == turn.pane_id {
-                info!("notification skipped (pane is active)");
-                return;
-            }
-        }
-    }
-
     if cfg.notify.skip_if_session_active {
         if let (Some(active_session), Some(pane_session)) = (
             active_tmux_session(),
@@ -345,6 +336,13 @@ pub fn notify(turn: &TurnCompleted) {
         ) {
             if active_session == pane_session {
                 info!("notification skipped (session is active)");
+                return;
+            }
+        }
+    } else if cfg.notify.skip_if_pane_active {
+        if let Some(active) = active_tmux_pane_id() {
+            if active == turn.pane_id {
+                info!("notification skipped (pane is active)");
                 return;
             }
         }
