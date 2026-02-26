@@ -24,6 +24,6 @@ Harold is currently macOS-only. It relies on iMessage (via AppleScript) and the 
 
 ## Agent hook
 
-Each agent needs a stop hook that calls Harold via `grpcurl` when a turn completes. See the [architecture doc](../tasks/first-breath/architecture.md) for the payload format.
+Each agent needs a stop hook that calls Harold via `grpcurl` when a turn completes. See the [architecture doc](explanations/architecture.md) for the payload format.
 
 A reference hook for Claude Code is provided in `hooks/claude_code/`.

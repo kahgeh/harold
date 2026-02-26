@@ -58,20 +58,6 @@ Harold is agent-agnostic — it works with any agent that can shell out to `grpc
 
 ---
 
-## TurnComplete RPC payload
-
-```protobuf
-message TurnCompleteRequest {
-  string pane_id            = 1;  // tmux pane ID (e.g. "%12")
-  string pane_label         = 2;  // human-readable label (e.g. "alir-app main:0.1")
-  string last_user_prompt   = 3;  // last thing the user asked
-  string assistant_message  = 4;  // agent's final response
-  string main_context       = 5;  // git branch or repo name
-}
-```
-
----
-
 ## Responsibilities
 
 | Concern | Owner |
@@ -92,6 +78,20 @@ message TurnCompleteRequest {
 
 ---
 
+## TurnComplete RPC payload
+
+```protobuf
+message TurnCompleteRequest {
+  string pane_id            = 1;  // tmux pane ID (e.g. "%12")
+  string pane_label         = 2;  // human-readable label (e.g. "alir-app main:0.1")
+  string last_user_prompt   = 3;  // last thing the user asked
+  string assistant_message  = 4;  // agent's final response
+  string main_context       = 5;  // git branch or repo name
+}
+```
+
+---
+
 ## Reply routing (inbound)
 
 1. `[tag]` prefix → exact/substring match against live tmux panes
@@ -104,7 +104,7 @@ message TurnCompleteRequest {
 
 ## State
 
-Harold owns all state:
+Harold owns all routing state in-memory, backed by the event store for durability:
 
 ```json
 {
@@ -113,4 +113,4 @@ Harold owns all state:
 }
 ```
 
-Routing uses live tmux queries — no stale pane registry.
+Live pane discovery uses live tmux queries — no stale pane registry.
