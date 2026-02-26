@@ -1,6 +1,6 @@
 # Reply Routing
 
-Inbound iMessages are routed to the correct tmux pane.
+Reply Routing routes inbound iMessage replies to the correct agent session running in a tmux pane.
 
 ## Problem
 

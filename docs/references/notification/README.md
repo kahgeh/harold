@@ -1,6 +1,6 @@
 # Notification
 
-When a turn completes, Harold notifies the user based on context.
+Notification notifies the user of completed agent turns, via voice when at the desk or iMessage when away.
 
 ## Problem
 

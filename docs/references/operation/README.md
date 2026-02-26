@@ -1,5 +1,7 @@
 # Operation
 
+Operation covers how Harold is started, configured, and shut down.
+
 ## Problem
 
 Harold needs to be running whenever an agent turn completes, but manually starting a daemon before every session is fragile and easy to forget.
