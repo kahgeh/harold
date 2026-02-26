@@ -14,3 +14,7 @@ command = "say"
 # Or use a custom TTS script:
 # command = "uv"
 # args = ["run", "/path/to/tts_script.py"]
+
+# [notify]
+# skip_if_pane_active = true    # skip if the completed pane is currently focused
+# skip_if_session_active = true # skip if any pane in the same tmux session is active
