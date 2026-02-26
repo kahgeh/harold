@@ -112,6 +112,26 @@ When a `TurnCompleted` event is received, Harold decides how to notify:
 
 ---
 
+## Lifecycle
+
+**Startup** — The agent stop hook checks for a running Harold (TCP connect to the gRPC port) and spawns it if absent, with its working directory set to the binary's parent so config and the event store are found without environment variables.
+
+**Running** — Three concurrent tasks:
+
+1. gRPC server — accepts `TurnComplete` RPCs, appends events, updates `last_notified_pane`
+2. Projector — consumes events from the store, drives notification and reply routing
+3. Listener — polls `chat.db` every 5 s for new inbound iMessages, appends `ReplyReceived` events
+
+**Shutdown** — SIGINT or SIGTERM triggers an ordered shutdown:
+
+1. gRPC server stops accepting new requests
+2. Projector and listener tasks drain and exit
+3. WAL checkpoint flushes all pending writes to the main database files
+
+The checkpoint ensures the next startup opens a clean database without replaying WAL pages.
+
+---
+
 ## State
 
 Harold owns all routing state in-memory, backed by the event store for durability:
