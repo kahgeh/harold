@@ -161,10 +161,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 async fn async_main(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
     let settings = settings::Settings::load()?;
-    init_settings(settings);
+    init_telemetry(&settings.log.level);
 
+    let errors = settings.validate();
+    if !errors.is_empty() {
+        for e in &errors {
+            tracing::error!("{e}");
+        }
+        return Err("invalid configuration".into());
+    }
+
+    init_settings(settings);
     let cfg = get_settings();
-    init_telemetry(&cfg.log.level);
 
     if args
         .iter()

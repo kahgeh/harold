@@ -129,7 +129,7 @@ fn semantic_resolve(body: &str, panes: &[PaneInfo]) -> Option<(usize, String)> {
          And these active tmux panes:\n{labels_list}\n\n\
          Pane labels use hyphens where users may write spaces (e.g. 'my agent' refers to 'my-agent').\n\
          Does the message contain EXPLICIT routing intent to a specific pane? \
-         (direct address like 'To X,', 'ask X', '[X]', 'my agent' — NOT just thematic association)\n\
+         (direct address like 'To X,', 'ask X', '[X]', 'my agent')\n\
          If yes, reply on two lines:\n\
          LINE1: exact pane label\n\
          LINE2: message with routing prefix removed\n\
@@ -207,16 +207,20 @@ pub(crate) fn resolve_pane<'a>(
         return Some((&panes[idx], cleaned));
     }
 
+    if let Some(p) = panes
+        .iter()
+        .find(|p| p.label.to_lowercase().contains("my-agent"))
+    {
+        return Some((p, body.to_string()));
+    }
+
     if let Some(last) = get_last_notified_pane()
         && let Some(p) = panes.iter().find(|p| p.pane_id == last.pane_id)
     {
         return Some((p, body.to_string()));
     }
 
-    panes
-        .iter()
-        .find(|p| p.label.to_lowercase().contains("my-agent"))
-        .map(|p| (p, body.to_string()))
+    None
 }
 
 // ---------------------------------------------------------------------------

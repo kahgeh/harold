@@ -1,4 +1,8 @@
-use crate::route_reply::{PaneInfo, is_claude_code_process, parse_tag, resolve_pane, strip_control};
+use crate::route_reply::{
+    PaneInfo, is_claude_code_process, parse_tag, resolve_pane, set_last_notified_pane,
+    strip_control,
+};
+use crate::settings::init_settings_for_test;
 
 #[test]
 fn parse_tag_with_tag() {
@@ -64,6 +68,29 @@ fn resolve_pane_no_tag_falls_back_to_my_agent() {
     let result = resolve_pane(None, "hi", &panes);
     assert!(result.is_some());
     assert_eq!(result.unwrap().0.pane_id, "%1");
+}
+
+#[test]
+fn resolve_pane_my_agent_beats_last_notified() {
+    // my-agent should win over last_notified_pane when no tag or semantic match.
+    init_settings_for_test();
+    let panes = vec![
+        PaneInfo {
+            pane_id: "%1".into(),
+            label: "harold:0.3".into(),
+        },
+        PaneInfo {
+            pane_id: "%2".into(),
+            label: "my-agent:0.0".into(),
+        },
+    ];
+    set_last_notified_pane(PaneInfo {
+        pane_id: "%1".into(),
+        label: "harold:0.3".into(),
+    });
+    let result = resolve_pane(None, "hi", &panes);
+    assert!(result.is_some());
+    assert_eq!(result.unwrap().0.pane_id, "%2");
 }
 
 #[test]

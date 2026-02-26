@@ -110,6 +110,22 @@ pub struct Settings {
 }
 
 impl Settings {
+    pub fn validate(&self) -> Vec<String> {
+        let mut errors = Vec::new();
+        if self.imessage.recipient.is_none() {
+            errors.push("imessage.recipient is required".into());
+        }
+        let has_inbound = self.imessage.handle_id.is_some_and(|id| id > 0)
+            || self.imessage.self_handle_id.is_some_and(|id| id > 0);
+        if !has_inbound {
+            errors.push(
+                "imessage.handle_id or imessage.self_handle_id is required to receive messages"
+                    .into(),
+            );
+        }
+        errors
+    }
+
     pub fn load() -> Result<Arc<Self>, ConfigError> {
         let env = std::env::var("HAROLD_ENV").unwrap_or_else(|_| "local".into());
         let config_dir = std::env::var("HAROLD_CONFIG_DIR").unwrap_or_else(|_| {
@@ -143,6 +159,21 @@ impl Settings {
 
 pub fn get_settings() -> &'static Arc<Settings> {
     SETTINGS.get().expect("settings not initialised")
+}
+
+#[cfg(test)]
+pub fn init_settings_for_test() {
+    static INIT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    INIT.get_or_init(|| {
+        let manifest_dir =
+            std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
+        // SAFETY: called exactly once via OnceLock before any other thread reads this var.
+        unsafe {
+            std::env::set_var("HAROLD_CONFIG_DIR", format!("{manifest_dir}/config"));
+        }
+        let s = Settings::load().expect("failed to load settings for test");
+        let _ = SETTINGS.set(s);
+    });
 }
 
 pub fn init_settings(settings: Arc<Settings>) {
