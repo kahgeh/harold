@@ -8,16 +8,15 @@ use tracing::warn;
 static SETTINGS: OnceLock<Arc<Settings>> = OnceLock::new();
 
 fn expand_tilde(path: &str) -> String {
-    if let Some(rest) = path.strip_prefix("~/") {
-        match std::env::var("HOME") {
-            Ok(home) => format!("{home}/{rest}"),
-            Err(_) => {
-                warn!("HOME env var not set; cannot expand tilde in path: {path}");
-                path.to_string()
-            }
+    let Some(rest) = path.strip_prefix("~/") else {
+        return path.to_string();
+    };
+    match std::env::var("HOME") {
+        Ok(home) => format!("{home}/{rest}"),
+        Err(_) => {
+            warn!("HOME env var not set; cannot expand tilde in path: {path}");
+            path.to_string()
         }
-    } else {
-        path.to_string()
     }
 }
 
@@ -88,7 +87,9 @@ pub struct NotifySettings {
 
 impl Default for NotifySettings {
     fn default() -> Self {
-        Self { skip_if_session_active: true }
+        Self {
+            skip_if_session_active: true,
+        }
     }
 }
 
@@ -112,7 +113,10 @@ impl Settings {
             // Default to a config/ directory next to the running binary.
             std::env::current_exe()
                 .ok()
-                .and_then(|p| p.parent().map(|d| d.join("config").to_string_lossy().into_owned()))
+                .and_then(|p| {
+                    p.parent()
+                        .map(|d| d.join("config").to_string_lossy().into_owned())
+                })
                 .unwrap_or_else(|| "config".into())
         });
 

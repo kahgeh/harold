@@ -4,6 +4,7 @@ use tracing::{info, warn};
 
 use crate::settings::get_settings;
 use crate::store::TurnCompleted;
+use crate::util::{ai_cli_env, sanitise_for_applescript};
 
 pub fn is_screen_locked() -> bool {
     let result = Command::new("bash")
@@ -17,21 +18,6 @@ pub fn is_screen_locked() -> bool {
         Ok(out) => String::from_utf8_lossy(&out.stdout).trim() == "true",
         Err(_) => false,
     }
-}
-
-fn ai_cli_env() -> Vec<(String, String)> {
-    // Allowlist: only forward variables the AI CLI actually needs.
-    let allowed = [
-        "PATH",
-        "HOME",
-        "ANTHROPIC_API_KEY",
-        "TMPDIR",
-        "LANG",
-        "LC_ALL",
-    ];
-    std::env::vars()
-        .filter(|(k, _)| allowed.contains(&k.as_str()))
-        .collect()
 }
 
 fn run_local_model(system_prompt: &str, prompt: &str, max_tokens: u32) -> Option<String> {
@@ -209,15 +195,6 @@ pub(crate) fn split_body(body: &str) -> (&str, Option<&str>) {
     (body.trim(), None)
 }
 
-pub(crate) fn sanitise_for_applescript(text: &str) -> String {
-    // Strip characters that can break or escape an AppleScript string literal
-    // passed via `osascript -e`. Newlines end the statement; ¬ is the
-    // AppleScript line-continuation character; control chars are noise.
-    text.chars()
-        .filter(|c| *c != '\n' && *c != '\r' && *c != '¬' && !c.is_control())
-        .collect()
-}
-
 fn send_raw_imessage(text: &str, recipient: &str) {
     let safe_text = sanitise_for_applescript(text);
     let safe_recipient = sanitise_for_applescript(recipient);
@@ -318,20 +295,18 @@ fn pane_session(pane_id: &str) -> Option<String> {
 pub fn notify(turn: &TurnCompleted) {
     let cfg = get_settings();
 
-    if cfg.notify.skip_if_session_active {
-        if let (Some(active_session), Some(pane_session)) = (
-            active_tmux_session(),
-            pane_session(&turn.pane_id),
-        ) {
-            if active_session == pane_session {
-                info!("notification skipped (session is active)");
-                return;
-            }
-        }
+    if cfg.notify.skip_if_session_active
+        && let (Some(active_session), Some(pane_session)) =
+            (active_tmux_session(), pane_session(&turn.pane_id))
+        && active_session == pane_session
+    {
+        info!("notification skipped (session is active)");
+        return;
     }
 
     if is_screen_locked() {
-        return notify_away(turn);
+        notify_away(turn);
+        return;
     }
     notify_at_desk(turn);
 }

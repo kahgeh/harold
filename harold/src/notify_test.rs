@@ -1,4 +1,5 @@
-use crate::notify::{sanitise_for_applescript, split_body};
+use crate::notify::split_body;
+use crate::util::sanitise_for_applescript;
 
 #[test]
 fn split_body_no_question() {

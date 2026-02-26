@@ -4,6 +4,7 @@ use std::sync::Mutex;
 use tracing::info;
 
 use crate::settings::get_settings;
+use crate::util::{ai_cli_env, sanitise_for_applescript};
 
 // ---------------------------------------------------------------------------
 // State — last_notified_pane (in-memory; Harold owns all routing state)
@@ -48,10 +49,11 @@ pub(crate) fn is_claude_code_process(cmd: &str) -> bool {
     // Claude Code runs as a node process named like "16.20.1" (the node version).
     // We match process names that are purely digits separated by dots (semver-like).
     // TODO: replace with explicit pane registration via the TurnComplete RPC.
-    cmd.split('.').count() >= 3
-        && cmd
-            .split('.')
-            .all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
+    let parts: Vec<&str> = cmd.split('.').collect();
+    parts.len() >= 3
+        && parts
+            .iter()
+            .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
 }
 
 fn live_claude_panes() -> Vec<PaneInfo> {
@@ -108,20 +110,6 @@ fn is_pane_alive(pane_id: &str) -> bool {
 // ---------------------------------------------------------------------------
 // Semantic routing via AI CLI
 // ---------------------------------------------------------------------------
-
-fn ai_cli_env() -> Vec<(String, String)> {
-    let allowed = [
-        "PATH",
-        "HOME",
-        "ANTHROPIC_API_KEY",
-        "TMPDIR",
-        "LANG",
-        "LC_ALL",
-    ];
-    std::env::vars()
-        .filter(|(k, _)| allowed.contains(&k.as_str()))
-        .collect()
-}
 
 fn semantic_resolve(body: &str, panes: &[PaneInfo]) -> Option<(usize, String)> {
     if panes.len() <= 1 {
@@ -272,18 +260,15 @@ fn relay_to_pane(pane_id: &str, text: &str) {
 // iMessage send (for error / confirmation replies)
 // ---------------------------------------------------------------------------
 
-pub fn send_imessage(msg: &str) {
+pub(crate) fn send_imessage(msg: &str) {
     let cfg = get_settings();
     let Some(recipient) = cfg.imessage.recipient.as_deref() else {
         return;
     };
-    let sanitise = |s: &str| -> String {
-        s.chars()
-            .filter(|c| *c != '\n' && *c != '\r' && *c != '¬' && !c.is_control())
-            .collect()
-    };
-    let escaped_msg = sanitise(msg).replace('\\', "\\\\").replace('"', "\\\"");
-    let escaped_rec = sanitise(recipient)
+    let escaped_msg = sanitise_for_applescript(msg)
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"");
+    let escaped_rec = sanitise_for_applescript(recipient)
         .replace('\\', "\\\\")
         .replace('"', "\\\"");
     let script = format!(
@@ -312,11 +297,11 @@ pub fn route_reply(text: &str) {
                 .map(|p| p.label.as_str())
                 .collect::<Vec<_>>()
                 .join(", ");
-            if let Some(t) = tag {
-                send_imessage(&format!("No pane matching '{t}'. Available: {available}"));
-            } else {
-                send_imessage(&format!("No active pane found. Available: {available}"));
-            }
+            let msg = match tag {
+                Some(t) => format!("No pane matching '{t}'. Available: {available}"),
+                None => format!("No active pane found. Available: {available}"),
+            };
+            send_imessage(&msg);
         }
         Some((pane, cleaned_body)) => {
             if !is_pane_alive(&pane.pane_id) {
@@ -330,11 +315,11 @@ pub fn route_reply(text: &str) {
                     "Pane {} is no longer active. Available: {}",
                     pane.label, available
                 ));
-            } else {
-                info!(pane_id = %pane.pane_id, label = %pane.label, "routing reply");
-                relay_to_pane(&pane.pane_id, &format!("📱 {cleaned_body}"));
-                send_imessage(&format!("✓ Delivered to [{}]", pane.label));
+                return;
             }
+            info!(pane_id = %pane.pane_id, label = %pane.label, "routing reply");
+            relay_to_pane(&pane.pane_id, &format!("📱 {cleaned_body}"));
+            send_imessage(&format!("✓ Delivered to [{}]", pane.label));
         }
     }
 }

@@ -5,6 +5,7 @@ mod routing;
 mod settings;
 mod store;
 mod telemetry;
+mod util;
 
 use std::sync::Arc;
 
@@ -40,9 +41,13 @@ impl Harold for HaroldService {
             "turn complete received"
         );
 
+        let pane = routing::PaneInfo {
+            pane_id: req.pane_id,
+            label: req.pane_label,
+        };
         let event = store::TurnCompleted {
-            pane_id: req.pane_id.clone(),
-            pane_label: req.pane_label.clone(),
+            pane_id: pane.pane_id.clone(),
+            pane_label: pane.label.clone(),
             last_user_prompt: req.last_user_prompt,
             assistant_message: req.assistant_message,
             main_context: req.main_context,
@@ -56,10 +61,7 @@ impl Harold for HaroldService {
                 Status::internal("event store write failed")
             })?;
 
-        routing::set_last_notified_pane(routing::PaneInfo {
-            pane_id: req.pane_id,
-            label: req.pane_label,
-        });
+        routing::set_last_notified_pane(pane);
 
         Ok(Response::new(TurnCompleteResponse { accepted: true }))
     }
@@ -105,8 +107,7 @@ fn run_diagnostics(delay_secs: u64) {
     );
     println!(
         "TTS           : command={} voice={:?}",
-        cfg.tts.command,
-        cfg.tts.voice,
+        cfg.tts.command, cfg.tts.voice,
     );
     println!(
         "AI cli        : {:?}",
@@ -114,19 +115,19 @@ fn run_diagnostics(delay_secs: u64) {
     );
 
     println!("\n--- Testing notify path (screen_locked={locked}) ---");
-    if locked {
-        if cfg.imessage.recipient.is_none() {
-            println!("iMessage NOT sent: recipient not configured");
-        } else {
-            println!("Sending iMessage...");
-            notify_away(&turn);
-            println!("iMessage sent (check your phone)");
-        }
-    } else {
+    if !locked {
         println!("Running TTS...");
         notify_at_desk(&turn);
         println!("TTS done");
+        return;
     }
+    if cfg.imessage.recipient.is_none() {
+        println!("iMessage NOT sent: recipient not configured");
+        return;
+    }
+    println!("Sending iMessage...");
+    notify_away(&turn);
+    println!("iMessage sent (check your phone)");
 
     println!("\nDone.");
 }
@@ -165,9 +166,14 @@ async fn async_main(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>>
     let cfg = get_settings();
     init_telemetry(&cfg.log.level);
 
-    if args.iter().any(|a| a == "--diagnostic" || a == "--diagnostics") {
+    if args
+        .iter()
+        .any(|a| a == "--diagnostic" || a == "--diagnostics")
+    {
         let delay = if let Some(pos) = args.iter().position(|a| a == "--delay") {
-            args.get(pos + 1).and_then(|v| v.parse::<u64>().ok()).unwrap_or(10)
+            args.get(pos + 1)
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(10)
         } else {
             0
         };
@@ -210,9 +216,9 @@ async fn async_main(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>>
     info!("checkpointing WAL");
     if let Err(e) = store.checkpoint().await {
         tracing::warn!(error = %e, "WAL checkpoint failed on shutdown");
-    } else {
-        info!("WAL checkpoint complete");
+        return Ok(());
     }
+    info!("WAL checkpoint complete");
 
     Ok(())
 }
