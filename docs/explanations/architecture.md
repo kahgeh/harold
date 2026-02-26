@@ -1,11 +1,5 @@
 # Harold Architecture
 
-## Problem
-
-AI coding agents run long tasks autonomously. Without Harold, there is no way to know when a task finishes unless you are watching the terminal — and no way to send a reply from your phone when you are away from your desk.
-
-Harold bridges that gap: it notifies you when a turn completes and routes your iMessage replies back to the right agent session.
-
 ## Overview
 
 Bidirectional iMessage ↔ AI coding agent communication, split into two components with clear responsibilities.

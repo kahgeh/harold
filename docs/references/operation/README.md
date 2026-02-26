@@ -1,5 +1,9 @@
 # Operation
 
+## Problem
+
+Harold needs to be running whenever an agent turn completes, but manually starting a daemon before every session is fragile and easy to forget.
+
 ## Starting Harold
 
 The agent stop hook starts Harold automatically if it is not running. Harold is detected via a TCP connect to the configured gRPC port.

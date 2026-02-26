@@ -2,6 +2,10 @@
 
 Inbound iMessages are routed to the correct tmux pane.
 
+## Problem
+
+Replying from your phone means you know which agent you meant but the message arrives as plain text with no session context. With multiple agent sessions running, there is no obvious way to get your reply to the right one.
+
 ## Routing precedence
 
 1. `[tag]` prefix in message — exact then substring match against live tmux pane labels

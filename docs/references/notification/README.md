@@ -2,6 +2,10 @@
 
 When a turn completes, Harold notifies the user based on context.
 
+## Problem
+
+AI agents finish turns silently. Without active monitoring you won't know a task is done until you look — which breaks flow at your desk and leaves agents idle when you're away.
+
 ## Decision flow
 
 1. `skip_if_session_active = true` (default) — skip if the user is already in the active tmux session
