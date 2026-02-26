@@ -196,7 +196,8 @@ pub(crate) fn split_body(body: &str) -> (&str, Option<&str>) {
 }
 
 fn send_raw_imessage(text: &str, recipient: &str) {
-    let safe_text = sanitise_for_applescript(text);
+    let text = format!("🤖 {text}");
+    let safe_text = sanitise_for_applescript(&text);
     let safe_recipient = sanitise_for_applescript(recipient);
     let escaped = safe_text.replace('\\', "\\\\").replace('"', "\\\"");
     let escaped_recipient = safe_recipient.replace('\\', "\\\\").replace('"', "\\\"");
@@ -259,7 +260,7 @@ pub fn notify_away(turn: &TurnCompleted) {
 
     if handle_id > 0
         && let Some(last) = last_outgoing_text(handle_id)
-        && last.trim() == message.trim()
+        && last.trim().trim_start_matches("🤖").trim() == message.trim()
     {
         info!("iMessage skipped (duplicate)");
         return;

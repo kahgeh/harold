@@ -113,7 +113,7 @@ fn fetch_new_messages(last_rowid: i64) -> Vec<(i64, String)> {
             let (rowid_s, text) = line.split_once('|')?;
             let rowid = rowid_s.trim().parse::<i64>().ok()?;
             let text = text.trim().to_string();
-            if text.is_empty() {
+            if text.is_empty() || text.starts_with('🤖') {
                 return None;
             }
             Some((rowid, text))
