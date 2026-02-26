@@ -6,6 +6,94 @@ Notification notifies the user of completed agent turns, via voice when at the d
 
 AI agents finish turns silently. Without active monitoring you won't know a task is done until you look — which breaks flow at your desk and leaves agents idle when you're away.
 
+## Architecture
+
+The projector consumes `TurnCompleted` events from the event store and drives the notification decision. Summarisation is offloaded to a local model or the AI CLI depending on the notification path.
+
+```
+TurnCompleted event
+       │
+       ▼
+  ┌─────────────────────────────────────────────┐
+  │              notify()                       │
+  │                                             │
+  │  skip_if_session_active?                    │
+  │  ├─ yes, session active → skip              │
+  │  └─ no                                      │
+  │       │                                     │
+  │       ▼                                     │
+  │  screen locked?                             │
+  │  ├─ no  → notify_at_desk()                  │
+  │  └─ yes → notify_away()                     │
+  └─────────────────────────────────────────────┘
+         │                      │
+         ▼                      ▼
+  local model (mlx_lm)     AI CLI (Sonnet)
+  short summary            detailed summary
+         │                      │
+         ▼                      ▼
+    TTS command            osascript
+    (configurable)         (iMessage)
+```
+
+## Sequence: at desk
+
+```mermaid
+sequenceDiagram
+    participant Hook as Stop hook
+    participant gRPC as Harold (gRPC)
+    participant Store as Event store
+    participant Projector
+    participant Tmux as tmux
+    participant LocalModel as Local model (mlx_lm)
+    participant TTS as TTS command
+
+    Hook->>gRPC: TurnComplete RPC (pane_id, pane_label, last_user_prompt, assistant_message, main_context)
+    gRPC->>Store: append TurnCompleted event
+    Store-->>gRPC: ok
+    gRPC->>gRPC: set last_notified_pane
+    gRPC-->>Hook: accepted
+
+    Projector->>Store: poll for new events
+    Store-->>Projector: TurnCompleted event
+    Projector->>Tmux: display-message -l → active session name
+    Projector->>Tmux: display-message -t pane_id → pane session name
+    note over Projector: sessions differ (or skip_if_session_active=false) → proceed
+    Projector->>Projector: ioreg → screen unlocked
+    Projector->>LocalModel: system prompt + last_user_prompt → short summary (≤20 tokens)
+    LocalModel-->>Projector: e.g. "Fixed WAL shutdown race condition"
+    Projector->>TTS: run tts.command [-v voice] [extra args] "Fixed WAL... on harold and waiting"
+```
+
+## Sequence: away (screen locked)
+
+```mermaid
+sequenceDiagram
+    participant Hook as Stop hook
+    participant gRPC as Harold (gRPC)
+    participant Store as Event store
+    participant Projector
+    participant AiCli as AI CLI (Sonnet)
+    participant ChatDb as chat.db
+    participant Messages as Messages.app (osascript)
+
+    Hook->>gRPC: TurnComplete RPC
+    gRPC->>Store: append TurnCompleted event
+    gRPC-->>Hook: accepted
+
+    Projector->>Store: poll for new events
+    Store-->>Projector: TurnCompleted event
+    Projector->>Projector: ioreg → screen locked
+    Projector->>AiCli: last_user_prompt + assistant_message → 2-4 sentence summary
+    AiCli-->>Projector: summary text
+    Projector->>Projector: split trailing question from summary body
+    Projector->>ChatDb: SELECT last outgoing message for handle_id
+    ChatDb-->>Projector: last text
+    note over Projector: not duplicate → send
+    Projector->>Messages: osascript send "[pane_label] <body> (main_context)"
+    Projector->>Messages: osascript send "<trailing question>" (if present)
+```
+
 ## Decision flow
 
 1. `skip_if_session_active = true` (default) — skip if the user is already in the active tmux session
