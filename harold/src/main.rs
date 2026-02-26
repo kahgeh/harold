@@ -135,7 +135,8 @@ fn print_help() {
     println!("harold — agent notification and reply routing daemon\n");
     println!("USAGE:");
     println!("  harold                  Start the Harold daemon");
-    println!("  harold --diagnostics [--delay N]  Test screen lock, TTS, and iMessage config");
+    println!("  harold --diagnostics [--delay [N]]  Test screen lock, TTS, and iMessage config");
+    println!("                                      --delay defaults to 10s if no value given");
     println!("  harold --help           Show this help\n");
     println!("ENVIRONMENT:");
     println!("  HAROLD_CONFIG_DIR       Path to config directory (default: ./config)");
@@ -165,10 +166,11 @@ async fn async_main(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>>
     init_telemetry(&cfg.log.level);
 
     if args.iter().any(|a| a == "--diagnostic" || a == "--diagnostics") {
-        let delay = args.windows(2)
-            .find(|w| w[0] == "--delay")
-            .and_then(|w| w[1].parse::<u64>().ok())
-            .unwrap_or(0);
+        let delay = if let Some(pos) = args.iter().position(|a| a == "--delay") {
+            args.get(pos + 1).and_then(|v| v.parse::<u64>().ok()).unwrap_or(10)
+        } else {
+            0
+        };
         run_diagnostics(delay);
         return Ok(());
     }
