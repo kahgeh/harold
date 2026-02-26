@@ -299,7 +299,57 @@ pub fn notify_away(turn: &TurnCompleted) {
     }
 }
 
+fn active_tmux_pane_id() -> Option<String> {
+    let out = Command::new("tmux")
+        .args(["display-message", "-l", "-p", "#{pane_id}"])
+        .output()
+        .ok()?;
+    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if s.is_empty() { None } else { Some(s) }
+}
+
+fn active_tmux_session() -> Option<String> {
+    let out = Command::new("tmux")
+        .args(["display-message", "-l", "-p", "#{session_name}"])
+        .output()
+        .ok()?;
+    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if s.is_empty() { None } else { Some(s) }
+}
+
+fn pane_session(pane_id: &str) -> Option<String> {
+    let out = Command::new("tmux")
+        .args(["display-message", "-t", pane_id, "-p", "#{session_name}"])
+        .output()
+        .ok()?;
+    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if s.is_empty() { None } else { Some(s) }
+}
+
 pub fn notify(turn: &TurnCompleted) {
+    let cfg = get_settings();
+
+    if cfg.notify.skip_if_pane_active {
+        if let Some(active) = active_tmux_pane_id() {
+            if active == turn.pane_id {
+                info!("notification skipped (pane is active)");
+                return;
+            }
+        }
+    }
+
+    if cfg.notify.skip_if_session_active {
+        if let (Some(active_session), Some(pane_session)) = (
+            active_tmux_session(),
+            pane_session(&turn.pane_id),
+        ) {
+            if active_session == pane_session {
+                info!("notification skipped (session is active)");
+                return;
+            }
+        }
+    }
+
     if is_screen_locked() {
         notify_away(turn);
     } else {
