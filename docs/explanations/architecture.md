@@ -53,28 +53,28 @@ Harold is agent-agnostic — it works with any agent that can shell out to `grpc
                     │                        ▲
                     │ iMessage               │ iMessage reply
                     ▼                        │
-              Your iPhone/iPad ─────────────┘
+              Your iPhone/iPad ──────────────┘
 ```
 
 ---
 
 ## Responsibilities
 
-| Concern | Owner |
-|---|---|
-| Transcript parsing | Hook |
-| Pane identity (self) | Hook |
-| main_context (branch or repo name) | Hook |
-| Skip subagent stop events | Hook |
-| Ensure harold is running | Hook |
-| Screen lock detection | Harold |
-| Summarisation (AI CLI) | Harold |
-| TTS notification | Harold |
-| iMessage send + dedup | Harold |
-| `last_notified_pane` state | Harold |
-| Reply routing (tmux) | Harold |
-| Live pane discovery | Harold |
-| Event store | Harold |
+| Concern                            | Owner  |
+| ---------------------------------- | ------ |
+| Transcript parsing                 | Hook   |
+| Pane identity (self)               | Hook   |
+| main_context (branch or repo name) | Hook   |
+| Skip subagent stop events          | Hook   |
+| Ensure harold is running           | Hook   |
+| Screen lock detection              | Harold |
+| Summarisation (AI CLI)             | Harold |
+| TTS notification                   | Harold |
+| iMessage send + dedup              | Harold |
+| `last_notified_pane` state         | Harold |
+| Reply routing (tmux)               | Harold |
+| Live pane discovery                | Harold |
+| Event store                        | Harold |
 
 ---
 
@@ -89,6 +89,16 @@ message TurnCompleteRequest {
   string main_context       = 5;  // git branch or repo name
 }
 ```
+
+---
+
+## Notification (outbound)
+
+When a `TurnCompleted` event is received, Harold decides how to notify:
+
+1. `skip_if_session_active = true` (default) → skip if the user is in an active tmux session
+2. Screen unlocked → TTS via `say` with an AI-generated summary
+3. Screen locked → iMessage with a detailed AI-generated summary; a trailing question is split into a second message
 
 ---
 
@@ -113,4 +123,4 @@ Harold owns all routing state in-memory, backed by the event store for durabilit
 }
 ```
 
-Live pane discovery uses live tmux queries — no stale pane registry.
+Live pane discovery uses live tmux queries.
