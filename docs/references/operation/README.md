@@ -10,11 +10,11 @@ Harold needs to be running whenever an agent turn completes, but manually starti
 
 Harold runs as a single binary with three concurrent tasks sharing an event store via a `tokio::sync::watch` shutdown channel. The agent stop hook is responsible for ensuring Harold is alive before calling it.
 
-| Task | Responsibility |
-|------|---------------|
-| gRPC server | Accepts `TurnComplete` RPCs, appends `TurnCompleted` events, updates `last_notified_pane` |
-| Projector | Tails the event store; dispatches `TurnCompleted` → `notify()` and `ReplyReceived` → `route_reply()` |
-| Listener | Polls `chat.db` every 5 s; appends `ReplyReceived` events for new inbound iMessages |
+| Task        | Responsibility                                                                                       |
+| ----------- | ---------------------------------------------------------------------------------------------------- |
+| gRPC server | Accepts `TurnComplete` RPCs, appends `TurnCompleted` events, updates `last_notified_pane`            |
+| Projector   | Tails the event store; dispatches `TurnCompleted` → `notify()` and `ReplyReceived` → `route_reply()` |
+| Listener    | Polls `chat.db` every 5 s; appends `ReplyReceived` events for new inbound iMessages                  |
 
 The shutdown channel is a `watch::Sender<()>`. Dropping the sender (on SIGINT/SIGTERM) closes the channel; all receivers (`Projector`, `Listener`) see `Err(RecvError)` and exit their loops.
 

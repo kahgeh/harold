@@ -12,9 +12,9 @@ The projector consumes `TurnCompleted` events and calls `notify()`. The notifica
 
 Summarisation uses different backends depending on the path:
 
-| Path | Summary backend | Max input | Output |
-|------|----------------|-----------|--------|
-| At desk (TTS) | Local model (`mlx_lm`) | 500 chars of last_user_prompt | 3–8 words, ≤20 tokens |
+| Path            | Summary backend                  | Max input                                       | Output                    |
+| --------------- | -------------------------------- | ----------------------------------------------- | ------------------------- |
+| At desk (TTS)   | Local model (`mlx_lm`)           | 500 chars of last_user_prompt                   | 3–8 words, ≤20 tokens     |
 | Away (iMessage) | AI CLI (`claude --model sonnet`) | 500 chars prompt + 2000 chars assistant message | 2–4 sentences, plain text |
 
 If the local model is not configured, the TTS summary falls back to `"Work complete"`. If the AI CLI fails, the iMessage body falls back to the first 280 characters of the assistant message.
@@ -45,11 +45,11 @@ TurnCompleted event
 
 Config keys (`[tts]`):
 
-| Key | Description |
-|-----|-------------|
-| `command` | TTS binary (e.g. `say`) |
-| `voice` | Optional voice name passed as `-v` |
-| `args` | Optional extra args prepended before `-v` and the message |
+| Key       | Description                                               |
+| --------- | --------------------------------------------------------- |
+| `command` | TTS binary (e.g. `say`)                                   |
+| `voice`   | Optional voice name passed as `-v`                        |
+| `args`    | Optional extra args prepended before `-v` and the message |
 
 ## Away: iMessage
 
@@ -61,11 +61,11 @@ Config keys (`[tts]`):
 
 Config keys (`[imessage]`):
 
-| Key | Description |
-|-----|-------------|
-| `recipient` | Phone number or email of the iMessage recipient |
-| `handle_id` | `handle_id` in `chat.db` for dedup and inbound polling |
-| `extra_handle_ids` | Additional handle IDs to poll (e.g. multiple devices) |
+| Key                | Description                                            |
+| ------------------ | ------------------------------------------------------ |
+| `recipient`        | Phone number or email of the iMessage recipient        |
+| `handle_id`        | `handle_id` in `chat.db` for dedup and inbound polling |
+| `extra_handle_ids` | Additional handle IDs to poll (e.g. multiple devices)  |
 
 ## Sequences
 
