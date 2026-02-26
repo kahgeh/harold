@@ -107,19 +107,35 @@ fn fetch_new_messages(last_rowid: i64) -> Vec<(i64, String)> {
         _ => return vec![],
     };
 
-    String::from_utf8_lossy(&out.stdout)
+    let mut messages: Vec<(i64, String)> = String::from_utf8_lossy(&out.stdout)
         .lines()
         .filter_map(|line| {
             let (rowid_s, text) = line.split_once('|')?;
             let rowid = rowid_s.trim().parse::<i64>().ok()?;
             let text = text.trim().to_string();
             if text.is_empty() {
-                None
-            } else {
-                Some((rowid, text))
+                return None;
             }
+            Some((rowid, text))
         })
-        .collect()
+        .collect();
+
+    // Deduplicate: iMessage sync can produce two rows for the same message —
+    // one as is_from_me=1 on self_handle_id (phone sync) and one as is_from_me=0
+    // on the sender's handle (normal inbound). Keep only the last occurrence of
+    // each unique text so we process it once at the highest ROWID.
+    messages.dedup_by(|a, b| {
+        if a.1 == b.1 {
+            // dedup_by: `a` is the later element (higher ROWID), `b` is the earlier one and
+            // is retained. Copy the higher ROWID from `a` into `b` before `a` is dropped.
+            b.0 = a.0;
+            true
+        } else {
+            false
+        }
+    });
+
+    messages
 }
 
 async fn poll(store: &EventStore) {
