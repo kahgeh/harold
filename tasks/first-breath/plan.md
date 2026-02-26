@@ -69,7 +69,7 @@ Stand up a minimal Harold binary that accepts `TurnComplete` calls.
 
 Persist `TurnComplete` events using the events crate pattern.
 
-- Add alir-platform `events` as a git submodule
+- Add `events` as a git submodule (github.com/kahgeh/events)
 - Define `TurnCompleted` domain event
 - On RPC received → append event to store
 - Wire up projector to consume events
