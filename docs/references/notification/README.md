@@ -8,35 +8,68 @@ AI agents finish turns silently. Without active monitoring you won't know a task
 
 ## Architecture
 
-The projector consumes `TurnCompleted` events from the event store and drives the notification decision. Summarisation is offloaded to a local model or the AI CLI depending on the notification path.
+The projector consumes `TurnCompleted` events and calls `notify()`. The notification path is chosen based on two runtime checks: whether the user's tmux session is active, and whether the screen is locked.
+
+Summarisation uses different backends depending on the path:
+
+| Path | Summary backend | Max input | Output |
+|------|----------------|-----------|--------|
+| At desk (TTS) | Local model (`mlx_lm`) | 500 chars of last_user_prompt | 3–8 words, ≤20 tokens |
+| Away (iMessage) | AI CLI (`claude --model sonnet`) | 500 chars prompt + 2000 chars assistant message | 2–4 sentences, plain text |
+
+If the local model is not configured, the TTS summary falls back to `"Work complete"`. If the AI CLI fails, the iMessage body falls back to the first 280 characters of the assistant message.
+
+## Decision flow
 
 ```
 TurnCompleted event
        │
        ▼
-  ┌─────────────────────────────────────────────┐
-  │              notify()                       │
-  │                                             │
-  │  skip_if_session_active?                    │
-  │  ├─ yes, session active → skip              │
-  │  └─ no                                      │
-  │       │                                     │
-  │       ▼                                     │
-  │  screen locked?                             │
-  │  ├─ no  → notify_at_desk()                  │
-  │  └─ yes → notify_away()                     │
-  └─────────────────────────────────────────────┘
-         │                      │
-         ▼                      ▼
-  local model (mlx_lm)     AI CLI (Sonnet)
-  short summary            detailed summary
-         │                      │
-         ▼                      ▼
-    TTS command            osascript
-    (configurable)         (iMessage)
+  notify()
+  │
+  ├─ skip_if_session_active = true?
+  │   └─ tmux display-message -l → MRU client session
+  │      tmux display-message -t pane_id → pane session
+  │      same session → skip (return)
+  │
+  ├─ ioreg → IOConsoleLocked = true?
+  │   ├─ no  → notify_at_desk()
+  │   └─ yes → notify_away()
 ```
 
-## Sequence: at desk
+## At-desk: TTS
+
+1. `build_short_summary()` — runs `uv run mlx_lm.generate` in `ai.local_model_dir` with a system prompt asking for a 3–8 word completion summary; strips `<think>...</think>` blocks from reasoning models
+2. Message assembled: `"<summary> on <main_context> and waiting for further instructions"`
+3. TTS command run: `<tts.command> [tts.args...] [-v tts.voice] "<message>"`
+
+Config keys (`[tts]`):
+
+| Key | Description |
+|-----|-------------|
+| `command` | TTS binary (e.g. `say`) |
+| `voice` | Optional voice name passed as `-v` |
+| `args` | Optional extra args prepended before `-v` and the message |
+
+## Away: iMessage
+
+1. `build_detailed_summary()` — runs AI CLI with a prompt asking for a 2–4 sentence plain-text summary covering what was done, current status, and whether a decision is needed; uses up to 500 chars of `last_user_prompt` and 2000 chars of `assistant_message`
+2. `split_body()` — splits the last sentence ending in `?` into a separate follow-up message
+3. Duplicate check — queries `chat.db` for the most recent outgoing message to `handle_id`; skips if identical
+4. Messages sent via AppleScript: `tell application "Messages" to send "..." to buddy "..."`
+5. Message format: `[<pane_label>] <main body> (<main_context>)` then `<question>` as a second message if present
+
+Config keys (`[imessage]`):
+
+| Key | Description |
+|-----|-------------|
+| `recipient` | Phone number or email of the iMessage recipient |
+| `handle_id` | `handle_id` in `chat.db` for dedup and inbound polling |
+| `extra_handle_ids` | Additional handle IDs to poll (e.g. multiple devices) |
+
+## Sequences
+
+### At desk
 
 ```mermaid
 sequenceDiagram
@@ -45,27 +78,27 @@ sequenceDiagram
     participant Store as Event store
     participant Projector
     participant Tmux as tmux
-    participant LocalModel as Local model (mlx_lm)
+    participant LocalModel as mlx_lm
     participant TTS as TTS command
 
     Hook->>gRPC: TurnComplete RPC (pane_id, pane_label, last_user_prompt, assistant_message, main_context)
     gRPC->>Store: append TurnCompleted event
     Store-->>gRPC: ok
-    gRPC->>gRPC: set last_notified_pane
-    gRPC-->>Hook: accepted
+    gRPC->>gRPC: set last_notified_pane in memory
+    gRPC-->>Hook: accepted: true
 
     Projector->>Store: poll for new events
     Store-->>Projector: TurnCompleted event
-    Projector->>Tmux: display-message -l → active session name
-    Projector->>Tmux: display-message -t pane_id → pane session name
-    note over Projector: sessions differ (or skip_if_session_active=false) → proceed
-    Projector->>Projector: ioreg → screen unlocked
-    Projector->>LocalModel: system prompt + last_user_prompt → short summary (≤20 tokens)
-    LocalModel-->>Projector: e.g. "Fixed WAL shutdown race condition"
-    Projector->>TTS: run tts.command [-v voice] [extra args] "Fixed WAL... on harold and waiting"
+    Projector->>Tmux: display-message -l -p #{session_name} → MRU client session
+    Projector->>Tmux: display-message -t <pane_id> -p #{session_name} → pane session
+    note over Projector: sessions differ → proceed
+    Projector->>Projector: ioreg → IOConsoleLocked = false
+    Projector->>LocalModel: system prompt + "User's last request: <last_user_prompt>" → ≤20 tokens
+    LocalModel-->>Projector: "Fixed WAL shutdown race condition"
+    Projector->>TTS: say [-v Samantha] "Fixed WAL... on harold and waiting for further instructions"
 ```
 
-## Sequence: away (screen locked)
+### Away (screen locked)
 
 ```mermaid
 sequenceDiagram
@@ -73,41 +106,23 @@ sequenceDiagram
     participant gRPC as Harold (gRPC)
     participant Store as Event store
     participant Projector
-    participant AiCli as AI CLI (Sonnet)
+    participant AiCli as claude (Sonnet)
     participant ChatDb as chat.db
-    participant Messages as Messages.app (osascript)
+    participant Messages as Messages.app
 
     Hook->>gRPC: TurnComplete RPC
     gRPC->>Store: append TurnCompleted event
-    gRPC-->>Hook: accepted
+    gRPC-->>Hook: accepted: true
 
     Projector->>Store: poll for new events
     Store-->>Projector: TurnCompleted event
-    Projector->>Projector: ioreg → screen locked
-    Projector->>AiCli: last_user_prompt + assistant_message → 2-4 sentence summary
-    AiCli-->>Projector: summary text
-    Projector->>Projector: split trailing question from summary body
-    Projector->>ChatDb: SELECT last outgoing message for handle_id
-    ChatDb-->>Projector: last text
+    Projector->>Projector: ioreg → IOConsoleLocked = true
+    Projector->>AiCli: prompt with last_user_prompt (≤500 chars) + assistant_message (≤2000 chars)
+    AiCli-->>Projector: 2-4 sentence plain-text summary
+    Projector->>Projector: split_body() → main body + trailing question (if ends in ?)
+    Projector->>ChatDb: SELECT text WHERE handle_id=? AND is_from_me=1 ORDER BY ROWID DESC LIMIT 1
+    ChatDb-->>Projector: last outgoing text
     note over Projector: not duplicate → send
-    Projector->>Messages: osascript send "[pane_label] <body> (main_context)"
-    Projector->>Messages: osascript send "<trailing question>" (if present)
+    Projector->>Messages: osascript → "[alir-app main:0.1] <body> (feature/foo)"
+    Projector->>Messages: osascript → "<trailing question>" (if present)
 ```
-
-## Decision flow
-
-1. `skip_if_session_active = true` (default) — skip if the user is already in the active tmux session
-2. Screen unlocked — TTS via configurable command with a short AI-generated summary
-3. Screen locked — iMessage with a detailed AI-generated summary
-
-## TTS (at desk)
-
-- Summary generated by a local model (`mlx_lm`) if configured; falls back to `"Work complete"`
-- TTS command, voice, and extra args are all configurable via `[tts]` in config
-
-## iMessage (away)
-
-- Summary generated by the AI CLI (Sonnet); falls back to the first 280 chars of the assistant message
-- A trailing question in the summary is split into a separate follow-up message
-- Duplicate suppression: skips send if the last outgoing message to the recipient is identical
-- Message format: `[pane_label] <summary> (main_context)`
