@@ -75,7 +75,7 @@ async fn shutdown_signal() {
     }
 }
 
-fn run_diagnostics() {
+fn run_diagnostics(delay_secs: u64) {
     use notify::{is_screen_locked, notify_at_desk, notify_away};
     use store::TurnCompleted;
 
@@ -88,6 +88,11 @@ fn run_diagnostics() {
     };
 
     println!("=== Harold diagnostics ===\n");
+
+    if delay_secs > 0 {
+        println!("Waiting {delay_secs}s — lock your screen now...");
+        std::thread::sleep(std::time::Duration::from_secs(delay_secs));
+    }
 
     let locked = is_screen_locked();
     println!("screen_locked : {locked}");
@@ -130,7 +135,7 @@ fn print_help() {
     println!("harold — agent notification and reply routing daemon\n");
     println!("USAGE:");
     println!("  harold                  Start the Harold daemon");
-    println!("  harold --diagnostics    Test screen lock, TTS, and iMessage config");
+    println!("  harold --diagnostics [--delay N]  Test screen lock, TTS, and iMessage config");
     println!("  harold --help           Show this help\n");
     println!("ENVIRONMENT:");
     println!("  HAROLD_CONFIG_DIR       Path to config directory (default: ./config)");
@@ -160,7 +165,11 @@ async fn async_main(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>>
     init_telemetry(&cfg.log.level);
 
     if args.iter().any(|a| a == "--diagnostic" || a == "--diagnostics") {
-        run_diagnostics();
+        let delay = args.windows(2)
+            .find(|w| w[0] == "--delay")
+            .and_then(|w| w[1].parse::<u64>().ok())
+            .unwrap_or(0);
+        run_diagnostics(delay);
         return Ok(());
     }
 
