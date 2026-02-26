@@ -1,3 +1,4 @@
+mod listener;
 mod notify;
 mod projector;
 mod routing;
@@ -91,15 +92,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Shutdown channel: sender closes on signal, receivers see the channel close.
     let (shutdown_tx, shutdown_rx) = watch::channel(());
 
-    let projector_store = Arc::clone(&store);
-    tokio::spawn(projector::run_projector(
-        projector_store,
+    let projector_handle = tokio::spawn(projector::run_projector(
+        Arc::clone(&store),
         shutdown_rx.clone(),
     ));
-    tokio::spawn(routing::run_reply_router(shutdown_rx));
+    let listener_handle = tokio::spawn(listener::listen(Arc::clone(&store), shutdown_rx));
 
     Server::builder()
-        .add_service(HaroldServer::new(HaroldService { store }))
+        .add_service(HaroldServer::new(HaroldService {
+            store: Arc::clone(&store),
+        }))
         .serve_with_shutdown(addr, async {
             shutdown_signal().await;
             info!("shutting down");
@@ -107,6 +109,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             drop(shutdown_tx);
         })
         .await?;
+
+    // Wait for tasks to stop before checkpointing — checkpoint requires no active connections.
+    let _ = projector_handle.await;
+    let _ = listener_handle.await;
+
+    // Checkpoint WAL: flushes all WAL pages to the main db files so next open is clean.
+    info!("checkpointing WAL");
+    if let Err(e) = store.checkpoint().await {
+        tracing::warn!(error = %e, "WAL checkpoint failed on shutdown");
+    } else {
+        info!("WAL checkpoint complete");
+    }
 
     Ok(())
 }
