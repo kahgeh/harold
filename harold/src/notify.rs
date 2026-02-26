@@ -135,12 +135,11 @@ fn run_ai_cli(prompt: &str, model: &str) -> Option<String> {
         .output()
         .ok()?;
 
-    if out.status.success() {
-        let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        if text.is_empty() { None } else { Some(text) }
-    } else {
-        None
+    if !out.status.success() {
+        return None;
     }
+    let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if text.is_empty() { None } else { Some(text) }
 }
 
 fn build_short_summary(turn: &TurnCompleted) -> String {
@@ -239,12 +238,11 @@ fn query_chat_db_single(db_path: &str, sql: &str) -> Option<String> {
         .arg(sql)
         .output()
         .ok()?;
-    if out.status.success() {
-        let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        if s.is_empty() { None } else { Some(s) }
-    } else {
-        None
+    if !out.status.success() {
+        return None;
     }
+    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if s.is_empty() { None } else { Some(s) }
 }
 
 fn last_outgoing_text(handle_id: i64) -> Option<String> {
@@ -333,10 +331,9 @@ pub fn notify(turn: &TurnCompleted) {
     }
 
     if is_screen_locked() {
-        notify_away(turn);
-    } else {
-        notify_at_desk(turn);
+        return notify_away(turn);
     }
+    notify_at_desk(turn);
 }
 
 #[cfg(test)]
