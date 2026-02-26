@@ -1,4 +1,4 @@
-use crate::routing::{PaneInfo, is_claude_code_process, parse_tag, resolve_pane, strip_control};
+use crate::route_reply::{PaneInfo, is_claude_code_process, parse_tag, resolve_pane, strip_control};
 
 #[test]
 fn parse_tag_with_tag() {

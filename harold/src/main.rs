@@ -1,7 +1,7 @@
 mod listener;
 mod notify;
 mod projector;
-mod routing;
+mod route_reply;
 mod settings;
 mod store;
 mod telemetry;
@@ -41,7 +41,7 @@ impl Harold for HaroldService {
             "turn complete received"
         );
 
-        let pane = routing::PaneInfo {
+        let pane = route_reply::PaneInfo {
             pane_id: req.pane_id,
             label: req.pane_label,
         };
@@ -61,7 +61,7 @@ impl Harold for HaroldService {
                 Status::internal("event store write failed")
             })?;
 
-        routing::set_last_notified_pane(pane);
+        route_reply::set_last_notified_pane(pane);
 
         Ok(Response::new(TurnCompleteResponse { accepted: true }))
     }

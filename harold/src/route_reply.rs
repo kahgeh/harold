@@ -325,5 +325,5 @@ pub fn route_reply(text: &str) {
 }
 
 #[cfg(test)]
-#[path = "routing_test.rs"]
+#[path = "route_reply_test.rs"]
 mod tests;

@@ -5,7 +5,7 @@ use tokio::sync::watch;
 use tracing::{info, warn};
 
 use crate::notify::notify;
-use crate::routing::route_reply;
+use crate::route_reply::route_reply;
 use crate::store::{ReplyReceived, TurnCompleted};
 
 pub async fn run_projector(store: Arc<EventStore>, mut shutdown: watch::Receiver<()>) {
