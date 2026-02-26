@@ -37,6 +37,9 @@ pub struct ImessageSettings {
     pub recipient: Option<String>,
     pub handle_id: Option<i64>,
     pub extra_handle_ids: Option<Vec<i64>>,
+    // handle_id for your own Apple ID in chat.db (e.g. your Gmail or Apple ID email).
+    // Messages sent from your phone appear in chat.db as is_from_me=1 on this handle.
+    pub self_handle_id: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]

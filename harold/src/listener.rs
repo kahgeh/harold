@@ -26,7 +26,9 @@ fn db_path() -> String {
 fn handle_ids() -> HashSet<i64> {
     let cfg = get_settings();
     let mut ids = HashSet::new();
-    if let Some(id) = cfg.imessage.handle_id && id > 0 {
+    if let Some(id) = cfg.imessage.handle_id
+        && id > 0
+    {
         ids.insert(id);
     }
     if let Some(extras) = &cfg.imessage.extra_handle_ids {
@@ -52,21 +54,53 @@ fn get_max_rowid() -> i64 {
 
 fn fetch_new_messages(last_rowid: i64) -> Vec<(i64, String)> {
     let ids = handle_ids();
-    if ids.is_empty() {
+    let self_handle_id = get_settings().imessage.self_handle_id.filter(|&id| id > 0);
+
+    if ids.is_empty() && self_handle_id.is_none() {
         return vec![];
     }
-    // id_list is built from HashSet<i64> — all values are numeric, no injection risk.
+
+    // id_list and self_handle_id are i64 — numeric, no injection risk.
     // last_rowid is i64 from AtomicI64 — numeric, safe to interpolate.
-    let id_list = ids
-        .iter()
-        .map(ToString::to_string)
-        .collect::<Vec<_>>()
-        .join(",");
-    let sql = format!(
-        "SELECT ROWID, text FROM message \
-         WHERE ROWID > {last_rowid} AND handle_id IN ({id_list}) AND is_from_me = 0 \
-         ORDER BY ROWID ASC;"
-    );
+    //
+    // Messages sent from your phone appear in chat.db as is_from_me=1 on your own Apple ID
+    // handle (self_handle_id). The standard inbound path is is_from_me=0 on the sender's handle.
+    let sql = match (ids.is_empty(), self_handle_id) {
+        (false, Some(self_id)) => {
+            let id_list = ids
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(",");
+            format!(
+                "SELECT ROWID, text FROM message \
+                 WHERE ROWID > {last_rowid} \
+                   AND ((handle_id IN ({id_list}) AND is_from_me = 0) \
+                     OR (handle_id = {self_id} AND is_from_me = 1)) \
+                 ORDER BY ROWID ASC;"
+            )
+        }
+        (false, None) => {
+            let id_list = ids
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(",");
+            format!(
+                "SELECT ROWID, text FROM message \
+                 WHERE ROWID > {last_rowid} AND handle_id IN ({id_list}) AND is_from_me = 0 \
+                 ORDER BY ROWID ASC;"
+            )
+        }
+        (true, Some(self_id)) => {
+            format!(
+                "SELECT ROWID, text FROM message \
+                 WHERE ROWID > {last_rowid} AND handle_id = {self_id} AND is_from_me = 1 \
+                 ORDER BY ROWID ASC;"
+            )
+        }
+        (true, None) => return vec![],
+    };
 
     let out = match Command::new("sqlite3").arg(db_path()).arg(&sql).output() {
         Ok(o) if o.status.success() => o,

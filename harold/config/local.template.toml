@@ -1,6 +1,8 @@
 [imessage]
 recipient = "+61..."
-handle_id = 0  # run: sqlite3 ~/Library/Messages/chat.db "SELECT ROWID, id FROM handle;"
+handle_id = 0       # run: sqlite3 ~/Library/Messages/chat.db "SELECT ROWID, id FROM handle;"
+self_handle_id = 0  # your own Apple ID handle (e.g. your Gmail) — messages sent from your
+                    # phone appear as is_from_me=1 on this handle due to iMessage sync
 
 [ai]
 cli_path = "/path/to/claude"
