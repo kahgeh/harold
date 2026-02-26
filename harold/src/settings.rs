@@ -83,16 +83,12 @@ impl StoreSettings {
 
 #[derive(Debug, Deserialize)]
 pub struct NotifySettings {
-    pub skip_if_pane_active: bool,
     pub skip_if_session_active: bool,
 }
 
 impl Default for NotifySettings {
     fn default() -> Self {
-        Self {
-            skip_if_pane_active: true,
-            skip_if_session_active: true,
-        }
+        Self { skip_if_session_active: true }
     }
 }
 

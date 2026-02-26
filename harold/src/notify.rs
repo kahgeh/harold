@@ -299,15 +299,6 @@ pub fn notify_away(turn: &TurnCompleted) {
     }
 }
 
-fn active_tmux_pane_id() -> Option<String> {
-    let out = Command::new("tmux")
-        .args(["display-message", "-l", "-p", "#{pane_id}"])
-        .output()
-        .ok()?;
-    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if s.is_empty() { None } else { Some(s) }
-}
-
 fn active_tmux_session() -> Option<String> {
     let out = Command::new("tmux")
         .args(["display-message", "-l", "-p", "#{session_name}"])
@@ -336,13 +327,6 @@ pub fn notify(turn: &TurnCompleted) {
         ) {
             if active_session == pane_session {
                 info!("notification skipped (session is active)");
-                return;
-            }
-        }
-    } else if cfg.notify.skip_if_pane_active {
-        if let Some(active) = active_tmux_pane_id() {
-            if active == turn.pane_id {
-                info!("notification skipped (pane is active)");
                 return;
             }
         }
