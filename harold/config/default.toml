@@ -1,0 +1,23 @@
+[grpc]
+host = "127.0.0.1"
+port = 50060
+
+[imessage]
+# recipient and handle_id can also be set via:
+#   HAROLD__IMESSAGE__RECIPIENT="+61..."
+#   HAROLD__IMESSAGE__HANDLE_ID=36
+
+[chat_db]
+path = "~/Library/Messages/chat.db"
+
+[ai]
+
+[tts]
+command = "say"
+# voice can be overridden in local.toml, e.g. voice = "Samantha"
+
+[log]
+level = "info"
+
+[store]
+path = "~/.harold/events"
