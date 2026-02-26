@@ -97,8 +97,8 @@ message TurnCompleteRequest {
 When a `TurnCompleted` event is received, Harold decides how to notify:
 
 1. `skip_if_session_active = true` (default) → skip if the user is in an active tmux session
-2. Screen unlocked → TTS via `say` with an AI-generated summary
-3. Screen locked → iMessage with a detailed AI-generated summary; a trailing question is split into a second message
+2. Screen unlocked → TTS via configurable command (e.g. `say`) with an AI-generated short summary
+3. Screen locked → iMessage with a detailed summary via AI CLI; a trailing question is split into a second message
 
 ---
 
