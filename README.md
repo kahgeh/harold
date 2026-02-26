@@ -21,7 +21,7 @@ Each agent session runs a stop hook that extracts context from the completed tur
 
 Harold is agent-agnostic. The hook is the only part that knows anything about a specific agent. Harold itself just receives a structured payload and uses the AI CLI for summarisation.
 
-See [tasks/first-breath/architecture.md](tasks/first-breath/architecture.md) for the full architecture.
+See [docs/explanations/architecture.md](docs/explanations/architecture.md) for the full architecture.
 
 ## Prerequisites
 

@@ -2,6 +2,10 @@
 
 ## How-Tos
 
+- [Setup](how-tos/setup.md)
+
+## Prerequisites
+
 - [Prerequisites](prerequisites.md)
 
 ## References
