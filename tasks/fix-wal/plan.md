@@ -1,51 +1,44 @@
 # Fix WAL Lifecycle
 
-## Status: WAL hypothesis disproved
+## Status: RESOLVED
 
-The original hypothesis (WAL files causing the panic) was wrong. Testing shows the panic occurs even with 0-byte WAL files after a clean checkpoint.
+## Root Cause
 
+The panic was:
 ```
-thread 'main' panicked at core/schema.rs:910:
+thread 'main' panicked at turso_core-0.3.2/schema.rs:613:
 all automatic indexes parsed from sqlite_schema should have been consumed, but 1 remain
 ```
 
-This fires at `Database::open_with_flags_bypass_registry_async` — during the database open itself. **Turso 0.5.0-pre.14 cannot reopen a database that it previously created**, regardless of WAL state.
+**The bug is in turso's `ALTER TABLE ... ADD COLUMN` implementation.** When a table has `UNIQUE` constraints, `ALTER TABLE` corrupts `sqlite_schema` by leaving an orphan autoindex entry (`sqlite_autoindex_events_2`) that has no matching constraint in the updated `CREATE TABLE` SQL. On reopen, turso finds 2 automatic index entries in `sqlite_schema` but only 1 constraint in the table definition → assertion failure.
 
-## Confirmed root cause: turso schema parser bug on reopen
+Verified: sqlite3 reports `malformed database schema - orphan index` when reading the turso-created WAL database. This confirms the schema is invalid, not turso's parser.
 
-After a clean shutdown with full WAL checkpoint:
+This affects **all turso versions** tested: 0.3.2, 0.4.4, 0.5.0-pre.14.
 
-- `catalog.db-wal` → 0 bytes ✓
-- `events_20260226.db-wal` → 0 bytes ✓
-- Schema in `catalog.db` is valid (sqlite3 reads it fine)
-- Reopen with turso → panic in `populate_indices`
+## Fix
 
-The schema contains `sqlite_autoindex_*` entries (turso's own auto-indexes for PRIMARY KEY / UNIQUE constraints). Turso's schema parser fails to match one of these to its table's `unique_sets` when reading back a database it created in a previous process.
+**events crate (`src/migration.rs`)**: Merged partition migrations 001 and 002 into a single `CREATE TABLE` that includes `trace_id TEXT` from the start. Eliminated the `ALTER TABLE events ADD COLUMN trace_id TEXT` that triggered the turso bug.
 
-This is a turso pre-release bug. The WAL is not involved.
+**events crate (`src/catalog.rs`)**: Changed `Catalog.db` from `Database` to `Option<Database>`. `open_with_pool` previously opened a direct `Database` AND the pool opened another — two simultaneous handles on the same file. Now the pool is the sole owner when present. Checkpoint uses pool-aware `get_connection()`.
 
-## What was fixed (still correct to keep)
+**harold (`src/main.rs`)**: Task handles joined before WAL checkpoint. Checkpoint requires no active connections.
 
-### 1. Shutdown ordering in `main.rs` ✓
-Task handles are now joined before checkpoint. This is correct regardless — checkpoint requires no active connections, so waiting for tasks to stop first is the right thing to do.
+**harold (`src/store.rs`)**: Removed `clear_wal_files()` — it was deleting the WAL which contains the entire schema until first checkpoint.
 
-### 2. `EventStore::checkpoint()` drains result rows ✓
-`PRAGMA wal_checkpoint(TRUNCATE)` must have its result rows consumed to complete execution. Fixed.
+## What was confirmed correct
 
-### 3. `EventStore::checkpoint()` covers all partitions ✓
-Previously only checkpointed the active partition. Now walks the root directory and checkpoints every `.db` file.
+- `PRAGMA wal_checkpoint(TRUNCATE)` requires its result rows to be consumed → fixed (while loop drains rows)
+- Checkpoint covers all partition `.db` files, not just the active one
+- Clean shutdown produces 0-byte WAL files on all databases
+- Three consecutive restarts confirmed stable after the fix
 
-### 4. WAL deletion removed from `store.rs` ✓
-The `clear_wal_files` workaround was wrong — it deleted the schema itself (which lived in the WAL before first checkpoint). Removed.
+## Filed as turso bug
 
-## Remaining problem
+The `ALTER TABLE ... ADD COLUMN` corruption of sqlite_schema when UNIQUE constraints exist should be reported upstream. Reproduction:
 
-Turso 0.5.0-pre.14 cannot reopen a database across process restarts. This needs to be resolved before harold is usable.
-
-**Options:**
-
-1. **Check if a newer turso pre-release fixes it** — the bug may have been fixed in a later commit on main. The repository is at `https://github.com/tursodatabase/turso`. Check commits after the 0.5.0-pre.14 tag.
-
-2. **File a bug** — report the `populate_indices` assertion failure with a minimal reproduction. The schema is valid SQLite; sqlite3 reads it correctly.
-
-3. **Reproduce minimally** — write a small Rust test that creates a turso db with a `PRIMARY KEY` column, drops the `Database`, reopens it, and checks if the panic occurs. This will confirm whether it's the `PRIMARY KEY` auto-index specifically causing the mismatch.
+```rust
+conn.execute("CREATE TABLE t (id TEXT, a TEXT, b TEXT, PRIMARY KEY (id), UNIQUE (a, b))", ()).await?;
+conn.execute("ALTER TABLE t ADD COLUMN c TEXT", ()).await?;
+// Reopen → panic: "all automatic indexes ... but 1 remain"
+```
