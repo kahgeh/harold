@@ -75,6 +75,57 @@ async fn shutdown_signal() {
     }
 }
 
+fn run_diagnostics() {
+    use notify::{is_screen_locked, notify_at_desk, notify_away};
+    use store::TurnCompleted;
+
+    let turn = TurnCompleted {
+        pane_id: "diag".into(),
+        pane_label: "harold:0.0".into(),
+        last_user_prompt: "diagnostic test".into(),
+        assistant_message: "Harold diagnostic test complete.".into(),
+        main_context: "harold".into(),
+    };
+
+    println!("=== Harold diagnostics ===\n");
+
+    let locked = is_screen_locked();
+    println!("screen_locked : {locked}");
+
+    let cfg = get_settings();
+    println!(
+        "iMessage      : recipient={} handle_id={:?}",
+        cfg.imessage.recipient.as_deref().unwrap_or("(not set)"),
+        cfg.imessage.handle_id,
+    );
+    println!(
+        "TTS           : command={} voice={:?}",
+        cfg.tts.command,
+        cfg.tts.voice,
+    );
+    println!(
+        "AI cli        : {:?}",
+        cfg.ai.cli_path.as_deref().unwrap_or("(not set)"),
+    );
+
+    println!("\n--- Testing notify path (screen_locked={locked}) ---");
+    if locked {
+        if cfg.imessage.recipient.is_none() {
+            println!("iMessage NOT sent: recipient not configured");
+        } else {
+            println!("Sending iMessage...");
+            notify_away(&turn);
+            println!("iMessage sent (check your phone)");
+        }
+    } else {
+        println!("Running TTS...");
+        notify_at_desk(&turn);
+        println!("TTS done");
+    }
+
+    println!("\nDone.");
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let settings = settings::Settings::load()?;
@@ -82,6 +133,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let cfg = get_settings();
     init_telemetry(&cfg.log.level);
+
+    if std::env::args().any(|a| a == "--diagnostic") {
+        run_diagnostics();
+        return Ok(());
+    }
 
     let store_path = cfg.store.resolved_path();
     let store = store::open_store(&store_path).await?;

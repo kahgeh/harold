@@ -1,0 +1,16 @@
+[imessage]
+recipient = "+61..."
+handle_id = 0  # run: sqlite3 ~/Library/Messages/chat.db "SELECT ROWID, id FROM handle;"
+
+[ai]
+cli_path = "/path/to/claude"
+# Optional: local MLX model for short TTS summaries (faster, private)
+# local_model = "Qwen/Qwen3-32B-MLX-8bit"
+# local_model_dir = "/path/to/mlx-lm"
+
+[tts]
+command = "say"
+# voice = "Samantha"
+# Or use a custom TTS script:
+# command = "uv"
+# args = ["run", "/path/to/tts_script.py"]
