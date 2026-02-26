@@ -126,15 +126,40 @@ fn run_diagnostics() {
     println!("\nDone.");
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn print_help() {
+    println!("harold — agent notification and reply routing daemon\n");
+    println!("USAGE:");
+    println!("  harold                  Start the Harold daemon");
+    println!("  harold --diagnostics    Test screen lock, TTS, and iMessage config");
+    println!("  harold --help           Show this help\n");
+    println!("ENVIRONMENT:");
+    println!("  HAROLD_CONFIG_DIR       Path to config directory (default: ./config)");
+    println!("  HAROLD_ENV              Config environment overlay (default: local)");
+    println!("  HAROLD__*               Override any config key via env var");
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let args: Vec<String> = std::env::args().collect();
+
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        print_help();
+        return Ok(());
+    }
+
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(async_main(args))
+}
+
+async fn async_main(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
     let settings = settings::Settings::load()?;
     init_settings(settings);
 
     let cfg = get_settings();
     init_telemetry(&cfg.log.level);
 
-    if std::env::args().any(|a| a == "--diagnostic") {
+    if args.iter().any(|a| a == "--diagnostic" || a == "--diagnostics") {
         run_diagnostics();
         return Ok(());
     }
