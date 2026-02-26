@@ -127,8 +127,9 @@ fn semantic_resolve(body: &str, panes: &[PaneInfo]) -> Option<(usize, String)> {
     let prompt = format!(
         "Given this message: \"{body}\"\n\n\
          And these active tmux panes:\n{labels_list}\n\n\
+         Pane labels use hyphens where users may write spaces (e.g. 'my agent' refers to 'my-agent').\n\
          Does the message contain EXPLICIT routing intent to a specific pane? \
-         (direct address like 'To X,', 'ask X', '[X]' — NOT just thematic association)\n\
+         (direct address like 'To X,', 'ask X', '[X]', 'my agent' — NOT just thematic association)\n\
          If yes, reply on two lines:\n\
          LINE1: exact pane label\n\
          LINE2: message with routing prefix removed\n\
