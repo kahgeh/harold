@@ -9,6 +9,7 @@ build:
 deploy: build
 	mkdir -p $(DEPLOY_DIR)
 	cp $(BINARY) $(DEPLOY_DIR)/harold
+	xattr -c $(DEPLOY_DIR)/harold
 	mkdir -p $(DEPLOY_DIR)/config
 	cp harold/config/default.toml $(DEPLOY_DIR)/config/default.toml
 	cp harold/config/local.template.toml $(DEPLOY_DIR)/config/local.template.toml

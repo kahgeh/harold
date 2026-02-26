@@ -95,7 +95,13 @@ pub struct Settings {
 impl Settings {
     pub fn load() -> Result<Arc<Self>, ConfigError> {
         let env = std::env::var("HAROLD_ENV").unwrap_or_else(|_| "local".into());
-        let config_dir = std::env::var("HAROLD_CONFIG_DIR").unwrap_or_else(|_| "config".into());
+        let config_dir = std::env::var("HAROLD_CONFIG_DIR").unwrap_or_else(|_| {
+            // Default to a config/ directory next to the running binary.
+            std::env::current_exe()
+                .ok()
+                .and_then(|p| p.parent().map(|d| d.join("config").to_string_lossy().into_owned()))
+                .unwrap_or_else(|| "config".into())
+        });
 
         let config = Config::builder()
             .add_source(File::new(
