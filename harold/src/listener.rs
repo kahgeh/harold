@@ -26,10 +26,8 @@ fn db_path() -> String {
 fn handle_ids() -> HashSet<i64> {
     let cfg = get_settings();
     let mut ids = HashSet::new();
-    if let Some(id) = cfg.imessage.handle_id {
-        if id > 0 {
-            ids.insert(id);
-        }
+    if let Some(id) = cfg.imessage.handle_id && id > 0 {
+        ids.insert(id);
     }
     if let Some(extras) = &cfg.imessage.extra_handle_ids {
         ids.extend(extras);
