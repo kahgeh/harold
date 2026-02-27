@@ -10,15 +10,17 @@
 
 set -euo pipefail
 
-IDENTITY_FILE=".codesign-identity"
+ENV_FILE=".env"
 
-if [[ -f "$IDENTITY_FILE" ]]; then
-    existing=$(cat "$IDENTITY_FILE")
-    echo "Current codesigning identity: $existing"
-    read -rp "Keep this identity? [Y/n] " answer
-    if [[ "${answer,,}" != "n" ]]; then
-        echo "Keeping: $existing"
-        exit 0
+if [[ -f "$ENV_FILE" ]]; then
+    existing=$(grep '^CODESIGN_IDENTITY=' "$ENV_FILE" 2>/dev/null | cut -d= -f2- | tr -d '"' || true)
+    if [[ -n "$existing" ]]; then
+        echo "Current codesigning identity: $existing"
+        read -rp "Keep this identity? [Y/n] " answer
+        if [[ "${answer,,}" != "n" ]]; then
+            echo "Keeping: $existing"
+            exit 0
+        fi
     fi
 fi
 
@@ -51,6 +53,12 @@ if [[ -z "$identity" ]]; then
     exit 1
 fi
 
-echo "$identity" > "$IDENTITY_FILE"
+# Update or create .env with the identity
+if [[ -f "$ENV_FILE" ]]; then
+    # Remove existing CODESIGN_IDENTITY line if present
+    grep -v '^CODESIGN_IDENTITY=' "$ENV_FILE" > "$ENV_FILE.tmp" || true
+    mv "$ENV_FILE.tmp" "$ENV_FILE"
+fi
+echo "CODESIGN_IDENTITY=$identity" >> "$ENV_FILE"
 echo ""
-echo "Saved to $IDENTITY_FILE: $identity"
+echo "Saved CODESIGN_IDENTITY to $ENV_FILE"
