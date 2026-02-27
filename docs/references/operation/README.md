@@ -14,7 +14,7 @@ Harold runs as a single binary with three concurrent tasks sharing an event stor
 | ----------- | ---------------------------------------------------------------------------------------------------- |
 | gRPC server | Accepts `TurnComplete` RPCs, appends `TurnCompleted` events                                          |
 | Projector   | Tails the event store; dispatches `TurnCompleted` → `notify()` and `ReplyReceived` → `route_reply()` |
-| Listener    | Polls `chat.db` every 5 s using separate inbound/self cursors; appends `ReplyReceived` events         |
+| Listener    | Watches `chat.db` via FSEvents (5 s fallback poll) using separate inbound/self cursors; appends `ReplyReceived` events |
 
 The shutdown channel is a `watch::Sender<()>`. Dropping the sender (on SIGINT/SIGTERM) closes the channel; all receivers (`Projector`, `Listener`) see `Err(RecvError)` and exit their loops.
 

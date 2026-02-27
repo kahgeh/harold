@@ -12,12 +12,12 @@ The projector consumes `TurnCompleted` events and calls `notify()`. The notifica
 
 Summarisation uses different backends depending on the path:
 
-| Path            | Summary backend                  | Max input                                       | Output                    |
-| --------------- | -------------------------------- | ----------------------------------------------- | ------------------------- |
-| At desk (TTS)   | Local model (`mlx_lm`)           | 500 chars of last_user_prompt                   | 3–8 words, ≤20 tokens     |
-| Away (iMessage) | AI CLI (`claude --model sonnet`) | 500 chars prompt + 2000 chars assistant message | 2–4 sentences, plain text |
+| Path            | Summary backend                  | Max input                     | Output                                            |
+| --------------- | -------------------------------- | ----------------------------- | ------------------------------------------------- |
+| At desk (TTS)   | Local model (`mlx_lm`)           | 500 chars of last_user_prompt | 3–8 words, ≤20 tokens                             |
+| Away (iMessage) | First 280 chars of assistant_message | 280 chars assistant message   | `[pane_label] body (context)` + trailing question  |
 
-If the local model is not configured, the TTS summary falls back to `"Work complete"`. If the AI CLI fails, the iMessage body falls back to the first 280 characters of the assistant message.
+If the local model is not configured, the TTS summary falls back to `"Work complete"`.
 
 ## Decision flow
 
@@ -53,11 +53,12 @@ Config keys (`[tts]`):
 
 ## Away: iMessage
 
-1. `build_detailed_summary()` — runs AI CLI with a prompt asking for a 2–4 sentence plain-text summary covering what was done, current status, and whether a decision is needed; uses up to 500 chars of `last_user_prompt` and 2000 chars of `assistant_message`
+1. First 280 characters of `assistant_message` extracted, newlines replaced with spaces
 2. `split_body()` — splits the last sentence ending in `?` into a separate follow-up message
-3. Duplicate check — queries `chat.db` for the most recent outgoing message to `handle_id`; skips if identical
-4. Messages sent via AppleScript: `tell application "Messages" to send "..." to buddy "..."`
-5. Message format: `[<pane_label>] <main body> (<main_context>)` then `<question>` as a second message if present
+3. Message assembled: `[<pane_label>] <main body> (<main_context>)`
+4. Duplicate check — queries `chat.db` for the most recent outgoing message to first configured `handle_id`; skips if identical (after stripping `🤖` prefix)
+5. Messages sent via AppleScript: `tell application "Messages" to send "🤖 ..." to buddy "..."`
+6. Trailing question (if present) sent as a second `🤖`-prefixed message
 
 Config keys (`[imessage]`):
 
@@ -81,7 +82,7 @@ sequenceDiagram
     participant LocalModel as mlx_lm
     participant TTS as TTS command
 
-    Hook->>gRPC: TurnComplete RPC (pane_id, pane_label, last_user_prompt, assistant_message, main_context)
+    Hook->>gRPC: TurnComplete RPC (pane_id, pane_label, last_user_prompt, assistant_message from hook input, main_context)
     gRPC->>Store: append TurnCompleted event
     Store-->>gRPC: ok
     gRPC-->>Hook: accepted: true
@@ -106,24 +107,22 @@ sequenceDiagram
     participant gRPC as Harold (gRPC)
     participant Store as Event store
     participant Projector
-    participant AiCli as claude (Sonnet)
     participant ChatDb as chat.db
     participant Messages as Messages.app
 
-    Hook->>gRPC: TurnComplete RPC
+    Hook->>gRPC: TurnComplete RPC (last_assistant_message from hook input)
     gRPC->>Store: append TurnCompleted event
     gRPC-->>Hook: accepted: true
 
     Projector->>Store: poll for new events
     Store-->>Projector: TurnCompleted event
     Projector->>Projector: ioreg → IOConsoleLocked = true
-    Projector->>AiCli: prompt with last_user_prompt (≤500 chars) + assistant_message (≤2000 chars)
-    AiCli-->>Projector: 2-4 sentence plain-text summary
+    Projector->>Projector: truncate assistant_message to 280 chars, replace newlines
     Projector->>Projector: split_body() → main body + trailing question (if ends in ?)
     Projector->>ChatDb: SELECT text WHERE handle_id=? AND is_from_me=1 ORDER BY ROWID DESC LIMIT 1
     ChatDb-->>Projector: last outgoing text
     note over Projector: not duplicate → send
-    Projector->>Messages: osascript → "[alir-app main:0.1] <body> (feature/foo)"
+    Projector->>Messages: osascript → "🤖 [harold:0.3] <body> (harold)"
     Projector->>Projector: set last_away_notification_source_agent
-    Projector->>Messages: osascript → "<trailing question>" (if present)
+    Projector->>Messages: osascript → "🤖 <trailing question>" (if present)
 ```
