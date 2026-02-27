@@ -191,7 +191,7 @@ fn last_outgoing_text(handle_id: i64) -> Option<String> {
     )
 }
 
-pub fn notify_away(turn: &TurnCompleted, trace_id: &str) {
+pub fn notify_away(turn: &TurnCompleted, _trace_id: &str) {
     let cfg = get_settings();
     let Some(recipient) = cfg.imessage.recipient.as_deref() else {
         warn!("iMessage recipient not configured");
@@ -205,13 +205,11 @@ pub fn notify_away(turn: &TurnCompleted, trace_id: &str) {
         .replace('\n', " ");
 
     let (main_body, question) = split_body(&body);
-    let short_id: String = trace_id.chars().take(8).collect();
     let message = format!(
-        "[{}] {} ({}) [{}]",
+        "[{}] {} ({})",
         turn.pane_label,
         main_body.trim(),
-        turn.main_context,
-        short_id
+        turn.main_context
     );
 
     let is_duplicate = cfg
