@@ -12,8 +12,8 @@ Routing has two stages: inbound collection and routing resolution.
 
 **Inbound collection** — The listener watches `chat.db` for filesystem changes (via FSEvents on macOS) and runs two separate queries on each change, each with its own ROWID cursor. A 5-second fallback poll ensures messages are still detected if the filesystem watcher is unavailable:
 
-- **Inbound** — `handle_id IN (configured IDs) AND is_from_me = 0` — messages sent by the user from the recipient's device
-- **Self** — `handle_id = self_handle_id AND is_from_me = 1` — messages sent from the user's phone that appear as self-sent rows in chat.db
+- **Inbound** — `handle_id IN (handle_ids) AND is_from_me = 0` — messages sent by the user from the recipient's device
+- **Self** — `handle_id IN (handle_ids) AND is_from_me = 1` — messages sent from the user's phone that appear as self-sent rows in chat.db
 
 Each cursor is advanced only after a successful `append_reply_received`, so a crash before the append causes the message to be reprocessed on the next poll rather than skipped.
 
@@ -39,7 +39,7 @@ route_reply(text)
 │
 ├─ no tag → semantic_resolve(body, panes)
 │   ├─ only 1 pane → skip (returns None, falls through)
-│   └─ multiple panes → AI CLI (Haiku, --max-turns 1, disableAllHooks)
+│   └─ multiple panes → AI CLI (Sonnet, --max-turns 1, disableAllHooks)
 │       prompt asks: "does this message have EXPLICIT routing intent?"
 │       ├─ response = "none" → return None
 │       └─ response = LINE1: pane label / LINE2: cleaned message → match by label
@@ -65,7 +65,7 @@ If no pane is found, an error iMessage lists the currently available pane labels
 
 ## Semantic routing prompt
 
-The AI CLI is invoked with Haiku (`--max-turns 1`, `--settings '{"disableAllHooks":true}'`) with this prompt structure:
+The AI CLI is invoked with Sonnet (`--max-turns 1`, `--settings '{"disableAllHooks":true}'`) with this prompt structure:
 
 ```
 You are a routing classifier. Do NOT answer or respond to the message content.
@@ -100,12 +100,12 @@ sequenceDiagram
     participant Store as Event store
     participant Projector
     participant Tmux as tmux
-    participant AiCli as claude (Haiku)
+    participant AiCli as claude (Sonnet)
     participant Messages as Messages.app
 
     Phone->>ChatDb: iMessage reply arrives
-    Listener->>ChatDb: SELECT ROWID, text WHERE ROWID > last_inbound_rowid AND handle_id IN (?) AND is_from_me = 0
-    Listener->>ChatDb: SELECT ROWID, text WHERE ROWID > last_self_rowid AND handle_id = self_handle_id AND is_from_me = 1
+    Listener->>ChatDb: SELECT ROWID, text WHERE ROWID > last_inbound_rowid AND handle_id IN (handle_ids) AND is_from_me = 0
+    Listener->>ChatDb: SELECT ROWID, text WHERE ROWID > last_self_rowid AND handle_id IN (handle_ids) AND is_from_me = 1
     ChatDb-->>Listener: [(rowid, text), ...]
     Listener->>Store: append ReplyReceived { text }
     Listener->>Listener: advance cursor (atomic store, only on successful append)
@@ -122,7 +122,7 @@ sequenceDiagram
     alt [tag] present
         Projector->>Projector: exact label match, then case-insensitive substring match
     else no tag, multiple panes
-        Projector->>AiCli: routing prompt with body + pane label list (--model haiku --max-turns 1)
+        Projector->>AiCli: routing prompt with body + pane label list (--model sonnet --max-turns 1)
         AiCli-->>Projector: "none" or LINE1: label / LINE2: cleaned message
         Projector->>Projector: match returned label to live panes
     else fallback

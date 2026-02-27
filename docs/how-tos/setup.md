@@ -28,7 +28,7 @@ Run the setup script to select your codesigning identity:
 make setup-codesign
 ```
 
-This lists available certificates and saves your choice to `.codesign-identity` (gitignored). If you don't have a certificate, create one in Keychain Access:
+This lists available certificates and saves your choice to `.env` (gitignored). If you don't have a certificate, create one in Keychain Access:
 
 1. Open **Keychain Access**
 2. **Keychain Access > Certificate Assistant > Create a Certificate**
@@ -67,7 +67,7 @@ Edit `local.toml` and fill in your values:
 ```toml
 [imessage]
 recipient = "+61400000000"   # your phone number
-handle_id = 36               # find with: sqlite3 ~/Library/Messages/chat.db \
+handle_ids = [36]            # find with: sqlite3 ~/Library/Messages/chat.db \
                              #   "SELECT ROWID, id FROM handle;"
 
 [ai]
@@ -81,13 +81,13 @@ command = "say"
 # voice = "Samantha"   # optional — omit to use system default
 ```
 
-To find your `handle_id`:
+To find your `handle_ids`:
 
 ```bash
 sqlite3 ~/Library/Messages/chat.db "SELECT ROWID, id FROM handle;"
 ```
 
-Find the row matching your phone number and use its `ROWID`.
+Find the rows matching your phone number and email addresses, and use their `ROWID` values.
 
 ## 4. Install the stop hook
 

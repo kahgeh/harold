@@ -25,9 +25,9 @@ The shutdown channel is a `watch::Sender<()>`. Dropping the sender (on SIGINT/SI
   │  ┌─────────────┐  ┌────────────┐  ┌─────────────┐  │
   │  │ gRPC server │  │ Projector  │  │  Listener   │  │
   │  │             │  │            │  │             │  │
-  │  │ TurnComplete│  │ TurnComple-│  │ polls       │  │
+  │  │ TurnComplete│  │ TurnComple-│  │ watches     │  │
   │  │ RPC handler │  │ ted →      │  │ chat.db     │  │
-  │  │             │  │ notify     │  │ every 5s    │  │
+  │  │             │  │ notify     │  │ (FSEvents)  │  │
   │  │             │  │            │  │             │  │
   │  │             │  │ ReplyRecei-│  │             │  │
   │  │             │  │ ved →      │  │             │  │

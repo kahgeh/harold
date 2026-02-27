@@ -56,17 +56,16 @@ Config keys (`[tts]`):
 1. First 280 characters of `assistant_message` extracted, newlines replaced with spaces
 2. `split_body()` — splits the last sentence ending in `?` into a separate follow-up message
 3. Message assembled: `[<pane_label>] <main body> (<main_context>)`
-4. Duplicate check — queries `chat.db` for the most recent outgoing message to first configured `handle_id`; skips if identical (after stripping `🤖` prefix)
+4. Duplicate check — queries `chat.db` for the most recent outgoing message to first configured handle ID; skips if identical (after stripping `🤖` prefix)
 5. Messages sent via AppleScript: `tell application "Messages" to send "🤖 ..." to buddy "..."`
 6. Trailing question (if present) sent as a second `🤖`-prefixed message
 
 Config keys (`[imessage]`):
 
-| Key                | Description                                            |
-| ------------------ | ------------------------------------------------------ |
-| `recipient`        | Phone number or email of the iMessage recipient        |
-| `handle_id`        | `handle_id` in `chat.db` for dedup and inbound polling |
-| `extra_handle_ids` | Additional handle IDs to poll (e.g. multiple devices)  |
+| Key          | Description                                                          |
+| ------------ | -------------------------------------------------------------------- |
+| `recipient`  | Phone number or email of the iMessage recipient                      |
+| `handle_ids` | All `chat.db` handle IDs for your Apple ID (dedup and inbound poll)  |
 
 ## Sequences
 
