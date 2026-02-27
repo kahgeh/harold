@@ -1,48 +1,24 @@
+pub mod directory;
+pub(crate) mod tmux;
+
 use std::process::Command;
 use std::sync::Mutex;
 
 use tracing::info;
 
+use crate::outbound::imessage::send_imessage;
 use crate::settings::get_settings;
-use crate::util::{ai_cli_env, sanitise_for_applescript};
+use crate::util::ai_cli_env;
+
+pub use directory::AgentAddress;
+use directory::AgentDirectory;
 
 // ---------------------------------------------------------------------------
 // State — agent routing (in-memory; Harold owns all routing state)
 // ---------------------------------------------------------------------------
 
-/// How to reach an agent session. Currently only tmux panes, but extensible.
-#[derive(Debug, Clone)]
-pub enum AgentAddress {
-    TmuxPane { pane_id: String, label: String },
-}
-
-impl AgentAddress {
-    pub fn label(&self) -> &str {
-        match self {
-            AgentAddress::TmuxPane { label, .. } => label,
-        }
-    }
-
-    pub(crate) fn tmux_pane_id(&self) -> &str {
-        match self {
-            AgentAddress::TmuxPane { pane_id, .. } => pane_id,
-        }
-    }
-
-    fn same_target(&self, other: &AgentAddress) -> bool {
-        match (self, other) {
-            (
-                AgentAddress::TmuxPane { pane_id: a, .. },
-                AgentAddress::TmuxPane { pane_id: b, .. },
-            ) => a == b,
-        }
-    }
-}
-
-/// The agent that last had a reply routed to it.
 static LAST_ROUTED_AGENT: Mutex<Option<AgentAddress>> = Mutex::new(None);
 
-/// The agent whose turn completion most recently triggered an away (iMessage) notification.
 static LAST_AWAY_NOTIFICATION_SOURCE_AGENT: Mutex<Option<AgentAddress>> = Mutex::new(None);
 
 pub(crate) fn set_last_routed_agent(addr: AgentAddress) {
@@ -80,72 +56,6 @@ pub(crate) fn parse_tag(text: &str) -> (Option<&str>, &str) {
         return (Some(tag), body);
     }
     (None, text)
-}
-
-// ---------------------------------------------------------------------------
-// Live pane discovery
-// ---------------------------------------------------------------------------
-
-pub(crate) fn is_claude_code_process(cmd: &str) -> bool {
-    // Claude Code runs as a node process named like "16.20.1" (the node version).
-    // We match process names that are purely digits separated by dots (semver-like).
-    // TODO: replace with explicit pane registration via the TurnComplete RPC.
-    let parts: Vec<&str> = cmd.split('.').collect();
-    parts.len() >= 3
-        && parts
-            .iter()
-            .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
-}
-
-pub(crate) fn live_claude_panes() -> Vec<AgentAddress> {
-    let out = match Command::new("tmux")
-        .args([
-            "list-panes",
-            "-a",
-            "-F",
-            "#{pane_id}|#{session_name}:#{window_index}.#{pane_index}|#{pane_current_command}",
-        ])
-        .output()
-    {
-        Ok(o) => o,
-        Err(_) => return vec![],
-    };
-
-    String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .filter_map(|line| {
-            let parts: Vec<&str> = line.splitn(3, '|').collect();
-            if parts.len() != 3 {
-                return None;
-            }
-            let pane_id = parts[0].to_string();
-            let label = parts[1]
-                .chars()
-                .filter(|c| c.is_ascii_graphic() || *c == ' ')
-                .collect::<String>()
-                .split_whitespace()
-                .collect::<Vec<_>>()
-                .join(" ");
-            if is_claude_code_process(parts[2].trim()) {
-                Some(AgentAddress::TmuxPane { pane_id, label })
-            } else {
-                None
-            }
-        })
-        .collect()
-}
-
-fn is_pane_alive(pane_id: &str) -> bool {
-    Command::new("tmux")
-        .args([
-            "display-message",
-            "-t",
-            pane_id,
-            "-p",
-            "#{pane_current_command}",
-        ])
-        .output()
-        .is_ok_and(|o| is_claude_code_process(String::from_utf8_lossy(&o.stdout).trim()))
 }
 
 // ---------------------------------------------------------------------------
@@ -304,77 +214,17 @@ pub(crate) fn resolve_pane<'a>(
 }
 
 // ---------------------------------------------------------------------------
-// tmux relay
-// ---------------------------------------------------------------------------
-
-pub(crate) fn strip_control(text: &str) -> String {
-    // Remove ANSI escape sequences and control characters before sending to tmux.
-    // The '-l' flag prevents shell interpretation but raw bytes still reach the pane.
-    let mut out = String::with_capacity(text.len());
-    let mut chars = text.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '\x1b' {
-            if chars.peek() == Some(&'[') {
-                chars.next();
-                for c2 in chars.by_ref() {
-                    if c2.is_ascii_alphabetic() {
-                        break;
-                    }
-                }
-            }
-        } else if c.is_control() && c != '\n' {
-            // drop
-        } else {
-            out.push(c);
-        }
-    }
-    out
-}
-
-fn relay_to_pane(pane_id: &str, text: &str) {
-    info!(pane_id, text, "relay_to_pane");
-    let safe = strip_control(text);
-    let _ = Command::new("tmux")
-        .args(["send-keys", "-t", pane_id, "-l", &safe])
-        .status();
-    let _ = Command::new("tmux")
-        .args(["send-keys", "-t", pane_id, "Enter"])
-        .status();
-}
-
-// ---------------------------------------------------------------------------
-// iMessage send (for error / confirmation replies)
-// ---------------------------------------------------------------------------
-
-pub(crate) fn send_imessage(msg: &str) {
-    info!(msg, "sending iMessage");
-    let cfg = get_settings();
-    let Some(recipient) = cfg.imessage.recipient.as_deref() else {
-        return;
-    };
-    let escaped_msg = sanitise_for_applescript(msg)
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"");
-    let escaped_rec = sanitise_for_applescript(recipient)
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"");
-    let script = format!(
-        "tell application \"Messages\" to send \"{escaped_msg}\" to buddy \"{escaped_rec}\""
-    );
-    let _ = Command::new("osascript").args(["-e", &script]).status();
-}
-
-// ---------------------------------------------------------------------------
 // Route a received reply — called from projector
 // ---------------------------------------------------------------------------
 
 pub fn route_reply(text: &str) {
+    let directory = AgentDirectory::TmuxProcessScan;
     info!(text, "route_reply entered");
     let (tag, body) = parse_tag(text);
-    let panes = live_claude_panes();
+    let panes = directory.discover();
 
     if panes.is_empty() {
-        send_imessage("No Claude Code sessions active.");
+        send_imessage("No active agent sessions found.");
         return;
     }
 
@@ -392,8 +242,7 @@ pub fn route_reply(text: &str) {
             send_imessage(&msg);
         }
         Some((agent, cleaned_body)) => {
-            let pane_id = agent.tmux_pane_id();
-            if !is_pane_alive(pane_id) {
+            if !directory.is_alive(agent) {
                 let available = panes
                     .iter()
                     .filter(|p| !p.same_target(agent))
@@ -407,14 +256,122 @@ pub fn route_reply(text: &str) {
                 ));
                 return;
             }
-            info!(pane_id, label = %agent.label(), "routing reply");
-            relay_to_pane(pane_id, &format!("📱 {cleaned_body}"));
+            info!(label = %agent.label(), "routing reply");
+            agent.relay(&format!("📱 {cleaned_body}"));
             set_last_routed_agent(agent.clone());
             send_imessage(&format!("✓ Delivered to [{}]", agent.label()));
         }
     }
 }
 
+// ---------------------------------------------------------------------------
+// Public re-exports for diagnostics / other modules
+// ---------------------------------------------------------------------------
+
+pub fn scan_live_panes() -> Vec<AgentAddress> {
+    tmux::scan_live_panes()
+}
+
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
 #[cfg(test)]
-#[path = "route_reply_test.rs"]
-mod tests;
+mod tests {
+    use std::sync::Mutex;
+
+    use crate::inbound::{
+        AgentAddress, clear_routing_state, parse_tag, resolve_pane,
+        set_last_away_notification_source_agent, set_last_routed_agent,
+    };
+    use crate::settings::init_settings_for_test;
+
+    /// Serialises tests that mutate global routing state.
+    static ROUTING_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    fn tmux(pane_id: &str, label: &str) -> AgentAddress {
+        AgentAddress::TmuxPane {
+            pane_id: pane_id.into(),
+            label: label.into(),
+        }
+    }
+
+    #[test]
+    fn parse_tag_with_tag() {
+        let (tag, body) = parse_tag("[main] hello world");
+        assert_eq!(tag, Some("main"));
+        assert_eq!(body, "hello world");
+    }
+
+    #[test]
+    fn parse_tag_without_tag() {
+        let (tag, body) = parse_tag("just a message");
+        assert_eq!(tag, None);
+        assert_eq!(body, "just a message");
+    }
+
+    #[test]
+    fn parse_tag_unclosed_bracket() {
+        let (tag, body) = parse_tag("[unclosed message");
+        assert_eq!(tag, None);
+        assert_eq!(body, "[unclosed message");
+    }
+
+    #[test]
+    fn resolve_pane_exact_match() {
+        let panes = vec![tmux("%1", "work:0.0"), tmux("%2", "home:0.1")];
+        let result = resolve_pane(Some("work:0.0"), "hi", &panes);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().0.pane_id(), "%1");
+    }
+
+    #[test]
+    fn resolve_pane_substring_match() {
+        let panes = vec![tmux("%1", "work:0.0"), tmux("%2", "home:0.1")];
+        let result = resolve_pane(Some("home"), "hi", &panes);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().0.pane_id(), "%2");
+    }
+
+    #[test]
+    fn resolve_pane_no_tag_falls_back_to_my_agent() {
+        let _lock = ROUTING_TEST_LOCK.lock().unwrap();
+        clear_routing_state();
+        let panes = vec![tmux("%1", "my-agent:0.0")];
+        let result = resolve_pane(None, "hi", &panes);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().0.pane_id(), "%1");
+    }
+
+    #[test]
+    fn resolve_pane_last_routed_agent_beats_my_agent() {
+        let _lock = ROUTING_TEST_LOCK.lock().unwrap();
+        init_settings_for_test();
+        clear_routing_state();
+        let panes = vec![tmux("%1", "harold:0.3"), tmux("%2", "my-agent:0.0")];
+        set_last_routed_agent(tmux("%1", "harold:0.3"));
+        let result = resolve_pane(None, "hi", &panes);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().0.pane_id(), "%1");
+    }
+
+    #[test]
+    fn resolve_pane_last_away_notification_source_beats_my_agent() {
+        let _lock = ROUTING_TEST_LOCK.lock().unwrap();
+        init_settings_for_test();
+        clear_routing_state();
+        let panes = vec![tmux("%3", "alir-app:0.1"), tmux("%4", "my-agent:0.0")];
+        set_last_away_notification_source_agent(tmux("%3", "alir-app:0.1"));
+        let result = resolve_pane(None, "hi", &panes);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().0.pane_id(), "%3");
+    }
+
+    #[test]
+    fn resolve_pane_no_match_returns_none() {
+        let panes = vec![tmux("%1", "work:0.0")];
+        let result = resolve_pane(Some("nonexistent"), "hi", &panes);
+        assert!(result.is_none());
+    }
+}

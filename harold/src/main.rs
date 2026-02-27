@@ -1,7 +1,7 @@
+mod inbound;
 mod listener;
-mod notify;
+mod outbound;
 mod projector;
-mod route_reply;
 mod settings;
 mod store;
 mod telemetry;
@@ -78,7 +78,7 @@ async fn shutdown_signal() {
 }
 
 fn run_diagnostics(delay_secs: u64) {
-    use notify::{is_screen_locked, notify_at_desk, notify_away};
+    use outbound::{is_screen_locked, tts::notify_at_desk, imessage::notify_away};
     use store::TurnCompleted;
 
     let turn = TurnCompleted {
@@ -115,13 +115,13 @@ fn run_diagnostics(delay_secs: u64) {
     );
 
     println!("\n--- Testing semantic resolver ---");
-    let panes = route_reply::live_claude_panes();
+    let panes = inbound::scan_live_panes();
     let pane_labels: Vec<&str> = panes.iter().map(|p| p.label()).collect();
     println!("live panes    : {pane_labels:?}");
 
     let test_phrases = ["to my agent, hi", "ask harold to check logs", "hi"];
     for phrase in &test_phrases {
-        let result = route_reply::semantic_resolve(phrase, &panes);
+        let result = inbound::semantic_resolve(phrase, &panes);
         match result {
             Some((idx, cleaned)) => {
                 println!(
