@@ -21,4 +21,5 @@ command = "say"
 # args = ["run", "/path/to/tts_script.py"]
 
 # [notify]
-# skip_if_session_active = true # skip if any pane in the same tmux session is active
+# skip_if_session_active = true  # skip if completing pane is in the active tmux session
+# skip_if_pane_active = false    # skip if completing pane is the active pane and screen is unlocked

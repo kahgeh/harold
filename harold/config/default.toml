@@ -24,3 +24,4 @@ path = "~/.harold/events"
 
 [notify]
 skip_if_session_active = true
+skip_if_pane_active = false

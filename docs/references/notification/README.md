@@ -28,9 +28,13 @@ TurnCompleted event
   notify()
   │
   ├─ skip_if_session_active = true?
-  │   └─ tmux display-message -l → MRU client session
-  │      tmux display-message -t pane_id → pane session
+  │   └─ tmux display-message -p #{session_name} → active session
+  │      tmux display-message -t pane_id -p #{session_name} → pane session
   │      same session → skip (return)
+  │
+  ├─ skip_if_pane_active = true?
+  │   └─ screen unlocked AND active pane == completing pane
+  │      → skip (return)
   │
   ├─ ioreg → IOConsoleLocked = true?
   │   ├─ no  → notify_at_desk()
@@ -95,7 +99,7 @@ sequenceDiagram
 
     Projector->>Store: poll for new events
     Store-->>Projector: TurnCompleted event
-    Projector->>Tmux: display-message -l -p #{session_name} → MRU client session
+    Projector->>Tmux: display-message -p #{session_name} → active session
     Projector->>Tmux: display-message -t <pane_id> -p #{session_name} → pane session
     note over Projector: sessions differ → proceed
     Projector->>Projector: ioreg → IOConsoleLocked = false

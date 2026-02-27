@@ -49,22 +49,22 @@ pub fn is_screen_locked() -> bool {
     }
 }
 
-fn active_tmux_session() -> Option<String> {
-    let out = Command::new("tmux")
-        .args(["display-message", "-l", "-p", "#{session_name}"])
-        .output()
-        .ok()?;
+fn tmux_query(args: &[&str]) -> Option<String> {
+    let out = Command::new("tmux").args(args).output().ok()?;
     let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
     if s.is_empty() { None } else { Some(s) }
 }
 
+fn active_tmux_session() -> Option<String> {
+    tmux_query(&["display-message", "-p", "#{session_name}"])
+}
+
 fn pane_session(pane_id: &str) -> Option<String> {
-    let out = Command::new("tmux")
-        .args(["display-message", "-t", pane_id, "-p", "#{session_name}"])
-        .output()
-        .ok()?;
-    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if s.is_empty() { None } else { Some(s) }
+    tmux_query(&["display-message", "-t", pane_id, "-p", "#{session_name}"])
+}
+
+fn active_tmux_pane() -> Option<String> {
+    tmux_query(&["display-message", "-p", "#{pane_id}"])
 }
 
 // ---------------------------------------------------------------------------
@@ -73,7 +73,10 @@ fn pane_session(pane_id: &str) -> Option<String> {
 
 pub fn notify(turn: &TurnCompleted, trace_id: &str) {
     let cfg = get_settings();
+    let screen_locked = is_screen_locked();
 
+    // Session-level skip: if completing pane is in the active session, skip entirely.
+    // Takes precedence — when this fires, pane-level skip is irrelevant.
     if cfg.notify.skip_if_session_active
         && let (Some(active_session), Some(pane_session)) =
             (active_tmux_session(), pane_session(&turn.pane_id))
@@ -83,9 +86,22 @@ pub fn notify(turn: &TurnCompleted, trace_id: &str) {
         return;
     }
 
-    let channel = match is_screen_locked() {
-        true => OutboundChannel::IMessage,
-        false => OutboundChannel::Tts,
+    // Pane-level skip: skip only when the completing pane is the active pane
+    // AND the screen is not locked (user is at desk looking at it).
+    // If screen is locked, always notify even if pane matches.
+    if cfg.notify.skip_if_pane_active
+        && !screen_locked
+        && let Some(active_pane) = active_tmux_pane()
+        && active_pane == turn.pane_id
+    {
+        info!("notification skipped (pane is active and screen unlocked)");
+        return;
+    }
+
+    let channel = if screen_locked {
+        OutboundChannel::IMessage
+    } else {
+        OutboundChannel::Tts
     };
 
     if let Some(source_agent) = channel.notify(turn, trace_id) {
