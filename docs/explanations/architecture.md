@@ -128,7 +128,7 @@ When a `TurnCompleted` event is received, Harold decides how to notify:
 
 1. gRPC server — accepts `TurnComplete` RPCs, appends events
 2. Projector — consumes events from the store, drives notification (sets `last_away_notification_source_agent` when away) and reply routing (sets `last_routed_agent`)
-3. Listener — polls `chat.db` every 5 s for new inbound and self-sent iMessages using separate cursors, appends `ReplyReceived` events
+3. Listener — watches `chat.db` for filesystem changes (FSEvents) and polls on each change for new inbound and self-sent iMessages using separate cursors, appends `ReplyReceived` events (5 s fallback poll if watcher unavailable)
 
 **Shutdown** — SIGINT or SIGTERM triggers an ordered shutdown:
 

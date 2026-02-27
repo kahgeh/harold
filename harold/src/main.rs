@@ -78,7 +78,7 @@ async fn shutdown_signal() {
 }
 
 fn run_diagnostics(delay_secs: u64) {
-    use outbound::{is_screen_locked, tts::notify_at_desk, imessage::notify_away};
+    use outbound::{imessage::notify_away, is_screen_locked, tts::notify_at_desk};
     use store::TurnCompleted;
 
     let turn = TurnCompleted {

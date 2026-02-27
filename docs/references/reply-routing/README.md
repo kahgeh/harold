@@ -10,7 +10,7 @@ Replying from your phone means you know which agent you meant but the message ar
 
 Routing has two stages: inbound collection and routing resolution.
 
-**Inbound collection** — The listener runs two separate queries against `chat.db` every 5 seconds, each with its own ROWID cursor:
+**Inbound collection** — The listener watches `chat.db` for filesystem changes (via FSEvents on macOS) and runs two separate queries on each change, each with its own ROWID cursor. A 5-second fallback poll ensures messages are still detected if the filesystem watcher is unavailable:
 
 - **Inbound** — `handle_id IN (configured IDs) AND is_from_me = 0` — messages sent by the user from the recipient's device
 - **Self** — `handle_id = self_handle_id AND is_from_me = 1` — messages sent from the user's phone that appear as self-sent rows in chat.db

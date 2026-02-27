@@ -1,12 +1,14 @@
 use std::collections::HashSet;
+use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicI64, Ordering};
 
 use events::EventStore;
-use tokio::sync::watch;
-use tracing::{Instrument, info, info_span};
+use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use tokio::sync::{mpsc, watch};
+use tracing::{Instrument, info, info_span, warn};
 
 use crate::settings::get_settings;
 use crate::store::{ReplyReceived, append_reply_received};
@@ -133,6 +135,51 @@ async fn poll(store: &EventStore) {
     }
 }
 
+fn start_watcher(chat_db_path: &str) -> Option<(RecommendedWatcher, mpsc::UnboundedReceiver<()>)> {
+    let parent = Path::new(chat_db_path).parent()?;
+    let db_name = Path::new(chat_db_path).file_name()?.to_str()?.to_string();
+    let wal_name = format!("{db_name}-wal");
+
+    let (tx, rx) = mpsc::unbounded_channel();
+
+    let watcher = notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| {
+        let event = match res {
+            Ok(e) => e,
+            Err(e) => {
+                tracing::warn!(error = %e, "fs watcher event error");
+                return;
+            }
+        };
+        if !matches!(event.kind, EventKind::Modify(_) | EventKind::Create(_)) {
+            return;
+        }
+        let targets_chat_db = event.paths.iter().any(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n == db_name || n == wal_name)
+        });
+        if targets_chat_db {
+            let _ = tx.send(());
+        }
+    });
+
+    let mut watcher = match watcher {
+        Ok(w) => w,
+        Err(e) => {
+            warn!(error = %e, "failed to create fs watcher, falling back to poll-only");
+            return None;
+        }
+    };
+
+    if let Err(e) = watcher.watch(parent, RecursiveMode::NonRecursive) {
+        warn!(error = %e, "failed to watch chat.db directory, falling back to poll-only");
+        return None;
+    }
+
+    info!(path = %parent.display(), "fs watcher active on chat.db directory");
+    Some((watcher, rx))
+}
+
 pub async fn listen(store: Arc<EventStore>, mut shutdown: watch::Receiver<()>) {
     let initial = tokio::task::spawn_blocking(get_max_rowid)
         .await
@@ -148,12 +195,30 @@ pub async fn listen(store: Arc<EventStore>, mut shutdown: watch::Receiver<()>) {
         .expect("listen called more than once");
     info!(initial_rowid = initial, "iMessage listener started");
 
+    // Keep _watcher alive (dropping it stops watching). In the fallback path,
+    // _keep_tx stays alive so fs_rx.recv() pends forever rather than returning None.
+    let (_watcher, mut fs_rx, _keep_tx) = match start_watcher(&db_path()) {
+        Some((watcher, rx)) => (Some(watcher), rx, None),
+        None => {
+            let (tx, rx) = mpsc::unbounded_channel();
+            (None, rx, Some(tx))
+        }
+    };
+
     loop {
         tokio::select! {
+            biased;
+
             _ = shutdown.changed() => {
                 info!("iMessage listener shutting down");
                 break;
             }
+            _ = fs_rx.recv() => {
+                while fs_rx.try_recv().is_ok() {}
+                poll(&store).await;
+            }
+            // The 5s timer restarts after every fs-triggered poll, which is intentional:
+            // if fs events are flowing, we don't need the fallback.
             () = tokio::time::sleep(tokio::time::Duration::from_secs(5)) => {
                 poll(&store).await;
             }
