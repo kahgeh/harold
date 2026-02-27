@@ -48,16 +48,22 @@ fn get_max_rowid() -> i64 {
 }
 
 fn query_messages(sql: &str) -> Vec<(i64, String)> {
-    let out = match Command::new("sqlite3").arg(db_path()).arg(sql).output() {
+    let out = match Command::new("sqlite3")
+        .arg("-json")
+        .arg(db_path())
+        .arg(sql)
+        .output()
+    {
         Ok(o) if o.status.success() => o,
         _ => return vec![],
     };
-    String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .filter_map(|line| {
-            let (rowid_s, text) = line.split_once('|')?;
-            let rowid = rowid_s.trim().parse::<i64>().ok()?;
-            let text = text.trim().to_string();
+    let Ok(rows) = serde_json::from_slice::<Vec<serde_json::Value>>(&out.stdout) else {
+        return vec![];
+    };
+    rows.into_iter()
+        .filter_map(|row| {
+            let rowid = row.get("ROWID")?.as_i64()?;
+            let text = row.get("text")?.as_str()?.trim().to_string();
             if text.is_empty() || text.starts_with('🤖') {
                 return None;
             }
