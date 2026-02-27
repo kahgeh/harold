@@ -33,23 +33,26 @@ Harold is agent-agnostic — it works with any agent that can shell out to `grpc
 │                          Harold                                  │
 │                       (Rust binary)                              │
 │                                                                  │
-│  ┌──────────────────────┐    ┌───────────────────────────────┐   │
+│  ┌─ outbound/ ──────────┐    ┌─ inbound/ ────────────────────┐   │
 │  │  Notification        │    │  Reply routing                │   │
 │  │                      │    │                               │   │
-│  │ - Generates summary  │    │ - Polls chat.db for replies   │   │
-│  │   via AI CLI         │    │   (separate inbound + self    │   │
-│  │ - Detects screen lock│    │    cursors)                   │   │
-│  │ - Sends iMessage or  │    │ - Semantic resolve via AI CLI │   │
-│  │   triggers TTS       │    │ - Falls back to               │   │
-│  │ - Updates last_away  │    │   last_routed_agent, then     │   │
-│  │   _notification_     │    │   last_away_notification_     │   │
-│  │   source_agent       │    │   source_agent, then my-agent │   │
-│  │                      │    │ - Sends keys to tmux pane     │   │
-│  │                      │    │ - Updates last_routed_agent   │   │
+│  │ OutboundChannel:     │    │ AgentDirectory:               │   │
+│  │   Tts | IMessage     │    │   TmuxProcessScan             │   │
+│  │                      │    │   → discover(), is_alive()    │   │
+│  │ - Generates summary  │    │                               │   │
+│  │   via local model    │    │ AgentAddress (= the channel): │   │
+│  │ - Detects screen lock│    │   TmuxPane { pane_id, label } │   │
+│  │ - Sends iMessage or  │    │   → relay(), label()          │   │
+│  │   triggers TTS       │    │                               │   │
+│  │ - Returns source     │    │ - Polls chat.db for replies   │   │
+│  │   agent for routing  │    │ - Semantic resolve via AI CLI │   │
+│  │   state update       │    │ - Falls back to               │   │
+│  │                      │    │   last_routed_agent, then     │   │
+│  │                      │    │   last_away_notification_     │   │
+│  │                      │    │   source_agent, then my-agent │   │
 │  └──────────────────────┘    └───────────────────────────────┘   │
 │                                                                  │
 │  Event store (CQRS/event sourcing)                               │
-│  AgentAddress: enum { TmuxPane { pane_id, label } }              │
 │  State: { last_inbound_rowid, last_self_rowid,                   │
 │     last_routed_agent, last_away_notification_source_agent }     │
 └──────────────────────────────────────────────────────────────────┘
