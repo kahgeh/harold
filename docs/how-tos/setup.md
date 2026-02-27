@@ -18,21 +18,32 @@
 
 - Full Disk Access granted to your terminal app — required to read `~/Library/Messages/chat.db`
 
-## 1. Build and deploy
+## 1. Set up code-signing
+
+Code-signing is required on macOS because unsigned binaries cannot send iMessages via AppleScript — macOS blocks `osascript` access to Messages.app for untrusted processes.
+
+Run the setup script to select your codesigning identity:
+
+```bash
+make setup-codesign
+```
+
+This lists available certificates and saves your choice to `.codesign-identity` (gitignored). If you don't have a certificate, create one in Keychain Access:
+
+1. Open **Keychain Access**
+2. **Keychain Access > Certificate Assistant > Create a Certificate**
+3. Set Identity Type to **Self Signed Root**
+4. Set Certificate Type to **Code Signing**
+
+See [Apple's guide on creating self-signed certificates](https://support.apple.com/en-au/guide/keychain-access/kyca8916/mac) for details.
+
+## 2. Build and deploy
 
 ```bash
 make deploy
 ```
 
-This builds a release binary, code-signs it, and copies the binary, proto file, and default config to `~/bin/harold/`.
-
-Code-signing is required on macOS because unsigned binaries cannot send iMessages via AppleScript — macOS blocks `osascript` access to Messages.app for untrusted processes. The `Makefile` signs with a local identity:
-
-```makefile
-codesign --force --sign "Your Name" $(DEPLOY_DIR)/harold
-```
-
-Replace `"Your Name"` with your Apple Developer identity (run `security find-identity -v -p codesigning` to list available identities). A self-signed ad-hoc identity (`-`) works for local use but may require re-signing after each build.
+This builds a release binary, code-signs it with the identity from step 1, and copies the binary, proto file, and default config to `~/bin/harold/`.
 
 Deployed layout:
 
@@ -45,7 +56,7 @@ Deployed layout:
     local.template.toml
 ```
 
-## 2. Create your local config
+## 3. Create your local config
 
 ```bash
 cp ~/bin/harold/config/local.template.toml ~/bin/harold/config/local.toml
@@ -78,11 +89,11 @@ sqlite3 ~/Library/Messages/chat.db "SELECT ROWID, id FROM handle;"
 
 Find the row matching your phone number and use its `ROWID`.
 
-## 3. Install the stop hook
+## 4. Install the stop hook
 
 Harold is notified of completed agent turns via a Claude Code [Stop hook](https://code.claude.com/docs/en/hooks). The hook also auto-starts Harold if it is not already running.
 
-### 3a. Create the hook script
+### 4a. Create the hook script
 
 Save the following as `~/.claude/hooks/smart_stop.py`:
 
@@ -258,7 +269,7 @@ The hook extracts five pieces of context from each completed turn:
 | `assistant_message` | `last_assistant_message` from Stop hook input (current turn)      |
 | `main_context`      | Git branch name, or repo name when on `main`                     |
 
-### 3b. Register the hook
+### 4b. Register the hook
 
 Add the Stop hook to `~/.claude/settings.json`:
 
@@ -282,7 +293,7 @@ Add the Stop hook to `~/.claude/settings.json`:
 
 The hook runs on every Stop event (empty matcher). It auto-starts Harold via TCP probe to `localhost:50060`, then sends the `TurnComplete` gRPC call.
 
-## 4. Verify
+## 5. Verify
 
 Run the diagnostics to confirm everything is wired up:
 
