@@ -35,11 +35,9 @@ impl GrpcSettings {
 #[derive(Debug, Deserialize)]
 pub struct ImessageSettings {
     pub recipient: Option<String>,
-    pub handle_id: Option<i64>,
-    pub extra_handle_ids: Option<Vec<i64>>,
-    // handle_id for your own Apple ID in chat.db (e.g. your Gmail or Apple ID email).
-    // Messages sent from your phone appear in chat.db as is_from_me=1 on this handle.
-    pub self_handle_id: Option<i64>,
+    /// All chat.db handle IDs associated with your Apple ID (phone number, emails).
+    #[serde(default)]
+    pub handle_ids: Vec<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -115,13 +113,8 @@ impl Settings {
         if self.imessage.recipient.is_none() {
             errors.push("imessage.recipient is required".into());
         }
-        let has_inbound = self.imessage.handle_id.is_some_and(|id| id > 0)
-            || self.imessage.self_handle_id.is_some_and(|id| id > 0);
-        if !has_inbound {
-            errors.push(
-                "imessage.handle_id or imessage.self_handle_id is required to receive messages"
-                    .into(),
-            );
+        if self.imessage.handle_ids.is_empty() {
+            errors.push("imessage.handle_ids requires at least one handle ID".into());
         }
         errors
     }
@@ -165,8 +158,7 @@ pub fn get_settings() -> &'static Arc<Settings> {
 pub fn init_settings_for_test() {
     static INIT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
     INIT.get_or_init(|| {
-        let manifest_dir =
-            std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
+        let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
         // SAFETY: called exactly once via OnceLock before any other thread reads this var.
         unsafe {
             std::env::set_var("HAROLD_CONFIG_DIR", format!("{manifest_dir}/config"));

@@ -6,17 +6,20 @@ use std::sync::atomic::{AtomicI64, Ordering};
 
 use events::EventStore;
 use tokio::sync::watch;
-use tracing::info;
+use tracing::{Instrument, info, info_span};
 
 use crate::settings::get_settings;
 use crate::store::{ReplyReceived, append_reply_received};
 
-static LAST_PROCESSED_ROWID: OnceLock<AtomicI64> = OnceLock::new();
+static LAST_INBOUND_ROWID: OnceLock<AtomicI64> = OnceLock::new();
+static LAST_SELF_ROWID: OnceLock<AtomicI64> = OnceLock::new();
 
-fn last_rowid() -> &'static AtomicI64 {
-    LAST_PROCESSED_ROWID
-        .get()
-        .expect("listener not initialised")
+fn last_inbound_rowid() -> &'static AtomicI64 {
+    LAST_INBOUND_ROWID.get().expect("listener not initialised")
+}
+
+fn last_self_rowid() -> &'static AtomicI64 {
+    LAST_SELF_ROWID.get().expect("listener not initialised")
 }
 
 fn db_path() -> String {
@@ -24,17 +27,7 @@ fn db_path() -> String {
 }
 
 fn handle_ids() -> HashSet<i64> {
-    let cfg = get_settings();
-    let mut ids = HashSet::new();
-    if let Some(id) = cfg.imessage.handle_id
-        && id > 0
-    {
-        ids.insert(id);
-    }
-    if let Some(extras) = &cfg.imessage.extra_handle_ids {
-        ids.extend(extras);
-    }
-    ids
+    get_settings().imessage.handle_ids.iter().copied().collect()
 }
 
 fn get_max_rowid() -> i64 {
@@ -52,62 +45,12 @@ fn get_max_rowid() -> i64 {
     .unwrap_or(0)
 }
 
-fn fetch_new_messages(last_rowid: i64) -> Vec<(i64, String)> {
-    let ids = handle_ids();
-    let self_handle_id = get_settings().imessage.self_handle_id.filter(|&id| id > 0);
-
-    if ids.is_empty() && self_handle_id.is_none() {
-        return vec![];
-    }
-
-    // id_list and self_handle_id are i64 — numeric, no injection risk.
-    // last_rowid is i64 from AtomicI64 — numeric, safe to interpolate.
-    //
-    // Messages sent from your phone appear in chat.db as is_from_me=1 on your own Apple ID
-    // handle (self_handle_id). The standard inbound path is is_from_me=0 on the sender's handle.
-    let sql = match (ids.is_empty(), self_handle_id) {
-        (false, Some(self_id)) => {
-            let id_list = ids
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join(",");
-            format!(
-                "SELECT ROWID, text FROM message \
-                 WHERE ROWID > {last_rowid} \
-                   AND ((handle_id IN ({id_list}) AND is_from_me = 0) \
-                     OR (handle_id = {self_id} AND is_from_me = 1)) \
-                 ORDER BY ROWID ASC;"
-            )
-        }
-        (false, None) => {
-            let id_list = ids
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join(",");
-            format!(
-                "SELECT ROWID, text FROM message \
-                 WHERE ROWID > {last_rowid} AND handle_id IN ({id_list}) AND is_from_me = 0 \
-                 ORDER BY ROWID ASC;"
-            )
-        }
-        (true, Some(self_id)) => {
-            format!(
-                "SELECT ROWID, text FROM message \
-                 WHERE ROWID > {last_rowid} AND handle_id = {self_id} AND is_from_me = 1 \
-                 ORDER BY ROWID ASC;"
-            )
-        }
-        (true, None) => return vec![],
-    };
-
-    let out = match Command::new("sqlite3").arg(db_path()).arg(&sql).output() {
+fn query_messages(sql: &str) -> Vec<(i64, String)> {
+    let out = match Command::new("sqlite3").arg(db_path()).arg(sql).output() {
         Ok(o) if o.status.success() => o,
         _ => return vec![],
     };
-
-    let mut messages: Vec<(i64, String)> = String::from_utf8_lossy(&out.stdout)
+    String::from_utf8_lossy(&out.stdout)
         .lines()
         .filter_map(|line| {
             let (rowid_s, text) = line.split_once('|')?;
@@ -118,44 +61,75 @@ fn fetch_new_messages(last_rowid: i64) -> Vec<(i64, String)> {
             }
             Some((rowid, text))
         })
-        .collect();
+        .collect()
+}
 
-    // Deduplicate: iMessage sync can produce two rows for the same message —
-    // one as is_from_me=1 on self_handle_id (phone sync) and one as is_from_me=0
-    // on the sender's handle (normal inbound). Keep only the last occurrence of
-    // each unique text so we process it once at the highest ROWID.
-    messages.dedup_by(|a, b| {
-        if a.1 == b.1 {
-            // dedup_by: `a` is the later element (higher ROWID), `b` is the earlier one and
-            // is retained. Copy the higher ROWID from `a` into `b` before `a` is dropped.
-            b.0 = a.0;
-            true
-        } else {
-            false
-        }
-    });
+fn fetch_messages(last_rowid: i64, is_from_me: u8) -> Vec<(i64, String)> {
+    let ids = handle_ids();
+    if ids.is_empty() {
+        return vec![];
+    }
+    let id_list = ids
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
+    query_messages(&format!(
+        "SELECT ROWID, text FROM message \
+         WHERE ROWID > {last_rowid} AND handle_id IN ({id_list}) AND is_from_me = {is_from_me} \
+           AND text IS NOT NULL AND length(text) > 0 \
+         ORDER BY ROWID ASC;"
+    ))
+}
 
-    messages
+fn fetch_inbound(last_rowid: i64) -> Vec<(i64, String)> {
+    fetch_messages(last_rowid, 0)
+}
+
+fn fetch_self(last_rowid: i64) -> Vec<(i64, String)> {
+    fetch_messages(last_rowid, 1)
 }
 
 async fn poll(store: &EventStore) {
-    let current_rowid = last_rowid().load(Ordering::Relaxed);
-    let messages = tokio::task::spawn_blocking(move || fetch_new_messages(current_rowid))
-        .await
-        .unwrap_or_else(|e| {
-            tracing::warn!(error = %e, "fetch_new_messages task panicked");
-            vec![]
-        });
+    let inbound_rowid = last_inbound_rowid().load(Ordering::Relaxed);
+    let self_rowid = last_self_rowid().load(Ordering::Relaxed);
 
-    for (rowid, text) in messages {
-        // Mark as seen before appending — prevents re-processing on crash.
-        last_rowid().store(rowid, Ordering::Relaxed);
-        info!(rowid, "iMessage received");
+    let (inbound, self_msgs) =
+        tokio::task::spawn_blocking(move || (fetch_inbound(inbound_rowid), fetch_self(self_rowid)))
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!(error = %e, "fetch task panicked");
+                (vec![], vec![])
+            });
 
-        if let Err(e) = append_reply_received(store, &ReplyReceived { text }).await {
-            // rowid already advanced; this message is skipped rather than reprocessed.
-            tracing::warn!(error = %e, "failed to append ReplyReceived event");
+    for (rowid, text) in inbound {
+        let trace_id = uuid::Uuid::new_v4().to_string();
+        let span = info_span!("listener_inbound", trace_id = %trace_id, rowid = rowid);
+
+        async {
+            info!("iMessage received (inbound)");
+            match append_reply_received(store, &ReplyReceived { text }).await {
+                Ok(()) => last_inbound_rowid().store(rowid, Ordering::Relaxed),
+                Err(e) => tracing::warn!(error = %e, "failed to append ReplyReceived event"),
+            }
         }
+        .instrument(span)
+        .await;
+    }
+
+    for (rowid, text) in self_msgs {
+        let trace_id = uuid::Uuid::new_v4().to_string();
+        let span = info_span!("listener_self", trace_id = %trace_id, rowid = rowid);
+
+        async {
+            info!("iMessage received (self)");
+            match append_reply_received(store, &ReplyReceived { text }).await {
+                Ok(()) => last_self_rowid().store(rowid, Ordering::Relaxed),
+                Err(e) => tracing::warn!(error = %e, "failed to append ReplyReceived event"),
+            }
+        }
+        .instrument(span)
+        .await;
     }
 }
 
@@ -166,14 +140,16 @@ pub async fn listen(store: Arc<EventStore>, mut shutdown: watch::Receiver<()>) {
             tracing::warn!(error = %e, "get_max_rowid task panicked, starting from 0");
             0
         });
-    LAST_PROCESSED_ROWID
+    LAST_INBOUND_ROWID
+        .set(AtomicI64::new(initial))
+        .expect("listen called more than once");
+    LAST_SELF_ROWID
         .set(AtomicI64::new(initial))
         .expect("listen called more than once");
     info!(initial_rowid = initial, "iMessage listener started");
 
     loop {
         tokio::select! {
-            // Sender dropped signals shutdown; Err(RecvError) means channel closed.
             _ = shutdown.changed() => {
                 info!("iMessage listener shutting down");
                 break;

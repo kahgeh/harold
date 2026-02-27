@@ -34,21 +34,24 @@ Harold is agent-agnostic — it works with any agent that can shell out to `grpc
 │                       (Rust binary)                              │
 │                                                                  │
 │  ┌──────────────────────┐    ┌───────────────────────────────┐   │
-│  │  Turn-complete       │    │  Reply routing                │   │
-│  │  receiver            │    │                               │   │
+│  │  Notification        │    │  Reply routing                │   │
 │  │                      │    │                               │   │
-│  │ - Receives RPC       │    │ - Polls chat.db for replies   │   │
-│  │ - Generates summary  │    │ - Semantic resolve via AI CLI │   │
-│  │   via AI CLI         │    │ - Falls back to               │   │
-│  │ - Detects screen lock│    │   last_notified_pane          │   │
-│  │ - Sends iMessage or  │    │ - Final fallback: my-agent    │   │
-│  │   triggers TTS       │    │ - Sends keys to tmux pane     │   │
-│  │ - Updates            │    │                               │   │
-│  │   last_notified_pane │    │                               │   │
+│  │ - Generates summary  │    │ - Polls chat.db for replies   │   │
+│  │   via AI CLI         │    │   (separate inbound + self    │   │
+│  │ - Detects screen lock│    │    cursors)                   │   │
+│  │ - Sends iMessage or  │    │ - Semantic resolve via AI CLI │   │
+│  │   triggers TTS       │    │ - Falls back to               │   │
+│  │ - Updates last_away  │    │   last_routed_agent, then     │   │
+│  │   _notification_     │    │   last_away_notification_     │   │
+│  │   source_agent       │    │   source_agent, then my-agent │   │
+│  │                      │    │ - Sends keys to tmux pane     │   │
+│  │                      │    │ - Updates last_routed_agent   │   │
 │  └──────────────────────┘    └───────────────────────────────┘   │
 │                                                                  │
 │  Event store (CQRS/event sourcing)                               │
-│  State: { last_processed_rowid, last_notified_pane }             │
+│  AgentAddress: enum { TmuxPane { pane_id, label } }              │
+│  State: { last_inbound_rowid, last_self_rowid,                   │
+│     last_routed_agent, last_away_notification_source_agent }     │
 └──────────────────────────────────────────────────────────────────┘
                     │                        ▲
                     │ iMessage               │ iMessage reply
@@ -60,21 +63,22 @@ Harold is agent-agnostic — it works with any agent that can shell out to `grpc
 
 ## Responsibilities
 
-| Concern                            | Owner  |
-| ---------------------------------- | ------ |
-| Transcript parsing                 | Hook   |
-| Pane identity (self)               | Hook   |
-| main_context (branch or repo name) | Hook   |
-| Skip subagent stop events          | Hook   |
-| Ensure harold is running           | Hook   |
-| Screen lock detection              | Harold |
-| Summarisation (AI CLI)             | Harold |
-| TTS notification                   | Harold |
-| iMessage send + dedup              | Harold |
-| `last_notified_pane` state         | Harold |
-| Reply routing (tmux)               | Harold |
-| Live pane discovery                | Harold |
-| Event store                        | Harold |
+| Concern                                 | Owner  |
+| --------------------------------------- | ------ |
+| Transcript parsing                      | Hook   |
+| Pane identity (self)                    | Hook   |
+| main_context (branch or repo name)      | Hook   |
+| Skip subagent stop events               | Hook   |
+| Ensure harold is running                | Hook   |
+| Screen lock detection                   | Harold |
+| Summarisation (AI CLI)                  | Harold |
+| TTS notification                        | Harold |
+| iMessage send + dedup                   | Harold |
+| `last_notification_source_agent` state  | Harold |
+| `last_routed_agent` state               | Harold |
+| Reply routing (tmux)                    | Harold |
+| Live pane discovery                     | Harold |
+| Event store                             | Harold |
 
 ---
 
@@ -106,9 +110,10 @@ When a `TurnCompleted` event is received, Harold decides how to notify:
 
 1. `[tag]` prefix → exact/substring match against live tmux panes
 2. No tag, multiple panes → semantic resolve via AI CLI
-3. No match → `last_notified_pane`
-4. Final fallback → pane whose label contains `my-agent`
-5. Nothing found → error iMessage sent back
+3. `last_routed_agent` → the agent last successfully delivered a reply to
+4. `last_away_notification_source_agent` → the agent whose turn last triggered an away (iMessage) notification
+5. Final fallback → pane whose label contains `my-agent`
+6. Nothing found → error iMessage sent back
 
 ---
 
@@ -118,9 +123,9 @@ When a `TurnCompleted` event is received, Harold decides how to notify:
 
 **Running** — Three concurrent tasks:
 
-1. gRPC server — accepts `TurnComplete` RPCs, appends events, updates `last_notified_pane`
-2. Projector — consumes events from the store, drives notification and reply routing
-3. Listener — polls `chat.db` every 5 s for new inbound iMessages, appends `ReplyReceived` events
+1. gRPC server — accepts `TurnComplete` RPCs, appends events
+2. Projector — consumes events from the store, drives notification (sets `last_away_notification_source_agent` when away) and reply routing (sets `last_routed_agent`)
+3. Listener — polls `chat.db` every 5 s for new inbound and self-sent iMessages using separate cursors, appends `ReplyReceived` events
 
 **Shutdown** — SIGINT or SIGTERM triggers an ordered shutdown:
 
@@ -134,13 +139,12 @@ The checkpoint ensures the next startup opens a clean database without replaying
 
 ## State
 
-Harold owns all routing state in-memory, backed by the event store for durability:
+Harold owns all routing state in-memory:
 
-```json
-{
-  "last_processed_rowid": 12345,
-  "last_notified_pane": "%12"
-}
-```
+- `last_inbound_rowid` / `last_self_rowid` — separate chat.db polling cursors for inbound messages and self-sent (phone-synced) messages
+- `last_routed_agent: Option<AgentAddress>` — the agent a reply was last successfully delivered to
+- `last_away_notification_source_agent: Option<AgentAddress>` — the agent whose turn completion last triggered an away (iMessage) notification
+
+`AgentAddress` is an enum (currently only `TmuxPane { pane_id, label }`), extensible to other transports.
 
 Live pane discovery uses live tmux queries.

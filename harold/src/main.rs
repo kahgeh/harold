@@ -13,7 +13,7 @@ use settings::{get_settings, init_settings};
 use telemetry::init_telemetry;
 use tokio::sync::watch;
 use tonic::{Request, Response, Status, transport::Server};
-use tracing::info;
+use tracing::{Instrument, info, info_span};
 
 pub mod harold {
     tonic::include_proto!("harold");
@@ -33,37 +33,37 @@ impl Harold for HaroldService {
         request: Request<TurnCompleteRequest>,
     ) -> Result<Response<TurnCompleteResponse>, Status> {
         let req = request.into_inner();
-        // assistant_message omitted from log — can be large
-        info!(
-            pane_id = %req.pane_id,
-            pane_label = %req.pane_label,
-            main_context = %req.main_context,
-            "turn complete received"
-        );
+        let trace_id = uuid::Uuid::new_v4().to_string();
+        let span = info_span!("grpc_turn_complete", trace_id = %trace_id);
 
-        let pane = route_reply::PaneInfo {
-            pane_id: req.pane_id,
-            label: req.pane_label,
-        };
-        let event = store::TurnCompleted {
-            pane_id: pane.pane_id.clone(),
-            pane_label: pane.label.clone(),
-            last_user_prompt: req.last_user_prompt,
-            assistant_message: req.assistant_message,
-            main_context: req.main_context,
-        };
+        async {
+            // assistant_message omitted from log — can be large
+            info!(
+                pane_id = %req.pane_id,
+                pane_label = %req.pane_label,
+                main_context = %req.main_context,
+                "turn complete received"
+            );
 
-        // Commit to store first; update routing state only on success.
-        store::append_turn_completed(&self.store, &event)
-            .await
-            .map_err(|e| {
-                tracing::error!(error = %e, "failed to append TurnCompleted event");
-                Status::internal("event store write failed")
-            })?;
+            let event = store::TurnCompleted {
+                pane_id: req.pane_id,
+                pane_label: req.pane_label,
+                last_user_prompt: req.last_user_prompt,
+                assistant_message: req.assistant_message,
+                main_context: req.main_context,
+            };
 
-        route_reply::set_last_notified_pane(pane);
+            store::append_turn_completed(&self.store, &event)
+                .await
+                .map_err(|e| {
+                    tracing::error!(error = %e, "failed to append TurnCompleted event");
+                    Status::internal("event store write failed")
+                })?;
 
-        Ok(Response::new(TurnCompleteResponse { accepted: true }))
+            Ok(Response::new(TurnCompleteResponse { accepted: true }))
+        }
+        .instrument(span)
+        .await
     }
 }
 
@@ -101,9 +101,9 @@ fn run_diagnostics(delay_secs: u64) {
 
     let cfg = get_settings();
     println!(
-        "iMessage      : recipient={} handle_id={:?}",
+        "iMessage      : recipient={} handle_ids={:?}",
         cfg.imessage.recipient.as_deref().unwrap_or("(not set)"),
-        cfg.imessage.handle_id,
+        cfg.imessage.handle_ids,
     );
     println!(
         "TTS           : command={} voice={:?}",
@@ -114,10 +114,31 @@ fn run_diagnostics(delay_secs: u64) {
         cfg.ai.cli_path.as_deref().unwrap_or("(not set)"),
     );
 
+    println!("\n--- Testing semantic resolver ---");
+    let panes = route_reply::live_claude_panes();
+    let pane_labels: Vec<&str> = panes.iter().map(|p| p.label()).collect();
+    println!("live panes    : {pane_labels:?}");
+
+    let test_phrases = ["to my agent, hi", "ask harold to check logs", "hi"];
+    for phrase in &test_phrases {
+        let result = route_reply::semantic_resolve(phrase, &panes);
+        match result {
+            Some((idx, cleaned)) => {
+                println!(
+                    "  \"{phrase}\" → {} (cleaned: \"{cleaned}\")",
+                    panes[idx].label()
+                );
+            }
+            None => {
+                println!("  \"{phrase}\" → none");
+            }
+        }
+    }
+
     println!("\n--- Testing notify path (screen_locked={locked}) ---");
     if !locked {
         println!("Running TTS...");
-        notify_at_desk(&turn);
+        notify_at_desk(&turn, "diag");
         println!("TTS done");
         return;
     }
@@ -126,7 +147,7 @@ fn run_diagnostics(delay_secs: u64) {
         return;
     }
     println!("Sending iMessage...");
-    notify_away(&turn);
+    notify_away(&turn, "diag");
     println!("iMessage sent (check your phone)");
 
     println!("\nDone.");

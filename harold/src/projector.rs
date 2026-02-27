@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use events::{EventEnvelope, EventStore, Projector, Result};
 use tokio::sync::watch;
-use tracing::{info, warn};
+use tracing::{Instrument, info, info_span, warn};
 
 use crate::notify::notify;
 use crate::route_reply::route_reply;
@@ -15,42 +15,57 @@ pub async fn run_projector(store: Arc<EventStore>, mut shutdown: watch::Receiver
     let result: Result<()> = tokio::select! {
         res = projector.run(|events: &[EventEnvelope]| {
             // Clone all needed data before the async block — no references may escape.
-            let batch: Vec<(String, serde_json::Value)> = events
+            let batch: Vec<(String, String, serde_json::Value)> = events
                 .iter()
-                .map(|e| (e.r#type.clone(), e.payload.clone()))
+                .map(|e| (e.id.to_string(), e.r#type.clone(), e.payload.clone()))
                 .collect();
 
             async move {
-                for (event_type, payload) in batch {
-                    match event_type.as_str() {
-                        "TurnCompleted" => {
-                            match serde_json::from_value::<TurnCompleted>(payload) {
-                                Ok(turn) => {
-                                    info!(
-                                        pane_label = %turn.pane_label,
-                                        main_context = %turn.main_context,
-                                        "projector: TurnCompleted"
-                                    );
-                                    tokio::task::spawn_blocking(move || notify(&turn)).await.ok();
+                for (event_id, event_type, payload) in batch {
+                    let span = info_span!("event", trace_id = %event_id);
+
+                    async {
+                        match event_type.as_str() {
+                            "TurnCompleted" => {
+                                match serde_json::from_value::<TurnCompleted>(payload) {
+                                    Ok(turn) => {
+                                        info!(
+                                            pane_label = %turn.pane_label,
+                                            main_context = %turn.main_context,
+                                            "projector: TurnCompleted"
+                                        );
+                                        let inner_span = tracing::Span::current();
+                                        let tid = event_id.clone();
+                                        tokio::task::spawn_blocking(move || {
+                                            let _g = inner_span.entered();
+                                            notify(&turn, &tid);
+                                        }).await.ok();
+                                    }
+                                    Err(e) => warn!(error = %e, "projector: failed to deserialise TurnCompleted"),
                                 }
-                                Err(e) => warn!(error = %e, "projector: failed to deserialise TurnCompleted"),
                             }
-                        }
-                        "ReplyReceived" => {
-                            match serde_json::from_value::<ReplyReceived>(payload) {
-                                Ok(reply) => {
-                                    info!("projector: ReplyReceived");
-                                    tokio::task::spawn_blocking(move || route_reply(&reply.text))
+                            "ReplyReceived" => {
+                                match serde_json::from_value::<ReplyReceived>(payload) {
+                                    Ok(reply) => {
+                                        info!("projector: ReplyReceived");
+                                        let inner_span = tracing::Span::current();
+                                        tokio::task::spawn_blocking(move || {
+                                            let _g = inner_span.entered();
+                                            route_reply(&reply.text);
+                                        })
                                         .await
                                         .ok();
+                                    }
+                                    Err(e) => warn!(error = %e, "projector: failed to deserialise ReplyReceived"),
                                 }
-                                Err(e) => warn!(error = %e, "projector: failed to deserialise ReplyReceived"),
+                            }
+                            other => {
+                                warn!(event_type = %other, "projector: unknown event type");
                             }
                         }
-                        other => {
-                            warn!(event_type = %other, "projector: unknown event type");
-                        }
                     }
+                    .instrument(span)
+                    .await;
                 }
                 Ok(())
             }

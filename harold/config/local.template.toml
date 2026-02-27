@@ -1,14 +1,17 @@
 [imessage]
 recipient = "+61..."
-handle_id = 0       # run: sqlite3 ~/Library/Messages/chat.db "SELECT ROWID, id FROM handle;"
-self_handle_id = 0  # your own Apple ID handle (e.g. your Gmail) — messages sent from your
-                    # phone appear as is_from_me=1 on this handle due to iMessage sync
+# All chat.db handle IDs for your Apple ID (phone number, emails).
+# Run: sqlite3 ~/Library/Messages/chat.db "SELECT ROWID, id FROM handle;"
+handle_ids = [1, 36]
 
 [ai]
 cli_path = "/path/to/claude"
 # Optional: local MLX model for short TTS summaries (faster, private)
 # local_model = "Qwen/Qwen3-32B-MLX-8bit"
 # local_model_dir = "/path/to/mlx-lm"
+
+[store]
+path = "~/bin/harold/data/events"
 
 [tts]
 command = "say"

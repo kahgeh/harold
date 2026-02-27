@@ -84,7 +84,6 @@ sequenceDiagram
     Hook->>gRPC: TurnComplete RPC (pane_id, pane_label, last_user_prompt, assistant_message, main_context)
     gRPC->>Store: append TurnCompleted event
     Store-->>gRPC: ok
-    gRPC->>gRPC: set last_notified_pane in memory
     gRPC-->>Hook: accepted: true
 
     Projector->>Store: poll for new events
@@ -96,6 +95,7 @@ sequenceDiagram
     Projector->>LocalModel: system prompt + "User's last request: <last_user_prompt>" → ≤20 tokens
     LocalModel-->>Projector: "Fixed WAL shutdown race condition"
     Projector->>TTS: say [-v Samantha] "Fixed WAL... on harold and waiting for further instructions"
+    note over Projector: at-desk does not update last_away_notification_source_agent
 ```
 
 ### Away (screen locked)
@@ -124,5 +124,6 @@ sequenceDiagram
     ChatDb-->>Projector: last outgoing text
     note over Projector: not duplicate → send
     Projector->>Messages: osascript → "[alir-app main:0.1] <body> (feature/foo)"
+    Projector->>Projector: set last_away_notification_source_agent
     Projector->>Messages: osascript → "<trailing question>" (if present)
 ```

@@ -1,8 +1,20 @@
+use std::sync::Mutex;
+
 use crate::route_reply::{
-    PaneInfo, is_claude_code_process, parse_tag, resolve_pane, set_last_notified_pane,
-    strip_control,
+    AgentAddress, clear_routing_state, is_claude_code_process, parse_tag, resolve_pane,
+    set_last_away_notification_source_agent, set_last_routed_agent, strip_control,
 };
 use crate::settings::init_settings_for_test;
+
+/// Serialises tests that mutate global routing state.
+static ROUTING_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+fn tmux(pane_id: &str, label: &str) -> AgentAddress {
+    AgentAddress::TmuxPane {
+        pane_id: pane_id.into(),
+        label: label.into(),
+    }
+}
 
 #[test]
 fn parse_tag_with_tag() {
@@ -27,78 +39,59 @@ fn parse_tag_unclosed_bracket() {
 
 #[test]
 fn resolve_pane_exact_match() {
-    let panes = vec![
-        PaneInfo {
-            pane_id: "%1".into(),
-            label: "work:0.0".into(),
-        },
-        PaneInfo {
-            pane_id: "%2".into(),
-            label: "home:0.1".into(),
-        },
-    ];
+    let panes = vec![tmux("%1", "work:0.0"), tmux("%2", "home:0.1")];
     let result = resolve_pane(Some("work:0.0"), "hi", &panes);
     assert!(result.is_some());
-    assert_eq!(result.unwrap().0.pane_id, "%1");
+    assert_eq!(result.unwrap().0.tmux_pane_id(), "%1");
 }
 
 #[test]
 fn resolve_pane_substring_match() {
-    let panes = vec![
-        PaneInfo {
-            pane_id: "%1".into(),
-            label: "work:0.0".into(),
-        },
-        PaneInfo {
-            pane_id: "%2".into(),
-            label: "home:0.1".into(),
-        },
-    ];
+    let panes = vec![tmux("%1", "work:0.0"), tmux("%2", "home:0.1")];
     let result = resolve_pane(Some("home"), "hi", &panes);
     assert!(result.is_some());
-    assert_eq!(result.unwrap().0.pane_id, "%2");
+    assert_eq!(result.unwrap().0.tmux_pane_id(), "%2");
 }
 
 #[test]
 fn resolve_pane_no_tag_falls_back_to_my_agent() {
-    let panes = vec![PaneInfo {
-        pane_id: "%1".into(),
-        label: "my-agent:0.0".into(),
-    }];
+    let _lock = ROUTING_TEST_LOCK.lock().unwrap();
+    clear_routing_state();
+    let panes = vec![tmux("%1", "my-agent:0.0")];
     let result = resolve_pane(None, "hi", &panes);
     assert!(result.is_some());
-    assert_eq!(result.unwrap().0.pane_id, "%1");
+    assert_eq!(result.unwrap().0.tmux_pane_id(), "%1");
 }
 
 #[test]
-fn resolve_pane_my_agent_beats_last_notified() {
-    // my-agent should win over last_notified_pane when no tag or semantic match.
+fn resolve_pane_last_routed_agent_beats_my_agent() {
+    let _lock = ROUTING_TEST_LOCK.lock().unwrap();
+    // last_routed_agent should win over my-agent when no tag or semantic match.
     init_settings_for_test();
-    let panes = vec![
-        PaneInfo {
-            pane_id: "%1".into(),
-            label: "harold:0.3".into(),
-        },
-        PaneInfo {
-            pane_id: "%2".into(),
-            label: "my-agent:0.0".into(),
-        },
-    ];
-    set_last_notified_pane(PaneInfo {
-        pane_id: "%1".into(),
-        label: "harold:0.3".into(),
-    });
+    clear_routing_state();
+    let panes = vec![tmux("%1", "harold:0.3"), tmux("%2", "my-agent:0.0")];
+    set_last_routed_agent(tmux("%1", "harold:0.3"));
     let result = resolve_pane(None, "hi", &panes);
     assert!(result.is_some());
-    assert_eq!(result.unwrap().0.pane_id, "%2");
+    assert_eq!(result.unwrap().0.tmux_pane_id(), "%1");
+}
+
+#[test]
+fn resolve_pane_last_away_notification_source_beats_my_agent() {
+    let _lock = ROUTING_TEST_LOCK.lock().unwrap();
+    // last_away_notification_source_agent should win over my-agent when no routed agent.
+    init_settings_for_test();
+    clear_routing_state();
+    let panes = vec![tmux("%3", "alir-app:0.1"), tmux("%4", "my-agent:0.0")];
+    set_last_away_notification_source_agent(tmux("%3", "alir-app:0.1"));
+    let result = resolve_pane(None, "hi", &panes);
+    assert!(result.is_some());
+    assert_eq!(result.unwrap().0.tmux_pane_id(), "%3");
 }
 
 #[test]
 fn resolve_pane_no_match_returns_none() {
-    let panes = vec![PaneInfo {
-        pane_id: "%1".into(),
-        label: "work:0.0".into(),
-    }];
+    let panes = vec![tmux("%1", "work:0.0")];
     let result = resolve_pane(Some("nonexistent"), "hi", &panes);
     assert!(result.is_none());
 }

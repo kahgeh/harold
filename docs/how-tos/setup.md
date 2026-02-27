@@ -52,6 +52,9 @@ handle_id = 36               # find with: sqlite3 ~/Library/Messages/chat.db \
 [ai]
 cli_path = "/usr/local/bin/claude"   # path to your AI CLI binary
 
+[store]
+path = "~/bin/harold/data/events"    # event store location
+
 [tts]
 command = "say"
 # voice = "Samantha"   # optional — omit to use system default

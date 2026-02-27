@@ -2,9 +2,10 @@ use std::process::Command;
 
 use tracing::{info, warn};
 
+use crate::route_reply::{AgentAddress, set_last_away_notification_source_agent};
 use crate::settings::get_settings;
 use crate::store::TurnCompleted;
-use crate::util::{ai_cli_env, sanitise_for_applescript};
+use crate::util::sanitise_for_applescript;
 
 pub fn is_screen_locked() -> bool {
     let result = Command::new("bash")
@@ -102,32 +103,6 @@ fn regex_strip_think(text: &str) -> String {
     result.trim().to_string()
 }
 
-fn run_ai_cli(prompt: &str, model: &str) -> Option<String> {
-    let cfg = get_settings();
-    let cli = cfg.ai.cli_path.as_deref()?;
-
-    let out = Command::new(cli)
-        .args([
-            "-p",
-            prompt,
-            "--model",
-            model,
-            "--max-turns",
-            "1",
-            "--settings",
-            r#"{"disableAllHooks":true}"#,
-        ])
-        .envs(ai_cli_env())
-        .output()
-        .ok()?;
-
-    if !out.status.success() {
-        return None;
-    }
-    let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if text.is_empty() { None } else { Some(text) }
-}
-
 fn build_short_summary(turn: &TurnCompleted) -> String {
     let system_prompt = "You are a notification assistant. Given a user's last request, \
          write ONLY a brief 3-8 word summary of what was completed. \
@@ -140,27 +115,7 @@ fn build_short_summary(turn: &TurnCompleted) -> String {
     run_local_model(system_prompt, &prompt, 20).unwrap_or_else(|| "Work complete".into())
 }
 
-fn build_detailed_summary(turn: &TurnCompleted) -> Option<String> {
-    let prompt = format!(
-        "You are a mobile notification assistant. Given a coding session's \
-         last request and the assistant's final message, write a 2-4 sentence \
-         summary covering: what was done, current status, and whether any \
-         user input or decision is needed. Be specific about file names, \
-         errors, or choices if relevant. \
-         Write plain text only, no markdown.\n\n\
-         USER REQUEST: {}\n\n\
-         ASSISTANT'S FINAL MESSAGE: {}\n\n\
-         Write a 2-4 sentence summary:",
-        turn.last_user_prompt.chars().take(500).collect::<String>(),
-        turn.assistant_message
-            .chars()
-            .take(2000)
-            .collect::<String>(),
-    );
-    run_ai_cli(&prompt, "sonnet")
-}
-
-pub fn notify_at_desk(turn: &TurnCompleted) {
+pub fn notify_at_desk(turn: &TurnCompleted, _trace_id: &str) {
     let summary = build_short_summary(turn);
     let message = format!(
         "{} on {} and waiting for further instructions",
@@ -196,6 +151,7 @@ pub(crate) fn split_body(body: &str) -> (&str, Option<&str>) {
 }
 
 fn send_raw_imessage(text: &str, recipient: &str) {
+    info!(msg = %text, "sending iMessage notification");
     let text = format!("🤖 {text}");
     let safe_text = sanitise_for_applescript(&text);
     let safe_recipient = sanitise_for_applescript(recipient);
@@ -235,39 +191,46 @@ fn last_outgoing_text(handle_id: i64) -> Option<String> {
     )
 }
 
-pub fn notify_away(turn: &TurnCompleted) {
+pub fn notify_away(turn: &TurnCompleted, trace_id: &str) {
     let cfg = get_settings();
     let Some(recipient) = cfg.imessage.recipient.as_deref() else {
         warn!("iMessage recipient not configured");
         return;
     };
-    let handle_id = cfg.imessage.handle_id.unwrap_or(0);
-
-    // Use detailed summary; fall back to truncated assistant message if AI is unavailable.
-    let body = build_detailed_summary(turn).unwrap_or_else(|| {
-        turn.assistant_message
-            .chars()
-            .take(280)
-            .collect::<String>()
-            .replace('\n', " ")
-    });
+    let body: String = turn
+        .assistant_message
+        .chars()
+        .take(280)
+        .collect::<String>()
+        .replace('\n', " ");
 
     let (main_body, question) = split_body(&body);
+    let short_id: String = trace_id.chars().take(8).collect();
     let message = format!(
-        "[{}] {} ({})",
-        turn.pane_label, main_body, turn.main_context
+        "[{}] {} ({}) [{}]",
+        turn.pane_label,
+        main_body.trim(),
+        turn.main_context,
+        short_id
     );
 
-    if handle_id > 0
-        && let Some(last) = last_outgoing_text(handle_id)
-        && last.trim().trim_start_matches("🤖").trim() == message.trim()
-    {
+    let is_duplicate = cfg
+        .imessage
+        .handle_ids
+        .first()
+        .and_then(|&id| last_outgoing_text(id))
+        .is_some_and(|last| last.trim().trim_start_matches("🤖").trim() == message.trim());
+    if is_duplicate {
         info!("iMessage skipped (duplicate)");
         return;
     }
 
     send_raw_imessage(&message, recipient);
     info!("iMessage notification sent");
+    set_last_away_notification_source_agent(AgentAddress::TmuxPane {
+        pane_id: turn.pane_id.clone(),
+        label: turn.pane_label.clone(),
+    });
 
     if let Some(q) = question {
         send_raw_imessage(q, recipient);
@@ -293,7 +256,7 @@ fn pane_session(pane_id: &str) -> Option<String> {
     if s.is_empty() { None } else { Some(s) }
 }
 
-pub fn notify(turn: &TurnCompleted) {
+pub fn notify(turn: &TurnCompleted, trace_id: &str) {
     let cfg = get_settings();
 
     if cfg.notify.skip_if_session_active
@@ -306,10 +269,10 @@ pub fn notify(turn: &TurnCompleted) {
     }
 
     if is_screen_locked() {
-        notify_away(turn);
+        notify_away(turn, trace_id);
         return;
     }
-    notify_at_desk(turn);
+    notify_at_desk(turn, trace_id);
 }
 
 #[cfg(test)]

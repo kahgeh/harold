@@ -10,9 +10,14 @@ Replying from your phone means you know which agent you meant but the message ar
 
 Routing has two stages: inbound collection and routing resolution.
 
-**Inbound collection** — The listener polls `chat.db` every 5 seconds for new rows where `handle_id` matches the configured sender(s) and `is_from_me = 0`. Each new message is appended as a `ReplyReceived` event and the `last_processed_rowid` is advanced atomically before appending, so a crash after advance skips the message rather than reprocessing it.
+**Inbound collection** — The listener runs two separate queries against `chat.db` every 5 seconds, each with its own ROWID cursor:
 
-**Routing resolution** — The projector consumes `ReplyReceived` events and calls `route_reply()`. Live pane discovery runs at resolution time via `tmux list-panes -a`, filtering to panes whose `pane_current_command` matches the Claude Code process heuristic (process name is a semver string of digits and dots, e.g. `20.11.0`).
+- **Inbound** — `handle_id IN (configured IDs) AND is_from_me = 0` — messages sent by the user from the recipient's device
+- **Self** — `handle_id = self_handle_id AND is_from_me = 1` — messages sent from the user's phone that appear as self-sent rows in chat.db
+
+Each cursor is advanced only after a successful `append_reply_received`, so a crash before the append causes the message to be reprocessed on the next poll rather than skipped.
+
+**Routing resolution** — The projector consumes `ReplyReceived` events and calls `route_reply()`. Live pane discovery runs at resolution time via `tmux list-panes -a`, filtering to panes whose `pane_current_command` matches the Claude Code process heuristic (process name is a semver string of digits and dots, e.g. `20.11.0`). Agents are addressed via the `AgentAddress` enum (currently only `TmuxPane { pane_id, label }`).
 
 ## Pane discovery
 
@@ -33,13 +38,15 @@ route_reply(text)
 │       └─ no match → return None (error iMessage)
 │
 ├─ no tag → semantic_resolve(body, panes)
-│   ├─ only 1 pane → skip (returns None, falls through to last_notified_pane)
+│   ├─ only 1 pane → skip (returns None, falls through)
 │   └─ multiple panes → AI CLI (Haiku, --max-turns 1, disableAllHooks)
 │       prompt asks: "does this message have EXPLICIT routing intent?"
 │       ├─ response = "none" → return None
 │       └─ response = LINE1: pane label / LINE2: cleaned message → match by label
 │
-├─ last_notified_pane → find pane_id in live panes (verify still alive)
+├─ last_routed_agent → find AgentAddress in live panes (verify still alive)
+│
+├─ last_away_notification_source_agent → find AgentAddress in live panes
 │
 └─ my-agent fallback → find pane whose label contains "my-agent"
 ```
@@ -61,21 +68,27 @@ If no pane is found, an error iMessage lists the currently available pane labels
 The AI CLI is invoked with Haiku (`--max-turns 1`, `--settings '{"disableAllHooks":true}'`) with this prompt structure:
 
 ```
-Given this message: "<body>"
+You are a routing classifier. Do NOT answer or respond to the message content.
 
-And these active tmux panes:
+MESSAGE TO CLASSIFY:
+<message>
+<body (with </message> tags stripped for injection prevention)>
+</message>
+
+ACTIVE TMUX PANES:
 - <label1>
 - <label2>
 
+Pane labels use hyphens where users may write spaces (e.g. 'my agent' refers to 'my-agent').
 Does the message contain EXPLICIT routing intent to a specific pane?
-(direct address like 'To X,', 'ask X', '[X]' — NOT just thematic association)
+(direct address like 'To X,', 'ask X', '[X]', 'my agent')
 If yes, reply on two lines:
 LINE1: exact pane label
 LINE2: message with routing prefix removed
 If no explicit routing intent, reply: none
 ```
 
-The cleaned message from LINE2 is what gets relayed to the pane, stripping any routing prefix the user included.
+The message body is wrapped in `<message>` tags with `</message>` occurrences stripped to prevent prompt injection. The cleaned message from LINE2 is what gets relayed to the pane, stripping any routing prefix the user included.
 
 ## Sequence
 
@@ -91,10 +104,11 @@ sequenceDiagram
     participant Messages as Messages.app
 
     Phone->>ChatDb: iMessage reply arrives
-    Listener->>ChatDb: SELECT ROWID, text WHERE ROWID > last_rowid AND handle_id IN (?) AND is_from_me = 0
+    Listener->>ChatDb: SELECT ROWID, text WHERE ROWID > last_inbound_rowid AND handle_id IN (?) AND is_from_me = 0
+    Listener->>ChatDb: SELECT ROWID, text WHERE ROWID > last_self_rowid AND handle_id = self_handle_id AND is_from_me = 1
     ChatDb-->>Listener: [(rowid, text), ...]
-    Listener->>Listener: advance last_processed_rowid (atomic store)
     Listener->>Store: append ReplyReceived { text }
+    Listener->>Listener: advance cursor (atomic store, only on successful append)
 
     Projector->>Store: poll for new events
     Store-->>Projector: ReplyReceived event
@@ -112,7 +126,8 @@ sequenceDiagram
         AiCli-->>Projector: "none" or LINE1: label / LINE2: cleaned message
         Projector->>Projector: match returned label to live panes
     else fallback
-        Projector->>Projector: find last_notified_pane in live panes
+        Projector->>Projector: find last_routed_agent in live panes
+        Projector->>Projector: else find last_away_notification_source_agent in live panes
         Projector->>Projector: else find pane label containing "my-agent"
     end
 
@@ -120,5 +135,6 @@ sequenceDiagram
     Projector->>Projector: strip_control(body) → remove ANSI + control chars
     Projector->>Tmux: send-keys -t pane_id -l "📱 <body>"
     Projector->>Tmux: send-keys -t pane_id Enter
+    Projector->>Projector: set last_routed_agent
     Projector->>Messages: osascript → "✓ Delivered to [pane_label]"
 ```
