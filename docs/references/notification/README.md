@@ -53,9 +53,16 @@ Config keys (`[tts]`):
 
 ## Away: iMessage
 
+All outgoing iMessages are prefixed with `🤖`. This serves two purposes:
+
+- **Inbound filtering** — the listener skips messages starting with `🤖` so Harold doesn't route its own notifications back to agents as user replies
+- **Visual distinction** — on your phone you can immediately tell which messages are from Harold vs from you
+
+Steps:
+
 1. First 280 characters of `assistant_message` extracted, newlines replaced with spaces
 2. `split_body()` — splits the last sentence ending in `?` into a separate follow-up message
-3. Message assembled: `[<pane_label>] <main body> (<main_context>)`
+3. Message assembled: `🤖 [<pane_label>] <main body> (<main_context>)`
 4. Duplicate check — queries `chat.db` for the most recent outgoing message to first configured handle ID; skips if identical (after stripping `🤖` prefix)
 5. Messages sent via AppleScript: `tell application "Messages" to send "🤖 ..." to buddy "..."`
 6. Trailing question (if present) sent as a second `🤖`-prefixed message
