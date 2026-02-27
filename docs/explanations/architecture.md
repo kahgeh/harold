@@ -47,14 +47,13 @@ Harold is agent-agnostic — it works with any agent that can shell out to `grpc
 │  │ - Returns source     │    │ - Polls chat.db for replies   │   │
 │  │   agent for routing  │    │ - Semantic resolve via AI CLI │   │
 │  │   state update       │    │ - Falls back to               │   │
-│  │                      │    │   last_routed_agent, then     │   │
 │  │                      │    │   last_away_notification_     │   │
 │  │                      │    │   source_agent, then my-agent │   │
 │  └──────────────────────┘    └───────────────────────────────┘   │
 │                                                                  │
 │  Event store (CQRS/event sourcing)                               │
 │  State: { last_inbound_rowid, last_self_rowid,                   │
-│     last_routed_agent, last_away_notification_source_agent }     │
+│     last_away_notification_source_agent }                        │
 └──────────────────────────────────────────────────────────────────┘
                     │                        ▲
                     │ iMessage               │ iMessage reply
@@ -78,7 +77,6 @@ Harold is agent-agnostic — it works with any agent that can shell out to `grpc
 | TTS notification                        | Harold |
 | iMessage send + dedup                   | Harold |
 | `last_notification_source_agent` state  | Harold |
-| `last_routed_agent` state               | Harold |
 | Reply routing (tmux)                    | Harold |
 | Live pane discovery                     | Harold |
 | Event store                             | Harold |
@@ -113,10 +111,9 @@ When a `TurnCompleted` event is received, Harold decides how to notify:
 
 1. `[tag]` prefix → exact/substring match against live tmux panes
 2. No tag, multiple panes → semantic resolve via AI CLI
-3. `last_routed_agent` → the agent last successfully delivered a reply to
-4. `last_away_notification_source_agent` → the agent whose turn last triggered an away (iMessage) notification
-5. Final fallback → pane whose label contains `my-agent`
-6. Nothing found → error iMessage sent back
+3. `last_away_notification_source_agent` → the agent whose turn last triggered an away (iMessage) notification
+4. Final fallback → pane whose label contains `my-agent`
+5. Nothing found → error iMessage sent back
 
 ---
 
@@ -127,7 +124,7 @@ When a `TurnCompleted` event is received, Harold decides how to notify:
 **Running** — Three concurrent tasks:
 
 1. gRPC server — accepts `TurnComplete` RPCs, appends events
-2. Projector — consumes events from the store, drives notification (sets `last_away_notification_source_agent` when away) and reply routing (sets `last_routed_agent`)
+2. Projector — consumes events from the store, drives notification (sets `last_away_notification_source_agent` when away) and reply routing
 3. Listener — watches `chat.db` for filesystem changes (FSEvents) and polls on each change for new inbound and self-sent iMessages using separate cursors, appends `ReplyReceived` events (5 s fallback poll if watcher unavailable)
 
 **Shutdown** — SIGINT or SIGTERM triggers an ordered shutdown:
@@ -145,7 +142,6 @@ The checkpoint ensures the next startup opens a clean database without replaying
 Harold owns all routing state in-memory:
 
 - `last_inbound_rowid` / `last_self_rowid` — separate chat.db polling cursors for inbound messages and self-sent (phone-synced) messages
-- `last_routed_agent: Option<AgentAddress>` — the agent a reply was last successfully delivered to
 - `last_away_notification_source_agent: Option<AgentAddress>` — the agent whose turn completion last triggered an away (iMessage) notification
 
 `AgentAddress` is an enum (currently only `TmuxPane { pane_id, label }`), extensible to other transports.

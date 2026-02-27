@@ -17,20 +17,10 @@ use directory::AgentDirectory;
 // State — agent routing (in-memory; Harold owns all routing state)
 // ---------------------------------------------------------------------------
 
-static LAST_ROUTED_AGENT: Mutex<Option<AgentAddress>> = Mutex::new(None);
-
 static LAST_AWAY_NOTIFICATION_SOURCE_AGENT: Mutex<Option<AgentAddress>> = Mutex::new(None);
-
-pub(crate) fn set_last_routed_agent(addr: AgentAddress) {
-    *LAST_ROUTED_AGENT.lock().unwrap() = Some(addr);
-}
 
 pub(crate) fn set_last_away_notification_source_agent(addr: AgentAddress) {
     *LAST_AWAY_NOTIFICATION_SOURCE_AGENT.lock().unwrap() = Some(addr);
-}
-
-fn get_last_routed_agent() -> Option<AgentAddress> {
-    LAST_ROUTED_AGENT.lock().unwrap().clone()
 }
 
 fn get_last_away_notification_source_agent() -> Option<AgentAddress> {
@@ -39,7 +29,6 @@ fn get_last_away_notification_source_agent() -> Option<AgentAddress> {
 
 #[cfg(test)]
 pub(crate) fn clear_routing_state() {
-    *LAST_ROUTED_AGENT.lock().unwrap() = None;
     *LAST_AWAY_NOTIFICATION_SOURCE_AGENT.lock().unwrap() = None;
 }
 
@@ -181,16 +170,6 @@ pub(crate) fn resolve_pane<'a>(
     }
     info!("semantic resolve returned none");
 
-    if let Some(last) = get_last_routed_agent() {
-        if let Some(p) = panes.iter().find(|p| p.same_target(&last)) {
-            info!(pane = %p.label(), "resolved via last routed agent");
-            return Some((p, body.to_string()));
-        }
-        info!(last_agent = %last.label(), "last routed agent no longer alive");
-    } else {
-        info!("no last routed agent");
-    }
-
     if let Some(last) = get_last_away_notification_source_agent() {
         if let Some(p) = panes.iter().find(|p| p.same_target(&last)) {
             info!(pane = %p.label(), "resolved via last notification source agent");
@@ -258,7 +237,6 @@ pub fn route_reply(text: &str) {
             }
             info!(label = %agent.label(), "routing reply");
             agent.relay(&format!("📱 {cleaned_body}"));
-            set_last_routed_agent(agent.clone());
             send_imessage(&format!("✓ Delivered to [{}]", agent.label()));
         }
     }
@@ -282,7 +260,7 @@ mod tests {
 
     use crate::inbound::{
         AgentAddress, clear_routing_state, parse_tag, resolve_pane,
-        set_last_away_notification_source_agent, set_last_routed_agent,
+        set_last_away_notification_source_agent,
     };
     use crate::settings::init_settings_for_test;
 
@@ -338,18 +316,6 @@ mod tests {
         let _lock = ROUTING_TEST_LOCK.lock().unwrap();
         clear_routing_state();
         let panes = vec![tmux("%1", "my-agent:0.0")];
-        let result = resolve_pane(None, "hi", &panes);
-        assert!(result.is_some());
-        assert_eq!(result.unwrap().0.pane_id(), "%1");
-    }
-
-    #[test]
-    fn resolve_pane_last_routed_agent_beats_my_agent() {
-        let _lock = ROUTING_TEST_LOCK.lock().unwrap();
-        init_settings_for_test();
-        clear_routing_state();
-        let panes = vec![tmux("%1", "harold:0.3"), tmux("%2", "my-agent:0.0")];
-        set_last_routed_agent(tmux("%1", "harold:0.3"));
         let result = resolve_pane(None, "hi", &panes);
         assert!(result.is_some());
         assert_eq!(result.unwrap().0.pane_id(), "%1");

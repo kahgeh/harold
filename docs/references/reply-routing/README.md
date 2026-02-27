@@ -44,8 +44,6 @@ route_reply(text)
 │       ├─ response = "none" → return None
 │       └─ response = LINE1: pane label / LINE2: cleaned message → match by label
 │
-├─ last_routed_agent → find AgentAddress in live panes (verify still alive)
-│
 ├─ last_away_notification_source_agent → find AgentAddress in live panes
 │
 └─ my-agent fallback → find pane whose label contains "my-agent"
@@ -126,8 +124,7 @@ sequenceDiagram
         AiCli-->>Projector: "none" or LINE1: label / LINE2: cleaned message
         Projector->>Projector: match returned label to live panes
     else fallback
-        Projector->>Projector: find last_routed_agent in live panes
-        Projector->>Projector: else find last_away_notification_source_agent in live panes
+        Projector->>Projector: find last_away_notification_source_agent in live panes
         Projector->>Projector: else find pane label containing "my-agent"
     end
 
@@ -135,6 +132,5 @@ sequenceDiagram
     Projector->>Projector: strip_control(body) → remove ANSI + control chars
     Projector->>Tmux: send-keys -t pane_id -l "📱 <body>"
     Projector->>Tmux: send-keys -t pane_id Enter
-    Projector->>Projector: set last_routed_agent
     Projector->>Messages: osascript → "✓ Delivered to [pane_label]"
 ```
