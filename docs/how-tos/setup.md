@@ -24,7 +24,17 @@
 make deploy
 ```
 
-This builds a release binary, code-signs it (required to prevent macOS killing it), and copies the binary, proto file, and default config to `~/bin/harold/`:
+This builds a release binary, code-signs it, and copies the binary, proto file, and default config to `~/bin/harold/`.
+
+Code-signing is required on macOS because unsigned binaries cannot send iMessages via AppleScript — macOS blocks `osascript` access to Messages.app for untrusted processes. The `Makefile` signs with a local identity:
+
+```makefile
+codesign --force --sign "Your Name" $(DEPLOY_DIR)/harold
+```
+
+Replace `"Your Name"` with your Apple Developer identity (run `security find-identity -v -p codesigning` to list available identities). A self-signed ad-hoc identity (`-`) works for local use but may require re-signing after each build.
+
+Deployed layout:
 
 ```
 ~/bin/harold/
