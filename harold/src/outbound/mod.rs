@@ -58,10 +58,14 @@ pub fn notify(turn: &TurnCompleted, trace_id: &str) {
     let cfg = get_settings();
     let screen_locked = is_screen_locked();
 
-    // Session-level skip: if completing pane's session has an attached client, skip entirely.
-    // Takes precedence — when this fires, pane-level skip is irrelevant.
-    if cfg.notify.skip_if_session_active && tmux::is_session_attached(&turn.pane_id) {
-        info!("notification skipped (session is active)");
+    // Session-level skip: if completing pane's session has an attached client AND the
+    // screen is not locked, skip entirely.  When the screen is locked the user is away
+    // from the desk, so we must still notify even though tmux is attached.
+    if cfg.notify.skip_if_session_active
+        && !screen_locked
+        && tmux::is_session_attached(&turn.pane_id)
+    {
+        info!("notification skipped (session is active, screen unlocked)");
         return;
     }
 
