@@ -6,12 +6,17 @@ fn query(args: &[&str]) -> Option<String> {
     if s.is_empty() { None } else { Some(s) }
 }
 
-pub fn active_session() -> Option<String> {
-    query(&["display-message", "-p", "#{session_name}"])
-}
-
 pub fn pane_session(pane_id: &str) -> Option<String> {
     query(&["display-message", "-t", pane_id, "-p", "#{session_name}"])
+}
+
+/// Whether the session containing `pane_id` has an attached client.
+pub fn is_session_attached(pane_id: &str) -> bool {
+    let Some(session) = pane_session(pane_id) else {
+        return false;
+    };
+    query(&["display-message", "-t", &session, "-p", "#{session_attached}"])
+        .is_some_and(|v| v != "0")
 }
 
 /// Returns the active pane of the session that `pane_id` belongs to.
