@@ -8,7 +8,7 @@ AI agents finish turns silently. Without active monitoring you won't know a task
 
 ## Architecture
 
-The projector consumes `TurnCompleted` events and calls `notify()`. The notification path is chosen based on two runtime checks: whether the user's tmux session is active, and whether the screen is locked.
+The projector consumes `TurnCompleted` events and calls `notify()`. The notification path is chosen based on runtime checks: whether the completing pane's tmux session has an attached client, whether the completing pane is the one the user is looking at, and whether the screen is locked.
 
 Summarisation uses different backends depending on the path:
 
@@ -22,24 +22,26 @@ If the local model is not configured, the TTS summary falls back to `"Work compl
 ## Decision flow
 
 ```
-TurnCompleted event
+TurnCompleted event (pane_id from $TMUX_PANE in stop hook)
        │
        ▼
   notify()
   │
   ├─ skip_if_session_active = true?
-  │   └─ tmux display-message -p #{session_name} → active session
-  │      tmux display-message -t pane_id -p #{session_name} → pane session
-  │      same session → skip (return)
+  │   └─ tmux display-message -t <session> -p #{session_attached}
+  │      attached ≠ 0 → skip (return)
   │
   ├─ skip_if_pane_active = true?
-  │   └─ screen unlocked AND active pane == completing pane
-  │      → skip (return)
+  │   └─ ioreg → screen unlocked?
+  │      tmux display-message -t <session> -p #{pane_id} → active pane
+  │      active pane == completing pane → skip (return)
   │
   ├─ ioreg → IOConsoleLocked = true?
   │   ├─ no  → notify_at_desk()
   │   └─ yes → notify_away()
 ```
+
+`<session>` is resolved from the completing pane via `tmux display-message -t <pane_id> -p #{session_name}`.
 
 ## At-desk: TTS
 
@@ -99,9 +101,9 @@ sequenceDiagram
 
     Projector->>Store: poll for new events
     Store-->>Projector: TurnCompleted event
-    Projector->>Tmux: display-message -p #{session_name} → active session
-    Projector->>Tmux: display-message -t <pane_id> -p #{session_name} → pane session
-    note over Projector: sessions differ → proceed
+    Projector->>Tmux: display-message -t <pane_id> -p #{session_name} → session
+    Projector->>Tmux: display-message -t <session> -p #{session_attached} → attached?
+    note over Projector: not attached → proceed
     Projector->>Projector: ioreg → IOConsoleLocked = false
     Projector->>LocalModel: system prompt + "User's last request: <last_user_prompt>" → ≤20 tokens
     LocalModel-->>Projector: "Fixed WAL shutdown race condition"
