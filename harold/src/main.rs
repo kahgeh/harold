@@ -5,6 +5,7 @@ mod projector;
 mod settings;
 mod store;
 mod telemetry;
+mod tmux;
 mod util;
 
 use std::sync::Arc;

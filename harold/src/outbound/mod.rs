@@ -8,6 +8,7 @@ use tracing::info;
 use crate::inbound::{AgentAddress, set_last_away_notification_source_agent};
 use crate::settings::get_settings;
 use crate::store::TurnCompleted;
+use crate::tmux;
 
 // ---------------------------------------------------------------------------
 // OutboundChannel — notification to human
@@ -32,7 +33,7 @@ impl OutboundChannel {
 }
 
 // ---------------------------------------------------------------------------
-// Session helpers
+// Screen lock detection
 // ---------------------------------------------------------------------------
 
 pub fn is_screen_locked() -> bool {
@@ -49,24 +50,6 @@ pub fn is_screen_locked() -> bool {
     }
 }
 
-fn tmux_query(args: &[&str]) -> Option<String> {
-    let out = Command::new("tmux").args(args).output().ok()?;
-    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if s.is_empty() { None } else { Some(s) }
-}
-
-fn active_tmux_session() -> Option<String> {
-    tmux_query(&["display-message", "-p", "#{session_name}"])
-}
-
-fn pane_session(pane_id: &str) -> Option<String> {
-    tmux_query(&["display-message", "-t", pane_id, "-p", "#{session_name}"])
-}
-
-fn active_tmux_pane() -> Option<String> {
-    tmux_query(&["display-message", "-p", "#{pane_id}"])
-}
-
 // ---------------------------------------------------------------------------
 // Notify orchestrator
 // ---------------------------------------------------------------------------
@@ -78,9 +61,9 @@ pub fn notify(turn: &TurnCompleted, trace_id: &str) {
     // Session-level skip: if completing pane is in the active session, skip entirely.
     // Takes precedence — when this fires, pane-level skip is irrelevant.
     if cfg.notify.skip_if_session_active
-        && let (Some(active_session), Some(pane_session)) =
-            (active_tmux_session(), pane_session(&turn.pane_id))
-        && active_session == pane_session
+        && let (Some(active), Some(pane_sess)) =
+            (tmux::active_session(), tmux::pane_session(&turn.pane_id))
+        && active == pane_sess
     {
         info!("notification skipped (session is active)");
         return;
@@ -91,7 +74,7 @@ pub fn notify(turn: &TurnCompleted, trace_id: &str) {
     // If screen is locked, always notify even if pane matches.
     if cfg.notify.skip_if_pane_active
         && !screen_locked
-        && let Some(active_pane) = active_tmux_pane()
+        && let Some(active_pane) = tmux::active_pane_in_session(&turn.pane_id)
         && active_pane == turn.pane_id
     {
         info!("notification skipped (pane is active and screen unlocked)");
