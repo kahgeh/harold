@@ -5,7 +5,7 @@ use tracing::{info, warn};
 use crate::inbound::AgentAddress;
 use crate::settings::get_settings;
 use crate::store::TurnCompleted;
-use crate::util::sanitise_for_applescript;
+use crate::util::{ai_cli_env, sanitise_for_applescript};
 
 // ---------------------------------------------------------------------------
 // iMessage helpers
@@ -87,6 +87,82 @@ pub(crate) fn split_body(body: &str) -> (&str, Option<&str>) {
 }
 
 // ---------------------------------------------------------------------------
+// AI-powered summary for iMessage notifications
+// ---------------------------------------------------------------------------
+
+/// Cap `assistant_message` to 280 chars and flatten newlines into spaces.
+fn truncate_body(assistant_message: &str) -> String {
+    assistant_message
+        .chars()
+        .take(280)
+        .collect::<String>()
+        .replace('\n', " ")
+}
+
+/// Summarise `assistant_message` for iMessage delivery using the AI CLI.
+/// Falls back to [`truncate_body`] if the CLI is not configured or fails.
+fn summarise_for_imessage(assistant_message: &str, last_user_prompt: &str) -> String {
+    let cfg = get_settings();
+    let Some(cli) = cfg.ai.cli_path.as_deref() else {
+        return truncate_body(assistant_message);
+    };
+
+    let safe_msg = assistant_message
+        .replace("</message>", "")
+        .replace("</prompt>", "");
+    let safe_prompt = last_user_prompt
+        .replace("</prompt>", "")
+        .replace("</message>", "");
+    let prompt = format!(
+        "You are writing a phone notification summary.\n\n\
+         USER ASKED:\n<prompt>\n{safe_prompt}\n</prompt>\n\n\
+         ASSISTANT REPLIED:\n<message>\n{safe_msg}\n</message>\n\n\
+         Write 2-3 plain sentences summarising what was done and the outcome.\n\
+         Preserve any question the assistant asked.\n\
+         No code, no markdown, no jargon. Keep it under 280 characters."
+    );
+
+    let out = Command::new(cli)
+        .args([
+            "-p",
+            &prompt,
+            "--model",
+            "sonnet",
+            "--max-turns",
+            "1",
+            "--settings",
+            r#"{"disableAllHooks":true}"#,
+        ])
+        .env_remove("CLAUDECODE")
+        .envs(ai_cli_env())
+        .output();
+
+    match out {
+        Ok(o) if o.status.success() => {
+            let summary = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            if summary.is_empty() {
+                truncate_body(assistant_message)
+            } else {
+                truncate_body(&summary)
+            }
+        }
+        Ok(o) => {
+            let stderr = String::from_utf8_lossy(&o.stderr);
+            warn!(
+                status = %o.status,
+                stderr = %stderr.chars().take(200).collect::<String>(),
+                "summarise_for_imessage: AI CLI failed, falling back to truncation"
+            );
+            truncate_body(assistant_message)
+        }
+        Err(e) => {
+            warn!(error = %e, "summarise_for_imessage: failed to spawn AI CLI, falling back to truncation");
+            truncate_body(assistant_message)
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Away notification via iMessage — returns the source agent address
 // ---------------------------------------------------------------------------
 
@@ -96,12 +172,7 @@ pub fn notify_away(turn: &TurnCompleted, _trace_id: &str) -> Option<AgentAddress
         warn!("iMessage recipient not configured");
         return None;
     };
-    let body: String = turn
-        .assistant_message
-        .chars()
-        .take(280)
-        .collect::<String>()
-        .replace('\n', " ");
+    let body = summarise_for_imessage(&turn.assistant_message, &turn.last_user_prompt);
 
     let (main_body, question) = split_body(&body);
     let message = format!(
@@ -171,6 +242,24 @@ mod tests {
         let (main, q) = split_body("Done. Tests pass. Ready to merge. Shall I open a PR?");
         assert_eq!(main, "Done. Tests pass. Ready to merge.");
         assert_eq!(q, Some("Shall I open a PR?"));
+    }
+
+    #[test]
+    fn truncate_body_caps_at_280_chars_and_flattens_newlines() {
+        use super::truncate_body;
+
+        let short = "Hello world.\nDone.";
+        assert_eq!(truncate_body(short), "Hello world. Done.");
+
+        let long: String = "x".repeat(300);
+        let result = truncate_body(&long);
+        assert_eq!(result.len(), 280);
+
+        // Multi-byte: caps at 280 *characters*, not bytes.
+        let emoji_long: String = "\u{1F600}".repeat(300);
+        let result = truncate_body(&emoji_long);
+        assert_eq!(result.chars().count(), 280);
+        assert!(result.len() > 280);
     }
 
     #[test]
