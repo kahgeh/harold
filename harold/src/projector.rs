@@ -6,9 +6,11 @@ use tracing::{Instrument, info, info_span, warn};
 
 use crate::inbound::route_reply;
 use crate::outbound::notify;
-use crate::store::{ReplyReceived, TurnCompleted};
+use crate::outbound::readout::handle_readout;
+use crate::store::{ReadoutRequested, ReplyReceived, TurnCompleted};
 
 pub async fn run_projector(store: Arc<EventStore>, mut shutdown: watch::Receiver<()>) {
+    let reply_store = store.clone();
     let projector = Projector::new(store, "harold.notifier".into());
     info!("projector starting");
 
@@ -19,6 +21,7 @@ pub async fn run_projector(store: Arc<EventStore>, mut shutdown: watch::Receiver
                 .iter()
                 .map(|e| (e.id.to_string(), e.r#type.clone(), e.payload.clone()))
                 .collect();
+            let reply_store = reply_store.clone();
 
             async move {
                 for (event_id, event_type, payload) in batch {
@@ -49,14 +52,30 @@ pub async fn run_projector(store: Arc<EventStore>, mut shutdown: watch::Receiver
                                     Ok(reply) => {
                                         info!("projector: ReplyReceived");
                                         let inner_span = tracing::Span::current();
+                                        let reply_store = reply_store.clone();
                                         tokio::task::spawn_blocking(move || {
                                             let _g = inner_span.entered();
-                                            route_reply(&reply.text);
+                                            route_reply(&reply.text, reply_store);
                                         })
                                         .await
                                         .ok();
                                     }
                                     Err(e) => warn!(error = %e, "projector: failed to deserialise ReplyReceived"),
+                                }
+                            }
+                            "ReadoutRequested" => {
+                                match serde_json::from_value::<ReadoutRequested>(payload) {
+                                    Ok(req) => {
+                                        info!("projector: ReadoutRequested");
+                                        let inner_span = tracing::Span::current();
+                                        tokio::task::spawn_blocking(move || {
+                                            let _g = inner_span.entered();
+                                            handle_readout(&req);
+                                        })
+                                        .await
+                                        .ok();
+                                    }
+                                    Err(e) => warn!(error = %e, "projector: failed to deserialise ReadoutRequested"),
                                 }
                             }
                             other => {

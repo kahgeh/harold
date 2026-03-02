@@ -34,7 +34,6 @@ impl AgentAddress {
         }
     }
 
-    #[cfg(test)]
     pub(crate) fn pane_id(&self) -> &str {
         match self {
             AgentAddress::TmuxPane { pane_id, .. } => pane_id,

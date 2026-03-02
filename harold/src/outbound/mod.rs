@@ -1,11 +1,12 @@
 pub mod imessage;
+pub mod readout;
 pub mod tts;
 
 use std::process::Command;
 
 use tracing::info;
 
-use crate::inbound::{AgentAddress, set_last_away_notification_source_agent};
+use crate::inbound::{AgentAddress, LastTurnContext, set_last_away_notification_source_agent};
 use crate::settings::get_settings;
 use crate::store::TurnCompleted;
 use crate::tmux;
@@ -88,6 +89,12 @@ pub fn notify(turn: &TurnCompleted, trace_id: &str) {
     };
 
     if let Some(source_agent) = channel.notify(turn, trace_id) {
-        set_last_away_notification_source_agent(source_agent);
+        set_last_away_notification_source_agent(
+            source_agent,
+            LastTurnContext {
+                assistant_message: turn.assistant_message.clone(),
+                last_user_prompt: turn.last_user_prompt.clone(),
+            },
+        );
     }
 }

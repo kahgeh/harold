@@ -2,12 +2,14 @@ pub mod directory;
 pub(crate) mod tmux;
 
 use std::process::Command;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
-use tracing::info;
+use events::EventStore;
+use tracing::{info, warn};
 
 use crate::outbound::imessage::send_imessage;
 use crate::settings::get_settings;
+use crate::store::{ReadoutRequested, append_readout_requested};
 use crate::util::ai_cli_env;
 
 pub use directory::AgentAddress;
@@ -17,19 +19,48 @@ use directory::AgentDirectory;
 // State — agent routing (in-memory; Harold owns all routing state)
 // ---------------------------------------------------------------------------
 
-static LAST_AWAY_NOTIFICATION_SOURCE_AGENT: Mutex<Option<AgentAddress>> = Mutex::new(None);
+#[derive(Debug, Clone)]
+pub(crate) struct LastTurnContext {
+    pub assistant_message: String,
+    pub last_user_prompt: String,
+}
 
-pub(crate) fn set_last_away_notification_source_agent(addr: AgentAddress) {
-    *LAST_AWAY_NOTIFICATION_SOURCE_AGENT.lock().unwrap() = Some(addr);
+struct AwayNotificationState {
+    source_agent: AgentAddress,
+    turn_context: LastTurnContext,
+}
+
+static LAST_AWAY_NOTIFICATION: Mutex<Option<AwayNotificationState>> = Mutex::new(None);
+
+pub(crate) fn set_last_away_notification_source_agent(
+    addr: AgentAddress,
+    turn_context: LastTurnContext,
+) {
+    *LAST_AWAY_NOTIFICATION.lock().unwrap() = Some(AwayNotificationState {
+        source_agent: addr,
+        turn_context,
+    });
 }
 
 fn get_last_away_notification_source_agent() -> Option<AgentAddress> {
-    LAST_AWAY_NOTIFICATION_SOURCE_AGENT.lock().unwrap().clone()
+    LAST_AWAY_NOTIFICATION
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|s| s.source_agent.clone())
+}
+
+pub(crate) fn get_last_turn_context() -> Option<LastTurnContext> {
+    LAST_AWAY_NOTIFICATION
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|s| s.turn_context.clone())
 }
 
 #[cfg(test)]
 pub(crate) fn clear_routing_state() {
-    *LAST_AWAY_NOTIFICATION_SOURCE_AGENT.lock().unwrap() = None;
+    *LAST_AWAY_NOTIFICATION.lock().unwrap() = None;
 }
 
 // ---------------------------------------------------------------------------
@@ -193,13 +224,61 @@ pub(crate) fn resolve_pane<'a>(
 }
 
 // ---------------------------------------------------------------------------
+// Readout intent detection
+// ---------------------------------------------------------------------------
+
+fn is_readout_request(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    lower.starts_with("read the ")
+        || lower.starts_with("read me ")
+        || lower.starts_with("read that")
+        || lower.starts_with("read file")
+        || lower == "read it"
+}
+
+// ---------------------------------------------------------------------------
 // Route a received reply — called from projector
 // ---------------------------------------------------------------------------
 
-pub fn route_reply(text: &str) {
+/// Route a received reply to the appropriate agent pane.
+///
+/// **Must be called from `spawn_blocking`** — this function uses
+/// `Handle::block_on` internally and will deadlock if called from an
+/// async task on the tokio worker pool.
+pub fn route_reply(text: &str, store: Arc<EventStore>) {
     let directory = AgentDirectory::TmuxProcessScan;
     info!(text, "route_reply entered");
     let (tag, body) = parse_tag(text);
+
+    // Check for readout request before routing to agents.
+    if is_readout_request(body) {
+        let Some(last_agent) = get_last_away_notification_source_agent() else {
+            send_imessage("No recent notification to look up files from");
+            return;
+        };
+        let Some(ctx) = get_last_turn_context() else {
+            send_imessage("No recent conversation context for file readout");
+            return;
+        };
+        let event = ReadoutRequested {
+            user_message: body.to_string(),
+            last_assistant_message: ctx.assistant_message,
+            last_user_prompt: ctx.last_user_prompt,
+            pane_id: last_agent.pane_id().to_string(),
+        };
+        let rt = tokio::runtime::Handle::current();
+        match rt.block_on(append_readout_requested(&store, &event)) {
+            Ok(()) => {
+                send_imessage("Looking up that file...");
+            }
+            Err(e) => {
+                warn!(error = %e, "failed to append ReadoutRequested event");
+                send_imessage("Couldn't process the readout request");
+            }
+        }
+        return;
+    }
+
     let panes = directory.discover();
 
     if panes.is_empty() {
@@ -258,8 +337,9 @@ pub fn scan_live_panes() -> Vec<AgentAddress> {
 mod tests {
     use std::sync::Mutex;
 
+    use super::is_readout_request;
     use crate::inbound::{
-        AgentAddress, clear_routing_state, parse_tag, resolve_pane,
+        AgentAddress, LastTurnContext, clear_routing_state, parse_tag, resolve_pane,
         set_last_away_notification_source_agent,
     };
     use crate::settings::init_settings_for_test;
@@ -327,7 +407,13 @@ mod tests {
         init_settings_for_test();
         clear_routing_state();
         let panes = vec![tmux("%3", "alir-app:0.1"), tmux("%4", "my-agent:0.0")];
-        set_last_away_notification_source_agent(tmux("%3", "alir-app:0.1"));
+        set_last_away_notification_source_agent(
+            tmux("%3", "alir-app:0.1"),
+            LastTurnContext {
+                assistant_message: String::new(),
+                last_user_prompt: String::new(),
+            },
+        );
         let result = resolve_pane(None, "hi", &panes);
         assert!(result.is_some());
         assert_eq!(result.unwrap().0.pane_id(), "%3");
@@ -338,5 +424,23 @@ mod tests {
         let panes = vec![tmux("%1", "work:0.0")];
         let result = resolve_pane(Some("nonexistent"), "hi", &panes);
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn is_readout_request_matches_expected_phrases() {
+        assert!(is_readout_request("read the Cargo.toml"));
+        assert!(is_readout_request("Read the main.rs"));
+        assert!(is_readout_request("read me the config"));
+        assert!(is_readout_request("read that file"));
+        assert!(is_readout_request("read file settings.toml"));
+        assert!(is_readout_request("read it"));
+    }
+
+    #[test]
+    fn is_readout_request_rejects_non_readout() {
+        assert!(!is_readout_request("hello there"));
+        assert!(!is_readout_request("please read"));
+        assert!(!is_readout_request("can you read this?"));
+        assert!(!is_readout_request("reading the file now"));
     }
 }

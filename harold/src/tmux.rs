@@ -15,15 +15,38 @@ pub fn is_session_attached(pane_id: &str) -> bool {
     let Some(session) = pane_session(pane_id) else {
         return false;
     };
-    query(&["display-message", "-t", &session, "-p", "#{session_attached}"])
-        .is_some_and(|v| v != "0")
+    query(&[
+        "display-message",
+        "-t",
+        &session,
+        "-p",
+        "#{session_attached}",
+    ])
+    .is_some_and(|v| v != "0")
+}
+
+/// Returns the working directory of the given pane.
+pub fn pane_cwd(pane_id: &str) -> Option<String> {
+    query(&[
+        "display-message",
+        "-t",
+        pane_id,
+        "-p",
+        "#{pane_current_path}",
+    ])
 }
 
 /// Returns the active pane of the session that `pane_id` belongs to,
 /// only if the session has an attached client (someone is looking at it).
 pub fn active_pane_in_session(pane_id: &str) -> Option<String> {
     let session = pane_session(pane_id)?;
-    let attached = query(&["display-message", "-t", &session, "-p", "#{session_attached}"])?;
+    let attached = query(&[
+        "display-message",
+        "-t",
+        &session,
+        "-p",
+        "#{session_attached}",
+    ])?;
     if attached == "0" {
         return None;
     }
