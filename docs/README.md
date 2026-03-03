@@ -18,3 +18,4 @@
 ## Explanations
 
 - [Architecture](explanations/architecture.md)
+- [Channel Security: iMessage vs Telegram](explanations/channel-security.md)

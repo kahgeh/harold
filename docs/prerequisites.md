@@ -2,7 +2,7 @@
 
 ## macOS
 
-Harold is currently macOS-only. It relies on iMessage (via AppleScript) and the macOS Messages app.
+Harold is currently macOS-only. It relies on macOS-specific features for screen lock detection (`ioreg`) and TTS (`say`). The iMessage channel requires the Messages app and AppleScript; the Telegram channel works cross-platform but Harold itself still requires macOS.
 
 ## Required
 
@@ -16,11 +16,21 @@ Harold is currently macOS-only. It relies on iMessage (via AppleScript) and the 
   npm install -g @anthropic-ai/claude-code
   ```
 
-## iMessage setup
+## Away channel setup
+
+Harold supports two away channels — configure one in `[notify] away_channel`:
+
+### iMessage (default)
 
 - Your Mac must be signed in to iMessage
 - Full Disk Access must be granted to the terminal (for reading `~/Library/Messages/chat.db`)
-- The recipient phone number must be set via the `HAROLD_RECIPIENT` environment variable (e.g. `+61400000000`)
+- Set `[imessage] recipient` and `handle_ids` in `local.toml`
+
+### Telegram
+
+- Create a Telegram bot via @BotFather and obtain a bot token
+- Set `[telegram] bot_token` and `chat_id` in `local.toml`
+- See [Setup Telegram](how-tos/setup-telegram.md) for step-by-step instructions
 
 ## Agent hook
 

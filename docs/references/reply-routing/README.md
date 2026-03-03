@@ -1,6 +1,6 @@
 # Reply Routing
 
-Reply Routing routes inbound iMessage replies to the correct agent session running in a tmux pane.
+Reply Routing routes inbound replies (from iMessage or Telegram, depending on the configured away channel) to the correct agent session running in a tmux pane.
 
 ## Problem
 
@@ -10,12 +10,16 @@ Replying from your phone means you know which agent you meant but the message ar
 
 Routing has two stages: inbound collection and routing resolution.
 
-**Inbound collection** — The listener watches `chat.db` for filesystem changes (via FSEvents on macOS) and runs two separate queries on each change, each with its own ROWID cursor. A 5-second fallback poll ensures messages are still detected if the filesystem watcher is unavailable:
+**Inbound collection** — The listener is channel-specific, selected by `[notify] away_channel`:
+
+**iMessage** — Watches `chat.db` for filesystem changes (via FSEvents on macOS) and runs two separate queries on each change, each with its own ROWID cursor. A 5-second fallback poll ensures messages are still detected if the filesystem watcher is unavailable:
 
 - **Inbound** — `handle_id IN (handle_ids) AND is_from_me = 0` — messages sent by the user from the recipient's device
 - **Self** — `handle_id IN (handle_ids) AND is_from_me = 1` — messages sent from the user's phone that appear as self-sent rows in chat.db
 
 Each cursor is advanced only after a successful `append_reply_received`, so a crash before the append causes the message to be reprocessed on the next poll rather than skipped.
+
+**Telegram** — Long-polls the Telegram Bot API `getUpdates` endpoint (30s timeout). On startup, drains any pre-existing updates to avoid replaying old messages. Only messages from the configured `chat_id` are processed; messages starting with `🤖` (Harold's own messages) are filtered out.
 
 **Routing resolution** — The projector consumes `ReplyReceived` events and calls `route_reply()`. Live pane discovery runs at resolution time via `tmux list-panes -a`, filtering to panes whose `pane_current_command` matches the Claude Code process heuristic (process name is a semver string of digits and dots, e.g. `20.11.0`). Agents are addressed via the `AgentAddress` enum (currently only `TmuxPane { pane_id, label }`).
 
@@ -57,9 +61,9 @@ Once a pane is resolved:
 2. `strip_control(text)` — removes ANSI escape sequences and non-newline control characters
 3. `tmux send-keys -t <pane_id> -l "📱 <body>"` — sends text literally (no shell interpretation)
 4. `tmux send-keys -t <pane_id> Enter` — submits the message
-5. Confirmation iMessage sent back: `"✓ Delivered to [<pane_label>]"`
+5. Confirmation sent back via the configured away channel: `"✓ Delivered to [<pane_label>]"`
 
-If no pane is found, an error iMessage lists the currently available pane labels.
+If no pane is found, an error message listing the currently available pane labels is sent back via the away channel.
 
 ## Semantic routing prompt
 
@@ -93,18 +97,16 @@ The message body is wrapped in `<message>` tags with `</message>` occurrences st
 ```mermaid
 sequenceDiagram
     participant Phone
-    participant ChatDb as chat.db
+    participant Channel as Away channel<br/>(iMessage or Telegram)
     participant Listener
     participant Store as Event store
     participant Projector
     participant Tmux as tmux
     participant AiCli as claude (Sonnet)
-    participant Messages as Messages.app
 
-    Phone->>ChatDb: iMessage reply arrives
-    Listener->>ChatDb: SELECT ROWID, text WHERE ROWID > last_inbound_rowid AND handle_id IN (handle_ids) AND is_from_me = 0
-    Listener->>ChatDb: SELECT ROWID, text WHERE ROWID > last_self_rowid AND handle_id IN (handle_ids) AND is_from_me = 1
-    ChatDb-->>Listener: [(rowid, text), ...]
+    Phone->>Channel: User reply arrives
+    note over Listener: iMessage: poll chat.db via FSEvents/5s fallback<br/>Telegram: long-poll getUpdates (30s)
+    Channel-->>Listener: new message(s)
     Listener->>Store: append ReplyReceived { text }
     Listener->>Listener: advance cursor (atomic store, only on successful append)
 
@@ -132,5 +134,5 @@ sequenceDiagram
     Projector->>Projector: strip_control(body) → remove ANSI + control chars
     Projector->>Tmux: send-keys -t pane_id -l "📱 <body>"
     Projector->>Tmux: send-keys -t pane_id Enter
-    Projector->>Messages: osascript → "✓ Delivered to [pane_label]"
+    Projector->>Channel: "✓ Delivered to [pane_label]"
 ```

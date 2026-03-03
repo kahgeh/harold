@@ -2,7 +2,7 @@
 
 ## Prerequisites
 
-- macOS (Harold uses iMessage via AppleScript and `ioreg` for screen lock detection)
+- macOS (Harold uses `ioreg` for screen lock detection; iMessage channel requires AppleScript)
 - tmux — agent sessions must run inside tmux panes
 - grpcurl — used by the stop hook to call Harold
 
@@ -324,4 +324,6 @@ Running TTS...
 TTS done
 ```
 
-If `screen_locked: true`, Harold will send an iMessage instead of speaking.
+If `screen_locked: true`, Harold will send an away notification (iMessage or Telegram, per `away_channel` config) instead of speaking.
+
+To use Telegram instead of iMessage, see [Setup Telegram](setup-telegram.md).

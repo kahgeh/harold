@@ -114,7 +114,6 @@ When `away_channel = "telegram"`:
 
 - **Outbound notifications** use the Telegram Bot API `sendMessage` instead of AppleScript/Messages.app
 - **Reply confirmations** (delivered, error messages) are sent via Telegram instead of iMessage
-- **File readout** uses `curl` to send voice messages via Telegram `sendVoice` instead of `osascript`
 - **Inbound listener** long-polls Telegram `getUpdates` instead of watching `chat.db`
 - Messages from the bot (prefixed with the robot emoji) are filtered out, same as iMessage
 - Only messages from the configured `chat_id` are accepted

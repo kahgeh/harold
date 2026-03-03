@@ -1,6 +1,6 @@
 # Notification
 
-Notification notifies the user of completed agent turns, via voice when at the desk or iMessage when away.
+Notification notifies the user of completed agent turns, via voice when at the desk or the configured away channel (iMessage or Telegram) when away.
 
 ## Problem
 
@@ -12,10 +12,11 @@ The projector consumes `TurnCompleted` events and calls `notify()`. The notifica
 
 Summarisation uses different backends depending on the path:
 
-| Path            | Summary backend                  | Max input                     | Output                                            |
-| --------------- | -------------------------------- | ----------------------------- | ------------------------------------------------- |
-| At desk (TTS)   | Local model (`mlx_lm`)           | 500 chars of last_user_prompt | 3–8 words, ≤20 tokens                             |
-| Away (iMessage) | First 280 chars of assistant_message | 280 chars assistant message   | `[pane_label] body (context)` + trailing question  |
+| Path              | Summary backend                      | Max input                     | Output                                            |
+| ----------------- | ------------------------------------ | ----------------------------- | ------------------------------------------------- |
+| At desk (TTS)     | Local model (`mlx_lm`)               | 500 chars of last_user_prompt | 3–8 words, ≤20 tokens                             |
+| Away (iMessage)   | AI CLI or 280-char truncation        | Full assistant_message         | `🤖 [pane_label] body (context)` + trailing question |
+| Away (Telegram)   | AI CLI or 280-char truncation        | Full assistant_message         | `🤖 [pane_label] body (context)` + trailing question |
 
 If the local model is not configured, the TTS summary falls back to `"Work complete"`.
 
@@ -38,7 +39,7 @@ TurnCompleted event (pane_id from $TMUX_PANE in stop hook)
   │
   ├─ ioreg → IOConsoleLocked = true?
   │   ├─ no  → notify_at_desk()
-  │   └─ yes → notify_away()
+  │   └─ yes → channels::notify_away() (iMessage or Telegram per config)
 ```
 
 `<session>` is resolved from the completing pane via `tmux display-message -t <pane_id> -p #{session_name}`.
@@ -57,21 +58,24 @@ Config keys (`[tts]`):
 | `voice`   | Optional voice name passed as `-v`                        |
 | `args`    | Optional extra args prepended before `-v` and the message |
 
-## Away: iMessage
+## Away: iMessage or Telegram
 
-All outgoing iMessages are prefixed with `🤖`. This serves two purposes:
+The away channel is selected by `[notify] away_channel` (`"imessage"` or `"telegram"`). Both channels share the same notification flow and prefix all outgoing messages with `🤖`. This serves two purposes:
 
 - **Inbound filtering** — the listener skips messages starting with `🤖` so Harold doesn't route its own notifications back to agents as user replies
 - **Visual distinction** — on your phone you can immediately tell which messages are from Harold vs from you
 
-Steps:
+### Common steps (both channels)
 
-1. First 280 characters of `assistant_message` extracted, newlines replaced with spaces
+1. `summarise_for_notification()` — uses AI CLI to summarise `assistant_message` into 2–3 sentences under 280 chars; falls back to `truncate_body()` (first 280 chars, newlines flattened)
 2. `split_body()` — splits the last sentence ending in `?` into a separate follow-up message
 3. Message assembled: `🤖 [<pane_label>] <main body> (<main_context>)`
-4. Duplicate check — queries `chat.db` for the most recent outgoing message to first configured handle ID; skips if identical (after stripping `🤖` prefix)
-5. Messages sent via AppleScript: `tell application "Messages" to send "🤖 ..." to buddy "..."`
-6. Trailing question (if present) sent as a second `🤖`-prefixed message
+4. Trailing question (if present) sent as a second `🤖`-prefixed message
+
+### iMessage-specific
+
+5. Duplicate check — queries `chat.db` for the most recent outgoing message to first configured handle ID; skips if identical (after stripping `🤖` prefix)
+6. Messages sent via AppleScript: `tell application "Messages" to send "🤖 ..." to buddy "..."`
 
 Config keys (`[imessage]`):
 
@@ -79,6 +83,17 @@ Config keys (`[imessage]`):
 | ------------ | -------------------------------------------------------------------- |
 | `recipient`  | Phone number or email of the iMessage recipient                      |
 | `handle_ids` | All `chat.db` handle IDs for your Apple ID (dedup and inbound poll)  |
+
+### Telegram-specific
+
+5. Messages sent via Telegram Bot API `sendMessage` to the configured chat ID
+
+Config keys (`[telegram]`):
+
+| Key         | Description                                |
+| ----------- | ------------------------------------------ |
+| `bot_token` | Telegram bot token from @BotFather         |
+| `chat_id`   | Numeric chat ID for the notification chat  |
 
 ## Sequences
 
@@ -119,8 +134,7 @@ sequenceDiagram
     participant gRPC as Harold (gRPC)
     participant Store as Event store
     participant Projector
-    participant ChatDb as chat.db
-    participant Messages as Messages.app
+    participant Channel as Away channel<br/>(iMessage or Telegram)
 
     Hook->>gRPC: TurnComplete RPC (last_assistant_message from hook input)
     gRPC->>Store: append TurnCompleted event
@@ -129,12 +143,10 @@ sequenceDiagram
     Projector->>Store: poll for new events
     Store-->>Projector: TurnCompleted event
     Projector->>Projector: ioreg → IOConsoleLocked = true
-    Projector->>Projector: truncate assistant_message to 280 chars, replace newlines
+    Projector->>Projector: summarise_for_notification() via AI CLI (fallback: truncate to 280 chars)
     Projector->>Projector: split_body() → main body + trailing question (if ends in ?)
-    Projector->>ChatDb: SELECT text WHERE handle_id=? AND is_from_me=1 ORDER BY ROWID DESC LIMIT 1
-    ChatDb-->>Projector: last outgoing text
-    note over Projector: not duplicate → send
-    Projector->>Messages: osascript → "🤖 [harold:0.3] <body> (harold)"
+    Projector->>Channel: send "🤖 [harold:0.3] <body> (harold)"
+    note over Channel: iMessage: dedup check via chat.db then osascript<br/>Telegram: Bot API sendMessage
     Projector->>Projector: set last_away_notification_source_agent
-    Projector->>Messages: osascript → "🤖 <trailing question>" (if present)
+    Projector->>Channel: send "🤖 <trailing question>" (if present)
 ```

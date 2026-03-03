@@ -14,7 +14,7 @@ Harold runs as a single binary with three concurrent tasks sharing an event stor
 | ----------- | ---------------------------------------------------------------------------------------------------- |
 | gRPC server | Accepts `TurnComplete` RPCs, appends `TurnCompleted` events                                          |
 | Projector   | Tails the event store; dispatches `TurnCompleted` → `notify()` and `ReplyReceived` → `route_reply()` |
-| Listener    | Watches `chat.db` via FSEvents (5 s fallback poll) using separate inbound/self cursors; appends `ReplyReceived` events |
+| Listener    | Channel-specific inbound listener: iMessage watches `chat.db` via FSEvents (5s fallback poll) with separate inbound/self cursors; Telegram long-polls Bot API `getUpdates`. Both append `ReplyReceived` events |
 
 The shutdown channel is a `watch::Sender<()>`. Dropping the sender (on SIGINT/SIGTERM) closes the channel; all receivers (`Projector`, `Listener`) see `Err(RecvError)` and exit their loops.
 
@@ -74,7 +74,7 @@ Runs without starting the daemon. Prints the current config, then tests:
 
 1. Screen lock detection (`ioreg`)
 2. TTS notification (`notify_at_desk` with a dummy turn)
-3. iMessage notification (`notify_away` with a dummy turn, if screen locked)
+3. Away channel notification (`channels::notify_away` with a dummy turn, if screen locked)
 
 `--delay N` sleeps N seconds before running (default 10 when `--delay` is given without a value) — allows time to lock the screen to test the away path.
 
