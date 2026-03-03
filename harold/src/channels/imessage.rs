@@ -10,8 +10,116 @@ use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use tokio::sync::{mpsc, watch};
 use tracing::{Instrument, info, info_span, warn};
 
+use super::{split_body, summarise_for_notification};
+use crate::inbound::AgentAddress;
 use crate::settings::get_settings;
-use crate::store::{ReplyReceived, append_reply_received};
+use crate::store::{ReplyReceived, TurnCompleted, append_reply_received};
+use crate::util::sanitise_for_applescript;
+
+// ===========================================================================
+// Sending
+// ===========================================================================
+
+/// Low-level iMessage send — delivers `text` as-is (no prefix) to `recipient`.
+pub(crate) fn send_imessage_to(text: &str, recipient: &str) {
+    let safe_text = sanitise_for_applescript(text);
+    let safe_recipient = sanitise_for_applescript(recipient);
+    let escaped = safe_text.replace('\\', "\\\\").replace('"', "\\\"");
+    let escaped_recipient = safe_recipient.replace('\\', "\\\\").replace('"', "\\\"");
+    let script = format!(
+        "tell application \"Messages\" to send \"{escaped}\" to buddy \"{escaped_recipient}\""
+    );
+    let _ = Command::new("osascript").args(["-e", &script]).status();
+}
+
+/// Send an iMessage notification with robot-emoji prefix.
+fn send_raw_imessage(text: &str, recipient: &str) {
+    info!(msg = %text, "sending iMessage notification");
+    send_imessage_to(&format!("🤖 {text}"), recipient);
+}
+
+/// Send a plain iMessage (confirmation/error) to the configured recipient.
+pub(crate) fn send_imessage(msg: &str) {
+    info!(msg, "sending iMessage");
+    let cfg = get_settings();
+    let Some(recipient) = cfg.imessage.recipient.as_deref() else {
+        return;
+    };
+    send_imessage_to(msg, recipient);
+}
+
+fn query_chat_db_single(db_path: &str, sql: &str) -> Option<String> {
+    let out = Command::new("sqlite3")
+        .arg(db_path)
+        .arg(sql)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if s.is_empty() { None } else { Some(s) }
+}
+
+fn last_outgoing_text(handle_id: i64) -> Option<String> {
+    let db_path = get_settings().chat_db.resolved_path();
+    query_chat_db_single(
+        &db_path,
+        &format!(
+            "SELECT text FROM message WHERE handle_id = {handle_id} AND is_from_me = 1 \
+             ORDER BY ROWID DESC LIMIT 1;"
+        ),
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Away notification via iMessage — returns the source agent address
+// ---------------------------------------------------------------------------
+
+pub(crate) fn notify_away(turn: &TurnCompleted, _trace_id: &str) -> Option<AgentAddress> {
+    let cfg = get_settings();
+    let Some(recipient) = cfg.imessage.recipient.as_deref() else {
+        warn!("iMessage recipient not configured");
+        return None;
+    };
+    let body = summarise_for_notification(&turn.assistant_message, &turn.last_user_prompt);
+
+    let (main_body, question) = split_body(&body);
+    let message = format!(
+        "[{}] {} ({})",
+        turn.pane_label,
+        main_body.trim(),
+        turn.main_context
+    );
+
+    let is_duplicate = cfg
+        .imessage
+        .handle_ids
+        .first()
+        .and_then(|&id| last_outgoing_text(id))
+        .is_some_and(|last| last.trim().trim_start_matches("🤖").trim() == message.trim());
+    if is_duplicate {
+        info!("iMessage skipped (duplicate)");
+        return None;
+    }
+
+    send_raw_imessage(&message, recipient);
+    info!("iMessage notification sent");
+
+    if let Some(q) = question {
+        send_raw_imessage(q, recipient);
+        info!("iMessage question sent");
+    }
+
+    Some(AgentAddress::TmuxPane {
+        pane_id: turn.pane_id.clone(),
+        label: turn.pane_label.clone(),
+    })
+}
+
+// ===========================================================================
+// Listening
+// ===========================================================================
 
 static LAST_INBOUND_ROWID: OnceLock<AtomicI64> = OnceLock::new();
 static LAST_SELF_ROWID: OnceLock<AtomicI64> = OnceLock::new();
@@ -72,6 +180,7 @@ fn query_messages(sql: &str) -> Vec<(i64, String)> {
         .collect()
 }
 
+/// All interpolated values are typed integers from trusted config/internal state — never user input.
 fn fetch_messages(last_rowid: i64, is_from_me: u8) -> Vec<(i64, String)> {
     let ids = handle_ids();
     if ids.is_empty() {
@@ -186,7 +295,7 @@ fn start_watcher(chat_db_path: &str) -> Option<(RecommendedWatcher, mpsc::Unboun
     Some((watcher, rx))
 }
 
-pub async fn listen(store: Arc<EventStore>, mut shutdown: watch::Receiver<()>) {
+pub(crate) async fn listen(store: Arc<EventStore>, mut shutdown: watch::Receiver<()>) {
     let initial = tokio::task::spawn_blocking(get_max_rowid)
         .await
         .unwrap_or_else(|e| {
@@ -231,3 +340,7 @@ pub async fn listen(store: Arc<EventStore>, mut shutdown: watch::Receiver<()>) {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "imessage_tests.rs"]
+mod tests;

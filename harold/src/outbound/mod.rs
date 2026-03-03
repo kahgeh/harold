@@ -1,12 +1,11 @@
-pub mod imessage;
-pub mod readout;
 pub mod tts;
 
 use std::process::Command;
 
 use tracing::info;
 
-use crate::inbound::{AgentAddress, LastTurnContext, set_last_away_notification_source_agent};
+use crate::channels;
+use crate::inbound::{AgentAddress, set_last_away_notification_source_agent};
 use crate::settings::get_settings;
 use crate::store::TurnCompleted;
 use crate::tmux;
@@ -17,7 +16,7 @@ use crate::tmux;
 
 pub enum OutboundChannel {
     Tts,
-    IMessage,
+    Away,
 }
 
 impl OutboundChannel {
@@ -28,7 +27,7 @@ impl OutboundChannel {
                 tts::notify_at_desk(turn, trace_id);
                 None
             }
-            OutboundChannel::IMessage => imessage::notify_away(turn, trace_id),
+            OutboundChannel::Away => channels::notify_away(turn, trace_id),
         }
     }
 }
@@ -83,18 +82,21 @@ pub fn notify(turn: &TurnCompleted, trace_id: &str) {
     }
 
     let channel = if screen_locked {
-        OutboundChannel::IMessage
+        OutboundChannel::Away
     } else {
         OutboundChannel::Tts
     };
 
     if let Some(source_agent) = channel.notify(turn, trace_id) {
-        set_last_away_notification_source_agent(
-            source_agent,
-            LastTurnContext {
-                assistant_message: turn.assistant_message.clone(),
-                last_user_prompt: turn.last_user_prompt.clone(),
-            },
-        );
+        set_last_away_notification_source_agent(source_agent);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Channel-aware reply — delegates to channels::send()
+// ---------------------------------------------------------------------------
+
+/// Send a confirmation/error message back through the configured away channel.
+pub fn send_reply(msg: &str) {
+    channels::send(msg);
 }

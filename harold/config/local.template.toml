@@ -20,6 +20,11 @@ command = "say"
 # command = "uv"
 # args = ["run", "/path/to/tts_script.py"]
 
+# [telegram]
+# bot_token = "123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11"
+# chat_id = 12345678
+
 # [notify]
 # skip_if_session_active = true  # skip if completing pane is in the active tmux session
 # skip_if_pane_active = false    # skip if completing pane is the active pane and screen is unlocked
+# away_channel = "telegram"      # "imessage" or "telegram"

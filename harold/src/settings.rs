@@ -85,6 +85,13 @@ impl StoreSettings {
 pub struct NotifySettings {
     pub skip_if_session_active: bool,
     pub skip_if_pane_active: bool,
+    pub away_channel: String,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct TelegramSettings {
+    pub bot_token: Option<String>,
+    pub chat_id: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -97,16 +104,39 @@ pub struct Settings {
     pub log: LogSettings,
     pub store: StoreSettings,
     pub notify: NotifySettings,
+    #[serde(default)]
+    pub telegram: TelegramSettings,
 }
 
 impl Settings {
     pub fn validate(&self) -> Vec<String> {
         let mut errors = Vec::new();
-        if self.imessage.recipient.is_none() {
-            errors.push("imessage.recipient is required".into());
-        }
-        if self.imessage.handle_ids.is_empty() {
-            errors.push("imessage.handle_ids requires at least one handle ID".into());
+        match self.notify.away_channel.as_str() {
+            "imessage" => {
+                if self.imessage.recipient.is_none() {
+                    errors.push("imessage.recipient is required".into());
+                }
+                if self.imessage.handle_ids.is_empty() {
+                    errors.push("imessage.handle_ids requires at least one handle ID".into());
+                }
+            }
+            "telegram" => {
+                if self.telegram.bot_token.is_none() {
+                    errors.push(
+                        "telegram.bot_token is required when away_channel = \"telegram\"".into(),
+                    );
+                }
+                if self.telegram.chat_id.is_none() {
+                    errors.push(
+                        "telegram.chat_id is required when away_channel = \"telegram\"".into(),
+                    );
+                }
+            }
+            other => {
+                errors.push(format!(
+                    "notify.away_channel must be \"imessage\" or \"telegram\", got \"{other}\""
+                ));
+            }
         }
         errors
     }

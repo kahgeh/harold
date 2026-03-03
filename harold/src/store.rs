@@ -21,14 +21,6 @@ pub struct ReplyReceived {
     pub text: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ReadoutRequested {
-    pub user_message: String,
-    pub last_assistant_message: String,
-    pub last_user_prompt: String,
-    pub pane_id: String,
-}
-
 fn rotation_policy() -> RotationPolicy {
     RotationPolicy::TimeWindow {
         window: Duration::from_secs(24 * 3600),
@@ -71,26 +63,6 @@ pub async fn append_reply_received(
             ExpectedVersion::Any,
             vec![NewEvent {
                 r#type: "ReplyReceived".into(),
-                payload: json!(event),
-                request_id: None,
-                actor_id: "system:harold".into(),
-                actor_type: ActorType::System,
-            }],
-        )
-        .await?;
-    Ok(())
-}
-
-pub async fn append_readout_requested(
-    store: &EventStore,
-    event: &ReadoutRequested,
-) -> events::Result<()> {
-    store
-        .append(
-            STREAM_ID,
-            ExpectedVersion::Any,
-            vec![NewEvent {
-                r#type: "ReadoutRequested".into(),
                 payload: json!(event),
                 request_id: None,
                 actor_id: "system:harold".into(),

@@ -22,6 +22,12 @@ level = "info"
 [store]
 path = "~/.harold/events"
 
+[telegram]
+# bot_token and chat_id set in local.toml or env vars:
+#   HAROLD__TELEGRAM__BOT_TOKEN="123:ABC..."
+#   HAROLD__TELEGRAM__CHAT_ID=12345678
+
 [notify]
 skip_if_session_active = true
 skip_if_pane_active = false
+away_channel = "imessage"

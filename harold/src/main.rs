@@ -1,5 +1,5 @@
+mod channels;
 mod inbound;
-mod listener;
 mod outbound;
 mod projector;
 mod settings;
@@ -79,7 +79,7 @@ async fn shutdown_signal() {
 }
 
 fn run_diagnostics(delay_secs: u64) {
-    use outbound::{imessage::notify_away, is_screen_locked, tts::notify_at_desk};
+    use outbound::{is_screen_locked, tts::notify_at_desk};
     use store::TurnCompleted;
 
     let turn = TurnCompleted {
@@ -101,10 +101,22 @@ fn run_diagnostics(delay_secs: u64) {
     println!("screen_locked : {locked}");
 
     let cfg = get_settings();
+    println!("away_channel  : {}", cfg.notify.away_channel);
     println!(
         "iMessage      : recipient={} handle_ids={:?}",
         cfg.imessage.recipient.as_deref().unwrap_or("(not set)"),
         cfg.imessage.handle_ids,
+    );
+    println!(
+        "Telegram      : bot_token={} chat_id={}",
+        if cfg.telegram.bot_token.is_some() {
+            "(set)"
+        } else {
+            "(not set)"
+        },
+        cfg.telegram
+            .chat_id
+            .map_or("(not set)".to_string(), |id| id.to_string()),
     );
     println!(
         "TTS           : command={} voice={:?}",
@@ -143,13 +155,20 @@ fn run_diagnostics(delay_secs: u64) {
         println!("TTS done");
         return;
     }
-    if cfg.imessage.recipient.is_none() {
-        println!("iMessage NOT sent: recipient not configured");
-        return;
-    }
-    println!("Sending iMessage...");
-    notify_away(&turn, "diag");
-    println!("iMessage sent (check your phone)");
+
+    println!(
+        "Sending away notification via {}...",
+        cfg.notify.away_channel
+    );
+    // Run in a separate thread so the blocking reqwest client
+    // doesn't panic when dropped inside the async runtime.
+    let diag_turn = turn.clone();
+    std::thread::spawn(move || {
+        channels::notify_away(&diag_turn, "diag");
+    })
+    .join()
+    .expect("diag away channel thread");
+    println!("Away notification sent (check your phone)");
 
     println!("\nDone.");
 }
@@ -224,7 +243,10 @@ async fn async_main(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>>
         Arc::clone(&store),
         shutdown_rx.clone(),
     ));
-    let listener_handle = tokio::spawn(listener::listen(Arc::clone(&store), shutdown_rx));
+    let listener_handle = tokio::spawn(channels::listen_for_inbound_messages(
+        Arc::clone(&store),
+        shutdown_rx,
+    ));
 
     Server::builder()
         .add_service(HaroldServer::new(HaroldService {

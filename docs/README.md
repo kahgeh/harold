@@ -3,6 +3,7 @@
 ## How-Tos
 
 - [Setup](how-tos/setup.md)
+- [Setup Telegram](how-tos/setup-telegram.md)
 
 ## Prerequisites
 

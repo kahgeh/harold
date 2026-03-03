@@ -2,7 +2,7 @@
 
 ## Overview
 
-Bidirectional iMessage ↔ AI coding agent communication, split into two components with clear responsibilities.
+Bidirectional messaging (iMessage or Telegram) ↔ AI coding agent communication, split into two components with clear responsibilities.
 
 Harold is agent-agnostic — it works with any agent that can shell out to `grpcurl` to report a completed turn.
 
@@ -33,32 +33,29 @@ Harold is agent-agnostic — it works with any agent that can shell out to `grpc
 │                          Harold                                  │
 │                       (Rust binary)                              │
 │                                                                  │
-│  ┌─ outbound/ ──────────┐    ┌─ inbound/ ────────────────────┐   │
-│  │  Notification        │    │  Reply routing                │   │
-│  │                      │    │                               │   │
-│  │ OutboundChannel:     │    │ AgentDirectory:               │   │
-│  │   Tts | IMessage     │    │   TmuxProcessScan             │   │
-│  │                      │    │   → discover(), is_alive()    │   │
-│  │ - Generates summary  │    │                               │   │
-│  │   via local model    │    │ AgentAddress (= the channel): │   │
-│  │ - Detects screen lock│    │   TmuxPane { pane_id, label } │   │
-│  │ - Sends iMessage or  │    │   → relay(), label()          │   │
-│  │   triggers TTS       │    │                               │   │
-│  │ - Returns source     │    │ - Polls chat.db for replies   │   │
-│  │   agent for routing  │    │ - Semantic resolve via AI CLI │   │
-│  │   state update       │    │ - Falls back to               │   │
-│  │                      │    │   last_away_notification_     │   │
-│  │                      │    │   source_agent, then my-agent │   │
-│  └──────────────────────┘    └───────────────────────────────┘   │
+│  ┌─ channels/ ───────────┐  ┌─ outbound/ ─┐  ┌─ inbound/ ──────┐ │
+│  │  iMessage + Telegram  │  │ Orchestrator│  │ Reply routing   │ │
+│  │                       │  │             │  │                 │ │
+│  │ Each channel owns:    │  │ Tts | Away  │  │ AgentDirectory: │ │
+│  │  - send / notify_away │  │             │  │  TmuxProcessScan│ │
+│  │  - listen (inbound)   │  │ Screen lock │  │                 │ │
+│  │                       │  │ detection   │  │ Semantic resolve│ │
+│  │ Static dispatch in    │  │             │  │ via AI CLI      │ │
+│  │ channels/mod.rs       │  │ Skip logic  │  │                 │ │
+│  │                       │  │ (session/   │  │ Fallback chain: │ │
+│  │ Shared utilities:     │  │  pane)      │  │ tag → AI → last │ │
+│  │  split_body,          │  │             │  │ notif → my-agent│ │
+│  │  summarise_for_notif  │  │             │  │                 │ │
+│  └───────────────────────┘  └─────────────┘  └─────────────────┘ │
 │                                                                  │
 │  Event store (CQRS/event sourcing)                               │
 │  State: { last_inbound_rowid, last_self_rowid,                   │
 │     last_away_notification_source_agent }                        │
 └──────────────────────────────────────────────────────────────────┘
                     │                        ▲
-                    │ iMessage               │ iMessage reply
+                    │ iMessage / Telegram    │ Reply
                     ▼                        │
-              Your iPhone/iPad ──────────────┘
+                Your phone ──────────────────┘
 ```
 
 ---
@@ -104,7 +101,7 @@ When a `TurnCompleted` event is received, Harold decides how to notify:
 1. `skip_if_session_active = true` (default) → skip if the completing pane's tmux session has an attached client
 1a. `skip_if_pane_active = false` → skip if the completing pane is the active pane in its session and the screen is unlocked
 2. Screen unlocked → TTS via configurable command (e.g. `say`) with an AI-generated short summary
-3. Screen locked → iMessage with a detailed summary via AI CLI; a trailing question is split into a second message
+3. Screen locked → away channel (iMessage or Telegram, per `away_channel` config) with a detailed summary via AI CLI; a trailing question is split into a second message
 
 ---
 
@@ -126,7 +123,7 @@ When a `TurnCompleted` event is received, Harold decides how to notify:
 
 1. gRPC server — accepts `TurnComplete` RPCs, appends events
 2. Projector — consumes events from the store, drives notification (sets `last_away_notification_source_agent` when away) and reply routing
-3. Listener — watches `chat.db` for filesystem changes (FSEvents) and polls on each change for new inbound and self-sent iMessages using separate cursors, appends `ReplyReceived` events (5 s fallback poll if watcher unavailable)
+3. Listener — channel-specific inbound message listener: iMessage watches `chat.db` for filesystem changes (FSEvents) with 5s fallback poll; Telegram uses Bot API long-polling. Both append `ReplyReceived` events
 
 **Shutdown** — SIGINT or SIGTERM triggers an ordered shutdown:
 

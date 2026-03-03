@@ -23,12 +23,11 @@ Under this assumption, risks like unauthenticated localhost gRPC access and tmux
 The review covered all source code including:
 
 - gRPC service handlers and routing (`harold/src/main.rs`)
-- iMessage integration and AppleScript execution (`harold/src/outbound/imessage.rs`)
+- Channel implementations — iMessage and Telegram (`harold/src/channels/`)
 - tmux pane scanning and relay (`harold/src/inbound/tmux.rs`)
 - Event store and database interactions (`events/src/`)
 - Configuration management and utility functions (`harold/src/util.rs`)
 - AI CLI subprocess spawning and prompt construction (`harold/src/inbound/mod.rs`)
-- Message listener and polling (`harold/src/listener.rs`)
 
 ## Remediated Issues
 
@@ -48,7 +47,7 @@ A dedicated investigation was conducted to determine whether an external party s
 
 ### Primary security boundary
 
-In `harold/src/listener.rs:87`, the SQL query that polls `~/Library/Messages/chat.db` includes a `WHERE handle_id IN ({id_list})` clause. Only messages from conversations matching the user's own configured handle IDs are processed. An arbitrary external sender's messages are never read by Harold.
+In `harold/src/channels/imessage.rs`, the SQL query that polls `~/Library/Messages/chat.db` includes a `WHERE handle_id IN ({id_list})` clause. Only messages from conversations matching the user's own configured handle IDs are processed. An arbitrary external sender's messages are never read by Harold.
 
 ### Defense-in-depth layers
 
@@ -60,7 +59,7 @@ Even if the `handle_ids` filter were bypassed, multiple layers prevent exploitat
 | Literal tmux mode | `inbound/tmux.rs:110` | `tmux send-keys -l` treats text literally, key names like `C-c` are not interpreted |
 | No shell interpolation | `inbound/tmux.rs:106-115` | `Command::new("tmux").args([...])` uses direct exec, no shell involved |
 | Constrained AI routing | `inbound/mod.rs:54-135` | AI classifier runs with `--max-turns 1` and `disableAllHooks: true`; output only matched against existing pane labels |
-| AppleScript escaping | `util.rs:17-21`, `outbound/imessage.rs:15-23` | `sanitise_for_applescript` + backslash/quote escaping applied to all text entering AppleScript |
+| AppleScript escaping | `util.rs:17-21`, `channels/imessage.rs` | `sanitise_for_applescript` + backslash/quote escaping applied to all text entering AppleScript |
 | Parameterized SQL | `events/src/` | All queries use bound parameters; dynamic table names validated by `TableNameValidator` regex |
 
 ## Positive Security Observations
@@ -69,7 +68,7 @@ Even if the `handle_ids` filter were bypassed, multiple layers prevent exploitat
 
 2. **No shell injection surface**: External commands (`tmux`, `osascript`, `sqlite3`, `uv`, Claude CLI) use `std::process::Command` with `.args()`, bypassing shell interpretation entirely.
 
-3. **AppleScript string injection handled**: The `sanitise_for_applescript` + escape sequence in `imessage.rs` properly escapes `\` and `"` for AppleScript string literals passed via `osascript -e`.
+3. **AppleScript string injection handled**: The `sanitise_for_applescript` + escape sequence in `channels/imessage.rs` properly escapes `\` and `"` for AppleScript string literals passed via `osascript -e`.
 
 4. **ANSI/control character stripping**: The `strip_control` function removes ANSI escape sequences and control characters before relaying text to tmux panes, preventing terminal escape sequence injection.
 

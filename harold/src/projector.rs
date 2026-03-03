@@ -6,8 +6,7 @@ use tracing::{Instrument, info, info_span, warn};
 
 use crate::inbound::route_reply;
 use crate::outbound::notify;
-use crate::outbound::readout::handle_readout;
-use crate::store::{ReadoutRequested, ReplyReceived, TurnCompleted};
+use crate::store::{ReplyReceived, TurnCompleted};
 
 pub async fn run_projector(store: Arc<EventStore>, mut shutdown: watch::Receiver<()>) {
     let reply_store = store.clone();
@@ -61,21 +60,6 @@ pub async fn run_projector(store: Arc<EventStore>, mut shutdown: watch::Receiver
                                         .ok();
                                     }
                                     Err(e) => warn!(error = %e, "projector: failed to deserialise ReplyReceived"),
-                                }
-                            }
-                            "ReadoutRequested" => {
-                                match serde_json::from_value::<ReadoutRequested>(payload) {
-                                    Ok(req) => {
-                                        info!("projector: ReadoutRequested");
-                                        let inner_span = tracing::Span::current();
-                                        tokio::task::spawn_blocking(move || {
-                                            let _g = inner_span.entered();
-                                            handle_readout(&req);
-                                        })
-                                        .await
-                                        .ok();
-                                    }
-                                    Err(e) => warn!(error = %e, "projector: failed to deserialise ReadoutRequested"),
                                 }
                             }
                             other => {
