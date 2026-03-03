@@ -17,11 +17,11 @@ Routing has two stages: inbound collection and routing resolution.
 - **Inbound** — `handle_id IN (handle_ids) AND is_from_me = 0` — messages sent by the user from the recipient's device
 - **Self** — `handle_id IN (handle_ids) AND is_from_me = 1` — messages sent from the user's phone that appear as self-sent rows in chat.db
 
-Each cursor is advanced only after a successful `append_reply_received`, so a crash before the append causes the message to be reprocessed on the next poll rather than skipped.
+Each cursor is advanced only after a successful `append_inbound_message`, so a crash before the append causes the message to be reprocessed on the next poll rather than skipped.
 
 **Telegram** — Long-polls the Telegram Bot API `getUpdates` endpoint (30s timeout). On startup, drains any pre-existing updates to avoid replaying old messages. Only messages from the configured `chat_id` are processed; messages starting with `🤖` (Harold's own messages) are filtered out.
 
-**Routing resolution** — The projector consumes `ReplyReceived` events and calls `route_reply()`. Live pane discovery runs at resolution time via `tmux list-panes -a`, filtering to panes whose `pane_current_command` matches the Claude Code process heuristic (process name is a semver string of digits and dots, e.g. `20.11.0`). Agents are addressed via the `AgentAddress` enum (currently only `TmuxPane { pane_id, label }`).
+**Routing resolution** — The projector consumes `InboundMessageReceived` events and calls `route_reply()`. Live pane discovery runs at resolution time via `tmux list-panes -a`, filtering to panes whose `pane_current_command` matches the Claude Code process heuristic (process name is a semver string of digits and dots, e.g. `20.11.0`). Agents are addressed via the `AgentAddress` enum (currently only `TmuxPane { pane_id, label }`).
 
 ## Pane discovery
 
@@ -107,11 +107,11 @@ sequenceDiagram
     Phone->>Channel: User reply arrives
     note over Listener: iMessage: poll chat.db via FSEvents/5s fallback<br/>Telegram: long-poll getUpdates (30s)
     Channel-->>Listener: new message(s)
-    Listener->>Store: append ReplyReceived { text }
+    Listener->>Store: append InboundMessageReceived { text }
     Listener->>Listener: advance cursor (atomic store, only on successful append)
 
     Projector->>Store: poll for new events
-    Store-->>Projector: ReplyReceived event
+    Store-->>Projector: InboundMessageReceived event
 
     Projector->>Tmux: list-panes -a -F "#{pane_id}|#{session_name}:#{window_index}.#{pane_index}|#{pane_current_command}"
     Tmux-->>Projector: pane rows

@@ -13,7 +13,7 @@ use tracing::{Instrument, info, info_span, warn};
 use super::{split_body, summarise_for_notification};
 use crate::inbound::AgentAddress;
 use crate::settings::get_settings;
-use crate::store::{ReplyReceived, TurnCompleted, append_reply_received};
+use crate::store::{InboundMessage, TurnCompleted, append_inbound_message};
 use crate::util::sanitise_for_applescript;
 
 // ===========================================================================
@@ -225,9 +225,9 @@ async fn poll(store: &EventStore) {
 
         async {
             info!("iMessage received (inbound)");
-            match append_reply_received(store, &ReplyReceived { text }).await {
+            match append_inbound_message(store, &InboundMessage { text }).await {
                 Ok(()) => last_inbound_rowid().store(rowid, Ordering::Relaxed),
-                Err(e) => tracing::warn!(error = %e, "failed to append ReplyReceived event"),
+                Err(e) => tracing::warn!(error = %e, "failed to append InboundMessageReceived event"),
             }
         }
         .instrument(span)
@@ -240,9 +240,9 @@ async fn poll(store: &EventStore) {
 
         async {
             info!("iMessage received (self)");
-            match append_reply_received(store, &ReplyReceived { text }).await {
+            match append_inbound_message(store, &InboundMessage { text }).await {
                 Ok(()) => last_self_rowid().store(rowid, Ordering::Relaxed),
-                Err(e) => tracing::warn!(error = %e, "failed to append ReplyReceived event"),
+                Err(e) => tracing::warn!(error = %e, "failed to append InboundMessageReceived event"),
             }
         }
         .instrument(span)

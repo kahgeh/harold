@@ -17,7 +17,7 @@ pub struct TurnCompleted {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ReplyReceived {
+pub struct InboundMessage {
     pub text: String,
 }
 
@@ -53,16 +53,16 @@ pub async fn append_turn_completed(
     Ok(())
 }
 
-pub async fn append_reply_received(
+pub async fn append_inbound_message(
     store: &EventStore,
-    event: &ReplyReceived,
+    event: &InboundMessage,
 ) -> events::Result<()> {
     store
         .append(
             STREAM_ID,
             ExpectedVersion::Any,
             vec![NewEvent {
-                r#type: "ReplyReceived".into(),
+                r#type: "InboundMessageReceived".into(),
                 payload: json!(event),
                 request_id: None,
                 actor_id: "system:harold".into(),

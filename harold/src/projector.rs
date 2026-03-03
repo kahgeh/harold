@@ -6,7 +6,7 @@ use tracing::{Instrument, info, info_span, warn};
 
 use crate::inbound::route_reply;
 use crate::outbound::notify;
-use crate::store::{ReplyReceived, TurnCompleted};
+use crate::store::{InboundMessage, TurnCompleted};
 
 pub async fn run_projector(store: Arc<EventStore>, mut shutdown: watch::Receiver<()>) {
     let reply_store = store.clone();
@@ -46,10 +46,10 @@ pub async fn run_projector(store: Arc<EventStore>, mut shutdown: watch::Receiver
                                     Err(e) => warn!(error = %e, "projector: failed to deserialise TurnCompleted"),
                                 }
                             }
-                            "ReplyReceived" => {
-                                match serde_json::from_value::<ReplyReceived>(payload) {
+                            "InboundMessageReceived" => {
+                                match serde_json::from_value::<InboundMessage>(payload) {
                                     Ok(reply) => {
-                                        info!("projector: ReplyReceived");
+                                        info!("projector: InboundMessageReceived");
                                         let inner_span = tracing::Span::current();
                                         let reply_store = reply_store.clone();
                                         tokio::task::spawn_blocking(move || {
@@ -59,7 +59,7 @@ pub async fn run_projector(store: Arc<EventStore>, mut shutdown: watch::Receiver
                                         .await
                                         .ok();
                                     }
-                                    Err(e) => warn!(error = %e, "projector: failed to deserialise ReplyReceived"),
+                                    Err(e) => warn!(error = %e, "projector: failed to deserialise InboundMessageReceived"),
                                 }
                             }
                             other => {

@@ -123,7 +123,7 @@ When a `TurnCompleted` event is received, Harold decides how to notify:
 
 1. gRPC server — accepts `TurnComplete` RPCs, appends events
 2. Projector — consumes events from the store, drives notification (sets `last_away_notification_source_agent` when away) and reply routing
-3. Listener — channel-specific inbound message listener: iMessage watches `chat.db` for filesystem changes (FSEvents) with 5s fallback poll; Telegram uses Bot API long-polling. Both append `ReplyReceived` events
+3. Listener — channel-specific inbound message listener: iMessage watches `chat.db` for filesystem changes (FSEvents) with 5s fallback poll; Telegram uses Bot API long-polling. Both append `InboundMessageReceived` events
 
 **Shutdown** — SIGINT or SIGTERM triggers an ordered shutdown:
 

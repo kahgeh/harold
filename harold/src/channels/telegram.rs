@@ -10,7 +10,7 @@ use tracing::{Instrument, info, info_span, warn};
 use super::{split_body, summarise_for_notification};
 use crate::inbound::AgentAddress;
 use crate::settings::get_settings;
-use crate::store::{ReplyReceived, TurnCompleted, append_reply_received};
+use crate::store::{InboundMessage, TurnCompleted, append_inbound_message};
 
 // ===========================================================================
 // Sending
@@ -333,9 +333,9 @@ pub(crate) async fn listen(store: Arc<EventStore>, mut shutdown: watch::Receiver
 
             async {
                 info!("Telegram message received");
-                match append_reply_received(&store, &ReplyReceived { text }).await {
+                match append_inbound_message(&store, &InboundMessage { text }).await {
                     Ok(()) => {}
-                    Err(e) => warn!(error = %e, "failed to append ReplyReceived event"),
+                    Err(e) => warn!(error = %e, "failed to append InboundMessageReceived event"),
                 }
             }
             .instrument(span)
