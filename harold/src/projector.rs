@@ -4,7 +4,7 @@ use events::{EventEnvelope, EventStore, Projector, Result};
 use tokio::sync::watch;
 use tracing::{Instrument, info, info_span, warn};
 
-use crate::inbound::route_reply;
+use crate::inbound::route_inbound_message;
 use crate::outbound::notify;
 use crate::store::{InboundMessage, TurnCompleted};
 
@@ -54,7 +54,7 @@ pub async fn run_projector(store: Arc<EventStore>, mut shutdown: watch::Receiver
                                         let reply_store = reply_store.clone();
                                         tokio::task::spawn_blocking(move || {
                                             let _g = inner_span.entered();
-                                            route_reply(&reply.text, reply_store);
+                                            route_inbound_message(&reply.text, reply_store);
                                         })
                                         .await
                                         .ok();

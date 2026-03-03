@@ -202,9 +202,9 @@ pub(crate) fn resolve_pane<'a>(
 /// **Must be called from `spawn_blocking`** — this function uses
 /// `Handle::block_on` internally and will deadlock if called from an
 /// async task on the tokio worker pool.
-pub fn route_reply(text: &str, _store: Arc<EventStore>) {
+pub fn route_inbound_message(text: &str, _store: Arc<EventStore>) {
     let directory = AgentDirectory::TmuxProcessScan;
-    info!(text, "route_reply entered");
+    info!(text, "route_inbound_message entered");
     let (tag, body) = parse_tag(text);
 
     let panes = directory.discover();

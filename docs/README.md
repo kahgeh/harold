@@ -12,7 +12,7 @@
 ## References
 
 - [Notification](references/notification/README.md)
-- [Reply Routing](references/reply-routing/README.md)
+- [Inbound Message Routing](references/inbound-message-routing/README.md)
 - [Operation](references/operation/README.md)
 
 ## Explanations

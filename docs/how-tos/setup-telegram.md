@@ -1,6 +1,6 @@
 # How to set up Telegram as the away channel
 
-This guide switches Harold's away-mode notifications and reply routing from iMessage to Telegram. Once configured, all away notifications, reply confirmations, and file readout responses go through a Telegram bot.
+This guide switches Harold's away-mode notifications and inbound message routing from iMessage to Telegram. Once configured, all away notifications, reply confirmations, and file readout responses go through a Telegram bot.
 
 ## Prerequisites
 

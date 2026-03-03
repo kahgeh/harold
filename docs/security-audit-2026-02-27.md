@@ -6,7 +6,7 @@
 
 ## Summary
 
-A comprehensive security review was conducted across the entire Harold codebase — a Rust-based agent notification and reply routing daemon for macOS. **No high-confidence exploitable vulnerabilities were identified.**
+A comprehensive security review was conducted across the entire Harold codebase — a Rust-based agent notification and inbound message routing daemon for macOS. **No high-confidence exploitable vulnerabilities were identified.**
 
 ## Threat Model Assumption
 

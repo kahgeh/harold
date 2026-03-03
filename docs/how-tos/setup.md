@@ -10,7 +10,7 @@
   brew install grpcurl
   ```
 
-- An AI CLI — used for summarisation and semantic reply routing. Claude Code is the reference implementation:
+- An AI CLI — used for summarisation and semantic inbound message routing. Claude Code is the reference implementation:
 
   ```bash
   npm install -g @anthropic-ai/claude-code

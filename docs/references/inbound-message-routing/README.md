@@ -1,10 +1,10 @@
-# Reply Routing
+# Inbound Message Routing
 
-Reply Routing routes inbound replies (from iMessage or Telegram, depending on the configured away channel) to the correct agent session running in a tmux pane.
+Inbound message routing routes messages from your phone (via iMessage or Telegram, depending on the configured away channel) to the correct agent session running in a tmux pane.
 
 ## Problem
 
-Replying from your phone means you know which agent you meant but the message arrives as plain text with no session context. With multiple agent sessions running, there is no obvious way to get your reply to the right one.
+Messaging from your phone means you know which agent you meant but the message arrives as plain text with no session context. With multiple agent sessions running, there is no obvious way to get your message to the right one.
 
 ## Architecture
 
@@ -21,7 +21,7 @@ Each cursor is advanced only after a successful `append_inbound_message`, so a c
 
 **Telegram** — Long-polls the Telegram Bot API `getUpdates` endpoint (30s timeout). On startup, drains any pre-existing updates to avoid replaying old messages. Only messages from the configured `chat_id` are processed; messages starting with `🤖` (Harold's own messages) are filtered out.
 
-**Routing resolution** — The projector consumes `InboundMessageReceived` events and calls `route_reply()`. Live pane discovery runs at resolution time via `tmux list-panes -a`, filtering to panes whose `pane_current_command` matches the Claude Code process heuristic (process name is a semver string of digits and dots, e.g. `20.11.0`). Agents are addressed via the `AgentAddress` enum (currently only `TmuxPane { pane_id, label }`).
+**Routing resolution** — The projector consumes `InboundMessageReceived` events and calls `route_inbound_message()`. Live pane discovery runs at resolution time via `tmux list-panes -a`, filtering to panes whose `pane_current_command` matches the Claude Code process heuristic (process name is a semver string of digits and dots, e.g. `20.11.0`). Agents are addressed via the `AgentAddress` enum (currently only `TmuxPane { pane_id, label }`).
 
 ## Pane discovery
 
@@ -32,7 +32,7 @@ Pane label format: `<session_name>:<window_index>.<pane_index>` (e.g. `alir-app 
 ## Routing resolution
 
 ```
-route_reply(text)
+route_inbound_message(text)
 │
 ├─ parse_tag(text) → ([tag], body)
 │

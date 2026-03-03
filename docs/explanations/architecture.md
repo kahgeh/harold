@@ -34,7 +34,7 @@ Harold is agent-agnostic — it works with any agent that can shell out to `grpc
 │                       (Rust binary)                              │
 │                                                                  │
 │  ┌─ channels/ ───────────┐  ┌─ outbound/ ─┐  ┌─ inbound/ ──────┐ │
-│  │  iMessage + Telegram  │  │ Orchestrator│  │ Reply routing   │ │
+│  │  iMessage + Telegram  │  │ Orchestrator│  │ Inbound msg     │ │
 │  │                       │  │             │  │                 │ │
 │  │ Each channel owns:    │  │ Tts | Away  │  │ AgentDirectory: │ │
 │  │  - send / notify_away │  │             │  │  TmuxProcessScan│ │
@@ -74,7 +74,7 @@ Harold is agent-agnostic — it works with any agent that can shell out to `grpc
 | TTS notification                        | Harold |
 | iMessage send + dedup                   | Harold |
 | `last_notification_source_agent` state  | Harold |
-| Reply routing (tmux)                    | Harold |
+| Inbound message routing (tmux)                    | Harold |
 | Live pane discovery                     | Harold |
 | Event store                             | Harold |
 
@@ -105,7 +105,7 @@ When a `TurnCompleted` event is received, Harold decides how to notify:
 
 ---
 
-## Reply routing (inbound)
+## Inbound message routing (inbound)
 
 1. `[tag]` prefix → exact/substring match against live tmux panes
 2. No tag, multiple panes → semantic resolve via AI CLI
@@ -122,7 +122,7 @@ When a `TurnCompleted` event is received, Harold decides how to notify:
 **Running** — Three concurrent tasks:
 
 1. gRPC server — accepts `TurnComplete` RPCs, appends events
-2. Projector — consumes events from the store, drives notification (sets `last_away_notification_source_agent` when away) and reply routing
+2. Projector — consumes events from the store, drives notification (sets `last_away_notification_source_agent` when away) and inbound message routing
 3. Listener — channel-specific inbound message listener: iMessage watches `chat.db` for filesystem changes (FSEvents) with 5s fallback poll; Telegram uses Bot API long-polling. Both append `InboundMessageReceived` events
 
 **Shutdown** — SIGINT or SIGTERM triggers an ordered shutdown:

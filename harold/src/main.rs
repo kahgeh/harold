@@ -174,7 +174,7 @@ fn run_diagnostics(delay_secs: u64) {
 }
 
 fn print_help() {
-    println!("harold — agent notification and reply routing daemon\n");
+    println!("harold — agent notification and inbound message routing daemon\n");
     println!("USAGE:");
     println!("  harold                  Start the Harold daemon");
     println!("  harold --diagnostics [--delay [N]]  Test screen lock, TTS, and iMessage config");

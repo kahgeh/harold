@@ -1,6 +1,6 @@
 # Away Channel Security: iMessage vs Telegram
 
-Harold supports two away channels for notifications and reply routing when the screen is locked. Each has different security properties.
+Harold supports two away channels for notifications and inbound message routing when the screen is locked. Each has different security properties.
 
 ## iMessage
 
