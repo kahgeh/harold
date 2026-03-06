@@ -1,6 +1,8 @@
 pub mod tts;
 
 use std::process::Command;
+use std::sync::Mutex;
+use std::time::Instant;
 
 use tracing::info;
 
@@ -9,6 +11,13 @@ use crate::inbound::{AgentAddress, set_last_away_notification_source_agent};
 use crate::settings::get_settings;
 use crate::store::TurnCompleted;
 use crate::tmux;
+
+// ---------------------------------------------------------------------------
+// Deduplication — suppress repeated notifications for the same turn
+// ---------------------------------------------------------------------------
+
+static LAST_NOTIFY: Mutex<Option<(String, Instant)>> = Mutex::new(None);
+const DEDUP_WINDOW_SECS: u64 = 30;
 
 // ---------------------------------------------------------------------------
 // OutboundChannel — notification to human
@@ -55,6 +64,19 @@ pub fn is_screen_locked() -> bool {
 // ---------------------------------------------------------------------------
 
 pub fn notify(turn: &TurnCompleted, trace_id: &str) {
+    // Dedup: skip if same pane+prompt was notified within the window.
+    let dedup_key = format!("{}:{}", turn.pane_id, turn.last_user_prompt);
+    {
+        let mut last = LAST_NOTIFY.lock().unwrap();
+        if let Some((ref prev_key, ref ts)) = *last {
+            if prev_key == &dedup_key && ts.elapsed().as_secs() < DEDUP_WINDOW_SECS {
+                info!("notification skipped (duplicate within dedup window)");
+                return;
+            }
+        }
+        *last = Some((dedup_key, Instant::now()));
+    }
+
     let cfg = get_settings();
     let screen_locked = is_screen_locked();
 
