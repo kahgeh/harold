@@ -88,14 +88,9 @@ Even if the `handle_ids` filter were bypassed, multiple layers prevent exploitat
 
 SMS spoofing allows an attacker to forge the sender ID on a text message so it appears to come from a trusted phone number. If Harold were watching SMS-based conversation threads, a spoofed message could pass the `handle_id` filter and be routed to an agent pane as if it came from the user.
 
-However, Harold's configured `handle_ids` (`1` and `36`) both resolve to **iMessage-service** handles in `chat.db`:
+However, all currently configured `handle_ids` resolve to **iMessage-service** handles in `chat.db` (verified via `SELECT ROWID, id, service FROM handle`).
 
-| handle_id | identifier | service |
-|---|---|---|
-| 1 | REDACTED_EMAIL | iMessage |
-| 36 | REDACTED_PHONE | iMessage |
-
-iMessage uses end-to-end encryption with Apple device certificate identity verification. A spoofed SMS would create a separate SMS-service handle with a different `ROWID` in `chat.db`, which would not match either configured handle ID. Apple's identity layer blocks the spoofed message from ever entering a watched conversation thread.
+iMessage uses end-to-end encryption with Apple device certificate identity verification. A spoofed SMS would create a separate SMS-service handle with a different `ROWID` in `chat.db`, which would not match any configured handle ID. Apple's identity layer blocks the spoofed message from ever entering a watched conversation thread.
 
 **Condition for this to remain safe:** The `handle_ids` config must only reference iMessage-service handles, not SMS-service handles. If a new handle ID is added, verify it maps to `service = "iMessage"` in the `handle` table of `chat.db`.
 
