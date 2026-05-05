@@ -63,6 +63,9 @@ pub struct TtsSettings {
     pub command: String,
     pub voice: Option<String>,
     pub args: Option<Vec<String>>,
+    pub fallback_command: Option<String>,
+    pub fallback_voice: Option<String>,
+    pub fallback_args: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]

@@ -2,7 +2,7 @@ use std::process::Command;
 
 use tracing::{info, warn};
 
-use crate::settings::get_settings;
+use crate::settings::{TtsSettings, get_settings};
 use crate::store::TurnCompleted;
 
 fn run_local_model(system_prompt: &str, prompt: &str, max_tokens: u32) -> Option<String> {
@@ -99,6 +99,63 @@ fn build_short_summary(turn: &TurnCompleted) -> String {
     run_local_model(system_prompt, &prompt, 20).unwrap_or_else(|| "Work complete".into())
 }
 
+fn run_tts_command(
+    command: &str,
+    args: Option<&Vec<String>>,
+    voice: Option<&String>,
+    message: &str,
+) -> std::io::Result<bool> {
+    let mut cmd = Command::new(command);
+    if let Some(extra_args) = args {
+        cmd.args(extra_args);
+    }
+    if let Some(voice) = voice {
+        cmd.args(["-v", voice]);
+    }
+
+    let status = cmd.arg(message).status()?;
+    Ok(status.success())
+}
+
+fn notify_with_fallback(tts: &TtsSettings, message: &str) -> bool {
+    match run_tts_command(&tts.command, tts.args.as_ref(), tts.voice.as_ref(), message) {
+        Ok(true) => {
+            info!("TTS notification sent");
+            return true;
+        }
+        Ok(false) => warn!(command = %tts.command, "TTS command failed"),
+        Err(e) => warn!(error = %e, command = %tts.command, "TTS command failed to start"),
+    }
+
+    let Some(fallback_command) = &tts.fallback_command else {
+        return false;
+    };
+
+    match run_tts_command(
+        fallback_command,
+        tts.fallback_args.as_ref(),
+        tts.fallback_voice.as_ref(),
+        message,
+    ) {
+        Ok(true) => {
+            info!("fallback TTS notification sent");
+            true
+        }
+        Ok(false) => {
+            warn!(command = %fallback_command, "fallback TTS command failed");
+            false
+        }
+        Err(e) => {
+            warn!(
+                error = %e,
+                command = %fallback_command,
+                "fallback TTS command failed to start"
+            );
+            false
+        }
+    }
+}
+
 pub fn notify_at_desk(turn: &TurnCompleted, _trace_id: &str) {
     let summary = build_short_summary(turn);
     let message = format!(
@@ -106,15 +163,38 @@ pub fn notify_at_desk(turn: &TurnCompleted, _trace_id: &str) {
         summary, turn.main_context
     );
     let tts = &get_settings().tts;
-    let mut cmd = Command::new(&tts.command);
-    if let Some(extra_args) = &tts.args {
-        cmd.args(extra_args);
+    notify_with_fallback(tts, &message);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn notify_with_fallback_uses_fallback_when_primary_fails() {
+        let tts = TtsSettings {
+            command: "/usr/bin/false".into(),
+            voice: None,
+            args: None,
+            fallback_command: Some("/usr/bin/true".into()),
+            fallback_voice: None,
+            fallback_args: None,
+        };
+
+        assert!(notify_with_fallback(&tts, "test message"));
     }
-    if let Some(voice) = &tts.voice {
-        cmd.args(["-v", voice]);
-    }
-    match cmd.arg(&message).status() {
-        Ok(_) => info!("TTS notification sent"),
-        Err(e) => warn!(error = %e, "TTS failed"),
+
+    #[test]
+    fn notify_with_fallback_fails_without_fallback() {
+        let tts = TtsSettings {
+            command: "/usr/bin/false".into(),
+            voice: None,
+            args: None,
+            fallback_command: None,
+            fallback_voice: None,
+            fallback_args: None,
+        };
+
+        assert!(!notify_with_fallback(&tts, "test message"));
     }
 }

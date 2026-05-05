@@ -19,6 +19,8 @@ deploy: build .env
 	cp $(BINARY) $(DEPLOY_DIR)/harold
 	codesign --force --sign "$(CODESIGN_IDENTITY)" $(DEPLOY_DIR)/harold
 	cp harold/proto/harold.proto $(DEPLOY_DIR)/harold.proto
+	mkdir -p $(DEPLOY_DIR)/hooks
+	cp hooks/shared/harold_turn_complete.py $(DEPLOY_DIR)/hooks/harold_turn_complete.py
 	mkdir -p $(DEPLOY_DIR)/config
 	cp harold/config/default.toml $(DEPLOY_DIR)/config/default.toml
 	cp harold/config/local.template.toml $(DEPLOY_DIR)/config/local.template.toml

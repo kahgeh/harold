@@ -94,7 +94,7 @@ Lock your screen during the 10-second window. You should receive a diagnostic no
 ## 6. Test the full loop
 
 1. Lock your screen
-2. Trigger an agent turn completion (run a Claude Code command in a tmux pane)
+2. Trigger an agent turn completion from a configured Claude, Codex, or other Harold hook
 3. Check Telegram for the notification
 4. Reply in Telegram — verify the reply routes to the correct agent pane
 5. Check the agent pane received your message prefixed with the phone emoji

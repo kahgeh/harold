@@ -49,14 +49,18 @@ TurnCompleted event (pane_id from $TMUX_PANE in stop hook)
 1. `build_short_summary()` — runs `uv run mlx_lm.generate` in `ai.local_model_dir` with a system prompt asking for a 3–8 word completion summary; strips `<think>...</think>` blocks from reasoning models
 2. Message assembled: `"<summary> on <main_context> and waiting for further instructions"`
 3. TTS command run: `<tts.command> [tts.args...] [-v tts.voice] "<message>"`
+4. If the primary command fails to start or exits non-zero, Harold runs the fallback command when configured: `<tts.fallback_command> [tts.fallback_args...] [-v tts.fallback_voice] "<message>"`
 
 Config keys (`[tts]`):
 
-| Key       | Description                                               |
-| --------- | --------------------------------------------------------- |
-| `command` | TTS binary (e.g. `say`)                                   |
-| `voice`   | Optional voice name passed as `-v`                        |
-| `args`    | Optional extra args prepended before `-v` and the message |
+| Key                | Description                                               |
+| ------------------ | --------------------------------------------------------- |
+| `command`          | TTS binary (e.g. `say`)                                   |
+| `voice`            | Optional voice name passed as `-v`                        |
+| `args`             | Optional extra args prepended before `-v` and the message |
+| `fallback_command` | Optional backup TTS binary when `command` fails           |
+| `fallback_voice`   | Optional fallback voice name passed as `-v`               |
+| `fallback_args`    | Optional fallback args prepended before `-v` and message  |
 
 ## Away: iMessage or Telegram
 

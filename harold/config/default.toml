@@ -15,6 +15,8 @@ path = "~/Library/Messages/chat.db"
 [tts]
 command = "say"
 # voice can be overridden in local.toml, e.g. voice = "Samantha"
+# fallback_command can be set in local.toml to run a backup TTS command
+# if the primary command fails.
 
 [log]
 level = "info"

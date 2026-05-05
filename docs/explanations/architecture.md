@@ -4,7 +4,7 @@
 
 Bidirectional messaging (iMessage or Telegram) ↔ AI coding agent communication, split into two components with clear responsibilities.
 
-Harold is agent-agnostic — it works with any agent that can shell out to `grpcurl` to report a completed turn.
+Harold's turn-completion notification path is agent-agnostic — it works with any agent that can run a Stop hook and shell out to `grpcurl` to report a completed turn.
 
 ---
 
@@ -14,9 +14,9 @@ Harold is agent-agnostic — it works with any agent that can shell out to `grpc
 ┌──────────────────────────────────────────────────────────────────┐
 │                      AI Agent Session                            │
 │                                                                  │
-│  Stop hook (e.g. smart_stop.py for Claude Code)                  │
+│  Stop hook adapter (Claude, Codex, etc.)                         │
 │  ┌─────────────────────────────────────────────────────────────┐ │
-│  │ - Reads transcript (agent-specific knowledge)               │ │
+│  │ - Reads transcript (agent-specific adapter)                 │ │
 │  │ - Extracts last user prompt + agent final message           │ │
 │  │ - Gets pane_id + label from tmux                            │ │
 │  │ - Computes main_context from git (branch or repo name)      │ │
@@ -64,7 +64,7 @@ Harold is agent-agnostic — it works with any agent that can shell out to `grpc
 
 | Concern                                 | Owner  |
 | --------------------------------------- | ------ |
-| Transcript parsing                      | Hook   |
+| Transcript parsing                      | Agent adapter hook |
 | Pane identity (self)                    | Hook   |
 | main_context (branch or repo name)      | Hook   |
 | Skip subagent stop events               | Hook   |
@@ -107,7 +107,7 @@ When a `TurnCompleted` event is received, Harold decides how to notify:
 
 ## Inbound message routing (inbound)
 
-1. `[tag]` prefix → exact/substring match against live tmux panes
+1. `[tag]` prefix → exact/substring match against discovered live tmux panes
 2. No tag, multiple panes → semantic resolve via AI CLI
 3. `last_away_notification_source_agent` → the agent whose turn last triggered an away (iMessage) notification
 4. Final fallback → pane whose label contains `my-agent`

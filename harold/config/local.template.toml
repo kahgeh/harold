@@ -16,9 +16,12 @@ path = "~/bin/harold/data/events"
 [tts]
 command = "say"
 # voice = "Samantha"
-# Or use a custom TTS script:
-# command = "uv"
-# args = ["run", "/path/to/tts_script.py"]
+# Optional fallback if the primary TTS command fails:
+# fallback_command = "say"
+# fallback_voice = "Samantha"
+# Or use a custom TTS executable. Harold appends the message as the final arg.
+# command = "/path/to/python"
+# args = ["-m", "mlx_audio.tts.generate", "--voice", "af_heart", "--play", "--text"]
 
 # [telegram]
 # bot_token = "123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11"

@@ -36,4 +36,8 @@ Harold supports two away channels — configure one in `[notify] away_channel`:
 
 Each agent needs a stop hook that calls Harold via `grpcurl` when a turn completes. See the [architecture doc](explanations/architecture.md) for the payload format.
 
-A reference hook for Claude Code is provided in `hooks/claude_code/`.
+The recommended layout is a shared Harold notifier plus thin per-agent adapters:
+
+- `~/bin/harold/hooks/harold_turn_complete.py` — shared Harold notifier, installed by `make deploy`
+- `~/.claude/hooks/turn_complete.py` — Claude Code adapter
+- `~/.codex/hooks/turn_complete.py` — Codex adapter

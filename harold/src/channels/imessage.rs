@@ -227,7 +227,9 @@ async fn poll(store: &EventStore) {
             info!("iMessage received (inbound)");
             match append_inbound_message(store, &InboundMessage { text }).await {
                 Ok(()) => last_inbound_rowid().store(rowid, Ordering::Relaxed),
-                Err(e) => tracing::warn!(error = %e, "failed to append InboundMessageReceived event"),
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to append InboundMessageReceived event")
+                }
             }
         }
         .instrument(span)
@@ -242,7 +244,9 @@ async fn poll(store: &EventStore) {
             info!("iMessage received (self)");
             match append_inbound_message(store, &InboundMessage { text }).await {
                 Ok(()) => last_self_rowid().store(rowid, Ordering::Relaxed),
-                Err(e) => tracing::warn!(error = %e, "failed to append InboundMessageReceived event"),
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to append InboundMessageReceived event")
+                }
             }
         }
         .instrument(span)
