@@ -21,7 +21,7 @@ use crate::agent::domain::{
 #[cfg(test)]
 use crate::agent::reducer::DEFAULT_HOOK_GRACE_MS;
 use crate::agent::reducer::reduce_agent_event;
-use crate::agent::summary::normalize_work_summary;
+use crate::agent::summary::{normalize_work_summary, sanitize_bounded_metadata};
 
 const NAMESPACE: &str = "harold";
 const PARTITION_KEY: &str = "main";
@@ -1098,6 +1098,7 @@ pub(crate) async fn append_monitor_turn_completed(
     fail_monitor_append_for_test(store)?;
     let mut events = Vec::with_capacity(usize::from(pane.is_some()) + 1);
     if let Some(pane) = pane {
+        let pane = normalize_pane_observation(pane);
         events.push(agent_new_event(AgentEvent::PaneObserved(
             crate::agent::domain::AgentPaneObserved { pane },
         ))?);
@@ -1138,6 +1139,10 @@ fn fail_monitor_append_for_test(_store: &HaroldStore) -> events::Result<()> {
 )]
 fn normalize_agent_event(event: AgentEvent) -> Option<AgentEvent> {
     match event {
+        AgentEvent::PaneObserved(mut observed) => {
+            observed.pane = normalize_pane_observation(observed.pane);
+            Some(AgentEvent::PaneObserved(observed))
+        }
         AgentEvent::LifecycleObserved(mut lifecycle) => {
             if let WorkSummaryUpdate::Set(summary) = lifecycle.work_summary {
                 lifecycle.work_summary = normalize_work_summary(&summary)
@@ -1146,8 +1151,30 @@ fn normalize_agent_event(event: AgentEvent) -> Option<AgentEvent> {
             Some(AgentEvent::LifecycleObserved(lifecycle))
         }
         AgentEvent::ScreenObserved(screen) => normalize_screen_event(screen),
+        AgentEvent::MonitorHealthChanged(mut health) => {
+            health.component = normalize_health_code(&health.component, 64, "invalid_component");
+            health.reason_code = normalize_health_code(&health.reason_code, 160, "invalid_reason");
+            Some(AgentEvent::MonitorHealthChanged(health))
+        }
         event => Some(event),
     }
+}
+
+fn normalize_health_code(input: &str, max_len: usize, fallback: &str) -> String {
+    let valid = !input.is_empty()
+        && input.len() <= max_len
+        && input.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"._-".contains(&byte)
+        });
+    if valid { input.into() } else { fallback.into() }
+}
+
+fn normalize_pane_observation(mut pane: AgentPaneObservation) -> AgentPaneObservation {
+    pane.tmux_target = sanitize_bounded_metadata(&pane.tmux_target, 256);
+    pane.session_name = sanitize_bounded_metadata(&pane.session_name, 256);
+    pane.provider_display_name = sanitize_bounded_metadata(&pane.provider_display_name, 256);
+    pane.working_directory = sanitize_bounded_metadata(&pane.working_directory, 1_024);
+    pane
 }
 
 #[allow(

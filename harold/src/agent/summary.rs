@@ -32,6 +32,10 @@ pub(crate) fn normalize_visible_grid(input: &str) -> String {
     sanitize_terminal_text(input, WhitespaceMode::PreserveLines, None)
 }
 
+pub(crate) fn sanitize_bounded_metadata(input: &str, max_scalars: usize) -> String {
+    sanitize_terminal_text(input, WhitespaceMode::Collapse, Some(max_scalars))
+}
+
 #[derive(Clone, Copy)]
 enum WhitespaceMode {
     Collapse,

@@ -271,10 +271,17 @@ async fn async_main(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>>
     let store = store::open_store(&store_path).await?;
 
     let addr = cfg.grpc.addr()?;
-    info!(address = %addr, "Harold listening");
 
     // Shutdown channel: sender closes on signal, receivers see the channel close.
     let (shutdown_tx, shutdown_rx) = watch::channel(());
+
+    loop {
+        let batch = store.project_unhandled_events(500).await?;
+        if batch.applied == 0 {
+            break;
+        }
+    }
+    let initial_agent_snapshot = store.load_agent_snapshot().await?;
 
     let inventory: Arc<dyn agent::inventory::AgentInventoryPort> = Arc::new(
         agent::inventory::TmuxAgentInventory::new(cfg.agents.clone()),
@@ -285,15 +292,17 @@ async fn async_main(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>>
         settings::AgentSettings::Named(providers) => providers.clone(),
         settings::AgentSettings::Legacy { .. } => Vec::new(),
     };
-    let (monitor, monitor_task) = agent::runtime::spawn_agent_monitor(
+    let (monitor, mut monitor_task) = agent::runtime::spawn_agent_monitor(
         Arc::clone(&store),
         inventory,
         screen,
         providers,
+        initial_agent_snapshot,
         agent::runtime::AgentMonitorRuntimeConfig {
             inventory_interval: Duration::from_millis(cfg.agent_monitor.inventory_interval_ms),
             screen_interval: Duration::from_millis(cfg.agent_monitor.screen_interval_ms),
             hook_grace_ms: cfg.agent_monitor.hook_grace_ms,
+            acquisition_timeout: Duration::from_millis(500),
         },
         shutdown_rx.clone(),
     );
@@ -307,6 +316,7 @@ async fn async_main(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>>
         shutdown_rx,
     ));
 
+    info!(address = %addr, "Harold listening");
     Server::builder()
         .add_service(HaroldServer::new(HaroldService { monitor }))
         .serve_with_shutdown(addr, async {
@@ -320,7 +330,14 @@ async fn async_main(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>>
     // Wait for the handler and listener to stop before returning.
     let _ = event_handler_handle.await;
     let _ = listener_handle.await;
-    let _ = monitor_task.await;
+    if tokio::time::timeout(Duration::from_secs(1), &mut monitor_task)
+        .await
+        .is_err()
+    {
+        tracing::warn!("agent monitor did not stop within shutdown deadline; aborting task");
+        monitor_task.abort();
+        let _ = monitor_task.await;
+    }
 
     Ok(())
 }
