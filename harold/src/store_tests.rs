@@ -131,6 +131,7 @@ async fn agent_events_round_trip_with_stable_types_and_normalized_payloads() {
     let pane_observed: AgentPaneObserved =
         serde_json::from_value(stored[0].payload.clone()).unwrap();
     assert_full_incarnation(&pane_observed.pane.incarnation);
+    assert_eq!(pane_observed.pane, agent_pane());
     assert_eq!(stored[1].r#type, "AgentLifecycleObserved");
     let lifecycle: AgentLifecycleObserved =
         serde_json::from_value(stored[1].payload.clone()).unwrap();
