@@ -13,15 +13,17 @@ use std::sync::Arc;
 use settings::{get_settings, init_settings};
 use telemetry::init_telemetry;
 use tokio::sync::watch;
+use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, transport::Server};
 use tracing::{Instrument, info, info_span};
 
-pub mod harold {
-    tonic::include_proto!("harold");
-}
+pub use harold_api::harold;
 
 use harold::harold_server::{Harold, HaroldServer};
-use harold::{TurnCompleteRequest, TurnCompleteResponse};
+use harold::{
+    AgentStateSnapshot, ReportAgentStateRequest, ReportAgentStateResponse, TurnCompleteRequest,
+    TurnCompleteResponse, WatchAgentStatesRequest,
+};
 
 struct HaroldService {
     store: Arc<store::HaroldStore>,
@@ -29,6 +31,8 @@ struct HaroldService {
 
 #[tonic::async_trait]
 impl Harold for HaroldService {
+    type WatchAgentStatesStream = ReceiverStream<Result<AgentStateSnapshot, Status>>;
+
     async fn turn_complete(
         &self,
         request: Request<TurnCompleteRequest>,
@@ -65,6 +69,24 @@ impl Harold for HaroldService {
         }
         .instrument(span)
         .await
+    }
+
+    async fn report_agent_state(
+        &self,
+        _request: Request<ReportAgentStateRequest>,
+    ) -> Result<Response<ReportAgentStateResponse>, Status> {
+        Err(Status::unimplemented(
+            "agent state reporting is not implemented",
+        ))
+    }
+
+    async fn watch_agent_states(
+        &self,
+        _request: Request<WatchAgentStatesRequest>,
+    ) -> Result<Response<Self::WatchAgentStatesStream>, Status> {
+        Err(Status::unimplemented(
+            "agent state streaming is not implemented",
+        ))
     }
 }
 

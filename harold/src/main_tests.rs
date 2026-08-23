@@ -3,6 +3,7 @@ use std::sync::Arc;
 use events::EventStreamVersion;
 
 use super::harold::harold_server::Harold;
+use super::harold::{AgentState, ReportAgentStateRequest, WatchAgentStatesRequest};
 use super::{HaroldService, Request, TurnCompleteRequest, store};
 
 struct TestDirectory(std::path::PathBuf);
@@ -55,4 +56,28 @@ async fn turn_complete_accepts_only_after_appending_every_request_field() {
     assert_eq!(event.last_user_prompt, "refresh events");
     assert_eq!(event.assistant_message, "events refreshed");
     assert_eq!(event.main_context, "harold");
+}
+
+#[tokio::test]
+async fn agent_state_rpcs_are_explicitly_unimplemented_during_contract_stage() {
+    let directory = TestDirectory::new();
+    let store = Arc::new(store::HaroldStore::open(&directory.0).await.unwrap());
+    let service = HaroldService { store };
+
+    let report_error = service
+        .report_agent_state(Request::new(ReportAgentStateRequest {
+            pane_id: "%8".into(),
+            state: AgentState::Busy.into(),
+            adapter_id: "codex-hook".into(),
+            work_summary: Some("refresh events".into()),
+        }))
+        .await
+        .unwrap_err();
+    assert_eq!(report_error.code(), tonic::Code::Unimplemented);
+
+    let watch_error = service
+        .watch_agent_states(Request::new(WatchAgentStatesRequest {}))
+        .await
+        .unwrap_err();
+    assert_eq!(watch_error.code(), tonic::Code::Unimplemented);
 }

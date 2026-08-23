@@ -18,7 +18,7 @@ deploy: build .env
 	sleep 1
 	cp $(BINARY) $(DEPLOY_DIR)/harold
 	codesign --force --sign "$(CODESIGN_IDENTITY)" $(DEPLOY_DIR)/harold
-	cp harold/proto/harold.proto $(DEPLOY_DIR)/harold.proto
+	cp harold-api/proto/harold.proto $(DEPLOY_DIR)/harold.proto
 	mkdir -p $(DEPLOY_DIR)/hooks
 	cp hooks/shared/harold_turn_complete.py $(DEPLOY_DIR)/hooks/harold_turn_complete.py
 	mkdir -p $(DEPLOY_DIR)/config

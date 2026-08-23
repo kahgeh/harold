@@ -1,5 +1,5 @@
 [workspace]
-members = ["harold", "events"]
+members = ["harold", "harold-api", "events"]
 resolver = "2"
 
 [workspace.dependencies]

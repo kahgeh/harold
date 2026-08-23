@@ -1,0 +1,78 @@
+syntax = "proto3";
+
+package harold;
+
+service Harold {
+  rpc TurnComplete (TurnCompleteRequest) returns (TurnCompleteResponse);
+  rpc ReportAgentState (ReportAgentStateRequest) returns (ReportAgentStateResponse);
+  rpc WatchAgentStates (WatchAgentStatesRequest) returns (stream AgentStateSnapshot);
+}
+
+message TurnCompleteRequest {
+  string pane_id = 1;
+  string pane_label = 2;
+  string last_user_prompt = 3;
+  string assistant_message = 4;
+  string main_context = 5;
+}
+
+message TurnCompleteResponse {
+  bool accepted = 1;
+}
+
+enum AgentState {
+  AGENT_STATE_UNSPECIFIED = 0;
+  AGENT_STATE_BUSY = 1;
+  AGENT_STATE_IDLE = 2;
+  AGENT_STATE_UNKNOWN = 3;
+}
+
+enum MonitorHealthState {
+  MONITOR_HEALTH_STATE_UNSPECIFIED = 0;
+  MONITOR_HEALTH_STATE_HEALTHY = 1;
+  MONITOR_HEALTH_STATE_DEGRADED = 2;
+}
+
+message ReportAgentStateRequest {
+  string pane_id = 1;
+  AgentState state = 2;
+  string adapter_id = 3;
+  optional string work_summary = 4;
+}
+
+message ReportAgentStateResponse {
+  bool accepted = 1;
+}
+
+message WatchAgentStatesRequest {}
+
+message AgentPaneState {
+  string pane_id = 1;
+  string tmux_target = 2;
+  string session_name = 3;
+  uint32 window_index = 4;
+  uint32 pane_index = 5;
+  uint32 pane_pid = 6;
+  uint32 agent_pid = 7;
+  int64 agent_started_at_ms = 8;
+  string provider_id = 9;
+  string provider_display_name = 10;
+  string working_directory = 11;
+  AgentState state = 12;
+  int64 last_transition_at_ms = 13;
+  optional string work_summary = 14;
+}
+
+message AgentMonitorHealth {
+  string component = 1;
+  MonitorHealthState state = 2;
+  string reason_code = 3;
+  int64 observed_at_ms = 4;
+}
+
+message AgentStateSnapshot {
+  uint64 through_event_version = 1;
+  int64 server_time_ms = 2;
+  repeated AgentMonitorHealth monitor_health = 3;
+  repeated AgentPaneState panes = 4;
+}

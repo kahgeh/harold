@@ -992,6 +992,7 @@ version = "0.1.0"
 dependencies = [
  "config",
  "events",
+ "harold-api",
  "hex",
  "notify",
  "prost",
@@ -1002,13 +1003,23 @@ dependencies = [
  "thiserror 2.0.18",
  "time",
  "tokio",
+ "tokio-stream",
  "tonic",
  "tonic-prost",
- "tonic-prost-build",
  "tracing",
  "tracing-subscriber",
  "turso",
  "uuid",
+]
+
+[[package]]
+name = "harold-api"
+version = "0.1.0"
+dependencies = [
+ "prost",
+ "tonic",
+ "tonic-prost",
+ "tonic-prost-build",
 ]
 
 [[package]]
