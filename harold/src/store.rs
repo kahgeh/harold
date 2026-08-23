@@ -13,9 +13,10 @@ use sha2::{Digest, Sha256};
 use turso::Database;
 
 use crate::agent::domain::{
-    AgentEvent, AgentMonitorHealthChanged, AgentPaneProjection, AgentScreenObserved, AgentSnapshot,
-    EffectiveAgentState, MonitorHealthProjection, ObservedAgentState, ProjectionChange,
-    WorkSummaryUpdate,
+    AgentEvent, AgentIncarnation, AgentLifecycleObserved, AgentMonitorHealthChanged,
+    AgentPaneObservation, AgentPaneProjection, AgentScreenObserved, AgentSnapshot,
+    CompletionSummaryUpdate, EffectiveAgentState, MonitorHealthProjection, ObservedAgentState,
+    ProjectionChange, WorkSummaryUpdate,
 };
 #[cfg(test)]
 use crate::agent::reducer::DEFAULT_HOOK_GRACE_MS;
@@ -56,6 +57,10 @@ pub struct TurnCompleted {
     pub last_user_prompt: String,
     pub assistant_message: String,
     pub main_context: String,
+    #[serde(default)]
+    pub agent_incarnation: Option<AgentIncarnation>,
+    #[serde(default)]
+    pub work_summary: CompletionSummaryUpdate,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -87,6 +92,8 @@ pub struct HaroldStore {
     fail_projection_before_checkpoint: std::sync::atomic::AtomicBool,
     #[cfg(test)]
     snapshot_read_gate: std::sync::Mutex<Option<SnapshotReadGate>>,
+    #[cfg(test)]
+    fail_next_monitor_append: std::sync::atomic::AtomicBool,
 }
 
 #[cfg(test)]
@@ -162,6 +169,8 @@ impl HaroldStore {
             fail_projection_before_checkpoint: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)]
             snapshot_read_gate: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            fail_next_monitor_append: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -195,7 +204,12 @@ impl HaroldStore {
             let mut snapshot_changed = false;
             for event in &events {
                 match event.r#type.as_str() {
-                    "TurnCompleted" | "InboundMessageReceived" => {
+                    "TurnCompleted" => {
+                        stage_delivery_event(&conn, event).await?;
+                        snapshot_changed |=
+                            project_turn_completed(&conn, event, self.hook_grace_ms).await?;
+                    }
+                    "InboundMessageReceived" => {
                         stage_delivery_event(&conn, event).await?;
                     }
                     "AgentPaneObserved"
@@ -277,6 +291,12 @@ impl HaroldStore {
     #[cfg(test)]
     pub(crate) fn fail_projection_before_checkpoint_for_test(&self) {
         self.fail_projection_before_checkpoint
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_next_monitor_append_for_test(&self) {
+        self.fail_next_monitor_append
             .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
@@ -483,6 +503,55 @@ async fn project_agent_event(
             Ok(removed > 0)
         }
         ProjectionChange::Ignore => Ok(false),
+    }
+}
+
+async fn project_turn_completed(
+    conn: &turso::Connection,
+    event: &events::EventEnvelope,
+    hook_grace_ms: u64,
+) -> events::Result<bool> {
+    let Ok(turn) = serde_json::from_value::<TurnCompleted>(event.payload.clone()) else {
+        // The delivery outbox remains the compatibility boundary for malformed notification
+        // payloads. Projection must not let one poison delivery block later durable events.
+        return Ok(false);
+    };
+    let Some(incarnation) = turn.agent_incarnation else {
+        return Ok(false);
+    };
+    let work_summary = match turn.work_summary {
+        CompletionSummaryUpdate::Unchanged => WorkSummaryUpdate::Unchanged,
+        CompletionSummaryUpdate::Set(summary) => WorkSummaryUpdate::Set(summary),
+    };
+    let current = load_agent_pane(conn, &incarnation.pane_id).await?;
+    let observed_at_ms = current
+        .as_ref()
+        .filter(|projection| projection.pane.incarnation == incarnation)
+        .map_or_else(
+            || {
+                (event.created_at.unix_timestamp_nanos() / 1_000_000)
+                    .try_into()
+                    .map_err(|_| {
+                        events::EsError::Cursor(
+                            "TurnCompleted timestamp is outside i64 milliseconds".into(),
+                        )
+                    })
+            },
+            |projection| Ok(projection.pane.observed_at_ms),
+        )?;
+    let agent_event = AgentEvent::LifecycleObserved(AgentLifecycleObserved {
+        incarnation,
+        state: ObservedAgentState::Idle,
+        adapter_id: "turn-complete-v1".into(),
+        work_summary,
+        observed_at_ms,
+    });
+    match reduce_agent_event(current, &agent_event, event.version, hook_grace_ms) {
+        ProjectionChange::Upsert(projection) => {
+            upsert_agent_pane(conn, &projection).await?;
+            Ok(true)
+        }
+        ProjectionChange::Remove(_) | ProjectionChange::Ignore => Ok(false),
     }
 }
 
@@ -959,6 +1028,7 @@ pub async fn open_store(path: impl AsRef<Path>) -> events::Result<Arc<HaroldStor
     ))
 }
 
+#[cfg(test)]
 pub async fn append_turn_completed(
     store: &HaroldStore,
     event: &TurnCompleted,
@@ -1011,12 +1081,55 @@ pub(crate) async fn append_agent_events(
     store: &HaroldStore,
     events: Vec<AgentEvent>,
 ) -> events::Result<events::AppendResult> {
+    fail_monitor_append_for_test(store)?;
     let events = events
         .into_iter()
         .filter_map(normalize_agent_event)
         .map(agent_new_event)
         .collect::<events::Result<Vec<_>>>()?;
     store.stream.append(ExpectedVersion::Any, events).await
+}
+
+pub(crate) async fn append_monitor_turn_completed(
+    store: &HaroldStore,
+    pane: Option<AgentPaneObservation>,
+    turn: &TurnCompleted,
+) -> events::Result<events::AppendResult> {
+    fail_monitor_append_for_test(store)?;
+    let mut events = Vec::with_capacity(usize::from(pane.is_some()) + 1);
+    if let Some(pane) = pane {
+        events.push(agent_new_event(AgentEvent::PaneObserved(
+            crate::agent::domain::AgentPaneObserved { pane },
+        ))?);
+    }
+    events.push(NewEvent {
+        r#type: "TurnCompleted".into(),
+        payload: json!(turn),
+        workflow_kind: None,
+        workflow: WorkflowRef::None,
+        request_id: None,
+        actor_id: "system:harold".into(),
+        actor_type: ActorType::System,
+    });
+    store.stream.append(ExpectedVersion::Any, events).await
+}
+
+#[cfg(test)]
+fn fail_monitor_append_for_test(store: &HaroldStore) -> events::Result<()> {
+    if store
+        .fail_next_monitor_append
+        .swap(false, std::sync::atomic::Ordering::SeqCst)
+    {
+        return Err(events::EsError::Migration(
+            "test monitor append failure".into(),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(test))]
+fn fail_monitor_append_for_test(_store: &HaroldStore) -> events::Result<()> {
+    Ok(())
 }
 
 #[allow(

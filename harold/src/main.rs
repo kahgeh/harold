@@ -10,6 +10,7 @@ mod tmux;
 mod util;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use settings::{get_settings, init_settings};
 use telemetry::init_telemetry;
@@ -27,7 +28,7 @@ use harold::{
 };
 
 struct HaroldService {
-    store: Arc<store::HaroldStore>,
+    monitor: agent::runtime::AgentMonitorHandle,
 }
 
 #[tonic::async_trait]
@@ -43,13 +44,9 @@ impl Harold for HaroldService {
         let span = info_span!("grpc_turn_complete", trace_id = %trace_id);
 
         async {
-            // assistant_message omitted from log — can be large
-            info!(
-                pane_id = %req.pane_id,
-                pane_label = %req.pane_label,
-                main_context = %req.main_context,
-                "turn complete received"
-            );
+            let pane_id = req.pane_id.clone();
+            let pane_id_log = pane_id_for_log(&pane_id);
+            info!(pane_id = %pane_id_log, "turn complete received");
 
             let event = store::TurnCompleted {
                 pane_id: req.pane_id,
@@ -57,14 +54,19 @@ impl Harold for HaroldService {
                 last_user_prompt: req.last_user_prompt,
                 assistant_message: req.assistant_message,
                 main_context: req.main_context,
+                agent_incarnation: None,
+                work_summary: agent::domain::CompletionSummaryUpdate::Unchanged,
             };
 
-            store::append_turn_completed(&self.store, &event)
+            self.monitor
+                .turn_completed(event)
                 .await
                 .map_err(|e| {
-                    tracing::error!(error = %e, "failed to append TurnCompleted event");
+                    tracing::error!(pane_id = %pane_id_log, result = "append_failed", error = %e, "turn complete rejected");
                     Status::internal("event store write failed")
                 })?;
+
+            info!(pane_id = %pane_id_log, result = "accepted", "turn complete persisted");
 
             Ok(Response::new(TurnCompleteResponse { accepted: true }))
         }
@@ -91,6 +93,14 @@ impl Harold for HaroldService {
     }
 }
 
+fn pane_id_for_log(value: &str) -> &str {
+    let valid = value.len() <= 32
+        && value.strip_prefix('%').is_some_and(|suffix| {
+            !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit())
+        });
+    if valid { value } else { "<invalid-pane-id>" }
+}
+
 async fn shutdown_signal() {
     use tokio::signal::unix::{SignalKind, signal};
     let mut sigint = signal(SignalKind::interrupt()).expect("failed to install SIGINT handler");
@@ -111,6 +121,8 @@ fn run_diagnostics(delay_secs: u64) {
         last_user_prompt: "diagnostic test".into(),
         assistant_message: "Harold diagnostic test complete.".into(),
         main_context: "harold".into(),
+        agent_incarnation: None,
+        work_summary: agent::domain::CompletionSummaryUpdate::Unchanged,
     };
 
     println!("=== Harold diagnostics ===\n");
@@ -264,6 +276,28 @@ async fn async_main(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>>
     // Shutdown channel: sender closes on signal, receivers see the channel close.
     let (shutdown_tx, shutdown_rx) = watch::channel(());
 
+    let inventory: Arc<dyn agent::inventory::AgentInventoryPort> = Arc::new(
+        agent::inventory::TmuxAgentInventory::new(cfg.agents.clone()),
+    );
+    let screen: Arc<dyn agent::screen::VisibleScreenPort> =
+        Arc::new(agent::screen::TmuxVisibleScreen::new());
+    let providers = match &cfg.agents {
+        settings::AgentSettings::Named(providers) => providers.clone(),
+        settings::AgentSettings::Legacy { .. } => Vec::new(),
+    };
+    let (monitor, monitor_task) = agent::runtime::spawn_agent_monitor(
+        Arc::clone(&store),
+        inventory,
+        screen,
+        providers,
+        agent::runtime::AgentMonitorRuntimeConfig {
+            inventory_interval: Duration::from_millis(cfg.agent_monitor.inventory_interval_ms),
+            screen_interval: Duration::from_millis(cfg.agent_monitor.screen_interval_ms),
+            hook_grace_ms: cfg.agent_monitor.hook_grace_ms,
+        },
+        shutdown_rx.clone(),
+    );
+
     let event_handler_handle = tokio::spawn(projector::run_event_handler(
         Arc::clone(&store),
         shutdown_rx.clone(),
@@ -274,9 +308,7 @@ async fn async_main(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>>
     ));
 
     Server::builder()
-        .add_service(HaroldServer::new(HaroldService {
-            store: Arc::clone(&store),
-        }))
+        .add_service(HaroldServer::new(HaroldService { monitor }))
         .serve_with_shutdown(addr, async {
             shutdown_signal().await;
             info!("shutting down");
@@ -288,6 +320,7 @@ async fn async_main(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>>
     // Wait for the handler and listener to stop before returning.
     let _ = event_handler_handle.await;
     let _ = listener_handle.await;
+    let _ = monitor_task.await;
 
     Ok(())
 }

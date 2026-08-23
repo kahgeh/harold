@@ -8,7 +8,9 @@ use super::{
     DeliveryDispatcher, DispatchError, ProductionDispatcher, handle_next_delivery,
     run_event_handler,
 };
-use crate::agent::domain::{AgentEvent, AgentIncarnation, AgentPaneObservation, AgentPaneObserved};
+use crate::agent::domain::{
+    AgentEvent, AgentIncarnation, AgentPaneObservation, AgentPaneObserved, CompletionSummaryUpdate,
+};
 use crate::outbound::DeliveryOutcome;
 use crate::store::{
     HaroldStore, InboundMessage, PendingDelivery, TurnCompleted, append_agent_events,
@@ -66,6 +68,8 @@ async fn handler_dispatches_staged_events_in_stream_version_order() {
             last_user_prompt: "Run the task".into(),
             assistant_message: "Task complete".into(),
             main_context: "harold".into(),
+            agent_incarnation: None,
+            work_summary: CompletionSummaryUpdate::Unchanged,
         },
     )
     .await

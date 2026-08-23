@@ -7,7 +7,7 @@ use events::EventStreamVersion;
 use crate::agent::domain::{
     AgentEvent, AgentIncarnation, AgentLifecycleObserved, AgentMonitorHealthChanged,
     AgentPaneDeparted, AgentPaneObservation, AgentPaneObserved, AgentScreenObserved,
-    EffectiveAgentState, ObservedAgentState, WorkSummaryUpdate,
+    CompletionSummaryUpdate, EffectiveAgentState, ObservedAgentState, WorkSummaryUpdate,
 };
 
 use super::{
@@ -237,6 +237,8 @@ async fn appended_turn_completed_is_readable_from_refreshed_stream() {
         last_user_prompt: "Update the event store".into(),
         assistant_message: "The event store was updated.".into(),
         main_context: "harold".into(),
+        agent_incarnation: None,
+        work_summary: CompletionSummaryUpdate::Unchanged,
     };
 
     append_turn_completed(&store, &turn).await.unwrap();
@@ -268,6 +270,8 @@ async fn staging_is_ordered_checkpointed_and_idempotent() {
             last_user_prompt: "first".into(),
             assistant_message: "done".into(),
             main_context: "harold".into(),
+            agent_incarnation: None,
+            work_summary: CompletionSummaryUpdate::Unchanged,
         },
     )
     .await
@@ -454,6 +458,8 @@ async fn projection_stages_only_deliveries_and_projects_agent_events_in_one_batc
             last_user_prompt: "project state".into(),
             assistant_message: "projected".into(),
             main_context: "harold".into(),
+            agent_incarnation: None,
+            work_summary: CompletionSummaryUpdate::Unchanged,
         },
     )
     .await
