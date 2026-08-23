@@ -94,6 +94,8 @@ pub struct HaroldStore {
     snapshot_read_gate: std::sync::Mutex<Option<SnapshotReadGate>>,
     #[cfg(test)]
     fail_next_monitor_append: std::sync::atomic::AtomicBool,
+    #[cfg(test)]
+    fail_next_snapshot_load: std::sync::atomic::AtomicBool,
 }
 
 #[cfg(test)]
@@ -171,6 +173,8 @@ impl HaroldStore {
             snapshot_read_gate: std::sync::Mutex::new(None),
             #[cfg(test)]
             fail_next_monitor_append: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            fail_next_snapshot_load: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -276,11 +280,16 @@ impl HaroldStore {
         })
     }
 
-    #[allow(
-        dead_code,
-        reason = "the Task 9 publisher consumes committed snapshots in the next monitor slice"
-    )]
     pub(crate) async fn load_agent_snapshot(&self) -> events::Result<AgentSnapshot> {
+        #[cfg(test)]
+        if self
+            .fail_next_snapshot_load
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(events::EsError::Migration(
+                "test snapshot load failure".into(),
+            ));
+        }
         let conn = self.state.connect()?;
         let snapshot = load_agent_snapshot_from_one_query(&conn).await?;
         #[cfg(test)]
@@ -297,6 +306,12 @@ impl HaroldStore {
     #[cfg(test)]
     pub(crate) fn fail_next_monitor_append_for_test(&self) {
         self.fail_next_monitor_append
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_next_snapshot_load_for_test(&self) {
+        self.fail_next_snapshot_load
             .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 

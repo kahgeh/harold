@@ -1,5 +1,7 @@
 use tokio::sync::watch;
 
+use events::EventStreamVersion;
+
 use super::domain::AgentSnapshot;
 
 #[derive(Clone)]
@@ -19,6 +21,10 @@ impl AgentSnapshotHub {
 
     pub(crate) fn subscribe(&self) -> watch::Receiver<AgentSnapshot> {
         self.sender.subscribe()
+    }
+
+    pub(crate) fn through_event_version(&self) -> EventStreamVersion {
+        self._receiver.borrow().through_event_version
     }
 
     pub(crate) fn publish_committed(&self, snapshot: AgentSnapshot) {

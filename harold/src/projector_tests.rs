@@ -329,3 +329,84 @@ async fn projection_publishes_only_committed_agent_snapshot_changes() {
     assert_eq!(empty.applied, 0);
     assert!(receiver.has_changed().is_ok_and(|changed| !changed));
 }
+
+#[tokio::test]
+async fn post_commit_snapshot_load_failure_is_retried_on_the_next_noop_cycle() {
+    let directory = TestDirectory::new();
+    let store = HaroldStore::open(&directory.0).await.unwrap();
+    let hub = AgentSnapshotHub::new(store.load_agent_snapshot().await.unwrap());
+    let mut receiver = hub.subscribe();
+    append_agent_events(
+        &store,
+        vec![AgentEvent::PaneObserved(AgentPaneObserved {
+            pane: AgentPaneObservation {
+                incarnation: AgentIncarnation {
+                    pane_id: "%13".into(),
+                    pane_pid: 130,
+                    agent_pid: 131,
+                    agent_started_at_ms: 3_000,
+                    provider_id: "codex".into(),
+                },
+                tmux_target: "harold:3.1".into(),
+                session_name: "harold".into(),
+                window_index: 3,
+                pane_index: 1,
+                working_directory: "/work/harold".into(),
+                provider_display_name: "Codex".into(),
+                observed_at_ms: 3_100,
+            },
+        })],
+    )
+    .await
+    .unwrap();
+    store.fail_next_snapshot_load_for_test();
+
+    assert!(
+        project_and_publish_agent_snapshot(&store, &hub, 500)
+            .await
+            .is_err()
+    );
+    assert_eq!(store.last_processed_version().await.unwrap().get(), 1);
+    assert!(receiver.has_changed().is_ok_and(|changed| !changed));
+
+    let retry = project_and_publish_agent_snapshot(&store, &hub, 500)
+        .await
+        .unwrap();
+    assert_eq!(retry.applied, 0);
+    tokio::time::timeout(Duration::from_millis(100), receiver.changed())
+        .await
+        .expect("committed snapshot was not retried")
+        .expect("snapshot hub closed");
+    let published = receiver.borrow_and_update().clone();
+    assert_eq!(published.through_event_version.get(), 1);
+    assert_eq!(published.panes[0].pane.incarnation.pane_id, "%13");
+}
+
+#[tokio::test]
+async fn non_agent_batch_publishes_the_advanced_durable_checkpoint() {
+    let directory = TestDirectory::new();
+    let store = HaroldStore::open(&directory.0).await.unwrap();
+    let hub = AgentSnapshotHub::new(store.load_agent_snapshot().await.unwrap());
+    let mut receiver = hub.subscribe();
+    append_inbound_message(
+        &store,
+        &InboundMessage {
+            text: "continue".into(),
+        },
+    )
+    .await
+    .unwrap();
+
+    let batch = project_and_publish_agent_snapshot(&store, &hub, 500)
+        .await
+        .unwrap();
+
+    assert!(!batch.snapshot_changed);
+    assert_eq!(batch.through_event_version.get(), 1);
+    tokio::time::timeout(Duration::from_millis(100), receiver.changed())
+        .await
+        .expect("checkpoint was not published")
+        .expect("snapshot hub closed");
+    assert_eq!(receiver.borrow_and_update().through_event_version.get(), 1);
+    assert!(receiver.borrow().panes.is_empty());
+}

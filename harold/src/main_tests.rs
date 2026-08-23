@@ -341,3 +341,31 @@ async fn startup_catches_up_and_recovers_stored_agent_truth_before_seeding() {
     assert_eq!(recovered.through_event_version.get(), 1);
     assert_eq!(recovered.panes[0].pane.incarnation.agent_pid, 142);
 }
+
+#[tokio::test]
+async fn watch_reconnect_observes_a_non_agent_checkpoint_revision() {
+    let directory = TestDirectory::new();
+    let store = Arc::new(store::HaroldStore::open(&directory.0).await.unwrap());
+    let (service, _shutdown, task) = test_service(Arc::clone(&store), empty_snapshot());
+    store::append_inbound_message(
+        &store,
+        &store::InboundMessage {
+            text: "continue".into(),
+        },
+    )
+    .await
+    .unwrap();
+    super::projector::project_and_publish_agent_snapshot(&store, &service.snapshots, 500)
+        .await
+        .unwrap();
+
+    let mut reconnected = service
+        .watch_agent_states(Request::new(WatchAgentStatesRequest {}))
+        .await
+        .unwrap()
+        .into_inner();
+    let current = reconnected.next().await.expect("current snapshot").unwrap();
+    assert_eq!(current.through_event_version, 1);
+    assert!(current.panes.is_empty());
+    task.abort();
+}

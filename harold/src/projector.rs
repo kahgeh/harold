@@ -143,7 +143,7 @@ pub(crate) async fn project_and_publish_agent_snapshot(
     limit: usize,
 ) -> events::Result<ProjectionBatch> {
     let batch = store.project_unhandled_events(limit).await?;
-    if batch.snapshot_changed {
+    if batch.through_event_version.get() > snapshots.through_event_version().get() {
         snapshots.publish_committed(store.load_agent_snapshot().await?);
     }
     Ok(batch)
