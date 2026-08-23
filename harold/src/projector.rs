@@ -4,9 +4,10 @@ use std::time::Duration;
 use tokio::sync::watch;
 use tracing::{info, info_span, warn};
 
+use crate::agent::snapshot::AgentSnapshotHub;
 use crate::inbound::route_inbound_message;
 use crate::outbound::{DeliveryOutcome, notify};
-use crate::store::{HaroldStore, InboundMessage, PendingDelivery, TurnCompleted};
+use crate::store::{HaroldStore, InboundMessage, PendingDelivery, ProjectionBatch, TurnCompleted};
 
 pub(crate) trait DeliveryDispatcher: Send + Sync + 'static {
     fn dispatch(&self, delivery: &PendingDelivery) -> Result<DeliveryOutcome, DispatchError>;
@@ -61,11 +62,27 @@ pub(crate) enum HandlerError {
     Delivery(String),
 }
 
+#[cfg(test)]
 pub(crate) async fn handle_next_delivery(
     store: &HaroldStore,
     dispatcher: Arc<dyn DeliveryDispatcher>,
 ) -> Result<bool, HandlerError> {
-    store.project_unhandled_events(500).await?;
+    handle_next_delivery_inner(store, dispatcher, None).await
+}
+
+async fn handle_next_delivery_inner(
+    store: &HaroldStore,
+    dispatcher: Arc<dyn DeliveryDispatcher>,
+    snapshots: Option<&AgentSnapshotHub>,
+) -> Result<bool, HandlerError> {
+    match snapshots {
+        Some(snapshots) => {
+            project_and_publish_agent_snapshot(store, snapshots, 500).await?;
+        }
+        None => {
+            store.project_unhandled_events(500).await?;
+        }
+    }
     let Some(delivery) = store.next_pending_delivery().await? else {
         return Ok(false);
     };
@@ -120,6 +137,18 @@ pub(crate) async fn handle_next_delivery(
     }
 }
 
+pub(crate) async fn project_and_publish_agent_snapshot(
+    store: &HaroldStore,
+    snapshots: &AgentSnapshotHub,
+    limit: usize,
+) -> events::Result<ProjectionBatch> {
+    let batch = store.project_unhandled_events(limit).await?;
+    if batch.snapshot_changed {
+        snapshots.publish_committed(store.load_agent_snapshot().await?);
+    }
+    Ok(batch)
+}
+
 async fn wait_or_shutdown(shutdown: &mut watch::Receiver<()>, delay: Duration) -> bool {
     tokio::select! {
         _ = shutdown.changed() => true,
@@ -127,7 +156,11 @@ async fn wait_or_shutdown(shutdown: &mut watch::Receiver<()>, delay: Duration) -
     }
 }
 
-pub async fn run_event_handler(store: Arc<HaroldStore>, mut shutdown: watch::Receiver<()>) {
+pub async fn run_event_handler(
+    store: Arc<HaroldStore>,
+    snapshots: AgentSnapshotHub,
+    mut shutdown: watch::Receiver<()>,
+) {
     let dispatcher: Arc<dyn DeliveryDispatcher> = Arc::new(ProductionDispatcher);
     info!("event handler starting");
 
@@ -136,7 +169,7 @@ pub async fn run_event_handler(store: Arc<HaroldStore>, mut shutdown: watch::Rec
             break;
         }
 
-        match handle_next_delivery(&store, Arc::clone(&dispatcher)).await {
+        match handle_next_delivery_inner(&store, Arc::clone(&dispatcher), Some(&snapshots)).await {
             Ok(true) => continue,
             Ok(false) => {
                 if wait_or_shutdown(&mut shutdown, Duration::from_millis(100)).await {

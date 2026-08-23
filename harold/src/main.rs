@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use settings::{get_settings, init_settings};
 use telemetry::init_telemetry;
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, transport::Server};
 use tracing::{Instrument, info, info_span};
@@ -23,12 +23,15 @@ pub use harold_api::harold;
 
 use harold::harold_server::{Harold, HaroldServer};
 use harold::{
-    AgentStateSnapshot, ReportAgentStateRequest, ReportAgentStateResponse, TurnCompleteRequest,
-    TurnCompleteResponse, WatchAgentStatesRequest,
+    AgentMonitorHealth, AgentPaneState, AgentState, AgentStateSnapshot, MonitorHealthState,
+    ReportAgentStateRequest, ReportAgentStateResponse, TurnCompleteRequest, TurnCompleteResponse,
+    WatchAgentStatesRequest,
 };
 
 struct HaroldService {
     monitor: agent::runtime::AgentMonitorHandle,
+    snapshots: agent::snapshot::AgentSnapshotHub,
+    shutdown: watch::Receiver<()>,
 }
 
 #[tonic::async_trait]
@@ -87,9 +90,103 @@ impl Harold for HaroldService {
         &self,
         _request: Request<WatchAgentStatesRequest>,
     ) -> Result<Response<Self::WatchAgentStatesStream>, Status> {
-        Err(Status::unimplemented(
-            "agent state streaming is not implemented",
-        ))
+        let snapshots = self.snapshots.subscribe();
+        let shutdown = self.shutdown.clone();
+        let (sender, receiver) = mpsc::channel(1);
+        tokio::spawn(forward_agent_snapshots(snapshots, sender, shutdown));
+        Ok(Response::new(ReceiverStream::new(receiver)))
+    }
+}
+
+async fn forward_agent_snapshots(
+    mut snapshots: watch::Receiver<agent::domain::AgentSnapshot>,
+    sender: mpsc::Sender<Result<AgentStateSnapshot, Status>>,
+    mut shutdown: watch::Receiver<()>,
+) {
+    if shutdown.has_changed().unwrap_or(true) {
+        return;
+    }
+
+    let initial = map_agent_snapshot(snapshots.borrow_and_update().clone());
+    if !send_agent_snapshot(&sender, initial, &mut shutdown).await {
+        return;
+    }
+
+    loop {
+        tokio::select! {
+            biased;
+            _ = shutdown.changed() => break,
+            _ = sender.closed() => break,
+            changed = snapshots.changed() => {
+                if changed.is_err() {
+                    break;
+                }
+                let snapshot = map_agent_snapshot(snapshots.borrow_and_update().clone());
+                if !send_agent_snapshot(&sender, snapshot, &mut shutdown).await {
+                    break;
+                }
+            }
+        }
+    }
+}
+
+async fn send_agent_snapshot(
+    sender: &mpsc::Sender<Result<AgentStateSnapshot, Status>>,
+    snapshot: AgentStateSnapshot,
+    shutdown: &mut watch::Receiver<()>,
+) -> bool {
+    tokio::select! {
+        biased;
+        _ = shutdown.changed() => false,
+        result = sender.send(Ok(snapshot)) => result.is_ok(),
+    }
+}
+
+fn map_agent_snapshot(snapshot: agent::domain::AgentSnapshot) -> AgentStateSnapshot {
+    AgentStateSnapshot {
+        through_event_version: snapshot.through_event_version.get() as u64,
+        server_time_ms: snapshot.server_time_ms,
+        monitor_health: snapshot
+            .monitor_health
+            .into_iter()
+            .map(|health| AgentMonitorHealth {
+                component: health.component,
+                state: if health.healthy {
+                    MonitorHealthState::Healthy.into()
+                } else {
+                    MonitorHealthState::Degraded.into()
+                },
+                reason_code: health.reason_code,
+                observed_at_ms: health.observed_at_ms,
+            })
+            .collect(),
+        panes: snapshot
+            .panes
+            .into_iter()
+            .map(|projection| {
+                let pane = projection.pane;
+                AgentPaneState {
+                    pane_id: pane.incarnation.pane_id,
+                    tmux_target: pane.tmux_target,
+                    session_name: pane.session_name,
+                    window_index: pane.window_index,
+                    pane_index: pane.pane_index,
+                    pane_pid: pane.incarnation.pane_pid,
+                    agent_pid: pane.incarnation.agent_pid,
+                    agent_started_at_ms: pane.incarnation.agent_started_at_ms,
+                    provider_id: pane.incarnation.provider_id,
+                    provider_display_name: pane.provider_display_name,
+                    working_directory: pane.working_directory,
+                    state: match projection.effective_state {
+                        agent::domain::EffectiveAgentState::Busy => AgentState::Busy.into(),
+                        agent::domain::EffectiveAgentState::Idle => AgentState::Idle.into(),
+                        agent::domain::EffectiveAgentState::Unknown => AgentState::Unknown.into(),
+                    },
+                    last_transition_at_ms: projection.last_transition_at_ms,
+                    work_summary: projection.work_summary,
+                }
+            })
+            .collect(),
     }
 }
 
@@ -275,13 +372,8 @@ async fn async_main(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>>
     // Shutdown channel: sender closes on signal, receivers see the channel close.
     let (shutdown_tx, shutdown_rx) = watch::channel(());
 
-    loop {
-        let batch = store.project_unhandled_events(500).await?;
-        if batch.applied == 0 {
-            break;
-        }
-    }
-    let initial_agent_snapshot = store.load_agent_snapshot().await?;
+    let initial_agent_snapshot = load_startup_agent_snapshot(&store).await?;
+    let snapshots = agent::snapshot::AgentSnapshotHub::new(initial_agent_snapshot.clone());
 
     let inventory: Arc<dyn agent::inventory::AgentInventoryPort> = Arc::new(
         agent::inventory::TmuxAgentInventory::new(cfg.agents.clone()),
@@ -309,16 +401,21 @@ async fn async_main(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>>
 
     let event_handler_handle = tokio::spawn(projector::run_event_handler(
         Arc::clone(&store),
+        snapshots.clone(),
         shutdown_rx.clone(),
     ));
     let listener_handle = tokio::spawn(channels::listen_for_inbound_messages(
         Arc::clone(&store),
-        shutdown_rx,
+        shutdown_rx.clone(),
     ));
 
     info!(address = %addr, "Harold listening");
     Server::builder()
-        .add_service(HaroldServer::new(HaroldService { monitor }))
+        .add_service(HaroldServer::new(HaroldService {
+            monitor,
+            snapshots,
+            shutdown: shutdown_rx.clone(),
+        }))
         .serve_with_shutdown(addr, async {
             shutdown_signal().await;
             info!("shutting down");
@@ -340,6 +437,17 @@ async fn async_main(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>>
     }
 
     Ok(())
+}
+
+async fn load_startup_agent_snapshot(
+    store: &store::HaroldStore,
+) -> events::Result<agent::domain::AgentSnapshot> {
+    loop {
+        let batch = store.project_unhandled_events(500).await?;
+        if batch.applied == 0 {
+            return store.load_agent_snapshot().await;
+        }
+    }
 }
 
 #[cfg(test)]

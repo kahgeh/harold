@@ -3,6 +3,7 @@ pub(crate) mod inventory;
 pub(crate) mod reducer;
 pub(crate) mod runtime;
 pub(crate) mod screen;
+pub(crate) mod snapshot;
 pub(crate) mod summary;
 
 #[cfg(test)]
@@ -20,6 +21,10 @@ mod inventory_tests;
 #[cfg(test)]
 #[path = "screen_tests.rs"]
 mod screen_tests;
+
+#[cfg(test)]
+#[path = "snapshot_tests.rs"]
+mod snapshot_tests;
 
 #[cfg(test)]
 #[path = "summary_tests.rs"]
