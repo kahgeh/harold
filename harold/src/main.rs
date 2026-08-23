@@ -1,3 +1,4 @@
+mod agent;
 mod channels;
 mod inbound;
 mod outbound;
