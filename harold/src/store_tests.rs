@@ -35,6 +35,24 @@ impl Drop for TestDirectory {
     }
 }
 
+fn assert_persisted_files_exclude(root: &Path, sentinel: &[u8]) {
+    for entry in std::fs::read_dir(root).expect("read store directory") {
+        let path = entry.expect("read store entry").path();
+        if path.is_dir() {
+            assert_persisted_files_exclude(&path, sentinel);
+            continue;
+        }
+        let bytes = std::fs::read(&path).expect("read persisted store file");
+        assert!(
+            !bytes
+                .windows(sentinel.len())
+                .any(|window| window == sentinel),
+            "sentinel leaked into persisted store file {}",
+            path.display()
+        );
+    }
+}
+
 fn agent_incarnation() -> AgentIncarnation {
     AgentIncarnation {
         pane_id: "%7".into(),
@@ -599,7 +617,10 @@ async fn projection_preserves_summary_candidates_across_restart_without_raw_scre
                 incarnation: agent_incarnation(),
                 state: ObservedAgentState::Busy,
                 adapter_id: "hook-v1".into(),
-                work_summary: WorkSummaryUpdate::Set("Fix projection".into()),
+                work_summary: WorkSummaryUpdate::Set(format!(
+                    "  Fix projection {}  ",
+                    "🦀".repeat(200)
+                )),
                 observed_at_ms: 130,
             }),
             AgentEvent::LifecycleObserved(AgentLifecycleObserved {
@@ -636,6 +657,13 @@ async fn projection_preserves_summary_candidates_across_restart_without_raw_scre
             .iter()
             .all(|event| !event.payload.to_string().contains(RAW_SCREEN_SENTINEL))
     );
+    let explicit: AgentLifecycleObserved =
+        serde_json::from_value(events[3].payload.clone()).unwrap();
+    let WorkSummaryUpdate::Set(summary) = explicit.work_summary else {
+        panic!("explicit summary should remain set");
+    };
+    assert!(summary.starts_with("Fix projection "));
+    assert_eq!(summary.chars().count(), 160);
     let conn = store.state.connect().unwrap();
     let mut rows = conn
         .query(
@@ -697,6 +725,8 @@ async fn projection_preserves_summary_candidates_across_restart_without_raw_scre
         snapshot.panes[0].screen_work_summary_updated_at_ms,
         Some(110)
     );
+    drop(reopened);
+    assert_persisted_files_exclude(directory.path(), RAW_SCREEN_SENTINEL.as_bytes());
 }
 
 #[tokio::test]

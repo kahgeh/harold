@@ -1,6 +1,8 @@
-use std::sync::Arc;
+use std::io::Write;
+use std::sync::{Arc, Mutex};
 
 use events::EventStreamVersion;
+use prost::Message;
 use tokio::sync::watch;
 use tokio_stream::StreamExt;
 
@@ -23,6 +25,19 @@ use super::{
 };
 
 struct EmptyInventory;
+
+struct CapturedLogWriter(Arc<Mutex<Vec<u8>>>);
+
+impl Write for CapturedLogWriter {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().expect("captured log lock").extend(buffer);
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
 
 #[test]
 fn turn_complete_log_identifier_is_bounded_and_shape_checked() {
@@ -447,6 +462,224 @@ async fn report_agent_state_keeps_normalized_empty_legacy_completion_summary_unc
     assert_eq!(event.agent_incarnation, Some(resolved_pane().incarnation));
     assert_eq!(event.work_summary, CompletionSummaryUpdate::Unchanged);
     task.abort();
+}
+
+#[tokio::test]
+async fn explicit_summary_survives_event_projection_watch_and_restart_with_full_incarnation() {
+    let directory = TestDirectory::new();
+    let store = Arc::new(store::HaroldStore::open(&directory.0).await.unwrap());
+    let expected_pane = resolved_pane();
+    let inventory = Arc::new(ResolvingInventory {
+        pane: Some(expected_pane.clone()),
+    });
+    let (service, _shutdown, task) =
+        test_service_with_inventory(Arc::clone(&store), empty_snapshot(), inventory);
+
+    let response = service
+        .report_agent_state(Request::new(ReportAgentStateRequest {
+            pane_id: expected_pane.incarnation.pane_id.clone(),
+            state: AgentState::Busy.into(),
+            adapter_id: "codex-hook".into(),
+            work_summary: Some("Implement projector".into()),
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(response.accepted);
+
+    let events = store
+        .stream()
+        .load_after_version(EventStreamVersion::start(), 10)
+        .await
+        .unwrap();
+    assert_eq!(events.len(), 2);
+    let observed: AgentPaneObserved = serde_json::from_value(events[0].payload.clone()).unwrap();
+    let lifecycle: AgentLifecycleObserved =
+        serde_json::from_value(events[1].payload.clone()).unwrap();
+    assert_eq!(observed.pane.incarnation, expected_pane.incarnation);
+    assert_eq!(lifecycle.incarnation, expected_pane.incarnation);
+    assert_eq!(lifecycle.state, ObservedAgentState::Busy);
+    assert_eq!(
+        lifecycle.work_summary,
+        WorkSummaryUpdate::Set("Implement projector".into())
+    );
+
+    super::projector::project_and_publish_agent_snapshot(&store, &service.snapshots, 500)
+        .await
+        .unwrap();
+    let mut stream = service
+        .watch_agent_states(Request::new(WatchAgentStatesRequest {}))
+        .await
+        .unwrap()
+        .into_inner();
+    let projected = stream.next().await.expect("projected snapshot").unwrap();
+    assert_watched_busy_incarnation(&projected, &expected_pane, "Implement projector");
+
+    task.abort();
+    task.await.expect_err("monitor task should be cancelled");
+    drop(stream);
+    drop(service);
+    drop(store);
+
+    let reopened = Arc::new(store::HaroldStore::open(&directory.0).await.unwrap());
+    let recovered = load_startup_agent_snapshot(&reopened).await.unwrap();
+    assert_eq!(
+        recovered.panes[0].work_summary.as_deref(),
+        Some("Implement projector")
+    );
+    assert_eq!(
+        recovered.panes[0].pane.incarnation,
+        expected_pane.incarnation
+    );
+    let (restarted_service, _shutdown, restarted_task) =
+        test_service(Arc::clone(&reopened), recovered);
+    let mut restarted_stream = restarted_service
+        .watch_agent_states(Request::new(WatchAgentStatesRequest {}))
+        .await
+        .unwrap()
+        .into_inner();
+    let restarted = restarted_stream
+        .next()
+        .await
+        .expect("restart snapshot")
+        .unwrap();
+    assert_watched_busy_incarnation(&restarted, &expected_pane, "Implement projector");
+    restarted_task.abort();
+}
+
+fn assert_watched_busy_incarnation(
+    snapshot: &super::harold::AgentStateSnapshot,
+    expected: &AgentPaneObservation,
+    summary: &str,
+) {
+    assert_eq!(snapshot.panes.len(), 1);
+    let pane = &snapshot.panes[0];
+    assert_eq!(pane.pane_id, expected.incarnation.pane_id);
+    assert_eq!(pane.pane_pid, expected.incarnation.pane_pid);
+    assert_eq!(pane.agent_pid, expected.incarnation.agent_pid);
+    assert_eq!(
+        pane.agent_started_at_ms,
+        expected.incarnation.agent_started_at_ms
+    );
+    assert_eq!(pane.provider_id, expected.incarnation.provider_id);
+    assert_eq!(pane.state, i32::from(AgentState::Busy));
+    assert_eq!(pane.work_summary.as_deref(), Some(summary));
+}
+
+#[tokio::test]
+async fn raw_summary_sentinel_is_absent_from_status_and_protobuf_diagnostics() {
+    const RAW_SCREEN_SENTINEL: &str = "RAW_SCREEN_SENTINEL_TASK_11";
+
+    let directory = TestDirectory::new();
+    let store = Arc::new(store::HaroldStore::open(&directory.0).await.unwrap());
+    let inventory = Arc::new(ResolvingInventory {
+        pane: Some(resolved_pane()),
+    });
+    let (service, _shutdown, task) =
+        test_service_with_inventory(Arc::clone(&store), empty_snapshot(), inventory);
+    let captured_logs = Arc::new(Mutex::new(Vec::new()));
+    let log_writer = Arc::clone(&captured_logs);
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_writer(move || CapturedLogWriter(Arc::clone(&log_writer)))
+        .finish();
+    let _subscriber_guard = tracing::subscriber::set_default(subscriber);
+    let error = service
+        .report_agent_state(Request::new(ReportAgentStateRequest {
+            pane_id: "not-a-pane".into(),
+            state: AgentState::Busy.into(),
+            adapter_id: "codex-hook".into(),
+            work_summary: Some(RAW_SCREEN_SENTINEL.into()),
+        }))
+        .await
+        .unwrap_err();
+    assert!(!format!("{error:?}").contains(RAW_SCREEN_SENTINEL));
+
+    store::append_agent_events(
+        &store,
+        vec![
+            AgentEvent::PaneObserved(AgentPaneObserved {
+                pane: resolved_pane(),
+            }),
+            AgentEvent::ScreenObserved(super::agent::domain::AgentScreenObserved {
+                incarnation: resolved_pane().incarnation,
+                state: Some(ObservedAgentState::Busy),
+                classifier_id: "tmux-visible-v1".into(),
+                fallback_summary: Some(format!(
+                    "\u{1b}P{RAW_SCREEN_SENTINEL}\u{1b}\\Review\t tests"
+                )),
+                observed_at_ms: 8_600,
+            }),
+        ],
+    )
+    .await
+    .unwrap();
+
+    let mut watch = service
+        .watch_agent_states(Request::new(WatchAgentStatesRequest {}))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(
+        watch
+            .next()
+            .await
+            .expect("initial snapshot")
+            .unwrap()
+            .through_event_version,
+        0
+    );
+    let (handler_shutdown, handler_shutdown_rx) = tokio::sync::watch::channel(());
+    let handler = tokio::spawn(super::projector::run_event_handler(
+        Arc::clone(&store),
+        service.snapshots.clone(),
+        handler_shutdown_rx,
+    ));
+    let snapshot = tokio::time::timeout(std::time::Duration::from_secs(1), watch.next())
+        .await
+        .expect("projector did not publish")
+        .expect("watch closed before projection")
+        .unwrap();
+    assert_eq!(
+        snapshot.panes[0].work_summary.as_deref(),
+        Some("Review tests")
+    );
+    assert!(!format!("{snapshot:?}").contains(RAW_SCREEN_SENTINEL));
+    assert!(
+        !snapshot
+            .encode_to_vec()
+            .windows(RAW_SCREEN_SENTINEL.len())
+            .any(|window| window == RAW_SCREEN_SENTINEL.as_bytes())
+    );
+    drop(handler_shutdown);
+    tokio::time::timeout(std::time::Duration::from_secs(1), handler)
+        .await
+        .expect("event handler exceeded shutdown deadline")
+        .expect("event handler task panicked");
+    let logs = String::from_utf8(captured_logs.lock().expect("captured log lock").clone())
+        .expect("logs are utf-8");
+    assert!(logs.contains("event handler starting"));
+    assert!(!logs.contains(RAW_SCREEN_SENTINEL));
+    task.abort();
+}
+
+#[test]
+fn protobuf_keeps_summary_optional_and_search_provenance_and_timestamp_local() {
+    let schema = include_str!("../../harold-api/proto/harold.proto");
+    assert!(schema.contains("optional string work_summary = 14;"));
+    for forbidden in [
+        "work_summary_updated_at_ms",
+        "rpc Search",
+        "rpc Query",
+        "search_term",
+        "query",
+        "provenance",
+    ] {
+        assert!(
+            !schema.contains(forbidden),
+            "public protobuf unexpectedly contains {forbidden}"
+        );
+    }
 }
 
 #[tokio::test]

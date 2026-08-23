@@ -691,6 +691,101 @@ async fn metadata_refresh_preserves_the_incarnations_reconciliation_epoch() {
 }
 
 #[tokio::test]
+async fn fallback_explicit_legacy_clear_and_replacement_converge_in_projection_order() {
+    let original = pane("%8", 80, 800, 1_000, 100);
+    let replacement = pane("%8", 80, 801, 2_000, 500);
+    let inventory = FakeInventory::scans(vec![
+        Ok(vec![original.clone()]),
+        Ok(vec![replacement.clone()]),
+    ]);
+    inventory.push_resolution(Ok(Some(original.clone())));
+    inventory.push_resolution(Ok(Some(original.clone())));
+    inventory.push_resolution(Ok(Some(original.clone())));
+    let fixture = Fixture::new(inventory).await;
+
+    fixture.handle.inventory_tick().await.unwrap();
+    fixture
+        .screen
+        .push(Ok(screen(&original, None, Some("  Review\t tests  "), 110)));
+    fixture.handle.screen_tick().await.unwrap();
+    fixture.store.project_unhandled_events(100).await.unwrap();
+    let fallback = fixture.store.load_agent_snapshot().await.unwrap();
+    assert_eq!(
+        fallback.panes[0].work_summary.as_deref(),
+        Some("Review tests")
+    );
+
+    fixture
+        .handle
+        .report_lifecycle(
+            "%8".into(),
+            ObservedAgentState::Busy,
+            "codex-hook".into(),
+            WorkSummaryUpdate::Set("  Fix\n projector  ".into()),
+        )
+        .await
+        .unwrap();
+    fixture.store.project_unhandled_events(100).await.unwrap();
+    let explicit = fixture.store.load_agent_snapshot().await.unwrap();
+    assert_eq!(explicit.panes[0].effective_state, EffectiveAgentState::Busy);
+    assert_eq!(
+        explicit.panes[0].work_summary.as_deref(),
+        Some("Fix projector")
+    );
+    assert_eq!(
+        explicit.panes[0].screen_work_summary.as_deref(),
+        Some("Review tests")
+    );
+
+    fixture
+        .handle
+        .turn_completed(turn(" \u{1b}[31m\t "))
+        .await
+        .unwrap();
+    fixture.store.project_unhandled_events(100).await.unwrap();
+    let preserved = fixture.store.load_agent_snapshot().await.unwrap();
+    assert_eq!(
+        preserved.panes[0].effective_state,
+        EffectiveAgentState::Idle
+    );
+    assert_eq!(
+        preserved.panes[0].work_summary.as_deref(),
+        Some("Fix projector")
+    );
+
+    fixture
+        .handle
+        .report_lifecycle(
+            "%8".into(),
+            ObservedAgentState::Idle,
+            "codex-hook".into(),
+            WorkSummaryUpdate::Clear,
+        )
+        .await
+        .unwrap();
+    fixture.store.project_unhandled_events(100).await.unwrap();
+    let cleared = fixture.store.load_agent_snapshot().await.unwrap();
+    assert_eq!(
+        cleared.panes[0].work_summary.as_deref(),
+        Some("Review tests")
+    );
+    assert_eq!(cleared.panes[0].explicit_work_summary, None);
+
+    fixture.handle.inventory_tick().await.unwrap();
+    fixture.store.project_unhandled_events(100).await.unwrap();
+    let replaced = fixture.store.load_agent_snapshot().await.unwrap();
+    assert_eq!(replaced.panes.len(), 1);
+    assert_eq!(replaced.panes[0].pane.incarnation, replacement.incarnation);
+    assert_eq!(
+        replaced.panes[0].effective_state,
+        EffectiveAgentState::Unknown
+    );
+    assert_eq!(replaced.panes[0].work_summary, None);
+    assert_eq!(replaced.panes[0].explicit_work_summary, None);
+    assert_eq!(replaced.panes[0].screen_work_summary, None);
+}
+
+#[tokio::test]
 async fn restart_seed_departure_requires_two_new_successful_absence_scans() {
     let directory = TestDirectory::new();
     let original_store = HaroldStore::open(&directory.0).await.unwrap();
