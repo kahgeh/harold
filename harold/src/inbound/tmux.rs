@@ -4,7 +4,10 @@ use tracing::{info, warn};
 
 use crate::agent::domain::AgentPaneObservation;
 use crate::agent::inventory::{AgentInventoryPort, TmuxAgentInventory};
+use crate::agent::summary::sanitize_bounded_metadata;
 use crate::settings::get_settings;
+
+const INBOUND_PANE_LABEL_MAX_SCALARS: usize = 256;
 
 // ---------------------------------------------------------------------------
 // Live pane discovery
@@ -38,7 +41,7 @@ pub(crate) fn is_pane_alive(pane_id: &str) -> bool {
 fn observation_to_address(observation: AgentPaneObservation) -> super::directory::AgentAddress {
     super::directory::AgentAddress::TmuxPane {
         pane_id: observation.incarnation.pane_id,
-        label: observation.tmux_target,
+        label: sanitize_bounded_metadata(&observation.tmux_target, INBOUND_PANE_LABEL_MAX_SCALARS),
     }
 }
 

@@ -647,6 +647,72 @@ async fn changed_screen_facts_append_independently_and_only_advance_after_succes
 }
 
 #[tokio::test]
+async fn configured_idle_placeholder_never_replaces_a_durable_screen_summary() {
+    let directory = TestDirectory::new();
+    let store = Arc::new(HaroldStore::open(&directory.0).await.unwrap());
+    let observation = pane("%8", 80, 800, 1_000, 100);
+    let inventory = Arc::new(FakeInventory::scans(vec![Ok(vec![observation.clone()])]));
+    let screen_port = Arc::new(FakeScreen::default());
+    screen_port.push(Ok(screen(
+        &observation,
+        Some(ObservedAgentState::Busy),
+        Some("Review durable state"),
+        200,
+    )));
+    screen_port.push(Ok(screen(
+        &observation,
+        Some(ObservedAgentState::Idle),
+        Some("Ask Codex to do anything"),
+        300,
+    )));
+    let mut codex = provider();
+    codex.idle_all = vec!["Ask Codex to do anything".into()];
+    let (shutdown, shutdown_rx) = watch::channel(());
+    let (handle, task) = spawn_agent_monitor_for_test(
+        Arc::clone(&store),
+        inventory,
+        screen_port,
+        vec![codex],
+        2_000,
+        shutdown_rx,
+    );
+
+    handle.inventory_tick().await.unwrap();
+    handle.screen_tick().await.unwrap();
+    handle.screen_tick().await.unwrap();
+
+    let events = store
+        .stream()
+        .load_after_version(EventStreamVersion::start(), 100)
+        .await
+        .unwrap();
+    assert!(events.iter().all(|event| {
+        !serde_json::to_string(&event.payload)
+            .unwrap()
+            .contains("Ask Codex to do anything")
+    }));
+    let latest_screen: super::domain::AgentScreenObserved =
+        serde_json::from_value(events.last().unwrap().payload.clone()).unwrap();
+    assert_eq!(latest_screen.state, Some(ObservedAgentState::Idle));
+    assert_eq!(latest_screen.fallback_summary, None);
+
+    store.project_unhandled_events(100).await.unwrap();
+    let snapshot = store.load_agent_snapshot().await.unwrap();
+    assert_eq!(snapshot.panes[0].effective_state, EffectiveAgentState::Idle);
+    assert_eq!(
+        snapshot.panes[0].screen_work_summary.as_deref(),
+        Some("Review durable state")
+    );
+    assert_eq!(
+        snapshot.panes[0].work_summary.as_deref(),
+        Some("Review durable state")
+    );
+
+    drop(shutdown);
+    task.await.unwrap();
+}
+
+#[tokio::test]
 async fn lifecycle_epoch_holds_conflicting_screen_state_but_allows_summary_then_repairs_once() {
     let observation = pane("%8", 80, 800, 1_000, 100);
     let fixture = Fixture::new(FakeInventory::scans(vec![Ok(vec![observation.clone()])])).await;

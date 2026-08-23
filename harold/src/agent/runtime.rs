@@ -149,7 +149,6 @@ struct TrackedPane {
     last_hook: Option<(ObservedAgentState, i64)>,
     screen_state: Option<ObservedAgentState>,
     screen_summary: Option<String>,
-    pending_screen_state: Option<ObservedAgentState>,
 }
 
 impl TrackedPane {
@@ -160,7 +159,6 @@ impl TrackedPane {
             last_hook: None,
             screen_state: None,
             screen_summary: None,
-            pending_screen_state: None,
         }
     }
 }
@@ -441,7 +439,6 @@ fn panes_from_snapshot(
                 last_hook: projection.hook_state.zip(projection.hook_observed_at_ms),
                 screen_state: seeded_screen_state(projection, hook_grace_ms),
                 screen_summary: projection.screen_work_summary.clone(),
-                pending_screen_state: None,
             };
             (projection.pane.incarnation.pane_id.clone(), tracked)
         })
@@ -562,7 +559,6 @@ impl AgentMonitorRuntime {
         }
         tracked.last_hook = Some((state, observed_at_ms));
         tracked.screen_state = None;
-        tracked.pending_screen_state = None;
         Ok(())
     }
 
@@ -605,7 +601,6 @@ impl AgentMonitorRuntime {
             }
             tracked.last_hook = Some((ObservedAgentState::Idle, observed_at_ms));
             tracked.screen_state = None;
-            tracked.pending_screen_state = None;
         }
         Ok(result)
     }
@@ -732,7 +727,7 @@ impl AgentMonitorRuntime {
             let observation = match observe_screen(
                 Arc::clone(&self.screen),
                 pane.clone(),
-                provider,
+                provider.clone(),
                 self.acquisition_timeout,
                 Arc::clone(&self.screen_gate),
             )
@@ -762,6 +757,7 @@ impl AgentMonitorRuntime {
             );
             let summary = observation
                 .fallback_summary
+                .filter(|summary| !matches_idle_clause(summary, &provider.idle_all))
                 .filter(|summary| tracked.screen_summary.as_deref() != Some(summary));
             if state.is_none() && summary.is_none() {
                 continue;
@@ -778,7 +774,6 @@ impl AgentMonitorRuntime {
                 .map_err(MonitorCommandError::EventAppend)?;
             if let Some(state) = state {
                 tracked.screen_state = Some(state);
-                tracked.pending_screen_state = None;
             }
             if summary.is_some() {
                 tracked.screen_summary = summary;
@@ -850,22 +845,23 @@ impl AgentMonitorRuntime {
 }
 
 fn screen_state_delta(
-    tracked: &mut TrackedPane,
+    tracked: &TrackedPane,
     observed: Option<ObservedAgentState>,
     observed_at_ms: i64,
     hook_grace_ms: u64,
 ) -> Option<ObservedAgentState> {
     let state = observed?;
-    if let Some((hook_state, hook_observed_at_ms)) = tracked.last_hook {
+    if let Some((_, hook_observed_at_ms)) = tracked.last_hook {
         let grace = i64::try_from(hook_grace_ms).unwrap_or(i64::MAX);
         if observed_at_ms < hook_observed_at_ms.saturating_add(grace) {
-            if state != hook_state {
-                tracked.pending_screen_state = Some(state);
-            }
             return None;
         }
     }
     (tracked.screen_state != Some(state)).then_some(state)
+}
+
+fn matches_idle_clause(summary: &str, fragments: &[String]) -> bool {
+    !fragments.is_empty() && fragments.iter().all(|fragment| summary.contains(fragment))
 }
 
 fn same_pane_metadata(left: &AgentPaneObservation, right: &AgentPaneObservation) -> bool {
