@@ -17,7 +17,9 @@ use crate::agent::domain::{
     EffectiveAgentState, MonitorHealthProjection, ObservedAgentState, ProjectionChange,
     WorkSummaryUpdate,
 };
-use crate::agent::reducer::{DEFAULT_HOOK_GRACE_MS, reduce_agent_event};
+#[cfg(test)]
+use crate::agent::reducer::DEFAULT_HOOK_GRACE_MS;
+use crate::agent::reducer::reduce_agent_event;
 use crate::agent::summary::normalize_work_summary;
 
 const NAMESPACE: &str = "harold";
@@ -80,8 +82,42 @@ pub(crate) struct ProjectionBatch {
 pub struct HaroldStore {
     stream: EventStream,
     state: Database,
+    hook_grace_ms: u64,
     #[cfg(test)]
     fail_projection_before_checkpoint: std::sync::atomic::AtomicBool,
+    #[cfg(test)]
+    snapshot_read_gate: std::sync::Mutex<Option<SnapshotReadGate>>,
+}
+
+#[cfg(test)]
+struct SnapshotReadGate {
+    started: tokio::sync::oneshot::Sender<()>,
+    resume: tokio::sync::oneshot::Receiver<()>,
+}
+
+#[cfg(test)]
+pub(crate) struct SnapshotReadGateHandle {
+    started: Option<tokio::sync::oneshot::Receiver<()>>,
+    resume: Option<tokio::sync::oneshot::Sender<()>>,
+}
+
+#[cfg(test)]
+impl SnapshotReadGateHandle {
+    pub(crate) async fn wait_until_started(&mut self) {
+        self.started
+            .take()
+            .expect("snapshot reader waits once")
+            .await
+            .expect("snapshot reader started");
+    }
+
+    pub(crate) fn resume(&mut self) {
+        let _ = self
+            .resume
+            .take()
+            .expect("snapshot reader resume once")
+            .send(());
+    }
 }
 
 fn rotation_policy() -> RotationPolicy {
@@ -92,7 +128,15 @@ fn rotation_policy() -> RotationPolicy {
 }
 
 impl HaroldStore {
+    #[cfg(test)]
     pub async fn open(path: impl AsRef<Path>) -> events::Result<Self> {
+        Self::open_with_hook_grace(path, DEFAULT_HOOK_GRACE_MS).await
+    }
+
+    pub(crate) async fn open_with_hook_grace(
+        path: impl AsRef<Path>,
+        hook_grace_ms: u64,
+    ) -> events::Result<Self> {
         let root = path.as_ref();
         tokio::fs::create_dir_all(root).await?;
 
@@ -113,8 +157,11 @@ impl HaroldStore {
         Ok(Self {
             stream,
             state,
+            hook_grace_ms,
             #[cfg(test)]
             fail_projection_before_checkpoint: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            snapshot_read_gate: std::sync::Mutex::new(None),
         })
     }
 
@@ -155,7 +202,8 @@ impl HaroldStore {
                     | "AgentPaneDeparted"
                     | "AgentLifecycleObserved"
                     | "AgentScreenObserved" => {
-                        snapshot_changed |= project_agent_event(&conn, event).await?;
+                        snapshot_changed |=
+                            project_agent_event(&conn, event, self.hook_grace_ms).await?;
                     }
                     "AgentMonitorHealthChanged" => {
                         let health = serde_json::from_value::<AgentMonitorHealthChanged>(
@@ -220,30 +268,30 @@ impl HaroldStore {
     )]
     pub(crate) async fn load_agent_snapshot(&self) -> events::Result<AgentSnapshot> {
         let conn = self.state.connect()?;
-        conn.execute("BEGIN IMMEDIATE", ()).await?;
-        let result = async {
-            let through_event_version = last_processed_version_from(&conn).await?;
-            let monitor_health = load_monitor_health(&conn).await?;
-            let panes = load_agent_panes(&conn).await?;
-            conn.execute("COMMIT", ()).await?;
-            Ok(AgentSnapshot {
-                through_event_version,
-                server_time_ms: now_ms(),
-                monitor_health,
-                panes,
-            })
-        }
-        .await;
-        if result.is_err() {
-            let _ = conn.execute("ROLLBACK", ()).await;
-        }
-        result
+        let snapshot = load_agent_snapshot_from_one_query(&conn).await?;
+        #[cfg(test)]
+        pause_snapshot_read_after_query(&self.snapshot_read_gate).await;
+        Ok(snapshot)
     }
 
     #[cfg(test)]
     pub(crate) fn fail_projection_before_checkpoint_for_test(&self) {
         self.fail_projection_before_checkpoint
             .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pause_snapshot_read_after_query_for_test(&self) -> SnapshotReadGateHandle {
+        let (started, started_receiver) = tokio::sync::oneshot::channel();
+        let (resume_sender, resume) = tokio::sync::oneshot::channel();
+        *self
+            .snapshot_read_gate
+            .lock()
+            .expect("snapshot read gate lock") = Some(SnapshotReadGate { started, resume });
+        SnapshotReadGateHandle {
+            started: Some(started_receiver),
+            resume: Some(resume_sender),
+        }
     }
 
     pub async fn next_pending_delivery(&self) -> events::Result<Option<PendingDelivery>> {
@@ -396,6 +444,7 @@ async fn stage_delivery_event(
 async fn project_agent_event(
     conn: &turso::Connection,
     event: &events::EventEnvelope,
+    hook_grace_ms: u64,
 ) -> events::Result<bool> {
     let agent_event = match event.r#type.as_str() {
         "AgentPaneObserved" => {
@@ -419,7 +468,7 @@ async fn project_agent_event(
     };
     let pane_id = agent_event_pane_id(&agent_event);
     let current = load_agent_pane(conn, pane_id).await?;
-    match reduce_agent_event(current, &agent_event, event.version, DEFAULT_HOOK_GRACE_MS) {
+    match reduce_agent_event(current, &agent_event, event.version, hook_grace_ms) {
         ProjectionChange::Upsert(projection) => {
             upsert_agent_pane(conn, &projection).await?;
             Ok(true)
@@ -551,22 +600,135 @@ async fn upsert_agent_pane(
     Ok(())
 }
 
-#[allow(
-    dead_code,
-    reason = "the Task 9 publisher consumes committed snapshots in the next monitor slice"
-)]
-async fn load_agent_panes(conn: &turso::Connection) -> events::Result<Vec<AgentPaneProjection>> {
+async fn load_agent_snapshot_from_one_query(
+    conn: &turso::Connection,
+) -> events::Result<AgentSnapshot> {
     let mut rows = conn
         .query(
-            format!("SELECT {AGENT_PANE_COLUMNS} FROM agent_panes ORDER BY pane_id"),
-            (),
+            r#"
+            WITH checkpoint AS (
+                SELECT COALESCE((
+                    SELECT last_processed_event_version
+                    FROM last_processed_event
+                    WHERE namespace = ?1 AND partition_key = ?2
+                ), 0) AS through_event_version
+            ), snapshot_rows AS (
+                SELECT
+                    'checkpoint' AS row_kind,
+                    checkpoint.through_event_version,
+                    NULL AS component,
+                    NULL AS healthy,
+                    NULL AS reason_code,
+                    NULL AS health_observed_at_ms,
+                    NULL AS health_last_event_version,
+                    NULL AS pane_id,
+                    NULL AS pane_pid,
+                    NULL AS agent_pid,
+                    NULL AS agent_started_at_ms,
+                    NULL AS provider_id,
+                    NULL AS tmux_target,
+                    NULL AS session_name,
+                    NULL AS window_index,
+                    NULL AS pane_index,
+                    NULL AS working_directory,
+                    NULL AS provider_display_name,
+                    NULL AS pane_observed_at_ms,
+                    NULL AS hook_state,
+                    NULL AS hook_observed_at_ms,
+                    NULL AS screen_state,
+                    NULL AS screen_classifier_id,
+                    NULL AS screen_observed_at_ms,
+                    NULL AS effective_state,
+                    NULL AS explicit_work_summary,
+                    NULL AS explicit_work_summary_updated_at_ms,
+                    NULL AS screen_work_summary,
+                    NULL AS screen_work_summary_updated_at_ms,
+                    NULL AS work_summary,
+                    NULL AS last_transition_at_ms,
+                    NULL AS pane_last_event_version
+                FROM checkpoint
+
+                UNION ALL
+
+                SELECT
+                    'health',
+                    checkpoint.through_event_version,
+                    health.component,
+                    health.healthy,
+                    health.reason_code,
+                    health.observed_at_ms,
+                    health.last_event_version,
+                    NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+                    NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+                    NULL, NULL, NULL
+                FROM checkpoint, agent_monitor_health AS health
+
+                UNION ALL
+
+                SELECT
+                    'pane',
+                    checkpoint.through_event_version,
+                    NULL, NULL, NULL, NULL, NULL,
+                    pane.pane_id,
+                    pane.pane_pid,
+                    pane.agent_pid,
+                    pane.agent_started_at_ms,
+                    pane.provider_id,
+                    pane.tmux_target,
+                    pane.session_name,
+                    pane.window_index,
+                    pane.pane_index,
+                    pane.working_directory,
+                    pane.provider_display_name,
+                    pane.pane_observed_at_ms,
+                    pane.hook_state,
+                    pane.hook_observed_at_ms,
+                    pane.screen_state,
+                    pane.screen_classifier_id,
+                    pane.screen_observed_at_ms,
+                    pane.effective_state,
+                    pane.explicit_work_summary,
+                    pane.explicit_work_summary_updated_at_ms,
+                    pane.screen_work_summary,
+                    pane.screen_work_summary_updated_at_ms,
+                    pane.work_summary,
+                    pane.last_transition_at_ms,
+                    pane.last_event_version
+                FROM checkpoint, agent_panes AS pane
+            )
+            SELECT * FROM snapshot_rows
+            ORDER BY row_kind, component, pane_id
+            "#,
+            (NAMESPACE, PARTITION_KEY),
         )
         .await?;
-    let mut panes = Vec::new();
+
+    let mut snapshot = AgentSnapshot {
+        through_event_version: EventStreamVersion::start(),
+        server_time_ms: now_ms(),
+        monitor_health: Vec::new(),
+        panes: Vec::new(),
+    };
     while let Some(row) = rows.next().await? {
-        panes.push(agent_pane_from_row(&row)?);
+        snapshot.through_event_version = event_stream_version(required_integer(&row, 1)?)?;
+        match required_text(&row, 0)?.as_str() {
+            "checkpoint" => {}
+            "health" => snapshot.monitor_health.push(MonitorHealthProjection {
+                component: required_text(&row, 2)?,
+                healthy: required_integer(&row, 3)? != 0,
+                reason_code: required_text(&row, 4)?,
+                observed_at_ms: required_integer(&row, 5)?,
+                last_event_version: event_stream_version(required_integer(&row, 6)?)?,
+            }),
+            "pane" => snapshot.panes.push(agent_pane_from_row_at(&row, 7)?),
+            row_kind => {
+                return Err(events::EsError::Cursor(format!(
+                    "invalid snapshot row kind: {row_kind}"
+                )));
+            }
+        }
     }
-    Ok(panes)
+    Ok(snapshot)
 }
 
 async fn load_agent_pane(
@@ -585,71 +747,45 @@ async fn load_agent_pane(
         .transpose()
 }
 
-#[allow(
-    dead_code,
-    reason = "the Task 9 publisher consumes committed snapshots in the next monitor slice"
-)]
-async fn load_monitor_health(
-    conn: &turso::Connection,
-) -> events::Result<Vec<MonitorHealthProjection>> {
-    let mut rows = conn
-        .query(
-            r#"
-            SELECT component, healthy, reason_code, observed_at_ms, last_event_version
-            FROM agent_monitor_health
-            ORDER BY component
-            "#,
-            (),
-        )
-        .await?;
-    let mut health = Vec::new();
-    while let Some(row) = rows.next().await? {
-        health.push(MonitorHealthProjection {
-            component: required_text(&row, 0)?,
-            healthy: required_integer(&row, 1)? != 0,
-            reason_code: required_text(&row, 2)?,
-            observed_at_ms: required_integer(&row, 3)?,
-            last_event_version: EventStreamVersion::new(required_integer(&row, 4)?)?,
-        });
-    }
-    Ok(health)
+fn agent_pane_from_row(row: &turso::Row) -> events::Result<AgentPaneProjection> {
+    agent_pane_from_row_at(row, 0)
 }
 
-fn agent_pane_from_row(row: &turso::Row) -> events::Result<AgentPaneProjection> {
+fn agent_pane_from_row_at(row: &turso::Row, offset: usize) -> events::Result<AgentPaneProjection> {
     Ok(AgentPaneProjection {
         pane: crate::agent::domain::AgentPaneObservation {
             incarnation: crate::agent::domain::AgentIncarnation {
-                pane_id: required_text(row, 0)?,
-                pane_pid: required_u32(row, 1)?,
-                agent_pid: required_u32(row, 2)?,
-                agent_started_at_ms: required_integer(row, 3)?,
-                provider_id: required_text(row, 4)?,
+                pane_id: required_text(row, offset)?,
+                pane_pid: required_u32(row, offset + 1)?,
+                agent_pid: required_u32(row, offset + 2)?,
+                agent_started_at_ms: required_integer(row, offset + 3)?,
+                provider_id: required_text(row, offset + 4)?,
             },
-            tmux_target: required_text(row, 5)?,
-            session_name: required_text(row, 6)?,
-            window_index: required_u32(row, 7)?,
-            pane_index: required_u32(row, 8)?,
-            working_directory: required_text(row, 9)?,
-            provider_display_name: required_text(row, 10)?,
-            observed_at_ms: required_integer(row, 11)?,
+            tmux_target: required_text(row, offset + 5)?,
+            session_name: required_text(row, offset + 6)?,
+            window_index: required_u32(row, offset + 7)?,
+            pane_index: required_u32(row, offset + 8)?,
+            working_directory: required_text(row, offset + 9)?,
+            provider_display_name: required_text(row, offset + 10)?,
+            observed_at_ms: required_integer(row, offset + 11)?,
         },
-        hook_state: optional_text(row, 12)?
+        hook_state: optional_text(row, offset + 12)?
             .map(parse_observed_state)
             .transpose()?,
-        hook_observed_at_ms: optional_integer(row, 13)?,
-        screen_state: optional_text(row, 14)?
+        hook_observed_at_ms: optional_integer(row, offset + 13)?,
+        screen_state: optional_text(row, offset + 14)?
             .map(parse_observed_state)
             .transpose()?,
-        screen_classifier_id: optional_text(row, 15)?,
-        screen_observed_at_ms: optional_integer(row, 16)?,
-        effective_state: parse_effective_state(&required_text(row, 17)?)?,
-        explicit_work_summary: optional_text(row, 18)?,
-        explicit_work_summary_updated_at_ms: optional_integer(row, 19)?,
-        screen_work_summary: optional_text(row, 20)?,
-        screen_work_summary_updated_at_ms: optional_integer(row, 21)?,
-        work_summary: optional_text(row, 22)?,
-        last_transition_at_ms: required_integer(row, 23)?,
-        last_event_version: EventStreamVersion::new(required_integer(row, 24)?)?,
+        screen_classifier_id: optional_text(row, offset + 15)?,
+        screen_observed_at_ms: optional_integer(row, offset + 16)?,
+        effective_state: parse_effective_state(&required_text(row, offset + 17)?)?,
+        explicit_work_summary: optional_text(row, offset + 18)?,
+        explicit_work_summary_updated_at_ms: optional_integer(row, offset + 19)?,
+        screen_work_summary: optional_text(row, offset + 20)?,
+        screen_work_summary_updated_at_ms: optional_integer(row, offset + 21)?,
+        work_summary: optional_text(row, offset + 22)?,
+        last_transition_at_ms: required_integer(row, offset + 23)?,
+        last_event_version: EventStreamVersion::new(required_integer(row, offset + 24)?)?,
     })
 }
 
@@ -690,6 +826,23 @@ fn optional_integer(row: &turso::Row, index: usize) -> events::Result<Option<i64
 fn required_u32(row: &turso::Row, index: usize) -> events::Result<u32> {
     u32::try_from(required_integer(row, index)?)
         .map_err(|_| events::EsError::Cursor(format!("projection column {index} is not a u32")))
+}
+
+fn event_stream_version(value: i64) -> events::Result<EventStreamVersion> {
+    if value == 0 {
+        Ok(EventStreamVersion::start())
+    } else {
+        EventStreamVersion::new(value)
+    }
+}
+
+#[cfg(test)]
+async fn pause_snapshot_read_after_query(gate: &std::sync::Mutex<Option<SnapshotReadGate>>) {
+    let snapshot_gate = gate.lock().expect("snapshot read gate lock").take();
+    if let Some(SnapshotReadGate { started, resume }) = snapshot_gate {
+        let _ = started.send(());
+        let _ = resume.await;
+    }
 }
 
 fn observed_state_text(state: ObservedAgentState) -> &'static str {
@@ -800,7 +953,10 @@ async fn run_state_migrations(conn: &turso::Connection) -> events::Result<()> {
 }
 
 pub async fn open_store(path: impl AsRef<Path>) -> events::Result<Arc<HaroldStore>> {
-    Ok(Arc::new(HaroldStore::open(path).await?))
+    let hook_grace_ms = crate::settings::get_settings().agent_monitor.hook_grace_ms;
+    Ok(Arc::new(
+        HaroldStore::open_with_hook_grace(path, hook_grace_ms).await?,
+    ))
 }
 
 pub async fn append_turn_completed(

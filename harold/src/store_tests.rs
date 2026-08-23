@@ -1,4 +1,6 @@
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
 
 use events::EventStreamVersion;
 
@@ -689,4 +691,77 @@ async fn projection_preserves_summary_candidates_across_restart_without_raw_scre
         snapshot.panes[0].screen_work_summary_updated_at_ms,
         Some(110)
     );
+}
+
+#[tokio::test]
+async fn configured_hook_grace_governs_replay_after_restart() {
+    let directory = TestDirectory::new();
+    let store = HaroldStore::open_with_hook_grace(directory.path(), 0)
+        .await
+        .unwrap();
+    append_agent_events(
+        &store,
+        vec![
+            AgentEvent::PaneObserved(AgentPaneObserved { pane: agent_pane() }),
+            AgentEvent::LifecycleObserved(AgentLifecycleObserved {
+                incarnation: agent_incarnation(),
+                state: ObservedAgentState::Busy,
+                adapter_id: "hook-v1".into(),
+                work_summary: WorkSummaryUpdate::Unchanged,
+                observed_at_ms: 100,
+            }),
+            AgentEvent::ScreenObserved(AgentScreenObserved {
+                incarnation: agent_incarnation(),
+                state: Some(ObservedAgentState::Idle),
+                classifier_id: "screen-v1".into(),
+                fallback_summary: None,
+                observed_at_ms: 101,
+            }),
+        ],
+    )
+    .await
+    .unwrap();
+    drop(store);
+
+    let reopened = HaroldStore::open_with_hook_grace(directory.path(), 0)
+        .await
+        .unwrap();
+    reopened.project_unhandled_events(500).await.unwrap();
+    let snapshot = reopened.load_agent_snapshot().await.unwrap();
+    assert_eq!(snapshot.panes[0].effective_state, EffectiveAgentState::Idle);
+}
+
+#[tokio::test]
+async fn snapshot_reader_does_not_reserve_the_projection_writer_lock() {
+    let directory = TestDirectory::new();
+    let store = Arc::new(HaroldStore::open(directory.path()).await.unwrap());
+    append_inbound_message(
+        &store,
+        &InboundMessage {
+            text: "write while snapshot is open".into(),
+        },
+    )
+    .await
+    .unwrap();
+
+    let mut snapshot_gate = store.pause_snapshot_read_after_query_for_test();
+    let reader_store = Arc::clone(&store);
+    let reader = tokio::spawn(async move { reader_store.load_agent_snapshot().await });
+    snapshot_gate.wait_until_started().await;
+
+    let writer_store = Arc::clone(&store);
+    let mut writer = tokio::spawn(async move { writer_store.project_unhandled_events(500).await });
+    let batch = tokio::time::timeout(Duration::from_millis(500), &mut writer)
+        .await
+        .expect("read-only snapshot must not reserve the projection writer lock")
+        .expect("projection task panicked")
+        .expect("projection failed");
+    assert_eq!(batch.applied, 1);
+
+    snapshot_gate.resume();
+    let snapshot = reader
+        .await
+        .expect("snapshot task panicked")
+        .expect("snapshot read failed");
+    assert_eq!(snapshot.through_event_version, EventStreamVersion::start());
 }
