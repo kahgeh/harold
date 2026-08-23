@@ -12,7 +12,7 @@ use super::domain::{
     AgentPaneObserved, AgentScreenObserved, AgentSnapshot, ObservedAgentState, WorkSummaryUpdate,
 };
 use super::inventory::{AgentInventoryPort, InventoryError};
-use super::screen::{ScreenError, VisibleScreenPort};
+use super::screen::{ScreenError, VisibleScreenPort, normalize_fallback_summary};
 use super::summary::completion_summary_update;
 
 const COMMAND_CAPACITY: usize = 64;
@@ -757,7 +757,8 @@ impl AgentMonitorRuntime {
             );
             let summary = observation
                 .fallback_summary
-                .filter(|summary| !matches_idle_clause(summary, &provider.idle_all))
+                .as_deref()
+                .and_then(|summary| normalize_fallback_summary(summary, &provider.idle_all))
                 .filter(|summary| tracked.screen_summary.as_deref() != Some(summary));
             if state.is_none() && summary.is_none() {
                 continue;
@@ -858,10 +859,6 @@ fn screen_state_delta(
         }
     }
     (tracked.screen_state != Some(state)).then_some(state)
-}
-
-fn matches_idle_clause(summary: &str, fragments: &[String]) -> bool {
-    !fragments.is_empty() && fragments.iter().all(|fragment| summary.contains(fragment))
 }
 
 fn same_pane_metadata(left: &AgentPaneObservation, right: &AgentPaneObservation) -> bool {

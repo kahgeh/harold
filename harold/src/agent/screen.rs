@@ -125,8 +125,7 @@ pub(super) fn observe_visible_text(
             .summary_line_prefixes
             .iter()
             .find_map(|prefix| line.strip_prefix(prefix))
-            .and_then(normalize_work_summary)
-            .filter(|summary| !clause_matches(summary, &provider.idle_all))
+            .and_then(|candidate| normalize_fallback_summary(candidate, &provider.idle_all))
     });
 
     ScreenObservation {
@@ -136,6 +135,15 @@ pub(super) fn observe_visible_text(
         classifier_id: CLASSIFIER_ID.to_string(),
         observed_at_ms,
     }
+}
+
+pub(crate) fn normalize_fallback_summary(input: &str, idle_fragments: &[String]) -> Option<String> {
+    let summary = normalize_work_summary(input)?;
+    let is_placeholder = idle_fragments
+        .iter()
+        .filter_map(|fragment| normalize_work_summary(fragment))
+        .any(|fragment| fragment == summary);
+    (!is_placeholder).then_some(summary)
 }
 
 fn clause_matches(visible_grid: &str, fragments: &[String]) -> bool {

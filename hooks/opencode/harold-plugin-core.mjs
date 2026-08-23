@@ -12,6 +12,59 @@ const REPOSITORY_PROTO = fileURLToPath(
 );
 const UI_PLACEHOLDER = /^(?:ask (?:codex|claude|opencode) to do anything|ask anything(?:\.\.\.)?(?:\s+".*")?)$/iu;
 
+function stripTerminalSequences(value) {
+  let output = "";
+  let state = "text";
+
+  for (const character of value) {
+    const codePoint = character.codePointAt(0);
+    if (state === "escape") {
+      if (character === "[") state = "csi";
+      else if (character === "]") state = "osc";
+      else if ("PX^_".includes(character)) state = "control-string";
+      else if (codePoint >= 0x20 && codePoint <= 0x2f) {
+        state = "escape-intermediate";
+      } else state = "text";
+      continue;
+    }
+    if (state === "escape-intermediate") {
+      if (codePoint >= 0x30 && codePoint <= 0x7e) state = "text";
+      continue;
+    }
+    if (state === "csi") {
+      if (codePoint >= 0x40 && codePoint <= 0x7e) state = "text";
+      continue;
+    }
+    if (state === "osc") {
+      if (character === "\x07" || character === "\u009c") state = "text";
+      else if (character === "\x1b") state = "osc-escape";
+      continue;
+    }
+    if (state === "osc-escape") {
+      state = character === "\\" ? "text" : "osc";
+      continue;
+    }
+    if (state === "control-string") {
+      if (character === "\u009c") state = "text";
+      else if (character === "\x1b") state = "control-string-escape";
+      continue;
+    }
+    if (state === "control-string-escape") {
+      state = character === "\\" ? "text" : "control-string";
+      continue;
+    }
+
+    if (character === "\x1b") state = "escape";
+    else if (character === "\u009b") state = "csi";
+    else if (character === "\u009d") state = "osc";
+    else if ([0x90, 0x98, 0x9e, 0x9f].includes(codePoint)) {
+      state = "control-string";
+    } else output += character;
+  }
+
+  return output;
+}
+
 export function normalizePrompt(parts) {
   if (!Array.isArray(parts)) return "";
 
@@ -25,7 +78,7 @@ export function normalizePrompt(parts) {
       continue;
     }
 
-    const candidate = part.text
+    const candidate = stripTerminalSequences(part.text)
       .replace(/[\u0000-\u001f\u007f-\u009f]/gu, " ")
       .replace(/\s+/gu, " ")
       .trim();

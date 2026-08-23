@@ -131,6 +131,23 @@ fn extractor_returns_no_summary_for_only_the_codex_idle_placeholder() {
 }
 
 #[test]
+fn extractor_keeps_a_prompt_that_mentions_the_codex_idle_placeholder() {
+    let mut codex = provider();
+    codex.idle_all = vec!["Ask Codex to do anything".to_string()];
+    let prompt = "Explain why the UI says Ask Codex to do anything";
+
+    let observation = observe_visible_text(
+        &pane("%34"),
+        &codex,
+        &format!("Codex ready\n› {prompt}\n"),
+        99,
+    );
+
+    assert_eq!(observation.state, Some(ObservedAgentState::Idle));
+    assert_eq!(observation.fallback_summary.as_deref(), Some(prompt));
+}
+
+#[test]
 fn extracted_summary_is_capped_at_160_unicode_scalars() {
     let expected = "🦀".repeat(160);
     let visible = format!("› {expected}extra");

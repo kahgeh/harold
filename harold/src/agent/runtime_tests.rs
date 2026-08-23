@@ -718,6 +718,54 @@ async fn configured_idle_placeholder_never_replaces_a_durable_screen_summary() {
 }
 
 #[tokio::test]
+async fn runtime_keeps_a_normalized_typed_summary_that_mentions_the_idle_placeholder() {
+    let directory = TestDirectory::new();
+    let store = Arc::new(HaroldStore::open(&directory.0).await.unwrap());
+    let observation = pane("%8", 80, 800, 1_000, 100);
+    let inventory = Arc::new(FakeInventory::scans(vec![Ok(vec![observation.clone()])]));
+    let screen_port = Arc::new(FakeScreen::default());
+    screen_port.push(Ok(screen(
+        &observation,
+        None,
+        Some(" \u{1b}[31mExplain why the UI says Ask Codex to do anything\u{1b}[0m "),
+        200,
+    )));
+    let mut codex = provider();
+    codex.idle_all = vec!["Ask Codex to do anything".into()];
+    let (shutdown, shutdown_rx) = watch::channel(());
+    let (handle, task) = spawn_agent_monitor_for_test(
+        Arc::clone(&store),
+        inventory,
+        screen_port,
+        vec![codex],
+        2_000,
+        shutdown_rx,
+    );
+
+    handle.inventory_tick().await.unwrap();
+    handle.screen_tick().await.unwrap();
+
+    let events = store
+        .stream()
+        .load_after_version(EventStreamVersion::start(), 100)
+        .await
+        .unwrap();
+    assert_eq!(
+        event_types(&events),
+        ["AgentPaneObserved", "AgentScreenObserved"]
+    );
+    let screen: super::domain::AgentScreenObserved =
+        serde_json::from_value(events[1].payload.clone()).unwrap();
+    assert_eq!(
+        screen.fallback_summary.as_deref(),
+        Some("Explain why the UI says Ask Codex to do anything")
+    );
+
+    drop(shutdown);
+    task.await.unwrap();
+}
+
+#[tokio::test]
 async fn lifecycle_epoch_holds_conflicting_screen_state_but_allows_summary_then_repairs_once() {
     let observation = pane("%8", 80, 800, 1_000, 100);
     let fixture = Fixture::new(FakeInventory::scans(vec![Ok(vec![observation.clone()])])).await;

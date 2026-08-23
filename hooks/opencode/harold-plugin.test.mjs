@@ -32,6 +32,26 @@ test("normalizePrompt selects the latest substantive submitted TextPart", () => 
   assert.equal(normalizePrompt([textPart("Ask OpenCode to do anything")]), "");
 });
 
+test("normalizePrompt removes complete terminal control sequences", () => {
+  const hiddenPayload = "PRIVATE_CONTROL_PAYLOAD";
+  const prompt = [
+    "\x1b[31mReview\x1b[0m",
+    `\x1b]0;${hiddenPayload}\x07`,
+    `\x1b]8;;https://example.invalid/${hiddenPayload}\x1b\\projector\x1b]8;;\x1b\\`,
+    "\u009b32msafely\u009b0m",
+    `\u009d0;${hiddenPayload}\u009c`,
+    `\u0090${hiddenPayload}\u009c`,
+    `\u0098${hiddenPayload}\u009c`,
+    `\u009e${hiddenPayload}\u009c`,
+    `\u009f${hiddenPayload}\u009c`,
+  ].join(" ");
+
+  const summary = normalizePrompt([textPart(prompt)]);
+
+  assert.equal(summary === "Review projector safely", true);
+  assert.equal(summary.includes(hiddenPayload), false);
+});
+
 test("lifecycleUpdate maps status and legacy idle events", () => {
   assert.deepEqual(
     lifecycleUpdate({
