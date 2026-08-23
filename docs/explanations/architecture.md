@@ -1,147 +1,80 @@
 # Harold Architecture
 
-## Overview
+Harold connects agent sessions running in tmux with notification and reply channels. It keeps durable facts separate from current derived state: observations enter one ordered event stream, a projector derives application state, and consumers see only committed snapshots.
 
-Bidirectional messaging (iMessage or Telegram) ↔ AI coding agent communication, split into two components with clear responsibilities.
+## Why the monitor is event-driven
 
-Harold's turn-completion notification path is agent-agnostic — it works with any agent that can run a Stop hook and shell out to `grpcurl` to report a completed turn.
+Agent state has several imperfect sources. A lifecycle hook knows that an agent started or finished work, but a hook can be missed. The visible terminal can repair a missed transition, but the screen can be stale or inconclusive. Process inventory establishes whether an agent is present, but CPU use or elapsed silence does not establish whether it is busy.
 
----
+Harold records observations instead of letting adapters overwrite a shared row. One serialized monitor runtime resolves the live process identity and appends agent events. A pure reducer then applies the precedence rules, and one application projector owns the current-state database. This keeps acquisition failures from erasing known state and makes restart recovery deterministic.
 
-## Components
+## Boundaries
 
-```
-┌──────────────────────────────────────────────────────────────────┐
-│                      AI Agent Session                            │
-│                                                                  │
-│  Stop hook adapter (Claude, Codex, etc.)                         │
-│  ┌─────────────────────────────────────────────────────────────┐ │
-│  │ - Reads transcript (agent-specific adapter)                 │ │
-│  │ - Extracts last user prompt + agent final message           │ │
-│  │ - Gets pane_id + label from tmux                            │ │
-│  │ - Computes main_context from git (branch or repo name)      │ │
-│  │ - Skips subagent stop events                                │ │
-│  │ - Ensures harold is running (starts if not)                 │ │
-│  │ - Calls harold via grpcurl (TurnComplete RPC)               │ │
-│  └─────────────────────────────────────────────────────────────┘ │
-└──────────────────────────────────────────────────────────────────┘
-                              │
-                              │ gRPC (grpcurl)
-                              │ TurnComplete RPC
-                              ▼
-┌──────────────────────────────────────────────────────────────────┐
-│                          Harold                                  │
-│                       (Rust binary)                              │
-│                                                                  │
-│  ┌─ channels/ ───────────┐  ┌─ outbound/ ─┐  ┌─ inbound/ ──────┐ │
-│  │  iMessage + Telegram  │  │ Orchestrator│  │ Inbound msg     │ │
-│  │                       │  │             │  │                 │ │
-│  │ Each channel owns:    │  │ Tts | Away  │  │ AgentDirectory: │ │
-│  │  - send / notify_away │  │             │  │  TmuxProcessScan│ │
-│  │  - listen (inbound)   │  │ Screen lock │  │                 │ │
-│  │                       │  │ detection   │  │ Semantic resolve│ │
-│  │ Static dispatch in    │  │             │  │ via AI CLI      │ │
-│  │ channels/mod.rs       │  │ Skip logic  │  │                 │ │
-│  │                       │  │ (session/   │  │ Fallback chain: │ │
-│  │ Shared utilities:     │  │  pane)      │  │ tag → AI → last │ │
-│  │  split_body,          │  │             │  │ notif → my-agent│ │
-│  │  summarise_for_notif  │  │             │  │                 │ │
-│  └───────────────────────┘  └─────────────┘  └─────────────────┘ │
-│                                                                  │
-│  EventStream: durable facts in harold/main                       │
-│  Harold state: delivery outbox + handler checkpoint              │
-│  Runtime state: inbound cursors + last notification source       │
-└──────────────────────────────────────────────────────────────────┘
-                    │                        ▲
-                    │ iMessage / Telegram    │ Reply
-                    ▼                        │
-                Your phone ──────────────────┘
+```text
+Agent hooks ───────────────┐
+                          │
+tmux and process inventory ├──> serialized monitor ───> durable event stream
+                          │                                  │
+visible-screen adapter ───┘                                  v
+                                                   application projector
+                                                            │
+                                             ┌──────────────┴──────────────┐
+                                             v                             v
+                                    current-state database       delivery outbox
+                                             │                             │
+                                             v                             v
+                                    snapshot publisher          notifications/replies
+                                             │
+                                             v
+                                    WatchAgentStates gRPC
 ```
 
----
+The boundaries have distinct responsibilities:
 
-## Responsibilities
+| Boundary | Responsibility |
+| --- | --- |
+| Inventory | Establish live pane and full agent-process incarnation identity. |
+| Lifecycle and completion ingress | Submit explicit busy/idle and work-summary observations. |
+| Screen adapter | Inspect only the current visible grid and return independent optional state and fallback-summary facts. |
+| Monitor runtime | Serialize decisions, deduplicate observations, revalidate departures, and append agent facts. |
+| Reducer | Reconcile hook grace, screen repair, incarnation replacement, and summary precedence. |
+| Application projector | Atomically update current state, stage externally deliverable work, and advance the checkpoint. |
+| Snapshot publisher | Publish only database-backed state after commit. |
 
-| Concern                                 | Owner  |
-| --------------------------------------- | ------ |
-| Transcript parsing                      | Agent adapter hook |
-| Pane identity (self)                    | Hook   |
-| main_context (branch or repo name)      | Hook   |
-| Skip subagent stop events               | Hook   |
-| Ensure harold is running                | Hook   |
-| Screen lock detection                   | Harold |
-| Summarisation (AI CLI)                  | Harold |
-| TTS notification                        | Harold |
-| iMessage send + dedup                   | Harold |
-| `last_notification_source_agent` state  | Harold |
-| Inbound message routing (tmux)                    | Harold |
-| Live pane discovery                     | Harold |
-| Event stream, handler checkpoint, and delivery outbox | Harold |
+Raw captured screen text exists only inside the screen adapter. It is not an event field, projection column, API field, diagnostic value, or application log field. This is a data boundary, not merely a display convention.
 
----
+## Identity before state
 
-## TurnComplete RPC payload
+A tmux pane ID alone is not enough to identify an agent over time. A shell can outlive several agent processes, and a PID can be reused. Harold therefore scopes every pane observation to this complete incarnation:
 
-```protobuf
-message TurnCompleteRequest {
-  string pane_id            = 1;  // tmux pane ID (e.g. "%12")
-  string pane_label         = 2;  // human-readable label (e.g. "alir-app main:0.1")
-  string last_user_prompt   = 3;  // last thing the user asked
-  string assistant_message  = 4;  // agent's final response
-  string main_context       = 5;  // git branch or repo name
-}
+```text
+(pane_id, pane_pid, agent_pid, agent_started_at_ms, provider_id)
 ```
 
----
+Replacing or restarting an agent creates a new incarnation. The new process begins with `Unknown` state and no work summary; it cannot inherit lifecycle or screen evidence from the previous process. Delayed events remain in durable history but do not mutate a different current incarnation.
 
-## Notification (outbound)
+## Reconciling lifecycle and screen evidence
 
-When a `TurnCompleted` event is received, Harold decides how to notify:
+Lifecycle evidence is authoritative for the configured grace period, which defaults to two seconds. This allows the terminal to repaint after a hook fires. After grace, a later conclusive screen observation can repair missed or stale lifecycle evidence. Inconclusive screen state preserves the current state.
 
-1. `skip_if_session_active = true` (default) → skip if the completing pane's tmux session has an attached client
-1a. `skip_if_pane_active = false` → skip if the completing pane is the active pane in its session and the screen is unlocked
-2. Screen unlocked → TTS via configurable command (e.g. `say`) with an AI-generated short summary
-3. Screen locked → away channel (iMessage or Telegram, per `away_channel` config) with a detailed summary via AI CLI; a trailing question is split into a second message
+State and summary are independent. One capture may provide either, both, or neither. Harold retains explicit and screen candidates with their durable observation times; the latest substantive candidate is effective, with explicit winning a tie. This lets a current Busy prompt replace a retained prior completion, while Idle placeholder/absence preserves the current summary. Clearing the explicit candidate can reveal an existing screen candidate.
 
----
+Current acquisition and ingress reject exact normalized configured idle placeholders before serializing a summary candidate, but older durable events may already contain them. Harold repairs that historical state with an incarnation-scoped, projection-only event that independently clears affected explicit or screen candidates and their timestamps. Because the correction is a durable fact rather than a direct database edit, rebuilding the projection cannot resurrect the placeholder.
 
-## Inbound message routing (inbound)
+Provider screen markers are intentionally configurable because terminal UIs change. When marker matching becomes inconclusive, Harold reports `Unknown` only for an incarnation with no conclusive evidence; it does not infer state from CPU use, tmux activity, or silence. The [agent-monitor reference](../references/agent-monitor/README.md) defines the exact reconciliation and configuration contracts.
 
-1. `[tag]` prefix → exact/substring match against discovered live tmux panes
-2. No tag, multiple panes → semantic resolve via AI CLI
-3. `last_away_notification_source_agent` → the agent whose turn last triggered an away (iMessage) notification
-4. Final fallback → pane whose label contains `my-agent`
-5. Nothing found → error iMessage sent back
+## Projection and delivery are separate effects
 
----
+All durable facts are read in event-stream order. In one state-database transaction, Harold applies agent facts, stages only externally deliverable events, and advances the application checkpoint. Agent observation and health events do not enter the delivery outbox. `TurnCompleted` and `InboundMessageReceived` retain their existing external effects.
 
-## Lifecycle
+Snapshot publication happens after the transaction commits. A late or reconnecting watcher receives the full stored snapshot first, so correctness does not depend on retaining every in-memory notification. The public stream exposes effective state and an optional effective work summary, not the evidence source used to derive them.
 
-**Startup** — The agent stop hook checks for a running Harold (TCP connect to the gRPC port) and spawns it if absent, with its working directory set to the binary's parent so config and the event store are found without environment variables.
+Search is also outside this boundary. A dashboard filters the snapshot it already holds; Harold has no search RPC, search field, or persisted query.
 
-**Running** — Three concurrent tasks:
+## Startup, restart, and shutdown
 
-1. gRPC server — accepts `TurnComplete` RPCs, appends events
-2. Event handler — stages ordered events into Harold's delivery outbox, drives notification (sets `last_away_notification_source_agent` when away) and inbound message routing, then records delivery state
-3. Listener — channel-specific inbound message listener: iMessage watches `chat.db` for filesystem changes (FSEvents) with 5s fallback poll; Telegram uses Bot API long-polling. Both append `InboundMessageReceived` events
+On startup, Harold opens the durable event stream and checksum-tracked application-state database and projects every historical page to the stream head without publishing. It inspects that complete projection, appends every required legacy-candidate repair in one event-stream batch, projects the repair batch, and reloads the clean snapshot. Only then does it create the publisher and seed the monitor runtime before accepting gRPC traffic. This prevents the first snapshot, an early shutdown, or a 500-event projection-page boundary from exposing a configured placeholder.
 
-**Shutdown** — SIGINT or SIGTERM triggers an ordered shutdown:
+During normal operation, the monitor, projector/delivery handler, inbound listener, and gRPC server share a shutdown signal. `SIGINT` or `SIGTERM` closes that signal, stops new monitoring work, closes open `WatchAgentStates` streams, lets the server drain in-flight RPCs, and joins the handler and listener. If the monitor does not stop within one second, Harold aborts that task. Already committed events and projection state remain available at the next start.
 
-1. gRPC server stops accepting new requests
-2. Event handler finishes any in-flight blocking delivery and exits; the listener exits
-3. Harold joins both tasks and returns; the refreshed event stream has no explicit shutdown-checkpoint API
-
----
-
-## State
-
-Harold owns its consumer checkpoint and delivery outbox in `<store-root>/harold-state.db`. New immutable events live in `<store-root>/harold/main/`; old-format files at the store root are left untouched.
-
-Harold also owns runtime routing state in memory:
-
-- `last_inbound_rowid` / `last_self_rowid` — separate chat.db polling cursors for inbound messages and self-sent (phone-synced) messages
-- `last_away_notification_source_agent: Option<AgentAddress>` — the agent whose turn completion last triggered an away (iMessage) notification
-
-`AgentAddress` is an enum (currently only `TmuxPane { pane_id, label }`), extensible to other transports.
-
-Live pane discovery uses live tmux queries.
+For exact events, fields, RPC statuses, failure behavior, and provider limitations, see the [agent-monitor reference](../references/agent-monitor/README.md). To register hooks, follow [Set up agent monitor hooks](../how-tos/setup-agent-monitor-hooks.md).

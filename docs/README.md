@@ -3,6 +3,7 @@
 ## How-Tos
 
 - [Setup](how-tos/setup.md)
+- [Setup Agent Monitor Hooks](how-tos/setup-agent-monitor-hooks.md)
 - [Setup Telegram](how-tos/setup-telegram.md)
 
 ## Prerequisites
@@ -11,6 +12,7 @@
 
 ## References
 
+- [Agent Monitor](references/agent-monitor/README.md)
 - [Notification](references/notification/README.md)
 - [Inbound Message Routing](references/inbound-message-routing/README.md)
 - [Operation](references/operation/README.md)

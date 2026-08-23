@@ -17,11 +17,11 @@ Contextual Routing: Don't worry about which agent is which. Harold knows exactly
 
 ## How it works
 
-Each agent session runs a stop hook that extracts context from the completed turn and hands it to Harold via gRPC. Harold handles everything from there — summarisation, notification, and routing replies back.
+Harold inventories configured agent processes in tmux, combines explicit lifecycle hooks with provider-specific visible-screen evidence, and stores the resulting current state durably. Existing stop hooks also report completed turns for notification and non-destructive work-summary updates.
 
-Harold is agent-agnostic. The hook is the only part that knows anything about a specific agent. Harold itself just receives a structured payload and uses the AI CLI for summarisation.
+The public agent-state stream starts with a complete current snapshot, then sends later revisions. Raw pane captures remain inside the screen adapter; only classified state and a normalized work summary can cross the acquisition boundary.
 
-See [docs/explanations/architecture.md](docs/explanations/architecture.md) for the full architecture.
+See the [architecture explanation](docs/explanations/architecture.md), [agent-monitor reference](docs/references/agent-monitor/README.md), and [hook setup guide](docs/how-tos/setup-agent-monitor-hooks.md).
 
 ## Prerequisites
 
