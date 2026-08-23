@@ -43,6 +43,14 @@ fn agent_incarnation() -> AgentIncarnation {
     }
 }
 
+fn assert_full_incarnation(incarnation: &AgentIncarnation) {
+    assert_eq!(incarnation.pane_id, "%7");
+    assert_eq!(incarnation.pane_pid, 10);
+    assert_eq!(incarnation.agent_pid, 20);
+    assert_eq!(incarnation.agent_started_at_ms, 1_000);
+    assert_eq!(incarnation.provider_id, "codex");
+}
+
 fn agent_pane() -> AgentPaneObservation {
     AgentPaneObservation {
         incarnation: agent_incarnation(),
@@ -122,7 +130,7 @@ async fn agent_events_round_trip_with_stable_types_and_normalized_payloads() {
     assert_eq!(stored[0].r#type, "AgentPaneObserved");
     let pane_observed: AgentPaneObserved =
         serde_json::from_value(stored[0].payload.clone()).unwrap();
-    assert_eq!(pane_observed.pane, agent_pane());
+    assert_full_incarnation(&pane_observed.pane.incarnation);
     assert_eq!(stored[1].r#type, "AgentLifecycleObserved");
     let lifecycle: AgentLifecycleObserved =
         serde_json::from_value(stored[1].payload.clone()).unwrap();
@@ -130,11 +138,13 @@ async fn agent_events_round_trip_with_stable_types_and_normalized_payloads() {
         lifecycle.work_summary,
         WorkSummaryUpdate::Set("Fix tests".into())
     );
+    assert_full_incarnation(&lifecycle.incarnation);
     assert_eq!(stored[2].r#type, "AgentScreenObserved");
     let state_only: AgentScreenObserved =
         serde_json::from_value(stored[2].payload.clone()).unwrap();
     assert_eq!(state_only.state, Some(ObservedAgentState::Idle));
     assert_eq!(state_only.fallback_summary, None);
+    assert_full_incarnation(&state_only.incarnation);
     let summary_only: AgentScreenObserved =
         serde_json::from_value(stored[3].payload.clone()).unwrap();
     assert_eq!(summary_only.state, None);
@@ -142,12 +152,14 @@ async fn agent_events_round_trip_with_stable_types_and_normalized_payloads() {
         summary_only.fallback_summary.as_deref(),
         Some("Review projector")
     );
+    assert_full_incarnation(&summary_only.incarnation);
     let both: AgentScreenObserved = serde_json::from_value(stored[4].payload.clone()).unwrap();
     assert_eq!(both.state, Some(ObservedAgentState::Busy));
     assert_eq!(both.fallback_summary.as_deref(), Some("Ship release"));
+    assert_full_incarnation(&both.incarnation);
     assert_eq!(stored[5].r#type, "AgentPaneDeparted");
     let departed: AgentPaneDeparted = serde_json::from_value(stored[5].payload.clone()).unwrap();
-    assert_eq!(departed.incarnation, agent_incarnation());
+    assert_full_incarnation(&departed.incarnation);
     assert_eq!(departed.observed_at_ms, 105);
     assert_eq!(stored[6].r#type, "AgentMonitorHealthChanged");
     let health: AgentMonitorHealthChanged =

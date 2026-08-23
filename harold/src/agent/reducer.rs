@@ -67,9 +67,13 @@ pub(crate) fn reduce_agent_event(
             }
 
             if let Some(state) = screen.state {
-                projection.screen_state = Some(state);
-                projection.screen_classifier_id = Some(screen.classifier_id.clone());
-                projection.screen_observed_at_ms = Some(screen.observed_at_ms);
+                let state_needs_revalidation = projection.screen_state != Some(state)
+                    || projection.effective_state != observed_to_effective(state);
+                if state_needs_revalidation {
+                    projection.screen_state = Some(state);
+                    projection.screen_classifier_id = Some(screen.classifier_id.clone());
+                    projection.screen_observed_at_ms = Some(screen.observed_at_ms);
+                }
             }
             if let Some(summary) = &screen.fallback_summary
                 && projection.screen_work_summary.as_deref() != Some(summary)

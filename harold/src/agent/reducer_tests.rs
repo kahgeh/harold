@@ -72,7 +72,7 @@ fn pane_observation_starts_an_unknown_projection() {
 }
 
 #[test]
-fn hook_wins_during_grace_then_later_screen_repairs_state() {
+fn hook_grace_allows_one_post_grace_screen_repair_then_ignores_duplicates() {
     let initial = apply(
         None,
         AgentEvent::PaneObserved(AgentPaneObserved {
@@ -103,7 +103,7 @@ fn hook_wins_during_grace_then_later_screen_repairs_state() {
         3,
     );
     let repaired = apply(
-        Some(during_grace),
+        Some(during_grace.clone()),
         AgentEvent::ScreenObserved(AgentScreenObserved {
             incarnation: incarnation(1_000),
             state: Some(ObservedAgentState::Idle),
@@ -113,10 +113,27 @@ fn hook_wins_during_grace_then_later_screen_repairs_state() {
         }),
         4,
     );
+    let duplicate = apply(
+        Some(repaired.clone()),
+        AgentEvent::ScreenObserved(AgentScreenObserved {
+            incarnation: incarnation(1_000),
+            state: Some(ObservedAgentState::Idle),
+            classifier_id: "screen-v1".into(),
+            fallback_summary: None,
+            observed_at_ms: 2_300,
+        }),
+        5,
+    );
 
+    assert_eq!(during_grace.effective_state, EffectiveAgentState::Busy);
+    assert_eq!(during_grace.screen_observed_at_ms, Some(201));
     assert_eq!(repaired.hook_state, Some(ObservedAgentState::Busy));
     assert_eq!(repaired.effective_state, EffectiveAgentState::Idle);
+    assert_eq!(repaired.screen_observed_at_ms, Some(2_200));
     assert_eq!(repaired.last_transition_at_ms, 2_200);
+    assert_eq!(duplicate.screen_observed_at_ms, Some(2_200));
+    assert_eq!(duplicate.last_transition_at_ms, 2_200);
+    assert_eq!(duplicate.last_event_version, version(5));
 }
 
 #[test]
