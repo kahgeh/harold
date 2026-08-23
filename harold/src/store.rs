@@ -12,7 +12,12 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 use turso::Database;
 
-use crate::agent::domain::{AgentEvent, AgentScreenObserved, WorkSummaryUpdate};
+use crate::agent::domain::{
+    AgentEvent, AgentMonitorHealthChanged, AgentPaneProjection, AgentScreenObserved, AgentSnapshot,
+    EffectiveAgentState, MonitorHealthProjection, ObservedAgentState, ProjectionChange,
+    WorkSummaryUpdate,
+};
+use crate::agent::reducer::{DEFAULT_HOOK_GRACE_MS, reduce_agent_event};
 use crate::agent::summary::normalize_work_summary;
 
 const NAMESPACE: &str = "harold";
@@ -33,9 +38,13 @@ CREATE INDEX IF NOT EXISTS idx_delivery_outbox_pending
     ON delivery_outbox(delivered_at_ms, event_version);
 "#;
 
-const STATE_MIGRATIONS: [(&str, &str); 2] = [
+const AGENT_MONITOR_PROJECTION_SQL: &str =
+    include_str!("store/migrations/003_agent_monitor_projection.sql");
+
+const STATE_MIGRATIONS: [(&str, &str); 3] = [
     ("001_last_processed_event", LAST_PROCESSED_EVENT_SQL),
     ("002_delivery_outbox", DELIVERY_OUTBOX_SQL),
+    ("003_agent_monitor_projection", AGENT_MONITOR_PROJECTION_SQL),
 ];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -61,9 +70,18 @@ pub struct PendingDelivery {
     pub trace_id: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ProjectionBatch {
+    pub applied: usize,
+    pub through_event_version: EventStreamVersion,
+    pub snapshot_changed: bool,
+}
+
 pub struct HaroldStore {
     stream: EventStream,
     state: Database,
+    #[cfg(test)]
+    fail_projection_before_checkpoint: std::sync::atomic::AtomicBool,
 }
 
 fn rotation_policy() -> RotationPolicy {
@@ -92,7 +110,12 @@ impl HaroldStore {
         configure_state_database(&conn).await?;
         run_state_migrations(&conn).await?;
 
-        Ok(Self { stream, state })
+        Ok(Self {
+            stream,
+            state,
+            #[cfg(test)]
+            fail_projection_before_checkpoint: std::sync::atomic::AtomicBool::new(false),
+        })
     }
 
     #[cfg(test)]
@@ -100,67 +123,67 @@ impl HaroldStore {
         &self.stream
     }
 
-    async fn last_processed_version(&self) -> events::Result<EventStreamVersion> {
+    pub(crate) async fn last_processed_version(&self) -> events::Result<EventStreamVersion> {
         let conn = self.state.connect()?;
-        let mut rows = conn
-            .query(
-                r#"
-                SELECT last_processed_event_version
-                FROM last_processed_event
-                WHERE namespace = ?1 AND partition_key = ?2
-                "#,
-                (NAMESPACE, PARTITION_KEY),
-            )
-            .await?;
-        let Some(row) = rows.next().await? else {
-            return Ok(EventStreamVersion::start());
-        };
-        let version = row.get_value(0)?.as_integer().copied().ok_or_else(|| {
-            events::EsError::Cursor("checkpoint version is not an integer".into())
-        })?;
-        if version == 0 {
-            return Ok(EventStreamVersion::start());
-        }
-        EventStreamVersion::new(version)
+        last_processed_version_from(&conn).await
     }
 
-    pub async fn stage_unhandled_events(&self, limit: usize) -> events::Result<usize> {
+    pub(crate) async fn project_unhandled_events(
+        &self,
+        limit: usize,
+    ) -> events::Result<ProjectionBatch> {
         let cursor = self.last_processed_version().await?;
         let events = self.stream.load_after_version(cursor, limit).await?;
         let Some(last) = events.last() else {
-            return Ok(0);
+            return Ok(ProjectionBatch {
+                applied: 0,
+                through_event_version: cursor,
+                snapshot_changed: false,
+            });
         };
 
         let conn = self.state.connect()?;
         conn.execute("BEGIN IMMEDIATE", ()).await?;
-        for event in &events {
-            let payload = serde_json::to_string(&event.payload)?;
-            let result = conn
-                .execute(
-                    r#"
-                    INSERT INTO delivery_outbox
-                        (event_id, event_version, event_type, payload, trace_id)
-                    VALUES (?1, ?2, ?3, ?4, ?5)
-                    ON CONFLICT(event_id) DO NOTHING
-                    "#,
-                    (
-                        event.id.to_string(),
-                        event.version.get(),
-                        event.r#type.as_str(),
-                        payload,
-                        event.id.to_string(),
-                    ),
-                )
-                .await;
-            if let Err(error) = result {
-                let _ = conn.execute("ROLLBACK", ()).await;
-                return Err(error.into());
+        let result = async {
+            let mut snapshot_changed = false;
+            for event in &events {
+                match event.r#type.as_str() {
+                    "TurnCompleted" | "InboundMessageReceived" => {
+                        stage_delivery_event(&conn, event).await?;
+                    }
+                    "AgentPaneObserved"
+                    | "AgentPaneDeparted"
+                    | "AgentLifecycleObserved"
+                    | "AgentScreenObserved" => {
+                        snapshot_changed |= project_agent_event(&conn, event).await?;
+                    }
+                    "AgentMonitorHealthChanged" => {
+                        let health = serde_json::from_value::<AgentMonitorHealthChanged>(
+                            event.payload.clone(),
+                        )?;
+                        upsert_monitor_health(&conn, &health, event.version).await?;
+                        snapshot_changed = true;
+                    }
+                    _ => {
+                        // Unknown stream facts stay visible to the existing permanent-delivery
+                        // path; advancing without an outbox record would silently lose them.
+                        stage_delivery_event(&conn, event).await?;
+                    }
+                }
             }
-        }
 
-        let now_ms = (time::OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000) as i64;
-        let checkpoint = conn
-            .execute(
+            #[cfg(test)]
+            if self
+                .fail_projection_before_checkpoint
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                return Err(events::EsError::Migration(
+                    "test projection failure before checkpoint".into(),
+                ));
+            }
+
+            let now_ms = now_ms();
+            conn.execute(
                 r#"
                 INSERT INTO last_processed_event
                     (namespace, partition_key, last_processed_event_version, updated_at_ms)
@@ -171,17 +194,56 @@ impl HaroldStore {
                 "#,
                 (NAMESPACE, PARTITION_KEY, last.version.get(), now_ms),
             )
-            .await;
-        if let Err(error) = checkpoint {
-            let _ = conn.execute("ROLLBACK", ()).await;
-            return Err(error.into());
+            .await?;
+            conn.execute("COMMIT", ()).await?;
+            Ok(snapshot_changed)
         }
-        if let Err(error) = conn.execute("COMMIT", ()).await {
-            let _ = conn.execute("ROLLBACK", ()).await;
-            return Err(error.into());
-        }
+        .await;
+        let snapshot_changed = match result {
+            Ok(snapshot_changed) => snapshot_changed,
+            Err(error) => {
+                let _ = conn.execute("ROLLBACK", ()).await;
+                return Err(error);
+            }
+        };
 
-        Ok(events.len())
+        Ok(ProjectionBatch {
+            applied: events.len(),
+            through_event_version: last.version,
+            snapshot_changed,
+        })
+    }
+
+    #[allow(
+        dead_code,
+        reason = "the Task 9 publisher consumes committed snapshots in the next monitor slice"
+    )]
+    pub(crate) async fn load_agent_snapshot(&self) -> events::Result<AgentSnapshot> {
+        let conn = self.state.connect()?;
+        conn.execute("BEGIN IMMEDIATE", ()).await?;
+        let result = async {
+            let through_event_version = last_processed_version_from(&conn).await?;
+            let monitor_health = load_monitor_health(&conn).await?;
+            let panes = load_agent_panes(&conn).await?;
+            conn.execute("COMMIT", ()).await?;
+            Ok(AgentSnapshot {
+                through_event_version,
+                server_time_ms: now_ms(),
+                monitor_health,
+                panes,
+            })
+        }
+        .await;
+        if result.is_err() {
+            let _ = conn.execute("ROLLBACK", ()).await;
+        }
+        result
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_projection_before_checkpoint_for_test(&self) {
+        self.fail_projection_before_checkpoint
+            .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
     pub async fn next_pending_delivery(&self) -> events::Result<Option<PendingDelivery>> {
@@ -269,6 +331,405 @@ impl HaroldStore {
         .await?;
         Ok(())
     }
+}
+
+const AGENT_PANE_COLUMNS: &str = r#"
+    pane_id, pane_pid, agent_pid, agent_started_at_ms, provider_id,
+    tmux_target, session_name, window_index, pane_index, working_directory,
+    provider_display_name, pane_observed_at_ms, hook_state, hook_observed_at_ms,
+    screen_state, screen_classifier_id, screen_observed_at_ms, effective_state,
+    explicit_work_summary, explicit_work_summary_updated_at_ms,
+    screen_work_summary, screen_work_summary_updated_at_ms, work_summary,
+    last_transition_at_ms, last_event_version
+"#;
+
+async fn last_processed_version_from(
+    conn: &turso::Connection,
+) -> events::Result<EventStreamVersion> {
+    let mut rows = conn
+        .query(
+            r#"
+            SELECT last_processed_event_version
+            FROM last_processed_event
+            WHERE namespace = ?1 AND partition_key = ?2
+            "#,
+            (NAMESPACE, PARTITION_KEY),
+        )
+        .await?;
+    let Some(row) = rows.next().await? else {
+        return Ok(EventStreamVersion::start());
+    };
+    let version =
+        row.get_value(0)?.as_integer().copied().ok_or_else(|| {
+            events::EsError::Cursor("checkpoint version is not an integer".into())
+        })?;
+    if version == 0 {
+        return Ok(EventStreamVersion::start());
+    }
+    EventStreamVersion::new(version)
+}
+
+async fn stage_delivery_event(
+    conn: &turso::Connection,
+    event: &events::EventEnvelope,
+) -> events::Result<()> {
+    let payload = serde_json::to_string(&event.payload)?;
+    conn.execute(
+        r#"
+        INSERT INTO delivery_outbox
+            (event_id, event_version, event_type, payload, trace_id)
+        VALUES (?1, ?2, ?3, ?4, ?5)
+        ON CONFLICT(event_id) DO NOTHING
+        "#,
+        (
+            event.id.to_string(),
+            event.version.get(),
+            event.r#type.as_str(),
+            payload,
+            event.id.to_string(),
+        ),
+    )
+    .await?;
+    Ok(())
+}
+
+async fn project_agent_event(
+    conn: &turso::Connection,
+    event: &events::EventEnvelope,
+) -> events::Result<bool> {
+    let agent_event = match event.r#type.as_str() {
+        "AgentPaneObserved" => {
+            AgentEvent::PaneObserved(serde_json::from_value(event.payload.clone())?)
+        }
+        "AgentPaneDeparted" => {
+            AgentEvent::PaneDeparted(serde_json::from_value(event.payload.clone())?)
+        }
+        "AgentLifecycleObserved" => {
+            AgentEvent::LifecycleObserved(serde_json::from_value(event.payload.clone())?)
+        }
+        "AgentScreenObserved" => {
+            AgentEvent::ScreenObserved(serde_json::from_value(event.payload.clone())?)
+        }
+        _ => {
+            return Err(events::EsError::Migration(format!(
+                "unsupported agent projection event type: {}",
+                event.r#type
+            )));
+        }
+    };
+    let pane_id = agent_event_pane_id(&agent_event);
+    let current = load_agent_pane(conn, pane_id).await?;
+    match reduce_agent_event(current, &agent_event, event.version, DEFAULT_HOOK_GRACE_MS) {
+        ProjectionChange::Upsert(projection) => {
+            upsert_agent_pane(conn, &projection).await?;
+            Ok(true)
+        }
+        ProjectionChange::Remove(incarnation) => {
+            let removed = conn
+                .execute(
+                    "DELETE FROM agent_panes WHERE pane_id = ?1",
+                    (incarnation.pane_id.as_str(),),
+                )
+                .await?;
+            Ok(removed > 0)
+        }
+        ProjectionChange::Ignore => Ok(false),
+    }
+}
+
+fn agent_event_pane_id(event: &AgentEvent) -> &str {
+    match event {
+        AgentEvent::PaneObserved(event) => &event.pane.incarnation.pane_id,
+        AgentEvent::PaneDeparted(event) => &event.incarnation.pane_id,
+        AgentEvent::LifecycleObserved(event) => &event.incarnation.pane_id,
+        AgentEvent::ScreenObserved(event) => &event.incarnation.pane_id,
+        AgentEvent::MonitorHealthChanged(_) => unreachable!("health events are not pane events"),
+    }
+}
+
+async fn upsert_monitor_health(
+    conn: &turso::Connection,
+    health: &AgentMonitorHealthChanged,
+    event_version: EventStreamVersion,
+) -> events::Result<()> {
+    conn.execute(
+        r#"
+        INSERT INTO agent_monitor_health
+            (component, healthy, reason_code, observed_at_ms, last_event_version)
+        VALUES (?1, ?2, ?3, ?4, ?5)
+        ON CONFLICT(component) DO UPDATE SET
+            healthy = excluded.healthy,
+            reason_code = excluded.reason_code,
+            observed_at_ms = excluded.observed_at_ms,
+            last_event_version = excluded.last_event_version
+        "#,
+        (
+            health.component.as_str(),
+            i64::from(health.healthy),
+            health.reason_code.as_str(),
+            health.observed_at_ms,
+            event_version.get(),
+        ),
+    )
+    .await?;
+    Ok(())
+}
+
+async fn upsert_agent_pane(
+    conn: &turso::Connection,
+    projection: &AgentPaneProjection,
+) -> events::Result<()> {
+    let pane = &projection.pane;
+    conn.execute(
+        r#"
+        INSERT INTO agent_panes (
+            pane_id, pane_pid, agent_pid, agent_started_at_ms, provider_id,
+            tmux_target, session_name, window_index, pane_index, working_directory,
+            provider_display_name, pane_observed_at_ms, hook_state, hook_observed_at_ms,
+            screen_state, screen_classifier_id, screen_observed_at_ms, effective_state,
+            explicit_work_summary, explicit_work_summary_updated_at_ms,
+            screen_work_summary, screen_work_summary_updated_at_ms, work_summary,
+            last_transition_at_ms, last_event_version
+        ) VALUES (
+            ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
+            ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25
+        ) ON CONFLICT(pane_id) DO UPDATE SET
+            pane_pid = excluded.pane_pid,
+            agent_pid = excluded.agent_pid,
+            agent_started_at_ms = excluded.agent_started_at_ms,
+            provider_id = excluded.provider_id,
+            tmux_target = excluded.tmux_target,
+            session_name = excluded.session_name,
+            window_index = excluded.window_index,
+            pane_index = excluded.pane_index,
+            working_directory = excluded.working_directory,
+            provider_display_name = excluded.provider_display_name,
+            pane_observed_at_ms = excluded.pane_observed_at_ms,
+            hook_state = excluded.hook_state,
+            hook_observed_at_ms = excluded.hook_observed_at_ms,
+            screen_state = excluded.screen_state,
+            screen_classifier_id = excluded.screen_classifier_id,
+            screen_observed_at_ms = excluded.screen_observed_at_ms,
+            effective_state = excluded.effective_state,
+            explicit_work_summary = excluded.explicit_work_summary,
+            explicit_work_summary_updated_at_ms = excluded.explicit_work_summary_updated_at_ms,
+            screen_work_summary = excluded.screen_work_summary,
+            screen_work_summary_updated_at_ms = excluded.screen_work_summary_updated_at_ms,
+            work_summary = excluded.work_summary,
+            last_transition_at_ms = excluded.last_transition_at_ms,
+            last_event_version = excluded.last_event_version
+        "#,
+        turso::params![
+            pane.incarnation.pane_id.as_str(),
+            i64::from(pane.incarnation.pane_pid),
+            i64::from(pane.incarnation.agent_pid),
+            pane.incarnation.agent_started_at_ms,
+            pane.incarnation.provider_id.as_str(),
+            pane.tmux_target.as_str(),
+            pane.session_name.as_str(),
+            i64::from(pane.window_index),
+            i64::from(pane.pane_index),
+            pane.working_directory.as_str(),
+            pane.provider_display_name.as_str(),
+            pane.observed_at_ms,
+            projection.hook_state.map(observed_state_text),
+            projection.hook_observed_at_ms,
+            projection.screen_state.map(observed_state_text),
+            projection.screen_classifier_id.as_deref(),
+            projection.screen_observed_at_ms,
+            effective_state_text(projection.effective_state),
+            projection.explicit_work_summary.as_deref(),
+            projection.explicit_work_summary_updated_at_ms,
+            projection.screen_work_summary.as_deref(),
+            projection.screen_work_summary_updated_at_ms,
+            projection.work_summary.as_deref(),
+            projection.last_transition_at_ms,
+            projection.last_event_version.get(),
+        ],
+    )
+    .await?;
+    Ok(())
+}
+
+#[allow(
+    dead_code,
+    reason = "the Task 9 publisher consumes committed snapshots in the next monitor slice"
+)]
+async fn load_agent_panes(conn: &turso::Connection) -> events::Result<Vec<AgentPaneProjection>> {
+    let mut rows = conn
+        .query(
+            format!("SELECT {AGENT_PANE_COLUMNS} FROM agent_panes ORDER BY pane_id"),
+            (),
+        )
+        .await?;
+    let mut panes = Vec::new();
+    while let Some(row) = rows.next().await? {
+        panes.push(agent_pane_from_row(&row)?);
+    }
+    Ok(panes)
+}
+
+async fn load_agent_pane(
+    conn: &turso::Connection,
+    pane_id: &str,
+) -> events::Result<Option<AgentPaneProjection>> {
+    let mut rows = conn
+        .query(
+            format!("SELECT {AGENT_PANE_COLUMNS} FROM agent_panes WHERE pane_id = ?1"),
+            (pane_id,),
+        )
+        .await?;
+    rows.next()
+        .await?
+        .map(|row| agent_pane_from_row(&row))
+        .transpose()
+}
+
+#[allow(
+    dead_code,
+    reason = "the Task 9 publisher consumes committed snapshots in the next monitor slice"
+)]
+async fn load_monitor_health(
+    conn: &turso::Connection,
+) -> events::Result<Vec<MonitorHealthProjection>> {
+    let mut rows = conn
+        .query(
+            r#"
+            SELECT component, healthy, reason_code, observed_at_ms, last_event_version
+            FROM agent_monitor_health
+            ORDER BY component
+            "#,
+            (),
+        )
+        .await?;
+    let mut health = Vec::new();
+    while let Some(row) = rows.next().await? {
+        health.push(MonitorHealthProjection {
+            component: required_text(&row, 0)?,
+            healthy: required_integer(&row, 1)? != 0,
+            reason_code: required_text(&row, 2)?,
+            observed_at_ms: required_integer(&row, 3)?,
+            last_event_version: EventStreamVersion::new(required_integer(&row, 4)?)?,
+        });
+    }
+    Ok(health)
+}
+
+fn agent_pane_from_row(row: &turso::Row) -> events::Result<AgentPaneProjection> {
+    Ok(AgentPaneProjection {
+        pane: crate::agent::domain::AgentPaneObservation {
+            incarnation: crate::agent::domain::AgentIncarnation {
+                pane_id: required_text(row, 0)?,
+                pane_pid: required_u32(row, 1)?,
+                agent_pid: required_u32(row, 2)?,
+                agent_started_at_ms: required_integer(row, 3)?,
+                provider_id: required_text(row, 4)?,
+            },
+            tmux_target: required_text(row, 5)?,
+            session_name: required_text(row, 6)?,
+            window_index: required_u32(row, 7)?,
+            pane_index: required_u32(row, 8)?,
+            working_directory: required_text(row, 9)?,
+            provider_display_name: required_text(row, 10)?,
+            observed_at_ms: required_integer(row, 11)?,
+        },
+        hook_state: optional_text(row, 12)?
+            .map(parse_observed_state)
+            .transpose()?,
+        hook_observed_at_ms: optional_integer(row, 13)?,
+        screen_state: optional_text(row, 14)?
+            .map(parse_observed_state)
+            .transpose()?,
+        screen_classifier_id: optional_text(row, 15)?,
+        screen_observed_at_ms: optional_integer(row, 16)?,
+        effective_state: parse_effective_state(&required_text(row, 17)?)?,
+        explicit_work_summary: optional_text(row, 18)?,
+        explicit_work_summary_updated_at_ms: optional_integer(row, 19)?,
+        screen_work_summary: optional_text(row, 20)?,
+        screen_work_summary_updated_at_ms: optional_integer(row, 21)?,
+        work_summary: optional_text(row, 22)?,
+        last_transition_at_ms: required_integer(row, 23)?,
+        last_event_version: EventStreamVersion::new(required_integer(row, 24)?)?,
+    })
+}
+
+fn required_text(row: &turso::Row, index: usize) -> events::Result<String> {
+    row.get_value(index)?
+        .as_text()
+        .map(ToString::to_string)
+        .ok_or_else(|| events::EsError::Cursor(format!("projection column {index} is not text")))
+}
+
+fn optional_text(row: &turso::Row, index: usize) -> events::Result<Option<String>> {
+    let value = row.get_value(index)?;
+    if value.is_null() {
+        return Ok(None);
+    }
+    value
+        .as_text()
+        .map(|text| Some(text.to_string()))
+        .ok_or_else(|| events::EsError::Cursor(format!("projection column {index} is not text")))
+}
+
+fn required_integer(row: &turso::Row, index: usize) -> events::Result<i64> {
+    row.get_value(index)?.as_integer().copied().ok_or_else(|| {
+        events::EsError::Cursor(format!("projection column {index} is not an integer"))
+    })
+}
+
+fn optional_integer(row: &turso::Row, index: usize) -> events::Result<Option<i64>> {
+    let value = row.get_value(index)?;
+    if value.is_null() {
+        return Ok(None);
+    }
+    value.as_integer().copied().map(Some).ok_or_else(|| {
+        events::EsError::Cursor(format!("projection column {index} is not an integer"))
+    })
+}
+
+fn required_u32(row: &turso::Row, index: usize) -> events::Result<u32> {
+    u32::try_from(required_integer(row, index)?)
+        .map_err(|_| events::EsError::Cursor(format!("projection column {index} is not a u32")))
+}
+
+fn observed_state_text(state: ObservedAgentState) -> &'static str {
+    match state {
+        ObservedAgentState::Busy => "busy",
+        ObservedAgentState::Idle => "idle",
+    }
+}
+
+fn parse_observed_state(value: String) -> events::Result<ObservedAgentState> {
+    match value.as_str() {
+        "busy" => Ok(ObservedAgentState::Busy),
+        "idle" => Ok(ObservedAgentState::Idle),
+        _ => Err(events::EsError::Cursor(format!(
+            "invalid observed agent state: {value}"
+        ))),
+    }
+}
+
+fn effective_state_text(state: EffectiveAgentState) -> &'static str {
+    match state {
+        EffectiveAgentState::Busy => "busy",
+        EffectiveAgentState::Idle => "idle",
+        EffectiveAgentState::Unknown => "unknown",
+    }
+}
+
+fn parse_effective_state(value: &str) -> events::Result<EffectiveAgentState> {
+    match value {
+        "busy" => Ok(EffectiveAgentState::Busy),
+        "idle" => Ok(EffectiveAgentState::Idle),
+        "unknown" => Ok(EffectiveAgentState::Unknown),
+        _ => Err(events::EsError::Cursor(format!(
+            "invalid effective agent state: {value}"
+        ))),
+    }
+}
+
+fn now_ms() -> i64 {
+    (time::OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000) as i64
 }
 
 async fn configure_state_database(conn: &turso::Connection) -> events::Result<()> {

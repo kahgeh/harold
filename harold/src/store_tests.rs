@@ -5,7 +5,7 @@ use events::EventStreamVersion;
 use crate::agent::domain::{
     AgentEvent, AgentIncarnation, AgentLifecycleObserved, AgentMonitorHealthChanged,
     AgentPaneDeparted, AgentPaneObservation, AgentPaneObserved, AgentScreenObserved,
-    ObservedAgentState, WorkSummaryUpdate,
+    EffectiveAgentState, ObservedAgentState, WorkSummaryUpdate,
 };
 
 use super::{
@@ -279,7 +279,10 @@ async fn staging_is_ordered_checkpointed_and_idempotent() {
     .await
     .unwrap();
 
-    assert_eq!(store.stage_unhandled_events(500).await.unwrap(), 2);
+    let batch = store.project_unhandled_events(500).await.unwrap();
+    assert_eq!(batch.applied, 2);
+    assert_eq!(batch.through_event_version.get(), 2);
+    assert!(!batch.snapshot_changed);
     assert_eq!(store.last_processed_version().await.unwrap().get(), 2);
 
     let first = store.next_pending_delivery().await.unwrap().unwrap();
@@ -293,7 +296,10 @@ async fn staging_is_ordered_checkpointed_and_idempotent() {
     store.mark_delivered(&second.event_id).await.unwrap();
 
     assert!(store.next_pending_delivery().await.unwrap().is_none());
-    assert_eq!(store.stage_unhandled_events(500).await.unwrap(), 0);
+    assert_eq!(
+        store.project_unhandled_events(500).await.unwrap().applied,
+        0
+    );
     assert!(store.next_pending_delivery().await.unwrap().is_none());
 }
 
@@ -309,7 +315,7 @@ async fn failed_delivery_remains_pending_until_marked_delivered() {
     )
     .await
     .unwrap();
-    store.stage_unhandled_events(500).await.unwrap();
+    store.project_unhandled_events(500).await.unwrap();
     let pending = store.next_pending_delivery().await.unwrap().unwrap();
 
     store
@@ -358,7 +364,10 @@ async fn reopening_preserves_checkpoint_and_pending_delivery_without_duplication
     )
     .await
     .unwrap();
-    assert_eq!(store.stage_unhandled_events(500).await.unwrap(), 1);
+    assert_eq!(
+        store.project_unhandled_events(500).await.unwrap().applied,
+        1
+    );
     let pending_id = store
         .next_pending_delivery()
         .await
@@ -369,9 +378,315 @@ async fn reopening_preserves_checkpoint_and_pending_delivery_without_duplication
 
     let reopened = HaroldStore::open(directory.path()).await.unwrap();
     assert_eq!(reopened.last_processed_version().await.unwrap().get(), 1);
-    assert_eq!(reopened.stage_unhandled_events(500).await.unwrap(), 0);
+    assert_eq!(
+        reopened
+            .project_unhandled_events(500)
+            .await
+            .unwrap()
+            .applied,
+        0
+    );
     let pending = reopened.next_pending_delivery().await.unwrap().unwrap();
     assert_eq!(pending.event_id, pending_id);
     reopened.mark_delivered(&pending.event_id).await.unwrap();
     assert!(reopened.next_pending_delivery().await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn projection_migration_is_idempotent_and_preserves_earlier_records() {
+    let directory = TestDirectory::new();
+    let store = HaroldStore::open(directory.path()).await.unwrap();
+    drop(store);
+    let store = HaroldStore::open(directory.path()).await.unwrap();
+    let conn = store.state.connect().unwrap();
+    let mut rows = conn
+        .query("SELECT name FROM _migrations ORDER BY id", ())
+        .await
+        .unwrap();
+    let mut names = Vec::new();
+    while let Some(row) = rows.next().await.unwrap() {
+        names.push(row.get_value(0).unwrap().as_text().unwrap().to_string());
+    }
+    assert_eq!(
+        names,
+        [
+            "001_last_processed_event",
+            "002_delivery_outbox",
+            "003_agent_monitor_projection",
+        ]
+    );
+
+    conn.execute(
+        "UPDATE _migrations SET checksum = 'changed' WHERE name = '003_agent_monitor_projection'",
+        (),
+    )
+    .await
+    .unwrap();
+    drop(conn);
+    drop(store);
+
+    let error = HaroldStore::open(directory.path())
+        .await
+        .err()
+        .expect("changed projection migration checksum should fail");
+    assert!(error.to_string().contains("checksum changed"));
+}
+
+#[tokio::test]
+async fn projection_stages_only_deliveries_and_projects_agent_events_in_one_batch() {
+    let directory = TestDirectory::new();
+    let store = HaroldStore::open(directory.path()).await.unwrap();
+    append_agent_events(
+        &store,
+        vec![AgentEvent::PaneObserved(AgentPaneObserved {
+            pane: agent_pane(),
+        })],
+    )
+    .await
+    .unwrap();
+    append_turn_completed(
+        &store,
+        &TurnCompleted {
+            pane_id: "%7".into(),
+            pane_label: "harold:2.1".into(),
+            last_user_prompt: "project state".into(),
+            assistant_message: "projected".into(),
+            main_context: "harold".into(),
+        },
+    )
+    .await
+    .unwrap();
+    append_agent_events(
+        &store,
+        vec![AgentEvent::LifecycleObserved(AgentLifecycleObserved {
+            incarnation: agent_incarnation(),
+            state: ObservedAgentState::Busy,
+            adapter_id: "hook-v1".into(),
+            work_summary: WorkSummaryUpdate::Set("Fix the projector".into()),
+            observed_at_ms: 101,
+        })],
+    )
+    .await
+    .unwrap();
+    append_inbound_message(
+        &store,
+        &InboundMessage {
+            text: "continue".into(),
+        },
+    )
+    .await
+    .unwrap();
+    append_agent_events(
+        &store,
+        vec![AgentEvent::MonitorHealthChanged(
+            AgentMonitorHealthChanged {
+                component: "screen".into(),
+                healthy: false,
+                reason_code: "capture_failed".into(),
+                observed_at_ms: 102,
+            },
+        )],
+    )
+    .await
+    .unwrap();
+
+    let batch = store.project_unhandled_events(500).await.unwrap();
+    assert_eq!(batch.applied, 5);
+    assert_eq!(batch.through_event_version.get(), 5);
+    assert!(batch.snapshot_changed);
+    assert_eq!(store.last_processed_version().await.unwrap().get(), 5);
+
+    let snapshot = store.load_agent_snapshot().await.unwrap();
+    assert_eq!(snapshot.through_event_version.get(), 5);
+    assert_eq!(snapshot.monitor_health.len(), 1);
+    assert_eq!(snapshot.monitor_health[0].component, "screen");
+    assert!(!snapshot.monitor_health[0].healthy);
+    assert_eq!(snapshot.monitor_health[0].reason_code, "capture_failed");
+    assert_eq!(snapshot.monitor_health[0].last_event_version.get(), 5);
+    assert_eq!(snapshot.panes.len(), 1);
+    assert_eq!(snapshot.panes[0].pane, agent_pane());
+    assert_eq!(snapshot.panes[0].effective_state, EffectiveAgentState::Busy);
+    assert_eq!(
+        snapshot.panes[0].work_summary.as_deref(),
+        Some("Fix the projector")
+    );
+    assert_eq!(
+        snapshot.panes[0].explicit_work_summary_updated_at_ms,
+        Some(101)
+    );
+
+    let first = store.next_pending_delivery().await.unwrap().unwrap();
+    assert_eq!(first.event_version.get(), 2);
+    assert_eq!(first.event_type, "TurnCompleted");
+    store.mark_delivered(&first.event_id).await.unwrap();
+    let second = store.next_pending_delivery().await.unwrap().unwrap();
+    assert_eq!(second.event_version.get(), 4);
+    assert_eq!(second.event_type, "InboundMessageReceived");
+    store.mark_delivered(&second.event_id).await.unwrap();
+    assert!(store.next_pending_delivery().await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn failed_projection_rolls_back_all_changes_and_replays_after_restart() {
+    let directory = TestDirectory::new();
+    let store = HaroldStore::open(directory.path()).await.unwrap();
+    append_agent_events(
+        &store,
+        vec![AgentEvent::PaneObserved(AgentPaneObserved {
+            pane: agent_pane(),
+        })],
+    )
+    .await
+    .unwrap();
+    append_inbound_message(
+        &store,
+        &InboundMessage {
+            text: "replay me".into(),
+        },
+    )
+    .await
+    .unwrap();
+
+    store.fail_projection_before_checkpoint_for_test();
+    assert!(store.project_unhandled_events(500).await.is_err());
+    assert_eq!(store.last_processed_version().await.unwrap().get(), 0);
+    assert!(store.load_agent_snapshot().await.unwrap().panes.is_empty());
+    assert!(store.next_pending_delivery().await.unwrap().is_none());
+    drop(store);
+
+    let reopened = HaroldStore::open(directory.path()).await.unwrap();
+    let batch = reopened.project_unhandled_events(500).await.unwrap();
+    assert_eq!(batch.applied, 2);
+    assert_eq!(batch.through_event_version.get(), 2);
+    assert_eq!(reopened.load_agent_snapshot().await.unwrap().panes.len(), 1);
+    let pending = reopened.next_pending_delivery().await.unwrap().unwrap();
+    assert_eq!(pending.event_type, "InboundMessageReceived");
+}
+
+#[tokio::test]
+async fn projection_preserves_summary_candidates_across_restart_without_raw_screen_text() {
+    const RAW_SCREEN_SENTINEL: &str = "RAW_SCREEN_SENTINEL_DO_NOT_STORE";
+
+    let directory = TestDirectory::new();
+    let store = HaroldStore::open(directory.path()).await.unwrap();
+    append_agent_events(
+        &store,
+        vec![
+            AgentEvent::PaneObserved(AgentPaneObserved { pane: agent_pane() }),
+            AgentEvent::ScreenObserved(AgentScreenObserved {
+                incarnation: agent_incarnation(),
+                state: None,
+                classifier_id: "screen-v1".into(),
+                fallback_summary: Some(format!("\u{1b}P{RAW_SCREEN_SENTINEL}\u{1b}\\Review tests")),
+                observed_at_ms: 110,
+            }),
+            AgentEvent::ScreenObserved(AgentScreenObserved {
+                incarnation: agent_incarnation(),
+                state: Some(ObservedAgentState::Idle),
+                classifier_id: "screen-v1".into(),
+                fallback_summary: None,
+                observed_at_ms: 120,
+            }),
+            AgentEvent::LifecycleObserved(AgentLifecycleObserved {
+                incarnation: agent_incarnation(),
+                state: ObservedAgentState::Busy,
+                adapter_id: "hook-v1".into(),
+                work_summary: WorkSummaryUpdate::Set("Fix projection".into()),
+                observed_at_ms: 130,
+            }),
+            AgentEvent::LifecycleObserved(AgentLifecycleObserved {
+                incarnation: agent_incarnation(),
+                state: ObservedAgentState::Idle,
+                adapter_id: "hook-v1".into(),
+                work_summary: WorkSummaryUpdate::Clear,
+                observed_at_ms: 140,
+            }),
+        ],
+    )
+    .await
+    .unwrap();
+
+    store.project_unhandled_events(500).await.unwrap();
+    let snapshot = store.load_agent_snapshot().await.unwrap();
+    let pane = &snapshot.panes[0];
+    assert_eq!(pane.work_summary.as_deref(), Some("Review tests"));
+    assert_eq!(pane.explicit_work_summary, None);
+    assert_eq!(pane.explicit_work_summary_updated_at_ms, None);
+    assert_eq!(pane.screen_work_summary.as_deref(), Some("Review tests"));
+    assert_eq!(pane.screen_work_summary_updated_at_ms, Some(110));
+    assert_eq!(pane.screen_state, Some(ObservedAgentState::Idle));
+    assert_eq!(pane.screen_observed_at_ms, Some(120));
+    assert_eq!(pane.last_event_version.get(), 5);
+
+    let events = store
+        .stream()
+        .load_after_version(EventStreamVersion::start(), 500)
+        .await
+        .unwrap();
+    assert!(
+        events
+            .iter()
+            .all(|event| !event.payload.to_string().contains(RAW_SCREEN_SENTINEL))
+    );
+    let conn = store.state.connect().unwrap();
+    let mut rows = conn
+        .query(
+            r#"
+            SELECT COUNT(*)
+            FROM agent_panes
+            WHERE instr(pane_id, ?1) > 0
+               OR instr(provider_id, ?1) > 0
+               OR instr(tmux_target, ?1) > 0
+               OR instr(session_name, ?1) > 0
+               OR instr(working_directory, ?1) > 0
+               OR instr(provider_display_name, ?1) > 0
+               OR instr(screen_classifier_id, ?1) > 0
+               OR instr(explicit_work_summary, ?1) > 0
+               OR instr(screen_work_summary, ?1) > 0
+               OR instr(work_summary, ?1) > 0
+            "#,
+            (RAW_SCREEN_SENTINEL,),
+        )
+        .await
+        .unwrap();
+    let count_value = rows.next().await.unwrap().unwrap().get_value(0).unwrap();
+    assert_eq!(*count_value.as_integer().unwrap(), 0);
+    assert!(
+        conn.execute(
+            "UPDATE agent_panes SET screen_work_summary = NULL WHERE pane_id = ?1",
+            ("%7",),
+        )
+        .await
+        .is_err()
+    );
+    assert!(
+        conn.execute(
+            "UPDATE agent_panes SET work_summary = ?1 WHERE pane_id = ?2",
+            ("x".repeat(161), "%7"),
+        )
+        .await
+        .is_err()
+    );
+    assert!(
+        conn.execute(
+            "UPDATE agent_panes SET screen_work_summary = ?1 WHERE pane_id = ?2",
+            ("x".repeat(161), "%7"),
+        )
+        .await
+        .is_err()
+    );
+    drop(conn);
+    drop(store);
+
+    let reopened = HaroldStore::open(directory.path()).await.unwrap();
+    let snapshot = reopened.load_agent_snapshot().await.unwrap();
+    assert_eq!(snapshot.through_event_version.get(), 5);
+    assert_eq!(
+        snapshot.panes[0].work_summary.as_deref(),
+        Some("Review tests")
+    );
+    assert_eq!(
+        snapshot.panes[0].screen_work_summary_updated_at_ms,
+        Some(110)
+    );
 }

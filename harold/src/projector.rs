@@ -65,7 +65,7 @@ pub(crate) async fn handle_next_delivery(
     store: &HaroldStore,
     dispatcher: Arc<dyn DeliveryDispatcher>,
 ) -> Result<bool, HandlerError> {
-    store.stage_unhandled_events(500).await?;
+    store.project_unhandled_events(500).await?;
     let Some(delivery) = store.next_pending_delivery().await? else {
         return Ok(false);
     };

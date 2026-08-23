@@ -8,10 +8,11 @@ use super::{
     DeliveryDispatcher, DispatchError, ProductionDispatcher, handle_next_delivery,
     run_event_handler,
 };
+use crate::agent::domain::{AgentEvent, AgentIncarnation, AgentPaneObservation, AgentPaneObserved};
 use crate::outbound::DeliveryOutcome;
 use crate::store::{
-    HaroldStore, InboundMessage, PendingDelivery, TurnCompleted, append_inbound_message,
-    append_turn_completed,
+    HaroldStore, InboundMessage, PendingDelivery, TurnCompleted, append_agent_events,
+    append_inbound_message, append_turn_completed,
 };
 
 struct TestDirectory(std::path::PathBuf);
@@ -225,5 +226,43 @@ async fn malformed_known_event_does_not_block_a_valid_later_delivery() {
         *dispatcher.event_types.lock().unwrap(),
         ["InboundMessageReceived"]
     );
+    assert!(store.next_pending_delivery().await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn agent_only_events_are_projected_without_creating_a_delivery() {
+    let directory = TestDirectory::new();
+    let store = HaroldStore::open(&directory.0).await.unwrap();
+    append_agent_events(
+        &store,
+        vec![AgentEvent::PaneObserved(AgentPaneObserved {
+            pane: AgentPaneObservation {
+                incarnation: AgentIncarnation {
+                    pane_id: "%11".into(),
+                    pane_pid: 11,
+                    agent_pid: 12,
+                    agent_started_at_ms: 1_000,
+                    provider_id: "codex".into(),
+                },
+                tmux_target: "harold:2.1".into(),
+                session_name: "harold".into(),
+                window_index: 2,
+                pane_index: 1,
+                working_directory: "/work/harold".into(),
+                provider_display_name: "Codex".into(),
+                observed_at_ms: 100,
+            },
+        })],
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        !handle_next_delivery(&store, Arc::new(RecordingDispatcher::default()))
+            .await
+            .unwrap()
+    );
+    assert_eq!(store.last_processed_version().await.unwrap().get(), 1);
+    assert_eq!(store.load_agent_snapshot().await.unwrap().panes.len(), 1);
     assert!(store.next_pending_delivery().await.unwrap().is_none());
 }
