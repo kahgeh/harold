@@ -79,11 +79,36 @@ impl Harold for HaroldService {
 
     async fn report_agent_state(
         &self,
-        _request: Request<ReportAgentStateRequest>,
+        request: Request<ReportAgentStateRequest>,
     ) -> Result<Response<ReportAgentStateResponse>, Status> {
-        Err(Status::unimplemented(
-            "agent state reporting is not implemented",
-        ))
+        let req = request.into_inner();
+        let state = match AgentState::try_from(req.state) {
+            Ok(AgentState::Busy) => agent::domain::ObservedAgentState::Busy,
+            Ok(AgentState::Idle) => agent::domain::ObservedAgentState::Idle,
+            Ok(AgentState::Unspecified | AgentState::Unknown) | Err(_) => {
+                return Err(Status::invalid_argument("invalid agent state report"));
+            }
+        };
+        let summary_update = agent::summary::explicit_summary_update(req.work_summary.as_deref());
+
+        self.monitor
+            .report_lifecycle(req.pane_id, state, req.adapter_id, summary_update)
+            .await
+            .map_err(|error| match error {
+                agent::runtime::MonitorCommandError::InvalidInput => {
+                    Status::invalid_argument("invalid agent state report")
+                }
+                agent::runtime::MonitorCommandError::AgentNotFound => {
+                    Status::failed_precondition("agent incarnation not found")
+                }
+                agent::runtime::MonitorCommandError::InventoryUnavailable
+                | agent::runtime::MonitorCommandError::EventAppend(_)
+                | agent::runtime::MonitorCommandError::RuntimeStopped => {
+                    Status::unavailable("agent state report unavailable")
+                }
+            })?;
+
+        Ok(Response::new(ReportAgentStateResponse { accepted: true }))
     }
 
     async fn watch_agent_states(

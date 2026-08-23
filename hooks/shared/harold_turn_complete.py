@@ -13,6 +13,22 @@ from pathlib import Path
 HAROLD_ADDR = os.getenv("HAROLD_ADDR", "localhost:50060")
 HAROLD_PROTO = Path.home() / "bin/harold/harold.proto"
 HAROLD_BINARY = Path.home() / "bin/harold/harold"
+TERMINAL_SEQUENCE_RE = re.compile(
+    r"""
+    \x1b
+    (?:
+        \[[0-?]*[ -/]*[@-~]
+        |\][^\x07\x1b]*(?:\x07|\x1b\\)
+        |[PX^_][^\x1b]*(?:\x1b\\)
+        |[ -/]*[@-~]
+    )
+    |
+    \x9b[0-?]*[ -/]*[@-~]
+    |
+    [\x90\x98\x9d\x9e\x9f][^\x9c]*\x9c
+    """,
+    re.VERBOSE,
+)
 
 
 @dataclass(frozen=True)
@@ -23,7 +39,8 @@ class TurnComplete:
 
 
 def clean_text(value: str, limit: int) -> str:
-    value = re.sub(r"[^\x09\x0a\x0d\x20-\x7e]", "", value)
+    value = TERMINAL_SEQUENCE_RE.sub("", value)
+    value = re.sub(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]", "", value)
     value = re.sub(r"\s+", " ", value).strip()
     return value[:limit]
 
