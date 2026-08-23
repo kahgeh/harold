@@ -12,8 +12,28 @@ path = "~/Library/Messages/chat.db"
 
 [ai]
 
-[agents]
-command_contains = ["claude", "codex"]
+[agent_monitor]
+inventory_interval_ms = 1000
+screen_interval_ms = 500
+hook_grace_ms = 2000
+
+[[agents]]
+id = "codex"
+display_name = "Codex"
+command_contains = ["codex"]
+busy_all = ["Working", "esc to interrupt"]
+idle_all = ["Ask Codex to do anything"]
+summary_line_prefixes = ["›"]
+
+[[agents]]
+id = "claude"
+display_name = "Claude"
+command_contains = ["claude"]
+
+[[agents]]
+id = "opencode"
+display_name = "OpenCode"
+command_contains = ["opencode"]
 
 [tts]
 command = "say"

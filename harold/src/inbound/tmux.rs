@@ -1,131 +1,45 @@
 use std::process::Command;
 
-use tracing::info;
+use tracing::{info, warn};
 
-use crate::settings::{AgentSettings, get_settings};
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ProcessInfo {
-    pub(crate) pid: u32,
-    pub(crate) ppid: u32,
-    pub(crate) command: String,
-}
-
-// ---------------------------------------------------------------------------
-// Process detection
-// ---------------------------------------------------------------------------
-
-fn command_matches_agent(command: &str, settings: &AgentSettings) -> bool {
-    let command = command.trim().to_lowercase();
-    settings.command_contains.iter().any(|needle| {
-        let needle = needle.trim().to_lowercase();
-        !needle.is_empty() && command.contains(&needle)
-    })
-}
-
-fn process_tree_contains_agent(
-    pane_pid: u32,
-    processes: &[ProcessInfo],
-    settings: &AgentSettings,
-) -> bool {
-    let mut pending = vec![pane_pid];
-
-    while let Some(pid) = pending.pop() {
-        for process in processes.iter().filter(|process| process.ppid == pid) {
-            if command_matches_agent(&process.command, settings) {
-                return true;
-            }
-            pending.push(process.pid);
-        }
-
-        if let Some(process) = processes.iter().find(|process| process.pid == pid)
-            && command_matches_agent(&process.command, settings)
-        {
-            return true;
-        }
-    }
-
-    false
-}
-
-fn read_process_table() -> Vec<ProcessInfo> {
-    let out = match Command::new("ps")
-        .args(["-axo", "pid=,ppid=,comm="])
-        .output()
-    {
-        Ok(o) => o,
-        Err(_) => return vec![],
-    };
-
-    String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .filter_map(|line| {
-            let mut parts = line.split_whitespace();
-            let pid = parts.next()?.parse().ok()?;
-            let ppid = parts.next()?.parse().ok()?;
-            let command = parts.next()?.to_string();
-            Some(ProcessInfo { pid, ppid, command })
-        })
-        .collect()
-}
+use crate::agent::domain::AgentPaneObservation;
+use crate::agent::inventory::{AgentInventoryPort, TmuxAgentInventory};
+use crate::settings::get_settings;
 
 // ---------------------------------------------------------------------------
 // Live pane discovery
 // ---------------------------------------------------------------------------
 
 pub(crate) fn scan_live_panes() -> Vec<super::directory::AgentAddress> {
-    let settings = get_settings();
-    let processes = read_process_table();
-    let out = match Command::new("tmux")
-        .args([
-            "list-panes",
-            "-a",
-            "-F",
-            "#{pane_id}|#{session_name}:#{window_index}.#{pane_index}|#{pane_pid}",
-        ])
-        .output()
-    {
-        Ok(o) => o,
-        Err(_) => return vec![],
-    };
-
-    String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .filter_map(|line| {
-            let parts: Vec<&str> = line.splitn(3, '|').collect();
-            if parts.len() != 3 {
-                return None;
-            }
-            let pane_pid = parts[2].parse().ok()?;
-            let pane_id = parts[0].to_string();
-            let label = parts[1]
-                .chars()
-                .filter(|c| c.is_ascii_graphic() || *c == ' ')
-                .collect::<String>()
-                .split_whitespace()
-                .collect::<Vec<_>>()
-                .join(" ");
-            if process_tree_contains_agent(pane_pid, &processes, &settings.agents) {
-                Some(super::directory::AgentAddress::TmuxPane { pane_id, label })
-            } else {
-                None
-            }
-        })
-        .collect()
+    let inventory = TmuxAgentInventory::new(get_settings().agents.clone());
+    match inventory.scan() {
+        Ok(observations) => observations
+            .into_iter()
+            .map(observation_to_address)
+            .collect(),
+        Err(error) => {
+            warn!(?error, "agent inventory scan failed");
+            Vec::new()
+        }
+    }
 }
 
 pub(crate) fn is_pane_alive(pane_id: &str) -> bool {
-    let pane_pid = match Command::new("tmux")
-        .args(["display-message", "-t", pane_id, "-p", "#{pane_pid}"])
-        .output()
-    {
-        Ok(o) => String::from_utf8_lossy(&o.stdout).trim().parse().ok(),
-        Err(_) => None,
-    };
+    let inventory = TmuxAgentInventory::new(get_settings().agents.clone());
+    match inventory.resolve(pane_id) {
+        Ok(observation) => observation.is_some(),
+        Err(error) => {
+            warn!(?error, pane_id, "agent inventory resolve failed");
+            false
+        }
+    }
+}
 
-    pane_pid.is_some_and(|pane_pid| {
-        process_tree_contains_agent(pane_pid, &read_process_table(), &get_settings().agents)
-    })
+fn observation_to_address(observation: AgentPaneObservation) -> super::directory::AgentAddress {
+    super::directory::AgentAddress::TmuxPane {
+        pane_id: observation.incarnation.pane_id,
+        label: observation.tmux_target,
+    }
 }
 
 // ---------------------------------------------------------------------------

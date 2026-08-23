@@ -10,9 +10,16 @@ cli_path = "/path/to/claude"
 # local_model = "Qwen/Qwen3-32B-MLX-8bit"
 # local_model_dir = "/path/to/mlx-lm"
 
-# [agents]
-# Text fragments recognized in a pane process command or descendant process command.
-# command_contains = ["claude", "codex"]
+# Override the named provider list only when custom process or visible-screen
+# markers are required. An old `[agents] command_contains = [...]` table remains
+# loadable as a deprecated presence-only matcher.
+# [[agents]]
+# id = "custom-agent"
+# display_name = "Custom Agent"
+# command_contains = ["custom-agent"]
+# busy_all = ["Working"]
+# idle_all = ["Ready"]
+# summary_line_prefixes = [">"]
 
 [store]
 path = "~/bin/harold/data/events"
