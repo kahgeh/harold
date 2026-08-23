@@ -724,6 +724,15 @@ async fn startup_repairs_all_legacy_placeholders_before_the_first_watch_snapshot
     screen_only.incarnation.agent_started_at_ms = 9_000;
     screen_only.pane_index = 4;
     screen_only.observed_at_ms = 9_500;
+    let mut removed_provider = resolved_pane();
+    removed_provider.incarnation.pane_id = "%10".into();
+    removed_provider.incarnation.pane_pid = 101;
+    removed_provider.incarnation.agent_pid = 102;
+    removed_provider.incarnation.agent_started_at_ms = 10_000;
+    removed_provider.incarnation.provider_id = "removed-codex".into();
+    removed_provider.provider_display_name = "Removed Codex".into();
+    removed_provider.pane_index = 5;
+    removed_provider.observed_at_ms = 10_500;
     store::append_agent_events(
         &store,
         vec![
@@ -753,6 +762,16 @@ async fn startup_repairs_all_legacy_placeholders_before_the_first_watch_snapshot
                 classifier_id: "legacy-screen".into(),
                 fallback_summary: Some(PLACEHOLDER.into()),
                 observed_at_ms: 9_520,
+            }),
+            AgentEvent::PaneObserved(AgentPaneObserved {
+                pane: removed_provider.clone(),
+            }),
+            AgentEvent::LifecycleObserved(AgentLifecycleObserved {
+                incarnation: removed_provider.incarnation.clone(),
+                state: ObservedAgentState::Idle,
+                adapter_id: "legacy-hook".into(),
+                work_summary: WorkSummaryUpdate::Set(PLACEHOLDER.into()),
+                observed_at_ms: 10_510,
             }),
         ],
     )
@@ -787,7 +806,7 @@ async fn startup_repairs_all_legacy_placeholders_before_the_first_watch_snapshot
         .unwrap()
         .into_inner();
     let first = stream.next().await.expect("first snapshot").unwrap();
-    assert_eq!(first.panes.len(), 2);
+    assert_eq!(first.panes.len(), 3);
     assert_eq!(
         first
             .panes
@@ -807,6 +826,15 @@ async fn startup_repairs_all_legacy_placeholders_before_the_first_watch_snapshot
             .as_deref(),
         Some(LEGITIMATE)
     );
+    assert_eq!(
+        first
+            .panes
+            .iter()
+            .find(|pane| pane.pane_id == removed_provider.incarnation.pane_id)
+            .unwrap()
+            .work_summary,
+        None
+    );
 
     let events = store
         .stream()
@@ -818,7 +846,7 @@ async fn startup_repairs_all_legacy_placeholders_before_the_first_watch_snapshot
         .filter(|event| event.r#type == "AgentWorkSummaryCandidatesRepaired")
         .map(|event| serde_json::from_value(event.payload.clone()).unwrap())
         .collect();
-    assert_eq!(repairs.len(), 2);
+    assert_eq!(repairs.len(), 3);
     assert!(repairs.iter().any(|repair| {
         repair.incarnation == explicit_only.incarnation
             && repair.clear_explicit
@@ -829,7 +857,12 @@ async fn startup_repairs_all_legacy_placeholders_before_the_first_watch_snapshot
             && !repair.clear_explicit
             && repair.clear_screen
     }));
-    assert!(events.iter().skip(5).all(|event| {
+    assert!(repairs.iter().any(|repair| {
+        repair.incarnation == removed_provider.incarnation
+            && repair.clear_explicit
+            && !repair.clear_screen
+    }));
+    assert!(events.iter().skip(7).all(|event| {
         !serde_json::to_string(&event.payload)
             .unwrap()
             .contains(PLACEHOLDER)
@@ -843,10 +876,33 @@ async fn startup_repairs_all_legacy_placeholders_before_the_first_watch_snapshot
 
     let reopened = store::HaroldStore::open(&directory.0).await.unwrap();
     let after_shutdown = reopened.load_agent_snapshot().await.unwrap();
-    assert_eq!(after_shutdown.panes[0].work_summary, None);
     assert_eq!(
-        after_shutdown.panes[1].work_summary.as_deref(),
+        after_shutdown
+            .panes
+            .iter()
+            .find(|pane| pane.pane.incarnation == explicit_only.incarnation)
+            .unwrap()
+            .work_summary,
+        None
+    );
+    assert_eq!(
+        after_shutdown
+            .panes
+            .iter()
+            .find(|pane| pane.pane.incarnation == screen_only.incarnation)
+            .unwrap()
+            .work_summary
+            .as_deref(),
         Some(LEGITIMATE)
+    );
+    assert_eq!(
+        after_shutdown
+            .panes
+            .iter()
+            .find(|pane| pane.pane.incarnation == removed_provider.incarnation)
+            .unwrap()
+            .work_summary,
+        None
     );
 }
 

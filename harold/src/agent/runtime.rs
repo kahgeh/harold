@@ -483,19 +483,13 @@ pub(crate) async fn append_configured_placeholder_repairs(
     providers: &[AgentProviderSettings],
     snapshot: &AgentSnapshot,
 ) -> events::Result<bool> {
-    let providers: HashMap<&str, &AgentProviderSettings> = providers
-        .iter()
-        .map(|provider| (provider.id.as_str(), provider))
-        .collect();
     let observed_at_ms = now_ms();
     let repairs: Vec<AgentWorkSummaryCandidatesRepaired> = snapshot
         .panes
         .iter()
         .filter_map(|projection| {
             repair_event(
-                providers
-                    .get(projection.pane.incarnation.provider_id.as_str())
-                    .copied(),
+                providers.iter(),
                 &projection.pane.incarnation,
                 projection.explicit_work_summary.as_deref(),
                 projection.screen_work_summary.as_deref(),
@@ -952,7 +946,7 @@ impl AgentMonitorRuntime {
         observed_at_ms: i64,
     ) -> Option<AgentWorkSummaryCandidatesRepaired> {
         repair_event(
-            self.providers.get(&incarnation.provider_id),
+            self.providers.values(),
             incarnation,
             explicit_summary,
             screen_summary,
@@ -980,9 +974,11 @@ impl AgentMonitorRuntime {
         incarnation: &AgentIncarnation,
         summary: &str,
     ) -> bool {
-        self.providers
-            .get(&incarnation.provider_id)
-            .is_some_and(|provider| matches_configured_placeholder(summary, &provider.idle_all))
+        matches_configured_placeholder_for_provider(
+            self.providers.values(),
+            &incarnation.provider_id,
+            summary,
+        )
     }
 
     fn matches_any_configured_placeholder(&self, summary: &str) -> bool {
@@ -1061,18 +1057,41 @@ fn matches_configured_placeholder(summary: &str, fragments: &[String]) -> bool {
         && normalize_fallback_summary(summary, fragments).is_none()
 }
 
-fn repair_event(
-    provider: Option<&AgentProviderSettings>,
+fn matches_configured_placeholder_for_provider<'a>(
+    mut providers: impl Iterator<Item = &'a AgentProviderSettings> + Clone,
+    provider_id: &str,
+    summary: &str,
+) -> bool {
+    if let Some(provider) = providers
+        .clone()
+        .find(|provider| provider.id == provider_id)
+    {
+        return matches_configured_placeholder(summary, &provider.idle_all);
+    }
+    providers.any(|provider| matches_configured_placeholder(summary, &provider.idle_all))
+}
+
+fn repair_event<'a>(
+    providers: impl Iterator<Item = &'a AgentProviderSettings> + Clone,
     incarnation: &AgentIncarnation,
     explicit_summary: Option<&str>,
     screen_summary: Option<&str>,
     observed_at_ms: i64,
 ) -> Option<AgentWorkSummaryCandidatesRepaired> {
-    let provider = provider?;
-    let clear_explicit = explicit_summary
-        .is_some_and(|summary| matches_configured_placeholder(summary, &provider.idle_all));
-    let clear_screen = screen_summary
-        .is_some_and(|summary| matches_configured_placeholder(summary, &provider.idle_all));
+    let clear_explicit = explicit_summary.is_some_and(|summary| {
+        matches_configured_placeholder_for_provider(
+            providers.clone(),
+            &incarnation.provider_id,
+            summary,
+        )
+    });
+    let clear_screen = screen_summary.is_some_and(|summary| {
+        matches_configured_placeholder_for_provider(
+            providers.clone(),
+            &incarnation.provider_id,
+            summary,
+        )
+    });
     (clear_explicit || clear_screen).then(|| AgentWorkSummaryCandidatesRepaired {
         incarnation: incarnation.clone(),
         clear_explicit,

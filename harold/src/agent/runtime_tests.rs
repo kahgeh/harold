@@ -589,6 +589,164 @@ async fn configured_placeholder_ingress_is_rejected_before_every_event_payload()
 }
 
 #[tokio::test]
+async fn resolved_unknown_provider_lifecycle_rejects_every_configured_exact_placeholder() {
+    const PLACEHOLDER: &str = "Ask Codex to do anything";
+
+    let directory = TestDirectory::new();
+    let store = Arc::new(HaroldStore::open(&directory.0).await.unwrap());
+    let mut unknown = pane("%8", 80, 800, 1_000, 100);
+    unknown.incarnation.provider_id = "unknown".into();
+    unknown.provider_display_name = "Unknown".into();
+    let inventory = Arc::new(FakeInventory::default());
+    inventory.push_resolution(Ok(Some(unknown.clone())));
+    let mut codex = provider();
+    codex.idle_all = vec![format!(" \u{1b}[31m{PLACEHOLDER}\u{1b}[0m ")];
+    let (shutdown, shutdown_rx) = watch::channel(());
+    let (handle, task) = spawn_agent_monitor_for_test(
+        Arc::clone(&store),
+        inventory,
+        Arc::new(FakeScreen::default()),
+        vec![codex],
+        2_000,
+        shutdown_rx,
+    );
+
+    handle
+        .report_lifecycle(
+            "%8".into(),
+            ObservedAgentState::Busy,
+            "unknown-hook".into(),
+            WorkSummaryUpdate::Set(PLACEHOLDER.into()),
+        )
+        .await
+        .unwrap();
+
+    let events = store
+        .stream()
+        .load_after_version(EventStreamVersion::start(), 100)
+        .await
+        .unwrap();
+    assert!(events.iter().all(|event| {
+        !serde_json::to_string(&event.payload)
+            .unwrap()
+            .contains(PLACEHOLDER)
+    }));
+    let lifecycle: AgentLifecycleObserved = events
+        .iter()
+        .find(|event| event.r#type == "AgentLifecycleObserved")
+        .map(|event| serde_json::from_value(event.payload.clone()).unwrap())
+        .unwrap();
+    assert_eq!(lifecycle.incarnation, unknown.incarnation);
+    assert_eq!(lifecycle.work_summary, WorkSummaryUpdate::Unchanged);
+
+    drop(shutdown);
+    task.await.unwrap();
+}
+
+#[tokio::test]
+async fn unknown_provider_completion_rejects_configured_placeholder_when_resolved_or_tracked() {
+    const PLACEHOLDER: &str = "Ask Codex to do anything";
+
+    let directory = TestDirectory::new();
+    let store = Arc::new(HaroldStore::open(&directory.0).await.unwrap());
+    let mut unknown = pane("%8", 80, 800, 1_000, 100);
+    unknown.incarnation.provider_id = "unknown".into();
+    unknown.provider_display_name = "Unknown".into();
+    let inventory = Arc::new(FakeInventory::default());
+    inventory.push_resolution(Ok(Some(unknown.clone())));
+    inventory.push_resolution(Ok(None));
+    let mut codex = provider();
+    codex.idle_all = vec![PLACEHOLDER.into()];
+    let (shutdown, shutdown_rx) = watch::channel(());
+    let (handle, task) = spawn_agent_monitor_for_test(
+        Arc::clone(&store),
+        inventory,
+        Arc::new(FakeScreen::default()),
+        vec![codex],
+        2_000,
+        shutdown_rx,
+    );
+
+    handle.turn_completed(turn(PLACEHOLDER)).await.unwrap();
+    handle.turn_completed(turn(PLACEHOLDER)).await.unwrap();
+
+    let events = store
+        .stream()
+        .load_after_version(EventStreamVersion::start(), 100)
+        .await
+        .unwrap();
+    assert!(events.iter().all(|event| {
+        !serde_json::to_string(&event.payload)
+            .unwrap()
+            .contains(PLACEHOLDER)
+    }));
+    let completions: Vec<TurnCompleted> = events
+        .iter()
+        .filter(|event| event.r#type == "TurnCompleted")
+        .map(|event| serde_json::from_value(event.payload.clone()).unwrap())
+        .collect();
+    assert_eq!(completions.len(), 2);
+    assert_eq!(completions[0].agent_incarnation, Some(unknown.incarnation));
+    assert_eq!(completions[1].agent_incarnation, None);
+    assert!(completions.iter().all(|completion| {
+        completion.last_user_prompt.is_empty()
+            && completion.work_summary == CompletionSummaryUpdate::Unchanged
+    }));
+
+    drop(shutdown);
+    task.await.unwrap();
+}
+
+#[tokio::test]
+async fn known_provider_does_not_reject_another_providers_exact_placeholder() {
+    const CODEX_PLACEHOLDER: &str = "Ask Codex to do anything";
+    const CLAUDE_PLACEHOLDER: &str = "How can I help you today?";
+
+    let directory = TestDirectory::new();
+    let store = Arc::new(HaroldStore::open(&directory.0).await.unwrap());
+    let observation = pane("%8", 80, 800, 1_000, 100);
+    let inventory = Arc::new(FakeInventory::default());
+    inventory.push_resolution(Ok(Some(observation)));
+    let mut codex = provider();
+    codex.idle_all = vec![CODEX_PLACEHOLDER.into()];
+    let mut claude = provider();
+    claude.id = "claude".into();
+    claude.display_name = "Claude".into();
+    claude.command_contains = vec!["claude".into()];
+    claude.idle_all = vec![CLAUDE_PLACEHOLDER.into()];
+    let (shutdown, shutdown_rx) = watch::channel(());
+    let (handle, task) = spawn_agent_monitor_for_test(
+        Arc::clone(&store),
+        inventory,
+        Arc::new(FakeScreen::default()),
+        vec![codex, claude],
+        2_000,
+        shutdown_rx,
+    );
+
+    handle
+        .report_lifecycle(
+            "%8".into(),
+            ObservedAgentState::Busy,
+            "codex-hook".into(),
+            WorkSummaryUpdate::Set(CLAUDE_PLACEHOLDER.into()),
+        )
+        .await
+        .unwrap();
+
+    store.project_unhandled_events(100).await.unwrap();
+    assert_eq!(
+        store.load_agent_snapshot().await.unwrap().panes[0]
+            .work_summary
+            .as_deref(),
+        Some(CLAUDE_PLACEHOLDER)
+    );
+
+    drop(shutdown);
+    task.await.unwrap();
+}
+
+#[tokio::test]
 async fn lifecycle_placeholder_cannot_leak_at_a_projection_page_boundary() {
     const PLACEHOLDER: &str = "Ask Codex to do anything";
     const RETAINED: &str = "Keep this real task";
