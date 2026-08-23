@@ -92,6 +92,32 @@ pub(crate) fn reduce_agent_event(
                 hook_grace_ms,
             ))
         }
+        AgentEvent::WorkSummaryCandidatesRepaired(repair) => {
+            if !repair.clear_explicit && !repair.clear_screen {
+                return ProjectionChange::Ignore;
+            }
+            let Some(mut projection) = current else {
+                return ProjectionChange::Ignore;
+            };
+            if projection.pane.incarnation != repair.incarnation {
+                return ProjectionChange::Ignore;
+            }
+
+            if repair.clear_explicit {
+                projection.explicit_work_summary = None;
+                projection.explicit_work_summary_updated_at_ms = None;
+            }
+            if repair.clear_screen {
+                projection.screen_work_summary = None;
+                projection.screen_work_summary_updated_at_ms = None;
+            }
+            ProjectionChange::Upsert(reconcile(
+                projection,
+                repair.observed_at_ms,
+                event_version,
+                hook_grace_ms,
+            ))
+        }
         AgentEvent::MonitorHealthChanged(_) => ProjectionChange::Ignore,
     }
 }

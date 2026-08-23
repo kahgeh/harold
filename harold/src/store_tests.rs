@@ -2,12 +2,14 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use events::EventStreamVersion;
+use events::{ActorType, EventStreamVersion, ExpectedVersion, NewEvent, WorkflowRef};
+use serde_json::json;
 
 use crate::agent::domain::{
     AgentEvent, AgentIncarnation, AgentLifecycleObserved, AgentMonitorHealthChanged,
     AgentPaneDeparted, AgentPaneObservation, AgentPaneObserved, AgentScreenObserved,
-    CompletionSummaryUpdate, EffectiveAgentState, ObservedAgentState, WorkSummaryUpdate,
+    AgentWorkSummaryCandidatesRepaired, AgentWorkSummaryRepairReason, CompletionSummaryUpdate,
+    EffectiveAgentState, ObservedAgentState, WorkSummaryUpdate,
 };
 
 use super::{
@@ -243,6 +245,43 @@ async fn all_absent_screen_observation_is_not_appended() {
 
     assert!(appended.events.is_empty());
     assert_eq!(store.stream().current_version().await.unwrap().get(), 0);
+}
+
+#[tokio::test]
+async fn repair_event_round_trips_without_embedding_the_rejected_candidate() {
+    const PLACEHOLDER: &str = "Ask Codex to do anything";
+
+    let directory = TestDirectory::new();
+    let store = HaroldStore::open(directory.path()).await.unwrap();
+    let appended = append_agent_events(
+        &store,
+        vec![AgentEvent::WorkSummaryCandidatesRepaired(
+            AgentWorkSummaryCandidatesRepaired {
+                incarnation: agent_incarnation(),
+                clear_explicit: true,
+                clear_screen: false,
+                reason: AgentWorkSummaryRepairReason::ConfiguredIdlePlaceholder,
+                observed_at_ms: 107,
+            },
+        )],
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(appended.events.len(), 1);
+    let stored = &appended.events[0];
+    assert_eq!(stored.r#type, "AgentWorkSummaryCandidatesRepaired");
+    assert!(!stored.payload.to_string().contains(PLACEHOLDER));
+    let repair: AgentWorkSummaryCandidatesRepaired =
+        serde_json::from_value(stored.payload.clone()).unwrap();
+    assert_full_incarnation(&repair.incarnation);
+    assert!(repair.clear_explicit);
+    assert!(!repair.clear_screen);
+    assert_eq!(
+        repair.reason,
+        AgentWorkSummaryRepairReason::ConfiguredIdlePlaceholder
+    );
+    assert_eq!(repair.observed_at_ms, 107);
 }
 
 #[tokio::test]
@@ -727,6 +766,102 @@ async fn projection_preserves_summary_candidates_across_restart_without_raw_scre
     );
     drop(reopened);
     assert_persisted_files_exclude(directory.path(), RAW_SCREEN_SENTINEL.as_bytes());
+}
+
+#[tokio::test]
+async fn legacy_placeholder_candidates_are_cleared_by_a_projection_only_repair_and_replay() {
+    const PLACEHOLDER: &str = "Ask Codex to do anything";
+
+    let directory = TestDirectory::new();
+    let store = HaroldStore::open(directory.path()).await.unwrap();
+    append_agent_events(
+        &store,
+        vec![
+            AgentEvent::PaneObserved(AgentPaneObserved { pane: agent_pane() }),
+            AgentEvent::LifecycleObserved(AgentLifecycleObserved {
+                incarnation: agent_incarnation(),
+                state: ObservedAgentState::Idle,
+                adapter_id: "legacy-hook".into(),
+                work_summary: WorkSummaryUpdate::Set(PLACEHOLDER.into()),
+                observed_at_ms: 110,
+            }),
+            AgentEvent::ScreenObserved(AgentScreenObserved {
+                incarnation: agent_incarnation(),
+                state: None,
+                classifier_id: "legacy-screen".into(),
+                fallback_summary: Some(PLACEHOLDER.into()),
+                observed_at_ms: 120,
+            }),
+        ],
+    )
+    .await
+    .unwrap();
+
+    store.project_unhandled_events(500).await.unwrap();
+    let before_repair = store.load_agent_snapshot().await.unwrap();
+    assert_eq!(
+        before_repair.panes[0].explicit_work_summary.as_deref(),
+        Some(PLACEHOLDER)
+    );
+    assert_eq!(
+        before_repair.panes[0].screen_work_summary.as_deref(),
+        Some(PLACEHOLDER)
+    );
+    assert_eq!(
+        before_repair.panes[0].work_summary.as_deref(),
+        Some(PLACEHOLDER)
+    );
+
+    store
+        .stream()
+        .append(
+            ExpectedVersion::Any,
+            [NewEvent {
+                r#type: "AgentWorkSummaryCandidatesRepaired".into(),
+                payload: json!({
+                    "incarnation": agent_incarnation(),
+                    "clear_explicit": true,
+                    "clear_screen": true,
+                    "reason": "ConfiguredIdlePlaceholder",
+                    "observed_at_ms": 130
+                }),
+                workflow_kind: None,
+                workflow: WorkflowRef::None,
+                request_id: None,
+                actor_id: "system:test".into(),
+                actor_type: ActorType::System,
+            }],
+        )
+        .await
+        .unwrap();
+
+    store.project_unhandled_events(500).await.unwrap();
+    let repaired = store.load_agent_snapshot().await.unwrap();
+    assert_eq!(repaired.panes[0].explicit_work_summary, None);
+    assert_eq!(repaired.panes[0].explicit_work_summary_updated_at_ms, None);
+    assert_eq!(repaired.panes[0].screen_work_summary, None);
+    assert_eq!(repaired.panes[0].screen_work_summary_updated_at_ms, None);
+    assert_eq!(repaired.panes[0].work_summary, None);
+    assert_eq!(repaired.panes[0].last_event_version.get(), 4);
+    assert!(store.next_pending_delivery().await.unwrap().is_none());
+    drop(store);
+
+    for suffix in ["", "-shm", "-wal"] {
+        let path = directory.path().join(format!("harold-state.db{suffix}"));
+        if path.exists() {
+            std::fs::remove_file(path).unwrap();
+        }
+    }
+    let replayed = HaroldStore::open(directory.path()).await.unwrap();
+    replayed.project_unhandled_events(500).await.unwrap();
+    let replayed_snapshot = replayed.load_agent_snapshot().await.unwrap();
+    assert_eq!(
+        replayed_snapshot.through_event_version,
+        repaired.through_event_version
+    );
+    assert_eq!(replayed_snapshot.monitor_health, repaired.monitor_health);
+    assert_eq!(replayed_snapshot.panes, repaired.panes);
+    assert!(replayed.next_pending_delivery().await.unwrap().is_none());
 }
 
 #[tokio::test]

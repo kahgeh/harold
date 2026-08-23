@@ -73,6 +73,7 @@ pub(crate) enum AgentEvent {
     PaneDeparted(AgentPaneDeparted),
     LifecycleObserved(AgentLifecycleObserved),
     ScreenObserved(AgentScreenObserved),
+    WorkSummaryCandidatesRepaired(AgentWorkSummaryCandidatesRepaired),
     MonitorHealthChanged(AgentMonitorHealthChanged),
 }
 
@@ -102,6 +103,20 @@ pub(crate) struct AgentScreenObserved {
     pub state: Option<ObservedAgentState>,
     pub classifier_id: String,
     pub fallback_summary: Option<String>,
+    pub observed_at_ms: i64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) enum AgentWorkSummaryRepairReason {
+    ConfiguredIdlePlaceholder,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct AgentWorkSummaryCandidatesRepaired {
+    pub incarnation: AgentIncarnation,
+    pub clear_explicit: bool,
+    pub clear_screen: bool,
+    pub reason: AgentWorkSummaryRepairReason,
     pub observed_at_ms: i64,
 }
 

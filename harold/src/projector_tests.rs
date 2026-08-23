@@ -9,7 +9,8 @@ use super::{
     project_and_publish_agent_snapshot, run_event_handler,
 };
 use crate::agent::domain::{
-    AgentEvent, AgentIncarnation, AgentPaneObservation, AgentPaneObserved, CompletionSummaryUpdate,
+    AgentEvent, AgentIncarnation, AgentPaneObservation, AgentPaneObserved, AgentScreenObserved,
+    CompletionSummaryUpdate,
 };
 use crate::agent::snapshot::AgentSnapshotHub;
 use crate::outbound::DeliveryOutcome;
@@ -270,6 +271,77 @@ async fn agent_only_events_are_projected_without_creating_a_delivery() {
     );
     assert_eq!(store.last_processed_version().await.unwrap().get(), 1);
     assert_eq!(store.load_agent_snapshot().await.unwrap().panes.len(), 1);
+    assert!(store.next_pending_delivery().await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn summary_candidate_repair_is_projected_without_creating_a_delivery() {
+    let directory = TestDirectory::new();
+    let store = HaroldStore::open(&directory.0).await.unwrap();
+    let incarnation = AgentIncarnation {
+        pane_id: "%14".into(),
+        pane_pid: 140,
+        agent_pid: 141,
+        agent_started_at_ms: 4_000,
+        provider_id: "codex".into(),
+    };
+    append_agent_events(
+        &store,
+        vec![
+            AgentEvent::PaneObserved(AgentPaneObserved {
+                pane: AgentPaneObservation {
+                    incarnation: incarnation.clone(),
+                    tmux_target: "harold:4.1".into(),
+                    session_name: "harold".into(),
+                    window_index: 4,
+                    pane_index: 1,
+                    working_directory: "/work/harold".into(),
+                    provider_display_name: "Codex".into(),
+                    observed_at_ms: 4_100,
+                },
+            }),
+            AgentEvent::ScreenObserved(AgentScreenObserved {
+                incarnation: incarnation.clone(),
+                state: None,
+                classifier_id: "legacy-screen".into(),
+                fallback_summary: Some("Ask Codex to do anything".into()),
+                observed_at_ms: 4_110,
+            }),
+        ],
+    )
+    .await
+    .unwrap();
+    store.project_unhandled_events(500).await.unwrap();
+    store
+        .stream()
+        .append(
+            ExpectedVersion::Any,
+            [NewEvent {
+                r#type: "AgentWorkSummaryCandidatesRepaired".into(),
+                payload: json!({
+                    "incarnation": incarnation,
+                    "clear_explicit": false,
+                    "clear_screen": true,
+                    "reason": "ConfiguredIdlePlaceholder",
+                    "observed_at_ms": 4_120
+                }),
+                workflow_kind: None,
+                workflow: WorkflowRef::None,
+                request_id: None,
+                actor_id: "system:test".into(),
+                actor_type: ActorType::System,
+            }],
+        )
+        .await
+        .unwrap();
+
+    assert!(
+        !handle_next_delivery(&store, Arc::new(RecordingDispatcher::default()))
+            .await
+            .unwrap()
+    );
+    let snapshot = store.load_agent_snapshot().await.unwrap();
+    assert_eq!(snapshot.panes[0].work_summary, None);
     assert!(store.next_pending_delivery().await.unwrap().is_none());
 }
 

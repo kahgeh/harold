@@ -9,7 +9,8 @@ use crate::store::{self, HaroldStore, TurnCompleted};
 
 use super::domain::{
     AgentEvent, AgentIncarnation, AgentLifecycleObserved, AgentPaneDeparted, AgentPaneObservation,
-    AgentPaneObserved, AgentScreenObserved, AgentSnapshot, ObservedAgentState, WorkSummaryUpdate,
+    AgentPaneObserved, AgentScreenObserved, AgentSnapshot, AgentWorkSummaryCandidatesRepaired,
+    AgentWorkSummaryRepairReason, CompletionSummaryUpdate, ObservedAgentState, WorkSummaryUpdate,
 };
 use super::inventory::{AgentInventoryPort, InventoryError};
 use super::screen::{ScreenError, VisibleScreenPort, normalize_fallback_summary};
@@ -147,6 +148,7 @@ struct TrackedPane {
     pane: AgentPaneObservation,
     consecutive_absences: u8,
     last_hook: Option<(ObservedAgentState, i64)>,
+    explicit_summary: Option<String>,
     screen_state: Option<ObservedAgentState>,
     screen_summary: Option<String>,
 }
@@ -157,6 +159,7 @@ impl TrackedPane {
             pane,
             consecutive_absences: 0,
             last_hook: None,
+            explicit_summary: None,
             screen_state: None,
             screen_summary: None,
         }
@@ -437,6 +440,7 @@ fn panes_from_snapshot(
                 pane,
                 consecutive_absences: 0,
                 last_hook: projection.hook_state.zip(projection.hook_observed_at_ms),
+                explicit_summary: projection.explicit_work_summary.clone(),
                 screen_state: seeded_screen_state(projection, hook_grace_ms),
                 screen_summary: projection.screen_work_summary.clone(),
             };
@@ -526,27 +530,51 @@ impl AgentMonitorRuntime {
         adapter_id: String,
         work_summary: WorkSummaryUpdate,
     ) -> Result<(), MonitorCommandError> {
+        self.repair_configured_placeholders()
+            .await
+            .map_err(MonitorCommandError::EventAppend)?;
         let pane = self.resolve_pane(pane_id).await?;
         let Some(pane) = pane else {
             return Err(MonitorCommandError::AgentNotFound);
         };
         let observed_at_ms = pane.observed_at_ms;
+        let work_summary = normalize_work_summary_update(work_summary);
+        let current = self
+            .panes
+            .get(&pane.incarnation.pane_id)
+            .filter(|tracked| tracked.pane.incarnation == pane.incarnation);
+        let next_explicit_summary = match &work_summary {
+            WorkSummaryUpdate::Unchanged => {
+                current.and_then(|tracked| tracked.explicit_summary.clone())
+            }
+            WorkSummaryUpdate::Clear => None,
+            WorkSummaryUpdate::Set(summary) => Some(summary.clone()),
+        };
+        let repair = self.repair_event(
+            &pane.incarnation,
+            next_explicit_summary.as_deref(),
+            current.and_then(|tracked| tracked.screen_summary.as_deref()),
+            observed_at_ms,
+        );
         let lifecycle = AgentLifecycleObserved {
             incarnation: pane.incarnation.clone(),
             state,
             adapter_id,
-            work_summary,
+            work_summary: work_summary.clone(),
             observed_at_ms,
         };
-        store::append_agent_events(
-            &self.store,
-            vec![
-                AgentEvent::PaneObserved(AgentPaneObserved { pane: pane.clone() }),
-                AgentEvent::LifecycleObserved(lifecycle),
-            ],
-        )
-        .await
-        .map_err(MonitorCommandError::EventAppend)?;
+        let mut events = vec![
+            AgentEvent::PaneObserved(AgentPaneObserved { pane: pane.clone() }),
+            AgentEvent::LifecycleObserved(lifecycle),
+        ];
+        events.extend(
+            repair
+                .clone()
+                .map(AgentEvent::WorkSummaryCandidatesRepaired),
+        );
+        store::append_agent_events(&self.store, events)
+            .await
+            .map_err(MonitorCommandError::EventAppend)?;
 
         let tracked = self
             .panes
@@ -558,7 +586,9 @@ impl AgentMonitorRuntime {
             tracked.pane = pane;
         }
         tracked.last_hook = Some((state, observed_at_ms));
+        tracked.explicit_summary = next_explicit_summary;
         tracked.screen_state = None;
+        apply_repair_to_tracked(tracked, repair.as_ref());
         Ok(())
     }
 
@@ -566,6 +596,7 @@ impl AgentMonitorRuntime {
         &mut self,
         mut turn: TurnCompleted,
     ) -> events::Result<events::AppendResult> {
+        self.repair_configured_placeholders().await?;
         let pane = match resolve(
             Arc::clone(&self.inventory),
             turn.pane_id.clone(),
@@ -587,7 +618,28 @@ impl AgentMonitorRuntime {
         };
         turn.work_summary = completion_summary_update(&turn.last_user_prompt);
         turn.agent_incarnation = pane.as_ref().map(|pane| pane.incarnation.clone());
-        let result = store::append_monitor_turn_completed(&self.store, pane.clone(), &turn).await?;
+        let next_explicit_summary = pane.as_ref().and_then(|pane| match &turn.work_summary {
+            CompletionSummaryUpdate::Unchanged => self
+                .panes
+                .get(&pane.incarnation.pane_id)
+                .filter(|tracked| tracked.pane.incarnation == pane.incarnation)
+                .and_then(|tracked| tracked.explicit_summary.clone()),
+            CompletionSummaryUpdate::Set(summary) => Some(summary.clone()),
+        });
+        let repair = pane.as_ref().and_then(|pane| {
+            self.repair_event(
+                &pane.incarnation,
+                next_explicit_summary.as_deref(),
+                self.panes
+                    .get(&pane.incarnation.pane_id)
+                    .filter(|tracked| tracked.pane.incarnation == pane.incarnation)
+                    .and_then(|tracked| tracked.screen_summary.as_deref()),
+                pane.observed_at_ms,
+            )
+        });
+        let result =
+            store::append_monitor_turn_completed(&self.store, pane.clone(), &turn, repair.clone())
+                .await?;
         if let Some(pane) = pane {
             let observed_at_ms = pane.observed_at_ms;
             let tracked = self
@@ -600,12 +652,17 @@ impl AgentMonitorRuntime {
                 tracked.pane = pane;
             }
             tracked.last_hook = Some((ObservedAgentState::Idle, observed_at_ms));
+            tracked.explicit_summary = next_explicit_summary;
             tracked.screen_state = None;
+            apply_repair_to_tracked(tracked, repair.as_ref());
         }
         Ok(result)
     }
 
     async fn inventory_tick(&mut self) -> Result<(), MonitorCommandError> {
+        self.repair_configured_placeholders()
+            .await
+            .map_err(MonitorCommandError::EventAppend)?;
         let observed = match scan(
             Arc::clone(&self.inventory),
             self.acquisition_timeout,
@@ -712,6 +769,9 @@ impl AgentMonitorRuntime {
     }
 
     async fn screen_tick(&mut self) -> Result<(), MonitorCommandError> {
+        self.repair_configured_placeholders()
+            .await
+            .map_err(MonitorCommandError::EventAppend)?;
         let panes: Vec<AgentPaneObservation> = self
             .panes
             .values()
@@ -788,6 +848,65 @@ impl AgentMonitorRuntime {
         Ok(())
     }
 
+    async fn repair_configured_placeholders(&mut self) -> events::Result<()> {
+        let observed_at_ms = now_ms();
+        let repairs: Vec<AgentWorkSummaryCandidatesRepaired> = self
+            .panes
+            .values()
+            .filter_map(|tracked| {
+                self.repair_event(
+                    &tracked.pane.incarnation,
+                    tracked.explicit_summary.as_deref(),
+                    tracked.screen_summary.as_deref(),
+                    observed_at_ms,
+                )
+            })
+            .collect();
+        if repairs.is_empty() {
+            return Ok(());
+        }
+        store::append_agent_events(
+            &self.store,
+            repairs
+                .iter()
+                .cloned()
+                .map(AgentEvent::WorkSummaryCandidatesRepaired)
+                .collect(),
+        )
+        .await?;
+        for repair in &repairs {
+            if let Some(tracked) = self
+                .panes
+                .get_mut(&repair.incarnation.pane_id)
+                .filter(|tracked| tracked.pane.incarnation == repair.incarnation)
+            {
+                apply_repair_to_tracked(tracked, Some(repair));
+            }
+        }
+        Ok(())
+    }
+
+    fn repair_event(
+        &self,
+        incarnation: &AgentIncarnation,
+        explicit_summary: Option<&str>,
+        screen_summary: Option<&str>,
+        observed_at_ms: i64,
+    ) -> Option<AgentWorkSummaryCandidatesRepaired> {
+        let provider = self.providers.get(&incarnation.provider_id)?;
+        let clear_explicit = explicit_summary
+            .is_some_and(|summary| matches_configured_placeholder(summary, &provider.idle_all));
+        let clear_screen = screen_summary
+            .is_some_and(|summary| matches_configured_placeholder(summary, &provider.idle_all));
+        (clear_explicit || clear_screen).then(|| AgentWorkSummaryCandidatesRepaired {
+            incarnation: incarnation.clone(),
+            clear_explicit,
+            clear_screen,
+            reason: AgentWorkSummaryRepairReason::ConfiguredIdlePlaceholder,
+            observed_at_ms,
+        })
+    }
+
     async fn resolve_pane(
         &mut self,
         pane_id: String,
@@ -842,6 +961,34 @@ impl AgentMonitorRuntime {
         .map_err(MonitorCommandError::EventAppend)?;
         self.health.insert(component.into(), next);
         Ok(())
+    }
+}
+
+fn normalize_work_summary_update(update: WorkSummaryUpdate) -> WorkSummaryUpdate {
+    match update {
+        WorkSummaryUpdate::Set(summary) => super::summary::normalize_work_summary(&summary)
+            .map_or(WorkSummaryUpdate::Clear, WorkSummaryUpdate::Set),
+        update => update,
+    }
+}
+
+fn matches_configured_placeholder(summary: &str, fragments: &[String]) -> bool {
+    super::summary::normalize_work_summary(summary).is_some()
+        && normalize_fallback_summary(summary, fragments).is_none()
+}
+
+fn apply_repair_to_tracked(
+    tracked: &mut TrackedPane,
+    repair: Option<&AgentWorkSummaryCandidatesRepaired>,
+) {
+    let Some(repair) = repair else {
+        return;
+    };
+    if repair.clear_explicit {
+        tracked.explicit_summary = None;
+    }
+    if repair.clear_screen {
+        tracked.screen_summary = None;
     }
 }
 

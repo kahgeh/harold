@@ -15,8 +15,8 @@ use turso::Database;
 use crate::agent::domain::{
     AgentEvent, AgentIncarnation, AgentLifecycleObserved, AgentMonitorHealthChanged,
     AgentPaneObservation, AgentPaneProjection, AgentScreenObserved, AgentSnapshot,
-    CompletionSummaryUpdate, EffectiveAgentState, MonitorHealthProjection, ObservedAgentState,
-    ProjectionChange, WorkSummaryUpdate,
+    AgentWorkSummaryCandidatesRepaired, CompletionSummaryUpdate, EffectiveAgentState,
+    MonitorHealthProjection, ObservedAgentState, ProjectionChange, WorkSummaryUpdate,
 };
 #[cfg(test)]
 use crate::agent::reducer::DEFAULT_HOOK_GRACE_MS;
@@ -219,7 +219,8 @@ impl HaroldStore {
                     "AgentPaneObserved"
                     | "AgentPaneDeparted"
                     | "AgentLifecycleObserved"
-                    | "AgentScreenObserved" => {
+                    | "AgentScreenObserved"
+                    | "AgentWorkSummaryCandidatesRepaired" => {
                         snapshot_changed |=
                             project_agent_event(&conn, event, self.hook_grace_ms).await?;
                     }
@@ -494,6 +495,9 @@ async fn project_agent_event(
         "AgentScreenObserved" => {
             AgentEvent::ScreenObserved(serde_json::from_value(event.payload.clone())?)
         }
+        "AgentWorkSummaryCandidatesRepaired" => AgentEvent::WorkSummaryCandidatesRepaired(
+            serde_json::from_value(event.payload.clone())?,
+        ),
         _ => {
             return Err(events::EsError::Migration(format!(
                 "unsupported agent projection event type: {}",
@@ -576,6 +580,7 @@ fn agent_event_pane_id(event: &AgentEvent) -> &str {
         AgentEvent::PaneDeparted(event) => &event.incarnation.pane_id,
         AgentEvent::LifecycleObserved(event) => &event.incarnation.pane_id,
         AgentEvent::ScreenObserved(event) => &event.incarnation.pane_id,
+        AgentEvent::WorkSummaryCandidatesRepaired(event) => &event.incarnation.pane_id,
         AgentEvent::MonitorHealthChanged(_) => unreachable!("health events are not pane events"),
     }
 }
@@ -1109,6 +1114,7 @@ pub(crate) async fn append_monitor_turn_completed(
     store: &HaroldStore,
     pane: Option<AgentPaneObservation>,
     turn: &TurnCompleted,
+    repair: Option<AgentWorkSummaryCandidatesRepaired>,
 ) -> events::Result<events::AppendResult> {
     fail_monitor_append_for_test(store)?;
     let mut events = Vec::with_capacity(usize::from(pane.is_some()) + 1);
@@ -1127,6 +1133,11 @@ pub(crate) async fn append_monitor_turn_completed(
         actor_id: "system:harold".into(),
         actor_type: ActorType::System,
     });
+    if let Some(repair) = repair {
+        events.push(agent_new_event(AgentEvent::WorkSummaryCandidatesRepaired(
+            repair,
+        ))?);
+    }
     store.stream.append(ExpectedVersion::Any, events).await
 }
 
@@ -1166,6 +1177,9 @@ fn normalize_agent_event(event: AgentEvent) -> Option<AgentEvent> {
             Some(AgentEvent::LifecycleObserved(lifecycle))
         }
         AgentEvent::ScreenObserved(screen) => normalize_screen_event(screen),
+        AgentEvent::WorkSummaryCandidatesRepaired(repair) => (repair.clear_explicit
+            || repair.clear_screen)
+            .then_some(AgentEvent::WorkSummaryCandidatesRepaired(repair)),
         AgentEvent::MonitorHealthChanged(mut health) => {
             health.component = normalize_health_code(&health.component, 64, "invalid_component");
             health.reason_code = normalize_health_code(&health.reason_code, 160, "invalid_reason");
@@ -1217,6 +1231,10 @@ fn agent_new_event(event: AgentEvent) -> events::Result<NewEvent> {
             ("AgentLifecycleObserved", serde_json::to_value(event)?)
         }
         AgentEvent::ScreenObserved(event) => ("AgentScreenObserved", serde_json::to_value(event)?),
+        AgentEvent::WorkSummaryCandidatesRepaired(event) => (
+            "AgentWorkSummaryCandidatesRepaired",
+            serde_json::to_value(event)?,
+        ),
         AgentEvent::MonitorHealthChanged(event) => {
             ("AgentMonitorHealthChanged", serde_json::to_value(event)?)
         }

@@ -374,6 +374,122 @@ async fn completion_preserves_legacy_payload_and_has_non_destructive_summary_sem
     assert_eq!(unresolved.work_summary, CompletionSummaryUpdate::Unchanged);
 }
 
+#[tokio::test]
+async fn later_explicit_ingress_repairs_exact_placeholders_and_preserves_update_semantics() {
+    const PLACEHOLDER: &str = "Ask Codex to do anything";
+    const LEGITIMATE: &str = "Explain why the UI says Ask Codex to do anything";
+
+    let directory = TestDirectory::new();
+    let store = Arc::new(HaroldStore::open(&directory.0).await.unwrap());
+    let observation = pane("%8", 80, 800, 1_000, 100);
+    let inventory = Arc::new(FakeInventory::default());
+    for _ in 0..6 {
+        inventory.push_resolution(Ok(Some(observation.clone())));
+    }
+    let mut codex = provider();
+    codex.idle_all = vec![" Ask Codex\tto do anything ".into()];
+    let (shutdown, shutdown_rx) = watch::channel(());
+    let (handle, task) = spawn_agent_monitor_for_test(
+        Arc::clone(&store),
+        inventory,
+        Arc::new(FakeScreen::default()),
+        vec![codex],
+        2_000,
+        shutdown_rx,
+    );
+
+    handle
+        .report_lifecycle(
+            "%8".into(),
+            ObservedAgentState::Busy,
+            "codex-hook".into(),
+            WorkSummaryUpdate::Set(PLACEHOLDER.into()),
+        )
+        .await
+        .unwrap();
+    store.project_unhandled_events(100).await.unwrap();
+    assert_eq!(
+        store.load_agent_snapshot().await.unwrap().panes[0].work_summary,
+        None
+    );
+
+    handle
+        .report_lifecycle(
+            "%8".into(),
+            ObservedAgentState::Busy,
+            "codex-hook".into(),
+            WorkSummaryUpdate::Unchanged,
+        )
+        .await
+        .unwrap();
+    handle
+        .report_lifecycle(
+            "%8".into(),
+            ObservedAgentState::Busy,
+            "codex-hook".into(),
+            WorkSummaryUpdate::Set(LEGITIMATE.into()),
+        )
+        .await
+        .unwrap();
+    store.project_unhandled_events(100).await.unwrap();
+    assert_eq!(
+        store.load_agent_snapshot().await.unwrap().panes[0]
+            .work_summary
+            .as_deref(),
+        Some(LEGITIMATE)
+    );
+
+    handle
+        .report_lifecycle(
+            "%8".into(),
+            ObservedAgentState::Idle,
+            "codex-hook".into(),
+            WorkSummaryUpdate::Clear,
+        )
+        .await
+        .unwrap();
+    handle.turn_completed(turn(PLACEHOLDER)).await.unwrap();
+    handle.turn_completed(turn(" \u{1b}[31m\t ")).await.unwrap();
+    store.project_unhandled_events(100).await.unwrap();
+    let snapshot = store.load_agent_snapshot().await.unwrap();
+    assert_eq!(snapshot.panes[0].explicit_work_summary, None);
+    assert_eq!(snapshot.panes[0].work_summary, None);
+
+    let events = store
+        .stream()
+        .load_after_version(EventStreamVersion::start(), 100)
+        .await
+        .unwrap();
+    assert_eq!(
+        event_types(&events),
+        [
+            "AgentPaneObserved",
+            "AgentLifecycleObserved",
+            "AgentWorkSummaryCandidatesRepaired",
+            "AgentPaneObserved",
+            "AgentLifecycleObserved",
+            "AgentPaneObserved",
+            "AgentLifecycleObserved",
+            "AgentPaneObserved",
+            "AgentLifecycleObserved",
+            "AgentPaneObserved",
+            "TurnCompleted",
+            "AgentWorkSummaryCandidatesRepaired",
+            "AgentPaneObserved",
+            "TurnCompleted",
+        ]
+    );
+    for repair in events
+        .iter()
+        .filter(|event| event.r#type == "AgentWorkSummaryCandidatesRepaired")
+    {
+        assert!(!repair.payload.to_string().contains(PLACEHOLDER));
+    }
+
+    drop(shutdown);
+    task.await.unwrap();
+}
+
 #[test]
 fn legacy_turn_completed_payload_defaults_new_state_fields() {
     let turn: TurnCompleted = serde_json::from_value(serde_json::json!({
@@ -1247,6 +1363,165 @@ async fn restart_seed_retains_screen_dedupe_for_a_live_incarnation() {
     assert_eq!(events.len(), 2);
     drop(shutdown);
     task.await.unwrap();
+}
+
+#[tokio::test]
+async fn restart_seed_repairs_exact_configured_placeholders_once_and_retries_failed_append() {
+    const PLACEHOLDER: &str = "Ask Codex to do anything";
+
+    let directory = TestDirectory::new();
+    let store = Arc::new(HaroldStore::open(&directory.0).await.unwrap());
+    let observed = pane("%8", 80, 800, 1_000, 100);
+    crate::store::append_agent_events(
+        &store,
+        vec![
+            AgentEvent::PaneObserved(AgentPaneObserved {
+                pane: observed.clone(),
+            }),
+            AgentEvent::LifecycleObserved(AgentLifecycleObserved {
+                incarnation: observed.incarnation.clone(),
+                state: ObservedAgentState::Idle,
+                adapter_id: "legacy-hook".into(),
+                work_summary: WorkSummaryUpdate::Set(PLACEHOLDER.into()),
+                observed_at_ms: 110,
+            }),
+            AgentEvent::ScreenObserved(super::domain::AgentScreenObserved {
+                incarnation: observed.incarnation.clone(),
+                state: None,
+                classifier_id: "legacy-screen".into(),
+                fallback_summary: Some(PLACEHOLDER.into()),
+                observed_at_ms: 120,
+            }),
+        ],
+    )
+    .await
+    .unwrap();
+    store.project_unhandled_events(100).await.unwrap();
+    let snapshot = store.load_agent_snapshot().await.unwrap();
+    assert_eq!(snapshot.panes[0].work_summary.as_deref(), Some(PLACEHOLDER));
+
+    let inventory = Arc::new(FakeInventory::scans(vec![
+        Ok(vec![observed.clone()]),
+        Ok(vec![observed.clone()]),
+        Ok(vec![observed]),
+    ]));
+    let mut codex = provider();
+    codex.idle_all = vec![format!(" \u{1b}[31m{PLACEHOLDER}\u{1b}[0m ")];
+    let (shutdown, shutdown_rx) = watch::channel(());
+    let (handle, task) = spawn_agent_monitor_seeded_for_test(
+        Arc::clone(&store),
+        inventory,
+        Arc::new(FakeScreen::default()),
+        vec![codex],
+        AgentMonitorSeed {
+            snapshot,
+            hook_grace_ms: 2_000,
+            acquisition_timeout: Duration::from_millis(50),
+        },
+        shutdown_rx,
+    );
+
+    store.fail_next_monitor_append_for_test();
+    assert!(matches!(
+        handle.inventory_tick().await,
+        Err(MonitorCommandError::EventAppend(_))
+    ));
+    assert_eq!(fixture_event_count(&store).await, 3);
+
+    handle.inventory_tick().await.unwrap();
+    let events = store
+        .stream()
+        .load_after_version(EventStreamVersion::start(), 100)
+        .await
+        .unwrap();
+    assert_eq!(
+        events.last().unwrap().r#type,
+        "AgentWorkSummaryCandidatesRepaired"
+    );
+    assert_eq!(events.len(), 4);
+    let repair_json = serde_json::to_string(&events[3].payload).unwrap();
+    assert!(!repair_json.contains(PLACEHOLDER));
+
+    handle.inventory_tick().await.unwrap();
+    assert_eq!(fixture_event_count(&store).await, 4);
+    store.project_unhandled_events(100).await.unwrap();
+    let repaired = store.load_agent_snapshot().await.unwrap();
+    assert_eq!(repaired.panes[0].explicit_work_summary, None);
+    assert_eq!(repaired.panes[0].screen_work_summary, None);
+    assert_eq!(repaired.panes[0].work_summary, None);
+
+    drop(shutdown);
+    task.await.unwrap();
+}
+
+#[tokio::test]
+async fn restart_seed_never_repairs_a_legitimate_summary_containing_the_placeholder() {
+    const LEGITIMATE: &str = "Explain why the UI says Ask Codex to do anything";
+
+    let directory = TestDirectory::new();
+    let store = Arc::new(HaroldStore::open(&directory.0).await.unwrap());
+    let observed = pane("%8", 80, 800, 1_000, 100);
+    crate::store::append_agent_events(
+        &store,
+        vec![
+            AgentEvent::PaneObserved(AgentPaneObserved {
+                pane: observed.clone(),
+            }),
+            AgentEvent::LifecycleObserved(AgentLifecycleObserved {
+                incarnation: observed.incarnation.clone(),
+                state: ObservedAgentState::Busy,
+                adapter_id: "legacy-hook".into(),
+                work_summary: WorkSummaryUpdate::Set(LEGITIMATE.into()),
+                observed_at_ms: 110,
+            }),
+        ],
+    )
+    .await
+    .unwrap();
+    store.project_unhandled_events(100).await.unwrap();
+    let snapshot = store.load_agent_snapshot().await.unwrap();
+
+    let inventory = Arc::new(FakeInventory::scans(vec![Ok(vec![observed])]));
+    let mut codex = provider();
+    codex.idle_all = vec!["Ask Codex to do anything".into()];
+    let (shutdown, shutdown_rx) = watch::channel(());
+    let (handle, task) = spawn_agent_monitor_seeded_for_test(
+        Arc::clone(&store),
+        inventory,
+        Arc::new(FakeScreen::default()),
+        vec![codex],
+        AgentMonitorSeed {
+            snapshot,
+            hook_grace_ms: 2_000,
+            acquisition_timeout: Duration::from_millis(50),
+        },
+        shutdown_rx,
+    );
+
+    handle.inventory_tick().await.unwrap();
+    assert_eq!(fixture_event_count(&store).await, 2);
+    store.project_unhandled_events(100).await.unwrap();
+    let unchanged = store.load_agent_snapshot().await.unwrap();
+    assert_eq!(unchanged.panes[0].work_summary.as_deref(), Some(LEGITIMATE));
+
+    drop(shutdown);
+    task.await.unwrap();
+    drop(store);
+
+    for suffix in ["", "-shm", "-wal"] {
+        let path = directory.0.join(format!("harold-state.db{suffix}"));
+        if path.exists() {
+            std::fs::remove_file(path).unwrap();
+        }
+    }
+    let replayed = HaroldStore::open(&directory.0).await.unwrap();
+    replayed.project_unhandled_events(100).await.unwrap();
+    assert_eq!(
+        replayed.load_agent_snapshot().await.unwrap().panes[0]
+            .work_summary
+            .as_deref(),
+        Some(LEGITIMATE)
+    );
 }
 
 #[tokio::test]
