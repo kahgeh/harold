@@ -6,8 +6,9 @@ use tokio_stream::StreamExt;
 
 use super::agent::domain::{
     AgentEvent, AgentIncarnation, AgentLifecycleObserved, AgentPaneObservation, AgentPaneObserved,
-    AgentPaneProjection, AgentSnapshot, CompletionSummaryUpdate, EffectiveAgentState,
-    MonitorHealthProjection, ObservedAgentState, WorkSummaryUpdate,
+    AgentPaneProjection, AgentScreenObserved, AgentSnapshot, AgentWorkSummaryCandidatesRepaired,
+    CompletionSummaryUpdate, EffectiveAgentState, MonitorHealthProjection, ObservedAgentState,
+    WorkSummaryUpdate,
 };
 use super::agent::inventory::{AgentInventoryPort, InventoryError};
 use super::agent::runtime::spawn_agent_monitor_for_test;
@@ -21,6 +22,7 @@ use super::{
     HaroldService, Request, TurnCompleteRequest, load_startup_agent_snapshot, pane_id_for_log,
     store,
 };
+use crate::settings::AgentProviderSettings;
 
 struct EmptyInventory;
 
@@ -507,7 +509,7 @@ async fn explicit_summary_survives_event_projection_watch_and_restart_with_full_
     drop(store);
 
     let reopened = Arc::new(store::HaroldStore::open(&directory.0).await.unwrap());
-    let recovered = load_startup_agent_snapshot(&reopened).await.unwrap();
+    let recovered = load_startup_agent_snapshot(&reopened, &[]).await.unwrap();
     assert_eq!(
         recovered.panes[0].work_summary.as_deref(),
         Some("Implement projector")
@@ -696,15 +698,156 @@ async fn startup_catches_up_and_recovers_stored_agent_truth_before_seeding() {
     .await
     .unwrap();
 
-    let first = load_startup_agent_snapshot(&store).await.unwrap();
+    let first = load_startup_agent_snapshot(&store, &[]).await.unwrap();
     assert_eq!(first.through_event_version.get(), 1);
     assert_eq!(first.panes[0].pane.incarnation.pane_id, "%14");
     drop(store);
 
     let reopened = store::HaroldStore::open(&directory.0).await.unwrap();
-    let recovered = load_startup_agent_snapshot(&reopened).await.unwrap();
+    let recovered = load_startup_agent_snapshot(&reopened, &[]).await.unwrap();
     assert_eq!(recovered.through_event_version.get(), 1);
     assert_eq!(recovered.panes[0].pane.incarnation.agent_pid, 142);
+}
+
+#[tokio::test]
+async fn startup_repairs_all_legacy_placeholders_before_the_first_watch_snapshot_or_tick() {
+    const PLACEHOLDER: &str = "Ask Codex to do anything";
+    const LEGITIMATE: &str = "Keep the legitimate task";
+
+    let directory = TestDirectory::new();
+    let store = Arc::new(store::HaroldStore::open(&directory.0).await.unwrap());
+    let explicit_only = resolved_pane();
+    let mut screen_only = resolved_pane();
+    screen_only.incarnation.pane_id = "%9".into();
+    screen_only.incarnation.pane_pid = 91;
+    screen_only.incarnation.agent_pid = 92;
+    screen_only.incarnation.agent_started_at_ms = 9_000;
+    screen_only.pane_index = 4;
+    screen_only.observed_at_ms = 9_500;
+    store::append_agent_events(
+        &store,
+        vec![
+            AgentEvent::PaneObserved(AgentPaneObserved {
+                pane: explicit_only.clone(),
+            }),
+            AgentEvent::LifecycleObserved(AgentLifecycleObserved {
+                incarnation: explicit_only.incarnation.clone(),
+                state: ObservedAgentState::Idle,
+                adapter_id: "legacy-hook".into(),
+                work_summary: WorkSummaryUpdate::Set(PLACEHOLDER.into()),
+                observed_at_ms: 8_510,
+            }),
+            AgentEvent::PaneObserved(AgentPaneObserved {
+                pane: screen_only.clone(),
+            }),
+            AgentEvent::LifecycleObserved(AgentLifecycleObserved {
+                incarnation: screen_only.incarnation.clone(),
+                state: ObservedAgentState::Busy,
+                adapter_id: "legacy-hook".into(),
+                work_summary: WorkSummaryUpdate::Set(LEGITIMATE.into()),
+                observed_at_ms: 9_510,
+            }),
+            AgentEvent::ScreenObserved(AgentScreenObserved {
+                incarnation: screen_only.incarnation.clone(),
+                state: None,
+                classifier_id: "legacy-screen".into(),
+                fallback_summary: Some(PLACEHOLDER.into()),
+                observed_at_ms: 9_520,
+            }),
+        ],
+    )
+    .await
+    .unwrap();
+    store.project_unhandled_events(500).await.unwrap();
+    assert!(
+        store
+            .load_agent_snapshot()
+            .await
+            .unwrap()
+            .panes
+            .iter()
+            .any(|pane| pane.work_summary.as_deref() == Some(PLACEHOLDER))
+    );
+
+    let providers = vec![AgentProviderSettings {
+        id: "codex".into(),
+        display_name: "Codex".into(),
+        command_contains: vec!["codex".into()],
+        busy_all: vec!["Working".into()],
+        idle_all: vec![format!(" \u{1b}[31m{PLACEHOLDER}\u{1b}[0m ")],
+        summary_line_prefixes: vec!["› ".into()],
+    }];
+    let initial = load_startup_agent_snapshot(&store, &providers)
+        .await
+        .unwrap();
+    let (service, shutdown, task) = test_service(Arc::clone(&store), initial);
+    let mut stream = service
+        .watch_agent_states(Request::new(WatchAgentStatesRequest {}))
+        .await
+        .unwrap()
+        .into_inner();
+    let first = stream.next().await.expect("first snapshot").unwrap();
+    assert_eq!(first.panes.len(), 2);
+    assert_eq!(
+        first
+            .panes
+            .iter()
+            .find(|pane| pane.pane_id == explicit_only.incarnation.pane_id)
+            .unwrap()
+            .work_summary,
+        None
+    );
+    assert_eq!(
+        first
+            .panes
+            .iter()
+            .find(|pane| pane.pane_id == screen_only.incarnation.pane_id)
+            .unwrap()
+            .work_summary
+            .as_deref(),
+        Some(LEGITIMATE)
+    );
+
+    let events = store
+        .stream()
+        .load_after_version(EventStreamVersion::start(), 100)
+        .await
+        .unwrap();
+    let repairs: Vec<AgentWorkSummaryCandidatesRepaired> = events
+        .iter()
+        .filter(|event| event.r#type == "AgentWorkSummaryCandidatesRepaired")
+        .map(|event| serde_json::from_value(event.payload.clone()).unwrap())
+        .collect();
+    assert_eq!(repairs.len(), 2);
+    assert!(repairs.iter().any(|repair| {
+        repair.incarnation == explicit_only.incarnation
+            && repair.clear_explicit
+            && !repair.clear_screen
+    }));
+    assert!(repairs.iter().any(|repair| {
+        repair.incarnation == screen_only.incarnation
+            && !repair.clear_explicit
+            && repair.clear_screen
+    }));
+    assert!(events.iter().skip(5).all(|event| {
+        !serde_json::to_string(&event.payload)
+            .unwrap()
+            .contains(PLACEHOLDER)
+    }));
+
+    drop(shutdown);
+    task.await.unwrap();
+    drop(stream);
+    drop(service);
+    drop(store);
+
+    let reopened = store::HaroldStore::open(&directory.0).await.unwrap();
+    let after_shutdown = reopened.load_agent_snapshot().await.unwrap();
+    assert_eq!(after_shutdown.panes[0].work_summary, None);
+    assert_eq!(
+        after_shutdown.panes[1].work_summary.as_deref(),
+        Some(LEGITIMATE)
+    );
 }
 
 #[tokio::test]

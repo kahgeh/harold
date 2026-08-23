@@ -478,6 +478,45 @@ fn health_from_snapshot(snapshot: &AgentSnapshot) -> HashMap<String, HealthState
         .collect()
 }
 
+pub(crate) async fn append_configured_placeholder_repairs(
+    store: &HaroldStore,
+    providers: &[AgentProviderSettings],
+    snapshot: &AgentSnapshot,
+) -> events::Result<bool> {
+    let providers: HashMap<&str, &AgentProviderSettings> = providers
+        .iter()
+        .map(|provider| (provider.id.as_str(), provider))
+        .collect();
+    let observed_at_ms = now_ms();
+    let repairs: Vec<AgentWorkSummaryCandidatesRepaired> = snapshot
+        .panes
+        .iter()
+        .filter_map(|projection| {
+            repair_event(
+                providers
+                    .get(projection.pane.incarnation.provider_id.as_str())
+                    .copied(),
+                &projection.pane.incarnation,
+                projection.explicit_work_summary.as_deref(),
+                projection.screen_work_summary.as_deref(),
+                observed_at_ms,
+            )
+        })
+        .collect();
+    if repairs.is_empty() {
+        return Ok(false);
+    }
+    store::append_agent_events(
+        store,
+        repairs
+            .into_iter()
+            .map(AgentEvent::WorkSummaryCandidatesRepaired)
+            .collect(),
+    )
+    .await?;
+    Ok(true)
+}
+
 #[cfg(test)]
 fn empty_snapshot() -> AgentSnapshot {
     AgentSnapshot {
@@ -538,7 +577,10 @@ impl AgentMonitorRuntime {
             return Err(MonitorCommandError::AgentNotFound);
         };
         let observed_at_ms = pane.observed_at_ms;
-        let work_summary = normalize_work_summary_update(work_summary);
+        let work_summary = self.reject_configured_placeholder_update(
+            &pane.incarnation,
+            normalize_work_summary_update(work_summary),
+        );
         let current = self
             .panes
             .get(&pane.incarnation.pane_id)
@@ -618,6 +660,22 @@ impl AgentMonitorRuntime {
         };
         turn.work_summary = completion_summary_update(&turn.last_user_prompt);
         turn.agent_incarnation = pane.as_ref().map(|pane| pane.incarnation.clone());
+        let candidate_incarnation = pane.as_ref().map(|pane| &pane.incarnation).or_else(|| {
+            self.panes
+                .get(&turn.pane_id)
+                .map(|tracked| &tracked.pane.incarnation)
+        });
+        if matches!(
+            &turn.work_summary,
+            CompletionSummaryUpdate::Set(summary)
+                if candidate_incarnation.map_or_else(
+                    || self.matches_any_configured_placeholder(summary),
+                    |incarnation| self.matches_configured_placeholder(incarnation, summary),
+                )
+        ) {
+            turn.last_user_prompt.clear();
+            turn.work_summary = CompletionSummaryUpdate::Unchanged;
+        }
         let next_explicit_summary = pane.as_ref().and_then(|pane| match &turn.work_summary {
             CompletionSummaryUpdate::Unchanged => self
                 .panes
@@ -893,18 +951,44 @@ impl AgentMonitorRuntime {
         screen_summary: Option<&str>,
         observed_at_ms: i64,
     ) -> Option<AgentWorkSummaryCandidatesRepaired> {
-        let provider = self.providers.get(&incarnation.provider_id)?;
-        let clear_explicit = explicit_summary
-            .is_some_and(|summary| matches_configured_placeholder(summary, &provider.idle_all));
-        let clear_screen = screen_summary
-            .is_some_and(|summary| matches_configured_placeholder(summary, &provider.idle_all));
-        (clear_explicit || clear_screen).then(|| AgentWorkSummaryCandidatesRepaired {
-            incarnation: incarnation.clone(),
-            clear_explicit,
-            clear_screen,
-            reason: AgentWorkSummaryRepairReason::ConfiguredIdlePlaceholder,
+        repair_event(
+            self.providers.get(&incarnation.provider_id),
+            incarnation,
+            explicit_summary,
+            screen_summary,
             observed_at_ms,
-        })
+        )
+    }
+
+    fn reject_configured_placeholder_update(
+        &self,
+        incarnation: &AgentIncarnation,
+        update: WorkSummaryUpdate,
+    ) -> WorkSummaryUpdate {
+        match update {
+            WorkSummaryUpdate::Set(summary)
+                if self.matches_configured_placeholder(incarnation, &summary) =>
+            {
+                WorkSummaryUpdate::Unchanged
+            }
+            update => update,
+        }
+    }
+
+    fn matches_configured_placeholder(
+        &self,
+        incarnation: &AgentIncarnation,
+        summary: &str,
+    ) -> bool {
+        self.providers
+            .get(&incarnation.provider_id)
+            .is_some_and(|provider| matches_configured_placeholder(summary, &provider.idle_all))
+    }
+
+    fn matches_any_configured_placeholder(&self, summary: &str) -> bool {
+        self.providers
+            .values()
+            .any(|provider| matches_configured_placeholder(summary, &provider.idle_all))
     }
 
     async fn resolve_pane(
@@ -975,6 +1059,27 @@ fn normalize_work_summary_update(update: WorkSummaryUpdate) -> WorkSummaryUpdate
 fn matches_configured_placeholder(summary: &str, fragments: &[String]) -> bool {
     super::summary::normalize_work_summary(summary).is_some()
         && normalize_fallback_summary(summary, fragments).is_none()
+}
+
+fn repair_event(
+    provider: Option<&AgentProviderSettings>,
+    incarnation: &AgentIncarnation,
+    explicit_summary: Option<&str>,
+    screen_summary: Option<&str>,
+    observed_at_ms: i64,
+) -> Option<AgentWorkSummaryCandidatesRepaired> {
+    let provider = provider?;
+    let clear_explicit = explicit_summary
+        .is_some_and(|summary| matches_configured_placeholder(summary, &provider.idle_all));
+    let clear_screen = screen_summary
+        .is_some_and(|summary| matches_configured_placeholder(summary, &provider.idle_all));
+    (clear_explicit || clear_screen).then(|| AgentWorkSummaryCandidatesRepaired {
+        incarnation: incarnation.clone(),
+        clear_explicit,
+        clear_screen,
+        reason: AgentWorkSummaryRepairReason::ConfiguredIdlePlaceholder,
+        observed_at_ms,
+    })
 }
 
 fn apply_repair_to_tracked(

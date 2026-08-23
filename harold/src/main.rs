@@ -397,9 +397,6 @@ async fn async_main(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>>
     // Shutdown channel: sender closes on signal, receivers see the channel close.
     let (shutdown_tx, shutdown_rx) = watch::channel(());
 
-    let initial_agent_snapshot = load_startup_agent_snapshot(&store).await?;
-    let snapshots = agent::snapshot::AgentSnapshotHub::new(initial_agent_snapshot.clone());
-
     let inventory: Arc<dyn agent::inventory::AgentInventoryPort> = Arc::new(
         agent::inventory::TmuxAgentInventory::new(cfg.agents.clone()),
     );
@@ -409,6 +406,9 @@ async fn async_main(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>>
         settings::AgentSettings::Named(providers) => providers.clone(),
         settings::AgentSettings::Legacy { .. } => Vec::new(),
     };
+    let initial_agent_snapshot = load_startup_agent_snapshot(&store, &providers).await?;
+    let snapshots = agent::snapshot::AgentSnapshotHub::new(initial_agent_snapshot.clone());
+
     let (monitor, mut monitor_task) = agent::runtime::spawn_agent_monitor(
         Arc::clone(&store),
         inventory,
@@ -466,7 +466,17 @@ async fn async_main(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>>
 
 async fn load_startup_agent_snapshot(
     store: &store::HaroldStore,
+    providers: &[settings::AgentProviderSettings],
 ) -> events::Result<agent::domain::AgentSnapshot> {
+    let snapshot = loop {
+        let batch = store.project_unhandled_events(500).await?;
+        if batch.applied == 0 {
+            break store.load_agent_snapshot().await?;
+        }
+    };
+    if !agent::runtime::append_configured_placeholder_repairs(store, providers, &snapshot).await? {
+        return Ok(snapshot);
+    }
     loop {
         let batch = store.project_unhandled_events(500).await?;
         if batch.applied == 0 {

@@ -375,7 +375,7 @@ async fn completion_preserves_legacy_payload_and_has_non_destructive_summary_sem
 }
 
 #[tokio::test]
-async fn later_explicit_ingress_repairs_exact_placeholders_and_preserves_update_semantics() {
+async fn later_explicit_ingress_rejects_exact_placeholders_and_preserves_update_semantics() {
     const PLACEHOLDER: &str = "Ask Codex to do anything";
     const LEGITIMATE: &str = "Explain why the UI says Ask Codex to do anything";
 
@@ -465,7 +465,6 @@ async fn later_explicit_ingress_repairs_exact_placeholders_and_preserves_update_
         [
             "AgentPaneObserved",
             "AgentLifecycleObserved",
-            "AgentWorkSummaryCandidatesRepaired",
             "AgentPaneObserved",
             "AgentLifecycleObserved",
             "AgentPaneObserved",
@@ -474,20 +473,227 @@ async fn later_explicit_ingress_repairs_exact_placeholders_and_preserves_update_
             "AgentLifecycleObserved",
             "AgentPaneObserved",
             "TurnCompleted",
-            "AgentWorkSummaryCandidatesRepaired",
             "AgentPaneObserved",
             "TurnCompleted",
         ]
     );
-    for repair in events
-        .iter()
-        .filter(|event| event.r#type == "AgentWorkSummaryCandidatesRepaired")
-    {
-        assert!(!repair.payload.to_string().contains(PLACEHOLDER));
+    for event in &events {
+        if event.r#type == "AgentLifecycleObserved" {
+            let lifecycle: AgentLifecycleObserved =
+                serde_json::from_value(event.payload.clone()).unwrap();
+            assert_ne!(
+                lifecycle.work_summary,
+                WorkSummaryUpdate::Set(PLACEHOLDER.into())
+            );
+        }
+        if event.r#type == "TurnCompleted" {
+            let completion: TurnCompleted = serde_json::from_value(event.payload.clone()).unwrap();
+            assert_ne!(completion.last_user_prompt, PLACEHOLDER);
+            assert_ne!(
+                completion.work_summary,
+                CompletionSummaryUpdate::Set(PLACEHOLDER.into())
+            );
+        }
     }
 
     drop(shutdown);
     task.await.unwrap();
+}
+
+#[tokio::test]
+async fn configured_placeholder_ingress_is_rejected_before_every_event_payload() {
+    const PLACEHOLDER: &str = "Ask Codex to do anything";
+    const RETAINED: &str = "Keep this real task";
+
+    let directory = TestDirectory::new();
+    let store = Arc::new(HaroldStore::open(&directory.0).await.unwrap());
+    let observation = pane("%8", 80, 800, 1_000, 100);
+    let inventory = Arc::new(FakeInventory::default());
+    for _ in 0..3 {
+        inventory.push_resolution(Ok(Some(observation.clone())));
+    }
+    inventory.push_resolution(Ok(None));
+    let mut codex = provider();
+    codex.idle_all = vec![format!(" \u{1b}[31m{PLACEHOLDER}\u{1b}[0m ")];
+    let (shutdown, shutdown_rx) = watch::channel(());
+    let (handle, task) = spawn_agent_monitor_for_test(
+        Arc::clone(&store),
+        inventory,
+        Arc::new(FakeScreen::default()),
+        vec![codex],
+        2_000,
+        shutdown_rx,
+    );
+
+    handle
+        .report_lifecycle(
+            "%8".into(),
+            ObservedAgentState::Busy,
+            "codex-hook".into(),
+            WorkSummaryUpdate::Set(RETAINED.into()),
+        )
+        .await
+        .unwrap();
+    handle
+        .report_lifecycle(
+            "%8".into(),
+            ObservedAgentState::Busy,
+            "codex-hook".into(),
+            WorkSummaryUpdate::Set(PLACEHOLDER.into()),
+        )
+        .await
+        .unwrap();
+    handle.turn_completed(turn(PLACEHOLDER)).await.unwrap();
+    handle.turn_completed(turn(PLACEHOLDER)).await.unwrap();
+    let mut never_tracked = turn(PLACEHOLDER);
+    never_tracked.pane_id = "%99".into();
+    handle.turn_completed(never_tracked).await.unwrap();
+
+    let events = store
+        .stream()
+        .load_after_version(EventStreamVersion::start(), 100)
+        .await
+        .unwrap();
+    assert!(events.iter().all(|event| {
+        !serde_json::to_string(&event.payload)
+            .unwrap()
+            .contains(PLACEHOLDER)
+    }));
+    assert!(
+        events
+            .iter()
+            .all(|event| event.r#type != "AgentWorkSummaryCandidatesRepaired")
+    );
+    store.project_unhandled_events(100).await.unwrap();
+    assert_eq!(
+        store.load_agent_snapshot().await.unwrap().panes[0]
+            .work_summary
+            .as_deref(),
+        Some(RETAINED)
+    );
+    let completions: Vec<TurnCompleted> = events
+        .iter()
+        .filter(|event| event.r#type == "TurnCompleted")
+        .map(|event| serde_json::from_value(event.payload.clone()).unwrap())
+        .collect();
+    assert_eq!(completions.len(), 3);
+    assert_eq!(
+        completions[0].agent_incarnation,
+        Some(observation.incarnation)
+    );
+    assert_eq!(completions[1].agent_incarnation, None);
+    assert_eq!(completions[2].agent_incarnation, None);
+
+    drop(shutdown);
+    task.await.unwrap();
+}
+
+#[tokio::test]
+async fn lifecycle_placeholder_cannot_leak_at_a_projection_page_boundary() {
+    const PLACEHOLDER: &str = "Ask Codex to do anything";
+    const RETAINED: &str = "Keep this real task";
+
+    let (directory, store, snapshot, observation) = unprojected_page_boundary_store(RETAINED).await;
+    let inventory = Arc::new(FakeInventory::default());
+    inventory.push_resolution(Ok(Some(observation)));
+    let mut codex = provider();
+    codex.idle_all = vec![PLACEHOLDER.into()];
+    let (shutdown, shutdown_rx) = watch::channel(());
+    let (handle, task) = spawn_agent_monitor_seeded_for_test(
+        Arc::clone(&store),
+        inventory,
+        Arc::new(FakeScreen::default()),
+        vec![codex],
+        AgentMonitorSeed {
+            snapshot,
+            hook_grace_ms: 2_000,
+            acquisition_timeout: Duration::from_millis(50),
+        },
+        shutdown_rx,
+    );
+
+    handle
+        .report_lifecycle(
+            "%8".into(),
+            ObservedAgentState::Busy,
+            "codex-hook".into(),
+            WorkSummaryUpdate::Set(PLACEHOLDER.into()),
+        )
+        .await
+        .unwrap();
+
+    let hub = AgentSnapshotHub::new(empty_snapshot());
+    crate::projector::project_and_publish_agent_snapshot(&store, &hub, 500)
+        .await
+        .unwrap();
+    assert_eq!(
+        hub.subscribe().borrow().panes[0].work_summary.as_deref(),
+        Some(RETAINED)
+    );
+    let ingress = store
+        .stream()
+        .load_after_version(EventStreamVersion::new(498).unwrap(), 10)
+        .await
+        .unwrap();
+    assert!(ingress.iter().all(|event| {
+        !serde_json::to_string(&event.payload)
+            .unwrap()
+            .contains(PLACEHOLDER)
+    }));
+
+    drop(shutdown);
+    task.await.unwrap();
+    drop(directory);
+}
+
+#[tokio::test]
+async fn completion_placeholder_cannot_leak_at_a_projection_page_boundary() {
+    const PLACEHOLDER: &str = "Ask Codex to do anything";
+    const RETAINED: &str = "Keep this real task";
+
+    let (directory, store, snapshot, observation) = unprojected_page_boundary_store(RETAINED).await;
+    let inventory = Arc::new(FakeInventory::default());
+    inventory.push_resolution(Ok(Some(observation)));
+    let mut codex = provider();
+    codex.idle_all = vec![PLACEHOLDER.into()];
+    let (shutdown, shutdown_rx) = watch::channel(());
+    let (handle, task) = spawn_agent_monitor_seeded_for_test(
+        Arc::clone(&store),
+        inventory,
+        Arc::new(FakeScreen::default()),
+        vec![codex],
+        AgentMonitorSeed {
+            snapshot,
+            hook_grace_ms: 2_000,
+            acquisition_timeout: Duration::from_millis(50),
+        },
+        shutdown_rx,
+    );
+
+    handle.turn_completed(turn(PLACEHOLDER)).await.unwrap();
+
+    let hub = AgentSnapshotHub::new(empty_snapshot());
+    crate::projector::project_and_publish_agent_snapshot(&store, &hub, 500)
+        .await
+        .unwrap();
+    assert_eq!(
+        hub.subscribe().borrow().panes[0].work_summary.as_deref(),
+        Some(RETAINED)
+    );
+    let ingress = store
+        .stream()
+        .load_after_version(EventStreamVersion::new(498).unwrap(), 10)
+        .await
+        .unwrap();
+    assert!(ingress.iter().all(|event| {
+        !serde_json::to_string(&event.payload)
+            .unwrap()
+            .contains(PLACEHOLDER)
+    }));
+
+    drop(shutdown);
+    task.await.unwrap();
+    drop(directory);
 }
 
 #[test]
@@ -2011,6 +2217,52 @@ fn empty_snapshot() -> AgentSnapshot {
         monitor_health: Vec::new(),
         panes: Vec::new(),
     }
+}
+
+async fn unprojected_page_boundary_store(
+    retained_summary: &str,
+) -> (
+    TestDirectory,
+    Arc<HaroldStore>,
+    AgentSnapshot,
+    AgentPaneObservation,
+) {
+    let directory = TestDirectory::new();
+    let initial_store = HaroldStore::open(&directory.0).await.unwrap();
+    let observation = pane("%8", 80, 800, 1_000, 100);
+    let mut history = vec![
+        AgentEvent::PaneObserved(AgentPaneObserved {
+            pane: observation.clone(),
+        }),
+        AgentEvent::LifecycleObserved(AgentLifecycleObserved {
+            incarnation: observation.incarnation.clone(),
+            state: ObservedAgentState::Busy,
+            adapter_id: "legacy-hook".into(),
+            work_summary: WorkSummaryUpdate::Set(retained_summary.into()),
+            observed_at_ms: 101,
+        }),
+    ];
+    history.extend((0..496).map(|offset| {
+        let mut pane = observation.clone();
+        pane.observed_at_ms = 102 + offset;
+        AgentEvent::PaneObserved(AgentPaneObserved { pane })
+    }));
+    crate::store::append_agent_events(&initial_store, history)
+        .await
+        .unwrap();
+    initial_store.project_unhandled_events(500).await.unwrap();
+    let snapshot = initial_store.load_agent_snapshot().await.unwrap();
+    assert_eq!(snapshot.through_event_version.get(), 498);
+    drop(initial_store);
+
+    for suffix in ["", "-shm", "-wal"] {
+        let path = directory.0.join(format!("harold-state.db{suffix}"));
+        if path.exists() {
+            std::fs::remove_file(path).unwrap();
+        }
+    }
+    let store = Arc::new(HaroldStore::open(&directory.0).await.unwrap());
+    (directory, store, snapshot, observation)
 }
 
 fn pane(
