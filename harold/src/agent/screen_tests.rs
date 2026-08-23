@@ -94,6 +94,43 @@ fn extractor_uses_sanitized_bottom_most_non_empty_prefixed_line() {
 }
 
 #[test]
+fn extractor_skips_codex_idle_placeholder_below_the_real_prompt() {
+    let mut codex = provider();
+    codex.idle_all = vec!["Ask Codex to do anything".to_string()];
+    let visible = concat!(
+        "› E2E-CODEX inspect the dashboard state transitions\n",
+        "\n",
+        "• Completed the requested inspection.\n",
+        "\n",
+        "› Ask Codex to do anything\n",
+    );
+
+    let observation = observe_visible_text(&pane("%34"), &codex, visible, 99);
+
+    assert_eq!(observation.state, Some(ObservedAgentState::Idle));
+    assert_eq!(
+        observation.fallback_summary.as_deref(),
+        Some("E2E-CODEX inspect the dashboard state transitions")
+    );
+}
+
+#[test]
+fn extractor_returns_no_summary_for_only_the_codex_idle_placeholder() {
+    let mut codex = provider();
+    codex.idle_all = vec!["Ask Codex to do anything".to_string()];
+
+    let observation = observe_visible_text(
+        &pane("%34"),
+        &codex,
+        "Codex ready\n› Ask Codex to do anything\n",
+        99,
+    );
+
+    assert_eq!(observation.state, Some(ObservedAgentState::Idle));
+    assert_eq!(observation.fallback_summary, None);
+}
+
+#[test]
 fn extracted_summary_is_capped_at_160_unicode_scalars() {
     let expected = "🦀".repeat(160);
     let visible = format!("› {expected}extra");

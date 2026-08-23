@@ -423,9 +423,14 @@ async fn resolved_completion_starts_an_idle_reconciliation_epoch() {
     let snapshot = fixture.store.load_agent_snapshot().await.unwrap();
     assert_eq!(snapshot.panes.len(), 1);
     assert_eq!(snapshot.panes[0].effective_state, EffectiveAgentState::Idle);
+    assert_eq!(snapshot.panes[0].work_summary.as_deref(), Some("fallback"));
     assert_eq!(
-        snapshot.panes[0].work_summary.as_deref(),
-        Some("current task")
+        snapshot.panes[0].explicit_work_summary_updated_at_ms,
+        Some(100)
+    );
+    assert_eq!(
+        snapshot.panes[0].screen_work_summary_updated_at_ms,
+        Some(1_500)
     );
 }
 
@@ -964,14 +969,17 @@ async fn real_screen_adapter_keeps_unrelated_capture_out_of_every_published_boun
 #[tokio::test]
 async fn grpc_fallback_explicit_legacy_clear_and_replacement_converge_in_projection_order() {
     let original = pane("%8", 80, 800, 1_000, 100);
+    let explicit_observation = pane("%8", 80, 800, 1_000, 120);
+    let completion_observation = pane("%8", 80, 800, 1_000, 130);
+    let clear_observation = pane("%8", 80, 800, 1_000, 140);
     let replacement = pane("%8", 80, 801, 2_000, 500);
     let inventory = FakeInventory::scans(vec![
         Ok(vec![original.clone()]),
         Ok(vec![replacement.clone()]),
     ]);
-    inventory.push_resolution(Ok(Some(original.clone())));
-    inventory.push_resolution(Ok(Some(original.clone())));
-    inventory.push_resolution(Ok(Some(original.clone())));
+    inventory.push_resolution(Ok(Some(explicit_observation)));
+    inventory.push_resolution(Ok(Some(completion_observation)));
+    inventory.push_resolution(Ok(Some(clear_observation)));
     let fixture = Fixture::new(inventory).await;
     let service = HaroldService {
         monitor: fixture.handle.clone(),
@@ -1010,6 +1018,14 @@ async fn grpc_fallback_explicit_legacy_clear_and_replacement_converge_in_project
     assert_eq!(
         explicit.panes[0].screen_work_summary.as_deref(),
         Some("Review tests")
+    );
+    assert_eq!(
+        explicit.panes[0].screen_work_summary_updated_at_ms,
+        Some(110)
+    );
+    assert_eq!(
+        explicit.panes[0].explicit_work_summary_updated_at_ms,
+        Some(120)
     );
 
     service

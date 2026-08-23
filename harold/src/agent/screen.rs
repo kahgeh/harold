@@ -126,6 +126,7 @@ pub(super) fn observe_visible_text(
             .iter()
             .find_map(|prefix| line.strip_prefix(prefix))
             .and_then(normalize_work_summary)
+            .filter(|summary| !clause_matches(summary, &provider.idle_all))
     });
 
     ScreenObservation {

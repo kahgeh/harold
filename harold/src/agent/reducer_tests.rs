@@ -337,6 +337,89 @@ fn explicit_summary_set_unchanged_and_clear_select_the_correct_candidate() {
 }
 
 #[test]
+fn later_busy_screen_summary_replaces_completed_explicit_and_survives_idle_without_summary() {
+    let initial = apply(
+        None,
+        AgentEvent::PaneObserved(AgentPaneObserved {
+            pane: pane(1_000, 100),
+        }),
+        1,
+    );
+    let completed = apply(
+        Some(initial),
+        AgentEvent::LifecycleObserved(AgentLifecycleObserved {
+            incarnation: incarnation(1_000),
+            state: ObservedAgentState::Idle,
+            adapter_id: "hook-v1".into(),
+            work_summary: WorkSummaryUpdate::Set("Completed task".into()),
+            observed_at_ms: 120,
+        }),
+        2,
+    );
+    let new_work = apply(
+        Some(completed),
+        AgentEvent::ScreenObserved(AgentScreenObserved {
+            incarnation: incarnation(1_000),
+            state: Some(ObservedAgentState::Busy),
+            classifier_id: "screen-v1".into(),
+            fallback_summary: Some("Current task".into()),
+            observed_at_ms: 130,
+        }),
+        3,
+    );
+    let idle = apply(
+        Some(new_work.clone()),
+        AgentEvent::ScreenObserved(AgentScreenObserved {
+            incarnation: incarnation(1_000),
+            state: Some(ObservedAgentState::Idle),
+            classifier_id: "screen-v1".into(),
+            fallback_summary: None,
+            observed_at_ms: 140,
+        }),
+        4,
+    );
+
+    assert_eq!(new_work.work_summary.as_deref(), Some("Current task"));
+    assert_eq!(idle.work_summary.as_deref(), Some("Current task"));
+    assert_eq!(idle.screen_work_summary_updated_at_ms, Some(130));
+}
+
+#[test]
+fn explicit_summary_wins_when_candidate_timestamps_are_equal() {
+    let initial = apply(
+        None,
+        AgentEvent::PaneObserved(AgentPaneObserved {
+            pane: pane(1_000, 100),
+        }),
+        1,
+    );
+    let screen = apply(
+        Some(initial),
+        AgentEvent::ScreenObserved(AgentScreenObserved {
+            incarnation: incarnation(1_000),
+            state: None,
+            classifier_id: "screen-v1".into(),
+            fallback_summary: Some("Screen task".into()),
+            observed_at_ms: 120,
+        }),
+        2,
+    );
+    let explicit = apply(
+        Some(screen),
+        AgentEvent::LifecycleObserved(AgentLifecycleObserved {
+            incarnation: incarnation(1_000),
+            state: ObservedAgentState::Busy,
+            adapter_id: "hook-v1".into(),
+            work_summary: WorkSummaryUpdate::Set("Explicit task".into()),
+            observed_at_ms: 120,
+        }),
+        3,
+    );
+
+    assert_eq!(explicit.work_summary.as_deref(), Some("Explicit task"));
+}
+
+#[test]
 fn clear_without_a_fallback_makes_the_effective_summary_absent() {
     let initial = apply(
         None,

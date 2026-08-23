@@ -165,10 +165,24 @@ fn reconcile(
         projection.effective_state = effective_state;
         projection.last_transition_at_ms = observed_at_ms;
     }
-    projection.work_summary = projection
+    let explicit_summary = projection
         .explicit_work_summary
-        .clone()
-        .or_else(|| projection.screen_work_summary.clone());
+        .as_ref()
+        .zip(projection.explicit_work_summary_updated_at_ms);
+    let screen_summary = projection
+        .screen_work_summary
+        .as_ref()
+        .zip(projection.screen_work_summary_updated_at_ms);
+    projection.work_summary = match (explicit_summary, screen_summary) {
+        (Some((_, explicit_at_ms)), Some((screen, screen_at_ms)))
+            if screen_at_ms > explicit_at_ms =>
+        {
+            Some(screen.clone())
+        }
+        (Some((explicit, _)), _) => Some(explicit.clone()),
+        (None, Some((screen, _))) => Some(screen.clone()),
+        (None, None) => None,
+    };
     projection.last_event_version = event_version;
     projection
 }
