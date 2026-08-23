@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::fmt;
 use std::io;
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -11,7 +12,7 @@ use super::domain::{
     AgentIncarnation, AgentPaneObservation, UNKNOWN_PROVIDER_DISPLAY_NAME, UNKNOWN_PROVIDER_ID,
 };
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub(super) struct ProcessInfo {
     pub(super) pid: u32,
     pub(super) ppid: u32,
@@ -20,6 +21,21 @@ pub(super) struct ProcessInfo {
     pub(super) tty: String,
     pub(super) started_at_ms: Option<i64>,
     pub(super) command: String,
+}
+
+impl fmt::Debug for ProcessInfo {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ProcessInfo")
+            .field("pid", &self.pid)
+            .field("ppid", &self.ppid)
+            .field("pgid", &self.pgid)
+            .field("tpgid", &self.tpgid)
+            .field("tty", &self.tty)
+            .field("started_at_ms", &self.started_at_ms)
+            .field("command", &"<redacted>")
+            .finish()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -39,6 +55,18 @@ pub(crate) enum InventoryError {
     CommandFailed,
     MalformedOutput,
     MissingProcessStartTime,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum ProviderResolution {
+    Matched {
+        provider_id: String,
+        provider_display_name: String,
+    },
+    Ambiguous {
+        match_count: usize,
+    },
+    Unknown,
 }
 
 pub(crate) trait AgentInventoryPort: Send + Sync {
@@ -122,7 +150,20 @@ pub(super) fn observe_pane(
     let Some(agent_started_at_ms) = process.started_at_ms else {
         return Err(InventoryError::MissingProcessStartTime);
     };
-    let (provider_id, provider_display_name) = resolve_provider(settings, &process.command);
+    let (provider_id, provider_display_name) = match resolve_provider(settings, &process.command) {
+        ProviderResolution::Matched {
+            provider_id,
+            provider_display_name,
+        } => (provider_id, provider_display_name),
+        ProviderResolution::Ambiguous { match_count } => {
+            tracing::warn!(
+                provider_match_count = match_count,
+                "agent process matched multiple providers; using unknown provider"
+            );
+            unknown_provider()
+        }
+        ProviderResolution::Unknown => unknown_provider(),
+    };
 
     Ok(Some(AgentPaneObservation {
         incarnation: AgentIncarnation {
@@ -167,17 +208,23 @@ fn descendant_depth(
     None
 }
 
-fn resolve_provider(settings: &AgentSettings, command: &str) -> (String, String) {
+pub(super) fn resolve_provider(settings: &AgentSettings, command: &str) -> ProviderResolution {
     let AgentSettings::Named(providers) = settings else {
-        return unknown_provider();
+        return ProviderResolution::Unknown;
     };
     let matching: Vec<&AgentProviderSettings> = providers
         .iter()
         .filter(|provider| command_matches_any(command, &provider.command_contains))
         .collect();
     match matching.as_slice() {
-        [provider] => (provider.id.clone(), provider.display_name.clone()),
-        _ => unknown_provider(),
+        [provider] => ProviderResolution::Matched {
+            provider_id: provider.id.clone(),
+            provider_display_name: provider.display_name.clone(),
+        },
+        [] => ProviderResolution::Unknown,
+        providers => ProviderResolution::Ambiguous {
+            match_count: providers.len(),
+        },
     }
 }
 

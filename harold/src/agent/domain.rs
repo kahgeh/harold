@@ -54,3 +54,12 @@ pub(crate) struct AgentPaneObservation {
     pub provider_display_name: String,
     pub observed_at_ms: i64,
 }
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ScreenObservation {
+    pub incarnation: AgentIncarnation,
+    pub state: Option<ObservedAgentState>,
+    pub fallback_summary: Option<String>,
+    pub classifier_id: String,
+    pub observed_at_ms: i64,
+}

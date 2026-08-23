@@ -128,6 +128,9 @@ impl AgentSettings {
                     } else if !ids.insert(provider.id.as_str()) {
                         errors.push(format!("duplicate agents.id: {}", provider.id));
                     }
+                    if provider.id == "unknown" {
+                        errors.push("reserved provider id must not be configured: unknown".into());
+                    }
                     if provider.display_name.trim().is_empty() {
                         errors.push(format!(
                             "agents.display_name must not be empty for {}",
@@ -456,6 +459,13 @@ mod tests {
             AgentSettings::Named(vec![provider("codex"), provider("codex")]).validate(&monitor);
         assert!(errors.iter().any(|error| error.contains("duplicate")));
 
+        let errors = AgentSettings::Named(vec![provider("unknown")]).validate(&monitor);
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.contains("reserved provider id"))
+        );
+
         let mut invalid = provider("codex");
         invalid.display_name = "  ".to_string();
         invalid.command_contains = vec![" ".to_string()];
@@ -475,6 +485,47 @@ mod tests {
             errors
                 .iter()
                 .any(|error| error.contains("summary_line_prefixes"))
+        );
+    }
+
+    #[test]
+    fn default_named_providers_have_verified_screen_contracts() {
+        let defaults = parse_agent_config(&[include_str!("../config/default.toml")]);
+        let AgentSettings::Named(providers) = defaults.agents else {
+            panic!("expected named default providers");
+        };
+
+        for provider in &providers {
+            assert!(
+                !provider.busy_all.is_empty(),
+                "{} needs a verified busy clause",
+                provider.id
+            );
+            assert!(
+                !provider.idle_all.is_empty(),
+                "{} needs a verified idle clause",
+                provider.id
+            );
+        }
+
+        for provider_id in ["codex", "claude"] {
+            let provider = providers
+                .iter()
+                .find(|provider| provider.id == provider_id)
+                .expect("default provider should exist");
+            assert!(
+                !provider.summary_line_prefixes.is_empty(),
+                "{provider_id} needs a verified safe summary prefix"
+            );
+        }
+
+        let opencode = providers
+            .iter()
+            .find(|provider| provider.id == "opencode")
+            .expect("OpenCode default should exist");
+        assert!(
+            opencode.summary_line_prefixes.is_empty(),
+            "OpenCode's prompt and user-message rows share the same visible prefix"
         );
     }
 

@@ -2,7 +2,8 @@ use crate::settings::{AgentProviderSettings, AgentSettings};
 
 use super::domain::{AgentIncarnation, UNKNOWN_PROVIDER_ID};
 use super::inventory::{
-    InventoryError, ProcessInfo, TmuxPaneInfo, observe_pane, parse_process_table, parse_tmux_panes,
+    InventoryError, ProcessInfo, ProviderResolution, TmuxPaneInfo, observe_pane,
+    parse_process_table, parse_tmux_panes, resolve_provider,
 };
 
 fn provider(id: &str, command_contains: &[&str]) -> AgentProviderSettings {
@@ -128,6 +129,19 @@ fn ambiguous_and_legacy_matches_remain_visible_as_unknown() {
 }
 
 #[test]
+fn ambiguous_provider_resolution_is_typed_for_bounded_operator_reporting() {
+    let settings = AgentSettings::Named(vec![
+        provider("codex", &["agent"]),
+        provider("future", &["future-agent"]),
+    ]);
+
+    assert_eq!(
+        resolve_provider(&settings, "future-agent"),
+        ProviderResolution::Ambiguous { match_count: 2 }
+    );
+}
+
+#[test]
 fn selected_process_requires_an_os_start_time() {
     let mut agent = process(11, 10, 50, "codex");
     agent.started_at_ms = None;
@@ -207,4 +221,15 @@ fn malformed_snapshots_are_errors_not_empty_successes() {
         parse_tmux_panes("%7\u{1f}missing-fields\n"),
         Err(InventoryError::MalformedOutput)
     );
+}
+
+#[test]
+fn process_debug_never_exposes_the_raw_command() {
+    let process = process(20, 10, 50, "codex --token TOP_SECRET_PROCESS_ARG");
+
+    let debug = format!("{process:?}");
+
+    assert!(debug.contains("pid: 20"));
+    assert!(!debug.contains("TOP_SECRET_PROCESS_ARG"));
+    assert!(!debug.contains("--token"));
 }

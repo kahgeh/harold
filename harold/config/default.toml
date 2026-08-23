@@ -29,11 +29,18 @@ summary_line_prefixes = ["›"]
 id = "claude"
 display_name = "Claude"
 command_contains = ["claude"]
+busy_all = ["esc to interrupt"]
+idle_all = ["❯"]
+summary_line_prefixes = ["❯"]
 
 [[agents]]
 id = "opencode"
 display_name = "OpenCode"
 command_contains = ["opencode"]
+busy_all = ["esc interrupt"]
+idle_all = ["agents", "commands"]
+# OpenCode 1.4.10 renders prompt and user-message rows with the same visible
+# prefix, so no safe provider-specific fallback summary prefix is configured.
 
 [tts]
 command = "say"
