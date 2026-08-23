@@ -1,8 +1,6 @@
-use std::io::Write;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use events::EventStreamVersion;
-use prost::Message;
 use tokio::sync::watch;
 use tokio_stream::StreamExt;
 
@@ -25,19 +23,6 @@ use super::{
 };
 
 struct EmptyInventory;
-
-struct CapturedLogWriter(Arc<Mutex<Vec<u8>>>);
-
-impl Write for CapturedLogWriter {
-    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().expect("captured log lock").extend(buffer);
-        Ok(buffer.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
 
 #[test]
 fn turn_complete_log_identifier_is_bounded_and_shape_checked() {
@@ -564,103 +549,6 @@ fn assert_watched_busy_incarnation(
     assert_eq!(pane.provider_id, expected.incarnation.provider_id);
     assert_eq!(pane.state, i32::from(AgentState::Busy));
     assert_eq!(pane.work_summary.as_deref(), Some(summary));
-}
-
-#[tokio::test]
-async fn raw_summary_sentinel_is_absent_from_status_and_protobuf_diagnostics() {
-    const RAW_SCREEN_SENTINEL: &str = "RAW_SCREEN_SENTINEL_TASK_11";
-
-    let directory = TestDirectory::new();
-    let store = Arc::new(store::HaroldStore::open(&directory.0).await.unwrap());
-    let inventory = Arc::new(ResolvingInventory {
-        pane: Some(resolved_pane()),
-    });
-    let (service, _shutdown, task) =
-        test_service_with_inventory(Arc::clone(&store), empty_snapshot(), inventory);
-    let captured_logs = Arc::new(Mutex::new(Vec::new()));
-    let log_writer = Arc::clone(&captured_logs);
-    let subscriber = tracing_subscriber::fmt()
-        .without_time()
-        .with_writer(move || CapturedLogWriter(Arc::clone(&log_writer)))
-        .finish();
-    let _subscriber_guard = tracing::subscriber::set_default(subscriber);
-    let error = service
-        .report_agent_state(Request::new(ReportAgentStateRequest {
-            pane_id: "not-a-pane".into(),
-            state: AgentState::Busy.into(),
-            adapter_id: "codex-hook".into(),
-            work_summary: Some(RAW_SCREEN_SENTINEL.into()),
-        }))
-        .await
-        .unwrap_err();
-    assert!(!format!("{error:?}").contains(RAW_SCREEN_SENTINEL));
-
-    store::append_agent_events(
-        &store,
-        vec![
-            AgentEvent::PaneObserved(AgentPaneObserved {
-                pane: resolved_pane(),
-            }),
-            AgentEvent::ScreenObserved(super::agent::domain::AgentScreenObserved {
-                incarnation: resolved_pane().incarnation,
-                state: Some(ObservedAgentState::Busy),
-                classifier_id: "tmux-visible-v1".into(),
-                fallback_summary: Some(format!(
-                    "\u{1b}P{RAW_SCREEN_SENTINEL}\u{1b}\\Review\t tests"
-                )),
-                observed_at_ms: 8_600,
-            }),
-        ],
-    )
-    .await
-    .unwrap();
-
-    let mut watch = service
-        .watch_agent_states(Request::new(WatchAgentStatesRequest {}))
-        .await
-        .unwrap()
-        .into_inner();
-    assert_eq!(
-        watch
-            .next()
-            .await
-            .expect("initial snapshot")
-            .unwrap()
-            .through_event_version,
-        0
-    );
-    let (handler_shutdown, handler_shutdown_rx) = tokio::sync::watch::channel(());
-    let handler = tokio::spawn(super::projector::run_event_handler(
-        Arc::clone(&store),
-        service.snapshots.clone(),
-        handler_shutdown_rx,
-    ));
-    let snapshot = tokio::time::timeout(std::time::Duration::from_secs(1), watch.next())
-        .await
-        .expect("projector did not publish")
-        .expect("watch closed before projection")
-        .unwrap();
-    assert_eq!(
-        snapshot.panes[0].work_summary.as_deref(),
-        Some("Review tests")
-    );
-    assert!(!format!("{snapshot:?}").contains(RAW_SCREEN_SENTINEL));
-    assert!(
-        !snapshot
-            .encode_to_vec()
-            .windows(RAW_SCREEN_SENTINEL.len())
-            .any(|window| window == RAW_SCREEN_SENTINEL.as_bytes())
-    );
-    drop(handler_shutdown);
-    tokio::time::timeout(std::time::Duration::from_secs(1), handler)
-        .await
-        .expect("event handler exceeded shutdown deadline")
-        .expect("event handler task panicked");
-    let logs = String::from_utf8(captured_logs.lock().expect("captured log lock").clone())
-        .expect("logs are utf-8");
-    assert!(logs.contains("event handler starting"));
-    assert!(!logs.contains(RAW_SCREEN_SENTINEL));
-    task.abort();
 }
 
 #[test]

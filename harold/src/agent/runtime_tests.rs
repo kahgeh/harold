@@ -1,9 +1,12 @@
 use std::collections::VecDeque;
+use std::io::Write;
+use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use events::EventStreamVersion;
+use prost::Message;
 use tokio::sync::watch;
 
 use super::domain::{
@@ -16,9 +19,15 @@ use super::runtime::{
     AgentMonitorHandle, AgentMonitorSeed, MonitorCommandError, coalesced_tick_channel_for_test,
     spawn_agent_monitor_for_test, spawn_agent_monitor_seeded_for_test,
 };
-use super::screen::{ScreenError, VisibleScreenPort};
+use super::screen::{
+    CommandOutput, CommandRunner, ScreenError, TmuxVisibleScreen, VisibleScreenPort,
+};
+use super::snapshot::AgentSnapshotHub;
+use crate::harold::harold_server::Harold;
+use crate::harold::{AgentState, ReportAgentStateRequest, TurnCompleteRequest};
 use crate::settings::AgentProviderSettings;
 use crate::store::{HaroldStore, TurnCompleted};
+use crate::{HaroldService, Request};
 
 struct TestDirectory(std::path::PathBuf);
 
@@ -91,6 +100,51 @@ impl AgentInventoryPort for FakeInventory {
 #[derive(Default)]
 struct FakeScreen {
     observations: Mutex<VecDeque<Result<ScreenObservation, ScreenError>>>,
+}
+
+struct CapturedScreenRunner {
+    outputs: Mutex<VecDeque<CommandOutput>>,
+}
+
+impl CommandRunner for CapturedScreenRunner {
+    fn output(&self, _program: &str, _args: &[&str]) -> std::io::Result<CommandOutput> {
+        Ok(self
+            .outputs
+            .lock()
+            .expect("captured screen output lock")
+            .pop_front()
+            .expect("captured screen output"))
+    }
+}
+
+struct CapturedLogWriter(Arc<Mutex<Vec<u8>>>);
+
+impl Write for CapturedLogWriter {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().expect("captured log lock").extend(buffer);
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn assert_persisted_files_exclude(root: &Path, sentinel: &[u8]) {
+    for entry in std::fs::read_dir(root).expect("read store directory") {
+        let path = entry.expect("read store entry").path();
+        if path.is_dir() {
+            assert_persisted_files_exclude(&path, sentinel);
+            continue;
+        }
+        let bytes = std::fs::read(&path).expect("read persisted store file");
+        assert!(
+            !bytes
+                .windows(sentinel.len())
+                .any(|window| window == sentinel),
+            "raw capture leaked into a persisted store file"
+        );
+    }
 }
 
 impl FakeScreen {
@@ -691,7 +745,158 @@ async fn metadata_refresh_preserves_the_incarnations_reconciliation_epoch() {
 }
 
 #[tokio::test]
-async fn fallback_explicit_legacy_clear_and_replacement_converge_in_projection_order() {
+async fn real_screen_adapter_keeps_unrelated_capture_out_of_every_published_boundary() {
+    let directory = TestDirectory::new();
+    let store = Arc::new(HaroldStore::open(&directory.0).await.unwrap());
+    let observed = pane("%8", 80, 800, 1_000, 100);
+    let inventory = Arc::new(FakeInventory::scans(vec![Ok(vec![observed.clone()])]));
+    let sentinel = ["RAW", "_SCREEN_", "TASK11_", "PRIVATE_", "7F3A"].concat();
+    let raw_capture = format!("{sentinel}\nWorking\nesc to interrupt\nTask:   Review\t tests  \n");
+    let screen = Arc::new(TmuxVisibleScreen::with_runner(
+        CapturedScreenRunner {
+            outputs: Mutex::new(
+                [
+                    CommandOutput {
+                        success: true,
+                        stdout: raw_capture.as_bytes().to_vec(),
+                    },
+                    CommandOutput {
+                        success: false,
+                        stdout: raw_capture.into_bytes(),
+                    },
+                ]
+                .into(),
+            ),
+        },
+        || 110,
+    ));
+    let (shutdown, shutdown_rx) = watch::channel(());
+    let (handle, monitor_task) = spawn_agent_monitor_for_test(
+        Arc::clone(&store),
+        inventory,
+        screen,
+        vec![provider()],
+        2_000,
+        shutdown_rx.clone(),
+    );
+    let snapshots = AgentSnapshotHub::new(empty_snapshot());
+    let service = HaroldService {
+        monitor: handle.clone(),
+        snapshots: snapshots.clone(),
+        shutdown: shutdown_rx,
+    };
+    let captured_logs = Arc::new(Mutex::new(Vec::new()));
+    let log_writer = Arc::clone(&captured_logs);
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_writer(move || CapturedLogWriter(Arc::clone(&log_writer)))
+        .finish();
+    let _subscriber_guard = tracing::subscriber::set_default(subscriber);
+
+    handle.inventory_tick().await.unwrap();
+    handle.screen_tick().await.unwrap();
+    handle.screen_tick().await.unwrap();
+    let error = service
+        .report_agent_state(Request::new(ReportAgentStateRequest {
+            pane_id: "not-a-pane".into(),
+            state: AgentState::Busy.into(),
+            adapter_id: "codex-hook".into(),
+            work_summary: Some(sentinel.clone()),
+        }))
+        .await
+        .unwrap_err();
+    assert!(!format!("{error:?}").contains(&sentinel));
+
+    let events = store
+        .stream()
+        .load_after_version(EventStreamVersion::start(), 100)
+        .await
+        .unwrap();
+    assert_eq!(
+        event_types(&events),
+        [
+            "AgentPaneObserved",
+            "AgentScreenObserved",
+            "AgentMonitorHealthChanged"
+        ]
+    );
+    let screen_event: super::domain::AgentScreenObserved =
+        serde_json::from_value(events[1].payload.clone()).unwrap();
+    assert_eq!(screen_event.state, Some(ObservedAgentState::Busy));
+    assert_eq!(
+        screen_event.fallback_summary.as_deref(),
+        Some("Review tests")
+    );
+    let health: super::domain::AgentMonitorHealthChanged =
+        serde_json::from_value(events[2].payload.clone()).unwrap();
+    assert_eq!(health.reason_code, "capture_failed");
+    assert!(events.iter().all(|event| {
+        !serde_json::to_string(&event.payload)
+            .expect("event payload serializes")
+            .contains(&sentinel)
+    }));
+
+    let mut published = snapshots.subscribe();
+    let (handler_shutdown, handler_shutdown_rx) = watch::channel(());
+    let event_handler = tokio::spawn(crate::projector::run_event_handler(
+        Arc::clone(&store),
+        snapshots,
+        handler_shutdown_rx,
+    ));
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while published.borrow().through_event_version.get() < 3 {
+            published
+                .changed()
+                .await
+                .expect("snapshot hub remains open");
+        }
+    })
+    .await
+    .expect("projector did not publish the screen observation");
+
+    let stored_snapshot = store.load_agent_snapshot().await.unwrap();
+    assert_eq!(
+        stored_snapshot.panes[0].work_summary.as_deref(),
+        Some("Review tests")
+    );
+    assert_eq!(
+        stored_snapshot.monitor_health[0].reason_code,
+        "capture_failed"
+    );
+    assert!(!format!("{stored_snapshot:?}").contains(&sentinel));
+    let protobuf = crate::map_agent_snapshot(stored_snapshot);
+    assert!(!format!("{protobuf:?}").contains(&sentinel));
+    assert!(
+        !protobuf
+            .encode_to_vec()
+            .windows(sentinel.len())
+            .any(|window| window == sentinel.as_bytes())
+    );
+
+    drop(handler_shutdown);
+    tokio::time::timeout(Duration::from_secs(1), event_handler)
+        .await
+        .expect("event handler exceeded shutdown deadline")
+        .expect("event handler task panicked");
+    let logs = String::from_utf8(captured_logs.lock().expect("captured log lock").clone())
+        .expect("logs are utf-8");
+    assert!(logs.contains("event handler starting"));
+    assert!(!logs.contains(&sentinel));
+
+    drop(service);
+    drop(handle);
+    drop(shutdown);
+    tokio::time::timeout(Duration::from_secs(1), monitor_task)
+        .await
+        .expect("monitor exceeded shutdown deadline")
+        .expect("monitor task panicked");
+    drop(published);
+    drop(store);
+    assert_persisted_files_exclude(&directory.0, sentinel.as_bytes());
+}
+
+#[tokio::test]
+async fn grpc_fallback_explicit_legacy_clear_and_replacement_converge_in_projection_order() {
     let original = pane("%8", 80, 800, 1_000, 100);
     let replacement = pane("%8", 80, 801, 2_000, 500);
     let inventory = FakeInventory::scans(vec![
@@ -702,6 +907,11 @@ async fn fallback_explicit_legacy_clear_and_replacement_converge_in_projection_o
     inventory.push_resolution(Ok(Some(original.clone())));
     inventory.push_resolution(Ok(Some(original.clone())));
     let fixture = Fixture::new(inventory).await;
+    let service = HaroldService {
+        monitor: fixture.handle.clone(),
+        snapshots: AgentSnapshotHub::new(empty_snapshot()),
+        shutdown: fixture._shutdown.subscribe(),
+    };
 
     fixture.handle.inventory_tick().await.unwrap();
     fixture
@@ -715,14 +925,13 @@ async fn fallback_explicit_legacy_clear_and_replacement_converge_in_projection_o
         Some("Review tests")
     );
 
-    fixture
-        .handle
-        .report_lifecycle(
-            "%8".into(),
-            ObservedAgentState::Busy,
-            "codex-hook".into(),
-            WorkSummaryUpdate::Set("  Fix\n projector  ".into()),
-        )
+    service
+        .report_agent_state(Request::new(ReportAgentStateRequest {
+            pane_id: "%8".into(),
+            state: AgentState::Busy.into(),
+            adapter_id: "codex-hook".into(),
+            work_summary: Some("  Fix\n projector  ".into()),
+        }))
         .await
         .unwrap();
     fixture.store.project_unhandled_events(100).await.unwrap();
@@ -737,9 +946,14 @@ async fn fallback_explicit_legacy_clear_and_replacement_converge_in_projection_o
         Some("Review tests")
     );
 
-    fixture
-        .handle
-        .turn_completed(turn(" \u{1b}[31m\t "))
+    service
+        .turn_complete(Request::new(TurnCompleteRequest {
+            pane_id: "%8".into(),
+            pane_label: "harold:0.8".into(),
+            last_user_prompt: " \u{1b}[31m\t ".into(),
+            assistant_message: "assistant result".into(),
+            main_context: "harold".into(),
+        }))
         .await
         .unwrap();
     fixture.store.project_unhandled_events(100).await.unwrap();
@@ -753,14 +967,13 @@ async fn fallback_explicit_legacy_clear_and_replacement_converge_in_projection_o
         Some("Fix projector")
     );
 
-    fixture
-        .handle
-        .report_lifecycle(
-            "%8".into(),
-            ObservedAgentState::Idle,
-            "codex-hook".into(),
-            WorkSummaryUpdate::Clear,
-        )
+    service
+        .report_agent_state(Request::new(ReportAgentStateRequest {
+            pane_id: "%8".into(),
+            state: AgentState::Idle.into(),
+            adapter_id: "codex-hook".into(),
+            work_summary: Some(" \u{1b}[31m\t ".into()),
+        }))
         .await
         .unwrap();
     fixture.store.project_unhandled_events(100).await.unwrap();
