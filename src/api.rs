@@ -107,7 +107,7 @@ impl From<ProtocolError> for SourceError {
 
 pub struct SourceStream {
     receiver: mpsc::Receiver<Result<Snapshot, SourceError>>,
-    reader: JoinHandle<()>,
+    reader: Option<JoinHandle<()>>,
 }
 
 trait SnapshotReader: Send + 'static {
@@ -144,18 +144,30 @@ where
         }
     });
 
-    SourceStream { receiver, reader }
+    SourceStream {
+        receiver,
+        reader: Some(reader),
+    }
 }
 
 impl SourceStream {
     pub async fn recv(&mut self) -> Option<Result<Snapshot, SourceError>> {
         self.receiver.recv().await
     }
+
+    pub async fn close(mut self) {
+        if let Some(reader) = self.reader.take() {
+            reader.abort();
+            let _ = reader.await;
+        }
+    }
 }
 
 impl Drop for SourceStream {
     fn drop(&mut self) {
-        self.reader.abort();
+        if let Some(reader) = self.reader.take() {
+            reader.abort();
+        }
     }
 }
 
@@ -643,6 +655,21 @@ mod tests {
 
         drop(stream);
         tokio::task::yield_now().await;
+
+        assert!(dropped.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn closing_source_stream_aborts_and_awaits_reader() {
+        let (entered_sender, entered_receiver) = oneshot::channel();
+        let dropped = Arc::new(AtomicBool::new(false));
+        let stream = spawn_reader(BlockingReader {
+            entered: Some(entered_sender),
+            dropped: Arc::clone(&dropped),
+        });
+        entered_receiver.await.expect("reader entered message");
+
+        stream.close().await;
 
         assert!(dropped.load(Ordering::SeqCst));
     }

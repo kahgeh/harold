@@ -92,11 +92,25 @@ pub struct SearchState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RuntimeStatus {
+    Retrying {
+        endpoint: String,
+        detail: String,
+        delay_ms: u64,
+    },
+    NavigationUnavailable,
+    NavigationFailed(String),
+    SourceError(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct App {
     pub connection: ConnectionState,
     pub snapshot: Snapshot,
     pub search: SearchState,
     pub selected: Option<AgentIncarnation>,
+    last_snapshot_received_at_ms: Option<i64>,
+    runtime_status: Option<RuntimeStatus>,
     has_snapshot: bool,
     normalized_query: String,
     searchable_rows: Vec<SearchableRow>,
@@ -153,6 +167,8 @@ impl App {
             snapshot,
             search,
             selected,
+            last_snapshot_received_at_ms: None,
+            runtime_status: None,
             has_snapshot: matches!(connection, ConnectionState::Live | ConnectionState::Stale),
             normalized_query,
             searchable_rows,
@@ -193,6 +209,26 @@ impl App {
         } else {
             ConnectionState::Unavailable
         };
+    }
+
+    pub(crate) fn record_snapshot_received_at(&mut self, received_at_ms: i64) {
+        self.last_snapshot_received_at_ms = Some(received_at_ms);
+    }
+
+    pub(crate) const fn last_snapshot_received_at_ms(&self) -> Option<i64> {
+        self.last_snapshot_received_at_ms
+    }
+
+    pub(crate) fn set_runtime_status(&mut self, status: RuntimeStatus) {
+        self.runtime_status = Some(status);
+    }
+
+    pub(crate) fn clear_runtime_status(&mut self) {
+        self.runtime_status = None;
+    }
+
+    pub(crate) const fn runtime_status(&self) -> Option<&RuntimeStatus> {
+        self.runtime_status.as_ref()
     }
 
     pub fn visible_rows(&self) -> Vec<&AgentRow> {

@@ -1,10 +1,12 @@
+use std::borrow::Cow;
+
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState, Wrap};
 
-use crate::app::{AgentState, App};
+use crate::app::{AgentState, App, RuntimeStatus};
 use crate::text::display_work_summary;
 
 const BOARD: Color = Color::Rgb(20, 20, 16);
@@ -140,11 +142,32 @@ fn render_monitor(frame: &mut Frame<'_>, area: Rect, app: &App, now_ms: i64) {
         ])
     };
     if app.connection == crate::app::ConnectionState::Stale {
+        let stale_age = app
+            .last_snapshot_received_at_ms()
+            .map(|received_at_ms| format!("{} ago", age(now_ms, received_at_ms)))
+            .unwrap_or_else(|| "age unavailable".to_owned());
         text.push_span(Span::styled(
-            format!(
-                "  ·  Last committed snapshot {} ago",
-                age(now_ms, app.snapshot.server_time_ms)
-            ),
+            format!("  ·  Last committed snapshot {stale_age}"),
+            Style::default().fg(CORAL).add_modifier(Modifier::BOLD),
+        ));
+    }
+    if let Some(status) = app.runtime_status() {
+        let label = match status {
+            RuntimeStatus::Retrying {
+                endpoint,
+                detail,
+                delay_ms,
+            } => {
+                format!("RETRY IN {delay_ms}ms: {endpoint}: {detail}")
+            }
+            RuntimeStatus::NavigationUnavailable => "NAVIGATION UNAVAILABLE".to_owned(),
+            RuntimeStatus::NavigationFailed(detail) => {
+                format!("NAVIGATION FAILED: {detail}")
+            }
+            RuntimeStatus::SourceError(detail) => format!("SOURCE ERROR: {detail}"),
+        };
+        text.push_span(Span::styled(
+            format!("  ·  {label}"),
             Style::default().fg(CORAL).add_modifier(Modifier::BOLD),
         ));
     }
@@ -259,16 +282,17 @@ fn render_live_workspace(frame: &mut Frame<'_>, area: Rect, app: &App, now_ms: i
 
     let [inventory, detail] =
         Layout::horizontal([Constraint::Percentage(68), Constraint::Percentage(32)]).areas(area);
-    if !detail_fits(detail, app, now_ms) {
+    let detail_lines = app.selected_row().map(|agent| detail_lines(agent, now_ms));
+    if !detail_fits(detail, detail_lines.as_deref()) {
         render_inventory(frame, area, app, now_ms);
         return;
     }
     render_inventory(frame, inventory, app, now_ms);
-    render_detail(frame, detail, app, now_ms);
+    render_detail(frame, detail, detail_lines);
 }
 
-fn detail_fits(area: Rect, app: &App, now_ms: i64) -> bool {
-    let Some(agent) = app.selected_row() else {
+fn detail_fits(area: Rect, lines: Option<&[Line<'_>]>) -> bool {
+    let Some(lines) = lines else {
         return area.height >= 3;
     };
     let inner_width = area.width.saturating_sub(2);
@@ -276,20 +300,19 @@ fn detail_fits(area: Rect, app: &App, now_ms: i64) -> bool {
         return false;
     }
 
-    let lines = detail_lines(agent, now_ms);
-    let wrapped_count = measured_wrapped_height(&lines, inner_width);
+    let wrapped_count = measured_wrapped_height(lines, inner_width);
     let required_height = wrapped_count + 2;
     required_height <= usize::from(area.height)
 }
 
-fn measured_wrapped_height(lines: &[Line<'static>], width: u16) -> usize {
+fn measured_wrapped_height(lines: &[Line<'_>], width: u16) -> usize {
     if width == 0 {
         return 0;
     }
     conservative_grapheme_height(lines, usize::from(width))
 }
 
-fn conservative_grapheme_height(lines: &[Line<'static>], width: usize) -> usize {
+fn conservative_grapheme_height(lines: &[Line<'_>], width: usize) -> usize {
     lines
         .iter()
         .map(|line| conservative_grapheme_line_height(line, width))
@@ -440,8 +463,8 @@ fn render_inventory(frame: &mut Frame<'_>, area: Rect, app: &App, now_ms: i64) {
     frame.render_stateful_widget(table, area, &mut state);
 }
 
-fn render_detail(frame: &mut Frame<'_>, area: Rect, app: &App, now_ms: i64) {
-    let Some(agent) = app.selected_row() else {
+fn render_detail<'a>(frame: &mut Frame<'_>, area: Rect, lines: Option<Vec<Line<'a>>>) {
+    let Some(lines) = lines else {
         frame.render_widget(
             Paragraph::new("No visible agent selected")
                 .style(Style::default().fg(MUTED))
@@ -455,7 +478,6 @@ fn render_detail(frame: &mut Frame<'_>, area: Rect, app: &App, now_ms: i64) {
         return;
     };
 
-    let lines = detail_lines(agent, now_ms);
     frame.render_widget(
         detail_paragraph(lines).block(
             board_block()
@@ -466,11 +488,11 @@ fn render_detail(frame: &mut Frame<'_>, area: Rect, app: &App, now_ms: i64) {
     );
 }
 
-fn detail_paragraph(lines: Vec<Line<'static>>) -> Paragraph<'static> {
+fn detail_paragraph<'a>(lines: Vec<Line<'a>>) -> Paragraph<'a> {
     Paragraph::new(lines).wrap(Wrap { trim: true })
 }
 
-fn detail_lines(agent: &crate::app::AgentRow, now_ms: i64) -> Vec<Line<'static>> {
+fn detail_lines<'a>(agent: &'a crate::app::AgentRow, now_ms: i64) -> Vec<Line<'a>> {
     vec![
         Line::styled(
             format!(
@@ -485,14 +507,14 @@ fn detail_lines(agent: &crate::app::AgentRow, now_ms: i64) -> Vec<Line<'static>>
         fact("TARGET", &agent.tmux_target),
         fact("PANE ID", &agent.incarnation.pane_id),
         fact("DIRECTORY", &agent.working_directory),
-        fact("AGE", &age(now_ms, agent.last_transition_at_ms)),
+        fact("AGE", age(now_ms, agent.last_transition_at_ms)),
         Line::raw(""),
         Line::styled(
             "CURRENT WORK",
             Style::default().fg(AMBER).add_modifier(Modifier::BOLD),
         ),
         Line::styled(
-            display_work_summary(agent.work_summary.as_deref()).to_owned(),
+            display_work_summary(agent.work_summary.as_deref()),
             Style::default().fg(INK),
         ),
     ]
@@ -535,10 +557,10 @@ fn board_block<'a>() -> Block<'a> {
         .border_style(Style::default().fg(Color::Rgb(90, 86, 72)))
 }
 
-fn fact(label: &str, value: &str) -> Line<'static> {
+fn fact<'a>(label: &str, value: impl Into<Cow<'a, str>>) -> Line<'a> {
     Line::from(vec![
         Span::styled(format!("{label:<10}"), Style::default().fg(MUTED)),
-        Span::styled(value.to_owned(), Style::default().fg(INK)),
+        Span::styled(value, Style::default().fg(INK)),
     ])
 }
 
@@ -575,6 +597,8 @@ fn age(now_ms: i64, transition_ms: i64) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::borrow::Cow;
+
     use crossterm::event::KeyCode;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
@@ -866,7 +890,7 @@ mod tests {
     #[test]
     fn stale_dashboard_marks_age_and_retains_last_committed_rows() {
         let selected = incarnation("%17", 91700, 91844, "codex");
-        let app = App::new(
+        let mut app = App::new(
             ConnectionState::Stale,
             Snapshot {
                 through_event_version: 42,
@@ -884,12 +908,47 @@ mod tests {
             empty_search(),
             Some(selected),
         );
+        app.record_snapshot_received_at(95_000);
 
         let content = rendered(&app, 104, 28, 100_000);
 
         assert!(content.contains("TRANSPORT STALE"));
-        assert!(content.contains("Last committed snapshot 10s ago"));
+        assert!(content.contains("Last committed snapshot 5s ago"));
         assert!(content.contains("Retained work remains readable"));
+    }
+
+    #[test]
+    fn runtime_status_exposes_retry_and_navigation_failures_without_hiding_rows() {
+        let selected = incarnation("%17", 91700, 91844, "codex");
+        let mut app = live_app(
+            vec![row(
+                selected.clone(),
+                AgentState::Busy,
+                "Codex",
+                "agents:2.7",
+                "Retained work",
+                90_000,
+            )],
+            Some(selected),
+        );
+
+        app.set_runtime_status(crate::app::RuntimeStatus::Retrying {
+            endpoint: "http://127.0.0.1:50060".into(),
+            detail: "Harold unavailable".into(),
+            delay_ms: 500,
+        });
+        let retrying = rendered(&app, 140, 38, 100_000);
+        assert!(retrying.contains("RETRY IN 500ms"));
+        assert!(retrying.contains("Harold unavailable"));
+        assert!(retrying.contains("Retained work"));
+
+        app.set_runtime_status(crate::app::RuntimeStatus::NavigationUnavailable);
+        assert!(rendered(&app, 140, 38, 100_000).contains("NAVIGATION UNAVAILABLE"));
+
+        app.set_runtime_status(crate::app::RuntimeStatus::NavigationFailed(
+            "pane disappeared".into(),
+        ));
+        assert!(rendered(&app, 140, 38, 100_000).contains("NAVIGATION FAILED: pane disappeared"));
     }
 
     #[test]
@@ -1241,6 +1300,31 @@ mod tests {
         );
 
         assert_eq!(super::measured_wrapped_height(&[line], 20), 5);
+    }
+
+    #[test]
+    fn detail_lines_borrow_agent_text_instead_of_cloning_it() {
+        let selected = incarnation("%17", 91700, 91844, "codex");
+        let agent = row(
+            selected,
+            AgentState::Busy,
+            "Codex",
+            "tmx-agent-dash:2.17",
+            "Keep detail text borrowed across measurement and rendering",
+            90_000,
+        );
+
+        let lines = super::detail_lines(&agent, 100_000);
+
+        for (line_index, span_index) in [(3, 1), (4, 1), (5, 1), (9, 0)] {
+            assert!(
+                matches!(
+                    lines[line_index].spans[span_index].content,
+                    Cow::Borrowed(_)
+                ),
+                "detail line {line_index} span {span_index} must borrow agent text"
+            );
+        }
     }
 
     fn rendered(app: &App, width: u16, height: u16, now_ms: i64) -> String {
