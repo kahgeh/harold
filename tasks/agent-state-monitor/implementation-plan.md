@@ -807,6 +807,8 @@ External acceptance record: ready commit `d9a55ea` served `WatchAgentStates` and
 
 Durable repair acceptance record: commit `c27cd89` served the same store on isolated `127.0.0.1:50061`. Projection-only `AgentWorkSummaryCandidatesRepaired` events at versions 591 through 594 independently cleared the legacy exact configured idle-placeholder screen candidates for `%1`, `%13`, `%14`, and `%23`; the dashboard was clear by revision 594. A same-store replay and restart retained the cleared result. This evidence remains valid but does not satisfy the blocked Claude or three-provider checks.
 
+Current-code replay record: after completion review and fresh offline gates, code commit `1568fd0` was launched from tmux pane `%6` using the same fixture configuration, isolated address, and event store. The first `WatchAgentStates` snapshot at event version 602 contained 10 rows and zero exact configured-placeholder summaries. A graceful `%6` `C-c` restart produced a same-store replay snapshot at event version 604 with 10 rows and zero exact placeholders; dashboard pane `%26` showed revision 604 with no placeholder occurrence. Claude sequential and three-provider concurrency remain unpassed.
+
 Completion-review correction record: independent review of `c27cd89` rejected three Important findings. Corrective commit `7523735` projects all historical pages and appends/projects one all-pane repair batch before constructing the hub or runtime seed; rejects lifecycle/completion exact configured placeholders before event serialization; and therefore removes the ingress/repair pair that could straddle a 500-event projector page. All three reported findings are fixed and focused/full code gates were recorded green.
 
 Re-review correction record: independent re-review rejected `7523735` because `unknown`, stale, and removed provider IDs bypassed repair or ingress rejection. Commit `1568fd0` uses provider-specific exact matching for a currently configured provider and conservative all-configured exact matching only when the provider ID is missing, `unknown`, stale, or removed. RED covered a removed-provider row in the first Watch snapshot, resolved-unknown lifecycle, and resolved plus tracked-unresolved unknown completion. Coverage also preserves the known-provider cross-provider guard and legitimate containing text. Those regressions and the fresh 204-test workspace gate are green; the scoped reviewer and coordinator returned explicit thumbs-up with no remaining findings.
@@ -846,7 +848,9 @@ cargo audit --no-fetch
 git diff --check
 ```
 
-- [ ] **Step 5: Commit verified docs/task record with message `docs: document agent state monitoring`**
+- [x] **Step 5: Commit verified docs/task record with message `docs: document agent state monitoring`**
+
+Execution record: durable docs and task records were committed as `c0559c8`. The subsequent authorized same-store current-code proof is recorded in a separate final evidence commit so the documentation does not claim live behavior before observing it.
 
 ## Staged Integration Order
 

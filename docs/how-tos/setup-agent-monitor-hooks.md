@@ -241,7 +241,7 @@ Do not treat the two-provider result as proof of Claude behavior or three-provid
 
 A later same-store run served commit `c27cd89` on the same isolated address. Projection-only repair events 591 through 594 cleared legacy exact configured idle-placeholder screen candidates for panes `%1`, `%13`, `%14`, and `%23`; the dashboard was clear by revision 594. After replay and restart against that same event store, those repaired candidates remained clear. This verifies durable repair of those historical rows, not the still-blocked Claude or three-provider checks.
 
-Corrective commits `7523735` and `1568fd0` subsequently changed startup and ingress handling after independent review; neither ran a new live process on `50061`. The revisions above therefore remain bounded evidence for the `c27cd89` same-store run. Re-run the real-provider procedure after the current-code completion re-review and final gates.
+Corrective commits `7523735` and `1568fd0` subsequently changed startup and ingress handling after independent review. After current-code completion review and fresh offline gates, `1568fd0` was launched from `%6` with the same fixture configuration and event store. Its first snapshot at event version 602 contained 10 rows and zero exact configured-placeholder summaries. A graceful `%6` `C-c` restart against that same store produced a replay snapshot at event version 604 with the same 10 rows and zero exact placeholders; dashboard pane `%26` also showed revision 604 with no placeholder occurrence. This proves current-code startup and replay for the existing store. It does not satisfy the still-blocked Claude or three-provider checks.
 
 ## Troubleshooting
 

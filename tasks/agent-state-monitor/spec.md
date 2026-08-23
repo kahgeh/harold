@@ -2,7 +2,7 @@
 
 ## Status
 
-Implemented behavior contract, reconciled with corrective commit `1568fd0`. Current-code completion review and offline Task 12 gates passed; the authorized same-store `50061` restart remains the final live gate.
+Implemented behavior contract, reconciled with corrective commit `1568fd0`. Current-code completion review, offline Task 12 gates, and the authorized same-store `50061` startup/replay proof passed. Claude sequential and three-provider concurrency remain externally blocked and are not claimed as passed.
 
 ## Problem Framing
 
