@@ -9,8 +9,7 @@ use crate::store::{self, HaroldStore, TurnCompleted};
 
 use super::domain::{
     AgentEvent, AgentIncarnation, AgentLifecycleObserved, AgentPaneDeparted, AgentPaneObservation,
-    AgentPaneObserved, AgentScreenObserved, AgentSnapshot, EffectiveAgentState, ObservedAgentState,
-    WorkSummaryUpdate,
+    AgentPaneObserved, AgentScreenObserved, AgentSnapshot, ObservedAgentState, WorkSummaryUpdate,
 };
 use super::inventory::{AgentInventoryPort, InventoryError};
 use super::screen::{ScreenError, VisibleScreenPort};
@@ -380,7 +379,7 @@ fn spawn_runtime(
             acquisition_timeout,
             inventory_gate: Arc::new(Semaphore::new(1)),
             screen_gate: Arc::new(Semaphore::new(1)),
-            panes: panes_from_snapshot(&initial_snapshot),
+            panes: panes_from_snapshot(&initial_snapshot, hook_grace_ms),
             health: health_from_snapshot(&initial_snapshot),
         };
         loop {
@@ -427,16 +426,20 @@ fn spawn_tick(tick: CoalescedTick, interval: Duration, mut shutdown: watch::Rece
     });
 }
 
-fn panes_from_snapshot(snapshot: &AgentSnapshot) -> HashMap<String, TrackedPane> {
+fn panes_from_snapshot(
+    snapshot: &AgentSnapshot,
+    hook_grace_ms: u64,
+) -> HashMap<String, TrackedPane> {
     snapshot
         .panes
         .iter()
         .map(|projection| {
+            let pane = store::normalize_pane_observation(projection.pane.clone());
             let tracked = TrackedPane {
-                pane: projection.pane.clone(),
+                pane,
                 consecutive_absences: 0,
                 last_hook: projection.hook_state.zip(projection.hook_observed_at_ms),
-                screen_state: seeded_screen_state(projection),
+                screen_state: seeded_screen_state(projection, hook_grace_ms),
                 screen_summary: projection.screen_work_summary.clone(),
                 pending_screen_state: None,
             };
@@ -447,17 +450,15 @@ fn panes_from_snapshot(snapshot: &AgentSnapshot) -> HashMap<String, TrackedPane>
 
 fn seeded_screen_state(
     projection: &super::domain::AgentPaneProjection,
+    hook_grace_ms: u64,
 ) -> Option<ObservedAgentState> {
     let screen_state = projection.screen_state?;
-    let screen_is_effective = matches!(
-        (screen_state, projection.effective_state),
-        (ObservedAgentState::Busy, EffectiveAgentState::Busy)
-            | (ObservedAgentState::Idle, EffectiveAgentState::Idle)
-    );
-    if projection.hook_state.is_some() && !screen_is_effective {
-        return None;
-    }
-    Some(screen_state)
+    let Some(hook_observed_at_ms) = projection.hook_observed_at_ms else {
+        return Some(screen_state);
+    };
+    let screen_observed_at_ms = projection.screen_observed_at_ms?;
+    let grace_ms = i64::try_from(hook_grace_ms).unwrap_or(i64::MAX);
+    (screen_observed_at_ms >= hook_observed_at_ms.saturating_add(grace_ms)).then_some(screen_state)
 }
 
 fn health_from_snapshot(snapshot: &AgentSnapshot) -> HashMap<String, HealthState> {
@@ -882,7 +883,14 @@ async fn scan(
     timeout: Duration,
     gate: Arc<Semaphore>,
 ) -> Result<Vec<AgentPaneObservation>, AcquisitionFailure> {
-    run_inventory(timeout, gate, move || inventory.scan()).await
+    run_inventory(timeout, gate, move || inventory.scan())
+        .await
+        .map(|panes| {
+            panes
+                .into_iter()
+                .map(store::normalize_pane_observation)
+                .collect()
+        })
 }
 
 async fn resolve(
@@ -891,7 +899,9 @@ async fn resolve(
     timeout: Duration,
     gate: Arc<Semaphore>,
 ) -> Result<Option<AgentPaneObservation>, AcquisitionFailure> {
-    run_inventory(timeout, gate, move || inventory.resolve(&pane_id)).await
+    run_inventory(timeout, gate, move || inventory.resolve(&pane_id))
+        .await
+        .map(|pane| pane.map(store::normalize_pane_observation))
 }
 
 async fn is_current(

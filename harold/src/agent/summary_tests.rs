@@ -1,5 +1,8 @@
 use super::domain::{CompletionSummaryUpdate, WorkSummaryUpdate};
-use super::summary::{completion_summary_update, explicit_summary_update, normalize_work_summary};
+use super::summary::{
+    completion_summary_update, explicit_summary_update, normalize_work_summary,
+    sanitize_bounded_metadata,
+};
 
 #[test]
 fn normalizer_removes_terminal_controls_and_collapses_whitespace() {
@@ -38,6 +41,16 @@ fn normalizer_caps_output_at_160_unicode_scalars() {
         Some(exactly_160.clone())
     );
     assert_eq!(normalize_work_summary(&over_160), Some(exactly_160));
+}
+
+#[test]
+fn metadata_sanitizer_preserves_ordinary_spaces_while_stripping_controls_and_bounding_scalars() {
+    let input = format!("session  name\u{1b}]0;secret\u{7}  {}", "🦀".repeat(300));
+    let sanitized = sanitize_bounded_metadata(&input, 32);
+
+    assert!(sanitized.starts_with("session  name  "));
+    assert!(!sanitized.contains("secret"));
+    assert_eq!(sanitized.chars().count(), 32);
 }
 
 #[test]

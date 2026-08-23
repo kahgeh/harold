@@ -1169,7 +1169,7 @@ fn normalize_health_code(input: &str, max_len: usize, fallback: &str) -> String 
     if valid { input.into() } else { fallback.into() }
 }
 
-fn normalize_pane_observation(mut pane: AgentPaneObservation) -> AgentPaneObservation {
+pub(crate) fn normalize_pane_observation(mut pane: AgentPaneObservation) -> AgentPaneObservation {
     pane.tmux_target = sanitize_bounded_metadata(&pane.tmux_target, 256);
     pane.session_name = sanitize_bounded_metadata(&pane.session_name, 256);
     pane.provider_display_name = sanitize_bounded_metadata(&pane.provider_display_name, 256);

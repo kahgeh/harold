@@ -137,6 +137,64 @@ fn hook_grace_allows_one_post_grace_screen_repair_then_ignores_duplicates() {
 }
 
 #[test]
+fn same_state_screen_revalidation_advances_once_after_a_later_hook_grace() {
+    let initial = apply(
+        None,
+        AgentEvent::PaneObserved(AgentPaneObserved {
+            pane: pane(1_000, 50),
+        }),
+        1,
+    );
+    let pre_hook_screen = apply(
+        Some(initial),
+        AgentEvent::ScreenObserved(AgentScreenObserved {
+            incarnation: incarnation(1_000),
+            state: Some(ObservedAgentState::Busy),
+            classifier_id: "screen-v1".into(),
+            fallback_summary: None,
+            observed_at_ms: 100,
+        }),
+        2,
+    );
+    let hooked = apply(
+        Some(pre_hook_screen),
+        AgentEvent::LifecycleObserved(AgentLifecycleObserved {
+            incarnation: incarnation(1_000),
+            state: ObservedAgentState::Busy,
+            adapter_id: "hook-v1".into(),
+            work_summary: WorkSummaryUpdate::Unchanged,
+            observed_at_ms: 200,
+        }),
+        3,
+    );
+    let revalidated = apply(
+        Some(hooked),
+        AgentEvent::ScreenObserved(AgentScreenObserved {
+            incarnation: incarnation(1_000),
+            state: Some(ObservedAgentState::Busy),
+            classifier_id: "screen-v1".into(),
+            fallback_summary: None,
+            observed_at_ms: 2_200,
+        }),
+        4,
+    );
+    let duplicate = apply(
+        Some(revalidated.clone()),
+        AgentEvent::ScreenObserved(AgentScreenObserved {
+            incarnation: incarnation(1_000),
+            state: Some(ObservedAgentState::Busy),
+            classifier_id: "screen-v1".into(),
+            fallback_summary: None,
+            observed_at_ms: 2_300,
+        }),
+        5,
+    );
+
+    assert_eq!(revalidated.screen_observed_at_ms, Some(2_200));
+    assert_eq!(duplicate.screen_observed_at_ms, Some(2_200));
+}
+
+#[test]
 fn explicit_summary_set_unchanged_and_clear_select_the_correct_candidate() {
     let initial = apply(
         None,

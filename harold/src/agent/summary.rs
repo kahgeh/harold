@@ -33,12 +33,13 @@ pub(crate) fn normalize_visible_grid(input: &str) -> String {
 }
 
 pub(crate) fn sanitize_bounded_metadata(input: &str, max_scalars: usize) -> String {
-    sanitize_terminal_text(input, WhitespaceMode::Collapse, Some(max_scalars))
+    sanitize_terminal_text(input, WhitespaceMode::Preserve, Some(max_scalars))
 }
 
 #[derive(Clone, Copy)]
 enum WhitespaceMode {
     Collapse,
+    Preserve,
     PreserveLines,
 }
 
@@ -125,6 +126,9 @@ fn sanitize_terminal_text(
             '\u{9d}' => state = EscapeState::Osc,
             '\u{90}' | '\u{98}' | '\u{9e}' | '\u{9f}' => state = EscapeState::ControlString,
             '\r' => {
+                if matches!(whitespace_mode, WhitespaceMode::Preserve) {
+                    continue;
+                }
                 skip_line_feed = true;
                 handle_whitespace(
                     &mut output,
@@ -135,6 +139,7 @@ fn sanitize_terminal_text(
                     max_scalars,
                 );
             }
+            '\n' | '\t' if matches!(whitespace_mode, WhitespaceMode::Preserve) => {}
             '\n' => handle_whitespace(
                 &mut output,
                 &mut pending_space,
@@ -152,6 +157,15 @@ fn sanitize_terminal_text(
                 max_scalars,
             ),
             '\u{80}'..='\u{9f}' | '\u{0}'..='\u{8}' | '\u{b}'..='\u{1f}' | '\u{7f}' => {}
+            _ if character.is_whitespace()
+                && matches!(whitespace_mode, WhitespaceMode::Preserve) =>
+            {
+                if limit_reached(output_scalars, max_scalars) {
+                    break;
+                }
+                output.push(character);
+                output_scalars += 1;
+            }
             _ if character.is_whitespace() => handle_whitespace(
                 &mut output,
                 &mut pending_space,
@@ -178,8 +192,10 @@ fn sanitize_terminal_text(
         }
     }
 
-    while output.ends_with([' ', '\n']) {
-        output.pop();
+    if !matches!(whitespace_mode, WhitespaceMode::Preserve) {
+        while output.ends_with([' ', '\n']) {
+            output.pop();
+        }
     }
     output
 }

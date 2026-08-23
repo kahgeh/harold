@@ -164,6 +164,15 @@ impl Drop for Fixture {
     }
 }
 
+async fn fixture_event_count(store: &HaroldStore) -> usize {
+    store
+        .stream()
+        .load_after_version(EventStreamVersion::start(), 100)
+        .await
+        .unwrap()
+        .len()
+}
+
 #[tokio::test]
 async fn lifecycle_resolves_full_incarnation_and_appends_one_contiguous_batch() {
     let fixture = Fixture::new(FakeInventory::default()).await;
@@ -798,6 +807,139 @@ async fn restart_seed_retains_screen_dedupe_for_a_live_incarnation() {
         .await
         .unwrap();
     assert_eq!(events.len(), 2);
+    drop(shutdown);
+    task.await.unwrap();
+}
+
+#[tokio::test]
+async fn restart_seed_revalidates_same_screen_state_once_when_it_predates_lifecycle() {
+    let directory = TestDirectory::new();
+    let store = Arc::new(HaroldStore::open(&directory.0).await.unwrap());
+    let observed = pane("%8", 80, 800, 1_000, 100);
+    crate::store::append_agent_events(
+        &store,
+        vec![
+            AgentEvent::PaneObserved(AgentPaneObserved {
+                pane: observed.clone(),
+            }),
+            AgentEvent::ScreenObserved(super::domain::AgentScreenObserved {
+                incarnation: observed.incarnation.clone(),
+                state: Some(ObservedAgentState::Busy),
+                classifier_id: "tmux-visible-v1".into(),
+                fallback_summary: None,
+                observed_at_ms: 100,
+            }),
+            AgentEvent::LifecycleObserved(AgentLifecycleObserved {
+                incarnation: observed.incarnation.clone(),
+                state: ObservedAgentState::Busy,
+                adapter_id: "codex-hook".into(),
+                work_summary: WorkSummaryUpdate::Unchanged,
+                observed_at_ms: 200,
+            }),
+        ],
+    )
+    .await
+    .unwrap();
+    store.project_unhandled_events(100).await.unwrap();
+    let snapshot = store.load_agent_snapshot().await.unwrap();
+    let screen_port = Arc::new(FakeScreen::default());
+    screen_port.push(Ok(screen(
+        &observed,
+        Some(ObservedAgentState::Busy),
+        None,
+        2_200,
+    )));
+    screen_port.push(Ok(screen(
+        &observed,
+        Some(ObservedAgentState::Busy),
+        None,
+        2_300,
+    )));
+    let (shutdown, shutdown_rx) = watch::channel(());
+    let (handle, task) = spawn_agent_monitor_seeded_for_test(
+        Arc::clone(&store),
+        Arc::new(FakeInventory::default()),
+        screen_port,
+        vec![provider()],
+        AgentMonitorSeed {
+            snapshot,
+            hook_grace_ms: 2_000,
+            acquisition_timeout: Duration::from_millis(50),
+        },
+        shutdown_rx,
+    );
+
+    handle.screen_tick().await.unwrap();
+    assert_eq!(fixture_event_count(&store).await, 4);
+    handle.screen_tick().await.unwrap();
+    assert_eq!(fixture_event_count(&store).await, 4);
+    drop(shutdown);
+    task.await.unwrap();
+
+    store.project_unhandled_events(100).await.unwrap();
+    let snapshot = store.load_agent_snapshot().await.unwrap();
+    let screen_port = Arc::new(FakeScreen::default());
+    screen_port.push(Ok(screen(
+        &observed,
+        Some(ObservedAgentState::Busy),
+        None,
+        2_400,
+    )));
+    let (shutdown, shutdown_rx) = watch::channel(());
+    let (handle, task) = spawn_agent_monitor_seeded_for_test(
+        Arc::clone(&store),
+        Arc::new(FakeInventory::default()),
+        screen_port,
+        vec![provider()],
+        AgentMonitorSeed {
+            snapshot,
+            hook_grace_ms: 2_000,
+            acquisition_timeout: Duration::from_millis(50),
+        },
+        shutdown_rx,
+    );
+    handle.screen_tick().await.unwrap();
+    assert_eq!(fixture_event_count(&store).await, 4);
+    drop(shutdown);
+    task.await.unwrap();
+}
+
+#[tokio::test]
+async fn restart_seed_compares_normalized_metadata_with_the_next_raw_scan() {
+    let directory = TestDirectory::new();
+    let store = Arc::new(HaroldStore::open(&directory.0).await.unwrap());
+    let mut raw = pane("%8", 80, 800, 1_000, 100);
+    raw.tmux_target = format!("session  target\u{1b}]0;secret\u{7}{}", "t".repeat(300));
+    raw.session_name = format!("session  name\u{90}secret\u{9c}{}", "s".repeat(300));
+    raw.provider_display_name = format!("Provider  Name{}", "p".repeat(300));
+    raw.working_directory = format!("/path  with  spaces/{}", "w".repeat(1_100));
+    crate::store::append_agent_events(
+        &store,
+        vec![AgentEvent::PaneObserved(AgentPaneObserved {
+            pane: raw.clone(),
+        })],
+    )
+    .await
+    .unwrap();
+    store.project_unhandled_events(100).await.unwrap();
+    let snapshot = store.load_agent_snapshot().await.unwrap();
+    let inventory = Arc::new(FakeInventory::scans(vec![Ok(vec![raw])]));
+    let (shutdown, shutdown_rx) = watch::channel(());
+    let (handle, task) = spawn_agent_monitor_seeded_for_test(
+        Arc::clone(&store),
+        inventory,
+        Arc::new(FakeScreen::default()),
+        vec![provider()],
+        AgentMonitorSeed {
+            snapshot,
+            hook_grace_ms: 2_000,
+            acquisition_timeout: Duration::from_millis(50),
+        },
+        shutdown_rx,
+    );
+
+    handle.inventory_tick().await.unwrap();
+    assert_eq!(fixture_event_count(&store).await, 1);
     drop(shutdown);
     task.await.unwrap();
 }

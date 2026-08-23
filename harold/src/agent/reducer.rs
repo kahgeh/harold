@@ -68,7 +68,8 @@ pub(crate) fn reduce_agent_event(
 
             if let Some(state) = screen.state {
                 let state_needs_revalidation = projection.screen_state != Some(state)
-                    || projection.effective_state != observed_to_effective(state);
+                    || projection.effective_state != observed_to_effective(state)
+                    || revalidates_hook_epoch(&projection, screen.observed_at_ms, hook_grace_ms);
                 if state_needs_revalidation {
                     projection.screen_state = Some(state);
                     projection.screen_classifier_id = Some(screen.classifier_id.clone());
@@ -90,6 +91,22 @@ pub(crate) fn reduce_agent_event(
         }
         AgentEvent::MonitorHealthChanged(_) => ProjectionChange::Ignore,
     }
+}
+
+fn revalidates_hook_epoch(
+    projection: &AgentPaneProjection,
+    screen_observed_at_ms: i64,
+    hook_grace_ms: u64,
+) -> bool {
+    let Some(hook_observed_at_ms) = projection.hook_observed_at_ms else {
+        return false;
+    };
+    let grace_ms = i64::try_from(hook_grace_ms).unwrap_or(i64::MAX);
+    let grace_ends_at_ms = hook_observed_at_ms.saturating_add(grace_ms);
+    screen_observed_at_ms >= grace_ends_at_ms
+        && projection
+            .screen_observed_at_ms
+            .is_none_or(|previous| previous < grace_ends_at_ms)
 }
 
 fn reduce_pane_observed(
