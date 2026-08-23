@@ -21,11 +21,17 @@ Each cursor is advanced only after a successful `append_inbound_message`, so a c
 
 **Telegram** — Long-polls the Telegram Bot API `getUpdates` endpoint (30s timeout). On startup, drains any pre-existing updates to avoid replaying old messages. Only messages from the configured `chat_id` are processed; messages starting with `🤖` (Harold's own messages) are filtered out.
 
-**Routing resolution** — The projector consumes `InboundMessageReceived` events and calls `route_inbound_message()`. Live pane discovery runs at resolution time via `tmux list-panes -a`, filtering to panes whose `pane_current_command` matches the Claude Code process heuristic (process name is a semver string of digits and dots, e.g. `20.11.0`). Agents are addressed via the `AgentAddress` enum (currently only `TmuxPane { pane_id, label }`).
+**Routing resolution** — Harold's event handler stages `InboundMessageReceived` events in its durable outbox and calls `route_inbound_message()` in stream-version order. Live pane discovery runs at resolution time via `tmux list-panes -a`, then reads the process tree under each pane's `pane_pid`. A pane is considered an agent when the pane process or a descendant process command contains one of the configured `[agents].command_contains` fragments. Agents are addressed via the `AgentAddress` enum (currently only `TmuxPane { pane_id, label }`).
 
 ## Pane discovery
 
-Claude Code runs under a node process named after the node version (e.g. `20.11.0`). Harold detects this by checking that the process name consists entirely of digit-separated numeric segments (at least 3 parts). This is a heuristic — a future improvement is explicit pane registration via the `TurnComplete` RPC.
+Harold currently recognizes a pane as an agent when the pane process or one of its descendants has a process command containing a configured fragment:
+
+- Default `[agents].command_contains`: `["claude", "codex"]`
+- Claude Code example: tmux may report `pane_current_command` as a Node-version-like process, but the pane's descendant command includes `claude`
+- Codex example: tmux may report `pane_current_command` as `codex-aarch64-a`, while the pane's descendant command includes `codex`
+
+This is a process-name heuristic. Update `[agents].command_contains` if an agent binary name changes. A future improvement is explicit pane registration via the `TurnComplete` RPC.
 
 Pane label format: `<session_name>:<window_index>.<pane_index>` (e.g. `alir-app main:0.1`).
 
@@ -57,13 +63,13 @@ route_inbound_message(text)
 
 Once a pane is resolved:
 
-1. `is_pane_alive(pane_id)` — re-checks `tmux display-message -t <pane_id> -p #{pane_current_command}` to confirm still a Claude Code process
+1. `is_pane_alive(pane_id)` — re-checks `tmux display-message -t <pane_id> -p #{pane_pid}` and the descendant process table to confirm the pane still hosts a known agent process
 2. `strip_control(text)` — removes ANSI escape sequences and non-newline control characters
 3. `tmux send-keys -t <pane_id> -l "📱 <body>"` — sends text literally (no shell interpretation)
 4. `tmux send-keys -t <pane_id> Enter` — submits the message
 5. Confirmation sent back via the configured away channel: `"✓ Delivered to [<pane_label>]"`
 
-If no pane is found, an error message listing the currently available pane labels is sent back via the away channel.
+If either tmux `send-keys` command fails, the outbox delivery remains pending for retry. A confirmation failure after tmux accepts the message is logged but does not retry the agent delivery, which avoids duplicating the user's input. If no pane is found, an error message listing the currently available pane labels is sent back via the away channel and the event is recorded as intentionally skipped.
 
 ## Semantic routing prompt
 
@@ -100,7 +106,7 @@ sequenceDiagram
     participant Channel as Away channel<br/>(iMessage or Telegram)
     participant Listener
     participant Store as Event store
-    participant Projector
+    participant Handler as Event handler
     participant Tmux as tmux
     participant AiCli as claude (Sonnet)
 
@@ -110,29 +116,30 @@ sequenceDiagram
     Listener->>Store: append InboundMessageReceived { text }
     Listener->>Listener: advance cursor (atomic store, only on successful append)
 
-    Projector->>Store: poll for new events
-    Store-->>Projector: InboundMessageReceived event
+    Handler->>Store: stage event and checkpoint in one transaction
+    Store-->>Handler: pending InboundMessageReceived delivery
 
-    Projector->>Tmux: list-panes -a -F "#{pane_id}|#{session_name}:#{window_index}.#{pane_index}|#{pane_current_command}"
-    Tmux-->>Projector: pane rows
-    Projector->>Projector: filter rows where pane_current_command matches semver heuristic
+    Handler->>Tmux: list-panes -a -F "#{pane_id}|#{session_name}:#{window_index}.#{pane_index}|#{pane_pid}"
+    Tmux-->>Handler: pane rows
+    Handler->>Handler: filter rows where pane process tree contains a configured agent command fragment
 
-    Projector->>Projector: parse_tag(text) → ([tag], body)
+    Handler->>Handler: parse_tag(text) → ([tag], body)
 
     alt [tag] present
-        Projector->>Projector: exact label match, then case-insensitive substring match
+        Handler->>Handler: exact label match, then case-insensitive substring match
     else no tag, multiple panes
-        Projector->>AiCli: routing prompt with body + pane label list (--model sonnet --max-turns 1)
-        AiCli-->>Projector: "none" or LINE1: label / LINE2: cleaned message
-        Projector->>Projector: match returned label to live panes
+        Handler->>AiCli: routing prompt with body + pane label list (--model sonnet --max-turns 1)
+        AiCli-->>Handler: "none" or LINE1: label / LINE2: cleaned message
+        Handler->>Handler: match returned label to live panes
     else fallback
-        Projector->>Projector: find last_away_notification_source_agent in live panes
-        Projector->>Projector: else find pane label containing "my-agent"
+        Handler->>Handler: find last_away_notification_source_agent in live panes
+        Handler->>Handler: else find pane label containing "my-agent"
     end
 
-    Projector->>Tmux: display-message -t pane_id -p #{pane_current_command} → liveness check
-    Projector->>Projector: strip_control(body) → remove ANSI + control chars
-    Projector->>Tmux: send-keys -t pane_id -l "📱 <body>"
-    Projector->>Tmux: send-keys -t pane_id Enter
-    Projector->>Channel: "✓ Delivered to [pane_label]"
+    Handler->>Tmux: display-message -t pane_id -p #{pane_pid} → process-tree liveness check
+    Handler->>Handler: strip_control(body) → remove ANSI + control chars
+    Handler->>Tmux: send-keys -t pane_id -l "📱 <body>"
+    Handler->>Tmux: send-keys -t pane_id Enter
+    Handler->>Channel: "✓ Delivered to [pane_label]"
+    Handler->>Store: mark delivery complete
 ```

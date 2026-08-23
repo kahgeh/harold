@@ -156,14 +156,14 @@ fn notify_with_fallback(tts: &TtsSettings, message: &str) -> bool {
     }
 }
 
-pub fn notify_at_desk(turn: &TurnCompleted, _trace_id: &str) {
+pub fn notify_at_desk(turn: &TurnCompleted, _trace_id: &str) -> bool {
     let summary = build_short_summary(turn);
     let message = format!(
         "{} on {} and waiting for further instructions",
         summary, turn.main_context
     );
     let tts = &get_settings().tts;
-    notify_with_fallback(tts, &message);
+    notify_with_fallback(tts, &message)
 }
 
 #[cfg(test)]

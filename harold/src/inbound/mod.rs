@@ -2,12 +2,11 @@ pub mod directory;
 pub(crate) mod tmux;
 
 use std::process::Command;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
-use events::EventStore;
-use tracing::info;
+use tracing::{info, warn};
 
-use crate::outbound::send_reply;
+use crate::outbound::{DeliveryOutcome, send_reply};
 use crate::settings::get_settings;
 use crate::util::ai_cli_env;
 
@@ -194,7 +193,7 @@ pub(crate) fn resolve_pane<'a>(
 }
 
 // ---------------------------------------------------------------------------
-// Route a received reply — called from projector
+// Route a received reply — called from the event handler.
 // ---------------------------------------------------------------------------
 
 /// Route a received reply to the appropriate agent pane.
@@ -202,7 +201,7 @@ pub(crate) fn resolve_pane<'a>(
 /// **Must be called from `spawn_blocking`** — this function uses
 /// `Handle::block_on` internally and will deadlock if called from an
 /// async task on the tokio worker pool.
-pub fn route_inbound_message(text: &str, _store: Arc<EventStore>) {
+pub fn route_inbound_message(text: &str) -> Result<DeliveryOutcome, String> {
     let directory = AgentDirectory::TmuxProcessScan;
     info!(text, "route_inbound_message entered");
     let (tag, body) = parse_tag(text);
@@ -210,8 +209,8 @@ pub fn route_inbound_message(text: &str, _store: Arc<EventStore>) {
     let panes = directory.discover();
 
     if panes.is_empty() {
-        send_reply("No active agent sessions found.");
-        return;
+        send_reply("No active agent sessions found.")?;
+        return Ok(DeliveryOutcome::Skipped);
     }
 
     match resolve_pane(tag, body, &panes) {
@@ -225,7 +224,8 @@ pub fn route_inbound_message(text: &str, _store: Arc<EventStore>) {
                 Some(t) => format!("No pane matching '{t}'. Available: {available}"),
                 None => format!("No active pane found. Available: {available}"),
             };
-            send_reply(&msg);
+            send_reply(&msg)?;
+            Ok(DeliveryOutcome::Skipped)
         }
         Some((agent, cleaned_body)) => {
             if !directory.is_alive(agent) {
@@ -239,12 +239,15 @@ pub fn route_inbound_message(text: &str, _store: Arc<EventStore>) {
                     "Pane {} is no longer active. Available: {}",
                     agent.label(),
                     available
-                ));
-                return;
+                ))?;
+                return Ok(DeliveryOutcome::Skipped);
             }
             info!(label = %agent.label(), "routing reply");
-            agent.relay(&format!("📱 {cleaned_body}"));
-            send_reply(&format!("✓ Delivered to [{}]", agent.label()));
+            agent.relay(&format!("📱 {cleaned_body}"))?;
+            if let Err(error) = send_reply(&format!("✓ Delivered to [{}]", agent.label())) {
+                warn!(error, "routed message but failed to send confirmation");
+            }
+            Ok(DeliveryOutcome::Delivered)
         }
     }
 }

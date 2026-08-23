@@ -12,6 +12,9 @@ path = "~/Library/Messages/chat.db"
 
 [ai]
 
+[agents]
+command_contains = ["claude", "codex"]
+
 [tts]
 command = "say"
 # voice can be overridden in local.toml, e.g. voice = "Samantha"

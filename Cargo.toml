@@ -3,4 +3,4 @@ members = ["harold", "events"]
 resolver = "2"
 
 [workspace.dependencies]
-turso = { version = "=0.4.4" }
+turso = { version = "=0.5.1" }

@@ -12,6 +12,12 @@ use crate::settings::get_settings;
 use crate::store::TurnCompleted;
 use crate::tmux;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DeliveryOutcome {
+    Delivered,
+    Skipped,
+}
+
 // ---------------------------------------------------------------------------
 // Deduplication — suppress repeated notifications for the same turn
 // ---------------------------------------------------------------------------
@@ -30,13 +36,25 @@ pub enum OutboundChannel {
 
 impl OutboundChannel {
     /// Send notification. Returns the source agent address if applicable (for routing state).
-    pub fn notify(&self, turn: &TurnCompleted, trace_id: &str) -> Option<AgentAddress> {
+    pub fn notify(
+        &self,
+        turn: &TurnCompleted,
+        trace_id: &str,
+    ) -> Result<(DeliveryOutcome, Option<AgentAddress>), String> {
         match self {
             OutboundChannel::Tts => {
-                tts::notify_at_desk(turn, trace_id);
-                None
+                if tts::notify_at_desk(turn, trace_id) {
+                    Ok((DeliveryOutcome::Delivered, None))
+                } else {
+                    Err("TTS notification command failed".into())
+                }
             }
-            OutboundChannel::Away => channels::notify_away(turn, trace_id),
+            OutboundChannel::Away => match channels::notify_away(turn, trace_id)? {
+                channels::AwayNotification::Sent(agent) => {
+                    Ok((DeliveryOutcome::Delivered, Some(agent)))
+                }
+                channels::AwayNotification::Skipped => Ok((DeliveryOutcome::Skipped, None)),
+            },
         }
     }
 }
@@ -63,18 +81,18 @@ pub fn is_screen_locked() -> bool {
 // Notify orchestrator
 // ---------------------------------------------------------------------------
 
-pub fn notify(turn: &TurnCompleted, trace_id: &str) {
+pub fn notify(turn: &TurnCompleted, trace_id: &str) -> Result<DeliveryOutcome, String> {
     // Dedup: skip if same pane+prompt was notified within the window.
     let dedup_key = format!("{}:{}", turn.pane_id, turn.last_user_prompt);
     {
-        let mut last = LAST_NOTIFY.lock().unwrap();
-        if let Some((ref prev_key, ref ts)) = *last {
-            if prev_key == &dedup_key && ts.elapsed().as_secs() < DEDUP_WINDOW_SECS {
-                info!("notification skipped (duplicate within dedup window)");
-                return;
-            }
+        let last = LAST_NOTIFY.lock().unwrap();
+        if let Some((ref prev_key, ref ts)) = *last
+            && prev_key == &dedup_key
+            && ts.elapsed().as_secs() < DEDUP_WINDOW_SECS
+        {
+            info!("notification skipped (duplicate within dedup window)");
+            return Ok(DeliveryOutcome::Skipped);
         }
-        *last = Some((dedup_key, Instant::now()));
     }
 
     let cfg = get_settings();
@@ -88,7 +106,7 @@ pub fn notify(turn: &TurnCompleted, trace_id: &str) {
         && tmux::is_session_attached(&turn.pane_id)
     {
         info!("notification skipped (session is active, screen unlocked)");
-        return;
+        return Ok(DeliveryOutcome::Skipped);
     }
 
     // Pane-level skip: skip only when the completing pane is the active pane
@@ -100,7 +118,7 @@ pub fn notify(turn: &TurnCompleted, trace_id: &str) {
         && active_pane == turn.pane_id
     {
         info!("notification skipped (pane is active and screen unlocked)");
-        return;
+        return Ok(DeliveryOutcome::Skipped);
     }
 
     let channel = if screen_locked {
@@ -109,9 +127,15 @@ pub fn notify(turn: &TurnCompleted, trace_id: &str) {
         OutboundChannel::Tts
     };
 
-    if let Some(source_agent) = channel.notify(turn, trace_id) {
+    let (outcome, source_agent) = channel.notify(turn, trace_id)?;
+    if let Some(source_agent) = source_agent {
         set_last_away_notification_source_agent(source_agent);
     }
+
+    if outcome == DeliveryOutcome::Delivered {
+        *LAST_NOTIFY.lock().unwrap() = Some((dedup_key, Instant::now()));
+    }
+    Ok(outcome)
 }
 
 // ---------------------------------------------------------------------------
@@ -119,6 +143,6 @@ pub fn notify(turn: &TurnCompleted, trace_id: &str) {
 // ---------------------------------------------------------------------------
 
 /// Send a confirmation/error message back through the configured away channel.
-pub fn send_reply(msg: &str) {
-    channels::send(msg);
+pub fn send_reply(msg: &str) -> Result<(), String> {
+    channels::send(msg)
 }

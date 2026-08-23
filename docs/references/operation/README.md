@@ -13,30 +13,29 @@ Harold runs as a single binary with three concurrent tasks sharing an event stor
 | Task        | Responsibility                                                                                       |
 | ----------- | ---------------------------------------------------------------------------------------------------- |
 | gRPC server | Accepts `TurnComplete` RPCs, appends `TurnCompleted` events                                          |
-| Projector   | Tails the event store; dispatches `TurnCompleted` → `notify()` and `InboundMessageReceived` → `route_inbound_message()` |
+| Event handler | Stages ordered events into a durable outbox; dispatches `TurnCompleted` → `notify()` and `InboundMessageReceived` → `route_inbound_message()` |
 | Listener    | Channel-specific inbound listener: iMessage watches `chat.db` via FSEvents (5s fallback poll) with separate inbound/self cursors; Telegram long-polls Bot API `getUpdates`. Both append `InboundMessageReceived` events |
 
-The shutdown channel is a `watch::Sender<()>`. Dropping the sender (on SIGINT/SIGTERM) closes the channel; all receivers (`Projector`, `Listener`) see `Err(RecvError)` and exit their loops.
+The shutdown channel is a `watch::Sender<()>`. Dropping the sender (on SIGINT/SIGTERM) closes the channel; the event handler and listener exit their loops. An in-flight blocking delivery completes before the handler exits.
 
 ```
   ┌────────────────────────────────────────────────────┐
   │                      Harold                        │
   │                                                    │
   │  ┌─────────────┐  ┌────────────┐  ┌─────────────┐  │
-  │  │ gRPC server │  │ Projector  │  │  Listener   │  │
+  │  │ gRPC server │  │  Handler   │  │  Listener   │  │
   │  │             │  │            │  │             │  │
   │  │ TurnComplete│  │ TurnComple-│  │ watches     │  │
   │  │ RPC handler │  │ ted →      │  │ chat.db     │  │
   │  │             │  │ notify     │  │ (FSEvents)  │  │
   │  │             │  │            │  │             │  │
-  │  │             │  │ ReplyRecei-│  │             │  │
-  │  │             │  │ ved →      │  │             │  │
-  │  │             │  │ route_reply│  │             │  │
+  │  │             │  │ InboundMsg │  │             │  │
+  │  │             │  │ → route    │  │             │  │
   │  └──────┬──────┘  └─────┬──────┘  └──────┬──────┘  │
   │         │               │                │         │
   │         └───────────────┴────────────────┘         │
   │                         │                          │
-  │                   Event store                      │
+  │           EventStream + Harold state DB            │
   └────────────────────────────────────────────────────┘
 ```
 
@@ -56,13 +55,14 @@ Config directory defaults to `config/` next to the running binary (`current_exe(
 
 SIGINT or SIGTERM triggers an ordered shutdown:
 
-1. gRPC server stops accepting new connections (in-flight RPCs complete)
-2. `shutdown_tx` is dropped, closing the `watch` channel
-3. `Projector` and `Listener` observe channel close and exit
-4. `projector_handle.await` and `listener_handle.await` join both tasks
-5. WAL checkpoint — flushes all WAL pages to the main database files so the next open is clean
+1. Tonic receives the shutdown signal and begins graceful gRPC shutdown
+2. The same signal future drops `shutdown_tx`, closing the `watch` channel while Tonic drains in-flight RPCs
+3. Event handler and listener observe channel close and exit; a blocking delivery already in progress completes first
+4. After the gRPC server finishes draining, `event_handler_handle.await` and `listener_handle.await` join both tasks
 
-The WAL checkpoint must run after all tasks exit because it requires exclusive database access.
+An RPC that appends after the handler has observed shutdown remains durable in the event stream and is staged on Harold's next start.
+
+There is no explicit final checkpoint call. The event stream and Harold state database commit writes as their operations complete.
 
 ## Diagnostics
 
@@ -93,9 +93,9 @@ sequenceDiagram
     alt connection refused (Harold not running)
         Hook->>OS: spawn ~/bin/harold/harold (cwd = ~/bin/harold/)
         Harold->>Harold: load config/default.toml → config/local.toml → HAROLD__* env vars
-        Harold->>Store: open event store (create WAL db if first run)
+        Harold->>Store: open harold/main EventStream and harold-state.db
         Harold->>Harold: start gRPC server on grpc.host:grpc.port
-        Harold->>Harold: start Projector task (watch shutdown_rx)
+        Harold->>Harold: start event handler task (watch shutdown_rx)
         Harold->>Harold: start Listener task (watch shutdown_rx)
     end
     Hook->>Harold: TurnComplete RPC
@@ -107,17 +107,17 @@ sequenceDiagram
 sequenceDiagram
     participant OS
     participant Harold
-    participant Projector
+    participant Handler as Event handler
     participant Listener
     participant Store as Event store
 
     OS->>Harold: SIGINT or SIGTERM
-    Harold->>Harold: gRPC serve_with_shutdown future resolves
     Harold->>Harold: drop shutdown_tx → watch channel closes
-    note over Projector: shutdown_rx.changed() → Err → exit loop
+    note over Handler: finish in-flight delivery, then exit loop
     note over Listener: shutdown_rx.changed() → Err → exit loop
-    Projector-->>Harold: task handle resolves
+    note over Harold: Tonic drains in-flight RPCs
+    Harold->>Harold: gRPC serve_with_shutdown future resolves
+    Handler-->>Harold: task handle resolves
     Listener-->>Harold: task handle resolves
-    Harold->>Store: checkpoint() → flush WAL pages to main db files
     Harold->>OS: exit 0
 ```

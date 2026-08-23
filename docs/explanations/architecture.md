@@ -48,9 +48,9 @@ Harold's turn-completion notification path is agent-agnostic — it works with a
 │  │  summarise_for_notif  │  │             │  │                 │ │
 │  └───────────────────────┘  └─────────────┘  └─────────────────┘ │
 │                                                                  │
-│  Event store (CQRS/event sourcing)                               │
-│  State: { last_inbound_rowid, last_self_rowid,                   │
-│     last_away_notification_source_agent }                        │
+│  EventStream: durable facts in harold/main                       │
+│  Harold state: delivery outbox + handler checkpoint              │
+│  Runtime state: inbound cursors + last notification source       │
 └──────────────────────────────────────────────────────────────────┘
                     │                        ▲
                     │ iMessage / Telegram    │ Reply
@@ -76,7 +76,7 @@ Harold's turn-completion notification path is agent-agnostic — it works with a
 | `last_notification_source_agent` state  | Harold |
 | Inbound message routing (tmux)                    | Harold |
 | Live pane discovery                     | Harold |
-| Event store                             | Harold |
+| Event stream, handler checkpoint, and delivery outbox | Harold |
 
 ---
 
@@ -122,22 +122,22 @@ When a `TurnCompleted` event is received, Harold decides how to notify:
 **Running** — Three concurrent tasks:
 
 1. gRPC server — accepts `TurnComplete` RPCs, appends events
-2. Projector — consumes events from the store, drives notification (sets `last_away_notification_source_agent` when away) and inbound message routing
+2. Event handler — stages ordered events into Harold's delivery outbox, drives notification (sets `last_away_notification_source_agent` when away) and inbound message routing, then records delivery state
 3. Listener — channel-specific inbound message listener: iMessage watches `chat.db` for filesystem changes (FSEvents) with 5s fallback poll; Telegram uses Bot API long-polling. Both append `InboundMessageReceived` events
 
 **Shutdown** — SIGINT or SIGTERM triggers an ordered shutdown:
 
 1. gRPC server stops accepting new requests
-2. Projector and listener tasks drain and exit
-3. WAL checkpoint flushes all pending writes to the main database files
-
-The checkpoint ensures the next startup opens a clean database without replaying WAL pages.
+2. Event handler finishes any in-flight blocking delivery and exits; the listener exits
+3. Harold joins both tasks and returns; the refreshed event stream has no explicit shutdown-checkpoint API
 
 ---
 
 ## State
 
-Harold owns all routing state in-memory:
+Harold owns its consumer checkpoint and delivery outbox in `<store-root>/harold-state.db`. New immutable events live in `<store-root>/harold/main/`; old-format files at the store root are left untouched.
+
+Harold also owns runtime routing state in memory:
 
 - `last_inbound_rowid` / `last_self_rowid` — separate chat.db polling cursors for inbound messages and self-sent (phone-synced) messages
 - `last_away_notification_source_agent: Option<AgentAddress>` — the agent whose turn completion last triggered an away (iMessage) notification

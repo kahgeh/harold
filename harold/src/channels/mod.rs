@@ -4,14 +4,18 @@ pub(crate) mod telegram;
 use std::process::Command;
 use std::sync::Arc;
 
-use events::EventStore;
 use tokio::sync::watch;
 use tracing::warn;
 
 use crate::inbound::AgentAddress;
 use crate::settings::get_settings;
-use crate::store::TurnCompleted;
+use crate::store::{HaroldStore, TurnCompleted};
 use crate::util::ai_cli_env;
+
+pub(crate) enum AwayNotification {
+    Sent(AgentAddress),
+    Skipped,
+}
 
 // ---------------------------------------------------------------------------
 // Shared utilities — used by both iMessage and Telegram channels
@@ -113,7 +117,7 @@ pub(crate) fn summarise_for_notification(
 // ---------------------------------------------------------------------------
 
 /// Start the inbound message listener for the configured away channel.
-pub async fn listen_for_inbound_messages(store: Arc<EventStore>, shutdown: watch::Receiver<()>) {
+pub async fn listen_for_inbound_messages(store: Arc<HaroldStore>, shutdown: watch::Receiver<()>) {
     let cfg = get_settings();
     match cfg.notify.away_channel.as_str() {
         "telegram" => telegram::listen(store, shutdown).await,
@@ -122,18 +126,16 @@ pub async fn listen_for_inbound_messages(store: Arc<EventStore>, shutdown: watch
 }
 
 /// Send a plain message through the configured away channel.
-pub fn send(msg: &str) {
+pub fn send(msg: &str) -> Result<(), String> {
     let cfg = get_settings();
     match cfg.notify.away_channel.as_str() {
-        "telegram" => {
-            let _ = telegram::send_telegram(msg);
-        }
+        "telegram" => telegram::send_telegram(msg),
         _ => imessage::send_imessage(msg),
     }
 }
 
 /// Send an away notification through the configured away channel.
-pub fn notify_away(turn: &TurnCompleted, trace_id: &str) -> Option<AgentAddress> {
+pub fn notify_away(turn: &TurnCompleted, trace_id: &str) -> Result<AwayNotification, String> {
     let cfg = get_settings();
     match cfg.notify.away_channel.as_str() {
         "telegram" => telegram::notify_away(turn, trace_id),

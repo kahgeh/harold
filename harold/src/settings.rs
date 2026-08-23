@@ -59,6 +59,19 @@ pub struct AiSettings {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct AgentSettings {
+    pub command_contains: Vec<String>,
+}
+
+impl Default for AgentSettings {
+    fn default() -> Self {
+        Self {
+            command_contains: vec!["claude".to_string(), "codex".to_string()],
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
 pub struct TtsSettings {
     pub command: String,
     pub voice: Option<String>,
@@ -103,6 +116,8 @@ pub struct Settings {
     pub imessage: ImessageSettings,
     pub chat_db: ChatDbSettings,
     pub ai: AiSettings,
+    #[serde(default)]
+    pub agents: AgentSettings,
     pub tts: TtsSettings,
     pub log: LogSettings,
     pub store: StoreSettings,

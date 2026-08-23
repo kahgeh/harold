@@ -8,7 +8,7 @@ AI agents finish turns silently. Without active monitoring you won't know a task
 
 ## Architecture
 
-The projector consumes `TurnCompleted` events and calls `notify()`. The notification path is chosen based on runtime checks: whether the completing pane's tmux session has an attached client, whether the completing pane is the one the user is looking at, and whether the screen is locked.
+Harold's event handler stages `TurnCompleted` events in its durable outbox and calls `notify()` in stream-version order. Successful deliveries and intentional skips are marked complete. TTS command, Telegram HTTP/configuration, and iMessage process failures remain pending for retry. Malformed payloads and unknown event types are recorded as terminal failures so one poison event cannot block later work. The notification path is chosen based on runtime checks: whether the completing pane's tmux session has an attached client, whether the completing pane is the one the user is looking at, and whether the screen is locked.
 
 Summarisation uses different backends depending on the path:
 
@@ -108,7 +108,7 @@ sequenceDiagram
     participant Hook as Stop hook
     participant gRPC as Harold (gRPC)
     participant Store as Event store
-    participant Projector
+    participant Handler as Event handler
     participant Tmux as tmux
     participant LocalModel as mlx_lm
     participant TTS as TTS command
@@ -118,16 +118,17 @@ sequenceDiagram
     Store-->>gRPC: ok
     gRPC-->>Hook: accepted: true
 
-    Projector->>Store: poll for new events
-    Store-->>Projector: TurnCompleted event
-    Projector->>Tmux: display-message -t <pane_id> -p #{session_name} → session
-    Projector->>Tmux: display-message -t <session> -p #{session_attached} → attached?
-    note over Projector: not attached → proceed
-    Projector->>Projector: ioreg → IOConsoleLocked = false
-    Projector->>LocalModel: system prompt + "User's last request: <last_user_prompt>" → ≤20 tokens
-    LocalModel-->>Projector: "Fixed WAL shutdown race condition"
-    Projector->>TTS: say [-v Samantha] "Fixed WAL... on harold and waiting for further instructions"
-    note over Projector: at-desk does not update last_away_notification_source_agent
+    Handler->>Store: stage event and checkpoint in one transaction
+    Store-->>Handler: pending TurnCompleted delivery
+    Handler->>Tmux: display-message -t <pane_id> -p #{session_name} → session
+    Handler->>Tmux: display-message -t <session> -p #{session_attached} → attached?
+    note over Handler: not attached → proceed
+    Handler->>Handler: ioreg → IOConsoleLocked = false
+    Handler->>LocalModel: system prompt + "User's last request: <last_user_prompt>" → ≤20 tokens
+    LocalModel-->>Handler: "Fixed event handler shutdown"
+    Handler->>TTS: say [-v Samantha] "Fixed event handler... on harold and waiting for further instructions"
+    Handler->>Store: mark delivery complete
+    note over Handler: at-desk does not update last_away_notification_source_agent
 ```
 
 ### Away (screen locked)
@@ -137,20 +138,21 @@ sequenceDiagram
     participant Hook as Stop hook
     participant gRPC as Harold (gRPC)
     participant Store as Event store
-    participant Projector
+    participant Handler as Event handler
     participant Channel as Away channel<br/>(iMessage or Telegram)
 
     Hook->>gRPC: TurnComplete RPC (last_assistant_message from hook input)
     gRPC->>Store: append TurnCompleted event
     gRPC-->>Hook: accepted: true
 
-    Projector->>Store: poll for new events
-    Store-->>Projector: TurnCompleted event
-    Projector->>Projector: ioreg → IOConsoleLocked = true
-    Projector->>Projector: summarise_for_notification() via AI CLI (fallback: truncate to 280 chars)
-    Projector->>Projector: split_body() → main body + trailing question (if ends in ?)
-    Projector->>Channel: send "🤖 [harold:0.3] <body> (harold)"
+    Handler->>Store: stage event and checkpoint in one transaction
+    Store-->>Handler: pending TurnCompleted delivery
+    Handler->>Handler: ioreg → IOConsoleLocked = true
+    Handler->>Handler: summarise_for_notification() via AI CLI (fallback: truncate to 280 chars)
+    Handler->>Handler: split_body() → main body + trailing question (if ends in ?)
+    Handler->>Channel: send "🤖 [harold:0.3] <body> (harold)"
     note over Channel: iMessage: dedup check via chat.db then osascript<br/>Telegram: Bot API sendMessage
-    Projector->>Projector: set last_away_notification_source_agent
-    Projector->>Channel: send "🤖 <trailing question>" (if present)
+    Handler->>Handler: set last_away_notification_source_agent
+    Handler->>Channel: send "🤖 <trailing question>" (if present)
+    Handler->>Store: mark delivery complete
 ```

@@ -24,4 +24,4 @@ deploy: build .env
 	mkdir -p $(DEPLOY_DIR)/config
 	cp harold/config/default.toml $(DEPLOY_DIR)/config/default.toml
 	cp harold/config/local.template.toml $(DEPLOY_DIR)/config/local.template.toml
-	nohup $(DEPLOY_DIR)/harold >> $(DEPLOY_DIR)/harold.log 2>&1 &
+	cd $(DEPLOY_DIR) && nohup $(DEPLOY_DIR)/harold </dev/null >> harold.log 2>&1 &

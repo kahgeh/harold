@@ -1,6 +1,8 @@
 use crate::channels::{split_body, truncate_body};
 use crate::util::sanitise_for_applescript;
 
+use super::{NotificationPlan, notification_plan};
+
 #[test]
 fn split_body_no_question() {
     let (main, q) = split_body("Work is done. All good.");
@@ -53,4 +55,43 @@ fn sanitise_strips_newlines_and_continuation() {
     assert!(!result.contains('¬'));
     assert!(result.contains("line1"));
     assert!(result.contains("line2"));
+}
+
+#[test]
+fn retry_after_main_only_resumes_with_the_missing_question() {
+    let plan = notification_plan(
+        &["🤖 [harold:0.1] Work is done. (harold)"],
+        "[harold:0.1] Work is done. (harold)",
+        Some("Should I deploy?"),
+    );
+
+    assert_eq!(plan, NotificationPlan::SendQuestionOnly("Should I deploy?"));
+}
+
+#[test]
+fn retry_after_both_parts_skips_the_completed_notification() {
+    let plan = notification_plan(
+        &[
+            "🤖 Should I deploy?",
+            "🤖 [harold:0.1] Work is done. (harold)",
+        ],
+        "[harold:0.1] Work is done. (harold)",
+        Some("Should I deploy?"),
+    );
+
+    assert_eq!(plan, NotificationPlan::Skip);
+}
+
+#[test]
+fn matching_question_from_another_turn_sends_the_full_notification() {
+    let plan = notification_plan(
+        &[
+            "🤖 Should I deploy?",
+            "🤖 [other:0.1] Different work. (other)",
+        ],
+        "[harold:0.1] Work is done. (harold)",
+        Some("Should I deploy?"),
+    );
+
+    assert_eq!(plan, NotificationPlan::SendAll);
 }

@@ -26,10 +26,10 @@ impl AgentAddress {
     }
 
     /// Relay a message to this agent via its native transport.
-    pub fn relay(&self, text: &str) {
+    pub fn relay(&self, text: &str) -> Result<(), String> {
         match self {
             AgentAddress::TmuxPane { pane_id, .. } => {
-                super::tmux::relay_to_tmux_pane(pane_id, text);
+                super::tmux::relay_to_tmux_pane(pane_id, text)
             }
         }
     }
@@ -63,5 +63,20 @@ impl AgentDirectory {
                 AgentAddress::TmuxPane { pane_id, .. } => super::tmux::is_pane_alive(pane_id),
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AgentAddress;
+
+    #[test]
+    fn relay_reports_tmux_command_failure() {
+        let agent = AgentAddress::TmuxPane {
+            pane_id: "%harold-definitely-missing".into(),
+            label: "missing:0.0".into(),
+        };
+
+        assert!(agent.relay("test").is_err());
     }
 }

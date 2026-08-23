@@ -1,16 +1,15 @@
 use std::sync::Arc;
 use std::sync::OnceLock;
 
-use events::EventStore;
 use reqwest::blocking::Client;
 use serde::Deserialize;
 use tokio::sync::watch;
 use tracing::{Instrument, info, info_span, warn};
 
-use super::{split_body, summarise_for_notification};
+use super::{AwayNotification, split_body, summarise_for_notification};
 use crate::inbound::AgentAddress;
 use crate::settings::get_settings;
-use crate::store::{InboundMessage, TurnCompleted, append_inbound_message};
+use crate::store::{HaroldStore, InboundMessage, TurnCompleted, append_inbound_message};
 
 // ===========================================================================
 // Sending
@@ -31,17 +30,25 @@ fn bot_url(token: &str, method: &str) -> String {
     format!("https://api.telegram.org/bot{token}/{method}")
 }
 
+fn sanitized_request_error(error: reqwest::Error) -> String {
+    error.without_url().to_string()
+}
+
+fn bounded_response_body(body: String) -> String {
+    body.chars().take(200).collect()
+}
+
 /// Send a plain text message to the configured Telegram chat.
-/// Returns `true` on success. Must be called from a `spawn_blocking` context.
-pub(crate) fn send_telegram(msg: &str) -> bool {
+/// Must be called from a `spawn_blocking` context.
+pub(crate) fn send_telegram(msg: &str) -> Result<(), String> {
     let cfg = get_settings();
     let Some(token) = cfg.telegram.bot_token.as_deref() else {
         warn!("telegram: bot_token not configured");
-        return false;
+        return Err("telegram bot_token is not configured".into());
     };
     let Some(chat_id) = cfg.telegram.chat_id else {
         warn!("telegram: chat_id not configured");
-        return false;
+        return Err("telegram chat_id is not configured".into());
     };
 
     info!(msg, "sending Telegram message");
@@ -58,21 +65,22 @@ pub(crate) fn send_telegram(msg: &str) -> bool {
     match res {
         Ok(r) if r.status().is_success() => {
             info!("Telegram message sent");
-            true
+            Ok(())
         }
         Ok(r) => {
             let status = r.status();
-            let body = r.text().unwrap_or_default();
+            let body = bounded_response_body(r.text().unwrap_or_default());
             warn!(
                 status = %status,
-                body = %body.chars().take(200).collect::<String>(),
+                body,
                 "Telegram sendMessage failed"
             );
-            false
+            Err(format!("Telegram sendMessage returned {status}: {body}"))
         }
         Err(e) => {
-            warn!(error = %e, "Telegram sendMessage request error");
-            false
+            let error = sanitized_request_error(e);
+            warn!(error, "Telegram sendMessage request error");
+            Err(format!("Telegram sendMessage request failed: {error}"))
         }
     }
 }
@@ -127,15 +135,16 @@ pub(crate) fn send_voice(ogg_path: &str, caption: &str) {
         }
         Ok(r) => {
             let status = r.status();
-            let body = r.text().unwrap_or_default();
+            let body = bounded_response_body(r.text().unwrap_or_default());
             warn!(
                 status = %status,
-                body = %body.chars().take(200).collect::<String>(),
+                body,
                 "Telegram sendVoice failed"
             );
         }
         Err(e) => {
-            warn!(error = %e, "Telegram sendVoice request error");
+            let error = sanitized_request_error(e);
+            warn!(error, "Telegram sendVoice request error");
         }
     }
 }
@@ -144,7 +153,10 @@ pub(crate) fn send_voice(ogg_path: &str, caption: &str) {
 // Away notification via Telegram — returns the source agent address
 // ---------------------------------------------------------------------------
 
-pub(crate) fn notify_away(turn: &TurnCompleted, _trace_id: &str) -> Option<AgentAddress> {
+pub(crate) fn notify_away(
+    turn: &TurnCompleted,
+    _trace_id: &str,
+) -> Result<AwayNotification, String> {
     let body = summarise_for_notification(&turn.assistant_message, &turn.last_user_prompt);
 
     let (main_body, question) = split_body(&body);
@@ -155,20 +167,18 @@ pub(crate) fn notify_away(turn: &TurnCompleted, _trace_id: &str) -> Option<Agent
         turn.main_context
     );
 
-    if !send_telegram(&message) {
-        return None;
-    }
+    send_telegram(&message)?;
     info!("Telegram notification sent");
 
     if let Some(q) = question {
-        send_telegram(&format!("🤖 {q}"));
+        send_telegram(&format!("🤖 {q}"))?;
         info!("Telegram question sent");
     }
 
-    Some(AgentAddress::TmuxPane {
+    Ok(AwayNotification::Sent(AgentAddress::TmuxPane {
         pane_id: turn.pane_id.clone(),
         label: turn.pane_label.clone(),
-    })
+    }))
 }
 
 // ===========================================================================
@@ -213,7 +223,11 @@ fn poll_updates(client: &Client, token: &str, offset: i64, timeout: u64) -> Opti
             let body: GetUpdatesResponse = match r.json() {
                 Ok(b) => b,
                 Err(e) => {
-                    warn!(error = %e, "telegram_listener: failed to parse getUpdates response");
+                    let error = sanitized_request_error(e);
+                    warn!(
+                        error,
+                        "telegram_listener: failed to parse getUpdates response"
+                    );
                     return None;
                 }
             };
@@ -226,22 +240,23 @@ fn poll_updates(client: &Client, token: &str, offset: i64, timeout: u64) -> Opti
         }
         Ok(r) => {
             let status = r.status();
-            let text = r.text().unwrap_or_default();
+            let text = bounded_response_body(r.text().unwrap_or_default());
             warn!(
                 status = %status,
-                body = %text.chars().take(200).collect::<String>(),
+                body = %text,
                 "telegram_listener: getUpdates HTTP error"
             );
             None
         }
         Err(e) => {
-            warn!(error = %e, "telegram_listener: getUpdates request error");
+            let error = sanitized_request_error(e);
+            warn!(error, "telegram_listener: getUpdates request error");
             None
         }
     }
 }
 
-pub(crate) async fn listen(store: Arc<EventStore>, mut shutdown: watch::Receiver<()>) {
+pub(crate) async fn listen(store: Arc<HaroldStore>, mut shutdown: watch::Receiver<()>) {
     let cfg = get_settings();
     let Some(token) = cfg.telegram.bot_token.clone() else {
         warn!("telegram_listener: bot_token not configured, not starting");

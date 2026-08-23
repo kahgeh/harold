@@ -5,15 +5,14 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicI64, Ordering};
 
-use events::EventStore;
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use tokio::sync::{mpsc, watch};
 use tracing::{Instrument, info, info_span, warn};
 
-use super::{split_body, summarise_for_notification};
+use super::{AwayNotification, split_body, summarise_for_notification};
 use crate::inbound::AgentAddress;
 use crate::settings::get_settings;
-use crate::store::{InboundMessage, TurnCompleted, append_inbound_message};
+use crate::store::{HaroldStore, InboundMessage, TurnCompleted, append_inbound_message};
 use crate::util::sanitise_for_applescript;
 
 // ===========================================================================
@@ -21,7 +20,7 @@ use crate::util::sanitise_for_applescript;
 // ===========================================================================
 
 /// Low-level iMessage send — delivers `text` as-is (no prefix) to `recipient`.
-pub(crate) fn send_imessage_to(text: &str, recipient: &str) {
+pub(crate) fn send_imessage_to(text: &str, recipient: &str) -> Result<(), String> {
     let safe_text = sanitise_for_applescript(text);
     let safe_recipient = sanitise_for_applescript(recipient);
     let escaped = safe_text.replace('\\', "\\\\").replace('"', "\\\"");
@@ -29,58 +28,101 @@ pub(crate) fn send_imessage_to(text: &str, recipient: &str) {
     let script = format!(
         "tell application \"Messages\" to send \"{escaped}\" to buddy \"{escaped_recipient}\""
     );
-    let _ = Command::new("osascript").args(["-e", &script]).status();
+    let status = Command::new("osascript")
+        .args(["-e", &script])
+        .status()
+        .map_err(|error| format!("failed to start osascript: {error}"))?;
+    if !status.success() {
+        return Err(format!("osascript exited unsuccessfully: {status}"));
+    }
+    Ok(())
 }
 
 /// Send an iMessage notification with robot-emoji prefix.
-fn send_raw_imessage(text: &str, recipient: &str) {
+fn send_raw_imessage(text: &str, recipient: &str) -> Result<(), String> {
     info!(msg = %text, "sending iMessage notification");
-    send_imessage_to(&format!("🤖 {text}"), recipient);
+    send_imessage_to(&format!("🤖 {text}"), recipient)
 }
 
 /// Send a plain iMessage (confirmation/error) to the configured recipient.
-pub(crate) fn send_imessage(msg: &str) {
+pub(crate) fn send_imessage(msg: &str) -> Result<(), String> {
     info!(msg, "sending iMessage");
     let cfg = get_settings();
     let Some(recipient) = cfg.imessage.recipient.as_deref() else {
-        return;
+        return Err("iMessage recipient is not configured".into());
     };
-    send_imessage_to(msg, recipient);
+    send_imessage_to(msg, recipient)
 }
 
-fn query_chat_db_single(db_path: &str, sql: &str) -> Option<String> {
-    let out = Command::new("sqlite3")
-        .arg(db_path)
-        .arg(sql)
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if s.is_empty() { None } else { Some(s) }
-}
-
-fn last_outgoing_text(handle_id: i64) -> Option<String> {
+fn recent_outgoing_texts(handle_id: i64) -> Vec<String> {
     let db_path = get_settings().chat_db.resolved_path();
-    query_chat_db_single(
-        &db_path,
-        &format!(
+    let out = Command::new("sqlite3")
+        .arg("-json")
+        .arg(db_path)
+        .arg(format!(
             "SELECT text FROM message WHERE handle_id = {handle_id} AND is_from_me = 1 \
-             ORDER BY ROWID DESC LIMIT 1;"
-        ),
-    )
+             ORDER BY ROWID DESC LIMIT 2;"
+        ))
+        .output();
+    let Ok(out) = out else {
+        return Vec::new();
+    };
+    if !out.status.success() {
+        return Vec::new();
+    }
+    serde_json::from_slice::<Vec<serde_json::Value>>(&out.stdout)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|row| row.get("text")?.as_str().map(ToString::to_string))
+        .collect()
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum NotificationPlan<'a> {
+    SendAll,
+    SendQuestionOnly(&'a str),
+    Skip,
+}
+
+fn normalize_notification_text(text: &str) -> &str {
+    text.trim().trim_start_matches('🤖').trim()
+}
+
+fn notification_plan<'a>(
+    recent_outgoing: &[&str],
+    message: &str,
+    question: Option<&'a str>,
+) -> NotificationPlan<'a> {
+    let Some(last) = recent_outgoing.first().copied() else {
+        return NotificationPlan::SendAll;
+    };
+    let last = normalize_notification_text(last);
+
+    if last == message.trim() {
+        return question.map_or(NotificationPlan::Skip, NotificationPlan::SendQuestionOnly);
+    }
+    if question.is_some_and(|question| last == question.trim())
+        && recent_outgoing
+            .get(1)
+            .is_some_and(|previous| normalize_notification_text(previous) == message.trim())
+    {
+        return NotificationPlan::Skip;
+    }
+    NotificationPlan::SendAll
 }
 
 // ---------------------------------------------------------------------------
 // Away notification via iMessage — returns the source agent address
 // ---------------------------------------------------------------------------
 
-pub(crate) fn notify_away(turn: &TurnCompleted, _trace_id: &str) -> Option<AgentAddress> {
+pub(crate) fn notify_away(
+    turn: &TurnCompleted,
+    _trace_id: &str,
+) -> Result<AwayNotification, String> {
     let cfg = get_settings();
     let Some(recipient) = cfg.imessage.recipient.as_deref() else {
         warn!("iMessage recipient not configured");
-        return None;
+        return Err("iMessage recipient is not configured".into());
     };
     let body = summarise_for_notification(&turn.assistant_message, &turn.last_user_prompt);
 
@@ -92,29 +134,38 @@ pub(crate) fn notify_away(turn: &TurnCompleted, _trace_id: &str) -> Option<Agent
         turn.main_context
     );
 
-    let is_duplicate = cfg
+    let recent_outgoing = cfg
         .imessage
         .handle_ids
         .first()
-        .and_then(|&id| last_outgoing_text(id))
-        .is_some_and(|last| last.trim().trim_start_matches("🤖").trim() == message.trim());
-    if is_duplicate {
-        info!("iMessage skipped (duplicate)");
-        return None;
+        .map_or_else(Vec::new, |&id| recent_outgoing_texts(id));
+    let recent_outgoing = recent_outgoing
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    match notification_plan(&recent_outgoing, &message, question) {
+        NotificationPlan::SendAll => {
+            send_raw_imessage(&message, recipient)?;
+            info!("iMessage notification sent");
+            if let Some(question) = question {
+                send_raw_imessage(question, recipient)?;
+                info!("iMessage question sent");
+            }
+        }
+        NotificationPlan::SendQuestionOnly(question) => {
+            send_raw_imessage(question, recipient)?;
+            info!("iMessage question retry sent");
+        }
+        NotificationPlan::Skip => {
+            info!("iMessage skipped (duplicate)");
+            return Ok(AwayNotification::Skipped);
+        }
     }
 
-    send_raw_imessage(&message, recipient);
-    info!("iMessage notification sent");
-
-    if let Some(q) = question {
-        send_raw_imessage(q, recipient);
-        info!("iMessage question sent");
-    }
-
-    Some(AgentAddress::TmuxPane {
+    Ok(AwayNotification::Sent(AgentAddress::TmuxPane {
         pane_id: turn.pane_id.clone(),
         label: turn.pane_label.clone(),
-    })
+    }))
 }
 
 // ===========================================================================
@@ -207,7 +258,7 @@ fn fetch_self(last_rowid: i64) -> Vec<(i64, String)> {
     fetch_messages(last_rowid, 1)
 }
 
-async fn poll(store: &EventStore) {
+async fn poll(store: &HaroldStore) {
     let inbound_rowid = last_inbound_rowid().load(Ordering::Relaxed);
     let self_rowid = last_self_rowid().load(Ordering::Relaxed);
 
@@ -299,7 +350,7 @@ fn start_watcher(chat_db_path: &str) -> Option<(RecommendedWatcher, mpsc::Unboun
     Some((watcher, rx))
 }
 
-pub(crate) async fn listen(store: Arc<EventStore>, mut shutdown: watch::Receiver<()>) {
+pub(crate) async fn listen(store: Arc<HaroldStore>, mut shutdown: watch::Receiver<()>) {
     let initial = tokio::task::spawn_blocking(get_max_rowid)
         .await
         .unwrap_or_else(|e| {

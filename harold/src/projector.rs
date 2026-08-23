@@ -1,85 +1,160 @@
 use std::sync::Arc;
+use std::time::Duration;
 
-use events::{EventEnvelope, EventStore, Projector, Result};
 use tokio::sync::watch;
-use tracing::{Instrument, info, info_span, warn};
+use tracing::{info, info_span, warn};
 
 use crate::inbound::route_inbound_message;
-use crate::outbound::notify;
-use crate::store::{InboundMessage, TurnCompleted};
+use crate::outbound::{DeliveryOutcome, notify};
+use crate::store::{HaroldStore, InboundMessage, PendingDelivery, TurnCompleted};
 
-pub async fn run_projector(store: Arc<EventStore>, mut shutdown: watch::Receiver<()>) {
-    let reply_store = store.clone();
-    let projector = Projector::new(store, "harold.notifier".into());
-    info!("projector starting");
+pub(crate) trait DeliveryDispatcher: Send + Sync + 'static {
+    fn dispatch(&self, delivery: &PendingDelivery) -> Result<DeliveryOutcome, DispatchError>;
+}
 
-    let result: Result<()> = tokio::select! {
-        res = projector.run(|events: &[EventEnvelope]| {
-            // Clone all needed data before the async block — no references may escape.
-            let batch: Vec<(String, String, serde_json::Value)> = events
-                .iter()
-                .map(|e| (e.id.to_string(), e.r#type.clone(), e.payload.clone()))
-                .collect();
-            let reply_store = reply_store.clone();
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum DispatchError {
+    #[error("{0}")]
+    Retryable(String),
 
-            async move {
-                for (event_id, event_type, payload) in batch {
-                    let span = info_span!("event", trace_id = %event_id);
+    #[error("{0}")]
+    Permanent(String),
+}
 
-                    async {
-                        match event_type.as_str() {
-                            "TurnCompleted" => {
-                                match serde_json::from_value::<TurnCompleted>(payload) {
-                                    Ok(turn) => {
-                                        info!(
-                                            pane_label = %turn.pane_label,
-                                            main_context = %turn.main_context,
-                                            "projector: TurnCompleted"
-                                        );
-                                        let inner_span = tracing::Span::current();
-                                        let tid = event_id.clone();
-                                        tokio::task::spawn_blocking(move || {
-                                            let _g = inner_span.entered();
-                                            notify(&turn, &tid);
-                                        }).await.ok();
-                                    }
-                                    Err(e) => warn!(error = %e, "projector: failed to deserialise TurnCompleted"),
-                                }
-                            }
-                            "InboundMessageReceived" => {
-                                match serde_json::from_value::<InboundMessage>(payload) {
-                                    Ok(reply) => {
-                                        info!("projector: InboundMessageReceived");
-                                        let inner_span = tracing::Span::current();
-                                        let reply_store = reply_store.clone();
-                                        tokio::task::spawn_blocking(move || {
-                                            let _g = inner_span.entered();
-                                            route_inbound_message(&reply.text, reply_store);
-                                        })
-                                        .await
-                                        .ok();
-                                    }
-                                    Err(e) => warn!(error = %e, "projector: failed to deserialise InboundMessageReceived"),
-                                }
-                            }
-                            other => {
-                                warn!(event_type = %other, "projector: unknown event type");
-                            }
-                        }
-                    }
-                    .instrument(span)
-                    .await;
-                }
-                Ok(())
+struct ProductionDispatcher;
+
+impl DeliveryDispatcher for ProductionDispatcher {
+    fn dispatch(&self, delivery: &PendingDelivery) -> Result<DeliveryOutcome, DispatchError> {
+        match delivery.event_type.as_str() {
+            "TurnCompleted" => {
+                let turn = serde_json::from_value::<TurnCompleted>(delivery.payload.clone())
+                    .map_err(|error| {
+                        DispatchError::Permanent(format!("invalid TurnCompleted payload: {error}"))
+                    })?;
+                notify(&turn, &delivery.trace_id).map_err(DispatchError::Retryable)
             }
-        }) => res,
-        _ = shutdown.changed() => {
-            info!("projector shutting down");
-            Ok(())
+            "InboundMessageReceived" => {
+                let message = serde_json::from_value::<InboundMessage>(delivery.payload.clone())
+                    .map_err(|error| {
+                        DispatchError::Permanent(format!(
+                            "invalid InboundMessageReceived payload: {error}"
+                        ))
+                    })?;
+                route_inbound_message(&message.text).map_err(DispatchError::Retryable)
+            }
+            other => Err(DispatchError::Permanent(format!(
+                "unknown event type: {other}"
+            ))),
         }
-    };
-
-    if let Err(e) = result {
-        warn!(error = %e, "projector exited with error");
     }
 }
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum HandlerError {
+    #[error(transparent)]
+    Store(#[from] events::EsError),
+
+    #[error("delivery task failed: {0}")]
+    Join(#[from] tokio::task::JoinError),
+
+    #[error("delivery failed: {0}")]
+    Delivery(String),
+}
+
+pub(crate) async fn handle_next_delivery(
+    store: &HaroldStore,
+    dispatcher: Arc<dyn DeliveryDispatcher>,
+) -> Result<bool, HandlerError> {
+    store.stage_unhandled_events(500).await?;
+    let Some(delivery) = store.next_pending_delivery().await? else {
+        return Ok(false);
+    };
+
+    let event_id = delivery.event_id.clone();
+    let event_version = delivery.event_version;
+    let event_type = delivery.event_type.clone();
+    let trace_id = delivery.trace_id.clone();
+    let span = info_span!(
+        "event",
+        trace_id = %trace_id,
+        event_version = event_version.get(),
+        event_type = %event_type,
+    );
+    let blocking_dispatcher = Arc::clone(&dispatcher);
+    let result = tokio::task::spawn_blocking(move || {
+        let _guard = span.enter();
+        blocking_dispatcher.dispatch(&delivery)
+    })
+    .await?;
+
+    match result {
+        Ok(outcome) => {
+            store.mark_delivered(&event_id).await?;
+            if outcome == DeliveryOutcome::Skipped {
+                info!(
+                    event_id,
+                    event_version = event_version.get(),
+                    event_type,
+                    "delivery intentionally skipped"
+                );
+            }
+            Ok(true)
+        }
+        Err(error) => match error {
+            DispatchError::Permanent(error) => {
+                store.mark_undeliverable(&event_id, &error).await?;
+                warn!(
+                    event_id,
+                    event_version = event_version.get(),
+                    event_type,
+                    error,
+                    "event is permanently undeliverable; continuing"
+                );
+                Ok(true)
+            }
+            DispatchError::Retryable(error) => {
+                store.record_delivery_failure(&event_id, &error).await?;
+                Err(HandlerError::Delivery(error))
+            }
+        },
+    }
+}
+
+async fn wait_or_shutdown(shutdown: &mut watch::Receiver<()>, delay: Duration) -> bool {
+    tokio::select! {
+        _ = shutdown.changed() => true,
+        _ = tokio::time::sleep(delay) => false,
+    }
+}
+
+pub async fn run_event_handler(store: Arc<HaroldStore>, mut shutdown: watch::Receiver<()>) {
+    let dispatcher: Arc<dyn DeliveryDispatcher> = Arc::new(ProductionDispatcher);
+    info!("event handler starting");
+
+    loop {
+        if shutdown.has_changed().unwrap_or(true) {
+            break;
+        }
+
+        match handle_next_delivery(&store, Arc::clone(&dispatcher)).await {
+            Ok(true) => continue,
+            Ok(false) => {
+                if wait_or_shutdown(&mut shutdown, Duration::from_millis(100)).await {
+                    break;
+                }
+            }
+            Err(error) => {
+                warn!(error = %error, "event handler cycle failed");
+                if wait_or_shutdown(&mut shutdown, Duration::from_secs(1)).await {
+                    break;
+                }
+            }
+        }
+    }
+
+    info!("event handler shutting down");
+}
+
+#[cfg(test)]
+#[path = "projector_tests.rs"]
+mod tests;

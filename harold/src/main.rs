@@ -24,7 +24,7 @@ use harold::harold_server::{Harold, HaroldServer};
 use harold::{TurnCompleteRequest, TurnCompleteResponse};
 
 struct HaroldService {
-    store: Arc<events::EventStore>,
+    store: Arc<store::HaroldStore>,
 }
 
 #[tonic::async_trait]
@@ -151,7 +151,7 @@ fn run_diagnostics(delay_secs: u64) {
     println!("\n--- Testing notify path (screen_locked={locked}) ---");
     if !locked {
         println!("Running TTS...");
-        notify_at_desk(&turn, "diag");
+        let _ = notify_at_desk(&turn, "diag");
         println!("TTS done");
         return;
     }
@@ -164,7 +164,9 @@ fn run_diagnostics(delay_secs: u64) {
     // doesn't panic when dropped inside the async runtime.
     let diag_turn = turn.clone();
     std::thread::spawn(move || {
-        channels::notify_away(&diag_turn, "diag");
+        if let Err(error) = channels::notify_away(&diag_turn, "diag") {
+            eprintln!("Away notification failed: {error}");
+        }
     })
     .join()
     .expect("diag away channel thread");
@@ -239,7 +241,7 @@ async fn async_main(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>>
     // Shutdown channel: sender closes on signal, receivers see the channel close.
     let (shutdown_tx, shutdown_rx) = watch::channel(());
 
-    let projector_handle = tokio::spawn(projector::run_projector(
+    let event_handler_handle = tokio::spawn(projector::run_event_handler(
         Arc::clone(&store),
         shutdown_rx.clone(),
     ));
@@ -260,17 +262,13 @@ async fn async_main(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>>
         })
         .await?;
 
-    // Wait for tasks to stop before checkpointing — checkpoint requires no active connections.
-    let _ = projector_handle.await;
+    // Wait for the handler and listener to stop before returning.
+    let _ = event_handler_handle.await;
     let _ = listener_handle.await;
-
-    // Checkpoint WAL: flushes all WAL pages to the main db files so next open is clean.
-    info!("checkpointing WAL");
-    if let Err(e) = store.checkpoint().await {
-        tracing::warn!(error = %e, "WAL checkpoint failed on shutdown");
-        return Ok(());
-    }
-    info!("WAL checkpoint complete");
 
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "main_tests.rs"]
+mod tests;
