@@ -37,6 +37,9 @@ pub(crate) fn reduce_agent_event(
 
             projection.hook_state = Some(lifecycle.state);
             projection.hook_observed_at_ms = Some(lifecycle.observed_at_ms);
+            projection.screen_state = None;
+            projection.screen_classifier_id = None;
+            projection.screen_observed_at_ms = None;
             match &lifecycle.work_summary {
                 WorkSummaryUpdate::Unchanged => {}
                 WorkSummaryUpdate::Clear => {

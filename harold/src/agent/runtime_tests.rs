@@ -905,6 +905,101 @@ async fn restart_seed_revalidates_same_screen_state_once_when_it_predates_lifecy
 }
 
 #[tokio::test]
+async fn zero_grace_same_millisecond_lifecycle_revalidates_once_across_two_restarts() {
+    let directory = TestDirectory::new();
+    let store = Arc::new(
+        HaroldStore::open_with_hook_grace(&directory.0, 0)
+            .await
+            .unwrap(),
+    );
+    let observed = pane("%8", 80, 800, 1_000, 50);
+    crate::store::append_agent_events(
+        &store,
+        vec![
+            AgentEvent::PaneObserved(AgentPaneObserved {
+                pane: observed.clone(),
+            }),
+            AgentEvent::ScreenObserved(super::domain::AgentScreenObserved {
+                incarnation: observed.incarnation.clone(),
+                state: Some(ObservedAgentState::Idle),
+                classifier_id: "tmux-visible-v1".into(),
+                fallback_summary: Some("Keep fallback".into()),
+                observed_at_ms: 100,
+            }),
+            AgentEvent::LifecycleObserved(AgentLifecycleObserved {
+                incarnation: observed.incarnation.clone(),
+                state: ObservedAgentState::Busy,
+                adapter_id: "codex-hook".into(),
+                work_summary: WorkSummaryUpdate::Unchanged,
+                observed_at_ms: 100,
+            }),
+        ],
+    )
+    .await
+    .unwrap();
+    store.project_unhandled_events(100).await.unwrap();
+    let snapshot = store.load_agent_snapshot().await.unwrap();
+    assert_eq!(snapshot.panes[0].effective_state, EffectiveAgentState::Busy);
+    assert_eq!(snapshot.panes[0].screen_state, None);
+    assert_eq!(
+        snapshot.panes[0].screen_work_summary.as_deref(),
+        Some("Keep fallback")
+    );
+
+    let screen_port = Arc::new(FakeScreen::default());
+    screen_port.push(Ok(screen(
+        &observed,
+        Some(ObservedAgentState::Idle),
+        None,
+        100,
+    )));
+    let (shutdown, shutdown_rx) = watch::channel(());
+    let (handle, task) = spawn_agent_monitor_seeded_for_test(
+        Arc::clone(&store),
+        Arc::new(FakeInventory::default()),
+        screen_port,
+        vec![provider()],
+        AgentMonitorSeed {
+            snapshot,
+            hook_grace_ms: 0,
+            acquisition_timeout: Duration::from_millis(50),
+        },
+        shutdown_rx,
+    );
+    handle.screen_tick().await.unwrap();
+    assert_eq!(fixture_event_count(&store).await, 4);
+    drop(shutdown);
+    task.await.unwrap();
+
+    store.project_unhandled_events(100).await.unwrap();
+    let snapshot = store.load_agent_snapshot().await.unwrap();
+    let screen_port = Arc::new(FakeScreen::default());
+    screen_port.push(Ok(screen(
+        &observed,
+        Some(ObservedAgentState::Idle),
+        None,
+        100,
+    )));
+    let (shutdown, shutdown_rx) = watch::channel(());
+    let (handle, task) = spawn_agent_monitor_seeded_for_test(
+        Arc::clone(&store),
+        Arc::new(FakeInventory::default()),
+        screen_port,
+        vec![provider()],
+        AgentMonitorSeed {
+            snapshot,
+            hook_grace_ms: 0,
+            acquisition_timeout: Duration::from_millis(50),
+        },
+        shutdown_rx,
+    );
+    handle.screen_tick().await.unwrap();
+    assert_eq!(fixture_event_count(&store).await, 4);
+    drop(shutdown);
+    task.await.unwrap();
+}
+
+#[tokio::test]
 async fn restart_seed_compares_normalized_metadata_with_the_next_raw_scan() {
     let directory = TestDirectory::new();
     let store = Arc::new(HaroldStore::open(&directory.0).await.unwrap());

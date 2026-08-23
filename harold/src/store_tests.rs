@@ -622,8 +622,8 @@ async fn projection_preserves_summary_candidates_across_restart_without_raw_scre
     assert_eq!(pane.explicit_work_summary_updated_at_ms, None);
     assert_eq!(pane.screen_work_summary.as_deref(), Some("Review tests"));
     assert_eq!(pane.screen_work_summary_updated_at_ms, Some(110));
-    assert_eq!(pane.screen_state, Some(ObservedAgentState::Idle));
-    assert_eq!(pane.screen_observed_at_ms, Some(120));
+    assert_eq!(pane.screen_state, None);
+    assert_eq!(pane.screen_observed_at_ms, None);
     assert_eq!(pane.last_event_version.get(), 5);
 
     let events = store

@@ -46,11 +46,20 @@ fn apply(
     event: AgentEvent,
     event_version: i64,
 ) -> super::domain::AgentPaneProjection {
+    apply_with_grace(current, event, event_version, DEFAULT_HOOK_GRACE_MS)
+}
+
+fn apply_with_grace(
+    current: Option<super::domain::AgentPaneProjection>,
+    event: AgentEvent,
+    event_version: i64,
+    hook_grace_ms: u64,
+) -> super::domain::AgentPaneProjection {
     upsert(reduce_agent_event(
         current,
         &event,
         version(event_version),
-        DEFAULT_HOOK_GRACE_MS,
+        hook_grace_ms,
     ))
 }
 
@@ -192,6 +201,77 @@ fn same_state_screen_revalidation_advances_once_after_a_later_hook_grace() {
 
     assert_eq!(revalidated.screen_observed_at_ms, Some(2_200));
     assert_eq!(duplicate.screen_observed_at_ms, Some(2_200));
+}
+
+#[test]
+fn later_same_millisecond_lifecycle_invalidates_screen_epoch_at_zero_grace() {
+    let initial = apply_with_grace(
+        None,
+        AgentEvent::PaneObserved(AgentPaneObserved {
+            pane: pane(1_000, 50),
+        }),
+        1,
+        0,
+    );
+    let screen = apply_with_grace(
+        Some(initial),
+        AgentEvent::ScreenObserved(AgentScreenObserved {
+            incarnation: incarnation(1_000),
+            state: Some(ObservedAgentState::Idle),
+            classifier_id: "screen-v1".into(),
+            fallback_summary: Some("Keep fallback".into()),
+            observed_at_ms: 100,
+        }),
+        2,
+        0,
+    );
+    let hooked = apply_with_grace(
+        Some(screen),
+        AgentEvent::LifecycleObserved(AgentLifecycleObserved {
+            incarnation: incarnation(1_000),
+            state: ObservedAgentState::Busy,
+            adapter_id: "hook-v1".into(),
+            work_summary: WorkSummaryUpdate::Unchanged,
+            observed_at_ms: 100,
+        }),
+        3,
+        0,
+    );
+
+    assert_eq!(hooked.effective_state, EffectiveAgentState::Busy);
+    assert_eq!(hooked.screen_state, None);
+    assert_eq!(hooked.screen_classifier_id, None);
+    assert_eq!(hooked.screen_observed_at_ms, None);
+    assert_eq!(hooked.screen_work_summary.as_deref(), Some("Keep fallback"));
+
+    let revalidated = apply_with_grace(
+        Some(hooked),
+        AgentEvent::ScreenObserved(AgentScreenObserved {
+            incarnation: incarnation(1_000),
+            state: Some(ObservedAgentState::Idle),
+            classifier_id: "screen-v1".into(),
+            fallback_summary: None,
+            observed_at_ms: 100,
+        }),
+        4,
+        0,
+    );
+    let duplicate = apply_with_grace(
+        Some(revalidated.clone()),
+        AgentEvent::ScreenObserved(AgentScreenObserved {
+            incarnation: incarnation(1_000),
+            state: Some(ObservedAgentState::Idle),
+            classifier_id: "screen-v1".into(),
+            fallback_summary: None,
+            observed_at_ms: 100,
+        }),
+        5,
+        0,
+    );
+
+    assert_eq!(revalidated.effective_state, EffectiveAgentState::Idle);
+    assert_eq!(revalidated.screen_observed_at_ms, Some(100));
+    assert_eq!(duplicate.screen_observed_at_ms, Some(100));
 }
 
 #[test]
