@@ -12,6 +12,9 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 use turso::Database;
 
+use crate::agent::domain::{AgentEvent, AgentScreenObserved, WorkSummaryUpdate};
+use crate::agent::summary::normalize_work_summary;
+
 const NAMESPACE: &str = "harold";
 const PARTITION_KEY: &str = "main";
 const STATE_DATABASE: &str = "harold-state.db";
@@ -381,6 +384,80 @@ pub async fn append_inbound_message(
         )
         .await?;
     Ok(())
+}
+
+#[allow(
+    dead_code,
+    reason = "the serialized monitor runtime is the sole appender in the next monitor slice"
+)]
+pub(crate) async fn append_agent_events(
+    store: &HaroldStore,
+    events: Vec<AgentEvent>,
+) -> events::Result<events::AppendResult> {
+    let events = events
+        .into_iter()
+        .filter_map(normalize_agent_event)
+        .map(agent_new_event)
+        .collect::<events::Result<Vec<_>>>()?;
+    store.stream.append(ExpectedVersion::Any, events).await
+}
+
+#[allow(
+    dead_code,
+    reason = "called by the runtime-facing agent append boundary above"
+)]
+fn normalize_agent_event(event: AgentEvent) -> Option<AgentEvent> {
+    match event {
+        AgentEvent::LifecycleObserved(mut lifecycle) => {
+            if let WorkSummaryUpdate::Set(summary) = lifecycle.work_summary {
+                lifecycle.work_summary = normalize_work_summary(&summary)
+                    .map_or(WorkSummaryUpdate::Clear, WorkSummaryUpdate::Set);
+            }
+            Some(AgentEvent::LifecycleObserved(lifecycle))
+        }
+        AgentEvent::ScreenObserved(screen) => normalize_screen_event(screen),
+        event => Some(event),
+    }
+}
+
+#[allow(
+    dead_code,
+    reason = "called by the runtime-facing agent append boundary above"
+)]
+fn normalize_screen_event(mut screen: AgentScreenObserved) -> Option<AgentEvent> {
+    screen.fallback_summary = screen
+        .fallback_summary
+        .as_deref()
+        .and_then(normalize_work_summary);
+    (screen.state.is_some() || screen.fallback_summary.is_some())
+        .then_some(AgentEvent::ScreenObserved(screen))
+}
+
+#[allow(
+    dead_code,
+    reason = "called by the runtime-facing agent append boundary above"
+)]
+fn agent_new_event(event: AgentEvent) -> events::Result<NewEvent> {
+    let (event_type, payload) = match event {
+        AgentEvent::PaneObserved(event) => ("AgentPaneObserved", serde_json::to_value(event)?),
+        AgentEvent::PaneDeparted(event) => ("AgentPaneDeparted", serde_json::to_value(event)?),
+        AgentEvent::LifecycleObserved(event) => {
+            ("AgentLifecycleObserved", serde_json::to_value(event)?)
+        }
+        AgentEvent::ScreenObserved(event) => ("AgentScreenObserved", serde_json::to_value(event)?),
+        AgentEvent::MonitorHealthChanged(event) => {
+            ("AgentMonitorHealthChanged", serde_json::to_value(event)?)
+        }
+    };
+    Ok(NewEvent {
+        r#type: event_type.into(),
+        payload,
+        workflow_kind: None,
+        workflow: WorkflowRef::None,
+        request_id: None,
+        actor_id: "system:harold".into(),
+        actor_type: ActorType::System,
+    })
 }
 
 #[cfg(test)]

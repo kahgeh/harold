@@ -1,7 +1,12 @@
 pub(crate) mod domain;
 pub(crate) mod inventory;
+pub(crate) mod reducer;
 mod screen;
-mod summary;
+pub(crate) mod summary;
+
+#[cfg(test)]
+#[path = "reducer_tests.rs"]
+mod reducer_tests;
 
 #[cfg(test)]
 #[path = "inventory_tests.rs"]
