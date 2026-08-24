@@ -620,15 +620,15 @@ tmux kill-session -t harold-dashboard-smoke
 
 Append the before/after PIDs, listener, install paths, signature checks, tmux capture summary, and restoration result to `## Review` below.
 
-- [ ] **Step 7: Request the mandatory completion reviewer**
+- [x] **Step 7: Request the mandatory completion reviewer**
 
 Dispatch a `review_subagent` to inspect all changes from `811244a` through `HEAD`, both repository histories, the dependency audit, root lockfile, Makefile ordering, task/lesson relocation, verification outputs, installed artifacts, Harold restart, and live tmux smoke evidence. Require an explicit thumbs-up.
 
-- [ ] **Step 8: Resolve every review finding and repeat affected gates**
+- [x] **Step 8: Resolve every review finding and repeat affected gates**
 
 Send findings back to the responsible implementation agent, implement root-cause fixes, rerun every affected focused and full check, update `## Review`, and request completion re-review. Do not report completion until no findings remain and the reviewer returns an explicit thumbs-up.
 
-- [ ] **Step 9: Commit the final evidence**
+- [x] **Step 9: Commit the final evidence**
 
 ```sh
 git add tasks/move-tmx-agent-dash/todo.md
@@ -1037,3 +1037,29 @@ Planning status:
   `tasks/tmux-agent-dashboard/screen-testing.md` to
   `../tasks/tmux-agent-dashboard/screen-testing.md`. Resolving that path from
   `tmx-agent-dash/README.md` reaches the existing root task ledger.
+
+### 2026-08-25 — Task 7 completion review and final conclusion
+
+- The mandatory completion reviewer rejected the first Task 7 evidence commit
+  `575ce6c`. The review found that the task-scoped launchd recovery proved the
+  installed Harold binary could run but did not prove `make deploy`'s own
+  background restart, and that the package README's screen-testing ledger link
+  still used its pre-relocation relative path.
+- Review-fix commit `39d58d4` removed the task-scoped launchd job before a new
+  deployment, captured literal `make deploy` from durable disposable caller
+  `harold-deploy-proof`, tied recipe shell PID `73302` and installed Harold PID
+  `73303` to the exact Makefile nohup command, and proved the same process and
+  `127.0.0.1:50060` listener survived caller-session removal. It also repeated
+  the healthy installed-dashboard smoke, corrected and resolved the README
+  link, and preserved the earlier automation-host attempts only as diagnosis.
+- Completion re-review at `39d58d4` returned explicit `👍 APPROVED` with no
+  Critical or Important findings. The reviewer accepted the repository
+  history, dependency/security gates, installation and signature evidence,
+  Makefile-owned Harold restart, live dashboard rendering/restoration, cleanup,
+  task/lesson relocation, and corrected documentation link.
+- Final Task 7 conclusion: all Steps 1-9 are complete. The dashboard migration
+  retains the approved non-squashed source history, leaves `events` unchanged,
+  integrates and verifies the root Cargo workspace, installs signed Harold and
+  dashboard artifacts through `make deploy`, leaves Make-deployed Harold PID
+  `73303` listening on `127.0.0.1:50060`, and has explicit clean completion
+  review approval.
