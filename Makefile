@@ -1,5 +1,8 @@
-DEPLOY_DIR := $(HOME)/bin/harold
-BINARY     := target/release/harold
+INSTALL_DIR       := $(HOME)/bin
+DEPLOY_DIR        := $(INSTALL_DIR)/harold
+BINARY            := target/release/harold
+DASHBOARD_BINARY  := target/release/tmx-agent-dash
+DASHBOARD_INSTALL := $(INSTALL_DIR)/tmx-agent-dash
 
 -include .env
 export
@@ -14,6 +17,9 @@ setup-codesign .env:
 
 deploy: build .env
 	mkdir -p $(DEPLOY_DIR)
+	if [ -f $(DASHBOARD_INSTALL) ]; then cp -p $(DASHBOARD_INSTALL) $(DASHBOARD_INSTALL).pre-deploy; fi
+	cp $(DASHBOARD_BINARY) $(DASHBOARD_INSTALL)
+	codesign --force --sign "$(CODESIGN_IDENTITY)" $(DASHBOARD_INSTALL)
 	pkill -f "$(DEPLOY_DIR)/harold" || true
 	sleep 1
 	cp $(BINARY) $(DEPLOY_DIR)/harold

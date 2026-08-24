@@ -10,19 +10,31 @@ the invoking tmux client to the selected pane.
 - Rust 1.97.1 (the currently verified toolchain)
 - tmux 3.6a (the currently verified version) for pane navigation
 - Harold with the `WatchAgentStates` gRPC service available
-- The Harold checkout beside this repository, so the shared API crate is at
-  `../harold/harold-api`
+- The containing Harold workspace, with the shared API crate at `../harold-api`
 
 Viewing works outside tmux, but pane navigation is disabled. Start the dashboard
 inside the tmux client that should move when you press `Enter`.
 
-Build the release binary from this checkout:
+From the containing Harold workspace root, build every release binary:
+
+```sh
+make build
+```
+
+Install the same workspace revision, including the signed on-demand dashboard
+command at `~/bin/tmx-agent-dash`:
+
+```sh
+make deploy
+```
+
+For standalone dashboard development from this package directory, use Cargo:
 
 ```sh
 cargo build --release
 ```
 
-The resulting executable is `target/release/tmx-agent-dash`.
+The resulting development executable is `target/release/tmx-agent-dash`.
 
 ## Run
 

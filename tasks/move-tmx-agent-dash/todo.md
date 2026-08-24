@@ -351,7 +351,7 @@ git commit -m "build: integrate dashboard workspace crate"
 - Consumes: `target/release/tmx-agent-dash`, `CODESIGN_IDENTITY`, and `~/bin` already on `PATH`
 - Produces: signed on-demand command `~/bin/tmx-agent-dash`
 
-- [ ] **Step 1: Demonstrate that deployment does not install the dashboard**
+- [x] **Step 1: Demonstrate that deployment does not install the dashboard**
 
 Run:
 
@@ -361,7 +361,7 @@ make -n deploy | rg 'target/release/tmx-agent-dash|bin/tmx-agent-dash'
 
 Expected: the assertion fails because the existing recipe contains no dashboard copy or signing command.
 
-- [ ] **Step 2: Extend the deploy recipe**
+- [x] **Step 2: Extend the deploy recipe**
 
 Use `apply_patch` to add these variables without changing the existing Harold paths:
 
@@ -383,7 +383,7 @@ After `mkdir -p $(DEPLOY_DIR)` and before stopping Harold, add these exact effec
 
 This ordering ensures build and dashboard installation finish before the existing `pkill` restarts Harold. Do not launch the dashboard from Make.
 
-- [ ] **Step 3: Prove the dry-run installation chain**
+- [x] **Step 3: Prove the dry-run installation chain**
 
 ```sh
 make -n deploy | rg -n \
@@ -392,7 +392,7 @@ make -n deploy | rg -n \
 
 Expected order: release build; optional dashboard rollback copy; dashboard copy; dashboard code-sign; Harold stop/copy/sign/start. No command launches `tmx-agent-dash`.
 
-- [ ] **Step 4: Update repository documentation**
+- [x] **Step 4: Update repository documentation**
 
 Use `apply_patch` to add a `## Dashboard` section to root `README.md` after `How it works`. It must state:
 
@@ -416,7 +416,7 @@ tmx-agent-dash
 
 Update `tmx-agent-dash/README.md` so its prerequisite/build text refers to the containing Harold workspace, `harold-api` at `../harold-api`, root `make build`, and root `make deploy`. Retain the standalone Cargo development commands and all behavioral documentation.
 
-- [ ] **Step 5: Commit installation and documentation**
+- [x] **Step 5: Commit installation and documentation**
 
 ```sh
 git add Makefile README.md tmx-agent-dash/README.md \
@@ -867,3 +867,30 @@ Planning status:
 - Task 4 is complete. Steps 1–7 are checked; the approved workspace, lock,
   task-record, and lesson changes are ready for the planned
   `build: integrate dashboard workspace crate` commit.
+
+### 2026-08-24 — Task 5 dashboard deployment and documentation
+
+- The literal RED command, `make -n deploy | rg
+  'target/release/tmx-agent-dash|bin/tmx-agent-dash'`, exited 1 in this
+  worktree because the untracked `.env` prerequisite is absent: Make reported
+  `No rule to make target '.env', needed by 'deploy'. Stop.` before it could
+  render the deploy recipe. A non-mutating equivalent, `make -n
+  --assume-old=.env deploy | rg 'target/release/tmx-agent-dash|bin/tmx-agent-dash'`,
+  then exited 1 with no matches, proving the pre-change recipe had no dashboard
+  deployment effect.
+- Added `INSTALL_DIR`, preserved Harold's effective install path as
+  `$(INSTALL_DIR)/harold`, and added the exact dashboard rollback copy, install
+  copy, and code-sign effects after `mkdir -p $(DEPLOY_DIR)` and before
+  `pkill`. The root workspace `build` prerequisite remains first; Make does not
+  launch `tmx-agent-dash`.
+- The literal GREEN filter is similarly blocked by the absent `.env` after
+  printing setup-codesign output (exit 2). With `.env` assumed old, its exact
+  relevant dry-run order was: `cargo build --release`; optional
+  `tmx-agent-dash.pre-deploy` copy; copy from
+  `target/release/tmx-agent-dash`; dashboard `codesign`; Harold `pkill`; and
+  Harold `codesign`. A launch assertion found no dashboard launch command.
+- Root README now introduces the dashboard and gives the exact deploy/start
+  commands. The package README now identifies the containing workspace and
+  `../harold-api`, documents root `make build` and `make deploy`, retains its
+  standalone `cargo build --release` and `cargo run` commands, and preserves
+  its behavioral sections. `git diff --check` passed before staging.

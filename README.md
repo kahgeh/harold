@@ -23,6 +23,22 @@ The public agent-state stream starts with a complete current snapshot, then send
 
 See the [architecture explanation](docs/explanations/architecture.md), [agent-monitor reference](docs/references/agent-monitor/README.md), and [hook setup guide](docs/how-tos/setup-agent-monitor-hooks.md).
 
+## Dashboard
+
+The [`tmx-agent-dash`](tmx-agent-dash/README.md) terminal dashboard shows Harold's current agent-pane projection and can switch the invoking tmux client to a selected pane.
+
+Build and install Harold and the dashboard from the same workspace revision:
+
+```sh
+make deploy
+```
+
+Then start the dashboard inside the tmux client it should navigate:
+
+```sh
+tmx-agent-dash
+```
+
 ## Prerequisites
 
 See [docs/prerequisites.md](docs/prerequisites.md).
