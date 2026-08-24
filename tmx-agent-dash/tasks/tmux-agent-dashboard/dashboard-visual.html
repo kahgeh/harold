@@ -1,0 +1,776 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TMX Agent Dash — Visual Reference</title>
+  <style>
+    :root {
+      color-scheme: dark;
+
+      --surface-page: #0d0d0b;
+      --surface-board: #141410;
+      --surface-panel: #191915;
+      --surface-raised: #20201a;
+      --surface-selected: #29281e;
+      --ink-strong: #ede7d8;
+      --ink: #c8c1b0;
+      --ink-muted: #8f8a7f;
+      --line: #3c3a31;
+      --line-strong: #5a5648;
+      --signal-green: #7dc88b;
+      --signal-amber: #e0ae55;
+      --signal-coral: #e07262;
+      --signal-off: #59584f;
+      --shadow: #050504;
+      --grid-line: rgb(237 231 216 / 0.025);
+      --selection-wash: rgb(224 174 85 / 0.08);
+      --selection-line: rgb(224 174 85 / 0.55);
+      --lamp-glow-green: rgb(125 200 139 / 0.35);
+      --lamp-glow-amber: rgb(224 174 85 / 0.38);
+      --lamp-glow-coral: rgb(224 114 98 / 0.38);
+
+      --font-mono: "Berkeley Mono", "IBM Plex Mono", "SFMono-Regular", Consolas, monospace;
+      --text-xs: 0.67rem;
+      --text-sm: 0.76rem;
+      --text-md: 0.9rem;
+      --text-lg: 1.08rem;
+      --text-xl: clamp(1.25rem, 2.3vw, 2rem);
+      --weight-normal: 450;
+      --weight-bold: 700;
+      --tracking-tight: -0.03em;
+      --tracking-wide: 0.13em;
+      --tracking-wider: 0.19em;
+      --line-height: 1.45;
+
+      --space-1: 0.25rem;
+      --space-2: 0.5rem;
+      --space-3: 0.75rem;
+      --space-4: 1rem;
+      --space-5: 1.25rem;
+      --space-6: 1.5rem;
+      --space-8: 2rem;
+      --space-10: 2.5rem;
+      --space-page: clamp(0.75rem, 2.4vw, 2.25rem);
+      --radius-sm: 0.15rem;
+      --radius-md: 0.3rem;
+      --border: 1px;
+      --border-heavy: 2px;
+      --lamp-size: 0.62rem;
+      --marker-width: 0.22rem;
+      --board-max: 92rem;
+      --detail-width: minmax(19rem, 0.38fr);
+      --transition-fast: 120ms ease-out;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html {
+      min-height: 100%;
+      background: var(--surface-page);
+    }
+
+    body {
+      min-height: 100vh;
+      margin: 0;
+      padding: var(--space-page);
+      color: var(--ink);
+      background:
+        linear-gradient(var(--grid-line) var(--border), transparent var(--border)),
+        linear-gradient(90deg, var(--grid-line) var(--border), transparent var(--border)),
+        radial-gradient(circle at 50% 0%, var(--surface-raised), var(--surface-page) 62%);
+      background-size: var(--space-8) var(--space-8), var(--space-8) var(--space-8), auto;
+      font-family: var(--font-mono);
+      font-size: var(--text-md);
+      font-weight: var(--weight-normal);
+      line-height: var(--line-height);
+    }
+
+    h1,
+    h2,
+    h3,
+    p,
+    dl,
+    dd {
+      margin: 0;
+    }
+
+    .board {
+      position: relative;
+      display: grid;
+      grid-template-rows: auto auto auto auto 1fr auto;
+      width: min(100%, var(--board-max));
+      min-height: calc(100vh - (2 * var(--space-page)));
+      margin-inline: auto;
+      overflow: hidden;
+      border: var(--border-heavy) solid var(--line-strong);
+      border-radius: var(--radius-md);
+      background: var(--surface-board);
+      box-shadow: 0 var(--space-3) var(--space-10) var(--shadow);
+    }
+
+    .board::before,
+    .board::after {
+      position: absolute;
+      z-index: 5;
+      width: var(--space-2);
+      height: var(--space-2);
+      border-radius: 50%;
+      background: var(--line-strong);
+      box-shadow: inset 0 0 0 var(--border-heavy) var(--surface-page);
+      content: "";
+    }
+
+    .board::before {
+      top: var(--space-2);
+      left: var(--space-2);
+    }
+
+    .board::after {
+      right: var(--space-2);
+      bottom: var(--space-2);
+    }
+
+    .masthead {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: var(--space-6);
+      align-items: end;
+      padding: var(--space-5) var(--space-6);
+      border-bottom: var(--border-heavy) solid var(--line-strong);
+      background: var(--surface-panel);
+    }
+
+    .eyebrow,
+    .section-kicker,
+    .label,
+    dt,
+    th {
+      color: var(--ink-muted);
+      font-size: var(--text-xs);
+      font-weight: var(--weight-bold);
+      letter-spacing: var(--tracking-wide);
+      text-transform: uppercase;
+    }
+
+    .eyebrow {
+      margin-bottom: var(--space-1);
+      color: var(--signal-amber);
+      letter-spacing: var(--tracking-wider);
+    }
+
+    h1 {
+      color: var(--ink-strong);
+      font-size: var(--text-xl);
+      font-weight: var(--weight-bold);
+      letter-spacing: var(--tracking-tight);
+      line-height: 1.1;
+    }
+
+    .connection {
+      display: grid;
+      grid-template-columns: auto auto;
+      gap: var(--space-2) var(--space-4);
+      align-items: center;
+      justify-items: end;
+      min-width: 18rem;
+    }
+
+    .connection-state {
+      display: inline-flex;
+      gap: var(--space-2);
+      align-items: center;
+      color: var(--signal-coral);
+      font-size: var(--text-sm);
+      font-weight: var(--weight-bold);
+      letter-spacing: var(--tracking-wide);
+      text-transform: uppercase;
+    }
+
+    .connection-meta {
+      color: var(--ink-muted);
+      font-size: var(--text-xs);
+      text-align: right;
+    }
+
+    .lamp {
+      display: inline-block;
+      flex: 0 0 auto;
+      width: var(--lamp-size);
+      height: var(--lamp-size);
+      border: var(--border) solid currentColor;
+      border-radius: 50%;
+      background: currentColor;
+    }
+
+    .lamp--busy {
+      color: var(--signal-amber);
+      box-shadow: 0 0 var(--space-2) var(--lamp-glow-amber);
+    }
+
+    .lamp--idle {
+      color: var(--signal-green);
+      box-shadow: 0 0 var(--space-2) var(--lamp-glow-green);
+    }
+
+    .lamp--unknown {
+      color: var(--ink-muted);
+      background: transparent;
+    }
+
+    .lamp--lost {
+      color: var(--signal-coral);
+      box-shadow: 0 0 var(--space-2) var(--lamp-glow-coral);
+    }
+
+    .stale-notice {
+      display: flex;
+      gap: var(--space-3);
+      align-items: center;
+      padding: var(--space-2) var(--space-6);
+      border-bottom: var(--border) solid var(--signal-coral);
+      color: var(--signal-coral);
+      background: rgb(224 114 98 / 0.07);
+      font-size: var(--text-xs);
+      font-weight: var(--weight-bold);
+      letter-spacing: var(--tracking-wide);
+      text-transform: uppercase;
+    }
+
+    .stale-notice strong {
+      color: var(--ink-strong);
+    }
+
+    .summary {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr) 1.4fr;
+      border-bottom: var(--border) solid var(--line-strong);
+    }
+
+    .counter,
+    .clock {
+      min-width: 0;
+      padding: var(--space-4) var(--space-5);
+      border-right: var(--border) solid var(--line);
+    }
+
+    .summary > :last-child {
+      border-right: 0;
+    }
+
+    .counter-line {
+      display: flex;
+      gap: var(--space-3);
+      align-items: baseline;
+    }
+
+    .counter-value {
+      color: var(--ink-strong);
+      font-size: var(--text-lg);
+      font-weight: var(--weight-bold);
+    }
+
+    .counter--busy .counter-value {
+      color: var(--signal-amber);
+    }
+
+    .counter--idle .counter-value {
+      color: var(--signal-green);
+    }
+
+    .counter--unknown .counter-value {
+      color: var(--ink-muted);
+    }
+
+    .clock {
+      text-align: right;
+    }
+
+    .clock time {
+      color: var(--ink-strong);
+      font-size: var(--text-sm);
+    }
+
+    .search-strip {
+      display: grid;
+      grid-template-columns: auto auto minmax(0, 1fr) auto;
+      gap: var(--space-3);
+      align-items: center;
+      padding: var(--space-3) var(--space-5);
+      border: 0;
+      border-bottom: var(--border) solid var(--line-strong);
+      color: var(--ink-muted);
+      background: var(--surface-raised);
+    }
+
+    .search-strip label,
+    .search-prefix {
+      color: var(--signal-amber);
+      font-size: var(--text-xs);
+      font-weight: var(--weight-bold);
+      letter-spacing: var(--tracking-wide);
+      text-transform: uppercase;
+    }
+
+    .search-strip input {
+      min-width: 0;
+      padding: var(--space-1) var(--space-2);
+      border: var(--border) solid var(--selection-line);
+      border-radius: var(--radius-sm);
+      outline: 0;
+      color: var(--ink-strong);
+      background: var(--surface-board);
+      font: inherit;
+    }
+
+    .search-strip output {
+      color: var(--ink);
+      font-size: var(--text-xs);
+      white-space: nowrap;
+    }
+
+    .workspace {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) var(--detail-width);
+      min-height: 31rem;
+    }
+
+    .inventory {
+      min-width: 0;
+      border-right: var(--border) solid var(--line-strong);
+    }
+
+    .panel-header {
+      display: flex;
+      gap: var(--space-4);
+      align-items: baseline;
+      justify-content: space-between;
+      padding: var(--space-4) var(--space-5) var(--space-3);
+      border-bottom: var(--border) solid var(--line);
+    }
+
+    h2,
+    h3 {
+      color: var(--ink-strong);
+      font-size: var(--text-sm);
+      font-weight: var(--weight-bold);
+      letter-spacing: var(--tracking-wide);
+      text-transform: uppercase;
+    }
+
+    .panel-meta {
+      color: var(--ink-muted);
+      font-size: var(--text-xs);
+    }
+
+    .table-scroll {
+      overflow-x: auto;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      table-layout: fixed;
+    }
+
+    caption,
+    .sr-only {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
+    }
+
+    th {
+      padding: var(--space-2) var(--space-3);
+      border-bottom: var(--border) solid var(--line-strong);
+      background: var(--surface-raised);
+      text-align: left;
+    }
+
+    td {
+      height: var(--space-10);
+      padding: var(--space-2) var(--space-3);
+      overflow: hidden;
+      border-bottom: var(--border) solid var(--line);
+      color: var(--ink);
+      font-size: var(--text-sm);
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    tbody tr {
+      position: relative;
+      background: var(--surface-panel);
+      transition: background var(--transition-fast);
+    }
+
+    tbody tr:nth-child(even) {
+      background: var(--surface-board);
+    }
+
+    tbody tr[data-selected="true"] {
+      background:
+        linear-gradient(90deg, var(--selection-wash), transparent 75%),
+        var(--surface-selected);
+      box-shadow: inset var(--marker-width) 0 var(--signal-amber);
+    }
+
+    tbody tr[data-selected="true"] td {
+      border-top: var(--border) solid var(--selection-line);
+      border-bottom: var(--border) solid var(--selection-line);
+      color: var(--ink-strong);
+    }
+
+    .status {
+      --status-color: var(--ink-strong);
+
+      display: inline-flex;
+      gap: var(--space-2);
+      align-items: center;
+      color: var(--status-color);
+    }
+
+    .status--busy {
+      --status-color: var(--signal-amber);
+    }
+
+    .status--idle {
+      --status-color: var(--signal-green);
+    }
+
+    .status--unknown {
+      --status-color: var(--ink-muted);
+    }
+
+    .provider {
+      color: var(--ink-strong);
+      font-weight: var(--weight-bold);
+    }
+
+    .pane-id,
+    .age {
+      color: var(--ink-muted);
+    }
+
+    .work-summary-cell {
+      color: var(--ink);
+    }
+
+    .detail {
+      display: flex;
+      min-width: 0;
+      flex-direction: column;
+      background: var(--surface-panel);
+    }
+
+    .detail-body {
+      display: grid;
+      gap: var(--space-5);
+      padding: var(--space-5);
+    }
+
+    .detail-identity {
+      padding-bottom: var(--space-4);
+      border-bottom: var(--border) solid var(--line);
+    }
+
+    .detail-provider {
+      display: flex;
+      gap: var(--space-3);
+      align-items: center;
+      margin-top: var(--space-1);
+      color: var(--status-color, var(--ink-strong));
+      font-size: var(--text-lg);
+      font-weight: var(--weight-bold);
+    }
+
+    .facts {
+      display: grid;
+      grid-template-columns: minmax(6rem, auto) 1fr;
+      gap: var(--space-2) var(--space-4);
+    }
+
+    dd {
+      min-width: 0;
+      overflow: hidden;
+      color: var(--ink-strong);
+      font-size: var(--text-sm);
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .work-summary {
+      padding: var(--space-4);
+      border: var(--border) solid var(--line-strong);
+      border-left: var(--marker-width) solid var(--signal-amber);
+      background: var(--surface-raised);
+    }
+
+    .work-summary h3 {
+      margin-bottom: var(--space-3);
+    }
+
+    .work-summary p {
+      color: var(--ink-strong);
+      font-size: var(--text-sm);
+    }
+
+    .keybar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: var(--space-3) var(--space-6);
+      align-items: center;
+      padding: var(--space-3) var(--space-6);
+      border-top: var(--border-heavy) solid var(--line-strong);
+      color: var(--ink-muted);
+      background: var(--surface-raised);
+      font-size: var(--text-xs);
+    }
+
+    .keybar p:first-child {
+      margin-right: auto;
+      color: var(--ink);
+      letter-spacing: var(--tracking-wide);
+      text-transform: uppercase;
+    }
+
+    kbd {
+      display: inline-block;
+      min-width: var(--space-6);
+      margin-right: var(--space-1);
+      padding-inline: var(--space-1);
+      border: var(--border) solid var(--line-strong);
+      border-bottom-width: var(--border-heavy);
+      border-radius: var(--radius-sm);
+      color: var(--ink-strong);
+      background: var(--surface-board);
+      font: inherit;
+      text-align: center;
+    }
+
+    @media (max-width: 850px) {
+      .masthead {
+        grid-template-columns: 1fr;
+        align-items: start;
+      }
+
+      .connection {
+        justify-items: start;
+      }
+
+      .connection-meta {
+        text-align: left;
+      }
+
+      .summary {
+        grid-template-columns: repeat(3, 1fr);
+      }
+
+      .search-strip {
+        grid-template-columns: auto auto minmax(0, 1fr);
+      }
+
+      .search-strip output {
+        grid-column: 1 / -1;
+      }
+
+      .clock {
+        grid-column: 1 / -1;
+        border-top: var(--border) solid var(--line);
+        text-align: left;
+      }
+
+      .workspace {
+        grid-template-columns: 1fr;
+      }
+
+      .inventory {
+        border-right: 0;
+      }
+
+      .detail {
+        border-top: var(--border-heavy) solid var(--line-strong);
+      }
+
+      .panel-header {
+        padding: var(--space-3) var(--space-5) var(--space-2);
+      }
+
+      .detail-body {
+        gap: var(--space-3);
+        padding: var(--space-4);
+      }
+
+      .detail-identity {
+        padding-bottom: var(--space-3);
+      }
+
+      .work-summary {
+        padding: var(--space-3);
+      }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *,
+      *::before,
+      *::after {
+        scroll-behavior: auto !important;
+        transition-duration: 0.01ms !important;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="board" aria-labelledby="page-title">
+    <header class="masthead">
+      <div>
+        <p class="eyebrow">Harold / Tmux control</p>
+        <h1 id="page-title">Agent Signal Board</h1>
+      </div>
+      <section class="connection" aria-label="Harold connection status">
+        <h2 class="sr-only">Harold connection</h2>
+        <p class="connection-state" role="status" aria-live="polite">
+          <span class="lamp lamp--lost" aria-hidden="true"></span>
+          Link lost
+        </p>
+        <p class="connection-meta">127.0.0.1:50060 · retry 03s</p>
+        <p class="connection-meta">Last revision</p>
+        <p class="connection-meta">#01842 · <time datetime="2026-08-23T17:41:06+10:00">17:41:06 AEST</time></p>
+      </section>
+    </header>
+
+    <aside class="stale-notice" role="alert">
+      <span aria-hidden="true">▲</span>
+      <p><strong>Snapshot stale 00:04</strong> — showing last known agent state while reconnecting</p>
+    </aside>
+
+    <section class="summary" aria-label="Agent state summary">
+      <h2 class="sr-only">Agent state summary</h2>
+      <article class="counter counter--busy">
+        <h3 class="label">Busy blocks</h3>
+        <p class="counter-line"><span class="counter-value">02</span><span>agents</span></p>
+      </article>
+      <article class="counter counter--idle">
+        <h3 class="label">Clear blocks</h3>
+        <p class="counter-line"><span class="counter-value">02</span><span>agents</span></p>
+      </article>
+      <article class="counter counter--unknown">
+        <h3 class="label">Unsignalled</h3>
+        <p class="counter-line"><span class="counter-value">01</span><span>agent</span></p>
+      </article>
+      <article class="clock">
+        <h3 class="label">Inventory observed</h3>
+        <time datetime="2026-08-23T17:41:02+10:00">17:41:02.442 AEST</time>
+      </article>
+    </section>
+
+    <form class="search-strip" role="search" aria-label="Filter current agents">
+      <label for="agent-search">Filter agents</label>
+      <span class="search-prefix" aria-hidden="true">/</span>
+      <input id="agent-search" name="agent-search" type="search" value="event" readonly>
+      <output for="agent-search">3 of 5 panes · live filter</output>
+    </form>
+
+    <div class="workspace">
+      <section class="inventory" aria-labelledby="inventory-title">
+        <header class="panel-header">
+          <h2 id="inventory-title">Agent block occupancy</h2>
+          <p class="panel-meta">3 of 5 panes · sorted busy first</p>
+        </header>
+        <div class="table-scroll">
+          <table>
+            <caption>Current agents discovered in tmux panes</caption>
+            <colgroup>
+              <col style="width: 15%">
+              <col style="width: 14%">
+              <col style="width: 19%">
+              <col style="width: 42%">
+              <col style="width: 10%">
+            </colgroup>
+            <thead>
+              <tr>
+                <th scope="col">State</th>
+                <th scope="col">Agent</th>
+                <th scope="col">Target</th>
+                <th scope="col">Work summary</th>
+                <th scope="col">Age</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr data-selected="true" aria-current="true">
+                <td><span class="status status--busy"><span class="lamp lamp--busy" aria-hidden="true"></span>Busy</span></td>
+                <td class="provider"><span class="sr-only">Selected: </span>Claude</td>
+                <td class="pane-id">harold:2.1</td>
+                <td class="work-summary-cell" title="Implement durable agent event projection and snapshot streaming">Implement durable agent event projection and snapshot streaming</td>
+                <td class="age">08s</td>
+              </tr>
+              <tr>
+                <td><span class="status status--idle"><span class="lamp lamp--idle" aria-hidden="true"></span>Idle</span></td>
+                <td class="provider">Codex</td>
+                <td class="pane-id">tmx-agent-dash:0.3</td>
+                <td class="work-summary-cell" title="Build event snapshot search and tmux navigation">Build event snapshot search and tmux navigation</td>
+                <td class="age">14s</td>
+              </tr>
+              <tr>
+                <td><span class="status status--unknown"><span class="lamp lamp--unknown" aria-hidden="true"></span>Unknown</span></td>
+                <td class="provider">OpenCode</td>
+                <td class="pane-id">lab:1.0</td>
+                <td class="work-summary-cell" title="Await event-state classification">Await event-state classification</td>
+                <td class="age">31s</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <aside class="detail" aria-labelledby="detail-title">
+        <header class="panel-header">
+          <h2 id="detail-title">Selected signal</h2>
+          <p class="panel-meta">pane %17</p>
+        </header>
+        <div class="detail-body">
+          <section class="detail-identity" aria-label="Selected agent identity">
+            <h3 class="sr-only">Selected agent identity</h3>
+            <p class="section-kicker">Agent / provider</p>
+            <p class="detail-provider status--busy">
+              <span class="lamp lamp--busy" aria-hidden="true"></span>
+              Busy · Claude Code
+            </p>
+          </section>
+
+          <dl class="facts">
+            <dt>State</dt><dd>Busy</dd>
+            <dt>Target</dt><dd>harold:2.1</dd>
+            <dt>Pane ID</dt><dd>%17</dd>
+            <dt>Directory</dt><dd title="~/Dev/p/harold">~/Dev/p/harold</dd>
+            <dt>Process</dt><dd>claude · pid 91844</dd>
+            <dt>Since</dt><dd><time datetime="2026-08-23T17:40:58+10:00">17:40:58</time> · 08s</dd>
+          </dl>
+
+          <section class="work-summary" aria-labelledby="work-summary-title">
+            <h3 id="work-summary-title">Current work</h3>
+            <p>Implement durable agent event projection and snapshot streaming.</p>
+          </section>
+        </div>
+      </aside>
+    </div>
+
+    <footer class="keybar" aria-label="Keyboard controls">
+      <p>TMX dispatch console · stale snapshot</p>
+      <p><kbd>j</kbd><kbd>k</kbd>select</p>
+      <p><kbd>/</kbd>search</p>
+      <p><kbd>esc</kbd>clear</p>
+      <p><kbd>↵</kbd>switch pane</p>
+      <p><kbd>r</kbd>reconnect</p>
+      <p><kbd>q</kbd>quit</p>
+    </footer>
+  </main>
+</body>
+</html>

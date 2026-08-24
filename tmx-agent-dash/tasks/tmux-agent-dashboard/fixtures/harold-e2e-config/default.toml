@@ -1,0 +1,57 @@
+[grpc]
+host = "127.0.0.1"
+port = 50061
+
+[imessage]
+recipient = "+10000000000"
+handle_ids = [999999999]
+
+[chat_db]
+path = "/private/tmp/tmx-agent-dash-e2e-20260823/missing-chat.db"
+
+[ai]
+cli_path = "/usr/bin/false"
+
+[agent_monitor]
+inventory_interval_ms = 250
+screen_interval_ms = 200
+hook_grace_ms = 750
+
+[[agents]]
+id = "codex"
+display_name = "Codex"
+command_contains = ["codex"]
+busy_all = ["Working", "esc to interrupt"]
+idle_all = ["Ask Codex to do anything"]
+summary_line_prefixes = ["›"]
+
+[[agents]]
+id = "claude"
+display_name = "Claude"
+command_contains = ["claude"]
+busy_all = ["esc to interrupt"]
+idle_all = ["❯"]
+summary_line_prefixes = ["❯"]
+
+[[agents]]
+id = "opencode"
+display_name = "OpenCode"
+command_contains = ["opencode"]
+busy_all = ["esc interrupt"]
+idle_all = ["agents", "commands"]
+
+[tts]
+command = "/usr/bin/true"
+
+[log]
+level = "info"
+
+[store]
+path = "/private/tmp/tmx-agent-dash-e2e-20260823/harold-events"
+
+[telegram]
+
+[notify]
+skip_if_session_active = true
+skip_if_pane_active = true
+away_channel = "imessage"
