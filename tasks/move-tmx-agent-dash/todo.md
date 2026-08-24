@@ -894,3 +894,12 @@ Planning status:
   `../harold-api`, documents root `make build` and `make deploy`, retains its
   standalone `cargo build --release` and `cargo run` commands, and preserves
   its behavioral sections. `git diff --check` passed before staging.
+
+### 2026-08-24 — Task 5 Fix Round 1 package-relative build path
+
+- Cargo metadata reports the containing workspace target directory as
+  `/Users/kahgeh/Dev/p/harold/.worktrees/move-tmx-agent-dash/target`.
+  Because the standalone development command is explicitly run from
+  `tmx-agent-dash/`, its resulting executable is correctly documented as
+  `../target/release/tmx-agent-dash`, not
+  `target/release/tmx-agent-dash`.

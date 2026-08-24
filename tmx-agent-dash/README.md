@@ -34,7 +34,7 @@ For standalone dashboard development from this package directory, use Cargo:
 cargo build --release
 ```
 
-The resulting development executable is `target/release/tmx-agent-dash`.
+The resulting development executable is `../target/release/tmx-agent-dash`.
 
 ## Run
 
