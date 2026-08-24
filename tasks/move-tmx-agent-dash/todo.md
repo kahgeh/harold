@@ -969,27 +969,29 @@ Planning status:
   `~/bin/tmx-agent-dash` and `~/bin/tmx-agent-dash.pre-deploy` were absent.
   Neither `harold` nor `tmx-agent-dash` resolved through `PATH` before the new
   dashboard executable existed, and `harold-dashboard-smoke` did not preexist.
-- Created the approved ignored worktree `.env` symlink to the primary
-  checkout's exact `/Users/kahgeh/Dev/p/harold/.env` without reading or
-  printing its contents. The literal `make deploy` exited zero: the release
-  build finished in 10.62 seconds, installed and signed both binaries,
-  restarted Harold, and did not launch the dashboard. The symlink target and
-  type were reverified before unlinking only that symlink; `.env` is absent
-  from the worktree afterward.
+- The first automation-host attempt created the approved ignored worktree
+  `.env` symlink to the primary checkout's exact
+  `/Users/kahgeh/Dev/p/harold/.env` without reading or printing its contents.
+  The literal `make deploy` exited zero, built the release artifacts in 10.62
+  seconds, and installed and signed both binaries, but its background Harold
+  child did not survive that tool-owned command scope. The symlink was
+  reverified before unlinking only that symlink. This attempt is retained as
+  diagnosis and artifact-install evidence, not daemon-restart acceptance.
 - The installed dashboard resolves exactly as
   `/Users/kahgeh/bin/tmx-agent-dash`. Strict code-sign verification reports
   both installed binaries valid on disk and satisfying their designated
   requirements. The installed sizes are 3,157,136 bytes for the dashboard and
-  21,458,384 bytes for Harold. The dashboard backup remains absent, as
-  expected because there was no prior dashboard installation.
-- The deploy recipe's `nohup` child was reaped when the tool-owned command
-  scope ended, leaving no listener and no new log error. A controlled launch
-  from `~/bin/harold` proved the installed binary and existing config healthy:
-  it listened within one second and logged normal startup, then disappeared
-  only when that diagnostic command scope ended. Harold was therefore restored
-  under the task-scoped login launchd job `com.kahgeh.harold.task7`, using the
-  installed binary, installed working directory/config, and existing log.
-- The initial task-scoped job exposed `inventory:malformed_output`. Sanitized
+  21,458,384 bytes for Harold. The first deployment correctly left the
+  dashboard backup absent because no prior dashboard existed; the later proof
+  deployment copied that first installed dashboard to the now-present, validly
+  signed `~/bin/tmx-agent-dash.pre-deploy`.
+- A controlled automation-host launch from `~/bin/harold` likewise listened
+  within one second and logged normal startup, then disappeared when that
+  command scope ended. The temporary restoration under task-scoped launchd job
+  `com.kahgeh.harold.task7` proved the installed binary/config could run, but
+  the completion reviewer correctly rejected it as proof of `make deploy`'s
+  own restart.
+- The temporary task-scoped job exposed `inventory:malformed_output`. Sanitized
   producer-to-parser tracing proved `ps` output was valid UTF-8 with zero shape
   or numeric failures, while locale-empty tmux 3.6a output contained zero
   `0x1f` separators across 31 lines, so all lines failed the required
@@ -997,12 +999,27 @@ Planning status:
   single-variable test restored exactly six separators per line with `LANG`;
   `TERM` alone did not. The agent-monitor source diff from `811244a..HEAD` is
   empty, establishing this as task-scoped restoration-environment drift, not a
-  migration code change. The controller approved restarting only the same job
-  with its existing `PATH`/`COMMAND_MODE` plus inherited `LANG`.
-- Final Harold PID `22480` differs from baseline PID `80498`; `pgrep` resolves
-  it to `/Users/kahgeh/bin/harold/harold`, and the same PID owns the IPv4
-  `127.0.0.1:50060` listener. The task-scoped launchd job reports running and
-  has never exited.
+  migration code change. Adding inherited `LANG` repaired that temporary
+  diagnostic job, but did not turn it into deployment acceptance.
+- For the completion-review fix, removed only
+  `com.kahgeh.harold.task7`. PID `22480` shut down cleanly; the exact launchd
+  job, installed Harold process, and port `50060` listener were all absent
+  before the deployment proof began. No replacement supervisor was created.
+- Recreated the exact approved ignored `.env` symlink, confirmed
+  `harold-deploy-proof` did not preexist, and created that durable disposable
+  tmux caller in the execution worktree. Sent literal `make deploy` and `Enter`
+  in separate tmux calls. Its capture shows the 0.16-second release build,
+  dashboard backup/copy/sign, Harold `pkill`, installed copy/sign, support-file
+  copies, and the exact final `cd /Users/kahgeh/bin/harold && nohup /Users/kahgeh/bin/harold/harold </dev/null >> harold.log 2>&1 &` recipe. Make
+  returned to live pane state `zsh 0 0`; the symlink was reverified and removed.
+- The resulting recipe shell is PID `73302`, PPID `1`, with the exact captured
+  nohup command; its child PID `73303` has executable mapping
+  `/Users/kahgeh/bin/harold/harold` and owns IPv4 listener
+  `127.0.0.1:50060`. After killing only `harold-deploy-proof` and waiting three
+  seconds, the same parent PID, child PID, executable path, and listener
+  remained. `com.kahgeh.harold.task7` remained absent. This durable evidence,
+  rather than either earlier automation-host/launchd workaround, satisfies the
+  deployment-restart gate.
 - Recreated only `harold-dashboard-smoke` at 120x40 and sent the exact installed
   path with literal mode, followed by `Enter` in a separate tmux command. The
   live capture showed `HAROLD / TMUX AGENT SIGNAL BOARD`, `TRANSPORT LIVE`,
@@ -1016,3 +1033,7 @@ Planning status:
   `harold-dashboard-smoke` and verified that exact session is absent. Steps
   7-9 remain deliberately unchecked for controller-owned completion review,
   finding resolution, and final evidence commit.
+- Corrected the package README's relocated screen-testing ledger link from
+  `tasks/tmux-agent-dashboard/screen-testing.md` to
+  `../tasks/tmux-agent-dashboard/screen-testing.md`. Resolving that path from
+  `tmx-agent-dash/README.md` reaches the existing root task ledger.
