@@ -255,7 +255,7 @@ Expected: no nested repository or build output; the historical standalone lockfi
 - Consumes: standalone package `tmx-agent-dash` and local crate `harold-api`
 - Produces: root workspace member `tmx-agent-dash` resolved by the root lockfile
 
-- [ ] **Step 1: Demonstrate the missing workspace integration**
+- [x] **Step 1: Demonstrate the missing workspace integration**
 
 Run:
 
@@ -266,7 +266,7 @@ cargo metadata --offline --no-deps --format-version 1 \
 
 Expected: the assertion fails because the root workspace does not yet include the imported crate.
 
-- [ ] **Step 2: Add the workspace member and correct the API path**
+- [x] **Step 2: Add the workspace member and correct the API path**
 
 Use `apply_patch` to make these exact manifest changes:
 
@@ -282,14 +282,14 @@ harold-api = { path = "../harold-api" }
 
 Do not change the dashboard's package name, feature flags, direct dependency versions, or features.
 
-- [ ] **Step 3: Remove the nested lockfile and relocate task evidence**
+- [x] **Step 3: Remove the nested lockfile and relocate task evidence**
 
 ```sh
 git rm tmx-agent-dash/Cargo.lock
 git mv tmx-agent-dash/tasks/tmux-agent-dashboard tasks/tmux-agent-dashboard
 ```
 
-- [ ] **Step 4: Merge lessons without overwriting Harold lessons**
+- [x] **Step 4: Merge lessons without overwriting Harold lessons**
 
 Identify dashboard bullets not already present:
 
@@ -306,7 +306,7 @@ git rm tmx-agent-dash/tasks/lessons.md
 rmdir tmx-agent-dash/tasks
 ```
 
-- [ ] **Step 5: Resolve the workspace lockfile offline**
+- [x] **Step 5: Resolve the workspace lockfile offline**
 
 ```sh
 MIGRATION_METADATA=$(mktemp)
@@ -316,7 +316,7 @@ cargo check --workspace --all-targets --all-features --offline
 
 Expected: Cargo updates only the root `Cargo.lock`; metadata contains exactly `harold`, `harold-api`, `events`, and `tmx-agent-dash` as workspace members; all targets check successfully without network access.
 
-- [ ] **Step 6: Prove the workspace integration**
+- [x] **Step 6: Prove the workspace integration**
 
 ```sh
 cargo metadata --offline --no-deps --format-version 1 \
@@ -329,7 +329,7 @@ cargo tree -p tmx-agent-dash --depth 1 --offline
 
 Expected: the dashboard is a member, has no nested lock/task directory, task evidence is at the root, and its five direct dependencies are Ratatui, Crossterm, Tokio, Tonic, and local `harold-api`.
 
-- [ ] **Step 7: Commit the workspace integration**
+- [x] **Step 7: Commit the workspace integration**
 
 ```sh
 git add Cargo.toml Cargo.lock tmx-agent-dash/Cargo.toml \
@@ -741,3 +741,129 @@ Planning status:
 - Exclusion verification passed: `tmx-agent-dash/.git` and
   `tmx-agent-dash/target` are absent, `tmx-agent-dash/Cargo.lock` is present,
   and the worktree was clean immediately after the subtree commit.
+
+### 2026-08-24 — Task 4 blocked during offline workspace resolution
+
+- RED passed before manifest edits: with `set -o pipefail`,
+  `cargo metadata --offline --no-deps --format-version 1 | rg
+  '"name":"tmx-agent-dash"'` exited 1 and emitted no match.
+- Applied exactly the two authorised manifest edits: the root workspace now
+  names `tmx-agent-dash` as its fourth member while retaining resolver `"2"`,
+  and the dashboard's local dependency is
+  `harold-api = { path = "../harold-api" }`. The audited direct pins,
+  default-feature settings, and feature lists are byte-for-byte unchanged.
+- Removed `tmx-agent-dash/Cargo.lock`, moved all ten dashboard task paths to
+  `tasks/tmux-agent-dashboard/`, appended all 31 dashboard lesson bullets
+  absent from Harold while preserving every existing Harold lesson, and removed
+  the imported `tmx-agent-dash/tasks` tree. A comparison against the imported
+  lessons at `HEAD` returned no unmerged bullet.
+- The required GREEN command did not complete. `cargo metadata --offline
+  --format-version 1` began updating the root lockfile, then exited 101 with
+  `failed to download bitflags v1.3.2` and `attempting to make an HTTP
+  request, but --offline was specified`. No cached
+  `bitflags-1.3.2.crate` exists under the active Cargo registry cache.
+- The partially rewritten root lockfile resolves `lru 0.18.2`, satisfying its
+  audit floor, but still contains `h2 0.4.13`, below the required
+  `h2 >= 0.4.16` floor. The pre-Task-4 root lockfile also contained
+  `h2 0.4.13`; cached archives for both `h2 0.4.13` and `h2 0.4.18`
+  exist, but no further Cargo resolution was attempted after the hard stop.
+- Per the Task 4 brief, no network-enabled Cargo command, workspace check,
+  GREEN proof, staging, or commit was attempted. Steps 5–7 remain unchecked.
+  The in-progress manifest, lockfile, task relocation, and lesson merge are
+  intentionally preserved for coordinator recovery. `git diff --check`
+  passes; `events` remains at
+  `a23c70c13588beeb9ebd4a248d4b91f5bad8bd46`, and `.gitmodules` retains
+  SHA-256
+  `8a32225f720343cd59eb8d0d6219e42145da61c29680a49865dbf0e2db1ee60d`.
+
+### 2026-08-24 — Task 4 approved recovery and resolved-feature blocker
+
+- The supply auditor's follow-up ruling conditionally approved restoring only
+  the task-generated partial root lockfile, resolving exactly `h2 0.4.18`,
+  enforcing a package-coordinate union gate, fetching the accepted locked graph
+  once, and returning to offline/no-fetch verification.
+- `git diff --check` passed before recovery. `git restore --source=HEAD --
+  Cargo.lock` discarded only the partial lockfile; all manifest, task,
+  relocation, lesson, and deletion changes were preserved.
+- The sole network-enabled resolution command, `cargo update -p h2 --precise
+  0.4.18`, added only the audited dashboard closure, replaced `h2 0.4.13`
+  with `0.4.18`, and unified `bitflags 2.11.0` to the dashboard-audited
+  `2.13.1`. It did not reproduce the earlier unrelated OpenSSL,
+  wasm-bindgen, Windows, Antithesis, generator, linkme, or io-uring drift.
+- Before any archive fetch, all 471 candidate
+  name/version/source/checksum tuples were compared with the 534-coordinate
+  union of `HEAD:Cargo.lock`, the standalone dashboard lock, and the approved
+  `h2 0.4.18` coordinate. The unapproved set was empty. The candidate
+  `h2 0.4.18` coordinate and checksum
+  `839c0e8a181239723652be9062bb56ca5bf5f64011f73b623f6f4fc59086a228`
+  exactly match the audited standalone lock.
+- The ruling prose incorrectly associates
+  `0cc23270f6e1808e30a928bdc84dea0b9b4136a8bc82338574f23baf47bbd280`
+  with `h2 0.4.18`; that is the adjacent `glob 0.3.3` checksum in both the
+  candidate and standalone locks. The authoritative lock-union gate still
+  passed without accepting the erroneous tuple.
+- The pre-fetch `cargo audit --no-fetch --file Cargo.lock` reported only the
+  explicitly exempt pre-existing `paste 1.0.15` unmaintained warning.
+  `cargo fetch --locked` was then run exactly once and downloaded the missing
+  locked archives, including unchanged `bitflags 1.3.2`, with Cargo checksum
+  verification.
+- The locked offline GREEN gate passed: `cargo metadata --offline --locked
+  --format-version 1` reported exactly `events`, `harold`, `harold-api`,
+  and `tmx-agent-dash`; `cargo check --workspace --all-targets
+  --all-features --offline --locked` completed successfully; and the final
+  `cargo audit --no-fetch --file Cargo.lock` again reported only the allowed
+  `paste 1.0.15` warning.
+- Membership and relocation assertions passed, and `cargo tree -p
+  tmx-agent-dash --depth 1 --offline --locked` showed exactly Crossterm
+  `0.29.0`, local `harold-api 0.1.0`, Ratatui `0.30.2`, Tokio `1.49.0`,
+  and Tonic `0.14.5`. The root lock now contains `lru 0.18.2` and
+  `h2 0.4.18`.
+- The final resolved-feature assertion failed the explicit audit condition.
+  Despite the exact direct declarations and `default-features = false`,
+  Ratatui `0.30.2` depends on `ratatui-crossterm 0.1.2` without disabling
+  its defaults; that package likewise depends on Crossterm without disabling
+  defaults. The resolved graph therefore enables Crossterm
+  `bracketed-paste, default, derive-more, events, windows` and
+  `ratatui-crossterm/default` plus `underline-color`. Re-running the tree
+  with `--no-default-features` produced the same transitive activation.
+- `osc52`, `use-dev-tty`, async `event-stream`, and Ratatui's Termina,
+  Termion, and Termwiz backends remain absent, but the required no-Crossterm-
+  defaults condition is not met. Step 6 and the commit remain unchecked. No
+  staging or commit was attempted; changing the dependency surface requires a
+  renewed supply-chain ruling and implementation decision.
+
+### 2026-08-24 — Task 4 corrected supply ruling and completion
+
+- The supply auditor's correction supersedes the earlier rejection of
+  Crossterm defaults. It confirms that the exact standalone dashboard already
+  resolved `ratatui/crossterm_0_29 -> ratatui-crossterm/default ->
+  crossterm/default`; this is approved upstream feature composition, not
+  workspace drift. The direct declarations remain immutable and unchanged.
+- The correction also confirms the authoritative `h2 0.4.18` checksum as
+  `839c0e8a181239723652be9062bb56ca5bf5f64011f73b623f6f4fc59086a228`;
+  the earlier `0cc23270...` value was the adjacent `glob 0.3.3` checksum.
+  The final lock contains the corrected `h2` identity and remains above the
+  RustSec `>= 0.4.16` remediation floor.
+- Fresh locked offline metadata asserted the exact approved feature sets:
+  Crossterm `bracketed-paste,default,derive-more,events,windows`; Ratatui
+  `crossterm,crossterm_0_29,std`; and Ratatui-Crossterm
+  `crossterm_0_29,default,underline-color`.
+- The same assertion proved absence of Crossterm `osc52`, `use-dev-tty`,
+  `event-stream`, and `serde`, plus Ratatui `termina`, `termion`,
+  `termwiz`, `calendar`, `all-widgets`, `palette`,
+  `portable-atomic`, `scrolling-regions`, and `unstable`.
+- Exact locked versions are Ratatui `0.30.2`, Crossterm `0.29.0`, Tokio
+  `1.49.0`, Tonic `0.14.5`, `lru 0.18.2`, and `h2 0.4.18`.
+- Fresh completion gates passed without network access:
+  `cargo metadata --offline --locked --format-version 1` reported exactly
+  `events`, `harold`, `harold-api`, and `tmx-agent-dash`;
+  the no-deps member assertion matched; all relocation assertions passed;
+  `cargo tree -p tmx-agent-dash --depth 1 --offline --locked` showed exactly
+  the five intended direct dependencies; and `cargo check --workspace
+  --all-targets --all-features --offline --locked` finished successfully.
+- `cargo audit --no-fetch --file Cargo.lock` scanned 471 dependencies and
+  reported only the explicitly approved pre-existing Turso transitive
+  `RUSTSEC-2024-0436` warning for unmaintained `paste 1.0.15`.
+- Task 4 is complete. Steps 1–7 are checked; the approved workspace, lock,
+  task-record, and lesson changes are ready for the planned
+  `build: integrate dashboard workspace crate` commit.

@@ -1,5 +1,5 @@
 [workspace]
-members = ["harold", "harold-api", "events"]
+members = ["harold", "harold-api", "events", "tmx-agent-dash"]
 resolver = "2"
 
 [workspace.dependencies]
