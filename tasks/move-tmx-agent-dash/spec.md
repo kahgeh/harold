@@ -137,7 +137,7 @@ If `~/bin/tmx-agent-dash` already exists when deployment begins, the workflow wi
 ### Installation and live behavior
 
 - Run `make deploy` through the documented workflow.
-- Verify the installed Harold and dashboard binaries match their release artifacts and have valid code signatures.
+- Verify the deployment recipe copies the freshly built Harold and dashboard release artifacts to their documented install paths, then confirm both installed binaries have valid code signatures.
 - Confirm Harold restarts successfully and listens on its configured endpoint.
 - Confirm `command -v tmx-agent-dash` resolves to `~/bin/tmx-agent-dash`.
 - Start the installed dashboard in a disposable tmux pane, confirm it connects to Harold and renders the agent-state view, then quit it normally and confirm terminal restoration.
