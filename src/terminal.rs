@@ -301,6 +301,13 @@ impl Drop for TerminalGuard {
     }
 }
 
+#[cfg(any(test, feature = "terminal-fault-harness"))]
+mod fault_harness;
+
+#[cfg(feature = "terminal-fault-harness")]
+#[doc(hidden)]
+pub use fault_harness::{FaultReport, FaultScenario, run_terminal_fault_harness};
+
 #[cfg(test)]
 mod tests {
     use std::io;
@@ -308,7 +315,10 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
+    use super::fault_harness::{FaultScenario, exercise_fault_scenario};
     use super::{CleanupState, PanicHookScope, TerminalOperations, acquire_stages};
+
+    static PANIC_HOOK_TEST: Mutex<()> = Mutex::new(());
 
     #[derive(Default)]
     struct FakeOperations {
@@ -533,8 +543,7 @@ mod tests {
 
     #[test]
     fn panic_hook_cleans_only_owner_thread_and_restores_previous_hook() {
-        static HOOK_TEST: Mutex<()> = Mutex::new(());
-        let _serial = HOOK_TEST.lock().unwrap();
+        let _serial = PANIC_HOOK_TEST.lock().unwrap();
         let original = std::panic::take_hook();
         let previous_calls = Arc::new(AtomicUsize::new(0));
         let observed_previous = Arc::clone(&previous_calls);
@@ -568,5 +577,83 @@ mod tests {
         let installed_previous = std::panic::take_hook();
         drop(installed_previous);
         std::panic::set_hook(original);
+    }
+
+    #[test]
+    fn fault_scenarios_exercise_the_expected_cleanup_boundaries() {
+        let _serial = PANIC_HOOK_TEST.lock().unwrap();
+
+        for (scenario, failures, expected_calls) in [
+            (
+                FaultScenario::PartialInitialization,
+                vec!["hide_cursor"],
+                vec![
+                    "enable_raw",
+                    "enter_alternate",
+                    "hide_cursor",
+                    "leave_alternate",
+                    "disable_raw",
+                ],
+            ),
+            (
+                FaultScenario::RenderFailure,
+                vec![],
+                vec![
+                    "enable_raw",
+                    "enter_alternate",
+                    "hide_cursor",
+                    "show_cursor",
+                    "leave_alternate",
+                    "disable_raw",
+                ],
+            ),
+            (
+                FaultScenario::PanicCleanup,
+                vec![],
+                vec![
+                    "enable_raw",
+                    "enter_alternate",
+                    "hide_cursor",
+                    "show_cursor",
+                    "leave_alternate",
+                    "disable_raw",
+                ],
+            ),
+            (
+                FaultScenario::RestorationFailure,
+                vec!["show_cursor"],
+                vec![
+                    "enable_raw",
+                    "enter_alternate",
+                    "hide_cursor",
+                    "show_cursor",
+                    "leave_alternate",
+                    "disable_raw",
+                ],
+            ),
+        ] {
+            let operations = FakeOperations::failing_many(failures);
+            let cleanup = CleanupState::new(operations.clone());
+
+            exercise_fault_scenario(scenario, cleanup, || {
+                Err(io::Error::other("injected render failure"))
+            })
+            .unwrap();
+
+            assert_eq!(operations.calls(), expected_calls, "{scenario:?}");
+        }
+    }
+
+    #[test]
+    fn partial_initialization_fault_rejects_a_real_rollback_failure() {
+        let _serial = PANIC_HOOK_TEST.lock().unwrap();
+        let operations = FakeOperations::failing_many(["hide_cursor", "leave_alternate"]);
+        let cleanup = CleanupState::new(operations);
+
+        let error =
+            exercise_fault_scenario(FaultScenario::PartialInitialization, cleanup, || Ok(()))
+                .unwrap_err();
+
+        assert!(error.to_string().contains("terminal rollback also failed"));
     }
 }

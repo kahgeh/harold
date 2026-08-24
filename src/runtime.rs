@@ -973,6 +973,31 @@ mod tests {
         );
         assert_eq!(core.app.search.query, "q");
         assert_eq!(core.handle_key(KeyCode::Esc, &navigator), Control::Continue);
+        assert_eq!(core.app.search.query, "");
+        assert!(!core.app.search.editing);
+        assert_eq!(
+            core.handle_key(KeyCode::Char('/'), &navigator),
+            Control::Continue
+        );
+        assert_eq!(
+            core.handle_key(KeyCode::Char('x'), &navigator),
+            Control::Continue
+        );
+        assert_eq!(
+            core.handle_key(KeyCode::Enter, &navigator),
+            Control::Continue
+        );
+        assert_eq!(core.handle_key(KeyCode::Esc, &navigator), Control::Continue);
+        assert_eq!(core.app.search.query, "");
+        assert!(!core.app.search.editing);
+        assert_eq!(
+            core.handle_key(KeyCode::Char('/'), &navigator),
+            Control::Continue
+        );
+        assert_eq!(core.handle_key(KeyCode::Esc, &navigator), Control::Continue);
+        assert_eq!(core.app.search.query, "");
+        assert!(!core.app.search.editing);
+        assert_eq!(core.handle_key(KeyCode::Esc, &navigator), Control::Continue);
         assert_eq!(
             core.handle_key(KeyCode::Char('r'), &navigator),
             Control::Retry

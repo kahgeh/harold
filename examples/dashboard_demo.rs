@@ -10,7 +10,7 @@ use crossterm::terminal::{
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use tmx_agent_dash::app::{
-    AgentIncarnation, AgentRow, AgentState, App, ConnectionState, MonitorHealth,
+    AgentIncarnation, AgentRow, AgentState, App, ConnectionState, Effect, MonitorHealth,
     MonitorHealthState, SearchState, Snapshot,
 };
 use tmx_agent_dash::ui;
@@ -24,7 +24,7 @@ fn main() -> io::Result<()> {
     execute!(output, EnterAlternateScreen, Hide)?;
     let backend = CrosstermBackend::new(output);
     let mut terminal = Terminal::new(backend)?;
-    let app = demo_app();
+    let mut app = demo_app();
 
     loop {
         terminal.draw(|frame| ui::render(frame, &app, NOW_MS))?;
@@ -32,7 +32,7 @@ fn main() -> io::Result<()> {
             let Event::Key(key) = event::read()? else {
                 continue;
             };
-            if should_quit(key.code) {
+            if handle_demo_key(&mut app, key.code) {
                 break;
             }
         }
@@ -43,8 +43,8 @@ fn main() -> io::Result<()> {
     Ok(())
 }
 
-fn should_quit(code: KeyCode) -> bool {
-    matches!(code, KeyCode::Char('q') | KeyCode::Esc)
+fn handle_demo_key(app: &mut App, code: KeyCode) -> bool {
+    matches!(app.handle_key(code), Effect::Quit)
 }
 
 struct TerminalRestore;
@@ -158,12 +158,22 @@ fn row(
 mod tests {
     use crossterm::event::KeyCode;
 
-    use super::should_quit;
+    use super::{demo_app, handle_demo_key};
 
     #[test]
-    fn q_and_escape_quit_the_demo() {
-        assert!(should_quit(KeyCode::Char('q')));
-        assert!(should_quit(KeyCode::Esc));
-        assert!(!should_quit(KeyCode::Char('j')));
+    fn escape_clears_the_demo_search_without_quitting() {
+        let mut app = demo_app();
+
+        assert!(!handle_demo_key(&mut app, KeyCode::Esc));
+        assert!(app.search.query.is_empty());
+        assert!(!app.search.editing);
+    }
+
+    #[test]
+    fn q_is_the_demo_quit_key_outside_search_editing() {
+        let mut app = demo_app();
+        assert!(!handle_demo_key(&mut app, KeyCode::Esc));
+
+        assert!(handle_demo_key(&mut app, KeyCode::Char('q')));
     }
 }

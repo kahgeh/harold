@@ -280,7 +280,11 @@ impl App {
 
         match key {
             KeyCode::Char('/') => self.search.editing = true,
-            KeyCode::Char('q') | KeyCode::Esc => return Effect::Quit,
+            KeyCode::Char('q') => return Effect::Quit,
+            KeyCode::Esc if !self.search.query.is_empty() => {
+                self.search.query.clear();
+                self.search_changed();
+            }
             KeyCode::Char('r') => return Effect::Retry,
             KeyCode::Char('j') | KeyCode::Down => self.select_relative(1),
             KeyCode::Char('k') | KeyCode::Up => self.select_relative(-1),
@@ -792,6 +796,8 @@ mod tests {
         assert_eq!(app.handle_key(KeyCode::Enter), Effect::None);
         assert!(!app.search.editing);
         assert_eq!(app.search.query, "q");
+        assert_eq!(app.handle_key(KeyCode::Esc), Effect::None);
+        assert_eq!(app.search, empty_search());
 
         app.handle_key(KeyCode::Char('/'));
         assert_eq!(app.handle_key(KeyCode::Esc), Effect::None);
@@ -820,7 +826,7 @@ mod tests {
         );
         assert_eq!(app.handle_key(KeyCode::Char('r')), Effect::Retry);
         assert_eq!(app.handle_key(KeyCode::Char('q')), Effect::Quit);
-        assert_eq!(app.handle_key(KeyCode::Esc), Effect::Quit);
+        assert_eq!(app.handle_key(KeyCode::Esc), Effect::None);
 
         app.selected = None;
         assert_eq!(app.handle_key(KeyCode::Enter), Effect::None);

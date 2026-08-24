@@ -417,7 +417,14 @@ fn render_inventory(frame: &mut Frame<'_>, area: Rect, app: &App, now_ms: i64) {
             Style::default().fg(INK)
         };
         let mut cells = vec![
-            Cell::from(format!("{marker}{}", agent.state.label())),
+            Cell::from(Line::styled(
+                format!(
+                    "{marker}{} {}",
+                    state_glyph(agent.state),
+                    agent.state.label()
+                ),
+                state_style(agent.state),
+            )),
             Cell::from(agent.provider_display_name.as_str()),
             Cell::from(agent.tmux_target.as_str()),
             Cell::from(display_work_summary(agent.work_summary.as_deref())),
@@ -433,7 +440,7 @@ fn render_inventory(frame: &mut Frame<'_>, area: Rect, app: &App, now_ms: i64) {
         (
             Row::new(["STATE", "AGENT", "TARGET", "WORK SUMMARY"]),
             vec![
-                Constraint::Length(10),
+                Constraint::Length(11),
                 Constraint::Length(9),
                 Constraint::Length(15),
                 Constraint::Min(8),
@@ -496,8 +503,9 @@ fn detail_lines<'a>(agent: &'a crate::app::AgentRow, now_ms: i64) -> Vec<Line<'a
     vec![
         Line::styled(
             format!(
-                "{}  {}",
+                "{} {}  {}",
                 state_glyph(agent.state),
+                agent.state.label(),
                 agent.provider_display_name
             ),
             state_style(agent.state).add_modifier(Modifier::BOLD),
@@ -529,7 +537,9 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, compact: bool) {
             Span::raw(" search  "),
             Span::styled("Enter", Style::default().fg(INK)),
             Span::raw(" switch  "),
-            Span::styled("q/Esc", Style::default().fg(INK)),
+            Span::styled("Esc", Style::default().fg(INK)),
+            Span::raw(" clear  "),
+            Span::styled("q", Style::default().fg(INK)),
             Span::raw(" quit "),
         ]
     } else {
@@ -541,7 +551,9 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, compact: bool) {
             Span::raw(" search   "),
             Span::styled("Enter", Style::default().fg(INK)),
             Span::raw(" switch pane   "),
-            Span::styled("q / Esc", Style::default().fg(INK)),
+            Span::styled("Esc", Style::default().fg(INK)),
+            Span::raw(" clear   "),
+            Span::styled("q", Style::default().fg(INK)),
             Span::raw(" quit "),
         ]
     };
@@ -567,8 +579,8 @@ fn fact<'a>(label: &str, value: impl Into<Cow<'a, str>>) -> Line<'a> {
 fn state_glyph(state: AgentState) -> &'static str {
     match state {
         AgentState::Busy => "●",
-        AgentState::Idle => "○",
-        AgentState::Unknown => "·",
+        AgentState::Idle => "●",
+        AgentState::Unknown => "○",
     }
 }
 
@@ -602,6 +614,8 @@ mod tests {
     use crossterm::event::KeyCode;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+    use ratatui::buffer::Buffer;
+    use ratatui::style::Color;
     use ratatui::text::Line;
 
     use super::render;
@@ -700,6 +714,41 @@ mod tests {
         for forbidden in ["EVIDENCE", "HOOK", "SCREEN"] {
             assert!(!content.contains(forbidden), "found {forbidden:?}");
         }
+    }
+
+    #[test]
+    fn table_and_selected_detail_keep_state_words_with_semantic_glyph_colors() {
+        for (state, expected, color) in [
+            (AgentState::Idle, "● IDLE", Color::Rgb(125, 200, 139)),
+            (AgentState::Busy, "● BUSY", Color::Rgb(224, 174, 85)),
+            (AgentState::Unknown, "○ UNKNOWN", Color::Rgb(143, 138, 127)),
+        ] {
+            let selected = incarnation("%17", 91700, 91844, "codex");
+            let app = live_app(
+                vec![row(
+                    selected.clone(),
+                    state,
+                    "Codex",
+                    "tmx-agent-dash:0.1",
+                    "Keep status accessible without colour",
+                    90_000,
+                )],
+                Some(selected),
+            );
+
+            let buffer = rendered_buffer(&app, 140, 38, 100_000);
+
+            assert_styled_occurrences(&buffer, expected, color, 2);
+        }
+    }
+
+    #[test]
+    fn footer_names_escape_clear_and_q_as_the_only_quit_key() {
+        let content = rendered(&live_app(Vec::new(), None), 140, 38, 100_000);
+
+        assert!(content.contains("Esc clear"));
+        assert!(content.contains("q quit"));
+        assert!(!content.contains("Esc quit"));
     }
 
     #[test]
@@ -842,6 +891,33 @@ mod tests {
             assert!(content.contains(expected), "missing {expected:?}");
         }
         assert!(!content.contains("CURRENT WORK"));
+    }
+
+    #[test]
+    fn compact_selected_unknown_keeps_hollow_glyph_and_complete_word() {
+        let selected = incarnation("%17", 91700, 91844, "codex");
+        let app = live_app(
+            vec![row(
+                selected.clone(),
+                AgentState::Unknown,
+                "Codex",
+                "agents:2.7",
+                "Awaiting classification",
+                90_000,
+            )],
+            Some(selected),
+        );
+
+        let buffer = rendered_buffer(&app, 72, 22, 100_000);
+        let content = buffer
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<Vec<_>>()
+            .join("");
+
+        assert!(content.contains("▶ ○ UNKNOWN"));
+        assert_styled_occurrences(&buffer, "○ UNKNOWN", Color::Rgb(143, 138, 127), 1);
     }
 
     #[test]
@@ -1129,13 +1205,13 @@ mod tests {
         );
 
         let before = rendered(&app, 104, 28, 100_000);
-        assert!(before.contains("▶ BUSY"));
-        assert!(!before.contains("▶ IDLE"));
+        assert!(before.contains("▶ ● BUSY"));
+        assert!(!before.contains("▶ ● IDLE"));
 
         app.handle_key(KeyCode::Char('j'));
         let after = rendered(&app, 104, 28, 100_000);
-        assert!(!after.contains("▶ BUSY"));
-        assert!(after.contains("▶ IDLE"));
+        assert!(!after.contains("▶ ● BUSY"));
+        assert!(after.contains("▶ ● IDLE"));
     }
 
     #[test]
@@ -1162,7 +1238,7 @@ mod tests {
 
         let content = rendered(&app, 104, 28, 100_000);
 
-        assert!(content.contains("▶ IDLE"));
+        assert!(content.contains("▶ ● IDLE"));
         assert!(content.contains("agents:2.9"));
         assert!(content.contains("Work item 9"));
     }
@@ -1249,7 +1325,7 @@ mod tests {
         assert!(!content.contains("SELECTED SIGNAL"));
         assert!(!content.contains("CURRENT WORK"));
         assert!(content.contains("AGENT BLOCK OCCUPANCY"));
-        assert!(content.contains("▶ BUSY"));
+        assert!(content.contains("▶ ● BUSY"));
         assert!(content.contains("tmx-agent-dash:2.17"));
         assert_eq!(content.matches('界').count(), 40);
     }
@@ -1328,17 +1404,58 @@ mod tests {
     }
 
     fn rendered(app: &App, width: u16, height: u16, now_ms: i64) -> String {
-        let backend = TestBackend::new(width, height);
-        let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|frame| render(frame, app, now_ms)).unwrap();
-        terminal
-            .backend()
-            .buffer()
+        rendered_buffer(app, width, height, now_ms)
             .content()
             .iter()
             .map(|cell| cell.symbol())
             .collect::<Vec<_>>()
             .join("")
+    }
+
+    fn rendered_buffer(app: &App, width: u16, height: u16, now_ms: i64) -> Buffer {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(frame, app, now_ms)).unwrap();
+        terminal.backend().buffer().clone()
+    }
+
+    fn assert_styled_occurrences(
+        buffer: &Buffer,
+        expected: &str,
+        color: Color,
+        expected_count: usize,
+    ) {
+        let symbols = expected
+            .chars()
+            .map(|character| character.to_string())
+            .collect::<Vec<_>>();
+        let matches = buffer
+            .content()
+            .windows(symbols.len())
+            .filter(|cells| {
+                cells
+                    .iter()
+                    .zip(&symbols)
+                    .all(|(cell, symbol)| cell.symbol() == symbol)
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            matches.len(),
+            expected_count,
+            "expected {expected_count} rendered {expected:?} labels"
+        );
+        for cells in matches {
+            for (cell, symbol) in cells.iter().zip(&symbols) {
+                if symbol != " " {
+                    assert_eq!(
+                        cell.style().fg,
+                        Some(color),
+                        "{expected:?} symbol {symbol:?} used the wrong foreground"
+                    );
+                }
+            }
+        }
     }
 
     fn live_app(rows: Vec<AgentRow>, selected: Option<AgentIncarnation>) -> App {
