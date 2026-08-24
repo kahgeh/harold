@@ -545,7 +545,7 @@ git commit -m "docs: verify dashboard repository migration"
 - Consumes: verified release binaries and the existing Harold deployment configuration
 - Produces: running Harold daemon plus a signed, PATH-resolvable, manually launched dashboard command
 
-- [ ] **Step 1: Inventory the live installation before replacement**
+- [x] **Step 1: Inventory the live installation before replacement**
 
 ```sh
 command -v harold || true
@@ -557,7 +557,7 @@ lsof -nP -iTCP:50060 -sTCP:LISTEN || true
 
 Record the existing Harold PID and whether a dashboard or rollback copy exists.
 
-- [ ] **Step 2: Run the documented deployment**
+- [x] **Step 2: Run the documented deployment**
 
 ```sh
 make deploy
@@ -565,7 +565,7 @@ make deploy
 
 Expected: the workspace release build succeeds before mutation; any prior dashboard is copied to `.pre-deploy`; both binaries are copied and signed; Harold restarts; the dashboard is not launched.
 
-- [ ] **Step 3: Verify installation and daemon health**
+- [x] **Step 3: Verify installation and daemon health**
 
 ```sh
 test "$(command -v tmx-agent-dash)" = "$HOME/bin/tmx-agent-dash"
@@ -577,7 +577,7 @@ lsof -nP -iTCP:50060 -sTCP:LISTEN
 
 Confirm the new Harold PID differs from the recorded old PID and the listener belongs to the installed Harold process.
 
-- [ ] **Step 4: Start the installed dashboard in an exact disposable tmux session**
+- [x] **Step 4: Start the installed dashboard in an exact disposable tmux session**
 
 Create only the named disposable session:
 
@@ -590,7 +590,7 @@ tmux send-keys -t harold-dashboard-smoke:0.0 Enter
 
 `tmux-send-keys` policy applies: the command and `Enter` must remain separate calls.
 
-- [ ] **Step 5: Verify the live TUI and terminal restoration**
+- [x] **Step 5: Verify the live TUI and terminal restoration**
 
 After the dashboard renders, run:
 
@@ -616,7 +616,7 @@ Expected: the pane returns to its shell, alternate screen is `0`, and the pane r
 tmux kill-session -t harold-dashboard-smoke
 ```
 
-- [ ] **Step 6: Record deployment and live evidence**
+- [x] **Step 6: Record deployment and live evidence**
 
 Append the before/after PIDs, listener, install paths, signature checks, tmux capture summary, and restoration result to `## Review` below.
 
@@ -961,3 +961,58 @@ Planning status:
   surface, and the full `git diff --submodule=log 811244a..HEAD` has no
   `events` gitlink hunk; a targeted `-- events` assertion is empty. The
   `events` submodule is unchanged.
+
+### 2026-08-25 — Task 7 deployment and installed-dashboard smoke
+
+- The live baseline had installed Harold PID `80498` owning
+  `127.0.0.1:50060`; `~/bin/harold/harold` existed at 20,153,328 bytes, while
+  `~/bin/tmx-agent-dash` and `~/bin/tmx-agent-dash.pre-deploy` were absent.
+  Neither `harold` nor `tmx-agent-dash` resolved through `PATH` before the new
+  dashboard executable existed, and `harold-dashboard-smoke` did not preexist.
+- Created the approved ignored worktree `.env` symlink to the primary
+  checkout's exact `/Users/kahgeh/Dev/p/harold/.env` without reading or
+  printing its contents. The literal `make deploy` exited zero: the release
+  build finished in 10.62 seconds, installed and signed both binaries,
+  restarted Harold, and did not launch the dashboard. The symlink target and
+  type were reverified before unlinking only that symlink; `.env` is absent
+  from the worktree afterward.
+- The installed dashboard resolves exactly as
+  `/Users/kahgeh/bin/tmx-agent-dash`. Strict code-sign verification reports
+  both installed binaries valid on disk and satisfying their designated
+  requirements. The installed sizes are 3,157,136 bytes for the dashboard and
+  21,458,384 bytes for Harold. The dashboard backup remains absent, as
+  expected because there was no prior dashboard installation.
+- The deploy recipe's `nohup` child was reaped when the tool-owned command
+  scope ended, leaving no listener and no new log error. A controlled launch
+  from `~/bin/harold` proved the installed binary and existing config healthy:
+  it listened within one second and logged normal startup, then disappeared
+  only when that diagnostic command scope ended. Harold was therefore restored
+  under the task-scoped login launchd job `com.kahgeh.harold.task7`, using the
+  installed binary, installed working directory/config, and existing log.
+- The initial task-scoped job exposed `inventory:malformed_output`. Sanitized
+  producer-to-parser tracing proved `ps` output was valid UTF-8 with zero shape
+  or numeric failures, while locale-empty tmux 3.6a output contained zero
+  `0x1f` separators across 31 lines, so all lines failed the required
+  seven-field split and mapped through `InventoryError::MalformedOutput`. A
+  single-variable test restored exactly six separators per line with `LANG`;
+  `TERM` alone did not. The agent-monitor source diff from `811244a..HEAD` is
+  empty, establishing this as task-scoped restoration-environment drift, not a
+  migration code change. The controller approved restarting only the same job
+  with its existing `PATH`/`COMMAND_MODE` plus inherited `LANG`.
+- Final Harold PID `22480` differs from baseline PID `80498`; `pgrep` resolves
+  it to `/Users/kahgeh/bin/harold/harold`, and the same PID owns the IPv4
+  `127.0.0.1:50060` listener. The task-scoped launchd job reports running and
+  has never exited.
+- Recreated only `harold-dashboard-smoke` at 120x40 and sent the exact installed
+  path with literal mode, followed by `Enter` in a separate tmux command. The
+  live capture showed `HAROLD / TMUX AGENT SIGNAL BOARD`, `TRANSPORT LIVE`,
+  revision `#00082`, `MONITOR HEALTHY`, counts `BUSY 01`, `IDLE 09`,
+  `UNKNOWN 02`, and 12 current rows. The dashboard process had an established
+  loopback socket to Harold at `127.0.0.1:50060`; pane state was exactly
+  `tmx-agent-dash 1 0`.
+- Sent `q` as a separate literal key. Restoration was immediate and pane state
+  was exactly `zsh 0 0`; the dashboard process exited, the shell remained
+  alive, and Harold continued listening. Killed only
+  `harold-dashboard-smoke` and verified that exact session is absent. Steps
+  7-9 remain deliberately unchecked for controller-owned completion review,
+  finding resolution, and final evidence commit.
