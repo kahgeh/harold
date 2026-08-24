@@ -434,7 +434,7 @@ git commit -m "build: install tmx agent dashboard"
 - Consumes: the imported and integrated repository
 - Produces: reproducible evidence that history, content, builds, tests, and boundaries are intact
 
-- [ ] **Step 1: Verify immutable repository boundaries**
+- [x] **Step 1: Verify immutable repository boundaries**
 
 ```sh
 test "$(git rev-parse HEAD:events)" = \
@@ -446,7 +446,7 @@ test ! -e tmx-agent-dash/target
 test -d /Users/kahgeh/Dev/p/tmx-agent-dash/.git
 ```
 
-- [ ] **Step 2: Verify every dashboard commit remains reachable**
+- [x] **Step 2: Verify every dashboard commit remains reachable**
 
 ```sh
 DASHBOARD_CHECKPOINT=$(git -C /Users/kahgeh/Dev/p/tmx-agent-dash rev-parse HEAD)
@@ -461,7 +461,7 @@ done
 
 Expected: every command exits zero.
 
-- [ ] **Step 3: Compare the source checkpoint with the imported content**
+- [x] **Step 3: Compare the source checkpoint with the imported content**
 
 Create a disposable directory and extract the checkpoint without touching either worktree:
 
@@ -487,7 +487,7 @@ diff -u \
   tmx-agent-dash/Cargo.toml
 ```
 
-- [ ] **Step 4: Run the complete offline Rust gate**
+- [x] **Step 4: Run the complete offline Rust gate**
 
 ```sh
 cargo fmt --all -- --check
@@ -501,7 +501,7 @@ cargo audit --no-fetch
 
 Expected: every command exits zero. Record actual test counts and any already-approved audit warning exactly.
 
-- [ ] **Step 5: Inspect repository changes**
+- [x] **Step 5: Inspect repository changes**
 
 ```sh
 git diff --check
@@ -513,7 +513,7 @@ git diff --submodule=log 811244a..HEAD
 
 Expected: no uncommitted implementation changes, imported history is visible, and the `events` submodule has no change.
 
-- [ ] **Step 6: Record the verification evidence**
+- [x] **Step 6: Record the verification evidence**
 
 Append commands, exact outcomes, test totals, audit result, checkpoint commit, import commit, content comparison, and boundary hashes to `## Review` below. Commit the evidence:
 
@@ -903,3 +903,50 @@ Planning status:
   `tmx-agent-dash/`, its resulting executable is correctly documented as
   `../target/release/tmx-agent-dash`, not
   `target/release/tmx-agent-dash`.
+
+### 2026-08-24 — Task 6 history, content, workspace, and security verification
+
+- Fresh immutable-boundary assertions all exited zero: `HEAD:events` is
+  `a23c70c13588beeb9ebd4a248d4b91f5bad8bd46`; `.gitmodules` SHA-256 is
+  `8a32225f720343cd59eb8d0d6219e42145da61c29680a49865dbf0e2db1ee60d`;
+  imported `tmx-agent-dash/.git` and `tmx-agent-dash/target` are absent; and
+  the recovery source repository remains at
+  `/Users/kahgeh/Dev/p/tmx-agent-dash/.git`.
+- The source checkpoint is
+  `e18fd04640bfe35bd0ae63e7d2e2348c5e333b07`. Fresh
+  `git merge-base --is-ancestor` assertions exited zero for all five required
+  dashboard commits: `c45dc1a`, `42bb384`, `1bbb387`,
+  `dc7c4919c3d589ef434ececca4b6a9562cfc127c`, and the checkpoint.
+  `af350775b88031c069960fbd416fba93179d5226` remains the non-squashed subtree
+  import merge.
+- Extracted the source checkpoint with `git archive` into a disposable
+  `/tmp/harold-task6.G5lmLr` directory. `diff -qr` found no differences after
+  excluding the approved integrated files (`Cargo.toml`, `Cargo.lock`,
+  `README.md`, and `tasks`); relocated
+  `tasks/tmux-agent-dashboard` matches byte-for-byte. The only Cargo manifest
+  hunk changes `harold-api` from `../harold/harold-api` to `../harold-api`.
+  The separately inspected README hunk is limited to containing-workspace
+  prerequisites, root `make build`/`make deploy`, and the correct package-run
+  output path `../target/release/tmx-agent-dash`.
+- Fresh offline, locked workspace gate commands all exited zero:
+  `cargo fmt --all -- --check`; `cargo clippy --workspace --all-targets
+  --all-features --offline --locked -- -D warnings`; `cargo test --workspace
+  --all-targets --all-features --offline --locked`; `cargo build --workspace
+  --all-targets --all-features --offline --locked`; `cargo build --workspace
+  --release --all-targets --all-features --offline --locked`; and `cargo doc
+  --workspace --no-deps --all-features --offline --locked`. The test gate
+  passed 315 tests across all targets: 52 `events`, 148 `harold`, 4
+  `harold-api`, and 111 `tmx-agent-dash`; every other target ran 0 tests.
+- `cargo audit --no-fetch --file Cargo.lock` exited zero, loaded 1,099 local
+  advisories, and scanned 471 locked dependencies. It reports exactly one
+  allowed, pre-existing warning: unmaintained `paste 1.0.15`
+  (`RUSTSEC-2024-0436`) through the Turso dependency chain; no advisory failure
+  occurred. `cargo audit` has no `--locked` option, so it was pointed directly
+  at the approved root `Cargo.lock` without fetching.
+- Fresh `git diff --check` was silent and `git status --short --branch` showed
+  only `## feat/move-tmx-agent-dash` before this evidence record. The recent
+  graph includes the complete imported five-commit chain beneath `af35077`.
+  `git diff --stat 811244a..HEAD` reports the approved 34-file migration
+  surface, and the full `git diff --submodule=log 811244a..HEAD` has no
+  `events` gitlink hunk; a targeted `-- events` assertion is empty. The
+  `events` submodule is unchanged.
