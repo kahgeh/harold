@@ -36,11 +36,11 @@
 - Consumes: the standalone dashboard's pinned `Cargo.toml` and `Cargo.lock`
 - Produces: an explicit supply-chain approval or a hard stop before dependency introduction
 
-- [ ] **Step 1: Re-read the approved specification and relevant lessons**
+- [x] **Step 1: Re-read the approved specification and relevant lessons**
 
 Read `tasks/move-tmx-agent-dash/spec.md`, root `tasks/lessons.md`, and `/Users/kahgeh/Dev/p/tmx-agent-dash/tasks/lessons.md`. Confirm the execution still matches the approved repository, history, installation, and verification boundaries.
 
-- [ ] **Step 2: Revalidate the Harold baseline**
+- [x] **Step 2: Revalidate the Harold baseline**
 
 Run:
 
@@ -53,7 +53,7 @@ git log -3 --oneline --decorate
 
 Expected: no unplanned worktree changes; `events` is `a23c70c13588beeb9ebd4a248d4b91f5bad8bd46`; `.gitmodules` has the approved SHA-256. The task spec may have the one planned wording correction staged or committed.
 
-- [ ] **Step 3: Revalidate the dashboard baseline**
+- [x] **Step 3: Revalidate the dashboard baseline**
 
 Run:
 
@@ -66,7 +66,7 @@ git -C /Users/kahgeh/Dev/p/tmx-agent-dash diff --check
 
 Expected: branch `main`; HEAD `dc7c4919c3d589ef434ececca4b6a9562cfc127c`; no remote; exactly the six known modified tracked files and the known README, example, terminal module, and task tree untracked; diff check passes.
 
-- [ ] **Step 4: Dispatch the required Rust supply-chain auditor**
+- [x] **Step 4: Dispatch the required Rust supply-chain auditor**
 
 Give the `rust_supply_chain_auditor` the immutable direct versions, exact features, standalone lockfile, and intended root-workspace introduction:
 
@@ -79,11 +79,11 @@ tonic = { version = "=0.14.5", default-features = false, features = ["channel", 
 
 The audit must cover Ratatui, Crossterm, every dependency newly introduced to Harold through them, provenance, maintenance, unsafe code, build scripts, platform behavior, and known advisories. Tokio and Tonic already exist in Harold but their resolved features must also be checked for workspace unification effects.
 
-- [ ] **Step 5: Record the audit result and stop on rejection**
+- [x] **Step 5: Record the audit result and stop on rejection**
 
 Append the auditor's approved versions, conditions, and evidence to `## Review` below. If any package or version is rejected, mark the task blocked and re-plan; do not checkpoint, import, edit manifests, or run Cargo resolution.
 
-- [ ] **Step 6: Commit the recorded audit gate**
+- [x] **Step 6: Commit the recorded audit gate**
 
 ```sh
 git add tasks/move-tmx-agent-dash/todo.md tasks/move-tmx-agent-dash/spec.md
@@ -633,3 +633,52 @@ Planning status:
 - The user approved the non-squashed history-preserving subtree, unchanged `events` submodule, root Cargo workspace integration, root task-record ownership, and installation at `~/bin/tmx-agent-dash` through `make deploy`.
 - The specification is committed at `811244a` and was approved by the user.
 - Implementation evidence is pending.
+
+### 2026-08-24 — Task 1 dependency gate and baseline revalidation
+
+- Re-read `tasks/move-tmx-agent-dash/spec.md`, Harold `tasks/lessons.md`, and
+  the dashboard's `tasks/lessons.md`. The approved boundaries remain intact:
+  preserve the four source commits plus a fifth checkpoint, use a non-squashed
+  subtree, keep `events` and `.gitmodules` unchanged, introduce no dependency
+  before approval, retain the dashboard as a separate binary/library coupled
+  only through `harold-api`, and install it on demand at `~/bin/tmx-agent-dash`.
+- Harold baseline, from this execution worktree: `git status --short --branch`
+  reported only `## feat/move-tmx-agent-dash`; `git rev-parse HEAD:events`
+  returned `a23c70c13588beeb9ebd4a248d4b91f5bad8bd46`; and `shasum -a 256
+  .gitmodules` returned `8a32225f720343cd59eb8d0d6219e42145da61c29680a49865dbf0e2db1ee60d`.
+  `git log -3 --oneline --decorate` showed `d1a3989`, `2452ba1`, and `811244a`.
+  The planned deployment-verification wording correction is already committed
+  in `2452ba1`; no uncommitted specification correction remained.
+- Dashboard baseline: `main` is at
+  `dc7c4919c3d589ef434ececca4b6a9562cfc127c`, has no remote, and
+  `git diff --check` exited zero. Its status is the expected six modified
+  tracked files (`Cargo.toml`, dashboard demo, `app`, `runtime`, `terminal`,
+  and `ui`) plus the expected untracked `README.md`, terminal fault-harness
+  example/module, and `tasks/` tree. No dashboard state was changed.
+- The completed `rust_supply_chain_auditor` report
+  `.superpowers/sdd/todo/task-1-supply-audit.md` approves exactly:
+
+  ```toml
+  ratatui = { version = "=0.30.2", default-features = false, features = ["crossterm_0_29"] }
+  crossterm = { version = "=0.29.0", default-features = false, features = ["events"] }
+  tokio = { version = "=1.49.0", default-features = false, features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
+  tonic = { version = "=0.14.5", default-features = false, features = ["channel", "codegen"] }
+  ```
+
+  It found an authenticated crates.io-only external source graph, no
+  typosquatting/dependency-confusion indicator, no adverse RustSec result for
+  the dashboard lockfile, and no unexpected network, credential, or repository
+  write behaviour in the active terminal stack. Ratatui and Crossterm have no
+  build script; active transitive build scripts are platform/compiler probes
+  confined to normal `OUT_DIR`/cfg work. Tokio 1.49.0 and Tonic 0.14.5 are
+  already present in Harold; the dashboard feature selections are subsets of
+  Harold's existing unified selections and add no capability.
+- Approval conditions are binding for subsequent tasks: retain those exact pins
+  and feature sets; do not enable Crossterm defaults, `osc52`, `use-dev-tty`,
+  or another Ratatui backend without a new audit; keep the dashboard
+  unprivileged because Crossterm may use the fixed-argument `tput` fallback via
+  `PATH`; after the authorised workspace manifest/lockfile change, run
+  `cargo audit --no-fetch --file Cargo.lock` using a current RustSec DB and
+  confirm final-lock `lru >= 0.18.2` and `h2 >= 0.4.16`. The auditor reviewed
+  the standalone resolution at exactly `lru 0.18.2` and Harold's existing
+  `h2 0.4.18`.
