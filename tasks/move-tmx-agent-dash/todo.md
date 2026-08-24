@@ -443,6 +443,9 @@ test "$(shasum -a 256 .gitmodules | awk '{print $1}')" = \
   8a32225f720343cd59eb8d0d6219e42145da61c29680a49865dbf0e2db1ee60d
 test ! -e tmx-agent-dash/.git
 test ! -e tmx-agent-dash/target
+test ! -e tmx-agent-dash/Cargo.lock
+test ! -e tmx-agent-dash/tasks
+test -d tasks/tmux-agent-dashboard
 test -d /Users/kahgeh/Dev/p/tmx-agent-dash/.git
 ```
 
@@ -472,31 +475,39 @@ mkdir "$MIGRATION_COMPARE_DIR/source"
 git -C /Users/kahgeh/Dev/p/tmx-agent-dash archive "$DASHBOARD_CHECKPOINT" \
   | tar -x -C "$MIGRATION_COMPARE_DIR/source"
 diff -qr \
-  -x Cargo.toml -x Cargo.lock -x tasks \
+  -x Cargo.toml -x Cargo.lock -x README.md -x tasks \
   "$MIGRATION_COMPARE_DIR/source" tmx-agent-dash
 diff -qr \
   "$MIGRATION_COMPARE_DIR/source/tasks/tmux-agent-dashboard" \
   tasks/tmux-agent-dashboard
 ```
 
-Expected: both comparisons report no differences. Inspect the intentional manifest diff separately and confirm it contains only the `harold-api` path change:
+Expected: both comparisons report no differences. Inspect the intentional
+manifest and approved workspace/API/build/deploy/path README diffs separately:
 
 ```sh
 diff -u \
   "$MIGRATION_COMPARE_DIR/source/Cargo.toml" \
   tmx-agent-dash/Cargo.toml
+diff -u \
+  "$MIGRATION_COMPARE_DIR/source/README.md" \
+  tmx-agent-dash/README.md
 ```
+
+Expected: the Cargo manifest diff contains only the `harold-api` path change;
+the README diff contains only approved workspace/API/build/deploy/path
+integration.
 
 - [x] **Step 4: Run the complete offline Rust gate**
 
 ```sh
 cargo fmt --all -- --check
-cargo clippy --workspace --all-targets --all-features --offline -- -D warnings
-cargo test --workspace --all-targets --all-features --offline
-cargo build --workspace --all-targets --all-features --offline
-cargo build --workspace --release --all-targets --all-features --offline
-cargo doc --workspace --no-deps --all-features --offline
-cargo audit --no-fetch
+cargo clippy --workspace --all-targets --all-features --offline --locked -- -D warnings
+cargo test --workspace --all-targets --all-features --offline --locked
+cargo build --workspace --all-targets --all-features --offline --locked
+cargo build --workspace --release --all-targets --all-features --offline --locked
+cargo doc --workspace --no-deps --all-features --offline --locked
+cargo audit --no-fetch --file Cargo.lock
 ```
 
 Expected: every command exits zero. Record actual test counts and any already-approved audit warning exactly.
