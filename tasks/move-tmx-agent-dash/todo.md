@@ -110,7 +110,7 @@ git commit -m "docs: approve dashboard migration dependencies"
 - Consumes: the approved dirty dashboard worktree at `dc7c491`
 - Produces: one clean source commit containing the complete reviewed dashboard tree
 
-- [ ] **Step 1: Record the exact intended source inventory**
+- [x] **Step 1: Record the exact intended source inventory**
 
 Run:
 
@@ -124,7 +124,7 @@ find /Users/kahgeh/Dev/p/tmx-agent-dash \
 
 Expected inventory: `.gitignore`, `Cargo.lock`, `Cargo.toml`, `README.md`, two example files, eleven files under `src/` including `src/terminal/fault_harness.rs`, `tasks/lessons.md`, and the dashboard spec, plan, todo, screen ledger, fixture, HTML visual, and four PNG screenshots.
 
-- [ ] **Step 2: Verify the standalone source before checkpointing**
+- [x] **Step 2: Verify the standalone source before checkpointing**
 
 Run from `/Users/kahgeh/Dev/p/tmx-agent-dash`:
 
@@ -138,7 +138,7 @@ git diff --check
 
 Expected: all 106 library tests and example tests pass, formatting and warnings-denied Clippy pass, the release build succeeds, and Git reports no whitespace errors. Record actual counts rather than copying historical counts if they differ.
 
-- [ ] **Step 3: Stage only the intended dashboard state**
+- [x] **Step 3: Stage only the intended dashboard state**
 
 Run:
 
@@ -152,7 +152,7 @@ git -C /Users/kahgeh/Dev/p/tmx-agent-dash ls-files --stage
 
 Expected: every intended modified and untracked file is staged; `target/` and `.git/` are absent; no other file is staged.
 
-- [ ] **Step 4: Create the fifth source commit**
+- [x] **Step 4: Create the fifth source commit**
 
 ```sh
 git -C /Users/kahgeh/Dev/p/tmx-agent-dash commit -m "fix: harden dashboard terminal lifecycle"
@@ -160,7 +160,7 @@ git -C /Users/kahgeh/Dev/p/tmx-agent-dash commit -m "fix: harden dashboard termi
 
 Record the resulting full commit ID as `DASHBOARD_CHECKPOINT` in `## Review`.
 
-- [ ] **Step 5: Verify the recovery repository**
+- [x] **Step 5: Verify the recovery repository**
 
 Run:
 
@@ -682,3 +682,35 @@ Planning status:
   confirm final-lock `lru >= 0.18.2` and `h2 >= 0.4.16`. The auditor reviewed
   the standalone resolution at exactly `lru 0.18.2` and Harold's existing
   `h2 0.4.18`.
+
+### 2026-08-24 — Task 2 standalone dashboard checkpoint
+
+- Recorded the approved source inventory before staging. `git status
+  --porcelain=v2` showed exactly six modified tracked files (`Cargo.toml`,
+  `examples/dashboard_demo.rs`, `src/app.rs`, `src/runtime.rs`,
+  `src/terminal.rs`, and `src/ui.rs`) plus `README.md`,
+  `examples/terminal_fault_harness.rs`, `src/terminal/fault_harness.rs`, and
+  `tasks/` as untracked. The pruned file inventory contained `.gitignore`,
+  `Cargo.lock`, `Cargo.toml`, `README.md`, two examples, eleven `src/` files,
+  `tasks/lessons.md`, and the dashboard spec, plan, todo, screen ledger,
+  fixture, HTML reference, and four PNG screenshots; `.git/` and `target/`
+  were excluded.
+- The exact offline gate passed from `/Users/kahgeh/Dev/p/tmx-agent-dash`:
+  `cargo fmt --all -- --check`; `cargo test --all-targets --all-features
+  --offline` (109 library tests plus 2 `dashboard_demo` example tests passed;
+  `src/main.rs` and `terminal_fault_harness` each ran 0 tests); `cargo clippy
+  --all-targets --all-features --offline -- -D warnings`; `cargo build
+  --release --all-targets --all-features --offline`; and `git diff --check`.
+- Staged only `.gitignore Cargo.lock Cargo.toml README.md examples src tasks`.
+  `git diff --cached --check` passed and the index held exactly 28 tracked
+  paths: the original `.gitignore`, `Cargo.lock`, and 6 unchanged `src/` paths;
+  the six modified tracked paths; and the 14 approved new files, including the
+  four screenshots. No `.git/`, `target/`, or unrelated path entered the index.
+- `DASHBOARD_CHECKPOINT` is
+  `e18fd04640bfe35bd0ae63e7d2e2348c5e333b07`
+  (`fix: harden dashboard terminal lifecycle`), a 20-file change with 3,026
+  insertions and 33 deletions.
+- Recovery verification passed: source `git status --short --branch` reports
+  only `## main`; the five-commit chain is `e18fd04`, `dc7c491`, `1bbb387`,
+  `42bb384`, and `c45dc1a`; and `git show --stat --oneline HEAD` matches the
+  reviewed 20-file checkpoint inventory.
