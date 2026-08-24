@@ -181,7 +181,7 @@ Expected: the source worktree is clean, the fifth commit sits above the four ori
 - Consumes: `DASHBOARD_CHECKPOINT` from Task 2
 - Produces: a non-squashed subtree merge with all five source commits reachable
 
-- [ ] **Step 1: Confirm the destination is ready**
+- [x] **Step 1: Confirm the destination is ready**
 
 Run from the Harold execution checkout:
 
@@ -194,7 +194,7 @@ shasum -a 256 .gitmodules
 
 Expected: `tmx-agent-dash/` does not exist; the worktree is clean; both immutable submodule baselines match the global constraints.
 
-- [ ] **Step 2: Fetch the local source history**
+- [x] **Step 2: Fetch the local source history**
 
 ```sh
 git remote add tmx-agent-dash-import /Users/kahgeh/Dev/p/tmx-agent-dash
@@ -202,7 +202,7 @@ git fetch tmx-agent-dash-import main
 test "$(git rev-parse tmx-agent-dash-import/main)" = "$(git -C /Users/kahgeh/Dev/p/tmx-agent-dash rev-parse HEAD)"
 ```
 
-- [ ] **Step 3: Add the non-squashed subtree**
+- [x] **Step 3: Add the non-squashed subtree**
 
 ```sh
 git subtree add \
@@ -213,7 +213,7 @@ git subtree add \
 
 Expected: Git creates one subtree merge commit; it does not report `--squash`; the imported files appear only below `tmx-agent-dash/`.
 
-- [ ] **Step 4: Remove the temporary remote and verify ancestry**
+- [x] **Step 4: Remove the temporary remote and verify ancestry**
 
 ```sh
 git remote remove tmx-agent-dash-import
@@ -228,7 +228,7 @@ git log --graph --oneline --decorate -12
 
 Expected: all ancestry checks exit zero and the graph shows the dashboard chain as the subtree merge's second parent.
 
-- [ ] **Step 5: Verify excluded repository internals**
+- [x] **Step 5: Verify excluded repository internals**
 
 ```sh
 test ! -e tmx-agent-dash/.git
@@ -714,3 +714,30 @@ Planning status:
   only `## main`; the five-commit chain is `e18fd04`, `dc7c491`, `1bbb387`,
   `42bb384`, and `c45dc1a`; and `git show --stat --oneline HEAD` matches the
   reviewed 20-file checkpoint inventory.
+
+### 2026-08-24 — Task 3 non-squashed dashboard history import
+
+- Destination readiness passed before mutation: `tmx-agent-dash/` did not
+  exist; `git status --short --branch` reported only
+  `## feat/move-tmx-agent-dash`; `git rev-parse HEAD:events` returned
+  `a23c70c13588beeb9ebd4a248d4b91f5bad8bd46`; and `shasum -a 256 .gitmodules`
+  returned `8a32225f720343cd59eb8d0d6219e42145da61c29680a49865dbf0e2db1ee60d`.
+- Added temporary remote `tmx-agent-dash-import` pointing to
+  `/Users/kahgeh/Dev/p/tmx-agent-dash`, fetched `main`, and verified its
+  remote-tracking ref exactly matched source `HEAD`
+  `e18fd04640bfe35bd0ae63e7d2e2348c5e333b07`.
+- `git subtree add --prefix=tmx-agent-dash tmx-agent-dash-import main -m
+  "chore: import tmx-agent-dash history"` produced merge commit
+  `af350775b88031c069960fbd416fba93179d5226`, with first parent
+  `4a0335010b8b004ba64f06980c6938c5d7876c9c` and second parent
+  `e18fd04640bfe35bd0ae63e7d2e2348c5e333b07`. Its subtree metadata records
+  `git-subtree-dir: tmx-agent-dash`, the same mainline parent, and the same
+  split checkpoint; no `--squash` was used or reported.
+- Removed `tmx-agent-dash-import`. Each required ancestry assertion exited
+  zero: `c45dc1a`, `42bb384`, `1bbb387`,
+  `dc7c4919c3d589ef434ececca4b6a9562cfc127c`, and
+  `e18fd04640bfe35bd0ae63e7d2e2348c5e333b07`. The resulting graph shows the
+  five-commit dashboard chain beneath `af35077`'s second parent.
+- Exclusion verification passed: `tmx-agent-dash/.git` and
+  `tmx-agent-dash/target` are absent, `tmx-agent-dash/Cargo.lock` is present,
+  and the worktree was clean immediately after the subtree commit.
