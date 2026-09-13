@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build and configure an on-demand, per-user Harold service on macOS."""
+"""Install and configure an on-demand, per-user Harold service on macOS."""
 
 import argparse
 from datetime import datetime, timezone
@@ -51,23 +51,43 @@ def validate_destination(prefix):
             raise RuntimeError('Expected managed directory: {}'.format(path))
 
 
-def prerequisites(repo):
+def prerequisites(repo, prebuilt=False):
     if sys.version_info < (3, 9):
         raise RuntimeError('Python 3.9+ is required')
     if sys.platform != 'darwin':
         raise RuntimeError('This installer requires macOS and a logged-in desktop user')
     if os.getuid() == 0:
         raise RuntimeError('Run as your normal desktop user, without sudo')
-    required = ('cargo', 'rustc', 'tmux', 'grpcurl', 'protoc', 'codesign', 'launchctl', 'plutil', 'lsof')
+    required = ('tmux', 'grpcurl', 'codesign', 'launchctl', 'plutil', 'lsof')
+    if not prebuilt:
+        required += ('cargo', 'rustc', 'protoc')
     missing = [name for name in required if not shutil.which(name)]
     if missing:
-        raise RuntimeError('Missing tools: {}. Install Rust via rustup; with Homebrew run '
-                           '`brew install tmux grpcurl protobuf`; Apple tools require '
-                           '`xcode-select --install`. Then rerun.'.format(', '.join(missing)))
-    if not (repo / 'events/Cargo.toml').is_file():
-        raise RuntimeError('Missing events submodule. Run git submodule update --init --recursive')
-    if not (repo / 'Cargo.lock').is_file():
-        raise RuntimeError('Missing Cargo.lock; restore the checked-in lockfile before installing')
+        instructions = ('With Homebrew run `brew install tmux grpcurl`; Apple tools require '
+                        '`xcode-select --install`.') if prebuilt else (
+                            'Install Rust via rustup; with Homebrew run '
+                            '`brew install tmux grpcurl protobuf`; Apple tools require '
+                            '`xcode-select --install`.')
+        raise RuntimeError('Missing tools: {}. {} Then rerun.'.format(', '.join(missing), instructions))
+    if not prebuilt:
+        if not (repo / 'events/Cargo.toml').is_file():
+            raise RuntimeError('Missing events submodule. Run git submodule update --init --recursive')
+        if not (repo / 'Cargo.lock').is_file():
+            raise RuntimeError('Missing Cargo.lock; restore the checked-in lockfile before installing')
+
+
+def prebuilt_files(directory):
+    required = ('harold', 'tmx-agent-dash', 'harold.proto',
+                'hooks/harold_turn_complete.py', 'scripts/harold_service.py',
+                'config/default.toml', 'config/local.template.toml')
+    for name in required:
+        path = directory / name
+        if not path.is_file() or path.is_symlink():
+            raise RuntimeError('Missing regular release file: {}'.format(path))
+    for name in ('harold', 'tmx-agent-dash'):
+        if not os.access(directory / name, os.X_OK):
+            raise RuntimeError('Release binary is not executable: {}'.format(directory / name))
+    return {name: directory / name for name in ('harold', 'tmx-agent-dash')}
 
 
 def choose_config(supplied, bundle):
@@ -200,13 +220,17 @@ def replace_bundle(stage, bundle, reinstall):
 
 
 def install(args, repo):
-    prerequisites(repo)
+    prebuilt = Path(args.prebuilt_dir).expanduser().resolve() if args.prebuilt_dir else None
+    prerequisites(repo, prebuilt=prebuilt is not None)
+    artifacts = prebuilt_files(prebuilt) if prebuilt is not None else None
+    assets = prebuilt if prebuilt is not None else repo
     raw_prefix = Path(os.path.abspath(os.path.expanduser(args.prefix)))
     validate_destination(raw_prefix)
     prefix = raw_prefix
     bundle = prefix / 'harold'
     local = choose_config(args.config, bundle)
-    artifacts = build_binaries(repo, args.offline)
+    if artifacts is None:
+        artifacts = build_binaries(repo, args.offline)
     prefix.mkdir(parents=True, exist_ok=True)
     with service.service_lock(prefix):
         validate_destination(prefix)
@@ -218,11 +242,13 @@ def install(args, repo):
             (stage / 'data/events').mkdir(parents=True)
             shutil.copy2(artifacts['harold'], stage / 'harold')
             shutil.copy2(artifacts['tmx-agent-dash'], staging / 'tmx-agent-dash')
-            shutil.copy2(repo / 'harold-api/proto/harold.proto', stage / 'harold.proto')
-            shutil.copy2(repo / 'hooks/shared/harold_turn_complete.py', stage / 'hooks/harold_turn_complete.py')
-            shutil.copy2(repo / 'scripts/harold_service.py', stage / 'service.py')
+            shutil.copy2(assets / ('harold.proto' if prebuilt is not None else 'harold-api/proto/harold.proto'),
+                         stage / 'harold.proto')
+            shutil.copy2(assets / ('hooks/harold_turn_complete.py' if prebuilt is not None else 'hooks/shared/harold_turn_complete.py'),
+                         stage / 'hooks/harold_turn_complete.py')
+            shutil.copy2(assets / 'scripts/harold_service.py', stage / 'service.py')
             for name in ('default.toml', 'local.template.toml'):
-                shutil.copy2(repo / 'harold/config' / name, stage / 'config' / name)
+                shutil.copy2(assets / ('config' if prebuilt is not None else 'harold/config') / name, stage / 'config' / name)
             (stage / 'config/local.toml').write_bytes(local)
             (stage / 'config/local.toml').chmod(0o600)
             metadata = make_metadata(prefix, '')
@@ -276,7 +302,10 @@ def main():
     parser.add_argument('--prefix', default=str(Path.home() / 'bin'), help='executable directory (default: ~/bin)')
     parser.add_argument('--signing-identity', default='-', help='codesign identity (default: ad-hoc signing)')
     parser.add_argument('--offline', action='store_true', help='build using cached Cargo dependencies only')
+    parser.add_argument('--prebuilt-dir', help='install binaries and assets from an extracted release instead of building')
     args = parser.parse_args()
+    if args.prebuilt_dir and args.offline:
+        parser.error('--offline only applies to source builds')
     try:
         install(args, Path(__file__).resolve().parents[1])
         return 0

@@ -55,3 +55,5 @@
 - Confirm requested platform and architecture scope from the latest steering before building a CI matrix. For this build task, macOS means ARM64 only; Linux is deferred.
 
 - For binary distribution requests, distinguish release assets from temporary Actions artifacts. Use release-only triggers when the user wants publication builds rather than push/PR CI.
+
+- A network bootstrap is not end-to-end verified by fixture downloads or local packaging. Publish the real release and exercise the public command against its assets before claiming installation works; distinguish isolated testing on the current Mac from fresh-machine acceptance.

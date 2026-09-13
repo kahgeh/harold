@@ -47,7 +47,7 @@ jobs:
         run: |
           set -euo pipefail
           package="harold-aarch64-apple-darwin"
-          mkdir -p "dist/$package/config"
+          mkdir -p "dist/$package/config" "dist/$package/scripts" "dist/$package/hooks"
           for binary in harold tmx-agent-dash; do
             source="target/aarch64-apple-darwin/release/$binary"
             lipo "$source" -verify_arch arm64
@@ -58,6 +58,8 @@ jobs:
           "dist/$package/harold" --help
           cp harold-api/proto/harold.proto "dist/$package/"
           cp harold/config/default.toml harold/config/local.template.toml "dist/$package/config/"
+          cp scripts/install.py scripts/harold_service.py "dist/$package/scripts/"
+          cp hooks/shared/harold_turn_complete.py "dist/$package/hooks/"
           cp README.md "dist/$package/"
           printf '%s\n' "$GITHUB_SHA" > "dist/$package/REVISION"
           tar -czf "dist/$package.tar.gz" -C dist "$package"

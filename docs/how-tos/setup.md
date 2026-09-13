@@ -218,3 +218,27 @@ The daemon also provides an explicit diagnostic command that can speak or send a
 ```
 
 For Telegram configuration details, see [Setup Telegram](setup-telegram.md).
+
+## Install a published release without Rust
+
+On an Apple Silicon Mac running macOS 15 or newer, install Python 3.9+, tmux,
+and grpcurl first (`brew install python tmux grpcurl`). Then run:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/kahgeh/harold/main/scripts/bootstrap.sh | sh
+```
+
+The release must include the installer files. The bootstrap downloads the latest
+stable release, verifies its SHA-256 checksum, and runs the same configuration and
+service setup as the source installer. It starts Harold to verify readiness but
+does not register login startup. Run `~/bin/haroldctl start` when needed.
+
+To supply settings or reinstall with fresh storage, forward installer options:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/kahgeh/harold/main/scripts/bootstrap.sh | sh -s -- --config "$HOME/local.toml" --reinstall
+```
+
+Existing configuration is retained by default. Without a terminal, supply
+`--config PATH` for the first installation. Provider-specific hook registration
+and macOS permissions still follow the steps above.

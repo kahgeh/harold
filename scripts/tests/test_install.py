@@ -103,7 +103,7 @@ class InstallTests(unittest.TestCase):
         (bundle / 'config').mkdir(parents=True)
         (bundle / 'config/local.toml').write_text('secret = "never print"')
         args = argparse.Namespace(prefix=str(self.prefix), config=None, reinstall=False,
-                                  offline=True, signing_identity='-')
+                                  offline=True, signing_identity='-', prebuilt_dir=None)
         for failure in ('codesign', '--check-config'):
             with self.subTest(failure=failure):
                 def process(argv, **kwargs):
@@ -138,7 +138,7 @@ class InstallTests(unittest.TestCase):
         config = self.prefix / 'import.toml'
         config.write_text('agents = []')
         args = argparse.Namespace(prefix=str(self.prefix), config=str(config), reinstall=False,
-                                  offline=True, signing_identity='-')
+                                  offline=True, signing_identity='-', prebuilt_dir=None)
 
         def process(argv, **kwargs):
             if argv[0] == 'cargo':
@@ -163,6 +163,65 @@ class InstallTests(unittest.TestCase):
             self.install.install(args, repo)
         self.assertEqual((self.prefix / 'harold/harold').read_text(), 'built harold')
         self.assertEqual((self.prefix / 'tmx-agent-dash').read_text(), 'built tmx-agent-dash')
+
+    def test_prebuilt_install_needs_no_source_or_build_tools(self):
+        release = self.prefix / 'release'
+        for name in ('harold', 'tmx-agent-dash', 'harold.proto',
+                     'hooks/harold_turn_complete.py', 'scripts/harold_service.py',
+                     'config/default.toml', 'config/local.template.toml'):
+            path = release / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text('release ' + name)
+            if name in ('harold', 'tmx-agent-dash'):
+                path.chmod(0o755)
+        config = self.prefix / 'import.toml'
+        config.write_text('agents = []')
+        args = argparse.Namespace(prefix=str(self.prefix), config=str(config), reinstall=False,
+                                  offline=False, signing_identity='-', prebuilt_dir=str(release))
+
+        def which(name):
+            if name in ('cargo', 'rustc', 'protoc'):
+                return None
+            return '/usr/bin/' + name
+
+        def process(argv, **kwargs):
+            self.assertNotEqual(argv[0], 'cargo')
+            output = ''
+            if '--check-config' in argv:
+                self.assertEqual(Path(argv[0]).read_text(), 'release harold')
+                output = json.dumps({'grpc_addr': '127.0.0.1:50123',
+                                     'store_path': str(self.prefix / 'harold/data/events')})
+            return subprocess.CompletedProcess(argv, 0, output, '')
+
+        with patch.object(sys, 'platform', 'darwin'), \
+             patch.object(self.install.os, 'getuid', return_value=501), \
+             patch.object(self.install.shutil, 'which', side_effect=which), \
+             patch.object(self.install, 'build_binaries') as build, \
+             patch.object(subprocess, 'run', side_effect=process), \
+             patch.object(self.install.service, 'listener_pids', return_value=set()), \
+             patch.object(self.install.service, 'stop'), \
+             patch.object(self.install.service, 'stop_unmanaged'), \
+             patch.object(self.install.service, 'start', return_value=123):
+            self.install.install(args, self.prefix / 'nonexistent source')
+        build.assert_not_called()
+        self.assertEqual((self.prefix / 'harold/harold').read_text(), 'release harold')
+        self.assertEqual((self.prefix / 'tmx-agent-dash').read_text(), 'release tmx-agent-dash')
+        self.assertEqual((self.prefix / 'harold/config/default.toml').read_text(),
+                         'release config/default.toml')
+        self.assertEqual((self.prefix / 'harold/config/local.toml').read_text(), 'agents = []')
+
+    def test_prebuilt_requires_runtime_tools(self):
+        with patch.object(sys, 'platform', 'darwin'), \
+             patch.object(self.install.os, 'getuid', return_value=501), \
+             patch.object(self.install.shutil, 'which', return_value=None):
+            with self.assertRaisesRegex(RuntimeError, 'Missing tools: tmux, grpcurl') as error:
+                self.install.prerequisites(self.prefix, prebuilt=True)
+        self.assertNotIn('rustup', str(error.exception))
+        self.assertNotIn('protobuf', str(error.exception))
+
+    def test_incomplete_release_rejected(self):
+        with self.assertRaisesRegex(RuntimeError, 'Missing regular release file'):
+            self.install.prebuilt_files(self.prefix)
 
     def test_missing_cargo_artifact_fails_without_falling_back_to_stale_file(self):
         repo = self.prefix / 'repo'
