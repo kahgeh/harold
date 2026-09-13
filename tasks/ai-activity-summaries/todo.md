@@ -97,5 +97,5 @@ User requested committing, pushing, and opening a PR for the combined Sonnet sum
 - [x] Inspect the full tracked/untracked scope and format the workspace.
 - [x] Fetch upstream and verify `origin/main` has not diverged from the feature branch base; verify the events submodule is clean.
 - [x] Rerun workspace tests (381 passed, 0 failed, 2 opt-in ignored), Clippy, and release build; final publication review confirms expected scope and artifact exclusions.
-- [ ] Commit the combined reviewed feature, push the feature branch, and open a PR against `main`.
-- [ ] Verify the remote branch/PR and record the result.
+- [x] Commit the combined reviewed feature as `66ea54f`, push `feat/claude-activity-summaries`, and open [PR #1](https://github.com/kahgeh/harold/pull/1) against `main`.
+- [x] Verify the remote branch commit matches the feature commit and PR #1 is open, ready for review, and mergeable. GitHub reports no checks for this PR; local verification and independent review are recorded above.
