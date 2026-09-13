@@ -61,3 +61,5 @@
 - When the user chooses an Actions secret for private dependency access, use a narrowly scoped token secret instead of adding a repository deploy key. Do not request or print the token in chat.
 
 - When a simpler supported installation path is added, rewrite the guide around it instead of appending it after the older path. Make its prerequisites and reinstall commands the default, and group build-only tools under an explicit source-build alternative.
+
+- Do not describe an older release as a complete installation when required provider adapters are absent. Mark that limitation clearly while its replacement builds, and promote the verified complete release promptly.
