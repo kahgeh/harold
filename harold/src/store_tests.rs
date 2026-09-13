@@ -476,6 +476,7 @@ async fn projection_migration_is_idempotent_and_preserves_earlier_records() {
             "001_last_processed_event",
             "002_delivery_outbox",
             "003_agent_monitor_projection",
+            "004_activity_summary_projection",
         ]
     );
 
@@ -935,4 +936,186 @@ async fn snapshot_reader_does_not_reserve_the_projection_writer_lock() {
         .expect("snapshot task panicked")
         .expect("snapshot read failed");
     assert_eq!(snapshot.through_event_version, EventStreamVersion::start());
+}
+
+#[tokio::test]
+async fn generated_activity_summary_survives_restart_and_projection_replay_without_delivery() {
+    let directory = TestDirectory::new();
+    let store = HaroldStore::open(directory.path()).await.unwrap();
+    append_agent_events(
+        &store,
+        vec![AgentEvent::PaneObserved(AgentPaneObserved {
+            pane: agent_pane(),
+        })],
+    )
+    .await
+    .unwrap();
+    store
+        .stream()
+        .append(
+            ExpectedVersion::Any,
+            [NewEvent {
+                r#type: "AgentActivitySummaryGenerated".into(),
+                payload: json!({
+                    "incarnation": agent_incarnation(),
+                    "basis_version": 1,
+                    "description": "Reviewing projection persistence",
+                    "generated_at_ms": 120
+                }),
+                workflow_kind: None,
+                workflow: WorkflowRef::None,
+                request_id: None,
+                actor_id: "system:test".into(),
+                actor_type: ActorType::System,
+            }],
+        )
+        .await
+        .unwrap();
+    store.fail_projection_before_checkpoint_for_test();
+    assert!(store.project_unhandled_events(500).await.is_err());
+    assert!(store.load_agent_snapshot().await.unwrap().panes.is_empty());
+    assert_eq!(
+        store.last_processed_version().await.unwrap(),
+        EventStreamVersion::start()
+    );
+    assert!(store.next_pending_delivery().await.unwrap().is_none());
+    store.project_unhandled_events(500).await.unwrap();
+    let projected = store.load_agent_snapshot().await.unwrap();
+    assert_eq!(
+        projected.panes[0].work_summary.as_deref(),
+        Some("Reviewing projection persistence")
+    );
+    assert_eq!(projected.panes[0].summary_basis_version.get(), 1);
+    assert_eq!(
+        projected.panes[0]
+            .generated_summary_basis_version
+            .unwrap()
+            .get(),
+        1
+    );
+    assert_eq!(
+        projected.panes[0].generated_work_summary,
+        projected.panes[0].work_summary
+    );
+    assert!(store.next_pending_delivery().await.unwrap().is_none());
+    drop(store);
+
+    let reopened = HaroldStore::open(directory.path()).await.unwrap();
+    assert_eq!(
+        reopened.load_agent_snapshot().await.unwrap().panes,
+        projected.panes
+    );
+    drop(reopened);
+    for suffix in ["", "-shm", "-wal"] {
+        let path = directory.path().join(format!("harold-state.db{suffix}"));
+        if path.exists() {
+            std::fs::remove_file(path).unwrap();
+        }
+    }
+    let replayed = HaroldStore::open(directory.path()).await.unwrap();
+    replayed.project_unhandled_events(500).await.unwrap();
+    assert_eq!(
+        replayed.load_agent_snapshot().await.unwrap().panes,
+        projected.panes
+    );
+    assert!(replayed.next_pending_delivery().await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn activity_summary_migration_upgrades_existing_panes_and_checks_its_checksum() {
+    use sha2::{Digest, Sha256};
+
+    let directory = TestDirectory::new();
+    let state_path = directory.path().join(super::STATE_DATABASE);
+    let database = turso::Builder::new_local(state_path.to_str().unwrap())
+        .build()
+        .await
+        .unwrap();
+    let conn = database.connect().unwrap();
+    super::configure_state_database(&conn).await.unwrap();
+    conn.execute_batch("CREATE TABLE _migrations (id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE, checksum TEXT NOT NULL, applied_at_ms INTEGER NOT NULL);").await.unwrap();
+    for (name, sql) in super::STATE_MIGRATIONS.iter().take(3) {
+        conn.execute_batch(sql).await.unwrap();
+        conn.execute(
+            "INSERT INTO _migrations (name, checksum, applied_at_ms) VALUES (?1, ?2, 0)",
+            (*name, hex::encode(Sha256::digest(sql.as_bytes()))),
+        )
+        .await
+        .unwrap();
+    }
+    conn.execute_batch("INSERT INTO agent_panes (pane_id, pane_pid, agent_pid, agent_started_at_ms, provider_id, tmux_target, session_name, window_index, pane_index, working_directory, provider_display_name, pane_observed_at_ms, effective_state, explicit_work_summary, explicit_work_summary_updated_at_ms, work_summary, last_transition_at_ms, last_event_version) VALUES ('%7', 10, 20, 1000, 'codex', 'harold:2.1', 'harold', 2, 1, '/work/harold', 'Codex', 100, 'unknown', 'Existing work', 100, 'Existing work', 100, 1);").await.unwrap();
+    drop(conn);
+    drop(database);
+
+    let store = HaroldStore::open(directory.path()).await.unwrap();
+    let snapshot = store.load_agent_snapshot().await.unwrap();
+    let pane = &snapshot.panes[0];
+    assert_eq!(pane.work_summary.as_deref(), Some("Existing work"));
+    assert_eq!(pane.explicit_work_summary.as_deref(), Some("Existing work"));
+    assert_eq!(pane.summary_basis_version, EventStreamVersion::start());
+    assert_eq!(pane.generated_work_summary, None);
+    assert_eq!(pane.generated_summary_basis_version, None);
+    drop(store);
+
+    let reopened = HaroldStore::open(directory.path()).await.unwrap();
+    assert_eq!(
+        reopened.load_agent_snapshot().await.unwrap().panes,
+        snapshot.panes
+    );
+    let conn = reopened.state.connect().unwrap();
+    conn.execute("UPDATE _migrations SET checksum = 'changed' WHERE name = '004_activity_summary_projection'", ()).await.unwrap();
+    drop(conn);
+    drop(reopened);
+    let error = HaroldStore::open(directory.path())
+        .await
+        .err()
+        .expect("changed summary migration checksum must fail");
+    assert!(
+        error
+            .to_string()
+            .contains("004_activity_summary_projection checksum changed")
+    );
+}
+
+#[tokio::test]
+async fn generated_activity_summary_append_normalizes_description_and_rejects_empty() {
+    use crate::agent::domain::AgentActivitySummaryGenerated;
+
+    let directory = TestDirectory::new();
+    let store = HaroldStore::open(directory.path()).await.unwrap();
+    let generated = |description: String| {
+        AgentEvent::ActivitySummaryGenerated(AgentActivitySummaryGenerated {
+            incarnation: agent_incarnation(),
+            basis_version: EventStreamVersion::new(1).unwrap(),
+            description,
+            generated_at_ms: 120,
+        })
+    };
+    let appended = append_agent_events(
+        &store,
+        vec![
+            generated(" \u{1b}[31mReviewing\n projections ".into()),
+            generated(" \u{1b}[31m\n\t".into()),
+            generated("x".repeat(200)),
+        ],
+    )
+    .await
+    .unwrap();
+    assert_eq!(appended.events.len(), 2);
+    let stored = store
+        .stream()
+        .load_after_version(EventStreamVersion::start(), 10)
+        .await
+        .unwrap();
+    assert_eq!(stored.len(), 2);
+    assert_eq!(stored[0].r#type, "AgentActivitySummaryGenerated");
+    let event: AgentActivitySummaryGenerated =
+        serde_json::from_value(stored[0].payload.clone()).unwrap();
+    assert_eq!(event.description, "Reviewing projections");
+    assert_eq!(event.incarnation, agent_incarnation());
+    assert_eq!(event.basis_version.get(), 1);
+    assert_eq!(event.generated_at_ms, 120);
+    let event: AgentActivitySummaryGenerated =
+        serde_json::from_value(stored[1].payload.clone()).unwrap();
+    assert_eq!(event.description.chars().count(), 160);
 }

@@ -17,6 +17,8 @@ fn provider(id: &str, command_contains: &[&str]) -> AgentProviderSettings {
         busy_all: Vec::new(),
         idle_all: Vec::new(),
         summary_line_prefixes: Vec::new(),
+        screen_adapter: crate::settings::ScreenAdapter::GenericV1,
+        screen_history_lines: 2000,
     }
 }
 

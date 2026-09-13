@@ -1,3 +1,4 @@
+mod activity_summary;
 mod agent;
 mod channels;
 mod inbound;
@@ -89,7 +90,11 @@ impl Harold for HaroldService {
                 return Err(Status::invalid_argument("invalid agent state report"));
             }
         };
-        let summary_update = agent::summary::explicit_summary_update(req.work_summary.as_deref());
+        let summary_update = match req.work_summary {
+            None => agent::domain::WorkSummaryUpdate::Unchanged,
+            Some(value) if value.trim().is_empty() => agent::domain::WorkSummaryUpdate::Clear,
+            Some(value) => agent::domain::WorkSummaryUpdate::Set(value),
+        };
 
         self.monitor
             .report_lifecycle(req.pane_id, state, req.adapter_id, summary_update)
@@ -409,13 +414,21 @@ async fn async_main(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>>
     let initial_agent_snapshot = load_startup_agent_snapshot(&store, &providers).await?;
     let snapshots = agent::snapshot::AgentSnapshotHub::new(initial_agent_snapshot.clone());
 
-    let (monitor, mut monitor_task) = agent::runtime::spawn_agent_monitor(
+    let activity_provider = cfg.activity_summary.enabled.then(|| {
+        Arc::new(activity_summary::ClaudeActivitySummarizer::new(
+            cfg.activity_summary.clone(),
+        )) as Arc<dyn activity_summary::ActivitySummarizer>
+    });
+    let (monitor, monitor_task) = agent::runtime::spawn_agent_monitor(
         Arc::clone(&store),
         inventory,
         screen,
         providers,
         initial_agent_snapshot,
         agent::runtime::AgentMonitorRuntimeConfig {
+            activity_summary: activity_provider
+                .as_ref()
+                .map(|provider| (Arc::clone(provider), cfg.activity_summary.clone())),
             inventory_interval: Duration::from_millis(cfg.agent_monitor.inventory_interval_ms),
             screen_interval: Duration::from_millis(cfg.agent_monitor.screen_interval_ms),
             hook_grace_ms: cfg.agent_monitor.hook_grace_ms,
@@ -435,7 +448,7 @@ async fn async_main(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>>
     ));
 
     info!(address = %addr, "Harold listening");
-    Server::builder()
+    let server_result = Server::builder()
         .add_service(HaroldServer::new(HaroldService {
             monitor,
             snapshots,
@@ -447,12 +460,22 @@ async fn async_main(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>>
             // Drop the sender to signal all receivers.
             drop(shutdown_tx);
         })
-        .await?;
+        .await;
 
     // Wait for the handler and listener to stop before returning.
     let _ = event_handler_handle.await;
     let _ = listener_handle.await;
-    if tokio::time::timeout(Duration::from_secs(1), &mut monitor_task)
+    stop_agent_monitor(monitor_task, activity_provider, Duration::from_secs(1)).await;
+    server_result?;
+    Ok(())
+}
+
+async fn stop_agent_monitor(
+    mut monitor_task: tokio::task::JoinHandle<()>,
+    activity_provider: Option<Arc<dyn activity_summary::ActivitySummarizer>>,
+    deadline: Duration,
+) {
+    if tokio::time::timeout(deadline, &mut monitor_task)
         .await
         .is_err()
     {
@@ -460,8 +483,11 @@ async fn async_main(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>>
         monitor_task.abort();
         let _ = monitor_task.await;
     }
-
-    Ok(())
+    // The scheduler may have been dropped during a blocked acquisition. Keep
+    // subprocess cleanup owned here until every admitted request has finished.
+    if let Some(provider) = activity_provider {
+        provider.shutdown().await;
+    }
 }
 
 async fn load_startup_agent_snapshot(

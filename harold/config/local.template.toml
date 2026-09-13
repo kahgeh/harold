@@ -10,6 +10,13 @@ cli_path = "/path/to/claude"
 # local_model = "Qwen/Qwen3-32B-MLX-8bit"
 # local_model_dir = "/path/to/mlx-lm"
 
+# Dashboard descriptions use Claude authentication independently of [ai].
+[activity_summary]
+enabled = true
+cli_path = "/path/to/claude"
+model = "sonnet"
+effort = "low"
+
 # Override the named provider list only when custom process or visible-screen
 # markers are required. An old `[agents] command_contains = [...]` table remains
 # loadable as a deprecated presence-only matcher.
@@ -20,6 +27,8 @@ cli_path = "/path/to/claude"
 # busy_all = ["Working"]
 # idle_all = ["Ready"]
 # summary_line_prefixes = [">"]
+# screen_adapter = "generic-v1" # use codex-v1 for Codex rendering
+# screen_history_lines = 2000 # positive, at most 10000 history rows
 
 [store]
 path = "~/bin/harold/data/events"

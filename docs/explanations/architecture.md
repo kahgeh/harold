@@ -15,7 +15,7 @@ Agent hooks ───────────────┐
                           │
 tmux and process inventory ├──> serialized monitor ───> durable event stream
                           │                                  │
-visible-screen adapter ───┘                                  v
+provider screen adapters ─┘                                  v
                                                    application projector
                                                             │
                                              ┌──────────────┴──────────────┐
@@ -35,13 +35,15 @@ The boundaries have distinct responsibilities:
 | --- | --- |
 | Inventory | Establish live pane and full agent-process incarnation identity. |
 | Lifecycle and completion ingress | Submit explicit busy/idle and work-summary observations. |
-| Screen adapter | Inspect only the current visible grid and return independent optional state and fallback-summary facts. |
-| Monitor runtime | Serialize decisions, deduplicate observations, revalidate departures, and append agent facts. |
+| Pane capture | Capture the visible grid for state or a bounded styled history tail for task recovery. |
+| Provider screen adapter | Interpret captured state markers and identify submitted prompt blocks using the configured rendering rules. |
+| Monitor runtime | Establish which submitted blocks belong to the current incarnation, serialize decisions, deduplicate observations, revalidate departures, and append agent facts. |
+| Activity summarizer | Generate a bounded description from supplied task/outcome evidence without blocking the monitor. |
 | Reducer | Reconcile hook grace, screen repair, incarnation replacement, and summary precedence. |
 | Application projector | Atomically update current state, stage externally deliverable work, and advance the checkpoint. |
 | Snapshot publisher | Publish only database-backed state after commit. |
 
-Raw captured screen text exists only inside the screen adapter. It is not an event field, projection column, API field, diagnostic value, or application log field. This is a data boundary, not merely a display convention.
+Raw captured screen text exists only inside the capture and screen-adapter boundary. The runtime receives fingerprints and bounded candidate instructions. Raw captures are not event fields, projection columns, API fields, diagnostic values, or application log fields.
 
 ## Identity before state
 
@@ -57,11 +59,29 @@ Replacing or restarting an agent creates a new incarnation. The new process begi
 
 Lifecycle evidence is authoritative for the configured grace period, which defaults to two seconds. This allows the terminal to repaint after a hook fires. After grace, a later conclusive screen observation can repair missed or stale lifecycle evidence. Inconclusive screen state preserves the current state.
 
-State and summary are independent. One capture may provide either, both, or neither. Harold retains explicit and screen candidates with their durable observation times; the latest substantive candidate is effective, with explicit winning a tie. This lets a current Busy prompt replace a retained prior completion, while Idle placeholder/absence preserves the current summary. Clearing the explicit candidate can reveal an existing screen candidate.
+State and summary are independent. A monitoring pass may provide either, both, or neither through its visible-state capture and any eligible history recovery. Harold retains explicit and screen candidates with their durable observation times; the latest substantive candidate supplies the source fallback, with explicit winning a tie. A generated description matching the current activity revision takes precedence when one exists. This lets a current Busy prompt replace a retained prior completion, while Idle placeholder/absence preserves the current summary. Clearing the explicit candidate can reveal an existing screen candidate.
 
 Current acquisition and ingress reject exact normalized configured idle placeholders before serializing a summary candidate, but older durable events may already contain them. Harold repairs that historical state with an incarnation-scoped, projection-only event that independently clears affected explicit or screen candidates and their timestamps. Because the correction is a durable fact rather than a direct database edit, rebuilding the projection cannot resurrect the placeholder.
 
 Provider screen markers are intentionally configurable because terminal UIs change. When marker matching becomes inconclusive, Harold reports `Unknown` only for an incarnation with no conclusive evidence; it does not infer state from CPU use, tmux activity, or silence. The [agent-monitor reference](../references/agent-monitor/README.md) defines the exact reconciliation and configuration contracts.
+
+## Recovering a submitted task from scrollback
+
+If a Codex hook misses a task and subsequent output pushes its prompt offscreen, Harold can recover that instruction from a bounded tmux history tail. State classification still reads the visible grid. History is captured separately when a process is first observed, when work starts, and at limited recovery retries.
+
+The selected adapter determines which terminal rows count as submitted input. `codex-v1` uses the styled prompt boundary to distinguish a submitted instruction from an unsent composer draft, even when the draft text has normal styling. `generic-v1` uses configured safe prefixes. Claude currently uses the generic adapter; OpenCode supplies screen state only and relies on its plugin for submitted tasks.
+
+Retained text alone cannot establish which process submitted it. Harold therefore records an initial sequence of prompt fingerprints for each incarnation and adopts none of those existing prompts. Later captures must overlap that sequence before newly added submissions can become task evidence. If the tail loses every prior anchor, Harold establishes another baseline without adopting its contents. This deliberately means a late attachment can miss the task already underway. A new post-baseline submission can be recovered, while a replacement process cannot inherit old pane history.
+
+Only fingerprints remain in the acquisition checkpoint, and that checkpoint is discarded on departure or restart. Durable source candidates continue to survive a Harold restart. A newly recovered occurrence advances the activity revision even when the user submits identical text again; repeated captures of the same occurrence do not. See [provider screen adapters](../references/agent-monitor/screen-adapters.md) for configuration, capture timing, and recovery limits.
+
+## Readable activity descriptions
+
+When activity summarization is enabled, Harold retains the submitted instruction as fallback and updates Busy/Idle as usual. A background Claude request then turns the available evidence into a short description. Completion hooks include the agent's reply, allowing the description to state a reported outcome such as a fix with tests still running. An instruction alone provides only the task, so it must not be treated as proof of completion.
+
+The description is a separate candidate tied to the source activity's event-stream revision and full process incarnation. Both runtime and reducer check that identity before accepting a result. This keeps a slow response from overwriting a newer task, and keeps old pane history from crossing a process replacement. Original instructions remain available when generation fails.
+
+Only an accepted generated result becomes a durable event. Its projection survives restart and replay, while pending requests remain ephemeral. Generation is bounded and independent of the notification outbox, so describing work cannot send a notification or recursively request another description. See the [activity-summary reference](../references/agent-monitor/activity-summaries.md) for configuration and evidence limits.
 
 ## Projection and delivery are separate effects
 

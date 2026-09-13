@@ -185,6 +185,9 @@ fn populated_snapshot(revision: i64, summary: Option<&str>) -> AgentSnapshot {
             explicit_work_summary_updated_at_ms: summary.map(|_| 8_600),
             screen_work_summary: None,
             screen_work_summary_updated_at_ms: None,
+            summary_basis_version: EventStreamVersion::start(),
+            generated_work_summary: None,
+            generated_summary_basis_version: None,
             work_summary: summary.map(str::to_string),
             last_transition_at_ms: 8_700,
             last_event_version: EventStreamVersion::new(revision).expect("valid revision"),
@@ -795,6 +798,8 @@ async fn startup_repairs_all_legacy_placeholders_before_the_first_watch_snapshot
         busy_all: vec!["Working".into()],
         idle_all: vec![format!(" \u{1b}[31m{PLACEHOLDER}\u{1b}[0m ")],
         summary_line_prefixes: vec!["› ".into()],
+        screen_adapter: crate::settings::ScreenAdapter::GenericV1,
+        screen_history_lines: 2000,
     }];
     let initial = load_startup_agent_snapshot(&store, &providers)
         .await

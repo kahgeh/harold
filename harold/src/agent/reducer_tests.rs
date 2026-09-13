@@ -726,3 +726,241 @@ fn only_a_matching_departure_removes_the_current_incarnation() {
         ProjectionChange::Remove(incarnation(2_000))
     );
 }
+
+#[test]
+fn generated_activity_requires_current_basis_and_preserves_source() {
+    use super::domain::AgentActivitySummaryGenerated;
+    let initial = apply(
+        None,
+        AgentEvent::PaneObserved(AgentPaneObserved {
+            pane: pane(1_000, 100),
+        }),
+        1,
+    );
+    let lifecycle = AgentEvent::LifecycleObserved(AgentLifecycleObserved {
+        incarnation: incarnation(1_000),
+        state: ObservedAgentState::Busy,
+        adapter_id: "codex".into(),
+        work_summary: WorkSummaryUpdate::Set("Fix authentication".into()),
+        observed_at_ms: 110,
+    });
+    let source = apply(Some(initial), lifecycle.clone(), 2);
+    let generated = AgentEvent::ActivitySummaryGenerated(AgentActivitySummaryGenerated {
+        incarnation: incarnation(1_000),
+        basis_version: version(2),
+        description: "Investigating authentication failures".into(),
+        generated_at_ms: 120,
+    });
+    let projection = apply(Some(source), generated.clone(), 3);
+    assert_eq!(
+        projection.work_summary.as_deref(),
+        Some("Investigating authentication failures")
+    );
+    assert_eq!(
+        projection.explicit_work_summary.as_deref(),
+        Some("Fix authentication")
+    );
+    assert_eq!(projection.last_transition_at_ms, 110);
+    let repeated = apply(Some(projection), lifecycle, 4);
+    assert_eq!(repeated.summary_basis_version, version(4));
+    assert_eq!(repeated.work_summary.as_deref(), Some("Fix authentication"));
+    assert_eq!(
+        reduce_agent_event(
+            Some(repeated.clone()),
+            &generated,
+            version(5),
+            DEFAULT_HOOK_GRACE_MS
+        ),
+        ProjectionChange::Ignore
+    );
+    let replaced = apply(
+        Some(repeated),
+        AgentEvent::PaneObserved(AgentPaneObserved {
+            pane: pane(2_000, 130),
+        }),
+        6,
+    );
+    assert_eq!(
+        reduce_agent_event(
+            Some(replaced),
+            &generated,
+            version(7),
+            DEFAULT_HOOK_GRACE_MS
+        ),
+        ProjectionChange::Ignore
+    );
+    assert_eq!(
+        reduce_agent_event(None, &generated, version(8), DEFAULT_HOOK_GRACE_MS),
+        ProjectionChange::Ignore
+    );
+}
+
+#[test]
+fn corroborating_busy_and_metadata_keep_generated_activity_but_new_work_invalidates() {
+    use super::domain::AgentActivitySummaryGenerated;
+    let initial = apply(
+        None,
+        AgentEvent::PaneObserved(AgentPaneObserved {
+            pane: pane(1_000, 100),
+        }),
+        1,
+    );
+    let source = apply(
+        Some(initial),
+        AgentEvent::LifecycleObserved(AgentLifecycleObserved {
+            incarnation: incarnation(1_000),
+            state: ObservedAgentState::Busy,
+            adapter_id: "codex".into(),
+            work_summary: WorkSummaryUpdate::Set("Fix tests".into()),
+            observed_at_ms: 110,
+        }),
+        2,
+    );
+    let generated = apply(
+        Some(source),
+        AgentEvent::ActivitySummaryGenerated(AgentActivitySummaryGenerated {
+            incarnation: incarnation(1_000),
+            basis_version: version(2),
+            description: "Investigating test failures".into(),
+            generated_at_ms: 120,
+        }),
+        3,
+    );
+    let corroborated = apply(
+        Some(generated),
+        AgentEvent::ScreenObserved(AgentScreenObserved {
+            incarnation: incarnation(1_000),
+            state: Some(ObservedAgentState::Busy),
+            classifier_id: "codex".into(),
+            fallback_summary: None,
+            observed_at_ms: 3_000,
+        }),
+        4,
+    );
+    assert_eq!(corroborated.summary_basis_version, version(2));
+    assert_eq!(
+        corroborated.work_summary.as_deref(),
+        Some("Investigating test failures")
+    );
+    let metadata = apply(
+        Some(corroborated),
+        AgentEvent::PaneObserved(AgentPaneObserved {
+            pane: pane(1_000, 4_000),
+        }),
+        5,
+    );
+    assert_eq!(metadata.summary_basis_version, version(2));
+    let new_work = apply(
+        Some(metadata),
+        AgentEvent::ScreenObserved(AgentScreenObserved {
+            incarnation: incarnation(1_000),
+            state: None,
+            classifier_id: "codex".into(),
+            fallback_summary: Some("Fix deployment".into()),
+            observed_at_ms: 5_000,
+        }),
+        6,
+    );
+    assert_eq!(new_work.summary_basis_version, version(6));
+    assert_eq!(new_work.work_summary.as_deref(), Some("Fix deployment"));
+}
+
+#[test]
+fn new_busy_boundary_and_source_repair_invalidate_generated_activity() {
+    use super::domain::AgentActivitySummaryGenerated;
+    let initial = apply(
+        None,
+        AgentEvent::PaneObserved(AgentPaneObserved {
+            pane: pane(1_000, 100),
+        }),
+        1,
+    );
+    let source = apply(
+        Some(initial),
+        AgentEvent::LifecycleObserved(AgentLifecycleObserved {
+            incarnation: incarnation(1_000),
+            state: ObservedAgentState::Idle,
+            adapter_id: "codex".into(),
+            work_summary: WorkSummaryUpdate::Set("Fix parser".into()),
+            observed_at_ms: 110,
+        }),
+        2,
+    );
+    let generated = apply(
+        Some(source),
+        AgentEvent::ActivitySummaryGenerated(AgentActivitySummaryGenerated {
+            incarnation: incarnation(1_000),
+            basis_version: version(2),
+            description: "Fixed parser; tests pending".into(),
+            generated_at_ms: 120,
+        }),
+        3,
+    );
+    let new_busy = apply(
+        Some(generated.clone()),
+        AgentEvent::ScreenObserved(AgentScreenObserved {
+            incarnation: incarnation(1_000),
+            state: Some(ObservedAgentState::Busy),
+            classifier_id: "codex".into(),
+            fallback_summary: None,
+            observed_at_ms: 3_000,
+        }),
+        4,
+    );
+    assert_eq!(new_busy.summary_basis_version, version(4));
+    assert_eq!(new_busy.work_summary.as_deref(), Some("Fix parser"));
+    assert!(new_busy.generated_work_summary.is_none());
+    let repaired = apply(
+        Some(generated),
+        AgentEvent::WorkSummaryCandidatesRepaired(AgentWorkSummaryCandidatesRepaired {
+            incarnation: incarnation(1_000),
+            clear_explicit: true,
+            clear_screen: false,
+            reason: AgentWorkSummaryRepairReason::ConfiguredIdlePlaceholder,
+            observed_at_ms: 3_000,
+        }),
+        4,
+    );
+    assert_eq!(repaired.summary_basis_version, version(4));
+    assert!(repaired.generated_work_summary.is_none());
+    assert!(repaired.work_summary.is_none());
+}
+
+#[test]
+fn proven_repeated_submission_refreshes_recency_and_generation_basis() {
+    let projection = apply(
+        None,
+        AgentEvent::PaneObserved(AgentPaneObserved {
+            pane: pane(1_000, 100),
+        }),
+        1,
+    );
+    let submitted = |at| {
+        AgentEvent::ScreenObserved(AgentScreenObserved {
+            incarnation: incarnation(1_000),
+            state: None,
+            classifier_id: "tmux-submitted-prompt-v1".into(),
+            fallback_summary: Some("Fix the retry loop".into()),
+            observed_at_ms: at,
+        })
+    };
+    let projection = apply(Some(projection), submitted(200), 2);
+    let projection = apply(
+        Some(projection),
+        AgentEvent::LifecycleObserved(AgentLifecycleObserved {
+            incarnation: incarnation(1_000),
+            state: ObservedAgentState::Busy,
+            adapter_id: "codex-hook".into(),
+            work_summary: WorkSummaryUpdate::Set("Another task".into()),
+            observed_at_ms: 300,
+        }),
+        3,
+    );
+    let projection = apply(Some(projection), submitted(400), 4);
+    assert_eq!(
+        projection.work_summary.as_deref(),
+        Some("Fix the retry loop")
+    );
+    assert_eq!(projection.screen_work_summary_updated_at_ms, Some(400));
+    assert_eq!(projection.summary_basis_version, version(4));
+}
