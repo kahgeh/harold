@@ -74,6 +74,7 @@ pub(crate) enum AgentEvent {
     LifecycleObserved(AgentLifecycleObserved),
     ScreenObserved(AgentScreenObserved),
     WorkSummaryCandidatesRepaired(AgentWorkSummaryCandidatesRepaired),
+    ActivitySummaryGenerated(AgentActivitySummaryGenerated),
     MonitorHealthChanged(AgentMonitorHealthChanged),
 }
 
@@ -121,6 +122,14 @@ pub(crate) struct AgentWorkSummaryCandidatesRepaired {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct AgentActivitySummaryGenerated {
+    pub incarnation: AgentIncarnation,
+    pub basis_version: EventStreamVersion,
+    pub description: String,
+    pub generated_at_ms: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct AgentMonitorHealthChanged {
     pub component: String,
     pub healthy: bool,
@@ -141,6 +150,9 @@ pub(crate) struct AgentPaneProjection {
     pub explicit_work_summary_updated_at_ms: Option<i64>,
     pub screen_work_summary: Option<String>,
     pub screen_work_summary_updated_at_ms: Option<i64>,
+    pub summary_basis_version: EventStreamVersion,
+    pub generated_work_summary: Option<String>,
+    pub generated_summary_basis_version: Option<EventStreamVersion>,
     pub work_summary: Option<String>,
     pub last_transition_at_ms: i64,
     pub last_event_version: EventStreamVersion,

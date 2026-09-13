@@ -11,6 +11,9 @@ use super::domain::{
 
 pub(crate) const DEFAULT_HOOK_GRACE_MS: u64 = 2_000;
 
+/// This classifier certifies a new submitted occurrence, including identical repeated text.
+pub(crate) const SUBMITTED_PROMPT_CLASSIFIER_ID: &str = "tmux-submitted-prompt-v1";
+
 pub(crate) fn reduce_agent_event(
     current: Option<AgentPaneProjection>,
     event: &AgentEvent,
@@ -35,6 +38,7 @@ pub(crate) fn reduce_agent_event(
                 return ProjectionChange::Ignore;
             }
 
+            invalidate_generated(&mut projection, event_version);
             projection.hook_state = Some(lifecycle.state);
             projection.hook_observed_at_ms = Some(lifecycle.observed_at_ms);
             projection.screen_state = None;
@@ -69,6 +73,13 @@ pub(crate) fn reduce_agent_event(
                 return ProjectionChange::Ignore;
             }
 
+            if screen_changes_activity(
+                projection.effective_state,
+                projection.screen_work_summary.as_deref(),
+                screen,
+            ) {
+                invalidate_generated(&mut projection, event_version);
+            }
             if let Some(state) = screen.state {
                 let state_needs_revalidation = projection.screen_state != Some(state)
                     || projection.effective_state != observed_to_effective(state)
@@ -80,7 +91,8 @@ pub(crate) fn reduce_agent_event(
                 }
             }
             if let Some(summary) = &screen.fallback_summary
-                && projection.screen_work_summary.as_deref() != Some(summary)
+                && (projection.screen_work_summary.as_deref() != Some(summary)
+                    || screen.classifier_id == SUBMITTED_PROMPT_CLASSIFIER_ID)
             {
                 projection.screen_work_summary = Some(summary.clone());
                 projection.screen_work_summary_updated_at_ms = Some(screen.observed_at_ms);
@@ -103,6 +115,7 @@ pub(crate) fn reduce_agent_event(
                 return ProjectionChange::Ignore;
             }
 
+            invalidate_generated(&mut projection, event_version);
             if repair.clear_explicit {
                 projection.explicit_work_summary = None;
                 projection.explicit_work_summary_updated_at_ms = None;
@@ -117,6 +130,25 @@ pub(crate) fn reduce_agent_event(
                 event_version,
                 hook_grace_ms,
             ))
+        }
+        AgentEvent::ActivitySummaryGenerated(generated) => {
+            let Some(mut projection) = current else {
+                return ProjectionChange::Ignore;
+            };
+            if projection.pane.incarnation != generated.incarnation
+                || projection.summary_basis_version != generated.basis_version
+            {
+                return ProjectionChange::Ignore;
+            }
+            let Some(description) = super::summary::normalize_work_summary(&generated.description)
+            else {
+                return ProjectionChange::Ignore;
+            };
+            projection.generated_work_summary = Some(description.clone());
+            projection.generated_summary_basis_version = Some(generated.basis_version);
+            projection.work_summary = Some(description);
+            projection.last_event_version = event_version;
+            ProjectionChange::Upsert(projection)
         }
         AgentEvent::MonitorHealthChanged(_) => ProjectionChange::Ignore,
     }
@@ -174,6 +206,9 @@ fn new_projection(
         explicit_work_summary_updated_at_ms: None,
         screen_work_summary: None,
         screen_work_summary_updated_at_ms: None,
+        summary_basis_version: event_version,
+        generated_work_summary: None,
+        generated_summary_basis_version: None,
         work_summary: None,
         last_transition_at_ms: observed.pane.observed_at_ms,
         last_event_version: event_version,
@@ -209,6 +244,11 @@ fn reconcile(
         (None, Some((screen, _))) => Some(screen.clone()),
         (None, None) => None,
     };
+    if projection.generated_summary_basis_version == Some(projection.summary_basis_version)
+        && let Some(generated) = &projection.generated_work_summary
+    {
+        projection.work_summary = Some(generated.clone());
+    }
     projection.last_event_version = event_version;
     projection
 }
@@ -236,4 +276,25 @@ fn observed_to_effective(state: super::domain::ObservedAgentState) -> EffectiveA
         super::domain::ObservedAgentState::Busy => EffectiveAgentState::Busy,
         super::domain::ObservedAgentState::Idle => EffectiveAgentState::Idle,
     }
+}
+
+fn invalidate_generated(projection: &mut AgentPaneProjection, event_version: EventStreamVersion) {
+    projection.summary_basis_version = event_version;
+    projection.generated_work_summary = None;
+    projection.generated_summary_basis_version = None;
+}
+
+/// A corroborating Busy observation does not denote another submitted turn.
+pub(crate) fn screen_changes_activity(
+    previous_state: EffectiveAgentState,
+    previous_summary: Option<&str>,
+    screen: &super::domain::AgentScreenObserved,
+) -> bool {
+    (screen.classifier_id == SUBMITTED_PROMPT_CLASSIFIER_ID && screen.fallback_summary.is_some())
+        || screen
+            .fallback_summary
+            .as_deref()
+            .is_some_and(|summary| previous_summary != Some(summary))
+        || (screen.state == Some(super::domain::ObservedAgentState::Busy)
+            && previous_state != EffectiveAgentState::Busy)
 }

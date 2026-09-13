@@ -1,6 +1,17 @@
+#[path = "activity_scheduler.rs"]
+mod activity_scheduler;
+#[path = "prompt_checkpoint.rs"]
+mod prompt_checkpoint;
+
+use crate::activity_summary::ActivitySummarizer;
+use crate::settings::ActivitySummarySettings;
+use activity_scheduler::{ActivityScheduler, SummaryJob, SummaryResult};
+use events::EventStreamVersion;
+use prompt_checkpoint::PromptAcquisitionCheckpoint;
+
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use tokio::sync::{Semaphore, mpsc, oneshot, watch};
 
@@ -13,7 +24,7 @@ use super::domain::{
     AgentWorkSummaryRepairReason, CompletionSummaryUpdate, ObservedAgentState, WorkSummaryUpdate,
 };
 use super::inventory::{AgentInventoryPort, InventoryError};
-use super::screen::{ScreenError, VisibleScreenPort, normalize_fallback_summary};
+use super::screen::{PromptScan, ScreenError, VisibleScreenPort, normalize_fallback_summary};
 use super::summary::completion_summary_update;
 
 const COMMAND_CAPACITY: usize = 64;
@@ -145,23 +156,29 @@ impl AgentMonitorHandle {
 }
 
 struct TrackedPane {
+    prompt_checkpoint: PromptAcquisitionCheckpoint,
+    recovery_failure: Option<&'static str>,
     pane: AgentPaneObservation,
     consecutive_absences: u8,
     last_hook: Option<(ObservedAgentState, i64)>,
     explicit_summary: Option<String>,
     screen_state: Option<ObservedAgentState>,
     screen_summary: Option<String>,
+    summary_basis_version: EventStreamVersion,
 }
 
 impl TrackedPane {
     fn new(pane: AgentPaneObservation) -> Self {
         Self {
             pane,
+            prompt_checkpoint: PromptAcquisitionCheckpoint::default(),
+            recovery_failure: None,
             consecutive_absences: 0,
             last_hook: None,
             explicit_summary: None,
             screen_state: None,
             screen_summary: None,
+            summary_basis_version: EventStreamVersion::start(),
         }
     }
 }
@@ -177,9 +194,11 @@ struct AgentMonitorRuntime {
     screen_gate: Arc<Semaphore>,
     panes: HashMap<String, TrackedPane>,
     health: HashMap<String, HealthState>,
+    summaries: Option<ActivityScheduler>,
 }
 
 pub(crate) struct AgentMonitorRuntimeConfig {
+    pub(crate) activity_summary: Option<(Arc<dyn ActivitySummarizer>, ActivitySummarySettings)>,
     pub(crate) inventory_interval: Duration,
     pub(crate) screen_interval: Duration,
     pub(crate) hook_grace_ms: u64,
@@ -195,6 +214,7 @@ struct RuntimeInputs {
     hook_grace_ms: u64,
     acquisition_timeout: Duration,
     intervals: Option<(Duration, Duration)>,
+    activity_summary: Option<(Arc<dyn ActivitySummarizer>, ActivitySummarySettings)>,
 }
 
 #[cfg(test)]
@@ -271,6 +291,7 @@ pub(crate) fn spawn_agent_monitor(
             hook_grace_ms: config.hook_grace_ms,
             acquisition_timeout: config.acquisition_timeout,
             intervals: Some((config.inventory_interval, config.screen_interval)),
+            activity_summary: config.activity_summary,
         },
         shutdown,
     )
@@ -299,6 +320,7 @@ where
             hook_grace_ms,
             acquisition_timeout: Duration::from_millis(100),
             intervals: None,
+            activity_summary: None,
         },
         shutdown,
     )
@@ -327,6 +349,7 @@ where
             hook_grace_ms: seed.hook_grace_ms,
             acquisition_timeout: seed.acquisition_timeout,
             intervals: None,
+            activity_summary: None,
         },
         shutdown,
     )
@@ -345,6 +368,7 @@ fn spawn_runtime(
         hook_grace_ms,
         acquisition_timeout,
         intervals,
+        activity_summary,
     } = inputs;
     let (sender, mut receiver) = mpsc::channel(COMMAND_CAPACITY);
     let (inventory_tick_sender, mut inventory_ticks) = mpsc::channel(1);
@@ -382,18 +406,23 @@ fn spawn_runtime(
             screen_gate: Arc::new(Semaphore::new(1)),
             panes: panes_from_snapshot(&initial_snapshot, hook_grace_ms),
             health: health_from_snapshot(&initial_snapshot),
+            summaries: activity_summary
+                .map(|(provider, settings)| ActivityScheduler::new(provider, settings)),
         };
+        let seeded_panes: Vec<_> = runtime.panes.keys().cloned().collect();
+        for pane_id in seeded_panes {
+            let _ = runtime.baseline_pane(&pane_id).await;
+        }
         loop {
             tokio::select! {
                 biased;
-                changed = shutdown.changed() => {
-                    if changed.is_err() || shutdown.has_changed().unwrap_or(true) {
-                        break;
-                    }
-                }
+                _ = shutdown.changed() => break,
                 command = receiver.recv() => {
                     let Some(command) = command else { break };
                     runtime.handle(command).await;
+                }
+                result = next_summary(&mut runtime.summaries) => {
+                    runtime.accept_summary(result).await;
                 }
                 tick = inventory_ticks.recv(), if scheduled => {
                     if tick.is_none() { break; }
@@ -404,6 +433,9 @@ fn spawn_runtime(
                     let _ = runtime.screen_tick().await;
                 }
             }
+        }
+        if let Some(summaries) = &mut runtime.summaries {
+            summaries.shutdown().await;
         }
     });
     (handle, task)
@@ -438,11 +470,14 @@ fn panes_from_snapshot(
             let pane = store::normalize_pane_observation(projection.pane.clone());
             let tracked = TrackedPane {
                 pane,
+                prompt_checkpoint: PromptAcquisitionCheckpoint::default(),
+                recovery_failure: None,
                 consecutive_absences: 0,
                 last_hook: projection.hook_state.zip(projection.hook_observed_at_ms),
                 explicit_summary: projection.explicit_work_summary.clone(),
                 screen_state: seeded_screen_state(projection, hook_grace_ms),
                 screen_summary: projection.screen_work_summary.clone(),
+                summary_basis_version: projection.summary_basis_version,
             };
             (projection.pane.incarnation.pane_id.clone(), tracked)
         })
@@ -522,6 +557,68 @@ fn empty_snapshot() -> AgentSnapshot {
 }
 
 impl AgentMonitorRuntime {
+    fn schedule_summary(
+        &mut self,
+        pane_id: &str,
+        instruction: Option<&str>,
+        assistant_reply: Option<&str>,
+    ) {
+        let Some(summaries) = &mut self.summaries else {
+            return;
+        };
+        summaries.invalidate(pane_id);
+        let input = summaries.input(instruction.unwrap_or_default(), assistant_reply);
+        if input.instruction.trim().is_empty()
+            && input
+                .assistant_reply
+                .as_deref()
+                .is_none_or(|reply| reply.trim().is_empty())
+        {
+            return;
+        }
+        let Some(tracked) = self.panes.get(pane_id) else {
+            return;
+        };
+        summaries.enqueue(SummaryJob {
+            incarnation: tracked.pane.incarnation.clone(),
+            basis_version: tracked.summary_basis_version,
+            input,
+        });
+    }
+
+    async fn accept_summary(&mut self, result: SummaryResult) {
+        let Some(tracked) = self.panes.get(&result.incarnation.pane_id) else {
+            return;
+        };
+        if tracked.pane.incarnation != result.incarnation
+            || tracked.summary_basis_version != result.basis_version
+        {
+            return;
+        }
+        let Some(description) = result
+            .description
+            .and_then(|value| super::summary::normalize_work_summary(&value))
+        else {
+            return;
+        };
+        if self.matches_configured_placeholder(&result.incarnation, &description) {
+            return;
+        }
+        // Failed generation or persistence leaves the durable source fallback untouched.
+        let _ = store::append_agent_events(
+            &self.store,
+            vec![AgentEvent::ActivitySummaryGenerated(
+                super::domain::AgentActivitySummaryGenerated {
+                    incarnation: result.incarnation,
+                    basis_version: result.basis_version,
+                    description,
+                    generated_at_ms: now_ms(),
+                },
+            )],
+        )
+        .await;
+    }
+
     async fn handle(&mut self, command: AgentMonitorCommand) {
         match command {
             AgentMonitorCommand::ReportLifecycle {
@@ -571,6 +668,10 @@ impl AgentMonitorRuntime {
             return Err(MonitorCommandError::AgentNotFound);
         };
         let observed_at_ms = pane.observed_at_ms;
+        let instruction = match &work_summary {
+            WorkSummaryUpdate::Set(value) => Some(value.clone()),
+            _ => None,
+        };
         let work_summary = self.reject_configured_placeholder_update(
             &pane.incarnation,
             normalize_work_summary_update(work_summary),
@@ -608,7 +709,7 @@ impl AgentMonitorRuntime {
                 .clone()
                 .map(AgentEvent::WorkSummaryCandidatesRepaired),
         );
-        store::append_agent_events(&self.store, events)
+        let appended = store::append_agent_events(&self.store, events)
             .await
             .map_err(MonitorCommandError::EventAppend)?;
 
@@ -625,6 +726,19 @@ impl AgentMonitorRuntime {
         tracked.explicit_summary = next_explicit_summary;
         tracked.screen_state = None;
         apply_repair_to_tracked(tracked, repair.as_ref());
+        let pane_id = tracked.pane.incarnation.pane_id.clone();
+        if let Some(basis) = source_version(
+            &appended,
+            &[
+                "AgentLifecycleObserved",
+                "AgentWorkSummaryCandidatesRepaired",
+            ],
+        ) {
+            tracked.summary_basis_version = basis;
+        }
+        let instruction = instruction.filter(|_| matches!(work_summary, WorkSummaryUpdate::Set(_)));
+        self.schedule_summary(&pane_id, instruction.as_deref(), None);
+        self.baseline_pane(&pane_id).await?;
         Ok(())
     }
 
@@ -707,6 +821,20 @@ impl AgentMonitorRuntime {
             tracked.explicit_summary = next_explicit_summary;
             tracked.screen_state = None;
             apply_repair_to_tracked(tracked, repair.as_ref());
+            let pane_id = tracked.pane.incarnation.pane_id.clone();
+            if let Some(basis) = source_version(
+                &result,
+                &["TurnCompleted", "AgentWorkSummaryCandidatesRepaired"],
+            ) {
+                tracked.summary_basis_version = basis;
+            }
+            self.schedule_summary(
+                &pane_id,
+                Some(&turn.last_user_prompt),
+                Some(&turn.assistant_message),
+            );
+            // The completion append has succeeded; capture failure degrades screen health only.
+            let _ = self.baseline_pane(&pane_id).await;
         }
         Ok(result)
     }
@@ -742,7 +870,7 @@ impl AgentMonitorRuntime {
                 .get(&pane_id)
                 .is_none_or(|tracked| !same_pane_metadata(&tracked.pane, &pane));
             if changed {
-                store::append_agent_events(
+                let appended = store::append_agent_events(
                     &self.store,
                     vec![AgentEvent::PaneObserved(AgentPaneObserved {
                         pane: pane.clone(),
@@ -758,11 +886,19 @@ impl AgentMonitorRuntime {
                     tracked.pane = pane;
                     tracked.consecutive_absences = 0;
                 } else {
-                    self.panes.insert(pane_id, TrackedPane::new(pane));
+                    let mut tracked = TrackedPane::new(pane);
+                    if let Some(basis) = source_version(&appended, &["AgentPaneObserved"]) {
+                        tracked.summary_basis_version = basis;
+                    }
+                    if let Some(summaries) = &mut self.summaries {
+                        summaries.invalidate(&pane_id);
+                    }
+                    self.panes.insert(pane_id.clone(), tracked);
                 }
             } else if let Some(tracked) = self.panes.get_mut(&pane_id) {
                 tracked.consecutive_absences = 0;
             }
+            self.baseline_pane(&pane_id).await?;
         }
 
         let candidates: Vec<AgentIncarnation> = self
@@ -815,16 +951,89 @@ impl AgentMonitorRuntime {
                 .is_some_and(|tracked| tracked.pane.incarnation == incarnation)
             {
                 self.panes.remove(&incarnation.pane_id);
+                if let Some(summaries) = &mut self.summaries {
+                    summaries.invalidate(&incarnation.pane_id);
+                }
             }
         }
         Ok(())
+    }
+
+    /// Discovery through inventory, lifecycle, completion, or restart uses the same baseline path.
+    async fn baseline_pane(&mut self, pane_id: &str) -> Result<(), MonitorCommandError> {
+        let Some(tracked) = self.panes.get(pane_id) else {
+            return Ok(());
+        };
+        if !tracked.prompt_checkpoint.baseline_due(Instant::now()) {
+            return Ok(());
+        }
+        let pane = tracked.pane.clone();
+        let Some(provider) = self.providers.get(&pane.incarnation.provider_id).cloned() else {
+            return Ok(());
+        };
+        self.recover_prompts(&pane, &provider, None).await;
+        if let Some(reason) = self
+            .panes
+            .get(pane_id)
+            .and_then(|tracked| tracked.recovery_failure)
+        {
+            self.set_health("screen", false, reason).await?;
+        }
+        Ok(())
+    }
+
+    /// The tentative checkpoint is committed by screen_tick only after its candidate is durable.
+    async fn recover_prompts(
+        &mut self,
+        pane: &AgentPaneObservation,
+        provider: &AgentProviderSettings,
+        state: Option<ObservedAgentState>,
+    ) -> Option<(PromptAcquisitionCheckpoint, Option<String>)> {
+        let tracked = self.panes.get_mut(&pane.incarnation.pane_id)?;
+        if tracked.pane.incarnation != pane.incarnation
+            || !tracked.prompt_checkpoint.should_scan(state, Instant::now())
+        {
+            return None;
+        }
+        tracked.prompt_checkpoint.attempted(Instant::now());
+        let result = scan_prompts(
+            Arc::clone(&self.screen),
+            pane.clone(),
+            provider.clone(),
+            self.acquisition_timeout,
+            Arc::clone(&self.screen_gate),
+        )
+        .await;
+        let tracked = self.panes.get_mut(&pane.incarnation.pane_id)?;
+        if tracked.pane.incarnation != pane.incarnation {
+            return None;
+        }
+        let scan = match result {
+            Ok(scan) => {
+                tracked.recovery_failure = None;
+                scan
+            }
+            Err(failure) => {
+                tracked.recovery_failure = Some(failure.reason_code);
+                tracked.prompt_checkpoint.capture_failed(state);
+                return None;
+            }
+        };
+        let mut checkpoint = tracked.prompt_checkpoint.clone();
+        let candidate = checkpoint
+            .acquire(scan, state)
+            .and_then(|value| normalize_fallback_summary(&value, &provider.idle_all));
+        if candidate.is_none() {
+            tracked.prompt_checkpoint = checkpoint.clone();
+        }
+        Some((checkpoint, candidate))
     }
 
     async fn screen_tick(&mut self) -> Result<(), MonitorCommandError> {
         self.repair_configured_placeholders()
             .await
             .map_err(MonitorCommandError::EventAppend)?;
-        let panes: Vec<AgentPaneObservation> = self
+        let panes: Vec<_> = self
             .panes
             .values()
             .map(|tracked| tracked.pane.clone())
@@ -836,6 +1045,8 @@ impl AgentMonitorRuntime {
                 continue;
             };
             attempted = true;
+            // Failed baselines retry in Idle and even when visible classification is unavailable.
+            self.baseline_pane(&pane.incarnation.pane_id).await?;
             let observation = match observe_screen(
                 Arc::clone(&self.screen),
                 pane.clone(),
@@ -854,44 +1065,100 @@ impl AgentMonitorRuntime {
             if observation.incarnation != pane.incarnation {
                 continue;
             }
-            let Some(tracked) = self.panes.get_mut(&pane.incarnation.pane_id) else {
+            // Recovery triggers consume raw visible state, independently of hook-grace filtering.
+            let recovery = self
+                .recover_prompts(&pane, &provider, observation.state)
+                .await;
+            let Some(tracked) = self
+                .panes
+                .get_mut(&pane.incarnation.pane_id)
+                .filter(|tracked| tracked.pane.incarnation == observation.incarnation)
+            else {
                 continue;
             };
-            if tracked.pane.incarnation != observation.incarnation {
-                continue;
-            }
-
             let state = screen_state_delta(
                 tracked,
                 observation.state,
                 observation.observed_at_ms,
                 self.hook_grace_ms,
             );
-            let summary = observation
-                .fallback_summary
-                .as_deref()
-                .and_then(|summary| normalize_fallback_summary(summary, &provider.idle_all))
-                .filter(|summary| tracked.screen_summary.as_deref() != Some(summary));
+            let recovered = recovery
+                .as_ref()
+                .and_then(|(_, candidate)| candidate.clone());
+            let summary = recovered.clone().or_else(|| {
+                observation
+                    .fallback_summary
+                    .as_deref()
+                    .and_then(|summary| normalize_fallback_summary(summary, &provider.idle_all))
+                    .filter(|summary| tracked.screen_summary.as_deref() != Some(summary))
+            });
             if state.is_none() && summary.is_none() {
+                tracked.prompt_checkpoint.observe_state(observation.state);
                 continue;
             }
             let event = AgentScreenObserved {
                 incarnation: observation.incarnation,
                 state,
-                classifier_id: observation.classifier_id,
+                classifier_id: if recovered.is_some() {
+                    super::reducer::SUBMITTED_PROMPT_CLASSIFIER_ID.into()
+                } else {
+                    observation.classifier_id
+                },
                 fallback_summary: summary.clone(),
                 observed_at_ms: observation.observed_at_ms,
             };
-            store::append_agent_events(&self.store, vec![AgentEvent::ScreenObserved(event)])
-                .await
-                .map_err(MonitorCommandError::EventAppend)?;
+            let previous_state = match tracked
+                .screen_state
+                .or(tracked.last_hook.map(|(state, _)| state))
+            {
+                Some(ObservedAgentState::Busy) => super::domain::EffectiveAgentState::Busy,
+                Some(ObservedAgentState::Idle) => super::domain::EffectiveAgentState::Idle,
+                None => super::domain::EffectiveAgentState::Unknown,
+            };
+            let changes_activity = super::reducer::screen_changes_activity(
+                previous_state,
+                tracked.screen_summary.as_deref(),
+                &event,
+            );
+            let appended = match store::append_agent_events(
+                &self.store,
+                vec![AgentEvent::ScreenObserved(event)],
+            )
+            .await
+            {
+                Ok(appended) => appended,
+                Err(error) => {
+                    if recovered.is_some() {
+                        tracked
+                            .prompt_checkpoint
+                            .source_append_failed(observation.state);
+                    }
+                    return Err(MonitorCommandError::EventAppend(error));
+                }
+            };
+            if let Some((checkpoint, _)) = recovery {
+                tracked.prompt_checkpoint = checkpoint;
+            }
+            tracked.prompt_checkpoint.observe_state(observation.state);
             if let Some(state) = state {
                 tracked.screen_state = Some(state);
             }
             if summary.is_some() {
-                tracked.screen_summary = summary;
+                tracked.screen_summary = summary.clone();
+            }
+            if changes_activity {
+                if let Some(basis) = source_version(&appended, &["AgentScreenObserved"]) {
+                    tracked.summary_basis_version = basis;
+                }
+                let pane_id = tracked.pane.incarnation.pane_id.clone();
+                self.schedule_summary(&pane_id, summary.as_deref(), None);
             }
         }
+        let failure_reason = failure_reason.or_else(|| {
+            self.panes
+                .values()
+                .find_map(|tracked| tracked.recovery_failure)
+        });
         if let Some(reason_code) = failure_reason {
             self.set_health("screen", false, reason_code).await?;
         } else if attempted {
@@ -917,7 +1184,7 @@ impl AgentMonitorRuntime {
         if repairs.is_empty() {
             return Ok(());
         }
-        store::append_agent_events(
+        let appended = store::append_agent_events(
             &self.store,
             repairs
                 .iter()
@@ -933,6 +1200,20 @@ impl AgentMonitorRuntime {
                 .filter(|tracked| tracked.pane.incarnation == repair.incarnation)
             {
                 apply_repair_to_tracked(tracked, Some(repair));
+                if let Some(event) = appended.events.iter().find(|event| {
+                    event.r#type == "AgentWorkSummaryCandidatesRepaired"
+                        && event
+                            .payload
+                            .get("incarnation")
+                            .and_then(|value| value.get("pane_id"))
+                            .and_then(serde_json::Value::as_str)
+                            == Some(repair.incarnation.pane_id.as_str())
+                }) {
+                    tracked.summary_basis_version = event.version;
+                }
+                if let Some(summaries) = &mut self.summaries {
+                    summaries.invalidate(&repair.incarnation.pane_id);
+                }
             }
         }
         Ok(())
@@ -1193,6 +1474,22 @@ async fn observe_screen(
     })
 }
 
+async fn scan_prompts(
+    screen: Arc<dyn VisibleScreenPort>,
+    pane: AgentPaneObservation,
+    provider: AgentProviderSettings,
+    timeout: Duration,
+    gate: Arc<Semaphore>,
+) -> Result<PromptScan, AcquisitionFailure> {
+    run_bounded_thread("harold-screen-history", timeout, gate, move || {
+        screen.scan_prompts(&pane, &provider)
+    })
+    .await?
+    .map_err(|error| AcquisitionFailure {
+        reason_code: screen_reason(error),
+    })
+}
+
 async fn run_inventory<T, F>(
     timeout: Duration,
     gate: Arc<Semaphore>,
@@ -1225,8 +1522,10 @@ where
     std::thread::Builder::new()
         .name(thread_name.into())
         .spawn(move || {
-            let _permit = permit;
-            let _ = sender.send(operation());
+            let result = operation();
+            // A waiting caller may immediately start the next visible/history acquisition.
+            drop(permit);
+            let _ = sender.send(result);
         })
         .map_err(|_| AcquisitionFailure {
             reason_code: "task_failed",
@@ -1287,4 +1586,46 @@ fn now_ms() -> i64 {
         .ok()
         .and_then(|duration| i64::try_from(duration.as_millis()).ok())
         .unwrap_or(i64::MAX)
+}
+
+async fn next_summary(summaries: &mut Option<ActivityScheduler>) -> SummaryResult {
+    match summaries {
+        Some(summaries) => summaries.next().await,
+        None => std::future::pending().await,
+    }
+}
+
+fn source_version(appended: &events::AppendResult, types: &[&str]) -> Option<EventStreamVersion> {
+    appended
+        .events
+        .iter()
+        .rev()
+        .find(|event| types.contains(&event.r#type.as_str()))
+        .map(|event| event.version)
+}
+
+#[cfg(test)]
+mod acquisition_tests {
+    use super::*;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn completed_acquisition_releases_gate_before_notifying_caller() {
+        let gate = Arc::new(Semaphore::new(1));
+        for _ in 0..1_000 {
+            run_bounded_thread(
+                "harold-gate-test",
+                Duration::from_secs(1),
+                gate.clone(),
+                || (),
+            )
+            .await
+            .unwrap_or_else(|failure| {
+                panic!("unexpected acquisition failure: {}", failure.reason_code)
+            });
+            assert!(
+                gate.try_acquire().is_ok(),
+                "a completed operation must no longer hold its gate"
+            );
+        }
+    }
 }

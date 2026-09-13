@@ -44,10 +44,17 @@ CREATE INDEX IF NOT EXISTS idx_delivery_outbox_pending
 const AGENT_MONITOR_PROJECTION_SQL: &str =
     include_str!("store/migrations/003_agent_monitor_projection.sql");
 
-const STATE_MIGRATIONS: [(&str, &str); 3] = [
+const ACTIVITY_SUMMARY_PROJECTION_SQL: &str =
+    include_str!("store/migrations/004_activity_summary_projection.sql");
+
+const STATE_MIGRATIONS: [(&str, &str); 4] = [
     ("001_last_processed_event", LAST_PROCESSED_EVENT_SQL),
     ("002_delivery_outbox", DELIVERY_OUTBOX_SQL),
     ("003_agent_monitor_projection", AGENT_MONITOR_PROJECTION_SQL),
+    (
+        "004_activity_summary_projection",
+        ACTIVITY_SUMMARY_PROJECTION_SQL,
+    ),
 ];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -220,7 +227,8 @@ impl HaroldStore {
                     | "AgentPaneDeparted"
                     | "AgentLifecycleObserved"
                     | "AgentScreenObserved"
-                    | "AgentWorkSummaryCandidatesRepaired" => {
+                    | "AgentWorkSummaryCandidatesRepaired"
+                    | "AgentActivitySummaryGenerated" => {
                         snapshot_changed |=
                             project_agent_event(&conn, event, self.hook_grace_ms).await?;
                     }
@@ -424,7 +432,8 @@ const AGENT_PANE_COLUMNS: &str = r#"
     screen_state, screen_classifier_id, screen_observed_at_ms, effective_state,
     explicit_work_summary, explicit_work_summary_updated_at_ms,
     screen_work_summary, screen_work_summary_updated_at_ms, work_summary,
-    last_transition_at_ms, last_event_version
+    last_transition_at_ms, last_event_version,
+    summary_basis_version, generated_work_summary, generated_summary_basis_version
 "#;
 
 async fn last_processed_version_from(
@@ -498,6 +507,9 @@ async fn project_agent_event(
         "AgentWorkSummaryCandidatesRepaired" => AgentEvent::WorkSummaryCandidatesRepaired(
             serde_json::from_value(event.payload.clone())?,
         ),
+        "AgentActivitySummaryGenerated" => {
+            AgentEvent::ActivitySummaryGenerated(serde_json::from_value(event.payload.clone())?)
+        }
         _ => {
             return Err(events::EsError::Migration(format!(
                 "unsupported agent projection event type: {}",
@@ -581,6 +593,7 @@ fn agent_event_pane_id(event: &AgentEvent) -> &str {
         AgentEvent::LifecycleObserved(event) => &event.incarnation.pane_id,
         AgentEvent::ScreenObserved(event) => &event.incarnation.pane_id,
         AgentEvent::WorkSummaryCandidatesRepaired(event) => &event.incarnation.pane_id,
+        AgentEvent::ActivitySummaryGenerated(event) => &event.incarnation.pane_id,
         AgentEvent::MonitorHealthChanged(_) => unreachable!("health events are not pane events"),
     }
 }
@@ -627,10 +640,11 @@ async fn upsert_agent_pane(
             screen_state, screen_classifier_id, screen_observed_at_ms, effective_state,
             explicit_work_summary, explicit_work_summary_updated_at_ms,
             screen_work_summary, screen_work_summary_updated_at_ms, work_summary,
-            last_transition_at_ms, last_event_version
+            last_transition_at_ms, last_event_version,
+            summary_basis_version, generated_work_summary, generated_summary_basis_version
         ) VALUES (
             ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
-            ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25
+            ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28
         ) ON CONFLICT(pane_id) DO UPDATE SET
             pane_pid = excluded.pane_pid,
             agent_pid = excluded.agent_pid,
@@ -655,7 +669,10 @@ async fn upsert_agent_pane(
             screen_work_summary_updated_at_ms = excluded.screen_work_summary_updated_at_ms,
             work_summary = excluded.work_summary,
             last_transition_at_ms = excluded.last_transition_at_ms,
-            last_event_version = excluded.last_event_version
+            last_event_version = excluded.last_event_version,
+            summary_basis_version = excluded.summary_basis_version,
+            generated_work_summary = excluded.generated_work_summary,
+            generated_summary_basis_version = excluded.generated_summary_basis_version
         "#,
         turso::params![
             pane.incarnation.pane_id.as_str(),
@@ -683,6 +700,11 @@ async fn upsert_agent_pane(
             projection.work_summary.as_deref(),
             projection.last_transition_at_ms,
             projection.last_event_version.get(),
+            projection.summary_basis_version.get(),
+            projection.generated_work_summary.as_deref(),
+            projection
+                .generated_summary_basis_version
+                .map(EventStreamVersion::get),
         ],
     )
     .await?;
@@ -734,7 +756,10 @@ async fn load_agent_snapshot_from_one_query(
                     NULL AS screen_work_summary_updated_at_ms,
                     NULL AS work_summary,
                     NULL AS last_transition_at_ms,
-                    NULL AS pane_last_event_version
+                    NULL AS pane_last_event_version,
+                    NULL AS summary_basis_version,
+                    NULL AS generated_work_summary,
+                    NULL AS generated_summary_basis_version
                 FROM checkpoint
 
                 UNION ALL
@@ -749,7 +774,7 @@ async fn load_agent_snapshot_from_one_query(
                     health.last_event_version,
                     NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
                     NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
-                    NULL, NULL, NULL
+                    NULL, NULL, NULL, NULL, NULL, NULL
                 FROM checkpoint, agent_monitor_health AS health
 
                 UNION ALL
@@ -782,7 +807,10 @@ async fn load_agent_snapshot_from_one_query(
                     pane.screen_work_summary_updated_at_ms,
                     pane.work_summary,
                     pane.last_transition_at_ms,
-                    pane.last_event_version
+                    pane.last_event_version,
+                    pane.summary_basis_version,
+                    pane.generated_work_summary,
+                    pane.generated_summary_basis_version
                 FROM checkpoint, agent_panes AS pane
             )
             SELECT * FROM snapshot_rows
@@ -875,6 +903,11 @@ fn agent_pane_from_row_at(row: &turso::Row, offset: usize) -> events::Result<Age
         work_summary: optional_text(row, offset + 22)?,
         last_transition_at_ms: required_integer(row, offset + 23)?,
         last_event_version: EventStreamVersion::new(required_integer(row, offset + 24)?)?,
+        summary_basis_version: event_stream_version(required_integer(row, offset + 25)?)?,
+        generated_work_summary: optional_text(row, offset + 26)?,
+        generated_summary_basis_version: optional_integer(row, offset + 27)?
+            .map(event_stream_version)
+            .transpose()?,
     })
 }
 
@@ -1177,6 +1210,10 @@ fn normalize_agent_event(event: AgentEvent) -> Option<AgentEvent> {
             Some(AgentEvent::LifecycleObserved(lifecycle))
         }
         AgentEvent::ScreenObserved(screen) => normalize_screen_event(screen),
+        AgentEvent::ActivitySummaryGenerated(mut generated) => {
+            generated.description = normalize_work_summary(&generated.description)?;
+            Some(AgentEvent::ActivitySummaryGenerated(generated))
+        }
         AgentEvent::WorkSummaryCandidatesRepaired(repair) => (repair.clear_explicit
             || repair.clear_screen)
             .then_some(AgentEvent::WorkSummaryCandidatesRepaired(repair)),
@@ -1238,6 +1275,10 @@ fn agent_new_event(event: AgentEvent) -> events::Result<NewEvent> {
         AgentEvent::MonitorHealthChanged(event) => {
             ("AgentMonitorHealthChanged", serde_json::to_value(event)?)
         }
+        AgentEvent::ActivitySummaryGenerated(event) => (
+            "AgentActivitySummaryGenerated",
+            serde_json::to_value(event)?,
+        ),
     };
     Ok(NewEvent {
         r#type: event_type.into(),

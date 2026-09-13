@@ -12,6 +12,18 @@ path = "~/Library/Messages/chat.db"
 
 [ai]
 
+[activity_summary]
+enabled = false
+cli_path = "claude"
+model = "sonnet"
+effort = "low"
+timeout_ms = 15000
+max_concurrent = 2
+max_pending = 64
+max_instruction_chars = 4000
+max_reply_chars = 8000
+max_output_bytes = 65536
+
 [agent_monitor]
 inventory_interval_ms = 1000
 screen_interval_ms = 500
@@ -19,6 +31,8 @@ hook_grace_ms = 2000
 
 [[agents]]
 id = "codex"
+screen_adapter = "codex-v1"
+screen_history_lines = 2000
 display_name = "Codex"
 command_contains = ["codex"]
 busy_all = ["Working", "esc to interrupt"]

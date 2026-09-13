@@ -20,7 +20,8 @@ use super::runtime::{
     spawn_agent_monitor_for_test, spawn_agent_monitor_seeded_for_test,
 };
 use super::screen::{
-    CommandOutput, CommandRunner, ScreenError, TmuxVisibleScreen, VisibleScreenPort,
+    CommandOutput, CommandRunner, PromptBlock, PromptScan, ScreenError, TmuxVisibleScreen,
+    VisibleScreenPort,
 };
 use super::snapshot::AgentSnapshotHub;
 use crate::harold::harold_server::Harold;
@@ -99,6 +100,8 @@ impl AgentInventoryPort for FakeInventory {
 
 #[derive(Default)]
 struct FakeScreen {
+    scans: Mutex<VecDeque<Result<PromptScan, ScreenError>>>,
+    scan_count: AtomicUsize,
     observations: Mutex<VecDeque<Result<ScreenObservation, ScreenError>>>,
 }
 
@@ -148,12 +151,35 @@ fn assert_persisted_files_exclude(root: &Path, sentinel: &[u8]) {
 }
 
 impl FakeScreen {
+    fn prompts(&self, ids: &[u8]) {
+        self.scans.lock().unwrap().push_back(Ok(PromptScan {
+            blocks: ids
+                .iter()
+                .map(|id| PromptBlock {
+                    fingerprint: [*id; 32],
+                    candidate: Some(format!("task {id}")),
+                })
+                .collect(),
+        }));
+    }
     fn push(&self, observation: Result<ScreenObservation, ScreenError>) {
         self.observations.lock().unwrap().push_back(observation);
     }
 }
 
 impl VisibleScreenPort for FakeScreen {
+    fn scan_prompts(
+        &self,
+        _pane: &AgentPaneObservation,
+        _provider: &AgentProviderSettings,
+    ) -> Result<PromptScan, ScreenError> {
+        self.scan_count.fetch_add(1, Ordering::SeqCst);
+        self.scans
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or_else(|| Ok(PromptScan::default()))
+    }
     fn observe(
         &self,
         _pane: &AgentPaneObservation,
@@ -1357,6 +1383,14 @@ async fn real_screen_adapter_keeps_unrelated_capture_out_of_every_published_boun
                 [
                     CommandOutput {
                         success: true,
+                        stdout: Vec::new(),
+                    },
+                    CommandOutput {
+                        success: true,
+                        stdout: raw_capture.as_bytes().to_vec(),
+                    },
+                    CommandOutput {
+                        success: true,
                         stdout: raw_capture.as_bytes().to_vec(),
                     },
                     CommandOutput {
@@ -2471,6 +2505,8 @@ fn provider() -> AgentProviderSettings {
         busy_all: vec!["Working".into()],
         idle_all: vec!["Ready".into()],
         summary_line_prefixes: vec!["Task: ".into()],
+        screen_adapter: crate::settings::ScreenAdapter::GenericV1,
+        screen_history_lines: 2000,
     }
 }
 
@@ -2488,4 +2524,1121 @@ fn turn(last_user_prompt: &str) -> TurnCompleted {
 
 fn event_types(events: &[events::EventEnvelope]) -> Vec<&str> {
     events.iter().map(|event| event.r#type.as_str()).collect()
+}
+
+struct ControlledSummarizer {
+    requests: tokio::sync::mpsc::UnboundedSender<SummaryRequest>,
+}
+struct SummaryRequest {
+    input: crate::activity_summary::ActivitySummaryInput,
+    reply: tokio::sync::oneshot::Sender<Result<String, crate::activity_summary::SummaryError>>,
+}
+#[tonic::async_trait]
+impl crate::activity_summary::ActivitySummarizer for ControlledSummarizer {
+    async fn summarize(
+        &self,
+        input: crate::activity_summary::ActivitySummaryInput,
+    ) -> Result<String, crate::activity_summary::SummaryError> {
+        let (reply, result) = tokio::sync::oneshot::channel();
+        self.requests
+            .send(SummaryRequest { input, reply })
+            .map_err(|_| crate::activity_summary::SummaryError::ProcessFailed)?;
+        result
+            .await
+            .map_err(|_| crate::activity_summary::SummaryError::ProcessFailed)?
+    }
+}
+
+impl Fixture {
+    async fn with_summaries() -> (Self, tokio::sync::mpsc::UnboundedReceiver<SummaryRequest>) {
+        let directory = TestDirectory::new();
+        let store = Arc::new(HaroldStore::open(&directory.0).await.unwrap());
+        let inventory = Arc::new(FakeInventory::default());
+        let screen = Arc::new(FakeScreen::default());
+        let (shutdown, shutdown_rx) = watch::channel(());
+        let (requests, receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (handle, task) = super::runtime::spawn_agent_monitor(
+            store.clone(),
+            inventory.clone(),
+            screen.clone(),
+            vec![provider()],
+            AgentSnapshot {
+                through_event_version: EventStreamVersion::start(),
+                server_time_ms: 0,
+                monitor_health: Vec::new(),
+                panes: Vec::new(),
+            },
+            super::runtime::AgentMonitorRuntimeConfig {
+                activity_summary: Some((
+                    Arc::new(ControlledSummarizer { requests }),
+                    crate::settings::ActivitySummarySettings {
+                        enabled: true,
+                        max_concurrent: 1,
+                        ..Default::default()
+                    },
+                )),
+                inventory_interval: Duration::from_secs(86_400),
+                screen_interval: Duration::from_secs(86_400),
+                hook_grace_ms: 2_000,
+                acquisition_timeout: Duration::from_millis(100),
+            },
+            shutdown_rx,
+        );
+        (
+            Self {
+                _directory: directory,
+                store,
+                inventory,
+                screen,
+                handle,
+                _shutdown: shutdown,
+                task,
+            },
+            receiver,
+        )
+    }
+
+    async fn submit_summary_task(&self, prompt: &str, started_at: i64) {
+        self.inventory
+            .push_resolution(Ok(Some(pane("%8", 80, 800, started_at, 100))));
+        tokio::time::timeout(
+            Duration::from_millis(500),
+            self.handle.report_lifecycle(
+                "%8".into(),
+                ObservedAgentState::Busy,
+                "codex-hook".into(),
+                WorkSummaryUpdate::Set(prompt.into()),
+            ),
+        )
+        .await
+        .expect("hook ack must not wait for generation")
+        .unwrap();
+    }
+
+    async fn wait_for_generated(&self, expected: usize) {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if self
+                    .events()
+                    .await
+                    .iter()
+                    .filter(|event| event.r#type == "AgentActivitySummaryGenerated")
+                    .count()
+                    >= expected
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("generated event must append");
+    }
+}
+
+async fn next_request(
+    receiver: &mut tokio::sync::mpsc::UnboundedReceiver<SummaryRequest>,
+) -> SummaryRequest {
+    tokio::time::timeout(Duration::from_secs(2), receiver.recv())
+        .await
+        .unwrap()
+        .unwrap()
+}
+
+#[tokio::test]
+async fn activity_summary_ack_is_nonblocking_and_identical_new_turn_rejects_old_result() {
+    let (fixture, mut requests) = Fixture::with_summaries().await;
+    let prompt = format!("{} preserve this richer instruction tail", "x".repeat(170));
+    fixture.submit_summary_task(&prompt, 1_000).await;
+    let first = next_request(&mut requests).await;
+    assert_eq!(first.input.instruction, prompt);
+    assert!(first.input.assistant_reply.is_none());
+    fixture.submit_summary_task(&prompt, 1_000).await;
+    first.reply.send(Ok("OLD RESULT".into())).unwrap();
+    let second = next_request(&mut requests).await;
+    second
+        .reply
+        .send(Ok("Investigating the requested change".into()))
+        .unwrap();
+    fixture.wait_for_generated(1).await;
+    let events = fixture.events().await;
+    let generated: Vec<_> = events
+        .iter()
+        .filter(|event| event.r#type == "AgentActivitySummaryGenerated")
+        .collect();
+    assert_eq!(generated.len(), 1);
+    assert_eq!(
+        generated[0].payload["description"],
+        "Investigating the requested change"
+    );
+    assert_eq!(
+        generated[0].payload["basis_version"],
+        events
+            .iter()
+            .rev()
+            .find(|event| event.r#type == "AgentLifecycleObserved")
+            .unwrap()
+            .version
+            .get()
+    );
+    let projection = fixture.store.project_unhandled_events(100).await.unwrap();
+    assert!(projection.applied > 0);
+    let snapshot = fixture.store.load_agent_snapshot().await.unwrap();
+    assert_eq!(
+        snapshot.panes[0].work_summary.as_deref(),
+        Some("Investigating the requested change")
+    );
+    assert_eq!(
+        snapshot.panes[0]
+            .explicit_work_summary
+            .as_ref()
+            .unwrap()
+            .chars()
+            .count(),
+        160
+    );
+}
+
+#[tokio::test]
+async fn activity_summary_new_task_and_pane_replacement_reject_late_results() {
+    let (fixture, mut requests) = Fixture::with_summaries().await;
+    fixture.submit_summary_task("Fix old task", 1_000).await;
+    let first = next_request(&mut requests).await;
+    fixture.submit_summary_task("Fix new task", 1_000).await;
+    first.reply.send(Ok("Old task done".into())).unwrap();
+    let second = next_request(&mut requests).await;
+    fixture
+        .submit_summary_task("Replacement agent task", 2_000)
+        .await;
+    second.reply.send(Ok("New task done".into())).unwrap();
+    let replacement = next_request(&mut requests).await;
+    replacement
+        .reply
+        .send(Ok("Investigating replacement task".into()))
+        .unwrap();
+    fixture.wait_for_generated(1).await;
+    let events = fixture.events().await;
+    let generated: Vec<_> = events
+        .iter()
+        .filter(|event| event.r#type == "AgentActivitySummaryGenerated")
+        .collect();
+    assert_eq!(generated.len(), 1);
+    assert_eq!(
+        generated[0].payload["incarnation"]["agent_started_at_ms"],
+        2_000
+    );
+}
+
+#[tokio::test]
+async fn activity_summary_departure_discards_result_and_pending_request() {
+    let (fixture, mut requests) = Fixture::with_summaries().await;
+    fixture.submit_summary_task("Running task", 1_000).await;
+    let running = next_request(&mut requests).await;
+    fixture.submit_summary_task("Pending task", 1_000).await;
+    fixture.handle.inventory_tick().await.unwrap();
+    fixture.handle.inventory_tick().await.unwrap();
+    running.reply.send(Ok("Stale result".into())).unwrap();
+    tokio::time::sleep(Duration::from_millis(40)).await;
+    assert!(requests.try_recv().is_err());
+    assert!(
+        fixture
+            .events()
+            .await
+            .iter()
+            .all(|event| event.r#type != "AgentActivitySummaryGenerated")
+    );
+    fixture.store.project_unhandled_events(100).await.unwrap();
+    assert!(
+        fixture
+            .store
+            .load_agent_snapshot()
+            .await
+            .unwrap()
+            .panes
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn activity_summary_completion_uses_full_reply_and_projects_reported_outcome() {
+    let (fixture, mut requests) = Fixture::with_summaries().await;
+    fixture
+        .inventory
+        .push_resolution(Ok(Some(pane("%8", 80, 800, 1_000, 100))));
+    let prompt = format!("Repair tests. {}", "task context ".repeat(20));
+    let assistant_message = "Fixed the parser; integration tests are still pending.";
+    fixture
+        .handle
+        .turn_completed(TurnCompleted {
+            pane_id: "%8".into(),
+            pane_label: "fixture".into(),
+            last_user_prompt: prompt.clone(),
+            assistant_message: assistant_message.into(),
+            main_context: "".into(),
+            agent_incarnation: None,
+            work_summary: CompletionSummaryUpdate::Unchanged,
+        })
+        .await
+        .unwrap();
+    let request = next_request(&mut requests).await;
+    assert_eq!(request.input.instruction, prompt);
+    assert_eq!(
+        request.input.assistant_reply.as_deref(),
+        Some(assistant_message)
+    );
+    request
+        .reply
+        .send(Ok("Fixed parser; integration tests pending".into()))
+        .unwrap();
+    fixture.wait_for_generated(1).await;
+    fixture.store.project_unhandled_events(100).await.unwrap();
+    let snapshot = fixture.store.load_agent_snapshot().await.unwrap();
+    assert_eq!(snapshot.panes[0].effective_state, EffectiveAgentState::Idle);
+    assert_eq!(
+        snapshot.panes[0].work_summary.as_deref(),
+        Some("Fixed parser; integration tests pending")
+    );
+}
+
+#[tokio::test]
+async fn activity_summary_screen_duplicates_and_busy_corroboration_do_not_regenerate() {
+    let (fixture, mut requests) = Fixture::with_summaries().await;
+    fixture.submit_summary_task("Fix parser", 1_000).await;
+    let request = next_request(&mut requests).await;
+    request
+        .reply
+        .send(Ok("Investigating parser failures".into()))
+        .unwrap();
+    fixture.wait_for_generated(1).await;
+    let observation = ScreenObservation {
+        incarnation: pane("%8", 80, 800, 1_000, 100).incarnation,
+        state: Some(ObservedAgentState::Busy),
+        fallback_summary: None,
+        classifier_id: "codex-v1".into(),
+        observed_at_ms: 3_000,
+    };
+    fixture.screen.push(Ok(observation.clone()));
+    fixture.handle.screen_tick().await.unwrap();
+    fixture.screen.push(Ok(observation.clone()));
+    fixture.handle.screen_tick().await.unwrap();
+    assert!(requests.try_recv().is_err());
+    fixture.store.project_unhandled_events(100).await.unwrap();
+    assert_eq!(
+        fixture.store.load_agent_snapshot().await.unwrap().panes[0]
+            .work_summary
+            .as_deref(),
+        Some("Investigating parser failures")
+    );
+    let source = ScreenObservation {
+        fallback_summary: Some("Fix deployment".into()),
+        observed_at_ms: 4_000,
+        ..observation
+    };
+    fixture.screen.push(Ok(source.clone()));
+    fixture.handle.screen_tick().await.unwrap();
+    let next = next_request(&mut requests).await;
+    assert_eq!(next.input.instruction, "Fix deployment");
+    fixture.screen.push(Ok(source));
+    fixture.handle.screen_tick().await.unwrap();
+    next.reply
+        .send(Ok("Investigating deployment".into()))
+        .unwrap();
+    fixture.wait_for_generated(2).await;
+    assert!(requests.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn activity_summary_provider_failure_preserves_source_and_shutdown_cancels_inference() {
+    let (fixture, mut requests) = Fixture::with_summaries().await;
+    fixture.submit_summary_task("Fix parser", 1_000).await;
+    let request = next_request(&mut requests).await;
+    request
+        .reply
+        .send(Err(crate::activity_summary::SummaryError::ProcessFailed))
+        .unwrap();
+    fixture.submit_summary_task("Fix deployment", 1_000).await;
+    let pending = next_request(&mut requests).await;
+    fixture.store.project_unhandled_events(100).await.unwrap();
+    assert_eq!(
+        fixture.store.load_agent_snapshot().await.unwrap().panes[0]
+            .work_summary
+            .as_deref(),
+        Some("Fix deployment")
+    );
+    fixture._shutdown.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while !fixture.task.is_finished() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(pending.reply.is_closed());
+    assert!(
+        fixture
+            .events()
+            .await
+            .iter()
+            .all(|event| event.r#type != "AgentActivitySummaryGenerated")
+    );
+}
+
+#[tokio::test]
+async fn activity_summary_failed_result_append_keeps_fallback_and_next_turn_can_generate() {
+    let (fixture, mut requests) = Fixture::with_summaries().await;
+    fixture.submit_summary_task("Fix parser", 1_000).await;
+    let request = next_request(&mut requests).await;
+    fixture.store.fail_next_monitor_append_for_test();
+    request
+        .reply
+        .send(Ok("Investigating parser".into()))
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(40)).await;
+    fixture.store.project_unhandled_events(100).await.unwrap();
+    let snapshot = fixture.store.load_agent_snapshot().await.unwrap();
+    assert_eq!(
+        snapshot.panes[0].work_summary.as_deref(),
+        Some("Fix parser")
+    );
+    assert!(snapshot.panes[0].generated_work_summary.is_none());
+    assert!(
+        fixture
+            .events()
+            .await
+            .iter()
+            .all(|event| event.r#type != "AgentActivitySummaryGenerated")
+    );
+    fixture.submit_summary_task("Fix parser", 1_000).await;
+    let retry = next_request(&mut requests).await;
+    retry.reply.send(Ok("Investigating parser".into())).unwrap();
+    fixture.wait_for_generated(1).await;
+}
+
+#[tokio::test]
+async fn activity_summary_failed_source_append_keeps_prior_result_eligible() {
+    let (fixture, mut requests) = Fixture::with_summaries().await;
+    fixture.submit_summary_task("Fix parser", 1_000).await;
+    let request = next_request(&mut requests).await;
+    fixture
+        .inventory
+        .push_resolution(Ok(Some(pane("%8", 80, 800, 1_000, 100))));
+    fixture.store.fail_next_monitor_append_for_test();
+    assert!(
+        fixture
+            .handle
+            .report_lifecycle(
+                "%8".into(),
+                ObservedAgentState::Busy,
+                "codex-hook".into(),
+                WorkSummaryUpdate::Set("Undurable task".into())
+            )
+            .await
+            .is_err()
+    );
+    request
+        .reply
+        .send(Ok("Investigating parser".into()))
+        .unwrap();
+    fixture.wait_for_generated(1).await;
+    fixture.store.project_unhandled_events(100).await.unwrap();
+    let snapshot = fixture.store.load_agent_snapshot().await.unwrap();
+    assert_eq!(
+        snapshot.panes[0].explicit_work_summary.as_deref(),
+        Some("Fix parser")
+    );
+    assert_eq!(
+        snapshot.panes[0].work_summary.as_deref(),
+        Some("Investigating parser")
+    );
+    assert!(requests.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn activity_summary_reply_only_completion_generates_outcome_and_empty_completion_skips() {
+    let (fixture, mut requests) = Fixture::with_summaries().await;
+    fixture.submit_summary_task("Fix parser", 1_000).await;
+    let task = next_request(&mut requests).await;
+    task.reply.send(Ok("Investigating parser".into())).unwrap();
+    fixture.wait_for_generated(1).await;
+
+    fixture
+        .inventory
+        .push_resolution(Ok(Some(pane("%8", 80, 800, 1_000, 200))));
+    fixture
+        .handle
+        .turn_completed(TurnCompleted {
+            pane_id: "%8".into(),
+            pane_label: "fixture".into(),
+            last_user_prompt: String::new(),
+            assistant_message: "Fixed parser; integration tests are pending.".into(),
+            main_context: String::new(),
+            agent_incarnation: None,
+            work_summary: CompletionSummaryUpdate::Unchanged,
+        })
+        .await
+        .unwrap();
+    let request = next_request(&mut requests).await;
+    assert!(request.input.instruction.is_empty());
+    assert_eq!(
+        request.input.assistant_reply.as_deref(),
+        Some("Fixed parser; integration tests are pending.")
+    );
+    fixture.store.project_unhandled_events(100).await.unwrap();
+    let pending = fixture.store.load_agent_snapshot().await.unwrap();
+    assert_eq!(pending.panes[0].work_summary.as_deref(), Some("Fix parser"));
+    assert!(pending.panes[0].generated_work_summary.is_none());
+    request
+        .reply
+        .send(Ok("Fixed parser; integration tests pending".into()))
+        .unwrap();
+    fixture.wait_for_generated(2).await;
+    fixture.store.project_unhandled_events(100).await.unwrap();
+    let completed = fixture.store.load_agent_snapshot().await.unwrap();
+    assert_eq!(
+        completed.panes[0].work_summary.as_deref(),
+        Some("Fixed parser; integration tests pending")
+    );
+    assert_eq!(
+        completed.panes[0].explicit_work_summary.as_deref(),
+        Some("Fix parser")
+    );
+    assert_eq!(
+        completed.panes[0].effective_state,
+        EffectiveAgentState::Idle
+    );
+
+    fixture
+        .inventory
+        .push_resolution(Ok(Some(pane("%8", 80, 800, 1_000, 300))));
+    fixture
+        .handle
+        .turn_completed(TurnCompleted {
+            pane_id: "%8".into(),
+            pane_label: "fixture".into(),
+            last_user_prompt: String::new(),
+            assistant_message: "  \n ".into(),
+            main_context: String::new(),
+            agent_incarnation: None,
+            work_summary: CompletionSummaryUpdate::Unchanged,
+        })
+        .await
+        .unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(40), requests.recv())
+            .await
+            .is_err()
+    );
+    fixture.store.project_unhandled_events(100).await.unwrap();
+    let empty = fixture.store.load_agent_snapshot().await.unwrap();
+    assert_eq!(empty.panes[0].work_summary.as_deref(), Some("Fix parser"));
+    assert!(empty.panes[0].generated_work_summary.is_none());
+    assert!(empty.panes[0].summary_basis_version > completed.panes[0].summary_basis_version);
+
+    fixture
+        .inventory
+        .push_resolution(Ok(Some(pane("%8", 80, 800, 1_000, 400))));
+    let mut placeholder_completion = turn("Ready");
+    placeholder_completion.assistant_message = "Fixed parser; tests pending.".into();
+    fixture
+        .handle
+        .turn_completed(placeholder_completion)
+        .await
+        .unwrap();
+    let placeholder = next_request(&mut requests).await;
+    assert!(placeholder.input.instruction.is_empty());
+    assert_eq!(
+        placeholder.input.assistant_reply.as_deref(),
+        Some("Fixed parser; tests pending.")
+    );
+    assert!(
+        fixture
+            .events()
+            .await
+            .iter()
+            .filter(|event| event.r#type == "TurnCompleted")
+            .all(|event| event.payload["last_user_prompt"] == "")
+    );
+}
+
+struct BlockedSummaryScreen {
+    started: std::sync::atomic::AtomicBool,
+    release: (Mutex<bool>, std::sync::Condvar),
+}
+impl VisibleScreenPort for BlockedSummaryScreen {
+    fn observe(
+        &self,
+        _: &AgentPaneObservation,
+        _: &AgentProviderSettings,
+    ) -> Result<ScreenObservation, ScreenError> {
+        self.started.store(true, Ordering::SeqCst);
+        let (lock, ready) = &self.release;
+        let mut released = lock.lock().unwrap();
+        while !*released {
+            released = ready.wait(released).unwrap();
+        }
+        Err(ScreenError::CaptureFailed)
+    }
+}
+struct ReleaseSummaryScreen(Arc<BlockedSummaryScreen>);
+impl Drop for ReleaseSummaryScreen {
+    fn drop(&mut self) {
+        *self.0.release.0.lock().unwrap() = true;
+        self.0.release.1.notify_all();
+    }
+}
+
+#[tokio::test]
+async fn activity_summary_forced_main_shutdown_reaps_active_cli_during_blocked_screen_scan() {
+    use std::os::unix::fs::PermissionsExt;
+    let directory = TestDirectory::new();
+    let script = directory.0.join("claude");
+    std::fs::write(
+        &script,
+        r#"#!/bin/sh
+printf '%s\n%s\n' "$$" "$PWD" > "${0%/*}/started"
+exec /bin/sleep 60
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let settings = crate::settings::ActivitySummarySettings {
+        enabled: true,
+        cli_path: script.to_string_lossy().into_owned(),
+        timeout_ms: 15_000,
+        ..Default::default()
+    };
+    let activity_provider: Arc<dyn crate::activity_summary::ActivitySummarizer> = Arc::new(
+        crate::activity_summary::ClaudeActivitySummarizer::new(settings.clone()),
+    );
+    let store = Arc::new(HaroldStore::open(&directory.0.join("store")).await.unwrap());
+    let inventory = Arc::new(FakeInventory::default());
+    inventory.push_resolution(Ok(Some(pane("%8", 80, 800, 1_000, 100))));
+    let screen = Arc::new(BlockedSummaryScreen {
+        started: std::sync::atomic::AtomicBool::new(false),
+        release: (Mutex::new(false), std::sync::Condvar::new()),
+    });
+    let _release_screen = ReleaseSummaryScreen(screen.clone());
+    let (shutdown, shutdown_rx) = watch::channel(());
+    let (handle, monitor_task) = super::runtime::spawn_agent_monitor(
+        store,
+        inventory,
+        screen.clone(),
+        vec![provider()],
+        empty_snapshot(),
+        super::runtime::AgentMonitorRuntimeConfig {
+            activity_summary: Some((activity_provider.clone(), settings)),
+            inventory_interval: Duration::from_secs(86_400),
+            screen_interval: Duration::from_secs(86_400),
+            hook_grace_ms: 2_000,
+            acquisition_timeout: Duration::from_secs(60),
+        },
+        shutdown_rx,
+    );
+    handle
+        .report_lifecycle(
+            "%8".into(),
+            ObservedAgentState::Busy,
+            "codex-hook".into(),
+            WorkSummaryUpdate::Set("Fix parser".into()),
+        )
+        .await
+        .unwrap();
+    let (pid, request_directory) = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Ok(text) = std::fs::read_to_string(directory.0.join("started")) {
+                let mut lines = text.lines();
+                if let Some(pid) = lines.next().and_then(|value| value.parse::<u32>().ok())
+                    && let Some(cwd) = lines.next()
+                {
+                    break (pid, std::path::PathBuf::from(cwd));
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let scan = tokio::spawn(async move { handle.screen_tick().await });
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !screen.started.load(Ordering::SeqCst) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    drop(shutdown);
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        crate::stop_agent_monitor(
+            monitor_task,
+            Some(activity_provider),
+            Duration::from_millis(10),
+        ),
+    )
+    .await
+    .expect("forced shutdown must await CLI cleanup");
+    // Release the acquisition thread after the main shutdown helper returns;
+    // the monitor cannot have exited normally while observe was blocked.
+    *screen.release.0.lock().unwrap() = true;
+    screen.release.1.notify_all();
+    assert!(scan.await.unwrap().is_err());
+    assert!(
+        !request_directory.exists(),
+        "request directory must be removed before main shutdown returns"
+    );
+    let alive = std::process::Command::new("/bin/kill")
+        .args(["-0", &pid.to_string()])
+        .stderr(std::process::Stdio::null())
+        .status()
+        .unwrap()
+        .success();
+    assert!(
+        !alive,
+        "CLI child must be reaped before main shutdown returns"
+    );
+}
+
+#[tokio::test]
+async fn submitted_prompt_recovery_baselines_then_recovers_new_busy_work_inside_hook_grace() {
+    let source = pane("%8", 80, 800, 1000, 100);
+    let fixture = Fixture::new(FakeInventory::scans(vec![Ok(vec![source.clone()])])).await;
+    fixture.screen.prompts(&[1]);
+    fixture.handle.inventory_tick().await.unwrap();
+    assert_eq!(
+        fixture.screen.scan_count.load(Ordering::SeqCst),
+        1,
+        "discovery must baseline immediately"
+    );
+    fixture.inventory.push_resolution(Ok(Some(source.clone())));
+    fixture
+        .handle
+        .report_lifecycle(
+            "%8".into(),
+            ObservedAgentState::Busy,
+            "codex-hook".into(),
+            WorkSummaryUpdate::Set("Earlier explicit".into()),
+        )
+        .await
+        .unwrap();
+    fixture.screen.prompts(&[1, 2]);
+    fixture.screen.push(Ok(screen(
+        &source,
+        Some(ObservedAgentState::Busy),
+        None,
+        200,
+    )));
+    fixture.handle.screen_tick().await.unwrap();
+    fixture.store.project_unhandled_events(100).await.unwrap();
+    let snapshot = fixture.store.load_agent_snapshot().await.unwrap();
+    assert_eq!(snapshot.panes[0].work_summary.as_deref(), Some("task 2"));
+    assert_eq!(snapshot.panes[0].effective_state, EffectiveAgentState::Busy);
+    assert_eq!(fixture.screen.scan_count.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn submitted_prompt_recovery_retries_idle_once_and_refreshes_identical_new_turn() {
+    let source = pane("%8", 80, 800, 1000, 100);
+    let fixture = Fixture::new(FakeInventory::scans(vec![Ok(vec![source.clone()])])).await;
+    fixture.screen.prompts(&[1]);
+    fixture.handle.inventory_tick().await.unwrap();
+    fixture.screen.prompts(&[1]);
+    fixture.screen.push(Ok(screen(
+        &source,
+        Some(ObservedAgentState::Busy),
+        None,
+        200,
+    )));
+    fixture.handle.screen_tick().await.unwrap();
+    fixture.screen.prompts(&[1, 2]);
+    fixture.screen.push(Ok(screen(
+        &source,
+        Some(ObservedAgentState::Idle),
+        None,
+        300,
+    )));
+    fixture.handle.screen_tick().await.unwrap();
+    fixture.screen.push(Ok(screen(
+        &source,
+        Some(ObservedAgentState::Idle),
+        None,
+        400,
+    )));
+    fixture.handle.screen_tick().await.unwrap();
+    assert_eq!(fixture.screen.scan_count.load(Ordering::SeqCst), 3);
+    fixture.screen.prompts(&[1, 2, 2]);
+    fixture.screen.push(Ok(screen(
+        &source,
+        Some(ObservedAgentState::Busy),
+        None,
+        500,
+    )));
+    fixture.handle.screen_tick().await.unwrap();
+    fixture.store.project_unhandled_events(100).await.unwrap();
+    let snapshot = fixture.store.load_agent_snapshot().await.unwrap();
+    assert_eq!(
+        snapshot.panes[0].screen_work_summary_updated_at_ms,
+        Some(500)
+    );
+    assert_eq!(snapshot.panes[0].work_summary.as_deref(), Some("task 2"));
+    let events = fixture.events().await;
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.payload["classifier_id"] == "tmux-submitted-prompt-v1")
+            .count(),
+        2
+    );
+}
+
+#[tokio::test]
+async fn submitted_prompt_recovery_preserves_checkpoint_after_source_append_failure() {
+    let source = pane("%8", 80, 800, 1000, 100);
+    let fixture = Fixture::new(FakeInventory::scans(vec![Ok(vec![source.clone()])])).await;
+    fixture.screen.prompts(&[1]);
+    fixture.handle.inventory_tick().await.unwrap();
+    fixture.screen.prompts(&[1, 2]);
+    fixture.screen.push(Ok(screen(
+        &source,
+        Some(ObservedAgentState::Busy),
+        None,
+        200,
+    )));
+    fixture.store.fail_next_monitor_append_for_test();
+    assert!(fixture.handle.screen_tick().await.is_err());
+    fixture.screen.prompts(&[1, 2]);
+    fixture.screen.push(Ok(screen(
+        &source,
+        Some(ObservedAgentState::Busy),
+        None,
+        300,
+    )));
+    fixture.handle.screen_tick().await.unwrap();
+    // A repeated Busy poll is not a new edge; retain the 30-second history bound.
+    assert_eq!(fixture.screen.scan_count.load(Ordering::SeqCst), 2);
+    fixture.screen.push(Ok(screen(
+        &source,
+        Some(ObservedAgentState::Idle),
+        None,
+        400,
+    )));
+    fixture.handle.screen_tick().await.unwrap();
+    fixture.store.project_unhandled_events(100).await.unwrap();
+    let snapshot = fixture.store.load_agent_snapshot().await.unwrap();
+    assert_eq!(snapshot.panes[0].work_summary.as_deref(), Some("task 2"));
+    assert_eq!(
+        snapshot.panes[0].screen_work_summary_updated_at_ms,
+        Some(400)
+    );
+}
+
+#[tokio::test]
+async fn submitted_prompt_recovery_baselines_lifecycle_completion_and_replacement_discovery() {
+    let old = pane("%8", 80, 800, 1000, 100);
+    let replacement = pane("%8", 80, 801, 2000, 300);
+    let fixture = Fixture::new(FakeInventory::default()).await;
+    fixture.screen.prompts(&[1]);
+    fixture.inventory.push_resolution(Ok(Some(old.clone())));
+    fixture
+        .handle
+        .report_lifecycle(
+            "%8".into(),
+            ObservedAgentState::Busy,
+            "codex-hook".into(),
+            WorkSummaryUpdate::Unchanged,
+        )
+        .await
+        .unwrap();
+    assert_eq!(fixture.screen.scan_count.load(Ordering::SeqCst), 1);
+    fixture.screen.prompts(&[1, 2]);
+    fixture
+        .screen
+        .push(Ok(screen(&old, Some(ObservedAgentState::Busy), None, 200)));
+    fixture.handle.screen_tick().await.unwrap();
+    fixture.screen.prompts(&[1, 2, 3]);
+    fixture
+        .inventory
+        .push_resolution(Ok(Some(replacement.clone())));
+    fixture.handle.turn_completed(turn("")).await.unwrap();
+    assert_eq!(fixture.screen.scan_count.load(Ordering::SeqCst), 3);
+    fixture.screen.prompts(&[1, 2, 3]);
+    fixture.screen.push(Ok(screen(
+        &replacement,
+        Some(ObservedAgentState::Busy),
+        None,
+        400,
+    )));
+    fixture.handle.screen_tick().await.unwrap();
+    fixture.store.project_unhandled_events(100).await.unwrap();
+    let snapshot = fixture.store.load_agent_snapshot().await.unwrap();
+    assert_eq!(snapshot.panes[0].pane.incarnation, replacement.incarnation);
+    assert_eq!(
+        snapshot.panes[0].work_summary, None,
+        "replacement cannot inherit baseline history"
+    );
+    fixture.screen.prompts(&[1, 2, 3, 4]);
+    fixture.screen.push(Ok(screen(
+        &replacement,
+        Some(ObservedAgentState::Idle),
+        None,
+        500,
+    )));
+    fixture.handle.screen_tick().await.unwrap();
+    fixture.store.project_unhandled_events(100).await.unwrap();
+    assert_eq!(
+        fixture.store.load_agent_snapshot().await.unwrap().panes[0]
+            .work_summary
+            .as_deref(),
+        Some("task 4")
+    );
+}
+
+#[tokio::test]
+async fn submitted_prompt_recovery_capture_failure_allows_one_idle_retry_and_keeps_existing_summary()
+ {
+    let source = pane("%8", 80, 800, 1000, 100);
+    let fixture = Fixture::new(FakeInventory::scans(vec![Ok(vec![source.clone()])])).await;
+    fixture.screen.prompts(&[1]);
+    fixture.handle.inventory_tick().await.unwrap();
+    fixture
+        .screen
+        .scans
+        .lock()
+        .unwrap()
+        .push_back(Err(ScreenError::CaptureFailed));
+    fixture.screen.push(Ok(screen(
+        &source,
+        Some(ObservedAgentState::Busy),
+        None,
+        200,
+    )));
+    fixture.handle.screen_tick().await.unwrap();
+    fixture.screen.prompts(&[1, 2]);
+    fixture.screen.push(Ok(screen(
+        &source,
+        Some(ObservedAgentState::Idle),
+        None,
+        300,
+    )));
+    fixture.handle.screen_tick().await.unwrap();
+    fixture.store.project_unhandled_events(100).await.unwrap();
+    let snapshot = fixture.store.load_agent_snapshot().await.unwrap();
+    assert_eq!(snapshot.panes[0].work_summary.as_deref(), Some("task 2"));
+    assert!(snapshot.monitor_health.iter().all(|health| health.healthy));
+}
+
+#[tokio::test]
+async fn submitted_prompt_recovery_feeds_sonnet_and_identical_repeat_invalidates_old_generation() {
+    let (fixture, mut requests) = Fixture::with_summaries().await;
+    let source = pane("%8", 80, 800, 1000, 100);
+    fixture
+        .inventory
+        .scans
+        .lock()
+        .unwrap()
+        .push_back(Ok(vec![source.clone()]));
+    fixture.screen.prompts(&[1]);
+    fixture.handle.inventory_tick().await.unwrap();
+    fixture.screen.prompts(&[1, 2]);
+    fixture.screen.push(Ok(screen(
+        &source,
+        Some(ObservedAgentState::Busy),
+        None,
+        200,
+    )));
+    fixture.handle.screen_tick().await.unwrap();
+    let first = tokio::time::timeout(Duration::from_secs(2), requests.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(first.input.instruction, "task 2");
+    fixture.screen.push(Ok(screen(
+        &source,
+        Some(ObservedAgentState::Idle),
+        None,
+        300,
+    )));
+    fixture.handle.screen_tick().await.unwrap();
+    fixture.screen.prompts(&[1, 2, 2]);
+    fixture.screen.push(Ok(screen(
+        &source,
+        Some(ObservedAgentState::Busy),
+        None,
+        400,
+    )));
+    fixture.handle.screen_tick().await.unwrap();
+    first.reply.send(Ok("Old result".into())).unwrap();
+    let second = tokio::time::timeout(Duration::from_secs(2), requests.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(second.input.instruction, "task 2");
+    second.reply.send(Ok("Current result".into())).unwrap();
+    fixture.wait_for_generated(1).await;
+    fixture.store.project_unhandled_events(100).await.unwrap();
+    let snapshot = fixture.store.load_agent_snapshot().await.unwrap();
+    assert_eq!(
+        snapshot.panes[0].work_summary.as_deref(),
+        Some("Current result")
+    );
+    assert_eq!(
+        fixture
+            .events()
+            .await
+            .iter()
+            .filter(|event| event.r#type == "AgentActivitySummaryGenerated")
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn submitted_prompt_recovery_departure_discards_checkpoint_even_if_identity_rejoins() {
+    let source = pane("%8", 80, 800, 1000, 100);
+    let fixture = Fixture::new(FakeInventory::scans(vec![
+        Ok(vec![source.clone()]),
+        Ok(vec![]),
+        Ok(vec![]),
+        Ok(vec![source.clone()]),
+    ]))
+    .await;
+    fixture.screen.prompts(&[1]);
+    fixture.handle.inventory_tick().await.unwrap();
+    fixture.screen.prompts(&[1, 2]);
+    fixture.screen.push(Ok(screen(
+        &source,
+        Some(ObservedAgentState::Busy),
+        None,
+        200,
+    )));
+    fixture.handle.screen_tick().await.unwrap();
+    fixture.handle.inventory_tick().await.unwrap();
+    fixture.handle.inventory_tick().await.unwrap();
+    fixture.screen.prompts(&[1, 2, 3]);
+    fixture.handle.inventory_tick().await.unwrap();
+    fixture.screen.prompts(&[1, 2, 3]);
+    fixture.screen.push(Ok(screen(
+        &source,
+        Some(ObservedAgentState::Busy),
+        None,
+        300,
+    )));
+    fixture.handle.screen_tick().await.unwrap();
+    fixture.store.project_unhandled_events(100).await.unwrap();
+    assert_eq!(
+        fixture.store.load_agent_snapshot().await.unwrap().panes[0].work_summary,
+        None
+    );
+}
+
+#[tokio::test]
+async fn submitted_prompt_recovery_seeded_restart_baselines_before_first_command() {
+    let directory = TestDirectory::new();
+    let store = Arc::new(HaroldStore::open(&directory.0).await.unwrap());
+    let source = pane("%8", 80, 800, 1000, 100);
+    crate::store::append_agent_events(
+        &store,
+        vec![AgentEvent::PaneObserved(AgentPaneObserved {
+            pane: source.clone(),
+        })],
+    )
+    .await
+    .unwrap();
+    store.project_unhandled_events(100).await.unwrap();
+    let snapshot = store.load_agent_snapshot().await.unwrap();
+    let screen_port = Arc::new(FakeScreen::default());
+    screen_port.prompts(&[1, 2]);
+    screen_port.prompts(&[1, 2]);
+    screen_port.push(Ok(screen(
+        &source,
+        Some(ObservedAgentState::Busy),
+        None,
+        200,
+    )));
+    let (shutdown, shutdown_rx) = watch::channel(());
+    let (handle, task) = spawn_agent_monitor_seeded_for_test(
+        store.clone(),
+        Arc::new(FakeInventory::default()),
+        screen_port.clone(),
+        vec![provider()],
+        AgentMonitorSeed {
+            snapshot,
+            hook_grace_ms: 2000,
+            acquisition_timeout: Duration::from_millis(100),
+        },
+        shutdown_rx,
+    );
+    handle.screen_tick().await.unwrap();
+    assert_eq!(screen_port.scan_count.load(Ordering::SeqCst), 2);
+    store.project_unhandled_events(100).await.unwrap();
+    assert_eq!(
+        store.load_agent_snapshot().await.unwrap().panes[0].work_summary,
+        None
+    );
+    drop(shutdown);
+    task.await.unwrap();
+}
+
+#[tokio::test]
+async fn submitted_prompt_recovery_failed_baseline_does_not_retry_on_busy_or_idle_ticks() {
+    let source = pane("%8", 80, 800, 1000, 100);
+    let fixture = Fixture::new(FakeInventory::scans(vec![Ok(vec![source.clone()])])).await;
+    fixture
+        .screen
+        .scans
+        .lock()
+        .unwrap()
+        .push_back(Err(ScreenError::CaptureFailed));
+    fixture.handle.inventory_tick().await.unwrap();
+    for (state, timestamp) in [
+        (ObservedAgentState::Idle, 200),
+        (ObservedAgentState::Busy, 300),
+        (ObservedAgentState::Idle, 400),
+    ] {
+        fixture
+            .screen
+            .push(Ok(screen(&source, Some(state), None, timestamp)));
+        fixture.handle.screen_tick().await.unwrap();
+    }
+    assert_eq!(fixture.screen.scan_count.load(Ordering::SeqCst), 1);
+    fixture.store.project_unhandled_events(100).await.unwrap();
+    let snapshot = fixture.store.load_agent_snapshot().await.unwrap();
+    assert!(snapshot.panes[0].work_summary.is_none());
+    assert!(
+        snapshot
+            .monitor_health
+            .iter()
+            .any(|health| health.component == "screen" && !health.healthy)
+    );
+}
+
+#[tokio::test]
+async fn submitted_prompt_recovery_retries_failed_busy_source_append_after_becoming_idle() {
+    let source = pane("%8", 80, 800, 1000, 100);
+    let fixture = Fixture::new(FakeInventory::scans(vec![Ok(vec![source.clone()])])).await;
+    fixture.screen.prompts(&[1]);
+    fixture.handle.inventory_tick().await.unwrap();
+    fixture.screen.prompts(&[1, 2]);
+    fixture.screen.push(Ok(screen(
+        &source,
+        Some(ObservedAgentState::Busy),
+        None,
+        200,
+    )));
+    fixture.store.fail_next_monitor_append_for_test();
+    assert!(fixture.handle.screen_tick().await.is_err());
+    fixture.screen.prompts(&[1, 2]);
+    fixture.screen.push(Ok(screen(
+        &source,
+        Some(ObservedAgentState::Idle),
+        None,
+        300,
+    )));
+    fixture.handle.screen_tick().await.unwrap();
+    fixture.store.project_unhandled_events(100).await.unwrap();
+    let snapshot = fixture.store.load_agent_snapshot().await.unwrap();
+    assert_eq!(snapshot.panes[0].work_summary.as_deref(), Some("task 2"));
+    assert_eq!(
+        snapshot.panes[0].screen_work_summary_updated_at_ms,
+        Some(300)
+    );
 }

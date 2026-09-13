@@ -29,9 +29,15 @@ command_contains = ["custom-agent"]
 busy_all = ["Working"]
 idle_all = ["Ready"]
 summary_line_prefixes = ["> "]
+screen_adapter = "generic-v1"
+screen_history_lines = 2000
 ```
 
-Use marker text observed in the current visible terminal grid. Every `busy_all` fragment must match for Busy, and every `idle_all` fragment must match for Idle. If both clauses match, Busy wins. Omit `summary_line_prefixes` when a visible prefix cannot safely distinguish submitted work from a composer or placeholder.
+Use marker text observed in the current visible terminal grid. Every `busy_all` fragment must match for Busy, and every `idle_all` fragment must match for Idle. If both clauses match, Busy wins. For `generic-v1`, omit `summary_line_prefixes` when a prefix cannot safely distinguish submitted work from a composer or placeholder.
+
+For Codex, keep `screen_adapter = "codex-v1"` in its named provider entry. Shipped defaults select it explicitly; an older local list that omits the key stays on `generic-v1`. The Codex adapter recognizes styled submitted input and rejects unsent composer drafts. Claude remains generic, and OpenCode remains state-only without a summary prefix. See the [adapter reference](../references/agent-monitor/screen-adapters.md) for the exact support and timing limits.
+
+Set `screen_history_lines` to the number of history rows to search before the visible grid. The default is 2,000; values outside 1 through 10,000 fail startup. This setting does not change tmux's own history retention.
 
 Do not configure `id = "unknown"`; it is reserved. IDs must match `[a-z0-9][a-z0-9._-]{0,63}`.
 
@@ -129,7 +135,7 @@ opencode .
 
 Run this isolated example inside the tmux pane to preserve `TMUX_PANE`. Port `50061` keeps the acceptance process separate; OpenCode's normal default remains `localhost:50060`. If `OPENCODE_CONFIG_CONTENT` already contains settings, merge the plugin entry rather than replacing the existing JSON. Do not use `opencode --pure`, which disables external plugins.
 
-OpenCode's shipped provider configuration has busy/idle screen markers but no fallback-summary prefix. Explicit plugin summaries work; visible-screen fallback summaries do not. The plugin reports lifecycle state only and does not send `TurnComplete` notifications.
+OpenCode's shipped provider configuration uses `generic-v1` with busy/idle screen markers but no fallback-summary prefix. Explicit plugin summaries work; screen fallback summaries do not. The plugin reports lifecycle state and submitted instructions through `ReportAgentState`; it does not send `TurnComplete` notifications.
 
 The plugin removes complete ESC and C1 CSI, OSC, DCS, SOS, PM, and APC terminal sequences before it collapses whitespace, rejects placeholders, and applies the 160-scalar bound. Harold applies its own sanitizer again at durable ingress.
 
@@ -163,6 +169,21 @@ For OpenCode, run the repository tests without installing packages:
 ```sh
 node --test hooks/opencode/harold-plugin.test.mjs
 ```
+
+### Verify Codex screen recovery separately
+
+Use a disposable Codex pane and a separate Harold instance with its own store and listener, following the isolation setup below. Disable notification effects in that instance and set `[activity_summary].enabled = false` so `workSummary` exposes the exact recovered instruction. Keep provider hooks from reporting to that listener during this check.
+
+1. Start Codex and let Harold discover the process and capture its initial baseline before submitting test work. A prompt already present at first capture is deliberately ineligible.
+2. Submit a harmless distinctive instruction, such as `Explain the fixture retry loop without editing files`. Observe the source instruction in the snapshot and dashboard after a Busy transition or eligible retry.
+3. Submit another distinctive instruction and produce enough harmless output to move its submitted block above the visible grid while it remains within retained history. Leave a different instruction typed but unsent in the composer. After recovery, require the newest submitted instruction; the draft must never appear.
+4. Submit the same harmless instruction again. Its new occurrence must advance the snapshot revision while repeated polling without another submission must not create repeated source events.
+5. Stop Codex and relaunch it in the same pane. Confirm a new incarnation with no inherited summary despite retained scrollback. Let its baseline settle, then submit new work and confirm recovery for that incarnation.
+6. Enable activity summarization only after the source checks pass. Submit another harmless task and confirm the generated description describes that task without claiming unreported completion.
+
+If a state edge is missed, allow the 30-second Busy retry. A prompt already in the baseline, outside retained history, or in a snapshot that lost every overlap anchor is not eligible. Increasing the history bound cannot retroactively establish provenance. See [capture timing and acquisition rules](../references/agent-monitor/screen-adapters.md#capture-requests-and-timing).
+
+Record provider versions, process and pane identities, configuration, snapshot revisions, and sanitized synthetic task wording. Keep raw terminal captures ephemeral. These checks establish Codex screen recovery; they do not establish Claude-specific parsing or three-provider hook acceptance.
 
 ## 7. Run real-provider dashboard acceptance
 
@@ -263,7 +284,11 @@ Confirm named configuration is active rather than deprecated `[agents].command_c
 
 ### Work summary is absent
 
-Confirm the lifecycle event sends a present substantive `workSummary`. For screen fallback, confirm the provider has a safe `summary_line_prefixes` entry. OpenCode intentionally has no fallback prefix. An exact normalized configured idle-placeholder value is rejected and does not replace the prior screen candidate. A substantive prompt that merely contains the placeholder phrase remains valid.
+Confirm the lifecycle event sends a present substantive `workSummary`. For Codex recovery, inspect the effective named provider configuration: it must select `screen_adapter = "codex-v1"`; the provider ID alone is insufficient. Submit new work after Harold has established a baseline, and allow an eligible history capture. The first successful capture never adopts existing work, and a failed baseline can delay eligibility until later submissions.
+
+For `generic-v1`, confirm the provider has a safe `summary_line_prefixes` entry. OpenCode intentionally has none. A prompt outside the configured retained tail cannot be recovered; loss of all overlap anchors also causes a new baseline without adopting its contents. Check `monitorHealth` for capture failures before changing limits.
+
+An exact normalized configured idle-placeholder value is rejected and does not replace the prior screen candidate. A substantive prompt that merely contains the placeholder phrase remains valid. If a new Codex version changes its terminal rendering, use hooks for explicit evidence while updating styled fixtures and the versioned adapter; do not make composer text eligible by weakening the prefix check.
 
 ### Watch exits during shutdown
 

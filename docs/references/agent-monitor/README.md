@@ -1,6 +1,6 @@
 # Agent Monitor Reference
 
-The agent monitor discovers configured agent processes in tmux, records lifecycle and visible-screen observations, projects current pane state, and serves complete snapshots over gRPC.
+The agent monitor discovers configured agent processes in tmux, records lifecycle and provider-screen observations, projects current pane state, and serves complete snapshots over gRPC.
 
 ## Problem
 
@@ -65,7 +65,7 @@ Any change creates a new incarnation. A replacement begins at `Unknown` with no 
 sequenceDiagram
     participant Inventory as tmux/process inventory
     participant Hook as Lifecycle or stop hook
-    participant Screen as Visible-screen adapter
+    participant Screen as Provider screen adapter
     participant Runtime as AgentMonitorRuntime
     participant Events as EventStream harold/main
     participant Projector as Application projector
@@ -77,9 +77,10 @@ sequenceDiagram
         Inventory->>Runtime: complete pane and process observations
     and explicit lifecycle
         Hook->>Runtime: pane ID, Busy/Idle, optional summary update
-    and visible screen
-        Screen->>Runtime: matching incarnation, optional state, optional fallback summary
+    and screen acquisition
+        Screen->>Runtime: matching incarnation, optional state, ordered prompt scan
     end
+    Runtime->>Runtime: align incarnation checkpoint and select eligible fallback
     Runtime->>Events: append meaningful ordered facts
     Events->>Projector: events after application checkpoint
     Projector->>StateDB: begin transaction
@@ -130,12 +131,13 @@ Agent events use the existing ordered `harold/main` `EventStream`. Append batche
 | `AgentLifecycleObserved` | Full incarnation, `Busy`/`Idle`, adapter ID, `Unchanged`/`Clear`/`Set` summary update, observation time | Updates matching hook evidence and explicit-summary candidate. |
 | `AgentScreenObserved` | Full incarnation, optional `Busy`/`Idle`, optional normalized fallback summary, classifier ID, observation time | Applies each present fact independently. An absent field preserves its candidate. |
 | `AgentWorkSummaryCandidatesRepaired` | Full incarnation, independent explicit/screen clear flags, typed `ConfiguredIdlePlaceholder` reason, observation time | Clears only the marked legacy candidate and its timestamp, then recomputes the effective summary. |
+| `AgentActivitySummaryGenerated` | Full incarnation, source basis version, generated description, generation time | Sets a generated candidate only for the matching current incarnation and activity revision; does not change agent state or stage delivery. |
 | `AgentMonitorHealthChanged` | Component, healthy/degraded flag, bounded reason code, observation time | Upserts health for the component. |
 | `TurnCompleted` | Existing five notification fields plus optional resolved incarnation and `Unchanged`/`Set` completion summary update | Always preserves notification behavior; a matching resolved incarnation also supplies idle evidence and a non-destructive summary update. |
 
 `ReportAgentState` resolves the current incarnation and appends `AgentPaneObserved` immediately before `AgentLifecycleObserved` in one batch. A resolved `TurnComplete` appends `AgentPaneObserved` immediately before `TurnCompleted`. An unresolved completion still appends `TurnCompleted` for notification but does not alter agent state.
 
-Repeated inventory metadata and unchanged screen outputs do not append events. A screen event is appended when either its state or fallback summary is a meaningful changed value; both fields do not need to be present.
+Repeated inventory metadata and repeated captures of the same screen evidence do not append events. A screen event is appended when its state changes or the acquisition checkpoint proves a new eligible submitted occurrence. That occurrence can repeat the previous instruction text. State and summary do not both need to be present.
 
 ## Reconciliation contract
 
@@ -153,7 +155,7 @@ The runtime retains a conflicting screen state during grace only as an acquisiti
 
 ### Work summaries
 
-Harold keeps an explicit candidate and a provider-screen candidate for each incarnation, with durable internal observation timestamps. The most recently observed substantive candidate is the effective `work_summary`; explicit wins an equal-timestamp tie. A new incarnation starts with neither.
+Harold keeps an explicit candidate and a provider-screen candidate for each incarnation, with durable internal observation timestamps. The most recently observed substantive source candidate is selected, with explicit winning an equal-timestamp tie. When enabled, a valid generated activity description takes precedence for the same source revision. A new incarnation starts without any candidate. See [AI activity summaries](activity-summaries.md) for generation, fallback, and configuration.
 
 | Input | Value | Explicit-summary effect |
 | --- | --- | --- |
@@ -164,8 +166,8 @@ Harold keeps an explicit candidate and a provider-screen candidate for each inca
 | `TurnComplete.last_user_prompt` | Normalizes to empty | Preserve (`Unchanged`) because legacy proto3 cannot distinguish absent from empty |
 | `TurnComplete.last_user_prompt` | Normalizes non-empty and is not an exact configured idle placeholder | Set explicit candidate when the completion resolves to the current incarnation |
 | `TurnComplete.last_user_prompt` | Exact normalized configured idle placeholder | Clear the legacy raw prompt and preserve (`Unchanged`) before event serialization |
-| Visible-screen fallback | Inconclusive | Preserve prior fallback |
-| Visible-screen fallback | Changed, substantive | Replace the screen candidate; it becomes effective when newer than the explicit candidate |
+| Provider-screen fallback | Inconclusive or no new submitted occurrence | Preserve prior fallback |
+| Provider-screen fallback | Newly acquired substantive submitted occurrence | Replace the screen candidate and advance the activity revision, even for repeated text; it becomes the source fallback when newer than the explicit candidate |
 
 All summary inputs pass through the same terminal sanitizer. It removes C0 and C1 controls and complete ESC control sequences, collapses Unicode whitespace to single spaces, trims the result, and truncates it to 160 Unicode scalar values. Screen acquisition and the runtime defense reject only exact equality with a normalized configured idle fragment; a substantive prompt that merely mentions the placeholder remains valid. A conclusive state from the same observation remains usable, and placeholder/absence does not refresh or clear the prior screen candidate.
 
@@ -190,9 +192,11 @@ Migration `003_agent_monitor_projection` adds two checksum-tracked tables to `<s
 | `agent_panes` | Pane/display metadata, full incarnation, hook and screen evidence, explicit and fallback summary candidates with internal timestamps, effective state/summary, last transition, and last event version |
 | `agent_monitor_health` | Component, healthy flag, bounded reason code, observation time, and last event version |
 
+Migration `004_activity_summary_projection` extends `agent_panes` with `summary_basis_version`, `generated_work_summary`, and `generated_summary_basis_version`. These keep a generated description tied to its source revision while preserving the original source candidates. Previously applied migration checksums remain unchanged.
+
 The state database uses WAL mode, `synchronous = NORMAL`, and a five-second busy timeout. For each projection batch, Harold opens one immediate transaction, applies agent rows, stages only externally deliverable events, advances `last_processed_event`, and commits. An error rolls the whole transaction back.
 
-Only `TurnCompleted`, `InboundMessageReceived`, and unknown event types are staged in the delivery outbox. Agent observation, summary-repair, and monitor-health events are projection-only. Unknown event types remain visible to the existing permanent-delivery failure path instead of being silently skipped.
+Only `TurnCompleted`, `InboundMessageReceived`, and unknown event types are staged in the delivery outbox. Agent observation, summary-repair, generated-summary, and monitor-health events are projection-only. Unknown event types remain visible to the existing permanent-delivery failure path instead of being silently skipped.
 
 After commit, Harold loads the checkpoint, health, and panes with one query and publishes the complete snapshot if its `through_event_version` is greater than the in-memory revision. A revision can advance because of a non-agent event while pane content remains unchanged.
 
@@ -251,6 +255,8 @@ The pane message does not expose adapter IDs, classifier IDs, evidence provenanc
 
 ## Configuration
 
+Optional Claude dashboard generation is configured separately under `[activity_summary]`; see the [complete settings reference](activity-summaries.md#configuration).
+
 Default monitor configuration:
 
 ```toml
@@ -266,6 +272,8 @@ command_contains = ["codex"]
 busy_all = ["Working", "esc to interrupt"]
 idle_all = ["Ask Codex to do anything"]
 summary_line_prefixes = ["›"]
+screen_adapter = "codex-v1"
+screen_history_lines = 2000
 ```
 
 | Key | Constraint and behavior |
@@ -278,11 +286,15 @@ summary_line_prefixes = ["›"]
 | `agents[].command_contains` | At least one non-empty fragment; any fragment matches case-insensitively |
 | `agents[].busy_all` | Optional conjunctive, case-sensitive visible-grid fragments |
 | `agents[].idle_all` | Optional conjunctive, case-sensitive visible-grid fragments and idle-placeholder rejection clauses |
-| `agents[].summary_line_prefixes` | Optional exact, case-sensitive line prefixes used to acquire one bottom-most fallback candidate |
+| `agents[].summary_line_prefixes` | Optional exact, case-sensitive safe submitted-input prefixes for `generic-v1`; `codex-v1` recognizes its own styled `>` and `›` blocks |
+| `agents[].screen_adapter` | `generic-v1` when omitted; accepts `generic-v1` or `codex-v1`; unknown names fail startup |
+| `agents[].screen_history_lines` | Integer from 1 through 10,000; defaults to 2,000 history rows before the visible grid |
 
 Process selection prefers a matching process in the pane TTY's foreground process group. Otherwise it selects the shallowest matching descendant of the pane root, with PID as a deterministic tie-breaker. Multiple named provider matches produce provider `unknown` rather than choosing configuration order. Missing trustworthy process start time degrades inventory and does not create an incarnation.
 
-The shipped named defaults cover Codex, Claude, and OpenCode state markers. Codex and Claude also define visible-screen summary prefixes. OpenCode deliberately defines no `summary_line_prefixes`: its prompt and submitted-message rows cannot be safely distinguished by the configured visible prefix, so screen acquisition supplies state but no fallback summary. Its opt-in lifecycle plugin can still send explicit summaries.
+The shipped named defaults cover Codex, Claude, and OpenCode state markers. Codex explicitly selects `codex-v1`. Claude uses `generic-v1` with its configured summary prefix; it has no Claude-specific styled parser. OpenCode uses `generic-v1` without `summary_line_prefixes`, so screen acquisition supplies state but no fallback summary. Its opt-in lifecycle plugin can still send explicit summaries. Older named configurations that omit `screen_adapter` remain generic even when their provider ID is `codex`; add the explicit selection to enable Codex parsing.
+
+See [provider screen adapters](screen-adapters.md) for capture timing, incarnation baselines, prompt selection, and provider limitations.
 
 Legacy configuration remains loadable:
 
@@ -295,7 +307,7 @@ Harold logs a deprecation warning for this form. It is presence-only: matched ag
 
 ## Privacy and field bounds
 
-The screen adapter invokes `tmux capture-pane` for an already identified pane using a non-negative start offset and holds the captured visible text only inside that adapter. It returns a typed observation containing the full incarnation, optional state, optional normalized fallback summary, classifier ID, and time. Raw capture content is not stored or logged, including on capture failure.
+The capture port invokes `tmux capture-pane` for an already identified pane. Visible classification starts at row `0`; conditional recovery preserves styles and starts at the negative configured history depth. Raw captures remain within the capture and adapter boundary and are not stored or logged, including on failure. Adapters return typed state and ordered prompt fingerprints with optional normalized candidates. The runtime retains only fingerprints in its ephemeral acquisition checkpoint and forwards at most one eligible summary through the existing screen event.
 
 Before durable append or publication, tmux-derived metadata is terminal-sanitized and bounded:
 
@@ -329,7 +341,8 @@ An inventory failure preserves current panes and never infers mass departure. A 
 ## Lifecycle limits
 
 - `WatchAgentStates` is snapshot-then-stream, not cursor replay. Slow consumers may coalesce obsolete in-memory snapshots; reconnecting restores the latest complete state.
-- Provider screen markers are version-sensitive configuration, not semantic understanding. Inconclusive text is preserved as uncertainty.
+- Provider screen markers and styled parsing are version-sensitive. Inconclusive text is preserved as uncertainty; `codex-v1` does not establish a Claude-specific rendering guarantee.
+- History recovery is bounded and starts with a baseline that emits no existing prompt. Lost fingerprint overlap also establishes a new baseline without adopting its contents. These rules can leave late-attached or older work without a recovered summary.
 - Harold does not infer busy/idle from CPU use, tmux window activity, or elapsed silence.
 - Harold does not navigate tmux for the dashboard and does not implement dashboard search.
 - The OpenCode lifecycle plugin is opt-in and is not installed by `make deploy`; its screen provider has no fallback-summary prefix.

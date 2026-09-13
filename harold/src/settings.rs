@@ -58,6 +58,138 @@ pub struct AiSettings {
     pub local_model_dir: Option<String>,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default)]
+pub(crate) struct ActivitySummarySettings {
+    pub enabled: bool,
+    pub cli_path: String,
+    pub model: String,
+    pub effort: String,
+    pub timeout_ms: u64,
+    pub max_concurrent: usize,
+    pub max_pending: usize,
+    pub max_instruction_chars: usize,
+    pub max_reply_chars: usize,
+    pub max_output_bytes: usize,
+    #[serde(skip)]
+    pub environment: ActivitySummaryEnvironment,
+}
+
+#[derive(Clone)]
+pub(crate) struct ActivitySummaryEnvironment(pub Vec<(std::ffi::OsString, std::ffi::OsString)>);
+
+impl Default for ActivitySummaryEnvironment {
+    fn default() -> Self {
+        // Keep authentication and executable discovery, without inheriting agent
+        // hooks, provider redirects, debug logging, or parent tmux identity.
+        const ALLOWED: &[&str] = &[
+            "HOME",
+            "USER",
+            "LOGNAME",
+            "PATH",
+            "TMPDIR",
+            "LANG",
+            "LC_ALL",
+            "SSL_CERT_FILE",
+            "SSL_CERT_DIR",
+            "ANTHROPIC_API_KEY",
+            "CLAUDE_CODE_OAUTH_TOKEN",
+        ];
+        Self(
+            ALLOWED
+                .iter()
+                .filter_map(|key| std::env::var_os(key).map(|value| ((*key).into(), value)))
+                .collect(),
+        )
+    }
+}
+
+impl std::fmt::Debug for ActivitySummaryEnvironment {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ActivitySummaryEnvironment([redacted])")
+    }
+}
+
+impl Default for ActivitySummarySettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            cli_path: "claude".into(),
+            model: "sonnet".into(),
+            effort: "low".into(),
+            timeout_ms: 15_000,
+            max_concurrent: 2,
+            max_pending: 64,
+            max_instruction_chars: 4_000,
+            max_reply_chars: 8_000,
+            max_output_bytes: 65_536,
+            environment: ActivitySummaryEnvironment::default(),
+        }
+    }
+}
+
+impl ActivitySummarySettings {
+    pub(crate) fn validate(&self) -> Vec<String> {
+        let mut errors = Vec::new();
+        for (name, value, maximum) in [
+            ("timeout_ms", self.timeout_ms, 120_000),
+            ("max_concurrent", self.max_concurrent as u64, 16),
+            ("max_pending", self.max_pending as u64, 4_096),
+            (
+                "max_instruction_chars",
+                self.max_instruction_chars as u64,
+                32_000,
+            ),
+            ("max_reply_chars", self.max_reply_chars as u64, 32_000),
+            ("max_output_bytes", self.max_output_bytes as u64, 1_048_576),
+        ] {
+            if !(1..=maximum).contains(&value) {
+                errors.push(format!(
+                    "activity_summary.{name} must be between 1 and {maximum}"
+                ));
+            }
+        }
+        if self.cli_path.trim().is_empty()
+            || self.cli_path.len() > 4_096
+            || self.cli_path.chars().any(char::is_control)
+        {
+            errors.push("activity_summary.cli_path must be a nonempty executable path of at most 4096 bytes without controls".into());
+        }
+        if self.model.is_empty()
+            || self.model.len() > 128
+            || !self.model.as_bytes()[0].is_ascii_alphanumeric()
+            || !self
+                .model
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"-._:/".contains(&byte))
+        {
+            errors.push(
+                "activity_summary.model must be a model name of at most 128 ASCII token characters"
+                    .into(),
+            );
+        }
+        if !matches!(
+            self.effort.as_str(),
+            "low" | "medium" | "high" | "xhigh" | "max"
+        ) {
+            errors.push("activity_summary.effort must be low, medium, high, xhigh, or max".into());
+        }
+        errors
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum ScreenAdapter {
+    #[default]
+    GenericV1,
+    CodexV1,
+}
+
+fn default_screen_history_lines() -> u16 {
+    2000
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 pub(crate) struct AgentProviderSettings {
     pub id: String,
@@ -69,6 +201,10 @@ pub(crate) struct AgentProviderSettings {
     pub idle_all: Vec<String>,
     #[serde(default)]
     pub summary_line_prefixes: Vec<String>,
+    #[serde(default)]
+    pub screen_adapter: ScreenAdapter,
+    #[serde(default = "default_screen_history_lines")]
+    pub screen_history_lines: u16,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
@@ -136,6 +272,10 @@ impl AgentSettings {
                             "agents.display_name must not be empty for {}",
                             provider.id
                         ));
+                    }
+                    if !(1..=10_000).contains(&provider.screen_history_lines) {
+                        errors
+                            .push("agents.screen_history_lines must be between 1 and 10000".into());
                     }
                     validate_fragments(
                         "agents.command_contains",
@@ -245,6 +385,8 @@ pub struct Settings {
     pub chat_db: ChatDbSettings,
     pub ai: AiSettings,
     #[serde(default)]
+    pub(crate) activity_summary: ActivitySummarySettings,
+    #[serde(default)]
     pub(crate) agents: AgentSettings,
     #[serde(default)]
     pub(crate) agent_monitor: AgentMonitorSettings,
@@ -260,6 +402,7 @@ impl Settings {
     pub fn validate(&self) -> Vec<String> {
         let mut errors = Vec::new();
         errors.extend(self.agents.validate(&self.agent_monitor));
+        errors.extend(self.activity_summary.validate());
         match self.notify.away_channel.as_str() {
             "imessage" => {
                 if self.imessage.recipient.is_none() {
@@ -383,6 +526,53 @@ mod tests {
             busy_all: vec!["Working".to_string()],
             idle_all: vec!["Ready".to_string()],
             summary_line_prefixes: vec![">".to_string()],
+            screen_adapter: crate::settings::ScreenAdapter::GenericV1,
+            screen_history_lines: 2000,
+        }
+    }
+
+    #[test]
+    fn screen_adapter_defaults_and_names_are_explicit_and_validated() {
+        let parsed = parse_agent_config(&[r#"[[agents]]
+            id = "custom"
+            display_name = "Custom"
+            command_contains = ["custom"]
+        "#]);
+        let AgentSettings::Named(providers) = parsed.agents else {
+            panic!("named")
+        };
+        assert_eq!(providers[0].screen_adapter, super::ScreenAdapter::GenericV1);
+        assert_eq!(providers[0].screen_history_lines, 2000);
+        assert_eq!(
+            serde_json::from_str::<super::ScreenAdapter>(r#""codex-v1""#).unwrap(),
+            super::ScreenAdapter::CodexV1
+        );
+        assert!(serde_json::from_str::<super::ScreenAdapter>(r#""unknown-v1""#).is_err());
+        let shipped = parse_agent_config(&[include_str!("../config/default.toml")]);
+        let AgentSettings::Named(providers) = shipped.agents else {
+            panic!("named")
+        };
+        assert_eq!(providers[0].screen_adapter, super::ScreenAdapter::CodexV1);
+        assert!(
+            providers[1..]
+                .iter()
+                .all(|provider| provider.screen_adapter == super::ScreenAdapter::GenericV1)
+        );
+    }
+
+    #[test]
+    fn screen_history_rejects_zero_and_excessive_limits() {
+        for limit in [0, 10001] {
+            let text = format!(
+                r#"[[agents]]
+                id = "custom"
+                display_name = "Custom"
+                command_contains = ["custom"]
+                screen_history_lines = {limit}
+            "#
+            );
+            let parsed = parse_agent_config(&[&text]);
+            assert!(!parsed.agents.validate(&parsed.agent_monitor).is_empty());
         }
     }
 

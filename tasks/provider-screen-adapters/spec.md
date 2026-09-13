@@ -2,7 +2,7 @@
 
 ## Status
 
-Spec draft awaiting user review. This is a pre-implementation contract and must be checked against the final code before durable documentation is updated.
+Implementation authorized on 2026-09-09. This contract remains the acceptance baseline; verify it against code and live evidence before closing the task.
 
 ## Problem Framing
 
@@ -43,20 +43,22 @@ tmux capture-pane -p -S 0 -t <pane-id>
 
 `-S 0` starts at the top of the visible grid, so earlier scrollback is excluded. Without `-e`, tmux also removes terminal attributes. The generic extractor normalizes the resulting text and scans prefixed lines from bottom to top.
 
-A live Codex 0.149.0 capture with `-e` demonstrated the useful distinction:
+A live Codex 0.153.4 capture on 2026-09-09 verified the current distinction:
 
-- submitted input: bold `›`, reset, then normal prompt text;
-- current composer placeholder: bold `›`, reset, then dim prompt text;
-- wrapped submitted text continues on following indented lines;
+- submitted input: bold/dim `› ` including its separator, reset, then normal prompt text;
+- empty composer: bold `›`, reset, then dim placeholder text;
+- **nonempty draft: bold `›`, reset before the separator, then normal draft text**;
+- wrapped submitted text continues on following two-space-indented rows until a blank/block boundary;
 - completed prompt blocks can be far above the bottom of the pane.
 
+Normal candidate text alone does not prove submission. `codex-v1` requires the styled marker and separator to belong to the submitted-prefix span, rejects a reset-before-separator composer, and treats ambiguous styling as inconclusive. This refines the older 0.149.0 draft assumption using current observed evidence.
 Tmux is the only screen-text source in this task. Visible capture and bounded scrollback capture differ only in requested range and retained styling. The approved default recovery tail is 2,000 rows, with a validated maximum of 10,000.
 
 ## Behavior Contract
 
 ### Evidence precedence
 
-1. Existing semantic-recency rules remain authoritative: the newest substantive explicit or screen candidate is effective, and explicit wins an equal-timestamp tie.
+1. Existing semantic-recency rules remain authoritative for source fallback: the newest substantive explicit or screen candidate wins, and explicit wins an equal-timestamp tie. A generated Sonnet candidate may take display precedence only for the matching activity revision; a newly recovered submitted occurrence advances that revision, including a repeated identical prompt.
 2. A substantive submitted prompt proven to occur after the current incarnation's acquisition checkpoint may therefore replace an older candidate from either source.
 3. Placeholder, composer, inconclusive, or absent screen evidence does not clear or refresh an existing meaningful summary.
 4. A new process incarnation begins without an inherited summary. Prompt blocks already present when that incarnation is first observed form its baseline and are not eligible for recovery.
@@ -86,7 +88,7 @@ Tmux is the only screen-text source in this task. Visible capture and bounded sc
 ### Codex summary selection
 
 - Recognise submitted prompt blocks beginning with visible `>` or `›`.
-- Use SGR styling retained by `tmux capture-pane -e` to reject dim composer text.
+- Use SGR styling retained by `tmux capture-pane -e` to prove the submitted marker/separator boundary and reject both dim placeholders and normal-text unsent drafts.
 - Reject exact configured idle placeholders after normalisation.
 - Accept a substantive prompt that merely contains placeholder words.
 - Include wrapped continuation lines belonging to the same submitted prompt block.

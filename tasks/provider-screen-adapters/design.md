@@ -91,12 +91,13 @@ If a non-empty previous sequence has no overlap with the current bounded tail, t
 The adapter uses only evidence demonstrated in a styled tmux capture:
 
 ```text
-submitted: <bold>› <reset><normal prompt text>
-composer:  <bold>›<reset> <dim placeholder or draft>
+submitted: <bold and optionally dim>› <reset><normal prompt text>
+placeholder: <bold>›<reset> <dim placeholder>
+draft:       <bold>›<reset> <normal unsent text>
 wrapped:   two-space-indented continuation rows until the prompt block ends
 ```
 
-Both `>` and `›` are accepted visible prefixes. The adapter treats styling as evidence about the candidate text, not the prefix glyph alone.
+Both `>` and `›` are accepted visible prefixes. The adapter requires the marker and separator to share the submitted prefix style, followed by normal non-dim text. A composer resets before its separator and may contain normal, non-dim text. This boundary was verified against Codex 0.153.4 in a disposable live pane; text styling alone is insufficient.
 
 ### Selection algorithm
 
@@ -147,7 +148,7 @@ adapter.classify_visible
      existing append -> reducer -> snapshot
 ```
 
-Explicit hook observations continue through their current ingress and compete by existing semantic recency. A strictly newer substantive screen candidate replaces an older explicit candidate; explicit wins only an equal-timestamp tie. The adapter boundary does not create another source-precedence policy.
+Explicit hook observations continue through their current ingress and compete as source fallback by existing semantic recency. Generated Sonnet descriptions may win display only at their matching activity revision; each newly recovered submitted occurrence advances source recency/revision even when its text repeats. A strictly newer substantive screen candidate replaces an older explicit candidate; explicit wins only an equal-timestamp tie. The adapter boundary does not create another source-precedence policy.
 
 ## Security And Reliability
 
@@ -195,4 +196,4 @@ Implementation must use RED/GREEN TDD and should be divided into independently r
 4. runtime recovery trigger and reducer-preserving integration;
 5. provider fixtures, full gates, live tmux acceptance, and documentation migration.
 
-No implementation begins until this design and the companion `spec.md` are reviewed and approved.
+The user approved implementation of this design and its companion `spec.md` on 2026-09-09. The implementation plan records current code and live evidence refinements.
