@@ -20,13 +20,39 @@ Require Python 3.9+, tmux and grpcurl; do not install system dependencies implic
 - Workflow package step executed with local release binaries: ARM64 and signing
   validation, binary help, archive checksum, and packaged installer import pass.
 - Shell syntax and diff whitespace checks pass.
-- Completion reviewer approved with no findings. Public bootstrap URL and release assets require
-  these changes to be pushed and a release containing the bundle to be published.
+- Completion reviewer approved with no findings. Public bootstrap and release assets are now published and verified below.
 
 ## Published-release acceptance
 
-- [ ] Commit and push bootstrap changes.
-- [ ] Publish first release v0.1.0 and verify hosted build succeeds.
-- [ ] Run public curl bootstrap into isolated prefix with synthetic config.
-- [ ] Verify installed process, readiness, manual control; clean test service.
-- [ ] Record exact results and remaining fresh-machine limitation.
+- [x] Commit and push bootstrap changes.
+- [x] Publish first release v0.1.0 and verify hosted build succeeds.
+- [x] Run public curl bootstrap into isolated prefix with synthetic config.
+- [x] Verify installed process, readiness, manual control; clean test service.
+- [x] Record exact results and remaining fresh-machine limitation.
+
+The first hosted run (34760572312) failed before compilation because events
+was private. The user made events public; anonymous API access is confirmed.
+The original recursive submodule checkout now works without additional secrets
+or deploy keys. Re-running the same v0.1.0 workflow preserves its tagged source.
+
+## Published acceptance results
+
+- Bootstrap commit: b9051fef66ccf8018db037914c74fc79af6ba473 on origin/main.
+- Release: https://github.com/kahgeh/harold/releases/tag/v0.1.0
+- Hosted run: https://github.com/kahgeh/harold/actions/runs/34760572312
+  Attempt 2 passed all steps in 6m41s, including tests, release compilation,
+  ARM64/signature checks, packaging, checksum and asset upload.
+- Anonymous public `curl -fsSL .../main/scripts/bootstrap.sh | sh -s --
+  --prefix <temporary>/bin --config <synthetic-settings>` exited 0.
+- Downloaded archive checksum passed; installed daemon owned its loopback
+  listener at 127.0.0.1:59095, PID 10893; readiness returned true.
+- Managed store path and absence of automatic login plist verified.
+- Manual stop removed readiness; manual start restored readiness with PID 16000.
+- Final stop removed launchd job and listener; temporary installation removed.
+- Existing production install was untouched; no notification RPC was sent.
+- This proves the published download/install/control path on the current Mac.
+  A separate fresh-Mac test and interactive credential-wizard acceptance remain
+  unperformed; this run used supplied synthetic settings and existing prerequisites.
+
+Final completion reviewer independently confirmed public assets, hosted success,
+install log readiness, and cleanup; approved with no findings.

@@ -57,3 +57,5 @@
 - For binary distribution requests, distinguish release assets from temporary Actions artifacts. Use release-only triggers when the user wants publication builds rather than push/PR CI.
 
 - A network bootstrap is not end-to-end verified by fixture downloads or local packaging. Publish the real release and exercise the public command against its assets before claiming installation works; distinguish isolated testing on the current Mac from fresh-machine acceptance.
+
+- When the user chooses an Actions secret for private dependency access, use a narrowly scoped token secret instead of adding a repository deploy key. Do not request or print the token in chat.
