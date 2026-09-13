@@ -209,9 +209,7 @@ fn descendant_depth(
 }
 
 pub(super) fn resolve_provider(settings: &AgentSettings, command: &str) -> ProviderResolution {
-    let AgentSettings::Named(providers) = settings else {
-        return ProviderResolution::Unknown;
-    };
+    let AgentSettings(providers) = settings;
     let matching: Vec<&AgentProviderSettings> = providers
         .iter()
         .filter(|provider| command_matches_any(command, &provider.command_contains))

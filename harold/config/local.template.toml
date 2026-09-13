@@ -18,8 +18,7 @@ model = "sonnet"
 effort = "low"
 
 # Override the named provider list only when custom process or visible-screen
-# markers are required. An old `[agents] command_contains = [...]` table remains
-# loadable as a deprecated presence-only matcher.
+# markers are required. Overrides replace the complete [[agents]] list.
 # [[agents]]
 # id = "custom-agent"
 # display_name = "Custom Agent"

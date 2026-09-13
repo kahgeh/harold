@@ -41,13 +41,7 @@ chat_id = 12345678
 away_channel = "telegram"
 ```
 
-Or use environment variables:
-
-```bash
-export HAROLD__TELEGRAM__BOT_TOKEN="123456789:ABCdefGHIjklMNOpqrsTUVwxyz"
-export HAROLD__TELEGRAM__CHAT_ID=12345678
-export HAROLD__NOTIFY__AWAY_CHANNEL="telegram"
-```
+For an installed service, put these settings in `~/bin/harold/config/local.toml`. The managed launcher clears Harold overrides inherited from your shell.
 
 The `[imessage]` section can remain — it is ignored when `away_channel = "telegram"`.
 
@@ -56,11 +50,10 @@ The `[imessage]` section can remain — it is ignored when `away_channel = "tele
 If Harold is already running, restart it to pick up the new config:
 
 ```bash
-pkill -f ~/bin/harold/harold
-~/bin/harold/harold &
+~/bin/haroldctl restart
 ```
 
-Or just let the stop hook auto-start it on the next agent turn.
+Use `~/bin/haroldctl status` to verify readiness without sending a message.
 
 ## 5. Verify
 

@@ -1,123 +1,108 @@
 # Operation
 
-Operation covers how Harold is started, configured, and shut down.
+Harold runs as a per-user service on macOS. The installer provides `haroldctl` to start, stop, restart, and check that service. It does not register automatic startup at login.
 
 ## Problem
 
-Harold needs to be running whenever an agent turn completes, but manually starting a daemon before every session is fragile and easy to forget.
+A listening port alone does not tell you which Harold process owns it or which configuration and database it uses. Starting a second daemon from a hook can also race the first process. Installation and hook startup therefore use one service owner and the same readiness check.
 
 ## Architecture
 
-Harold runs as a single binary with three concurrent tasks sharing an event store via a `tokio::sync::watch` shutdown channel. The agent stop hook is responsible for ensuring Harold is alive before calling it.
+The installed `service.plist` stays inside the Harold bundle. `haroldctl start` loads it into the current user's graphical launchd domain and starts the service on demand. Its launcher applies the managed environment and replaces itself with the Harold binary. The service remains in that login session until stopped; the plist is not placed in `~/Library/LaunchAgents`.
 
-| Task        | Responsibility                                                                                       |
-| ----------- | ---------------------------------------------------------------------------------------------------- |
-| gRPC server | Accepts `TurnComplete` RPCs, appends `TurnCompleted` events                                          |
-| Event handler | Stages ordered events into a durable outbox; dispatches `TurnCompleted` → `notify()` and `InboundMessageReceived` → `route_inbound_message()` |
-| Listener    | Channel-specific inbound listener: iMessage watches `chat.db` via FSEvents (5s fallback poll) with separate inbound/self cursors; Telegram long-polls Bot API `getUpdates`. Both append `InboundMessageReceived` events |
+| Component | Responsibility |
+| --- | --- |
+| Installer | Build, stage, sign, validate, replace files, and verify startup |
+| `haroldctl` / `service.py` | Serialize control operations and manage the exact launchd service |
+| gRPC server | Accept hook reports and stream current agent snapshots |
+| Agent monitor | Resolve agent identity and record lifecycle/screen observations |
+| Event handler | Project state, stage delivery work, and dispatch notifications/replies |
+| Channel listener | Collect incoming messages for the event stream |
 
-The shutdown channel is a `watch::Sender<()>`. Dropping the sender (on SIGINT/SIGTERM) closes the channel; the event handler and listener exit their loops. An in-flight blocking delivery completes before the handler exits.
+The runtime components share Harold's store and shutdown signal. See [Harold Architecture](../../explanations/architecture.md) for their data flow.
 
+## Installation commands
+
+Run these from the repository:
+
+| Command | Behavior |
+| --- | --- |
+| `./scripts/install.sh` | Install or replace programs; retain existing local settings and managed data |
+| `./scripts/install.sh --reinstall` | Archive the old bundle; retain settings and create fresh managed data |
+| `--config PATH` | Import local TOML settings instead of retaining or prompting for them |
+| `--prefix PATH` | Set executable directory; defaults to `~/bin` |
+| `--signing-identity ID` | Choose a signing identity; defaults to ad-hoc `-` |
+| `--offline` | Build with cached locked Cargo dependencies |
+
+`make install` and `make deploy` call the normal installer. `make reinstall` selects fresh storage. Pass installer flags using `INSTALL_ARGS`. Missing prerequisites and invalid configuration stop installation before the running service is replaced. A readiness failure returns nonzero and reports where to find the installed log and configuration.
+
+Reinstall operates only on the managed bundle. It does not convert database schemas or remove an external store mentioned in a copied configuration. Backups are named uniquely and their locations are printed. A normal install moves retained managed data into the new bundle; its archived previous bundle is not a second copy of that data.
+
+## Configuration and environment
+
+The daemon loads configuration in this order:
+
+1. `config/default.toml`, required.
+2. `config/local.toml`, optional user settings for an installed service.
+3. `HAROLD__<SECTION>__<KEY>` environment overrides.
+
+For a directly run binary, `HAROLD_CONFIG_DIR` selects the directory and `HAROLD_ENV` selects the overlay name. By default, configuration is adjacent to the executable.
+
+The installed service controls its own config directory, `local` overlay, PATH, UTF-8 locale, and store at `<prefix>/harold/data/events`. It clears inherited Harold settings overrides before applying that environment. This keeps startup, configuration checks, readiness checks, and hooks pointed at the same installation even when the invoking shell contains development overrides.
+
+`service.json` records the service identity and environment. Channel credentials belong in `config/local.toml`, which the installer writes with owner-only permissions. Edit that file and run `haroldctl restart` to apply changes.
+
+## Start, stop, and inspect
+
+For the default installation:
+
+```sh
+~/bin/haroldctl start
+~/bin/haroldctl status
+~/bin/haroldctl restart
+~/bin/haroldctl stop
 ```
-  ┌────────────────────────────────────────────────────┐
-  │                      Harold                        │
-  │                                                    │
-  │  ┌─────────────┐  ┌────────────┐  ┌─────────────┐  │
-  │  │ gRPC server │  │  Handler   │  │  Listener   │  │
-  │  │             │  │            │  │             │  │
-  │  │ TurnComplete│  │ TurnComple-│  │ watches     │  │
-  │  │ RPC handler │  │ ted →      │  │ chat.db     │  │
-  │  │             │  │ notify     │  │ (FSEvents)  │  │
-  │  │             │  │            │  │             │  │
-  │  │             │  │ InboundMsg │  │             │  │
-  │  │             │  │ → route    │  │             │  │
-  │  └──────┬──────┘  └─────┬──────┘  └──────┬──────┘  │
-  │         │               │                │         │
-  │         └───────────────┴────────────────┘         │
-  │                         │                          │
-  │           EventStream + Harold state DB            │
-  └────────────────────────────────────────────────────┘
+
+`start` is idempotent. It succeeds only when the launchd service's PID owns the configured listening socket and a read-only gRPC request receives the initial `WatchAgentStates` snapshot. It does not use `TurnComplete` or notification diagnostics as a probe. An unrelated listener is an error, not a process to kill.
+
+Hooks call the same `start` operation before sending a completion. They use the managed endpoint and do not spawn a daemon directly.
+
+```mermaid
+sequenceDiagram
+    participant Caller as User or hook
+    participant Control as haroldctl
+    participant Launchd as User launchd domain
+    participant Harold
+    Caller->>Control: start
+    opt Service is not running
+        Control->>Launchd: load bundled plist and start job
+        Launchd->>Harold: exec with managed environment
+        Harold->>Harold: validate config, open store, catch up snapshot
+    end
+    Control->>Launchd: find managed PID
+    Control->>Control: verify PID owns listening socket
+    Control->>Harold: WatchAgentStates
+    Harold-->>Control: initial snapshot
+    Control-->>Caller: ready
 ```
-
-## Startup
-
-The stop hook detects Harold via a TCP connect to `host:port` (configured in `[grpc]`). If the connect fails, it spawns `~/bin/harold/harold` with the working directory set to `~/bin/harold/` so the binary finds `config/` and its event store without any environment variables.
-
-Config is loaded in layers on startup:
-
-1. `config/default.toml` — shipped defaults, always required
-2. `config/local.toml` — personal overrides, optional (not committed to git)
-3. `HAROLD__<SECTION>__<KEY>` environment variables — highest priority, e.g. `HAROLD__IMESSAGE__RECIPIENT`
-
-Config directory defaults to `config/` next to the running binary (`current_exe()` parent). Override with `HAROLD_CONFIG_DIR`.
 
 ## Shutdown
 
-SIGINT or SIGTERM triggers an ordered shutdown:
+`haroldctl stop` unloads the exact service and waits for its process to stop within a bounded period. Within Harold, SIGINT or SIGTERM closes the shared shutdown signal, ends snapshot streams, drains in-flight RPCs, and joins the event handler and listener. The monitor has a bounded shutdown deadline.
 
-1. Tonic receives the shutdown signal and begins graceful gRPC shutdown
-2. The same signal future drops `shutdown_tx`, closing the `watch` channel while Tonic drains in-flight RPCs
-3. Event handler and listener observe channel close and exit; a blocking delivery already in progress completes first
-4. After the gRPC server finishes draining, `event_handler_handle.await` and `listener_handle.await` join both tasks
+An RPC that appends after the handler has stopped remains durable and is projected at the next start. Event-stream and state-database writes commit as operations complete; shutdown does not require a separate final checkpoint.
 
-An RPC that appends after the handler has observed shutdown remains durable in the event stream and is staged on Harold's next start.
+## Read-only daemon checks
 
-There is no explicit final checkpoint call. The event stream and Harold state database commit writes as their operations complete.
+| Command | Result |
+| --- | --- |
+| `harold --check-config` | Validates resolved configuration and prints only `grpc_addr` and `store_path` as JSON; does not open storage |
+| `harold --check-ready` | Receives one snapshot within five seconds and prints `ready` and `through_event_version`; does not print pane contents or append events |
 
-## Diagnostics
+These direct commands use the invoking process's normal configuration environment. `haroldctl status` runs the readiness check with the installed environment and adds process ownership verification.
 
-```
-harold --diagnostics [--delay N]
-```
+## Notification diagnostics
 
-Runs without starting the daemon. Prints the current config, then tests:
+`harold --diagnostics [--delay N]` explicitly tests screen-lock detection, TTS, and the selected away channel. It can speak or send a message. A bare `--delay` defaults to ten seconds, allowing time to lock the screen.
 
-1. Screen lock detection (`ioreg`)
-2. TTS notification (`notify_at_desk` with a dummy turn)
-3. Away channel notification (`channels::notify_away` with a dummy turn, if screen locked)
-
-`--delay N` sleeps N seconds before running (default 10 when `--delay` is given without a value) — allows time to lock the screen to test the away path.
-
-## Sequences
-
-### Startup
-
-```mermaid
-sequenceDiagram
-    participant Hook as Stop hook
-    participant OS
-    participant Harold
-    participant Store as Event store
-
-    Hook->>OS: TCP connect to grpc.host:grpc.port
-    alt connection refused (Harold not running)
-        Hook->>OS: spawn ~/bin/harold/harold (cwd = ~/bin/harold/)
-        Harold->>Harold: load config/default.toml → config/local.toml → HAROLD__* env vars
-        Harold->>Store: open harold/main EventStream and harold-state.db
-        Harold->>Harold: start gRPC server on grpc.host:grpc.port
-        Harold->>Harold: start event handler task (watch shutdown_rx)
-        Harold->>Harold: start Listener task (watch shutdown_rx)
-    end
-    Hook->>Harold: TurnComplete RPC
-```
-
-### Shutdown
-
-```mermaid
-sequenceDiagram
-    participant OS
-    participant Harold
-    participant Handler as Event handler
-    participant Listener
-    participant Store as Event store
-
-    OS->>Harold: SIGINT or SIGTERM
-    Harold->>Harold: drop shutdown_tx → watch channel closes
-    note over Handler: finish in-flight delivery, then exit loop
-    note over Listener: shutdown_rx.changed() → Err → exit loop
-    note over Harold: Tonic drains in-flight RPCs
-    Harold->>Harold: gRPC serve_with_shutdown future resolves
-    Handler-->>Harold: task handle resolves
-    Listener-->>Harold: task handle resolves
-    Harold->>OS: exit 0
-```
+Use diagnostics only when intentionally testing notification delivery. See [installation and setup](../../how-tos/setup.md) for the manual macOS permissions and provider-hook steps that remain after the service is ready.

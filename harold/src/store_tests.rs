@@ -8,8 +8,7 @@ use serde_json::json;
 use crate::agent::domain::{
     AgentEvent, AgentIncarnation, AgentLifecycleObserved, AgentMonitorHealthChanged,
     AgentPaneDeparted, AgentPaneObservation, AgentPaneObserved, AgentScreenObserved,
-    AgentWorkSummaryCandidatesRepaired, AgentWorkSummaryRepairReason, CompletionSummaryUpdate,
-    EffectiveAgentState, ObservedAgentState, WorkSummaryUpdate,
+    CompletionSummaryUpdate, EffectiveAgentState, ObservedAgentState, WorkSummaryUpdate,
 };
 
 use super::{
@@ -248,43 +247,6 @@ async fn all_absent_screen_observation_is_not_appended() {
 }
 
 #[tokio::test]
-async fn repair_event_round_trips_without_embedding_the_rejected_candidate() {
-    const PLACEHOLDER: &str = "Ask Codex to do anything";
-
-    let directory = TestDirectory::new();
-    let store = HaroldStore::open(directory.path()).await.unwrap();
-    let appended = append_agent_events(
-        &store,
-        vec![AgentEvent::WorkSummaryCandidatesRepaired(
-            AgentWorkSummaryCandidatesRepaired {
-                incarnation: agent_incarnation(),
-                clear_explicit: true,
-                clear_screen: false,
-                reason: AgentWorkSummaryRepairReason::ConfiguredIdlePlaceholder,
-                observed_at_ms: 107,
-            },
-        )],
-    )
-    .await
-    .unwrap();
-
-    assert_eq!(appended.events.len(), 1);
-    let stored = &appended.events[0];
-    assert_eq!(stored.r#type, "AgentWorkSummaryCandidatesRepaired");
-    assert!(!stored.payload.to_string().contains(PLACEHOLDER));
-    let repair: AgentWorkSummaryCandidatesRepaired =
-        serde_json::from_value(stored.payload.clone()).unwrap();
-    assert_full_incarnation(&repair.incarnation);
-    assert!(repair.clear_explicit);
-    assert!(!repair.clear_screen);
-    assert_eq!(
-        repair.reason,
-        AgentWorkSummaryRepairReason::ConfiguredIdlePlaceholder
-    );
-    assert_eq!(repair.observed_at_ms, 107);
-}
-
-#[tokio::test]
 async fn appended_turn_completed_is_readable_from_refreshed_stream() {
     let directory = TestDirectory::new();
     let store = HaroldStore::open(directory.path()).await.unwrap();
@@ -400,7 +362,7 @@ async fn state_migrations_are_idempotent_and_reject_changed_checksums() {
     let store = HaroldStore::open(directory.path()).await.unwrap();
     let conn = store.state.connect().unwrap();
     conn.execute(
-        "UPDATE _migrations SET checksum = 'changed' WHERE name = '001_last_processed_event'",
+        "UPDATE _migrations SET checksum = 'changed' WHERE name = '001_initial'",
         (),
     )
     .await
@@ -456,7 +418,7 @@ async fn reopening_preserves_checkpoint_and_pending_delivery_without_duplication
 }
 
 #[tokio::test]
-async fn projection_migration_is_idempotent_and_preserves_earlier_records() {
+async fn fresh_schema_has_one_initial_record_across_reopen() {
     let directory = TestDirectory::new();
     let store = HaroldStore::open(directory.path()).await.unwrap();
     drop(store);
@@ -470,30 +432,166 @@ async fn projection_migration_is_idempotent_and_preserves_earlier_records() {
     while let Some(row) = rows.next().await.unwrap() {
         names.push(row.get_value(0).unwrap().as_text().unwrap().to_string());
     }
-    assert_eq!(
-        names,
-        [
-            "001_last_processed_event",
-            "002_delivery_outbox",
-            "003_agent_monitor_projection",
-            "004_activity_summary_projection",
-        ]
-    );
+    assert_eq!(names, ["001_initial"]);
+}
 
+#[tokio::test]
+async fn conflicting_schema_fails_without_partial_initialization_or_data_loss() {
+    let directory = TestDirectory::new();
+    let state_path = directory.path().join(super::STATE_DATABASE);
+    let database = turso::Builder::new_local(state_path.to_str().unwrap())
+        .build()
+        .await
+        .unwrap();
+    let conn = database.connect().unwrap();
+    super::configure_state_database(&conn).await.unwrap();
+    conn.execute_batch(
+        "CREATE TABLE agent_panes (existing_data TEXT NOT NULL);
+         INSERT INTO agent_panes VALUES ('preserve this record');",
+    )
+    .await
+    .unwrap();
+
+    assert!(HaroldStore::open(directory.path()).await.is_err());
+
+    let mut rows = conn
+        .query("SELECT existing_data FROM agent_panes", ())
+        .await
+        .unwrap();
+    assert_eq!(
+        rows.next()
+            .await
+            .unwrap()
+            .unwrap()
+            .get_value(0)
+            .unwrap()
+            .as_text()
+            .map(String::as_str),
+        Some("preserve this record")
+    );
+    assert!(rows.next().await.unwrap().is_none());
+    let mut rows = conn
+        .query(
+            "SELECT name FROM sqlite_schema WHERE type = 'table' ORDER BY name",
+            (),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        rows.next()
+            .await
+            .unwrap()
+            .unwrap()
+            .get_value(0)
+            .unwrap()
+            .as_text()
+            .map(String::as_str),
+        Some("agent_panes")
+    );
+    assert!(rows.next().await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn unknown_schema_record_is_rejected_without_modifying_pending_delivery() {
+    let directory = TestDirectory::new();
+    let store = HaroldStore::open(directory.path()).await.unwrap();
+    append_inbound_message(
+        &store,
+        &InboundMessage {
+            text: "keep pending".into(),
+        },
+    )
+    .await
+    .unwrap();
+    store.project_unhandled_events(500).await.unwrap();
+    let pending_id = store
+        .next_pending_delivery()
+        .await
+        .unwrap()
+        .unwrap()
+        .event_id;
+    let conn = store.state.connect().unwrap();
     conn.execute(
-        "UPDATE _migrations SET checksum = 'changed' WHERE name = '003_agent_monitor_projection'",
+        "INSERT INTO _migrations (name, checksum, applied_at_ms) VALUES ('unknown_schema', 'unknown', 0)",
         (),
     )
     .await
     .unwrap();
-    drop(conn);
-    drop(store);
 
     let error = HaroldStore::open(directory.path())
         .await
         .err()
-        .expect("changed projection migration checksum should fail");
-    assert!(error.to_string().contains("checksum changed"));
+        .expect("unknown schema must fail");
+    assert!(error.to_string().contains("incompatible state schema"));
+    assert_eq!(store.last_processed_version().await.unwrap().get(), 1);
+    assert_eq!(
+        store
+            .next_pending_delivery()
+            .await
+            .unwrap()
+            .unwrap()
+            .event_id,
+        pending_id
+    );
+    let mut rows = conn
+        .query("SELECT COUNT(*) FROM _migrations", ())
+        .await
+        .unwrap();
+    assert_eq!(
+        rows.next()
+            .await
+            .unwrap()
+            .unwrap()
+            .get_value(0)
+            .unwrap()
+            .as_integer(),
+        Some(&2)
+    );
+}
+
+#[tokio::test]
+async fn fresh_schema_enforces_generated_summary_constraints() {
+    let directory = TestDirectory::new();
+    let store = HaroldStore::open(directory.path()).await.unwrap();
+    append_agent_events(
+        &store,
+        vec![AgentEvent::PaneObserved(AgentPaneObserved {
+            pane: agent_pane(),
+        })],
+    )
+    .await
+    .unwrap();
+    store.project_unhandled_events(500).await.unwrap();
+    let pane = store.load_agent_snapshot().await.unwrap().panes.remove(0);
+    assert_eq!(pane.generated_work_summary, None);
+    assert_eq!(pane.generated_summary_basis_version, None);
+
+    let conn = store.state.connect().unwrap();
+    for sql in [
+        "UPDATE agent_panes SET summary_basis_version = -1",
+        "UPDATE agent_panes SET generated_work_summary = 'Reviewing tests'",
+        "UPDATE agent_panes SET generated_summary_basis_version = 1",
+        "UPDATE agent_panes SET generated_work_summary = '', generated_summary_basis_version = 1",
+        "UPDATE agent_panes SET generated_work_summary = 'Reviewing tests', generated_summary_basis_version = -1",
+    ] {
+        assert!(
+            conn.execute(sql, ()).await.is_err(),
+            "accepted invalid update: {sql}"
+        );
+    }
+    assert!(conn.execute(
+        "UPDATE agent_panes SET generated_work_summary = ?1, generated_summary_basis_version = 1",
+        ("x".repeat(161),),
+    ).await.is_err());
+    conn.execute(
+        "UPDATE agent_panes SET generated_work_summary = ?1, generated_summary_basis_version = 1",
+        ("x".repeat(160),),
+    )
+    .await
+    .unwrap();
+    let updated = store.load_agent_snapshot().await.unwrap().panes.remove(0);
+    assert_eq!(updated.generated_work_summary, Some("x".repeat(160)));
+    assert_eq!(updated.generated_summary_basis_version.unwrap().get(), 1);
 }
 
 #[tokio::test]
@@ -770,102 +868,6 @@ async fn projection_preserves_summary_candidates_across_restart_without_raw_scre
 }
 
 #[tokio::test]
-async fn legacy_placeholder_candidates_are_cleared_by_a_projection_only_repair_and_replay() {
-    const PLACEHOLDER: &str = "Ask Codex to do anything";
-
-    let directory = TestDirectory::new();
-    let store = HaroldStore::open(directory.path()).await.unwrap();
-    append_agent_events(
-        &store,
-        vec![
-            AgentEvent::PaneObserved(AgentPaneObserved { pane: agent_pane() }),
-            AgentEvent::LifecycleObserved(AgentLifecycleObserved {
-                incarnation: agent_incarnation(),
-                state: ObservedAgentState::Idle,
-                adapter_id: "legacy-hook".into(),
-                work_summary: WorkSummaryUpdate::Set(PLACEHOLDER.into()),
-                observed_at_ms: 110,
-            }),
-            AgentEvent::ScreenObserved(AgentScreenObserved {
-                incarnation: agent_incarnation(),
-                state: None,
-                classifier_id: "legacy-screen".into(),
-                fallback_summary: Some(PLACEHOLDER.into()),
-                observed_at_ms: 120,
-            }),
-        ],
-    )
-    .await
-    .unwrap();
-
-    store.project_unhandled_events(500).await.unwrap();
-    let before_repair = store.load_agent_snapshot().await.unwrap();
-    assert_eq!(
-        before_repair.panes[0].explicit_work_summary.as_deref(),
-        Some(PLACEHOLDER)
-    );
-    assert_eq!(
-        before_repair.panes[0].screen_work_summary.as_deref(),
-        Some(PLACEHOLDER)
-    );
-    assert_eq!(
-        before_repair.panes[0].work_summary.as_deref(),
-        Some(PLACEHOLDER)
-    );
-
-    store
-        .stream()
-        .append(
-            ExpectedVersion::Any,
-            [NewEvent {
-                r#type: "AgentWorkSummaryCandidatesRepaired".into(),
-                payload: json!({
-                    "incarnation": agent_incarnation(),
-                    "clear_explicit": true,
-                    "clear_screen": true,
-                    "reason": "ConfiguredIdlePlaceholder",
-                    "observed_at_ms": 130
-                }),
-                workflow_kind: None,
-                workflow: WorkflowRef::None,
-                request_id: None,
-                actor_id: "system:test".into(),
-                actor_type: ActorType::System,
-            }],
-        )
-        .await
-        .unwrap();
-
-    store.project_unhandled_events(500).await.unwrap();
-    let repaired = store.load_agent_snapshot().await.unwrap();
-    assert_eq!(repaired.panes[0].explicit_work_summary, None);
-    assert_eq!(repaired.panes[0].explicit_work_summary_updated_at_ms, None);
-    assert_eq!(repaired.panes[0].screen_work_summary, None);
-    assert_eq!(repaired.panes[0].screen_work_summary_updated_at_ms, None);
-    assert_eq!(repaired.panes[0].work_summary, None);
-    assert_eq!(repaired.panes[0].last_event_version.get(), 4);
-    assert!(store.next_pending_delivery().await.unwrap().is_none());
-    drop(store);
-
-    for suffix in ["", "-shm", "-wal"] {
-        let path = directory.path().join(format!("harold-state.db{suffix}"));
-        if path.exists() {
-            std::fs::remove_file(path).unwrap();
-        }
-    }
-    let replayed = HaroldStore::open(directory.path()).await.unwrap();
-    replayed.project_unhandled_events(500).await.unwrap();
-    let replayed_snapshot = replayed.load_agent_snapshot().await.unwrap();
-    assert_eq!(
-        replayed_snapshot.through_event_version,
-        repaired.through_event_version
-    );
-    assert_eq!(replayed_snapshot.monitor_health, repaired.monitor_health);
-    assert_eq!(replayed_snapshot.panes, repaired.panes);
-    assert!(replayed.next_pending_delivery().await.unwrap().is_none());
-}
-
-#[tokio::test]
 async fn configured_hook_grace_governs_replay_after_restart() {
     let directory = TestDirectory::new();
     let store = HaroldStore::open_with_hook_grace(directory.path(), 0)
@@ -1019,62 +1021,6 @@ async fn generated_activity_summary_survives_restart_and_projection_replay_witho
         projected.panes
     );
     assert!(replayed.next_pending_delivery().await.unwrap().is_none());
-}
-
-#[tokio::test]
-async fn activity_summary_migration_upgrades_existing_panes_and_checks_its_checksum() {
-    use sha2::{Digest, Sha256};
-
-    let directory = TestDirectory::new();
-    let state_path = directory.path().join(super::STATE_DATABASE);
-    let database = turso::Builder::new_local(state_path.to_str().unwrap())
-        .build()
-        .await
-        .unwrap();
-    let conn = database.connect().unwrap();
-    super::configure_state_database(&conn).await.unwrap();
-    conn.execute_batch("CREATE TABLE _migrations (id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE, checksum TEXT NOT NULL, applied_at_ms INTEGER NOT NULL);").await.unwrap();
-    for (name, sql) in super::STATE_MIGRATIONS.iter().take(3) {
-        conn.execute_batch(sql).await.unwrap();
-        conn.execute(
-            "INSERT INTO _migrations (name, checksum, applied_at_ms) VALUES (?1, ?2, 0)",
-            (*name, hex::encode(Sha256::digest(sql.as_bytes()))),
-        )
-        .await
-        .unwrap();
-    }
-    conn.execute_batch("INSERT INTO agent_panes (pane_id, pane_pid, agent_pid, agent_started_at_ms, provider_id, tmux_target, session_name, window_index, pane_index, working_directory, provider_display_name, pane_observed_at_ms, effective_state, explicit_work_summary, explicit_work_summary_updated_at_ms, work_summary, last_transition_at_ms, last_event_version) VALUES ('%7', 10, 20, 1000, 'codex', 'harold:2.1', 'harold', 2, 1, '/work/harold', 'Codex', 100, 'unknown', 'Existing work', 100, 'Existing work', 100, 1);").await.unwrap();
-    drop(conn);
-    drop(database);
-
-    let store = HaroldStore::open(directory.path()).await.unwrap();
-    let snapshot = store.load_agent_snapshot().await.unwrap();
-    let pane = &snapshot.panes[0];
-    assert_eq!(pane.work_summary.as_deref(), Some("Existing work"));
-    assert_eq!(pane.explicit_work_summary.as_deref(), Some("Existing work"));
-    assert_eq!(pane.summary_basis_version, EventStreamVersion::start());
-    assert_eq!(pane.generated_work_summary, None);
-    assert_eq!(pane.generated_summary_basis_version, None);
-    drop(store);
-
-    let reopened = HaroldStore::open(directory.path()).await.unwrap();
-    assert_eq!(
-        reopened.load_agent_snapshot().await.unwrap().panes,
-        snapshot.panes
-    );
-    let conn = reopened.state.connect().unwrap();
-    conn.execute("UPDATE _migrations SET checksum = 'changed' WHERE name = '004_activity_summary_projection'", ()).await.unwrap();
-    drop(conn);
-    drop(reopened);
-    let error = HaroldStore::open(directory.path())
-        .await
-        .err()
-        .expect("changed summary migration checksum must fail");
-    assert!(
-        error
-            .to_string()
-            .contains("004_activity_summary_projection checksum changed")
-    );
 }
 
 #[tokio::test]

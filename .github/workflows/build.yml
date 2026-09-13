@@ -1,0 +1,77 @@
+name: Build macOS ARM64
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: macos-build-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 45
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
+      MACOSX_DEPLOYMENT_TARGET: '15.0'
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Install build prerequisites
+        run: |
+          test "$(uname -m)" = arm64
+          brew install protobuf
+          rustup toolchain install 1.97.1 --profile minimal
+          rustup default 1.97.1
+          rustup target add aarch64-apple-darwin
+
+      - name: Test
+        run: |
+          cargo test --locked --workspace --target aarch64-apple-darwin
+          python3 -m unittest discover -s scripts/tests
+          python3 -m unittest hooks.shared.harold_turn_complete_test
+
+      - name: Build release binaries
+        run: cargo build --locked --release --target aarch64-apple-darwin -p harold -p tmx-agent-dash
+
+      - name: Package and smoke test
+        shell: bash
+        run: |
+          set -euo pipefail
+          package="harold-aarch64-apple-darwin"
+          mkdir -p "dist/$package/config"
+          for binary in harold tmx-agent-dash; do
+            source="target/aarch64-apple-darwin/release/$binary"
+            lipo "$source" -verify_arch arm64
+            cp "$source" "dist/$package/$binary"
+            codesign --force --sign - "dist/$package/$binary"
+            codesign --verify --strict "dist/$package/$binary"
+          done
+          "dist/$package/harold" --help
+          cp harold-api/proto/harold.proto "dist/$package/"
+          cp harold/config/default.toml harold/config/local.template.toml "dist/$package/config/"
+          cp README.md "dist/$package/"
+          printf '%s\n' "$GITHUB_SHA" > "dist/$package/REVISION"
+          tar -czf "dist/$package.tar.gz" -C dist "$package"
+          cd dist
+          shasum -a 256 "$package.tar.gz" > "$package.tar.gz.sha256"
+          shasum -a 256 -c "$package.tar.gz.sha256"
+
+      - name: Upload release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          gh release upload "$RELEASE_TAG" \
+            dist/harold-aarch64-apple-darwin.tar.gz \
+            dist/harold-aarch64-apple-darwin.tar.gz.sha256 \
+            --clobber

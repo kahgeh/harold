@@ -1,6 +1,6 @@
 # Set Up Agent Monitor Hooks
 
-To add explicit busy/idle state and work summaries to Harold, configure named agent providers, run Harold, then connect each provider's lifecycle events to `ReportAgentState`. Existing stop hooks can continue calling `TurnComplete` for notifications.
+To add explicit busy/idle state and work summaries to Harold, configure named agent providers, run Harold, then connect each provider's lifecycle events to `ReportAgentState`. Stop hooks call `TurnComplete` for notifications.
 
 ## Prerequisites
 
@@ -35,20 +35,11 @@ screen_history_lines = 2000
 
 Use marker text observed in the current visible terminal grid. Every `busy_all` fragment must match for Busy, and every `idle_all` fragment must match for Idle. If both clauses match, Busy wins. For `generic-v1`, omit `summary_line_prefixes` when a prefix cannot safely distinguish submitted work from a composer or placeholder.
 
-For Codex, keep `screen_adapter = "codex-v1"` in its named provider entry. Shipped defaults select it explicitly; an older local list that omits the key stays on `generic-v1`. The Codex adapter recognizes styled submitted input and rejects unsent composer drafts. Claude remains generic, and OpenCode remains state-only without a summary prefix. See the [adapter reference](../references/agent-monitor/screen-adapters.md) for the exact support and timing limits.
+For Codex, keep `screen_adapter = "codex-v1"` in its named provider entry. Shipped defaults select it explicitly; the setting otherwise defaults to `generic-v1`. The Codex adapter recognizes styled submitted input and rejects unsent composer drafts. Claude remains generic, and OpenCode remains state-only without a summary prefix. See the [adapter reference](../references/agent-monitor/screen-adapters.md) for the exact support and timing limits.
 
 Set `screen_history_lines` to the number of history rows to search before the visible grid. The default is 2,000; values outside 1 through 10,000 fail startup. This setting does not change tmux's own history retention.
 
 Do not configure `id = "unknown"`; it is reserved. IDs must match `[a-z0-9][a-z0-9._-]{0,63}`.
-
-The old presence-only form remains loadable but cannot select provider-specific screen behavior:
-
-```toml
-[agents]
-command_contains = ["claude", "codex"]
-```
-
-Migrate to `[[agents]]` before relying on visible-screen state or fallback summaries.
 
 ## 2. Start or restart Harold with the configuration
 
@@ -58,17 +49,17 @@ For a repository run, point Harold at the repository configuration and start it:
 HAROLD_CONFIG_DIR="$PWD/harold/config" cargo run --offline -p harold
 ```
 
-For an installed copy, update its `config/local.toml` and restart it using your existing operating procedure. `make deploy` builds, copies, signs, and restarts the installed binary; run it only when you intend to deploy.
+For an installed copy, update its `config/local.toml` and run `~/bin/haroldctl restart`. To rebuild the installed programs, follow the [installation guide](setup.md).
 
 Harold projects the durable stream to its head and seeds the current snapshot before it listens for gRPC requests.
 
 ## 3. Preserve completion hooks where notifications are required
 
-`ReportAgentState` does not replace `TurnComplete` notifications. Keep the Claude or Codex stop adapter described in [Setup](setup.md#4-install-agent-stop-hooks) when you need TTS or away notifications.
+`ReportAgentState` does not replace `TurnComplete` notifications. Keep the Claude or Codex stop adapter described in [Setup](setup.md#5-connect-agent-hooks) when you need TTS or away notifications.
 
 The shared notifier installed by `make deploy` is `~/bin/harold/hooks/harold_turn_complete.py`. Provider-specific Claude and Codex transcript adapters live in their respective user configuration directories; they are not copied from this repository by `make deploy`.
 
-A stop adapter must select the most recent substantive submitted user instruction for `last_user_prompt`. A normalized-empty legacy prompt preserves the explicit candidate and its timestamp. The legacy RPC cannot explicitly clear a summary.
+A stop adapter must select the most recent substantive submitted user instruction for `last_user_prompt`. A normalized-empty prompt preserves the explicit candidate and its timestamp. `TurnComplete` cannot explicitly clear a summary; use a present-empty `ReportAgentState.work_summary` for that operation.
 
 ## 4. Connect lifecycle events
 
@@ -245,25 +236,6 @@ Fixtures and fake provider processes do not satisfy this check. Use the real ins
 
 7. Stop the temporary Harold instance and every provider process created for the run. Confirm the watcher closes, no process still listens on `127.0.0.1:50061`, and the acceptance path is the exact disposable directory before removing it.
 
-### Recorded acceptance outcomes
-
-The real-provider run at ready commit `d9a55ea` on `127.0.0.1:50061` produced this bounded result:
-
-| Check | Outcome |
-| --- | --- |
-| Codex `%34` and OpenCode `%35` simultaneous Busy with distinct summaries | Passed at dashboard revision 571 |
-| Codex `%34` and OpenCode `%35` both Idle while retaining their own summaries | Passed at revision 577, with no cross-talk |
-| OpenCode `%35` departure | Passed at revision 578 |
-| Process-local OpenCode `%35` rejoin as a new incarnation with no prior-incarnation leakage | Passed at revision 580 |
-| Claude Code `%33` sequential acceptance | Not passed: the real CLI displayed `Login expired` / `run /login` |
-| Three-provider `%33`/`%34`/`%35` concurrency | Not passed because Claude authentication blocked `%33` |
-
-Do not treat the two-provider result as proof of Claude behavior or three-provider concurrency. Re-run those two checks after authenticating the real Claude Code process.
-
-A later same-store run served commit `c27cd89` on the same isolated address. Projection-only repair events 591 through 594 cleared legacy exact configured idle-placeholder screen candidates for panes `%1`, `%13`, `%14`, and `%23`; the dashboard was clear by revision 594. After replay and restart against that same event store, those repaired candidates remained clear. This verifies durable repair of those historical rows, not the still-blocked Claude or three-provider checks.
-
-Corrective commits `7523735` and `1568fd0` subsequently changed startup and ingress handling after independent review. After current-code completion review and fresh offline gates, `1568fd0` was launched from `%6` with the same fixture configuration and event store. Its first snapshot at event version 602 contained 10 rows and zero exact configured-placeholder summaries. A graceful `%6` `C-c` restart against that same store produced a replay snapshot at event version 604 with the same 10 rows and zero exact placeholders; dashboard pane `%26` also showed revision 604 with no placeholder occurrence. This proves current-code startup and replay for the existing store. It does not satisfy the still-blocked Claude or three-provider checks.
-
 ## Troubleshooting
 
 ### `INVALID_ARGUMENT`
@@ -280,7 +252,7 @@ Check Harold's logs and the `monitorHealth` entries. Inventory or event append m
 
 ### State remains `Unknown`
 
-Confirm named configuration is active rather than deprecated `[agents].command_contains`. Then compare the current visible grid with every case-sensitive `busy_all` or `idle_all` fragment. Harold deliberately preserves uncertainty when neither full clause matches.
+Confirm the agent matches a configured `[[agents]]` entry. Then compare the current visible grid with every case-sensitive `busy_all` or `idle_all` fragment. Harold deliberately preserves uncertainty when neither full clause matches.
 
 ### Work summary is absent
 

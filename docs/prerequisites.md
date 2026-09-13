@@ -1,43 +1,35 @@
 # Prerequisites
 
-## macOS
+Harold currently requires macOS for screen-lock detection and speech. Run installation as your normal user in a graphical login session.
 
-Harold is currently macOS-only. It relies on macOS-specific features for screen lock detection (`ioreg`) and TTS (`say`). The iMessage channel requires the Messages app and AppleScript; the Telegram channel works cross-platform but Harold itself still requires macOS.
+## Build and runtime tools
 
-## Required
+The source installer needs Xcode Command Line Tools, Rust/Cargo, Python 3.9 or newer, tmux, grpcurl, and protoc. It also checks the macOS tools codesign, launchctl, plutil, and lsof. Agent sessions run inside tmux.
 
-- **tmux** — sessions must run inside tmux panes
-- **grpcurl** — used by agent hooks to call Harold
-  ```
-  brew install grpcurl
-  ```
-- **An AI CLI** — used by Harold for summarisation and semantic routing. Claude Code is the reference implementation:
-  ```
-  npm install -g @anthropic-ai/claude-code
-  ```
+With Homebrew available:
 
-## Away channel setup
+```sh
+xcode-select --install
+brew install rust python tmux grpcurl protobuf
+```
 
-Harold supports two away channels — configure one in `[notify] away_channel`:
+Clone the repository with `--recurse-submodules` to include `events`. The installer builds using the checked-in Cargo lockfile; `--offline` requires those dependencies to be cached already. See [install or reinstall Harold](how-tos/setup.md).
 
-### iMessage (default)
+## Away channel
 
-- Your Mac must be signed in to iMessage
-- Full Disk Access must be granted to the terminal (for reading `~/Library/Messages/chat.db`)
-- Set `[imessage] recipient` and `handle_ids` in `local.toml`
+Choose one channel during installation or supply a local configuration file.
 
-### Telegram
+- **iMessage:** sign into Messages, provide the recipient and database handle IDs, and configure macOS database/automation permissions for the installed Harold process.
+- **Telegram:** provide a bot token and chat ID. See [Setup Telegram](how-tos/setup-telegram.md).
 
-- Create a Telegram bot via @BotFather and obtain a bot token
-- Set `[telegram] bot_token` and `chat_id` in `local.toml`
-- See [Setup Telegram](how-tos/setup-telegram.md) for step-by-step instructions
+The installer checks service readiness without sending messages. Channel permissions and delivery must be tested separately.
 
-## Agent hook
+## Optional AI features
 
-Each agent needs a stop hook that calls Harold via `grpcurl` when a turn completes. See the [architecture doc](explanations/architecture.md) for the payload format.
+Claude CLI is used for semantic routing and generated summaries when configured. Install and authenticate it before enabling those features. Basic monitoring and notification fallbacks do not require it. Optional activity-summary generation remains disabled in installer-created settings.
 
-The recommended layout is a shared Harold notifier plus thin per-agent adapters:
+## Agent hooks
 
-- `~/bin/harold/hooks/harold_turn_complete.py` — shared Harold notifier, installed by `make deploy`
-- `~/.claude/hooks/turn_complete.py` — Claude Code adapter
-- `~/.codex/hooks/turn_complete.py` — Codex adapter
+The installer provides `~/bin/harold/hooks/harold_turn_complete.py`, the shared notifier. Provider-specific transcript adapters and hook registration remain separate; existing provider settings are not overwritten.
+
+See [hook setup](how-tos/setup-agent-monitor-hooks.md) for lifecycle reporting, and [installation setup](how-tos/setup.md#5-connect-agent-hooks) for completion-hook registration.

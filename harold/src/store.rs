@@ -2,7 +2,6 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use events::application_schema::LAST_PROCESSED_EVENT_SQL;
 use events::{
     ActorType, EventNamespaces, EventStream, EventStreamVersion, ExpectedVersion, NewEvent,
     RotationPolicy, WorkflowRef,
@@ -15,8 +14,8 @@ use turso::Database;
 use crate::agent::domain::{
     AgentEvent, AgentIncarnation, AgentLifecycleObserved, AgentMonitorHealthChanged,
     AgentPaneObservation, AgentPaneProjection, AgentScreenObserved, AgentSnapshot,
-    AgentWorkSummaryCandidatesRepaired, CompletionSummaryUpdate, EffectiveAgentState,
-    MonitorHealthProjection, ObservedAgentState, ProjectionChange, WorkSummaryUpdate,
+    CompletionSummaryUpdate, EffectiveAgentState, MonitorHealthProjection, ObservedAgentState,
+    ProjectionChange, WorkSummaryUpdate,
 };
 #[cfg(test)]
 use crate::agent::reducer::DEFAULT_HOOK_GRACE_MS;
@@ -26,36 +25,8 @@ use crate::agent::summary::{normalize_work_summary, sanitize_bounded_metadata};
 const NAMESPACE: &str = "harold";
 const PARTITION_KEY: &str = "main";
 const STATE_DATABASE: &str = "harold-state.db";
-const DELIVERY_OUTBOX_SQL: &str = r#"
-CREATE TABLE IF NOT EXISTS delivery_outbox (
-    event_id TEXT PRIMARY KEY,
-    event_version INTEGER NOT NULL UNIQUE,
-    event_type TEXT NOT NULL,
-    payload TEXT NOT NULL,
-    trace_id TEXT NOT NULL,
-    attempt_count INTEGER NOT NULL DEFAULT 0,
-    last_error TEXT,
-    delivered_at_ms INTEGER
-);
-CREATE INDEX IF NOT EXISTS idx_delivery_outbox_pending
-    ON delivery_outbox(delivered_at_ms, event_version);
-"#;
-
-const AGENT_MONITOR_PROJECTION_SQL: &str =
-    include_str!("store/migrations/003_agent_monitor_projection.sql");
-
-const ACTIVITY_SUMMARY_PROJECTION_SQL: &str =
-    include_str!("store/migrations/004_activity_summary_projection.sql");
-
-const STATE_MIGRATIONS: [(&str, &str); 4] = [
-    ("001_last_processed_event", LAST_PROCESSED_EVENT_SQL),
-    ("002_delivery_outbox", DELIVERY_OUTBOX_SQL),
-    ("003_agent_monitor_projection", AGENT_MONITOR_PROJECTION_SQL),
-    (
-        "004_activity_summary_projection",
-        ACTIVITY_SUMMARY_PROJECTION_SQL,
-    ),
-];
+const INITIAL_SCHEMA_NAME: &str = "001_initial";
+const INITIAL_SCHEMA_SQL: &str = include_str!("store/migrations/001_initial.sql");
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TurnCompleted {
@@ -64,9 +35,7 @@ pub struct TurnCompleted {
     pub last_user_prompt: String,
     pub assistant_message: String,
     pub main_context: String,
-    #[serde(default)]
     pub agent_incarnation: Option<AgentIncarnation>,
-    #[serde(default)]
     pub work_summary: CompletionSummaryUpdate,
 }
 
@@ -168,7 +137,7 @@ impl HaroldStore {
         let state = turso::Builder::new_local(state_path).build().await?;
         let conn = state.connect()?;
         configure_state_database(&conn).await?;
-        run_state_migrations(&conn).await?;
+        initialize_state_schema(&conn).await?;
 
         Ok(Self {
             stream,
@@ -227,7 +196,6 @@ impl HaroldStore {
                     | "AgentPaneDeparted"
                     | "AgentLifecycleObserved"
                     | "AgentScreenObserved"
-                    | "AgentWorkSummaryCandidatesRepaired"
                     | "AgentActivitySummaryGenerated" => {
                         snapshot_changed |=
                             project_agent_event(&conn, event, self.hook_grace_ms).await?;
@@ -504,9 +472,6 @@ async fn project_agent_event(
         "AgentScreenObserved" => {
             AgentEvent::ScreenObserved(serde_json::from_value(event.payload.clone())?)
         }
-        "AgentWorkSummaryCandidatesRepaired" => AgentEvent::WorkSummaryCandidatesRepaired(
-            serde_json::from_value(event.payload.clone())?,
-        ),
         "AgentActivitySummaryGenerated" => {
             AgentEvent::ActivitySummaryGenerated(serde_json::from_value(event.payload.clone())?)
         }
@@ -592,7 +557,6 @@ fn agent_event_pane_id(event: &AgentEvent) -> &str {
         AgentEvent::PaneDeparted(event) => &event.incarnation.pane_id,
         AgentEvent::LifecycleObserved(event) => &event.incarnation.pane_id,
         AgentEvent::ScreenObserved(event) => &event.incarnation.pane_id,
-        AgentEvent::WorkSummaryCandidatesRepaired(event) => &event.incarnation.pane_id,
         AgentEvent::ActivitySummaryGenerated(event) => &event.incarnation.pane_id,
         AgentEvent::MonitorHealthChanged(_) => unreachable!("health events are not pane events"),
     }
@@ -1015,7 +979,21 @@ async fn configure_state_database(conn: &turso::Connection) -> events::Result<()
     Ok(())
 }
 
-async fn run_state_migrations(conn: &turso::Connection) -> events::Result<()> {
+async fn initialize_state_schema(conn: &turso::Connection) -> events::Result<()> {
+    conn.execute("BEGIN IMMEDIATE", ()).await?;
+    let result = apply_initial_schema(conn).await;
+    if let Err(error) = result {
+        let _ = conn.execute("ROLLBACK", ()).await;
+        return Err(error);
+    }
+    if let Err(error) = conn.execute("COMMIT", ()).await {
+        let _ = conn.execute("ROLLBACK", ()).await;
+        return Err(error.into());
+    }
+    Ok(())
+}
+
+async fn apply_initial_schema(conn: &turso::Connection) -> events::Result<()> {
     conn.execute(
         r#"
         CREATE TABLE IF NOT EXISTS _migrations (
@@ -1029,48 +1007,33 @@ async fn run_state_migrations(conn: &turso::Connection) -> events::Result<()> {
     )
     .await?;
 
-    for (name, sql) in STATE_MIGRATIONS {
-        let checksum = hex::encode(Sha256::digest(sql.as_bytes()));
-        let mut rows = conn
-            .query("SELECT checksum FROM _migrations WHERE name = ?1", (name,))
-            .await?;
-        if let Some(row) = rows.next().await? {
-            let applied = row
-                .get_value(0)?
-                .as_text()
-                .ok_or_else(|| {
-                    events::EsError::Migration(format!("migration {name} has a non-text checksum"))
-                })?
-                .to_string();
-            if applied != checksum {
-                return Err(events::EsError::Migration(format!(
-                    "migration {name} checksum changed"
-                )));
-            }
-            continue;
-        }
-
-        conn.execute("BEGIN IMMEDIATE", ()).await?;
-        if let Err(error) = conn.execute_batch(sql).await {
-            let _ = conn.execute("ROLLBACK", ()).await;
-            return Err(error.into());
-        }
-        let now_ms = (time::OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000) as i64;
-        if let Err(error) = conn
-            .execute(
-                "INSERT INTO _migrations (name, checksum, applied_at_ms) VALUES (?1, ?2, ?3)",
-                (name, checksum, now_ms),
-            )
-            .await
+    let checksum = hex::encode(Sha256::digest(INITIAL_SCHEMA_SQL.as_bytes()));
+    let mut rows = conn
+        .query("SELECT name, checksum FROM _migrations", ())
+        .await?;
+    if let Some(row) = rows.next().await? {
+        if row.get_value(0)?.as_text().map(String::as_str) != Some(INITIAL_SCHEMA_NAME)
+            || rows.next().await?.is_some()
         {
-            let _ = conn.execute("ROLLBACK", ()).await;
-            return Err(error.into());
+            return Err(events::EsError::Migration(
+                "incompatible state schema".into(),
+            ));
         }
-        if let Err(error) = conn.execute("COMMIT", ()).await {
-            let _ = conn.execute("ROLLBACK", ()).await;
-            return Err(error.into());
+        if row.get_value(1)?.as_text() != Some(&checksum) {
+            return Err(events::EsError::Migration(format!(
+                "migration {INITIAL_SCHEMA_NAME} checksum changed"
+            )));
         }
+        return Ok(());
     }
+    drop(rows);
+
+    conn.execute_batch(INITIAL_SCHEMA_SQL).await?;
+    conn.execute(
+        "INSERT INTO _migrations (name, checksum, applied_at_ms) VALUES (?1, ?2, ?3)",
+        (INITIAL_SCHEMA_NAME, checksum, now_ms()),
+    )
+    .await?;
     Ok(())
 }
 
@@ -1147,7 +1110,6 @@ pub(crate) async fn append_monitor_turn_completed(
     store: &HaroldStore,
     pane: Option<AgentPaneObservation>,
     turn: &TurnCompleted,
-    repair: Option<AgentWorkSummaryCandidatesRepaired>,
 ) -> events::Result<events::AppendResult> {
     fail_monitor_append_for_test(store)?;
     let mut events = Vec::with_capacity(usize::from(pane.is_some()) + 1);
@@ -1166,11 +1128,6 @@ pub(crate) async fn append_monitor_turn_completed(
         actor_id: "system:harold".into(),
         actor_type: ActorType::System,
     });
-    if let Some(repair) = repair {
-        events.push(agent_new_event(AgentEvent::WorkSummaryCandidatesRepaired(
-            repair,
-        ))?);
-    }
     store.stream.append(ExpectedVersion::Any, events).await
 }
 
@@ -1214,9 +1171,6 @@ fn normalize_agent_event(event: AgentEvent) -> Option<AgentEvent> {
             generated.description = normalize_work_summary(&generated.description)?;
             Some(AgentEvent::ActivitySummaryGenerated(generated))
         }
-        AgentEvent::WorkSummaryCandidatesRepaired(repair) => (repair.clear_explicit
-            || repair.clear_screen)
-            .then_some(AgentEvent::WorkSummaryCandidatesRepaired(repair)),
         AgentEvent::MonitorHealthChanged(mut health) => {
             health.component = normalize_health_code(&health.component, 64, "invalid_component");
             health.reason_code = normalize_health_code(&health.reason_code, 160, "invalid_reason");
@@ -1268,10 +1222,6 @@ fn agent_new_event(event: AgentEvent) -> events::Result<NewEvent> {
             ("AgentLifecycleObserved", serde_json::to_value(event)?)
         }
         AgentEvent::ScreenObserved(event) => ("AgentScreenObserved", serde_json::to_value(event)?),
-        AgentEvent::WorkSummaryCandidatesRepaired(event) => (
-            "AgentWorkSummaryCandidatesRepaired",
-            serde_json::to_value(event)?,
-        ),
         AgentEvent::MonitorHealthChanged(event) => {
             ("AgentMonitorHealthChanged", serde_json::to_value(event)?)
         }

@@ -67,7 +67,7 @@ fn explicit_summary_presence_distinguishes_preserve_clear_and_set() {
 }
 
 #[test]
-fn legacy_empty_summary_is_non_destructive() {
+fn empty_summary_is_non_destructive() {
     assert_eq!(
         completion_summary_update(" \u{1b}[31m \t"),
         CompletionSummaryUpdate::Unchanged

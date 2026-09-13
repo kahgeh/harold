@@ -53,7 +53,7 @@ Every pane-scoped agent event identifies the complete current agent incarnation:
 | `pane_pid` | Long-lived pane-root process ID |
 | `agent_pid` | Selected configured agent process ID |
 | `agent_started_at_ms` | OS-reported agent-process start time |
-| `provider_id` | Named provider ID, or `unknown` for an ambiguous/legacy match |
+| `provider_id` | Named provider ID, or `unknown` for an ambiguous provider match |
 
 Any change creates a new incarnation. A replacement begins at `Unknown` with no lifecycle state, screen state, explicit summary, or fallback summary. Events for a different incarnation remain in history but are ignored by the current projection.
 
@@ -102,13 +102,12 @@ sequenceDiagram
     participant Hub as Snapshot publisher
     participant Client as Watch client
 
+    Harold->>StateDB: initialize or verify the current schema
     Harold->>Events: load all pages after stored checkpoint
     Harold->>StateDB: atomically project through stream head
     Harold->>StateDB: load complete projected snapshot
-    Harold->>Events: append all required candidate repairs as one batch
-    Harold->>StateDB: project repairs and reload clean snapshot
     Harold->>Hub: create and seed snapshot publisher
-    Harold->>Harold: seed monitor runtime from clean snapshot
+    Harold->>Harold: seed monitor runtime from stored snapshot
     Harold->>OS: bind gRPC listener
     Client->>Harold: WatchAgentStates({})
     Harold-->>Client: current complete snapshot first
@@ -130,10 +129,9 @@ Agent events use the existing ordered `harold/main` `EventStream`. Append batche
 | `AgentPaneDeparted` | Full incarnation, observation time | Removes the row only when the full incarnation still matches. |
 | `AgentLifecycleObserved` | Full incarnation, `Busy`/`Idle`, adapter ID, `Unchanged`/`Clear`/`Set` summary update, observation time | Updates matching hook evidence and explicit-summary candidate. |
 | `AgentScreenObserved` | Full incarnation, optional `Busy`/`Idle`, optional normalized fallback summary, classifier ID, observation time | Applies each present fact independently. An absent field preserves its candidate. |
-| `AgentWorkSummaryCandidatesRepaired` | Full incarnation, independent explicit/screen clear flags, typed `ConfiguredIdlePlaceholder` reason, observation time | Clears only the marked legacy candidate and its timestamp, then recomputes the effective summary. |
 | `AgentActivitySummaryGenerated` | Full incarnation, source basis version, generated description, generation time | Sets a generated candidate only for the matching current incarnation and activity revision; does not change agent state or stage delivery. |
 | `AgentMonitorHealthChanged` | Component, healthy/degraded flag, bounded reason code, observation time | Upserts health for the component. |
-| `TurnCompleted` | Existing five notification fields plus optional resolved incarnation and `Unchanged`/`Set` completion summary update | Always preserves notification behavior; a matching resolved incarnation also supplies idle evidence and a non-destructive summary update. |
+| `TurnCompleted` | Five notification fields plus optional resolved incarnation and `Unchanged`/`Set` completion summary update | Always preserves notification behavior; a matching resolved incarnation also supplies idle evidence and a non-destructive summary update. |
 
 `ReportAgentState` resolves the current incarnation and appends `AgentPaneObserved` immediately before `AgentLifecycleObserved` in one batch. A resolved `TurnComplete` appends `AgentPaneObserved` immediately before `TurnCompleted`. An unresolved completion still appends `TurnCompleted` for notification but does not alter agent state.
 
@@ -163,40 +161,36 @@ Harold keeps an explicit candidate and a provider-screen candidate for each inca
 | `ReportAgentState.work_summary` | Present, normalizes to empty | Clear explicit candidate; reveal fallback if one exists |
 | `ReportAgentState.work_summary` | Present, normalizes non-empty and is not an exact configured idle placeholder | Set explicit candidate |
 | `ReportAgentState.work_summary` | Exact normalized configured idle placeholder | Preserve (`Unchanged`) before event serialization |
-| `TurnComplete.last_user_prompt` | Normalizes to empty | Preserve (`Unchanged`) because legacy proto3 cannot distinguish absent from empty |
+| `TurnComplete.last_user_prompt` | Normalizes to empty | Preserve (`Unchanged`) because this proto3 scalar does not distinguish absent from empty |
 | `TurnComplete.last_user_prompt` | Normalizes non-empty and is not an exact configured idle placeholder | Set explicit candidate when the completion resolves to the current incarnation |
-| `TurnComplete.last_user_prompt` | Exact normalized configured idle placeholder | Clear the legacy raw prompt and preserve (`Unchanged`) before event serialization |
+| `TurnComplete.last_user_prompt` | Exact normalized configured idle placeholder | Clear the raw prompt and preserve (`Unchanged`) before event serialization |
 | Provider-screen fallback | Inconclusive or no new submitted occurrence | Preserve prior fallback |
 | Provider-screen fallback | Newly acquired substantive submitted occurrence | Replace the screen candidate and advance the activity revision, even for repeated text; it becomes the source fallback when newer than the explicit candidate |
 
 All summary inputs pass through the same terminal sanitizer. It removes C0 and C1 controls and complete ESC control sequences, collapses Unicode whitespace to single spaces, trims the result, and truncates it to 160 Unicode scalar values. Screen acquisition and the runtime defense reject only exact equality with a normalized configured idle fragment; a substantive prompt that merely mentions the placeholder remains valid. A conclusive state from the same observation remains usable, and placeholder/absence does not refresh or clear the prior screen candidate.
 
-### Legacy candidate repair
+Lifecycle and completion input use only the matching provider's idle fragments when the incarnation names a currently configured provider. If the provider ID is missing, `unknown`, or no longer configured, Harold compares against every configured provider's fragments. An exact match becomes `Unchanged` before event serialization; completion also clears the raw prompt. Another provider's placeholder remains legitimate for a known provider, and text that merely contains a placeholder remains substantive. For example, `Explain why the UI says Ask Codex to do anything` is a valid instruction.
 
-Current rejection cannot remove a placeholder already accepted into durable history by an older binary. At startup, Harold first projects every historical event page without creating the snapshot hub or monitor runtime. It then checks the complete stored explicit and screen candidates for each named provider. Exact configured placeholders produce `AgentWorkSummaryCandidatesRepaired` with independent `clear_explicit` and `clear_screen` flags.
-
-The repair carries no rejected summary text. It applies only to the complete current incarnation, clears each marked candidate together with its timestamp, and uses the normal timestamp rule to select anything that remains. All pane repairs are collected into one event-stream append, projected completely, and reloaded before Harold creates the hub or runtime seed. An append or projection failure aborts startup; an all-false or stale-incarnation repair is ignored.
-
-New exact placeholders need no compensating repair. Lifecycle `Set` and completion input use only the matching provider's fragments when the incarnation names a currently configured provider. If the provider ID is missing, `unknown`, or no longer configured, Harold conservatively compares against every configured provider's fragments. An exact match becomes `Unchanged` before event serialization; completion also clears the legacy raw prompt. Another provider's placeholder remains legitimate for a known provider, and text that merely contains a placeholder remains substantive. Because no ingress/repair pair exists, a 500-event projector page cannot expose an intermediate placeholder.
-
-Because the repair is durable and projection-only, deleting and rebuilding `harold-state.db` from the event stream preserves the correction without creating delivery work. A legitimate containing prompt, such as `Explain why the UI says Ask Codex to do anything`, does not equal the configured placeholder and survives replay.
+Placeholder rules apply when observations arrive. Changing the configuration does not retroactively change stored summaries.
 
 The public API exposes one optional effective summary. When it is absent, the dashboard—not Harold—owns the exact display copy `No work summary reported`.
 
 ## Projection and storage
 
-Migration `003_agent_monitor_projection` adds two checksum-tracked tables to `<store.path>/harold-state.db`:
+A fresh installation creates `<store.path>/harold-state.db` from one complete schema, `001_initial.sql`. Its checksum is recorded in `_migrations` and verified on subsequent opens. The application tables are:
 
 | Table | Contents |
 | --- | --- |
+| `last_processed_event` | Last event-stream version processed for each namespace and partition |
+| `delivery_outbox` | Pending and completed external delivery work, including retry state |
 | `agent_panes` | Pane/display metadata, full incarnation, hook and screen evidence, explicit and fallback summary candidates with internal timestamps, effective state/summary, last transition, and last event version |
 | `agent_monitor_health` | Component, healthy flag, bounded reason code, observation time, and last event version |
 
-Migration `004_activity_summary_projection` extends `agent_panes` with `summary_basis_version`, `generated_work_summary`, and `generated_summary_basis_version`. These keep a generated description tied to its source revision while preserving the original source candidates. Previously applied migration checksums remain unchanged.
+`agent_panes` includes `summary_basis_version`, `generated_work_summary`, and `generated_summary_basis_version` from creation. These keep a generated description tied to its source revision while preserving the original source candidates. Stores created with this schema can reopen and replay normally. Incompatible schemas are rejected; Harold does not convert or reset them.
 
 The state database uses WAL mode, `synchronous = NORMAL`, and a five-second busy timeout. For each projection batch, Harold opens one immediate transaction, applies agent rows, stages only externally deliverable events, advances `last_processed_event`, and commits. An error rolls the whole transaction back.
 
-Only `TurnCompleted`, `InboundMessageReceived`, and unknown event types are staged in the delivery outbox. Agent observation, summary-repair, generated-summary, and monitor-health events are projection-only. Unknown event types remain visible to the existing permanent-delivery failure path instead of being silently skipped.
+Only `TurnCompleted`, `InboundMessageReceived`, and unknown event types are staged in the delivery outbox. Agent observation, generated-summary, and monitor-health events are projection-only. Unknown event types remain visible to the existing permanent-delivery failure path instead of being silently skipped.
 
 After commit, Harold loads the checkpoint, health, and panes with one query and publishes the complete snapshot if its `through_event_version` is greater than the in-memory revision. A revision can advance because of a non-agent event while pane content remains unchanged.
 
@@ -292,18 +286,9 @@ screen_history_lines = 2000
 
 Process selection prefers a matching process in the pane TTY's foreground process group. Otherwise it selects the shallowest matching descendant of the pane root, with PID as a deterministic tie-breaker. Multiple named provider matches produce provider `unknown` rather than choosing configuration order. Missing trustworthy process start time degrades inventory and does not create an incarnation.
 
-The shipped named defaults cover Codex, Claude, and OpenCode state markers. Codex explicitly selects `codex-v1`. Claude uses `generic-v1` with its configured summary prefix; it has no Claude-specific styled parser. OpenCode uses `generic-v1` without `summary_line_prefixes`, so screen acquisition supplies state but no fallback summary. Its opt-in lifecycle plugin can still send explicit summaries. Older named configurations that omit `screen_adapter` remain generic even when their provider ID is `codex`; add the explicit selection to enable Codex parsing.
+The shipped named defaults cover Codex, Claude, and OpenCode state markers. Codex explicitly selects `codex-v1`. Claude uses `generic-v1` with its configured summary prefix; it has no Claude-specific styled parser. OpenCode uses `generic-v1` without `summary_line_prefixes`, so screen acquisition supplies state but no fallback summary. Its opt-in lifecycle plugin can still send explicit summaries. The `screen_adapter` setting defaults to `generic-v1`; selecting a provider ID alone does not select a parser.
 
 See [provider screen adapters](screen-adapters.md) for capture timing, incarnation baselines, prompt selection, and provider limitations.
-
-Legacy configuration remains loadable:
-
-```toml
-[agents]
-command_contains = ["claude", "codex"]
-```
-
-Harold logs a deprecation warning for this form. It is presence-only: matched agents use provider `unknown`, and named provider screen classification and fallback extraction are unavailable until the configuration is migrated to `[[agents]]`.
 
 ## Privacy and field bounds
 
@@ -336,7 +321,7 @@ The public snapshot reports `inventory` and `screen` health after a component fi
 | `task_failed` | The bounded acquisition worker could not start or return |
 | `ok` | Recovery to healthy |
 
-An inventory failure preserves current panes and never infers mass departure. A screen failure preserves lifecycle state and the prior fallback. Projector failures leave the checkpoint and projection unchanged and are retried by the event-handler loop. A startup catch-up, repair append/projection, or snapshot-load error prevents the server from becoming ready.
+An inventory failure preserves current panes and never infers mass departure. A screen failure preserves lifecycle state and the prior fallback. Projector failures leave the checkpoint and projection unchanged and are retried by the event-handler loop. A schema initialization, startup catch-up, or snapshot-load error prevents the server from becoming ready.
 
 ## Lifecycle limits
 
@@ -346,7 +331,6 @@ An inventory failure preserves current panes and never infers mass departure. A 
 - Harold does not infer busy/idle from CPU use, tmux window activity, or elapsed silence.
 - Harold does not navigate tmux for the dashboard and does not implement dashboard search.
 - The OpenCode lifecycle plugin is opt-in and is not installed by `make deploy`; its screen provider has no fallback-summary prefix.
-- The legacy `TurnComplete` path remains a notification ingress. Empty legacy prompts preserve summaries and cannot explicitly clear them.
-- A store containing `AgentWorkSummaryCandidatesRepaired` is forward-compatible with the current binary, but an older binary does not know that event type and would route it through the unknown-delivery path.
+- The `TurnComplete` RPC is the notification ingress. Empty prompts preserve summaries and cannot explicitly clear them.
 
 For operational registration and verification, see [Set up agent monitor hooks](../../how-tos/setup-agent-monitor-hooks.md). For rationale, see [Harold Architecture](../../explanations/architecture.md).

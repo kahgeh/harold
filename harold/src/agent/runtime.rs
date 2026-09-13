@@ -20,8 +20,8 @@ use crate::store::{self, HaroldStore, TurnCompleted};
 
 use super::domain::{
     AgentEvent, AgentIncarnation, AgentLifecycleObserved, AgentPaneDeparted, AgentPaneObservation,
-    AgentPaneObserved, AgentScreenObserved, AgentSnapshot, AgentWorkSummaryCandidatesRepaired,
-    AgentWorkSummaryRepairReason, CompletionSummaryUpdate, ObservedAgentState, WorkSummaryUpdate,
+    AgentPaneObserved, AgentScreenObserved, AgentSnapshot, CompletionSummaryUpdate,
+    ObservedAgentState, WorkSummaryUpdate,
 };
 use super::inventory::{AgentInventoryPort, InventoryError};
 use super::screen::{PromptScan, ScreenError, VisibleScreenPort, normalize_fallback_summary};
@@ -513,39 +513,6 @@ fn health_from_snapshot(snapshot: &AgentSnapshot) -> HashMap<String, HealthState
         .collect()
 }
 
-pub(crate) async fn append_configured_placeholder_repairs(
-    store: &HaroldStore,
-    providers: &[AgentProviderSettings],
-    snapshot: &AgentSnapshot,
-) -> events::Result<bool> {
-    let observed_at_ms = now_ms();
-    let repairs: Vec<AgentWorkSummaryCandidatesRepaired> = snapshot
-        .panes
-        .iter()
-        .filter_map(|projection| {
-            repair_event(
-                providers.iter(),
-                &projection.pane.incarnation,
-                projection.explicit_work_summary.as_deref(),
-                projection.screen_work_summary.as_deref(),
-                observed_at_ms,
-            )
-        })
-        .collect();
-    if repairs.is_empty() {
-        return Ok(false);
-    }
-    store::append_agent_events(
-        store,
-        repairs
-            .into_iter()
-            .map(AgentEvent::WorkSummaryCandidatesRepaired)
-            .collect(),
-    )
-    .await?;
-    Ok(true)
-}
-
 #[cfg(test)]
 fn empty_snapshot() -> AgentSnapshot {
     AgentSnapshot {
@@ -660,9 +627,6 @@ impl AgentMonitorRuntime {
         adapter_id: String,
         work_summary: WorkSummaryUpdate,
     ) -> Result<(), MonitorCommandError> {
-        self.repair_configured_placeholders()
-            .await
-            .map_err(MonitorCommandError::EventAppend)?;
         let pane = self.resolve_pane(pane_id).await?;
         let Some(pane) = pane else {
             return Err(MonitorCommandError::AgentNotFound);
@@ -687,12 +651,6 @@ impl AgentMonitorRuntime {
             WorkSummaryUpdate::Clear => None,
             WorkSummaryUpdate::Set(summary) => Some(summary.clone()),
         };
-        let repair = self.repair_event(
-            &pane.incarnation,
-            next_explicit_summary.as_deref(),
-            current.and_then(|tracked| tracked.screen_summary.as_deref()),
-            observed_at_ms,
-        );
         let lifecycle = AgentLifecycleObserved {
             incarnation: pane.incarnation.clone(),
             state,
@@ -700,15 +658,10 @@ impl AgentMonitorRuntime {
             work_summary: work_summary.clone(),
             observed_at_ms,
         };
-        let mut events = vec![
+        let events = vec![
             AgentEvent::PaneObserved(AgentPaneObserved { pane: pane.clone() }),
             AgentEvent::LifecycleObserved(lifecycle),
         ];
-        events.extend(
-            repair
-                .clone()
-                .map(AgentEvent::WorkSummaryCandidatesRepaired),
-        );
         let appended = store::append_agent_events(&self.store, events)
             .await
             .map_err(MonitorCommandError::EventAppend)?;
@@ -725,15 +678,8 @@ impl AgentMonitorRuntime {
         tracked.last_hook = Some((state, observed_at_ms));
         tracked.explicit_summary = next_explicit_summary;
         tracked.screen_state = None;
-        apply_repair_to_tracked(tracked, repair.as_ref());
         let pane_id = tracked.pane.incarnation.pane_id.clone();
-        if let Some(basis) = source_version(
-            &appended,
-            &[
-                "AgentLifecycleObserved",
-                "AgentWorkSummaryCandidatesRepaired",
-            ],
-        ) {
+        if let Some(basis) = source_version(&appended, &["AgentLifecycleObserved"]) {
             tracked.summary_basis_version = basis;
         }
         let instruction = instruction.filter(|_| matches!(work_summary, WorkSummaryUpdate::Set(_)));
@@ -746,7 +692,6 @@ impl AgentMonitorRuntime {
         &mut self,
         mut turn: TurnCompleted,
     ) -> events::Result<events::AppendResult> {
-        self.repair_configured_placeholders().await?;
         let pane = match resolve(
             Arc::clone(&self.inventory),
             turn.pane_id.clone(),
@@ -792,20 +737,7 @@ impl AgentMonitorRuntime {
                 .and_then(|tracked| tracked.explicit_summary.clone()),
             CompletionSummaryUpdate::Set(summary) => Some(summary.clone()),
         });
-        let repair = pane.as_ref().and_then(|pane| {
-            self.repair_event(
-                &pane.incarnation,
-                next_explicit_summary.as_deref(),
-                self.panes
-                    .get(&pane.incarnation.pane_id)
-                    .filter(|tracked| tracked.pane.incarnation == pane.incarnation)
-                    .and_then(|tracked| tracked.screen_summary.as_deref()),
-                pane.observed_at_ms,
-            )
-        });
-        let result =
-            store::append_monitor_turn_completed(&self.store, pane.clone(), &turn, repair.clone())
-                .await?;
+        let result = store::append_monitor_turn_completed(&self.store, pane.clone(), &turn).await?;
         if let Some(pane) = pane {
             let observed_at_ms = pane.observed_at_ms;
             let tracked = self
@@ -820,12 +752,8 @@ impl AgentMonitorRuntime {
             tracked.last_hook = Some((ObservedAgentState::Idle, observed_at_ms));
             tracked.explicit_summary = next_explicit_summary;
             tracked.screen_state = None;
-            apply_repair_to_tracked(tracked, repair.as_ref());
             let pane_id = tracked.pane.incarnation.pane_id.clone();
-            if let Some(basis) = source_version(
-                &result,
-                &["TurnCompleted", "AgentWorkSummaryCandidatesRepaired"],
-            ) {
+            if let Some(basis) = source_version(&result, &["TurnCompleted"]) {
                 tracked.summary_basis_version = basis;
             }
             self.schedule_summary(
@@ -840,9 +768,6 @@ impl AgentMonitorRuntime {
     }
 
     async fn inventory_tick(&mut self) -> Result<(), MonitorCommandError> {
-        self.repair_configured_placeholders()
-            .await
-            .map_err(MonitorCommandError::EventAppend)?;
         let observed = match scan(
             Arc::clone(&self.inventory),
             self.acquisition_timeout,
@@ -1030,9 +955,6 @@ impl AgentMonitorRuntime {
     }
 
     async fn screen_tick(&mut self) -> Result<(), MonitorCommandError> {
-        self.repair_configured_placeholders()
-            .await
-            .map_err(MonitorCommandError::EventAppend)?;
         let panes: Vec<_> = self
             .panes
             .values()
@@ -1167,74 +1089,6 @@ impl AgentMonitorRuntime {
         Ok(())
     }
 
-    async fn repair_configured_placeholders(&mut self) -> events::Result<()> {
-        let observed_at_ms = now_ms();
-        let repairs: Vec<AgentWorkSummaryCandidatesRepaired> = self
-            .panes
-            .values()
-            .filter_map(|tracked| {
-                self.repair_event(
-                    &tracked.pane.incarnation,
-                    tracked.explicit_summary.as_deref(),
-                    tracked.screen_summary.as_deref(),
-                    observed_at_ms,
-                )
-            })
-            .collect();
-        if repairs.is_empty() {
-            return Ok(());
-        }
-        let appended = store::append_agent_events(
-            &self.store,
-            repairs
-                .iter()
-                .cloned()
-                .map(AgentEvent::WorkSummaryCandidatesRepaired)
-                .collect(),
-        )
-        .await?;
-        for repair in &repairs {
-            if let Some(tracked) = self
-                .panes
-                .get_mut(&repair.incarnation.pane_id)
-                .filter(|tracked| tracked.pane.incarnation == repair.incarnation)
-            {
-                apply_repair_to_tracked(tracked, Some(repair));
-                if let Some(event) = appended.events.iter().find(|event| {
-                    event.r#type == "AgentWorkSummaryCandidatesRepaired"
-                        && event
-                            .payload
-                            .get("incarnation")
-                            .and_then(|value| value.get("pane_id"))
-                            .and_then(serde_json::Value::as_str)
-                            == Some(repair.incarnation.pane_id.as_str())
-                }) {
-                    tracked.summary_basis_version = event.version;
-                }
-                if let Some(summaries) = &mut self.summaries {
-                    summaries.invalidate(&repair.incarnation.pane_id);
-                }
-            }
-        }
-        Ok(())
-    }
-
-    fn repair_event(
-        &self,
-        incarnation: &AgentIncarnation,
-        explicit_summary: Option<&str>,
-        screen_summary: Option<&str>,
-        observed_at_ms: i64,
-    ) -> Option<AgentWorkSummaryCandidatesRepaired> {
-        repair_event(
-            self.providers.values(),
-            incarnation,
-            explicit_summary,
-            screen_summary,
-            observed_at_ms,
-        )
-    }
-
     fn reject_configured_placeholder_update(
         &self,
         incarnation: &AgentIncarnation,
@@ -1350,51 +1204,6 @@ fn matches_configured_placeholder_for_provider<'a>(
         return matches_configured_placeholder(summary, &provider.idle_all);
     }
     providers.any(|provider| matches_configured_placeholder(summary, &provider.idle_all))
-}
-
-fn repair_event<'a>(
-    providers: impl Iterator<Item = &'a AgentProviderSettings> + Clone,
-    incarnation: &AgentIncarnation,
-    explicit_summary: Option<&str>,
-    screen_summary: Option<&str>,
-    observed_at_ms: i64,
-) -> Option<AgentWorkSummaryCandidatesRepaired> {
-    let clear_explicit = explicit_summary.is_some_and(|summary| {
-        matches_configured_placeholder_for_provider(
-            providers.clone(),
-            &incarnation.provider_id,
-            summary,
-        )
-    });
-    let clear_screen = screen_summary.is_some_and(|summary| {
-        matches_configured_placeholder_for_provider(
-            providers.clone(),
-            &incarnation.provider_id,
-            summary,
-        )
-    });
-    (clear_explicit || clear_screen).then(|| AgentWorkSummaryCandidatesRepaired {
-        incarnation: incarnation.clone(),
-        clear_explicit,
-        clear_screen,
-        reason: AgentWorkSummaryRepairReason::ConfiguredIdlePlaceholder,
-        observed_at_ms,
-    })
-}
-
-fn apply_repair_to_tracked(
-    tracked: &mut TrackedPane,
-    repair: Option<&AgentWorkSummaryCandidatesRepaired>,
-) {
-    let Some(repair) = repair else {
-        return;
-    };
-    if repair.clear_explicit {
-        tracked.explicit_summary = None;
-    }
-    if repair.clear_screen {
-        tracked.screen_summary = None;
-    }
 }
 
 fn screen_state_delta(

@@ -1,5 +1,11 @@
 # Claude Activity Summaries
 
+> Historical implementation record. The fresh-install consolidation in
+> [fresh-install-state](../fresh-install-state/todo.md) supersedes schema-upgrade,
+> historical candidate-repair, and deprecated configuration requirements here.
+> The [monitor reference](../../docs/references/agent-monitor/README.md) defines the current contract.
+
+
 ## Accepted direction
 
 The user selected Claude/Sonnet after a successful CLI comparison. Implement dashboard activity summaries in Harold using that provider, low effort, and the existing ChatGPT-independent Claude authentication. The existing phone and spoken notification paths retain their own configuration.

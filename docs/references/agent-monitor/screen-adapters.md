@@ -20,7 +20,7 @@ The returned snapshot can contain the configured history depth plus the pane's v
 | OpenCode | `generic-v1` | State only: no summary prefix is configured. The explicit plugin supplies submitted instructions. |
 | Custom named provider | `generic-v1` unless overridden | Configured safe line prefixes. Omit prefixes if they cannot distinguish submitted input safely. |
 
-Missing keys preserve the generic behavior of existing named configurations. A provider named `codex` does not select `codex-v1` implicitly. If a local overlay replaces the complete `[[agents]]` list, add the adapter selection to its Codex entry as well.
+`screen_adapter` defaults to `generic-v1` when omitted. A provider named `codex` does not select `codex-v1` implicitly. If a local overlay replaces the complete `[[agents]]` list, add the adapter selection to its Codex entry as well.
 
 ## Capture requests and timing
 

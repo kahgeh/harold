@@ -207,34 +207,18 @@ pub(crate) struct AgentProviderSettings {
     pub screen_history_lines: u16,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
-#[serde(untagged)]
-pub(crate) enum AgentSettings {
-    Named(Vec<AgentProviderSettings>),
-    Legacy { command_contains: Vec<String> },
-}
-
-impl Default for AgentSettings {
-    fn default() -> Self {
-        Self::Legacy {
-            command_contains: vec!["claude".to_string(), "codex".to_string()],
-        }
-    }
-}
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(transparent)]
+pub(crate) struct AgentSettings(pub Vec<AgentProviderSettings>);
 
 impl AgentSettings {
     pub(crate) fn matches_command(&self, command: &str) -> bool {
         let command = command.trim().to_lowercase();
         let contains = |fragment: &str| command.contains(&fragment.trim().to_lowercase());
-        match self {
-            Self::Named(providers) => providers
-                .iter()
-                .flat_map(|provider| &provider.command_contains)
-                .any(|fragment| !fragment.trim().is_empty() && contains(fragment)),
-            Self::Legacy { command_contains } => command_contains
-                .iter()
-                .any(|fragment| !fragment.trim().is_empty() && contains(fragment)),
-        }
+        self.0
+            .iter()
+            .flat_map(|provider| &provider.command_contains)
+            .any(|fragment| !fragment.trim().is_empty() && contains(fragment))
     }
 
     pub(crate) fn validate(&self, monitor: &AgentMonitorSettings) -> Vec<String> {
@@ -246,53 +230,42 @@ impl AgentSettings {
             errors.push("agent_monitor.screen_interval_ms must be greater than zero".into());
         }
 
-        match self {
-            Self::Legacy { command_contains } => validate_fragments(
+        let mut ids = std::collections::HashSet::new();
+        for provider in &self.0 {
+            if !valid_identifier(&provider.id) {
+                errors.push(format!(
+                    "agents.id must match [a-z0-9][a-z0-9._-]{{0,63}}: {}",
+                    provider.id
+                ));
+            } else if !ids.insert(provider.id.as_str()) {
+                errors.push(format!("duplicate agents.id: {}", provider.id));
+            }
+            if provider.id == "unknown" {
+                errors.push("reserved provider id must not be configured: unknown".into());
+            }
+            if provider.display_name.trim().is_empty() {
+                errors.push(format!(
+                    "agents.display_name must not be empty for {}",
+                    provider.id
+                ));
+            }
+            if !(1..=10_000).contains(&provider.screen_history_lines) {
+                errors.push("agents.screen_history_lines must be between 1 and 10000".into());
+            }
+            validate_fragments(
                 "agents.command_contains",
-                command_contains,
+                &provider.command_contains,
                 true,
                 &mut errors,
-            ),
-            Self::Named(providers) => {
-                let mut ids = std::collections::HashSet::new();
-                for provider in providers {
-                    if !valid_identifier(&provider.id) {
-                        errors.push(format!(
-                            "agents.id must match [a-z0-9][a-z0-9._-]{{0,63}}: {}",
-                            provider.id
-                        ));
-                    } else if !ids.insert(provider.id.as_str()) {
-                        errors.push(format!("duplicate agents.id: {}", provider.id));
-                    }
-                    if provider.id == "unknown" {
-                        errors.push("reserved provider id must not be configured: unknown".into());
-                    }
-                    if provider.display_name.trim().is_empty() {
-                        errors.push(format!(
-                            "agents.display_name must not be empty for {}",
-                            provider.id
-                        ));
-                    }
-                    if !(1..=10_000).contains(&provider.screen_history_lines) {
-                        errors
-                            .push("agents.screen_history_lines must be between 1 and 10000".into());
-                    }
-                    validate_fragments(
-                        "agents.command_contains",
-                        &provider.command_contains,
-                        true,
-                        &mut errors,
-                    );
-                    validate_fragments("agents.busy_all", &provider.busy_all, false, &mut errors);
-                    validate_fragments("agents.idle_all", &provider.idle_all, false, &mut errors);
-                    validate_fragments(
-                        "agents.summary_line_prefixes",
-                        &provider.summary_line_prefixes,
-                        false,
-                        &mut errors,
-                    );
-                }
-            }
+            );
+            validate_fragments("agents.busy_all", &provider.busy_all, false, &mut errors);
+            validate_fragments("agents.idle_all", &provider.idle_all, false, &mut errors);
+            validate_fragments(
+                "agents.summary_line_prefixes",
+                &provider.summary_line_prefixes,
+                false,
+                &mut errors,
+            );
         }
         errors
     }
@@ -460,11 +433,6 @@ impl Settings {
             .build()?;
 
         let settings = config.try_deserialize::<Settings>()?;
-        if matches!(settings.agents, AgentSettings::Legacy { .. }) {
-            warn!(
-                "legacy [agents].command_contains configuration is deprecated; migrate to [[agents]]"
-            );
-        }
         Ok(Arc::new(settings))
     }
 }
@@ -538,9 +506,7 @@ mod tests {
             display_name = "Custom"
             command_contains = ["custom"]
         "#]);
-        let AgentSettings::Named(providers) = parsed.agents else {
-            panic!("named")
-        };
+        let AgentSettings(providers) = parsed.agents;
         assert_eq!(providers[0].screen_adapter, super::ScreenAdapter::GenericV1);
         assert_eq!(providers[0].screen_history_lines, 2000);
         assert_eq!(
@@ -549,9 +515,7 @@ mod tests {
         );
         assert!(serde_json::from_str::<super::ScreenAdapter>(r#""unknown-v1""#).is_err());
         let shipped = parse_agent_config(&[include_str!("../config/default.toml")]);
-        let AgentSettings::Named(providers) = shipped.agents else {
-            panic!("named")
-        };
+        let AgentSettings(providers) = shipped.agents;
         assert_eq!(providers[0].screen_adapter, super::ScreenAdapter::CodexV1);
         assert!(
             providers[1..]
@@ -577,7 +541,19 @@ mod tests {
     }
 
     #[test]
-    fn named_and_legacy_agent_settings_both_deserialize() {
+    fn agents_configuration_requires_a_provider_list() {
+        let result = Config::builder()
+            .add_source(File::from_str(
+                "[agents]\ncommand_contains = [\"codex\"]",
+                FileFormat::Toml,
+            ))
+            .build()
+            .and_then(Config::try_deserialize::<AgentConfigFixture>);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn named_agent_settings_deserialize_with_optional_defaults() {
         let named = parse_agent_config(&[r#"
             [[agents]]
             id = "codex"
@@ -593,42 +569,32 @@ mod tests {
             command_contains = ["claude"]
         "#]);
         assert_eq!(named.agent_monitor, AgentMonitorSettings::default());
-        let AgentSettings::Named(providers) = named.agents else {
-            panic!("expected named providers");
-        };
+        let AgentSettings(providers) = named.agents;
         assert_eq!(providers.len(), 2);
         assert_eq!(providers[0].id, "codex");
         assert_eq!(providers[1].id, "claude");
 
-        let legacy = parse_agent_config(&[r#"
-            [agents]
-            command_contains = ["claude", "codex"]
-        "#]);
-        let AgentSettings::Legacy { command_contains } = legacy.agents else {
-            panic!("expected legacy settings");
-        };
-        assert_eq!(command_contains, ["claude", "codex"]);
+        assert!(providers[1].busy_all.is_empty());
+        assert!(providers[1].idle_all.is_empty());
+        assert!(providers[1].summary_line_prefixes.is_empty());
     }
 
     #[test]
-    fn legacy_local_table_replaces_named_default_array() {
+    fn local_provider_list_replaces_default_list() {
         let settings = parse_agent_config(&[
+            include_str!("../config/default.toml"),
             r#"
                 [[agents]]
-                id = "codex"
-                display_name = "Codex"
-                command_contains = ["codex"]
-            "#,
-            r#"
-                [agents]
-                command_contains = ["future-agent"]
+                id = "custom"
+                display_name = "Custom"
+                command_contains = ["custom-agent"]
             "#,
         ]);
 
-        let AgentSettings::Legacy { command_contains } = settings.agents else {
-            panic!("expected local legacy table to replace the named defaults");
-        };
-        assert_eq!(command_contains, ["future-agent"]);
+        assert_eq!(settings.agents.0.len(), 1);
+        assert_eq!(settings.agents.0[0].id, "custom");
+        assert!(settings.agents.matches_command("/bin/CUSTOM-AGENT --run"));
+        assert!(!settings.agents.matches_command("codex"));
     }
 
     #[test]
@@ -641,15 +607,14 @@ mod tests {
             "a".repeat(65),
         ];
         for id in invalid_ids {
-            let errors = AgentSettings::Named(vec![provider(&id)]).validate(&monitor);
+            let errors = AgentSettings(vec![provider(&id)]).validate(&monitor);
             assert!(errors.iter().any(|error| error.contains("agents.id")));
         }
 
-        let errors =
-            AgentSettings::Named(vec![provider("codex"), provider("codex")]).validate(&monitor);
+        let errors = AgentSettings(vec![provider("codex"), provider("codex")]).validate(&monitor);
         assert!(errors.iter().any(|error| error.contains("duplicate")));
 
-        let errors = AgentSettings::Named(vec![provider("unknown")]).validate(&monitor);
+        let errors = AgentSettings(vec![provider("unknown")]).validate(&monitor);
         assert!(
             errors
                 .iter()
@@ -662,7 +627,7 @@ mod tests {
         invalid.busy_all = vec!["".to_string()];
         invalid.idle_all = vec![" ".to_string()];
         invalid.summary_line_prefixes = vec!["\t".to_string()];
-        let errors = AgentSettings::Named(vec![invalid]).validate(&monitor);
+        let errors = AgentSettings(vec![invalid]).validate(&monitor);
         assert!(errors.iter().any(|error| error.contains("display_name")));
         assert!(
             errors
@@ -681,9 +646,7 @@ mod tests {
     #[test]
     fn default_named_providers_have_verified_screen_contracts() {
         let defaults = parse_agent_config(&[include_str!("../config/default.toml")]);
-        let AgentSettings::Named(providers) = defaults.agents else {
-            panic!("expected named default providers");
-        };
+        let AgentSettings(providers) = defaults.agents;
 
         for provider in &providers {
             assert!(
@@ -721,7 +684,7 @@ mod tests {
 
     #[test]
     fn monitor_polling_intervals_must_be_non_zero() {
-        let agents = AgentSettings::Named(vec![provider("codex")]);
+        let agents = AgentSettings(vec![provider("codex")]);
         let zero_inventory = AgentMonitorSettings {
             inventory_interval_ms: 0,
             ..AgentMonitorSettings::default()
@@ -748,16 +711,12 @@ mod tests {
     }
 
     #[test]
-    fn legacy_matcher_rejects_empty_fragments() {
-        let errors = AgentSettings::Legacy {
-            command_contains: vec!["codex".to_string(), " ".to_string()],
-        }
-        .validate(&AgentMonitorSettings::default());
-
-        assert!(
-            errors
-                .iter()
-                .any(|error| error.contains("command_contains"))
-        );
+    fn command_matching_ignores_empty_fragments_and_normalizes_case() {
+        let mut custom = provider("custom");
+        custom.command_contains = vec![" ".into(), " Custom-Agent ".into()];
+        let settings = AgentSettings(vec![custom]);
+        assert!(settings.matches_command(" /opt/bin/CUSTOM-AGENT --run "));
+        assert!(!settings.matches_command("unrelated-command"));
+        assert!(!AgentSettings::default().matches_command("codex"));
     }
 }

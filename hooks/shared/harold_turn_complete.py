@@ -3,16 +3,15 @@ from __future__ import annotations
 import json
 import os
 import re
-import socket
 import subprocess
-import time
 from dataclasses import dataclass
 from pathlib import Path
 
 
-HAROLD_ADDR = os.getenv("HAROLD_ADDR", "localhost:50060")
-HAROLD_PROTO = Path.home() / "bin/harold/harold.proto"
-HAROLD_BINARY = Path.home() / "bin/harold/harold"
+# The installer places this module directly in <prefix>/harold/hooks/.
+HAROLD_BUNDLE = Path(__file__).resolve().parent.parent
+HAROLD_PROTO = HAROLD_BUNDLE / "harold.proto"
+HAROLD_CONTROL = HAROLD_BUNDLE.parent / "haroldctl"
 TERMINAL_SEQUENCE_RE = re.compile(
     r"""
     \x1b
@@ -106,22 +105,20 @@ def get_main_context(cwd: str) -> str:
     return clean_text(os.path.basename(cwd) or "unknown", 120)
 
 
-def ensure_harold_running() -> None:
-    try:
-        host, port = HAROLD_ADDR.rsplit(":", 1)
-        with socket.create_connection((host, int(port)), timeout=1):
-            return
-    except Exception:
-        pass
-
-    subprocess.Popen(
-        [str(HAROLD_BINARY)],
-        cwd=str(HAROLD_BINARY.parent),
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,
+def ensure_harold_running() -> str:
+    # Only the controller can attribute readiness to the managed process.
+    # Keep this wait inside provider hook deadlines; launchd owns slow startup.
+    subprocess.run(
+        [str(HAROLD_CONTROL), "start"],
+        capture_output=True,
+        check=True,
+        timeout=8,
     )
-    time.sleep(1)
+    metadata = json.loads((HAROLD_BUNDLE / "service.json").read_text(encoding="utf-8"))
+    grpc_addr = metadata.get("grpc_addr")
+    if not isinstance(grpc_addr, str) or not grpc_addr.strip():
+        raise ValueError("Managed Harold service has no gRPC address")
+    return grpc_addr
 
 
 def call_harold(
@@ -130,6 +127,7 @@ def call_harold(
     last_user_prompt: str,
     assistant_message: str,
     main_context: str,
+    grpc_addr: str,
 ) -> None:
     payload = json.dumps(
         {
@@ -150,21 +148,22 @@ def call_harold(
             HAROLD_PROTO.name,
             "-d",
             payload,
-            HAROLD_ADDR,
+            grpc_addr,
             "harold.Harold/TurnComplete",
         ],
         capture_output=True,
-        timeout=10,
+        timeout=5,
     )
 
 
 def notify_harold(turn: TurnComplete) -> None:
     pane_id, pane_label = get_pane_info()
-    ensure_harold_running()
+    grpc_addr = ensure_harold_running()
     call_harold(
         pane_id=pane_id,
         pane_label=pane_label,
         last_user_prompt=clean_text(turn.last_user_prompt, 500),
         assistant_message=clean_text(turn.assistant_message, 2000),
         main_context=get_main_context(turn.cwd),
+        grpc_addr=grpc_addr,
     )

@@ -309,16 +309,16 @@ fn activity_summary_limits_reject_zero_excessive_and_unsupported_settings() {
 }
 
 #[test]
-fn activity_summary_old_configuration_stays_disabled() {
-    let legacy: crate::settings::Settings = serde_json::from_value(serde_json::json!({
+fn activity_summary_is_disabled_when_configuration_is_omitted() {
+    let defaults: crate::settings::Settings = serde_json::from_value(serde_json::json!({
         "grpc": { "host": "127.0.0.1", "port": 50060 },
         "imessage": {}, "chat_db": { "path": "chat.db" }, "ai": {},
         "tts": { "command": "say" }, "log": { "level": "info" },
         "store": { "path": "events" },
         "notify": { "skip_if_session_active": true, "skip_if_pane_active": false, "away_channel": "imessage" }
     })).unwrap();
-    assert!(!legacy.activity_summary.enabled);
-    assert!(legacy.activity_summary.validate().is_empty());
+    assert!(!defaults.activity_summary.enabled);
+    assert!(defaults.activity_summary.validate().is_empty());
     let settings: crate::settings::Settings = config::Config::builder()
         .add_source(config::File::from_str(
             include_str!("../config/default.toml"),

@@ -27,17 +27,34 @@ See the [architecture explanation](docs/explanations/architecture.md), [agent-mo
 
 The [`tmx-agent-dash`](tmx-agent-dash/README.md) terminal dashboard shows Harold's current agent-pane projection and can switch the invoking tmux client to a selected pane.
 
-Build and install Harold and the dashboard from the same workspace revision:
+Install Harold and the dashboard from the same workspace revision:
 
 ```sh
-make deploy
+./scripts/install.sh
 ```
+
+The installer verifies readiness and provides `haroldctl start` for on-demand startup. It does not register automatic login startup. Use `./scripts/install.sh --reinstall` for fresh storage with retained settings. See [installation and reinstallation](docs/how-tos/setup.md) for another-Mac setup.
 
 Then start the dashboard inside the tmux client it should navigate:
 
 ```sh
 tmx-agent-dash
 ```
+
+## Download release builds
+
+Publishing a GitHub release triggers the **Build macOS ARM64** workflow. After
+its tests and build succeed, it attaches `harold-aarch64-apple-darwin.tar.gz`
+and its `.sha256` checksum to that release. The archive contains `harold`,
+`tmx-agent-dash`, configuration templates, the gRPC schema, and the source
+revision. Draft releases, pushes, and pull requests do not trigger builds.
+Re-running a release workflow replaces its matching assets.
+
+These builds target Apple Silicon Macs running macOS 15 or newer. Binaries are
+ad-hoc signed, not notarized. The archive is a binary build, not a configured
+installation: use the source installer above for service setup and hooks; it
+currently builds from source. Linux builds and `curl ... | sh` installation are
+not provided yet.
 
 ## Prerequisites
 

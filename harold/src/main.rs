@@ -1,6 +1,7 @@
 mod activity_summary;
 mod agent;
 mod channels;
+mod cli;
 mod inbound;
 mod outbound;
 mod projector;
@@ -341,19 +342,22 @@ fn print_help() {
     println!("harold — agent notification and inbound message routing daemon\n");
     println!("USAGE:");
     println!("  harold                  Start the Harold daemon");
+    println!("  harold --check-config   Validate config and print address/store JSON; no writes");
+    println!("  harold --check-ready    Read one agent snapshot; 5s timeout, no writes");
     println!("  harold --diagnostics [--delay [N]]  Test screen lock, TTS, and iMessage config");
     println!("                                      --delay defaults to 10s if no value given");
     println!("  harold --help           Show this help\n");
     println!("ENVIRONMENT:");
-    println!("  HAROLD_CONFIG_DIR       Path to config directory (default: ./config)");
+    println!("  HAROLD_CONFIG_DIR       Config directory (default: config/ next to the binary)");
     println!("  HAROLD_ENV              Config environment overlay (default: local)");
     println!("  HAROLD__*               Override any config key via env var");
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let args: Vec<String> = std::env::args().collect();
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mode = cli::Mode::parse(&args)?;
 
-    if args.iter().any(|a| a == "--help" || a == "-h") {
+    if mode == cli::Mode::Help {
         print_help();
         return Ok(());
     }
@@ -361,36 +365,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?
-        .block_on(async_main(args))
+        .block_on(async_main(mode))
 }
 
-async fn async_main(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
-    let settings = settings::Settings::load()?;
-    init_telemetry(&settings.log.level);
+async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
+    let is_probe = matches!(mode, cli::Mode::CheckConfig | cli::Mode::CheckReady);
+    let settings = settings::Settings::load().map_err(|error| -> Box<dyn std::error::Error> {
+        if is_probe {
+            return "invalid configuration".into();
+        }
+        error.into()
+    })?;
 
     let errors = settings.validate();
     if !errors.is_empty() {
-        for e in &errors {
-            tracing::error!("{e}");
+        if is_probe {
+            return Err("invalid configuration".into());
         }
-        return Err("invalid configuration".into());
+        return Err(format!("invalid configuration: {}", errors.join("; ")).into());
     }
 
+    match mode {
+        cli::Mode::CheckConfig => return cli::check_config(&settings),
+        cli::Mode::CheckReady => return cli::check_ready(&settings).await,
+        _ => {}
+    }
+
+    init_telemetry(&settings.log.level);
     init_settings(settings);
     let cfg = get_settings();
 
-    if args
-        .iter()
-        .any(|a| a == "--diagnostic" || a == "--diagnostics")
-    {
-        let delay = if let Some(pos) = args.iter().position(|a| a == "--delay") {
-            args.get(pos + 1)
-                .and_then(|v| v.parse::<u64>().ok())
-                .unwrap_or(10)
-        } else {
-            0
-        };
-        run_diagnostics(delay);
+    if let cli::Mode::Diagnostics { delay_seconds } = mode {
+        run_diagnostics(delay_seconds);
         return Ok(());
     }
 
@@ -407,11 +413,8 @@ async fn async_main(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>>
     );
     let screen: Arc<dyn agent::screen::VisibleScreenPort> =
         Arc::new(agent::screen::TmuxVisibleScreen::new());
-    let providers = match &cfg.agents {
-        settings::AgentSettings::Named(providers) => providers.clone(),
-        settings::AgentSettings::Legacy { .. } => Vec::new(),
-    };
-    let initial_agent_snapshot = load_startup_agent_snapshot(&store, &providers).await?;
+    let providers = cfg.agents.0.clone();
+    let initial_agent_snapshot = load_startup_agent_snapshot(&store).await?;
     let snapshots = agent::snapshot::AgentSnapshotHub::new(initial_agent_snapshot.clone());
 
     let activity_provider = cfg.activity_summary.enabled.then(|| {
@@ -492,17 +495,7 @@ async fn stop_agent_monitor(
 
 async fn load_startup_agent_snapshot(
     store: &store::HaroldStore,
-    providers: &[settings::AgentProviderSettings],
 ) -> events::Result<agent::domain::AgentSnapshot> {
-    let snapshot = loop {
-        let batch = store.project_unhandled_events(500).await?;
-        if batch.applied == 0 {
-            break store.load_agent_snapshot().await?;
-        }
-    };
-    if !agent::runtime::append_configured_placeholder_repairs(store, providers, &snapshot).await? {
-        return Ok(snapshot);
-    }
     loop {
         let batch = store.project_unhandled_events(500).await?;
         if batch.applied == 0 {

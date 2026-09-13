@@ -1,5 +1,11 @@
 # Claude Activity Summaries Implementation Plan
 
+> Historical implementation record. The fresh-install consolidation in
+> [fresh-install-state](../fresh-install-state/todo.md) supersedes schema-upgrade,
+> historical candidate-repair, and deprecated configuration requirements here.
+> The [monitor reference](../../docs/references/agent-monitor/README.md) defines the current contract.
+
+
 **Goal:** Display readable Claude/Sonnet activity descriptions without delaying Harold's agent monitor.
 
 **Architecture:** Existing source observations feed bounded asynchronous generation. Results enter a dedicated durable event and a revision-checked projection; original instructions remain the fallback.

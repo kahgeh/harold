@@ -2,9 +2,8 @@ use events::EventStreamVersion;
 
 use super::domain::{
     AgentEvent, AgentIncarnation, AgentLifecycleObserved, AgentPaneDeparted, AgentPaneObservation,
-    AgentPaneObserved, AgentScreenObserved, AgentWorkSummaryCandidatesRepaired,
-    AgentWorkSummaryRepairReason, EffectiveAgentState, ObservedAgentState, ProjectionChange,
-    WorkSummaryUpdate,
+    AgentPaneObserved, AgentScreenObserved, EffectiveAgentState, ObservedAgentState,
+    ProjectionChange, WorkSummaryUpdate,
 };
 use super::reducer::{DEFAULT_HOOK_GRACE_MS, reduce_agent_event};
 
@@ -456,90 +455,6 @@ fn clear_without_a_fallback_makes_the_effective_summary_absent() {
 }
 
 #[test]
-fn summary_candidate_repair_clears_only_marked_candidates_and_recomputes_by_recency() {
-    let initial = apply(
-        None,
-        AgentEvent::PaneObserved(AgentPaneObserved {
-            pane: pane(1_000, 100),
-        }),
-        1,
-    );
-    let explicit = apply(
-        Some(initial),
-        AgentEvent::LifecycleObserved(AgentLifecycleObserved {
-            incarnation: incarnation(1_000),
-            state: ObservedAgentState::Idle,
-            adapter_id: "legacy-hook".into(),
-            work_summary: WorkSummaryUpdate::Set("Explicit placeholder".into()),
-            observed_at_ms: 110,
-        }),
-        2,
-    );
-    let both = apply(
-        Some(explicit),
-        AgentEvent::ScreenObserved(AgentScreenObserved {
-            incarnation: incarnation(1_000),
-            state: None,
-            classifier_id: "screen-v1".into(),
-            fallback_summary: Some("Legitimate screen task".into()),
-            observed_at_ms: 120,
-        }),
-        3,
-    );
-    let repaired = apply(
-        Some(both),
-        AgentEvent::WorkSummaryCandidatesRepaired(AgentWorkSummaryCandidatesRepaired {
-            incarnation: incarnation(1_000),
-            clear_explicit: true,
-            clear_screen: false,
-            reason: AgentWorkSummaryRepairReason::ConfiguredIdlePlaceholder,
-            observed_at_ms: 130,
-        }),
-        4,
-    );
-
-    assert_eq!(repaired.explicit_work_summary, None);
-    assert_eq!(repaired.explicit_work_summary_updated_at_ms, None);
-    assert_eq!(
-        repaired.screen_work_summary.as_deref(),
-        Some("Legitimate screen task")
-    );
-    assert_eq!(
-        repaired.work_summary.as_deref(),
-        Some("Legitimate screen task")
-    );
-    assert_eq!(repaired.last_event_version, version(4));
-    assert_eq!(repaired.last_transition_at_ms, 110);
-}
-
-#[test]
-fn summary_candidate_repair_for_an_old_incarnation_is_ignored() {
-    let current = apply(
-        None,
-        AgentEvent::PaneObserved(AgentPaneObserved {
-            pane: pane(2_000, 100),
-        }),
-        1,
-    );
-
-    assert_eq!(
-        reduce_agent_event(
-            Some(current),
-            &AgentEvent::WorkSummaryCandidatesRepaired(AgentWorkSummaryCandidatesRepaired {
-                incarnation: incarnation(1_000),
-                clear_explicit: true,
-                clear_screen: true,
-                reason: AgentWorkSummaryRepairReason::ConfiguredIdlePlaceholder,
-                observed_at_ms: 130,
-            },),
-            version(2),
-            DEFAULT_HOOK_GRACE_MS,
-        ),
-        ProjectionChange::Ignore
-    );
-}
-
-#[test]
 fn screen_facts_update_independently_and_absence_preserves_candidates() {
     let initial = apply(
         None,
@@ -866,7 +781,7 @@ fn corroborating_busy_and_metadata_keep_generated_activity_but_new_work_invalida
 }
 
 #[test]
-fn new_busy_boundary_and_source_repair_invalidate_generated_activity() {
+fn new_busy_boundary_invalidates_generated_activity() {
     use super::domain::AgentActivitySummaryGenerated;
     let initial = apply(
         None,
@@ -897,7 +812,7 @@ fn new_busy_boundary_and_source_repair_invalidate_generated_activity() {
         3,
     );
     let new_busy = apply(
-        Some(generated.clone()),
+        Some(generated),
         AgentEvent::ScreenObserved(AgentScreenObserved {
             incarnation: incarnation(1_000),
             state: Some(ObservedAgentState::Busy),
@@ -910,20 +825,6 @@ fn new_busy_boundary_and_source_repair_invalidate_generated_activity() {
     assert_eq!(new_busy.summary_basis_version, version(4));
     assert_eq!(new_busy.work_summary.as_deref(), Some("Fix parser"));
     assert!(new_busy.generated_work_summary.is_none());
-    let repaired = apply(
-        Some(generated),
-        AgentEvent::WorkSummaryCandidatesRepaired(AgentWorkSummaryCandidatesRepaired {
-            incarnation: incarnation(1_000),
-            clear_explicit: true,
-            clear_screen: false,
-            reason: AgentWorkSummaryRepairReason::ConfiguredIdlePlaceholder,
-            observed_at_ms: 3_000,
-        }),
-        4,
-    );
-    assert_eq!(repaired.summary_basis_version, version(4));
-    assert!(repaired.generated_work_summary.is_none());
-    assert!(repaired.work_summary.is_none());
 }
 
 #[test]

@@ -21,17 +21,17 @@ Each cursor is advanced only after a successful `append_inbound_message`, so a c
 
 **Telegram** — Long-polls the Telegram Bot API `getUpdates` endpoint (30s timeout). On startup, drains any pre-existing updates to avoid replaying old messages. Only messages from the configured `chat_id` are processed; messages starting with `🤖` (Harold's own messages) are filtered out.
 
-**Routing resolution** — Harold's event handler stages `InboundMessageReceived` events in its durable outbox and calls `route_inbound_message()` in stream-version order. Live pane discovery runs at resolution time via `tmux list-panes -a`, then reads the process tree under each pane's `pane_pid`. A pane is considered an agent when the pane process or a descendant process command contains one of the configured `[agents].command_contains` fragments. Agents are addressed via the `AgentAddress` enum (currently only `TmuxPane { pane_id, label }`).
+**Routing resolution** — Harold's event handler stages `InboundMessageReceived` events in its durable outbox and calls `route_inbound_message()` in stream-version order. Live pane discovery runs at resolution time via `tmux list-panes -a`, then reads the process tree under each pane's `pane_pid`. A pane is considered an agent when the pane process or a descendant process command contains one of the configured `agents[].command_contains` fragments. Agents are addressed via the `AgentAddress` enum (currently only `TmuxPane { pane_id, label }`).
 
 ## Pane discovery
 
 Harold currently recognizes a pane as an agent when the pane process or one of its descendants has a process command containing a configured fragment:
 
-- Default `[agents].command_contains`: `["claude", "codex"]`
+- Shipped `[[agents]]` providers match `codex`, `claude`, and `opencode` command fragments
 - Claude Code example: tmux may report `pane_current_command` as a Node-version-like process, but the pane's descendant command includes `claude`
 - Codex example: tmux may report `pane_current_command` as `codex-aarch64-a`, while the pane's descendant command includes `codex`
 
-This is a process-name heuristic. Update `[agents].command_contains` if an agent binary name changes. A future improvement is explicit pane registration via the `TurnComplete` RPC.
+This is a process-name heuristic. Update `agents[].command_contains` if an agent binary name changes.
 
 Pane label format: `<session_name>:<window_index>.<pane_index>` (e.g. `alir-app main:0.1`).
 

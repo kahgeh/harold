@@ -47,7 +47,7 @@ fn process(pid: u32, ppid: u32, pgid: i32, command: &str) -> ProcessInfo {
 }
 
 fn named_settings() -> AgentSettings {
-    AgentSettings::Named(vec![
+    AgentSettings(vec![
         provider("codex", &["codex"]),
         provider("claude", &["claude"]),
     ])
@@ -107,8 +107,8 @@ fn pane_root_and_wrapped_descendant_are_both_discoverable() {
 }
 
 #[test]
-fn ambiguous_and_legacy_matches_remain_visible_as_unknown() {
-    let ambiguous = AgentSettings::Named(vec![
+fn ambiguous_matches_remain_visible_as_unknown() {
+    let ambiguous = AgentSettings(vec![
         provider("codex", &["agent"]),
         provider("future", &["future-agent"]),
     ]);
@@ -120,19 +120,11 @@ fn ambiguous_and_legacy_matches_remain_visible_as_unknown() {
         .unwrap()
         .unwrap();
     assert_eq!(observation.incarnation.provider_id, UNKNOWN_PROVIDER_ID);
-
-    let legacy = AgentSettings::Legacy {
-        command_contains: vec!["future-agent".to_string()],
-    };
-    let observation = observe_pane(&pane(), &processes, &legacy, 99)
-        .unwrap()
-        .unwrap();
-    assert_eq!(observation.incarnation.provider_id, UNKNOWN_PROVIDER_ID);
 }
 
 #[test]
 fn ambiguous_provider_resolution_is_typed_for_bounded_operator_reporting() {
-    let settings = AgentSettings::Named(vec![
+    let settings = AgentSettings(vec![
         provider("codex", &["agent"]),
         provider("future", &["future-agent"]),
     ]);

@@ -1,5 +1,11 @@
 # Agent State Monitor Backend Implementation Plan
 
+> Historical implementation record. The fresh-install consolidation in
+> [fresh-install-state](../fresh-install-state/todo.md) supersedes schema-upgrade,
+> historical candidate-repair, and deprecated configuration requirements here.
+> The [monitor reference](../../docs/references/agent-monitor/README.md) defines the current contract.
+
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Make Harold durably discover and monitor tmux agents, publish snapshot-first state with one concise current-work summary per pane, and keep raw screen content and dashboard search outside Harold's persistence and API boundaries.
