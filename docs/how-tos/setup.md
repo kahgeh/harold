@@ -1,51 +1,47 @@
 # Install or Reinstall Harold
 
-Use this guide to set up Harold and its dashboard on a Mac. The installer asks for channel settings, builds both programs, and starts Harold once to verify that installation succeeded. Later, start it when needed with `haroldctl start`; nothing is registered for automatic login startup.
+Install Harold and its dashboard from the latest macOS release. This is the recommended path: it downloads ready-built programs, checks their checksum, and asks for your channel settings. Rust and a source checkout are unnecessary.
+
+The installer starts Harold once to verify installation. Later, start it when needed with `haroldctl start`; nothing is registered for automatic login startup.
 
 ## Prerequisites
 
-- macOS with an active graphical login session; run the installer as your normal user.
-- Xcode Command Line Tools, Rust/Cargo, Python 3.9 or newer, tmux, grpcurl, and protoc.
+- An Apple Silicon Mac running macOS 15 or newer, with an active graphical login session. Run the installer as your normal user.
+- Python 3.9 or newer, tmux, and grpcurl.
 - A configured iMessage account or Telegram bot for the away channel.
 
-If you use Homebrew, the build/runtime tools can be installed with:
+With Homebrew available, install the runtime tools:
 
 ```sh
-xcode-select --install
-brew install rust python tmux grpcurl protobuf
+brew install python tmux grpcurl
 ```
 
-The installer checks prerequisites and reports missing tools. It does not install third-party packages for you. Claude is optional: enable AI summaries and semantic routing after installing and authenticating it. See [prerequisites](../prerequisites.md) for channel-specific requirements.
+The installer checks prerequisites and reports missing tools; it does not install packages for you. It also uses macOS tools such as codesign and launchctl. See [prerequisites](../prerequisites.md) for channel requirements and optional AI features.
 
-## 1. Get the source
+## 1. Install
+
+<a id="install-a-published-release-without-rust"></a>
 
 ```sh
-git clone --recurse-submodules https://github.com/kahgeh/harold.git
-cd harold
+curl -fsSL https://raw.githubusercontent.com/kahgeh/harold/main/scripts/bootstrap.sh | sh
 ```
 
-If the checkout is missing its `events` submodule, initialize it before installation:
+This downloads the latest stable release and verifies its SHA-256 checksum before installation. To compile local changes instead, use [Build from source](#build-from-source).
 
-```sh
-git submodule update --init --recursive
-```
-
-## 2. Install
-
-```sh
-./scripts/install.sh
-```
+## 2. Configure
 
 On the first run, choose iMessage or Telegram and enter the requested channel settings. Telegram tokens are entered without echo. Alternatively, supply a complete local configuration file:
 
 ```sh
-./scripts/install.sh --config /path/to/local.toml
+curl -fsSL https://raw.githubusercontent.com/kahgeh/harold/main/scripts/bootstrap.sh | sh -s -- --config /path/to/local.toml
 ```
+
+Without a terminal, supply `--config PATH` for the first installation. Existing configuration is retained by default.
 
 The installer validates configuration before replacing the installed program. It uses ad-hoc code signing by default; to use your own signing identity:
 
 ```sh
-./scripts/install.sh --signing-identity 'My Code Signing Certificate'
+curl -fsSL https://raw.githubusercontent.com/kahgeh/harold/main/scripts/bootstrap.sh | sh -s -- --signing-identity 'My Code Signing Certificate'
 ```
 
 Signing does not grant macOS privacy permissions. For iMessage, configure the installed Harold process's access to the Messages database and approve Messages automation when macOS requests it. A service managed by launchd does not run inside your terminal.
@@ -104,24 +100,16 @@ After changing `~/bin/harold/config/local.toml`, restart Harold. For a startup f
 To replace the programs while retaining your settings and managed database, run the installer again:
 
 ```sh
-./scripts/install.sh
+curl -fsSL https://raw.githubusercontent.com/kahgeh/harold/main/scripts/bootstrap.sh | sh
 ```
 
 To retain settings but start with a fresh database:
 
 ```sh
-./scripts/install.sh --reinstall
+curl -fsSL https://raw.githubusercontent.com/kahgeh/harold/main/scripts/bootstrap.sh | sh -s -- --reinstall
 ```
 
 Reinstall archives the previous installation, including its data, and prints the backup location. It creates a fresh managed store; it does not convert old schemas or delete an external store named in a copied configuration. Use `--config` as well if you want to replace the local settings.
-
-`make install` and `make deploy` use the same normal-install path. `make reinstall` selects fresh storage. Additional flags can be passed as `INSTALL_ARGS`, for example:
-
-```sh
-make reinstall INSTALL_ARGS='--offline'
-```
-
-`--offline` requires the locked Cargo dependencies to be cached already.
 
 ## 5. Connect agent hooks
 
@@ -219,26 +207,31 @@ The daemon also provides an explicit diagnostic command that can speak or send a
 
 For Telegram configuration details, see [Setup Telegram](setup-telegram.md).
 
-## Install a published release without Rust
+## Build from source
 
-On an Apple Silicon Mac running macOS 15 or newer, install Python 3.9+, tmux,
-and grpcurl first (`brew install python tmux grpcurl`). Then run:
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/kahgeh/harold/main/scripts/bootstrap.sh | sh
-```
-
-The release must include the installer files. The bootstrap downloads the latest
-stable release, verifies its SHA-256 checksum, and runs the same configuration and
-service setup as the source installer. It starts Harold to verify readiness but
-does not register login startup. Run `~/bin/haroldctl start` when needed.
-
-To supply settings or reinstall with fresh storage, forward installer options:
+Use this path to install local code changes. In addition to the runtime tools above, install Xcode Command Line Tools, Rust/Cargo, and protoc:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/kahgeh/harold/main/scripts/bootstrap.sh | sh -s -- --config "$HOME/local.toml" --reinstall
+xcode-select --install
+brew install rust protobuf
 ```
 
-Existing configuration is retained by default. Without a terminal, supply
-`--config PATH` for the first installation. Provider-specific hook registration
-and macOS permissions still follow the steps above.
+Get the source and its dependency:
+
+```sh
+git clone --recurse-submodules https://github.com/kahgeh/harold.git
+cd harold
+./scripts/install.sh
+```
+
+If an existing checkout is missing `events`, run `git submodule update --init --recursive` first. The source installer builds both programs using the checked-in Cargo lockfile, then performs the same configuration and readiness checks as the release installer.
+
+Run `./scripts/install.sh` again to install the current checkout while retaining settings and data. Use `./scripts/install.sh --reinstall` for fresh storage with retained settings.
+
+`make install` and `make deploy` use the same normal-install path. `make reinstall` selects fresh storage. Additional flags can be passed as `INSTALL_ARGS`, for example:
+
+```sh
+make reinstall INSTALL_ARGS='--offline'
+```
+
+`--offline` requires the locked Cargo dependencies to be cached already.
