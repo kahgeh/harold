@@ -38,6 +38,7 @@ jobs:
           cargo test --locked --workspace --target aarch64-apple-darwin
           python3 -m unittest discover -s scripts/tests
           python3 -m unittest hooks.shared.harold_turn_complete_test
+          python3 -m unittest hooks.providers.test_turn_complete
 
       - name: Build release binaries
         run: cargo build --locked --release --target aarch64-apple-darwin -p harold -p tmx-agent-dash
@@ -60,6 +61,7 @@ jobs:
           cp harold/config/default.toml harold/config/local.template.toml "dist/$package/config/"
           cp scripts/install.py scripts/harold_service.py "dist/$package/scripts/"
           cp hooks/shared/harold_turn_complete.py "dist/$package/hooks/"
+          cp hooks/providers/claude_turn_complete.py hooks/providers/codex_turn_complete.py "dist/$package/hooks/"
           cp README.md "dist/$package/"
           printf '%s\n' "$GITHUB_SHA" > "dist/$package/REVISION"
           tar -czf "dist/$package.tar.gz" -C dist "$package"

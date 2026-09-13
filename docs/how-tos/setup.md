@@ -59,6 +59,8 @@ The default layout is:
   config/local.toml
   config/local.template.toml
   hooks/harold_turn_complete.py
+  hooks/claude_turn_complete.py
+  hooks/codex_turn_complete.py
   data/events/
   harold.log
 ~/bin/haroldctl
@@ -113,14 +115,14 @@ Reinstall archives the previous installation, including its data, and prints the
 
 ## 5. Connect agent hooks
 
-The core installation includes the shared notifier. Copy the provider-specific transcript adapters from your existing setup to the paths below before registering them. Those adapters and their registration are separate: the installer does not overwrite your Claude, Codex, or OpenCode settings. The [agent-monitor hook guide](setup-agent-monitor-hooks.md) covers lifecycle reporting and the opt-in OpenCode plugin.
+Starting with v0.1.1, the installer provides both Claude Code and Codex completion scripts, plus the shared notifier. Register the installed scripts using the commands below. The installer does not overwrite your Claude, Codex, or OpenCode settings. The [agent-monitor hook guide](setup-agent-monitor-hooks.md) covers lifecycle reporting and the opt-in OpenCode plugin.
 
 Harold is notified of completed turns by agent-specific Stop hooks. The hook layout keeps Harold integration shared and leaves transcript parsing to each agent adapter:
 
 ```
 ~/bin/harold/hooks/harold_turn_complete.py   # shared Harold notifier, installed by the installer
-~/.claude/hooks/turn_complete.py             # Claude transcript adapter
-~/.codex/hooks/turn_complete.py              # Codex transcript adapter
+~/bin/harold/hooks/claude_turn_complete.py   # reads Claude completion data
+~/bin/harold/hooks/codex_turn_complete.py    # reads Codex completion data
 ```
 
 The adapter parses its agent's hook payload and transcript, then calls the shared notifier with:
@@ -141,20 +143,11 @@ The shared notifier adds the Harold-specific fields:
 
 The shared notifier asks `~/bin/haroldctl start` to ensure the managed service is ready, then sends `TurnComplete` through `grpcurl` to the installed endpoint. It does not launch another daemon.
 
-Each adapter should load the shared notifier from Harold's install directory:
-
-```python
-import sys
-from pathlib import Path
-
-sys.path.insert(0, str(Path.home() / "bin/harold/hooks"))
-
-from harold_turn_complete import TurnComplete, notify_harold
-```
+Both scripts call the same shared notifier after translating their provider's completion data. They resolve it beside themselves, so a custom install prefix works too. Python 3.9+ is sufficient; uv is not required.
 
 ### Register Claude Code
 
-Add the Stop hook to `~/.claude/settings.json`. Use the absolute path for your home directory:
+Add the Stop hook to `~/.claude/settings.json`. Use the absolute path for your installation. Replace an existing Harold Stop hook command rather than adding a duplicate:
 
 ```json
 {
@@ -165,7 +158,7 @@ Add the Stop hook to `~/.claude/settings.json`. Use the absolute path for your h
         "hooks": [
           {
             "type": "command",
-            "command": "uv run /Users/<you>/.claude/hooks/turn_complete.py"
+            "command": "python3 /Users/<you>/bin/harold/hooks/claude_turn_complete.py"
           }
         ]
       }
@@ -178,7 +171,7 @@ The Claude adapter skips `SubagentStop`, prefers `last_assistant_message` from t
 
 ### Register Codex
 
-Enable Codex hooks and register the Stop hook in `~/.codex/config.toml`. Use the absolute path for your home directory:
+Enable Codex hooks and register the Stop hook in `~/.codex/config.toml`. Use the absolute path for your installation. Replace an existing Harold Stop hook command rather than adding a duplicate:
 
 ```toml
 [features]
@@ -188,7 +181,7 @@ codex_hooks = true
 
 [[hooks.Stop.hooks]]
 type = "command"
-command = "uv run /Users/<you>/.codex/hooks/turn_complete.py"
+command = "python3 /Users/<you>/bin/harold/hooks/codex_turn_complete.py"
 timeout = 15
 statusMessage = "Notifying Harold"
 ```

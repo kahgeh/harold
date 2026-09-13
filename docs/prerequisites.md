@@ -40,6 +40,6 @@ Claude CLI is used for semantic routing and generated summaries when configured.
 
 ## Agent hooks
 
-The installer provides `~/bin/harold/hooks/harold_turn_complete.py`, the shared notifier. Provider-specific transcript adapters and hook registration remain separate; existing provider settings are not overwritten.
+Starting with v0.1.1, the installer provides `claude_turn_complete.py`, `codex_turn_complete.py`, and the shared `harold_turn_complete.py` in `~/bin/harold/hooks/`. All use Python 3.9+ without uv. Hook registration remains a separate step; existing provider settings are not overwritten.
 
 See [hook setup](how-tos/setup-agent-monitor-hooks.md) for lifecycle reporting, and [installation setup](how-tos/setup.md#5-connect-agent-hooks) for completion-hook registration.

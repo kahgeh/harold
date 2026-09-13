@@ -78,7 +78,8 @@ def prerequisites(repo, prebuilt=False):
 
 def prebuilt_files(directory):
     required = ('harold', 'tmx-agent-dash', 'harold.proto',
-                'hooks/harold_turn_complete.py', 'scripts/harold_service.py',
+                'hooks/harold_turn_complete.py', 'hooks/claude_turn_complete.py',
+                'hooks/codex_turn_complete.py', 'scripts/harold_service.py',
                 'config/default.toml', 'config/local.template.toml')
     for name in required:
         path = directory / name
@@ -246,6 +247,9 @@ def install(args, repo):
                          stage / 'harold.proto')
             shutil.copy2(assets / ('hooks/harold_turn_complete.py' if prebuilt is not None else 'hooks/shared/harold_turn_complete.py'),
                          stage / 'hooks/harold_turn_complete.py')
+            for name in ('claude_turn_complete.py', 'codex_turn_complete.py'):
+                source = assets / ('hooks' if prebuilt is not None else 'hooks/providers') / name
+                shutil.copy2(source, stage / 'hooks' / name)
             shutil.copy2(assets / 'scripts/harold_service.py', stage / 'service.py')
             for name in ('default.toml', 'local.template.toml'):
                 shutil.copy2(assets / ('config' if prebuilt is not None else 'harold/config') / name, stage / 'config' / name)

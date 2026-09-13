@@ -94,6 +94,7 @@ class InstallTests(unittest.TestCase):
         repo = self.prefix / 'repo'
         for name in ('target/release/harold', 'target/release/tmx-agent-dash',
                      'harold-api/proto/harold.proto', 'hooks/shared/harold_turn_complete.py',
+                     'hooks/providers/claude_turn_complete.py', 'hooks/providers/codex_turn_complete.py',
                      'scripts/harold_service.py', 'harold/config/default.toml',
                      'harold/config/local.template.toml'):
             path = repo / name
@@ -126,6 +127,7 @@ class InstallTests(unittest.TestCase):
         repo = self.prefix / 'repo'
         for name in ('target/release/harold', 'target/release/tmx-agent-dash',
                      'harold-api/proto/harold.proto', 'hooks/shared/harold_turn_complete.py',
+                     'hooks/providers/claude_turn_complete.py', 'hooks/providers/codex_turn_complete.py',
                      'scripts/harold_service.py', 'harold/config/default.toml',
                      'harold/config/local.template.toml'):
             path = repo / name
@@ -163,11 +165,15 @@ class InstallTests(unittest.TestCase):
             self.install.install(args, repo)
         self.assertEqual((self.prefix / 'harold/harold').read_text(), 'built harold')
         self.assertEqual((self.prefix / 'tmx-agent-dash').read_text(), 'built tmx-agent-dash')
+        for name in ('claude_turn_complete.py', 'codex_turn_complete.py'):
+            self.assertEqual((self.prefix / 'harold/hooks' / name).read_text(), 'stale')
+
 
     def test_prebuilt_install_needs_no_source_or_build_tools(self):
         release = self.prefix / 'release'
         for name in ('harold', 'tmx-agent-dash', 'harold.proto',
-                     'hooks/harold_turn_complete.py', 'scripts/harold_service.py',
+                     'hooks/harold_turn_complete.py', 'hooks/claude_turn_complete.py',
+                     'hooks/codex_turn_complete.py', 'scripts/harold_service.py',
                      'config/default.toml', 'config/local.template.toml'):
             path = release / name
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -209,6 +215,10 @@ class InstallTests(unittest.TestCase):
         self.assertEqual((self.prefix / 'harold/config/default.toml').read_text(),
                          'release config/default.toml')
         self.assertEqual((self.prefix / 'harold/config/local.toml').read_text(), 'agents = []')
+        for name in ('claude_turn_complete.py', 'codex_turn_complete.py'):
+            self.assertEqual((self.prefix / 'harold/hooks' / name).read_text(),
+                             'release hooks/' + name)
+
 
     def test_prebuilt_requires_runtime_tools(self):
         with patch.object(sys, 'platform', 'darwin'), \

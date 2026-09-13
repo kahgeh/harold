@@ -57,7 +57,7 @@ Harold projects the durable stream to its head and seeds the current snapshot be
 
 `ReportAgentState` does not replace `TurnComplete` notifications. Keep the Claude or Codex stop adapter described in [Setup](setup.md#5-connect-agent-hooks) when you need TTS or away notifications.
 
-The shared notifier installed by `make deploy` is `~/bin/harold/hooks/harold_turn_complete.py`. Provider-specific Claude and Codex transcript adapters live in their respective user configuration directories; they are not copied from this repository by `make deploy`.
+The shared notifier installed by `make deploy` is `~/bin/harold/hooks/harold_turn_complete.py`. Starting with v0.1.1, the installer also provides `claude_turn_complete.py` and `codex_turn_complete.py` in that same directory. Register those installed scripts using the [setup commands](setup.md#5-connect-agent-hooks).
 
 A stop adapter must select the most recent substantive submitted user instruction for `last_user_prompt`. A normalized-empty prompt preserves the explicit candidate and its timestamp. `TurnComplete` cannot explicitly clear a summary; use a present-empty `ReportAgentState.work_summary` for that operation.
 
