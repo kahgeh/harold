@@ -190,10 +190,12 @@ struct AgentMonitorRuntime {
     providers: HashMap<String, AgentProviderSettings>,
     hook_grace_ms: u64,
     acquisition_timeout: Duration,
+    inventory_timeout: Duration,
     inventory_gate: Arc<Semaphore>,
     screen_gate: Arc<Semaphore>,
     panes: HashMap<String, TrackedPane>,
     health: HashMap<String, HealthState>,
+    logged_health: HashMap<String, HealthState>,
     summaries: Option<ActivityScheduler>,
 }
 
@@ -203,6 +205,7 @@ pub(crate) struct AgentMonitorRuntimeConfig {
     pub(crate) screen_interval: Duration,
     pub(crate) hook_grace_ms: u64,
     pub(crate) acquisition_timeout: Duration,
+    pub(crate) inventory_timeout: Duration,
 }
 
 struct RuntimeInputs {
@@ -213,6 +216,7 @@ struct RuntimeInputs {
     initial_snapshot: AgentSnapshot,
     hook_grace_ms: u64,
     acquisition_timeout: Duration,
+    inventory_timeout: Duration,
     intervals: Option<(Duration, Duration)>,
     activity_summary: Option<(Arc<dyn ActivitySummarizer>, ActivitySummarySettings)>,
 }
@@ -290,6 +294,7 @@ pub(crate) fn spawn_agent_monitor(
             initial_snapshot,
             hook_grace_ms: config.hook_grace_ms,
             acquisition_timeout: config.acquisition_timeout,
+            inventory_timeout: config.inventory_timeout,
             intervals: Some((config.inventory_interval, config.screen_interval)),
             activity_summary: config.activity_summary,
         },
@@ -319,6 +324,7 @@ where
             initial_snapshot: empty_snapshot(),
             hook_grace_ms,
             acquisition_timeout: Duration::from_millis(100),
+            inventory_timeout: Duration::from_millis(100),
             intervals: None,
             activity_summary: None,
         },
@@ -348,6 +354,7 @@ where
             initial_snapshot: seed.snapshot,
             hook_grace_ms: seed.hook_grace_ms,
             acquisition_timeout: seed.acquisition_timeout,
+            inventory_timeout: seed.acquisition_timeout,
             intervals: None,
             activity_summary: None,
         },
@@ -367,6 +374,7 @@ fn spawn_runtime(
         initial_snapshot,
         hook_grace_ms,
         acquisition_timeout,
+        inventory_timeout,
         intervals,
         activity_summary,
     } = inputs;
@@ -402,10 +410,12 @@ fn spawn_runtime(
                 .collect(),
             hook_grace_ms,
             acquisition_timeout,
+            inventory_timeout,
             inventory_gate: Arc::new(Semaphore::new(1)),
             screen_gate: Arc::new(Semaphore::new(1)),
             panes: panes_from_snapshot(&initial_snapshot, hook_grace_ms),
             health: health_from_snapshot(&initial_snapshot),
+            logged_health: HashMap::new(),
             summaries: activity_summary
                 .map(|(provider, settings)| ActivityScheduler::new(provider, settings)),
         };
@@ -695,7 +705,7 @@ impl AgentMonitorRuntime {
         let pane = match resolve(
             Arc::clone(&self.inventory),
             turn.pane_id.clone(),
-            self.acquisition_timeout,
+            self.inventory_timeout,
             Arc::clone(&self.inventory_gate),
         )
         .await
@@ -770,7 +780,7 @@ impl AgentMonitorRuntime {
     async fn inventory_tick(&mut self) -> Result<(), MonitorCommandError> {
         let observed = match scan(
             Arc::clone(&self.inventory),
-            self.acquisition_timeout,
+            self.inventory_timeout,
             Arc::clone(&self.inventory_gate),
         )
         .await
@@ -843,7 +853,7 @@ impl AgentMonitorRuntime {
             let current = match is_current(
                 Arc::clone(&self.inventory),
                 incarnation.clone(),
-                self.acquisition_timeout,
+                self.inventory_timeout,
                 Arc::clone(&self.inventory_gate),
             )
             .await
@@ -1129,7 +1139,7 @@ impl AgentMonitorRuntime {
         match resolve(
             Arc::clone(&self.inventory),
             pane_id,
-            self.acquisition_timeout,
+            self.inventory_timeout,
             Arc::clone(&self.inventory_gate),
         )
         .await
@@ -1152,10 +1162,15 @@ impl AgentMonitorRuntime {
         healthy: bool,
         reason_code: &'static str,
     ) -> Result<(), MonitorCommandError> {
+        // A previous timed-out worker still owns the gate: there is no new observation.
+        if reason_code == "busy" {
+            return Ok(());
+        }
         let next = HealthState {
             healthy,
             reason_code: reason_code.into(),
         };
+        self.log_health_transition(component, &next);
         if self.health.get(component) == Some(&next)
             || (healthy && !self.health.contains_key(component))
         {
@@ -1176,6 +1191,24 @@ impl AgentMonitorRuntime {
         .map_err(MonitorCommandError::EventAppend)?;
         self.health.insert(component.into(), next);
         Ok(())
+    }
+
+    fn log_health_transition(&mut self, component: &'static str, next: &HealthState) {
+        if self.logged_health.get(component) == Some(next) {
+            return;
+        }
+        let previous = self
+            .logged_health
+            .get(component)
+            .or_else(|| self.health.get(component));
+        if !next.healthy {
+            tracing::warn!(component, reason_code = %next.reason_code, "agent monitor degraded");
+        } else if previous.is_some_and(|previous| !previous.healthy) {
+            tracing::info!(component, reason_code = %next.reason_code, "agent monitor recovered");
+        }
+        // Track current-process observations separately so restored failures are logged once,
+        // without making a failed durable append suppress its retry.
+        self.logged_health.insert(component.into(), next.clone());
     }
 }
 
@@ -1325,7 +1358,7 @@ where
     F: FnOnce() -> T + Send + 'static,
 {
     let permit = gate.try_acquire_owned().map_err(|_| AcquisitionFailure {
-        reason_code: "timeout",
+        reason_code: "busy",
     })?;
     let (sender, receiver) = oneshot::channel();
     std::thread::Builder::new()
@@ -1416,6 +1449,7 @@ fn source_version(appended: &events::AppendResult, types: &[&str]) -> Option<Eve
 #[cfg(test)]
 mod acquisition_tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn completed_acquisition_releases_gate_before_notifying_caller() {
@@ -1436,5 +1470,52 @@ mod acquisition_tests {
                 "a completed operation must no longer hold its gate"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn timed_out_worker_holds_gate_and_busy_attempt_does_not_start_another_worker() {
+        let gate = Arc::new(Semaphore::new(1));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let worker_calls = Arc::clone(&calls);
+        let (release, held) = std::sync::mpsc::channel();
+        let failure = run_bounded_thread(
+            "test-inventory",
+            Duration::from_millis(20),
+            Arc::clone(&gate),
+            move || {
+                worker_calls.fetch_add(1, Ordering::SeqCst);
+                let _ = held.recv();
+            },
+        )
+        .await
+        .expect_err("held worker must time out");
+        assert_eq!(failure.reason_code, "timeout");
+        for _ in 0..3 {
+            let worker_calls = Arc::clone(&calls);
+            let failure = run_bounded_thread(
+                "test-inventory",
+                Duration::from_secs(1),
+                Arc::clone(&gate),
+                move || {
+                    worker_calls.fetch_add(1, Ordering::SeqCst);
+                },
+            )
+            .await
+            .expect_err("held gate must reject another worker");
+            assert_eq!(failure.reason_code, "busy");
+        }
+        // The worker might only get scheduled after the timeout, so release it before joining.
+        release.send(()).unwrap();
+        let permit = tokio::time::timeout(Duration::from_secs(1), gate.acquire())
+            .await
+            .expect("worker must release the gate")
+            .unwrap();
+        drop(permit);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(
+            run_bounded_thread("test-inventory", Duration::from_secs(1), gate, || ())
+                .await
+                .is_ok()
+        );
     }
 }

@@ -19,6 +19,7 @@ Keep the shipped providers in `config/default.toml` or override the complete nam
 ```toml
 [agent_monitor]
 inventory_interval_ms = 1000
+inventory_timeout_ms = 3000
 screen_interval_ms = 500
 hook_grace_ms = 2000
 

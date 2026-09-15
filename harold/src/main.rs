@@ -435,6 +435,7 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
             inventory_interval: Duration::from_millis(cfg.agent_monitor.inventory_interval_ms),
             screen_interval: Duration::from_millis(cfg.agent_monitor.screen_interval_ms),
             hook_grace_ms: cfg.agent_monitor.hook_grace_ms,
+            inventory_timeout: Duration::from_millis(cfg.agent_monitor.inventory_timeout_ms),
             acquisition_timeout: Duration::from_millis(500),
         },
         shutdown_rx.clone(),

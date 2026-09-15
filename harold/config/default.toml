@@ -26,6 +26,7 @@ max_output_bytes = 65536
 
 [agent_monitor]
 inventory_interval_ms = 1000
+inventory_timeout_ms = 3000
 screen_interval_ms = 500
 hook_grace_ms = 2000
 

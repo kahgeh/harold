@@ -226,6 +226,9 @@ impl AgentSettings {
         if monitor.inventory_interval_ms == 0 {
             errors.push("agent_monitor.inventory_interval_ms must be greater than zero".into());
         }
+        if monitor.inventory_timeout_ms == 0 {
+            errors.push("agent_monitor.inventory_timeout_ms must be greater than zero".into());
+        }
         if monitor.screen_interval_ms == 0 {
             errors.push("agent_monitor.screen_interval_ms must be greater than zero".into());
         }
@@ -298,6 +301,7 @@ fn validate_fragments(
 #[serde(default)]
 pub(crate) struct AgentMonitorSettings {
     pub inventory_interval_ms: u64,
+    pub inventory_timeout_ms: u64,
     pub screen_interval_ms: u64,
     pub hook_grace_ms: u64,
 }
@@ -306,6 +310,7 @@ impl Default for AgentMonitorSettings {
     fn default() -> Self {
         Self {
             inventory_interval_ms: 1_000,
+            inventory_timeout_ms: 3_000,
             screen_interval_ms: 500,
             hook_grace_ms: 2_000,
         }
@@ -679,6 +684,25 @@ mod tests {
         assert!(
             opencode.summary_line_prefixes.is_empty(),
             "OpenCode's prompt and user-message rows share the same visible prefix"
+        );
+    }
+
+    #[test]
+    fn inventory_timeout_is_configurable_and_must_be_positive() {
+        let defaults = parse_agent_config(&[include_str!("../config/default.toml")]);
+        assert_eq!(defaults.agent_monitor.inventory_timeout_ms, 3000);
+        assert_eq!(AgentMonitorSettings::default().inventory_timeout_ms, 3000);
+        let configured =
+            parse_agent_config(&["agents = []\n[agent_monitor]\ninventory_timeout_ms = 5000"]);
+        assert_eq!(configured.agent_monitor.inventory_timeout_ms, 5000);
+        let agents = AgentSettings::default();
+        assert!(agents.validate(&configured.agent_monitor).is_empty());
+        let zero = parse_agent_config(&["agents = []\n[agent_monitor]\ninventory_timeout_ms = 0"]);
+        assert!(
+            agents
+                .validate(&zero.agent_monitor)
+                .iter()
+                .any(|error| error.contains("inventory_timeout_ms"))
         );
     }
 

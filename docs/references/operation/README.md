@@ -106,3 +106,20 @@ These direct commands use the invoking process's normal configuration environmen
 `harold --diagnostics [--delay N]` explicitly tests screen-lock detection, TTS, and the selected away channel. It can speak or send a message. A bare `--delay` defaults to ten seconds, allowing time to lock the screen.
 
 Use diagnostics only when intentionally testing notification delivery. See [installation and setup](../../how-tos/setup.md) for the manual macOS permissions and provider-hook steps that remain after the service is ready.
+
+## Inventory timeout
+
+If the dashboard reports `MONITOR DEGRADED inventory:timeout`, check
+`~/bin/harold/harold.log` for the component's failure and recovery messages.
+Inventory scans can take longer when macOS schedules Harold in the background.
+The inventory deadline defaults to 3000 ms and can be overridden in local.toml:
+
+```toml
+[agent_monitor]
+inventory_timeout_ms = 5000
+```
+
+Restart with `~/bin/haroldctl restart` after changing it. This controls process
+inventory scanning and identity resolution; screen captures retain their 500 ms
+deadline. A worker still finishing after a timeout is not launched again; the
+previous health state and panes remain until another acquisition completes.

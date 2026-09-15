@@ -2139,6 +2139,81 @@ impl AgentInventoryPort for WedgedInventory {
     }
 }
 
+struct ControlledInventory {
+    scan_calls: AtomicUsize,
+    release: Mutex<std::sync::mpsc::Receiver<()>>,
+}
+
+impl AgentInventoryPort for ControlledInventory {
+    fn scan(&self) -> Result<Vec<AgentPaneObservation>, InventoryError> {
+        if self.scan_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            let _ = self.release.lock().unwrap().recv();
+        }
+        Ok(Vec::new())
+    }
+
+    fn resolve(&self, _pane_id: &str) -> Result<Option<AgentPaneObservation>, InventoryError> {
+        Ok(None)
+    }
+
+    fn is_current(&self, _incarnation: &AgentIncarnation) -> Result<bool, InventoryError> {
+        Ok(false)
+    }
+}
+
+#[tokio::test]
+async fn inventory_timeout_busy_retries_and_recovery_emit_only_actual_health_transitions() {
+    let directory = TestDirectory::new();
+    let store = Arc::new(HaroldStore::open(&directory.0).await.unwrap());
+    let (release, held) = std::sync::mpsc::channel();
+    let inventory = Arc::new(ControlledInventory {
+        scan_calls: AtomicUsize::new(0),
+        release: Mutex::new(held),
+    });
+    let (shutdown, shutdown_rx) = watch::channel(());
+    let (handle, task) = spawn_agent_monitor_seeded_for_test(
+        store.clone(),
+        inventory.clone(),
+        Arc::new(FakeScreen::default()),
+        vec![provider()],
+        AgentMonitorSeed {
+            snapshot: empty_snapshot(),
+            hook_grace_ms: 2_000,
+            acquisition_timeout: Duration::from_millis(20),
+        },
+        shutdown_rx,
+    );
+    assert!(handle.inventory_tick().await.is_err());
+    for _ in 0..3 {
+        assert!(handle.inventory_tick().await.is_err());
+    }
+    let events = store
+        .stream()
+        .load_after_version(EventStreamVersion::start(), 100)
+        .await
+        .unwrap();
+    assert_eq!(event_types(&events), ["AgentMonitorHealthChanged"]);
+    assert_eq!(events[0].payload["reason_code"], "timeout");
+    release.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while handle.inventory_tick().await.is_err() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("inventory must recover once the timed-out worker finishes");
+    assert_eq!(inventory.scan_calls.load(Ordering::SeqCst), 2);
+    let events = store
+        .stream()
+        .load_after_version(EventStreamVersion::start(), 100)
+        .await
+        .unwrap();
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[1].payload["reason_code"], "ok");
+    drop(shutdown);
+    task.await.unwrap();
+}
+
 #[tokio::test]
 async fn shutdown_completes_when_a_blocking_inventory_port_wedges() {
     let directory = TestDirectory::new();
@@ -2169,6 +2244,120 @@ async fn shutdown_completes_when_a_blocking_inventory_port_wedges() {
         .await
         .expect("runtime shutdown remained blocked")
         .unwrap();
+}
+
+struct SlowInventory {
+    observed: AgentPaneObservation,
+}
+
+impl AgentInventoryPort for SlowInventory {
+    fn scan(&self) -> Result<Vec<AgentPaneObservation>, InventoryError> {
+        std::thread::sleep(Duration::from_millis(80));
+        Ok(vec![self.observed.clone()])
+    }
+
+    fn resolve(&self, _pane_id: &str) -> Result<Option<AgentPaneObservation>, InventoryError> {
+        std::thread::sleep(Duration::from_millis(80));
+        Ok(Some(self.observed.clone()))
+    }
+
+    fn is_current(&self, _incarnation: &AgentIncarnation) -> Result<bool, InventoryError> {
+        std::thread::sleep(Duration::from_millis(80));
+        Ok(true)
+    }
+}
+
+struct SlowScreen;
+
+impl VisibleScreenPort for SlowScreen {
+    fn scan_prompts(
+        &self,
+        _pane: &AgentPaneObservation,
+        _provider: &AgentProviderSettings,
+    ) -> Result<PromptScan, ScreenError> {
+        Ok(PromptScan::default())
+    }
+
+    fn observe(
+        &self,
+        _pane: &AgentPaneObservation,
+        _provider: &AgentProviderSettings,
+    ) -> Result<ScreenObservation, ScreenError> {
+        std::thread::sleep(Duration::from_millis(80));
+        Err(ScreenError::CaptureFailed)
+    }
+}
+
+#[tokio::test]
+async fn slow_inventory_uses_its_own_budget_while_screen_keeps_the_short_deadline() {
+    let directory = TestDirectory::new();
+    let store = Arc::new(HaroldStore::open(&directory.0).await.unwrap());
+    let (shutdown, shutdown_rx) = watch::channel(());
+    let (handle, task) = super::runtime::spawn_agent_monitor(
+        store.clone(),
+        Arc::new(SlowInventory {
+            observed: pane("%8", 80, 800, 1_000, 100),
+        }),
+        Arc::new(SlowScreen),
+        vec![provider()],
+        empty_snapshot(),
+        super::runtime::AgentMonitorRuntimeConfig {
+            activity_summary: None,
+            inventory_interval: Duration::from_secs(86_400),
+            screen_interval: Duration::from_secs(86_400),
+            hook_grace_ms: 2_000,
+            acquisition_timeout: Duration::from_millis(20),
+            inventory_timeout: Duration::from_secs(1),
+        },
+        shutdown_rx,
+    );
+    handle.inventory_tick().await.unwrap();
+    handle.screen_tick().await.unwrap();
+    store.project_unhandled_events(100).await.unwrap();
+    let snapshot = store.load_agent_snapshot().await.unwrap();
+    assert_eq!(snapshot.panes.len(), 1);
+    assert_eq!(snapshot.monitor_health.len(), 1);
+    assert_eq!(snapshot.monitor_health[0].component, "screen");
+    assert_eq!(snapshot.monitor_health[0].reason_code, "timeout");
+    drop(shutdown);
+    task.await.unwrap();
+}
+
+#[tokio::test]
+async fn restored_inventory_failure_deduplicates_until_recovery() {
+    let fixture = Fixture::new(FakeInventory::scans(vec![Err(
+        InventoryError::CommandFailed,
+    )]))
+    .await;
+    assert!(fixture.handle.inventory_tick().await.is_err());
+    fixture.store.project_unhandled_events(100).await.unwrap();
+    let snapshot = fixture.store.load_agent_snapshot().await.unwrap();
+    let (shutdown, shutdown_rx) = watch::channel(());
+    let (handle, task) = spawn_agent_monitor_seeded_for_test(
+        fixture.store.clone(),
+        Arc::new(FakeInventory::scans(vec![
+            Err(InventoryError::CommandFailed),
+            Err(InventoryError::CommandFailed),
+            Ok(Vec::new()),
+            Ok(Vec::new()),
+        ])),
+        Arc::new(FakeScreen::default()),
+        vec![provider()],
+        AgentMonitorSeed {
+            snapshot,
+            hook_grace_ms: 2_000,
+            acquisition_timeout: Duration::from_millis(100),
+        },
+        shutdown_rx,
+    );
+    assert!(handle.inventory_tick().await.is_err());
+    assert!(handle.inventory_tick().await.is_err());
+    assert_eq!(fixture.events().await.len(), 1);
+    handle.inventory_tick().await.unwrap();
+    handle.inventory_tick().await.unwrap();
+    assert_eq!(fixture.events().await.len(), 2);
+    drop(shutdown);
+    task.await.unwrap();
 }
 
 #[tokio::test]
@@ -2485,6 +2674,7 @@ impl Fixture {
                 screen_interval: Duration::from_secs(86_400),
                 hook_grace_ms: 2_000,
                 acquisition_timeout: Duration::from_millis(100),
+                inventory_timeout: Duration::from_millis(100),
             },
             shutdown_rx,
         );
@@ -3035,6 +3225,7 @@ exec /bin/sleep 60
             screen_interval: Duration::from_secs(86_400),
             hook_grace_ms: 2_000,
             acquisition_timeout: Duration::from_secs(60),
+            inventory_timeout: Duration::from_secs(60),
         },
         shutdown_rx,
     );

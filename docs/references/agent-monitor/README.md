@@ -256,6 +256,7 @@ Default monitor configuration:
 ```toml
 [agent_monitor]
 inventory_interval_ms = 1000
+inventory_timeout_ms = 3000
 screen_interval_ms = 500
 hook_grace_ms = 2000
 
@@ -273,6 +274,7 @@ screen_history_lines = 2000
 | Key | Constraint and behavior |
 | --- | --- |
 | `agent_monitor.inventory_interval_ms` | Positive integer; scheduled inventory period |
+| `agent_monitor.inventory_timeout_ms` | Positive integer; inventory scan/resolve deadline in milliseconds, default 3000 |
 | `agent_monitor.screen_interval_ms` | Positive integer; scheduled visible-screen period |
 | `agent_monitor.hook_grace_ms` | Non-negative lifecycle precedence period |
 | `agents[].id` | Unique bounded identifier; `unknown` is reserved |
@@ -317,9 +319,11 @@ The public snapshot reports `inventory` and `screen` health after a component fi
 | `capture_unavailable` | Screen-capture command is absent |
 | `capture_failed` | Screen capture exits unsuccessfully |
 | `pane_departed` | Pane disappears during capture |
-| `timeout` | Acquisition exceeded the bounded deadline or a prior acquisition still owns its gate |
+| `timeout` | Acquisition exceeded its deadline (inventory: configured timeout; screen: 500 ms) |
 | `task_failed` | The bounded acquisition worker could not start or return |
 | `ok` | Recovery to healthy |
+
+A still-running worker causes later attempts to return internal `busy` without starting another worker or changing public health. A deadline miss remains `timeout` until a later acquisition succeeds. Degradation and recovery are logged on health transitions with component and reason code; process commands and screen content are excluded.
 
 An inventory failure preserves current panes and never infers mass departure. A screen failure preserves lifecycle state and the prior fallback. Projector failures leave the checkpoint and projection unchanged and are retried by the event-handler loop. A schema initialization, startup catch-up, or snapshot-load error prevents the server from becoming ready.
 
