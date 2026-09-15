@@ -28,6 +28,23 @@ without that controlling terminal and must not silently lose them.
 
 ## Release delivery
 
-- [ ] Publish v0.1.2 and verify hosted build/test/upload.
-- [ ] Exercise same timeout/recovery check with publicly downloaded release.
-- [ ] Record delivery evidence and reporting-machine limitation.
+- [x] Publish v0.1.2 and verify hosted build/test/upload.
+- [x] Exercise same timeout/recovery check with publicly downloaded release.
+- [x] Record delivery evidence and reporting-machine limitation.
+
+## Published acceptance
+
+- v0.1.2 is latest: https://github.com/kahgeh/harold/releases/tag/v0.1.2
+- Hosted run https://github.com/kahgeh/harold/actions/runs/34965790266
+  passed build, tests, signing, package checks, and asset upload at6256019.
+- Public curl bootstrap installed downloaded release into a temporary prefix.
+  Checksum passed; service ready PID28148 port53740.
+- With800ms injected real-ps delay, configured500ms reproduced degraded inventory
+  and no panes; warning logged. Restart at3000ms PID31845 recovered health and
+  discovered one controlled fixture pane; recovery logged.
+- Temporary service/listener/files removed. Production installation untouched.
+- Reporting machine's actual workload remains unverified. Issue #2 remains open
+  pending that confirmation; no issue comments or notifications were sent.
+
+Final completion reviewer independently confirmed public assets, successful hosted
+run and isolated acceptance evidence; approved with no findings.
