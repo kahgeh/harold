@@ -286,6 +286,8 @@ screen_history_lines = 2000
 | `agents[].screen_adapter` | `generic-v1` when omitted; accepts `generic-v1` or `codex-v1`; unknown names fail startup |
 | `agents[].screen_history_lines` | Integer from 1 through 10,000; defaults to 2,000 history rows before the visible grid |
 
+Tmux pane inventory uses tab-separated fields and explicitly requests UTF-8 output (`tmux -u`), so output framing does not depend on the daemon’s locale. Rows must contain exactly seven fields; embedded tabs are rejected as malformed rather than guessing their meaning.
+
 Process selection prefers a matching process in the pane TTY's foreground process group. Otherwise it selects the shallowest matching descendant of the pane root, with PID as a deterministic tie-breaker. Multiple named provider matches produce provider `unknown` rather than choosing configuration order. Missing trustworthy process start time degrades inventory and does not create an incarnation.
 
 The shipped named defaults cover Codex, Claude, and OpenCode state markers. Codex explicitly selects `codex-v1`. Claude uses `generic-v1` with its configured summary prefix; it has no Claude-specific styled parser. OpenCode uses `generic-v1` without `summary_line_prefixes`, so screen acquisition supplies state but no fallback summary. Its opt-in lifecycle plugin can still send explicit summaries. The `screen_adapter` setting defaults to `generic-v1`; selecting a provider ID alone does not select a parser.

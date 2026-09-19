@@ -28,7 +28,8 @@ jobs:
       - name: Install build prerequisites
         run: |
           test "$(uname -m)" = arm64
-          brew install protobuf
+          brew install protobuf tmux
+          tmux -V
           rustup toolchain install 1.97.1 --profile minimal
           rustup default 1.97.1
           rustup target add aarch64-apple-darwin
@@ -36,6 +37,7 @@ jobs:
       - name: Test
         run: |
           cargo test --locked --workspace --target aarch64-apple-darwin
+          cargo test --locked -p harold --target aarch64-apple-darwin live_tmux_inventory_roundtrip_without_locale -- --ignored
           python3 -m unittest discover -s scripts/tests
           python3 -m unittest hooks.shared.harold_turn_complete_test
           python3 -m unittest hooks.providers.test_turn_complete

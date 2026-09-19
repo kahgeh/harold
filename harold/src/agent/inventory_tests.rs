@@ -198,11 +198,29 @@ fn process_and_tmux_snapshots_parse_complete_identity_fields() {
     assert_eq!(processes[0].started_at_ms, Some(1_787_479_872_000));
     assert_eq!(processes[0].command, "codex --profile local");
 
-    let panes = parse_tmux_panes(
-        "%7\u{1f}harold\u{1f}2\u{1f}1\u{1f}10\u{1f}/dev/ttys007\u{1f}/work/harold\n",
-    )
-    .unwrap();
+    let panes = parse_tmux_panes("%7\tharold\t2\t1\t10\t/dev/ttys007\t/work/harold\n").unwrap();
     assert_eq!(panes, [pane()]);
+}
+
+#[test]
+fn tab_delimited_tmux_rows_preserve_spaces_unicode_and_literal_escapes() {
+    let rows = parse_tmux_panes("%7\tharold café\t2\t1\t10\t/dev/ttys007\t/work/a folder/\\037\n")
+        .unwrap();
+    assert_eq!(rows[0].session_name, "harold café");
+    assert_eq!(rows[0].working_directory, r"/work/a folder/\037");
+    assert_eq!(rows[0].tty, "ttys007");
+}
+
+#[test]
+fn tab_delimited_tmux_rows_reject_ambiguous_or_invalid_fields() {
+    for row in [
+        "%7\tharold\t2\t1\t10\t/dev/ttys007",
+        "%7\tharold\t2\t1\t10\t/dev/ttys007\t/work\textra",
+        "%7\tharold\tbad\t1\t10\t/dev/ttys007\t/work",
+        r"%7\037harold\0372\0371\03710\037/dev/ttys007\037/work",
+    ] {
+        assert_eq!(parse_tmux_panes(row), Err(InventoryError::MalformedOutput));
+    }
 }
 
 #[test]
@@ -212,7 +230,7 @@ fn malformed_snapshots_are_errors_not_empty_successes() {
         Err(InventoryError::MalformedOutput)
     );
     assert_eq!(
-        parse_tmux_panes("%7\u{1f}missing-fields\n"),
+        parse_tmux_panes("%7\tmissing-fields\n"),
         Err(InventoryError::MalformedOutput)
     );
 }
@@ -226,4 +244,75 @@ fn process_debug_never_exposes_the_raw_command() {
     assert!(debug.contains("pid: 20"));
     assert!(!debug.contains("TOP_SECRET_PROCESS_ARG"));
     assert!(!debug.contains("--token"));
+}
+
+#[test]
+#[ignore = "requires tmux; uses an isolated socket and no user configuration"]
+fn live_tmux_inventory_roundtrip_without_locale() {
+    use std::process::Command;
+
+    struct Server {
+        socket: std::path::PathBuf,
+        directory: std::path::PathBuf,
+    }
+    impl Drop for Server {
+        fn drop(&mut self) {
+            let _ = Command::new("tmux")
+                .arg("-S")
+                .arg(&self.socket)
+                .arg("kill-server")
+                .output();
+            let _ = std::fs::remove_dir_all(&self.directory);
+        }
+    }
+    let directory = std::env::temp_dir().join(format!(
+        "ht-{}",
+        &uuid::Uuid::new_v4().simple().to_string()[..16]
+    ));
+    std::fs::create_dir(&directory).unwrap();
+    let directory = directory.canonicalize().unwrap();
+    let server = Server {
+        socket: directory.join("socket"),
+        directory,
+    };
+    let working_directory = server.directory.join(r"space café \037");
+    std::fs::create_dir(&working_directory).unwrap();
+    let created = Command::new("tmux")
+        .args(["-u", "-S"])
+        .arg(&server.socket)
+        .args([
+            "-f",
+            "/dev/null",
+            "new-session",
+            "-d",
+            "-s",
+            "fixture café",
+            "-c",
+        ])
+        .arg(&working_directory)
+        .arg("sleep 60")
+        .output()
+        .unwrap();
+    assert!(created.status.success(), "isolated tmux startup failed");
+    for locale in [None, Some("C"), Some("en_US.UTF-8")] {
+        let mut command = super::inventory::tmux_panes_command();
+        command
+            .env_clear()
+            .env("PATH", std::env::var_os("PATH").unwrap())
+            .env("TMUX", format!("{},0,0", server.socket.display()));
+        if let Some(locale) = locale {
+            command.env("LANG", locale).env("LC_ALL", locale);
+        }
+        let output = command.output().unwrap();
+        assert!(output.status.success(), "isolated inventory command failed");
+        let output = String::from_utf8(output.stdout).unwrap();
+        let panes = parse_tmux_panes(&output).unwrap();
+        assert_eq!(panes.len(), 1);
+        assert_eq!(panes[0].session_name, "fixture café");
+        assert_eq!(
+            panes[0].working_directory,
+            working_directory.to_str().unwrap()
+        );
+        assert!(panes[0].pane_pid > 0);
+    }
 }

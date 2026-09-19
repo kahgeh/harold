@@ -272,7 +272,7 @@ pub(super) fn parse_tmux_panes(output: &str) -> Result<Vec<TmuxPaneInfo>, Invent
         .lines()
         .filter(|line| !line.trim().is_empty())
         .map(|line| {
-            let fields: Vec<&str> = line.split('\u{1f}').collect();
+            let fields: Vec<&str> = line.split('\t').collect();
             if fields.len() != 7 {
                 return Err(InventoryError::MalformedOutput);
             }
@@ -340,16 +340,21 @@ fn read_process_table() -> Result<Vec<ProcessInfo>, InventoryError> {
     parse_process_table(&stdout)
 }
 
+pub(super) fn tmux_panes_command() -> Command {
+    let mut command = Command::new("tmux");
+    // Tabs survive tmux's output escaping; -u avoids locale-dependent sanitizing.
+    command.args([
+        "-u",
+        "list-panes",
+        "-a",
+        "-F",
+        "#{pane_id}\t#{session_name}\t#{window_index}\t#{pane_index}\t#{pane_pid}\t#{pane_tty}\t#{pane_current_path}",
+    ]);
+    command
+}
+
 fn read_tmux_panes() -> Result<Vec<TmuxPaneInfo>, InventoryError> {
-    let output = Command::new("tmux")
-        .args([
-            "list-panes",
-            "-a",
-            "-F",
-            "#{pane_id}\x1f#{session_name}\x1f#{window_index}\x1f#{pane_index}\x1f#{pane_pid}\x1f#{pane_tty}\x1f#{pane_current_path}",
-        ])
-        .output()
-        .map_err(command_error)?;
+    let output = tmux_panes_command().output().map_err(command_error)?;
     if !output.status.success() {
         return Err(InventoryError::CommandFailed);
     }
