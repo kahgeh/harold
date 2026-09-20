@@ -1,5 +1,11 @@
 # Lessons
 
+- When a user defers cloud or account details, keep them configurable at runtime and leave live integration checks pending. Do not require resource selection to finish a portable local implementation.
+
+- When an exploratory example reveals a broader product vision, keep the transport, storage, and reliability experiments small and runnable in their original home; move product workflows and multi-user application design into an explicitly separate repository when requested.
+
+- When building a learning example, choose the smallest scenario from the user's intended destination and grow it one observable behavior at a time. Confirm the target use case before choosing an unrelated toy domain.
+
 - For installers, distinguish starting the service to verify installation from registering automatic login startup. Honor the user's explicit manual-start preference: keep an on-demand service definition inside the install directory, not in the auto-loaded LaunchAgents directory.
 
 - When the user specifies fresh installations only, consolidate the current schema and remove historical-data repair and upgrade paths. Do not preserve migration compatibility merely because older code or task notes required it. If the user accepts impact to the existing install, prioritize the clean current design over old schema, event, or configuration support. Keep current input validation and ordinary restart/replay behavior; live deployment and data-reset actions remain separate from source cleanup.

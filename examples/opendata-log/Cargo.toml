@@ -1,0 +1,20 @@
+[package]
+name = "opendata-agent-progress"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# Keep this learning crate and its lockfile independent of Harold.
+[workspace]
+
+[[bin]]
+name = "opendata-agent-progress"
+path = "src/main.rs"
+
+[dependencies]
+bytes = "=1.11.1"
+opendata_common = { package = "opendata-common", version = "=0.1.17" }
+opendata_log = { package = "opendata-log", version = "=1.0.0" }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.151"
+tokio = { version = "=1.49.0", features = ["macros", "rt-multi-thread", "sync", "time"] }
