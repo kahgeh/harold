@@ -1407,8 +1407,8 @@ async fn real_screen_adapter_keeps_unrelated_capture_out_of_every_published_boun
     );
     let snapshots = AgentSnapshotHub::new(empty_snapshot());
     let service = HaroldService {
-        messaging_switch: tokio::sync::Mutex::new(()),
-        tts_switch: tokio::sync::Mutex::new(()),
+        messaging_switch: tokio::sync::Mutex::new(None),
+        tts_switch: tokio::sync::Mutex::new(None),
         monitor: handle.clone(),
         store: Arc::clone(&store),
         snapshots: snapshots.clone(),
@@ -1540,8 +1540,8 @@ async fn grpc_fallback_explicit_clear_and_replacement_converge_in_projection_ord
     inventory.push_resolution(Ok(Some(clear_observation)));
     let fixture = Fixture::new(inventory).await;
     let service = HaroldService {
-        messaging_switch: tokio::sync::Mutex::new(()),
-        tts_switch: tokio::sync::Mutex::new(()),
+        messaging_switch: tokio::sync::Mutex::new(None),
+        tts_switch: tokio::sync::Mutex::new(None),
         monitor: fixture.handle.clone(),
         store: Arc::clone(&fixture.store),
         snapshots: AgentSnapshotHub::new(empty_snapshot()),

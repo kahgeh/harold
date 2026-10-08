@@ -15,12 +15,12 @@ use super::agent::screen::TmuxVisibleScreen;
 use super::agent::snapshot::AgentSnapshotHub;
 use super::harold::harold_server::Harold;
 use super::harold::{
-    AgentState, MonitorHealthState, ReportAgentStateRequest, SetTtsMutedRequest,
-    WatchAgentStatesRequest,
+    AgentState, MonitorHealthState, ReportAgentStateRequest, SetMessagingPausedRequest,
+    SetTtsMutedRequest, WatchAgentStatesRequest,
 };
 use super::{
-    HaroldService, Request, TurnCompleteRequest, load_startup_agent_snapshot, map_agent_snapshot,
-    pane_id_for_log, restore_startup_state, store,
+    HaroldService, Request, TurnCompleteRequest, apply_setting, load_startup_agent_snapshot,
+    map_agent_snapshot, pane_id_for_log, restore_startup_state, store,
 };
 
 struct EmptyInventory;
@@ -87,8 +87,8 @@ where
             monitor,
             store: service_store,
             snapshots: AgentSnapshotHub::new(snapshot),
-            messaging_switch: tokio::sync::Mutex::new(()),
-            tts_switch: tokio::sync::Mutex::new(()),
+            messaging_switch: tokio::sync::Mutex::new(None),
+            tts_switch: tokio::sync::Mutex::new(None),
             shutdown: shutdown_rx,
         },
         shutdown,
@@ -1015,4 +1015,160 @@ async fn overlapping_pause_requests_wait_for_the_one_in_progress() {
     drop(shutdown);
     let _ = task.await;
     let _ = std::fs::remove_dir_all(&directory);
+}
+
+/// Opens a store whose snapshot hub has caught up with a stored `on` value for both
+/// settings, as after startup.
+async fn service_started_with_both_settings(
+    directory: &std::path::Path,
+    on: bool,
+) -> (
+    Arc<store::HaroldStore>,
+    HaroldService,
+    watch::Sender<()>,
+    tokio::task::JoinHandle<()>,
+) {
+    std::fs::create_dir_all(directory).unwrap();
+    let store = Arc::new(store::HaroldStore::open(directory).await.unwrap());
+    store::append_tts_mute_changed(&store, on).await.unwrap();
+    store::append_messaging_paused_changed(&store, on)
+        .await
+        .unwrap();
+    store.project_unhandled_events(10).await.unwrap();
+    let snapshot = store.load_agent_snapshot().await.unwrap();
+    super::outbound::set_tts_muted(snapshot.tts_muted);
+    super::outbound::set_messaging_paused(snapshot.messaging_paused);
+    let (service, shutdown, task) = test_service(Arc::clone(&store), snapshot);
+    (store, service, shutdown, task)
+}
+
+#[tokio::test]
+async fn mute_after_the_projector_rewrites_the_switch_from_an_older_snapshot_is_stored() {
+    let directory = std::env::temp_dir().join(format!("harold-stale-{}", uuid::Uuid::new_v4()));
+    let (store, service, shutdown, task) =
+        service_started_with_both_settings(&directory, true).await;
+
+    service
+        .set_tts_muted(Request::new(SetTtsMutedRequest { muted: false }))
+        .await
+        .unwrap();
+    assert!(!super::outbound::is_tts_muted());
+    // The projector finishes a pass it began before the unmute was stored: it writes the
+    // switch from its older snapshot, and the hub still says "muted" too.
+    super::outbound::set_tts_muted(true);
+    assert!(service.snapshots.tts_muted());
+
+    service
+        .set_tts_muted(Request::new(SetTtsMutedRequest { muted: true }))
+        .await
+        .unwrap();
+
+    assert_eq!(store.project_unhandled_events(10).await.unwrap().applied, 2);
+    assert!(store.load_agent_snapshot().await.unwrap().tts_muted);
+    assert!(super::outbound::is_tts_muted());
+
+    drop(shutdown);
+    let _ = task.await;
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+#[tokio::test]
+async fn pause_after_the_projector_rewrites_the_switch_from_an_older_snapshot_is_stored() {
+    let directory = std::env::temp_dir().join(format!("harold-stale-{}", uuid::Uuid::new_v4()));
+    let (store, service, shutdown, task) =
+        service_started_with_both_settings(&directory, true).await;
+
+    service
+        .set_messaging_paused(Request::new(SetMessagingPausedRequest { paused: false }))
+        .await
+        .unwrap();
+    assert!(!super::outbound::is_messaging_paused());
+    // As above: the switch is rewritten from a snapshot older than the resume.
+    super::outbound::set_messaging_paused(true);
+    assert!(service.snapshots.messaging_paused());
+
+    service
+        .set_messaging_paused(Request::new(SetMessagingPausedRequest { paused: true }))
+        .await
+        .unwrap();
+
+    assert_eq!(store.project_unhandled_events(10).await.unwrap().applied, 2);
+    assert!(store.load_agent_snapshot().await.unwrap().messaging_paused);
+    assert!(super::outbound::is_messaging_paused());
+
+    drop(shutdown);
+    let _ = task.await;
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+#[tokio::test]
+async fn first_request_after_startup_is_judged_against_the_loaded_state() {
+    let directory = std::env::temp_dir().join(format!("harold-first-{}", uuid::Uuid::new_v4()));
+    let (store, service, shutdown, task) =
+        service_started_with_both_settings(&directory, true).await;
+
+    // Nothing has been requested yet, and both requests match what startup loaded.
+    service
+        .set_tts_muted(Request::new(SetTtsMutedRequest { muted: true }))
+        .await
+        .unwrap();
+    service
+        .set_messaging_paused(Request::new(SetMessagingPausedRequest { paused: true }))
+        .await
+        .unwrap();
+    assert_eq!(store.project_unhandled_events(10).await.unwrap().applied, 0);
+    assert_eq!(*service.tts_switch.lock().await, None);
+    assert_eq!(*service.messaging_switch.lock().await, None);
+
+    service
+        .set_tts_muted(Request::new(SetTtsMutedRequest { muted: false }))
+        .await
+        .unwrap();
+    service
+        .set_messaging_paused(Request::new(SetMessagingPausedRequest { paused: false }))
+        .await
+        .unwrap();
+    assert_eq!(store.project_unhandled_events(10).await.unwrap().applied, 2);
+    let snapshot = store.load_agent_snapshot().await.unwrap();
+    assert!(!snapshot.tts_muted);
+    assert!(!snapshot.messaging_paused);
+    assert_eq!(*service.tts_switch.lock().await, Some(false));
+    assert_eq!(*service.messaging_switch.lock().await, Some(false));
+
+    drop(shutdown);
+    let _ = task.await;
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+#[tokio::test]
+async fn failed_append_leaves_the_last_requested_value_and_the_switch_alone() {
+    for remembered in [None, Some(false)] {
+        let last_requested = tokio::sync::Mutex::new(remembered);
+        let mut switched = Vec::new();
+
+        let failed = apply_setting(
+            &last_requested,
+            true,
+            || false,
+            || async { Err("store unavailable") },
+            |on| switched.push(on),
+        )
+        .await;
+        assert_eq!(failed, Err("store unavailable"));
+        assert_eq!(*last_requested.lock().await, remembered);
+        assert!(switched.is_empty());
+
+        // The request is not taken for a repeat when it is sent again.
+        let stored = apply_setting(
+            &last_requested,
+            true,
+            || false,
+            || async { Ok::<(), &str>(()) },
+            |on| switched.push(on),
+        )
+        .await;
+        assert_eq!(stored, Ok(true));
+        assert_eq!(*last_requested.lock().await, Some(true));
+        assert_eq!(switched, [true]);
+    }
 }

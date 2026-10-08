@@ -36,38 +36,75 @@ struct HaroldService {
     store: Arc<store::HaroldStore>,
     snapshots: agent::snapshot::AgentSnapshotHub,
     /// Held across a pause request's append and switch, so overlapping requests
-    /// cannot leave the store and the switch disagreeing.
-    messaging_switch: tokio::sync::Mutex<()>,
+    /// cannot leave the store and the switch disagreeing. Holds the last pause value
+    /// stored by a request, `None` until the first one since startup.
+    messaging_switch: tokio::sync::Mutex<Option<bool>>,
     /// The same for a voice mute request. The two settings are independent, so a mute
     /// does not queue behind a pause.
-    tts_switch: tokio::sync::Mutex<()>,
+    tts_switch: tokio::sync::Mutex<Option<bool>>,
     shutdown: watch::Receiver<()>,
 }
 
+/// Stores a changed on/off setting with `append`, then hands it to `switch` straight away
+/// so it acts before the projector reaches the event. Returns whether anything was stored.
+/// Requests run one at a time, so the last one stored is also the last one switched.
+///
+/// A request is a repeat when it equals the last value stored by a request. The published
+/// snapshot and the switch cannot decide that: both are written by the projector from a
+/// snapshot that may predate a stored change, so they can briefly show the value before
+/// it. The request handlers are the only writers of these settings, so once one has stored
+/// a value, `last_requested` is the stream's last word. Before the first request since
+/// startup there is nothing to lag, and `already_in_force` decides.
+async fn apply_setting<A, E>(
+    last_requested: &tokio::sync::Mutex<Option<bool>>,
+    requested: bool,
+    already_in_force: impl FnOnce() -> bool,
+    append: impl FnOnce() -> A,
+    switch: impl FnOnce(bool),
+) -> Result<bool, E>
+where
+    A: Future<Output = Result<(), E>>,
+{
+    let mut last_requested = last_requested.lock().await;
+    let repeat = match *last_requested {
+        Some(last) => last == requested,
+        None => already_in_force(),
+    };
+    if repeat {
+        return Ok(false);
+    }
+    append().await?;
+    *last_requested = Some(requested);
+    switch(requested);
+    Ok(true)
+}
+
 impl HaroldService {
-    /// Persists a changed pause flag, then hands it to `switch` straight away so the
-    /// gates act before the projector reaches the event. `switched` reads the switch's
-    /// current value: the published snapshot can lag a change that is stored but not
-    /// yet projected, so a request is a repeat only when both already agree with it.
-    /// Requests run one at a time, so the last one stored is also the last one switched.
+    /// Persists a changed pause flag and flips the switch, see `apply_setting`. `switched`
+    /// reads the switch's current value: the published snapshot can lag a change that is
+    /// stored but not yet projected, so with no earlier request to go by, a request is a
+    /// repeat only when both already agree with it.
     async fn apply_messaging_paused(
         &self,
         paused: bool,
         switched: impl FnOnce() -> bool,
         switch: impl FnOnce(bool),
     ) -> Result<(), Status> {
-        let _in_progress = self.messaging_switch.lock().await;
-        if switched() == paused && self.snapshots.messaging_paused() == paused {
-            return Ok(());
+        let stored = apply_setting(
+            &self.messaging_switch,
+            paused,
+            || switched() == paused && self.snapshots.messaging_paused() == paused,
+            || store::append_messaging_paused_changed(&self.store, paused),
+            switch,
+        )
+        .await
+        .map_err(|error| {
+            tracing::error!(result = "append_failed", error = %error, "messaging pause rejected");
+            Status::internal("event store write failed")
+        })?;
+        if stored {
+            info!(paused, "messaging pause change persisted");
         }
-        store::append_messaging_paused_changed(&self.store, paused)
-            .await
-            .map_err(|error| {
-                tracing::error!(result = "append_failed", error = %error, "messaging pause rejected");
-                Status::internal("event store write failed")
-            })?;
-        switch(paused);
-        info!(paused, "messaging pause change persisted");
         Ok(())
     }
 
@@ -78,18 +115,21 @@ impl HaroldService {
         switched: impl FnOnce() -> bool,
         switch: impl FnOnce(bool),
     ) -> Result<(), Status> {
-        let _in_progress = self.tts_switch.lock().await;
-        if switched() == muted && self.snapshots.tts_muted() == muted {
-            return Ok(());
+        let stored = apply_setting(
+            &self.tts_switch,
+            muted,
+            || switched() == muted && self.snapshots.tts_muted() == muted,
+            || store::append_tts_mute_changed(&self.store, muted),
+            switch,
+        )
+        .await
+        .map_err(|error| {
+            tracing::error!(result = "append_failed", error = %error, "tts mute rejected");
+            Status::internal("event store write failed")
+        })?;
+        if stored {
+            info!(muted, "tts mute change persisted");
         }
-        store::append_tts_mute_changed(&self.store, muted)
-            .await
-            .map_err(|error| {
-                tracing::error!(result = "append_failed", error = %error, "tts mute rejected");
-                Status::internal("event store write failed")
-            })?;
-        switch(muted);
-        info!(muted, "tts mute change persisted");
         Ok(())
     }
 }
@@ -542,8 +582,8 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
             monitor,
             store: service_store,
             snapshots,
-            messaging_switch: tokio::sync::Mutex::new(()),
-            tts_switch: tokio::sync::Mutex::new(()),
+            messaging_switch: tokio::sync::Mutex::new(None),
+            tts_switch: tokio::sync::Mutex::new(None),
             shutdown: shutdown_rx.clone(),
         }))
         .serve_with_shutdown(addr, async {
