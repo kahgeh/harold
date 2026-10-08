@@ -183,7 +183,7 @@ pub struct App {
     has_snapshot: bool,
     normalized_query: String,
     searchable_rows: Vec<SearchableRow>,
-    row_labels: Vec<String>,
+    row_labels: Vec<RowLabel>,
     waiting: Vec<AgentIncarnation>,
     active_pane: Option<String>,
     focus_tracking: bool,
@@ -268,12 +268,25 @@ impl App {
     }
 
     pub fn label<'a>(&'a self, row: &'a AgentRow) -> &'a str {
+        self.row_label(row)
+            .map_or_else(|| row.name(), |label| label.full.as_str())
+    }
+
+    /// The row label split into its name and the disambiguating suffix (empty
+    /// unless the name collides). Renderers truncate the name, never the suffix.
+    pub fn label_parts<'a>(&'a self, row: &'a AgentRow) -> (&'a str, &'a str) {
+        self.row_label(row).map_or_else(
+            || (row.name(), ""),
+            |label| label.full.split_at(label.full.len() - label.suffix_len),
+        )
+    }
+
+    fn row_label(&self, row: &AgentRow) -> Option<&RowLabel> {
         self.snapshot
             .rows
             .iter()
             .position(|candidate| candidate.incarnation == row.incarnation)
             .and_then(|index| self.row_labels.get(index))
-            .map_or_else(|| row.name(), String::as_str)
     }
 
     pub fn visible_groups(&self) -> Vec<(&str, Vec<&AgentRow>)> {
@@ -766,18 +779,35 @@ fn sort_rows(rows: &mut [AgentRow]) {
     });
 }
 
-fn build_labels(rows: &[AgentRow]) -> Vec<String> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RowLabel {
+    full: String,
+    suffix_len: usize,
+}
+
+/// Rows sharing a group and name get a suffix so they stay distinguishable:
+/// ` :window.pane` when they share a session, otherwise the session's second
+/// word (or, lacking one, the whole tmux target) is added so same-address panes
+/// of different sessions in one group still differ.
+fn build_labels(rows: &[AgentRow]) -> Vec<RowLabel> {
     rows.iter()
         .map(|row| {
-            let shared = rows
+            let mut colliders = rows
                 .iter()
-                .filter(|other| other.group() == row.group() && other.name() == row.name())
-                .count()
-                > 1;
-            if shared {
-                format!("{} :{}.{}", row.name(), row.window_index, row.pane_index)
+                .filter(|other| other.group() == row.group() && other.name() == row.name());
+            let suffix = if colliders.clone().count() < 2 {
+                String::new()
+            } else if colliders.any(|other| other.session_name != row.session_name) {
+                match row.session_name.split_whitespace().nth(1) {
+                    Some(word) => format!(" {word}:{}.{}", row.window_index, row.pane_index),
+                    None => format!(" {}", row.tmux_target),
+                }
             } else {
-                row.name().to_owned()
+                format!(" :{}.{}", row.window_index, row.pane_index)
+            };
+            RowLabel {
+                full: format!("{}{suffix}", row.name()),
+                suffix_len: suffix.len(),
             }
         })
         .collect()
@@ -1771,6 +1801,39 @@ mod tests {
             .map(|row| app.label(row).to_owned())
             .collect();
         assert_eq!(labels, ["skills :0.3", "skills :0.4", "sre", "skills"]);
+    }
+
+    #[test]
+    fn cross_session_collisions_in_one_group_still_get_distinct_labels() {
+        let mut app = empty_app();
+        let mut first = placed("%1", AgentState::Idle, "harold", "/w/main", 0);
+        first.session_name = "harold  a".into();
+        first.tmux_target = "harold  a:0.0".into();
+        first.pane_index = 0;
+        let mut second = placed("%2", AgentState::Idle, "harold", "/w/main", 0);
+        second.session_name = "harold b".into();
+        second.tmux_target = "harold b:0.0".into();
+        second.pane_index = 0;
+        let mut third = placed("%3", AgentState::Idle, "harold", "/w/main", 0);
+        third.session_name = "harold".into();
+        third.tmux_target = "harold:0.0".into();
+        third.pane_index = 0;
+        app.apply_first_snapshot(snapshot(1, 0, vec![first, second, third]))
+            .unwrap();
+        let mut labels: Vec<String> = app
+            .snapshot
+            .rows
+            .iter()
+            .map(|row| app.label(row).to_owned())
+            .collect();
+        labels.sort();
+        labels.dedup();
+        assert_eq!(labels.len(), 3, "{labels:?}");
+        for row in &app.snapshot.rows {
+            let (name, suffix) = app.label_parts(row);
+            assert_eq!(name, "main");
+            assert!(!suffix.is_empty());
+        }
     }
 
     #[test]

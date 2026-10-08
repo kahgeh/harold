@@ -467,7 +467,7 @@ fn render_inventory(frame: &mut Frame<'_>, area: Rect, app: &App, now_ms: i64) {
                 )),
                 Cell::from(format!(
                     "  {}",
-                    fit(app.label(agent), usize::from(where_width) - 2)
+                    fit_with_suffix("", app.label_parts(agent), usize::from(where_width) - 2)
                 )),
                 Cell::from(Line::styled(
                     if app.is_waiting(&agent.incarnation) {
@@ -537,6 +537,17 @@ fn waiting_entry(app: &App, row: &crate::app::AgentRow) -> String {
     }
 }
 
+/// `prefix` + name truncated with an ellipsis so the pane-address suffix that
+/// tells colliding agents apart always stays visible.
+fn fit_with_suffix(prefix: &str, (name, suffix): (&str, &str), width: usize) -> String {
+    let suffix_width = Line::raw(suffix).width();
+    let head = format!("{prefix}{name}");
+    if suffix_width + 1 >= width {
+        return fit(&format!("{head}{suffix}"), width).into_owned();
+    }
+    format!("{}{suffix}", fit(&head, width - suffix_width))
+}
+
 /// The waiting line: count, focus-tracking state, then as many entries as fit.
 /// Never exceeds `max_width`; when not even the oldest entry fits whole it is
 /// truncated so something useful still renders.
@@ -601,7 +612,12 @@ fn waiting_title(app: &App, max_width: usize) -> Line<'static> {
         if budget == 0 {
             return Line::from(spans);
         }
-        let text = fit(&waiting_entry(app, oldest), budget).into_owned();
+        let prefix = if oldest.group() == oldest.name() {
+            String::new()
+        } else {
+            format!("{}/", oldest.group())
+        };
+        let text = fit_with_suffix(&prefix, app.label_parts(oldest), budget);
         let width = Line::raw(text.as_str()).width();
         entries.push(Span::styled(text, Style::default().fg(INK)));
         let hidden = more(waiting.len() - 1);
@@ -1600,9 +1616,51 @@ mod tests {
         assert!(content.contains("▶ ● BUSY"));
         assert!(content.contains("cx"));
         assert!(!content.contains("tmx-agent-dash:2.17"));
-        // The waiting-marker column takes one more cell of width (plus its
-        // spacing) from the work column, so the last wide glyph is clipped.
+        // The work column takes whatever width the fixed columns leave, and
+        // the current layout leaves it wider than before (40 -> 42 glyphs).
         assert_eq!(content.matches('界').count(), 42);
+    }
+
+    #[test]
+    fn long_shared_names_keep_their_pane_address_at_compact_and_wide_widths() {
+        let name = "voice-mute-palette-extended";
+        let mut first = row(
+            incarnation("%1", 1, 2, "codex"),
+            AgentState::Busy,
+            "Codex",
+            "work:0.3",
+            "a",
+            90_000,
+        );
+        first.working_directory = format!("/w/{name}");
+        first.pane_index = 3;
+        let mut second = row(
+            incarnation("%2", 4, 5, "codex"),
+            AgentState::Idle,
+            "Codex",
+            "work:0.4",
+            "b",
+            90_000,
+        );
+        second.working_directory = format!("/w/{name}");
+        second.pane_index = 4;
+        let app = live_app(vec![first, second], None);
+        for width in [70, 84, 100, 140] {
+            let content = rendered(&app, width, 29, 100_000);
+            assert!(content.contains(" :0.3"), "{width}: {content}");
+            assert!(content.contains(" :0.4"), "{width}: {content}");
+            assert!(content.contains("voice-mute"), "{width}");
+        }
+    }
+
+    #[test]
+    fn fit_with_suffix_truncates_the_name_and_keeps_the_suffix() {
+        assert_eq!(
+            super::fit_with_suffix("", ("tmux-agent-dash", " :0.3"), 12),
+            "tmux-a… :0.3"
+        );
+        assert_eq!(super::fit_with_suffix("", ("sre", ""), 18), "sre");
+        assert_eq!(super::fit_with_suffix("", ("abc", " :0.3"), 3), "ab…");
     }
 
     #[test]

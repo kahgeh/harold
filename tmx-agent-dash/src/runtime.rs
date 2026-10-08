@@ -9,7 +9,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use tokio::runtime::Builder;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tokio::time::sleep;
 
 use crate::api::{AgentStateSource, SourceError, SourceStream};
@@ -472,7 +472,6 @@ fn panic_detail(payload: Box<dyn std::any::Any + Send>) -> String {
 enum InputMessage {
     Key(KeyCode),
     Redraw,
-    Focus(FocusReading),
     Error(String),
 }
 
@@ -483,12 +482,14 @@ enum RuntimeInput {
     Focus(FocusReading),
 }
 
+type FocusReceiver = watch::Receiver<Option<FocusReading>>;
+
 struct InputPump {
     receiver: mpsc::Receiver<InputMessage>,
     cancelled: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
     focus_worker: Option<JoinHandle<()>>,
-    focus_sender: Option<mpsc::Sender<InputMessage>>,
+    focus: Option<FocusReceiver>,
     redraw_pending: Arc<AtomicBool>,
 }
 
@@ -528,27 +529,28 @@ impl FocusProbe for TmuxFocusProbe {
     }
 }
 
+/// Publishes the latest reading on a `watch` channel, only when it changed. A watch
+/// is never full, so the newest reading can neither block nor be lost, and the input
+/// channel keeps a single sender (the input worker) so it closes when that worker dies.
 fn spawn_focus_worker(
     mut probe: impl FocusProbe,
-    sender: mpsc::Sender<InputMessage>,
+    sender: watch::Sender<Option<FocusReading>>,
     cancelled: Arc<AtomicBool>,
     interval: Duration,
 ) -> JoinHandle<()> {
     std::thread::spawn(move || {
-        let mut last_sent: Option<FocusReading> = None;
         let mut next = Instant::now();
-        while !cancelled.load(Ordering::Acquire) {
+        while !cancelled.load(Ordering::Acquire) && !sender.is_closed() {
             if Instant::now() >= next {
                 next = Instant::now() + interval;
                 let reading = probe.read();
-                if last_sent.as_ref() != Some(&reading) {
-                    match sender.try_send(InputMessage::Focus(reading.clone())) {
-                        Ok(()) => last_sent = Some(reading),
-                        Err(_) if sender.is_closed() => break,
-                        // Channel full: keep `last_sent` so the next poll retries.
-                        Err(_) => {}
+                sender.send_if_modified(|current| {
+                    let changed = current.as_ref() != Some(&reading);
+                    if changed {
+                        *current = Some(reading);
                     }
-                }
+                    changed
+                });
             }
             std::thread::sleep(interval.min(INPUT_POLL_INTERVAL));
         }
@@ -579,14 +581,14 @@ impl InputPump {
 
     fn start_with_focus(input: impl TerminalInput, probe: impl FocusProbe) -> Self {
         let mut pump = Self::start_with(input);
-        if let Some(sender) = pump.focus_sender.take() {
-            pump.focus_worker = Some(spawn_focus_worker(
-                probe,
-                sender,
-                Arc::clone(&pump.cancelled),
-                FOCUS_POLL_INTERVAL,
-            ));
-        }
+        let (sender, receiver) = watch::channel(None);
+        pump.focus = Some(receiver);
+        pump.focus_worker = Some(spawn_focus_worker(
+            probe,
+            sender,
+            Arc::clone(&pump.cancelled),
+            FOCUS_POLL_INTERVAL,
+        ));
         pump
     }
 
@@ -594,7 +596,6 @@ impl InputPump {
         let (sender, receiver) = mpsc::channel(INPUT_CHANNEL_CAPACITY);
         let cancelled = Arc::new(AtomicBool::new(false));
         let redraw_pending = Arc::new(AtomicBool::new(false));
-        let focus_sender = sender.clone();
         let worker_cancelled = Arc::clone(&cancelled);
         let worker_redraw_pending = Arc::clone(&redraw_pending);
         let worker = std::thread::spawn(move || {
@@ -638,7 +639,7 @@ impl InputPump {
             cancelled,
             worker: Some(worker),
             focus_worker: None,
-            focus_sender: Some(focus_sender),
+            focus: None,
             redraw_pending,
         }
     }
@@ -653,23 +654,42 @@ impl InputPump {
                 cancelled: Arc::new(AtomicBool::new(false)),
                 worker: None,
                 focus_worker: None,
-                focus_sender: None,
+                focus: None,
                 redraw_pending: Arc::new(AtomicBool::new(false)),
             },
         )
     }
 
     async fn recv(&mut self) -> Option<Result<RuntimeInput, String>> {
-        self.receiver.recv().await.map(|message| match message {
+        // Input first: the main channel has one sender (the input worker), so it
+        // closing means that worker died and ends the stream even while focus lives.
+        let message = tokio::select! {
+            biased;
+            message = self.receiver.recv() => message,
+            Some(reading) = next_focus(&mut self.focus) => {
+                return Some(Ok(RuntimeInput::Focus(reading)));
+            }
+        };
+        message.map(|message| match message {
             InputMessage::Key(key) => Ok(RuntimeInput::Key(key)),
             InputMessage::Redraw => {
                 self.redraw_pending.store(false, Ordering::Release);
                 Ok(RuntimeInput::Redraw)
             }
-            InputMessage::Focus(reading) => Ok(RuntimeInput::Focus(reading)),
             InputMessage::Error(detail) => Err(detail),
         })
     }
+}
+
+/// The next published focus reading; `None` (disabling the select branch) when there is
+/// no focus worker or it has gone away.
+async fn next_focus(focus: &mut Option<FocusReceiver>) -> Option<FocusReading> {
+    let receiver = focus.as_mut()?;
+    if receiver.changed().await.is_err() {
+        *focus = None;
+        return None;
+    }
+    receiver.borrow_and_update().clone()
 }
 
 fn queue_redraw(sender: &mpsc::Sender<InputMessage>, pending: &AtomicBool) {
@@ -687,7 +707,6 @@ fn queue_redraw(sender: &mpsc::Sender<InputMessage>, pending: &AtomicBool) {
 impl Drop for InputPump {
     fn drop(&mut self) {
         self.cancelled.store(true, Ordering::Release);
-        drop(self.focus_sender.take());
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }
@@ -1784,11 +1803,26 @@ mod tests {
         }
     }
 
+    fn pump_with_focus(
+        probe: impl FocusProbe,
+        interval: Duration,
+    ) -> (
+        mpsc::Sender<InputMessage>,
+        InputPump,
+        Arc<AtomicBool>,
+        std::thread::JoinHandle<()>,
+    ) {
+        let (input, mut pump) = InputPump::channel();
+        let (sender, receiver) = tokio::sync::watch::channel(None);
+        pump.focus = Some(receiver);
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let worker = spawn_focus_worker(probe, sender, Arc::clone(&cancelled), interval);
+        (input, pump, cancelled, worker)
+    }
+
     #[tokio::test]
     async fn focus_worker_reports_changes_only_and_stops_on_cancel() {
-        let (sender, mut pump) = InputPump::channel();
-        let cancelled = Arc::new(AtomicBool::new(false));
-        let worker = spawn_focus_worker(
+        let (_input, mut pump, cancelled, worker) = pump_with_focus(
             ScriptedProbe(
                 [
                     FocusReading::Active("%1".into()),
@@ -1797,17 +1831,23 @@ mod tests {
                 ]
                 .into(),
             ),
-            sender,
-            Arc::clone(&cancelled),
             Duration::from_millis(5),
         );
-        assert_eq!(
-            pump.recv().await,
-            Some(Ok(RuntimeInput::Focus(FocusReading::Active("%1".into()))))
-        );
-        assert_eq!(
-            pump.recv().await,
-            Some(Ok(RuntimeInput::Focus(FocusReading::Active("%2".into()))))
+        // A watch keeps only the latest value, so %1 may be skipped, but no reading is
+        // repeated and the final state is always delivered.
+        let mut seen = Vec::new();
+        while seen.last() != Some(&FocusReading::Active("%2".into())) {
+            let Some(Ok(RuntimeInput::Focus(reading))) = pump.recv().await else {
+                panic!("expected a focus reading");
+            };
+            seen.push(reading);
+        }
+        assert!(seen.windows(2).all(|pair| pair[0] != pair[1]), "{seen:?}");
+        // Unchanged readings publish nothing further.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), pump.recv())
+                .await
+                .is_err()
         );
         cancelled.store(true, Ordering::Release);
         worker.join().unwrap();
@@ -1836,18 +1876,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn focus_reading_is_retried_when_the_channel_is_full() {
-        let (sender, mut pump) = InputPump::channel();
-        for _ in 0..super::INPUT_CHANNEL_CAPACITY {
-            sender.try_send(InputMessage::Redraw).unwrap();
-        }
-        let cancelled = Arc::new(AtomicBool::new(false));
-        let worker = spawn_focus_worker(
+    async fn pending_input_is_delivered_first_and_the_latest_focus_is_never_lost() {
+        let (input, mut pump, cancelled, worker) = pump_with_focus(
             ScriptedProbe([FocusReading::Active("%1".into())].into()),
-            sender,
-            Arc::clone(&cancelled),
             Duration::from_millis(5),
         );
+        for _ in 0..super::INPUT_CHANNEL_CAPACITY {
+            input.try_send(InputMessage::Redraw).unwrap();
+        }
         std::thread::sleep(Duration::from_millis(40));
         for _ in 0..super::INPUT_CHANNEL_CAPACITY {
             assert_eq!(pump.recv().await, Some(Ok(RuntimeInput::Redraw)));
@@ -1858,6 +1894,35 @@ mod tests {
         );
         cancelled.store(true, Ordering::Release);
         worker.join().unwrap();
+    }
+
+    struct PanickingInput;
+
+    impl TerminalInput for PanickingInput {
+        fn poll(&mut self, _timeout: Duration) -> io::Result<bool> {
+            panic!("input worker dies");
+        }
+
+        fn read(&mut self) -> io::Result<Event> {
+            unreachable!()
+        }
+    }
+
+    #[tokio::test]
+    async fn a_dead_input_worker_ends_the_stream_even_with_a_live_focus_worker() {
+        let mut pump = InputPump::start_with_focus(
+            PanickingInput,
+            ScriptedProbe([FocusReading::Active("%1".into())].into()),
+        );
+        let ended = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if pump.recv().await.is_none() {
+                    return;
+                }
+            }
+        })
+        .await;
+        assert!(ended.is_ok(), "recv never reported the dead input worker");
     }
 
     struct BlockingProbe(std::sync::mpsc::Receiver<()>);

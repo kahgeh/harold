@@ -112,9 +112,11 @@ Transport and monitor health describe different system-level conditions:
 
 Rows are grouped by project (the first word of the tmux session name) and
 ordered by name (the last component of the working directory), then pane
-address; state never changes a row's position. Each row shows the name, a compact
-location (the pane address is only spelled out when two names in a group
-collide), and a provider tag: `cc` for Claude Code, `cx` for Codex, otherwise the
+address; state never changes a row's position. Each row shows the name (the
+pane address is added only when two names in a group collide, and a long name is
+truncated before that address, never the address itself; panes of different
+sessions in one group are told apart by the session's second word, or the full
+tmux target), and a provider tag: `cc` for Claude Code, `cx` for Codex, otherwise the
 first two letters of the provider name. The selected agent's detail panel still
 shows the full tmux target and working directory. Narrower terminals drop some
 footer hints (below 100 columns the footer switches to a shorter set). Selection follows a stable agent
@@ -130,7 +132,9 @@ of waiting agents are marked with `◆`.
 - An agent joins when it goes from Busy to Idle while its pane is not the pane
   you are looking at.
 - It leaves when you visit its pane, when it goes Busy again, when it exits, or
-  when you press `Enter` on it.
+  when you press `Enter` on it. With focus tracking on, `Enter` does not clear
+  it directly: it leaves once the jump makes its pane active, on the next poll.
+  With tracking off, `Enter` clears it.
 - Waiting state is per dash and kept in memory only. Agents that are already
   Idle when the dash starts do not join, and a second dash keeps its own list.
 - `h`/`l` (or Left/Right) step the selection through the waiting agents and
@@ -141,8 +145,11 @@ of waiting agents are marked with `◆`.
 Once a second the dash runs `tmux list-clients` and decides which pane you can
 see. Suspended clients are ignored; a focused client is preferred, otherwise the
 most recently active client is used, and that client's active pane counts as
-seen. When the query fails, the waiting line shows `(focus tracking off)` and an
-agent leaves the list only on `Enter` or when it goes Busy.
+seen. Focus is sampled once a second, so leaving a pane less than about a second
+before its agent finishes can keep that agent off the line. The waiting line shows
+`(focus tracking off)` when the query fails, when no client is eligible, and for
+the first second after start; while it is off, an agent leaves the list only on
+`Enter` or when it goes Busy.
 
 An absent or empty work summary is displayed exactly as:
 
