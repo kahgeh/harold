@@ -574,10 +574,14 @@ impl TerminalInput for CrosstermInput {
 
 impl InputPump {
     fn start() -> Self {
-        let mut pump = Self::start_with(CrosstermInput);
+        Self::start_with_focus(CrosstermInput, TmuxFocusProbe)
+    }
+
+    fn start_with_focus(input: impl TerminalInput, probe: impl FocusProbe) -> Self {
+        let mut pump = Self::start_with(input);
         if let Some(sender) = pump.focus_sender.take() {
             pump.focus_worker = Some(spawn_focus_worker(
-                TmuxFocusProbe,
+                probe,
                 sender,
                 Arc::clone(&pump.cancelled),
                 FOCUS_POLL_INTERVAL,
@@ -687,9 +691,9 @@ impl Drop for InputPump {
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }
-        if let Some(worker) = self.focus_worker.take() {
-            let _ = worker.join();
-        }
+        // Detached, not joined: a hung tmux must not delay terminal restore on quit. The
+        // worker exits at its next loop check, or when its send finds the receiver gone.
+        drop(self.focus_worker.take());
     }
 }
 
@@ -1854,5 +1858,30 @@ mod tests {
         );
         cancelled.store(true, Ordering::Release);
         worker.join().unwrap();
+    }
+
+    struct BlockingProbe(std::sync::mpsc::Receiver<()>);
+
+    impl FocusProbe for BlockingProbe {
+        fn read(&mut self) -> FocusReading {
+            let _ = self.0.recv();
+            FocusReading::Unavailable
+        }
+    }
+
+    #[test]
+    fn dropping_the_pump_does_not_wait_for_a_hung_focus_probe() {
+        let (release, blocked) = std::sync::mpsc::channel();
+        let pump = InputPump::start_with_focus(
+            SequenceInput {
+                events: Vec::new().into(),
+            },
+            BlockingProbe(blocked),
+        );
+        std::thread::sleep(Duration::from_millis(50));
+        let started = std::time::Instant::now();
+        drop(pump);
+        assert!(started.elapsed() < Duration::from_millis(500));
+        release.send(()).unwrap();
     }
 }
