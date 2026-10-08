@@ -120,6 +120,32 @@ impl TmuxNavigator {
         Ok(Some(client))
     }
 
+    /// The pane the user is looking at: the active pane of the best attached client.
+    /// Suspended clients are ignored; a focused client wins; otherwise the most recently active.
+    pub fn focused_pane(&self) -> Result<Option<String>, NavigationError> {
+        let output = self.run_tmux(
+            "read tmux clients",
+            &[
+                "list-clients",
+                "-F",
+                "#{client_activity}\t#{client_flags}\t#{pane_id}",
+            ],
+        )?;
+        let listing = String::from_utf8_lossy(&output.stdout);
+        let best = listing
+            .lines()
+            .filter_map(|line| {
+                let mut fields = line.split('\t');
+                let activity = fields.next()?.trim().parse::<u64>().ok()?;
+                let flags = fields.next()?;
+                let pane = sanitize_display(fields.next()?.trim(), ERROR_DETAIL_MAX_SCALARS);
+                let has = |flag: &str| flags.split(',').any(|candidate| candidate == flag);
+                (!pane.is_empty() && !has("suspended")).then(|| (has("focused"), activity, pane))
+            })
+            .max_by(|left, right| (left.0, left.1).cmp(&(right.0, right.1)));
+        Ok(best.map(|(_, _, pane)| pane))
+    }
+
     fn has_invoking_tmux_context(&self) -> bool {
         ["TMUX", "TMUX_PANE"]
             .into_iter()
@@ -478,5 +504,65 @@ mod tests {
         // The application remains snapshot-owned; only a later Harold snapshot may change rows.
         app.mark_disconnected();
         assert_eq!(app.snapshot.rows.len(), 1);
+    }
+
+    #[test]
+    fn focused_pane_uses_exact_argv_and_ignores_suspended_clients() {
+        let (navigator, runner) = navigator_with(
+            FakeRunner::successful(
+                "1790945360\tattached,focused,suspended,UTF-8\t%0\n\
+                 1791018376\tattached,focused,suspended,UTF-8\t%36\n\
+                 1791453304\tattached,focused,UTF-8\t%53\n",
+            ),
+            FakeContext::valid(),
+        );
+        assert_eq!(navigator.focused_pane(), Ok(Some("%53".to_owned())));
+        assert_eq!(
+            runner.calls(),
+            vec![(
+                "tmux".into(),
+                vec![
+                    "list-clients".into(),
+                    "-F".into(),
+                    "#{client_activity}\t#{client_flags}\t#{pane_id}".into()
+                ]
+            )]
+        );
+    }
+
+    #[test]
+    fn focused_client_beats_a_more_recent_unfocused_one_and_activity_breaks_ties() {
+        let (navigator, _) = navigator_with(
+            FakeRunner::successful("900\tattached,UTF-8\t%1\n100\tattached,focused\t%2\n"),
+            FakeContext::valid(),
+        );
+        assert_eq!(navigator.focused_pane(), Ok(Some("%2".to_owned())));
+
+        let (navigator, _) = navigator_with(
+            FakeRunner::successful("100\tattached\t%1\n900\tattached\t%2\n500\tattached\t%3\n"),
+            FakeContext::valid(),
+        );
+        assert_eq!(navigator.focused_pane(), Ok(Some("%2".to_owned())));
+    }
+
+    #[test]
+    fn no_usable_client_is_none_and_command_failure_is_an_error() {
+        for stdout in [
+            "",
+            "\n",
+            "garbage\n",
+            "x\tattached\t%1\n",
+            "5\tattached,suspended\t%1\n",
+            "5\tattached\t\n",
+        ] {
+            let (navigator, _) =
+                navigator_with(FakeRunner::successful(stdout), FakeContext::valid());
+            assert_eq!(navigator.focused_pane(), Ok(None), "{stdout:?}");
+        }
+        let (navigator, _) = navigator_with(
+            FakeRunner::failed("no server running"),
+            FakeContext::valid(),
+        );
+        assert!(navigator.focused_pane().is_err());
     }
 }

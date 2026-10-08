@@ -14,7 +14,7 @@ use tokio::time::sleep;
 
 use crate::api::{AgentStateSource, SourceError, SourceStream};
 use crate::app::{
-    App, ConnectionState, Effect, RuntimeStatus, SearchState, Snapshot, SnapshotError,
+    App, ConnectionState, Effect, FocusReading, RuntimeStatus, SearchState, Snapshot, SnapshotError,
 };
 use crate::cli::Options;
 use crate::navigation::{NavigationError, PaneNavigator, TmuxNavigator};
@@ -25,6 +25,7 @@ const ERROR_LIMIT: usize = 512;
 const RETRY_DELAYS_MS: [u64; 6] = [250, 500, 1_000, 2_000, 4_000, 5_000];
 const INPUT_CHANNEL_CAPACITY: usize = 32;
 const INPUT_POLL_INTERVAL: Duration = Duration::from_millis(50);
+const FOCUS_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const REDRAW_INTERVAL: Duration = Duration::from_millis(100);
 type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
@@ -395,6 +396,10 @@ fn handle_input(
     match item {
         Some(Ok(RuntimeInput::Key(key))) => Ok(core.handle_key(key, navigator)),
         Some(Ok(RuntimeInput::Redraw)) => Ok(Control::Continue),
+        Some(Ok(RuntimeInput::Focus(reading))) => {
+            core.app.observe_focus(reading);
+            Ok(Control::Continue)
+        }
         Some(Err(detail)) => Err(AppError::Input(detail)),
         None => Err(AppError::Input("terminal input worker stopped".into())),
     }
@@ -467,19 +472,23 @@ fn panic_detail(payload: Box<dyn std::any::Any + Send>) -> String {
 enum InputMessage {
     Key(KeyCode),
     Redraw,
+    Focus(FocusReading),
     Error(String),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum RuntimeInput {
     Key(KeyCode),
     Redraw,
+    Focus(FocusReading),
 }
 
 struct InputPump {
     receiver: mpsc::Receiver<InputMessage>,
     cancelled: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
+    focus_worker: Option<JoinHandle<()>>,
+    focus_sender: Option<mpsc::Sender<InputMessage>>,
     redraw_pending: Arc<AtomicBool>,
 }
 
@@ -503,6 +512,49 @@ impl RedrawCadence {
     }
 }
 
+trait FocusProbe: Send + 'static {
+    fn read(&mut self) -> FocusReading;
+}
+
+struct TmuxFocusProbe;
+
+impl FocusProbe for TmuxFocusProbe {
+    fn read(&mut self) -> FocusReading {
+        // Built per read: TmuxNavigator's ports are not Send, and construction is free.
+        match TmuxNavigator::new().focused_pane() {
+            Ok(Some(pane_id)) => FocusReading::Active(pane_id),
+            Ok(None) | Err(_) => FocusReading::Unavailable,
+        }
+    }
+}
+
+fn spawn_focus_worker(
+    mut probe: impl FocusProbe,
+    sender: mpsc::Sender<InputMessage>,
+    cancelled: Arc<AtomicBool>,
+    interval: Duration,
+) -> JoinHandle<()> {
+    std::thread::spawn(move || {
+        let mut last_sent: Option<FocusReading> = None;
+        let mut next = Instant::now();
+        while !cancelled.load(Ordering::Acquire) {
+            if Instant::now() >= next {
+                next = Instant::now() + interval;
+                let reading = probe.read();
+                if last_sent.as_ref() != Some(&reading) {
+                    match sender.try_send(InputMessage::Focus(reading.clone())) {
+                        Ok(()) => last_sent = Some(reading),
+                        Err(_) if sender.is_closed() => break,
+                        // Channel full: keep `last_sent` so the next poll retries.
+                        Err(_) => {}
+                    }
+                }
+            }
+            std::thread::sleep(interval.min(INPUT_POLL_INTERVAL));
+        }
+    })
+}
+
 trait TerminalInput: Send + 'static {
     fn poll(&mut self, timeout: Duration) -> std::io::Result<bool>;
     fn read(&mut self) -> std::io::Result<Event>;
@@ -522,13 +574,23 @@ impl TerminalInput for CrosstermInput {
 
 impl InputPump {
     fn start() -> Self {
-        Self::start_with(CrosstermInput)
+        let mut pump = Self::start_with(CrosstermInput);
+        if let Some(sender) = pump.focus_sender.take() {
+            pump.focus_worker = Some(spawn_focus_worker(
+                TmuxFocusProbe,
+                sender,
+                Arc::clone(&pump.cancelled),
+                FOCUS_POLL_INTERVAL,
+            ));
+        }
+        pump
     }
 
     fn start_with(mut input: impl TerminalInput) -> Self {
         let (sender, receiver) = mpsc::channel(INPUT_CHANNEL_CAPACITY);
         let cancelled = Arc::new(AtomicBool::new(false));
         let redraw_pending = Arc::new(AtomicBool::new(false));
+        let focus_sender = sender.clone();
         let worker_cancelled = Arc::clone(&cancelled);
         let worker_redraw_pending = Arc::clone(&redraw_pending);
         let worker = std::thread::spawn(move || {
@@ -571,6 +633,8 @@ impl InputPump {
             receiver,
             cancelled,
             worker: Some(worker),
+            focus_worker: None,
+            focus_sender: Some(focus_sender),
             redraw_pending,
         }
     }
@@ -584,6 +648,8 @@ impl InputPump {
                 receiver,
                 cancelled: Arc::new(AtomicBool::new(false)),
                 worker: None,
+                focus_worker: None,
+                focus_sender: None,
                 redraw_pending: Arc::new(AtomicBool::new(false)),
             },
         )
@@ -596,6 +662,7 @@ impl InputPump {
                 self.redraw_pending.store(false, Ordering::Release);
                 Ok(RuntimeInput::Redraw)
             }
+            InputMessage::Focus(reading) => Ok(RuntimeInput::Focus(reading)),
             InputMessage::Error(detail) => Err(detail),
         })
     }
@@ -616,7 +683,11 @@ fn queue_redraw(sender: &mpsc::Sender<InputMessage>, pending: &AtomicBool) {
 impl Drop for InputPump {
     fn drop(&mut self) {
         self.cancelled.store(true, Ordering::Release);
+        drop(self.focus_sender.take());
         if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+        if let Some(worker) = self.focus_worker.take() {
             let _ = worker.join();
         }
     }
@@ -866,15 +937,15 @@ mod tests {
     use tokio::sync::mpsc;
 
     use super::{
-        Backoff, BoxFuture, ClockPort, Control, InputMessage, InputPump, OpenOutcome,
+        Backoff, BoxFuture, ClockPort, Control, FocusProbe, InputMessage, InputPump, OpenOutcome,
         RedrawCadence, RuntimeCore, RuntimeInput, ScreenPort, ShutdownPort, SourcePort,
-        StreamControl, StreamPort, TerminalInput, consume_stream, merge_exit, open_stream,
-        resolve_client, wait_for_retry,
+        StreamControl, StreamPort, TerminalInput, consume_stream, handle_input, merge_exit,
+        open_stream, resolve_client, spawn_focus_worker, wait_for_retry,
     };
     use crate::api::SourceError;
     use crate::app::{
-        AgentIncarnation, AgentRow, AgentState, ConnectionState, MonitorHealth, MonitorHealthState,
-        RuntimeStatus, Snapshot,
+        AgentIncarnation, AgentRow, AgentState, ConnectionState, FocusReading, MonitorHealth,
+        MonitorHealthState, RuntimeStatus, Snapshot,
     };
     use crate::navigation::{NavigationError, PaneNavigator};
 
@@ -1695,5 +1766,93 @@ mod tests {
                 KeyModifiers::NONE,
             )))
         }
+    }
+
+    struct ScriptedProbe(std::collections::VecDeque<FocusReading>);
+
+    impl FocusProbe for ScriptedProbe {
+        fn read(&mut self) -> FocusReading {
+            if self.0.len() > 1 {
+                self.0.pop_front().unwrap()
+            } else {
+                self.0.front().cloned().unwrap_or(FocusReading::Unavailable)
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn focus_worker_reports_changes_only_and_stops_on_cancel() {
+        let (sender, mut pump) = InputPump::channel();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let worker = spawn_focus_worker(
+            ScriptedProbe(
+                [
+                    FocusReading::Active("%1".into()),
+                    FocusReading::Active("%1".into()),
+                    FocusReading::Active("%2".into()),
+                ]
+                .into(),
+            ),
+            sender,
+            Arc::clone(&cancelled),
+            Duration::from_millis(5),
+        );
+        assert_eq!(
+            pump.recv().await,
+            Some(Ok(RuntimeInput::Focus(FocusReading::Active("%1".into()))))
+        );
+        assert_eq!(
+            pump.recv().await,
+            Some(Ok(RuntimeInput::Focus(FocusReading::Active("%2".into()))))
+        );
+        cancelled.store(true, Ordering::Release);
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn focus_input_updates_the_app_without_changing_control_flow() {
+        let navigator = FakeNavigator::successful();
+        let mut core = RuntimeCore::new(None);
+        let control = handle_input(
+            Some(Ok(RuntimeInput::Focus(FocusReading::Active("%7".into())))),
+            &mut core,
+            &navigator,
+        )
+        .unwrap();
+        assert!(matches!(control, Control::Continue));
+        assert!(core.app.focus_tracking());
+
+        handle_input(
+            Some(Ok(RuntimeInput::Focus(FocusReading::Unavailable))),
+            &mut core,
+            &navigator,
+        )
+        .unwrap();
+        assert!(!core.app.focus_tracking());
+    }
+
+    #[tokio::test]
+    async fn focus_reading_is_retried_when_the_channel_is_full() {
+        let (sender, mut pump) = InputPump::channel();
+        for _ in 0..super::INPUT_CHANNEL_CAPACITY {
+            sender.try_send(InputMessage::Redraw).unwrap();
+        }
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let worker = spawn_focus_worker(
+            ScriptedProbe([FocusReading::Active("%1".into())].into()),
+            sender,
+            Arc::clone(&cancelled),
+            Duration::from_millis(5),
+        );
+        std::thread::sleep(Duration::from_millis(40));
+        for _ in 0..super::INPUT_CHANNEL_CAPACITY {
+            assert_eq!(pump.recv().await, Some(Ok(RuntimeInput::Redraw)));
+        }
+        assert_eq!(
+            pump.recv().await,
+            Some(Ok(RuntimeInput::Focus(FocusReading::Active("%1".into()))))
+        );
+        cancelled.store(true, Ordering::Release);
+        worker.join().unwrap();
     }
 }
