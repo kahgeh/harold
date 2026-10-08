@@ -2,3 +2,4 @@ target/
 .worktrees/
 **/config/local.toml
 .env
+.superpowers/
