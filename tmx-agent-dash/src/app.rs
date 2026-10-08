@@ -164,6 +164,13 @@ pub(crate) enum RuntimeStatus {
     SourceError(String),
 }
 
+/// What the tmux focus probe saw: the user's active pane, or nothing usable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FocusReading {
+    Active(String),
+    Unavailable,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct App {
     pub connection: ConnectionState,
@@ -177,6 +184,9 @@ pub struct App {
     normalized_query: String,
     searchable_rows: Vec<SearchableRow>,
     row_labels: Vec<String>,
+    waiting: Vec<AgentIncarnation>,
+    active_pane: Option<String>,
+    focus_tracking: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -251,6 +261,9 @@ impl App {
             normalized_query,
             searchable_rows,
             row_labels,
+            waiting: Vec::new(),
+            active_pane: None,
+            focus_tracking: false,
         }
     }
 
@@ -272,6 +285,97 @@ impl App {
             }
         }
         groups
+    }
+
+    pub fn observe_focus(&mut self, reading: FocusReading) {
+        match reading {
+            FocusReading::Active(pane_id) => {
+                self.waiting.retain(|waiting| waiting.pane_id != pane_id);
+                self.active_pane = Some(pane_id);
+                self.focus_tracking = true;
+            }
+            FocusReading::Unavailable => {
+                self.active_pane = None;
+                self.focus_tracking = false;
+            }
+        }
+    }
+
+    pub const fn focus_tracking(&self) -> bool {
+        self.focus_tracking
+    }
+
+    pub fn is_waiting(&self, incarnation: &AgentIncarnation) -> bool {
+        self.waiting.contains(incarnation)
+    }
+
+    /// Agents that finished while the user was elsewhere, oldest first.
+    pub fn waiting_rows(&self) -> Vec<&AgentRow> {
+        self.waiting
+            .iter()
+            .filter_map(|waiting| {
+                self.snapshot
+                    .rows
+                    .iter()
+                    .find(|row| &row.incarnation == waiting)
+            })
+            .collect()
+    }
+
+    fn next_waiting(&self, rows: &[AgentRow]) -> Vec<AgentIncarnation> {
+        let mut waiting: Vec<AgentIncarnation> = self
+            .waiting
+            .iter()
+            .filter(|waiting| {
+                rows.iter()
+                    .any(|row| &row.incarnation == *waiting && row.state != AgentState::Busy)
+            })
+            .cloned()
+            .collect();
+        for row in rows {
+            if row.state != AgentState::Idle || waiting.contains(&row.incarnation) {
+                continue;
+            }
+            let was_busy = self.snapshot.rows.iter().any(|prior| {
+                prior.incarnation == row.incarnation && prior.state == AgentState::Busy
+            });
+            let in_view = self.active_pane.as_deref() == Some(row.incarnation.pane_id.as_str());
+            if was_busy && !in_view {
+                waiting.push(row.incarnation.clone());
+            }
+        }
+        waiting
+    }
+
+    fn select_waiting(&mut self, forward: bool) {
+        let waiting: Vec<AgentIncarnation> = self
+            .waiting_rows()
+            .into_iter()
+            .map(|row| row.incarnation.clone())
+            .collect();
+        if waiting.is_empty() {
+            return;
+        }
+        let current = self
+            .selected
+            .as_ref()
+            .and_then(|selected| waiting.iter().position(|waiting| waiting == selected));
+        let index = match (current, forward) {
+            (Some(index), true) => (index + 1) % waiting.len(),
+            (Some(index), false) => (index + waiting.len() - 1) % waiting.len(),
+            (None, true) => 0,
+            (None, false) => waiting.len() - 1,
+        };
+        let target = waiting[index].clone();
+        if !self
+            .visible_rows()
+            .iter()
+            .any(|row| row.incarnation == target)
+        {
+            self.search.query.clear();
+            self.normalized_query.clear();
+        }
+        self.selected = Some(target);
     }
 
     pub fn voice(&self) -> VoiceState {
@@ -463,12 +567,20 @@ impl App {
             KeyCode::Char('k') | KeyCode::Up => self.select_relative(-1),
             KeyCode::Char('g') => self.select_boundary(false),
             KeyCode::Char('G') => self.select_boundary(true),
+            KeyCode::Char('l') | KeyCode::Right => self.select_waiting(true),
+            KeyCode::Char('h') | KeyCode::Left => self.select_waiting(false),
             KeyCode::Enter => {
-                return self
-                    .selected_row()
-                    .map_or(Effect::None, |row| Effect::Navigate {
-                        pane_id: row.incarnation.pane_id.clone(),
-                    });
+                let Some(incarnation) = self.selected_row().map(|row| row.incarnation.clone())
+                else {
+                    return Effect::None;
+                };
+                if !self.focus_tracking {
+                    // Without a focus probe, jumping from the dash is the only visit we can see.
+                    self.waiting.retain(|waiting| *waiting != incarnation);
+                }
+                return Effect::Navigate {
+                    pane_id: incarnation.pane_id,
+                };
             }
             _ => {}
         }
@@ -482,6 +594,7 @@ impl App {
     ) -> Result<(), SnapshotError> {
         validate_rows(&snapshot.rows)?;
         sort_rows(&mut snapshot.rows);
+        let waiting = self.next_waiting(&snapshot.rows);
 
         let prior_selection = self.selected.clone();
         let prior_index = prior_selection.as_ref().and_then(|selected| {
@@ -517,6 +630,7 @@ impl App {
             })
         };
         self.snapshot = snapshot;
+        self.waiting = waiting;
         self.searchable_rows = self.snapshot.rows.iter().map(SearchableRow::from).collect();
         self.row_labels = build_labels(&self.snapshot.rows);
         if !self.normalized_query.is_empty()
@@ -674,6 +788,7 @@ mod tests {
     use crossterm::event::KeyCode;
 
     use super::*;
+    use AgentState::{Busy, Idle, Unknown};
 
     #[test]
     fn voice_is_unknown_until_a_snapshot_then_follows_the_snapshot() {
@@ -1688,5 +1803,199 @@ mod tests {
             .map(|(group, rows)| (group, rows.len()))
             .collect();
         assert_eq!(groups, [("home", 1)]);
+    }
+
+    fn fleet(states: [AgentState; 3], revision: u64) -> Snapshot {
+        snapshot(
+            revision,
+            0,
+            vec![
+                placed("%1", states[0], "harold  main", "/p/harold/main", 3),
+                placed("%2", states[1], "harold  voice", "/p/harold/voice", 3),
+                placed("%3", states[2], "home", "/Users/k/Dev/p/sre", 1),
+            ],
+        )
+    }
+
+    fn waiting_panes(app: &App) -> Vec<String> {
+        app.waiting_rows()
+            .iter()
+            .map(|row| row.incarnation.pane_id.clone())
+            .collect()
+    }
+
+    #[test]
+    fn busy_to_idle_joins_in_order_and_first_seen_idle_does_not() {
+        let mut app = empty_app();
+        app.apply_first_snapshot(fleet([Busy, Busy, Idle], 1))
+            .unwrap();
+        assert!(waiting_panes(&app).is_empty());
+
+        app.apply_later_snapshot(fleet([Busy, Idle, Idle], 2))
+            .unwrap();
+        assert_eq!(waiting_panes(&app), ["%2"]);
+        app.apply_later_snapshot(fleet([Idle, Idle, Idle], 3))
+            .unwrap();
+        assert_eq!(waiting_panes(&app), ["%2", "%1"]);
+        assert!(app.is_waiting(&app.snapshot.rows[0].incarnation));
+    }
+
+    #[test]
+    fn going_busy_or_disappearing_leaves_and_unknown_stays() {
+        let mut app = empty_app();
+        app.apply_first_snapshot(fleet([Busy, Busy, Busy], 1))
+            .unwrap();
+        app.apply_later_snapshot(fleet([Idle, Idle, Idle], 2))
+            .unwrap();
+        assert_eq!(waiting_panes(&app), ["%1", "%2", "%3"]);
+
+        app.apply_later_snapshot(fleet([Busy, Unknown, Idle], 3))
+            .unwrap();
+        assert_eq!(waiting_panes(&app), ["%2", "%3"]);
+
+        app.apply_later_snapshot(snapshot(
+            4,
+            0,
+            vec![placed("%3", Idle, "home", "/Users/k/Dev/p/sre", 1)],
+        ))
+        .unwrap();
+        assert_eq!(waiting_panes(&app), ["%3"]);
+    }
+
+    #[test]
+    fn a_new_incarnation_in_the_same_pane_does_not_inherit_waiting() {
+        let mut app = empty_app();
+        app.apply_first_snapshot(fleet([Busy, Busy, Busy], 1))
+            .unwrap();
+        app.apply_later_snapshot(fleet([Idle, Busy, Busy], 2))
+            .unwrap();
+        let mut replacement = placed("%1", Idle, "harold  main", "/p/harold/main", 3);
+        replacement.incarnation.agent_pid = 999;
+        app.apply_later_snapshot(snapshot(3, 0, vec![replacement]))
+            .unwrap();
+        assert!(waiting_panes(&app).is_empty());
+    }
+
+    #[test]
+    fn focus_clears_waiting_and_suppresses_joining_for_the_pane_in_view() {
+        let mut app = empty_app();
+        assert!(!app.focus_tracking());
+        app.apply_first_snapshot(fleet([Busy, Busy, Busy], 1))
+            .unwrap();
+        app.apply_later_snapshot(fleet([Idle, Busy, Busy], 2))
+            .unwrap();
+        assert_eq!(waiting_panes(&app), ["%1"]);
+
+        app.observe_focus(FocusReading::Active("%1".into()));
+        assert!(app.focus_tracking());
+        assert!(waiting_panes(&app).is_empty());
+
+        // The user is now looking at %2 when it finishes: it never joins.
+        app.observe_focus(FocusReading::Active("%2".into()));
+        app.apply_later_snapshot(fleet([Idle, Idle, Busy], 3))
+            .unwrap();
+        assert!(waiting_panes(&app).is_empty());
+
+        app.observe_focus(FocusReading::Unavailable);
+        assert!(!app.focus_tracking());
+        app.apply_later_snapshot(fleet([Idle, Idle, Idle], 4))
+            .unwrap();
+        assert_eq!(waiting_panes(&app), ["%3"]);
+    }
+
+    #[test]
+    fn h_and_l_cycle_waiting_agents_and_wrap() {
+        let mut app = empty_app();
+        app.apply_first_snapshot(fleet([Busy, Busy, Busy], 1))
+            .unwrap();
+        app.apply_later_snapshot(fleet([Busy, Busy, Idle], 2))
+            .unwrap();
+        app.apply_later_snapshot(fleet([Idle, Busy, Idle], 3))
+            .unwrap();
+        assert_eq!(waiting_panes(&app), ["%3", "%1"]);
+        let selected = |app: &App| app.selected.as_ref().map(|s| s.pane_id.clone());
+
+        app.selected = Some(app.snapshot.rows[1].incarnation.clone()); // %2, not waiting
+        assert_eq!(app.handle_key(KeyCode::Char('l')), Effect::None);
+        assert_eq!(selected(&app).as_deref(), Some("%3"));
+        app.handle_key(KeyCode::Right);
+        assert_eq!(selected(&app).as_deref(), Some("%1"));
+        app.handle_key(KeyCode::Char('l'));
+        assert_eq!(selected(&app).as_deref(), Some("%3"));
+        app.handle_key(KeyCode::Char('h'));
+        assert_eq!(selected(&app).as_deref(), Some("%1"));
+
+        app.selected = Some(app.snapshot.rows[1].incarnation.clone());
+        app.handle_key(KeyCode::Left);
+        assert_eq!(selected(&app).as_deref(), Some("%1"));
+    }
+
+    #[test]
+    fn h_and_l_do_nothing_when_nothing_waits_and_type_text_while_editing() {
+        let mut app = empty_app();
+        app.apply_first_snapshot(fleet([Busy, Busy, Busy], 1))
+            .unwrap();
+        let before = app.selected.clone();
+        app.handle_key(KeyCode::Char('l'));
+        app.handle_key(KeyCode::Char('h'));
+        assert_eq!(app.selected, before);
+
+        app.handle_key(KeyCode::Char('f'));
+        app.handle_key(KeyCode::Char('h'));
+        app.handle_key(KeyCode::Char('l'));
+        assert_eq!(app.search.query, "hl");
+        app.handle_key(KeyCode::Esc);
+
+        app.handle_key(KeyCode::Char('/'));
+        app.handle_key(KeyCode::Char('l'));
+        assert_eq!(app.palette.as_ref().unwrap().query, "l");
+    }
+
+    #[test]
+    fn stepping_to_a_waiting_agent_hidden_by_search_clears_the_search() {
+        let mut app = empty_app();
+        app.apply_first_snapshot(fleet([Busy, Busy, Busy], 1))
+            .unwrap();
+        app.apply_later_snapshot(fleet([Busy, Busy, Idle], 2))
+            .unwrap();
+        app.handle_key(KeyCode::Char('f'));
+        for character in "main".chars() {
+            app.handle_key(KeyCode::Char(character));
+        }
+        app.handle_key(KeyCode::Enter);
+        assert_eq!(app.visible_rows().len(), 1);
+
+        app.handle_key(KeyCode::Char('l'));
+        assert!(app.search.query.is_empty());
+        assert_eq!(app.selected.as_ref().unwrap().pane_id, "%3");
+        assert_eq!(app.visible_rows().len(), 3);
+    }
+
+    #[test]
+    fn enter_clears_waiting_only_when_focus_tracking_is_off() {
+        let mut app = empty_app();
+        app.apply_first_snapshot(fleet([Busy, Busy, Busy], 1))
+            .unwrap();
+        app.apply_later_snapshot(fleet([Idle, Busy, Busy], 2))
+            .unwrap();
+        app.handle_key(KeyCode::Char('l'));
+        assert_eq!(
+            app.handle_key(KeyCode::Enter),
+            Effect::Navigate {
+                pane_id: "%1".into()
+            }
+        );
+        assert!(waiting_panes(&app).is_empty());
+
+        app.observe_focus(FocusReading::Active("%9".into()));
+        app.apply_later_snapshot(fleet([Idle, Idle, Busy], 3))
+            .unwrap();
+        app.handle_key(KeyCode::Char('l'));
+        app.handle_key(KeyCode::Enter);
+        assert_eq!(
+            waiting_panes(&app),
+            ["%2"],
+            "tracking on: only a real visit clears it"
+        );
     }
 }
