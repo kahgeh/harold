@@ -35,21 +35,26 @@ struct HaroldService {
     monitor: agent::runtime::AgentMonitorHandle,
     store: Arc<store::HaroldStore>,
     snapshots: agent::snapshot::AgentSnapshotHub,
+    /// Held across a pause request's append and switch, so overlapping requests
+    /// cannot leave the store and the switch disagreeing.
+    messaging_switch: tokio::sync::Mutex<()>,
     shutdown: watch::Receiver<()>,
 }
 
 impl HaroldService {
     /// Persists a changed pause flag, then hands it to `switch` straight away so the
-    /// gates act before the projector reaches the event. `switched` is the switch's
+    /// gates act before the projector reaches the event. `switched` reads the switch's
     /// current value: the published snapshot can lag a change that is stored but not
     /// yet projected, so a request is a repeat only when both already agree with it.
+    /// Requests run one at a time, so the last one stored is also the last one switched.
     async fn apply_messaging_paused(
         &self,
         paused: bool,
-        switched: bool,
+        switched: impl FnOnce() -> bool,
         switch: impl FnOnce(bool),
     ) -> Result<(), Status> {
-        if switched == paused && self.snapshots.messaging_paused() == paused {
+        let _in_progress = self.messaging_switch.lock().await;
+        if switched() == paused && self.snapshots.messaging_paused() == paused {
             return Ok(());
         }
         store::append_messaging_paused_changed(&self.store, paused)
@@ -92,7 +97,7 @@ impl Harold for HaroldService {
         let paused = request.into_inner().paused;
         self.apply_messaging_paused(
             paused,
-            outbound::is_messaging_paused(),
+            outbound::is_messaging_paused,
             outbound::set_messaging_paused,
         )
         .await?;
@@ -475,9 +480,7 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
     let screen: Arc<dyn agent::screen::VisibleScreenPort> =
         Arc::new(agent::screen::TmuxVisibleScreen::new());
     let providers = cfg.agents.0.clone();
-    let initial_agent_snapshot = load_startup_agent_snapshot(&store).await?;
-    outbound::set_tts_muted(initial_agent_snapshot.tts_muted);
-    outbound::set_messaging_paused(initial_agent_snapshot.messaging_paused);
+    let initial_agent_snapshot = restore_startup_state(&store).await?;
     let snapshots = agent::snapshot::AgentSnapshotHub::new(initial_agent_snapshot.clone());
 
     let activity_provider = cfg.activity_summary.enabled.then(|| {
@@ -521,6 +524,7 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
             monitor,
             store: service_store,
             snapshots,
+            messaging_switch: tokio::sync::Mutex::new(()),
             shutdown: shutdown_rx.clone(),
         }))
         .serve_with_shutdown(addr, async {
@@ -557,6 +561,17 @@ async fn stop_agent_monitor(
     if let Some(provider) = activity_provider {
         provider.shutdown().await;
     }
+}
+
+/// Loads the caught-up snapshot and sets the outbound switches from it, so the persisted
+/// mute and pause hold before any listener or handler starts.
+async fn restore_startup_state(
+    store: &store::HaroldStore,
+) -> events::Result<agent::domain::AgentSnapshot> {
+    let snapshot = load_startup_agent_snapshot(store).await?;
+    outbound::set_tts_muted(snapshot.tts_muted);
+    outbound::set_messaging_paused(snapshot.messaging_paused);
+    Ok(snapshot)
 }
 
 async fn load_startup_agent_snapshot(

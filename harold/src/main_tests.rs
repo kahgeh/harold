@@ -20,7 +20,7 @@ use super::harold::{
 };
 use super::{
     HaroldService, Request, TurnCompleteRequest, load_startup_agent_snapshot, map_agent_snapshot,
-    pane_id_for_log, store,
+    pane_id_for_log, restore_startup_state, store,
 };
 
 struct EmptyInventory;
@@ -87,6 +87,7 @@ where
             monitor,
             store: service_store,
             snapshots: AgentSnapshotHub::new(snapshot),
+            messaging_switch: tokio::sync::Mutex::new(()),
             shutdown: shutdown_rx,
         },
         shutdown,
@@ -841,7 +842,7 @@ async fn set_messaging_paused_appends_once_and_switches_immediately() {
     // The switch is flipped by the request itself, before anything is projected.
     let mut switched = Vec::new();
     service
-        .apply_messaging_paused(true, false, |paused| switched.push(paused))
+        .apply_messaging_paused(true, || false, |paused| switched.push(paused))
         .await
         .unwrap();
     assert_eq!(switched, [true]);
@@ -854,7 +855,7 @@ async fn set_messaging_paused_appends_once_and_switches_immediately() {
         .snapshots
         .publish_committed(store.load_agent_snapshot().await.unwrap());
     service
-        .apply_messaging_paused(true, true, |paused| switched.push(paused))
+        .apply_messaging_paused(true, || true, |paused| switched.push(paused))
         .await
         .unwrap();
     assert_eq!(store.project_unhandled_events(10).await.unwrap().applied, 0);
@@ -863,11 +864,11 @@ async fn set_messaging_paused_appends_once_and_switches_immediately() {
     // A resume that is not projected yet leaves the hub saying "paused". A pause sent
     // in that window must still be stored and applied, not taken for a repeat.
     service
-        .apply_messaging_paused(false, true, |paused| switched.push(paused))
+        .apply_messaging_paused(false, || true, |paused| switched.push(paused))
         .await
         .unwrap();
     service
-        .apply_messaging_paused(true, false, |paused| switched.push(paused))
+        .apply_messaging_paused(true, || false, |paused| switched.push(paused))
         .await
         .unwrap();
     assert_eq!(switched, [true, false, true]);
@@ -884,4 +885,56 @@ fn snapshot_mapping_carries_messaging_paused() {
     let mut snapshot = empty_snapshot();
     snapshot.messaging_paused = true;
     assert!(map_agent_snapshot(snapshot).messaging_paused);
+}
+
+#[tokio::test]
+async fn startup_restores_the_messaging_switch_from_a_reopened_store() {
+    let directory = std::env::temp_dir().join(format!("harold-startup-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&directory).unwrap();
+    {
+        let store = store::HaroldStore::open(&directory).await.unwrap();
+        store::append_messaging_paused_changed(&store, true)
+            .await
+            .unwrap();
+    }
+    assert!(!super::outbound::is_messaging_paused());
+
+    let reopened = store::HaroldStore::open(&directory).await.unwrap();
+    let snapshot = restore_startup_state(&reopened).await.unwrap();
+
+    assert!(snapshot.messaging_paused);
+    assert!(super::outbound::is_messaging_paused());
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+#[tokio::test]
+async fn overlapping_pause_requests_wait_for_the_one_in_progress() {
+    let directory = std::env::temp_dir().join(format!("harold-serial-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let store = Arc::new(store::HaroldStore::open(&directory).await.unwrap());
+    let (service, shutdown, task) = test_service(Arc::clone(&store), empty_snapshot());
+
+    // Stand in for a request that is between its append and its switch.
+    let in_progress = service.messaging_switch.lock().await;
+    let mut switched = Vec::new();
+    {
+        let mut request = Box::pin(service.apply_messaging_paused(
+            true,
+            || false,
+            |paused| switched.push(paused),
+        ));
+        let waited =
+            tokio::time::timeout(std::time::Duration::from_millis(200), &mut request).await;
+        assert!(waited.is_err(), "second request ran inside the first");
+        assert_eq!(store.project_unhandled_events(10).await.unwrap().applied, 0);
+
+        drop(in_progress);
+        request.await.unwrap();
+    }
+    assert_eq!(switched, [true]);
+    assert_eq!(store.project_unhandled_events(10).await.unwrap().applied, 1);
+
+    drop(shutdown);
+    let _ = task.await;
+    let _ = std::fs::remove_dir_all(&directory);
 }

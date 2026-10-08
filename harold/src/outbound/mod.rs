@@ -36,14 +36,29 @@ pub fn is_tts_muted() -> bool {
     TTS_MUTED.load(Ordering::SeqCst)
 }
 
+#[cfg(not(test))]
 static MESSAGING_PAUSED: AtomicBool = AtomicBool::new(false);
 
+// Tests run in parallel and several of them flip this switch through the production
+// wiring, so under test every thread gets its own.
+#[cfg(test)]
+thread_local! {
+    static MESSAGING_PAUSED: AtomicBool = const { AtomicBool::new(false) };
+}
+
+fn with_messaging_switch<T>(read_or_write: impl FnOnce(&AtomicBool) -> T) -> T {
+    #[cfg(not(test))]
+    return read_or_write(&MESSAGING_PAUSED);
+    #[cfg(test)]
+    MESSAGING_PAUSED.with(read_or_write)
+}
+
 pub fn set_messaging_paused(paused: bool) {
-    MESSAGING_PAUSED.store(paused, Ordering::SeqCst);
+    with_messaging_switch(|switch| switch.store(paused, Ordering::SeqCst));
 }
 
 pub fn is_messaging_paused() -> bool {
-    MESSAGING_PAUSED.load(Ordering::SeqCst)
+    with_messaging_switch(|switch| switch.load(Ordering::SeqCst))
 }
 
 // ---------------------------------------------------------------------------
@@ -217,9 +232,15 @@ mod tests {
     }
 
     #[test]
-    fn paused_away_channel_skips_without_sending() {
-        let outcome = OutboundChannel::Away.notify_with_switches(&turn(), "trace", false, true);
-        assert!(matches!(outcome, Ok((DeliveryOutcome::Skipped, None))));
+    fn paused_away_channel_is_skipped_whatever_the_voice_state() {
+        // Asserts the decision only. Going through `notify_with_switches` would reach
+        // the real away send if this gate were ever removed.
+        for tts_muted in [false, true] {
+            assert_eq!(
+                OutboundChannel::Away.skip_reason(tts_muted, true),
+                Some("away notification skipped (messaging paused)")
+            );
+        }
     }
 
     #[test]

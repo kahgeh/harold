@@ -15,7 +15,7 @@ use crate::agent::snapshot::AgentSnapshotHub;
 use crate::outbound::DeliveryOutcome;
 use crate::store::{
     HaroldStore, InboundMessage, PendingDelivery, TurnCompleted, append_agent_events,
-    append_inbound_message, append_turn_completed,
+    append_inbound_message, append_messaging_paused_changed, append_turn_completed,
 };
 
 struct TestDirectory(std::path::PathBuf);
@@ -427,5 +427,47 @@ fn paused_inbound_delivery_is_skipped_without_routing() {
     assert!(matches!(outcome, Ok(DeliveryOutcome::Skipped)));
 
     let outcome = ProductionDispatcher.dispatch_with_pause(&delivery, false);
+    assert!(matches!(outcome, Err(DispatchError::Permanent(_))));
+}
+
+#[tokio::test]
+async fn projecting_a_pause_change_sets_the_messaging_switch() {
+    let directory = TestDirectory::new();
+    let store = HaroldStore::open(&directory.0).await.unwrap();
+    let snapshots = AgentSnapshotHub::new(store.load_agent_snapshot().await.unwrap());
+    assert!(!crate::outbound::is_messaging_paused());
+
+    append_messaging_paused_changed(&store, true).await.unwrap();
+    project_and_publish_agent_snapshot(&store, &snapshots, 500)
+        .await
+        .unwrap();
+    assert!(crate::outbound::is_messaging_paused());
+
+    append_messaging_paused_changed(&store, false)
+        .await
+        .unwrap();
+    project_and_publish_agent_snapshot(&store, &snapshots, 500)
+        .await
+        .unwrap();
+    assert!(!crate::outbound::is_messaging_paused());
+}
+
+#[test]
+fn production_dispatcher_reads_the_messaging_switch() {
+    // Unroutable on purpose, as above: without the switch this fails on the payload.
+    let delivery = PendingDelivery {
+        event_id: "event-1".into(),
+        event_version: events::EventStreamVersion::new(1).unwrap(),
+        event_type: "InboundMessageReceived".into(),
+        payload: json!(null),
+        trace_id: "trace".into(),
+    };
+
+    crate::outbound::set_messaging_paused(true);
+    let outcome = ProductionDispatcher.dispatch(&delivery);
+    assert!(matches!(outcome, Ok(DeliveryOutcome::Skipped)));
+
+    crate::outbound::set_messaging_paused(false);
+    let outcome = ProductionDispatcher.dispatch(&delivery);
     assert!(matches!(outcome, Err(DispatchError::Permanent(_))));
 }
