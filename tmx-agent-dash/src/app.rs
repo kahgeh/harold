@@ -596,6 +596,10 @@ const fn state_rank(state: AgentState) -> u8 {
 
 #[cfg(test)]
 mod tests {
+    use crossterm::event::KeyCode;
+
+    use super::*;
+
     #[test]
     fn voice_is_unknown_until_a_snapshot_then_follows_the_snapshot() {
         let empty = Snapshot {
@@ -627,10 +631,6 @@ mod tests {
         .unwrap();
         assert_eq!(app.voice(), VoiceState::Muted);
     }
-
-    use crossterm::event::KeyCode;
-
-    use super::*;
 
     #[test]
     fn snapshot_first_message_is_authoritative_at_any_revision() {

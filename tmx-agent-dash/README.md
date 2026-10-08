@@ -72,7 +72,7 @@ outside this MVP; use a trusted deployment boundary for remote connections.
 | `Enter` | Accept the query while editing; otherwise switch the invoking tmux client to the selected pane |
 | `Esc` | While editing, clear the query and leave editing; otherwise clear an accepted filter, or do nothing when no filter exists |
 | `r` | Retry the Harold connection immediately |
-| `q` | Quit outside search editing; enter `q` into the query while editing |
+| `q` | Quit outside search editing or the palette; enter `q` into the query while editing |
 
 Search is a local, case-insensitive filter over provider, work summary, tmux
 target, and working directory. It never sends a search request to Harold and it
@@ -82,7 +82,8 @@ row counts while a filter is active. Press `f` to start editing the search query
 The masthead shows the confirmed voice state as `● VOICE ON` or `○ VOICE MUTED`,
 taken from the Harold snapshot rather than from local guesses. Voice commands are
 offered in the palette only while the connection is LIVE and a snapshot has
-arrived; otherwise the palette shows `Voice state unavailable`.
+arrived; otherwise the palette shows `Commands unavailable until connected`.
+Before the first snapshot the masthead shows `○ VOICE —`.
 
 ## Reading status
 
@@ -151,7 +152,7 @@ clipping.
 
 ### Terminal shutdown
 
-Use `q` outside search editing. `Esc` never quits: while editing it always clears
+Use `q` outside search editing or the palette. `Esc` never quits: while editing it always clears
 the query and leaves editing, and outside editing it clears an accepted filter or
 does nothing when no filter exists. `SIGINT` and `SIGTERM` also initiate shutdown.
 The runtime restores raw mode, the primary screen, and

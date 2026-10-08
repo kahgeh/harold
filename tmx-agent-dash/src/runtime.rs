@@ -1318,6 +1318,61 @@ mod tests {
         drop(pump);
     }
 
+    async fn run_palette_mute(fail: bool) -> (RuntimeCore, Vec<bool>) {
+        let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut stream = FakeStream::pending(Arc::new(AtomicBool::new(false)));
+        stream.mute = Some(MuteProbe {
+            calls: Arc::clone(&calls),
+            fail,
+        });
+        let (input_sender, mut input) = InputPump::channel();
+        for key in "/voice"
+            .chars()
+            .map(KeyCode::Char)
+            .chain([KeyCode::Enter, KeyCode::Char('q')])
+        {
+            input_sender.try_send(InputMessage::Key(key)).unwrap();
+        }
+        let (_shutdown_sender, mut shutdown) = FakeShutdown::channel();
+        let mut core = live_core(false);
+        let outcome = consume_stream(
+            stream,
+            &mut core,
+            &mut input,
+            &mut shutdown,
+            &mut FakeScreen::default(),
+            &FakeNavigator::successful(),
+            &FakeClock::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome, Control::Quit);
+        let recorded = calls.lock().unwrap().clone();
+        (core, recorded)
+    }
+
+    #[tokio::test]
+    async fn consume_stream_sends_palette_mute_request_and_clears_status_on_success() {
+        let (core, calls) = run_palette_mute(false).await;
+        assert_eq!(calls, vec![true]);
+        assert!(!matches!(
+            core.app.runtime_status(),
+            Some(RuntimeStatus::VoiceFailed(_))
+        ));
+        // Confirmed state is still driven by the snapshot, not the RPC.
+        assert_eq!(core.app.voice(), crate::app::VoiceState::On);
+    }
+
+    #[tokio::test]
+    async fn consume_stream_reports_voice_failed_when_the_mute_request_fails() {
+        let (core, calls) = run_palette_mute(true).await;
+        assert_eq!(calls, vec![true]);
+        assert!(matches!(
+            core.app.runtime_status(),
+            Some(RuntimeStatus::VoiceFailed(detail)) if detail.contains("mute refused")
+        ));
+    }
+
     fn live_core(muted: bool) -> RuntimeCore {
         let mut core = RuntimeCore::new(None);
         let mut live = snapshot(1, MonitorHealthState::Healthy);
@@ -1504,6 +1559,12 @@ mod tests {
     struct FakeStream {
         closed: Arc<AtomicBool>,
         receive: FakeReceive,
+        mute: Option<MuteProbe>,
+    }
+
+    struct MuteProbe {
+        calls: Arc<std::sync::Mutex<Vec<bool>>>,
+        fail: bool,
     }
 
     enum FakeReceive {
@@ -1516,6 +1577,7 @@ mod tests {
             Self {
                 closed,
                 receive: FakeReceive::Pending,
+                mute: None,
             }
         }
 
@@ -1523,6 +1585,7 @@ mod tests {
             Self {
                 closed,
                 receive: FakeReceive::Item(Some(Ok(snapshot))),
+                mute: None,
             }
         }
     }
@@ -1533,6 +1596,21 @@ mod tests {
                 FakeReceive::Pending => Box::pin(std::future::pending()),
                 FakeReceive::Item(item) => Box::pin(async move { item.take() }),
             }
+        }
+
+        fn set_tts_muted(&mut self, muted: bool) -> BoxFuture<'_, Result<(), SourceError>> {
+            let Some(probe) = &self.mute else {
+                return Box::pin(async { Ok(()) });
+            };
+            probe.calls.lock().unwrap().push(muted);
+            let fail = probe.fail;
+            Box::pin(async move {
+                if fail {
+                    Err(SourceError::Transport("mute refused".into()))
+                } else {
+                    Ok(())
+                }
+            })
         }
 
         fn close_stream(self) -> BoxFuture<'static, ()> {

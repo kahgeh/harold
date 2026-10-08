@@ -308,18 +308,6 @@ fn map_monitor_health_state(state: i32) -> MonitorHealthState {
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn maps_tts_muted_from_the_snapshot() {
-        for muted in [false, true] {
-            let mapped = map_snapshot(AgentStateSnapshot {
-                tts_muted: muted,
-                ..Default::default()
-            })
-            .unwrap();
-            assert_eq!(mapped.tts_muted, muted);
-        }
-    }
-
     use std::collections::VecDeque;
     use std::future::Future;
     use std::pin::Pin;
@@ -335,6 +323,18 @@ mod tests {
     use crate::app::{AgentState, MonitorHealthState};
 
     use super::{ProtocolError, SnapshotReader, SourceError, map_snapshot, spawn_reader};
+
+    #[test]
+    fn maps_tts_muted_from_the_snapshot() {
+        for muted in [false, true] {
+            let mapped = map_snapshot(AgentStateSnapshot {
+                tts_muted: muted,
+                ..Default::default()
+            })
+            .unwrap();
+            assert_eq!(mapped.tts_muted, muted);
+        }
+    }
 
     #[test]
     fn maps_snapshot_metadata_every_pane_field_and_every_known_agent_state() {

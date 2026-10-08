@@ -556,31 +556,31 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, compact: bool) {
     let spans = if compact {
         vec![
             Span::styled(" j/k", Style::default().fg(INK)),
+            Span::raw(" move "),
+            Span::styled("f", Style::default().fg(INK)),
+            Span::raw(" search "),
+            Span::styled("/", Style::default().fg(INK)),
+            Span::raw(" commands "),
+            Span::styled("Enter", Style::default().fg(INK)),
+            Span::raw(" go "),
+            Span::styled("Esc", Style::default().fg(INK)),
+            Span::raw(" clear "),
+            Span::styled("q", Style::default().fg(INK)),
+            Span::raw(" quit "),
+        ]
+    } else {
+        vec![
+            Span::styled(" DISPATCH  ", Style::default().fg(MUTED)),
+            Span::styled("j/k", Style::default().fg(INK)),
             Span::raw(" select  "),
             Span::styled("f", Style::default().fg(INK)),
             Span::raw(" search  "),
             Span::styled("/", Style::default().fg(INK)),
             Span::raw(" commands  "),
             Span::styled("Enter", Style::default().fg(INK)),
-            Span::raw(" switch  "),
+            Span::raw(" switch pane  "),
             Span::styled("Esc", Style::default().fg(INK)),
             Span::raw(" clear  "),
-            Span::styled("q", Style::default().fg(INK)),
-            Span::raw(" quit "),
-        ]
-    } else {
-        vec![
-            Span::styled(" TMX DISPATCH CONSOLE  ", Style::default().fg(MUTED)),
-            Span::styled("j/k", Style::default().fg(INK)),
-            Span::raw(" select   "),
-            Span::styled("f", Style::default().fg(INK)),
-            Span::raw(" search   "),
-            Span::styled("/", Style::default().fg(INK)),
-            Span::raw(" commands   "),
-            Span::styled("Enter", Style::default().fg(INK)),
-            Span::raw(" switch pane   "),
-            Span::styled("Esc", Style::default().fg(INK)),
-            Span::raw(" clear   "),
             Span::styled("q", Style::default().fg(INK)),
             Span::raw(" quit "),
         ]
@@ -1721,6 +1721,23 @@ mod tests {
         let compact = rendered(&live_app(Vec::new(), None), 70, 30, 100_000);
         assert!(compact.contains("f search"));
         assert!(compact.contains("/ commands"));
+    }
+
+    #[test]
+    fn footer_keeps_q_quit_visible_at_supported_widths() {
+        for (w, h) in [(60, 18), (70, 30), (84, 38), (98, 38), (140, 38)] {
+            let content = rendered(&live_app(Vec::new(), None), w, h, 100_000);
+            assert!(content.contains("q quit"), "q quit missing at {w}x{h}");
+        }
+    }
+
+    #[test]
+    fn muted_masthead_keeps_voice_and_transport_at_minimum_size() {
+        let mut app = live_app(Vec::new(), None);
+        app.snapshot.tts_muted = true;
+        let content = rendered(&app, 60, 18, 100_000);
+        assert!(content.contains("○ VOICE MUTED"));
+        assert!(content.contains("TRANSPORT"));
     }
 
     #[test]
