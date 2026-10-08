@@ -184,6 +184,7 @@ pub(crate) enum ScreenAdapter {
     #[default]
     GenericV1,
     CodexV1,
+    ClaudeV1,
 }
 
 fn default_screen_history_lines() -> u16 {
@@ -521,9 +522,14 @@ mod tests {
         assert!(serde_json::from_str::<super::ScreenAdapter>(r#""unknown-v1""#).is_err());
         let shipped = parse_agent_config(&[include_str!("../config/default.toml")]);
         let AgentSettings(providers) = shipped.agents;
+        assert_eq!(
+            serde_json::from_str::<super::ScreenAdapter>(r#""claude-v1""#).unwrap(),
+            super::ScreenAdapter::ClaudeV1
+        );
         assert_eq!(providers[0].screen_adapter, super::ScreenAdapter::CodexV1);
+        assert_eq!(providers[1].screen_adapter, super::ScreenAdapter::ClaudeV1);
         assert!(
-            providers[1..]
+            providers[2..]
                 .iter()
                 .all(|provider| provider.screen_adapter == super::ScreenAdapter::GenericV1)
         );

@@ -546,3 +546,90 @@ fn malformed_sgr_cannot_lend_submission_style_to_a_later_row() {
     assert_eq!(recovered.blocks.len(), 1);
     assert_eq!(recovered.blocks[0].candidate.as_deref(), Some("Genuine"));
 }
+
+fn claude_provider() -> AgentProviderSettings {
+    AgentProviderSettings {
+        id: "claude".to_string(),
+        display_name: "Claude".to_string(),
+        command_contains: vec!["claude".to_string()],
+        busy_all: vec!["esc to interrupt".to_string()],
+        idle_all: vec!["❯".to_string()],
+        summary_line_prefixes: vec!["❯".to_string()],
+        screen_adapter: crate::settings::ScreenAdapter::ClaudeV1,
+        screen_history_lines: 2000,
+    }
+}
+
+fn claude_state(transcript: &str) -> Option<ObservedAgentState> {
+    let border = "─".repeat(40);
+    let visible = format!(
+        "{transcript}\n\n{border}\n❯ \n{border}\n  -- INSERT -- ⏵⏵ bypass permissions on (shift+tab to cycle)\n"
+    );
+    TmuxVisibleScreen::with_runner(FakeRunner::output(true, &visible), || 99)
+        .observe(&pane("%7"), &claude_provider())
+        .unwrap()
+        .state
+}
+
+#[test]
+fn claude_spinner_status_above_the_input_box_is_busy() {
+    // Claude Code 2.1.295 in vim mode: the busy footer no longer says "esc to interrupt".
+    for status in [
+        "✽ Synthesizing… (13m 18s · ↓ 72.3k tokens)",
+        "✳ Bunning… (22s · ↓ 1.7k tokens)",
+        "· Thinking… (2s)",
+        "✻ No response from the API after 3m · retrying once, waiting up to 10m",
+    ] {
+        let transcript = format!("⏺ Reading the reducer\n  ⎿  Read 273 lines\n\n{status}");
+        assert_eq!(
+            claude_state(&transcript),
+            Some(ObservedAgentState::Busy),
+            "{status}"
+        );
+    }
+}
+
+#[test]
+fn claude_spinner_status_stays_busy_with_indented_rows_beneath_it() {
+    let transcript = concat!(
+        "✢ Envisioning… (1m 57s · ↓ 9.6k tokens)\n",
+        "  ⎿  ☐ Write the failing test\n",
+        "     ☒ Capture the footer\n",
+        "\n",
+        "  Tip: Use /memory to edit project memory",
+    );
+    assert_eq!(claude_state(transcript), Some(ObservedAgentState::Busy));
+}
+
+#[test]
+fn claude_finished_turn_and_spinner_text_in_output_are_idle() {
+    let finished = "⏺ Done.\n\n✻ Worked for 20s · done 8:32 am";
+    assert_eq!(claude_state(finished), Some(ObservedAgentState::Idle));
+
+    let quoted = concat!(
+        "⏺ The busy footer reads ✽ Synthesizing… (13m 18s · ↓ 72.3k tokens)\n",
+        "  ⎿  ✳ Bunning… (22s · ↓ 1.7k tokens)\n",
+        "\n",
+        "✻ Cooked for 1m 3s",
+    );
+    assert_eq!(claude_state(quoted), Some(ObservedAgentState::Idle));
+}
+
+#[test]
+fn claude_keeps_configured_busy_markers_and_prompt_prefixes() {
+    assert_eq!(
+        claude_state("✻ Thinking (esc to interrupt)"),
+        Some(ObservedAgentState::Busy)
+    );
+    let scan = TmuxVisibleScreen::with_runner(
+        FakeRunner::output(true, "❯ Review the reducer\n\n⏺ Reviewed.\n"),
+        || 99,
+    )
+    .scan_prompts(&pane("%7"), &claude_provider())
+    .unwrap();
+    assert_eq!(scan.blocks.len(), 1);
+    assert_eq!(
+        scan.blocks[0].candidate.as_deref(),
+        Some("Review the reducer")
+    );
+}

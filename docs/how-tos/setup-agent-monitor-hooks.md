@@ -36,7 +36,7 @@ screen_history_lines = 2000
 
 Use marker text observed in the current visible terminal grid. Every `busy_all` fragment must match for Busy, and every `idle_all` fragment must match for Idle. If both clauses match, Busy wins. For `generic-v1`, omit `summary_line_prefixes` when a prefix cannot safely distinguish submitted work from a composer or placeholder.
 
-For Codex, keep `screen_adapter = "codex-v1"` in its named provider entry. Shipped defaults select it explicitly; the setting otherwise defaults to `generic-v1`. The Codex adapter recognizes styled submitted input and rejects unsent composer drafts. Claude remains generic, and OpenCode remains state-only without a summary prefix. See the [adapter reference](../references/agent-monitor/screen-adapters.md) for the exact support and timing limits.
+For Codex, keep `screen_adapter = "codex-v1"` in its named provider entry. Shipped defaults select it explicitly; the setting otherwise defaults to `generic-v1`. The Codex adapter recognizes styled submitted input and rejects unsent composer drafts. For Claude, keep `screen_adapter = "claude-v1"`: it recognizes Claude Code's running status row, which carries no fixed busy phrase. OpenCode remains state-only without a summary prefix. See the [adapter reference](../references/agent-monitor/screen-adapters.md) for the exact support and timing limits.
 
 Set `screen_history_lines` to the number of history rows to search before the visible grid. The default is 2,000; values outside 1 through 10,000 fail startup. This setting does not change tmux's own history retention.
 

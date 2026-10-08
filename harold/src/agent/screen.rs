@@ -11,6 +11,8 @@ use sha2::{Digest, Sha256};
 
 #[path = "screen_capture.rs"]
 mod capture;
+#[path = "screen_claude.rs"]
+mod claude;
 #[path = "screen_codex.rs"]
 mod codex;
 use capture::{CaptureRequest, CaptureScope, PaneCapturePort, StyledPaneCapture, TmuxPaneCapture};
@@ -150,6 +152,7 @@ fn adapter(provider: &AgentProviderSettings) -> Box<dyn ProviderScreenAdapter + 
     match provider.screen_adapter {
         ScreenAdapter::GenericV1 => Box::new(GenericAdapter(provider)),
         ScreenAdapter::CodexV1 => Box::new(codex::CodexAdapter(provider)),
+        ScreenAdapter::ClaudeV1 => Box::new(claude::ClaudeAdapter(provider)),
     }
 }
 

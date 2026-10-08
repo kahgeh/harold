@@ -8,7 +8,7 @@ Each named `[[agents]]` entry accepts:
 
 | Key | Default when omitted | Accepted values and behavior |
 | --- | --- | --- |
-| `screen_adapter` | `"generic-v1"` | `"generic-v1"` or `"codex-v1"`. Unknown names fail startup. Selection is explicit, independent of provider ID. |
+| `screen_adapter` | `"generic-v1"` | `"generic-v1"`, `"codex-v1"`, or `"claude-v1"`. Unknown names fail startup. Selection is explicit, independent of provider ID. |
 | `screen_history_lines` | `2000` | Integer from 1 through 10,000. Number of history rows requested before the visible grid. |
 
 The returned snapshot can contain the configured history depth plus the pane's visible height. Harold does not expand the range automatically when a prompt is missing.
@@ -16,11 +16,11 @@ The returned snapshot can contain the configured history depth plus the pane's v
 | Shipped provider | Adapter | Summary evidence |
 | --- | --- | --- |
 | Codex | Explicit `codex-v1` | Styled submitted `>` or `›` prompt blocks, including wrapped continuation rows. |
-| Claude | `generic-v1` | Configured safe line prefixes; no Claude-specific styled parser or composer guarantee. |
+| Claude | Explicit `claude-v1` | Configured safe line prefixes, as in `generic-v1`; no Claude-specific styled parser or composer guarantee. |
 | OpenCode | `generic-v1` | State only: no summary prefix is configured. The explicit plugin supplies submitted instructions. |
 | Custom named provider | `generic-v1` unless overridden | Configured safe line prefixes. Omit prefixes if they cannot distinguish submitted input safely. |
 
-`screen_adapter` defaults to `generic-v1` when omitted. A provider named `codex` does not select `codex-v1` implicitly. If a local overlay replaces the complete `[[agents]]` list, add the adapter selection to its Codex entry as well.
+`screen_adapter` defaults to `generic-v1` when omitted. A provider named `codex` or `claude` does not select `codex-v1` or `claude-v1` implicitly. If a local overlay replaces the complete `[[agents]]` list, add the adapter selection to its Codex and Claude entries as well.
 
 ## Capture requests and timing
 
@@ -55,7 +55,20 @@ Visible-state evidence remains independent of prompt recovery. A history failure
 
 The adapter accepts ASCII `>` and Unicode `›` submitted blocks, joins their wrapped continuation rows, and excludes composer, assistant, tool, shell, and inconclusive rows. Ambiguous or malformed styling produces no submitted candidate. Exact normalized configured idle placeholders cannot become summaries; a substantive instruction that merely contains the placeholder wording remains eligible.
 
-`generic-v1` retains configurable `busy_all`, `idle_all`, and safe-prefix parsing without embedding Codex layout rules. Both adapters use visible-grid state clauses, with Busy winning when both full clauses match.
+`generic-v1` retains configurable `busy_all`, `idle_all`, and safe-prefix parsing without embedding Codex layout rules. Every adapter uses visible-grid state clauses, with Busy winning when both full clauses match.
+
+## Claude running status
+
+`claude-v1` reads Claude Code's status row before falling back to the configured clauses. It finds the input box (a `❯` row directly below a `─` border) and takes the newest non-blank, unindented row above it. Rows Claude nests under a status, such as tool results, todos, and tips, are indented and skipped.
+
+That row is Busy when it starts with a spinner glyph (`·`, `✢`, `✳`, `✶`, `✻`, `✽`, or `*`) and a space, and contains `…` or `retrying`:
+
+```text
+✽ Synthesizing… (13m 18s · ↓ 72.3k tokens)
+✻ No response from the API after 3m · retrying once, waiting up to 10m
+```
+
+A finished turn keeps the glyph without an ellipsis (`✻ Worked for 20s · done 8:32 am`). Any other row leaves the decision to `busy_all` and `idle_all`. The shipped `❯` idle clause matches whenever the input box is visible, so a pane without a running status is Idle. Claude Code 2.1.295 in vim mode does not draw `esc to interrupt` while busy; the shipped `busy_all` keeps it for renderings that do.
 
 ## Acquisition checkpoint and selection
 

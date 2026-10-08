@@ -26,7 +26,7 @@ effort = "low"
 # busy_all = ["Working"]
 # idle_all = ["Ready"]
 # summary_line_prefixes = [">"]
-# screen_adapter = "generic-v1" # use codex-v1 for Codex rendering
+# screen_adapter = "generic-v1" # use codex-v1 for Codex, claude-v1 for Claude Code
 # screen_history_lines = 2000 # positive, at most 10000 history rows
 
 [store]

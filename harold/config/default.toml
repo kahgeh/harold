@@ -42,6 +42,7 @@ summary_line_prefixes = ["›"]
 
 [[agents]]
 id = "claude"
+screen_adapter = "claude-v1"
 display_name = "Claude"
 command_contains = ["claude"]
 busy_all = ["esc to interrupt"]
