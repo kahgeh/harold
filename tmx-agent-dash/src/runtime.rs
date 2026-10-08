@@ -793,6 +793,8 @@ impl RuntimeCore {
             Effect::None => Control::Continue,
             Effect::Retry => Control::Retry,
             Effect::Quit => Control::Quit,
+            // Wired to the runtime in a later task.
+            Effect::SetTtsMuted(_) => Control::Continue,
             Effect::Navigate { pane_id } => {
                 let Some(client) = self.client.as_deref() else {
                     self.app
@@ -965,7 +967,7 @@ mod tests {
         core.accept_snapshot(snapshot(1, MonitorHealthState::Healthy), 1);
 
         assert_eq!(
-            core.handle_key(KeyCode::Char('/'), &navigator),
+            core.handle_key(KeyCode::Char('f'), &navigator),
             Control::Continue
         );
         assert_eq!(
@@ -977,7 +979,7 @@ mod tests {
         assert_eq!(core.app.search.query, "");
         assert!(!core.app.search.editing);
         assert_eq!(
-            core.handle_key(KeyCode::Char('/'), &navigator),
+            core.handle_key(KeyCode::Char('f'), &navigator),
             Control::Continue
         );
         assert_eq!(
@@ -992,7 +994,7 @@ mod tests {
         assert_eq!(core.app.search.query, "");
         assert!(!core.app.search.editing);
         assert_eq!(
-            core.handle_key(KeyCode::Char('/'), &navigator),
+            core.handle_key(KeyCode::Char('f'), &navigator),
             Control::Continue
         );
         assert_eq!(core.handle_key(KeyCode::Esc, &navigator), Control::Continue);

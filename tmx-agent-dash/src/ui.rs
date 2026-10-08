@@ -4,7 +4,7 @@ use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState, Wrap};
+use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, TableState, Wrap};
 
 use crate::app::{AgentState, App, RuntimeStatus};
 use crate::text::display_work_summary;
@@ -48,6 +48,7 @@ pub fn render(frame: &mut Frame<'_>, app: &App, now_ms: i64) {
     render_search(frame, search, app);
     render_workspace(frame, workspace, app, now_ms);
     render_footer(frame, footer, compact);
+    render_palette(frame, area, app);
 }
 
 fn render_resize_instruction(frame: &mut Frame<'_>, area: Rect) {
@@ -240,7 +241,7 @@ fn render_search(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let query = Line::from(vec![
         Span::styled(" FILTER  ", Style::default().fg(MUTED)),
         Span::styled(
-            format!("/ {}", app.search.query),
+            format!("f {}", app.search.query),
             Style::default().fg(INK).add_modifier(Modifier::BOLD),
         ),
         Span::styled(format!("  [{mode}]"), Style::default().fg(AMBER)),
@@ -555,8 +556,10 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, compact: bool) {
         vec![
             Span::styled(" j/k", Style::default().fg(INK)),
             Span::raw(" select  "),
-            Span::styled("/", Style::default().fg(INK)),
+            Span::styled("f", Style::default().fg(INK)),
             Span::raw(" search  "),
+            Span::styled("/", Style::default().fg(INK)),
+            Span::raw(" commands  "),
             Span::styled("Enter", Style::default().fg(INK)),
             Span::raw(" switch  "),
             Span::styled("Esc", Style::default().fg(INK)),
@@ -569,8 +572,10 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, compact: bool) {
             Span::styled(" TMX DISPATCH CONSOLE  ", Style::default().fg(MUTED)),
             Span::styled("j/k", Style::default().fg(INK)),
             Span::raw(" select   "),
-            Span::styled("/", Style::default().fg(INK)),
+            Span::styled("f", Style::default().fg(INK)),
             Span::raw(" search   "),
+            Span::styled("/", Style::default().fg(INK)),
+            Span::raw(" commands   "),
             Span::styled("Enter", Style::default().fg(INK)),
             Span::raw(" switch pane   "),
             Span::styled("Esc", Style::default().fg(INK)),
@@ -582,6 +587,66 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, compact: bool) {
     frame.render_widget(
         Paragraph::new(Line::from(spans)).block(board_block().borders(Borders::ALL)),
         area,
+    );
+}
+
+fn render_palette(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    let Some(palette) = &app.palette else {
+        return;
+    };
+    let entries = app.palette_entries();
+    let list_rows = u16::try_from(entries.len().clamp(1, 6)).unwrap_or(6);
+    let width = area.width.saturating_sub(4).min(60);
+    let height = (list_rows + 4).min(area.height);
+    let popup = Rect {
+        x: area.x + (area.width.saturating_sub(width)) / 2,
+        y: area.y + (area.height.saturating_sub(height)) / 3,
+        width,
+        height,
+    };
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled("> ", Style::default().fg(AMBER)),
+            Span::styled(
+                palette.query.clone(),
+                Style::default().fg(INK).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("█", Style::default().fg(AMBER)),
+        ]),
+        Line::from(""),
+    ];
+    if entries.is_empty() {
+        let message = if app.connection == crate::app::ConnectionState::Live {
+            "No matching command"
+        } else {
+            "Commands unavailable until connected"
+        };
+        lines.push(Line::from(Span::styled(
+            message,
+            Style::default().fg(MUTED),
+        )));
+    } else {
+        for (index, entry) in entries.iter().enumerate() {
+            let selected = index == palette.selected;
+            lines.push(Line::from(Span::styled(
+                format!("{} {}", if selected { "▸" } else { " " }, entry.label),
+                if selected {
+                    Style::default().fg(INK).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(MUTED)
+                },
+            )));
+        }
+    }
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        Paragraph::new(lines).block(
+            board_block()
+                .borders(Borders::ALL)
+                .title(" Command ")
+                .title_bottom(" Enter run · Esc close "),
+        ),
+        popup,
     );
 }
 
@@ -725,7 +790,7 @@ mod tests {
             "IDLE",
             "UNKNOWN",
             "WORK SUMMARY",
-            "/ event",
+            "f event",
             "2 OF 3",
             "CURRENT WORK",
             "Build event snapshot dashboard",
@@ -1610,5 +1675,58 @@ mod tests {
             state,
             last_transition_at_ms,
         }
+    }
+
+    #[test]
+    fn palette_overlay_lists_filtered_entries_and_empty_state() {
+        let mut app = live_app(Vec::new(), None);
+        app.handle_key(crossterm::event::KeyCode::Char('/'));
+        for character in "voi".chars() {
+            app.handle_key(crossterm::event::KeyCode::Char(character));
+        }
+        let content = rendered(&app, 140, 38, 100_000);
+        assert!(content.contains("Command"));
+        assert!(content.contains("> voi"));
+        assert!(content.contains("Voice: mute"));
+        assert!(!content.contains("Voice: unmute"));
+
+        app.handle_key(crossterm::event::KeyCode::Char('z'));
+        assert!(rendered(&app, 140, 38, 100_000).contains("No matching command"));
+    }
+
+    #[test]
+    fn palette_explains_when_commands_are_unavailable() {
+        let mut app = App::new(
+            crate::app::ConnectionState::Connecting,
+            crate::app::Snapshot {
+                through_event_version: 0,
+                server_time_ms: 0,
+                monitor_health: Vec::new(),
+                rows: Vec::new(),
+                tts_muted: false,
+            },
+            empty_search(),
+            None,
+        );
+        app.handle_key(crossterm::event::KeyCode::Char('/'));
+        assert!(rendered(&app, 140, 38, 100_000).contains("Commands unavailable until connected"));
+    }
+
+    #[test]
+    fn footer_advertises_f_search_and_slash_commands() {
+        let content = rendered(&live_app(Vec::new(), None), 140, 38, 100_000);
+        assert!(content.contains("f search"));
+        assert!(content.contains("/ commands"));
+        let compact = rendered(&live_app(Vec::new(), None), 70, 30, 100_000);
+        assert!(compact.contains("f search"));
+        assert!(compact.contains("/ commands"));
+    }
+
+    #[test]
+    fn palette_fits_the_minimum_terminal_size() {
+        let mut app = live_app(Vec::new(), None);
+        app.handle_key(crossterm::event::KeyCode::Char('/'));
+        let content = rendered(&app, 60, 18, 100_000);
+        assert!(content.contains("Voice: mute"));
     }
 }

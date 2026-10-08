@@ -65,7 +65,8 @@ outside this MVP; use a trusted deployment boundary for remote connections.
 | `j` / Down | Select the next visible row |
 | `k` / Up | Select the previous visible row |
 | `g` / `G` | Select the first / last visible row |
-| `/` | Enter search editing |
+| `f` | Enter search editing |
+| `/` | Open the command palette (e.g. `Voice: mute` / `Voice: unmute`); Enter runs, Esc closes |
 | Printable text | Extend the query while editing |
 | Backspace | Remove the last Unicode scalar value while editing |
 | `Enter` | Accept the query while editing; otherwise switch the invoking tmux client to the selected pane |

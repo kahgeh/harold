@@ -126,6 +126,7 @@ pub struct App {
     pub connection: ConnectionState,
     pub snapshot: Snapshot,
     pub search: SearchState,
+    pub palette: Option<PaletteState>,
     pub selected: Option<AgentIncarnation>,
     last_snapshot_received_at_ms: Option<i64>,
     runtime_status: Option<RuntimeStatus>,
@@ -145,6 +146,19 @@ pub enum Effect {
     Navigate { pane_id: String },
     Retry,
     Quit,
+    SetTtsMuted(bool),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaletteState {
+    pub query: String,
+    pub selected: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaletteEntry {
+    pub label: &'static str,
+    pub effect: Effect,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -184,6 +198,7 @@ impl App {
             connection,
             snapshot,
             search,
+            palette: None,
             selected,
             last_snapshot_received_at_ms: None,
             runtime_status: None,
@@ -301,13 +316,77 @@ impl App {
             .filter(|health| health.state == MonitorHealthState::Degraded)
     }
 
+    pub fn palette_entries(&self) -> Vec<PaletteEntry> {
+        let Some(palette) = &self.palette else {
+            return Vec::new();
+        };
+        if self.connection != ConnectionState::Live {
+            return Vec::new();
+        }
+        let query = normalize_search(&palette.query);
+        let all = match self.voice() {
+            VoiceState::On => vec![PaletteEntry {
+                label: "Voice: mute",
+                effect: Effect::SetTtsMuted(true),
+            }],
+            VoiceState::Muted => vec![PaletteEntry {
+                label: "Voice: unmute",
+                effect: Effect::SetTtsMuted(false),
+            }],
+            VoiceState::Unknown => Vec::new(),
+        };
+        all.into_iter()
+            .filter(|entry| normalize_search(entry.label).contains(&query))
+            .collect()
+    }
+
+    fn handle_palette_key(&mut self, key: KeyCode) -> Effect {
+        let entries = self.palette_entries();
+        let Some(palette) = self.palette.as_mut() else {
+            return Effect::None;
+        };
+        match key {
+            KeyCode::Esc => self.palette = None,
+            KeyCode::Enter => {
+                if let Some(entry) = entries.get(palette.selected) {
+                    let effect = entry.effect.clone();
+                    self.palette = None;
+                    return effect;
+                }
+            }
+            KeyCode::Up => palette.selected = palette.selected.saturating_sub(1),
+            KeyCode::Down => {
+                palette.selected = (palette.selected + 1).min(entries.len().saturating_sub(1));
+            }
+            KeyCode::Backspace => {
+                palette.query.pop();
+                palette.selected = 0;
+            }
+            KeyCode::Char(character) if !character.is_control() => {
+                palette.query.push(character);
+                palette.selected = 0;
+            }
+            _ => {}
+        }
+        Effect::None
+    }
+
     pub fn handle_key(&mut self, key: KeyCode) -> Effect {
         if self.search.editing {
             return self.handle_search_key(key);
         }
+        if self.palette.is_some() {
+            return self.handle_palette_key(key);
+        }
 
         match key {
-            KeyCode::Char('/') => self.search.editing = true,
+            KeyCode::Char('f') => self.search.editing = true,
+            KeyCode::Char('/') => {
+                self.palette = Some(PaletteState {
+                    query: String::new(),
+                    selected: 0,
+                });
+            }
             KeyCode::Char('q') => return Effect::Quit,
             KeyCode::Esc if !self.search.query.is_empty() => {
                 self.search.query.clear();
@@ -849,7 +928,7 @@ mod tests {
     fn search_edit_mode_handles_q_unicode_backspace_accept_and_clear() {
         let mut app = empty_app();
 
-        assert_eq!(app.handle_key(KeyCode::Char('/')), Effect::None);
+        assert_eq!(app.handle_key(KeyCode::Char('f')), Effect::None);
         assert!(app.search.editing);
         assert_eq!(app.handle_key(KeyCode::Char('q')), Effect::None);
         assert_eq!(app.handle_key(KeyCode::Char('界')), Effect::None);
@@ -863,7 +942,7 @@ mod tests {
         assert_eq!(app.handle_key(KeyCode::Esc), Effect::None);
         assert_eq!(app.search, empty_search());
 
-        app.handle_key(KeyCode::Char('/'));
+        app.handle_key(KeyCode::Char('f'));
         assert_eq!(app.handle_key(KeyCode::Esc), Effect::None);
         assert_eq!(app.search, empty_search());
     }
@@ -1131,7 +1210,7 @@ mod tests {
             Some(selected),
         );
 
-        app.handle_key(KeyCode::Char('/'));
+        app.handle_key(KeyCode::Char('f'));
         for character in "absent".chars() {
             app.handle_key(KeyCode::Char(character));
         }
@@ -1213,5 +1292,133 @@ mod tests {
             state,
             last_transition_at_ms: 10,
         }
+    }
+
+    fn live_voice_app(muted: bool) -> App {
+        let snapshot = Snapshot {
+            through_event_version: 1,
+            server_time_ms: 0,
+            monitor_health: Vec::new(),
+            rows: Vec::new(),
+            tts_muted: muted,
+        };
+        let mut app = App::new(
+            ConnectionState::Connecting,
+            snapshot.clone(),
+            SearchState {
+                query: String::new(),
+                editing: false,
+            },
+            None,
+        );
+        app.apply_first_snapshot(snapshot).unwrap();
+        app
+    }
+
+    fn type_text(app: &mut App, text: &str) {
+        for character in text.chars() {
+            app.handle_key(KeyCode::Char(character));
+        }
+    }
+
+    #[test]
+    fn f_opens_agent_search_and_slash_opens_the_palette() {
+        let mut app = live_voice_app(false);
+        assert_eq!(app.handle_key(KeyCode::Char('f')), Effect::None);
+        assert!(app.search.editing);
+        assert!(app.palette.is_none());
+
+        let mut app = live_voice_app(false);
+        assert_eq!(app.handle_key(KeyCode::Char('/')), Effect::None);
+        assert!(app.palette.is_some());
+        assert!(!app.search.editing);
+    }
+
+    #[test]
+    fn slash_and_f_are_plain_characters_inside_either_input() {
+        let mut app = live_voice_app(false);
+        app.handle_key(KeyCode::Char('f'));
+        type_text(&mut app, "a/f");
+        assert_eq!(app.search.query, "a/f");
+        assert!(app.palette.is_none());
+
+        let mut app = live_voice_app(false);
+        app.handle_key(KeyCode::Char('/'));
+        type_text(&mut app, "f/");
+        assert_eq!(app.palette.as_ref().unwrap().query, "f/");
+        assert!(!app.search.editing);
+    }
+
+    #[test]
+    fn palette_offers_only_the_applicable_voice_action_and_runs_it() {
+        let mut app = live_voice_app(false);
+        app.handle_key(KeyCode::Char('/'));
+        type_text(&mut app, "voi");
+        let labels: Vec<_> = app.palette_entries().iter().map(|e| e.label).collect();
+        assert_eq!(labels, ["Voice: mute"]);
+        assert_eq!(app.handle_key(KeyCode::Enter), Effect::SetTtsMuted(true));
+        assert!(app.palette.is_none());
+
+        let mut app = live_voice_app(true);
+        app.handle_key(KeyCode::Char('/'));
+        type_text(&mut app, "UNMUTE");
+        assert_eq!(app.handle_key(KeyCode::Enter), Effect::SetTtsMuted(false));
+    }
+
+    #[test]
+    fn palette_filter_with_no_match_does_nothing_on_enter_and_esc_closes() {
+        let mut app = live_voice_app(false);
+        app.handle_key(KeyCode::Char('/'));
+        type_text(&mut app, "zzz");
+        assert!(app.palette_entries().is_empty());
+        assert_eq!(app.handle_key(KeyCode::Enter), Effect::None);
+        assert!(app.palette.is_some());
+        assert_eq!(app.handle_key(KeyCode::Esc), Effect::None);
+        assert!(app.palette.is_none());
+    }
+
+    #[test]
+    fn palette_backspace_edits_and_resets_selection() {
+        let mut app = live_voice_app(false);
+        app.handle_key(KeyCode::Char('/'));
+        type_text(&mut app, "voz");
+        assert!(app.palette_entries().is_empty());
+        app.handle_key(KeyCode::Backspace);
+        assert_eq!(app.palette_entries().len(), 1);
+        assert_eq!(app.palette.as_ref().unwrap().selected, 0);
+    }
+
+    #[test]
+    fn voice_actions_are_hidden_before_a_snapshot_and_when_not_live() {
+        let mut app = App::new(
+            ConnectionState::Connecting,
+            Snapshot {
+                through_event_version: 0,
+                server_time_ms: 0,
+                monitor_health: Vec::new(),
+                rows: Vec::new(),
+                tts_muted: false,
+            },
+            SearchState {
+                query: String::new(),
+                editing: false,
+            },
+            None,
+        );
+        app.handle_key(KeyCode::Char('/'));
+        assert!(app.palette_entries().is_empty());
+
+        let mut stale = live_voice_app(false);
+        stale.mark_disconnected();
+        stale.handle_key(KeyCode::Char('/'));
+        assert!(stale.palette_entries().is_empty());
+    }
+
+    #[test]
+    fn quit_and_navigation_keys_are_inert_while_the_palette_is_open() {
+        let mut app = live_voice_app(false);
+        app.handle_key(KeyCode::Char('/'));
+        assert_eq!(app.handle_key(KeyCode::Char('q')), Effect::None);
+        assert_eq!(app.palette.as_ref().unwrap().query, "q");
     }
 }
