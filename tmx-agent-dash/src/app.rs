@@ -43,6 +43,48 @@ pub struct AgentRow {
     pub last_transition_at_ms: i64,
 }
 
+impl AgentRow {
+    /// Project the agent belongs to: the first word of its tmux session name.
+    pub fn group(&self) -> &str {
+        self.session_name
+            .split_whitespace()
+            .next()
+            .unwrap_or(&self.session_name)
+    }
+
+    /// What the user calls this agent: the last component of its working directory.
+    pub fn name(&self) -> &str {
+        if self.working_directory.is_empty() {
+            return &self.tmux_target;
+        }
+        match self
+            .working_directory
+            .trim_end_matches('/')
+            .rsplit('/')
+            .next()
+        {
+            Some(last) if !last.is_empty() => last,
+            _ => "/",
+        }
+    }
+
+    pub fn provider_tag(&self) -> String {
+        let id = self.incarnation.provider_id.to_lowercase();
+        let display = self.provider_display_name.to_lowercase();
+        if id.contains("claude") || display.contains("claude") {
+            return "cc".into();
+        }
+        if id.contains("codex") || display.contains("codex") {
+            return "cx".into();
+        }
+        display
+            .chars()
+            .filter(|character| character.is_alphanumeric())
+            .take(2)
+            .collect()
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MonitorHealthState {
     Healthy,
@@ -134,6 +176,7 @@ pub struct App {
     has_snapshot: bool,
     normalized_query: String,
     searchable_rows: Vec<SearchableRow>,
+    row_labels: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -195,6 +238,7 @@ impl App {
     ) -> Self {
         let normalized_query = normalize_search(&search.query);
         let searchable_rows = snapshot.rows.iter().map(SearchableRow::from).collect();
+        let row_labels = build_labels(&snapshot.rows);
         Self {
             connection,
             snapshot,
@@ -206,7 +250,28 @@ impl App {
             has_snapshot: matches!(connection, ConnectionState::Live | ConnectionState::Stale),
             normalized_query,
             searchable_rows,
+            row_labels,
         }
+    }
+
+    pub fn label<'a>(&'a self, row: &'a AgentRow) -> &'a str {
+        self.snapshot
+            .rows
+            .iter()
+            .position(|candidate| candidate.incarnation == row.incarnation)
+            .and_then(|index| self.row_labels.get(index))
+            .map_or_else(|| row.name(), String::as_str)
+    }
+
+    pub fn visible_groups(&self) -> Vec<(&str, Vec<&AgentRow>)> {
+        let mut groups: Vec<(&str, Vec<&AgentRow>)> = Vec::new();
+        for row in self.visible_rows() {
+            match groups.last_mut() {
+                Some((group, rows)) if *group == row.group() => rows.push(row),
+                _ => groups.push((row.group(), vec![row])),
+            }
+        }
+        groups
     }
 
     pub fn voice(&self) -> VoiceState {
@@ -453,6 +518,7 @@ impl App {
         };
         self.snapshot = snapshot;
         self.searchable_rows = self.snapshot.rows.iter().map(SearchableRow::from).collect();
+        self.row_labels = build_labels(&self.snapshot.rows);
         if !self.normalized_query.is_empty()
             || preserved_stable_selection
             || (!authoritative && !replacement_in_same_pane && prior_selection.is_some())
@@ -565,9 +631,9 @@ fn validate_rows(rows: &[AgentRow]) -> Result<(), SnapshotError> {
 
 fn sort_rows(rows: &mut [AgentRow]) {
     rows.sort_by(|left, right| {
-        state_rank(left.state)
-            .cmp(&state_rank(right.state))
-            .then_with(|| left.session_name.cmp(&right.session_name))
+        left.group()
+            .cmp(right.group())
+            .then_with(|| left.name().cmp(right.name()))
             .then_with(|| left.window_index.cmp(&right.window_index))
             .then_with(|| left.pane_index.cmp(&right.pane_index))
             .then_with(|| left.incarnation.pane_id.cmp(&right.incarnation.pane_id))
@@ -586,12 +652,21 @@ fn sort_rows(rows: &mut [AgentRow]) {
     });
 }
 
-const fn state_rank(state: AgentState) -> u8 {
-    match state {
-        AgentState::Busy => 0,
-        AgentState::Idle => 1,
-        AgentState::Unknown => 2,
-    }
+fn build_labels(rows: &[AgentRow]) -> Vec<String> {
+    rows.iter()
+        .map(|row| {
+            let shared = rows
+                .iter()
+                .filter(|other| other.group() == row.group() && other.name() == row.name())
+                .count()
+                > 1;
+            if shared {
+                format!("{} :{}.{}", row.name(), row.window_index, row.pane_index)
+            } else {
+                row.name().to_owned()
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -798,7 +873,7 @@ mod tests {
                 .iter()
                 .map(|agent| agent.incarnation.pane_id.as_str())
                 .collect::<Vec<_>>(),
-            vec!["%2", "%3", "%4", "%1", "%5"]
+            vec!["%1", "%5", "%2", "%3", "%4"]
         );
 
         let duplicate = row(
@@ -1040,7 +1115,7 @@ mod tests {
 
         let mut first = row(first_match.clone(), AgentState::Idle, "two", 0, 0);
         first.work_summary = Some("Needle first".into());
-        let mut later = row(later_match, AgentState::Unknown, "three", 0, 0);
+        let mut later = row(later_match, AgentState::Unknown, "zthree", 0, 0);
         later.work_summary = Some("another NEEDLE".into());
         app.apply_later_snapshot(snapshot(2, 2, vec![later, first]))
             .unwrap();
@@ -1421,5 +1496,197 @@ mod tests {
         app.handle_key(KeyCode::Char('/'));
         assert_eq!(app.handle_key(KeyCode::Char('q')), Effect::None);
         assert_eq!(app.palette.as_ref().unwrap().query, "q");
+    }
+
+    fn placed(
+        pane_id: &str,
+        state: AgentState,
+        session: &str,
+        directory: &str,
+        pane_index: u32,
+    ) -> AgentRow {
+        let mut placed = row(
+            incarnation(pane_id, 1, 2, 3, "claude"),
+            state,
+            session,
+            0,
+            pane_index,
+        );
+        placed.working_directory = directory.into();
+        placed
+    }
+
+    #[test]
+    fn group_is_the_first_word_of_the_session_and_name_is_the_last_directory() {
+        let main = placed(
+            "%1",
+            AgentState::Idle,
+            "harold  main",
+            "/Users/k/Dev/p/harold/main",
+            3,
+        );
+        assert_eq!(main.group(), "harold");
+        assert_eq!(main.name(), "main");
+
+        let drifted = placed(
+            "%2",
+            AgentState::Idle,
+            "harold  voice-mute-palette1",
+            "/Users/k/Dev/p/harold/voice-mute-palette/",
+            3,
+        );
+        assert_eq!(drifted.group(), "harold");
+        assert_eq!(drifted.name(), "voice-mute-palette");
+
+        let single = placed(
+            "%3",
+            AgentState::Idle,
+            "kahgeh-com",
+            "/Users/k/Dev/p/kahgeh-com",
+            3,
+        );
+        assert_eq!(
+            (single.group(), single.name()),
+            ("kahgeh-com", "kahgeh-com")
+        );
+
+        let dotted = placed("%4", AgentState::Idle, " home", "/Users/k/.claude", 3);
+        assert_eq!((dotted.group(), dotted.name()), ("home", ".claude"));
+    }
+
+    #[test]
+    fn name_is_never_empty() {
+        assert_eq!(placed("%1", AgentState::Idle, "s", "/", 0).name(), "/");
+        let mut blank = placed("%2", AgentState::Idle, "s", "", 4);
+        blank.tmux_target = "s:0.4".into();
+        assert_eq!(blank.name(), "s:0.4");
+        let mut nameless = placed("%3", AgentState::Idle, "   ", "/w/x", 0);
+        nameless.session_name = "   ".into();
+        assert_eq!(nameless.group(), "   ");
+    }
+
+    #[test]
+    fn provider_tag_is_two_letters() {
+        let mut agent = placed("%1", AgentState::Idle, "s", "/w", 0);
+        agent.incarnation.provider_id = "claude".into();
+        agent.provider_display_name = "Claude Code".into();
+        assert_eq!(agent.provider_tag(), "cc");
+        agent.incarnation.provider_id = "codex".into();
+        agent.provider_display_name = "Codex".into();
+        assert_eq!(agent.provider_tag(), "cx");
+        agent.incarnation.provider_id = "opencode".into();
+        agent.provider_display_name = "OpenCode".into();
+        assert_eq!(agent.provider_tag(), "op");
+    }
+
+    #[test]
+    fn rows_sort_by_group_then_name_and_ignore_state() {
+        let mut app = empty_app();
+        app.apply_first_snapshot(snapshot(
+            1,
+            0,
+            vec![
+                placed("%4", AgentState::Busy, "home", "/Users/k/Dev/xn", 2),
+                placed(
+                    "%2",
+                    AgentState::Idle,
+                    "harold  voice",
+                    "/p/harold/voice",
+                    3,
+                ),
+                placed("%3", AgentState::Unknown, "home", "/Users/k/Dev/p/sre", 1),
+                placed("%1", AgentState::Busy, "harold  main", "/p/harold/main", 3),
+            ],
+        ))
+        .unwrap();
+        let order = |app: &App| -> Vec<String> {
+            app.snapshot
+                .rows
+                .iter()
+                .map(|row| row.incarnation.pane_id.clone())
+                .collect()
+        };
+        assert_eq!(order(&app), ["%1", "%2", "%3", "%4"]);
+
+        // Every state flips; positions must not move.
+        app.apply_later_snapshot(snapshot(
+            2,
+            0,
+            vec![
+                placed("%4", AgentState::Idle, "home", "/Users/k/Dev/xn", 2),
+                placed(
+                    "%2",
+                    AgentState::Busy,
+                    "harold  voice",
+                    "/p/harold/voice",
+                    3,
+                ),
+                placed("%3", AgentState::Busy, "home", "/Users/k/Dev/p/sre", 1),
+                placed(
+                    "%1",
+                    AgentState::Unknown,
+                    "harold  main",
+                    "/p/harold/main",
+                    3,
+                ),
+            ],
+        ))
+        .unwrap();
+        assert_eq!(order(&app), ["%1", "%2", "%3", "%4"]);
+    }
+
+    #[test]
+    fn labels_append_the_pane_address_only_when_a_name_is_shared_in_a_group() {
+        let mut app = empty_app();
+        app.apply_first_snapshot(snapshot(
+            1,
+            0,
+            vec![
+                placed("%1", AgentState::Idle, "home", "/Users/k/.claude/skills", 3),
+                placed("%2", AgentState::Idle, "home", "/Users/k/other/skills", 4),
+                placed("%3", AgentState::Idle, "home", "/Users/k/Dev/p/sre", 1),
+                placed("%4", AgentState::Idle, "work", "/w/skills", 0),
+            ],
+        ))
+        .unwrap();
+        let labels: Vec<String> = app
+            .snapshot
+            .rows
+            .iter()
+            .map(|row| app.label(row).to_owned())
+            .collect();
+        assert_eq!(labels, ["skills :0.3", "skills :0.4", "sre", "skills"]);
+    }
+
+    #[test]
+    fn visible_groups_follow_the_search_filter_and_drop_empty_groups() {
+        let mut app = empty_app();
+        app.apply_first_snapshot(snapshot(
+            1,
+            0,
+            vec![
+                placed("%1", AgentState::Idle, "harold  main", "/p/harold/main", 3),
+                placed("%2", AgentState::Idle, "home", "/Users/k/Dev/p/sre", 1),
+                placed("%3", AgentState::Idle, "home", "/Users/k/Dev/xn", 2),
+            ],
+        ))
+        .unwrap();
+        let groups: Vec<(&str, usize)> = app
+            .visible_groups()
+            .into_iter()
+            .map(|(group, rows)| (group, rows.len()))
+            .collect();
+        assert_eq!(groups, [("harold", 1), ("home", 2)]);
+
+        app.handle_key(KeyCode::Char('f'));
+        for character in "sre".chars() {
+            app.handle_key(KeyCode::Char(character));
+        }
+        let groups: Vec<(&str, usize)> = app
+            .visible_groups()
+            .into_iter()
+            .map(|(group, rows)| (group, rows.len()))
+            .collect();
+        assert_eq!(groups, [("home", 1)]);
     }
 }
