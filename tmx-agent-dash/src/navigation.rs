@@ -173,10 +173,10 @@ impl PaneNavigator for TmuxNavigator {
             return Err(NavigationError::EmptyPane);
         }
 
-        self.run_tmux(
-            "switch tmux client",
-            &["switch-client", "-c", client, "-t", pane_id],
-        )?;
+        // No `-c`: a client name is its tty path, which a suspended client on the same
+        // tty shares, and tmux resolves a shared name to the oldest match. Left to
+        // itself tmux moves the most recently active client of this session.
+        self.run_tmux("switch tmux client", &["switch-client", "-t", pane_id])?;
         Ok(())
     }
 }
@@ -368,23 +368,19 @@ mod tests {
     }
 
     #[test]
-    fn jumps_to_the_pane_with_captured_client_and_exact_tmux_argv() {
+    fn jump_lets_tmux_choose_the_client_instead_of_naming_it() {
         let runner = FakeRunner::successful("");
         let (navigator, observed_runner) = navigator_with(runner, FakeContext::valid());
 
-        navigator.jump_to("client-9", "%27").unwrap();
+        // Client names are tty paths and are not unique: a suspended client on the
+        // same tty shares the name and tmux resolves the name to the oldest match.
+        navigator.jump_to("/dev/ttys000", "%27").unwrap();
 
         assert_eq!(
             observed_runner.calls(),
             vec![(
                 "tmux".into(),
-                vec![
-                    "switch-client".into(),
-                    "-c".into(),
-                    "client-9".into(),
-                    "-t".into(),
-                    "%27".into()
-                ]
+                vec!["switch-client".into(), "-t".into(), "%27".into()]
             )]
         );
     }

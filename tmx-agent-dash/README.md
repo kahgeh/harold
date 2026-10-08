@@ -13,7 +13,8 @@ the invoking tmux client to the selected pane.
 - The containing Harold workspace, with the shared API crate at `../harold-api`
 
 Viewing works outside tmux, but pane navigation is disabled. Start the dashboard
-inside the tmux client that should move when you press `Enter`.
+inside the tmux client that should move when you press `Enter`. When several
+clients are attached to that session, tmux moves the most recently active one.
 
 From the containing Harold workspace root, build every release binary:
 
