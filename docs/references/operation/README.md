@@ -107,6 +107,31 @@ These direct commands use the invoking process's normal configuration environmen
 
 Use diagnostics only when intentionally testing notification delivery. See [installation and setup](../../how-tos/setup.md) for the manual macOS permissions and provider-hook steps that remain after the service is ready.
 
+## Pausing messaging
+
+Harold has a kill switch for the away channel. While messaging is paused the daemon keeps running, and so do the agent monitor, the dashboard stream and at-desk TTS, but nothing moves over iMessage or Telegram:
+
+- no away notification, confirmation or error reply is sent;
+- no inbound message is routed to a pane, including messages already waiting in the delivery outbox;
+- messages that arrive are discarded, not queued. The listener still moves its cursor past them, so nothing is replayed on resume.
+
+Use it when the away channel misbehaves, for example when Harold keeps answering its own messages. `haroldctl stop` does not hold in that case, because the next turn-complete hook starts the service again. The pause is stored as a `MessagingPausedChanged` stream event and projected into the `settings` table of the Turso state database, so it survives a restart and stays on until you resume.
+
+From `tmx-agent-dash`: press `/`, type `messaging`, and run `Messaging: pause`. The masthead of every connected dash then shows `■ MSG PAUSED`. `Messaging: resume` turns messaging back on.
+
+Without a dash, call the RPC with `grpcurl` from the repository's `harold-api/proto` directory:
+
+```sh
+grpcurl -plaintext \
+  -import-path . \
+  -proto harold.proto \
+  -d '{"paused": true}' \
+  localhost:50060 \
+  harold.Harold/SetMessagingPaused
+```
+
+Send `{"paused": false}` to resume. The RPC handler flips the in-process switch itself once the event is stored, without waiting for the projection; the event handler then confirms the value from the projected snapshot, so the switch is settled within one delivery cycle. A delivery that is already being dispatched at that moment still completes.
+
 ## Inventory timeout
 
 If the dashboard reports `MONITOR DEGRADED inventory:timeout`, check

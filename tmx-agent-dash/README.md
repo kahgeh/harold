@@ -69,7 +69,7 @@ outside this MVP; use a trusted deployment boundary for remote connections.
 | `l` / Right | Select the next waiting agent (wraps) |
 | `h` / Left | Select the previous waiting agent (wraps) |
 | `f` | Enter search editing |
-| `/` | Open the command palette (type to filter, Up/Down choose, Enter run, Esc close; e.g. `Voice: mute` / `Voice: unmute`) |
+| `/` | Open the command palette (type to filter, Up/Down choose, Enter run, Esc close; e.g. `Voice: mute` / `Voice: unmute`, `Messaging: pause` / `Messaging: resume`) |
 | Printable text | Extend the query while editing |
 | Backspace | Remove the last Unicode scalar value while editing |
 | `Enter` | Accept the query while editing; otherwise switch the invoking tmux client to the selected pane |
@@ -87,6 +87,17 @@ taken from the Harold snapshot rather than from local guesses. Voice commands ar
 offered in the palette only while the connection is LIVE and a snapshot has
 arrived; otherwise the palette shows `Commands unavailable until connected`.
 Before the first snapshot the masthead shows `○ VOICE —`.
+
+`Messaging: pause` is the kill switch for Harold's away channel: it stops all
+iMessage or Telegram traffic, in both directions, without stopping Harold.
+`Messaging: resume` turns it back on. Both are offered under the same conditions
+as the voice commands. While Harold reports messaging as paused, the masthead of
+every connected dash shows `■ MSG PAUSED` after the voice state; nothing is shown
+while messaging is running. When the masthead is too narrow, the title is dropped
+first and then the `REV` segment, so transport, voice and the paused marker stay
+visible. A failed request is reported as `MESSAGING ERROR: …`. See Harold's
+[operation reference](../docs/references/operation/README.md#pausing-messaging)
+for what the switch does.
 
 ## Reading status
 

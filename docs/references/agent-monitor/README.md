@@ -132,6 +132,7 @@ Agent events use the existing ordered `harold/main` `EventStream`. Append batche
 | `AgentActivitySummaryGenerated` | Full incarnation, source basis version, generated description, generation time | Sets a generated candidate only for the matching current incarnation and activity revision; does not change agent state or stage delivery. |
 | `AgentMonitorHealthChanged` | Component, healthy/degraded flag, bounded reason code, observation time | Upserts health for the component. |
 | `TtsMuteChanged` | `{muted}` | Upserts `settings.tts_muted`, advances the snapshot revision, and creates no delivery. |
+| `MessagingPausedChanged` | `{paused}` | Upserts `settings.messaging_paused`, advances the snapshot revision, and creates no delivery. |
 | `TurnCompleted` | Five notification fields plus optional resolved incarnation and `Unchanged`/`Set` completion summary update | Always preserves notification behavior; a matching resolved incarnation also supplies idle evidence and a non-destructive summary update. |
 
 `ReportAgentState` resolves the current incarnation and appends `AgentPaneObserved` immediately before `AgentLifecycleObserved` in one batch. A resolved `TurnComplete` appends `AgentPaneObserved` immediately before `TurnCompleted`. An unresolved completion still appends `TurnCompleted` for notification but does not alter agent state.
@@ -186,7 +187,7 @@ A fresh installation creates `<store.path>/harold-state.db` from the ordered mig
 | `delivery_outbox` | Pending and completed external delivery work, including retry state |
 | `agent_panes` | Pane/display metadata, full incarnation, hook and screen evidence, explicit and fallback summary candidates with internal timestamps, effective state/summary, last transition, and last event version |
 | `agent_monitor_health` | Component, healthy flag, bounded reason code, observation time, and last event version |
-| `settings` | Key/value application settings; currently `tts_muted`, written by `TtsMuteChanged` |
+| `settings` | Key/value application settings; currently `tts_muted`, written by `TtsMuteChanged`, and `messaging_paused`, written by `MessagingPausedChanged` |
 
 `agent_panes` includes `summary_basis_version`, `generated_work_summary`, and `generated_summary_basis_version` from creation. These keep a generated description tied to its source revision while preserving the original source candidates. Stores created with this schema can reopen and replay normally. Incompatible schemas are rejected; Harold does not convert or reset them.
 
@@ -206,6 +207,7 @@ The canonical schema is `harold-api/proto/harold.proto`. The service exposes exa
 | `ReportAgentState` | `pane_id = 1`, `state = 2`, `adapter_id = 3`, `optional work_summary = 4` | Unary `accepted = true` after the pane-plus-lifecycle batch is durably appended. Projection may follow asynchronously. |
 | `WatchAgentStates` | Empty request | Server stream whose first message is the complete current snapshot, followed by complete snapshots at greater revisions. There is no cursor. |
 | `SetTtsMuted` | `muted = 1` | Unary; responds with the requested `muted` value after the `TtsMuteChanged` event is durably appended, or immediately when the value is unchanged. The new value is visible in a later snapshot. See [Notification](../notification/README.md#muting-voice). |
+| `SetMessagingPaused` | `paused = 1` | Unary; responds with the requested `paused` value after the `MessagingPausedChanged` event is durably appended, or immediately when the value is unchanged. The away channel stops or resumes as soon as the event is appended; the new value is visible in a later snapshot. See [Operation](../operation/README.md#pausing-messaging). |
 
 `ReportAgentState.state` accepts only `AGENT_STATE_BUSY` and `AGENT_STATE_IDLE`. Pane IDs have the tmux `%` plus decimal-digits form. Adapter and configured provider IDs match `[a-z0-9][a-z0-9._-]{0,63}`; provider ID `unknown` is reserved.
 
@@ -218,6 +220,7 @@ The canonical schema is `harold-api/proto/harold.proto`. The service exposes exa
 | `monitor_health = 3` | repeated `AgentMonitorHealth` | Current component health |
 | `panes = 4` | repeated `AgentPaneState` | Current live agent incarnations |
 | `tts_muted = 5` | `bool` | Whether at-desk TTS is muted |
+| `messaging_paused = 6` | `bool` | Whether away-channel messaging (iMessage or Telegram, both directions) is paused |
 
 `AgentMonitorHealth` contains `component = 1`, `state = 2`, `reason_code = 3`, and `observed_at_ms = 4`.
 

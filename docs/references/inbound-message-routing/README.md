@@ -23,6 +23,14 @@ Each cursor is advanced only after a successful `append_inbound_message`, so a c
 
 **Routing resolution** — Harold's event handler stages `InboundMessageReceived` events in its durable outbox and calls `route_inbound_message()` in stream-version order. Live pane discovery runs at resolution time via `tmux list-panes -a`, then reads the process tree under each pane's `pane_pid`. A pane is considered an agent when the pane process or a descendant process command contains one of the configured `agents[].command_contains` fragments. Agents are addressed via the `AgentAddress` enum (currently only `TmuxPane { pane_id, label }`).
 
+## Paused messaging
+
+While messaging is paused (`SetMessagingPaused`, see [Operation](../operation/README.md#pausing-messaging)) nothing on this page happens:
+
+- **Listeners** — fetched iMessage rows and Telegram updates still advance the ROWID cursors and the update offset, but no `InboundMessageReceived` event is appended. Messages that arrive while paused are discarded and are not replayed on resume.
+- **Routing** — an `InboundMessageReceived` delivery that was already in the outbox is marked as an intentional skip before its payload is read. No pane is discovered, nothing is sent to tmux and no confirmation goes out.
+- **Replies** — the confirmation and error replies described under [Delivery](#delivery) are not sent.
+
 ## Pane discovery
 
 Harold currently recognizes a pane as an agent when the pane process or one of its descendants has a process command containing a configured fragment:
