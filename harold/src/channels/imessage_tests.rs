@@ -1,10 +1,15 @@
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicI64, Ordering};
+use std::time::{Duration, Instant};
 
 use crate::channels::{split_body, truncate_body};
 use crate::store::HaroldStore;
 use crate::util::sanitise_for_applescript;
 
-use super::{NotificationPlan, is_marked_as_harold, notification_plan, record_row, send_script};
+use super::{
+    Direction, FetchedRow, NotificationPlan, RecentRows, TWIN_WINDOW, is_marked_as_harold,
+    notification_plan, record_row, send_script,
+};
 
 #[test]
 fn split_body_no_question() {
@@ -162,21 +167,26 @@ impl Drop for TestDirectory {
     }
 }
 
+fn row(rowid: i64, text: &str, direction: Direction) -> FetchedRow {
+    FetchedRow {
+        rowid,
+        text: text.into(),
+        direction,
+    }
+}
+
 #[tokio::test]
 async fn paused_listener_advances_the_cursor_and_appends_nothing() {
     let directory = TestDirectory::new();
     let store = HaroldStore::open(&directory.0).await.unwrap();
     let cursor = AtomicI64::new(10);
+    let recent = Mutex::new(RecentRows::new());
+    let now = Instant::now();
 
-    record_row(
-        &store,
-        11,
-        "✓ Delivered to [harold:0.1]".into(),
-        &cursor,
-        true,
-    )
-    .await;
-    record_row(&store, 12, "carry on".into(), &cursor, true).await;
+    let confirmation = row(11, "✓ Delivered to [harold:0.1]", Direction::Inbound);
+    record_row(&store, confirmation, &cursor, &recent, true, now).await;
+    let reply = row(12, "carry on", Direction::Inbound);
+    record_row(&store, reply, &cursor, &recent, true, now).await;
 
     assert_eq!(cursor.load(Ordering::Relaxed), 12);
     assert_eq!(store.project_unhandled_events(10).await.unwrap().applied, 0);
@@ -188,11 +198,164 @@ async fn running_listener_appends_the_row_and_advances_the_cursor() {
     let directory = TestDirectory::new();
     let store = HaroldStore::open(&directory.0).await.unwrap();
     let cursor = AtomicI64::new(10);
+    let recent = Mutex::new(RecentRows::new());
 
-    record_row(&store, 11, "carry on".into(), &cursor, false).await;
+    let reply = row(11, "carry on", Direction::Inbound);
+    record_row(&store, reply, &cursor, &recent, false, Instant::now()).await;
 
     assert_eq!(cursor.load(Ordering::Relaxed), 11);
     assert_eq!(store.project_unhandled_events(10).await.unwrap().applied, 1);
     let delivery = store.next_pending_delivery().await.unwrap().unwrap();
     assert_eq!(delivery.event_type, "InboundMessageReceived");
+}
+
+#[test]
+fn same_text_from_the_other_direction_within_the_window_is_a_duplicate() {
+    let start = Instant::now();
+    let soon = start + Duration::from_millis(5);
+
+    let mut recent = RecentRows::new();
+    recent.remember(Direction::Inbound, "Yes".into(), start);
+    assert!(recent.is_duplicate(Direction::SelfSent, "Yes", soon));
+
+    let mut recent = RecentRows::new();
+    recent.remember(Direction::SelfSent, "Yes".into(), start);
+    assert!(recent.is_duplicate(Direction::Inbound, "Yes", soon));
+    assert!(recent.is_duplicate(Direction::Inbound, "Yes", start + TWIN_WINDOW));
+}
+
+#[test]
+fn same_text_from_the_same_direction_is_kept() {
+    let start = Instant::now();
+    let mut recent = RecentRows::new();
+    recent.remember(Direction::Inbound, "Yes".into(), start);
+
+    assert!(!recent.is_duplicate(Direction::Inbound, "Yes", start + Duration::from_millis(5)));
+}
+
+#[test]
+fn different_text_from_the_other_direction_is_kept() {
+    let start = Instant::now();
+    let mut recent = RecentRows::new();
+    recent.remember(Direction::Inbound, "Yes".into(), start);
+
+    assert!(!recent.is_duplicate(Direction::SelfSent, "Yes please", start));
+    assert!(!recent.is_duplicate(Direction::SelfSent, "yes", start));
+}
+
+#[test]
+fn same_text_from_the_other_direction_outside_the_window_is_kept() {
+    let start = Instant::now();
+    let mut recent = RecentRows::new();
+    recent.remember(Direction::Inbound, "Yes".into(), start);
+
+    let late = start + TWIN_WINDOW + Duration::from_millis(1);
+    assert!(!recent.is_duplicate(Direction::SelfSent, "Yes", late));
+}
+
+#[test]
+fn recent_rows_forget_entries_older_than_the_window() {
+    let start = Instant::now();
+    let mut recent = RecentRows::new();
+    for second in 0..5 {
+        recent.remember(
+            Direction::Inbound,
+            "Yes".into(),
+            start + Duration::from_secs(second),
+        );
+    }
+    assert_eq!(recent.0.len(), 5);
+
+    // Both a lookup and a new entry drop what has aged out.
+    recent.is_duplicate(
+        Direction::SelfSent,
+        "No",
+        start + TWIN_WINDOW + Duration::from_millis(2_500),
+    );
+    assert_eq!(recent.0.len(), 2);
+    recent.remember(Direction::SelfSent, "No".into(), start + TWIN_WINDOW * 2);
+    assert_eq!(recent.0.len(), 1);
+}
+
+#[tokio::test]
+async fn reply_stored_as_an_inbound_and_a_self_row_is_recorded_once() {
+    let directory = TestDirectory::new();
+    let store = HaroldStore::open(&directory.0).await.unwrap();
+    let inbound_cursor = AtomicI64::new(10);
+    let self_cursor = AtomicI64::new(10);
+    let recent = Mutex::new(RecentRows::new());
+    let now = Instant::now();
+
+    // One poll: inbound rows first, then self rows.
+    let inbound = row(12, "carry on", Direction::Inbound);
+    record_row(&store, inbound, &inbound_cursor, &recent, false, now).await;
+    let twin = row(11, "carry on", Direction::SelfSent);
+    record_row(&store, twin, &self_cursor, &recent, false, now).await;
+
+    assert_eq!(inbound_cursor.load(Ordering::Relaxed), 12);
+    assert_eq!(self_cursor.load(Ordering::Relaxed), 11);
+    assert_eq!(store.project_unhandled_events(10).await.unwrap().applied, 1);
+
+    // The copies can also land in different polls, in either order.
+    let later = now + Duration::from_secs(5);
+    let own = row(13, "and then stop", Direction::SelfSent);
+    record_row(&store, own, &self_cursor, &recent, false, now).await;
+    let twin = row(14, "and then stop", Direction::Inbound);
+    record_row(&store, twin, &inbound_cursor, &recent, false, later).await;
+
+    assert_eq!(self_cursor.load(Ordering::Relaxed), 13);
+    assert_eq!(inbound_cursor.load(Ordering::Relaxed), 14);
+    assert_eq!(store.project_unhandled_events(10).await.unwrap().applied, 1);
+}
+
+#[tokio::test]
+async fn same_reply_sent_twice_from_the_phone_is_recorded_twice() {
+    let directory = TestDirectory::new();
+    let store = HaroldStore::open(&directory.0).await.unwrap();
+    let cursor = AtomicI64::new(10);
+    let recent = Mutex::new(RecentRows::new());
+    let now = Instant::now();
+
+    record_row(
+        &store,
+        row(11, "Yes", Direction::Inbound),
+        &cursor,
+        &recent,
+        false,
+        now,
+    )
+    .await;
+    record_row(
+        &store,
+        row(12, "Yes", Direction::Inbound),
+        &cursor,
+        &recent,
+        false,
+        now,
+    )
+    .await;
+
+    assert_eq!(cursor.load(Ordering::Relaxed), 12);
+    assert_eq!(store.project_unhandled_events(10).await.unwrap().applied, 2);
+}
+
+#[tokio::test]
+async fn row_discarded_by_the_pause_is_not_remembered() {
+    let directory = TestDirectory::new();
+    let store = HaroldStore::open(&directory.0).await.unwrap();
+    let inbound_cursor = AtomicI64::new(10);
+    let self_cursor = AtomicI64::new(10);
+    let recent = Mutex::new(RecentRows::new());
+    let now = Instant::now();
+
+    let discarded = row(11, "carry on", Direction::Inbound);
+    record_row(&store, discarded, &inbound_cursor, &recent, true, now).await;
+    assert!(recent.lock().unwrap().0.is_empty());
+
+    // Messaging resumes before the other copy is read: it is the only one recorded.
+    let twin = row(12, "carry on", Direction::SelfSent);
+    record_row(&store, twin, &self_cursor, &recent, false, now).await;
+
+    assert_eq!(self_cursor.load(Ordering::Relaxed), 12);
+    assert_eq!(store.project_unhandled_events(10).await.unwrap().applied, 1);
 }

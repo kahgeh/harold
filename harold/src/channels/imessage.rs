@@ -2,8 +2,9 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use tokio::sync::{mpsc, watch};
@@ -195,6 +196,54 @@ fn last_self_rowid() -> &'static AtomicI64 {
     LAST_SELF_ROWID.get().expect("listener not initialised")
 }
 
+/// Which of the two queries a row came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Direction {
+    Inbound,
+    SelfSent,
+}
+
+struct FetchedRow {
+    rowid: i64,
+    text: String,
+    direction: Direction,
+}
+
+/// How long a recorded row is remembered, to catch its copy from the other direction.
+const TWIN_WINDOW: Duration = Duration::from_secs(10);
+
+/// Rows recorded within the last `TWIN_WINDOW`. A message the Mac sends to the user's own
+/// number is stored as two rows with the same text, one per direction, so without this a
+/// reply typed in Messages on the Mac is routed twice.
+struct RecentRows(Vec<(Direction, String, Instant)>);
+
+impl RecentRows {
+    const fn new() -> Self {
+        Self(Vec::new())
+    }
+
+    /// Whether the same text was recorded from the other direction within the window.
+    /// The same text twice from one direction is the user sending it twice, and is kept.
+    fn is_duplicate(&mut self, direction: Direction, text: &str, now: Instant) -> bool {
+        self.forget_old(now);
+        self.0
+            .iter()
+            .any(|(recorded, recorded_text, _)| *recorded != direction && recorded_text == text)
+    }
+
+    fn remember(&mut self, direction: Direction, text: String, now: Instant) {
+        self.forget_old(now);
+        self.0.push((direction, text, now));
+    }
+
+    fn forget_old(&mut self, now: Instant) {
+        self.0
+            .retain(|(_, _, at)| now.saturating_duration_since(*at) <= TWIN_WINDOW);
+    }
+}
+
+static RECENT_ROWS: Mutex<RecentRows> = Mutex::new(RecentRows::new());
+
 fn db_path() -> String {
     get_settings().chat_db.resolved_path()
 }
@@ -272,20 +321,39 @@ fn fetch_self(last_rowid: i64) -> Vec<(i64, String)> {
 
 /// Record one fetched row as an inbound event and move `cursor` past it. While messaging
 /// is paused the row is discarded: the cursor still moves, so nothing is replayed on resume.
+/// A row whose text was just recorded from the other direction is skipped the same way.
 async fn record_row(
     store: &HaroldStore,
-    rowid: i64,
-    text: String,
+    row: FetchedRow,
     cursor: &AtomicI64,
+    recent: &Mutex<RecentRows>,
     messaging_paused: bool,
+    now: Instant,
 ) {
+    let FetchedRow {
+        rowid,
+        text,
+        direction,
+    } = row;
     if messaging_paused {
         info!("iMessage discarded (messaging paused)");
         cursor.store(rowid, Ordering::Relaxed);
         return;
     }
-    match append_inbound_message(store, &InboundMessage { text }).await {
-        Ok(()) => cursor.store(rowid, Ordering::Relaxed),
+    if recent.lock().unwrap().is_duplicate(direction, &text, now) {
+        info!("iMessage skipped (same text already recorded from the other direction)");
+        cursor.store(rowid, Ordering::Relaxed);
+        return;
+    }
+    let message = InboundMessage { text };
+    match append_inbound_message(store, &message).await {
+        Ok(()) => {
+            cursor.store(rowid, Ordering::Relaxed);
+            recent
+                .lock()
+                .unwrap()
+                .remember(direction, message.text, now);
+        }
         Err(e) => {
             tracing::warn!(error = %e, "failed to append InboundMessageReceived event")
         }
@@ -304,6 +372,7 @@ async fn poll(store: &HaroldStore) {
                 (vec![], vec![])
             });
     let messaging_paused = is_messaging_paused();
+    let now = Instant::now();
 
     for (rowid, text) in inbound {
         let trace_id = uuid::Uuid::new_v4().to_string();
@@ -311,7 +380,13 @@ async fn poll(store: &HaroldStore) {
 
         async {
             info!("iMessage received (inbound)");
-            record_row(store, rowid, text, last_inbound_rowid(), messaging_paused).await;
+            let row = FetchedRow {
+                rowid,
+                text,
+                direction: Direction::Inbound,
+            };
+            let cursor = last_inbound_rowid();
+            record_row(store, row, cursor, &RECENT_ROWS, messaging_paused, now).await;
         }
         .instrument(span)
         .await;
@@ -323,7 +398,13 @@ async fn poll(store: &HaroldStore) {
 
         async {
             info!("iMessage received (self)");
-            record_row(store, rowid, text, last_self_rowid(), messaging_paused).await;
+            let row = FetchedRow {
+                rowid,
+                text,
+                direction: Direction::SelfSent,
+            };
+            let cursor = last_self_rowid();
+            record_row(store, row, cursor, &RECENT_ROWS, messaging_paused, now).await;
         }
         .instrument(span)
         .await;
