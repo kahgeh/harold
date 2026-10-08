@@ -424,61 +424,80 @@ fn render_state_message(
 }
 
 fn render_inventory(frame: &mut Frame<'_>, area: Rect, app: &App, now_ms: i64) {
-    let visible = app.visible_rows();
-    let selected_index = app
-        .selected
-        .as_ref()
-        .and_then(|selected| visible.iter().position(|row| &row.incarnation == selected));
-    let rows = visible.into_iter().map(|agent| {
-        let selected = app.selected.as_ref() == Some(&agent.incarnation);
-        let marker = if selected { "▶ " } else { "  " };
-        let style = if selected {
-            Style::default()
-                .fg(INK)
-                .bg(Color::Rgb(41, 40, 30))
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(INK)
-        };
-        let mut cells = vec![
+    let wide = area.width >= COMPACT_WIDTH;
+    let where_width: u16 = if wide { 26 } else { 20 };
+    let mut rows = Vec::new();
+    let mut selected_index = None;
+    for (group, agents) in app.visible_groups() {
+        let mut header = Row::new(vec![
+            Cell::from(""),
             Cell::from(Line::styled(
-                format!(
-                    "{marker}{} {}",
-                    state_glyph(agent.state),
-                    agent.state.label()
-                ),
-                state_style(agent.state),
+                fit(group, usize::from(where_width)).into_owned(),
+                Style::default().fg(AMBER).add_modifier(Modifier::BOLD),
             )),
-            Cell::from(agent.provider_display_name.as_str()),
-            Cell::from(agent.tmux_target.as_str()),
-            Cell::from(display_work_summary(agent.work_summary.as_deref())),
-        ];
-        if area.width >= COMPACT_WIDTH {
-            cells.push(Cell::from(age(now_ms, agent.last_transition_at_ms)));
+        ]);
+        if wide && !rows.is_empty() {
+            header = header.top_margin(1);
         }
-        Row::new(cells)
-            .style(style)
-            .height(u16::from(area.width >= COMPACT_WIDTH) + 1)
-    });
-    let (header, widths) = if area.width < COMPACT_WIDTH {
+        rows.push(header);
+        for agent in agents {
+            let selected = app.selected.as_ref() == Some(&agent.incarnation);
+            if selected {
+                selected_index = Some(rows.len());
+            }
+            let marker = if selected { "▶ " } else { "  " };
+            let style = if selected {
+                Style::default()
+                    .fg(INK)
+                    .bg(Color::Rgb(41, 40, 30))
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(INK)
+            };
+            let mut cells = vec![
+                Cell::from(Line::styled(
+                    format!(
+                        "{marker}{} {}",
+                        state_glyph(agent.state),
+                        agent.state.label()
+                    ),
+                    state_style(agent.state),
+                )),
+                Cell::from(format!(
+                    "  {}",
+                    fit(app.label(agent), usize::from(where_width) - 2)
+                )),
+                Cell::from(Line::styled(
+                    agent.provider_tag(),
+                    Style::default().fg(MUTED),
+                )),
+                Cell::from(display_work_summary(agent.work_summary.as_deref())),
+            ];
+            if wide {
+                cells.push(Cell::from(age(now_ms, agent.last_transition_at_ms)));
+            }
+            rows.push(Row::new(cells).style(style));
+        }
+    }
+    let (header, widths) = if wide {
         (
-            Row::new(["STATE", "AGENT", "TARGET", "WORK SUMMARY"]),
+            Row::new(["STATE", "WHERE", "", "WORK SUMMARY", "AGE"]),
             vec![
-                Constraint::Length(11),
-                Constraint::Length(9),
-                Constraint::Length(15),
-                Constraint::Min(8),
+                Constraint::Length(13),
+                Constraint::Length(where_width),
+                Constraint::Length(2),
+                Constraint::Min(12),
+                Constraint::Length(7),
             ],
         )
     } else {
         (
-            Row::new(["STATE", "AGENT", "TARGET", "WORK SUMMARY", "AGE"]),
+            Row::new(["STATE", "WHERE", "", "WORK SUMMARY"]),
             vec![
-                Constraint::Length(13),
-                Constraint::Length(12),
-                Constraint::Length(22),
-                Constraint::Min(12),
-                Constraint::Length(7),
+                Constraint::Length(11),
+                Constraint::Length(where_width),
+                Constraint::Length(2),
+                Constraint::Min(8),
             ],
         )
     };
@@ -664,6 +683,23 @@ fn fact<'a>(label: &str, value: impl Into<Cow<'a, str>>) -> Line<'a> {
     ])
 }
 
+/// Truncates `text` to `width` terminal columns, marking the cut with an ellipsis.
+fn fit(text: &str, width: usize) -> Cow<'_, str> {
+    if Line::raw(text).width() <= width {
+        return Cow::Borrowed(text);
+    }
+    let mut fitted = String::new();
+    for character in text.chars() {
+        fitted.push(character);
+        if Line::raw(fitted.as_str()).width() + 1 > width {
+            fitted.pop();
+            break;
+        }
+    }
+    fitted.push('…');
+    Cow::Owned(fitted)
+}
+
 fn state_glyph(state: AgentState) -> &'static str {
     match state {
         AgentState::Busy => "●",
@@ -706,7 +742,7 @@ mod tests {
     use ratatui::style::Color;
     use ratatui::text::Line;
 
-    use super::render;
+    use super::{fit, render};
     use crate::app::{
         AgentIncarnation, AgentRow, AgentState, App, ConnectionState, MonitorHealth,
         MonitorHealthState, SearchState, Snapshot,
@@ -937,11 +973,10 @@ mod tests {
 
         for expected in [
             "STATE",
-            "AGENT",
-            "TARGET",
+            "WHERE",
             "WORK SUMMARY",
             "Codex",
-            "agents:2.7",
+            "cx",
             "Build responsive dashboard",
         ] {
             assert!(content.contains(expected), "missing {expected:?}");
@@ -969,14 +1004,13 @@ mod tests {
 
         for expected in [
             "STATE",
-            "AGENT",
-            "TARGET",
+            "WHERE",
             "WORK SUMMARY",
             "BUSY",
             "BUSY 01",
             "IDLE 00",
             "Codex",
-            "agents:2.7",
+            "cx",
             "Responsive",
         ] {
             assert!(content.contains(expected), "missing {expected:?}");
@@ -1333,7 +1367,7 @@ mod tests {
         let content = rendered(&app, 104, 28, 100_000);
 
         assert!(content.contains("▶ ● IDLE"));
-        assert!(content.contains("agents:2.9"));
+        assert!(content.contains("cx"));
         assert!(content.contains("Work item 9"));
     }
 
@@ -1454,8 +1488,11 @@ mod tests {
         assert!(!content.contains("CURRENT WORK"));
         assert!(content.contains("AGENT BLOCK OCCUPANCY"));
         assert!(content.contains("▶ ● BUSY"));
-        assert!(content.contains("tmx-agent-dash:2.17"));
-        assert_eq!(content.matches('界').count(), 40);
+        assert!(content.contains("cx"));
+        assert!(!content.contains("tmx-agent-dash:2.17"));
+        // The WHERE column is narrower than the old AGENT+TARGET pair, so the
+        // whole summary now fits in the work column.
+        assert_eq!(content.matches('界').count(), 43);
     }
 
     #[test]
@@ -1676,6 +1713,141 @@ mod tests {
             state,
             last_transition_at_ms,
         }
+    }
+
+    fn located(
+        pane_id: &str,
+        state: AgentState,
+        provider: &str,
+        session: &str,
+        directory: &str,
+        summary: &str,
+    ) -> AgentRow {
+        let mut located = row(
+            incarnation(pane_id, 10, 20, &provider.to_lowercase()),
+            state,
+            provider,
+            &format!("{session}:0.3"),
+            summary,
+            90_000,
+        );
+        located.session_name = session.into();
+        located.working_directory = directory.into();
+        located
+    }
+
+    fn user_layout() -> App {
+        let mut app = live_app(Vec::new(), None);
+        app.apply_later_snapshot(Snapshot {
+            through_event_version: 43,
+            ..snapshot(
+                vec![health(MonitorHealthState::Healthy, "ok")],
+                vec![
+                    located(
+                        "%1",
+                        AgentState::Busy,
+                        "Claude",
+                        "harold  main",
+                        "/p/harold/main",
+                        "fixing handler",
+                    ),
+                    located(
+                        "%2",
+                        AgentState::Idle,
+                        "Claude",
+                        "harold  voice-mute-palette1",
+                        "/p/harold/voice-mute-palette",
+                        "writing plan",
+                    ),
+                    located(
+                        "%3",
+                        AgentState::Idle,
+                        "Codex",
+                        "home",
+                        "/Users/k/Dev/p/sre",
+                        "waiting",
+                    ),
+                ],
+            )
+        })
+        .unwrap();
+        app
+    }
+
+    #[test]
+    fn list_groups_agents_under_project_headers_with_names_and_tags() {
+        for (width, height) in [(140, 38), (100, 30), (70, 30), (60, 20)] {
+            let content = rendered(&user_layout(), width, height, 100_000);
+            assert!(content.contains("WHERE"), "{width}x{height}");
+            assert!(
+                !content.contains("TARGET") || width >= 120,
+                "{width}x{height}"
+            );
+            let harold = content.find("harold").expect("harold header");
+            let main = content.find("main").expect("main row");
+            let palette = content
+                .find("voice-mute-palette")
+                .expect("full worktree name");
+            let home = content.find("home").expect("home header");
+            let sre = content.find("sre").expect("sre row");
+            assert!(harold < main && main < palette && palette < home && home < sre);
+            assert!(content.contains("cc"));
+            assert!(content.contains("cx"));
+            assert!(
+                !content.contains("voice-mute-palette1"),
+                "session suffix must not show"
+            );
+        }
+    }
+
+    #[test]
+    fn group_header_is_not_selectable_and_selection_marker_tracks_the_agent_row() {
+        let mut app = user_layout();
+        app.handle_key(crossterm::event::KeyCode::Char('g'));
+        assert_eq!(app.selected.as_ref().unwrap().pane_id, "%1");
+        let buffer = rendered_buffer(&app, 140, 38, 100_000);
+        let marker_line = buffer
+            .content()
+            .chunks(usize::from(buffer.area.width))
+            .map(|cells| cells.iter().map(|cell| cell.symbol()).collect::<String>())
+            .find(|line| line.contains('▶'))
+            .expect("selection marker");
+        assert!(marker_line.contains("main"));
+        assert!(!marker_line.contains("harold"));
+    }
+
+    #[test]
+    fn long_names_are_truncated_at_the_end_with_an_ellipsis() {
+        assert_eq!(fit("voice-mute-palette", 18), "voice-mute-palette");
+        assert_eq!(fit("voice-mute-palette", 10), "voice-mut…");
+        assert_eq!(fit("界界界界", 5), "界界…");
+        assert_eq!(fit("abc", 0), "…");
+    }
+
+    #[test]
+    fn selected_row_in_a_late_group_scrolls_into_view() {
+        let rows = (0..30)
+            .map(|index| {
+                located(
+                    &format!("%{index}"),
+                    AgentState::Idle,
+                    "Claude",
+                    &format!("proj{index:02}  w"),
+                    &format!("/p/proj{index:02}/w{index:02}"),
+                    "work",
+                )
+            })
+            .collect();
+        let mut app = live_app(Vec::new(), None);
+        app.apply_later_snapshot(Snapshot {
+            through_event_version: 43,
+            ..snapshot(vec![health(MonitorHealthState::Healthy, "ok")], rows)
+        })
+        .unwrap();
+        app.handle_key(crossterm::event::KeyCode::Char('G'));
+        let content = rendered(&app, 100, 24, 100_000);
+        assert!(content.contains("w29"));
+        assert!(content.contains("proj29"));
     }
 
     #[test]
