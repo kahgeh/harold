@@ -118,6 +118,7 @@ pub(crate) enum RuntimeStatus {
     },
     NavigationUnavailable,
     NavigationFailed(String),
+    VoiceFailed(String),
     SourceError(String),
 }
 

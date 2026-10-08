@@ -187,6 +187,7 @@ fn render_monitor(frame: &mut Frame<'_>, area: Rect, app: &App, now_ms: i64) {
             RuntimeStatus::NavigationFailed(detail) => {
                 format!("NAVIGATION FAILED: {detail}")
             }
+            RuntimeStatus::VoiceFailed(detail) => format!("VOICE ERROR: {detail}"),
             RuntimeStatus::SourceError(detail) => format!("SOURCE ERROR: {detail}"),
         };
         text.push_span(Span::styled(

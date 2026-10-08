@@ -148,7 +148,7 @@ async fn run_async(
             .await?
             {
                 Control::Quit => return Ok(()),
-                Control::Retry | Control::Continue => {}
+                Control::Retry | Control::Continue | Control::SetTtsMuted(_) => {}
             }
         }
         retry_immediately = false;
@@ -189,7 +189,7 @@ async fn run_async(
             Ok(Control::Retry) => {
                 retry_immediately = true;
             }
-            Ok(Control::Continue) => {
+            Ok(Control::Continue | Control::SetTtsMuted(_)) => {
                 let detail = core
                     .app
                     .runtime_status()
@@ -219,6 +219,9 @@ trait SourcePort {
 trait StreamPort: Sized {
     fn receive(&mut self) -> BoxFuture<'_, Option<Result<Snapshot, SourceError>>>;
     fn close_stream(self) -> BoxFuture<'static, ()>;
+    fn set_tts_muted(&mut self, _muted: bool) -> BoxFuture<'_, Result<(), SourceError>> {
+        Box::pin(async { Ok(()) })
+    }
 }
 
 impl SourcePort for AgentStateSource {
@@ -236,6 +239,10 @@ impl StreamPort for SourceStream {
 
     fn close_stream(self) -> BoxFuture<'static, ()> {
         Box::pin(self.close())
+    }
+
+    fn set_tts_muted(&mut self, muted: bool) -> BoxFuture<'_, Result<(), SourceError>> {
+        Box::pin(self.request_tts_muted(muted))
     }
 }
 
@@ -282,7 +289,7 @@ where
                 match handle_input(item, core, navigator)? {
                     Control::Quit => return Ok(OpenOutcome::Quit),
                     Control::Retry => return Ok(OpenOutcome::RetryNow),
-                    Control::Continue => draw(terminal, &core.app, clock)?,
+                    Control::Continue | Control::SetTtsMuted(_) => draw(terminal, &core.app, clock)?,
                 }
             }
             () = shutdown.recv_shutdown() => return Ok(OpenOutcome::Quit),
@@ -331,6 +338,12 @@ where
             }
             item = input.recv() => {
                 let control = handle_input(item, core, navigator)?;
+                if let Control::SetTtsMuted(muted) = control {
+                    let result = stream.set_tts_muted(muted).await;
+                    core.voice_result(result);
+                    draw(terminal, &core.app, clock)?;
+                    continue;
+                }
                 draw(terminal, &core.app, clock)?;
                 if control != Control::Continue {
                     break Ok(control);
@@ -365,7 +378,7 @@ async fn wait_for_retry(
             item = input.recv() => {
                 let control = handle_input(item, core, navigator)?;
                 draw(terminal, &core.app, clock)?;
-                if control != Control::Continue {
+                if !matches!(control, Control::Continue | Control::SetTtsMuted(_)) {
                     return Ok(control);
                 }
             }
@@ -436,6 +449,7 @@ fn runtime_status_detail(status: &RuntimeStatus) -> String {
     match status {
         RuntimeStatus::Retrying { detail, .. }
         | RuntimeStatus::NavigationFailed(detail)
+        | RuntimeStatus::VoiceFailed(detail)
         | RuntimeStatus::SourceError(detail) => detail.clone(),
         RuntimeStatus::NavigationUnavailable => "navigation unavailable".into(),
     }
@@ -664,6 +678,7 @@ enum Control {
     Continue,
     Retry,
     Quit,
+    SetTtsMuted(bool),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -712,6 +727,26 @@ impl RuntimeCore {
             backoff: Backoff::default(),
             navigation_issue,
             endpoint_display: sanitize_display(endpoint, ERROR_LIMIT),
+        }
+    }
+
+    fn voice_result(&mut self, result: Result<(), SourceError>) {
+        match result {
+            Ok(()) => self.app.clear_runtime_status(),
+            Err(error) => {
+                self.app
+                    .set_runtime_status(RuntimeStatus::VoiceFailed(sanitize_display(
+                        &error.to_string(),
+                        ERROR_LIMIT,
+                    )))
+            }
+        }
+        if let Some(status) = self
+            .navigation_issue
+            .clone()
+            .filter(|_| self.app.runtime_status().is_none())
+        {
+            self.app.set_runtime_status(status);
         }
     }
 
@@ -794,7 +829,7 @@ impl RuntimeCore {
             Effect::Retry => Control::Retry,
             Effect::Quit => Control::Quit,
             // Wired to the runtime in a later task.
-            Effect::SetTtsMuted(_) => Control::Continue,
+            Effect::SetTtsMuted(muted) => Control::SetTtsMuted(muted),
             Effect::Navigate { pane_id } => {
                 let Some(client) = self.client.as_deref() else {
                     self.app
@@ -1282,6 +1317,47 @@ mod tests {
         }
         assert!(reads.load(Ordering::Acquire) >= 64);
         drop(pump);
+    }
+
+    fn live_core(muted: bool) -> RuntimeCore {
+        let mut core = RuntimeCore::new(None);
+        let mut live = snapshot(1, MonitorHealthState::Healthy);
+        live.tts_muted = muted;
+        core.accept_snapshot(live, 1_000);
+        core
+    }
+
+    #[test]
+    fn palette_voice_action_becomes_a_runtime_control() {
+        let navigator = FakeNavigator::successful();
+        let mut core = live_core(false);
+        core.handle_key(KeyCode::Char('/'), &navigator);
+        for character in "voice".chars() {
+            core.handle_key(KeyCode::Char(character), &navigator);
+        }
+        assert_eq!(
+            core.handle_key(KeyCode::Enter, &navigator),
+            Control::SetTtsMuted(true)
+        );
+    }
+
+    #[test]
+    fn voice_result_failure_sets_status_and_leaves_the_confirmed_state() {
+        let mut core = live_core(false);
+        core.voice_result(Err(SourceError::Transport("boom".into())));
+        assert!(matches!(
+            core.app.runtime_status(),
+            Some(RuntimeStatus::VoiceFailed(detail)) if detail.contains("boom")
+        ));
+        assert_eq!(core.app.voice(), crate::app::VoiceState::On);
+
+        // `RuntimeCore::new(None)` carries a standing navigation issue, which
+        // is restored once the voice error clears.
+        core.voice_result(Ok(()));
+        assert_eq!(
+            core.app.runtime_status(),
+            Some(&RuntimeStatus::NavigationUnavailable)
+        );
     }
 
     struct FakeNavigator {

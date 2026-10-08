@@ -2,21 +2,23 @@ use std::collections::HashSet;
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
+use std::time::Duration;
 
 use harold_api::harold::{
     AgentMonitorHealth, AgentPaneState, AgentState as ProtoAgentState, AgentStateSnapshot,
-    MonitorHealthState as ProtoMonitorHealthState, WatchAgentStatesRequest,
+    MonitorHealthState as ProtoMonitorHealthState, SetTtsMutedRequest, WatchAgentStatesRequest,
     harold_client::HaroldClient,
 };
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
-use tonic::transport::Endpoint;
+use tonic::transport::{Channel, Endpoint};
 
 use crate::app::{
     AgentIncarnation, AgentRow, AgentState, MonitorHealth, MonitorHealthState, Snapshot,
 };
 use crate::text::sanitize_display;
 
+const VOICE_REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
 const PANE_FIELD_LIMIT: usize = 256;
 const DIRECTORY_LIMIT: usize = 1_024;
 const SUMMARY_LIMIT: usize = 160;
@@ -108,6 +110,7 @@ impl From<ProtocolError> for SourceError {
 pub struct SourceStream {
     receiver: mpsc::Receiver<Result<Snapshot, SourceError>>,
     reader: Option<JoinHandle<()>>,
+    voice: Option<HaroldClient<Channel>>,
 }
 
 trait SnapshotReader: Send + 'static {
@@ -147,12 +150,27 @@ where
     SourceStream {
         receiver,
         reader: Some(reader),
+        voice: None,
     }
 }
 
 impl SourceStream {
     pub async fn recv(&mut self) -> Option<Result<Snapshot, SourceError>> {
         self.receiver.recv().await
+    }
+
+    pub async fn request_tts_muted(&self, muted: bool) -> Result<(), SourceError> {
+        let Some(mut client) = self.voice.clone() else {
+            return Err(SourceError::transport("voice control unavailable"));
+        };
+        tokio::time::timeout(
+            VOICE_REQUEST_TIMEOUT,
+            client.set_tts_muted(SetTtsMutedRequest { muted }),
+        )
+        .await
+        .map_err(|_| SourceError::transport("voice request timed out"))?
+        .map(|_| ())
+        .map_err(|error| SourceError::transport(error.to_string()))
     }
 
     pub async fn close(mut self) {
@@ -194,7 +212,9 @@ impl AgentStateSource {
                 .map_err(|error| SourceError::watch(error.to_string()))?
                 .into_inner();
 
-            Ok(spawn_reader(stream))
+            let mut source = spawn_reader(stream);
+            source.voice = Some(client);
+            Ok(source)
         })
     }
 }
@@ -691,6 +711,13 @@ mod tests {
         stream.close().await;
 
         assert!(dropped.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn request_tts_muted_without_a_client_reports_unavailable() {
+        let stream = spawn_reader(FakeReader::new([]));
+        let error = stream.request_tts_muted(true).await.unwrap_err();
+        assert!(error.detail().contains("voice control unavailable"));
     }
 
     struct FakeReader {
