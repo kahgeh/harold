@@ -1,9 +1,7 @@
 use crate::channels::{split_body, truncate_body};
 use crate::util::sanitise_for_applescript;
 
-use super::{
-    NotificationPlan, confirmation_text, is_marked_as_harold, marked_as_harold, notification_plan,
-};
+use super::{NotificationPlan, is_marked_as_harold, notification_plan, send_script};
 
 #[test]
 fn split_body_no_question() {
@@ -98,23 +96,44 @@ fn matching_question_from_another_turn_sends_the_full_notification() {
     assert_eq!(plan, NotificationPlan::SendAll);
 }
 
+/// The text Messages is told to send, as the listener later reads it from chat.db.
+fn sent_text(text: &str) -> String {
+    let script = send_script(text, "+61400000000");
+    let body = script
+        .strip_prefix("tell application \"Messages\" to send \"")
+        .expect("send script prefix");
+    let end = body
+        .rfind("\" to buddy \"")
+        .expect("send script recipient clause");
+    body[..end].to_string()
+}
+
 #[test]
 fn listener_skips_every_message_harold_sends() {
     // Messages to the user's own number are stored as both sent and received rows,
     // and the listener reads both, so anything unmarked is routed back in as a reply.
-    for reply in [
+    for text in [
         "✓ Delivered to [harold  main:0.3]",
         "No active pane found. Available: harold  main:0.3",
         "No active agent sessions found.",
+        "[harold:0.1] Work is done. (harold)",
+        "Should I deploy?",
     ] {
+        let sent = sent_text(text);
         assert!(
-            is_marked_as_harold(&confirmation_text(reply)),
-            "{reply:?} would be read back as an inbound message"
+            is_marked_as_harold(sent.trim()),
+            "{text:?} is sent as {sent:?} and would be read back as an inbound message"
         );
+        assert!(sent.ends_with(text), "{sent:?} lost its body");
     }
-    assert!(is_marked_as_harold(&marked_as_harold(
-        "[harold:0.1] Work is done."
-    )));
+}
+
+#[test]
+fn send_script_escapes_quotes_and_backslashes_after_marking() {
+    assert_eq!(
+        send_script("say \"hi\" \\ bye", "bud\"dy"),
+        "tell application \"Messages\" to send \"🤖 say \\\"hi\\\" \\\\ bye\" to buddy \"bud\\\"dy\""
+    );
 }
 
 #[test]

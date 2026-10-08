@@ -19,17 +19,28 @@ use crate::util::sanitise_for_applescript;
 // Sending
 // ===========================================================================
 
-/// Low-level iMessage send — delivers `text` as-is (no prefix) to `recipient`.
-pub(crate) fn send_imessage_to(text: &str, recipient: &str) -> Result<(), String> {
-    let safe_text = sanitise_for_applescript(text);
+/// Marks text as written by Harold. The listener skips marked text when it reads
+/// chat.db, so Harold never routes its own messages back in as replies.
+const HAROLD_MARKER: char = '🤖';
+
+fn is_marked_as_harold(text: &str) -> bool {
+    text.starts_with(HAROLD_MARKER)
+}
+
+/// AppleScript that sends `text` to `recipient`. Every message goes out marked here,
+/// in the one place that builds a send: an unmarked "Delivered" confirmation is read
+/// back as a reply, routed, and confirmed again, without end.
+fn send_script(text: &str, recipient: &str) -> String {
+    let safe_text = sanitise_for_applescript(&format!("{HAROLD_MARKER} {text}"));
     let safe_recipient = sanitise_for_applescript(recipient);
     let escaped = safe_text.replace('\\', "\\\\").replace('"', "\\\"");
     let escaped_recipient = safe_recipient.replace('\\', "\\\\").replace('"', "\\\"");
-    let script = format!(
-        "tell application \"Messages\" to send \"{escaped}\" to buddy \"{escaped_recipient}\""
-    );
+    format!("tell application \"Messages\" to send \"{escaped}\" to buddy \"{escaped_recipient}\"")
+}
+
+fn send_imessage_to(text: &str, recipient: &str) -> Result<(), String> {
     let status = Command::new("osascript")
-        .args(["-e", &script])
+        .args(["-e", &send_script(text, recipient)])
         .status()
         .map_err(|error| format!("failed to start osascript: {error}"))?;
     if !status.success() {
@@ -38,29 +49,10 @@ pub(crate) fn send_imessage_to(text: &str, recipient: &str) -> Result<(), String
     Ok(())
 }
 
-/// Marks text as written by Harold. The listener skips marked text when it reads
-/// chat.db, so Harold never routes its own messages back in as replies.
-const HAROLD_MARKER: char = '🤖';
-
-fn marked_as_harold(text: &str) -> String {
-    format!("{HAROLD_MARKER} {text}")
-}
-
-fn is_marked_as_harold(text: &str) -> bool {
-    text.starts_with(HAROLD_MARKER)
-}
-
-/// Text of a confirmation or error reply as it is sent to the recipient. It carries
-/// the marker like a notification does: an unmarked "Delivered" receipt is read back
-/// as a reply, routed, and answered with another receipt, without end.
-fn confirmation_text(msg: &str) -> String {
-    marked_as_harold(msg)
-}
-
-/// Send an iMessage notification with robot-emoji prefix.
+/// Send an iMessage notification to `recipient`.
 fn send_raw_imessage(text: &str, recipient: &str) -> Result<(), String> {
     info!(msg = %text, "sending iMessage notification");
-    send_imessage_to(&marked_as_harold(text), recipient)
+    send_imessage_to(text, recipient)
 }
 
 /// Send a confirmation or error reply to the configured recipient.
@@ -70,7 +62,7 @@ pub(crate) fn send_imessage(msg: &str) -> Result<(), String> {
     let Some(recipient) = cfg.imessage.recipient.as_deref() else {
         return Err("iMessage recipient is not configured".into());
     };
-    send_imessage_to(&confirmation_text(msg), recipient)
+    send_imessage_to(msg, recipient)
 }
 
 fn recent_outgoing_texts(handle_id: i64) -> Vec<String> {
