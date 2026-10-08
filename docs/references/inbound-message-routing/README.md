@@ -19,7 +19,7 @@ Routing has two stages: inbound collection and routing resolution.
 
 Each cursor is advanced only after a successful `append_inbound_message`, so a crash before the append causes the message to be reprocessed on the next poll rather than skipped.
 
-A reply typed in Messages on the Mac is stored as two rows with the same text, one matched by each query, so the listener records a row only once when both arrive: a row is skipped if a row with identical text from the other query was recorded within the last 10 seconds and has not already been matched this way. A skipped row still advances its cursor but appends no event. Two rows with the same text from the same query are both recorded (the user sent it twice), and rows discarded while messaging is paused are not remembered.
+A reply typed in Messages on the Mac is stored as two rows with the same text, one matched by each query, so the listener records a row only once when both arrive: a row is skipped if a row with identical text from the other query was recorded within the last 10 seconds and has not already been matched this way. A skipped row still advances its cursor but appends no event. Two rows with the same text from the same query are both recorded (the user sent it twice), and rows discarded while messaging is paused are not remembered. Two limits are known: if the two copies are stored more than 10 seconds apart, or Harold restarts between them, the reply is routed twice.
 
 **Telegram** — Long-polls the Telegram Bot API `getUpdates` endpoint (30s timeout). On startup, drains any pre-existing updates to avoid replaying old messages. Only messages from the configured `chat_id` are processed; messages starting with `🤖` (Harold's own messages) are filtered out.
 
