@@ -149,7 +149,10 @@ async fn run_async(
             .await?
             {
                 Control::Quit => return Ok(()),
-                Control::Retry | Control::Continue | Control::SetTtsMuted(_) => {}
+                Control::Retry
+                | Control::Continue
+                | Control::SetTtsMuted(_)
+                | Control::SetMessagingPaused(_) => {}
             }
         }
         retry_immediately = false;
@@ -190,7 +193,7 @@ async fn run_async(
             Ok(Control::Retry) => {
                 retry_immediately = true;
             }
-            Ok(Control::Continue | Control::SetTtsMuted(_)) => {
+            Ok(Control::Continue | Control::SetTtsMuted(_) | Control::SetMessagingPaused(_)) => {
                 let detail = core
                     .app
                     .runtime_status()
@@ -223,6 +226,9 @@ trait StreamPort: Sized {
     fn set_tts_muted(&mut self, _muted: bool) -> BoxFuture<'_, Result<(), SourceError>> {
         Box::pin(async { Ok(()) })
     }
+    fn set_messaging_paused(&mut self, _paused: bool) -> BoxFuture<'_, Result<(), SourceError>> {
+        Box::pin(async { Ok(()) })
+    }
 }
 
 impl SourcePort for AgentStateSource {
@@ -244,6 +250,10 @@ impl StreamPort for SourceStream {
 
     fn set_tts_muted(&mut self, muted: bool) -> BoxFuture<'_, Result<(), SourceError>> {
         Box::pin(self.request_tts_muted(muted))
+    }
+
+    fn set_messaging_paused(&mut self, paused: bool) -> BoxFuture<'_, Result<(), SourceError>> {
+        Box::pin(self.request_messaging_paused(paused))
     }
 }
 
@@ -290,7 +300,7 @@ where
                 match handle_input(item, core, navigator)? {
                     Control::Quit => return Ok(OpenOutcome::Quit),
                     Control::Retry => return Ok(OpenOutcome::RetryNow),
-                    Control::Continue | Control::SetTtsMuted(_) => draw(terminal, &core.app, clock)?,
+                    Control::Continue | Control::SetTtsMuted(_) | Control::SetMessagingPaused(_) => draw(terminal, &core.app, clock)?,
                 }
             }
             () = shutdown.recv_shutdown() => return Ok(OpenOutcome::Quit),
@@ -345,6 +355,12 @@ where
                     draw(terminal, &core.app, clock)?;
                     continue;
                 }
+                if let Control::SetMessagingPaused(paused) = control {
+                    let result = stream.set_messaging_paused(paused).await;
+                    core.messaging_result(result);
+                    draw(terminal, &core.app, clock)?;
+                    continue;
+                }
                 draw(terminal, &core.app, clock)?;
                 if control != Control::Continue {
                     break Ok(control);
@@ -379,7 +395,7 @@ async fn wait_for_retry(
             item = input.recv() => {
                 let control = handle_input(item, core, navigator)?;
                 draw(terminal, &core.app, clock)?;
-                if !matches!(control, Control::Continue | Control::SetTtsMuted(_)) {
+                if !matches!(control, Control::Continue | Control::SetTtsMuted(_) | Control::SetMessagingPaused(_)) {
                     return Ok(control);
                 }
             }
@@ -455,6 +471,7 @@ fn runtime_status_detail(status: &RuntimeStatus) -> String {
         RuntimeStatus::Retrying { detail, .. }
         | RuntimeStatus::NavigationFailed(detail)
         | RuntimeStatus::VoiceFailed(detail)
+        | RuntimeStatus::MessagingFailed(detail)
         | RuntimeStatus::SourceError(detail) => detail.clone(),
         RuntimeStatus::NavigationUnavailable => "navigation unavailable".into(),
     }
@@ -773,6 +790,7 @@ enum Control {
     Retry,
     Quit,
     SetTtsMuted(bool),
+    SetMessagingPaused(bool),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -805,6 +823,7 @@ impl RuntimeCore {
                 ConnectionState::Connecting,
                 Snapshot {
                     tts_muted: false,
+                    messaging_paused: false,
                     through_event_version: 0,
                     server_time_ms: 0,
                     monitor_health: Vec::new(),
@@ -825,15 +844,23 @@ impl RuntimeCore {
     }
 
     fn voice_result(&mut self, result: Result<(), SourceError>) {
+        self.request_result(result, RuntimeStatus::VoiceFailed);
+    }
+
+    fn messaging_result(&mut self, result: Result<(), SourceError>) {
+        self.request_result(result, RuntimeStatus::MessagingFailed);
+    }
+
+    fn request_result(
+        &mut self,
+        result: Result<(), SourceError>,
+        failed: fn(String) -> RuntimeStatus,
+    ) {
         match result {
             Ok(()) => self.app.clear_runtime_status(),
-            Err(error) => {
-                self.app
-                    .set_runtime_status(RuntimeStatus::VoiceFailed(sanitize_display(
-                        &error.to_string(),
-                        ERROR_LIMIT,
-                    )))
-            }
+            Err(error) => self
+                .app
+                .set_runtime_status(failed(sanitize_display(&error.to_string(), ERROR_LIMIT))),
         }
         if let Some(status) = self
             .navigation_issue
@@ -923,6 +950,7 @@ impl RuntimeCore {
             Effect::Retry => Control::Retry,
             Effect::Quit => Control::Quit,
             Effect::SetTtsMuted(muted) => Control::SetTtsMuted(muted),
+            Effect::SetMessagingPaused(paused) => Control::SetMessagingPaused(paused),
             Effect::Navigate { pane_id } => {
                 let Some(client) = self.client.as_deref() else {
                     self.app
@@ -1445,6 +1473,94 @@ mod tests {
         (core, recorded)
     }
 
+    async fn run_palette_pause(fail: bool) -> (RuntimeCore, Vec<bool>) {
+        let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut stream = FakeStream::pending(Arc::new(AtomicBool::new(false)));
+        stream.pause = Some(MuteProbe {
+            calls: Arc::clone(&calls),
+            fail,
+        });
+        let (input_sender, mut input) = InputPump::channel();
+        for key in "/messaging"
+            .chars()
+            .map(KeyCode::Char)
+            .chain([KeyCode::Enter, KeyCode::Char('q')])
+        {
+            input_sender.try_send(InputMessage::Key(key)).unwrap();
+        }
+        let (_shutdown_sender, mut shutdown) = FakeShutdown::channel();
+        let mut core = live_core(false);
+        let outcome = consume_stream(
+            stream,
+            &mut core,
+            &mut input,
+            &mut shutdown,
+            &mut FakeScreen::default(),
+            &FakeNavigator::successful(),
+            &FakeClock::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome, Control::Quit);
+        let recorded = calls.lock().unwrap().clone();
+        (core, recorded)
+    }
+
+    #[tokio::test]
+    async fn consume_stream_sends_palette_pause_request_and_clears_status_on_success() {
+        let (core, calls) = run_palette_pause(false).await;
+        assert_eq!(calls, vec![true]);
+        assert!(!matches!(
+            core.app.runtime_status(),
+            Some(RuntimeStatus::MessagingFailed(_))
+        ));
+        // Confirmed state is still driven by the snapshot, not the RPC.
+        assert!(!core.app.messaging_paused());
+    }
+
+    #[tokio::test]
+    async fn consume_stream_reports_messaging_failed_when_the_pause_request_fails() {
+        let (core, calls) = run_palette_pause(true).await;
+        assert_eq!(calls, vec![true]);
+        assert!(matches!(
+            core.app.runtime_status(),
+            Some(RuntimeStatus::MessagingFailed(detail)) if detail.contains("pause refused")
+        ));
+    }
+
+    #[test]
+    fn palette_messaging_action_becomes_a_runtime_control() {
+        let navigator = FakeNavigator::successful();
+        let mut core = live_core(false);
+        core.handle_key(KeyCode::Char('/'), &navigator);
+        for character in "messaging".chars() {
+            core.handle_key(KeyCode::Char(character), &navigator);
+        }
+        assert_eq!(
+            core.handle_key(KeyCode::Enter, &navigator),
+            Control::SetMessagingPaused(true)
+        );
+    }
+
+    #[test]
+    fn messaging_result_failure_sets_status_and_leaves_the_confirmed_state() {
+        let mut core = live_core(false);
+        core.messaging_result(Err(SourceError::Transport("boom".into())));
+        assert!(matches!(
+            core.app.runtime_status(),
+            Some(RuntimeStatus::MessagingFailed(detail)) if detail.contains("boom")
+        ));
+        assert!(!core.app.messaging_paused());
+
+        // `RuntimeCore::new(None)` carries a standing navigation issue, which
+        // is restored once the messaging error clears.
+        core.messaging_result(Ok(()));
+        assert_eq!(
+            core.app.runtime_status(),
+            Some(&RuntimeStatus::NavigationUnavailable)
+        );
+    }
+
     #[tokio::test]
     async fn consume_stream_sends_palette_mute_request_and_clears_status_on_success() {
         let (core, calls) = run_palette_mute(false).await;
@@ -1540,6 +1656,7 @@ mod tests {
     fn snapshot(revision: u64, health_state: MonitorHealthState) -> Snapshot {
         Snapshot {
             tts_muted: false,
+            messaging_paused: false,
             through_event_version: revision,
             server_time_ms: 999_999_999,
             monitor_health: vec![MonitorHealth {
@@ -1654,6 +1771,7 @@ mod tests {
         closed: Arc<AtomicBool>,
         receive: FakeReceive,
         mute: Option<MuteProbe>,
+        pause: Option<MuteProbe>,
     }
 
     struct MuteProbe {
@@ -1672,6 +1790,7 @@ mod tests {
                 closed,
                 receive: FakeReceive::Pending,
                 mute: None,
+                pause: None,
             }
         }
 
@@ -1680,6 +1799,7 @@ mod tests {
                 closed,
                 receive: FakeReceive::Item(Some(Ok(snapshot))),
                 mute: None,
+                pause: None,
             }
         }
     }
@@ -1701,6 +1821,21 @@ mod tests {
             Box::pin(async move {
                 if fail {
                     Err(SourceError::Transport("mute refused".into()))
+                } else {
+                    Ok(())
+                }
+            })
+        }
+
+        fn set_messaging_paused(&mut self, paused: bool) -> BoxFuture<'_, Result<(), SourceError>> {
+            let Some(probe) = &self.pause else {
+                return Box::pin(async { Ok(()) });
+            };
+            probe.calls.lock().unwrap().push(paused);
+            let fail = probe.fail;
+            Box::pin(async move {
+                if fail {
+                    Err(SourceError::Transport("pause refused".into()))
                 } else {
                     Ok(())
                 }

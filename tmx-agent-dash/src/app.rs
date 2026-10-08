@@ -107,6 +107,7 @@ pub struct Snapshot {
     pub monitor_health: Vec<MonitorHealth>,
     pub rows: Vec<AgentRow>,
     pub tts_muted: bool,
+    pub messaging_paused: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -161,6 +162,7 @@ pub(crate) enum RuntimeStatus {
     NavigationUnavailable,
     NavigationFailed(String),
     VoiceFailed(String),
+    MessagingFailed(String),
     SourceError(String),
 }
 
@@ -201,6 +203,7 @@ pub enum Effect {
     Retry,
     Quit,
     SetTtsMuted(bool),
+    SetMessagingPaused(bool),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -492,6 +495,11 @@ impl App {
             })
     }
 
+    /// Whether Harold has confirmed that away-channel messaging is paused.
+    pub fn messaging_paused(&self) -> bool {
+        self.has_snapshot && self.snapshot.messaging_paused
+    }
+
     pub fn degraded_health(&self) -> impl Iterator<Item = &MonitorHealth> {
         self.snapshot
             .monitor_health
@@ -507,7 +515,7 @@ impl App {
             return Vec::new();
         }
         let query = normalize_search(&palette.query);
-        let all = match self.voice() {
+        let mut all = match self.voice() {
             VoiceState::On => vec![PaletteEntry {
                 label: "Voice: mute",
                 effect: Effect::SetTtsMuted(true),
@@ -518,6 +526,19 @@ impl App {
             }],
             VoiceState::Unknown => Vec::new(),
         };
+        if self.has_snapshot {
+            all.push(if self.snapshot.messaging_paused {
+                PaletteEntry {
+                    label: "Messaging: resume",
+                    effect: Effect::SetMessagingPaused(false),
+                }
+            } else {
+                PaletteEntry {
+                    label: "Messaging: pause",
+                    effect: Effect::SetMessagingPaused(true),
+                }
+            });
+        }
         all.into_iter()
             .filter(|entry| normalize_search(entry.label).contains(&query))
             .collect()
@@ -828,6 +849,7 @@ mod tests {
             monitor_health: Vec::new(),
             rows: Vec::new(),
             tts_muted: false,
+            messaging_paused: false,
         };
         let search = SearchState {
             query: String::new(),
@@ -846,6 +868,7 @@ mod tests {
         app.apply_later_snapshot(Snapshot {
             through_event_version: 2,
             tts_muted: true,
+            messaging_paused: false,
             ..empty
         })
         .unwrap();
@@ -871,6 +894,7 @@ mod tests {
         assert_eq!(app.connection, ConnectionState::Connecting);
         app.apply_first_snapshot(Snapshot {
             tts_muted: false,
+            messaging_paused: false,
             through_event_version: 2,
             server_time_ms: 222,
             monitor_health: vec![health(MonitorHealthState::Degraded, "tmux_unavailable")],
@@ -924,6 +948,7 @@ mod tests {
         let mut app = empty_app();
         app.apply_first_snapshot(Snapshot {
             tts_muted: false,
+            messaging_paused: false,
             through_event_version: 10,
             server_time_ms: 1_000,
             monitor_health: vec![
@@ -943,6 +968,7 @@ mod tests {
         assert!(
             !app.apply_later_snapshot(Snapshot {
                 tts_muted: false,
+                messaging_paused: false,
                 through_event_version: 10,
                 server_time_ms: 1_001,
                 monitor_health: vec![health(MonitorHealthState::Healthy, "ok")],
@@ -955,6 +981,7 @@ mod tests {
         assert!(
             app.apply_later_snapshot(Snapshot {
                 tts_muted: false,
+                messaging_paused: false,
                 through_event_version: 11,
                 server_time_ms: 1_100,
                 monitor_health: vec![health(MonitorHealthState::Healthy, "ok")],
@@ -1462,6 +1489,7 @@ mod tests {
     fn snapshot(through_event_version: u64, server_time_ms: i64, rows: Vec<AgentRow>) -> Snapshot {
         Snapshot {
             tts_muted: false,
+            messaging_paused: false,
             through_event_version,
             server_time_ms,
             monitor_health: Vec::new(),
@@ -1522,6 +1550,7 @@ mod tests {
             monitor_health: Vec::new(),
             rows: Vec::new(),
             tts_muted: muted,
+            messaging_paused: false,
         };
         let mut app = App::new(
             ConnectionState::Connecting,
@@ -1619,6 +1648,7 @@ mod tests {
                 monitor_health: Vec::new(),
                 rows: Vec::new(),
                 tts_muted: false,
+                messaging_paused: false,
             },
             SearchState {
                 query: String::new(),
@@ -1633,6 +1663,76 @@ mod tests {
         stale.mark_disconnected();
         stale.handle_key(KeyCode::Char('/'));
         assert!(stale.palette_entries().is_empty());
+    }
+
+    fn live_messaging_app(paused: bool) -> App {
+        let mut app = live_voice_app(false);
+        app.snapshot.messaging_paused = paused;
+        app
+    }
+
+    #[test]
+    fn palette_offers_only_the_applicable_messaging_action_and_runs_it() {
+        let mut app = live_messaging_app(false);
+        assert!(!app.messaging_paused());
+        app.handle_key(KeyCode::Char('/'));
+        type_text(&mut app, "messaging");
+        let labels: Vec<_> = app.palette_entries().iter().map(|e| e.label).collect();
+        assert_eq!(labels, ["Messaging: pause"]);
+        assert_eq!(
+            app.handle_key(KeyCode::Enter),
+            Effect::SetMessagingPaused(true)
+        );
+        assert!(app.palette.is_none());
+
+        let mut app = live_messaging_app(true);
+        assert!(app.messaging_paused());
+        app.handle_key(KeyCode::Char('/'));
+        type_text(&mut app, "MESSAGING");
+        let labels: Vec<_> = app.palette_entries().iter().map(|e| e.label).collect();
+        assert_eq!(labels, ["Messaging: resume"]);
+        assert_eq!(
+            app.handle_key(KeyCode::Enter),
+            Effect::SetMessagingPaused(false)
+        );
+    }
+
+    #[test]
+    fn unfiltered_palette_lists_voice_then_messaging() {
+        let mut app = live_messaging_app(false);
+        app.handle_key(KeyCode::Char('/'));
+        let labels: Vec<_> = app.palette_entries().iter().map(|e| e.label).collect();
+        assert_eq!(labels, ["Voice: mute", "Messaging: pause"]);
+    }
+
+    #[test]
+    fn messaging_actions_are_hidden_before_a_snapshot_and_when_not_live() {
+        let mut app = App::new(
+            ConnectionState::Connecting,
+            Snapshot {
+                through_event_version: 0,
+                server_time_ms: 0,
+                monitor_health: Vec::new(),
+                rows: Vec::new(),
+                tts_muted: false,
+                messaging_paused: true,
+            },
+            SearchState {
+                query: String::new(),
+                editing: false,
+            },
+            None,
+        );
+        assert!(!app.messaging_paused());
+        app.handle_key(KeyCode::Char('/'));
+        assert!(app.palette_entries().is_empty());
+
+        let mut stale = live_messaging_app(true);
+        stale.mark_disconnected();
+        stale.handle_key(KeyCode::Char('/'));
+        assert!(stale.palette_entries().is_empty());
+        // The last confirmed state stays on show while the stream is down.
+        assert!(stale.messaging_paused());
     }
 
     #[test]

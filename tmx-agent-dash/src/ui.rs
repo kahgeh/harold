@@ -80,19 +80,27 @@ fn voice_style(voice: crate::app::VoiceState) -> Style {
 
 fn render_masthead(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let voice = app.voice();
-    let tail = vec![
-        Span::styled(
-            format!(
-                "TRANSPORT {}  ·  REV #{:05}",
-                app.connection.label(),
-                app.snapshot.through_event_version
-            ),
-            transport_style(app.connection).add_modifier(Modifier::BOLD),
-        ),
+    let transport_style = transport_style(app.connection).add_modifier(Modifier::BOLD);
+    let transport = Span::styled(
+        format!("TRANSPORT {}", app.connection.label()),
+        transport_style,
+    );
+    let revision = Span::styled(
+        format!("  ·  REV #{:05}", app.snapshot.through_event_version),
+        transport_style,
+    );
+    let mut tail = vec![
         Span::raw("  ·  "),
         Span::styled(voice.label(), voice_style(voice)),
     ];
-    let mut spans = if area.width < COMPACT_WIDTH {
+    if app.messaging_paused() {
+        tail.push(Span::raw("  ·  "));
+        tail.push(Span::styled(
+            "■ MSG PAUSED",
+            Style::default().fg(CORAL).add_modifier(Modifier::BOLD),
+        ));
+    }
+    let heading = if area.width < COMPACT_WIDTH {
         vec![
             Span::styled(" TMX DASH ", Style::default().fg(AMBER)),
             Span::raw("· "),
@@ -107,15 +115,24 @@ fn render_masthead(frame: &mut Frame<'_>, area: Rect, app: &App) {
             Span::raw("  ·  "),
         ]
     };
-    spans.extend(tail.clone());
-    let mut title = Line::from(spans);
-    if title.width() > usize::from(area.width.saturating_sub(2)) {
-        // Transport, revision and voice outrank the title when the masthead is tight.
-        title = Line::from(
-            std::iter::once(Span::raw(" "))
-                .chain(tail)
+    let line = |lead: Vec<Span<'static>>, with_revision: bool| {
+        Line::from(
+            lead.into_iter()
+                .chain(std::iter::once(transport.clone()))
+                .chain(with_revision.then(|| revision.clone()))
+                .chain(tail.iter().cloned())
                 .collect::<Vec<_>>(),
-        );
+        )
+    };
+    let available = usize::from(area.width.saturating_sub(2));
+    let mut title = line(heading, true);
+    // When the masthead is tight the title goes first, then the revision. Transport,
+    // voice and the paused marker always remain.
+    if title.width() > available {
+        title = line(vec![Span::raw(" ")], true);
+    }
+    if title.width() > available {
+        title = line(vec![Span::raw(" ")], false);
     }
     frame.render_widget(
         Paragraph::new(title).block(board_block().borders(Borders::ALL)),
@@ -190,6 +207,7 @@ fn render_monitor(frame: &mut Frame<'_>, area: Rect, app: &App, now_ms: i64) {
                 format!("NAVIGATION FAILED: {detail}")
             }
             RuntimeStatus::VoiceFailed(detail) => format!("VOICE ERROR: {detail}"),
+            RuntimeStatus::MessagingFailed(detail) => format!("MESSAGING ERROR: {detail}"),
             RuntimeStatus::SourceError(detail) => format!("SOURCE ERROR: {detail}"),
         };
         text.push_span(Span::styled(
@@ -881,6 +899,7 @@ mod tests {
             ConnectionState::Live,
             Snapshot {
                 tts_muted: false,
+                messaging_paused: false,
                 through_event_version: 1842,
                 server_time_ms: 1_777_000_000_000,
                 monitor_health: vec![
@@ -1008,6 +1027,7 @@ mod tests {
             ConnectionState::Live,
             Snapshot {
                 tts_muted: false,
+                messaging_paused: false,
                 through_event_version: 1843,
                 server_time_ms: 1_777_000_000_000,
                 monitor_health: vec![MonitorHealth {
@@ -1049,6 +1069,7 @@ mod tests {
             ConnectionState::Live,
             Snapshot {
                 tts_muted: false,
+                messaging_paused: false,
                 through_event_version: 1843,
                 server_time_ms: 1_777_000_000_000,
                 monitor_health: Vec::new(),
@@ -1221,6 +1242,7 @@ mod tests {
             ConnectionState::Stale,
             Snapshot {
                 tts_muted: false,
+                messaging_paused: false,
                 through_event_version: 42,
                 server_time_ms: 90_000,
                 monitor_health: vec![health(MonitorHealthState::Healthy, "ok")],
@@ -1307,6 +1329,7 @@ mod tests {
 
         app.apply_later_snapshot(Snapshot {
             tts_muted: false,
+            messaging_paused: false,
             through_event_version: 43,
             server_time_ms: 100_000,
             monitor_health: vec![health(MonitorHealthState::Healthy, "ok")],
@@ -1326,6 +1349,7 @@ mod tests {
             ConnectionState::Live,
             Snapshot {
                 tts_muted: false,
+                messaging_paused: false,
                 through_event_version: 42,
                 server_time_ms: 100_000,
                 monitor_health: vec![health(MonitorHealthState::Degraded, "capture_failed")],
@@ -1539,12 +1563,69 @@ mod tests {
                 monitor_health: Vec::new(),
                 rows: Vec::new(),
                 tts_muted: false,
+                messaging_paused: false,
             },
             empty_search(),
             None,
         );
         assert!(rendered(&unknown, 140, 38, 100_000).contains("○ VOICE —"));
         assert!(rendered(&unknown, 60, 18, 100_000).contains("○ VOICE —"));
+    }
+
+    fn paused_app() -> App {
+        let mut app = live_app(Vec::new(), None);
+        app.apply_later_snapshot(crate::app::Snapshot {
+            through_event_version: 43,
+            messaging_paused: true,
+            ..app.snapshot.clone()
+        })
+        .unwrap();
+        app
+    }
+
+    #[test]
+    fn masthead_marks_paused_messaging_at_every_supported_width() {
+        let app = paused_app();
+
+        let wide = rendered(&app, 140, 38, 100_000);
+        assert!(wide.contains("AGENT SIGNAL BOARD"));
+        assert!(wide.contains("REV #00043  ·  ● VOICE ON  ·  ■ MSG PAUSED"));
+
+        // The title goes first when the line is tight.
+        let medium = rendered(&app, 84, 38, 100_000);
+        assert!(!medium.contains("AGENT SIGNAL BOARD"));
+        assert!(medium.contains("TRANSPORT LIVE  ·  REV #00043  ·  ● VOICE ON  ·  ■ MSG PAUSED"));
+
+        // Then the revision: transport, voice and the paused marker always remain.
+        let minimum = rendered(&app, 60, 18, 100_000);
+        assert!(!minimum.contains("TMX DASH"));
+        assert!(!minimum.contains("REV #"));
+        assert!(minimum.contains("TRANSPORT LIVE  ·  ● VOICE ON  ·  ■ MSG PAUSED"));
+    }
+
+    #[test]
+    fn masthead_shows_nothing_about_messaging_while_it_is_running() {
+        let app = live_app(Vec::new(), None);
+        for (width, height) in [(140, 38), (84, 38), (60, 18)] {
+            let content = rendered(&app, width, height, 100_000);
+            assert!(!content.contains("MSG"), "{width}x{height}");
+            assert!(content.contains("REV #00042"), "{width}x{height}");
+        }
+    }
+
+    #[test]
+    fn paused_marker_is_coral() {
+        let buffer = rendered_buffer(&paused_app(), 140, 38, 100_000);
+        assert_styled_occurrences(&buffer, "■ MSG PAUSED", Color::Rgb(224, 114, 98), 1);
+    }
+
+    #[test]
+    fn messaging_failure_is_reported_in_the_monitor_line() {
+        let mut app = live_app(Vec::new(), None);
+        app.set_runtime_status(crate::app::RuntimeStatus::MessagingFailed(
+            "pause refused".into(),
+        ));
+        assert!(rendered(&app, 140, 38, 100_000).contains("MESSAGING ERROR: pause refused"));
     }
 
     #[test]
@@ -1834,6 +1915,7 @@ mod tests {
     fn snapshot(monitor_health: Vec<MonitorHealth>, rows: Vec<AgentRow>) -> Snapshot {
         Snapshot {
             tts_muted: false,
+            messaging_paused: false,
             through_event_version: 42,
             server_time_ms: 100_000,
             monitor_health,
@@ -2056,6 +2138,7 @@ mod tests {
                 monitor_health: Vec::new(),
                 rows: Vec::new(),
                 tts_muted: false,
+                messaging_paused: false,
             },
             empty_search(),
             None,

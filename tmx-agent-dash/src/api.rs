@@ -6,8 +6,8 @@ use std::time::Duration;
 
 use harold_api::harold::{
     AgentMonitorHealth, AgentPaneState, AgentState as ProtoAgentState, AgentStateSnapshot,
-    MonitorHealthState as ProtoMonitorHealthState, SetTtsMutedRequest, WatchAgentStatesRequest,
-    harold_client::HaroldClient,
+    MonitorHealthState as ProtoMonitorHealthState, SetMessagingPausedRequest, SetTtsMutedRequest,
+    WatchAgentStatesRequest, harold_client::HaroldClient,
 };
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -173,6 +173,20 @@ impl SourceStream {
         .map_err(|error| SourceError::transport(error.to_string()))
     }
 
+    pub async fn request_messaging_paused(&self, paused: bool) -> Result<(), SourceError> {
+        let Some(mut client) = self.voice.clone() else {
+            return Err(SourceError::transport("messaging control unavailable"));
+        };
+        tokio::time::timeout(
+            VOICE_REQUEST_TIMEOUT,
+            client.set_messaging_paused(SetMessagingPausedRequest { paused }),
+        )
+        .await
+        .map_err(|_| SourceError::transport("messaging request timed out"))?
+        .map(|_| ())
+        .map_err(|error| SourceError::transport(error.to_string()))
+    }
+
     pub async fn close(mut self) {
         if let Some(reader) = self.reader.take() {
             reader.abort();
@@ -242,6 +256,7 @@ pub fn map_snapshot(snapshot: AgentStateSnapshot) -> Result<Snapshot, ProtocolEr
         monitor_health,
         rows,
         tts_muted: snapshot.tts_muted,
+        messaging_paused: snapshot.messaging_paused,
     })
 }
 
@@ -333,6 +348,19 @@ mod tests {
             })
             .unwrap();
             assert_eq!(mapped.tts_muted, muted);
+        }
+    }
+
+    #[test]
+    fn maps_messaging_paused_from_the_snapshot() {
+        for paused in [false, true] {
+            let mapped = map_snapshot(AgentStateSnapshot {
+                messaging_paused: paused,
+                ..Default::default()
+            })
+            .unwrap();
+            assert_eq!(mapped.messaging_paused, paused);
+            assert!(!mapped.tts_muted);
         }
     }
 
@@ -724,6 +752,13 @@ mod tests {
         let stream = spawn_reader(FakeReader::new([]));
         let error = stream.request_tts_muted(true).await.unwrap_err();
         assert!(error.detail().contains("voice control unavailable"));
+    }
+
+    #[tokio::test]
+    async fn request_messaging_paused_without_a_client_reports_unavailable() {
+        let stream = spawn_reader(FakeReader::new([]));
+        let error = stream.request_messaging_paused(true).await.unwrap_err();
+        assert!(error.detail().contains("messaging control unavailable"));
     }
 
     struct FakeReader {
