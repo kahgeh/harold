@@ -66,7 +66,7 @@ outside this MVP; use a trusted deployment boundary for remote connections.
 | `k` / Up | Select the previous visible row |
 | `g` / `G` | Select the first / last visible row |
 | `f` | Enter search editing |
-| `/` | Open the command palette (e.g. `Voice: mute` / `Voice: unmute`); Enter runs, Esc closes |
+| `/` | Open the command palette (type to filter, Up/Down choose, Enter run, Esc close; e.g. `Voice: mute` / `Voice: unmute`) |
 | Printable text | Extend the query while editing |
 | Backspace | Remove the last Unicode scalar value while editing |
 | `Enter` | Accept the query while editing; otherwise switch the invoking tmux client to the selected pane |
@@ -77,7 +77,12 @@ outside this MVP; use a trusted deployment boundary for remote connections.
 Search is a local, case-insensitive filter over provider, work summary, tmux
 target, and working directory. It never sends a search request to Harold and it
 does not pause incoming snapshots. The search line reports visible and total
-row counts while a filter is active.
+row counts while a filter is active. Press `f` to start editing the search query.
+
+The masthead shows the confirmed voice state as `● VOICE ON` or `○ VOICE MUTED`,
+taken from the Harold snapshot rather than from local guesses. Voice commands are
+offered in the palette only while the connection is LIVE and a snapshot has
+arrived; otherwise the palette shows `Voice state unavailable`.
 
 ## Reading status
 

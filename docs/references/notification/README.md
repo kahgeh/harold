@@ -62,6 +62,14 @@ Config keys (`[tts]`):
 | `fallback_voice`   | Optional fallback voice name passed as `-v`               |
 | `fallback_args`    | Optional fallback args prepended before `-v` and message  |
 
+### Muting voice
+
+`SetTtsMuted(muted)` turns the at-desk TTS channel off or on. The flag is stored as a `TtsMuteChanged` stream event and projected into the `settings` table, so it persists across daemon restarts until changed back. It is part of the agent-state snapshot (`tts_muted`), which is how `tmx-agent-dash` shows `VOICE ON` / `VOICE MUTED`.
+
+- Mute gates only the at-desk TTS channel. The delivery is recorded as an intentional skip. Away notifications (iMessage, Telegram) are unaffected.
+- A `TurnCompleted` delivered in the same projection batch as a mute change observes the post-batch value.
+- Limitation: `SetTtsMuted` compares the requested value against the daemon's last published snapshot, so two opposite requests from a non-dash client within the projection window may drop the second. The dash always sends from confirmed state and is unaffected.
+
 ## Away: iMessage or Telegram
 
 The away channel is selected by `[notify] away_channel` (`"imessage"` or `"telegram"`). Both channels share the same notification flow and prefix all outgoing messages with `🤖`. This serves two purposes:

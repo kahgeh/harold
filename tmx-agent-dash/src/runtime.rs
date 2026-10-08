@@ -828,7 +828,6 @@ impl RuntimeCore {
             Effect::None => Control::Continue,
             Effect::Retry => Control::Retry,
             Effect::Quit => Control::Quit,
-            // Wired to the runtime in a later task.
             Effect::SetTtsMuted(muted) => Control::SetTtsMuted(muted),
             Effect::Navigate { pane_id } => {
                 let Some(client) = self.client.as_deref() else {
