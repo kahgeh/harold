@@ -13,7 +13,7 @@ use crate::agent::domain::{
 
 use super::{
     HaroldStore, InboundMessage, TurnCompleted, append_agent_events, append_inbound_message,
-    append_turn_completed,
+    append_tts_mute_changed, append_turn_completed,
 };
 
 struct TestDirectory(PathBuf);
@@ -432,7 +432,7 @@ async fn fresh_schema_has_one_initial_record_across_reopen() {
     while let Some(row) = rows.next().await.unwrap() {
         names.push(row.get_value(0).unwrap().as_text().unwrap().to_string());
     }
-    assert_eq!(names, ["001_initial"]);
+    assert_eq!(names, ["001_initial", "002_settings"]);
 }
 
 #[tokio::test]
@@ -545,7 +545,7 @@ async fn unknown_schema_record_is_rejected_without_modifying_pending_delivery() 
             .get_value(0)
             .unwrap()
             .as_integer(),
-        Some(&2)
+        Some(&3)
     );
 }
 
@@ -1064,4 +1064,53 @@ async fn generated_activity_summary_append_normalizes_description_and_rejects_em
     let event: AgentActivitySummaryGenerated =
         serde_json::from_value(stored[1].payload.clone()).unwrap();
     assert_eq!(event.description.chars().count(), 160);
+}
+
+#[tokio::test]
+async fn tts_mute_is_projected_into_the_snapshot_and_survives_reopen() {
+    let directory = TestDirectory::new();
+    let store = HaroldStore::open(directory.path()).await.unwrap();
+    assert!(!store.load_agent_snapshot().await.unwrap().tts_muted);
+
+    append_tts_mute_changed(&store, true).await.unwrap();
+    let batch = store.project_unhandled_events(10).await.unwrap();
+    assert_eq!(batch.applied, 1);
+    assert!(batch.snapshot_changed);
+    let snapshot = store.load_agent_snapshot().await.unwrap();
+    assert!(snapshot.tts_muted);
+    assert_eq!(snapshot.through_event_version, batch.through_event_version);
+
+    drop(store);
+    let reopened = HaroldStore::open(directory.path()).await.unwrap();
+    assert!(reopened.load_agent_snapshot().await.unwrap().tts_muted);
+
+    append_tts_mute_changed(&reopened, false).await.unwrap();
+    reopened.project_unhandled_events(10).await.unwrap();
+    assert!(!reopened.load_agent_snapshot().await.unwrap().tts_muted);
+}
+
+#[tokio::test]
+async fn tts_mute_event_creates_no_delivery() {
+    let directory = TestDirectory::new();
+    let store = HaroldStore::open(directory.path()).await.unwrap();
+    append_tts_mute_changed(&store, true).await.unwrap();
+    store.project_unhandled_events(10).await.unwrap();
+    assert!(store.next_pending_delivery().await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn second_migration_applies_to_a_database_that_only_has_the_first() {
+    let directory = TestDirectory::new();
+    {
+        let store = HaroldStore::open(directory.path()).await.unwrap();
+        let conn = store.state.connect().unwrap();
+        conn.execute("DROP TABLE settings", ()).await.unwrap();
+        conn.execute("DELETE FROM _migrations WHERE name = '002_settings'", ())
+            .await
+            .unwrap();
+    }
+    let reopened = HaroldStore::open(directory.path()).await.unwrap();
+    append_tts_mute_changed(&reopened, true).await.unwrap();
+    reopened.project_unhandled_events(10).await.unwrap();
+    assert!(reopened.load_agent_snapshot().await.unwrap().tts_muted);
 }

@@ -7,6 +7,7 @@ use super::snapshot::AgentSnapshotHub;
 
 fn snapshot(revision: i64, summary: Option<&str>) -> AgentSnapshot {
     AgentSnapshot {
+        tts_muted: false,
         through_event_version: EventStreamVersion::new(revision).expect("valid revision"),
         server_time_ms: 10_000 + revision,
         monitor_health: Vec::new(),

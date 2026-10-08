@@ -169,4 +169,5 @@ pub(crate) struct AgentSnapshot {
     pub server_time_ms: i64,
     pub monitor_health: Vec<MonitorHealthProjection>,
     pub panes: Vec<AgentPaneProjection>,
+    pub tts_muted: bool,
 }

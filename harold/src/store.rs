@@ -25,8 +25,16 @@ use crate::agent::summary::{normalize_work_summary, sanitize_bounded_metadata};
 const NAMESPACE: &str = "harold";
 const PARTITION_KEY: &str = "main";
 const STATE_DATABASE: &str = "harold-state.db";
-const INITIAL_SCHEMA_NAME: &str = "001_initial";
-const INITIAL_SCHEMA_SQL: &str = include_str!("store/migrations/001_initial.sql");
+const MIGRATIONS: [(&str, &str); 2] = [
+    (
+        "001_initial",
+        include_str!("store/migrations/001_initial.sql"),
+    ),
+    (
+        "002_settings",
+        include_str!("store/migrations/002_settings.sql"),
+    ),
+];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TurnCompleted {
@@ -207,6 +215,29 @@ impl HaroldStore {
                         upsert_monitor_health(&conn, &health, event.version).await?;
                         snapshot_changed = true;
                     }
+                    "TtsMuteChanged" => {
+                        let muted = event
+                            .payload
+                            .get("muted")
+                            .and_then(serde_json::Value::as_bool)
+                            .ok_or_else(|| {
+                                events::EsError::Migration(
+                                    "TtsMuteChanged payload missing muted".into(),
+                                )
+                            })?;
+                        conn.execute(
+                            r#"
+                            INSERT INTO settings (key, value, last_event_version)
+                            VALUES ('tts_muted', ?1, ?2)
+                            ON CONFLICT(key) DO UPDATE SET
+                                value = excluded.value,
+                                last_event_version = excluded.last_event_version
+                            "#,
+                            (if muted { "true" } else { "false" }, event.version.get()),
+                        )
+                        .await?;
+                        snapshot_changed = true;
+                    }
                     _ => {
                         // Unknown stream facts stay visible to the existing permanent-delivery
                         // path; advancing without an outbox record would silently lose them.
@@ -268,7 +299,8 @@ impl HaroldStore {
             ));
         }
         let conn = self.state.connect()?;
-        let snapshot = load_agent_snapshot_from_one_query(&conn).await?;
+        let mut snapshot = load_agent_snapshot_from_one_query(&conn).await?;
+        snapshot.tts_muted = load_tts_muted(&conn).await?;
         #[cfg(test)]
         pause_snapshot_read_after_query(&self.snapshot_read_gate).await;
         Ok(snapshot)
@@ -789,6 +821,7 @@ async fn load_agent_snapshot_from_one_query(
         server_time_ms: now_ms(),
         monitor_health: Vec::new(),
         panes: Vec::new(),
+        tts_muted: false,
     };
     while let Some(row) = rows.next().await? {
         snapshot.through_event_version = event_stream_version(required_integer(&row, 1)?)?;
@@ -981,7 +1014,7 @@ async fn configure_state_database(conn: &turso::Connection) -> events::Result<()
 
 async fn initialize_state_schema(conn: &turso::Connection) -> events::Result<()> {
     conn.execute("BEGIN IMMEDIATE", ()).await?;
-    let result = apply_initial_schema(conn).await;
+    let result = apply_migrations(conn).await;
     if let Err(error) = result {
         let _ = conn.execute("ROLLBACK", ()).await;
         return Err(error);
@@ -993,7 +1026,17 @@ async fn initialize_state_schema(conn: &turso::Connection) -> events::Result<()>
     Ok(())
 }
 
-async fn apply_initial_schema(conn: &turso::Connection) -> events::Result<()> {
+async fn load_tts_muted(conn: &turso::Connection) -> events::Result<bool> {
+    let mut rows = conn
+        .query("SELECT value FROM settings WHERE key = 'tts_muted'", ())
+        .await?;
+    Ok(match rows.next().await? {
+        Some(row) => row.get_value(0)?.as_text().map(String::as_str) == Some("true"),
+        None => false,
+    })
+}
+
+async fn apply_migrations(conn: &turso::Connection) -> events::Result<()> {
     conn.execute(
         r#"
         CREATE TABLE IF NOT EXISTS _migrations (
@@ -1007,33 +1050,45 @@ async fn apply_initial_schema(conn: &turso::Connection) -> events::Result<()> {
     )
     .await?;
 
-    let checksum = hex::encode(Sha256::digest(INITIAL_SCHEMA_SQL.as_bytes()));
+    let mut applied = std::collections::HashMap::new();
     let mut rows = conn
         .query("SELECT name, checksum FROM _migrations", ())
         .await?;
-    if let Some(row) = rows.next().await? {
-        if row.get_value(0)?.as_text().map(String::as_str) != Some(INITIAL_SCHEMA_NAME)
-            || rows.next().await?.is_some()
-        {
-            return Err(events::EsError::Migration(
-                "incompatible state schema".into(),
-            ));
-        }
-        if row.get_value(1)?.as_text() != Some(&checksum) {
-            return Err(events::EsError::Migration(format!(
-                "migration {INITIAL_SCHEMA_NAME} checksum changed"
-            )));
-        }
-        return Ok(());
+    while let Some(row) = rows.next().await? {
+        let name = row.get_value(0)?.as_text().cloned().unwrap_or_default();
+        let checksum = row.get_value(1)?.as_text().cloned().unwrap_or_default();
+        applied.insert(name, checksum);
     }
     drop(rows);
 
-    conn.execute_batch(INITIAL_SCHEMA_SQL).await?;
-    conn.execute(
-        "INSERT INTO _migrations (name, checksum, applied_at_ms) VALUES (?1, ?2, ?3)",
-        (INITIAL_SCHEMA_NAME, checksum, now_ms()),
-    )
-    .await?;
+    if applied
+        .keys()
+        .any(|name| !MIGRATIONS.iter().any(|(known, _)| known == name))
+    {
+        return Err(events::EsError::Migration(
+            "incompatible state schema".into(),
+        ));
+    }
+
+    for (name, sql) in MIGRATIONS {
+        let checksum = hex::encode(Sha256::digest(sql.as_bytes()));
+        match applied.get(name) {
+            Some(existing) if *existing == checksum => {}
+            Some(_) => {
+                return Err(events::EsError::Migration(format!(
+                    "migration {name} checksum changed"
+                )));
+            }
+            None => {
+                conn.execute_batch(sql).await?;
+                conn.execute(
+                    "INSERT INTO _migrations (name, checksum, applied_at_ms) VALUES (?1, ?2, ?3)",
+                    (name, checksum, now_ms()),
+                )
+                .await?;
+            }
+        }
+    }
     Ok(())
 }
 
@@ -1056,6 +1111,27 @@ pub async fn append_turn_completed(
             [NewEvent {
                 r#type: "TurnCompleted".into(),
                 payload: json!(event),
+                workflow_kind: None,
+                workflow: WorkflowRef::None,
+                request_id: None,
+                actor_id: "system:harold".into(),
+                actor_type: ActorType::System,
+            }],
+        )
+        .await?;
+    Ok(())
+}
+
+// Called by the mute IPC handler added in a later task.
+#[allow(dead_code)]
+pub async fn append_tts_mute_changed(store: &HaroldStore, muted: bool) -> events::Result<()> {
+    store
+        .stream
+        .append(
+            ExpectedVersion::Any,
+            [NewEvent {
+                r#type: "TtsMuteChanged".into(),
+                payload: json!({ "muted": muted }),
                 workflow_kind: None,
                 workflow: WorkflowRef::None,
                 request_id: None,

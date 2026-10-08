@@ -526,6 +526,7 @@ fn health_from_snapshot(snapshot: &AgentSnapshot) -> HashMap<String, HealthState
 #[cfg(test)]
 fn empty_snapshot() -> AgentSnapshot {
     AgentSnapshot {
+        tts_muted: false,
         through_event_version: events::EventStreamVersion::start(),
         server_time_ms: 0,
         monitor_health: Vec::new(),

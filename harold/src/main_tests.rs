@@ -138,6 +138,7 @@ fn resolved_pane() -> AgentPaneObservation {
 
 fn empty_snapshot() -> AgentSnapshot {
     AgentSnapshot {
+        tts_muted: false,
         through_event_version: EventStreamVersion::start(),
         server_time_ms: 1_000,
         monitor_health: Vec::new(),
@@ -147,6 +148,7 @@ fn empty_snapshot() -> AgentSnapshot {
 
 fn populated_snapshot(revision: i64, summary: Option<&str>) -> AgentSnapshot {
     AgentSnapshot {
+        tts_muted: false,
         through_event_version: EventStreamVersion::new(revision).expect("valid revision"),
         server_time_ms: 10_000 + revision,
         monitor_health: vec![MonitorHealthProjection {
