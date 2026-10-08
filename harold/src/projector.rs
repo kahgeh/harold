@@ -26,6 +26,16 @@ struct ProductionDispatcher;
 
 impl DeliveryDispatcher for ProductionDispatcher {
     fn dispatch(&self, delivery: &PendingDelivery) -> Result<DeliveryOutcome, DispatchError> {
+        self.dispatch_with_pause(delivery, crate::outbound::is_messaging_paused())
+    }
+}
+
+impl ProductionDispatcher {
+    fn dispatch_with_pause(
+        &self,
+        delivery: &PendingDelivery,
+        messaging_paused: bool,
+    ) -> Result<DeliveryOutcome, DispatchError> {
         match delivery.event_type.as_str() {
             "TurnCompleted" => {
                 let turn = serde_json::from_value::<TurnCompleted>(delivery.payload.clone())
@@ -35,6 +45,11 @@ impl DeliveryDispatcher for ProductionDispatcher {
                 notify(&turn, &delivery.trace_id).map_err(DispatchError::Retryable)
             }
             "InboundMessageReceived" => {
+                // Checked before the payload is read, so a backlog queued before the
+                // pause drains without being routed or confirmed.
+                if messaging_paused {
+                    return Ok(DeliveryOutcome::Skipped);
+                }
                 let message = serde_json::from_value::<InboundMessage>(delivery.payload.clone())
                     .map_err(|error| {
                         DispatchError::Permanent(format!(
@@ -146,6 +161,7 @@ pub(crate) async fn project_and_publish_agent_snapshot(
     if batch.through_event_version.get() > snapshots.through_event_version().get() {
         let snapshot = store.load_agent_snapshot().await?;
         crate::outbound::set_tts_muted(snapshot.tts_muted);
+        crate::outbound::set_messaging_paused(snapshot.messaging_paused);
         snapshots.publish_committed(snapshot);
     }
     Ok(batch)

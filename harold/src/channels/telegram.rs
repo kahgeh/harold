@@ -8,6 +8,7 @@ use tracing::{Instrument, info, info_span, warn};
 
 use super::{AwayNotification, split_body, summarise_for_notification};
 use crate::inbound::AgentAddress;
+use crate::outbound::is_messaging_paused;
 use crate::settings::get_settings;
 use crate::store::{HaroldStore, InboundMessage, TurnCompleted, append_inbound_message};
 
@@ -208,6 +209,27 @@ struct Chat {
     id: i64,
 }
 
+/// The text of an update that should be routed, if any. While messaging is paused nothing
+/// is: the caller has already moved its offset past the update, so it is not replayed.
+fn routable_text(
+    message: Option<Message>,
+    expected_chat_id: i64,
+    messaging_paused: bool,
+) -> Option<String> {
+    if messaging_paused {
+        return None;
+    }
+    let msg = message?;
+    if msg.chat.id != expected_chat_id {
+        return None;
+    }
+    let text = msg.text?.trim().to_string();
+    if text.is_empty() || text.starts_with('🤖') {
+        return None;
+    }
+    Some(text)
+}
+
 fn poll_updates(client: &Client, token: &str, offset: i64, timeout: u64) -> Option<Vec<Update>> {
     let url = format!("https://api.telegram.org/bot{token}/getUpdates");
     let res = client
@@ -325,19 +347,10 @@ pub(crate) async fn listen(store: Arc<HaroldStore>, mut shutdown: watch::Receive
         for update in updates {
             offset = update.update_id + 1;
 
-            let Some(msg) = update.message else {
+            let Some(text) = routable_text(update.message, expected_chat_id, is_messaging_paused())
+            else {
                 continue;
             };
-            if msg.chat.id != expected_chat_id {
-                continue;
-            }
-            let Some(text) = msg.text else {
-                continue;
-            };
-            let text = text.trim().to_string();
-            if text.is_empty() || text.starts_with('🤖') {
-                continue;
-            }
 
             let trace_id = uuid::Uuid::new_v4().to_string();
             let span = info_span!(
@@ -356,5 +369,34 @@ pub(crate) async fn listen(store: Arc<HaroldStore>, mut shutdown: watch::Receive
             .instrument(span)
             .await;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Chat, Message, routable_text};
+
+    fn message(chat_id: i64, text: &str) -> Option<Message> {
+        Some(Message {
+            chat: Chat { id: chat_id },
+            text: Some(text.into()),
+        })
+    }
+
+    #[test]
+    fn running_listener_routes_text_from_the_configured_chat() {
+        assert_eq!(
+            routable_text(message(7, " carry on "), 7, false),
+            Some("carry on".to_string())
+        );
+        assert_eq!(routable_text(message(8, "carry on"), 7, false), None);
+        assert_eq!(routable_text(message(7, "🤖 done"), 7, false), None);
+        assert_eq!(routable_text(message(7, "  "), 7, false), None);
+        assert_eq!(routable_text(None, 7, false), None);
+    }
+
+    #[test]
+    fn paused_listener_discards_every_update() {
+        assert_eq!(routable_text(message(7, "carry on"), 7, true), None);
     }
 }

@@ -142,6 +142,7 @@ fn resolved_pane() -> AgentPaneObservation {
 fn empty_snapshot() -> AgentSnapshot {
     AgentSnapshot {
         tts_muted: false,
+        messaging_paused: false,
         through_event_version: EventStreamVersion::start(),
         server_time_ms: 1_000,
         monitor_health: Vec::new(),
@@ -152,6 +153,7 @@ fn empty_snapshot() -> AgentSnapshot {
 fn populated_snapshot(revision: i64, summary: Option<&str>) -> AgentSnapshot {
     AgentSnapshot {
         tts_muted: false,
+        messaging_paused: false,
         through_event_version: EventStreamVersion::new(revision).expect("valid revision"),
         server_time_ms: 10_000 + revision,
         monitor_health: vec![MonitorHealthProjection {
@@ -827,4 +829,45 @@ fn snapshot_mapping_carries_tts_muted() {
     let mut snapshot = empty_snapshot();
     snapshot.tts_muted = true;
     assert!(map_agent_snapshot(snapshot).tts_muted);
+}
+
+#[tokio::test]
+async fn set_messaging_paused_appends_once_and_switches_immediately() {
+    let directory = std::env::temp_dir().join(format!("harold-pause-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let store = Arc::new(store::HaroldStore::open(&directory).await.unwrap());
+    let (service, shutdown, task) = test_service(Arc::clone(&store), empty_snapshot());
+
+    // The switch is flipped by the request itself, before anything is projected.
+    let mut switched = Vec::new();
+    service
+        .apply_messaging_paused(true, |paused| switched.push(paused))
+        .await
+        .unwrap();
+    assert_eq!(switched, [true]);
+    let batch = store.project_unhandled_events(10).await.unwrap();
+    assert_eq!(batch.applied, 1);
+    assert!(store.load_agent_snapshot().await.unwrap().messaging_paused);
+
+    // Already-applied value (as seen by the hub) must not append again.
+    service
+        .snapshots
+        .publish_committed(store.load_agent_snapshot().await.unwrap());
+    service
+        .apply_messaging_paused(true, |paused| switched.push(paused))
+        .await
+        .unwrap();
+    assert_eq!(store.project_unhandled_events(10).await.unwrap().applied, 0);
+    assert_eq!(switched, [true]);
+
+    drop(shutdown);
+    let _ = task.await;
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+#[test]
+fn snapshot_mapping_carries_messaging_paused() {
+    let mut snapshot = empty_snapshot();
+    snapshot.messaging_paused = true;
+    assert!(map_agent_snapshot(snapshot).messaging_paused);
 }

@@ -170,4 +170,5 @@ pub(crate) struct AgentSnapshot {
     pub monitor_health: Vec<MonitorHealthProjection>,
     pub panes: Vec<AgentPaneProjection>,
     pub tts_muted: bool,
+    pub messaging_paused: bool,
 }

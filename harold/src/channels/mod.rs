@@ -5,7 +5,7 @@ use std::process::Command;
 use std::sync::Arc;
 
 use tokio::sync::watch;
-use tracing::warn;
+use tracing::{info, warn};
 
 use crate::inbound::AgentAddress;
 use crate::settings::get_settings;
@@ -127,11 +127,27 @@ pub async fn listen_for_inbound_messages(store: Arc<HaroldStore>, shutdown: watc
 
 /// Send a plain message through the configured away channel.
 pub fn send(msg: &str) -> Result<(), String> {
-    let cfg = get_settings();
-    match cfg.notify.away_channel.as_str() {
-        "telegram" => telegram::send_telegram(msg),
-        _ => imessage::send_imessage(msg),
+    send_unless_paused(msg, crate::outbound::is_messaging_paused(), |msg| {
+        let cfg = get_settings();
+        match cfg.notify.away_channel.as_str() {
+            "telegram" => telegram::send_telegram(msg),
+            _ => imessage::send_imessage(msg),
+        }
+    })
+}
+
+/// Hand `msg` to `deliver` unless messaging is paused. A paused send reports success:
+/// the reply is dropped on purpose, so the caller must not retry it.
+fn send_unless_paused(
+    msg: &str,
+    messaging_paused: bool,
+    deliver: impl FnOnce(&str) -> Result<(), String>,
+) -> Result<(), String> {
+    if messaging_paused {
+        info!("reply not sent (messaging paused)");
+        return Ok(());
     }
+    deliver(msg)
 }
 
 /// Send an away notification through the configured away channel.
@@ -140,5 +156,34 @@ pub fn notify_away(turn: &TurnCompleted, trace_id: &str) -> Result<AwayNotificat
     match cfg.notify.away_channel.as_str() {
         "telegram" => telegram::notify_away(turn, trace_id),
         _ => imessage::notify_away(turn, trace_id),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::send_unless_paused;
+
+    #[test]
+    fn paused_send_reports_success_without_delivering() {
+        let mut delivered = Vec::new();
+        let result = send_unless_paused("✓ Delivered to [harold:0.1]", true, |msg| {
+            delivered.push(msg.to_string());
+            Ok(())
+        });
+
+        assert_eq!(result, Ok(()));
+        assert!(delivered.is_empty());
+    }
+
+    #[test]
+    fn running_send_delivers_and_returns_the_channel_result() {
+        let mut delivered = Vec::new();
+        let result = send_unless_paused("hello", false, |msg| {
+            delivered.push(msg.to_string());
+            Err("channel down".to_string())
+        });
+
+        assert_eq!(result, Err("channel down".to_string()));
+        assert_eq!(delivered, ["hello"]);
     }
 }

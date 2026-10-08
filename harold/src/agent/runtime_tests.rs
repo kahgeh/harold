@@ -2500,6 +2500,7 @@ async fn interval_tick_channel_coalesces_without_waiting_or_filling_ingress() {
 fn empty_snapshot() -> AgentSnapshot {
     AgentSnapshot {
         tts_muted: false,
+        messaging_paused: false,
         through_event_version: EventStreamVersion::start(),
         server_time_ms: 0,
         monitor_health: Vec::new(),
@@ -2660,6 +2661,7 @@ impl Fixture {
             vec![provider()],
             AgentSnapshot {
                 tts_muted: false,
+                messaging_paused: false,
                 through_event_version: EventStreamVersion::start(),
                 server_time_ms: 0,
                 monitor_health: Vec::new(),

@@ -11,6 +11,7 @@ use tracing::{Instrument, info, info_span, warn};
 
 use super::{AwayNotification, split_body, summarise_for_notification};
 use crate::inbound::AgentAddress;
+use crate::outbound::is_messaging_paused;
 use crate::settings::get_settings;
 use crate::store::{HaroldStore, InboundMessage, TurnCompleted, append_inbound_message};
 use crate::util::sanitise_for_applescript;
@@ -269,6 +270,28 @@ fn fetch_self(last_rowid: i64) -> Vec<(i64, String)> {
     fetch_messages(last_rowid, 1)
 }
 
+/// Record one fetched row as an inbound event and move `cursor` past it. While messaging
+/// is paused the row is discarded: the cursor still moves, so nothing is replayed on resume.
+async fn record_row(
+    store: &HaroldStore,
+    rowid: i64,
+    text: String,
+    cursor: &AtomicI64,
+    messaging_paused: bool,
+) {
+    if messaging_paused {
+        info!("iMessage discarded (messaging paused)");
+        cursor.store(rowid, Ordering::Relaxed);
+        return;
+    }
+    match append_inbound_message(store, &InboundMessage { text }).await {
+        Ok(()) => cursor.store(rowid, Ordering::Relaxed),
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to append InboundMessageReceived event")
+        }
+    }
+}
+
 async fn poll(store: &HaroldStore) {
     let inbound_rowid = last_inbound_rowid().load(Ordering::Relaxed);
     let self_rowid = last_self_rowid().load(Ordering::Relaxed);
@@ -280,6 +303,7 @@ async fn poll(store: &HaroldStore) {
                 tracing::warn!(error = %e, "fetch task panicked");
                 (vec![], vec![])
             });
+    let messaging_paused = is_messaging_paused();
 
     for (rowid, text) in inbound {
         let trace_id = uuid::Uuid::new_v4().to_string();
@@ -287,12 +311,7 @@ async fn poll(store: &HaroldStore) {
 
         async {
             info!("iMessage received (inbound)");
-            match append_inbound_message(store, &InboundMessage { text }).await {
-                Ok(()) => last_inbound_rowid().store(rowid, Ordering::Relaxed),
-                Err(e) => {
-                    tracing::warn!(error = %e, "failed to append InboundMessageReceived event")
-                }
-            }
+            record_row(store, rowid, text, last_inbound_rowid(), messaging_paused).await;
         }
         .instrument(span)
         .await;
@@ -304,12 +323,7 @@ async fn poll(store: &HaroldStore) {
 
         async {
             info!("iMessage received (self)");
-            match append_inbound_message(store, &InboundMessage { text }).await {
-                Ok(()) => last_self_rowid().store(rowid, Ordering::Relaxed),
-                Err(e) => {
-                    tracing::warn!(error = %e, "failed to append InboundMessageReceived event")
-                }
-            }
+            record_row(store, rowid, text, last_self_rowid(), messaging_paused).await;
         }
         .instrument(span)
         .await;

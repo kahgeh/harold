@@ -1,7 +1,10 @@
+use std::sync::atomic::{AtomicI64, Ordering};
+
 use crate::channels::{split_body, truncate_body};
+use crate::store::HaroldStore;
 use crate::util::sanitise_for_applescript;
 
-use super::{NotificationPlan, is_marked_as_harold, notification_plan, send_script};
+use super::{NotificationPlan, is_marked_as_harold, notification_plan, record_row, send_script};
 
 #[test]
 fn split_body_no_question() {
@@ -141,4 +144,55 @@ fn listener_keeps_messages_the_user_wrote() {
     for text in ["Yes", "[harold  main:0.3] carry on", "✓ sounds good"] {
         assert!(!is_marked_as_harold(text), "{text:?}");
     }
+}
+
+struct TestDirectory(std::path::PathBuf);
+
+impl TestDirectory {
+    fn new() -> Self {
+        let path = std::env::temp_dir().join(format!("harold-imessage-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&path).expect("create test directory");
+        Self(path)
+    }
+}
+
+impl Drop for TestDirectory {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+#[tokio::test]
+async fn paused_listener_advances_the_cursor_and_appends_nothing() {
+    let directory = TestDirectory::new();
+    let store = HaroldStore::open(&directory.0).await.unwrap();
+    let cursor = AtomicI64::new(10);
+
+    record_row(
+        &store,
+        11,
+        "✓ Delivered to [harold:0.1]".into(),
+        &cursor,
+        true,
+    )
+    .await;
+    record_row(&store, 12, "carry on".into(), &cursor, true).await;
+
+    assert_eq!(cursor.load(Ordering::Relaxed), 12);
+    assert_eq!(store.project_unhandled_events(10).await.unwrap().applied, 0);
+    assert!(store.next_pending_delivery().await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn running_listener_appends_the_row_and_advances_the_cursor() {
+    let directory = TestDirectory::new();
+    let store = HaroldStore::open(&directory.0).await.unwrap();
+    let cursor = AtomicI64::new(10);
+
+    record_row(&store, 11, "carry on".into(), &cursor, false).await;
+
+    assert_eq!(cursor.load(Ordering::Relaxed), 11);
+    assert_eq!(store.project_unhandled_events(10).await.unwrap().applied, 1);
+    let delivery = store.next_pending_delivery().await.unwrap().unwrap();
+    assert_eq!(delivery.event_type, "InboundMessageReceived");
 }

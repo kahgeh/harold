@@ -410,3 +410,22 @@ async fn non_agent_batch_publishes_the_advanced_durable_checkpoint() {
     assert_eq!(receiver.borrow_and_update().through_event_version.get(), 1);
     assert!(receiver.borrow().panes.is_empty());
 }
+
+#[test]
+fn paused_inbound_delivery_is_skipped_without_routing() {
+    // The payload is deliberately unroutable: were the gate removed, this fails on the
+    // payload instead of relaying text to a real pane.
+    let delivery = PendingDelivery {
+        event_id: "event-1".into(),
+        event_version: events::EventStreamVersion::new(1).unwrap(),
+        event_type: "InboundMessageReceived".into(),
+        payload: json!(null),
+        trace_id: "trace".into(),
+    };
+
+    let outcome = ProductionDispatcher.dispatch_with_pause(&delivery, true);
+    assert!(matches!(outcome, Ok(DeliveryOutcome::Skipped)));
+
+    let outcome = ProductionDispatcher.dispatch_with_pause(&delivery, false);
+    assert!(matches!(outcome, Err(DispatchError::Permanent(_))));
+}

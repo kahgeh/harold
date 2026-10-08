@@ -225,17 +225,21 @@ impl HaroldStore {
                                     "TtsMuteChanged payload missing muted".into(),
                                 )
                             })?;
-                        conn.execute(
-                            r#"
-                            INSERT INTO settings (key, value, last_event_version)
-                            VALUES ('tts_muted', ?1, ?2)
-                            ON CONFLICT(key) DO UPDATE SET
-                                value = excluded.value,
-                                last_event_version = excluded.last_event_version
-                            "#,
-                            (if muted { "true" } else { "false" }, event.version.get()),
-                        )
-                        .await?;
+                        upsert_bool_setting(&conn, "tts_muted", muted, event.version).await?;
+                        snapshot_changed = true;
+                    }
+                    "MessagingPausedChanged" => {
+                        let paused = event
+                            .payload
+                            .get("paused")
+                            .and_then(serde_json::Value::as_bool)
+                            .ok_or_else(|| {
+                                events::EsError::Migration(
+                                    "MessagingPausedChanged payload missing paused".into(),
+                                )
+                            })?;
+                        upsert_bool_setting(&conn, "messaging_paused", paused, event.version)
+                            .await?;
                         snapshot_changed = true;
                     }
                     _ => {
@@ -300,7 +304,8 @@ impl HaroldStore {
         }
         let conn = self.state.connect()?;
         let mut snapshot = load_agent_snapshot_from_one_query(&conn).await?;
-        snapshot.tts_muted = load_tts_muted(&conn).await?;
+        snapshot.tts_muted = load_bool_setting(&conn, "tts_muted").await?;
+        snapshot.messaging_paused = load_bool_setting(&conn, "messaging_paused").await?;
         #[cfg(test)]
         pause_snapshot_read_after_query(&self.snapshot_read_gate).await;
         Ok(snapshot)
@@ -822,6 +827,7 @@ async fn load_agent_snapshot_from_one_query(
         monitor_health: Vec::new(),
         panes: Vec::new(),
         tts_muted: false,
+        messaging_paused: false,
     };
     while let Some(row) = rows.next().await? {
         snapshot.through_event_version = event_stream_version(required_integer(&row, 1)?)?;
@@ -1026,9 +1032,33 @@ async fn initialize_state_schema(conn: &turso::Connection) -> events::Result<()>
     Ok(())
 }
 
-async fn load_tts_muted(conn: &turso::Connection) -> events::Result<bool> {
+async fn upsert_bool_setting(
+    conn: &turso::Connection,
+    key: &str,
+    value: bool,
+    event_version: EventStreamVersion,
+) -> events::Result<()> {
+    conn.execute(
+        r#"
+        INSERT INTO settings (key, value, last_event_version)
+        VALUES (?1, ?2, ?3)
+        ON CONFLICT(key) DO UPDATE SET
+            value = excluded.value,
+            last_event_version = excluded.last_event_version
+        "#,
+        (
+            key,
+            if value { "true" } else { "false" },
+            event_version.get(),
+        ),
+    )
+    .await?;
+    Ok(())
+}
+
+async fn load_bool_setting(conn: &turso::Connection, key: &str) -> events::Result<bool> {
     let mut rows = conn
-        .query("SELECT value FROM settings WHERE key = 'tts_muted'", ())
+        .query("SELECT value FROM settings WHERE key = ?1", [key])
         .await?;
     Ok(match rows.next().await? {
         Some(row) => row.get_value(0)?.as_text().map(String::as_str) == Some("true"),
@@ -1130,6 +1160,28 @@ pub async fn append_tts_mute_changed(store: &HaroldStore, muted: bool) -> events
             [NewEvent {
                 r#type: "TtsMuteChanged".into(),
                 payload: json!({ "muted": muted }),
+                workflow_kind: None,
+                workflow: WorkflowRef::None,
+                request_id: None,
+                actor_id: "system:harold".into(),
+                actor_type: ActorType::System,
+            }],
+        )
+        .await?;
+    Ok(())
+}
+
+pub async fn append_messaging_paused_changed(
+    store: &HaroldStore,
+    paused: bool,
+) -> events::Result<()> {
+    store
+        .stream
+        .append(
+            ExpectedVersion::Any,
+            [NewEvent {
+                r#type: "MessagingPausedChanged".into(),
+                payload: json!({ "paused": paused }),
                 workflow_kind: None,
                 workflow: WorkflowRef::None,
                 request_id: None,

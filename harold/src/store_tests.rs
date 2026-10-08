@@ -13,7 +13,7 @@ use crate::agent::domain::{
 
 use super::{
     HaroldStore, InboundMessage, TurnCompleted, append_agent_events, append_inbound_message,
-    append_tts_mute_changed, append_turn_completed,
+    append_messaging_paused_changed, append_tts_mute_changed, append_turn_completed,
 };
 
 struct TestDirectory(PathBuf);
@@ -1113,4 +1113,51 @@ async fn second_migration_applies_to_a_database_that_only_has_the_first() {
     append_tts_mute_changed(&reopened, true).await.unwrap();
     reopened.project_unhandled_events(10).await.unwrap();
     assert!(reopened.load_agent_snapshot().await.unwrap().tts_muted);
+}
+
+#[tokio::test]
+async fn messaging_pause_is_projected_into_the_snapshot_and_survives_reopen() {
+    let directory = TestDirectory::new();
+    let store = HaroldStore::open(directory.path()).await.unwrap();
+    assert!(!store.load_agent_snapshot().await.unwrap().messaging_paused);
+
+    append_messaging_paused_changed(&store, true).await.unwrap();
+    let batch = store.project_unhandled_events(10).await.unwrap();
+    assert_eq!(batch.applied, 1);
+    assert!(batch.snapshot_changed);
+    let snapshot = store.load_agent_snapshot().await.unwrap();
+    assert!(snapshot.messaging_paused);
+    assert!(!snapshot.tts_muted);
+    assert_eq!(snapshot.through_event_version, batch.through_event_version);
+
+    drop(store);
+    let reopened = HaroldStore::open(directory.path()).await.unwrap();
+    assert!(
+        reopened
+            .load_agent_snapshot()
+            .await
+            .unwrap()
+            .messaging_paused
+    );
+
+    append_messaging_paused_changed(&reopened, false)
+        .await
+        .unwrap();
+    reopened.project_unhandled_events(10).await.unwrap();
+    assert!(
+        !reopened
+            .load_agent_snapshot()
+            .await
+            .unwrap()
+            .messaging_paused
+    );
+}
+
+#[tokio::test]
+async fn messaging_pause_event_creates_no_delivery() {
+    let directory = TestDirectory::new();
+    let store = HaroldStore::open(directory.path()).await.unwrap();
+    append_messaging_paused_changed(&store, true).await.unwrap();
+    store.project_unhandled_events(10).await.unwrap();
+    assert!(store.next_pending_delivery().await.unwrap().is_none());
 }

@@ -8,8 +8,8 @@ use std::time::{Duration, Instant};
 
 use harold_api::harold::{
     AgentPaneState, AgentStateSnapshot, ReportAgentStateRequest, ReportAgentStateResponse,
-    SetTtsMutedRequest, SetTtsMutedResponse, TurnCompleteRequest, TurnCompleteResponse,
-    WatchAgentStatesRequest,
+    SetMessagingPausedRequest, SetMessagingPausedResponse, SetTtsMutedRequest, SetTtsMutedResponse,
+    TurnCompleteRequest, TurnCompleteResponse, WatchAgentStatesRequest,
     harold_server::{Harold, HaroldServer},
 };
 use tokio::sync::mpsc;
@@ -173,6 +173,14 @@ impl Harold for ProbeServer {
         &self,
         _: Request<SetTtsMutedRequest>,
     ) -> Result<Response<SetTtsMutedResponse>, Status> {
+        self.writes.fetch_add(1, Ordering::SeqCst);
+        Err(Status::permission_denied("probe must not write"))
+    }
+
+    async fn set_messaging_paused(
+        &self,
+        _: Request<SetMessagingPausedRequest>,
+    ) -> Result<Response<SetMessagingPausedResponse>, Status> {
         self.writes.fetch_add(1, Ordering::SeqCst);
         Err(Status::permission_denied("probe must not write"))
     }

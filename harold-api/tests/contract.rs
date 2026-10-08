@@ -1,7 +1,7 @@
 use harold_api::FILE_DESCRIPTOR_SET;
 use harold_api::harold::{
-    AgentPaneState, AgentState, ReportAgentStateRequest, SetTtsMutedRequest, SetTtsMutedResponse,
-    TurnCompleteRequest,
+    AgentPaneState, AgentState, ReportAgentStateRequest, SetMessagingPausedRequest,
+    SetMessagingPausedResponse, SetTtsMutedRequest, SetTtsMutedResponse, TurnCompleteRequest,
 };
 use prost::Message;
 
@@ -201,6 +201,7 @@ fn harold_service_exposes_only_the_approved_rpcs() {
             "ReportAgentState".to_string(),
             "WatchAgentStates".to_string(),
             "SetTtsMuted".to_string(),
+            "SetMessagingPaused".to_string(),
         ]
     );
 }
@@ -216,5 +217,23 @@ fn set_tts_muted_contract_is_additive() {
     );
     let snapshot_fields = message_fields("AgentStateSnapshot");
     assert!(snapshot_fields.contains(&("tts_muted".to_string(), 5)));
-    assert_eq!(snapshot_fields.len(), 5);
+    assert_eq!(snapshot_fields.len(), 6);
+}
+
+#[test]
+fn set_messaging_paused_contract_is_additive() {
+    let request = SetMessagingPausedRequest { paused: true };
+    assert!(round_trip(&request).paused);
+    assert!(round_trip(&SetMessagingPausedResponse { paused: true }).paused);
+    assert_eq!(
+        message_fields("SetMessagingPausedRequest"),
+        [("paused".to_string(), 1)]
+    );
+    assert_eq!(
+        message_fields("SetMessagingPausedResponse"),
+        [("paused".to_string(), 1)]
+    );
+    let snapshot_fields = message_fields("AgentStateSnapshot");
+    assert!(snapshot_fields.contains(&("messaging_paused".to_string(), 6)));
+    assert_eq!(snapshot_fields.len(), 6);
 }

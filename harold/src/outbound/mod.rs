@@ -36,6 +36,16 @@ pub fn is_tts_muted() -> bool {
     TTS_MUTED.load(Ordering::SeqCst)
 }
 
+static MESSAGING_PAUSED: AtomicBool = AtomicBool::new(false);
+
+pub fn set_messaging_paused(paused: bool) {
+    MESSAGING_PAUSED.store(paused, Ordering::SeqCst);
+}
+
+pub fn is_messaging_paused() -> bool {
+    MESSAGING_PAUSED.load(Ordering::SeqCst)
+}
+
 // ---------------------------------------------------------------------------
 // OutboundChannel — notification to human
 // ---------------------------------------------------------------------------
@@ -52,21 +62,34 @@ impl OutboundChannel {
         turn: &TurnCompleted,
         trace_id: &str,
     ) -> Result<(DeliveryOutcome, Option<AgentAddress>), String> {
-        self.notify_with_mute(turn, trace_id, is_tts_muted())
+        self.notify_with_switches(turn, trace_id, is_tts_muted(), is_messaging_paused())
     }
 
-    fn notify_with_mute(
+    /// Why this channel stays silent under the given switches, if it does. The voice
+    /// mute covers only TTS and the messaging pause covers only the away channel.
+    fn skip_reason(&self, tts_muted: bool, messaging_paused: bool) -> Option<&'static str> {
+        match self {
+            OutboundChannel::Tts if tts_muted => Some("TTS notification skipped (voice muted)"),
+            OutboundChannel::Away if messaging_paused => {
+                Some("away notification skipped (messaging paused)")
+            }
+            _ => None,
+        }
+    }
+
+    fn notify_with_switches(
         &self,
         turn: &TurnCompleted,
         trace_id: &str,
         tts_muted: bool,
+        messaging_paused: bool,
     ) -> Result<(DeliveryOutcome, Option<AgentAddress>), String> {
+        if let Some(reason) = self.skip_reason(tts_muted, messaging_paused) {
+            info!("{reason}");
+            return Ok((DeliveryOutcome::Skipped, None));
+        }
         match self {
             OutboundChannel::Tts => {
-                if tts_muted {
-                    info!("TTS notification skipped (voice muted)");
-                    return Ok((DeliveryOutcome::Skipped, None));
-                }
                 if tts::notify_at_desk(turn, trace_id) {
                     Ok((DeliveryOutcome::Delivered, None))
                 } else {
@@ -189,7 +212,25 @@ mod tests {
 
     #[test]
     fn muted_tts_channel_skips_without_running_the_command() {
-        let outcome = OutboundChannel::Tts.notify_with_mute(&turn(), "trace", true);
+        let outcome = OutboundChannel::Tts.notify_with_switches(&turn(), "trace", true, false);
         assert!(matches!(outcome, Ok((DeliveryOutcome::Skipped, None))));
+    }
+
+    #[test]
+    fn paused_away_channel_skips_without_sending() {
+        let outcome = OutboundChannel::Away.notify_with_switches(&turn(), "trace", false, true);
+        assert!(matches!(outcome, Ok((DeliveryOutcome::Skipped, None))));
+    }
+
+    #[test]
+    fn messaging_pause_silences_the_away_channel_only() {
+        assert!(OutboundChannel::Away.skip_reason(false, true).is_some());
+        assert!(OutboundChannel::Tts.skip_reason(false, true).is_none());
+    }
+
+    #[test]
+    fn voice_mute_does_not_silence_the_away_channel() {
+        assert!(OutboundChannel::Away.skip_reason(true, false).is_none());
+        assert!(OutboundChannel::Tts.skip_reason(false, false).is_none());
     }
 }
