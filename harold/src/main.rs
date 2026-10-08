@@ -53,8 +53,12 @@ struct HaroldService {
 /// snapshot and the switch cannot decide that: both are written by the projector from a
 /// snapshot that may predate a stored change, so they can briefly show the value before
 /// it. The request handlers are the only writers of these settings, so once one has stored
-/// a value, `last_requested` is the stream's last word. Before the first request since
-/// startup there is nothing to lag, and `already_in_force` decides.
+/// a value, `last_requested` is the stream's last word. A repeat stores nothing but still
+/// sets the switch, which the projector may have just put back to the older value.
+///
+/// With nothing remembered, `already_in_force` decides. That is the case before the first
+/// request since startup, and after an append that failed or was dropped part-way: the
+/// event may have been written all the same, so the remembered value is forgotten first.
 async fn apply_setting<A, E>(
     last_requested: &tokio::sync::Mutex<Option<bool>>,
     requested: bool,
@@ -70,13 +74,13 @@ where
         Some(last) => last == requested,
         None => already_in_force(),
     };
-    if repeat {
-        return Ok(false);
+    if !repeat {
+        *last_requested = None;
+        append().await?;
+        *last_requested = Some(requested);
     }
-    append().await?;
-    *last_requested = Some(requested);
     switch(requested);
-    Ok(true)
+    Ok(!repeat)
 }
 
 impl HaroldService {

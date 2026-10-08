@@ -852,7 +852,7 @@ async fn mute_sent_while_the_snapshot_lags_an_unmute_is_stored() {
         .apply_tts_muted(true, || true, |muted| switched.push(muted))
         .await
         .unwrap();
-    assert_eq!(switched, [true]);
+    assert_eq!(switched, [true, true]);
     assert_eq!(store.project_unhandled_events(10).await.unwrap().applied, 0);
 
     // An unmute that is not projected yet leaves the hub saying "muted". A mute sent
@@ -865,7 +865,7 @@ async fn mute_sent_while_the_snapshot_lags_an_unmute_is_stored() {
         .apply_tts_muted(true, || false, |muted| switched.push(muted))
         .await
         .unwrap();
-    assert_eq!(switched, [true, false, true]);
+    assert_eq!(switched, [true, true, false, true]);
     assert_eq!(store.project_unhandled_events(10).await.unwrap().applied, 2);
     assert!(store.load_agent_snapshot().await.unwrap().tts_muted);
 
@@ -937,7 +937,7 @@ async fn set_messaging_paused_appends_once_and_switches_immediately() {
         .await
         .unwrap();
     assert_eq!(store.project_unhandled_events(10).await.unwrap().applied, 0);
-    assert_eq!(switched, [true]);
+    assert_eq!(switched, [true, true]);
 
     // A resume that is not projected yet leaves the hub saying "paused". A pause sent
     // in that window must still be stored and applied, not taken for a repeat.
@@ -949,7 +949,7 @@ async fn set_messaging_paused_appends_once_and_switches_immediately() {
         .apply_messaging_paused(true, || false, |paused| switched.push(paused))
         .await
         .unwrap();
-    assert_eq!(switched, [true, false, true]);
+    assert_eq!(switched, [true, true, false, true]);
     assert_eq!(store.project_unhandled_events(10).await.unwrap().applied, 2);
     assert!(store.load_agent_snapshot().await.unwrap().messaging_paused);
 
@@ -1141,7 +1141,7 @@ async fn first_request_after_startup_is_judged_against_the_loaded_state() {
 }
 
 #[tokio::test]
-async fn failed_append_leaves_the_last_requested_value_and_the_switch_alone() {
+async fn failed_append_forgets_the_last_requested_value_and_leaves_the_switch_alone() {
     for remembered in [None, Some(false)] {
         let last_requested = tokio::sync::Mutex::new(remembered);
         let mut switched = Vec::new();
@@ -1155,7 +1155,7 @@ async fn failed_append_leaves_the_last_requested_value_and_the_switch_alone() {
         )
         .await;
         assert_eq!(failed, Err("store unavailable"));
-        assert_eq!(*last_requested.lock().await, remembered);
+        assert_eq!(*last_requested.lock().await, None);
         assert!(switched.is_empty());
 
         // The request is not taken for a repeat when it is sent again.
@@ -1171,4 +1171,90 @@ async fn failed_append_leaves_the_last_requested_value_and_the_switch_alone() {
         assert_eq!(*last_requested.lock().await, Some(true));
         assert_eq!(switched, [true]);
     }
+}
+
+#[tokio::test]
+async fn request_after_a_failed_append_is_judged_against_the_loaded_state() {
+    let last_requested = tokio::sync::Mutex::new(Some(false));
+    let mut switched = Vec::new();
+    let failed = apply_setting(
+        &last_requested,
+        true,
+        || false,
+        || async { Err("store unavailable") },
+        |on| switched.push(on),
+    )
+    .await;
+    assert_eq!(failed, Err("store unavailable"));
+
+    // The event may have been written all the same. If the loaded state says so, the
+    // remembered "false" must not make this a change to store again.
+    let stored = apply_setting(
+        &last_requested,
+        true,
+        || true,
+        || async { Err("a repeat appends nothing") },
+        |on| switched.push(on),
+    )
+    .await;
+    assert_eq!(stored, Ok(false));
+    assert_eq!(switched, [true]);
+}
+
+#[tokio::test]
+async fn request_dropped_during_its_append_forgets_the_last_requested_value() {
+    let last_requested = tokio::sync::Mutex::new(Some(false));
+
+    let dropped = tokio::time::timeout(
+        std::time::Duration::from_millis(50),
+        apply_setting(
+            &last_requested,
+            true,
+            || false,
+            std::future::pending::<Result<(), &str>>,
+            |_| panic!("switched without a stored value"),
+        ),
+    )
+    .await;
+
+    assert!(dropped.is_err(), "append finished");
+    assert_eq!(*last_requested.lock().await, None);
+}
+
+#[tokio::test]
+async fn repeated_request_sets_the_switch_again_and_appends_nothing() {
+    let directory = std::env::temp_dir().join(format!("harold-repeat-{}", uuid::Uuid::new_v4()));
+    let (store, service, shutdown, task) =
+        service_started_with_both_settings(&directory, false).await;
+
+    service
+        .set_tts_muted(Request::new(SetTtsMutedRequest { muted: true }))
+        .await
+        .unwrap();
+    service
+        .set_messaging_paused(Request::new(SetMessagingPausedRequest { paused: true }))
+        .await
+        .unwrap();
+    assert_eq!(store.project_unhandled_events(10).await.unwrap().applied, 2);
+    // The projector finishes a pass it began before the requests were stored and writes
+    // both switches from its older snapshot.
+    super::outbound::set_tts_muted(false);
+    super::outbound::set_messaging_paused(false);
+
+    service
+        .set_tts_muted(Request::new(SetTtsMutedRequest { muted: true }))
+        .await
+        .unwrap();
+    service
+        .set_messaging_paused(Request::new(SetMessagingPausedRequest { paused: true }))
+        .await
+        .unwrap();
+
+    assert_eq!(store.project_unhandled_events(10).await.unwrap().applied, 0);
+    assert!(super::outbound::is_tts_muted());
+    assert!(super::outbound::is_messaging_paused());
+
+    drop(shutdown);
+    let _ = task.await;
+    let _ = std::fs::remove_dir_all(&directory);
 }
