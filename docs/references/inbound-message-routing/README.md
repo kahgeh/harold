@@ -67,7 +67,7 @@ Once a pane is resolved:
 2. `strip_control(text)` — removes ANSI escape sequences and non-newline control characters
 3. `tmux send-keys -t <pane_id> -l "📱 <body>"` — sends text literally (no shell interpretation)
 4. `tmux send-keys -t <pane_id> Enter` — submits the message
-5. Confirmation sent back via the configured away channel: `"✓ Delivered to [<pane_label>]"`
+5. Confirmation sent back via the configured away channel: `"✓ Delivered to [<pane_label>]"`. On iMessage the confirmation, like every error reply, is sent with the `🤖` prefix (`"🤖 ✓ Delivered to [<pane_label>]"`): a message to your own number is stored as both a sent and a received row, the listener reads both, and it skips only `🤖`-prefixed text, so an unprefixed confirmation would be routed back in as a new reply and confirmed again without end
 
 If either tmux `send-keys` command fails, the outbox delivery remains pending for retry. A confirmation failure after tmux accepts the message is logged but does not retry the agent delivery, which avoids duplicating the user's input. If no pane is found, an error message listing the currently available pane labels is sent back via the away channel and the event is recorded as intentionally skipped.
 

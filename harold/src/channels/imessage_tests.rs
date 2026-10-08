@@ -1,7 +1,9 @@
 use crate::channels::{split_body, truncate_body};
 use crate::util::sanitise_for_applescript;
 
-use super::{NotificationPlan, notification_plan};
+use super::{
+    NotificationPlan, confirmation_text, is_marked_as_harold, marked_as_harold, notification_plan,
+};
 
 #[test]
 fn split_body_no_question() {
@@ -94,4 +96,30 @@ fn matching_question_from_another_turn_sends_the_full_notification() {
     );
 
     assert_eq!(plan, NotificationPlan::SendAll);
+}
+
+#[test]
+fn listener_skips_every_message_harold_sends() {
+    // Messages to the user's own number are stored as both sent and received rows,
+    // and the listener reads both, so anything unmarked is routed back in as a reply.
+    for reply in [
+        "✓ Delivered to [harold  main:0.3]",
+        "No active pane found. Available: harold  main:0.3",
+        "No active agent sessions found.",
+    ] {
+        assert!(
+            is_marked_as_harold(&confirmation_text(reply)),
+            "{reply:?} would be read back as an inbound message"
+        );
+    }
+    assert!(is_marked_as_harold(&marked_as_harold(
+        "[harold:0.1] Work is done."
+    )));
+}
+
+#[test]
+fn listener_keeps_messages_the_user_wrote() {
+    for text in ["Yes", "[harold  main:0.3] carry on", "✓ sounds good"] {
+        assert!(!is_marked_as_harold(text), "{text:?}");
+    }
 }

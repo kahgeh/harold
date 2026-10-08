@@ -38,20 +38,39 @@ pub(crate) fn send_imessage_to(text: &str, recipient: &str) -> Result<(), String
     Ok(())
 }
 
+/// Marks text as written by Harold. The listener skips marked text when it reads
+/// chat.db, so Harold never routes its own messages back in as replies.
+const HAROLD_MARKER: char = '🤖';
+
+fn marked_as_harold(text: &str) -> String {
+    format!("{HAROLD_MARKER} {text}")
+}
+
+fn is_marked_as_harold(text: &str) -> bool {
+    text.starts_with(HAROLD_MARKER)
+}
+
+/// Text of a confirmation or error reply as it is sent to the recipient. It carries
+/// the marker like a notification does: an unmarked "Delivered" receipt is read back
+/// as a reply, routed, and answered with another receipt, without end.
+fn confirmation_text(msg: &str) -> String {
+    marked_as_harold(msg)
+}
+
 /// Send an iMessage notification with robot-emoji prefix.
 fn send_raw_imessage(text: &str, recipient: &str) -> Result<(), String> {
     info!(msg = %text, "sending iMessage notification");
-    send_imessage_to(&format!("🤖 {text}"), recipient)
+    send_imessage_to(&marked_as_harold(text), recipient)
 }
 
-/// Send a plain iMessage (confirmation/error) to the configured recipient.
+/// Send a confirmation or error reply to the configured recipient.
 pub(crate) fn send_imessage(msg: &str) -> Result<(), String> {
     info!(msg, "sending iMessage");
     let cfg = get_settings();
     let Some(recipient) = cfg.imessage.recipient.as_deref() else {
         return Err("iMessage recipient is not configured".into());
     };
-    send_imessage_to(msg, recipient)
+    send_imessage_to(&confirmation_text(msg), recipient)
 }
 
 fn recent_outgoing_texts(handle_id: i64) -> Vec<String> {
@@ -223,7 +242,7 @@ fn query_messages(sql: &str) -> Vec<(i64, String)> {
         .filter_map(|row| {
             let rowid = row.get("ROWID")?.as_i64()?;
             let text = row.get("text")?.as_str()?.trim().to_string();
-            if text.is_empty() || text.starts_with('🤖') {
+            if text.is_empty() || is_marked_as_harold(&text) {
                 return None;
             }
             Some((rowid, text))
