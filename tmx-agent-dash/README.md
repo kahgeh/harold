@@ -66,6 +66,8 @@ outside this MVP; use a trusted deployment boundary for remote connections.
 | `j` / Down | Select the next visible row |
 | `k` / Up | Select the previous visible row |
 | `g` / `G` | Select the first / last visible row |
+| `l` / Right | Select the next waiting agent (wraps) |
+| `h` / Left | Select the previous waiting agent (wraps) |
 | `f` | Enter search editing |
 | `/` | Open the command palette (type to filter, Up/Down choose, Enter run, Esc close; e.g. `Voice: mute` / `Voice: unmute`) |
 | Printable text | Extend the query while editing |
@@ -108,9 +110,39 @@ Transport and monitor health describe different system-level conditions:
 - `MONITOR HEALTHY` requires one or more monitor observations with every
   component healthy.
 
-Rows are sorted by state and tmux location. Selection follows a stable agent
+Rows are grouped by project (the first word of the tmux session name) and
+ordered by name (the last component of the working directory), then pane
+address; state never changes a row's position. Each row shows the name, a compact
+location (the pane address is only spelled out when two names in a group
+collide), and a provider tag: `cc` for Claude Code, `cx` for Codex, otherwise the
+first two letters of the provider name. The selected agent's detail panel still
+shows the full tmux target and working directory. Narrower terminals drop some
+footer hints (below 100 columns the footer switches to a shorter set). Selection follows a stable agent
 incarnation when possible. A restarted agent in the same pane is a new
 incarnation and does not inherit the old selection.
+
+### Waiting line
+
+The top border of the agent list carries a waiting line: `WAITING n` followed by
+the waiting agents, oldest first, with `+N more` when they do not all fit. Rows
+of waiting agents are marked with `◆`.
+
+- An agent joins when it goes from Busy to Idle while its pane is not the pane
+  you are looking at.
+- It leaves when you visit its pane, when it goes Busy again, when it exits, or
+  when you press `Enter` on it.
+- Waiting state is per dash and kept in memory only. Agents that are already
+  Idle when the dash starts do not join, and a second dash keeps its own list.
+- `h`/`l` (or Left/Right) step the selection through the waiting agents and
+  wrap around.
+
+### Focus tracking
+
+Once a second the dash runs `tmux list-clients` and decides which pane you can
+see. Suspended clients are ignored; a focused client is preferred, otherwise the
+most recently active client is used, and that client's active pane counts as
+seen. When the query fails, the waiting line shows `(focus tracking off)` and an
+agent leaves the list only on `Enter` or when it goes Busy.
 
 An absent or empty work summary is displayed exactly as:
 
