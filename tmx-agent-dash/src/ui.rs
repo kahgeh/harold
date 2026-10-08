@@ -66,32 +66,54 @@ fn render_resize_instruction(frame: &mut Frame<'_>, area: Rect) {
     frame.render_widget(message, area);
 }
 
+fn voice_style(voice: crate::app::VoiceState) -> Style {
+    let color = match voice {
+        crate::app::VoiceState::On => GREEN,
+        crate::app::VoiceState::Muted => AMBER,
+        crate::app::VoiceState::Unknown => MUTED,
+    };
+    Style::default().fg(color).add_modifier(Modifier::BOLD)
+}
+
 fn render_masthead(frame: &mut Frame<'_>, area: Rect, app: &App) {
-    let status = Span::styled(
-        format!(
-            "TRANSPORT {}  ·  REV #{:05}",
-            app.connection.label(),
-            app.snapshot.through_event_version
+    let voice = app.voice();
+    let tail = vec![
+        Span::styled(
+            format!(
+                "TRANSPORT {}  ·  REV #{:05}",
+                app.connection.label(),
+                app.snapshot.through_event_version
+            ),
+            transport_style(app.connection).add_modifier(Modifier::BOLD),
         ),
-        transport_style(app.connection).add_modifier(Modifier::BOLD),
-    );
-    let title = if area.width < COMPACT_WIDTH {
-        Line::from(vec![
+        Span::raw("  ·  "),
+        Span::styled(voice.label(), voice_style(voice)),
+    ];
+    let mut spans = if area.width < COMPACT_WIDTH {
+        vec![
             Span::styled(" TMX DASH ", Style::default().fg(AMBER)),
             Span::raw("· "),
-            status,
-        ])
+        ]
     } else {
-        Line::from(vec![
+        vec![
             Span::styled(" HAROLD / TMUX  ", Style::default().fg(AMBER)),
             Span::styled(
                 "AGENT SIGNAL BOARD",
                 Style::default().fg(INK).add_modifier(Modifier::BOLD),
             ),
             Span::raw("  ·  "),
-            status,
-        ])
+        ]
     };
+    spans.extend(tail.clone());
+    let mut title = Line::from(spans);
+    if title.width() > usize::from(area.width.saturating_sub(2)) {
+        // Transport, revision and voice outrank the title when the masthead is tight.
+        title = Line::from(
+            std::iter::once(Span::raw(" "))
+                .chain(tail)
+                .collect::<Vec<_>>(),
+        );
+    }
     frame.render_widget(
         Paragraph::new(title).block(board_block().borders(Borders::ALL)),
         area,
@@ -630,6 +652,7 @@ mod tests {
         let app = App::new(
             ConnectionState::Live,
             Snapshot {
+                tts_muted: false,
                 through_event_version: 1842,
                 server_time_ms: 1_777_000_000_000,
                 monitor_health: vec![
@@ -756,6 +779,7 @@ mod tests {
         let app = App::new(
             ConnectionState::Live,
             Snapshot {
+                tts_muted: false,
                 through_event_version: 1843,
                 server_time_ms: 1_777_000_000_000,
                 monitor_health: vec![MonitorHealth {
@@ -796,6 +820,7 @@ mod tests {
         let app = App::new(
             ConnectionState::Live,
             Snapshot {
+                tts_muted: false,
                 through_event_version: 1843,
                 server_time_ms: 1_777_000_000_000,
                 monitor_health: Vec::new(),
@@ -969,6 +994,7 @@ mod tests {
         let mut app = App::new(
             ConnectionState::Stale,
             Snapshot {
+                tts_muted: false,
                 through_event_version: 42,
                 server_time_ms: 90_000,
                 monitor_health: vec![health(MonitorHealthState::Healthy, "ok")],
@@ -1054,6 +1080,7 @@ mod tests {
         );
 
         app.apply_later_snapshot(Snapshot {
+            tts_muted: false,
             through_event_version: 43,
             server_time_ms: 100_000,
             monitor_health: vec![health(MonitorHealthState::Healthy, "ok")],
@@ -1072,6 +1099,7 @@ mod tests {
         let app = App::new(
             ConnectionState::Live,
             Snapshot {
+                tts_muted: false,
                 through_event_version: 42,
                 server_time_ms: 100_000,
                 monitor_health: vec![health(MonitorHealthState::Degraded, "capture_failed")],
@@ -1265,6 +1293,40 @@ mod tests {
         assert!(!content.contains("SELECTED SIGNAL"));
         assert!(!content.contains("CURRENT WORK"));
         assert!(!content.contains("/Users/kahgeh/Dev/p/Codex"));
+    }
+
+    #[test]
+    fn masthead_shows_voice_on_muted_and_unknown_in_wide_and_compact() {
+        let mut on = live_app(Vec::new(), None);
+        assert!(rendered(&on, 140, 38, 100_000).contains("● VOICE ON"));
+        assert!(rendered(&on, 70, 30, 100_000).contains("● VOICE ON"));
+
+        on.snapshot.tts_muted = true;
+        assert!(rendered(&on, 140, 38, 100_000).contains("○ VOICE MUTED"));
+        assert!(rendered(&on, 70, 30, 100_000).contains("○ VOICE MUTED"));
+
+        let unknown = App::new(
+            crate::app::ConnectionState::Connecting,
+            crate::app::Snapshot {
+                through_event_version: 0,
+                server_time_ms: 0,
+                monitor_health: Vec::new(),
+                rows: Vec::new(),
+                tts_muted: false,
+            },
+            empty_search(),
+            None,
+        );
+        assert!(rendered(&unknown, 140, 38, 100_000).contains("○ VOICE —"));
+        assert!(rendered(&unknown, 60, 18, 100_000).contains("○ VOICE —"));
+    }
+
+    #[test]
+    fn voice_indicator_colour_and_glyph_are_paired_with_the_word() {
+        let mut app = live_app(Vec::new(), None);
+        app.snapshot.tts_muted = true;
+        let buffer = rendered_buffer(&app, 140, 38, 100_000);
+        assert_styled_occurrences(&buffer, "○ VOICE MUTED", Color::Rgb(224, 174, 85), 1);
     }
 
     #[test]
@@ -1489,6 +1551,7 @@ mod tests {
 
     fn snapshot(monitor_health: Vec<MonitorHealth>, rows: Vec<AgentRow>) -> Snapshot {
         Snapshot {
+            tts_muted: false,
             through_event_version: 42,
             server_time_ms: 100_000,
             monitor_health,

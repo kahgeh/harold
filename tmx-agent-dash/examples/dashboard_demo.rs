@@ -61,6 +61,7 @@ fn demo_app() -> App {
     App::new(
         ConnectionState::Live,
         Snapshot {
+            tts_muted: false,
             through_event_version: 1842,
             server_time_ms: NOW_MS,
             monitor_health: vec![

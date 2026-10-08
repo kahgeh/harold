@@ -221,6 +221,7 @@ pub fn map_snapshot(snapshot: AgentStateSnapshot) -> Result<Snapshot, ProtocolEr
         server_time_ms: snapshot.server_time_ms,
         monitor_health,
         rows,
+        tts_muted: snapshot.tts_muted,
     })
 }
 
@@ -287,6 +288,18 @@ fn map_monitor_health_state(state: i32) -> MonitorHealthState {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn maps_tts_muted_from_the_snapshot() {
+        for muted in [false, true] {
+            let mapped = map_snapshot(AgentStateSnapshot {
+                tts_muted: muted,
+                ..Default::default()
+            })
+            .unwrap();
+            assert_eq!(mapped.tts_muted, muted);
+        }
+    }
+
     use std::collections::VecDeque;
     use std::future::Future;
     use std::pin::Pin;

@@ -64,6 +64,24 @@ pub struct Snapshot {
     pub server_time_ms: i64,
     pub monitor_health: Vec<MonitorHealth>,
     pub rows: Vec<AgentRow>,
+    pub tts_muted: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VoiceState {
+    Unknown,
+    On,
+    Muted,
+}
+
+impl VoiceState {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Unknown => "○ VOICE —",
+            Self::On => "● VOICE ON",
+            Self::Muted => "○ VOICE MUTED",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -172,6 +190,16 @@ impl App {
             has_snapshot: matches!(connection, ConnectionState::Live | ConnectionState::Stale),
             normalized_query,
             searchable_rows,
+        }
+    }
+
+    pub fn voice(&self) -> VoiceState {
+        if !self.has_snapshot {
+            VoiceState::Unknown
+        } else if self.snapshot.tts_muted {
+            VoiceState::Muted
+        } else {
+            VoiceState::On
         }
     }
 
@@ -488,6 +516,38 @@ const fn state_rank(state: AgentState) -> u8 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn voice_is_unknown_until_a_snapshot_then_follows_the_snapshot() {
+        let empty = Snapshot {
+            through_event_version: 0,
+            server_time_ms: 0,
+            monitor_health: Vec::new(),
+            rows: Vec::new(),
+            tts_muted: false,
+        };
+        let search = SearchState {
+            query: String::new(),
+            editing: false,
+        };
+        let mut app = App::new(ConnectionState::Connecting, empty.clone(), search, None);
+        assert_eq!(app.voice(), VoiceState::Unknown);
+
+        app.apply_first_snapshot(Snapshot {
+            through_event_version: 1,
+            ..empty.clone()
+        })
+        .unwrap();
+        assert_eq!(app.voice(), VoiceState::On);
+
+        app.apply_later_snapshot(Snapshot {
+            through_event_version: 2,
+            tts_muted: true,
+            ..empty
+        })
+        .unwrap();
+        assert_eq!(app.voice(), VoiceState::Muted);
+    }
+
     use crossterm::event::KeyCode;
 
     use super::*;
@@ -510,6 +570,7 @@ mod tests {
         app.begin_connection();
         assert_eq!(app.connection, ConnectionState::Connecting);
         app.apply_first_snapshot(Snapshot {
+            tts_muted: false,
             through_event_version: 2,
             server_time_ms: 222,
             monitor_health: vec![health(MonitorHealthState::Degraded, "tmux_unavailable")],
@@ -562,6 +623,7 @@ mod tests {
         let pane = incarnation("%1", 1, 2, 3, "codex");
         let mut app = empty_app();
         app.apply_first_snapshot(Snapshot {
+            tts_muted: false,
             through_event_version: 10,
             server_time_ms: 1_000,
             monitor_health: vec![
@@ -580,6 +642,7 @@ mod tests {
 
         assert!(
             !app.apply_later_snapshot(Snapshot {
+                tts_muted: false,
                 through_event_version: 10,
                 server_time_ms: 1_001,
                 monitor_health: vec![health(MonitorHealthState::Healthy, "ok")],
@@ -591,6 +654,7 @@ mod tests {
 
         assert!(
             app.apply_later_snapshot(Snapshot {
+                tts_muted: false,
                 through_event_version: 11,
                 server_time_ms: 1_100,
                 monitor_health: vec![health(MonitorHealthState::Healthy, "ok")],
@@ -1097,6 +1161,7 @@ mod tests {
 
     fn snapshot(through_event_version: u64, server_time_ms: i64, rows: Vec<AgentRow>) -> Snapshot {
         Snapshot {
+            tts_muted: false,
             through_event_version,
             server_time_ms,
             monitor_health: Vec::new(),

@@ -449,6 +449,7 @@ mod tests {
         let mut app = App::new(
             ConnectionState::Live,
             Snapshot {
+                tts_muted: false,
                 through_event_version: 1,
                 server_time_ms: 1,
                 monitor_health: Vec::new(),
