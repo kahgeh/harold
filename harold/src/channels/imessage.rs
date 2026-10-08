@@ -212,9 +212,9 @@ struct FetchedRow {
 /// How long a recorded row is remembered, to catch its copy from the other direction.
 const TWIN_WINDOW: Duration = Duration::from_secs(10);
 
-/// Rows recorded within the last `TWIN_WINDOW`. A message the Mac sends to the user's own
-/// number is stored as two rows with the same text, one per direction, so without this a
-/// reply typed in Messages on the Mac is routed twice.
+/// Rows recorded within the last `TWIN_WINDOW` whose twin has not been seen. A message the
+/// Mac sends to the user's own number is stored as two rows with the same text, one per
+/// direction, so without this a reply typed in Messages on the Mac is routed twice.
 struct RecentRows(Vec<(Direction, String, Instant)>);
 
 impl RecentRows {
@@ -222,13 +222,19 @@ impl RecentRows {
         Self(Vec::new())
     }
 
-    /// Whether the same text was recorded from the other direction within the window.
-    /// The same text twice from one direction is the user sending it twice, and is kept.
-    fn is_duplicate(&mut self, direction: Direction, text: &str, now: Instant) -> bool {
+    /// Whether this row is the copy of one recorded from the other direction within the
+    /// window. The oldest such row is forgotten, so each recorded row absorbs one twin and
+    /// the same text sent again is kept, as is the same text twice from one direction.
+    fn take_twin(&mut self, direction: Direction, text: &str, now: Instant) -> bool {
         self.forget_old(now);
-        self.0
-            .iter()
-            .any(|(recorded, recorded_text, _)| *recorded != direction && recorded_text == text)
+        let twin = self.0.iter().position(|(recorded, recorded_text, _)| {
+            *recorded != direction && recorded_text == text
+        });
+        let Some(twin) = twin else {
+            return false;
+        };
+        self.0.remove(twin);
+        true
     }
 
     fn remember(&mut self, direction: Direction, text: String, now: Instant) {
@@ -340,7 +346,7 @@ async fn record_row(
         cursor.store(rowid, Ordering::Relaxed);
         return;
     }
-    if recent.lock().unwrap().is_duplicate(direction, &text, now) {
+    if recent.lock().unwrap().take_twin(direction, &text, now) {
         info!("iMessage skipped (same text already recorded from the other direction)");
         cursor.store(rowid, Ordering::Relaxed);
         return;

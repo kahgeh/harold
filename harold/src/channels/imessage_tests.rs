@@ -216,12 +216,43 @@ fn same_text_from_the_other_direction_within_the_window_is_a_duplicate() {
 
     let mut recent = RecentRows::new();
     recent.remember(Direction::Inbound, "Yes".into(), start);
-    assert!(recent.is_duplicate(Direction::SelfSent, "Yes", soon));
+    assert!(recent.take_twin(Direction::SelfSent, "Yes", soon));
 
     let mut recent = RecentRows::new();
     recent.remember(Direction::SelfSent, "Yes".into(), start);
-    assert!(recent.is_duplicate(Direction::Inbound, "Yes", soon));
-    assert!(recent.is_duplicate(Direction::Inbound, "Yes", start + TWIN_WINDOW));
+    assert!(recent.take_twin(Direction::Inbound, "Yes", start + TWIN_WINDOW));
+}
+
+#[test]
+fn recorded_row_absorbs_only_one_twin() {
+    let start = Instant::now();
+    let mut recent = RecentRows::new();
+    recent.remember(Direction::SelfSent, "Yes".into(), start);
+
+    // The wrong direction neither matches nor uses the entry up.
+    assert!(!recent.take_twin(Direction::SelfSent, "Yes", start));
+    assert!(recent.take_twin(Direction::Inbound, "Yes", start));
+    assert!(recent.0.is_empty());
+    assert!(!recent.take_twin(Direction::Inbound, "Yes", start));
+}
+
+#[test]
+fn twin_takes_the_oldest_matching_entry() {
+    let start = Instant::now();
+    let later = start + Duration::from_secs(6);
+    let mut recent = RecentRows::new();
+    recent.remember(Direction::Inbound, "Yes".into(), start);
+    recent.remember(Direction::SelfSent, "Yes".into(), start);
+    recent.remember(Direction::Inbound, "Yes".into(), later);
+
+    assert!(recent.take_twin(Direction::SelfSent, "Yes", later));
+    assert_eq!(
+        recent.0,
+        [
+            (Direction::SelfSent, "Yes".to_string(), start),
+            (Direction::Inbound, "Yes".to_string(), later),
+        ]
+    );
 }
 
 #[test]
@@ -230,7 +261,7 @@ fn same_text_from_the_same_direction_is_kept() {
     let mut recent = RecentRows::new();
     recent.remember(Direction::Inbound, "Yes".into(), start);
 
-    assert!(!recent.is_duplicate(Direction::Inbound, "Yes", start + Duration::from_millis(5)));
+    assert!(!recent.take_twin(Direction::Inbound, "Yes", start + Duration::from_millis(5)));
 }
 
 #[test]
@@ -239,8 +270,8 @@ fn different_text_from_the_other_direction_is_kept() {
     let mut recent = RecentRows::new();
     recent.remember(Direction::Inbound, "Yes".into(), start);
 
-    assert!(!recent.is_duplicate(Direction::SelfSent, "Yes please", start));
-    assert!(!recent.is_duplicate(Direction::SelfSent, "yes", start));
+    assert!(!recent.take_twin(Direction::SelfSent, "Yes please", start));
+    assert!(!recent.take_twin(Direction::SelfSent, "yes", start));
 }
 
 #[test]
@@ -250,7 +281,7 @@ fn same_text_from_the_other_direction_outside_the_window_is_kept() {
     recent.remember(Direction::Inbound, "Yes".into(), start);
 
     let late = start + TWIN_WINDOW + Duration::from_millis(1);
-    assert!(!recent.is_duplicate(Direction::SelfSent, "Yes", late));
+    assert!(!recent.take_twin(Direction::SelfSent, "Yes", late));
 }
 
 #[test]
@@ -267,7 +298,7 @@ fn recent_rows_forget_entries_older_than_the_window() {
     assert_eq!(recent.0.len(), 5);
 
     // Both a lookup and a new entry drop what has aged out.
-    recent.is_duplicate(
+    recent.take_twin(
         Direction::SelfSent,
         "No",
         start + TWIN_WINDOW + Duration::from_millis(2_500),
@@ -358,4 +389,61 @@ async fn row_discarded_by_the_pause_is_not_remembered() {
 
     assert_eq!(self_cursor.load(Ordering::Relaxed), 12);
     assert_eq!(store.project_unhandled_events(10).await.unwrap().applied, 1);
+}
+
+/// Feeds rows through `record_row` in the given order, a second apart, and returns how
+/// many were recorded.
+async fn recorded_count(directions: &[Direction]) -> usize {
+    let directory = TestDirectory::new();
+    let store = HaroldStore::open(&directory.0).await.unwrap();
+    let inbound_cursor = AtomicI64::new(10);
+    let self_cursor = AtomicI64::new(10);
+    let recent = Mutex::new(RecentRows::new());
+    let start = Instant::now();
+
+    let mut rowid = 10;
+    for &direction in directions {
+        rowid += 1;
+        let cursor = match direction {
+            Direction::Inbound => &inbound_cursor,
+            Direction::SelfSent => &self_cursor,
+        };
+        let now = start + Duration::from_secs((rowid - 10) as u64);
+        record_row(
+            &store,
+            row(rowid, "Yes", direction),
+            cursor,
+            &recent,
+            false,
+            now,
+        )
+        .await;
+        assert_eq!(cursor.load(Ordering::Relaxed), rowid);
+    }
+    store.project_unhandled_events(10).await.unwrap().applied
+}
+
+#[tokio::test]
+async fn phone_reply_after_the_same_text_from_the_mac_is_recorded() {
+    use Direction::{Inbound, SelfSent};
+
+    // The Mac pair in either arrival order, then a single row from the phone.
+    assert_eq!(recorded_count(&[SelfSent, Inbound, Inbound]).await, 2);
+    assert_eq!(recorded_count(&[Inbound, SelfSent, Inbound]).await, 2);
+}
+
+#[tokio::test]
+async fn same_reply_typed_twice_on_the_mac_is_recorded_twice() {
+    use Direction::{Inbound, SelfSent};
+
+    for order in [
+        [Inbound, SelfSent, Inbound, SelfSent],
+        [Inbound, SelfSent, SelfSent, Inbound],
+        [SelfSent, Inbound, Inbound, SelfSent],
+        [SelfSent, Inbound, SelfSent, Inbound],
+        // Both pairs read in one poll: inbound rows first, then self rows.
+        [Inbound, Inbound, SelfSent, SelfSent],
+    ] {
+        assert_eq!(recorded_count(&order).await, 2, "{order:?}");
+    }
 }
