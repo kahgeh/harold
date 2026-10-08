@@ -841,7 +841,7 @@ async fn set_messaging_paused_appends_once_and_switches_immediately() {
     // The switch is flipped by the request itself, before anything is projected.
     let mut switched = Vec::new();
     service
-        .apply_messaging_paused(true, |paused| switched.push(paused))
+        .apply_messaging_paused(true, false, |paused| switched.push(paused))
         .await
         .unwrap();
     assert_eq!(switched, [true]);
@@ -854,11 +854,25 @@ async fn set_messaging_paused_appends_once_and_switches_immediately() {
         .snapshots
         .publish_committed(store.load_agent_snapshot().await.unwrap());
     service
-        .apply_messaging_paused(true, |paused| switched.push(paused))
+        .apply_messaging_paused(true, true, |paused| switched.push(paused))
         .await
         .unwrap();
     assert_eq!(store.project_unhandled_events(10).await.unwrap().applied, 0);
     assert_eq!(switched, [true]);
+
+    // A resume that is not projected yet leaves the hub saying "paused". A pause sent
+    // in that window must still be stored and applied, not taken for a repeat.
+    service
+        .apply_messaging_paused(false, true, |paused| switched.push(paused))
+        .await
+        .unwrap();
+    service
+        .apply_messaging_paused(true, false, |paused| switched.push(paused))
+        .await
+        .unwrap();
+    assert_eq!(switched, [true, false, true]);
+    assert_eq!(store.project_unhandled_events(10).await.unwrap().applied, 2);
+    assert!(store.load_agent_snapshot().await.unwrap().messaging_paused);
 
     drop(shutdown);
     let _ = task.await;

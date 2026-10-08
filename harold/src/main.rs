@@ -40,13 +40,16 @@ struct HaroldService {
 
 impl HaroldService {
     /// Persists a changed pause flag, then hands it to `switch` straight away so the
-    /// gates act before the projector reaches the event.
+    /// gates act before the projector reaches the event. `switched` is the switch's
+    /// current value: the published snapshot can lag a change that is stored but not
+    /// yet projected, so a request is a repeat only when both already agree with it.
     async fn apply_messaging_paused(
         &self,
         paused: bool,
+        switched: bool,
         switch: impl FnOnce(bool),
     ) -> Result<(), Status> {
-        if self.snapshots.messaging_paused() == paused {
+        if switched == paused && self.snapshots.messaging_paused() == paused {
             return Ok(());
         }
         store::append_messaging_paused_changed(&self.store, paused)
@@ -87,8 +90,12 @@ impl Harold for HaroldService {
         request: Request<SetMessagingPausedRequest>,
     ) -> Result<Response<SetMessagingPausedResponse>, Status> {
         let paused = request.into_inner().paused;
-        self.apply_messaging_paused(paused, outbound::set_messaging_paused)
-            .await?;
+        self.apply_messaging_paused(
+            paused,
+            outbound::is_messaging_paused(),
+            outbound::set_messaging_paused,
+        )
+        .await?;
         Ok(Response::new(SetMessagingPausedResponse { paused }))
     }
 
