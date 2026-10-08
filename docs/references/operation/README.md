@@ -103,7 +103,7 @@ These direct commands use the invoking process's normal configuration environmen
 
 ## Notification diagnostics
 
-`harold --diagnostics [--delay N]` explicitly tests screen-lock detection, TTS, and the selected away channel. It can speak or send a message. A bare `--delay` defaults to ten seconds, allowing time to lock the screen.
+`harold --diagnostics [--delay N]` explicitly tests screen-lock detection, TTS, and the selected away channel. It can speak or send a message. It runs as its own process and does not consult the messaging pause, so it sends on the away channel even while messaging is paused. A bare `--delay` defaults to ten seconds, allowing time to lock the screen.
 
 Use diagnostics only when intentionally testing notification delivery. See [installation and setup](../../how-tos/setup.md) for the manual macOS permissions and provider-hook steps that remain after the service is ready.
 
@@ -130,7 +130,7 @@ grpcurl -plaintext \
   harold.Harold/SetMessagingPaused
 ```
 
-Send `{"paused": false}` to resume. The RPC handler flips the in-process switch itself once the event is stored, without waiting for the projection; the event handler then confirms the value from the projected snapshot, so the switch is settled within one delivery cycle. A delivery that is already being dispatched at that moment still completes.
+Send `{"paused": false}` to resume. The RPC handler flips the in-process switch itself once the event is stored, without waiting for the projection; the event handler then confirms the value from the projected snapshot, so the switch is settled within one delivery cycle. A delivery that is already being dispatched at that moment still completes. Overlapping requests are applied one at a time, in the order they are stored.
 
 ## Inventory timeout
 
