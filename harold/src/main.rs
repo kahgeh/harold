@@ -38,6 +38,9 @@ struct HaroldService {
     /// Held across a pause request's append and switch, so overlapping requests
     /// cannot leave the store and the switch disagreeing.
     messaging_switch: tokio::sync::Mutex<()>,
+    /// The same for a voice mute request. The two settings are independent, so a mute
+    /// does not queue behind a pause.
+    tts_switch: tokio::sync::Mutex<()>,
     shutdown: watch::Receiver<()>,
 }
 
@@ -67,6 +70,28 @@ impl HaroldService {
         info!(paused, "messaging pause change persisted");
         Ok(())
     }
+
+    /// The voice mute, handled like the messaging pause above.
+    async fn apply_tts_muted(
+        &self,
+        muted: bool,
+        switched: impl FnOnce() -> bool,
+        switch: impl FnOnce(bool),
+    ) -> Result<(), Status> {
+        let _in_progress = self.tts_switch.lock().await;
+        if switched() == muted && self.snapshots.tts_muted() == muted {
+            return Ok(());
+        }
+        store::append_tts_mute_changed(&self.store, muted)
+            .await
+            .map_err(|error| {
+                tracing::error!(result = "append_failed", error = %error, "tts mute rejected");
+                Status::internal("event store write failed")
+            })?;
+        switch(muted);
+        info!(muted, "tts mute change persisted");
+        Ok(())
+    }
 }
 
 #[tonic::async_trait]
@@ -78,15 +103,8 @@ impl Harold for HaroldService {
         request: Request<SetTtsMutedRequest>,
     ) -> Result<Response<SetTtsMutedResponse>, Status> {
         let muted = request.into_inner().muted;
-        if self.snapshots.tts_muted() != muted {
-            store::append_tts_mute_changed(&self.store, muted)
-                .await
-                .map_err(|error| {
-                    tracing::error!(result = "append_failed", error = %error, "tts mute rejected");
-                    Status::internal("event store write failed")
-                })?;
-            info!(muted, "tts mute change persisted");
-        }
+        self.apply_tts_muted(muted, outbound::is_tts_muted, outbound::set_tts_muted)
+            .await?;
         Ok(Response::new(SetTtsMutedResponse { muted }))
     }
 
@@ -525,6 +543,7 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
             store: service_store,
             snapshots,
             messaging_switch: tokio::sync::Mutex::new(()),
+            tts_switch: tokio::sync::Mutex::new(()),
             shutdown: shutdown_rx.clone(),
         }))
         .serve_with_shutdown(addr, async {

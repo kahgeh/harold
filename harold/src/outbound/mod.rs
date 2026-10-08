@@ -26,21 +26,34 @@ pub(crate) enum DeliveryOutcome {
 static LAST_NOTIFY: Mutex<Option<(String, Instant)>> = Mutex::new(None);
 const DEDUP_WINDOW_SECS: u64 = 30;
 
+// Tests run in parallel and several of them flip these switches through the production
+// wiring, so under test every thread gets its own.
+#[cfg(not(test))]
 static TTS_MUTED: AtomicBool = AtomicBool::new(false);
 
+#[cfg(test)]
+thread_local! {
+    static TTS_MUTED: AtomicBool = const { AtomicBool::new(false) };
+}
+
+fn with_tts_switch<T>(read_or_write: impl FnOnce(&AtomicBool) -> T) -> T {
+    #[cfg(not(test))]
+    return read_or_write(&TTS_MUTED);
+    #[cfg(test)]
+    TTS_MUTED.with(read_or_write)
+}
+
 pub fn set_tts_muted(muted: bool) {
-    TTS_MUTED.store(muted, Ordering::SeqCst);
+    with_tts_switch(|switch| switch.store(muted, Ordering::SeqCst));
 }
 
 pub fn is_tts_muted() -> bool {
-    TTS_MUTED.load(Ordering::SeqCst)
+    with_tts_switch(|switch| switch.load(Ordering::SeqCst))
 }
 
 #[cfg(not(test))]
 static MESSAGING_PAUSED: AtomicBool = AtomicBool::new(false);
 
-// Tests run in parallel and several of them flip this switch through the production
-// wiring, so under test every thread gets its own.
 #[cfg(test)]
 thread_local! {
     static MESSAGING_PAUSED: AtomicBool = const { AtomicBool::new(false) };

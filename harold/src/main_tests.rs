@@ -88,6 +88,7 @@ where
             store: service_store,
             snapshots: AgentSnapshotHub::new(snapshot),
             messaging_switch: tokio::sync::Mutex::new(()),
+            tts_switch: tokio::sync::Mutex::new(()),
             shutdown: shutdown_rx,
         },
         shutdown,
@@ -800,12 +801,15 @@ async fn set_tts_muted_appends_once_and_is_idempotent() {
     let store = Arc::new(store::HaroldStore::open(&directory).await.unwrap());
     let (service, shutdown, task) = test_service(Arc::clone(&store), empty_snapshot());
 
+    // The switch is flipped by the request itself, before anything is projected.
+    assert!(!super::outbound::is_tts_muted());
     let response = service
         .set_tts_muted(Request::new(SetTtsMutedRequest { muted: true }))
         .await
         .unwrap()
         .into_inner();
     assert!(response.muted);
+    assert!(super::outbound::is_tts_muted());
     let batch = store.project_unhandled_events(10).await.unwrap();
     assert_eq!(batch.applied, 1);
     assert!(store.load_agent_snapshot().await.unwrap().tts_muted);
@@ -819,6 +823,80 @@ async fn set_tts_muted_appends_once_and_is_idempotent() {
         .await
         .unwrap();
     assert_eq!(store.project_unhandled_events(10).await.unwrap().applied, 0);
+
+    drop(shutdown);
+    let _ = task.await;
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+#[tokio::test]
+async fn mute_sent_while_the_snapshot_lags_an_unmute_is_stored() {
+    let directory = std::env::temp_dir().join(format!("harold-mute-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let store = Arc::new(store::HaroldStore::open(&directory).await.unwrap());
+    let (service, shutdown, task) = test_service(Arc::clone(&store), empty_snapshot());
+
+    let mut switched = Vec::new();
+    service
+        .apply_tts_muted(true, || false, |muted| switched.push(muted))
+        .await
+        .unwrap();
+    assert_eq!(switched, [true]);
+    assert_eq!(store.project_unhandled_events(10).await.unwrap().applied, 1);
+    service
+        .snapshots
+        .publish_committed(store.load_agent_snapshot().await.unwrap());
+
+    // A true repeat: the switch and the hub both say "muted" already.
+    service
+        .apply_tts_muted(true, || true, |muted| switched.push(muted))
+        .await
+        .unwrap();
+    assert_eq!(switched, [true]);
+    assert_eq!(store.project_unhandled_events(10).await.unwrap().applied, 0);
+
+    // An unmute that is not projected yet leaves the hub saying "muted". A mute sent
+    // in that window must still be stored and applied, not taken for a repeat.
+    service
+        .apply_tts_muted(false, || true, |muted| switched.push(muted))
+        .await
+        .unwrap();
+    service
+        .apply_tts_muted(true, || false, |muted| switched.push(muted))
+        .await
+        .unwrap();
+    assert_eq!(switched, [true, false, true]);
+    assert_eq!(store.project_unhandled_events(10).await.unwrap().applied, 2);
+    assert!(store.load_agent_snapshot().await.unwrap().tts_muted);
+
+    drop(shutdown);
+    let _ = task.await;
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+#[tokio::test]
+async fn overlapping_mute_requests_wait_for_the_one_in_progress() {
+    let directory = std::env::temp_dir().join(format!("harold-mute-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let store = Arc::new(store::HaroldStore::open(&directory).await.unwrap());
+    let (service, shutdown, task) = test_service(Arc::clone(&store), empty_snapshot());
+
+    // Stand in for a request that is between its append and its switch.
+    let in_progress = service.tts_switch.lock().await;
+    let mut switched = Vec::new();
+    {
+        let mut request =
+            Box::pin(service.apply_tts_muted(true, || false, |muted| switched.push(muted)));
+        let waited =
+            tokio::time::timeout(std::time::Duration::from_millis(200), &mut request).await;
+        assert!(waited.is_err(), "second request ran inside the first");
+        assert_eq!(store.project_unhandled_events(10).await.unwrap().applied, 0);
+
+        drop(in_progress);
+        request.await.unwrap();
+    }
+    assert_eq!(switched, [true]);
+    assert_eq!(store.project_unhandled_events(10).await.unwrap().applied, 1);
 
     drop(shutdown);
     let _ = task.await;
