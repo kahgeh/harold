@@ -144,7 +144,9 @@ pub(crate) async fn project_and_publish_agent_snapshot(
 ) -> events::Result<ProjectionBatch> {
     let batch = store.project_unhandled_events(limit).await?;
     if batch.through_event_version.get() > snapshots.through_event_version().get() {
-        snapshots.publish_committed(store.load_agent_snapshot().await?);
+        let snapshot = store.load_agent_snapshot().await?;
+        crate::outbound::set_tts_muted(snapshot.tts_muted);
+        snapshots.publish_committed(snapshot);
     }
     Ok(batch)
 }

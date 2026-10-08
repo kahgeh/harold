@@ -2,6 +2,7 @@ pub mod tts;
 
 use std::process::Command;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use tracing::info;
@@ -25,6 +26,16 @@ pub(crate) enum DeliveryOutcome {
 static LAST_NOTIFY: Mutex<Option<(String, Instant)>> = Mutex::new(None);
 const DEDUP_WINDOW_SECS: u64 = 30;
 
+static TTS_MUTED: AtomicBool = AtomicBool::new(false);
+
+pub fn set_tts_muted(muted: bool) {
+    TTS_MUTED.store(muted, Ordering::SeqCst);
+}
+
+pub fn is_tts_muted() -> bool {
+    TTS_MUTED.load(Ordering::SeqCst)
+}
+
 // ---------------------------------------------------------------------------
 // OutboundChannel — notification to human
 // ---------------------------------------------------------------------------
@@ -41,8 +52,21 @@ impl OutboundChannel {
         turn: &TurnCompleted,
         trace_id: &str,
     ) -> Result<(DeliveryOutcome, Option<AgentAddress>), String> {
+        self.notify_with_mute(turn, trace_id, is_tts_muted())
+    }
+
+    fn notify_with_mute(
+        &self,
+        turn: &TurnCompleted,
+        trace_id: &str,
+        tts_muted: bool,
+    ) -> Result<(DeliveryOutcome, Option<AgentAddress>), String> {
         match self {
             OutboundChannel::Tts => {
+                if tts_muted {
+                    info!("TTS notification skipped (voice muted)");
+                    return Ok((DeliveryOutcome::Skipped, None));
+                }
                 if tts::notify_at_desk(turn, trace_id) {
                     Ok((DeliveryOutcome::Delivered, None))
                 } else {
@@ -145,4 +169,27 @@ pub fn notify(turn: &TurnCompleted, trace_id: &str) -> Result<DeliveryOutcome, S
 /// Send a confirmation/error message back through the configured away channel.
 pub fn send_reply(msg: &str) -> Result<(), String> {
     channels::send(msg)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn turn() -> TurnCompleted {
+        TurnCompleted {
+            pane_id: "%1".into(),
+            pane_label: "label".into(),
+            last_user_prompt: "prompt".into(),
+            assistant_message: "message".into(),
+            main_context: "ctx".into(),
+            agent_incarnation: None,
+            work_summary: crate::agent::domain::CompletionSummaryUpdate::Unchanged,
+        }
+    }
+
+    #[test]
+    fn muted_tts_channel_skips_without_running_the_command() {
+        let outcome = OutboundChannel::Tts.notify_with_mute(&turn(), "trace", true);
+        assert!(matches!(outcome, Ok((DeliveryOutcome::Skipped, None))));
+    }
 }

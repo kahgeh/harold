@@ -27,6 +27,10 @@ impl AgentSnapshotHub {
         self._receiver.borrow().through_event_version
     }
 
+    pub(crate) fn tts_muted(&self) -> bool {
+        self._receiver.borrow().tts_muted
+    }
+
     pub(crate) fn publish_committed(&self, snapshot: AgentSnapshot) {
         self.sender.send_if_modified(|current| {
             if snapshot.through_event_version.get() <= current.through_event_version.get() {

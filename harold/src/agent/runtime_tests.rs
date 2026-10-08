@@ -1408,6 +1408,7 @@ async fn real_screen_adapter_keeps_unrelated_capture_out_of_every_published_boun
     let snapshots = AgentSnapshotHub::new(empty_snapshot());
     let service = HaroldService {
         monitor: handle.clone(),
+        store: Arc::clone(&store),
         snapshots: snapshots.clone(),
         shutdown: shutdown_rx,
     };
@@ -1538,6 +1539,7 @@ async fn grpc_fallback_explicit_clear_and_replacement_converge_in_projection_ord
     let fixture = Fixture::new(inventory).await;
     let service = HaroldService {
         monitor: fixture.handle.clone(),
+        store: Arc::clone(&fixture.store),
         snapshots: AgentSnapshotHub::new(empty_snapshot()),
         shutdown: fixture._shutdown.subscribe(),
     };

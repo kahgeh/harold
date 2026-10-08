@@ -15,11 +15,12 @@ use super::agent::screen::TmuxVisibleScreen;
 use super::agent::snapshot::AgentSnapshotHub;
 use super::harold::harold_server::Harold;
 use super::harold::{
-    AgentState, MonitorHealthState, ReportAgentStateRequest, WatchAgentStatesRequest,
+    AgentState, MonitorHealthState, ReportAgentStateRequest, SetTtsMutedRequest,
+    WatchAgentStatesRequest,
 };
 use super::{
-    HaroldService, Request, TurnCompleteRequest, load_startup_agent_snapshot, pane_id_for_log,
-    store,
+    HaroldService, Request, TurnCompleteRequest, load_startup_agent_snapshot, map_agent_snapshot,
+    pane_id_for_log, store,
 };
 
 struct EmptyInventory;
@@ -72,6 +73,7 @@ where
     I: AgentInventoryPort + 'static,
 {
     let (shutdown, shutdown_rx) = watch::channel(());
+    let service_store = Arc::clone(&store);
     let (monitor, task) = spawn_agent_monitor_for_test(
         store,
         inventory,
@@ -83,6 +85,7 @@ where
     (
         HaroldService {
             monitor,
+            store: service_store,
             snapshots: AgentSnapshotHub::new(snapshot),
             shutdown: shutdown_rx,
         },
@@ -785,4 +788,43 @@ async fn watch_reconnect_observes_a_non_agent_checkpoint_revision() {
     assert_eq!(current.through_event_version, 1);
     assert!(current.panes.is_empty());
     task.abort();
+}
+
+#[tokio::test]
+async fn set_tts_muted_appends_once_and_is_idempotent() {
+    let directory = std::env::temp_dir().join(format!("harold-mute-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let store = Arc::new(store::HaroldStore::open(&directory).await.unwrap());
+    let (service, shutdown, task) = test_service(Arc::clone(&store), empty_snapshot());
+
+    let response = service
+        .set_tts_muted(Request::new(SetTtsMutedRequest { muted: true }))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(response.muted);
+    let batch = store.project_unhandled_events(10).await.unwrap();
+    assert_eq!(batch.applied, 1);
+    assert!(store.load_agent_snapshot().await.unwrap().tts_muted);
+
+    // Already-applied value (as seen by the hub) must not append again.
+    service
+        .snapshots
+        .publish_committed(store.load_agent_snapshot().await.unwrap());
+    service
+        .set_tts_muted(Request::new(SetTtsMutedRequest { muted: true }))
+        .await
+        .unwrap();
+    assert_eq!(store.project_unhandled_events(10).await.unwrap().applied, 0);
+
+    drop(shutdown);
+    let _ = task.await;
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+#[test]
+fn snapshot_mapping_carries_tts_muted() {
+    let mut snapshot = empty_snapshot();
+    snapshot.tts_muted = true;
+    assert!(map_agent_snapshot(snapshot).tts_muted);
 }

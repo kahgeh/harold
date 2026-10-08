@@ -1122,8 +1122,6 @@ pub async fn append_turn_completed(
     Ok(())
 }
 
-// Called by the mute IPC handler added in a later task.
-#[allow(dead_code)]
 pub async fn append_tts_mute_changed(store: &HaroldStore, muted: bool) -> events::Result<()> {
     store
         .stream

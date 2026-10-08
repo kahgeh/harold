@@ -6,6 +6,7 @@ service Harold {
   rpc TurnComplete (TurnCompleteRequest) returns (TurnCompleteResponse);
   rpc ReportAgentState (ReportAgentStateRequest) returns (ReportAgentStateResponse);
   rpc WatchAgentStates (WatchAgentStatesRequest) returns (stream AgentStateSnapshot);
+  rpc SetTtsMuted (SetTtsMutedRequest) returns (SetTtsMutedResponse);
 }
 
 message TurnCompleteRequest {
@@ -75,4 +76,13 @@ message AgentStateSnapshot {
   int64 server_time_ms = 2;
   repeated AgentMonitorHealth monitor_health = 3;
   repeated AgentPaneState panes = 4;
+  bool tts_muted = 5;
+}
+
+message SetTtsMutedRequest {
+  bool muted = 1;
+}
+
+message SetTtsMutedResponse {
+  bool muted = 1;
 }

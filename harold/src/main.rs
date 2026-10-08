@@ -26,12 +26,13 @@ pub use harold_api::harold;
 use harold::harold_server::{Harold, HaroldServer};
 use harold::{
     AgentMonitorHealth, AgentPaneState, AgentState, AgentStateSnapshot, MonitorHealthState,
-    ReportAgentStateRequest, ReportAgentStateResponse, TurnCompleteRequest, TurnCompleteResponse,
-    WatchAgentStatesRequest,
+    ReportAgentStateRequest, ReportAgentStateResponse, SetTtsMutedRequest, SetTtsMutedResponse,
+    TurnCompleteRequest, TurnCompleteResponse, WatchAgentStatesRequest,
 };
 
 struct HaroldService {
     monitor: agent::runtime::AgentMonitorHandle,
+    store: Arc<store::HaroldStore>,
     snapshots: agent::snapshot::AgentSnapshotHub,
     shutdown: watch::Receiver<()>,
 }
@@ -39,6 +40,23 @@ struct HaroldService {
 #[tonic::async_trait]
 impl Harold for HaroldService {
     type WatchAgentStatesStream = ReceiverStream<Result<AgentStateSnapshot, Status>>;
+
+    async fn set_tts_muted(
+        &self,
+        request: Request<SetTtsMutedRequest>,
+    ) -> Result<Response<SetTtsMutedResponse>, Status> {
+        let muted = request.into_inner().muted;
+        if self.snapshots.tts_muted() != muted {
+            store::append_tts_mute_changed(&self.store, muted)
+                .await
+                .map_err(|error| {
+                    tracing::error!(result = "append_failed", error = %error, "tts mute rejected");
+                    Status::internal("event store write failed")
+                })?;
+            info!(muted, "tts mute change persisted");
+        }
+        Ok(Response::new(SetTtsMutedResponse { muted }))
+    }
 
     async fn turn_complete(
         &self,
@@ -175,6 +193,7 @@ async fn send_agent_snapshot(
 
 fn map_agent_snapshot(snapshot: agent::domain::AgentSnapshot) -> AgentStateSnapshot {
     AgentStateSnapshot {
+        tts_muted: snapshot.tts_muted,
         through_event_version: snapshot.through_event_version.get() as u64,
         server_time_ms: snapshot.server_time_ms,
         monitor_health: snapshot
@@ -415,6 +434,7 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
         Arc::new(agent::screen::TmuxVisibleScreen::new());
     let providers = cfg.agents.0.clone();
     let initial_agent_snapshot = load_startup_agent_snapshot(&store).await?;
+    outbound::set_tts_muted(initial_agent_snapshot.tts_muted);
     let snapshots = agent::snapshot::AgentSnapshotHub::new(initial_agent_snapshot.clone());
 
     let activity_provider = cfg.activity_summary.enabled.then(|| {
@@ -452,9 +472,11 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
     ));
 
     info!(address = %addr, "Harold listening");
+    let service_store = Arc::clone(&store);
     let server_result = Server::builder()
         .add_service(HaroldServer::new(HaroldService {
             monitor,
+            store: service_store,
             snapshots,
             shutdown: shutdown_rx.clone(),
         }))

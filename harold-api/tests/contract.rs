@@ -1,6 +1,7 @@
 use harold_api::FILE_DESCRIPTOR_SET;
 use harold_api::harold::{
-    AgentPaneState, AgentState, ReportAgentStateRequest, TurnCompleteRequest,
+    AgentPaneState, AgentState, ReportAgentStateRequest, SetTtsMutedRequest, SetTtsMutedResponse,
+    TurnCompleteRequest,
 };
 use prost::Message;
 
@@ -199,6 +200,21 @@ fn harold_service_exposes_only_the_approved_rpcs() {
             "TurnComplete".to_string(),
             "ReportAgentState".to_string(),
             "WatchAgentStates".to_string(),
+            "SetTtsMuted".to_string(),
         ]
     );
+}
+
+#[test]
+fn set_tts_muted_contract_is_additive() {
+    let request = SetTtsMutedRequest { muted: true };
+    assert!(round_trip(&request).muted);
+    assert!(round_trip(&SetTtsMutedResponse { muted: true }).muted);
+    assert_eq!(
+        message_fields("SetTtsMutedRequest"),
+        [("muted".to_string(), 1)]
+    );
+    let snapshot_fields = message_fields("AgentStateSnapshot");
+    assert!(snapshot_fields.contains(&("tts_muted".to_string(), 5)));
+    assert_eq!(snapshot_fields.len(), 5);
 }

@@ -332,6 +332,7 @@ mod tests {
         .collect();
 
         let mapped = map_snapshot(AgentStateSnapshot {
+            tts_muted: false,
             through_event_version: 42,
             server_time_ms: 9_876,
             monitor_health: Vec::new(),
@@ -375,6 +376,7 @@ mod tests {
     #[test]
     fn maps_every_monitor_health_state_and_unknown_enum_values_to_unknown() {
         let mapped = map_snapshot(AgentStateSnapshot {
+            tts_muted: false,
             through_event_version: 1,
             server_time_ms: 2,
             monitor_health: vec![
@@ -445,6 +447,7 @@ mod tests {
             .collect();
 
         let mapped = map_snapshot(AgentStateSnapshot {
+            tts_muted: false,
             through_event_version: 1,
             server_time_ms: 2,
             monitor_health: Vec::new(),
@@ -500,6 +503,7 @@ mod tests {
         };
 
         let mapped = map_snapshot(AgentStateSnapshot {
+            tts_muted: false,
             through_event_version: 1,
             server_time_ms: 2,
             monitor_health: vec![proto_health(1, &over_64, &over_64, 3)],
@@ -587,6 +591,7 @@ mod tests {
     #[tokio::test]
     async fn reader_maps_generated_snapshot_before_delivery_then_closes_at_eof() {
         let generated = AgentStateSnapshot {
+            tts_muted: false,
             through_event_version: 7,
             server_time_ms: 8,
             monitor_health: Vec::new(),
@@ -610,6 +615,7 @@ mod tests {
         let mut invalid = proto_pane("%1");
         invalid.pane_pid = 0;
         let mut stream = spawn_reader(FakeReader::new([Ok(Some(AgentStateSnapshot {
+            tts_muted: false,
             through_event_version: 1,
             server_time_ms: 2,
             monitor_health: Vec::new(),
@@ -762,6 +768,7 @@ mod tests {
 
     fn mapping_error(panes: Vec<AgentPaneState>) -> ProtocolError {
         map_snapshot(AgentStateSnapshot {
+            tts_muted: false,
             through_event_version: 1,
             server_time_ms: 2,
             monitor_health: Vec::new(),
