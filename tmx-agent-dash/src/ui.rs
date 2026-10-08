@@ -19,6 +19,8 @@ const CORAL: Color = Color::Rgb(224, 114, 98);
 const MIN_WIDTH: u16 = 60;
 const MIN_HEIGHT: u16 = 18;
 const WIDE_WIDTH: u16 = 120;
+/// Narrowest terminal that fits the long-form footer with every hint visible.
+const WIDE_FOOTER_WIDTH: u16 = 100;
 const COMPACT_WIDTH: u16 = 84;
 
 pub fn render(frame: &mut Frame<'_>, app: &App, now_ms: i64) {
@@ -47,7 +49,7 @@ pub fn render(frame: &mut Frame<'_>, app: &App, now_ms: i64) {
     render_summary(frame, summary, app);
     render_search(frame, search, app);
     render_workspace(frame, workspace, app, now_ms);
-    render_footer(frame, footer, compact);
+    render_footer(frame, footer, compact || area.width < WIDE_FOOTER_WIDTH);
     render_palette(frame, area, app);
 }
 
@@ -468,6 +470,14 @@ fn render_inventory(frame: &mut Frame<'_>, area: Rect, app: &App, now_ms: i64) {
                     fit(app.label(agent), usize::from(where_width) - 2)
                 )),
                 Cell::from(Line::styled(
+                    if app.is_waiting(&agent.incarnation) {
+                        "◆"
+                    } else {
+                        ""
+                    },
+                    Style::default().fg(AMBER),
+                )),
+                Cell::from(Line::styled(
                     agent.provider_tag(),
                     Style::default().fg(MUTED),
                 )),
@@ -481,10 +491,11 @@ fn render_inventory(frame: &mut Frame<'_>, area: Rect, app: &App, now_ms: i64) {
     }
     let (header, widths) = if wide {
         (
-            Row::new(["STATE", "WHERE", "", "WORK SUMMARY", "AGE"]),
+            Row::new(["STATE", "WHERE", "", "", "WORK SUMMARY", "AGE"]),
             vec![
                 Constraint::Length(13),
                 Constraint::Length(where_width),
+                Constraint::Length(1),
                 Constraint::Length(2),
                 Constraint::Min(12),
                 Constraint::Length(7),
@@ -492,25 +503,122 @@ fn render_inventory(frame: &mut Frame<'_>, area: Rect, app: &App, now_ms: i64) {
         )
     } else {
         (
-            Row::new(["STATE", "WHERE", "", "WORK SUMMARY"]),
+            Row::new(["STATE", "WHERE", "", "", "WORK SUMMARY"]),
             vec![
                 Constraint::Length(11),
                 Constraint::Length(where_width),
+                Constraint::Length(1),
                 Constraint::Length(2),
                 Constraint::Min(8),
             ],
         )
     };
+    const LIST_TITLE: &str = " AGENT BLOCK OCCUPANCY ";
+    let title_room = usize::from(area.width)
+        .saturating_sub(2)
+        .saturating_sub(LIST_TITLE.chars().count() + 1);
+    let block = board_block()
+        .title(LIST_TITLE)
+        .title_top(waiting_title(app, title_room).right_aligned())
+        .borders(Borders::ALL);
     let table = Table::new(rows, widths)
         .header(header.style(Style::default().fg(MUTED).add_modifier(Modifier::BOLD)))
         .column_spacing(1)
-        .block(
-            board_block()
-                .title(" AGENT BLOCK OCCUPANCY ")
-                .borders(Borders::ALL),
-        );
+        .block(block);
     let mut state = TableState::default().with_selected(selected_index);
     frame.render_stateful_widget(table, area, &mut state);
+}
+
+fn waiting_entry(app: &App, row: &crate::app::AgentRow) -> String {
+    if row.group() == row.name() {
+        app.label(row).to_owned()
+    } else {
+        format!("{}/{}", row.group(), app.label(row))
+    }
+}
+
+/// The waiting line: count, focus-tracking state, then as many entries as fit.
+/// Never exceeds `max_width`; when not even the oldest entry fits whole it is
+/// truncated so something useful still renders.
+fn waiting_title(app: &App, max_width: usize) -> Line<'static> {
+    const OPEN: &str = "◀ h  ";
+    const CLOSE: &str = "  l ▶ ";
+    let waiting = app.waiting_rows();
+    let mut spans = vec![Span::styled(
+        format!(" WAITING {} ", waiting.len()),
+        Style::default()
+            .fg(if waiting.is_empty() { MUTED } else { AMBER })
+            .add_modifier(Modifier::BOLD),
+    )];
+    if !app.focus_tracking() {
+        spans.push(Span::styled(
+            "(focus tracking off) ",
+            Style::default().fg(MUTED),
+        ));
+    }
+    let used = Line::from(spans.clone()).width();
+    let budget =
+        max_width.saturating_sub(used + Line::raw(OPEN).width() + Line::raw(CLOSE).width());
+    let more = |hidden: usize| format!(" +{hidden} more");
+    let mut entries: Vec<Span<'static>> = Vec::new();
+    let mut entries_width = 0;
+    let mut shown = 0;
+    for (index, row) in waiting.iter().enumerate() {
+        let text = format!(
+            "{}{}",
+            if index == 0 { "" } else { " · " },
+            waiting_entry(app, row)
+        );
+        let hidden_after = waiting.len() - index - 1;
+        let reserve = if hidden_after == 0 {
+            0
+        } else {
+            Line::raw(more(hidden_after)).width()
+        };
+        let width = Line::raw(text.as_str()).width();
+        if entries_width + width + reserve > budget {
+            break;
+        }
+        let selected = app.selected.as_ref() == Some(&row.incarnation);
+        entries.push(Span::styled(
+            text,
+            if selected {
+                Style::default()
+                    .fg(INK)
+                    .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+            } else {
+                Style::default().fg(INK)
+            },
+        ));
+        entries_width += width;
+        shown += 1;
+    }
+    let mut trailing = None;
+    if shown == 0 {
+        let Some(oldest) = waiting.first() else {
+            return Line::from(spans);
+        };
+        if budget == 0 {
+            return Line::from(spans);
+        }
+        let text = fit(&waiting_entry(app, oldest), budget).into_owned();
+        let width = Line::raw(text.as_str()).width();
+        entries.push(Span::styled(text, Style::default().fg(INK)));
+        let hidden = more(waiting.len() - 1);
+        // The count is dropped rather than overflowing the border.
+        if waiting.len() > 1 && width + Line::raw(hidden.as_str()).width() <= budget {
+            trailing = Some(hidden);
+        }
+    } else if shown < waiting.len() {
+        trailing = Some(more(waiting.len() - shown));
+    }
+    spans.push(Span::styled(OPEN, Style::default().fg(MUTED)));
+    spans.extend(entries);
+    if let Some(hidden) = trailing {
+        spans.push(Span::styled(hidden, Style::default().fg(MUTED)));
+    }
+    spans.push(Span::styled(CLOSE, Style::default().fg(MUTED)));
+    Line::from(spans)
 }
 
 fn render_detail<'a>(frame: &mut Frame<'_>, area: Rect, lines: Option<Vec<Line<'a>>>) {
@@ -576,14 +684,14 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, compact: bool) {
         vec![
             Span::styled(" j/k", Style::default().fg(INK)),
             Span::raw(" move "),
+            Span::styled("h/l", Style::default().fg(INK)),
+            Span::raw(" wait "),
             Span::styled("f", Style::default().fg(INK)),
             Span::raw(" search "),
             Span::styled("/", Style::default().fg(INK)),
             Span::raw(" commands "),
             Span::styled("Enter", Style::default().fg(INK)),
             Span::raw(" go "),
-            Span::styled("Esc", Style::default().fg(INK)),
-            Span::raw(" clear "),
             Span::styled("q", Style::default().fg(INK)),
             Span::raw(" quit "),
         ]
@@ -592,6 +700,8 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, compact: bool) {
             Span::styled(" DISPATCH  ", Style::default().fg(MUTED)),
             Span::styled("j/k", Style::default().fg(INK)),
             Span::raw(" select  "),
+            Span::styled("h/l", Style::default().fg(INK)),
+            Span::raw(" waiting  "),
             Span::styled("f", Style::default().fg(INK)),
             Span::raw(" search  "),
             Span::styled("/", Style::default().fg(INK)),
@@ -1490,9 +1600,9 @@ mod tests {
         assert!(content.contains("▶ ● BUSY"));
         assert!(content.contains("cx"));
         assert!(!content.contains("tmx-agent-dash:2.17"));
-        // The WHERE column is narrower than the old AGENT+TARGET pair, so the
-        // whole summary now fits in the work column.
-        assert_eq!(content.matches('界').count(), 43);
+        // The waiting-marker column takes one more cell of width (plus its
+        // spacing) from the work column, so the last wide glyph is clipped.
+        assert_eq!(content.matches('界').count(), 42);
     }
 
     #[test]
@@ -1575,6 +1685,17 @@ mod tests {
             .map(|cell| cell.symbol())
             .collect::<Vec<_>>()
             .join("")
+    }
+
+    /// Like `rendered`, but with a newline after every terminal row.
+    fn rendered_lines(app: &App, width: u16, height: u16, now_ms: i64) -> String {
+        let buffer = rendered_buffer(app, width, height, now_ms);
+        buffer
+            .content()
+            .chunks(usize::from(buffer.area.width))
+            .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     fn rendered_buffer(app: &App, width: u16, height: u16, now_ms: i64) -> Buffer {
@@ -1918,5 +2039,133 @@ mod tests {
         app.handle_key(crossterm::event::KeyCode::Char('/'));
         let content = rendered(&app, 60, 18, 100_000);
         assert!(content.contains("Voice: mute"));
+    }
+
+    fn layout_with_states(states: [AgentState; 3], revision: u64) -> crate::app::Snapshot {
+        crate::app::Snapshot {
+            through_event_version: revision,
+            ..snapshot(
+                vec![health(MonitorHealthState::Healthy, "ok")],
+                vec![
+                    located(
+                        "%1",
+                        states[0],
+                        "Claude",
+                        "harold  main",
+                        "/p/harold/main",
+                        "a",
+                    ),
+                    located(
+                        "%2",
+                        states[1],
+                        "Claude",
+                        "harold  voice-mute-palette1",
+                        "/p/harold/voice-mute-palette",
+                        "b",
+                    ),
+                    located("%3", states[2], "Codex", "home", "/Users/k/Dev/p/sre", "c"),
+                ],
+            )
+        }
+    }
+
+    fn waiting_app() -> App {
+        use AgentState::{Busy, Idle};
+        let mut app = live_app(Vec::new(), None);
+        app.observe_focus(crate::app::FocusReading::Active("%99".into()));
+        app.apply_later_snapshot(layout_with_states([Busy, Busy, Busy], 43))
+            .unwrap();
+        app.apply_later_snapshot(layout_with_states([Busy, Busy, Idle], 44))
+            .unwrap();
+        app.apply_later_snapshot(layout_with_states([Busy, Idle, Idle], 45))
+            .unwrap();
+        app
+    }
+
+    #[test]
+    fn waiting_line_shows_count_entries_oldest_first_and_keys() {
+        let content = rendered(&waiting_app(), 140, 38, 100_000);
+        assert!(content.contains("WAITING 2"));
+        assert!(content.contains("◀ h"));
+        assert!(content.contains("l ▶"));
+        let sre = content.find("home/sre").expect("oldest entry");
+        let palette = content
+            .find("harold/voice-mute-palette")
+            .expect("newest entry");
+        assert!(sre < palette);
+        assert!(content.contains("AGENT BLOCK OCCUPANCY"));
+        assert!(!content.contains("focus tracking off"));
+    }
+
+    #[test]
+    fn waiting_line_is_quiet_when_empty_and_flags_missing_focus_tracking() {
+        let mut app = user_layout();
+        let content = rendered(&app, 140, 38, 100_000);
+        assert!(content.contains("WAITING 0"));
+        assert!(!content.contains("◀ h"));
+        assert!(content.contains("(focus tracking off)"));
+
+        app.observe_focus(crate::app::FocusReading::Active("%99".into()));
+        assert!(!rendered(&app, 140, 38, 100_000).contains("focus tracking off"));
+    }
+
+    #[test]
+    fn waiting_rows_carry_a_marker_and_others_do_not() {
+        let content = rendered_lines(&waiting_app(), 140, 38, 100_000);
+        let line_with = |needle: &str| {
+            content
+                .lines()
+                .find(|line| line.contains(needle) && line.contains("IDLE"))
+                .map(str::to_owned)
+        };
+        assert!(line_with("sre").unwrap().contains('◆'));
+        let busy = content
+            .lines()
+            .find(|line| line.contains("BUSY") && line.contains("main"))
+            .unwrap();
+        assert!(!busy.contains('◆'));
+    }
+
+    #[test]
+    fn waiting_line_overflow_reports_how_many_are_hidden_and_never_wraps() {
+        let content = rendered_lines(&waiting_app(), 60, 18, 100_000);
+        assert!(content.contains("WAITING 2"));
+        assert!(content.contains("more") || content.contains("home/sre"));
+        assert_eq!(content.lines().count(), 18);
+    }
+
+    #[test]
+    fn group_equal_to_name_is_not_repeated_in_a_waiting_entry() {
+        use AgentState::{Busy, Idle};
+        let single = |state, revision| crate::app::Snapshot {
+            through_event_version: revision,
+            ..snapshot(
+                vec![health(MonitorHealthState::Healthy, "ok")],
+                vec![located(
+                    "%1",
+                    state,
+                    "Codex",
+                    "kahgeh-com",
+                    "/p/kahgeh-com",
+                    "a",
+                )],
+            )
+        };
+        let mut app = live_app(Vec::new(), None);
+        app.apply_later_snapshot(single(Busy, 43)).unwrap();
+        app.apply_later_snapshot(single(Idle, 44)).unwrap();
+        let content = rendered(&app, 140, 38, 100_000);
+        assert!(content.contains("WAITING 1"));
+        assert!(!content.contains("kahgeh-com/kahgeh-com"));
+    }
+
+    #[test]
+    fn footer_lists_every_hint_untruncated_at_all_widths() {
+        for (width, height) in [(140, 38), (84, 30), (70, 30), (60, 18)] {
+            let content = rendered(&user_layout(), width, height, 100_000);
+            for hint in ["j/k", "h/l", "f search", "/ commands", "Enter", "q quit"] {
+                assert!(content.contains(hint), "{hint} missing at {width}x{height}");
+            }
+        }
     }
 }
