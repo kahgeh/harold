@@ -13,6 +13,8 @@ let isBusy = false
 let isMainTurnRunning = false
 // Runs from the start of a main turn until the pane is reported idle.
 let checks: Timer | undefined
+// The one pending wait after a subagent's turn ended; each new subagent end replaces it.
+let settle: Timer | undefined
 
 async function report($: EngineInterface, event: ReportEvent): Promise<boolean> {
   try {
@@ -60,6 +62,12 @@ function startChecks($: EngineInterface): void {
 function stopChecks(): void {
   checks?.cancel()
   checks = undefined
+  cancelSettle()
+}
+
+function cancelSettle(): void {
+  settle?.cancel()
+  settle = undefined
 }
 
 // Called when a main turn or a subagent's turn has ended, and at a check with no main turn
@@ -79,9 +87,12 @@ async function reportAfterEnd($: EngineInterface, idleEvent: ReportEvent): Promi
   return enqueue($, idleEvent)
 }
 
-// Reports a subagent's end once nothing has woken the main session for SETTLE_MS.
+// Reports a subagent's end once nothing has woken the main session for SETTLE_MS. Each end
+// restarts the one wait, and a check does not report idle while it is pending.
 function settleAfterSubagentEnd($: EngineInterface): void {
-  $.clock.after(SETTLE_MS, () => {
+  cancelSettle()
+  settle = $.clock.after(SETTLE_MS, () => {
+    settle = undefined
     void reportAfterEnd($, 'subagents-finished')
   })
 }
@@ -91,7 +102,17 @@ async function check($: EngineInterface): Promise<void> {
     await enqueue($, 'still-working')
     return
   }
+  if (settle !== undefined) return
   await reportAfterEnd($, 'subagents-finished')
+}
+
+// A timer that cannot start must not lose the report that goes with it.
+function tryStartChecks($: EngineInterface): void {
+  try {
+    startChecks($)
+  } catch {
+    // Fail open, as every report does.
+  }
 }
 
 const agentIdOf = (e: object): string | undefined => (e as { agentId?: string }).agentId
@@ -101,7 +122,8 @@ export const register: Register = on => {
     let sent: Promise<boolean> | undefined
     if (agentIdOf(e) === undefined) {
       isMainTurnRunning = true
-      startChecks($)
+      cancelSettle()
+      tryStartChecks($)
       sent = enqueue($, 'turn-started')
     }
     const result = await next(e)
@@ -111,14 +133,16 @@ export const register: Register = on => {
   })
 
   on('turn.complete', async ($, e, next) => {
+    const isMain = agentIdOf(e) === undefined
+    if (isMain) isMainTurnRunning = false
+    const result = await next(e)
+    // The subagent list is read after the engine has finished with the turn.
     let sent: Promise<boolean> | undefined
-    if (agentIdOf(e) === undefined) {
-      isMainTurnRunning = false
+    if (isMain) {
       sent = reportAfterEnd($, 'turn-completed')
     } else if (!isMainTurnRunning && checks !== undefined) {
       settleAfterSubagentEnd($)
     }
-    const result = await next(e)
     await sent
 
     return result

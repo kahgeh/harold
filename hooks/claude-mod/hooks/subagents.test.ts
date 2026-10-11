@@ -12,7 +12,12 @@ const row = (id: string, status: string): Row => ({ id, type: 'general-purpose',
 
 // The bottom of the test: a clock the test moves, the subagent list the test hands over, and
 // the event each `harold accept` run carried.
-const bottom = (on: On, list: () => Row[], exitCode: () => number = () => 0) => {
+const bottom = (
+  on: On,
+  list: () => Row[],
+  exitCode: () => number = () => 0,
+  onRun: (c: { argv: readonly string[] }) => Promise<void> = async () => {},
+) => {
   const sent: string[] = []
   const clock = mock.clock(on)
   mock.env(on, ENV)
@@ -21,6 +26,7 @@ const bottom = (on: On, list: () => Row[], exitCode: () => number = () => 0) => 
   on('agent.list', () => ({ value: list() as never }))
   on('process.run', async (_$, e) => {
     sent.push(e.argv[2])
+    await onRun({ argv: e.argv })
     return { value: { exitCode: exitCode(), stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
   })
   return { sent, clock }
@@ -78,10 +84,14 @@ test('a 10-second check that finds no subagent working reports subagents-finishe
 })
 
 test('a subagent that finishes while the main turn is running reports nothing', async ($, on) => {
-  const { sent } = bottom(on, () => [row('a1', 'completed')])
+  const { sent, clock } = bottom(on, () => [row('a1', 'completed')])
   await $.turn.start(START)
   await $.turn.complete(subagentEnd('a1'))
+  await clock.advance(3_000)
   expect(sent).toEqual(['turn-started'])
+  await clock.advance(10_000)
+  // Only the main turn's own check reports, and it reports busy.
+  expect(sent).toEqual(['turn-started', 'still-working'])
 })
 
 test('one of two subagents finishing keeps the pane on still-working', async ($, on) => {
@@ -178,10 +188,12 @@ test('a main turn that ends with a subagent working, with no start seen, still c
 })
 
 test('a subagent turn that ends after the pane was reported idle reports nothing', async ($, on) => {
-  const { sent } = bottom(on, () => [row('a1', 'completed')])
+  const { sent, clock } = bottom(on, () => [row('a1', 'completed')])
   await $.turn.start(START)
   await $.turn.complete(MAIN_END)
   await $.turn.complete(subagentEnd('a1'))
+  await clock.advance(3_000)
+  await clock.advance(10_000)
   expect(sent).toEqual(['turn-started', 'turn-completed'])
 })
 
@@ -221,4 +233,100 @@ test('a main turn that wakes within 3 seconds of the last subagent ending is nev
   await $.turn.complete({ ...MAIN_END, turnId: 't2' })
   await clock.advance(60_000)
   expect(sent.slice(3)).toEqual(['turn-completed'])
+})
+
+test('a check that runs inside the 3-second wait does not report idle, and a wake-up cancels the wait', async ($, on) => {
+  let rows = [row('a1', 'running')]
+  const { sent, clock } = bottom(on, () => rows)
+  await $.turn.start(START)
+  await $.turn.complete(MAIN_END)
+  await clock.advance(9_800)
+  rows = [row('a1', 'completed')]
+  await $.turn.complete(subagentEnd('a1'))
+  await clock.advance(200)
+  await clock.advance(200)
+  await $.turn.start({ text: 'woken', turnId: 't2' })
+  await clock.advance(30_000)
+  expect(sent).not.toContain('subagents-finished')
+  // The check at 10.0 s, inside the wait, sent nothing; the wake-up's turn-started follows.
+  expect(sent.slice(0, 3)).toEqual(['turn-started', 'still-working', 'turn-started'])
+})
+
+test('two subagents ending 1 second apart report idle 3 seconds after the second', async ($, on) => {
+  let rows = [row('a1', 'running'), row('a2', 'running')]
+  const { sent, clock } = bottom(on, () => rows)
+  await $.turn.start(START)
+  await $.turn.complete(MAIN_END)
+  rows = [row('a1', 'completed'), row('a2', 'running')]
+  await $.turn.complete(subagentEnd('a1'))
+  await clock.advance(1_000)
+  rows = [row('a1', 'completed'), row('a2', 'completed')]
+  await $.turn.complete(subagentEnd('a2'))
+  await clock.advance(2_999)
+  expect(sent).not.toContain('subagents-finished')
+  await clock.advance(1)
+  expect(sent.at(-1)).toBe('subagents-finished')
+  expect(sent.filter(e => e === 'subagents-finished')).toHaveLength(1)
+})
+
+// A report that ignores the chain would finish first here: only turn-started is slow.
+const slowStart = async (c: { argv: readonly string[] }) => {
+  if (c.argv.includes('turn-started')) await new Promise(r => setTimeout(r, 50))
+}
+
+test('a check queues behind a report still in flight', async ($, on) => {
+  const finished: string[] = []
+  const { clock } = bottom(on, () => [], undefined, async c => {
+    await slowStart(c)
+    finished.push(c.argv[2])
+  })
+  const started = $.turn.start(START)
+  await clock.settle()
+  await clock.advance(10_000)
+  await started
+  await new Promise(r => setTimeout(r, 100))
+  expect(finished).toEqual(['turn-started', 'still-working'])
+})
+
+test('a main turn ending with a subagent working queues behind a report still in flight', async ($, on) => {
+  const finished: string[] = []
+  bottom(on, () => [row('a1', 'running')], undefined, async c => {
+    await slowStart(c)
+    finished.push(c.argv[2])
+  })
+  const started = $.turn.start(START)
+  await $.turn.complete(MAIN_END)
+  await started
+  expect(finished).toEqual(['turn-started', 'still-working'])
+})
+
+test('a subagent-finished report queues behind a report still in flight', async ($, on) => {
+  const finished: string[] = []
+  let rows = [row('a1', 'running')]
+  const { clock } = bottom(on, () => rows, undefined, async c => {
+    if (c.argv.includes('still-working')) await new Promise(r => setTimeout(r, 50))
+    finished.push(c.argv[2])
+  })
+  await $.turn.start(START)
+  await $.turn.complete(MAIN_END)
+  rows = [row('a1', 'completed')]
+  await $.turn.complete(subagentEnd('a1'))
+  await clock.advance(3_000)
+  await new Promise(r => setTimeout(r, 100))
+  expect(finished).toEqual(['turn-started', 'still-working', 'subagents-finished'])
+})
+
+test('a throwing timer cannot lose the turn-started report', async ($, on) => {
+  const sent: string[] = []
+  mock.env(on, ENV)
+  on('turn.start', (_$, e) => ({ turnId: e.turnId }))
+  on('clock.every', () => {
+    throw new Error('no timers')
+  })
+  on('process.run', async (_$, e) => {
+    sent.push(e.argv[2])
+    return { value: { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
+  await $.turn.start(START)
+  expect(sent).toEqual(['turn-started'])
 })

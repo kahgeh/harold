@@ -1276,3 +1276,17 @@ async fn the_reporting_adapter_is_stored_with_the_pane_and_survives_reopen() {
         Some("claude.lifecycle")
     );
 }
+
+#[test]
+fn the_store_takes_both_windows_from_the_monitor_settings() {
+    let monitor = crate::settings::AgentMonitorSettings {
+        hook_grace_ms: 1_234,
+        report_grace_ms: 56_789,
+        ..crate::settings::AgentMonitorSettings::default()
+    };
+
+    let graces = super::graces_from(&monitor);
+
+    assert_eq!(graces.hook_ms, 1_234);
+    assert_eq!(graces.report_ms, 56_789);
+}

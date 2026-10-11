@@ -1126,12 +1126,16 @@ async fn apply_migrations(conn: &turso::Connection) -> events::Result<()> {
     Ok(())
 }
 
-pub async fn open_store(path: impl AsRef<Path>) -> events::Result<Arc<HaroldStore>> {
-    let monitor = &crate::settings::get_settings().agent_monitor;
-    let graces = GraceWindows {
+/// The monitor settings that decide how long a report stands against the screen reading.
+pub(crate) fn graces_from(monitor: &crate::settings::AgentMonitorSettings) -> GraceWindows {
+    GraceWindows {
         hook_ms: monitor.hook_grace_ms,
         report_ms: monitor.report_grace_ms,
-    };
+    }
+}
+
+pub async fn open_store(path: impl AsRef<Path>) -> events::Result<Arc<HaroldStore>> {
+    let graces = graces_from(&crate::settings::get_settings().agent_monitor);
     Ok(Arc::new(HaroldStore::open_with_graces(path, graces).await?))
 }
 

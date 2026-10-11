@@ -26,7 +26,8 @@ one timer. The repeat tells Harold the mod is still there: Harold lets a busy re
 against its screen reading for `agent_monitor.report_grace_ms` (30 seconds), so the mod has to
 miss three reports in a row before the screen reading takes over. The check also notices a
 subagent that ended without an event reaching the mod. A subagent's turn that ends after the
-pane was reported idle sends nothing. The 3-second wait after a subagent's turn ends lets a
+pane was reported idle sends nothing. The mod keeps one 3-second wait: each subagent end restarts it, and a 10-second check that runs
+inside it sends nothing. The wait lets a
 main-session turn that Claude Code starts at once for that subagent's result begin first, so the
 pane is not reported idle in between.
 

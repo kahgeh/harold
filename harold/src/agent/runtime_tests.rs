@@ -4117,3 +4117,96 @@ async fn a_repeated_busy_report_does_not_cancel_a_summary_in_progress() {
         Some("Fixing the parser")
     );
 }
+
+async fn screen_events(fixture: &Fixture) -> usize {
+    fixture
+        .events()
+        .await
+        .iter()
+        .filter(|event| event.r#type == "AgentScreenObserved")
+        .count()
+}
+
+#[tokio::test]
+async fn the_daemon_config_reaches_the_runtime_as_two_windows() {
+    let directory = TestDirectory::new();
+    let store = Arc::new(HaroldStore::open(&directory.0).await.unwrap());
+    let inventory = Arc::new(FakeInventory::default());
+    inventory.push_resolution(Ok(Some(reported_pane(100))));
+    let screen_port = Arc::new(FakeScreen::default());
+    let (shutdown, shutdown_rx) = watch::channel(());
+    let (handle, task) = super::runtime::spawn_agent_monitor(
+        store.clone(),
+        inventory,
+        screen_port.clone(),
+        vec![provider()],
+        empty_snapshot(),
+        super::runtime::AgentMonitorRuntimeConfig {
+            activity_summary: None,
+            inventory_interval: Duration::from_secs(86_400),
+            screen_interval: Duration::from_secs(86_400),
+            hook_grace_ms: 2_000,
+            report_grace_ms: 30_000,
+            acquisition_timeout: Duration::from_millis(50),
+            inventory_timeout: Duration::from_secs(1),
+        },
+        shutdown_rx,
+    );
+    handle
+        .report_lifecycle(
+            "%8".into(),
+            ObservedAgentState::Busy,
+            "claude.lifecycle".into(),
+            WorkSummaryUpdate::Unchanged,
+        )
+        .await
+        .unwrap();
+    let screen_count = |store: Arc<HaroldStore>| async move {
+        store
+            .stream()
+            .load_after_version(EventStreamVersion::start(), 100)
+            .await
+            .unwrap()
+            .iter()
+            .filter(|event| event.r#type == "AgentScreenObserved")
+            .count()
+    };
+
+    // 5 seconds after the report: past hook_grace_ms, far inside report_grace_ms.
+    screen_port.push(Ok(screen(
+        &reported_pane(100),
+        Some(ObservedAgentState::Idle),
+        None,
+        5_000,
+    )));
+    handle.screen_tick().await.unwrap();
+    assert_eq!(screen_count(store.clone()).await, 0);
+
+    screen_port.push(Ok(screen(
+        &reported_pane(100),
+        Some(ObservedAgentState::Idle),
+        None,
+        30_100,
+    )));
+    handle.screen_tick().await.unwrap();
+    assert_eq!(screen_count(store.clone()).await, 1);
+    drop(shutdown);
+    task.await.unwrap();
+}
+
+#[tokio::test]
+async fn a_second_idle_report_restarts_the_busy_run() {
+    let fixture = Fixture::with_default_graces().await;
+    report(&fixture, ObservedAgentState::Idle, 100).await;
+    sample(&fixture, Some(ObservedAgentState::Busy), 5_000).await;
+    sample(&fixture, Some(ObservedAgentState::Busy), 20_000).await;
+
+    report(&fixture, ObservedAgentState::Idle, 25_000).await;
+    sample(&fixture, Some(ObservedAgentState::Busy), 26_000).await;
+    // 30 seconds after the first busy reading, 9 after the run restarted.
+    sample(&fixture, Some(ObservedAgentState::Busy), 35_000).await;
+    assert_eq!(screen_events(&fixture).await, 0);
+
+    sample(&fixture, Some(ObservedAgentState::Busy), 56_000).await;
+    assert_eq!(screen_events(&fixture).await, 1);
+}
