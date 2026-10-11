@@ -8,7 +8,7 @@ use crate::util::sanitise_for_applescript;
 
 use super::{
     Direction, FetchedRow, NotificationPlan, RecentRows, TWIN_WINDOW, is_marked_as_harold,
-    notification_plan, record_row, send_script,
+    notification_plan, parse_max_rowid, record_row, send_script, wait_for_start_row,
 };
 
 #[test]
@@ -446,4 +446,48 @@ async fn same_reply_typed_twice_on_the_mac_is_recorded_twice() {
     ] {
         assert_eq!(recorded_count(&order).await, 2, "{order:?}");
     }
+}
+
+#[test]
+fn a_failed_read_of_the_newest_row_is_not_row_zero() {
+    // sqlite3 exits non-zero when it may not open chat.db; that is not an empty table.
+    assert_eq!(parse_max_rowid(false, b""), None);
+    assert_eq!(parse_max_rowid(false, b"0\n"), None);
+    assert_eq!(parse_max_rowid(true, b""), None);
+    assert_eq!(
+        parse_max_rowid(true, b"Error: unable to open database file\n"),
+        None
+    );
+}
+
+#[test]
+fn a_successful_read_gives_the_newest_row_and_zero_only_for_an_empty_table() {
+    assert_eq!(parse_max_rowid(true, b"2869\n"), Some(2869));
+    assert_eq!(parse_max_rowid(true, b"0\n"), Some(0));
+}
+
+#[tokio::test]
+async fn the_listener_waits_for_a_readable_database_before_it_picks_its_start_row() {
+    let (_keep, mut shutdown) = tokio::sync::watch::channel(());
+    let mut answers = vec![None, None, Some(2869)].into_iter();
+    let mut reads = 0;
+    let start = wait_for_start_row(
+        || {
+            reads += 1;
+            answers.next().flatten()
+        },
+        Duration::from_millis(1),
+        &mut shutdown,
+    )
+    .await;
+    assert_eq!(start, Some(2869));
+    assert_eq!(reads, 3);
+}
+
+#[tokio::test]
+async fn a_shutdown_while_the_database_is_unreadable_ends_the_wait_without_a_start_row() {
+    let (stop, mut shutdown) = tokio::sync::watch::channel(());
+    stop.send(()).unwrap();
+    let start = wait_for_start_row(|| None, Duration::from_secs(60), &mut shutdown).await;
+    assert_eq!(start, None);
 }

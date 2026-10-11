@@ -185,6 +185,8 @@ pub(crate) fn notify_away(
 // Listening
 // ===========================================================================
 
+const START_ROW_RETRY: Duration = Duration::from_secs(5);
+
 static LAST_INBOUND_ROWID: OnceLock<AtomicI64> = OnceLock::new();
 static LAST_SELF_ROWID: OnceLock<AtomicI64> = OnceLock::new();
 
@@ -258,19 +260,48 @@ fn handle_ids() -> HashSet<i64> {
     get_settings().imessage.handle_ids.iter().copied().collect()
 }
 
-fn get_max_rowid() -> i64 {
+/// The newest row in chat.db, or `None` when the database could not be read. An empty
+/// table reads as row 0; a failed read must not, or every stored message would later
+/// look new.
+fn get_max_rowid() -> Option<i64> {
     let out = Command::new("sqlite3")
         .arg(db_path())
-        .arg("SELECT MAX(ROWID) FROM message;")
+        .arg("SELECT COALESCE(MAX(ROWID), 0) FROM message;")
         .output()
-        .ok();
-    out.and_then(|o| {
-        String::from_utf8_lossy(&o.stdout)
-            .trim()
-            .parse::<i64>()
-            .ok()
-    })
-    .unwrap_or(0)
+        .ok()?;
+    parse_max_rowid(out.status.success(), &out.stdout)
+}
+
+fn parse_max_rowid(succeeded: bool, stdout: &[u8]) -> Option<i64> {
+    if !succeeded {
+        return None;
+    }
+    String::from_utf8_lossy(stdout).trim().parse().ok()
+}
+
+/// Reads the newest row until a read succeeds, so the listener never starts from a row
+/// it did not read. Returns `None` if shutdown is signalled first.
+async fn wait_for_start_row(
+    mut read: impl FnMut() -> Option<i64>,
+    retry_every: Duration,
+    shutdown: &mut watch::Receiver<()>,
+) -> Option<i64> {
+    let mut warned = false;
+    loop {
+        if let Some(rowid) = read() {
+            return Some(rowid);
+        }
+        if !warned {
+            warn!("cannot read the Messages database; inbound messages wait until it can be read");
+            warned = true;
+        }
+        tokio::select! {
+            biased;
+
+            _ = shutdown.changed() => return None,
+            () = tokio::time::sleep(retry_every) => {}
+        }
+    }
 }
 
 fn query_messages(sql: &str) -> Vec<(i64, String)> {
@@ -463,12 +494,16 @@ fn start_watcher(chat_db_path: &str) -> Option<(RecommendedWatcher, mpsc::Unboun
 }
 
 pub(crate) async fn listen(store: Arc<HaroldStore>, mut shutdown: watch::Receiver<()>) {
-    let initial = tokio::task::spawn_blocking(get_max_rowid)
-        .await
-        .unwrap_or_else(|e| {
-            tracing::warn!(error = %e, "get_max_rowid task panicked, starting from 0");
-            0
-        });
+    let Some(initial) = wait_for_start_row(
+        || tokio::task::block_in_place(get_max_rowid),
+        START_ROW_RETRY,
+        &mut shutdown,
+    )
+    .await
+    else {
+        info!("iMessage listener shutting down before the Messages database was readable");
+        return;
+    };
     LAST_INBOUND_ROWID
         .set(AtomicI64::new(initial))
         .expect("listen called more than once");
