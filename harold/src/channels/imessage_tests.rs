@@ -244,6 +244,30 @@ fn run_sql(db: &ChatDb, sql: &str) {
     assert!(status.success(), "{sql}");
 }
 
+/// Adds the date column while a listener may be reading the same file. sqlite3 refuses a
+/// write at once, with "database is locked", while a reader holds the file, so this tries
+/// again. Returns the last failure if it never succeeds.
+fn add_date_column_while_read(db: &ChatDb) -> Result<(), String> {
+    let mut last = String::new();
+    for _ in 0..200 {
+        let out = std::process::Command::new("sqlite3")
+            .arg(&db.path)
+            .arg("ALTER TABLE message ADD COLUMN date INTEGER;")
+            .output()
+            .map_err(|error| format!("sqlite3 did not start: {error}"))?;
+        if out.status.success() {
+            return Ok(());
+        }
+        last = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    Err(last)
+}
+
+/// How long a test lets the listener's startup wait for a database before it fails.
+/// Normal runs take well under a second.
+const START_DEADLINE: Duration = Duration::from_secs(20);
+
 /// Appends `rows`, each a (handle id, is_from_me, text), in order, with no date. The first
 /// row of a new database gets ROWID 1.
 fn insert(db: &ChatDb, rows: &[(i64, u8, &str)]) {
@@ -1095,15 +1119,17 @@ async fn the_listener_waits_for_a_readable_database_before_it_picks_its_start_ro
     ]
     .into_iter();
     let mut reads = 0;
-    let start = wait_for_start_row(
+    let wait = wait_for_start_row(
         || {
             reads += 1;
             answers.next().unwrap()
         },
         Duration::from_millis(1),
         &mut shutdown,
-    )
-    .await;
+    );
+    let start = tokio::time::timeout(START_DEADLINE, wait)
+        .await
+        .expect("the wait never ended");
     assert_eq!(start, Some(2869));
     assert_eq!(reads, 3);
 }
@@ -1122,7 +1148,7 @@ async fn startup_read_that_fails_is_retried_and_its_rows_recorded_once() {
     );
     // The newest row can be read, the marked rows cannot until the third read.
     let mut reads = 0;
-    let start = wait_for_start_row(
+    let wait = wait_for_start_row(
         || {
             reads += 1;
             if reads == 3 {
@@ -1132,8 +1158,10 @@ async fn startup_read_that_fails_is_retried_and_its_rows_recorded_once() {
         },
         Duration::from_millis(1),
         &mut shutdown,
-    )
-    .await;
+    );
+    let start = tokio::time::timeout(START_DEADLINE, wait)
+        .await
+        .expect("the database never became readable");
     let (initial, rows) = start.expect("a start row");
     let fed = Mutex::new(Vec::new());
     let cursors = start_cursors(initial, rows, |text, date| {
@@ -1200,8 +1228,9 @@ async fn listener_startup_seeds_the_process_wide_notifier_record() {
     insert_dated(&db, &[(HANDLE, 1, text, 9_001)]);
     let (_keep, mut shutdown) = tokio::sync::watch::channel(());
 
-    start_listener_cursors(&db, &mut shutdown)
+    tokio::time::timeout(START_DEADLINE, start_listener_cursors(&db, &mut shutdown))
         .await
+        .expect("the database never became readable")
         .expect("cursors");
 
     assert!(fed_markers().contains(&(text.to_string(), 9_001)));
@@ -1346,11 +1375,13 @@ fn insert_many_marked(db: &ChatDb, count: i64) -> Vec<i64> {
 async fn start_with(db: &ChatDb) -> (Vec<(String, i64)>, Cursors) {
     let (_keep, mut shutdown) = tokio::sync::watch::channel(());
     let fed = Mutex::new(Vec::new());
-    let cursors = start_listener_reading(db, Duration::from_millis(1), &mut shutdown, |t, d| {
+    let start = start_listener_reading(db, Duration::from_millis(1), &mut shutdown, |t, d| {
         fed.lock().unwrap().push((t.to_string(), d));
-    })
-    .await
-    .expect("cursors");
+    });
+    let cursors = tokio::time::timeout(START_DEADLINE, start)
+        .await
+        .expect("the database never became readable")
+        .expect("cursors");
     (fed.into_inner().unwrap(), cursors)
 }
 
@@ -1398,17 +1429,21 @@ async fn startup_waits_for_an_unreadable_database_then_feeds_its_rows() {
     let (_keep, mut shutdown) = tokio::sync::watch::channel(());
     let fed = Mutex::new(Vec::new());
     let fixer = db.clone();
-    let repair = tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        add_date_column(&fixer);
+    // A thread with its result returned, so a failed repair is reported with its cause.
+    let repair = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(50));
+        add_date_column_while_read(&fixer)
     });
 
-    let cursors = start_listener_reading(&db, Duration::from_millis(5), &mut shutdown, |t, d| {
+    let start = start_listener_reading(&db, Duration::from_millis(5), &mut shutdown, |t, d| {
         fed.lock().unwrap().push((t.to_string(), d));
-    })
-    .await
-    .expect("cursors");
-    repair.await.unwrap();
+    });
+    let waited = tokio::time::timeout(START_DEADLINE, start).await;
+    let repaired = repair.join().expect("the repair thread panicked");
+    assert_eq!(repaired, Ok(()), "the repair step failed");
+    let cursors = waited
+        .expect("the database never became readable after the repair")
+        .expect("cursors");
 
     assert_eq!(*fed.lock().unwrap(), [(STUDIO_NOTIFICATION.to_string(), 0)]);
     assert_eq!(cursors.inbound.load(Ordering::Relaxed), 1);
