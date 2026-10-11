@@ -8,6 +8,7 @@ use tracing::{Instrument, info, info_span, warn};
 
 use super::{AwayNotification, split_body, summarise_for_notification};
 use crate::inbound::AgentAddress;
+use crate::inbound::ownership::notification_text;
 use crate::outbound::is_messaging_paused;
 use crate::settings::get_settings;
 use crate::store::{HaroldStore, InboundMessage, TurnCompleted, append_inbound_message};
@@ -39,6 +40,16 @@ fn bounded_response_body(body: String) -> String {
     body.chars().take(200).collect()
 }
 
+/// Marks text as written by Harold.
+const HAROLD_MARKER: char = '🤖';
+
+/// `msg` as it is sent. Every message goes out marked here, in the one place that builds
+/// a send, so the listener skips it wherever it is read, and a notification is found by
+/// its `🤖 [machine/pane]` start.
+fn marked(msg: &str) -> String {
+    format!("{HAROLD_MARKER} {msg}")
+}
+
 /// Send a plain text message to the configured Telegram chat.
 /// Must be called from a `spawn_blocking` context.
 pub(crate) fn send_telegram(msg: &str) -> Result<(), String> {
@@ -55,7 +66,7 @@ pub(crate) fn send_telegram(msg: &str) -> Result<(), String> {
     info!(msg, "sending Telegram message");
     let body = serde_json::json!({
         "chat_id": chat_id,
-        "text": msg,
+        "text": marked(msg),
     });
 
     let res = client()
@@ -161,18 +172,18 @@ pub(crate) fn notify_away(
     let body = summarise_for_notification(&turn.assistant_message, &turn.last_user_prompt);
 
     let (main_body, question) = split_body(&body);
-    let message = format!(
-        "🤖 [{}] {} ({})",
-        turn.pane_label,
-        main_body.trim(),
-        turn.main_context
+    let message = notification_text(
+        &get_settings().machine_name,
+        &turn.pane_label,
+        main_body,
+        &turn.main_context,
     );
 
     send_telegram(&message)?;
     info!("Telegram notification sent");
 
     if let Some(q) = question {
-        send_telegram(&format!("🤖 {q}"))?;
+        send_telegram(q)?;
         info!("Telegram question sent");
     }
 
@@ -224,7 +235,7 @@ fn routable_text(
         return None;
     }
     let text = msg.text?.trim().to_string();
-    if text.is_empty() || text.starts_with('🤖') {
+    if text.is_empty() || text.starts_with(HAROLD_MARKER) {
         return None;
     }
     Some(text)
@@ -378,7 +389,8 @@ pub(crate) async fn listen(store: Arc<HaroldStore>, mut shutdown: watch::Receive
 
 #[cfg(test)]
 mod tests {
-    use super::{Chat, Message, routable_text};
+    use super::{Chat, Message, marked, routable_text};
+    use crate::inbound::ownership::{delivered_text, error_text, notification_text, parse_marker};
 
     fn message(chat_id: i64, text: &str) -> Option<Message> {
         Some(Message {
@@ -402,5 +414,49 @@ mod tests {
     #[test]
     fn paused_listener_discards_every_update() {
         assert_eq!(routable_text(message(7, "carry on"), 7, true), None);
+    }
+
+    #[test]
+    fn every_text_is_sent_marked_as_harold() {
+        assert_eq!(
+            marked(&delivered_text("studio", "alir-app main:0.1")),
+            "🤖 ✓ Delivered to [studio/alir-app main:0.1]"
+        );
+        assert_eq!(
+            marked(&error_text("studio", "No active agent sessions found.")),
+            "🤖 [studio] No active agent sessions found."
+        );
+        assert_eq!(marked("Should I deploy?"), "🤖 Should I deploy?");
+    }
+
+    #[test]
+    fn notification_is_sent_in_the_form_the_marker_parser_reads() {
+        let sent = marked(&notification_text(
+            "studio",
+            "alir-app main:0.1",
+            "Tests pass.",
+            "alir",
+        ));
+
+        assert_eq!(sent, "🤖 [studio/alir-app main:0.1] Tests pass. (alir)");
+        assert_eq!(
+            parse_marker(&sent).map(|marker| marker.machine),
+            Some("studio")
+        );
+    }
+
+    #[test]
+    fn listener_skips_every_text_harold_sends() {
+        for text in [
+            delivered_text("studio", "alir-app main:0.1"),
+            error_text("studio", "No active agent sessions found."),
+            notification_text("studio", "alir-app main:0.1", "Tests pass.", "alir"),
+        ] {
+            assert_eq!(
+                routable_text(message(7, &marked(&text)), 7, false),
+                None,
+                "{text:?}"
+            );
+        }
     }
 }

@@ -12,6 +12,7 @@ use tracing::{Instrument, info, info_span, warn};
 
 use super::{AwayNotification, split_body, summarise_for_notification};
 use crate::inbound::AgentAddress;
+use crate::inbound::ownership::notification_text;
 use crate::outbound::is_messaging_paused;
 use crate::settings::get_settings;
 use crate::store::{HaroldStore, InboundMessage, TurnCompleted, append_inbound_message};
@@ -140,11 +141,11 @@ pub(crate) fn notify_away(
     let body = summarise_for_notification(&turn.assistant_message, &turn.last_user_prompt);
 
     let (main_body, question) = split_body(&body);
-    let message = format!(
-        "[{}] {} ({})",
-        turn.pane_label,
-        main_body.trim(),
-        turn.main_context
+    let message = notification_text(
+        &cfg.machine_name,
+        &turn.pane_label,
+        main_body,
+        &turn.main_context,
     );
 
     let recent_outgoing = cfg

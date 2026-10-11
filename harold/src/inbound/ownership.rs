@@ -207,10 +207,6 @@ pub(crate) fn pane_address(machine: &str, pane_label: &str) -> String {
     format!("[{machine}/{pane_label}]")
 }
 
-#[allow(
-    dead_code,
-    reason = "called by the channels when they build a notification (Task 6)"
-)]
 pub(crate) fn notification_text(
     machine: &str,
     pane_label: &str,

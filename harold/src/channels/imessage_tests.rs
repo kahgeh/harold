@@ -3,6 +3,7 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::channels::{split_body, truncate_body};
+use crate::inbound::ownership::{delivered_text, error_text, notification_text, parse_marker};
 use crate::store::HaroldStore;
 use crate::util::sanitise_for_applescript;
 
@@ -68,8 +69,8 @@ fn sanitise_strips_newlines_and_continuation() {
 #[test]
 fn retry_after_main_only_resumes_with_the_missing_question() {
     let plan = notification_plan(
-        &["🤖 [harold:0.1] Work is done. (harold)"],
-        "[harold:0.1] Work is done. (harold)",
+        &["🤖 [studio/harold:0.1] Work is done. (harold)"],
+        "[studio/harold:0.1] Work is done. (harold)",
         Some("Should I deploy?"),
     );
 
@@ -81,9 +82,9 @@ fn retry_after_both_parts_skips_the_completed_notification() {
     let plan = notification_plan(
         &[
             "🤖 Should I deploy?",
-            "🤖 [harold:0.1] Work is done. (harold)",
+            "🤖 [studio/harold:0.1] Work is done. (harold)",
         ],
-        "[harold:0.1] Work is done. (harold)",
+        "[studio/harold:0.1] Work is done. (harold)",
         Some("Should I deploy?"),
     );
 
@@ -95,9 +96,9 @@ fn matching_question_from_another_turn_sends_the_full_notification() {
     let plan = notification_plan(
         &[
             "🤖 Should I deploy?",
-            "🤖 [other:0.1] Different work. (other)",
+            "🤖 [studio/other:0.1] Different work. (other)",
         ],
-        "[harold:0.1] Work is done. (harold)",
+        "[studio/harold:0.1] Work is done. (harold)",
         Some("Should I deploy?"),
     );
 
@@ -117,6 +118,28 @@ fn sent_text(text: &str) -> String {
 }
 
 #[test]
+fn texts_that_name_the_machine_are_sent_in_the_forms_the_spec_gives() {
+    let notification = notification_text("studio", "alir-app main:0.1", "Tests pass.", "alir");
+
+    assert_eq!(
+        sent_text(&notification),
+        "🤖 [studio/alir-app main:0.1] Tests pass. (alir)"
+    );
+    assert_eq!(
+        parse_marker(&sent_text(&notification)).map(|marker| marker.machine),
+        Some("studio")
+    );
+    assert_eq!(
+        sent_text(&delivered_text("studio", "alir-app main:0.1")),
+        "🤖 ✓ Delivered to [studio/alir-app main:0.1]"
+    );
+    assert_eq!(
+        sent_text(&error_text("studio", "No active agent sessions found.")),
+        "🤖 [studio] No active agent sessions found."
+    );
+}
+
+#[test]
 fn listener_skips_every_message_harold_sends() {
     // Messages to the user's own number are stored as both sent and received rows,
     // and the listener reads both, so anything unmarked is routed back in as a reply.
@@ -124,7 +147,7 @@ fn listener_skips_every_message_harold_sends() {
         "✓ Delivered to [harold  main:0.3]",
         "No active pane found. Available: harold  main:0.3",
         "No active agent sessions found.",
-        "[harold:0.1] Work is done. (harold)",
+        "[studio/harold:0.1] Work is done. (harold)",
         "Should I deploy?",
     ] {
         let sent = sent_text(text);
