@@ -1,36 +1,31 @@
 import type { EngineInterface, Register } from 'claude-code'
-import { buildInvocation, buildRequest, isPaneId, resolveConfig, type AgentState } from './report'
+import { buildArgv, isPaneId, resolveProgram, type TurnEvent } from './accept'
 
 // Reports leave one at a time, in the order the events fired.
 let chain: Promise<void> = Promise.resolve()
 
-async function report($: EngineInterface, state: AgentState): Promise<void> {
+async function report($: EngineInterface, event: TurnEvent): Promise<void> {
   try {
     const paneId = await $.env.get('TMUX_PANE')
     if (!isPaneId(paneId)) return
 
-    const config = resolveConfig({
-      addr: await $.env.get('HAROLD_ADDR'),
-      proto: await $.env.get('HAROLD_PROTO'),
-      home: await $.env.get('HOME'),
-    })
-    const { argv, stdin } = buildInvocation(buildRequest(paneId, state), config)
+    const program = resolveProgram({ bin: await $.env.get('HAROLD_BIN'), root: $.plugin.root })
 
-    await $.process.run(argv, { stdin, timeoutMs: 4000 })
+    await $.process.run(buildArgv({ program, event, paneId }), { timeoutMs: 4000 })
   } catch {
-    // Fail open: Harold down, grpcurl missing or a timeout never reaches the session.
+    // Fail open: a missing program, a dead daemon or a timeout never reaches the session.
   }
 }
 
-function enqueue($: EngineInterface, state: AgentState): Promise<void> {
-  chain = chain.then(() => report($, state))
+function enqueue($: EngineInterface, event: TurnEvent): Promise<void> {
+  chain = chain.then(() => report($, event))
 
   return chain
 }
 
 export const register: Register = on => {
   on('turn.start', async ($, e, next) => {
-    const sent = 'agentId' in e ? undefined : enqueue($, 'AGENT_STATE_BUSY')
+    const sent = 'agentId' in e ? undefined : enqueue($, 'turn-started')
     const result = await next(e)
     await sent
 
@@ -38,7 +33,7 @@ export const register: Register = on => {
   })
 
   on('turn.complete', async ($, e, next) => {
-    const sent = e.agentId === undefined ? enqueue($, 'AGENT_STATE_IDLE') : undefined
+    const sent = e.agentId === undefined ? enqueue($, 'turn-completed') : undefined
     const result = await next(e)
     await sent
 
