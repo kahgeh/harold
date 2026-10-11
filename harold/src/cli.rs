@@ -1,6 +1,8 @@
 use std::time::Duration;
 
-use crate::harold::{WatchAgentStatesRequest, harold_client::HaroldClient};
+use crate::harold::{
+    AgentState, ReportAgentStateRequest, WatchAgentStatesRequest, harold_client::HaroldClient,
+};
 use crate::settings::Settings;
 
 #[derive(Debug, PartialEq, Eq)]
@@ -10,6 +12,57 @@ pub(crate) enum Mode {
     Diagnostics { delay_seconds: u64 },
     CheckConfig,
     CheckReady,
+    Accept(AcceptArgs),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AcceptEvent {
+    TurnStarted,
+    TurnCompleted,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct AcceptArgs {
+    pub(crate) event: AcceptEvent,
+    pub(crate) pane: String,
+    pub(crate) adapter: String,
+}
+
+const ACCEPT_ARGUMENTS: &str =
+    "invalid argument: usage is accept turn-started|turn-completed --pane ID --adapter NAME";
+
+fn parse_accept(args: &[&str]) -> Result<AcceptArgs, String> {
+    let [event, flags @ ..] = args else {
+        return Err(ACCEPT_ARGUMENTS.into());
+    };
+    let event = match *event {
+        "turn-started" => AcceptEvent::TurnStarted,
+        "turn-completed" => AcceptEvent::TurnCompleted,
+        _ => return Err(ACCEPT_ARGUMENTS.into()),
+    };
+    let (mut pane, mut adapter) = (None, None);
+    let mut rest = flags.iter();
+    while let Some(flag) = rest.next() {
+        let slot = match *flag {
+            "--pane" => &mut pane,
+            "--adapter" => &mut adapter,
+            _ => return Err(ACCEPT_ARGUMENTS.into()),
+        };
+        match rest.next() {
+            Some(value) if slot.is_none() && !value.starts_with("--") => {
+                *slot = Some(value.to_string())
+            }
+            _ => return Err(ACCEPT_ARGUMENTS.into()),
+        }
+    }
+    match (pane, adapter) {
+        (Some(pane), Some(adapter)) => Ok(AcceptArgs {
+            event,
+            pane,
+            adapter,
+        }),
+        _ => Err(ACCEPT_ARGUMENTS.into()),
+    }
 }
 
 impl Mode {
@@ -20,6 +73,7 @@ impl Mode {
             ["--help" | "-h"] => Ok(Self::Help),
             ["--check-config"] => Ok(Self::CheckConfig),
             ["--check-ready"] => Ok(Self::CheckReady),
+            ["accept", rest @ ..] => parse_accept(rest).map(Self::Accept),
             ["--diagnostic" | "--diagnostics"] => Ok(Self::Diagnostics { delay_seconds: 0 }),
             ["--diagnostic" | "--diagnostics", "--delay"] => {
                 Ok(Self::Diagnostics { delay_seconds: 10 })
@@ -71,4 +125,107 @@ pub(crate) async fn check_ready(settings: &Settings) -> Result<(), Box<dyn std::
         })
     );
     Ok(())
+}
+
+pub(crate) async fn accept(
+    settings: &Settings,
+    args: &AcceptArgs,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let address = settings.grpc.addr()?;
+    let state = match args.event {
+        AcceptEvent::TurnStarted => AgentState::Busy,
+        AcceptEvent::TurnCompleted => AgentState::Idle,
+    };
+    let response = tokio::time::timeout(Duration::from_secs(3), async {
+        let mut client = HaroldClient::connect(format!("http://{address}"))
+            .await
+            .map_err(|_| "the Harold daemon is not reachable")?;
+        client
+            .report_agent_state(ReportAgentStateRequest {
+                pane_id: args.pane.clone(),
+                state: state as i32,
+                adapter_id: args.adapter.clone(),
+                work_summary: None,
+            })
+            .await
+            .map_err(|_| "the Harold daemon refused the call")
+    })
+    .await
+    .map_err(|_| "the Harold daemon did not answer within 3 seconds")??;
+    if !response.into_inner().accepted {
+        return Err("the Harold daemon did not accept the report".into());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> Result<Mode, String> {
+        Mode::parse(&args.iter().map(|a| a.to_string()).collect::<Vec<_>>())
+    }
+
+    fn accept(event: AcceptEvent) -> Mode {
+        Mode::Accept(AcceptArgs {
+            event,
+            pane: "%47".into(),
+            adapter: "claude.lifecycle".into(),
+        })
+    }
+
+    #[test]
+    fn accept_parses_both_events_and_either_flag_order() {
+        let started = [
+            "accept",
+            "turn-started",
+            "--pane",
+            "%47",
+            "--adapter",
+            "claude.lifecycle",
+        ];
+        assert_eq!(parse(&started), Ok(accept(AcceptEvent::TurnStarted)));
+        let completed = [
+            "accept",
+            "turn-completed",
+            "--adapter",
+            "claude.lifecycle",
+            "--pane",
+            "%47",
+        ];
+        assert_eq!(parse(&completed), Ok(accept(AcceptEvent::TurnCompleted)));
+    }
+
+    #[test]
+    fn accept_rejects_unknown_events_and_malformed_flags() {
+        for args in [
+            vec!["accept", "turn-paused", "--pane", "%1", "--adapter", "a"],
+            vec!["accept", "turn-started", "--pane", "%1"],
+            vec!["accept", "turn-started", "--adapter", "a"],
+            vec![
+                "accept",
+                "turn-started",
+                "--pane",
+                "%1",
+                "--pane",
+                "%2",
+                "--adapter",
+                "a",
+            ],
+            vec!["accept", "turn-started", "--pane", "--adapter", "a"],
+            vec![
+                "accept",
+                "turn-started",
+                "--pane",
+                "%1",
+                "--adapter",
+                "a",
+                "--extra",
+            ],
+            vec!["accept"],
+        ] {
+            let error = parse(&args).unwrap_err();
+            assert!(error.contains("argument"), "{args:?}: {error}");
+        }
+    }
 }

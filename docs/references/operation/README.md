@@ -98,6 +98,7 @@ An RPC that appends after the handler has stopped remains durable and is project
 | --- | --- |
 | `harold --check-config` | Validates resolved configuration and prints only `grpc_addr` and `store_path` as JSON; does not open storage |
 | `harold --check-ready` | Receives one snapshot within five seconds and prints `ready` and `through_event_version`; does not print pane contents or append events |
+| `harold accept turn-started\|turn-completed --pane ID --adapter NAME` | Reports one turn event for a pane to the running daemon (busy or idle, no work summary); exits 0 when accepted, otherwise prints one line on standard error and exits 1; waits 3 seconds at most; never starts a daemon |
 
 These direct commands use the invoking process's normal configuration environment. `haroldctl status` runs the readiness check with the installed environment and adds process ownership verification.
 

@@ -472,6 +472,10 @@ fn print_help() {
     println!("  harold                  Start the Harold daemon");
     println!("  harold --check-config   Validate config and print address/store JSON; no writes");
     println!("  harold --check-ready    Read one agent snapshot; 5s timeout, no writes");
+    println!("  harold accept EVENT --pane ID --adapter NAME");
+    println!(
+        "                          Report turn-started or turn-completed for a pane; 3s timeout"
+    );
     println!("  harold --diagnostics [--delay [N]]  Test screen lock, TTS, and iMessage config");
     println!("                                      --delay defaults to 10s if no value given");
     println!("  harold --help           Show this help\n");
@@ -497,7 +501,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
-    let is_probe = matches!(mode, cli::Mode::CheckConfig | cli::Mode::CheckReady);
+    let is_probe = matches!(
+        mode,
+        cli::Mode::CheckConfig | cli::Mode::CheckReady | cli::Mode::Accept(_)
+    );
     let settings = settings::Settings::load().map_err(|error| -> Box<dyn std::error::Error> {
         if is_probe {
             return "invalid configuration".into();
@@ -516,6 +523,7 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
     match mode {
         cli::Mode::CheckConfig => return cli::check_config(&settings),
         cli::Mode::CheckReady => return cli::check_ready(&settings).await,
+        cli::Mode::Accept(ref args) => return cli::accept(&settings, args).await,
         _ => {}
     }
 

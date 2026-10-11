@@ -292,3 +292,197 @@ fn readiness_probe_fails_for_an_unreachable_server_without_opening_storage() {
     assert!(!output.status.success());
     assert!(output.stdout.is_empty());
 }
+
+#[derive(Clone, Copy)]
+enum ReportKind {
+    Accepted,
+    Rejected,
+    Hang,
+}
+
+struct RecordingServer {
+    kind: ReportKind,
+    requests: Arc<std::sync::Mutex<Vec<ReportAgentStateRequest>>>,
+}
+
+#[tonic::async_trait]
+impl Harold for RecordingServer {
+    type WatchAgentStatesStream = ReceiverStream<Result<AgentStateSnapshot, Status>>;
+
+    async fn turn_complete(
+        &self,
+        _: Request<TurnCompleteRequest>,
+    ) -> Result<Response<TurnCompleteResponse>, Status> {
+        Err(Status::unimplemented("not used"))
+    }
+
+    async fn report_agent_state(
+        &self,
+        request: Request<ReportAgentStateRequest>,
+    ) -> Result<Response<ReportAgentStateResponse>, Status> {
+        self.requests.lock().unwrap().push(request.into_inner());
+        match self.kind {
+            ReportKind::Accepted => Ok(Response::new(ReportAgentStateResponse { accepted: true })),
+            ReportKind::Rejected => Ok(Response::new(ReportAgentStateResponse { accepted: false })),
+            ReportKind::Hang => {
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                Err(Status::unavailable("hung"))
+            }
+        }
+    }
+
+    async fn set_tts_muted(
+        &self,
+        _: Request<SetTtsMutedRequest>,
+    ) -> Result<Response<SetTtsMutedResponse>, Status> {
+        Err(Status::unimplemented("not used"))
+    }
+
+    async fn set_messaging_paused(
+        &self,
+        _: Request<SetMessagingPausedRequest>,
+    ) -> Result<Response<SetMessagingPausedResponse>, Status> {
+        Err(Status::unimplemented("not used"))
+    }
+
+    async fn watch_agent_states(
+        &self,
+        _: Request<WatchAgentStatesRequest>,
+    ) -> Result<Response<Self::WatchAgentStatesStream>, Status> {
+        Err(Status::unimplemented("not used"))
+    }
+}
+
+type Recorded = Arc<std::sync::Mutex<Vec<ReportAgentStateRequest>>>;
+
+struct ServerGuard(Vec<tokio::task::JoinHandle<()>>);
+
+impl Drop for ServerGuard {
+    fn drop(&mut self) {
+        for handle in &self.0 {
+            handle.abort();
+        }
+    }
+}
+
+async fn serve_recording(kind: ReportKind) -> (u16, Recorded, ServerGuard) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (incoming, connections) = mpsc::channel(1);
+    let accept = tokio::spawn(async move {
+        while let Ok((socket, _)) = listener.accept().await {
+            if incoming
+                .send(Ok::<_, std::io::Error>(socket))
+                .await
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
+    let requests: Recorded = Arc::default();
+    let service = RecordingServer {
+        kind,
+        requests: Arc::clone(&requests),
+    };
+    let server = tokio::spawn(async move {
+        let _ = tonic::transport::Server::builder()
+            .add_service(HaroldServer::new(service))
+            .serve_with_incoming(ReceiverStream::new(connections))
+            .await;
+    });
+    (port, requests, ServerGuard(vec![accept, server]))
+}
+
+fn accept_args(event: &'static str) -> Vec<&'static str> {
+    vec![
+        "accept",
+        event,
+        "--pane",
+        "%47",
+        "--adapter",
+        "claude.lifecycle",
+    ]
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn accept_sends_one_exact_report_and_exits_zero_when_accepted() {
+    for (event, state) in [("turn-started", 1), ("turn-completed", 2)] {
+        let (port, requests, _guard) = serve_recording(ReportKind::Accepted).await;
+        let fixture = Fixture::new(&format!("{VALID}\n[grpc]\nport = {port}\n"));
+        let output = fixture.run(&accept_args(event));
+        assert!(output.status.success(), "{output:?}");
+        assert!(output.stdout.is_empty());
+        let seen = requests.lock().unwrap().clone();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].pane_id, "%47");
+        assert_eq!(seen[0].state, state);
+        assert_eq!(seen[0].adapter_id, "claude.lifecycle");
+        assert_eq!(seen[0].work_summary, None);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn accept_exits_one_with_one_line_when_the_daemon_rejects() {
+    let (port, _requests, _guard) = serve_recording(ReportKind::Rejected).await;
+    let fixture = Fixture::new(&format!("{VALID}\n[grpc]\nport = {port}\n"));
+    let output = fixture.run(&accept_args("turn-started"));
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr)
+            .trim()
+            .lines()
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn accept_fails_at_once_with_no_daemon() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    let fixture = Fixture::new(&format!("{VALID}\n[grpc]\nport = {port}\n"));
+    let started = Instant::now();
+    let output = fixture.run(&accept_args("turn-completed"));
+    assert_eq!(output.status.code(), Some(1));
+    assert!(started.elapsed() < Duration::from_secs(2));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn accept_gives_up_after_three_seconds_when_the_daemon_does_not_answer() {
+    let (port, _requests, _guard) = serve_recording(ReportKind::Hang).await;
+    let fixture = Fixture::new(&format!("{VALID}\n[grpc]\nport = {port}\n"));
+    let started = Instant::now();
+    let output = fixture.run(&accept_args("turn-started"));
+    assert_eq!(output.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("3 seconds"));
+    assert!(started.elapsed() < Duration::from_secs(5));
+}
+
+#[test]
+fn accept_with_bad_arguments_or_configuration_discloses_nothing() {
+    let output = Fixture::new("invalid toml!").run(&[
+        "accept",
+        "turn-paused",
+        "--pane",
+        "%1",
+        "--adapter",
+        "a",
+    ]);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("argument"));
+    let output = Fixture::new("[telegram]\nchat_id = 'review-sentinel-secret'\n").run(&[
+        "accept",
+        "turn-started",
+        "--pane",
+        "%1",
+        "--adapter",
+        "a",
+    ]);
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("invalid configuration"));
+    assert!(!stderr.contains("review-sentinel-secret"));
+}
