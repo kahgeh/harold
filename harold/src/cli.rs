@@ -18,7 +18,28 @@ pub(crate) enum Mode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AcceptEvent {
     TurnStarted,
+    StillWorking,
     TurnCompleted,
+    SubagentsFinished,
+}
+
+impl AcceptEvent {
+    fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "turn-started" => Some(Self::TurnStarted),
+            "still-working" => Some(Self::StillWorking),
+            "turn-completed" => Some(Self::TurnCompleted),
+            "subagents-finished" => Some(Self::SubagentsFinished),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn state(self) -> AgentState {
+        match self {
+            Self::TurnStarted | Self::StillWorking => AgentState::Busy,
+            Self::TurnCompleted | Self::SubagentsFinished => AgentState::Idle,
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -28,17 +49,14 @@ pub(crate) struct AcceptArgs {
     pub(crate) adapter: String,
 }
 
-const ACCEPT_ARGUMENTS: &str =
-    "invalid argument: usage is accept turn-started|turn-completed --pane ID --adapter NAME";
+const ACCEPT_ARGUMENTS: &str = "invalid argument: usage is accept turn-started|still-working|turn-completed|subagents-finished --pane ID --adapter NAME";
 
 fn parse_accept(args: &[&str]) -> Result<AcceptArgs, String> {
     let [event, flags @ ..] = args else {
         return Err(ACCEPT_ARGUMENTS.into());
     };
-    let event = match *event {
-        "turn-started" => AcceptEvent::TurnStarted,
-        "turn-completed" => AcceptEvent::TurnCompleted,
-        _ => return Err(ACCEPT_ARGUMENTS.into()),
+    let Some(event) = AcceptEvent::from_name(event) else {
+        return Err(ACCEPT_ARGUMENTS.into());
     };
     let (mut pane, mut adapter) = (None, None);
     let mut rest = flags.iter();
@@ -132,10 +150,7 @@ pub(crate) async fn accept(
     args: &AcceptArgs,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let address = settings.grpc.addr()?;
-    let state = match args.event {
-        AcceptEvent::TurnStarted => AgentState::Busy,
-        AcceptEvent::TurnCompleted => AgentState::Idle,
-    };
+    let state = args.event.state();
     let response = tokio::time::timeout(Duration::from_secs(3), async {
         let mut client = HaroldClient::connect(format!("http://{address}"))
             .await
@@ -227,5 +242,30 @@ mod tests {
             let error = parse(&args).unwrap_err();
             assert!(error.contains("argument"), "{args:?}: {error}");
         }
+    }
+    #[test]
+    fn accept_parses_the_two_subagent_events() {
+        for (name, event) in [
+            ("still-working", AcceptEvent::StillWorking),
+            ("subagents-finished", AcceptEvent::SubagentsFinished),
+        ] {
+            let args = [
+                "accept",
+                name,
+                "--pane",
+                "%47",
+                "--adapter",
+                "claude.lifecycle",
+            ];
+            assert_eq!(parse(&args), Ok(accept(event)), "{name}");
+        }
+    }
+
+    #[test]
+    fn accept_maps_each_event_to_busy_or_idle() {
+        assert_eq!(AcceptEvent::TurnStarted.state(), AgentState::Busy);
+        assert_eq!(AcceptEvent::StillWorking.state(), AgentState::Busy);
+        assert_eq!(AcceptEvent::TurnCompleted.state(), AgentState::Idle);
+        assert_eq!(AcceptEvent::SubagentsFinished.state(), AgentState::Idle);
     }
 }

@@ -473,9 +473,8 @@ fn print_help() {
     println!("  harold --check-config   Validate config and print address/store JSON; no writes");
     println!("  harold --check-ready    Read one agent snapshot; 5s timeout, no writes");
     println!("  harold accept EVENT --pane ID --adapter NAME");
-    println!(
-        "                          Report turn-started or turn-completed for a pane; 3s timeout"
-    );
+    println!("                          Report a pane busy (turn-started, still-working) or idle");
+    println!("                          (turn-completed, subagents-finished); 3s timeout");
     println!("  harold --diagnostics [--delay [N]]  Test screen lock, TTS, and iMessage config");
     println!("                                      --delay defaults to 10s if no value given");
     println!("  harold --help           Show this help\n");
