@@ -19,17 +19,24 @@ const bottom = (
   onRun: (c: { argv: readonly string[] }) => Promise<void> = async () => {},
 ) => {
   const sent: string[] = []
+  const engine = { turnCompleted: false, listReadAfterTurn: [] as boolean[] }
   const clock = mock.clock(on)
   mock.env(on, ENV)
   on('turn.start', (_$, e) => ({ turnId: e.turnId }))
-  on('turn.complete', () => ({ text: 'done' }))
-  on('agent.list', () => ({ value: list() as never }))
+  on('turn.complete', () => {
+    engine.turnCompleted = true
+    return { text: 'done' }
+  })
+  on('agent.list', () => {
+    engine.listReadAfterTurn.push(engine.turnCompleted)
+    return { value: list() as never }
+  })
   on('process.run', async (_$, e) => {
     sent.push(e.argv[2])
     await onRun({ argv: e.argv })
     return { value: { exitCode: exitCode(), stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
   })
-  return { sent, clock }
+  return { sent, clock, engine }
 }
 
 test('every 10 seconds of a main turn reports still-working', async ($, on) => {
@@ -329,4 +336,37 @@ test('a throwing timer cannot lose the turn-started report', async ($, on) => {
   })
   await $.turn.start(START)
   expect(sent).toEqual(['turn-started'])
+})
+
+test('a steady stream of subagent ends keeps the pane on still-working every 10 seconds', async ($, on) => {
+  const { sent, clock } = bottom(on, () => [row('a1', 'running'), row('a2', 'completed')])
+  await $.turn.start(START)
+  await $.turn.complete(MAIN_END)
+  for (let at = 2; at <= 40; at += 2) {
+    await clock.advance(2_000)
+    await $.turn.complete(subagentEnd('a2'))
+  }
+  expect(sent).toEqual(['turn-started', ...Array(5).fill('still-working')])
+})
+
+test('the wait firing with another subagent working leaves the checks able to report idle', async ($, on) => {
+  let rows = [row('a1', 'running'), row('a2', 'running')]
+  const { sent, clock } = bottom(on, () => rows)
+  await $.turn.start(START)
+  await $.turn.complete(MAIN_END)
+  rows = [row('a1', 'completed'), row('a2', 'running')]
+  await $.turn.complete(subagentEnd('a1'))
+  await clock.advance(3_000)
+  expect(sent.at(-1)).toBe('still-working')
+  // a2 ends with no event reaching the mod; the next check at 10 s notices.
+  rows = [row('a1', 'completed'), row('a2', 'completed')]
+  await clock.advance(7_000)
+  expect(sent.at(-1)).toBe('subagents-finished')
+})
+
+test('the subagent list is read after the engine has handled the main turn end', async ($, on) => {
+  const { engine } = bottom(on, () => [row('a1', 'completed')])
+  await $.turn.start(START)
+  await $.turn.complete(MAIN_END)
+  expect(engine.listReadAfterTurn).toEqual([true])
 })

@@ -77,8 +77,10 @@ async function reportAfterEnd($: EngineInterface, idleEvent: ReportEvent): Promi
   if (isMainTurnRunning) return true
   // Another path reported the pane idle while the list was being read.
   if (idleEvent === 'subagents-finished' && checks === undefined) return true
+  // A subagent just ended: leave the idle report to the wait, which a wake-up can cancel.
+  if (idleEvent === 'subagents-finished' && !isSubagentWorking && settle !== undefined) return true
   if (isSubagentWorking) {
-    startChecks($)
+    tryStartChecks($)
 
     return enqueue($, 'still-working')
   }
@@ -88,7 +90,8 @@ async function reportAfterEnd($: EngineInterface, idleEvent: ReportEvent): Promi
 }
 
 // Reports a subagent's end once nothing has woken the main session for SETTLE_MS. Each end
-// restarts the one wait, and a check does not report idle while it is pending.
+// restarts the one wait, and a check does not report idle while it is pending (it still
+// reports busy).
 function settleAfterSubagentEnd($: EngineInterface): void {
   cancelSettle()
   settle = $.clock.after(SETTLE_MS, () => {
@@ -102,7 +105,6 @@ async function check($: EngineInterface): Promise<void> {
     await enqueue($, 'still-working')
     return
   }
-  if (settle !== undefined) return
   await reportAfterEnd($, 'subagents-finished')
 }
 
