@@ -121,8 +121,72 @@ fn a_name_seen_in_another_case_is_known_once() {
     assert_eq!(record.latest_notifier(), Some("studio"));
 }
 
+fn listed(names: &[&str]) -> Vec<String> {
+    names.iter().map(ToString::to_string).collect()
+}
+
+#[test]
+fn listed_machines_are_known_before_any_marker_is_read() {
+    let record = NotifierRecord::for_machines(&listed(&["studio", "laptop"]));
+
+    assert_eq!(record.known_machine_names(), ["studio", "laptop"]);
+    assert_eq!(record.latest_notifier(), None);
+}
+
+#[test]
+fn marker_with_a_name_that_is_not_listed_changes_nothing() {
+    let mut record = NotifierRecord::for_machines(&listed(&["studio", "laptop"]));
+
+    record.record_marker("🤖 [laptop/harold main:0.0] Build done (harold)");
+    // A question that starts with a bracket, a notification in the earlier format from a
+    // tmux session named feature/x, and two messages from a Mac that is not listed.
+    record.record_marker("🤖 [1/2] Should I deploy?");
+    record.record_marker("🤖 [feature/x:0.0] done (x)");
+    record.record_marker("🤖 [mini] No active agent sessions found.");
+    record.record_notification("mini");
+
+    assert_eq!(record.latest_notifier(), Some("laptop"));
+    assert_eq!(record.known_machine_names(), ["studio", "laptop"]);
+}
+
+#[test]
+fn listed_name_counts_in_any_case() {
+    let mut record = NotifierRecord::for_machines(&listed(&["Studio", "laptop"]));
+
+    record.record_marker("🤖 [studio/a:0.0] done (a)");
+
+    assert_eq!(record.latest_notifier(), Some("studio"));
+    assert_eq!(record.known_machine_names(), ["Studio", "laptop"]);
+}
+
+#[test]
+fn with_no_machines_listed_every_machine_name_in_a_marker_counts() {
+    let mut record = NotifierRecord::for_machines(&[]);
+
+    record.record_marker("🤖 [mini/a:0.0] done (a)");
+
+    assert_eq!(record.latest_notifier(), Some("mini"));
+    assert_eq!(record.known_machine_names(), ["mini"]);
+}
+
+#[test]
+fn tag_for_a_listed_mac_that_has_not_notified_is_left_to_that_mac() {
+    let record = NotifierRecord::for_machines(&listed(&["studio", "laptop"]));
+
+    let ownership = decide_ownership(
+        "[laptop/harold] go",
+        false,
+        "studio",
+        record.known_machine_names(),
+        record.latest_notifier(),
+    );
+
+    assert_eq!(ownership, owned_by("laptop"));
+}
+
 #[test]
 fn process_wide_record_is_fed_and_read_through_the_four_functions() {
+    crate::settings::init_settings_for_test();
     // The only test that touches the process-wide record. The names are unique to it.
     record_marker("🤖 [ownership-test-a/x:0.0] done (x)");
     assert_eq!(latest_notifier().as_deref(), Some("ownership-test-a"));

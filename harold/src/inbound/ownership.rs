@@ -4,10 +4,10 @@
 //! each Harold keeps the name from the last notification it saw. A reply that names no
 //! Mac belongs to the Mac that notified last.
 
-use std::sync::Mutex;
+use std::sync::{LazyLock, Mutex};
 
 use super::parse_tag;
-use crate::settings::is_valid_machine_name;
+use crate::settings::{get_settings, is_valid_machine_name};
 
 /// Starts every message Harold sends.
 const HAROLD_MARKER: char = '🤖';
@@ -53,6 +53,8 @@ pub(crate) fn same_machine(a: &str, b: &str) -> bool {
 /// The machine names seen in markers, and the one from the last notification.
 #[derive(Debug)]
 pub(crate) struct NotifierRecord {
+    /// The `machines` setting. When it is not empty, only these names are machine names.
+    machines: Vec<String>,
     known: Vec<String>,
     latest: Option<String>,
 }
@@ -60,17 +62,29 @@ pub(crate) struct NotifierRecord {
 impl NotifierRecord {
     pub(crate) const fn new() -> Self {
         Self {
+            machines: Vec::new(),
             known: Vec::new(),
             latest: None,
         }
     }
 
+    /// The record of a Mac whose `machines` setting is `machines`.
+    pub(crate) fn for_machines(machines: &[String]) -> Self {
+        Self {
+            machines: machines.to_vec(),
+            ..Self::new()
+        }
+    }
+
     /// Record a message Harold sent, as read back from the conversation. Text that is
-    /// not a marker changes nothing.
+    /// not a marker, or that names a machine `machines` does not list, changes nothing.
     pub(crate) fn record_marker(&mut self, text: &str) {
         let Some(marker) = parse_marker(text) else {
             return;
         };
+        if !self.is_machine_name(marker.machine) {
+            return;
+        }
         self.learn(marker.machine);
         if marker.is_notification {
             self.latest = Some(marker.machine.to_string());
@@ -79,7 +93,7 @@ impl NotifierRecord {
 
     /// Record that `machine` sent a notification just now.
     pub(crate) fn record_notification(&mut self, machine: &str) {
-        if !is_valid_machine_name(machine) {
+        if !is_valid_machine_name(machine) || !self.is_machine_name(machine) {
             return;
         }
         self.learn(machine);
@@ -90,8 +104,23 @@ impl NotifierRecord {
         self.latest.as_deref()
     }
 
+    /// The `machines` setting when it is set, otherwise the names seen in markers.
     pub(crate) fn known_machine_names(&self) -> &[String] {
-        &self.known
+        if self.machines.is_empty() {
+            &self.known
+        } else {
+            &self.machines
+        }
+    }
+
+    /// Whether `machine` can name a Mac: any name while `machines` is empty, otherwise
+    /// only a listed one.
+    fn is_machine_name(&self, machine: &str) -> bool {
+        self.machines.is_empty()
+            || self
+                .machines
+                .iter()
+                .any(|listed| same_machine(listed, machine))
     }
 
     fn learn(&mut self, machine: &str) {
@@ -101,7 +130,10 @@ impl NotifierRecord {
     }
 }
 
-static NOTIFIERS: Mutex<NotifierRecord> = Mutex::new(NotifierRecord::new());
+/// The record of this process. It takes the `machines` setting when it is first used, so
+/// the listed names are known before any marker is read.
+static NOTIFIERS: LazyLock<Mutex<NotifierRecord>> =
+    LazyLock::new(|| Mutex::new(NotifierRecord::for_machines(&get_settings().machines)));
 
 /// Record a `🤖 [...]` message read from the conversation.
 #[allow(
@@ -130,7 +162,8 @@ pub(crate) fn latest_notifier() -> Option<String> {
         .map(String::from)
 }
 
-/// Every machine name recorded so far. This Mac's own name is not added here.
+/// The known machine names: the `machines` setting when it is set, otherwise every name
+/// recorded so far. This Mac's own name is not added to the recorded names.
 pub(crate) fn known_machine_names() -> Vec<String> {
     NOTIFIERS.lock().unwrap().known_machine_names().to_vec()
 }
