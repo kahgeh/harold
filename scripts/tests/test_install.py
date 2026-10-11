@@ -453,6 +453,27 @@ class ClaudeSettingsTests(unittest.TestCase):
         self.assertIn('/odd:dir/claude-mod', outcome)
         self.assertIn("':'", outcome)
 
+    def test_a_failed_write_returns_the_manual_line_and_leaves_no_temp_file(self):
+        self.write('{"model": "x"}')
+        folder = self.path.parent
+        folder.chmod(0o500)
+        self.addCleanup(folder.chmod, 0o700)
+        outcome = self.link()
+        folder.chmod(0o700)
+        self.assertIn('CLAUDE_CODE_PLUGIN_DIRS', outcome)
+        self.assertEqual(self.path.read_text(), '{"model": "x"}')
+        self.assertEqual(sorted(p.name for p in folder.iterdir()), ['settings.json'])
+
+    def test_equivalent_spellings_of_the_folder_count_as_named(self):
+        home = Path(self.temp.name) / 'home'
+        mod = home / 'bin/harold/hooks/claude-mod'
+        for value in (str(mod) + '/', '~/bin/harold/hooks/claude-mod'):
+            text = json.dumps({'env': {'CLAUDE_CODE_PLUGIN_DIRS': value}})
+            self.write(text)
+            with patch.dict('os.environ', {'HOME': str(home)}):
+                self.assertEqual(self.install.link_claude_mod(self.path, mod), 'unchanged')
+            self.assertEqual(self.path.read_text(), text)
+
 
 if __name__ == '__main__':
     unittest.main()

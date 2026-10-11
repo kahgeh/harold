@@ -297,6 +297,7 @@ fn readiness_probe_fails_for_an_unreachable_server_without_opening_storage() {
 enum ReportKind {
     Accepted,
     Rejected,
+    Refused,
     Hang,
 }
 
@@ -324,6 +325,7 @@ impl Harold for RecordingServer {
         match self.kind {
             ReportKind::Accepted => Ok(Response::new(ReportAgentStateResponse { accepted: true })),
             ReportKind::Rejected => Ok(Response::new(ReportAgentStateResponse { accepted: false })),
+            ReportKind::Refused => Err(Status::failed_precondition("agent incarnation not found")),
             ReportKind::Hang => {
                 tokio::time::sleep(Duration::from_secs(30)).await;
                 Err(Status::unavailable("hung"))
@@ -436,6 +438,18 @@ async fn accept_exits_one_with_one_line_when_the_daemon_rejects() {
             .count(),
         1
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn accept_exits_one_when_the_daemon_refuses_with_a_status_error() {
+    let (port, _requests, _guard) = serve_recording(ReportKind::Refused).await;
+    let fixture = Fixture::new(&format!("{VALID}\n[grpc]\nport = {port}\n"));
+    let output = fixture.run(&accept_args("turn-started"));
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(stderr.trim().lines().count(), 1);
+    assert!(!stderr.contains("incarnation"));
 }
 
 #[test]

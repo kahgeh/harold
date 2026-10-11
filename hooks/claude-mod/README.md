@@ -22,10 +22,18 @@ program, for a mod run from a checkout.
 ## Waiting and ordering
 
 Each hook starts its report, calls `next(e)`, then waits for the report before returning.
-The report therefore overlaps the turn's own start, one promise chain keeps reports in the
-order the events fired, and a dead or hung Harold costs a turn at most the one bounded call:
-`harold accept` gives up after 3 seconds and the mod after 4. Every failure is swallowed and
-nothing is shown to the person.
+`turn.start` fires before the first model call, so the turn most likely waits for the report:
+a few milliseconds normally. One promise chain keeps reports in the order the events fired,
+and a dead or hung Harold costs a turn at most the one bounded call: `harold accept` gives up
+after 3 seconds and the mod after 4. Every failure is swallowed and nothing is shown to the
+person.
+
+## Known gap
+
+Claude Code passes the settings `env` block to child processes, so a `claude -p` run from a
+Bash tool inside a pane loads this mod and inherits that pane's `TMUX_PANE`. When the nested
+run ends, it reports the parent pane idle while the parent may still be busy. Harold's screen
+reading corrects it after `agent_monitor.hook_grace_ms` (2 seconds).
 
 ## Loading it
 

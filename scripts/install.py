@@ -110,7 +110,8 @@ def link_claude_mod(settings_path, mod_dir):
             reason, settings_path, PLUGIN_DIRS, mod_dir)
 
     if ':' in str(mod_dir):
-        return manual("The mod folder contains ':', which a ':'-separated list cannot hold")
+        return 'Not added: the mod folder path contains \':\', which a \':\'-separated list cannot hold. ' \
+               'Move the install or load it with `claude --plugin-dir {}`'.format(mod_dir)
     target = settings_path.resolve()
     try:
         data = json.loads(target.read_text(encoding='utf-8'))
@@ -120,17 +121,24 @@ def link_claude_mod(settings_path, mod_dir):
     if not isinstance(env, dict) or not isinstance(env.get(PLUGIN_DIRS, ''), str):
         return manual('The settings file has an unexpected shape')
     folders = [folder for folder in env.get(PLUGIN_DIRS, '').split(':') if folder]
-    if str(mod_dir) in folders:
+    if str(mod_dir) in [os.path.expanduser(folder).rstrip('/') for folder in folders]:
         return 'unchanged'
     env[PLUGIN_DIRS] = ':'.join(folders + [str(mod_dir)])
     data['env'] = env
     backup = target.with_name(target.name + '.before-harold')
-    if not backup.exists():
-        shutil.copy2(target, backup)
     temporary = target.with_name(target.name + '.harold-tmp')
-    temporary.write_text(json.dumps(data, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
-    temporary.chmod(stat.S_IMODE(target.stat().st_mode))
-    os.replace(temporary, target)
+    try:
+        if not backup.exists():
+            shutil.copy2(target, backup)
+        # Owner-only from the first byte: the file can hold tokens in its env block.
+        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(descriptor, 'w', encoding='utf-8') as handle:
+            handle.write(json.dumps(data, indent=2, ensure_ascii=False) + '\n')
+        temporary.chmod(stat.S_IMODE(target.stat().st_mode))
+        os.replace(temporary, target)
+    except OSError as error:
+        temporary.unlink(missing_ok=True)
+        return manual('The settings file could not be written ({})'.format(error.strerror))
     return 'appended' if folders else 'added'
 
 

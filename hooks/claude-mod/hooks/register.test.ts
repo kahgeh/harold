@@ -59,21 +59,39 @@ test('a non-zero exit leaves the results unchanged', async ($, on) => {
 })
 
 test('a rejecting process.run leaves the results unchanged', async ($, on) => {
-  bottom(on, ENV, async () => { throw new Error('no grpcurl') })
+  bottom(on, ENV, async () => { throw new Error('no harold') })
   expect(await $.turn.start({ text: 'hi', turnId: 't1' })).toEqual({ turnId: 't1' })
   expect(await $.turn.complete({ ...COMPLETE, reason: 'answer' })).toEqual({ text: 'done' })
 })
 
-test('reports keep their order even when the first is slow', async ($, on) => {
-  const calls = bottom(on, ENV, async c => {
+test('reports finish in the order the events fired, even when the first is slow', async ($, on) => {
+  const finished: string[] = []
+  bottom(on, ENV, async c => {
     if (c.argv.includes('turn-started')) await new Promise(r => setTimeout(r, 50))
+    finished.push(c.argv[2])
     return { exitCode: 0 }
   })
   await Promise.all([
     $.turn.start({ text: 'hi', turnId: 't1' }),
     $.turn.complete({ ...COMPLETE, reason: 'answer' }),
   ])
-  expect(calls.map(c => c.argv[2])).toEqual(['turn-started', 'turn-completed'])
+  expect(finished).toEqual(['turn-started', 'turn-completed'])
+})
+
+for (const reason of ['aborted', 'error'] as const) {
+  test(`a turn that ends as ${reason} reports turn-completed`, async ($, on) => {
+    const calls = bottom(on, ENV, async () => ({ exitCode: 0 }))
+    await $.turn.complete({ ...COMPLETE, reason })
+    expect(calls.map(c => c.argv[2])).toEqual(['turn-completed'])
+  })
+}
+
+test('a turn that ends as a refusal reports turn-completed', async ($, on) => {
+  const calls = bottom(on, ENV, async () => ({ exitCode: 0 }))
+  await $.turn.complete({
+    ...COMPLETE, reason: 'refusal', refusal: { category: null, explanation: null },
+  })
+  expect(calls.map(c => c.argv[2])).toEqual(['turn-completed'])
 })
 
 test('HAROLD_BIN names a different program', async ($, on) => {
