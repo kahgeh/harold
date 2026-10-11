@@ -357,8 +357,49 @@ pub struct TelegramSettings {
     pub chat_id: Option<i64>,
 }
 
+/// Whether `name` can identify a Mac in a reply tag. `/` and the brackets delimit the tag
+/// (`[machine/pane]`). `:` is in every pane label (`session:window.pane`), so a name
+/// without one is never mistaken for a label.
+pub(crate) fn is_valid_machine_name(name: &str) -> bool {
+    !name.is_empty()
+        && !name
+            .chars()
+            .any(|c| c.is_whitespace() || matches!(c, '/' | '[' | ']' | ':'))
+}
+
+fn machine_name_error(name: &str) -> Option<String> {
+    if is_valid_machine_name(name) {
+        return None;
+    }
+    Some(format!(
+        "machine_name must not be empty or contain whitespace, '/', '[', ']' or ':', got \"{name}\""
+    ))
+}
+
+fn machine_name_from_hostname(hostname: &str) -> String {
+    hostname.split_whitespace().collect::<Vec<_>>().join("-")
+}
+
+/// The Mac's short hostname. Empty when it cannot be read, which `validate` rejects, so
+/// Harold never sends notifications under a made-up name.
+fn default_machine_name() -> String {
+    let out = std::process::Command::new("hostname").arg("-s").output();
+    match out {
+        Ok(out) if out.status.success() => {
+            machine_name_from_hostname(&String::from_utf8_lossy(&out.stdout))
+        }
+        _ => {
+            warn!("could not read the hostname; set machine_name in the configuration");
+            String::new()
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct Settings {
+    /// Names this Mac in every message Harold sends and in reply tags.
+    #[serde(default = "default_machine_name")]
+    pub machine_name: String,
     pub grpc: GrpcSettings,
     pub imessage: ImessageSettings,
     pub chat_db: ChatDbSettings,
@@ -380,6 +421,7 @@ pub struct Settings {
 impl Settings {
     pub fn validate(&self) -> Vec<String> {
         let mut errors = Vec::new();
+        errors.extend(machine_name_error(&self.machine_name));
         errors.extend(self.agents.validate(&self.agent_monitor));
         errors.extend(self.activity_summary.validate());
         match self.notify.away_channel.as_str() {
@@ -472,7 +514,10 @@ mod tests {
     use config::{Config, File, FileFormat};
     use serde::Deserialize;
 
-    use super::{AgentMonitorSettings, AgentProviderSettings, AgentSettings};
+    use super::{
+        AgentMonitorSettings, AgentProviderSettings, AgentSettings, is_valid_machine_name,
+        machine_name_error, machine_name_from_hostname,
+    };
 
     #[derive(Debug, Deserialize)]
     struct AgentConfigFixture {
@@ -748,5 +793,49 @@ mod tests {
         assert!(settings.matches_command(" /opt/bin/CUSTOM-AGENT --run "));
         assert!(!settings.matches_command("unrelated-command"));
         assert!(!AgentSettings::default().matches_command("codex"));
+    }
+
+    #[test]
+    fn machine_name_default_replaces_whitespace_in_the_hostname() {
+        assert_eq!(machine_name_from_hostname("studio\n"), "studio");
+        assert_eq!(
+            machine_name_from_hostname("Kahs MacBook  Pro\n"),
+            "Kahs-MacBook-Pro"
+        );
+        assert_eq!(machine_name_from_hostname(""), "");
+    }
+
+    #[test]
+    fn machine_name_rejects_characters_that_delimit_a_tag_or_a_pane_label() {
+        for name in ["studio", "Kahs-MacBook-Pro", "mac.local", "m1"] {
+            assert!(is_valid_machine_name(name), "{name:?}");
+        }
+        for name in [
+            "",
+            "my mac",
+            "a/b",
+            "[studio",
+            "studio]",
+            "harold:0.1",
+            "a\tb",
+        ] {
+            assert!(!is_valid_machine_name(name), "{name:?}");
+        }
+    }
+
+    #[test]
+    fn invalid_machine_name_is_a_configuration_error_that_names_the_setting() {
+        assert_eq!(machine_name_error("studio"), None);
+        let error = machine_name_error("my mac").expect("an error");
+        assert!(error.starts_with("machine_name "), "{error}");
+        assert!(error.contains("\"my mac\""), "{error}");
+        assert!(machine_name_error("").is_some());
+    }
+
+    #[test]
+    fn default_configuration_has_a_valid_machine_name() {
+        crate::settings::init_settings_for_test();
+        let name = &crate::settings::get_settings().machine_name;
+        assert!(is_valid_machine_name(name), "{name:?}");
     }
 }
