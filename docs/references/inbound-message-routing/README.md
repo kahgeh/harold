@@ -23,7 +23,7 @@ A reply typed in Messages on the Mac is stored as two rows with the same text, o
 
 **Telegram** — Long-polls the Telegram Bot API `getUpdates` endpoint (30s timeout). On startup, drains any pre-existing updates to avoid replaying old messages. Only messages from the configured `chat_id` are processed; messages starting with `🤖` (Harold's own messages) are filtered out. With [several Macs](#several-macs), only the hub calls `getUpdates`; a member starts no Telegram listener.
 
-**Routing resolution** — Harold's event handler stages `InboundMessageReceived` events in its durable outbox and calls `route_inbound_message()` in stream-version order. Live pane discovery runs at resolution time via `tmux list-panes -a`, then reads the process tree under each pane's `pane_pid`. A pane is considered an agent when the pane process or a descendant process command contains one of the configured `agents[].command_contains` fragments. Agents are addressed via the `AgentAddress` enum (currently only `TmuxPane { pane_id, label }`).
+**Routing resolution** — Harold's event handler stages `InboundMessageReceived` events in its durable outbox and calls `route_inbound_message(text, forwarded)` in stream-version order. Live pane discovery runs at resolution time via `tmux list-panes -a`, then reads the process tree under each pane's `pane_pid`. A pane is considered an agent when the pane process or a descendant process command contains one of the configured `agents[].command_contains` fragments. Agents are addressed via the `AgentAddress` enum (currently only `TmuxPane { pane_id, label }`).
 
 An `InboundMessageReceived` event carries two fields:
 
@@ -57,9 +57,11 @@ Pane label format: `<session_name>:<window_index>.<pane_index>` (e.g. `alir-app 
 ## Routing resolution
 
 ```
-route_inbound_message(text)
+route_inbound_message(text, forwarded)
 │
-├─ parse_tag(text) → ([tag], body)
+├─ decide_ownership(text, forwarded, …) → Owned { pane_tag, body } | NotOwned { owner }
+│   ├─ NotOwned → return Skipped (another Mac owns the reply; no pane discovery)
+│   └─ Owned → pane resolution below, with the tag and body from the ownership decision
 │
 ├─ tag present?
 │   ├─ exact match on pane label → use it
@@ -132,7 +134,7 @@ Each Harold applies this rule to every inbound reply before any pane discovery, 
 4. A `🤖 [name/…]` message counts as a notification only when `name` is a known machine name. No other `🤖` text that starts with a bracket is taken for a Mac's notification: not a question that begins `[1/2]`, and not a notification in the earlier format such as `🤖 [harold:0.1] …`. A tag for a Mac that has not notified yet is still recognised.
 5. No notification is found in the recent conversation. Every Mac owns the reply.
 
-A reply with `forwarded = true` skips this rule: this Mac owns it, as described under [Routing resolution](#routing-resolution). Within the owning Mac, routing is unchanged: tag match, semantic resolution, `last_away_notification_source_agent`, `my-agent` fallback.
+A reply with `forwarded = true` skips this rule: this Mac owns it, as described under [Architecture](#architecture). Within the owning Mac, routing is unchanged: tag match, semantic resolution, `last_away_notification_source_agent`, `my-agent` fallback.
 
 ### iMessage: the latest notifier
 
@@ -204,7 +206,7 @@ Harold refuses to start with an error that names the setting when any of these h
 - **The latest notifier is asleep or offline.** On iMessage no Mac claims an untagged reply, so it is lost and you get no message. On Telegram the hub sends `could not reach <machine>`. A tagged reply to an awake Mac works.
 - **No notification is found.** The history was cleared, or `machines` is empty. Every Mac owns an untagged reply, so a Mac without a matching pane sends a "no pane found" error and Macs with matching panes may both deliver.
 - **A notification lands just before the reply.** Harold decides ownership when it handles the reply, against the latest notifier at that moment.
-- **A notification is stamped in the future.** A Mac whose clock is ahead stamps its notification with a later send time than any real one. It stays the latest notifier until that time passes, a restart does not clear it while the row is among the last 50 marked rows, and the other Macs drop untagged replies meanwhile. Tagged replies still work.
+- **A notification is stamped in the future (iMessage only).** A Mac whose clock is ahead stamps its notification with a later send time than any real one. It stays the latest notifier until that time passes, a restart does not clear it while the row is among the last 50 marked rows, and the other Macs drop untagged replies meanwhile. Tagged replies still work.
 - **Clocks differ between Macs (iMessage only).** The latest notifier follows the send time each Mac stamps on its notification. If two Macs notify within their clock difference, the one stamped later is the latest notifier on both Macs, even if it was sent first.
 - **Messages in iCloud does not sync a Mac's sent notifications to the other Mac.** Each Mac sees only its own notifications and owns every untagged reply.
 - **Two Macs have the same `machine_name`.** This is a configuration error that Harold does not detect.
