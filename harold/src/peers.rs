@@ -5,7 +5,13 @@
 //! hub knows which Mac notified last. The hub hands a member each reply that member owns
 //! (`ForwardReply`). Both calls carry a shared secret.
 
+use std::time::Duration;
+
 use sha2::{Digest, Sha256};
+use tonic::transport::{Channel, Endpoint};
+
+use crate::harold::harold_client::HaroldClient;
+use crate::harold::{ForwardReplyRequest, ReportNotificationRequest};
 
 use crate::inbound::ownership::same_machine;
 use crate::settings::{PeerHub, PeerMember, PeerRole, PeersSettings};
@@ -102,6 +108,86 @@ pub(crate) fn authorize_forward(endpoint: &PeerEndpoint, secret: &str) -> Result
         return Err(Denied::WrongSecret);
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Calling another Mac
+// ---------------------------------------------------------------------------
+
+/// How long connecting to a peer may take, and how long the call may take after that.
+#[allow(dead_code, reason = "called by the Telegram channel in the next task")]
+pub(crate) const PEER_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// A new connection to the Harold at `url`. Each call opens its own and drops it: calls are
+/// rare, and a peer that slept or restarted is found out at once.
+async fn connect(url: &str, timeout: Duration) -> Result<HaroldClient<Channel>, String> {
+    let endpoint = Endpoint::from_shared(url.to_string())
+        .map_err(|error| format!("invalid peer url: {error}"))?
+        .connect_timeout(timeout)
+        .timeout(timeout);
+    let channel = endpoint
+        .connect()
+        .await
+        .map_err(|error| format!("could not connect: {error}"))?;
+    Ok(HaroldClient::new(channel))
+}
+
+/// A refused or failed call, without the request: the request holds the secret.
+fn status_error(status: tonic::Status) -> String {
+    format!("{:?}: {}", status.code(), status.message())
+}
+
+fn accepted(accepted: bool) -> Result<(), String> {
+    if accepted {
+        Ok(())
+    } else {
+        Err("the peer did not accept the call".into())
+    }
+}
+
+/// Tell the hub that `machine`, this member, is about to send a notification. One attempt.
+#[allow(dead_code, reason = "called by the Telegram channel in the next task")]
+pub(crate) async fn report_notification(hub: &PeerHub, machine: &str) -> Result<(), String> {
+    report_notification_within(hub, machine, PEER_TIMEOUT).await
+}
+
+async fn report_notification_within(
+    hub: &PeerHub,
+    machine: &str,
+    timeout: Duration,
+) -> Result<(), String> {
+    let mut client = connect(&hub.url, timeout).await?;
+    let response = client
+        .report_notification(ReportNotificationRequest {
+            machine: machine.to_string(),
+            secret: hub.secret.clone(),
+        })
+        .await
+        .map_err(status_error)?;
+    accepted(response.into_inner().accepted)
+}
+
+/// `report_notification` for a blocking thread of the tokio runtime, which is where the
+/// event handler sends notifications. On any other thread it reports an error.
+#[allow(dead_code, reason = "called by the Telegram channel in the next task")]
+pub(crate) fn report_notification_blocking(hub: &PeerHub, machine: &str) -> Result<(), String> {
+    let runtime = tokio::runtime::Handle::try_current()
+        .map_err(|_| "no async runtime on this thread".to_string())?;
+    runtime.block_on(report_notification(hub, machine))
+}
+
+/// Hand `member` a reply it owns, as the user typed it. One attempt.
+#[allow(dead_code, reason = "called by the Telegram channel in the next task")]
+pub(crate) async fn forward_reply(member: &PeerMember, text: &str) -> Result<(), String> {
+    let mut client = connect(&member.url, PEER_TIMEOUT).await?;
+    let response = client
+        .forward_reply(ForwardReplyRequest {
+            text: text.to_string(),
+            secret: member.secret.clone(),
+        })
+        .await
+        .map_err(status_error)?;
+    accepted(response.into_inner().accepted)
 }
 
 #[cfg(test)]

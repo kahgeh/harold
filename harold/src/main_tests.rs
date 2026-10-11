@@ -278,7 +278,6 @@ pub(crate) async fn inbound_messages(store: &store::HaroldStore) -> Vec<store::I
 }
 
 /// An address on this machine that nothing listens on.
-#[allow(dead_code, reason = "used by the peer client tests in the next task")]
 pub(crate) fn closed_port_url() -> String {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     format!("http://{}", listener.local_addr().unwrap())
