@@ -19,6 +19,7 @@ use super::reducer::GraceWindows;
 use super::runtime::{
     AgentMonitorHandle, AgentMonitorSeed, MonitorCommandError, coalesced_tick_channel_for_test,
     spawn_agent_monitor_for_test, spawn_agent_monitor_seeded_for_test,
+    spawn_agent_monitor_with_graces_for_test,
 };
 use super::screen::{
     CommandOutput, CommandRunner, PromptBlock, PromptScan, ScreenError, TmuxVisibleScreen,
@@ -206,17 +207,30 @@ struct Fixture {
 
 impl Fixture {
     async fn new(inventory: FakeInventory) -> Self {
+        Self::with_graces(inventory, GraceWindows::same(2_000)).await
+    }
+
+    /// The shipped windows: 2 seconds for a turn-complete, 30 seconds for an adapter's report.
+    async fn with_default_graces() -> Self {
+        Self::with_graces(FakeInventory::default(), GraceWindows::default()).await
+    }
+
+    async fn with_graces(inventory: FakeInventory, graces: GraceWindows) -> Self {
         let directory = TestDirectory::new();
-        let store = Arc::new(HaroldStore::open(&directory.0).await.unwrap());
+        let store = Arc::new(
+            HaroldStore::open_with_graces(&directory.0, graces)
+                .await
+                .unwrap(),
+        );
         let inventory = Arc::new(inventory);
         let screen = Arc::new(FakeScreen::default());
         let (shutdown, shutdown_rx) = watch::channel(());
-        let (handle, task) = spawn_agent_monitor_for_test(
+        let (handle, task) = spawn_agent_monitor_with_graces_for_test(
             Arc::clone(&store),
             inventory.clone(),
             screen.clone(),
             vec![provider()],
-            2_000,
+            graces,
             shutdown_rx,
         );
         Self {
@@ -3782,6 +3796,14 @@ async fn projected_state(store: &HaroldStore) -> EffectiveAgentState {
     store.load_agent_snapshot().await.unwrap().panes[0].effective_state
 }
 
+/// One screen tick whose sample was taken at `observed_at_ms`.
+async fn sample(fixture: &Fixture, state: Option<ObservedAgentState>, observed_at_ms: i64) {
+    fixture
+        .screen
+        .push(Ok(screen(&reported_pane(100), state, None, observed_at_ms)));
+    fixture.handle.screen_tick().await.unwrap();
+}
+
 #[tokio::test]
 async fn a_turn_complete_leaves_the_state_of_a_pane_the_mod_reports_on() {
     let fixture = Fixture::new(FakeInventory::default()).await;
@@ -3878,4 +3900,220 @@ async fn restart_keeps_the_adapter_so_a_turn_complete_still_leaves_the_state() {
     assert_eq!(projected_state(&store).await, EffectiveAgentState::Idle);
     drop(shutdown);
     task.await.unwrap();
+}
+
+#[tokio::test]
+async fn a_busy_report_holds_at_29_seconds_and_the_screen_decides_at_30() {
+    let fixture = Fixture::with_default_graces().await;
+    report(&fixture, ObservedAgentState::Busy, 100).await;
+
+    sample(&fixture, Some(ObservedAgentState::Idle), 29_100).await;
+    assert_eq!(
+        projected_state(&fixture.store).await,
+        EffectiveAgentState::Busy
+    );
+
+    sample(&fixture, Some(ObservedAgentState::Idle), 30_100).await;
+    assert_eq!(
+        projected_state(&fixture.store).await,
+        EffectiveAgentState::Idle
+    );
+
+    // The screen decides until the mod reports again.
+    sample(&fixture, Some(ObservedAgentState::Busy), 30_600).await;
+    assert_eq!(
+        projected_state(&fixture.store).await,
+        EffectiveAgentState::Busy
+    );
+}
+
+#[tokio::test]
+async fn a_repeated_busy_report_restarts_the_30_seconds_in_the_runtime() {
+    let fixture = Fixture::with_default_graces().await;
+    report(&fixture, ObservedAgentState::Busy, 100).await;
+    report(&fixture, ObservedAgentState::Busy, 10_100).await;
+    report(&fixture, ObservedAgentState::Busy, 20_100).await;
+
+    sample(&fixture, Some(ObservedAgentState::Idle), 49_100).await;
+    assert_eq!(
+        projected_state(&fixture.store).await,
+        EffectiveAgentState::Busy
+    );
+
+    // The mod has missed three reports in a row.
+    sample(&fixture, Some(ObservedAgentState::Idle), 50_100).await;
+    assert_eq!(
+        projected_state(&fixture.store).await,
+        EffectiveAgentState::Idle
+    );
+
+    // The next report puts the mod's state back, and the screen is held back again.
+    report(&fixture, ObservedAgentState::Busy, 60_100).await;
+    sample(&fixture, Some(ObservedAgentState::Idle), 60_600).await;
+    assert_eq!(
+        projected_state(&fixture.store).await,
+        EffectiveAgentState::Busy
+    );
+}
+
+#[tokio::test]
+async fn an_idle_report_holds_until_the_screen_has_read_busy_for_30_seconds() {
+    let fixture = Fixture::with_default_graces().await;
+    report(&fixture, ObservedAgentState::Idle, 100).await;
+
+    // The busy reading starts 40 seconds after the report: the report's age does not count.
+    sample(&fixture, Some(ObservedAgentState::Busy), 40_000).await;
+    sample(&fixture, Some(ObservedAgentState::Busy), 50_000).await;
+    assert_eq!(
+        projected_state(&fixture.store).await,
+        EffectiveAgentState::Idle
+    );
+    sample(&fixture, Some(ObservedAgentState::Busy), 69_000).await;
+    assert_eq!(
+        projected_state(&fixture.store).await,
+        EffectiveAgentState::Idle
+    );
+
+    sample(&fixture, Some(ObservedAgentState::Busy), 70_000).await;
+    assert_eq!(
+        projected_state(&fixture.store).await,
+        EffectiveAgentState::Busy
+    );
+
+    // The screen decides until the mod reports again.
+    sample(&fixture, Some(ObservedAgentState::Idle), 70_500).await;
+    assert_eq!(
+        projected_state(&fixture.store).await,
+        EffectiveAgentState::Idle
+    );
+    sample(&fixture, Some(ObservedAgentState::Busy), 71_000).await;
+    assert_eq!(
+        projected_state(&fixture.store).await,
+        EffectiveAgentState::Busy
+    );
+    report(&fixture, ObservedAgentState::Idle, 80_000).await;
+    sample(&fixture, Some(ObservedAgentState::Busy), 80_500).await;
+    assert_eq!(
+        projected_state(&fixture.store).await,
+        EffectiveAgentState::Idle
+    );
+}
+
+#[tokio::test]
+async fn a_break_in_the_busy_reading_restarts_the_30_seconds() {
+    for break_reading in [Some(ObservedAgentState::Idle), None] {
+        let fixture = Fixture::with_default_graces().await;
+        report(&fixture, ObservedAgentState::Idle, 100).await;
+
+        sample(&fixture, Some(ObservedAgentState::Busy), 5_000).await;
+        sample(&fixture, break_reading, 20_000).await;
+        sample(&fixture, Some(ObservedAgentState::Busy), 21_000).await;
+        // 30 seconds after the first busy reading, 14 after the run restarted.
+        sample(&fixture, Some(ObservedAgentState::Busy), 35_000).await;
+        assert_eq!(
+            projected_state(&fixture.store).await,
+            EffectiveAgentState::Idle,
+            "break: {break_reading:?}"
+        );
+
+        sample(&fixture, Some(ObservedAgentState::Busy), 51_000).await;
+        assert_eq!(
+            projected_state(&fixture.store).await,
+            EffectiveAgentState::Busy,
+            "break: {break_reading:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_failed_capture_does_not_break_the_busy_reading() {
+    let fixture = Fixture::with_default_graces().await;
+    report(&fixture, ObservedAgentState::Idle, 100).await;
+
+    sample(&fixture, Some(ObservedAgentState::Busy), 5_000).await;
+    fixture.screen.push(Err(ScreenError::CaptureFailed));
+    fixture.handle.screen_tick().await.unwrap();
+    sample(&fixture, Some(ObservedAgentState::Busy), 35_000).await;
+
+    assert_eq!(
+        projected_state(&fixture.store).await,
+        EffectiveAgentState::Busy
+    );
+}
+
+#[tokio::test]
+async fn a_turn_complete_does_not_hand_a_reported_pane_to_the_2_second_window() {
+    let fixture = Fixture::with_default_graces().await;
+    report(&fixture, ObservedAgentState::Busy, 100).await;
+    fixture
+        .inventory
+        .push_resolution(Ok(Some(reported_pane(4_000))));
+    fixture
+        .handle
+        .turn_completed(turn("current task"))
+        .await
+        .unwrap();
+
+    // 2.1 seconds after the turn-complete, 6 seconds after the report.
+    sample(&fixture, Some(ObservedAgentState::Idle), 6_100).await;
+
+    assert_eq!(
+        projected_state(&fixture.store).await,
+        EffectiveAgentState::Busy
+    );
+}
+
+#[tokio::test]
+async fn a_turn_complete_without_an_adapter_keeps_the_2_second_window_in_the_runtime() {
+    let fixture = Fixture::with_default_graces().await;
+    fixture
+        .inventory
+        .push_resolution(Ok(Some(reported_pane(100))));
+    fixture
+        .handle
+        .turn_completed(turn("current task"))
+        .await
+        .unwrap();
+
+    sample(&fixture, Some(ObservedAgentState::Busy), 2_000).await;
+    assert_eq!(
+        projected_state(&fixture.store).await,
+        EffectiveAgentState::Idle
+    );
+    sample(&fixture, Some(ObservedAgentState::Busy), 2_100).await;
+    assert_eq!(
+        projected_state(&fixture.store).await,
+        EffectiveAgentState::Busy
+    );
+}
+
+#[tokio::test]
+async fn a_repeated_busy_report_does_not_cancel_a_summary_in_progress() {
+    let (fixture, mut requests) = Fixture::with_summaries().await;
+    fixture.submit_summary_task("fix the parser", 1_000).await;
+    let pending = next_request(&mut requests).await;
+
+    // A still-working from the same adapter: the same state and no summary.
+    fixture
+        .inventory
+        .push_resolution(Ok(Some(pane("%8", 80, 800, 1_000, 10_100))));
+    fixture
+        .handle
+        .report_lifecycle(
+            "%8".into(),
+            ObservedAgentState::Busy,
+            "codex-hook".into(),
+            WorkSummaryUpdate::Unchanged,
+        )
+        .await
+        .unwrap();
+
+    pending.reply.send(Ok("Fixing the parser".into())).unwrap();
+    fixture.wait_for_generated(1).await;
+    fixture.store.project_unhandled_events(100).await.unwrap();
+    let snapshot = fixture.store.load_agent_snapshot().await.unwrap();
+    assert_eq!(
+        snapshot.panes[0].work_summary.as_deref(),
+        Some("Fixing the parser")
+    );
 }

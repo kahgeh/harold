@@ -166,6 +166,8 @@ struct TrackedPane {
     lifecycle_adapter_id: Option<String>,
     explicit_summary: Option<String>,
     screen_state: Option<ObservedAgentState>,
+    /// When the unbroken busy reading began, for a pane whose adapter reported idle.
+    screen_busy_since_ms: Option<i64>,
     screen_summary: Option<String>,
     summary_basis_version: EventStreamVersion,
 }
@@ -181,6 +183,7 @@ impl TrackedPane {
             lifecycle_adapter_id: None,
             explicit_summary: None,
             screen_state: None,
+            screen_busy_since_ms: None,
             screen_summary: None,
             summary_basis_version: EventStreamVersion::start(),
         }
@@ -518,6 +521,7 @@ fn panes_from_snapshot(
                 lifecycle_adapter_id: projection.lifecycle_adapter_id.clone(),
                 explicit_summary: projection.explicit_work_summary.clone(),
                 screen_state: seeded_screen_state(projection, graces),
+                screen_busy_since_ms: None,
                 screen_summary: projection.screen_work_summary.clone(),
                 summary_basis_version: projection.summary_basis_version,
             };
@@ -688,6 +692,13 @@ impl AgentMonitorRuntime {
             .panes
             .get(&pane.incarnation.pane_id)
             .filter(|tracked| tracked.pane.incarnation == pane.incarnation);
+        // The same adapter repeating the pane's state, with no summary: the reducer applies
+        // the same test to the stored event.
+        let is_repeat = work_summary == WorkSummaryUpdate::Unchanged
+            && current.is_some_and(|tracked| {
+                tracked.lifecycle_adapter_id.as_deref() == Some(adapter_id.as_str())
+                    && tracked.last_hook.map(|(state, _)| state) == Some(state)
+            });
         let next_explicit_summary = match &work_summary {
             WorkSummaryUpdate::Unchanged => {
                 current.and_then(|tracked| tracked.explicit_summary.clone())
@@ -723,12 +734,17 @@ impl AgentMonitorRuntime {
         tracked.lifecycle_adapter_id = Some(adapter_id);
         tracked.explicit_summary = next_explicit_summary;
         tracked.screen_state = None;
+        tracked.screen_busy_since_ms = None;
         let pane_id = tracked.pane.incarnation.pane_id.clone();
-        if let Some(basis) = source_version(&appended, &["AgentLifecycleObserved"]) {
-            tracked.summary_basis_version = basis;
+        // A repeat starts no new work, so the summary in progress stands.
+        if !is_repeat {
+            if let Some(basis) = source_version(&appended, &["AgentLifecycleObserved"]) {
+                tracked.summary_basis_version = basis;
+            }
+            let instruction =
+                instruction.filter(|_| matches!(work_summary, WorkSummaryUpdate::Set(_)));
+            self.schedule_summary(&pane_id, instruction.as_deref(), None);
         }
-        let instruction = instruction.filter(|_| matches!(work_summary, WorkSummaryUpdate::Set(_)));
-        self.schedule_summary(&pane_id, instruction.as_deref(), None);
         self.baseline_pane(&pane_id).await?;
         Ok(())
     }
@@ -1277,18 +1293,36 @@ fn matches_configured_placeholder_for_provider<'a>(
     providers.any(|provider| matches_configured_placeholder(summary, &provider.idle_all))
 }
 
+/// The screen state to store for this sample, if any.
 fn screen_state_delta(
-    tracked: &TrackedPane,
+    tracked: &mut TrackedPane,
     observed: Option<ObservedAgentState>,
     observed_at_ms: i64,
     graces: GraceWindows,
 ) -> Option<ObservedAgentState> {
-    let state = observed?;
-    if let Some((_, hook_observed_at_ms)) = tracked.last_hook {
-        let grace = graces.for_pane(tracked.lifecycle_adapter_id.is_some());
-        if observed_at_ms < hook_observed_at_ms.saturating_add(grace) {
+    let Some((hook_state, hook_observed_at_ms)) = tracked.last_hook else {
+        return observed.filter(|state| tracked.screen_state != Some(*state));
+    };
+    let has_adapter = tracked.lifecycle_adapter_id.is_some();
+    let grace = graces.for_pane(has_adapter);
+
+    // An adapter's idle report has no repeats to keep it fresh. It stands until the screen
+    // has read busy for the whole grace without a break; then the screen decides.
+    if has_adapter && hook_state == ObservedAgentState::Idle && tracked.screen_state.is_none() {
+        if observed != Some(ObservedAgentState::Busy) {
+            tracked.screen_busy_since_ms = None;
             return None;
         }
+        let busy_since_ms = *tracked
+            .screen_busy_since_ms
+            .get_or_insert(observed_at_ms.max(hook_observed_at_ms));
+        return (observed_at_ms >= busy_since_ms.saturating_add(grace))
+            .then_some(ObservedAgentState::Busy);
+    }
+
+    let state = observed?;
+    if observed_at_ms < hook_observed_at_ms.saturating_add(grace) {
+        return None;
     }
     (tracked.screen_state != Some(state)).then_some(state)
 }
