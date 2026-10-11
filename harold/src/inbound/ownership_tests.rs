@@ -1,7 +1,7 @@
 use super::{
     Marker, NotifierRecord, Ownership, decide_ownership, delivered_text, error_text, fed_markers,
     known_machine_names, latest_notifier, notification_text, pane_address, parse_marker,
-    record_marker, record_notification,
+    record_marker, record_notification, recorded_notifications,
 };
 
 fn notification(machine: &str) -> Option<Marker<'_>> {
@@ -509,4 +509,13 @@ fn address_copied_from_a_confirmation_reaches_the_same_pane() {
         decide_ownership(&reply, false, "laptop", &known(), Some("laptop")),
         owned_by("studio")
     );
+}
+
+#[test]
+fn process_wide_record_notification_logs_the_name_for_tests() {
+    crate::settings::init_settings_for_test();
+
+    record_notification("ownership-test-mac");
+
+    assert!(recorded_notifications().contains(&"ownership-test-mac".to_string()));
 }

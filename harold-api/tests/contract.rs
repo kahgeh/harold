@@ -1,6 +1,7 @@
 use harold_api::FILE_DESCRIPTOR_SET;
 use harold_api::harold::{
-    AgentPaneState, AgentState, ReportAgentStateRequest, SetMessagingPausedRequest,
+    AgentPaneState, AgentState, ForwardReplyRequest, ForwardReplyResponse, ReportAgentStateRequest,
+    ReportNotificationRequest, ReportNotificationResponse, SetMessagingPausedRequest,
     SetMessagingPausedResponse, SetTtsMutedRequest, SetTtsMutedResponse, TurnCompleteRequest,
 };
 use prost::Message;
@@ -202,6 +203,8 @@ fn harold_service_exposes_only_the_approved_rpcs() {
             "WatchAgentStates".to_string(),
             "SetTtsMuted".to_string(),
             "SetMessagingPaused".to_string(),
+            "ReportNotification".to_string(),
+            "ForwardReply".to_string(),
         ]
     );
 }
@@ -236,4 +239,37 @@ fn set_messaging_paused_contract_is_additive() {
     let snapshot_fields = message_fields("AgentStateSnapshot");
     assert!(snapshot_fields.contains(&("messaging_paused".to_string(), 6)));
     assert_eq!(snapshot_fields.len(), 6);
+}
+
+#[test]
+fn peer_rpcs_carry_the_secret_in_field_two() {
+    let report = ReportNotificationRequest {
+        machine: "laptop".to_string(),
+        secret: "s3cret".to_string(),
+    };
+    assert_eq!(round_trip(&report), report);
+    assert!(round_trip(&ReportNotificationResponse { accepted: true }).accepted);
+    assert_eq!(
+        message_fields("ReportNotificationRequest"),
+        [("machine".to_string(), 1), ("secret".to_string(), 2)]
+    );
+    assert_eq!(
+        message_fields("ReportNotificationResponse"),
+        [("accepted".to_string(), 1)]
+    );
+
+    let forward = ForwardReplyRequest {
+        text: "[laptop/harold main:0.0] revert that".to_string(),
+        secret: "s3cret".to_string(),
+    };
+    assert_eq!(round_trip(&forward), forward);
+    assert!(round_trip(&ForwardReplyResponse { accepted: true }).accepted);
+    assert_eq!(
+        message_fields("ForwardReplyRequest"),
+        [("text".to_string(), 1), ("secret".to_string(), 2)]
+    );
+    assert_eq!(
+        message_fields("ForwardReplyResponse"),
+        [("accepted".to_string(), 1)]
+    );
 }

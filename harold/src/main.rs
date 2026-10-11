@@ -4,6 +4,7 @@ mod channels;
 mod cli;
 mod inbound;
 mod outbound;
+mod peers;
 mod projector;
 mod settings;
 mod store;
@@ -25,8 +26,9 @@ pub use harold_api::harold;
 
 use harold::harold_server::{Harold, HaroldServer};
 use harold::{
-    AgentMonitorHealth, AgentPaneState, AgentState, AgentStateSnapshot, MonitorHealthState,
-    ReportAgentStateRequest, ReportAgentStateResponse, SetMessagingPausedRequest,
+    AgentMonitorHealth, AgentPaneState, AgentState, AgentStateSnapshot, ForwardReplyRequest,
+    ForwardReplyResponse, MonitorHealthState, ReportAgentStateRequest, ReportAgentStateResponse,
+    ReportNotificationRequest, ReportNotificationResponse, SetMessagingPausedRequest,
     SetMessagingPausedResponse, SetTtsMutedRequest, SetTtsMutedResponse, TurnCompleteRequest,
     TurnCompleteResponse, WatchAgentStatesRequest,
 };
@@ -43,6 +45,8 @@ struct HaroldService {
     /// does not queue behind a pause.
     tts_switch: tokio::sync::Mutex<Option<bool>>,
     shutdown: watch::Receiver<()>,
+    /// Which of the two peer RPCs this Harold answers, and for whom.
+    peers: peers::PeerEndpoint,
 }
 
 /// Stores a changed on/off setting with `append`, then hands it to `switch` straight away
@@ -252,6 +256,46 @@ impl Harold for HaroldService {
         let (sender, receiver) = mpsc::channel(1);
         tokio::spawn(forward_agent_snapshots(snapshots, sender, shutdown));
         Ok(Response::new(ReceiverStream::new(receiver)))
+    }
+
+    async fn report_notification(
+        &self,
+        request: Request<ReportNotificationRequest>,
+    ) -> Result<Response<ReportNotificationResponse>, Status> {
+        let req = request.into_inner();
+        let member =
+            peers::authorize_report(&self.peers, &req.machine, &req.secret).map_err(|denied| {
+                tracing::warn!(reason = denied.reason(), "notification report rejected");
+                Status::permission_denied("peer call rejected")
+            })?;
+        inbound::ownership::record_notification(&member.name);
+        info!(machine = %member.name, "member notification recorded");
+        Ok(Response::new(ReportNotificationResponse { accepted: true }))
+    }
+
+    async fn forward_reply(
+        &self,
+        request: Request<ForwardReplyRequest>,
+    ) -> Result<Response<ForwardReplyResponse>, Status> {
+        let req = request.into_inner();
+        peers::authorize_forward(&self.peers, &req.secret).map_err(|denied| {
+            tracing::warn!(reason = denied.reason(), "forwarded reply rejected");
+            Status::permission_denied("peer call rejected")
+        })?;
+        // forwarded = true: the hub decided this Mac owns the reply, so routing does not
+        // decide again and never forwards it.
+        let message = store::InboundMessage {
+            text: req.text,
+            forwarded: true,
+        };
+        store::append_inbound_message(&self.store, &message)
+            .await
+            .map_err(|error| {
+                tracing::error!(result = "append_failed", error = %error, "forwarded reply rejected");
+                Status::internal("event store write failed")
+            })?;
+        info!("forwarded reply stored");
+        Ok(Response::new(ForwardReplyResponse { accepted: true }))
     }
 }
 
@@ -597,6 +641,7 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
             messaging_switch: tokio::sync::Mutex::new(None),
             tts_switch: tokio::sync::Mutex::new(None),
             shutdown: shutdown_rx.clone(),
+            peers: peers::PeerEndpoint::from_settings(&cfg.notify.away_channel, &cfg.peers),
         }))
         .serve_with_shutdown(addr, async {
             shutdown_signal().await;

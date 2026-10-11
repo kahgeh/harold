@@ -166,12 +166,19 @@ pub(crate) fn record_marker(text: &str, date: i64) {
     NOTIFIERS.lock().unwrap().record_marker(text, date);
 }
 
-/// Record a notification by the name of the Mac that sent it.
-#[allow(
-    dead_code,
-    reason = "called by the hub for its own and its members' notifications (piece 3)"
-)]
+/// Every name passed to `record_notification`, so a test can see that a caller reaches the
+/// process-wide record while the test settings list no machines and the record keeps none.
+#[cfg(test)]
+static RECORDED_NOTIFICATIONS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// Record a notification by the name of the Mac that sent it. Only for a channel one Mac
+/// reads: the hub calls it for its own notifications and for each member's report.
 pub(crate) fn record_notification(machine: &str) {
+    #[cfg(test)]
+    RECORDED_NOTIFICATIONS
+        .lock()
+        .unwrap()
+        .push(machine.to_string());
     NOTIFIERS.lock().unwrap().record_notification(machine);
 }
 
@@ -193,6 +200,12 @@ pub(crate) fn known_machine_names() -> Vec<String> {
 #[cfg(test)]
 pub(crate) fn fed_markers() -> Vec<(String, i64)> {
     FED_MARKERS.lock().unwrap().clone()
+}
+
+/// The names passed to `record_notification` so far, in order.
+#[cfg(test)]
+pub(crate) fn recorded_notifications() -> Vec<String> {
+    RECORDED_NOTIFICATIONS.lock().unwrap().clone()
 }
 
 // ---------------------------------------------------------------------------

@@ -7,9 +7,11 @@ use std::sync::{
 use std::time::{Duration, Instant};
 
 use harold_api::harold::{
-    AgentPaneState, AgentStateSnapshot, ReportAgentStateRequest, ReportAgentStateResponse,
-    SetMessagingPausedRequest, SetMessagingPausedResponse, SetTtsMutedRequest, SetTtsMutedResponse,
-    TurnCompleteRequest, TurnCompleteResponse, WatchAgentStatesRequest,
+    AgentPaneState, AgentStateSnapshot, ForwardReplyRequest, ForwardReplyResponse,
+    ReportAgentStateRequest, ReportAgentStateResponse, ReportNotificationRequest,
+    ReportNotificationResponse, SetMessagingPausedRequest, SetMessagingPausedResponse,
+    SetTtsMutedRequest, SetTtsMutedResponse, TurnCompleteRequest, TurnCompleteResponse,
+    WatchAgentStatesRequest,
     harold_server::{Harold, HaroldServer},
 };
 use tokio::sync::mpsc;
@@ -185,6 +187,22 @@ impl Harold for ProbeServer {
         Err(Status::permission_denied("probe must not write"))
     }
 
+    async fn report_notification(
+        &self,
+        _: Request<ReportNotificationRequest>,
+    ) -> Result<Response<ReportNotificationResponse>, Status> {
+        self.writes.fetch_add(1, Ordering::SeqCst);
+        Err(Status::permission_denied("probe must not write"))
+    }
+
+    async fn forward_reply(
+        &self,
+        _: Request<ForwardReplyRequest>,
+    ) -> Result<Response<ForwardReplyResponse>, Status> {
+        self.writes.fetch_add(1, Ordering::SeqCst);
+        Err(Status::permission_denied("probe must not write"))
+    }
+
     async fn watch_agent_states(
         &self,
         _: Request<WatchAgentStatesRequest>,
@@ -344,6 +362,20 @@ impl Harold for RecordingServer {
         &self,
         _: Request<SetMessagingPausedRequest>,
     ) -> Result<Response<SetMessagingPausedResponse>, Status> {
+        Err(Status::unimplemented("not used"))
+    }
+
+    async fn report_notification(
+        &self,
+        _: Request<ReportNotificationRequest>,
+    ) -> Result<Response<ReportNotificationResponse>, Status> {
+        Err(Status::unimplemented("not used"))
+    }
+
+    async fn forward_reply(
+        &self,
+        _: Request<ForwardReplyRequest>,
+    ) -> Result<Response<ForwardReplyResponse>, Status> {
         Err(Status::unimplemented("not used"))
     }
 
