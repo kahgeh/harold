@@ -8,7 +8,7 @@ use tokio::sync::watch;
 use tracing::{info, warn};
 
 use crate::inbound::AgentAddress;
-use crate::settings::get_settings;
+use crate::settings::{PeerRole, get_settings};
 use crate::store::{HaroldStore, TurnCompleted};
 use crate::util::ai_cli_env;
 
@@ -116,12 +116,34 @@ pub(crate) fn summarise_for_notification(
 // Static dispatch — delegates to the configured away channel
 // ---------------------------------------------------------------------------
 
+/// Which listener reads replies on this Mac.
+#[derive(Debug, PartialEq, Eq)]
+enum InboundListener {
+    Imessage,
+    Telegram,
+    /// A member on Telegram. Telegram lets one process read a bot's updates, and a second
+    /// reader gets a conflict, so only the hub reads them. The hub forwards this Mac its
+    /// replies.
+    None,
+}
+
+fn inbound_listener(away_channel: &str, role: PeerRole) -> InboundListener {
+    match (away_channel, role) {
+        ("telegram", PeerRole::Member) => InboundListener::None,
+        ("telegram", PeerRole::Hub) => InboundListener::Telegram,
+        _ => InboundListener::Imessage,
+    }
+}
+
 /// Start the inbound message listener for the configured away channel.
 pub async fn listen_for_inbound_messages(store: Arc<HaroldStore>, shutdown: watch::Receiver<()>) {
     let cfg = get_settings();
-    match cfg.notify.away_channel.as_str() {
-        "telegram" => telegram::listen(store, shutdown).await,
-        _ => imessage::listen(store, shutdown).await,
+    match inbound_listener(&cfg.notify.away_channel, cfg.peers.role) {
+        InboundListener::Telegram => telegram::listen(store, shutdown).await,
+        InboundListener::Imessage => imessage::listen(store, shutdown).await,
+        InboundListener::None => {
+            info!("Telegram listener not started: this Mac is a member and the hub reads replies");
+        }
     }
 }
 
@@ -161,7 +183,8 @@ pub fn notify_away(turn: &TurnCompleted, trace_id: &str) -> Result<AwayNotificat
 
 #[cfg(test)]
 mod tests {
-    use super::send_unless_paused;
+    use super::{InboundListener, inbound_listener, send_unless_paused};
+    use crate::settings::PeerRole;
 
     #[test]
     fn paused_send_reports_success_without_delivering() {
@@ -185,5 +208,27 @@ mod tests {
 
         assert_eq!(result, Err("channel down".to_string()));
         assert_eq!(delivered, ["hello"]);
+    }
+
+    #[test]
+    fn telegram_member_starts_no_listener_because_the_hub_reads_the_bot() {
+        assert_eq!(
+            inbound_listener("telegram", PeerRole::Member),
+            InboundListener::None
+        );
+        assert_eq!(
+            inbound_listener("telegram", PeerRole::Hub),
+            InboundListener::Telegram
+        );
+    }
+
+    #[test]
+    fn imessage_listener_starts_whatever_the_role() {
+        for role in [PeerRole::Hub, PeerRole::Member] {
+            assert_eq!(
+                inbound_listener("imessage", role),
+                InboundListener::Imessage
+            );
+        }
     }
 }

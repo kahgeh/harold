@@ -8,9 +8,10 @@ use tracing::{Instrument, info, info_span, warn};
 
 use super::{AwayNotification, split_body, summarise_for_notification};
 use crate::inbound::AgentAddress;
-use crate::inbound::ownership::notification_text;
+use crate::inbound::ownership::{notification_text, record_notification};
 use crate::outbound::is_messaging_paused;
-use crate::settings::get_settings;
+use crate::peers::report_notification_blocking;
+use crate::settings::{PeerRole, PeersSettings, get_settings};
 use crate::store::{HaroldStore, InboundMessage, TurnCompleted, append_inbound_message};
 
 // ===========================================================================
@@ -175,20 +176,42 @@ fn notification_message(machine: &str, turn: &TurnCompleted, main_body: &str) ->
     notification_text(machine, &turn.pane_label, main_body, &turn.main_context)
 }
 
-pub(crate) fn notify_away(
+/// Make this notification known to the hub's record of who notified last, before it is
+/// sent. The hub records itself. A member reports to the hub; when the report fails the
+/// notification is still sent, and the hub's record is stale until the next notification.
+fn announce_notification(peers: &PeersSettings, machine: &str) {
+    match (peers.role, &peers.hub) {
+        (PeerRole::Hub, _) => record_notification(machine),
+        (PeerRole::Member, Some(hub)) => {
+            if let Err(error) = report_notification_blocking(hub, machine) {
+                warn!(
+                    error,
+                    "notification not reported to the hub; sending it anyway"
+                );
+            }
+        }
+        // `validate` refuses this configuration before Harold starts.
+        (PeerRole::Member, None) => warn!("peers.hub not configured; notification not reported"),
+    }
+}
+
+/// Announce the notification for `turn`, then send it and its question through `send`.
+fn send_notification(
     turn: &TurnCompleted,
-    _trace_id: &str,
+    machine: &str,
+    peers: &PeersSettings,
+    body: &str,
+    send: impl Fn(&str) -> Result<(), String>,
 ) -> Result<AwayNotification, String> {
-    let body = summarise_for_notification(&turn.assistant_message, &turn.last_user_prompt);
+    let (main_body, question) = split_body(body);
+    let message = notification_message(machine, turn, main_body);
 
-    let (main_body, question) = split_body(&body);
-    let message = notification_message(&get_settings().machine_name, turn, main_body);
-
-    send_telegram(&message)?;
+    announce_notification(peers, machine);
+    send(&message)?;
     info!("Telegram notification sent");
 
     if let Some(q) = question {
-        send_telegram(q)?;
+        send(q)?;
         info!("Telegram question sent");
     }
 
@@ -196,6 +219,16 @@ pub(crate) fn notify_away(
         pane_id: turn.pane_id.clone(),
         label: turn.pane_label.clone(),
     }))
+}
+
+/// Must be called from a `spawn_blocking` context.
+pub(crate) fn notify_away(
+    turn: &TurnCompleted,
+    _trace_id: &str,
+) -> Result<AwayNotification, String> {
+    let cfg = get_settings();
+    let body = summarise_for_notification(&turn.assistant_message, &turn.last_user_prompt);
+    send_notification(turn, &cfg.machine_name, &cfg.peers, &body, send_telegram)
 }
 
 // ===========================================================================
@@ -394,7 +427,10 @@ pub(crate) async fn listen(store: Arc<HaroldStore>, mut shutdown: watch::Receive
 
 #[cfg(test)]
 mod tests {
-    use super::{Chat, Message, marked, notification_message, routable_text, send_message_body};
+    use super::{
+        Chat, Message, marked, notification_message, routable_text, send_message_body,
+        send_notification,
+    };
     use crate::inbound::ownership::{delivered_text, error_text, notification_text, parse_marker};
     use crate::store::TurnCompleted;
 
@@ -476,7 +512,21 @@ mod tests {
 
     #[test]
     fn notification_names_the_machine_and_the_pane() {
-        let turn = TurnCompleted {
+        assert_eq!(
+            notification_message("studio", &turn(), " Tests pass. "),
+            "[studio/alir-app main:0.1] Tests pass. (alir)"
+        );
+    }
+
+    use std::sync::Mutex;
+
+    use crate::inbound::ownership::recorded_notifications;
+    use crate::peers::PeerEndpoint;
+    use crate::settings::{PeerHub, PeerMember, PeerRole, PeersSettings};
+    use crate::tests::{closed_port_url, start_peer_server};
+
+    fn turn() -> TurnCompleted {
+        TurnCompleted {
             pane_id: "%1".into(),
             pane_label: "alir-app main:0.1".into(),
             last_user_prompt: "prompt".into(),
@@ -484,11 +534,131 @@ mod tests {
             main_context: "alir".into(),
             agent_incarnation: None,
             work_summary: crate::agent::domain::CompletionSummaryUpdate::Unchanged,
-        };
+        }
+    }
+
+    fn member_of(hub_url: &str) -> PeersSettings {
+        PeersSettings {
+            role: PeerRole::Member,
+            members: Vec::new(),
+            hub: Some(PeerHub {
+                url: hub_url.into(),
+                secret: "s3cret".into(),
+            }),
+        }
+    }
+
+    // Each test names its Mac differently: the log of recorded names is shared by every
+    // test in the process.
+
+    #[test]
+    fn hub_records_its_own_notification_before_sending_it() {
+        crate::settings::init_settings_for_test();
+        let sent = Mutex::new(Vec::new());
+
+        let result = send_notification(
+            &turn(),
+            "studio-notify-hub",
+            &PeersSettings::default(),
+            "Tests pass. Deploy?",
+            |text| {
+                let recorded = recorded_notifications().contains(&"studio-notify-hub".to_string());
+                sent.lock().unwrap().push((text.to_string(), recorded));
+                Ok(())
+            },
+        );
+
+        assert!(result.is_ok());
+        assert_eq!(
+            *sent.lock().unwrap(),
+            [
+                (
+                    "[studio-notify-hub/alir-app main:0.1] Tests pass. (alir)".to_string(),
+                    true
+                ),
+                ("Deploy?".to_string(), true),
+            ]
+        );
+        let times = recorded_notifications()
+            .iter()
+            .filter(|name| *name == "studio-notify-hub")
+            .count();
+        assert_eq!(times, 1, "one record for the notification and its question");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn member_reports_to_the_hub_before_sending_and_records_nothing_itself() {
+        crate::settings::init_settings_for_test();
+        let hub = start_peer_server(PeerEndpoint::Hub {
+            members: vec![PeerMember {
+                name: "laptop-notify-member".into(),
+                url: "http://127.0.0.1:1".into(),
+                secret: "s3cret".into(),
+            }],
+        })
+        .await;
+        let peers = member_of(&hub.url);
+
+        // On a blocking thread, as the event handler sends notifications.
+        let reported_before_send = tokio::task::spawn_blocking(move || {
+            let reported = Mutex::new(Vec::new());
+            let result =
+                send_notification(&turn(), "laptop-notify-member", &peers, "Done.", |_| {
+                    reported.lock().unwrap().push(
+                        recorded_notifications()
+                            .iter()
+                            .filter(|name| *name == "laptop-notify-member")
+                            .count(),
+                    );
+                    Ok(())
+                });
+            assert!(result.is_ok());
+            reported.into_inner().unwrap()
+        })
+        .await
+        .unwrap();
+
+        // One record, made by the hub's handler, already there when the member sent.
+        assert_eq!(reported_before_send, [1]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn member_sends_its_notification_when_the_hub_cannot_be_reached() {
+        crate::settings::init_settings_for_test();
+        let peers = member_of(&closed_port_url());
+
+        let sent = tokio::task::spawn_blocking(move || {
+            let sent = Mutex::new(Vec::new());
+            let result =
+                send_notification(&turn(), "laptop-notify-offline", &peers, "Done.", |text| {
+                    sent.lock().unwrap().push(text.to_string());
+                    Ok(())
+                });
+            assert!(result.is_ok());
+            sent.into_inner().unwrap()
+        })
+        .await
+        .unwrap();
 
         assert_eq!(
-            notification_message("studio", &turn, " Tests pass. "),
-            "[studio/alir-app main:0.1] Tests pass. (alir)"
+            sent,
+            ["[laptop-notify-offline/alir-app main:0.1] Done. (alir)"]
         );
+        assert!(!recorded_notifications().contains(&"laptop-notify-offline".to_string()));
+    }
+
+    #[test]
+    fn failed_send_is_reported_to_the_caller() {
+        crate::settings::init_settings_for_test();
+
+        let result = send_notification(
+            &turn(),
+            "studio-notify-fail",
+            &PeersSettings::default(),
+            "Done.",
+            |_| Err("telegram down".to_string()),
+        );
+
+        assert_eq!(result.err(), Some("telegram down".to_string()));
     }
 }

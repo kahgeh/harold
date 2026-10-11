@@ -115,7 +115,6 @@ pub(crate) fn authorize_forward(endpoint: &PeerEndpoint, secret: &str) -> Result
 // ---------------------------------------------------------------------------
 
 /// How long connecting to a peer may take, and how long the call may take after that.
-#[allow(dead_code, reason = "called by the Telegram channel in the next task")]
 pub(crate) const PEER_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// A new connection to the Harold at `url`. Each call opens its own and drops it: calls are
@@ -146,7 +145,6 @@ fn accepted(accepted: bool) -> Result<(), String> {
 }
 
 /// Tell the hub that `machine`, this member, is about to send a notification. One attempt.
-#[allow(dead_code, reason = "called by the Telegram channel in the next task")]
 pub(crate) async fn report_notification(hub: &PeerHub, machine: &str) -> Result<(), String> {
     report_notification_within(hub, machine, PEER_TIMEOUT).await
 }
@@ -169,7 +167,6 @@ async fn report_notification_within(
 
 /// `report_notification` for a blocking thread of the tokio runtime, which is where the
 /// event handler sends notifications. On any other thread it reports an error.
-#[allow(dead_code, reason = "called by the Telegram channel in the next task")]
 pub(crate) fn report_notification_blocking(hub: &PeerHub, machine: &str) -> Result<(), String> {
     let runtime = tokio::runtime::Handle::try_current()
         .map_err(|_| "no async runtime on this thread".to_string())?;
@@ -177,7 +174,7 @@ pub(crate) fn report_notification_blocking(hub: &PeerHub, machine: &str) -> Resu
 }
 
 /// Hand `member` a reply it owns, as the user typed it. One attempt.
-#[allow(dead_code, reason = "called by the Telegram channel in the next task")]
+#[allow(dead_code, reason = "called by the Telegram listener in the next task")]
 pub(crate) async fn forward_reply(member: &PeerMember, text: &str) -> Result<(), String> {
     let mut client = connect(&member.url, PEER_TIMEOUT).await?;
     let response = client
