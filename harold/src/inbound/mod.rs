@@ -1,4 +1,5 @@
 pub mod directory;
+pub(crate) mod ownership;
 pub(crate) mod tmux;
 
 use std::process::Command;
