@@ -499,15 +499,31 @@ fn start_cursors(db: &ChatDb, initial: i64, record_marker: impl Fn(&str)) -> Cur
 }
 
 async fn poll(store: &HaroldStore) {
-    poll_chat_db(
+    poll_db(
         store,
         ChatDb::configured(),
         cursors(),
-        ownership::record_marker,
-        &RECENT_ROWS,
         is_messaging_paused(),
     )
     .await;
+}
+
+/// One poll of `db` with the process-wide notifier record and recent rows.
+async fn poll_db(store: &HaroldStore, db: ChatDb, cursors: &Cursors, messaging_paused: bool) {
+    poll_chat_db(
+        store,
+        db,
+        cursors,
+        ownership::record_marker,
+        &RECENT_ROWS,
+        messaging_paused,
+    )
+    .await;
+}
+
+/// The listener's cursors, seeding the process-wide notifier record from `db`.
+fn start_listener_cursors(db: &ChatDb, initial: i64) -> Cursors {
+    start_cursors(db, initial, ownership::record_marker)
 }
 
 /// One poll of `db`. Marked rows are read before any reply is recorded, and while
@@ -639,9 +655,8 @@ pub(crate) async fn listen(store: Arc<HaroldStore>, mut shutdown: watch::Receive
         info!("iMessage listener shutting down before the Messages database was readable");
         return;
     };
-    let cursors = tokio::task::block_in_place(|| {
-        start_cursors(&ChatDb::configured(), initial, ownership::record_marker)
-    });
+    let cursors =
+        tokio::task::block_in_place(|| start_listener_cursors(&ChatDb::configured(), initial));
     CURSORS.set(cursors).expect("listen called more than once");
     info!(initial_rowid = initial, "iMessage listener started");
 

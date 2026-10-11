@@ -11,7 +11,8 @@ use crate::util::sanitise_for_applescript;
 use super::{
     ChatDb, Cursors, Direction, FetchedRow, NotificationPlan, RecentRows, TWIN_WINDOW,
     is_marked_as_harold, max_rowid_of, notification_message, notification_plan, parse_max_rowid,
-    poll_chat_db, record_row, send_script, start_cursors, wait_for_start_row,
+    poll_chat_db, poll_db, record_row, send_script, start_cursors, start_listener_cursors,
+    wait_for_start_row,
 };
 
 #[test]
@@ -870,4 +871,31 @@ fn notification_is_sent_naming_the_machine_and_the_pane() {
         sent_text(&message),
         "🤖 [studio/alir-app main:0.1] Tests pass. (alir)"
     );
+}
+
+#[test]
+fn listener_startup_seeds_the_process_wide_notifier_record() {
+    crate::settings::init_settings_for_test();
+    let directory = TestDirectory::new();
+    let db = chat_db(&directory);
+    insert(&db, &[(HANDLE, 1, "🤖 [seed-test-a/x main:0.0] done (x)")]);
+
+    start_listener_cursors(&db, 1);
+
+    assert!(crate::inbound::ownership::known_machine_names().contains(&"seed-test-a".to_string()));
+}
+
+#[tokio::test]
+async fn listener_poll_feeds_marked_rows_to_the_process_wide_notifier_record() {
+    crate::settings::init_settings_for_test();
+    let store_directory = TestDirectory::new();
+    let store = HaroldStore::open(&store_directory.0).await.unwrap();
+    let directory = TestDirectory::new();
+    let db = chat_db(&directory);
+    let cursors = Cursors::starting_at(0);
+    insert(&db, &[(HANDLE, 0, "🤖 [poll-test-b/x main:0.0] done (x)")]);
+
+    poll_db(&store, db, &cursors, false).await;
+
+    assert!(crate::inbound::ownership::known_machine_names().contains(&"poll-test-b".to_string()));
 }
