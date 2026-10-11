@@ -186,7 +186,7 @@ fn render_monitor(frame: &mut Frame<'_>, area: Rect, app: &App, now_ms: i64) {
     if app.connection == crate::app::ConnectionState::Stale {
         let stale_age = app
             .last_snapshot_received_at_ms()
-            .map(|received_at_ms| format!("{} ago", age(now_ms, received_at_ms)))
+            .map(|received_at_ms| format!("{} ago", seconds_ago(now_ms, received_at_ms)))
             .unwrap_or_else(|| "age unavailable".to_owned());
         text.push_span(Span::styled(
             format!("  ·  Last committed snapshot {stale_age}"),
@@ -870,9 +870,19 @@ fn transport_style(connection: crate::app::ConnectionState) -> Style {
     Style::default().fg(color)
 }
 
+/// One unit, rounded down, so a row's age changes at most once a minute.
 fn age(now_ms: i64, transition_ms: i64) -> String {
-    let elapsed_ms = now_ms.saturating_sub(transition_ms).max(0);
-    format!("{}s", elapsed_ms / 1_000)
+    let minutes = now_ms.saturating_sub(transition_ms).max(0) / 60_000;
+    match minutes {
+        0 => "<1m".to_owned(),
+        1..=59 => format!("{minutes}m"),
+        60..=1_439 => format!("{}h", minutes / 60),
+        _ => format!("{}d", minutes / 1_440),
+    }
+}
+
+fn seconds_ago(now_ms: i64, then_ms: i64) -> String {
+    format!("{}s", now_ms.saturating_sub(then_ms).max(0) / 1_000)
 }
 
 #[cfg(test)]
@@ -2308,5 +2318,78 @@ mod tests {
                 assert!(content.contains(hint), "{hint} missing at {width}x{height}");
             }
         }
+    }
+    #[test]
+    fn age_shows_one_unit_rounded_down() {
+        const SECOND: i64 = 1_000;
+        const MINUTE: i64 = 60 * SECOND;
+        const HOUR: i64 = 60 * MINUTE;
+        const DAY: i64 = 24 * HOUR;
+        let now_ms = 1_777_000_000_000;
+        for (elapsed_ms, expected) in [
+            (0, "<1m"),
+            (42 * SECOND, "<1m"),
+            (59 * SECOND, "<1m"),
+            (MINUTE, "1m"),
+            (12 * MINUTE + 50 * SECOND, "12m"),
+            (59 * MINUTE + 59 * SECOND, "59m"),
+            (HOUR, "1h"),
+            (3 * HOUR + 59 * MINUTE, "3h"),
+            (23 * HOUR + 59 * MINUTE, "23h"),
+            (DAY, "1d"),
+            (2 * DAY + 5 * HOUR, "2d"),
+            (400 * DAY, "400d"),
+            // A state change timestamped in the future, when the clocks differ.
+            (-5 * MINUTE, "<1m"),
+        ] {
+            assert_eq!(
+                super::age(now_ms, now_ms - elapsed_ms),
+                expected,
+                "{elapsed_ms} ms"
+            );
+        }
+    }
+
+    #[test]
+    fn seconds_ago_keeps_seconds() {
+        assert_eq!(super::seconds_ago(100_000, 95_000), "5s");
+        assert_eq!(super::seconds_ago(700_000, 100_000), "600s");
+        assert_eq!(super::seconds_ago(100_000, 105_000), "0s");
+    }
+
+    #[test]
+    fn pane_list_and_detail_panel_show_no_age_in_seconds() {
+        let selected = incarnation("%17", 91700, 91844, "codex");
+        let now_ms = 1_777_000_000_000;
+        let app = App::new(
+            ConnectionState::Live,
+            Snapshot {
+                tts_muted: false,
+                messaging_paused: false,
+                through_event_version: 42,
+                server_time_ms: now_ms,
+                monitor_health: vec![health(MonitorHealthState::Healthy, "ok")],
+                rows: vec![row(
+                    selected.clone(),
+                    AgentState::Idle,
+                    "Codex",
+                    "agents:2.7",
+                    "Review the projection contract",
+                    now_ms - 5 * 60_000,
+                )],
+            },
+            empty_search(),
+            Some(selected),
+        );
+
+        let lines = rendered_lines(&app, 140, 38, now_ms);
+
+        assert_eq!(lines.matches("5m").count(), 2, "pane list and detail panel");
+        let has_seconds_age = lines.split_whitespace().any(|word| {
+            word.strip_suffix('s').is_some_and(|digits| {
+                !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())
+            })
+        });
+        assert!(!has_seconds_age, "an age in seconds is shown:\n{lines}");
     }
 }
