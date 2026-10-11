@@ -1,17 +1,32 @@
 # harold-lifecycle: Claude Code mod
 
-Tells Harold when a Claude Code pane starts and stops working, by running
-`harold accept` at the start and end of each main-session turn. It only watches: each hook
-passes its event on unchanged.
+Tells Harold whether a Claude Code pane is working, by running `harold accept`. A pane is
+working while its main session's turn is running, or while one of its subagents is `pending`,
+`running` or `waiting`. The mod only watches: each hook passes its event on unchanged.
 
-| Mod event | Condition | Runs |
-|---|---|---|
-| `turn.start` | no `agentId` | `harold accept turn-started --pane <id> --adapter claude.lifecycle` |
-| `turn.complete` | no `agentId` | `harold accept turn-completed --pane <id> --adapter claude.lifecycle` |
-| `turn.complete` | has an `agentId` (a subagent) | nothing |
+| When | Condition | Runs `harold accept` with | Harold sets |
+|---|---|---|---|
+| A main-session turn starts (`turn.start`, no `agentId`) | Always | `turn-started` | Busy |
+| Every 10 seconds | The pane is working | `still-working` | Busy |
+| A main-session turn ends (`turn.complete`, no `agentId`) | No subagent is working | `turn-completed` | Idle |
+| A main-session turn ends | A subagent is working | `still-working` | Busy |
+| A subagent's turn ends (`turn.complete` with an `agentId`), or a 10-second check runs | No main turn is running, and no subagent is working | `subagents-finished` | Idle |
 
-The pane is the `TMUX_PANE` environment variable. Unless it is `%` plus digits, the mod
-sends nothing.
+Every run has the form `harold accept <event> --pane <id> --adapter claude.lifecycle`. The pane
+is the `TMUX_PANE` environment variable. Unless it is `%` plus digits, the mod sends nothing.
+
+## Subagents
+
+The mod reads the subagents' states with `$.agent.list()` when a main turn ends, when a
+subagent's turn ends, and at each 10-second check. If the call fails, the mod counts no subagent
+as working, so a failing call cannot keep a pane busy.
+
+The 10-second check runs from the start of a main turn until the mod reports the pane idle, on
+one timer. The repeat tells Harold the mod is still there: Harold lets a busy report stand
+against its screen reading for `agent_monitor.report_grace_ms` (30 seconds), so the mod has to
+miss three reports in a row before the screen reading takes over. The check also notices a
+subagent that ended without an event reaching the mod. A subagent's turn that ends after the
+pane was reported idle sends nothing.
 
 ## Finding the program
 
@@ -23,8 +38,8 @@ program, for a mod run from a checkout.
 
 Each hook starts its report, calls `next(e)`, then waits for the report before returning.
 `turn.start` fires before the first model call, so the turn most likely waits for the report:
-a few milliseconds normally. One promise chain keeps reports in the order the events fired, and a report that had to wait
-behind one that failed or timed out is skipped (the screen reading covers the gap). A dead or
+a few milliseconds normally. One promise chain carries all four events in the order they were raised, and a report that had to wait
+behind one that failed or timed out is skipped (the next 10-second check sends the state again). A dead or
 hung Harold therefore costs a turn at most the one bounded call: `harold accept` gives up
 after 3 seconds and the mod after 4. Every failure is swallowed and nothing is shown to the
 person.
@@ -33,8 +48,8 @@ person.
 
 Claude Code passes the settings `env` block to child processes, so a `claude -p` run from a
 Bash tool inside a pane loads this mod and inherits that pane's `TMUX_PANE`. When the nested
-run ends, it reports the parent pane idle while the parent may still be busy. Harold's screen
-reading corrects it after `agent_monitor.hook_grace_ms` (2 seconds).
+run ends, it reports the parent pane idle while the parent may still be busy. The parent's next
+`still-working`, at most 10 seconds later, corrects it.
 
 ## Loading it
 
@@ -45,8 +60,9 @@ block of `~/.claude/settings.json`. For one session, or from a checkout:
 claude --plugin-dir hooks/claude-mod
 ```
 
-Mods are early access: a Claude Code release can stop this one loading. Harold then falls
-back to reading the screen, as it does for any session without the mod.
+Mods are early access: a Claude Code release can stop this one loading. Harold then reads
+the screen: at once for a session that never had the mod, and after
+`agent_monitor.report_grace_ms` (30 seconds) for a pane whose mod stopped while it was busy.
 
 ## Tests
 

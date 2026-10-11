@@ -1,4 +1,10 @@
-export type TurnEvent = 'turn-started' | 'turn-completed'
+export type ReportEvent = 'turn-started' | 'still-working' | 'turn-completed' | 'subagents-finished'
+
+// A subagent in one of these states has work under way.
+const WORKING_STATUSES: readonly string[] = ['pending', 'running', 'waiting']
+
+export const hasWorking = (agents: readonly { status: string }[]): boolean =>
+  agents.some(agent => WORKING_STATUSES.includes(agent.status))
 
 export const isPaneId = (value: string | undefined): value is string =>
   value !== undefined && /^%[0-9]+$/.test(value)
@@ -13,6 +19,6 @@ export const buildArgv = ({
   paneId,
 }: {
   program: string
-  event: TurnEvent
+  event: ReportEvent
   paneId: string
 }): string[] => [program, 'accept', event, '--pane', paneId, '--adapter', 'claude.lifecycle']

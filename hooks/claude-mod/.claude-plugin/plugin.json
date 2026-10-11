@@ -1,6 +1,6 @@
 {
   "name": "harold-lifecycle",
-  "version": "0.1.0",
-  "description": "Reports a Claude Code pane's busy and idle state to Harold from turn.start and turn.complete.",
+  "version": "0.2.0",
+  "description": "Reports a Claude Code pane as busy to Harold while its main turn runs or a subagent works, and as idle otherwise.",
   "author": { "name": "kahgeh" }
 }
