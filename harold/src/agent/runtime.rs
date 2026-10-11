@@ -161,6 +161,8 @@ struct TrackedPane {
     pane: AgentPaneObservation,
     consecutive_absences: u8,
     last_hook: Option<(ObservedAgentState, i64)>,
+    /// The lifecycle adapter that last reported for this agent process.
+    lifecycle_adapter_id: Option<String>,
     explicit_summary: Option<String>,
     screen_state: Option<ObservedAgentState>,
     screen_summary: Option<String>,
@@ -175,6 +177,7 @@ impl TrackedPane {
             recovery_failure: None,
             consecutive_absences: 0,
             last_hook: None,
+            lifecycle_adapter_id: None,
             explicit_summary: None,
             screen_state: None,
             screen_summary: None,
@@ -484,6 +487,7 @@ fn panes_from_snapshot(
                 recovery_failure: None,
                 consecutive_absences: 0,
                 last_hook: projection.hook_state.zip(projection.hook_observed_at_ms),
+                lifecycle_adapter_id: projection.lifecycle_adapter_id.clone(),
                 explicit_summary: projection.explicit_work_summary.clone(),
                 screen_state: seeded_screen_state(projection, hook_grace_ms),
                 screen_summary: projection.screen_work_summary.clone(),
@@ -666,7 +670,7 @@ impl AgentMonitorRuntime {
         let lifecycle = AgentLifecycleObserved {
             incarnation: pane.incarnation.clone(),
             state,
-            adapter_id,
+            adapter_id: adapter_id.clone(),
             work_summary: work_summary.clone(),
             observed_at_ms,
         };
@@ -688,6 +692,7 @@ impl AgentMonitorRuntime {
             tracked.pane = pane;
         }
         tracked.last_hook = Some((state, observed_at_ms));
+        tracked.lifecycle_adapter_id = Some(adapter_id);
         tracked.explicit_summary = next_explicit_summary;
         tracked.screen_state = None;
         let pane_id = tracked.pane.incarnation.pane_id.clone();
@@ -761,9 +766,12 @@ impl AgentMonitorRuntime {
             } else {
                 tracked.pane = pane;
             }
-            tracked.last_hook = Some((ObservedAgentState::Idle, observed_at_ms));
             tracked.explicit_summary = next_explicit_summary;
-            tracked.screen_state = None;
+            // The Stop hook sets the state only for a pane no lifecycle adapter reports on.
+            if tracked.lifecycle_adapter_id.is_none() {
+                tracked.last_hook = Some((ObservedAgentState::Idle, observed_at_ms));
+                tracked.screen_state = None;
+            }
             let pane_id = tracked.pane.incarnation.pane_id.clone();
             if let Some(basis) = source_version(&result, &["TurnCompleted"]) {
                 tracked.summary_basis_version = basis;

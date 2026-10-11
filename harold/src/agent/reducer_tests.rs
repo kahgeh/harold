@@ -5,7 +5,7 @@ use super::domain::{
     AgentPaneObserved, AgentScreenObserved, EffectiveAgentState, ObservedAgentState,
     ProjectionChange, WorkSummaryUpdate,
 };
-use super::reducer::{DEFAULT_HOOK_GRACE_MS, reduce_agent_event};
+use super::reducer::{DEFAULT_HOOK_GRACE_MS, reduce_agent_event, reduce_turn_completed};
 
 fn version(value: i64) -> EventStreamVersion {
     EventStreamVersion::new(value).unwrap()
@@ -900,4 +900,93 @@ fn a_new_agent_process_in_the_pane_starts_without_an_adapter() {
         3,
     );
     assert_eq!(replaced.lifecycle_adapter_id, None);
+}
+
+#[test]
+fn a_turn_complete_leaves_the_state_of_a_pane_an_adapter_reports_on() {
+    let initial = apply(
+        None,
+        AgentEvent::PaneObserved(AgentPaneObserved {
+            pane: pane(1_000, 100),
+        }),
+        1,
+    );
+    let reported = apply(
+        Some(initial),
+        AgentEvent::LifecycleObserved(AgentLifecycleObserved {
+            incarnation: incarnation(1_000),
+            state: ObservedAgentState::Busy,
+            adapter_id: "claude.lifecycle".into(),
+            work_summary: WorkSummaryUpdate::Unchanged,
+            observed_at_ms: 1_000,
+        }),
+        2,
+    );
+
+    let completed = upsert(reduce_turn_completed(
+        Some(reported),
+        &incarnation(1_000),
+        &WorkSummaryUpdate::Set("fix the parser".into()),
+        4_000,
+        version(3),
+        DEFAULT_HOOK_GRACE_MS,
+    ));
+
+    assert_eq!(completed.effective_state, EffectiveAgentState::Busy);
+    assert_eq!(completed.hook_state, Some(ObservedAgentState::Busy));
+    assert_eq!(completed.hook_observed_at_ms, Some(1_000));
+    assert_eq!(completed.last_transition_at_ms, 1_000);
+    assert_eq!(
+        completed.lifecycle_adapter_id.as_deref(),
+        Some("claude.lifecycle")
+    );
+    assert_eq!(completed.work_summary.as_deref(), Some("fix the parser"));
+}
+
+#[test]
+fn a_turn_complete_sets_idle_for_a_pane_without_an_adapter() {
+    let initial = apply(
+        None,
+        AgentEvent::PaneObserved(AgentPaneObserved {
+            pane: pane(1_000, 100),
+        }),
+        1,
+    );
+
+    let completed = upsert(reduce_turn_completed(
+        Some(initial),
+        &incarnation(1_000),
+        &WorkSummaryUpdate::Unchanged,
+        4_000,
+        version(2),
+        DEFAULT_HOOK_GRACE_MS,
+    ));
+
+    assert_eq!(completed.effective_state, EffectiveAgentState::Idle);
+    assert_eq!(completed.hook_state, Some(ObservedAgentState::Idle));
+    assert_eq!(completed.hook_observed_at_ms, Some(4_000));
+    assert_eq!(completed.lifecycle_adapter_id, None);
+}
+
+#[test]
+fn a_turn_complete_for_another_agent_process_is_ignored() {
+    let initial = apply(
+        None,
+        AgentEvent::PaneObserved(AgentPaneObserved {
+            pane: pane(1_000, 100),
+        }),
+        1,
+    );
+
+    assert_eq!(
+        reduce_turn_completed(
+            Some(initial),
+            &incarnation(2_000),
+            &WorkSummaryUpdate::Unchanged,
+            4_000,
+            version(2),
+            DEFAULT_HOOK_GRACE_MS,
+        ),
+        ProjectionChange::Ignore
+    );
 }

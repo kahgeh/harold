@@ -12,14 +12,14 @@ use sha2::{Digest, Sha256};
 use turso::Database;
 
 use crate::agent::domain::{
-    AgentEvent, AgentIncarnation, AgentLifecycleObserved, AgentMonitorHealthChanged,
-    AgentPaneObservation, AgentPaneProjection, AgentScreenObserved, AgentSnapshot,
-    CompletionSummaryUpdate, EffectiveAgentState, MonitorHealthProjection, ObservedAgentState,
-    ProjectionChange, WorkSummaryUpdate,
+    AgentEvent, AgentIncarnation, AgentMonitorHealthChanged, AgentPaneObservation,
+    AgentPaneProjection, AgentScreenObserved, AgentSnapshot, CompletionSummaryUpdate,
+    EffectiveAgentState, MonitorHealthProjection, ObservedAgentState, ProjectionChange,
+    WorkSummaryUpdate,
 };
 #[cfg(test)]
 use crate::agent::reducer::DEFAULT_HOOK_GRACE_MS;
-use crate::agent::reducer::reduce_agent_event;
+use crate::agent::reducer::{reduce_agent_event, reduce_turn_completed};
 use crate::agent::summary::{normalize_work_summary, sanitize_bounded_metadata};
 
 const NAMESPACE: &str = "harold";
@@ -571,21 +571,15 @@ async fn project_turn_completed(
             },
             |projection| Ok(projection.pane.observed_at_ms),
         )?;
-    let current_adapter = current
-        .as_ref()
-        .filter(|projection| projection.pane.incarnation == incarnation)
-        .and_then(|projection| projection.lifecycle_adapter_id.clone());
-    let agent_event = AgentEvent::LifecycleObserved(AgentLifecycleObserved {
-        incarnation,
-        state: ObservedAgentState::Idle,
-        adapter_id: "turn-complete-v1".into(),
-        work_summary,
+    match reduce_turn_completed(
+        current,
+        &incarnation,
+        &work_summary,
         observed_at_ms,
-    });
-    match reduce_agent_event(current, &agent_event, event.version, hook_grace_ms) {
-        ProjectionChange::Upsert(mut projection) => {
-            // The Stop hook is not a lifecycle adapter.
-            projection.lifecycle_adapter_id = current_adapter;
+        event.version,
+        hook_grace_ms,
+    ) {
+        ProjectionChange::Upsert(projection) => {
             upsert_agent_pane(conn, &projection).await?;
             Ok(true)
         }

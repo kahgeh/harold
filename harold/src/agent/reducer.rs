@@ -6,7 +6,8 @@
 use events::EventStreamVersion;
 
 use super::domain::{
-    AgentEvent, AgentPaneProjection, EffectiveAgentState, ProjectionChange, WorkSummaryUpdate,
+    AgentEvent, AgentIncarnation, AgentPaneProjection, EffectiveAgentState, ObservedAgentState,
+    ProjectionChange, WorkSummaryUpdate,
 };
 
 pub(crate) const DEFAULT_HOOK_GRACE_MS: u64 = 2_000;
@@ -40,22 +41,12 @@ pub(crate) fn reduce_agent_event(
 
             invalidate_generated(&mut projection, event_version);
             projection.lifecycle_adapter_id = Some(lifecycle.adapter_id.clone());
-            projection.hook_state = Some(lifecycle.state);
-            projection.hook_observed_at_ms = Some(lifecycle.observed_at_ms);
-            projection.screen_state = None;
-            projection.screen_classifier_id = None;
-            projection.screen_observed_at_ms = None;
-            match &lifecycle.work_summary {
-                WorkSummaryUpdate::Unchanged => {}
-                WorkSummaryUpdate::Clear => {
-                    projection.explicit_work_summary = None;
-                    projection.explicit_work_summary_updated_at_ms = None;
-                }
-                WorkSummaryUpdate::Set(summary) => {
-                    projection.explicit_work_summary = Some(summary.clone());
-                    projection.explicit_work_summary_updated_at_ms = Some(lifecycle.observed_at_ms);
-                }
-            }
+            set_hook_state(&mut projection, lifecycle.state, lifecycle.observed_at_ms);
+            apply_work_summary(
+                &mut projection,
+                &lifecycle.work_summary,
+                lifecycle.observed_at_ms,
+            );
             ProjectionChange::Upsert(reconcile(
                 projection,
                 lifecycle.observed_at_ms,
@@ -126,6 +117,67 @@ pub(crate) fn reduce_agent_event(
         }
         AgentEvent::MonitorHealthChanged(_) => ProjectionChange::Ignore,
     }
+}
+
+fn apply_work_summary(
+    projection: &mut AgentPaneProjection,
+    update: &WorkSummaryUpdate,
+    observed_at_ms: i64,
+) {
+    match update {
+        WorkSummaryUpdate::Unchanged => {}
+        WorkSummaryUpdate::Clear => {
+            projection.explicit_work_summary = None;
+            projection.explicit_work_summary_updated_at_ms = None;
+        }
+        WorkSummaryUpdate::Set(summary) => {
+            projection.explicit_work_summary = Some(summary.clone());
+            projection.explicit_work_summary_updated_at_ms = Some(observed_at_ms);
+        }
+    }
+}
+
+/// A report replaces the hook state and starts a new epoch for the screen reading.
+fn set_hook_state(
+    projection: &mut AgentPaneProjection,
+    state: ObservedAgentState,
+    observed_at_ms: i64,
+) {
+    projection.hook_state = Some(state);
+    projection.hook_observed_at_ms = Some(observed_at_ms);
+    projection.screen_state = None;
+    projection.screen_classifier_id = None;
+    projection.screen_observed_at_ms = None;
+}
+
+/// A turn-complete from the Stop hook. It sets the pane idle only while no lifecycle adapter
+/// has reported for this agent process; the work-summary update applies either way.
+pub(crate) fn reduce_turn_completed(
+    current: Option<AgentPaneProjection>,
+    incarnation: &AgentIncarnation,
+    work_summary: &WorkSummaryUpdate,
+    observed_at_ms: i64,
+    event_version: EventStreamVersion,
+    hook_grace_ms: u64,
+) -> ProjectionChange {
+    let Some(mut projection) = current else {
+        return ProjectionChange::Ignore;
+    };
+    if projection.pane.incarnation != *incarnation {
+        return ProjectionChange::Ignore;
+    }
+
+    invalidate_generated(&mut projection, event_version);
+    if projection.lifecycle_adapter_id.is_none() {
+        set_hook_state(&mut projection, ObservedAgentState::Idle, observed_at_ms);
+    }
+    apply_work_summary(&mut projection, work_summary, observed_at_ms);
+    ProjectionChange::Upsert(reconcile(
+        projection,
+        observed_at_ms,
+        event_version,
+        hook_grace_ms,
+    ))
 }
 
 fn revalidates_hook_epoch(

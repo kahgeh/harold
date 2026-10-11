@@ -1601,9 +1601,10 @@ async fn grpc_fallback_explicit_clear_and_replacement_converge_in_projection_ord
         .unwrap();
     fixture.store.project_unhandled_events(100).await.unwrap();
     let preserved = fixture.store.load_agent_snapshot().await.unwrap();
+    // The adapter reported busy, so the turn-complete leaves the state alone.
     assert_eq!(
         preserved.panes[0].effective_state,
-        EffectiveAgentState::Idle
+        EffectiveAgentState::Busy
     );
     assert_eq!(
         preserved.panes[0].work_summary.as_deref(),
@@ -3106,9 +3107,10 @@ async fn activity_summary_reply_only_completion_generates_outcome_and_empty_comp
         completed.panes[0].explicit_work_summary.as_deref(),
         Some("Fix parser")
     );
+    // The adapter reported busy, so the turn-complete leaves the state alone.
     assert_eq!(
         completed.panes[0].effective_state,
-        EffectiveAgentState::Idle
+        EffectiveAgentState::Busy
     );
 
     fixture
@@ -3746,4 +3748,130 @@ async fn submitted_prompt_recovery_retries_failed_busy_source_append_after_becom
         snapshot.panes[0].screen_work_summary_updated_at_ms,
         Some(300)
     );
+}
+
+const REPORTED_PANE: &str = "%8";
+
+fn reported_pane(observed_at_ms: i64) -> AgentPaneObservation {
+    pane(REPORTED_PANE, 80, 800, 1_000, observed_at_ms)
+}
+
+/// One `harold accept` from the mod, received when the inventory saw the pane.
+async fn report(fixture: &Fixture, state: ObservedAgentState, observed_at_ms: i64) {
+    fixture
+        .inventory
+        .push_resolution(Ok(Some(reported_pane(observed_at_ms))));
+    fixture
+        .handle
+        .report_lifecycle(
+            REPORTED_PANE.into(),
+            state,
+            "claude.lifecycle".into(),
+            WorkSummaryUpdate::Unchanged,
+        )
+        .await
+        .unwrap();
+}
+
+async fn projected_state(store: &HaroldStore) -> EffectiveAgentState {
+    store.project_unhandled_events(100).await.unwrap();
+    store.load_agent_snapshot().await.unwrap().panes[0].effective_state
+}
+
+#[tokio::test]
+async fn a_turn_complete_leaves_the_state_of_a_pane_the_mod_reports_on() {
+    let fixture = Fixture::new(FakeInventory::default()).await;
+    report(&fixture, ObservedAgentState::Busy, 100).await;
+
+    fixture
+        .inventory
+        .push_resolution(Ok(Some(reported_pane(4_000))));
+    fixture
+        .handle
+        .turn_completed(turn("current task"))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        projected_state(&fixture.store).await,
+        EffectiveAgentState::Busy
+    );
+    // The notification is still staged.
+    let delivery = fixture
+        .store
+        .next_pending_delivery()
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(delivery.event_type, "TurnCompleted");
+    // The turn-complete did not restart the 2-second window of this fixture: a screen reading
+    // 4.9 seconds after the mod's report decides.
+    fixture.screen.push(Ok(screen(
+        &reported_pane(100),
+        Some(ObservedAgentState::Idle),
+        None,
+        5_000,
+    )));
+    fixture.handle.screen_tick().await.unwrap();
+    assert_eq!(
+        projected_state(&fixture.store).await,
+        EffectiveAgentState::Idle
+    );
+}
+
+#[tokio::test]
+async fn restart_keeps_the_adapter_so_a_turn_complete_still_leaves_the_state() {
+    let directory = TestDirectory::new();
+    let store = Arc::new(HaroldStore::open(&directory.0).await.unwrap());
+    let observed = reported_pane(100);
+    crate::store::append_agent_events(
+        &store,
+        vec![
+            AgentEvent::PaneObserved(AgentPaneObserved {
+                pane: observed.clone(),
+            }),
+            AgentEvent::LifecycleObserved(AgentLifecycleObserved {
+                incarnation: observed.incarnation.clone(),
+                state: ObservedAgentState::Busy,
+                adapter_id: "claude.lifecycle".into(),
+                work_summary: WorkSummaryUpdate::Unchanged,
+                observed_at_ms: 100,
+            }),
+        ],
+    )
+    .await
+    .unwrap();
+    store.project_unhandled_events(100).await.unwrap();
+    let snapshot = store.load_agent_snapshot().await.unwrap();
+    let inventory = Arc::new(FakeInventory::default());
+    inventory.push_resolution(Ok(Some(reported_pane(4_000))));
+    let screen_port = Arc::new(FakeScreen::default());
+    let (shutdown, shutdown_rx) = watch::channel(());
+    let (handle, task) = spawn_agent_monitor_seeded_for_test(
+        Arc::clone(&store),
+        inventory,
+        screen_port.clone(),
+        vec![provider()],
+        AgentMonitorSeed {
+            snapshot,
+            hook_grace_ms: 2_000,
+            acquisition_timeout: Duration::from_millis(50),
+        },
+        shutdown_rx,
+    );
+
+    handle.turn_completed(turn("current task")).await.unwrap();
+    assert_eq!(projected_state(&store).await, EffectiveAgentState::Busy);
+
+    // The restarted runtime still counts the mod's report at 100 as the pane's last report.
+    screen_port.push(Ok(screen(
+        &observed,
+        Some(ObservedAgentState::Idle),
+        None,
+        5_000,
+    )));
+    handle.screen_tick().await.unwrap();
+    assert_eq!(projected_state(&store).await, EffectiveAgentState::Idle);
+    drop(shutdown);
+    task.await.unwrap();
 }
