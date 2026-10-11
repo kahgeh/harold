@@ -49,6 +49,25 @@ struct HaroldService {
     peers: peers::PeerEndpoint,
 }
 
+/// The service Harold serves, answering the peer calls its `settings` call for.
+fn harold_service(
+    settings: &settings::Settings,
+    monitor: agent::runtime::AgentMonitorHandle,
+    store: Arc<store::HaroldStore>,
+    snapshots: agent::snapshot::AgentSnapshotHub,
+    shutdown: watch::Receiver<()>,
+) -> HaroldService {
+    HaroldService {
+        monitor,
+        store,
+        snapshots,
+        messaging_switch: tokio::sync::Mutex::new(None),
+        tts_switch: tokio::sync::Mutex::new(None),
+        shutdown,
+        peers: peers::PeerEndpoint::from_settings(&settings.notify.away_channel, &settings.peers),
+    }
+}
+
 /// Stores a changed on/off setting with `append`, then hands it to `switch` straight away
 /// so it acts before the projector reaches the event. Returns whether anything was stored.
 /// Requests run one at a time, so the last one stored is also the last one switched.
@@ -284,8 +303,14 @@ impl Harold for HaroldService {
         })?;
         // forwarded = true: the hub decided this Mac owns the reply, so routing does not
         // decide again and never forwards it.
+        // The same filter as the hub's Telegram listener. Text it would skip is accepted and
+        // ignored: the hub did its job, and a retry could not make the text routable.
+        let Some(text) = channels::reply_text(&req.text) else {
+            info!("forwarded reply ignored (empty or sent by Harold)");
+            return Ok(Response::new(ForwardReplyResponse { accepted: true }));
+        };
         let message = store::InboundMessage {
-            text: req.text,
+            text,
             forwarded: true,
         };
         store::append_inbound_message(&self.store, &message)
@@ -632,17 +657,15 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
     ));
 
     info!(address = %addr, "Harold listening");
-    let service_store = Arc::clone(&store);
+    let service = harold_service(
+        cfg,
+        monitor,
+        Arc::clone(&store),
+        snapshots,
+        shutdown_rx.clone(),
+    );
     let server_result = Server::builder()
-        .add_service(HaroldServer::new(HaroldService {
-            monitor,
-            store: service_store,
-            snapshots,
-            messaging_switch: tokio::sync::Mutex::new(None),
-            tts_switch: tokio::sync::Mutex::new(None),
-            shutdown: shutdown_rx.clone(),
-            peers: peers::PeerEndpoint::from_settings(&cfg.notify.away_channel, &cfg.peers),
-        }))
+        .add_service(HaroldServer::new(service))
         .serve_with_shutdown(addr, async {
             shutdown_signal().await;
             info!("shutting down");

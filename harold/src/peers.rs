@@ -186,6 +186,20 @@ pub(crate) async fn forward_reply(member: &PeerMember, text: &str) -> Result<(),
     accepted(response.into_inner().accepted)
 }
 
+/// The shipped default configuration with `overrides` (TOML) laid over it: a `Settings` a
+/// test builds itself, so code that takes `&Settings` is tested without the process-wide one.
+#[cfg(test)]
+pub(crate) fn settings_with(overrides: &str) -> crate::settings::Settings {
+    use config::{Config, File, FileFormat};
+    let default = format!("{}/config/default", env!("CARGO_MANIFEST_DIR"));
+    Config::builder()
+        .add_source(File::new(&default, FileFormat::Toml))
+        .add_source(File::from_str(overrides, FileFormat::Toml))
+        .build()
+        .and_then(Config::try_deserialize)
+        .expect("default configuration with overrides should deserialize")
+}
+
 #[cfg(test)]
 #[path = "peers_tests.rs"]
 mod tests;

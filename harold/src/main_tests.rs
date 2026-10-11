@@ -396,6 +396,50 @@ async fn member_stores_a_forwarded_reply_marked_forwarded() {
 }
 
 #[tokio::test]
+async fn member_stores_a_forwarded_reply_trimmed() {
+    let server = start_peer_server(member_of_a_hub()).await;
+
+    let accepted = forward(&server, "  \n revert that \t", "s3cret").await;
+
+    assert!(accepted.unwrap());
+    let stored = inbound_messages(&server.store).await;
+    assert_eq!(stored.len(), 1);
+    assert_eq!(stored[0].text, "revert that");
+    assert!(stored[0].forwarded);
+}
+
+/// A reply the Telegram listener would not store is accepted and ignored: the hub did its
+/// job, and retrying cannot make the text routable.
+#[tokio::test]
+async fn member_accepts_and_ignores_a_forwarded_reply_the_listener_would_skip() {
+    let server = start_peer_server(member_of_a_hub()).await;
+
+    for text in [
+        "",
+        "   \n\t",
+        "\u{1F916} [laptop/harold main:0.0] Done.",
+        "  \u{1F916} hi",
+    ] {
+        let accepted = forward(&server, text, "s3cret").await;
+
+        assert!(accepted.unwrap(), "{text:?}");
+    }
+    assert!(inbound_messages(&server.store).await.is_empty());
+}
+
+#[tokio::test]
+async fn forwarded_reply_with_a_wrong_secret_is_denied_before_any_filtering() {
+    let server = start_peer_server(member_of_a_hub()).await;
+
+    for text in ["", "\u{1F916} hi", "carry on"] {
+        let status = forward(&server, text, "wrong").await.unwrap_err();
+
+        assert_eq!(status.code(), tonic::Code::PermissionDenied, "{text:?}");
+    }
+    assert!(inbound_messages(&server.store).await.is_empty());
+}
+
+#[tokio::test]
 async fn member_denies_a_forwarded_reply_with_a_wrong_secret_and_stores_nothing() {
     let server = start_peer_server(member_of_a_hub()).await;
 
@@ -1459,4 +1503,69 @@ async fn repeated_request_sets_the_switch_again_and_appends_nothing() {
     drop(shutdown);
     let _ = task.await;
     let _ = std::fs::remove_dir_all(&directory);
+}
+
+const WIRING_HUB: &str = r#"
+    machine_name = "studio"
+    machines = ["studio", "laptop"]
+    [notify]
+    away_channel = "telegram"
+    [[peers.members]]
+    name = "laptop"
+    url = "http://laptop.tailnet:50060"
+    secret = "s3cret"
+"#;
+
+const WIRING_MEMBER: &str = r#"
+    machine_name = "laptop"
+    machines = ["studio", "laptop"]
+    [notify]
+    away_channel = "telegram"
+    [peers]
+    role = "member"
+    [peers.hub]
+    url = "http://studio.tailnet:50060"
+    secret = "s3cret"
+"#;
+
+/// The peer endpoint of the service built from `toml` laid over the default settings.
+async fn served_peers(toml: &str) -> PeerEndpoint {
+    let settings = super::peers::settings_with(toml);
+    let directory = TestDirectory::new();
+    let store = Arc::new(store::HaroldStore::open(&directory.0).await.unwrap());
+    let (base, _shutdown, task) = test_service(Arc::clone(&store), empty_snapshot());
+    let service = super::harold_service(
+        &settings,
+        base.monitor,
+        store,
+        base.snapshots,
+        base.shutdown,
+    );
+    task.abort();
+    service.peers
+}
+
+#[tokio::test]
+async fn service_answers_the_peer_calls_its_settings_call_for() {
+    assert_eq!(
+        served_peers(WIRING_HUB).await,
+        PeerEndpoint::Hub {
+            members: vec![PeerMember {
+                name: "laptop".into(),
+                url: "http://laptop.tailnet:50060".into(),
+                secret: "s3cret".into(),
+            }]
+        }
+    );
+    assert_eq!(
+        served_peers(WIRING_MEMBER).await,
+        PeerEndpoint::Member {
+            hub: PeerHub {
+                url: "http://studio.tailnet:50060".into(),
+                secret: "s3cret".into(),
+            }
+        }
+    );
+    let imessage = WIRING_MEMBER.replace("telegram", "imessage");
+    assert_eq!(served_peers(&imessage).await, PeerEndpoint::Off);
 }

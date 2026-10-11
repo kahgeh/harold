@@ -9,12 +9,12 @@ use tracing::{Instrument, info, info_span, warn};
 use super::{AwayNotification, split_body, summarise_for_notification};
 use crate::inbound::AgentAddress;
 use crate::inbound::ownership::{
-    Ownership, decide_ownership, error_text, known_machine_names, latest_notifier,
-    notification_text, record_notification, same_machine,
+    Ownership, decide_ownership, error_text, latest_notifier, notification_text,
+    record_notification, same_machine,
 };
 use crate::outbound::is_messaging_paused;
 use crate::peers::{forward_reply, report_notification_blocking};
-use crate::settings::{PeerMember, PeerRole, PeersSettings, get_settings};
+use crate::settings::{PeerMember, PeerRole, PeersSettings, Settings, get_settings};
 use crate::store::{HaroldStore, InboundMessage, TurnCompleted, append_inbound_message};
 
 // ===========================================================================
@@ -229,9 +229,19 @@ pub(crate) fn notify_away(
     turn: &TurnCompleted,
     _trace_id: &str,
 ) -> Result<AwayNotification, String> {
-    let cfg = get_settings();
     let body = summarise_for_notification(&turn.assistant_message, &turn.last_user_prompt);
-    send_notification(turn, &cfg.machine_name, &cfg.peers, &body, send_telegram)
+    notify_with(get_settings(), turn, &body, send_telegram)
+}
+
+/// `send_notification` for the Mac `settings` describe: its name, and its role among the
+/// Macs.
+fn notify_with(
+    settings: &Settings,
+    turn: &TurnCompleted,
+    body: &str,
+    send: impl Fn(&str) -> Result<(), String>,
+) -> Result<AwayNotification, String> {
+    send_notification(turn, &settings.machine_name, &settings.peers, body, send)
 }
 
 // ===========================================================================
@@ -275,11 +285,17 @@ fn routable_text(
     if msg.chat.id != expected_chat_id {
         return None;
     }
-    let text = msg.text?.trim().to_string();
+    reply_text(&msg.text?)
+}
+
+/// The text of a reply worth routing: trimmed, and neither empty nor a message Harold sent
+/// itself. The Telegram listener and a member storing a forwarded reply both apply it.
+pub(crate) fn reply_text(text: &str) -> Option<String> {
+    let text = text.trim();
     if text.is_empty() || text.starts_with(HAROLD_MARKER) {
         return None;
     }
-    Some(text)
+    Some(text.to_string())
 }
 
 /// What the hub needs around it to place a reply: who the Macs are, which one notified
@@ -292,32 +308,57 @@ trait HubEnv {
     async fn tell_user(&self, text: String);
 }
 
-struct LiveHub;
+/// The hub of the Mac `settings` describe, telling the user through the away channel.
+struct LiveHub<'a> {
+    settings: &'a Settings,
+    /// The Mac that notified last, from the record of this process.
+    latest_notifier: fn() -> Option<String>,
+    /// How the user is told: the configured away channel.
+    send: fn(&str) -> Result<(), String>,
+}
 
-impl HubEnv for LiveHub {
+impl<'a> LiveHub<'a> {
+    fn new(settings: &'a Settings) -> Self {
+        Self {
+            settings,
+            latest_notifier,
+            send: super::send,
+        }
+    }
+}
+
+impl HubEnv for LiveHub<'_> {
     fn machine(&self) -> &str {
-        &get_settings().machine_name
+        &self.settings.machine_name
     }
 
     fn known_machines(&self) -> Vec<String> {
-        known_machine_names()
+        self.settings.machines.clone()
     }
 
     fn latest_notifier(&self) -> Option<String> {
-        latest_notifier()
+        (self.latest_notifier)()
     }
 
     fn members(&self) -> &[PeerMember] {
-        &get_settings().peers.members
+        &self.settings.peers.members
     }
 
     async fn tell_user(&self, text: String) {
-        // The send blocks, so it runs off the async workers.
-        match tokio::task::spawn_blocking(move || super::send(&text)).await {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => warn!(error, "telegram_listener: could not tell the user"),
-            Err(error) => warn!(error = %error, "telegram_listener: send task panicked"),
-        }
+        tell_user_with(text, self.send).await;
+    }
+}
+
+/// Send `text` with `send`, off the async workers because the send blocks. A failed send
+/// is logged and nothing more: the reply it answers has already been dealt with.
+async fn tell_user_with(
+    text: String,
+    send: impl FnOnce(&str) -> Result<(), String> + Send + 'static,
+) {
+    match tokio::task::spawn_blocking(move || send(&text)).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => warn!(error, "telegram_listener: could not tell the user"),
+        Err(error) => warn!(error = %error, "telegram_listener: send task panicked"),
     }
 }
 
@@ -469,6 +510,11 @@ fn poll_updates(client: &Client, token: &str, offset: i64, timeout: u64) -> Opti
     }
 }
 
+/// Where the listener reads whether messaging is paused: the switch the projector keeps.
+fn pause_check() -> fn() -> bool {
+    is_messaging_paused
+}
+
 pub(crate) async fn listen(store: Arc<HaroldStore>, mut shutdown: watch::Receiver<()>) {
     let cfg = get_settings();
     let Some(token) = cfg.telegram.bot_token.clone() else {
@@ -537,11 +583,11 @@ pub(crate) async fn listen(store: Arc<HaroldStore>, mut shutdown: watch::Receive
 
         offset = handle_updates(
             &store,
-            &LiveHub,
+            &LiveHub::new(cfg),
             updates,
             offset,
             expected_chat_id,
-            is_messaging_paused,
+            pause_check(),
         )
         .await;
     }
@@ -550,8 +596,9 @@ pub(crate) async fn listen(store: Arc<HaroldStore>, mut shutdown: watch::Receive
 #[cfg(test)]
 mod tests {
     use super::{
-        Chat, HubEnv, Message, ReplyPlace, Update, handle_updates, marked, notification_message,
-        place_reply, routable_text, send_message_body, send_notification,
+        Chat, HubEnv, LiveHub, Message, ReplyPlace, Update, handle_updates, marked,
+        notification_message, notify_with, pause_check, place_reply, routable_text,
+        send_message_body, send_notification, tell_user_with,
     };
     use crate::inbound::ownership::{delivered_text, error_text, notification_text, parse_marker};
     use crate::store::TurnCompleted;
@@ -782,6 +829,170 @@ mod tests {
         );
 
         assert_eq!(result.err(), Some("telegram down".to_string()));
+    }
+
+    use crate::peers::settings_with;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn notify_reports_to_the_hub_the_settings_name() {
+        crate::settings::init_settings_for_test();
+        let hub = start_peer_server(PeerEndpoint::Hub {
+            members: vec![laptop_at(
+                "Laptop-Notify-With",
+                "http://127.0.0.1:1",
+                "s3cret",
+            )],
+        })
+        .await;
+        let settings = settings_with(&format!(
+            r#"
+            machine_name = "laptop-notify-with"
+            machines = ["studio", "laptop-notify-with"]
+            [peers]
+            role = "member"
+            [peers.hub]
+            url = "{}"
+            secret = "s3cret"
+            "#,
+            hub.url
+        ));
+
+        let sent = tokio::task::spawn_blocking(move || {
+            let sent = Mutex::new(Vec::new());
+            let result = notify_with(&settings, &turn(), "Done.", |text| {
+                sent.lock().unwrap().push(text.to_string());
+                Ok(())
+            });
+            assert!(result.is_ok());
+            sent.into_inner().unwrap()
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(sent.len(), 1);
+        assert!(sent[0].starts_with("[laptop-notify-with/"), "{sent:?}");
+        // The hub records the member under the spelling it configured. A member that
+        // recorded itself would have used its own.
+        let recorded = |name: &str| {
+            recorded_notifications()
+                .iter()
+                .filter(|recorded| *recorded == name)
+                .count()
+        };
+        assert_eq!(
+            recorded("Laptop-Notify-With"),
+            1,
+            "the hub recorded the report"
+        );
+        assert_eq!(
+            recorded("laptop-notify-with"),
+            0,
+            "the member recorded nothing"
+        );
+    }
+
+    #[test]
+    fn notify_on_a_hub_records_the_settings_name_itself() {
+        crate::settings::init_settings_for_test();
+        let settings = settings_with(r#"machine_name = "studio-notify-with""#);
+
+        let result = notify_with(&settings, &turn(), "Done.", |_| Ok(()));
+
+        assert!(result.is_ok());
+        let times = recorded_notifications()
+            .iter()
+            .filter(|name| *name == "studio-notify-with")
+            .count();
+        assert_eq!(times, 1);
+    }
+
+    #[test]
+    fn live_hub_answers_from_the_settings_it_is_given() {
+        let settings = settings_with(
+            r#"
+            machine_name = "studio"
+            machines = ["studio", "laptop"]
+            [[peers.members]]
+            name = "laptop"
+            url = "http://laptop.tailnet:50060"
+            secret = "s3cret"
+            "#,
+        );
+        let hub = LiveHub {
+            settings: &settings,
+            latest_notifier: || Some("laptop".into()),
+            send: |_| Ok(()),
+        };
+
+        assert_eq!(hub.machine(), "studio");
+        assert_eq!(hub.known_machines(), ["studio", "laptop"]);
+        assert_eq!(hub.latest_notifier().as_deref(), Some("laptop"));
+        assert_eq!(
+            hub.members(),
+            [laptop_at("laptop", "http://laptop.tailnet:50060", "s3cret")]
+        );
+    }
+
+    #[test]
+    fn live_hub_reads_the_latest_notifier_from_the_process_record() {
+        let settings = settings_with(r#"machine_name = "studio""#);
+
+        let hub = LiveHub::new(&settings);
+
+        assert!(std::ptr::fn_addr_eq(
+            hub.latest_notifier,
+            crate::inbound::ownership::latest_notifier as fn() -> Option<String>
+        ));
+        assert!(std::ptr::fn_addr_eq(
+            hub.send,
+            crate::channels::send as fn(&str) -> Result<(), String>
+        ));
+    }
+
+    #[tokio::test]
+    async fn live_hub_tells_the_user_through_its_sender() {
+        static TOLD: Mutex<Vec<String>> = Mutex::new(Vec::new());
+        let settings = settings_with(r#"machine_name = "studio""#);
+        let hub = LiveHub {
+            settings: &settings,
+            latest_notifier: || None,
+            send: |text| {
+                TOLD.lock().unwrap().push(text.to_string());
+                Ok(())
+            },
+        };
+
+        hub.tell_user("Laptop is not reachable".into()).await;
+
+        assert_eq!(*TOLD.lock().unwrap(), ["Laptop is not reachable"]);
+    }
+
+    #[tokio::test]
+    async fn telling_the_user_sends_the_text() {
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let record = Arc::clone(&sent);
+
+        tell_user_with("Laptop is not reachable".into(), move |text| {
+            record.lock().unwrap().push(text.to_string());
+            Ok(())
+        })
+        .await;
+
+        assert_eq!(*sent.lock().unwrap(), ["Laptop is not reachable"]);
+    }
+
+    #[tokio::test]
+    async fn a_failed_or_panicking_send_to_the_user_is_only_logged() {
+        tell_user_with("hi".into(), |_| Err("telegram down".to_string())).await;
+        tell_user_with("hi".into(), |_| panic!("send blew up")).await;
+    }
+
+    #[test]
+    fn listener_reads_the_pause_switch_of_the_projector() {
+        assert!(std::ptr::fn_addr_eq(
+            pause_check(),
+            crate::outbound::is_messaging_paused as fn() -> bool
+        ));
     }
 
     use std::sync::Arc;

@@ -1,6 +1,8 @@
 pub(crate) mod imessage;
 pub(crate) mod telegram;
 
+pub(crate) use telegram::reply_text;
+
 use std::process::Command;
 use std::sync::Arc;
 
@@ -8,7 +10,7 @@ use tokio::sync::watch;
 use tracing::{info, warn};
 
 use crate::inbound::AgentAddress;
-use crate::settings::{PeerRole, get_settings};
+use crate::settings::{PeerRole, Settings, get_settings};
 use crate::store::{HaroldStore, TurnCompleted};
 use crate::util::ai_cli_env;
 
@@ -135,10 +137,14 @@ fn inbound_listener(away_channel: &str, role: PeerRole) -> InboundListener {
     }
 }
 
+/// The listener `settings` call for.
+fn inbound_listener_for(settings: &Settings) -> InboundListener {
+    inbound_listener(&settings.notify.away_channel, settings.peers.role)
+}
+
 /// Start the inbound message listener for the configured away channel.
 pub async fn listen_for_inbound_messages(store: Arc<HaroldStore>, shutdown: watch::Receiver<()>) {
-    let cfg = get_settings();
-    match inbound_listener(&cfg.notify.away_channel, cfg.peers.role) {
+    match inbound_listener_for(get_settings()) {
         InboundListener::Telegram => telegram::listen(store, shutdown).await,
         InboundListener::Imessage => imessage::listen(store, shutdown).await,
         InboundListener::None => {
@@ -183,8 +189,42 @@ pub fn notify_away(turn: &TurnCompleted, trace_id: &str) -> Result<AwayNotificat
 
 #[cfg(test)]
 mod tests {
-    use super::{InboundListener, inbound_listener, send_unless_paused};
+    use super::{InboundListener, inbound_listener, inbound_listener_for, send_unless_paused};
+    use crate::peers::settings_with;
     use crate::settings::PeerRole;
+
+    const MEMBER: &str = r#"
+        machine_name = "laptop"
+        machines = ["studio", "laptop"]
+        [peers]
+        role = "member"
+        [peers.hub]
+        url = "http://studio.tailnet:50060"
+        secret = "s3cret"
+    "#;
+
+    fn on(channel: &str, role_settings: &str) -> crate::settings::Settings {
+        settings_with(&format!(
+            "{role_settings}\n[notify]\naway_channel = \"{channel}\""
+        ))
+    }
+
+    #[test]
+    fn listener_follows_the_away_channel_and_role_of_the_settings_it_is_given() {
+        let hub = "machine_name = \"studio\"";
+        assert_eq!(
+            inbound_listener_for(&on("telegram", MEMBER)),
+            InboundListener::None
+        );
+        assert_eq!(
+            inbound_listener_for(&on("telegram", hub)),
+            InboundListener::Telegram
+        );
+        assert_eq!(
+            inbound_listener_for(&on("imessage", MEMBER)),
+            InboundListener::Imessage
+        );
+    }
 
     #[test]
     fn paused_send_reports_success_without_delivering() {
