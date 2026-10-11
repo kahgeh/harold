@@ -379,6 +379,29 @@ fn machine_name_error(name: &str) -> Option<String> {
     ))
 }
 
+/// What is wrong with the `machines` list, one error for each problem. An empty list is
+/// valid: the machine names are then learned from the notifications Harold reads.
+fn machines_errors(machine_name: &str, machines: &[String]) -> Vec<String> {
+    let mut errors = machines
+        .iter()
+        .filter(|name| !is_valid_machine_name(name))
+        .map(|name| {
+            format!(
+                "machines must contain only machine names (not empty, no whitespace, '/', '[', ']' or ':'), got \"{name}\""
+            )
+        })
+        .collect::<Vec<_>>();
+    let includes_this_mac = machines
+        .iter()
+        .any(|name| name.to_lowercase() == machine_name.to_lowercase());
+    if !machines.is_empty() && !includes_this_mac {
+        errors.push(format!(
+            "machines must include this Mac's machine_name \"{machine_name}\", got {machines:?}"
+        ));
+    }
+    errors
+}
+
 fn machine_name_from_hostname(hostname: &str) -> String {
     hostname.split_whitespace().collect::<Vec<_>>().join("-")
 }
@@ -403,6 +426,10 @@ pub struct Settings {
     /// Names this Mac in every message Harold sends and in reply tags.
     #[serde(default = "default_machine_name")]
     pub machine_name: String,
+    /// The machine names of all the user's Macs, the same list on every Mac. When it is
+    /// not empty, only these names are machine names.
+    #[serde(default)]
+    pub machines: Vec<String>,
     pub grpc: GrpcSettings,
     pub imessage: ImessageSettings,
     pub chat_db: ChatDbSettings,
@@ -425,6 +452,7 @@ impl Settings {
     pub fn validate(&self) -> Vec<String> {
         let mut errors = Vec::new();
         errors.extend(machine_name_error(&self.machine_name));
+        errors.extend(machines_errors(&self.machine_name, &self.machines));
         errors.extend(self.agents.validate(&self.agent_monitor));
         errors.extend(self.activity_summary.validate());
         match self.notify.away_channel.as_str() {
@@ -883,5 +911,51 @@ mod tests {
         for name in ["", "my mac", "a/b", "[a]", "harold:0.1"] {
             assert_eq!(machine_name_errors(name).len(), 1, "{name:?}");
         }
+    }
+
+    /// The errors `validate()` reports about `machines` for the default configuration
+    /// with `overrides` laid over it.
+    fn machines_errors_with(overrides: &str) -> Vec<String> {
+        default_settings_with(overrides)
+            .validate()
+            .into_iter()
+            .filter(|error| error.starts_with("machines "))
+            .collect()
+    }
+
+    #[test]
+    fn machines_defaults_to_an_empty_list_which_is_valid() {
+        let settings = default_settings_with("machine_name = \"studio\"");
+
+        assert!(settings.machines.is_empty());
+        assert!(machines_errors_with("machine_name = \"studio\"").is_empty());
+    }
+
+    #[test]
+    fn machines_that_include_this_mac_are_valid() {
+        for machines in ["[\"studio\", \"laptop\"]", "[\"Studio\", \"laptop\"]"] {
+            let errors =
+                machines_errors_with(&format!("machine_name = \"studio\"\nmachines = {machines}"));
+            assert!(errors.is_empty(), "{machines}: {errors:?}");
+        }
+    }
+
+    #[test]
+    fn validate_reports_machines_that_leave_out_this_mac() {
+        let errors = machines_errors_with("machine_name = \"studio\"\nmachines = [\"laptop\"]");
+
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(errors[0].contains("\"studio\""), "{errors:?}");
+    }
+
+    #[test]
+    fn validate_reports_each_entry_of_machines_that_is_not_a_machine_name() {
+        let errors = machines_errors_with(
+            "machine_name = \"studio\"\nmachines = [\"studio\", \"my mac\", \"a/b\"]",
+        );
+
+        assert_eq!(errors.len(), 2, "{errors:?}");
+        assert!(errors[0].contains("\"my mac\""), "{errors:?}");
+        assert!(errors[1].contains("\"a/b\""), "{errors:?}");
     }
 }
