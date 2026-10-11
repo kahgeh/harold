@@ -260,16 +260,20 @@ fn handle_ids() -> HashSet<i64> {
     get_settings().imessage.handle_ids.iter().copied().collect()
 }
 
-/// The newest row in chat.db, or `None` when the database could not be read. An empty
-/// table reads as row 0; a failed read must not, or every stored message would later
-/// look new.
-fn get_max_rowid() -> Option<i64> {
+/// The newest row in chat.db, or why it could not be read. An empty table reads as
+/// row 0; a failed read must not, or every stored message would later look new.
+fn get_max_rowid() -> Result<i64, String> {
+    max_rowid_of(&db_path())
+}
+
+fn max_rowid_of(db: &str) -> Result<i64, String> {
     let out = Command::new("sqlite3")
-        .arg(db_path())
+        .arg(db)
         .arg("SELECT COALESCE(MAX(ROWID), 0) FROM message;")
         .output()
-        .ok()?;
+        .map_err(|error| format!("sqlite3 did not start: {error}"))?;
     parse_max_rowid(out.status.success(), &out.stdout)
+        .ok_or_else(|| first_line(&String::from_utf8_lossy(&out.stderr)))
 }
 
 fn parse_max_rowid(succeeded: bool, stdout: &[u8]) -> Option<i64> {
@@ -279,21 +283,33 @@ fn parse_max_rowid(succeeded: bool, stdout: &[u8]) -> Option<i64> {
     String::from_utf8_lossy(stdout).trim().parse().ok()
 }
 
+fn first_line(text: &str) -> String {
+    let line = text.lines().next().unwrap_or("").trim();
+    if line.is_empty() {
+        return "sqlite3 gave no row number".into();
+    }
+    line.chars().take(200).collect()
+}
+
 /// Reads the newest row until a read succeeds, so the listener never starts from a row
 /// it did not read. Returns `None` if shutdown is signalled first.
 async fn wait_for_start_row(
-    mut read: impl FnMut() -> Option<i64>,
+    mut read: impl FnMut() -> Result<i64, String>,
     retry_every: Duration,
     shutdown: &mut watch::Receiver<()>,
 ) -> Option<i64> {
     let mut warned = false;
     loop {
-        if let Some(rowid) = read() {
-            return Some(rowid);
-        }
-        if !warned {
-            warn!("cannot read the Messages database; inbound messages wait until it can be read");
-            warned = true;
+        match read() {
+            Ok(rowid) => return Some(rowid),
+            Err(cause) if !warned => {
+                warn!(
+                    %cause,
+                    "cannot read the Messages database; inbound messages wait until it can be read"
+                );
+                warned = true;
+            }
+            Err(_) => {}
         }
         tokio::select! {
             biased;

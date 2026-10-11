@@ -8,7 +8,7 @@ use crate::util::sanitise_for_applescript;
 
 use super::{
     Direction, FetchedRow, NotificationPlan, RecentRows, TWIN_WINDOW, is_marked_as_harold,
-    notification_plan, parse_max_rowid, record_row, send_script, wait_for_start_row,
+    max_rowid_of, notification_plan, parse_max_rowid, record_row, send_script, wait_for_start_row,
 };
 
 #[test]
@@ -466,15 +466,52 @@ fn a_successful_read_gives_the_newest_row_and_zero_only_for_an_empty_table() {
     assert_eq!(parse_max_rowid(true, b"0\n"), Some(0));
 }
 
+#[test]
+fn the_real_query_tells_an_empty_table_from_a_database_it_cannot_read() {
+    let dir = std::env::temp_dir().join(format!("harold-chatdb-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir(&dir).unwrap();
+    let sqlite = |db: &std::path::Path, sql: &str| {
+        let status = std::process::Command::new("sqlite3")
+            .arg(db)
+            .arg(sql)
+            .status()
+            .unwrap();
+        assert!(status.success());
+    };
+    let empty = dir.join("empty.db");
+    sqlite(&empty, "CREATE TABLE message(text);");
+    let two = dir.join("two.db");
+    sqlite(
+        &two,
+        "CREATE TABLE message(text); INSERT INTO message VALUES ('a'), ('b');",
+    );
+    let not_a_database = dir.join("garbage.db");
+    std::fs::write(&not_a_database, "this is not a database").unwrap();
+
+    assert_eq!(max_rowid_of(empty.to_str().unwrap()), Ok(0));
+    assert_eq!(max_rowid_of(two.to_str().unwrap()), Ok(2));
+    let unreadable = max_rowid_of(not_a_database.to_str().unwrap());
+    let missing = max_rowid_of(dir.join("no-such-folder/chat.db").to_str().unwrap());
+    std::fs::remove_dir_all(&dir).unwrap();
+    assert!(unreadable.is_err(), "{unreadable:?}");
+    assert!(missing.is_err(), "{missing:?}");
+    assert!(!missing.unwrap_err().is_empty());
+}
+
 #[tokio::test]
 async fn the_listener_waits_for_a_readable_database_before_it_picks_its_start_row() {
     let (_keep, mut shutdown) = tokio::sync::watch::channel(());
-    let mut answers = vec![None, None, Some(2869)].into_iter();
+    let mut answers = vec![
+        Err("denied".to_string()),
+        Err("denied".to_string()),
+        Ok(2869),
+    ]
+    .into_iter();
     let mut reads = 0;
     let start = wait_for_start_row(
         || {
             reads += 1;
-            answers.next().flatten()
+            answers.next().unwrap()
         },
         Duration::from_millis(1),
         &mut shutdown,
@@ -486,8 +523,16 @@ async fn the_listener_waits_for_a_readable_database_before_it_picks_its_start_ro
 
 #[tokio::test]
 async fn a_shutdown_while_the_database_is_unreadable_ends_the_wait_without_a_start_row() {
+    // Harold signals shutdown by dropping the sender.
     let (stop, mut shutdown) = tokio::sync::watch::channel(());
-    stop.send(()).unwrap();
-    let start = wait_for_start_row(|| None, Duration::from_secs(60), &mut shutdown).await;
+    drop(stop);
+    let wait = wait_for_start_row(
+        || Err("denied".into()),
+        Duration::from_secs(60),
+        &mut shutdown,
+    );
+    let start = tokio::time::timeout(Duration::from_secs(5), wait)
+        .await
+        .expect("the wait did not end on shutdown");
     assert_eq!(start, None);
 }
