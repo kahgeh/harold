@@ -25,16 +25,10 @@ use crate::agent::summary::{normalize_work_summary, sanitize_bounded_metadata};
 const NAMESPACE: &str = "harold";
 const PARTITION_KEY: &str = "main";
 const STATE_DATABASE: &str = "harold-state.db";
-const MIGRATIONS: [(&str, &str); 2] = [
-    (
-        "001_initial",
-        include_str!("store/migrations/001_initial.sql"),
-    ),
-    (
-        "002_settings",
-        include_str!("store/migrations/002_settings.sql"),
-    ),
-];
+const MIGRATIONS: [(&str, &str); 1] = [(
+    "001_initial",
+    include_str!("store/migrations/001_initial.sql"),
+)];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TurnCompleted {
@@ -442,7 +436,8 @@ const AGENT_PANE_COLUMNS: &str = r#"
     explicit_work_summary, explicit_work_summary_updated_at_ms,
     screen_work_summary, screen_work_summary_updated_at_ms, work_summary,
     last_transition_at_ms, last_event_version,
-    summary_basis_version, generated_work_summary, generated_summary_basis_version
+    summary_basis_version, generated_work_summary, generated_summary_basis_version,
+    lifecycle_adapter_id
 "#;
 
 async fn last_processed_version_from(
@@ -576,6 +571,10 @@ async fn project_turn_completed(
             },
             |projection| Ok(projection.pane.observed_at_ms),
         )?;
+    let current_adapter = current
+        .as_ref()
+        .filter(|projection| projection.pane.incarnation == incarnation)
+        .and_then(|projection| projection.lifecycle_adapter_id.clone());
     let agent_event = AgentEvent::LifecycleObserved(AgentLifecycleObserved {
         incarnation,
         state: ObservedAgentState::Idle,
@@ -584,7 +583,9 @@ async fn project_turn_completed(
         observed_at_ms,
     });
     match reduce_agent_event(current, &agent_event, event.version, hook_grace_ms) {
-        ProjectionChange::Upsert(projection) => {
+        ProjectionChange::Upsert(mut projection) => {
+            // The Stop hook is not a lifecycle adapter.
+            projection.lifecycle_adapter_id = current_adapter;
             upsert_agent_pane(conn, &projection).await?;
             Ok(true)
         }
@@ -646,10 +647,11 @@ async fn upsert_agent_pane(
             explicit_work_summary, explicit_work_summary_updated_at_ms,
             screen_work_summary, screen_work_summary_updated_at_ms, work_summary,
             last_transition_at_ms, last_event_version,
-            summary_basis_version, generated_work_summary, generated_summary_basis_version
+            summary_basis_version, generated_work_summary, generated_summary_basis_version,
+            lifecycle_adapter_id
         ) VALUES (
             ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
-            ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28
+            ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29
         ) ON CONFLICT(pane_id) DO UPDATE SET
             pane_pid = excluded.pane_pid,
             agent_pid = excluded.agent_pid,
@@ -677,7 +679,8 @@ async fn upsert_agent_pane(
             last_event_version = excluded.last_event_version,
             summary_basis_version = excluded.summary_basis_version,
             generated_work_summary = excluded.generated_work_summary,
-            generated_summary_basis_version = excluded.generated_summary_basis_version
+            generated_summary_basis_version = excluded.generated_summary_basis_version,
+            lifecycle_adapter_id = excluded.lifecycle_adapter_id
         "#,
         turso::params![
             pane.incarnation.pane_id.as_str(),
@@ -710,6 +713,7 @@ async fn upsert_agent_pane(
             projection
                 .generated_summary_basis_version
                 .map(EventStreamVersion::get),
+            projection.lifecycle_adapter_id.as_deref(),
         ],
     )
     .await?;
@@ -764,7 +768,8 @@ async fn load_agent_snapshot_from_one_query(
                     NULL AS pane_last_event_version,
                     NULL AS summary_basis_version,
                     NULL AS generated_work_summary,
-                    NULL AS generated_summary_basis_version
+                    NULL AS generated_summary_basis_version,
+                    NULL AS lifecycle_adapter_id
                 FROM checkpoint
 
                 UNION ALL
@@ -779,7 +784,7 @@ async fn load_agent_snapshot_from_one_query(
                     health.last_event_version,
                     NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
                     NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
-                    NULL, NULL, NULL, NULL, NULL, NULL
+                    NULL, NULL, NULL, NULL, NULL, NULL, NULL
                 FROM checkpoint, agent_monitor_health AS health
 
                 UNION ALL
@@ -815,7 +820,8 @@ async fn load_agent_snapshot_from_one_query(
                     pane.last_event_version,
                     pane.summary_basis_version,
                     pane.generated_work_summary,
-                    pane.generated_summary_basis_version
+                    pane.generated_summary_basis_version,
+                    pane.lifecycle_adapter_id
                 FROM checkpoint, agent_panes AS pane
             )
             SELECT * FROM snapshot_rows
@@ -915,6 +921,7 @@ fn agent_pane_from_row_at(row: &turso::Row, offset: usize) -> events::Result<Age
         generated_summary_basis_version: optional_integer(row, offset + 27)?
             .map(event_stream_version)
             .transpose()?,
+        lifecycle_adapter_id: optional_text(row, offset + 28)?,
     })
 }
 

@@ -865,3 +865,39 @@ fn proven_repeated_submission_refreshes_recency_and_generation_basis() {
     assert_eq!(projection.screen_work_summary_updated_at_ms, Some(400));
     assert_eq!(projection.summary_basis_version, version(4));
 }
+
+#[test]
+fn a_new_agent_process_in_the_pane_starts_without_an_adapter() {
+    let initial = apply(
+        None,
+        AgentEvent::PaneObserved(AgentPaneObserved {
+            pane: pane(1_000, 100),
+        }),
+        1,
+    );
+    assert_eq!(initial.lifecycle_adapter_id, None);
+    let reported = apply(
+        Some(initial),
+        AgentEvent::LifecycleObserved(AgentLifecycleObserved {
+            incarnation: incarnation(1_000),
+            state: ObservedAgentState::Busy,
+            adapter_id: "claude.lifecycle".into(),
+            work_summary: WorkSummaryUpdate::Unchanged,
+            observed_at_ms: 200,
+        }),
+        2,
+    );
+    assert_eq!(
+        reported.lifecycle_adapter_id.as_deref(),
+        Some("claude.lifecycle")
+    );
+
+    let replaced = apply(
+        Some(reported),
+        AgentEvent::PaneObserved(AgentPaneObserved {
+            pane: pane(2_000, 300),
+        }),
+        3,
+    );
+    assert_eq!(replaced.lifecycle_adapter_id, None);
+}

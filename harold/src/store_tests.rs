@@ -435,7 +435,7 @@ async fn fresh_schema_has_one_initial_record_across_reopen() {
     while let Some(row) = rows.next().await.unwrap() {
         names.push(row.get_value(0).unwrap().as_text().unwrap().to_string());
     }
-    assert_eq!(names, ["001_initial", "002_settings"]);
+    assert_eq!(names, ["001_initial"]);
 }
 
 #[tokio::test]
@@ -549,7 +549,7 @@ async fn unknown_schema_record_is_rejected_without_modifying_pending_delivery() 
             .get_value(0)
             .unwrap()
             .as_integer(),
-        Some(&3)
+        Some(&2)
     );
 }
 
@@ -1106,23 +1106,6 @@ async fn tts_mute_event_creates_no_delivery() {
 }
 
 #[tokio::test]
-async fn second_migration_applies_to_a_database_that_only_has_the_first() {
-    let directory = TestDirectory::new();
-    {
-        let store = HaroldStore::open(directory.path()).await.unwrap();
-        let conn = store.state.connect().unwrap();
-        conn.execute("DROP TABLE settings", ()).await.unwrap();
-        conn.execute("DELETE FROM _migrations WHERE name = '002_settings'", ())
-            .await
-            .unwrap();
-    }
-    let reopened = HaroldStore::open(directory.path()).await.unwrap();
-    append_tts_mute_changed(&reopened, true).await.unwrap();
-    reopened.project_unhandled_events(10).await.unwrap();
-    assert!(reopened.load_agent_snapshot().await.unwrap().tts_muted);
-}
-
-#[tokio::test]
 async fn messaging_pause_is_projected_into_the_snapshot_and_survives_reopen() {
     let directory = TestDirectory::new();
     let store = HaroldStore::open(directory.path()).await.unwrap();
@@ -1198,4 +1181,92 @@ async fn forwarded_flag_reaches_the_pending_delivery() {
 
     assert_eq!(message.text, "carry on");
     assert!(message.forwarded);
+}
+
+#[tokio::test]
+async fn a_store_made_by_v0_3_1_is_refused() {
+    let directory = TestDirectory::new();
+    let state_path = directory.path().join(super::STATE_DATABASE);
+    let state = turso::Builder::new_local(state_path.to_str().unwrap())
+        .build()
+        .await
+        .unwrap();
+    let conn = state.connect().unwrap();
+    conn.execute(
+        r#"
+        CREATE TABLE _migrations (
+            id INTEGER PRIMARY KEY,
+            name TEXT NOT NULL UNIQUE,
+            checksum TEXT NOT NULL,
+            applied_at_ms INTEGER NOT NULL
+        )
+        "#,
+        (),
+    )
+    .await
+    .unwrap();
+    for (name, checksum) in [
+        (
+            "001_initial",
+            "bc4ff7edbea046516df88dc4fedf03b29b442d977ee69b52290fc4b0a36d42ff",
+        ),
+        (
+            "002_settings",
+            "0da3944133e15c66194bae29cf350dc82164062a6982d7d1d19573c6bb21553d",
+        ),
+    ] {
+        conn.execute(
+            "INSERT INTO _migrations (name, checksum, applied_at_ms) VALUES (?1, ?2, 0)",
+            (name, checksum),
+        )
+        .await
+        .unwrap();
+    }
+    drop(conn);
+    drop(state);
+
+    let error = HaroldStore::open(directory.path())
+        .await
+        .err()
+        .expect("a v0.3.1 store must be refused");
+    assert!(error.to_string().contains("incompatible state schema"));
+}
+
+#[tokio::test]
+async fn the_reporting_adapter_is_stored_with_the_pane_and_survives_reopen() {
+    let directory = TestDirectory::new();
+    let store = HaroldStore::open(directory.path()).await.unwrap();
+    append_agent_events(
+        &store,
+        vec![AgentEvent::PaneObserved(AgentPaneObserved {
+            pane: agent_pane(),
+        })],
+    )
+    .await
+    .unwrap();
+    store.project_unhandled_events(500).await.unwrap();
+    let before = store.load_agent_snapshot().await.unwrap();
+    assert_eq!(before.panes[0].lifecycle_adapter_id, None);
+
+    append_agent_events(
+        &store,
+        vec![AgentEvent::LifecycleObserved(AgentLifecycleObserved {
+            incarnation: agent_incarnation(),
+            state: ObservedAgentState::Busy,
+            adapter_id: "claude.lifecycle".into(),
+            work_summary: WorkSummaryUpdate::Unchanged,
+            observed_at_ms: 100,
+        })],
+    )
+    .await
+    .unwrap();
+    store.project_unhandled_events(500).await.unwrap();
+    drop(store);
+
+    let reopened = HaroldStore::open(directory.path()).await.unwrap();
+    let after = reopened.load_agent_snapshot().await.unwrap();
+    assert_eq!(
+        after.panes[0].lifecycle_adapter_id.as_deref(),
+        Some("claude.lifecycle")
+    );
 }

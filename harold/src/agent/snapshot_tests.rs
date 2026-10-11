@@ -31,6 +31,7 @@ fn snapshot(revision: i64, summary: Option<&str>) -> AgentSnapshot {
             },
             hook_state: None,
             hook_observed_at_ms: None,
+            lifecycle_adapter_id: None,
             screen_state: None,
             screen_classifier_id: None,
             screen_observed_at_ms: None,

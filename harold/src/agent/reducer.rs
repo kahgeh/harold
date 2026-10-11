@@ -39,6 +39,7 @@ pub(crate) fn reduce_agent_event(
             }
 
             invalidate_generated(&mut projection, event_version);
+            projection.lifecycle_adapter_id = Some(lifecycle.adapter_id.clone());
             projection.hook_state = Some(lifecycle.state);
             projection.hook_observed_at_ms = Some(lifecycle.observed_at_ms);
             projection.screen_state = None;
@@ -171,6 +172,7 @@ fn new_projection(
         pane: observed.pane.clone(),
         hook_state: None,
         hook_observed_at_ms: None,
+        lifecycle_adapter_id: None,
         screen_state: None,
         screen_classifier_id: None,
         screen_observed_at_ms: None,

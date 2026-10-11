@@ -127,6 +127,8 @@ pub(crate) struct AgentPaneProjection {
     pub pane: AgentPaneObservation,
     pub hook_state: Option<ObservedAgentState>,
     pub hook_observed_at_ms: Option<i64>,
+    /// The lifecycle adapter that last reported for this agent process; none has when absent.
+    pub lifecycle_adapter_id: Option<String>,
     pub screen_state: Option<ObservedAgentState>,
     pub screen_classifier_id: Option<String>,
     pub screen_observed_at_ms: Option<i64>,

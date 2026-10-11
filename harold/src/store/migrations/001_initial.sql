@@ -34,6 +34,7 @@ CREATE TABLE agent_panes (
     pane_observed_at_ms INTEGER NOT NULL,
     hook_state TEXT,
     hook_observed_at_ms INTEGER,
+    lifecycle_adapter_id TEXT,
     screen_state TEXT,
     screen_classifier_id TEXT,
     screen_observed_at_ms INTEGER,
@@ -69,5 +70,11 @@ CREATE TABLE agent_monitor_health (
     healthy INTEGER NOT NULL CHECK (healthy IN (0, 1)),
     reason_code TEXT NOT NULL CHECK (length(reason_code) <= 160),
     observed_at_ms INTEGER NOT NULL,
+    last_event_version INTEGER NOT NULL
+);
+
+CREATE TABLE settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
     last_event_version INTEGER NOT NULL
 );
