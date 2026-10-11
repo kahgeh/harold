@@ -6,6 +6,7 @@
 
 use std::sync::Mutex;
 
+use super::parse_tag;
 use crate::settings::is_valid_machine_name;
 
 /// Starts every message Harold sends.
@@ -132,6 +133,69 @@ pub(crate) fn latest_notifier() -> Option<String> {
 /// Every machine name recorded so far. This Mac's own name is not added here.
 pub(crate) fn known_machine_names() -> Vec<String> {
     NOTIFIERS.lock().unwrap().known_machine_names().to_vec()
+}
+
+// ---------------------------------------------------------------------------
+// Ownership — does this Mac route the reply?
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Ownership<'a> {
+    /// This Mac routes the reply: `pane_tag` picks the pane and `body` is relayed.
+    Owned {
+        pane_tag: Option<&'a str>,
+        body: &'a str,
+    },
+    /// The Mac named `owner` owns the reply. This Mac does not route it.
+    NotOwned { owner: String },
+}
+
+/// Decide whether this Mac routes `text`.
+///
+/// A tag that names a machine (`[machine/pane]` or `[machine]`) settles it. Any other
+/// reply belongs to the Mac that sent the latest notification, and to every Mac when none
+/// is recorded. A forwarded reply is always owned: the hub decided before it forwarded.
+pub(crate) fn decide_ownership<'a>(
+    text: &'a str,
+    forwarded: bool,
+    this_machine: &str,
+    known_machines: &[String],
+    latest_notifier: Option<&str>,
+) -> Ownership<'a> {
+    let (tag, body) = parse_tag(text);
+    let follows_latest_notifier = |pane_tag: Option<&'a str>| match latest_notifier {
+        Some(latest) if !forwarded && !same_machine(latest, this_machine) => Ownership::NotOwned {
+            owner: latest.to_string(),
+        },
+        _ => Ownership::Owned { pane_tag, body },
+    };
+
+    let Some(tag) = tag else {
+        return follows_latest_notifier(None);
+    };
+    let (machine, pane) = match tag.split_once('/') {
+        Some((machine, pane)) => (machine.trim(), Some(pane.trim())),
+        None => (tag.trim(), None),
+    };
+    let pane_tag = pane.filter(|pane| !pane.is_empty());
+
+    if same_machine(machine, this_machine) {
+        return Ownership::Owned { pane_tag, body };
+    }
+    let named = known_machines
+        .iter()
+        .find(|known| same_machine(known, machine));
+    if let Some(owner) = named {
+        return if forwarded {
+            Ownership::Owned { pane_tag, body }
+        } else {
+            Ownership::NotOwned {
+                owner: owner.clone(),
+            }
+        };
+    }
+    // The tag names no machine: it is a pane tag, as before machine names.
+    follows_latest_notifier(Some(tag))
 }
 
 #[cfg(test)]
