@@ -8,7 +8,7 @@ use crate::store::{HaroldStore, TurnCompleted};
 use crate::util::sanitise_for_applescript;
 
 use super::{
-    Direction, FetchedRow, NotificationPlan, RecentRows, TWIN_WINDOW, is_marked_as_harold,
+    ChatDb, Direction, FetchedRow, NotificationPlan, RecentRows, TWIN_WINDOW, is_marked_as_harold,
     max_rowid_of, notification_message, notification_plan, parse_max_rowid, record_row,
     send_script, wait_for_start_row,
 };
@@ -189,6 +189,85 @@ impl Drop for TestDirectory {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);
     }
+}
+
+/// The handle id the test databases are read for.
+const HANDLE: i64 = 7;
+
+/// An empty database in `directory` with the columns of chat.db's `message` table that
+/// the listener reads. `ROWID` is declared as chat.db declares it, so `sqlite3 -json`
+/// names the column the same way.
+fn chat_db(directory: &TestDirectory) -> ChatDb {
+    let db = ChatDb {
+        path: directory.0.join("chat.db").to_str().unwrap().to_string(),
+        handle_ids: vec![HANDLE],
+    };
+    run_sql(
+        &db,
+        "CREATE TABLE message(ROWID INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT, \
+         handle_id INTEGER, is_from_me INTEGER);",
+    );
+    db
+}
+
+fn run_sql(db: &ChatDb, sql: &str) {
+    let status = std::process::Command::new("sqlite3")
+        .arg(&db.path)
+        .arg(sql)
+        .status()
+        .unwrap();
+    assert!(status.success(), "{sql}");
+}
+
+/// Appends `rows`, each a (handle id, is_from_me, text), in order. The first row of a new
+/// database gets ROWID 1.
+fn insert(db: &ChatDb, rows: &[(i64, u8, &str)]) {
+    for (handle_id, is_from_me, text) in rows {
+        let text = text.replace('\'', "''");
+        run_sql(
+            db,
+            &format!(
+                "INSERT INTO message(text, handle_id, is_from_me) \
+                 VALUES ('{text}', {handle_id}, {is_from_me});"
+            ),
+        );
+    }
+}
+
+fn texts(rows: &[(i64, &str)]) -> Vec<(i64, String)> {
+    rows.iter()
+        .map(|(rowid, text)| (*rowid, text.to_string()))
+        .collect()
+}
+
+#[test]
+fn replies_are_read_per_direction_for_the_configured_handles_without_harolds_messages() {
+    let directory = TestDirectory::new();
+    let db = chat_db(&directory);
+    insert(
+        &db,
+        &[
+            (HANDLE, 0, "yes, merge it"),
+            (HANDLE, 1, "🤖 [studio/alir-app main:0.1] Tests pass (alir)"),
+            (HANDLE, 1, "typed on the Mac"),
+            (99, 0, "from another conversation"),
+            (HANDLE, 0, "🤖 [laptop/harold main:0.0] Build done (harold)"),
+            (HANDLE, 0, "  and deploy  "),
+        ],
+    );
+
+    assert_eq!(
+        db.replies_after(0, 0),
+        texts(&[(1, "yes, merge it"), (6, "and deploy")])
+    );
+    assert_eq!(db.replies_after(0, 1), texts(&[(3, "typed on the Mac")]));
+    assert_eq!(db.replies_after(1, 0), texts(&[(6, "and deploy")]));
+
+    let no_handles = ChatDb {
+        handle_ids: Vec::new(),
+        ..db.clone()
+    };
+    assert!(no_handles.replies_after(0, 0).is_empty());
 }
 
 fn row(rowid: i64, text: &str, direction: Direction) -> FetchedRow {

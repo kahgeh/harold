@@ -1,4 +1,3 @@
-use std::collections::HashSet;
 use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
@@ -257,10 +256,6 @@ fn db_path() -> String {
     get_settings().chat_db.resolved_path()
 }
 
-fn handle_ids() -> HashSet<i64> {
-    get_settings().imessage.handle_ids.iter().copied().collect()
-}
-
 /// The newest row in chat.db, or why it could not be read. An empty table reads as
 /// row 0; a failed read must not, or every stored message would later look new.
 fn get_max_rowid() -> Result<i64, String> {
@@ -321,56 +316,78 @@ async fn wait_for_start_row(
     }
 }
 
-fn query_messages(sql: &str) -> Vec<(i64, String)> {
-    let out = match Command::new("sqlite3")
-        .arg("-json")
-        .arg(db_path())
-        .arg(sql)
-        .output()
-    {
-        Ok(o) if o.status.success() => o,
-        _ => return vec![],
-    };
-    let Ok(rows) = serde_json::from_slice::<Vec<serde_json::Value>>(&out.stdout) else {
-        return vec![];
-    };
-    rows.into_iter()
-        .filter_map(|row| {
-            let rowid = row.get("ROWID")?.as_i64()?;
-            let text = row.get("text")?.as_str()?.trim().to_string();
-            if text.is_empty() || is_marked_as_harold(&text) {
-                return None;
-            }
-            Some((rowid, text))
-        })
-        .collect()
+/// The Messages database and the conversations in it that Harold reads.
+#[derive(Debug, Clone)]
+struct ChatDb {
+    path: String,
+    handle_ids: Vec<i64>,
 }
 
-/// All interpolated values are typed integers from trusted config/internal state — never user input.
-fn fetch_messages(last_rowid: i64, is_from_me: u8) -> Vec<(i64, String)> {
-    let ids = handle_ids();
-    if ids.is_empty() {
-        return vec![];
+impl ChatDb {
+    fn configured() -> Self {
+        let cfg = get_settings();
+        Self {
+            path: cfg.chat_db.resolved_path(),
+            handle_ids: cfg.imessage.handle_ids.clone(),
+        }
     }
-    let id_list = ids
-        .iter()
-        .map(ToString::to_string)
-        .collect::<Vec<_>>()
-        .join(",");
-    query_messages(&format!(
-        "SELECT ROWID, text FROM message \
-         WHERE ROWID > {last_rowid} AND handle_id IN ({id_list}) AND is_from_me = {is_from_me} \
-           AND text IS NOT NULL AND length(text) > 0 \
-         ORDER BY ROWID ASC;"
-    ))
-}
 
-fn fetch_inbound(last_rowid: i64) -> Vec<(i64, String)> {
-    fetch_messages(last_rowid, 0)
-}
+    /// The rows after `last_rowid` in one direction that the user wrote, oldest first.
+    /// Rows Harold sent are left out.
+    fn replies_after(&self, last_rowid: i64, is_from_me: u8) -> Vec<(i64, String)> {
+        let Some(id_list) = self.id_list() else {
+            return vec![];
+        };
+        let mut rows = self.query(&format!(
+            "SELECT ROWID, text FROM message \
+             WHERE ROWID > {last_rowid} AND handle_id IN ({id_list}) AND is_from_me = {is_from_me} \
+               AND text IS NOT NULL AND length(text) > 0 \
+             ORDER BY ROWID ASC;"
+        ));
+        rows.retain(|(_, text)| !is_marked_as_harold(text));
+        rows
+    }
 
-fn fetch_self(last_rowid: i64) -> Vec<(i64, String)> {
-    fetch_messages(last_rowid, 1)
+    /// The handle ids as an SQL list, or `None` when none is configured. Every value put
+    /// into a query is an integer from the configuration or from internal state, never
+    /// user input.
+    fn id_list(&self) -> Option<String> {
+        if self.handle_ids.is_empty() {
+            return None;
+        }
+        let ids = self
+            .handle_ids
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+        Some(ids.join(","))
+    }
+
+    /// The (ROWID, trimmed text) of each row `sql` selects. A failed read gives no rows.
+    fn query(&self, sql: &str) -> Vec<(i64, String)> {
+        let out = match Command::new("sqlite3")
+            .arg("-json")
+            .arg(&self.path)
+            .arg(sql)
+            .output()
+        {
+            Ok(o) if o.status.success() => o,
+            _ => return vec![],
+        };
+        let Ok(rows) = serde_json::from_slice::<Vec<serde_json::Value>>(&out.stdout) else {
+            return vec![];
+        };
+        rows.into_iter()
+            .filter_map(|row| {
+                let rowid = row.get("ROWID")?.as_i64()?;
+                let text = row.get("text")?.as_str()?.trim().to_string();
+                if text.is_empty() {
+                    return None;
+                }
+                Some((rowid, text))
+            })
+            .collect()
+    }
 }
 
 /// Record one fetched row as an inbound event and move `cursor` past it. While messaging
@@ -421,13 +438,18 @@ async fn poll(store: &HaroldStore) {
     let inbound_rowid = last_inbound_rowid().load(Ordering::Relaxed);
     let self_rowid = last_self_rowid().load(Ordering::Relaxed);
 
-    let (inbound, self_msgs) =
-        tokio::task::spawn_blocking(move || (fetch_inbound(inbound_rowid), fetch_self(self_rowid)))
-            .await
-            .unwrap_or_else(|e| {
-                tracing::warn!(error = %e, "fetch task panicked");
-                (vec![], vec![])
-            });
+    let db = ChatDb::configured();
+    let (inbound, self_msgs) = tokio::task::spawn_blocking(move || {
+        (
+            db.replies_after(inbound_rowid, 0),
+            db.replies_after(self_rowid, 1),
+        )
+    })
+    .await
+    .unwrap_or_else(|e| {
+        tracing::warn!(error = %e, "fetch task panicked");
+        (vec![], vec![])
+    });
     let messaging_paused = is_messaging_paused();
     let now = Instant::now();
 
