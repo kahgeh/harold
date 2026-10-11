@@ -380,7 +380,8 @@ fn machine_name_error(name: &str) -> Option<String> {
 }
 
 /// What is wrong with the `machines` list, one error for each problem. An empty list is
-/// valid: the machine names are then learned from the notifications Harold reads.
+/// valid: with `machines` empty multi-Mac routing is off. Harold keeps no latest notifier
+/// and recognises no machine name but its own.
 fn machines_errors(machine_name: &str, machines: &[String]) -> Vec<String> {
     let mut errors = machines
         .iter()

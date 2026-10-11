@@ -365,10 +365,20 @@ struct ChatDb {
 impl ChatDb {
     fn configured() -> Self {
         let cfg = get_settings();
+        Self::from_settings(
+            cfg.chat_db.resolved_path(),
+            cfg.imessage.handle_ids.clone(),
+            &cfg.machines,
+        )
+    }
+
+    /// The database at `path`, read for `handle_ids`. Marked rows are read only when
+    /// `machines` is not empty.
+    fn from_settings(path: String, handle_ids: Vec<i64>, machines: &[String]) -> Self {
         Self {
-            path: cfg.chat_db.resolved_path(),
-            handle_ids: cfg.imessage.handle_ids.clone(),
-            read_marked: !cfg.machines.is_empty(),
+            path,
+            handle_ids,
+            read_marked: !machines.is_empty(),
         }
     }
 
@@ -575,9 +585,31 @@ async fn poll_db(store: &HaroldStore, db: ChatDb, cursors: &Cursors, is_paused: 
     .await;
 }
 
-/// The listener's cursors, seeding the process-wide notifier record with `marked`.
-fn start_listener_cursors(initial: i64, marked: Vec<MarkedRow>) -> Cursors {
-    start_cursors(initial, marked, ownership::record_marker)
+/// The listener's cursors, seeding the process-wide notifier record. None if shutdown is
+/// signalled before the database could be read.
+async fn start_listener_cursors(
+    db: &ChatDb,
+    shutdown: &mut watch::Receiver<()>,
+) -> Option<Cursors> {
+    start_listener_reading(db, START_ROW_RETRY, shutdown, ownership::record_marker).await
+}
+
+/// Wait for `db` to be readable, read the newest row and the last `STARTUP_MARKED_ROWS`
+/// marked rows, feed those to `record_marker` oldest first and return the cursors, which
+/// start after the newest row. None if shutdown is signalled first.
+async fn start_listener_reading(
+    db: &ChatDb,
+    retry_every: Duration,
+    shutdown: &mut watch::Receiver<()>,
+    record_marker: impl Fn(&str, i64),
+) -> Option<Cursors> {
+    let (initial, marked) = wait_for_start_row(
+        || tokio::task::block_in_place(|| read_start(db)),
+        retry_every,
+        shutdown,
+    )
+    .await?;
+    Some(start_cursors(initial, marked, record_marker))
 }
 
 /// One poll of `db`. Marked rows are read before any reply is recorded, and while
@@ -710,17 +742,11 @@ fn start_watcher(chat_db_path: &str) -> Option<(RecommendedWatcher, mpsc::Unboun
 
 pub(crate) async fn listen(store: Arc<HaroldStore>, mut shutdown: watch::Receiver<()>) {
     let db = ChatDb::configured();
-    let Some((initial, marked)) = wait_for_start_row(
-        || tokio::task::block_in_place(|| read_start(&db)),
-        START_ROW_RETRY,
-        &mut shutdown,
-    )
-    .await
-    else {
+    let Some(cursors) = start_listener_cursors(&db, &mut shutdown).await else {
         info!("iMessage listener shutting down before the Messages database was readable");
         return;
     };
-    let cursors = start_listener_cursors(initial, marked);
+    let initial = cursors.inbound.load(Ordering::Relaxed);
     CURSORS.set(cursors).expect("listen called more than once");
     info!(initial_rowid = initial, "iMessage listener started");
 

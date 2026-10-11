@@ -14,7 +14,7 @@ use super::{
     ChatDb, Cursors, Direction, FetchedRow, MarkedRow, NotificationPlan, RecentRows, TWIN_WINDOW,
     is_marked_as_harold, max_rowid_of, notification_message, notification_plan, parse_max_rowid,
     poll_chat_db, poll_db, read_start, record_row, send_script, start_cursors,
-    start_listener_cursors, wait_for_start_row,
+    start_listener_cursors, start_listener_reading, wait_for_start_row,
 };
 
 #[test]
@@ -1191,12 +1191,18 @@ fn notification_is_sent_naming_the_machine_and_the_pane() {
 // The test settings list no machines, so the process-wide record keeps nothing it is fed.
 // These tests see what it was fed instead. The texts and dates are unique to each test.
 
-#[test]
-fn listener_startup_seeds_the_process_wide_notifier_record() {
+#[tokio::test(flavor = "multi_thread")]
+async fn listener_startup_seeds_the_process_wide_notifier_record() {
     crate::settings::init_settings_for_test();
     let text = "🤖 [seed-test-a/x main:0.0] done (x)";
+    let directory = TestDirectory::new();
+    let db = chat_db(&directory);
+    insert_dated(&db, &[(HANDLE, 1, text, 9_001)]);
+    let (_keep, mut shutdown) = tokio::sync::watch::channel(());
 
-    start_listener_cursors(1, marked(&[(1, 9_001, text)]));
+    start_listener_cursors(&db, &mut shutdown)
+        .await
+        .expect("cursors");
 
     assert!(fed_markers().contains(&(text.to_string(), 9_001)));
 }
@@ -1275,4 +1281,135 @@ async fn pause_is_read_after_the_rows_are_fetched() {
     poll_chat_db(&store, db, &cursors, |_, _| {}, &recent, || false).await;
     assert_eq!(cursors.inbound.load(Ordering::Relaxed), 2);
     assert_eq!(store.project_unhandled_events(10).await.unwrap().applied, 1);
+}
+
+#[test]
+fn chat_db_from_settings_passes_the_path_and_handles_through_and_reads_marked_rows_only_with_machines()
+ {
+    let directory = TestDirectory::new();
+    let seeded = chat_db(&directory);
+    insert_dated(
+        &seeded,
+        &[
+            (HANDLE, 1, STUDIO_NOTIFICATION, 5),
+            (HANDLE, 0, LAPTOP_NOTIFICATION, 6),
+        ],
+    );
+    let machines = vec!["studio".to_string()];
+
+    let without = ChatDb::from_settings(seeded.path.clone(), vec![HANDLE, 9], &[]);
+    let with = ChatDb::from_settings(seeded.path.clone(), vec![HANDLE, 9], &machines);
+
+    assert_eq!(without.path, seeded.path);
+    assert_eq!(without.handle_ids, [HANDLE, 9]);
+    assert_eq!(with.path, seeded.path);
+    assert_eq!(with.handle_ids, [HANDLE, 9]);
+    assert_eq!(without.marked_after(0), Ok(vec![]));
+    assert_eq!(without.latest_marked(2, 10), Ok(vec![]));
+    assert_eq!(
+        with.marked_after(0).unwrap().len(),
+        2,
+        "a set machines list reads the marked rows"
+    );
+    assert_eq!(with.latest_marked(2, 10).unwrap().len(), 2);
+}
+
+/// 60 marked rows (dates 1000 + ROWID) on `HANDLE`, each followed by a row that is not
+/// marked and one marked row on another handle. Returns the ROWIDs of the marked rows.
+fn insert_many_marked(db: &ChatDb, count: i64) -> Vec<i64> {
+    let mut rowids = vec![];
+    let mut rowid = 0;
+    for n in 0..count {
+        rowid += 1;
+        insert_dated(
+            db,
+            &[(
+                HANDLE,
+                (n % 2) as u8,
+                &format!("🤖 [studio/x main:0.0] n{n} (x)"),
+                1000 + rowid,
+            )],
+        );
+        rowids.push(rowid);
+        insert_dated(
+            db,
+            &[
+                (HANDLE, 0, "plain reply", 1),
+                (HANDLE + 1, 1, "🤖 [other/x main:0.0] elsewhere (x)", 2),
+            ],
+        );
+        rowid += 2;
+    }
+    rowids
+}
+
+async fn start_with(db: &ChatDb) -> (Vec<(String, i64)>, Cursors) {
+    let (_keep, mut shutdown) = tokio::sync::watch::channel(());
+    let fed = Mutex::new(Vec::new());
+    let cursors = start_listener_reading(db, Duration::from_millis(1), &mut shutdown, |t, d| {
+        fed.lock().unwrap().push((t.to_string(), d));
+    })
+    .await
+    .expect("cursors");
+    (fed.into_inner().unwrap(), cursors)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn startup_feeds_the_last_fifty_marked_rows_oldest_first() {
+    let directory = TestDirectory::new();
+    let db = chat_db(&directory);
+    let rowids = insert_many_marked(&db, 60);
+
+    let (fed, cursors) = start_with(&db).await;
+
+    let expected: Vec<(String, i64)> = (10..60)
+        .map(|n| {
+            (
+                format!("🤖 [studio/x main:0.0] n{n} (x)"),
+                1000 + rowids[n as usize],
+            )
+        })
+        .collect();
+    assert_eq!(fed, expected);
+    assert_eq!(cursors.inbound.load(Ordering::Relaxed), 180);
+    assert_eq!(cursors.self_sent.load(Ordering::Relaxed), 180);
+    assert_eq!(cursors.marked.load(Ordering::Relaxed), 180);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn startup_feeds_fewer_than_fifty_marked_rows_all_oldest_first() {
+    let directory = TestDirectory::new();
+    let db = chat_db(&directory);
+    let rowids = insert_many_marked(&db, 7);
+
+    let (fed, cursors) = start_with(&db).await;
+
+    let dates: Vec<i64> = fed.iter().map(|(_, date)| *date).collect();
+    let expected: Vec<i64> = rowids.iter().map(|rowid| 1000 + rowid).collect();
+    assert_eq!(dates, expected);
+    assert_eq!(cursors.inbound.load(Ordering::Relaxed), 21);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn startup_waits_for_an_unreadable_database_then_feeds_its_rows() {
+    let directory = TestDirectory::new();
+    let db = chat_db_without_date(&directory);
+    insert(&db, &[(HANDLE, 1, STUDIO_NOTIFICATION)]);
+    let (_keep, mut shutdown) = tokio::sync::watch::channel(());
+    let fed = Mutex::new(Vec::new());
+    let fixer = db.clone();
+    let repair = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        add_date_column(&fixer);
+    });
+
+    let cursors = start_listener_reading(&db, Duration::from_millis(5), &mut shutdown, |t, d| {
+        fed.lock().unwrap().push((t.to_string(), d));
+    })
+    .await
+    .expect("cursors");
+    repair.await.unwrap();
+
+    assert_eq!(*fed.lock().unwrap(), [(STUDIO_NOTIFICATION.to_string(), 0)]);
+    assert_eq!(cursors.inbound.load(Ordering::Relaxed), 1);
 }
