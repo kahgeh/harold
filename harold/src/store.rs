@@ -44,8 +44,10 @@ pub struct TurnCompleted {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InboundMessage {
     pub text: String,
-    /// True when the hub forwarded this reply from another Mac. Events stored before the
-    /// field existed have none and read as false.
+    /// True when ownership of this reply is already decided: the hub forwarded it from
+    /// another Mac, or the hub read it from Telegram and decided to keep it. Routing then
+    /// does not decide again, and the reply is never forwarded again. Events stored before
+    /// the field existed have none and read as false.
     #[serde(default)]
     pub forwarded: bool,
 }
