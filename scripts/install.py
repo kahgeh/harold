@@ -128,17 +128,22 @@ def link_claude_mod(settings_path, mod_dir):
     backup = target.with_name(target.name + '.before-harold')
     temporary = target.with_name(target.name + '.harold-tmp')
     try:
+        text = json.dumps(data, indent=2, ensure_ascii=False) + '\n'
+        text.encode('utf-8')
         if not backup.exists():
             shutil.copy2(target, backup)
         # Owner-only from the first byte: the file can hold tokens in its env block.
         descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(descriptor, 'w', encoding='utf-8') as handle:
-            handle.write(json.dumps(data, indent=2, ensure_ascii=False) + '\n')
+            handle.write(text)
         temporary.chmod(stat.S_IMODE(target.stat().st_mode))
         os.replace(temporary, target)
-    except OSError as error:
-        temporary.unlink(missing_ok=True)
-        return manual('The settings file could not be written ({})'.format(error.strerror))
+    except (OSError, ValueError) as error:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return manual('The settings file could not be written ({})'.format(getattr(error, 'strerror', None) or error))
     return 'appended' if folders else 'added'
 
 
