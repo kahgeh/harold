@@ -71,6 +71,30 @@ The default layout is:
 
 Add `~/bin` to your shell's PATH if needed, or use the absolute commands below. The installer prints the service definition and installation paths. The service definition stays inside the installation rather than the auto-loaded LaunchAgents directory. A custom location can be selected with `--prefix /absolute/path/to/bin`.
 
+### Several Macs on iMessage
+
+If you run Harold on more than one Mac signed into the same Apple ID, each Mac needs to know the names of all your Macs, so that a reply from your phone reaches only the Mac that runs the agent you meant.
+
+1. Read each Mac's name. Harold uses the output of this command unless you set `machine_name`:
+
+   ```sh
+   hostname -s
+   ```
+
+2. On every Mac, add the same list of all your Macs' names to `~/bin/harold/config/local.toml`. The list includes this Mac's own name. For two Macs named `studio` and `laptop`:
+
+   ```toml
+   machines = ["studio", "laptop"]
+   ```
+
+   To use a name other than the hostname, set `machine_name = "studio"` on that Mac. A name is not empty and has no whitespace, `/`, `:`, `[` or `]`. Put both settings above the first `[section]` header in the file.
+3. Upgrade and configure all Macs together. A Mac running an older Harold sends notifications without a machine name, and the other Macs cannot tell it apart.
+4. Restart Harold on each Mac with `~/bin/haroldctl restart`. Harold refuses to start when `machines` does not include this Mac's name.
+
+To check it, lock your screen on one Mac and trigger an agent turn completion. The notification starts with `🤖 [<machine_name>/…]`. Reply without a tag: only the Mac that sent the latest notification answers. A reply that starts with `[<machine_name>]` or `[<machine_name>/<pane>]` goes to that Mac.
+
+The [inbound routing reference](../references/inbound-message-routing/README.md#several-macs) explains the rules and the failure modes. For Telegram, see [Several Macs: a hub and members](setup-telegram.md#several-macs-a-hub-and-members).
+
 ## 3. Verify and control the service
 
 ```sh

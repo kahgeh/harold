@@ -103,3 +103,13 @@ These are not vulnerabilities but would strengthen defense-in-depth:
 2. **AI prompt tag stripping**: Consider stripping `<message>` (opening tag) in addition to `</message>` to further harden the prompt boundary.
 
 3. **gRPC authentication**: The localhost-bound gRPC service has no authentication. On a single-user macOS workstation this is low risk, but a shared secret or Unix domain socket would add a layer of protection.
+
+## Follow-up 2026-10-11: gRPC beyond loopback for several Macs
+
+Hardening recommendation 3 assumed a gRPC service bound to localhost. With a hub and members on Telegram (see [Several Macs](references/inbound-message-routing/README.md#several-macs)), each Mac sets `grpc.host` to its Tailscale address, so `harold-api` listens beyond loopback.
+
+- Only `ReportNotification` and `ForwardReply` check a secret. Each member has one shared secret. Harold compares it in constant time, an empty secret never matches, and a wrong one gets `PERMISSION_DENIED`. Harold never logs a secret.
+- The existing RPCs (`TurnComplete`, `ReportAgentState`, `WatchAgentStates`, `SetTtsMuted`, `SetMessagingPaused`) check nothing. Any device on the tailnet that can reach the port can call them. That includes injecting a turn completion, reading agent pane summaries and pausing messaging.
+- The calls are plain gRPC over HTTP with no TLS of their own. Tailscale encrypts the traffic and limits who can reach the port.
+- The user accepted this on 2026-10-11 on the basis that the Macs bind to Tailscale addresses only. Binding `grpc.host` to `0.0.0.0` or a LAN address is not accepted.
+- `ForwardReply` text is routed like any reply, so the member's existing input handling applies to it. A holder of the member's secret can send text to that Mac's agents.

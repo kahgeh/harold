@@ -15,8 +15,8 @@ Summarisation uses different backends depending on the path:
 | Path              | Summary backend                      | Max input                     | Output                                            |
 | ----------------- | ------------------------------------ | ----------------------------- | ------------------------------------------------- |
 | At desk (TTS)     | Local model (`mlx_lm`)               | 500 chars of last_user_prompt | 3–8 words, ≤20 tokens                             |
-| Away (iMessage)   | AI CLI or 280-char truncation        | Full assistant_message         | `🤖 [pane_label] body (context)` + trailing question |
-| Away (Telegram)   | AI CLI or 280-char truncation        | Full assistant_message         | `🤖 [pane_label] body (context)` + trailing question |
+| Away (iMessage)   | AI CLI or 280-char truncation        | Full assistant_message         | `🤖 [machine_name/pane_label] body (context)` + trailing question |
+| Away (Telegram)   | AI CLI or 280-char truncation        | Full assistant_message         | `🤖 [machine_name/pane_label] body (context)` + trailing question |
 
 If the local model is not configured, the TTS summary falls back to `"Work complete"`.
 
@@ -85,8 +85,10 @@ The away channel is selected by `[notify] away_channel` (`"imessage"` or `"teleg
 
 1. `summarise_for_notification()` — uses AI CLI to summarise `assistant_message` into 2–3 sentences under 280 chars; falls back to `truncate_body()` (first 280 chars, newlines flattened)
 2. `split_body()` — splits the last sentence ending in `?` into a separate follow-up message
-3. Message assembled: `🤖 [<pane_label>] <main body> (<main_context>)`
-4. Trailing question (if present) sent as a second `🤖`-prefixed message
+3. Message assembled: `🤖 [<machine_name>/<pane_label>] <main body> (<main_context>)`. `machine_name` is this Mac's name, which defaults to the output of `hostname -s`.
+4. Trailing question (if present) sent as a second `🤖`-prefixed message, `🤖 <question>`, without a tag
+
+Confirmations and error replies carry the machine name too: `🤖 ✓ Delivered to [<machine_name>/<pane_label>]` and `🤖 [<machine_name>] <detail>`. The machine name tells you which Mac a notification came from and lets a reply reach that Mac. See [Several Macs](../inbound-message-routing/README.md#several-macs).
 
 ### iMessage-specific
 
@@ -102,7 +104,8 @@ Config keys (`[imessage]`):
 
 ### Telegram-specific
 
-5. Messages sent via Telegram Bot API `sendMessage` to the configured chat ID
+5. Before the notification is sent, the Mac records which Mac sent the latest notification, so that a reply with no tag can be routed to it. The hub records itself as the latest notifier. A member calls `ReportNotification` on the hub with its machine name and the shared secret. A failed report is logged and the notification is still sent. On iMessage nothing is reported: the other Macs read the notification's row in `chat.db`.
+6. Messages sent via Telegram Bot API `sendMessage` to the configured chat ID
 
 Config keys (`[telegram]`):
 
@@ -162,7 +165,7 @@ sequenceDiagram
     Handler->>Handler: ioreg → IOConsoleLocked = true
     Handler->>Handler: summarise_for_notification() via AI CLI (fallback: truncate to 280 chars)
     Handler->>Handler: split_body() → main body + trailing question (if ends in ?)
-    Handler->>Channel: send "🤖 [harold:0.3] <body> (harold)"
+    Handler->>Channel: send "🤖 [studio/harold:0.3] <body> (harold)"
     note over Channel: iMessage: dedup check via chat.db then osascript<br/>Telegram: Bot API sendMessage
     Handler->>Handler: set last_away_notification_source_agent
     Handler->>Channel: send "🤖 <trailing question>" (if present)

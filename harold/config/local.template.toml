@@ -1,3 +1,11 @@
+# This Mac's name in every message Harold sends and in reply tags. Defaults to the
+# output of `hostname -s`. No whitespace, '/', ':', '[' or ']'.
+# machine_name = "studio"
+
+# Several Macs: the machine names of all your Macs, the same list on every Mac.
+# Setting it turns multi-Mac reply routing on. It must include this Mac's name.
+# machines = ["studio", "laptop"]
+
 [imessage]
 recipient = "+61..."
 # All chat.db handle IDs for your Apple ID (phone number, emails).
@@ -50,3 +58,28 @@ command = "say"
 # skip_if_session_active = true  # skip if completing pane is in the active tmux session
 # skip_if_pane_active = false    # skip if completing pane is the active pane and screen is unlocked
 # away_channel = "telegram"      # "imessage" or "telegram"
+
+# Several Macs on Telegram. One Mac, the hub, reads the bot's replies; the others are
+# members. Not used when away_channel = "imessage". Set [grpc] host on every Mac to its
+# Tailscale address so the Macs can call each other. The calls are plain HTTP.
+#
+# On the hub (role defaults to "hub"), one [[peers.members]] block for each other Mac.
+# Each name must be in `machines`.
+# [grpc]
+# host = "100.64.0.1"
+#
+# [[peers.members]]
+# name = "laptop"
+# url = "http://laptop.tailnet:50060"
+# secret = "a long random string, the same on the hub and on this member"
+#
+# On each member:
+# [grpc]
+# host = "100.64.0.2"
+#
+# [peers]
+# role = "member"
+#
+# [peers.hub]
+# url = "http://studio.tailnet:50060"
+# secret = "the same string as in the hub's block for this Mac"

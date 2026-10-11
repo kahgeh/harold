@@ -92,6 +92,62 @@ Lock your screen during the 10-second window. You should receive a diagnostic no
 4. Reply in Telegram — verify the reply routes to the correct agent pane
 5. Check the agent pane received your message prefixed with the phone emoji
 
+## Several Macs: a hub and members
+
+Telegram lets only one process read a bot's replies. With Harold on several Macs, one Mac, the hub, reads the replies and forwards each one to the Mac that should receive it. The other Macs, the members, do not read Telegram. A reply with no tag goes to the Mac that sent the latest notification. Skip this section if you run Harold on one Mac.
+
+This path has unit tests only. It has not been run live on two Macs.
+
+The examples use two Macs: `studio` is the hub and `laptop` is a member.
+
+1. Choose the hub.
+2. On every Mac, set `machines` to the names of all your Macs and, if the hostname is not the name you want, `machine_name`. Use the same `[telegram]` settings and `away_channel = "telegram"` on every Mac. See [Several Macs on iMessage](setup.md#several-macs-on-imessage) for the name rules.
+3. On every Mac, set `[grpc] host` to that Mac's Tailscale address. The default, `127.0.0.1`, cannot be reached from the other Mac. Restart Harold on every Mac after you change it.
+4. Generate one secret for each member. The hub and that member share it:
+
+   ```bash
+   openssl rand -hex 32
+   ```
+
+5. On the hub, add one `[[peers.members]]` block for each member. Each `name` is in `machines`.
+
+   ```toml
+   [grpc]
+   host = "100.64.0.1"
+
+   [[peers.members]]
+   name = "laptop"
+   url = "http://laptop.tailnet:50060"
+   secret = "a long random string, the same on the hub and on this member"
+   ```
+
+6. On each member, set the role and the hub's address:
+
+   ```toml
+   [grpc]
+   host = "100.64.0.2"
+
+   [peers]
+   role = "member"
+
+   [peers.hub]
+   url = "http://studio.tailnet:50060"
+   secret = "the same string as in the hub's block for this Mac"
+   ```
+
+7. Restart Harold on every Mac.
+
+What to expect:
+
+- A member does not poll Telegram. Only the hub does.
+- A reply with no tag goes to the Mac that sent the latest notification. A tag such as `[laptop]` or `[laptop/harold main:0.0]` goes to that Mac.
+- When the Mac that should receive a reply is off or unreachable, the hub sends `🤖 [studio] could not reach laptop` and does not route the reply itself.
+- After the hub restarts, it keeps every untagged reply itself until the next notification from any Mac.
+
+The calls between Macs are plain HTTP. Tailscale encrypts the traffic and limits who can reach the port. With `grpc.host` on a Tailscale address, the existing RPCs, which check no secret, are reachable from your tailnet; see the [security audit follow-up](../security-audit-2026-02-27.md#follow-up-2026-10-11-grpc-beyond-loopback-for-several-macs). Keep the secrets in `local.toml`, which the installer makes readable by you only. The managed launcher clears Harold overrides inherited from your environment, so an environment variable does not carry a secret to the installed service.
+
+The [routing reference](../references/inbound-message-routing/README.md#several-macs) describes the rules, settings and failure modes.
+
 ## Switching back to iMessage
 
 Set `away_channel` back to `"imessage"` in `local.toml` and restart Harold:
@@ -107,7 +163,7 @@ When `away_channel = "telegram"`:
 
 - **Outbound notifications** use the Telegram Bot API `sendMessage` instead of AppleScript/Messages.app
 - **Reply confirmations** (delivered, error messages) are sent via Telegram instead of iMessage
-- **Inbound listener** long-polls Telegram `getUpdates` instead of watching `chat.db`
+- **Inbound listener** long-polls Telegram `getUpdates` instead of watching `chat.db`. With several Macs, only the hub does this and a member starts no listener
 - Messages from the bot (prefixed with the robot emoji) are filtered out, same as iMessage
 - Only messages from the configured `chat_id` are accepted
 
