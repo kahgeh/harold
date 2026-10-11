@@ -145,7 +145,7 @@ The installer copies the mod to `~/bin/harold/hooks/claude-mod/` and names that 
 | It already names the mod's folder | Writes nothing |
 | The file is missing or is not valid JSON | Writes nothing, prints the line to add, and finishes the install |
 
-A Claude Code session that is already running loads the mod the next time it starts. To load it in one session from a checkout, run `claude --plugin-dir hooks/claude-mod` and set `HAROLD_BIN` to the `harold` program to run.
+If `settings.json` is a symlink, the installer edits the file it points to and keeps the backup beside that file. It keeps the file's permissions, and it writes nothing (and prints the line to add) if the mod's folder path contains `:`, which a `:`-separated list cannot hold. A Claude Code session that is already running loads the mod the next time it starts. To load it in one session from a checkout, run `claude --plugin-dir hooks/claude-mod` and set `HAROLD_BIN` to the `harold` program to run.
 
 The mod interface is early access: a Claude Code release can stop the mod from loading. Harold then falls back to reading the screen, which remains the only source for a session without the mod. Harold's lifecycle report wins for `agent_monitor.hook_grace_ms` (2 seconds); a screen reading that clearly shows the other state replaces it after that. Keep the `Stop` hook from section 3: it sends the `TurnComplete` call that produces notifications, which the mod does not.
 

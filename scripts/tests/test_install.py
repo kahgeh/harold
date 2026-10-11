@@ -1,4 +1,5 @@
 import json
+import re
 import argparse
 import plistlib
 from pathlib import Path
@@ -10,6 +11,9 @@ from unittest.mock import patch
 
 SCRIPTS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SCRIPTS))
+
+RUNTIME_FILES = ('.claude-plugin/plugin.json', 'hooks/hooks.json',
+                 'hooks/register.ts', 'hooks/accept.ts')
 
 
 def artifact_output(repo, directory):
@@ -103,6 +107,7 @@ class InstallTests(unittest.TestCase):
                      'harold-api/proto/harold.proto', 'hooks/shared/harold_turn_complete.py',
                      'hooks/providers/claude_turn_complete.py', 'hooks/providers/codex_turn_complete.py',
                      'hooks/claude-mod/hooks/register.ts', 'hooks/claude-mod/hooks/register.test.ts',
+                     'hooks/claude-mod/hooks/accept.ts', 'hooks/claude-mod/hooks/hooks.json',
                      'hooks/claude-mod/.claude-plugin/plugin.json',
                      'scripts/harold_service.py', 'harold/config/default.toml',
                      'harold/config/local.template.toml'):
@@ -137,7 +142,7 @@ class InstallTests(unittest.TestCase):
         for name in ('target/release/harold', 'target/release/tmx-agent-dash',
                      'harold-api/proto/harold.proto', 'hooks/shared/harold_turn_complete.py',
                      'hooks/providers/claude_turn_complete.py', 'hooks/providers/codex_turn_complete.py',
-                     'hooks/claude-mod/hooks/register.ts',
+                     'hooks/claude-mod/hooks/register.ts', 'hooks/claude-mod/hooks/register.test.ts', 'hooks/claude-mod/hooks/accept.ts', 'hooks/claude-mod/hooks/hooks.json',
                      'hooks/claude-mod/.claude-plugin/plugin.json',
                      'scripts/harold_service.py', 'harold/config/default.toml',
                      'harold/config/local.template.toml'):
@@ -180,7 +185,8 @@ class InstallTests(unittest.TestCase):
             self.assertEqual((self.prefix / 'harold/hooks' / name).read_text(), 'stale')
         mod = self.prefix / 'harold/hooks/claude-mod'
         self.assertEqual((mod / 'hooks/register.ts').read_text(), 'stale')
-        self.assertTrue((mod / '.claude-plugin/plugin.json').is_file())
+        for runtime in RUNTIME_FILES:
+            self.assertTrue((mod / runtime).is_file(), runtime)
         self.assertFalse((mod / 'hooks/register.test.ts').exists())
         self.assertIn(str(mod), self.claude_settings.read_text())
 
@@ -190,7 +196,7 @@ class InstallTests(unittest.TestCase):
         for name in ('harold', 'tmx-agent-dash', 'harold.proto',
                      'hooks/harold_turn_complete.py', 'hooks/claude_turn_complete.py',
                      'hooks/codex_turn_complete.py', 'scripts/harold_service.py',
-                     'hooks/claude-mod/hooks/register.ts',
+                     'hooks/claude-mod/hooks/register.ts', 'hooks/claude-mod/hooks/accept.ts', 'hooks/claude-mod/hooks/hooks.json',
                      'hooks/claude-mod/.claude-plugin/plugin.json',
                      'config/default.toml', 'config/local.template.toml'):
             path = release / name
@@ -239,6 +245,8 @@ class InstallTests(unittest.TestCase):
         mod = self.prefix / 'harold/hooks/claude-mod'
         self.assertEqual((mod / 'hooks/register.ts').read_text(),
                          'release hooks/claude-mod/hooks/register.ts')
+        for runtime in RUNTIME_FILES:
+            self.assertTrue((mod / runtime).is_file(), runtime)
         self.assertIn(str(mod), self.claude_settings.read_text())
 
 
@@ -250,6 +258,21 @@ class InstallTests(unittest.TestCase):
                 self.install.prerequisites(self.prefix, prebuilt=True)
         self.assertNotIn('rustup', str(error.exception))
         self.assertNotIn('protobuf', str(error.exception))
+
+    def test_release_missing_any_mod_runtime_file_is_rejected(self):
+        for missing in RUNTIME_FILES:
+            release = self.prefix / ('release-' + missing.replace('/', '-'))
+            for name in ('harold', 'tmx-agent-dash', 'harold.proto',
+                         'hooks/harold_turn_complete.py', 'hooks/claude_turn_complete.py',
+                         'hooks/codex_turn_complete.py', 'scripts/harold_service.py',
+                         'config/default.toml', 'config/local.template.toml',
+                         *('hooks/claude-mod/' + f for f in RUNTIME_FILES if f != missing)):
+                path = release / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text('x')
+                path.chmod(0o755)
+            with self.assertRaisesRegex(RuntimeError, re.escape(missing)):
+                self.install.prebuilt_files(release)
 
     def test_incomplete_release_rejected(self):
         with self.assertRaisesRegex(RuntimeError, 'Missing regular release file'):
@@ -400,6 +423,35 @@ class ClaudeSettingsTests(unittest.TestCase):
         self.link()
         self.assertEqual(self.backup.read_text(), 'older copy')
         self.assertIn('CLAUDE_CODE_PLUGIN_DIRS', self.path.read_text())
+
+    def test_a_symlinked_settings_file_stays_a_symlink(self):
+        target = Path(self.temp.name) / 'repo' / 'settings.json'
+        target.parent.mkdir()
+        target.write_text('{"model": "x"}')
+        self.path.parent.mkdir(parents=True)
+        self.path.symlink_to(target)
+        self.link()
+        self.assertTrue(self.path.is_symlink())
+        self.assertIn(self.MOD, json.loads(target.read_text())['env']['CLAUDE_CODE_PLUGIN_DIRS'])
+        self.assertEqual((target.parent / 'settings.json.before-harold').read_text(), '{"model": "x"}')
+        self.assertFalse(self.backup.exists())
+
+    def test_rewrite_keeps_permissions_and_non_ascii_text(self):
+        self.write('{"note": "caf\u00e9 \u2014 na\u00efve"}')
+        self.path.chmod(0o600)
+        self.link()
+        self.assertEqual(self.path.stat().st_mode & 0o777, 0o600)
+        text = self.path.read_text(encoding='utf-8')
+        self.assertIn('caf\u00e9 \u2014 na\u00efve', text)
+        self.assertNotIn('\\u00e9', text)
+
+    def test_a_folder_containing_a_colon_cannot_be_listed(self):
+        self.write('{"model": "x"}')
+        outcome = self.install.link_claude_mod(self.path, Path('/odd:dir/claude-mod'))
+        self.assertEqual(self.path.read_text(), '{"model": "x"}')
+        self.assertFalse(self.backup.exists())
+        self.assertIn('/odd:dir/claude-mod', outcome)
+        self.assertIn("':'", outcome)
 
 
 if __name__ == '__main__':

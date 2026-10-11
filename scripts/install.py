@@ -11,6 +11,7 @@ from pathlib import Path
 import plistlib
 import shutil
 import shlex
+import stat
 import subprocess
 import sys
 import tempfile
@@ -20,6 +21,9 @@ import harold_service as service
 
 CLAUDE_SETTINGS = Path.home() / '.claude/settings.json'
 PLUGIN_DIRS = 'CLAUDE_CODE_PLUGIN_DIRS'
+# What the mod loads at runtime; a release or checkout missing any of these loads nothing.
+CLAUDE_MOD_FILES = tuple('hooks/claude-mod/' + name for name in (
+    '.claude-plugin/plugin.json', 'hooks/hooks.json', 'hooks/register.ts', 'hooks/accept.ts'))
 
 
 def reject_symlinks(path):
@@ -82,9 +86,8 @@ def prerequisites(repo, prebuilt=False):
 def prebuilt_files(directory):
     required = ('harold', 'tmx-agent-dash', 'harold.proto',
                 'hooks/harold_turn_complete.py', 'hooks/claude_turn_complete.py',
-                'hooks/codex_turn_complete.py', 'hooks/claude-mod/hooks/register.ts',
-                'hooks/claude-mod/.claude-plugin/plugin.json', 'scripts/harold_service.py',
-                'config/default.toml', 'config/local.template.toml')
+                'hooks/codex_turn_complete.py', 'scripts/harold_service.py',
+                'config/default.toml', 'config/local.template.toml') + CLAUDE_MOD_FILES
     for name in required:
         path = directory / name
         if not path.is_file() or path.is_symlink():
@@ -99,28 +102,36 @@ def link_claude_mod(settings_path, mod_dir):
     """Name the mod's folder in CLAUDE_CODE_PLUGIN_DIRS in Claude Code's settings.
 
     Returns 'added', 'appended' or 'unchanged', or the text of the line for the person to add
-    when the file is missing or not safe to edit; then nothing is written.
+    when the file is missing or not safe to edit; then nothing is written. A symlinked file is
+    edited through the link, and its backup sits beside the real file.
     """
-    manual = 'Add to the "env" block of {}: "{}": "{}"'.format(settings_path, PLUGIN_DIRS, mod_dir)
+    def manual(reason):
+        return '{}. Add to the "env" block of {}: "{}": "{}"'.format(
+            reason, settings_path, PLUGIN_DIRS, mod_dir)
+
+    if ':' in str(mod_dir):
+        return manual("The mod folder contains ':', which a ':'-separated list cannot hold")
+    target = settings_path.resolve()
     try:
-        data = json.loads(settings_path.read_text())
+        data = json.loads(target.read_text(encoding='utf-8'))
     except (OSError, ValueError):
-        return manual
+        return manual('The settings file is missing or is not valid JSON')
     env = data.get('env', {}) if isinstance(data, dict) else None
     if not isinstance(env, dict) or not isinstance(env.get(PLUGIN_DIRS, ''), str):
-        return manual
+        return manual('The settings file has an unexpected shape')
     folders = [folder for folder in env.get(PLUGIN_DIRS, '').split(':') if folder]
     if str(mod_dir) in folders:
         return 'unchanged'
     env[PLUGIN_DIRS] = ':'.join(folders + [str(mod_dir)])
     data['env'] = env
-    backup = settings_path.with_name(settings_path.name + '.before-harold')
+    backup = target.with_name(target.name + '.before-harold')
     if not backup.exists():
-        shutil.copy2(settings_path, backup)
-    temporary = settings_path.with_name(settings_path.name + '.harold-tmp')
-    temporary.write_text(json.dumps(data, indent=2) + '\n')
-    os.replace(temporary, settings_path)
-    return 'appended' if len(folders) else 'added'
+        shutil.copy2(target, backup)
+    temporary = target.with_name(target.name + '.harold-tmp')
+    temporary.write_text(json.dumps(data, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
+    temporary.chmod(stat.S_IMODE(target.stat().st_mode))
+    os.replace(temporary, target)
+    return 'appended' if folders else 'added'
 
 
 def choose_config(supplied, bundle):
