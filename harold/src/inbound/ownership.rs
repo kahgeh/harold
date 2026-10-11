@@ -198,6 +198,40 @@ pub(crate) fn decide_ownership<'a>(
     follows_latest_notifier(Some(tag))
 }
 
+// ---------------------------------------------------------------------------
+// Text that names this Mac. The channel adds the 🤖 marker when it sends.
+// ---------------------------------------------------------------------------
+
+/// The full address of a pane. Pasted at the start of a reply, it reaches that pane.
+pub(crate) fn pane_address(machine: &str, pane_label: &str) -> String {
+    format!("[{machine}/{pane_label}]")
+}
+
+#[allow(
+    dead_code,
+    reason = "called by the channels when they build a notification (Task 6)"
+)]
+pub(crate) fn notification_text(
+    machine: &str,
+    pane_label: &str,
+    body: &str,
+    context: &str,
+) -> String {
+    format!(
+        "{} {} ({context})",
+        pane_address(machine, pane_label),
+        body.trim()
+    )
+}
+
+pub(crate) fn delivered_text(machine: &str, pane_label: &str) -> String {
+    format!("✓ Delivered to {}", pane_address(machine, pane_label))
+}
+
+/// An error reply, prefixed with the Mac that sent it.
+pub(crate) fn error_text(machine: &str, detail: &str) -> String {
+    format!("[{machine}] {detail}")
+}
 #[cfg(test)]
 #[path = "ownership_tests.rs"]
 mod tests;

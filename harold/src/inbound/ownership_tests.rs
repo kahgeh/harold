@@ -1,6 +1,7 @@
 use super::{
-    Marker, NotifierRecord, Ownership, decide_ownership, known_machine_names, latest_notifier,
-    parse_marker, record_marker, record_notification,
+    Marker, NotifierRecord, Ownership, decide_ownership, delivered_text, error_text,
+    known_machine_names, latest_notifier, notification_text, pane_address, parse_marker,
+    record_marker, record_notification,
 };
 
 fn notification(machine: &str) -> Option<Marker<'_>> {
@@ -319,5 +320,78 @@ fn reply_this_mac_does_not_own_names_the_mac_that_does() {
     assert_eq!(
         on_hub("yes, merge it", Some("hub")),
         owned(None, "yes, merge it")
+    );
+}
+
+#[test]
+fn texts_name_the_machine_in_the_forms_the_spec_gives() {
+    assert_eq!(
+        pane_address("studio", "alir-app main:0.1"),
+        "[studio/alir-app main:0.1]"
+    );
+    assert_eq!(
+        notification_text("studio", "alir-app main:0.1", " Tests pass. ", "alir"),
+        "[studio/alir-app main:0.1] Tests pass. (alir)"
+    );
+    assert_eq!(
+        delivered_text("studio", "alir-app main:0.1"),
+        "✓ Delivered to [studio/alir-app main:0.1]"
+    );
+    assert_eq!(
+        error_text("studio", "No active agent sessions found."),
+        "[studio] No active agent sessions found."
+    );
+}
+
+/// `text` as the channel sends it and a listener reads it back.
+fn as_sent(text: &str) -> String {
+    format!("🤖 {text}")
+}
+
+#[test]
+fn sent_texts_are_read_back_as_the_markers_they_are() {
+    let sent = as_sent(&notification_text(
+        "studio",
+        "alir-app main:0.1",
+        "Tests pass.",
+        "alir",
+    ));
+    assert_eq!(
+        parse_marker(&sent),
+        Some(Marker {
+            machine: "studio",
+            is_notification: true,
+        })
+    );
+
+    let sent = as_sent(&error_text("studio", "No active agent sessions found."));
+    assert_eq!(
+        parse_marker(&sent),
+        Some(Marker {
+            machine: "studio",
+            is_notification: false,
+        })
+    );
+
+    // A confirmation says where a reply went. It is not a notification, so it must not
+    // move the latest notifier.
+    let sent = as_sent(&delivered_text("studio", "alir-app main:0.1"));
+    assert_eq!(parse_marker(&sent), None);
+}
+
+#[test]
+fn address_copied_from_a_confirmation_reaches_the_same_pane() {
+    let reply = format!(
+        "{} revert that",
+        pane_address("studio", "alir-app main:0.1")
+    );
+
+    assert_eq!(
+        decide_ownership(&reply, false, "studio", &known(), Some("laptop")),
+        owned(Some("alir-app main:0.1"), "revert that")
+    );
+    assert_eq!(
+        decide_ownership(&reply, false, "laptop", &known(), Some("laptop")),
+        owned_by("studio")
     );
 }

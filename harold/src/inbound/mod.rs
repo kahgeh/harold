@@ -13,6 +13,7 @@ use crate::util::ai_cli_env;
 
 pub use directory::AgentAddress;
 use directory::AgentDirectory;
+use ownership::{Ownership, decide_ownership, delivered_text, error_text};
 
 // ---------------------------------------------------------------------------
 // State — agent routing (in-memory; Harold owns all routing state)
@@ -197,20 +198,51 @@ pub(crate) fn resolve_pane<'a>(
 // Route a received reply — called from the event handler.
 // ---------------------------------------------------------------------------
 
-/// Route a received reply to the appropriate agent pane.
+/// Route a received reply to the appropriate agent pane, if this Mac owns it.
 ///
 /// **Must be called from `spawn_blocking`** — this function uses
 /// `Handle::block_on` internally and will deadlock if called from an
 /// async task on the tokio worker pool.
-pub fn route_inbound_message(text: &str) -> Result<DeliveryOutcome, String> {
-    let directory = AgentDirectory::TmuxProcessScan;
-    info!(text, "route_inbound_message entered");
-    let (tag, body) = parse_tag(text);
+pub fn route_inbound_message(text: &str, forwarded: bool) -> Result<DeliveryOutcome, String> {
+    info!(text, forwarded, "route_inbound_message entered");
+    let machine = get_settings().machine_name.as_str();
+    let ownership = decide_ownership(
+        text,
+        forwarded,
+        machine,
+        &ownership::known_machine_names(),
+        ownership::latest_notifier().as_deref(),
+    );
+    route_if_owned(ownership, |pane_tag, body| {
+        route_owned_reply(machine, pane_tag, body)
+    })
+}
 
+/// Hand an owned reply to `route`. A reply another Mac owns is skipped here, before any
+/// pane discovery, tmux call or message to the user.
+fn route_if_owned(
+    ownership: Ownership<'_>,
+    route: impl FnOnce(Option<&str>, &str) -> Result<DeliveryOutcome, String>,
+) -> Result<DeliveryOutcome, String> {
+    match ownership {
+        Ownership::Owned { pane_tag, body } => route(pane_tag, body),
+        Ownership::NotOwned { owner } => {
+            info!(owner, "reply dropped (another Mac owns it)");
+            Ok(DeliveryOutcome::Skipped)
+        }
+    }
+}
+
+fn route_owned_reply(
+    machine: &str,
+    tag: Option<&str>,
+    body: &str,
+) -> Result<DeliveryOutcome, String> {
+    let directory = AgentDirectory::TmuxProcessScan;
     let panes = directory.discover();
 
     if panes.is_empty() {
-        send_reply("No active agent sessions found.")?;
+        send_reply(&error_text(machine, "No active agent sessions found."))?;
         return Ok(DeliveryOutcome::Skipped);
     }
 
@@ -225,7 +257,7 @@ pub fn route_inbound_message(text: &str) -> Result<DeliveryOutcome, String> {
                 Some(t) => format!("No pane matching '{t}'. Available: {available}"),
                 None => format!("No active pane found. Available: {available}"),
             };
-            send_reply(&msg)?;
+            send_reply(&error_text(machine, &msg))?;
             Ok(DeliveryOutcome::Skipped)
         }
         Some((agent, cleaned_body)) => {
@@ -236,16 +268,17 @@ pub fn route_inbound_message(text: &str) -> Result<DeliveryOutcome, String> {
                     .map(|p| p.label())
                     .collect::<Vec<_>>()
                     .join(", ");
-                send_reply(&format!(
+                let msg = format!(
                     "Pane {} is no longer active. Available: {}",
                     agent.label(),
                     available
-                ))?;
+                );
+                send_reply(&error_text(machine, &msg))?;
                 return Ok(DeliveryOutcome::Skipped);
             }
             info!(label = %agent.label(), "routing reply");
             agent.relay(&format!("📱 {cleaned_body}"))?;
-            if let Err(error) = send_reply(&format!("✓ Delivered to [{}]", agent.label())) {
+            if let Err(error) = send_reply(&delivered_text(machine, agent.label())) {
                 warn!(error, "routed message but failed to send confirmation");
             }
             Ok(DeliveryOutcome::Delivered)

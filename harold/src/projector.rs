@@ -56,7 +56,8 @@ impl ProductionDispatcher {
                             "invalid InboundMessageReceived payload: {error}"
                         ))
                     })?;
-                route_inbound_message(&message.text).map_err(DispatchError::Retryable)
+                route_inbound_message(&message.text, message.forwarded)
+                    .map_err(DispatchError::Retryable)
             }
             other => Err(DispatchError::Permanent(format!(
                 "unknown event type: {other}"
