@@ -105,3 +105,58 @@ test('a turn.start that carries an agentId reports nothing', async ($, on) => {
   await $.turn.start({ text: 'hi', turnId: 't1', agentId: 'a1' } as never)
   expect(calls).toEqual([])
 })
+
+test('a turn.start with agentId undefined still reports', async ($, on) => {
+  const calls = bottom(on, ENV, async () => ({ exitCode: 0 }))
+  await $.turn.start({ text: 'hi', turnId: 't1', agentId: undefined } as never)
+  expect(calls.map(c => c.argv[2])).toEqual(['turn-started'])
+})
+
+test('a pane id that is not % and digits reports nothing', async ($, on) => {
+  const calls = bottom(on, { TMUX_PANE: '47' }, async () => ({ exitCode: 0 }))
+  await $.turn.start({ text: 'hi', turnId: 't1' })
+  await $.turn.complete({ ...COMPLETE, reason: 'answer' })
+  expect(calls).toEqual([])
+})
+
+test('an event after a rejecting run still reports', async ($, on) => {
+  let first = true
+  const calls = bottom(on, ENV, async () => {
+    if (first) {
+      first = false
+      throw new Error('no harold')
+    }
+    return { exitCode: 0 }
+  })
+  await $.turn.start({ text: 'hi', turnId: 't1' })
+  await $.turn.complete({ ...COMPLETE, reason: 'answer' })
+  expect(calls.map(c => c.argv[2])).toEqual(['turn-started', 'turn-completed'])
+})
+
+test('a report queued behind a slow failing one is skipped, so a turn waits about one call', async ($, on) => {
+  const calls = bottom(on, ENV, async () => {
+    await new Promise(r => setTimeout(r, 80))
+    throw new Error('timed out')
+  })
+  const started = Date.now()
+  const [start, done] = await Promise.all([
+    $.turn.start({ text: 'hi', turnId: 't1' }),
+    $.turn.complete({ ...COMPLETE, reason: 'answer' }),
+  ])
+  expect(start).toEqual({ turnId: 't1' })
+  expect(done).toEqual({ text: 'done' })
+  expect(calls.map(c => c.argv[2])).toEqual(['turn-started'])
+  expect(Date.now() - started).toBeLessThan(150)
+})
+
+test('a report queued behind a slow successful one still goes out, in order', async ($, on) => {
+  const calls = bottom(on, ENV, async c => {
+    if (c.argv.includes('turn-started')) await new Promise(r => setTimeout(r, 40))
+    return { exitCode: 0 }
+  })
+  await Promise.all([
+    $.turn.start({ text: 'hi', turnId: 't1' }),
+    $.turn.complete({ ...COMPLETE, reason: 'answer' }),
+  ])
+  expect(calls.map(c => c.argv[2])).toEqual(['turn-started', 'turn-completed'])
+})

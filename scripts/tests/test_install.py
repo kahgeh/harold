@@ -474,6 +474,24 @@ class ClaudeSettingsTests(unittest.TestCase):
                 self.assertEqual(self.install.link_claude_mod(self.path, mod), 'unchanged')
             self.assertEqual(self.path.read_text(), text)
 
+    def test_a_number_json_cannot_write_back_leaves_the_file_alone(self):
+        self.write('{"big": 1e999}')
+        outcome = self.link()
+        self.assertEqual(self.path.read_text(), '{"big": 1e999}')
+        self.assertIn('CLAUDE_CODE_PLUGIN_DIRS', outcome)
+        self.assertEqual(sorted(p.name for p in self.path.parent.iterdir()), ['settings.json'])
+
+    def test_symlinks_at_the_backup_and_temp_paths_are_not_written_through(self):
+        self.write('{"model": "x"}')
+        victim = Path(self.temp.name) / 'victim'
+        victim.write_text('keep')
+        self.backup.symlink_to(victim)
+        self.path.with_name('settings.json.harold-tmp').symlink_to(victim)
+        self.link()
+        self.assertEqual(victim.read_text(), 'keep')
+        self.assertIn(self.MOD, self.path.read_text())
+        self.assertFalse(self.path.is_symlink())
+
 
 if __name__ == '__main__':
     unittest.main()

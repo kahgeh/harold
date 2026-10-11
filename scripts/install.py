@@ -126,21 +126,24 @@ def link_claude_mod(settings_path, mod_dir):
     env[PLUGIN_DIRS] = ':'.join(folders + [str(mod_dir)])
     data['env'] = env
     backup = target.with_name(target.name + '.before-harold')
-    temporary = target.with_name(target.name + '.harold-tmp')
+    temporary = None
     try:
-        text = json.dumps(data, indent=2, ensure_ascii=False) + '\n'
+        text = json.dumps(data, indent=2, ensure_ascii=False, allow_nan=False) + '\n'
         text.encode('utf-8')
-        if not backup.exists():
+        # lexists: an existing symlink there counts as a copy, and is never written through.
+        if not os.path.lexists(backup):
             shutil.copy2(target, backup)
         # Owner-only from the first byte: the file can hold tokens in its env block.
-        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        descriptor, name = tempfile.mkstemp(dir=target.parent, prefix=target.name + '.', suffix='.harold-tmp')
+        temporary = Path(name)
         with os.fdopen(descriptor, 'w', encoding='utf-8') as handle:
             handle.write(text)
         temporary.chmod(stat.S_IMODE(target.stat().st_mode))
         os.replace(temporary, target)
     except (OSError, ValueError) as error:
         try:
-            temporary.unlink(missing_ok=True)
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
         except OSError:
             pass
         return manual('The settings file could not be written ({})'.format(getattr(error, 'strerror', None) or error))

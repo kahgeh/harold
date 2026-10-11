@@ -23,8 +23,9 @@ program, for a mod run from a checkout.
 
 Each hook starts its report, calls `next(e)`, then waits for the report before returning.
 `turn.start` fires before the first model call, so the turn most likely waits for the report:
-a few milliseconds normally. One promise chain keeps reports in the order the events fired,
-and a dead or hung Harold costs a turn at most the one bounded call: `harold accept` gives up
+a few milliseconds normally. One promise chain keeps reports in the order the events fired, and a report that had to wait
+behind one that failed or timed out is skipped (the screen reading covers the gap). A dead or
+hung Harold therefore costs a turn at most the one bounded call: `harold accept` gives up
 after 3 seconds and the mod after 4. Every failure is swallowed and nothing is shown to the
 person.
 
