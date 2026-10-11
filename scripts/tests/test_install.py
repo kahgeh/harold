@@ -30,6 +30,13 @@ class InstallTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.prefix = Path(self.temp.name).resolve() / 'prefix with spaces'
         self.prefix.mkdir()
+        # Never the real ~/.claude/settings.json.
+        self.claude_settings = Path(self.temp.name).resolve() / 'claude/settings.json'
+        self.claude_settings.parent.mkdir()
+        self.claude_settings.write_text('{}')
+        patcher = patch.object(install, 'CLAUDE_SETTINGS', self.claude_settings)
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def test_symlinked_managed_data_rejected_before_mutation(self):
         bundle = self.prefix / 'harold'
@@ -95,6 +102,8 @@ class InstallTests(unittest.TestCase):
         for name in ('target/release/harold', 'target/release/tmx-agent-dash',
                      'harold-api/proto/harold.proto', 'hooks/shared/harold_turn_complete.py',
                      'hooks/providers/claude_turn_complete.py', 'hooks/providers/codex_turn_complete.py',
+                     'hooks/claude-mod/hooks/register.ts', 'hooks/claude-mod/hooks/register.test.ts',
+                     'hooks/claude-mod/.claude-plugin/plugin.json',
                      'scripts/harold_service.py', 'harold/config/default.toml',
                      'harold/config/local.template.toml'):
             path = repo / name
@@ -128,6 +137,8 @@ class InstallTests(unittest.TestCase):
         for name in ('target/release/harold', 'target/release/tmx-agent-dash',
                      'harold-api/proto/harold.proto', 'hooks/shared/harold_turn_complete.py',
                      'hooks/providers/claude_turn_complete.py', 'hooks/providers/codex_turn_complete.py',
+                     'hooks/claude-mod/hooks/register.ts',
+                     'hooks/claude-mod/.claude-plugin/plugin.json',
                      'scripts/harold_service.py', 'harold/config/default.toml',
                      'harold/config/local.template.toml'):
             path = repo / name
@@ -167,6 +178,11 @@ class InstallTests(unittest.TestCase):
         self.assertEqual((self.prefix / 'tmx-agent-dash').read_text(), 'built tmx-agent-dash')
         for name in ('claude_turn_complete.py', 'codex_turn_complete.py'):
             self.assertEqual((self.prefix / 'harold/hooks' / name).read_text(), 'stale')
+        mod = self.prefix / 'harold/hooks/claude-mod'
+        self.assertEqual((mod / 'hooks/register.ts').read_text(), 'stale')
+        self.assertTrue((mod / '.claude-plugin/plugin.json').is_file())
+        self.assertFalse((mod / 'hooks/register.test.ts').exists())
+        self.assertIn(str(mod), self.claude_settings.read_text())
 
 
     def test_prebuilt_install_needs_no_source_or_build_tools(self):
@@ -174,6 +190,8 @@ class InstallTests(unittest.TestCase):
         for name in ('harold', 'tmx-agent-dash', 'harold.proto',
                      'hooks/harold_turn_complete.py', 'hooks/claude_turn_complete.py',
                      'hooks/codex_turn_complete.py', 'scripts/harold_service.py',
+                     'hooks/claude-mod/hooks/register.ts',
+                     'hooks/claude-mod/.claude-plugin/plugin.json',
                      'config/default.toml', 'config/local.template.toml'):
             path = release / name
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -218,6 +236,10 @@ class InstallTests(unittest.TestCase):
         for name in ('claude_turn_complete.py', 'codex_turn_complete.py'):
             self.assertEqual((self.prefix / 'harold/hooks' / name).read_text(),
                              'release hooks/' + name)
+        mod = self.prefix / 'harold/hooks/claude-mod'
+        self.assertEqual((mod / 'hooks/register.ts').read_text(),
+                         'release hooks/claude-mod/hooks/register.ts')
+        self.assertIn(str(mod), self.claude_settings.read_text())
 
 
     def test_prebuilt_requires_runtime_tools(self):
@@ -304,6 +326,80 @@ class ServiceTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, '^Configuration validation failed') as error:
                 self.service.validated_metadata(metadata)
         self.assertNotIn('secret', str(error.exception))
+
+
+class ClaudeSettingsTests(unittest.TestCase):
+    MOD = '/home/u/bin/harold/hooks/claude-mod'
+
+    def setUp(self):
+        import install
+        self.install = install
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.path = Path(self.temp.name) / '.claude' / 'settings.json'
+        self.backup = self.path.with_name('settings.json.before-harold')
+
+    def link(self):
+        return self.install.link_claude_mod(self.path, Path(self.MOD))
+
+    def write(self, text):
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.write_text(text)
+
+    def assert_untouched(self, text, outcome):
+        self.assertEqual(self.path.read_text(), text)
+        self.assertFalse(self.backup.exists())
+        self.assertIn('CLAUDE_CODE_PLUGIN_DIRS', outcome)
+        self.assertIn(self.MOD, outcome)
+
+    def test_missing_file_writes_nothing_and_prints_the_line(self):
+        outcome = self.link()
+        self.assertFalse(self.path.exists())
+        self.assertFalse(self.backup.exists())
+        self.assertIn('CLAUDE_CODE_PLUGIN_DIRS', outcome)
+        self.assertIn(self.MOD, outcome)
+
+    def test_unsafe_files_are_left_alone(self):
+        for text in ('{not json', '[]', '{"env": []}', '{"env": {"CLAUDE_CODE_PLUGIN_DIRS": 3}}'):
+            self.write(text)
+            self.assert_untouched(text, self.link())
+
+    def test_adds_the_variable_and_keeps_everything_else(self):
+        original = '{"model": "x", "env": {"A": "1"}, "hooks": {"Stop": []}}'
+        self.write(original)
+        self.link()
+        self.assertEqual(json.loads(self.path.read_text()), {
+            'model': 'x', 'hooks': {'Stop': []},
+            'env': {'A': '1', 'CLAUDE_CODE_PLUGIN_DIRS': self.MOD}})
+        self.assertEqual(self.backup.read_text(), original)
+
+    def test_adds_env_when_there_is_none(self):
+        self.write('{"model": "x"}')
+        self.link()
+        self.assertEqual(json.loads(self.path.read_text()),
+                         {'model': 'x', 'env': {'CLAUDE_CODE_PLUGIN_DIRS': self.MOD}})
+
+    def test_appends_to_other_folders(self):
+        self.write('{"env": {"CLAUDE_CODE_PLUGIN_DIRS": "/a:/b"}}')
+        self.link()
+        self.assertEqual(json.loads(self.path.read_text())['env']['CLAUDE_CODE_PLUGIN_DIRS'],
+                         '/a:/b:' + self.MOD)
+        self.assertTrue(self.backup.exists())
+
+    def test_already_named_writes_nothing(self):
+        for value in (self.MOD, '/a:{}:/b'.format(self.MOD), '/a:{}:'.format(self.MOD)):
+            text = json.dumps({'env': {'CLAUDE_CODE_PLUGIN_DIRS': value}})
+            self.write(text)
+            self.assertEqual(self.link(), 'unchanged')
+            self.assertEqual(self.path.read_text(), text)
+            self.assertFalse(self.backup.exists())
+
+    def test_an_existing_backup_is_never_overwritten(self):
+        self.write('{"model": "new"}')
+        self.backup.write_text('older copy')
+        self.link()
+        self.assertEqual(self.backup.read_text(), 'older copy')
+        self.assertIn('CLAUDE_CODE_PLUGIN_DIRS', self.path.read_text())
 
 
 if __name__ == '__main__':

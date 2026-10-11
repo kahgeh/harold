@@ -18,6 +18,9 @@ import uuid
 
 import harold_service as service
 
+CLAUDE_SETTINGS = Path.home() / '.claude/settings.json'
+PLUGIN_DIRS = 'CLAUDE_CODE_PLUGIN_DIRS'
+
 
 def reject_symlinks(path):
     for candidate in [path] + list(path.parents):
@@ -79,7 +82,8 @@ def prerequisites(repo, prebuilt=False):
 def prebuilt_files(directory):
     required = ('harold', 'tmx-agent-dash', 'harold.proto',
                 'hooks/harold_turn_complete.py', 'hooks/claude_turn_complete.py',
-                'hooks/codex_turn_complete.py', 'scripts/harold_service.py',
+                'hooks/codex_turn_complete.py', 'hooks/claude-mod/hooks/register.ts',
+                'hooks/claude-mod/.claude-plugin/plugin.json', 'scripts/harold_service.py',
                 'config/default.toml', 'config/local.template.toml')
     for name in required:
         path = directory / name
@@ -89,6 +93,34 @@ def prebuilt_files(directory):
         if not os.access(directory / name, os.X_OK):
             raise RuntimeError('Release binary is not executable: {}'.format(directory / name))
     return {name: directory / name for name in ('harold', 'tmx-agent-dash')}
+
+
+def link_claude_mod(settings_path, mod_dir):
+    """Name the mod's folder in CLAUDE_CODE_PLUGIN_DIRS in Claude Code's settings.
+
+    Returns 'added', 'appended' or 'unchanged', or the text of the line for the person to add
+    when the file is missing or not safe to edit; then nothing is written.
+    """
+    manual = 'Add to the "env" block of {}: "{}": "{}"'.format(settings_path, PLUGIN_DIRS, mod_dir)
+    try:
+        data = json.loads(settings_path.read_text())
+    except (OSError, ValueError):
+        return manual
+    env = data.get('env', {}) if isinstance(data, dict) else None
+    if not isinstance(env, dict) or not isinstance(env.get(PLUGIN_DIRS, ''), str):
+        return manual
+    folders = [folder for folder in env.get(PLUGIN_DIRS, '').split(':') if folder]
+    if str(mod_dir) in folders:
+        return 'unchanged'
+    env[PLUGIN_DIRS] = ':'.join(folders + [str(mod_dir)])
+    data['env'] = env
+    backup = settings_path.with_name(settings_path.name + '.before-harold')
+    if not backup.exists():
+        shutil.copy2(settings_path, backup)
+    temporary = settings_path.with_name(settings_path.name + '.harold-tmp')
+    temporary.write_text(json.dumps(data, indent=2) + '\n')
+    os.replace(temporary, settings_path)
+    return 'appended' if len(folders) else 'added'
 
 
 def choose_config(supplied, bundle):
@@ -250,6 +282,8 @@ def install(args, repo):
             for name in ('claude_turn_complete.py', 'codex_turn_complete.py'):
                 source = assets / ('hooks' if prebuilt is not None else 'hooks/providers') / name
                 shutil.copy2(source, stage / 'hooks' / name)
+            shutil.copytree(assets / 'hooks/claude-mod', stage / 'hooks/claude-mod',
+                            ignore=shutil.ignore_patterns('*.test.ts'))
             shutil.copy2(assets / 'scripts/harold_service.py', stage / 'service.py')
             for name in ('default.toml', 'local.template.toml'):
                 shutil.copy2(assets / ('config' if prebuilt is not None else 'harold/config') / name, stage / 'config' / name)
@@ -297,6 +331,8 @@ def install(args, repo):
             pid = service.start(metadata)
             print('Harold ready at {} (LaunchAgent PID {}).\nControl: {}\nConfig: {}\nLog: {}'.format(
                 metadata['grpc_addr'], pid, prefix / 'haroldctl', bundle / 'config/local.toml', bundle / 'harold.log'))
+            outcome = link_claude_mod(CLAUDE_SETTINGS, bundle / 'hooks/claude-mod')
+            print('Claude Code mod: {}'.format(outcome), flush=True)
 
 
 def main():
