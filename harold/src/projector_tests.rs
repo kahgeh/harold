@@ -6,7 +6,7 @@ use serde_json::json;
 
 use super::{
     DeliveryDispatcher, DispatchError, ProductionDispatcher, handle_next_delivery,
-    project_and_publish_agent_snapshot, run_event_handler,
+    project_and_publish_agent_snapshot, route_message, run_event_handler,
 };
 use crate::agent::domain::{
     AgentEvent, AgentIncarnation, AgentPaneObservation, AgentPaneObserved, CompletionSummaryUpdate,
@@ -475,4 +475,35 @@ fn production_dispatcher_reads_the_messaging_switch() {
     crate::outbound::set_messaging_paused(false);
     let outcome = ProductionDispatcher.dispatch(&delivery);
     assert!(matches!(outcome, Err(DispatchError::Permanent(_))));
+}
+
+#[test]
+fn stored_reply_reaches_routing_with_its_forwarded_flag() {
+    for forwarded in [false, true] {
+        let message = InboundMessage {
+            text: "[studio] carry on".into(),
+            forwarded,
+        };
+        let mut routed = None;
+
+        let outcome = route_message(&message, |text, flag| {
+            routed = Some((text.to_string(), flag));
+            Ok(DeliveryOutcome::Delivered)
+        });
+
+        assert!(matches!(outcome, Ok(DeliveryOutcome::Delivered)));
+        assert_eq!(routed, Some(("[studio] carry on".to_string(), forwarded)));
+    }
+}
+
+#[test]
+fn routing_failure_of_a_stored_reply_is_retryable() {
+    let message = InboundMessage {
+        text: "carry on".into(),
+        forwarded: false,
+    };
+
+    let outcome = route_message(&message, |_, _| Err("tmux failed".to_string()));
+
+    assert!(matches!(outcome, Err(DispatchError::Retryable(error)) if error == "tmux failed"));
 }

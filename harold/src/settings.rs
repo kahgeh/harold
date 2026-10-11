@@ -838,4 +838,31 @@ mod tests {
         let name = &crate::settings::get_settings().machine_name;
         assert!(is_valid_machine_name(name), "{name:?}");
     }
+
+    /// The shipped default configuration with `overrides` laid over it.
+    fn default_settings_with(overrides: &str) -> super::Settings {
+        let default = format!("{}/config/default", env!("CARGO_MANIFEST_DIR"));
+        Config::builder()
+            .add_source(File::new(&default, FileFormat::Toml))
+            .add_source(File::from_str(overrides, FileFormat::Toml))
+            .build()
+            .and_then(Config::try_deserialize)
+            .expect("default configuration with overrides should deserialize")
+    }
+
+    #[test]
+    fn validate_reports_an_invalid_or_empty_machine_name() {
+        let machine_name_errors = |name: &str| {
+            default_settings_with(&format!("machine_name = \"{name}\""))
+                .validate()
+                .into_iter()
+                .filter(|error| error.starts_with("machine_name "))
+                .collect::<Vec<_>>()
+        };
+
+        assert!(machine_name_errors("studio").is_empty());
+        for name in ["", "my mac", "a/b", "[a]", "harold:0.1"] {
+            assert_eq!(machine_name_errors(name).len(), 1, "{name:?}");
+        }
+    }
 }

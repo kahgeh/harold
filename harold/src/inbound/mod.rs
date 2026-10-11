@@ -214,7 +214,7 @@ pub fn route_inbound_message(text: &str, forwarded: bool) -> Result<DeliveryOutc
         ownership::latest_notifier().as_deref(),
     );
     route_if_owned(ownership, |pane_tag, body| {
-        route_owned_reply(machine, pane_tag, body)
+        route_owned_reply(&TmuxEnv, machine, pane_tag, body)
     })
 }
 
@@ -233,16 +233,45 @@ fn route_if_owned(
     }
 }
 
+/// What routing an owned reply needs from the machine around it: the panes, the relay and
+/// the reply to the user. A seam so the texts sent to the user are tested without tmux.
+trait RoutingEnv {
+    fn discover(&self) -> Vec<AgentAddress>;
+    fn is_alive(&self, agent: &AgentAddress) -> bool;
+    fn relay(&self, agent: &AgentAddress, text: &str) -> Result<(), String>;
+    fn send_reply(&self, text: &str) -> Result<(), String>;
+}
+
+struct TmuxEnv;
+
+impl RoutingEnv for TmuxEnv {
+    fn discover(&self) -> Vec<AgentAddress> {
+        AgentDirectory::TmuxProcessScan.discover()
+    }
+
+    fn is_alive(&self, agent: &AgentAddress) -> bool {
+        AgentDirectory::TmuxProcessScan.is_alive(agent)
+    }
+
+    fn relay(&self, agent: &AgentAddress, text: &str) -> Result<(), String> {
+        agent.relay(text)
+    }
+
+    fn send_reply(&self, text: &str) -> Result<(), String> {
+        send_reply(text)
+    }
+}
+
 fn route_owned_reply(
+    env: &impl RoutingEnv,
     machine: &str,
     tag: Option<&str>,
     body: &str,
 ) -> Result<DeliveryOutcome, String> {
-    let directory = AgentDirectory::TmuxProcessScan;
-    let panes = directory.discover();
+    let panes = env.discover();
 
     if panes.is_empty() {
-        send_reply(&error_text(machine, "No active agent sessions found."))?;
+        env.send_reply(&error_text(machine, "No active agent sessions found."))?;
         return Ok(DeliveryOutcome::Skipped);
     }
 
@@ -257,11 +286,11 @@ fn route_owned_reply(
                 Some(t) => format!("No pane matching '{t}'. Available: {available}"),
                 None => format!("No active pane found. Available: {available}"),
             };
-            send_reply(&error_text(machine, &msg))?;
+            env.send_reply(&error_text(machine, &msg))?;
             Ok(DeliveryOutcome::Skipped)
         }
         Some((agent, cleaned_body)) => {
-            if !directory.is_alive(agent) {
+            if !env.is_alive(agent) {
                 let available = panes
                     .iter()
                     .filter(|p| !p.same_target(agent))
@@ -273,12 +302,12 @@ fn route_owned_reply(
                     agent.label(),
                     available
                 );
-                send_reply(&error_text(machine, &msg))?;
+                env.send_reply(&error_text(machine, &msg))?;
                 return Ok(DeliveryOutcome::Skipped);
             }
             info!(label = %agent.label(), "routing reply");
-            agent.relay(&format!("📱 {cleaned_body}"))?;
-            if let Err(error) = send_reply(&delivered_text(machine, agent.label())) {
+            env.relay(agent, &format!("📱 {cleaned_body}"))?;
+            if let Err(error) = env.send_reply(&delivered_text(machine, agent.label())) {
                 warn!(error, "routed message but failed to send confirmation");
             }
             Ok(DeliveryOutcome::Delivered)

@@ -50,6 +50,14 @@ fn marked(msg: &str) -> String {
     format!("{HAROLD_MARKER} {msg}")
 }
 
+/// The `sendMessage` request body for `msg`, marked as written by Harold.
+fn send_message_body(chat_id: i64, msg: &str) -> serde_json::Value {
+    serde_json::json!({
+        "chat_id": chat_id,
+        "text": marked(msg),
+    })
+}
+
 /// Send a plain text message to the configured Telegram chat.
 /// Must be called from a `spawn_blocking` context.
 pub(crate) fn send_telegram(msg: &str) -> Result<(), String> {
@@ -64,10 +72,7 @@ pub(crate) fn send_telegram(msg: &str) -> Result<(), String> {
     };
 
     info!(msg, "sending Telegram message");
-    let body = serde_json::json!({
-        "chat_id": chat_id,
-        "text": marked(msg),
-    });
+    let body = send_message_body(chat_id, msg);
 
     let res = client()
         .post(bot_url(token, "sendMessage"))
@@ -165,6 +170,11 @@ pub(crate) fn send_voice(ogg_path: &str, caption: &str) {
 // Away notification via Telegram — returns the source agent address
 // ---------------------------------------------------------------------------
 
+/// The notification text for `turn`, naming the Mac that sends it.
+fn notification_message(machine: &str, turn: &TurnCompleted, main_body: &str) -> String {
+    notification_text(machine, &turn.pane_label, main_body, &turn.main_context)
+}
+
 pub(crate) fn notify_away(
     turn: &TurnCompleted,
     _trace_id: &str,
@@ -172,12 +182,7 @@ pub(crate) fn notify_away(
     let body = summarise_for_notification(&turn.assistant_message, &turn.last_user_prompt);
 
     let (main_body, question) = split_body(&body);
-    let message = notification_text(
-        &get_settings().machine_name,
-        &turn.pane_label,
-        main_body,
-        &turn.main_context,
-    );
+    let message = notification_message(&get_settings().machine_name, turn, main_body);
 
     send_telegram(&message)?;
     info!("Telegram notification sent");
@@ -389,8 +394,9 @@ pub(crate) async fn listen(store: Arc<HaroldStore>, mut shutdown: watch::Receive
 
 #[cfg(test)]
 mod tests {
-    use super::{Chat, Message, marked, routable_text};
+    use super::{Chat, Message, marked, notification_message, routable_text, send_message_body};
     use crate::inbound::ownership::{delivered_text, error_text, notification_text, parse_marker};
+    use crate::store::TurnCompleted;
 
     fn message(chat_id: i64, text: &str) -> Option<Message> {
         Some(Message {
@@ -458,5 +464,31 @@ mod tests {
                 "{text:?}"
             );
         }
+    }
+
+    #[test]
+    fn text_sent_to_telegram_is_marked_as_harold() {
+        let body = send_message_body(7, "✓ Delivered to [studio/alir-app main:0.1]");
+
+        assert_eq!(body["chat_id"], 7);
+        assert_eq!(body["text"], "🤖 ✓ Delivered to [studio/alir-app main:0.1]");
+    }
+
+    #[test]
+    fn notification_names_the_machine_and_the_pane() {
+        let turn = TurnCompleted {
+            pane_id: "%1".into(),
+            pane_label: "alir-app main:0.1".into(),
+            last_user_prompt: "prompt".into(),
+            assistant_message: "message".into(),
+            main_context: "alir".into(),
+            agent_incarnation: None,
+            work_summary: crate::agent::domain::CompletionSummaryUpdate::Unchanged,
+        };
+
+        assert_eq!(
+            notification_message("studio", &turn, " Tests pass. "),
+            "[studio/alir-app main:0.1] Tests pass. (alir)"
+        );
     }
 }

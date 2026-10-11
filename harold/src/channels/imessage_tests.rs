@@ -4,12 +4,13 @@ use std::time::{Duration, Instant};
 
 use crate::channels::{split_body, truncate_body};
 use crate::inbound::ownership::{delivered_text, error_text, notification_text, parse_marker};
-use crate::store::HaroldStore;
+use crate::store::{HaroldStore, TurnCompleted};
 use crate::util::sanitise_for_applescript;
 
 use super::{
     Direction, FetchedRow, NotificationPlan, RecentRows, TWIN_WINDOW, is_marked_as_harold,
-    max_rowid_of, notification_plan, parse_max_rowid, record_row, send_script, wait_for_start_row,
+    max_rowid_of, notification_message, notification_plan, parse_max_rowid, record_row,
+    send_script, wait_for_start_row,
 };
 
 #[test]
@@ -558,4 +559,25 @@ async fn a_shutdown_while_the_database_is_unreadable_ends_the_wait_without_a_sta
         .await
         .expect("the wait did not end on shutdown");
     assert_eq!(start, None);
+}
+
+#[test]
+fn notification_is_sent_naming_the_machine_and_the_pane() {
+    let turn = TurnCompleted {
+        pane_id: "%1".into(),
+        pane_label: "alir-app main:0.1".into(),
+        last_user_prompt: "prompt".into(),
+        assistant_message: "message".into(),
+        main_context: "alir".into(),
+        agent_incarnation: None,
+        work_summary: crate::agent::domain::CompletionSummaryUpdate::Unchanged,
+    };
+
+    let message = notification_message("studio", &turn, " Tests pass. ");
+
+    assert_eq!(message, "[studio/alir-app main:0.1] Tests pass. (alir)");
+    assert_eq!(
+        sent_text(&message),
+        "🤖 [studio/alir-app main:0.1] Tests pass. (alir)"
+    );
 }

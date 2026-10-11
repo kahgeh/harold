@@ -56,14 +56,21 @@ impl ProductionDispatcher {
                             "invalid InboundMessageReceived payload: {error}"
                         ))
                     })?;
-                route_inbound_message(&message.text, message.forwarded)
-                    .map_err(DispatchError::Retryable)
+                route_message(&message, route_inbound_message)
             }
             other => Err(DispatchError::Permanent(format!(
                 "unknown event type: {other}"
             ))),
         }
     }
+}
+
+/// Hand a stored reply to `route` together with whether the hub forwarded it.
+fn route_message(
+    message: &InboundMessage,
+    route: impl FnOnce(&str, bool) -> Result<DeliveryOutcome, String>,
+) -> Result<DeliveryOutcome, DispatchError> {
+    route(&message.text, message.forwarded).map_err(DispatchError::Retryable)
 }
 
 #[derive(Debug, thiserror::Error)]

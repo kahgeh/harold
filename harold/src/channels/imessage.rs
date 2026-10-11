@@ -129,6 +129,11 @@ fn notification_plan<'a>(
 // Away notification via iMessage — returns the source agent address
 // ---------------------------------------------------------------------------
 
+/// The notification text for `turn`, naming the Mac that sends it.
+fn notification_message(machine: &str, turn: &TurnCompleted, main_body: &str) -> String {
+    notification_text(machine, &turn.pane_label, main_body, &turn.main_context)
+}
+
 pub(crate) fn notify_away(
     turn: &TurnCompleted,
     _trace_id: &str,
@@ -141,12 +146,7 @@ pub(crate) fn notify_away(
     let body = summarise_for_notification(&turn.assistant_message, &turn.last_user_prompt);
 
     let (main_body, question) = split_body(&body);
-    let message = notification_text(
-        &cfg.machine_name,
-        &turn.pane_label,
-        main_body,
-        &turn.main_context,
-    );
+    let message = notification_message(&cfg.machine_name, turn, main_body);
 
     let recent_outgoing = cfg
         .imessage

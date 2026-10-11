@@ -1,9 +1,10 @@
+use std::cell::RefCell;
 use std::sync::Mutex;
 
 use crate::inbound::ownership::Ownership;
 use crate::inbound::{
-    AgentAddress, clear_routing_state, parse_tag, resolve_pane, route_if_owned,
-    set_last_away_notification_source_agent,
+    AgentAddress, RoutingEnv, clear_routing_state, parse_tag, resolve_pane, route_if_owned,
+    route_owned_reply, set_last_away_notification_source_agent,
 };
 use crate::outbound::DeliveryOutcome;
 use crate::settings::init_settings_for_test;
@@ -134,4 +135,96 @@ fn routing_failure_of_an_owned_reply_is_returned() {
     let outcome = route_if_owned(ownership, |_, _| Err("tmux failed".to_string()));
 
     assert_eq!(outcome, Err("tmux failed".to_string()));
+}
+
+/// A machine with the given panes that records what is relayed and replied.
+struct FakeEnv {
+    panes: Vec<AgentAddress>,
+    alive: bool,
+    relayed: RefCell<Vec<String>>,
+    replies: RefCell<Vec<String>>,
+}
+
+impl FakeEnv {
+    fn with_panes(panes: Vec<AgentAddress>) -> Self {
+        Self {
+            panes,
+            alive: true,
+            relayed: RefCell::new(Vec::new()),
+            replies: RefCell::new(Vec::new()),
+        }
+    }
+}
+
+impl RoutingEnv for FakeEnv {
+    fn discover(&self) -> Vec<AgentAddress> {
+        self.panes.clone()
+    }
+
+    fn is_alive(&self, _: &AgentAddress) -> bool {
+        self.alive
+    }
+
+    fn relay(&self, _: &AgentAddress, text: &str) -> Result<(), String> {
+        self.relayed.borrow_mut().push(text.to_string());
+        Ok(())
+    }
+
+    fn send_reply(&self, text: &str) -> Result<(), String> {
+        self.replies.borrow_mut().push(text.to_string());
+        Ok(())
+    }
+}
+
+#[test]
+fn delivered_reply_is_confirmed_with_the_full_address_of_the_pane() {
+    let env = FakeEnv::with_panes(vec![tmux("%1", "alir-app main:0.1")]);
+
+    let outcome = route_owned_reply(&env, "studio", Some("alir"), "revert that");
+
+    assert_eq!(outcome, Ok(DeliveryOutcome::Delivered));
+    assert_eq!(*env.relayed.borrow(), ["📱 revert that"]);
+    assert_eq!(
+        *env.replies.borrow(),
+        ["✓ Delivered to [studio/alir-app main:0.1]"]
+    );
+}
+
+#[test]
+fn error_replies_name_the_machine_that_sends_them() {
+    let _lock = ROUTING_TEST_LOCK.lock().unwrap();
+    clear_routing_state();
+
+    let none = FakeEnv::with_panes(Vec::new());
+    assert_eq!(
+        route_owned_reply(&none, "studio", None, "go"),
+        Ok(DeliveryOutcome::Skipped)
+    );
+    assert_eq!(
+        *none.replies.borrow(),
+        ["[studio] No active agent sessions found."]
+    );
+
+    let work = FakeEnv::with_panes(vec![tmux("%1", "work:0.0")]);
+    route_owned_reply(&work, "studio", Some("nonexistent"), "go").unwrap();
+    assert_eq!(
+        *work.replies.borrow(),
+        ["[studio] No pane matching 'nonexistent'. Available: work:0.0"]
+    );
+
+    let untagged = FakeEnv::with_panes(vec![tmux("%1", "work:0.0")]);
+    route_owned_reply(&untagged, "studio", None, "go").unwrap();
+    assert_eq!(
+        *untagged.replies.borrow(),
+        ["[studio] No active pane found. Available: work:0.0"]
+    );
+
+    let mut gone = FakeEnv::with_panes(vec![tmux("%1", "work:0.0")]);
+    gone.alive = false;
+    route_owned_reply(&gone, "studio", Some("work"), "go").unwrap();
+    assert_eq!(
+        *gone.replies.borrow(),
+        ["[studio] Pane work:0.0 is no longer active. Available: "]
+    );
+    assert!(gone.relayed.borrow().is_empty());
 }
