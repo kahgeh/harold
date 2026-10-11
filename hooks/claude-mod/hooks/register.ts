@@ -2,6 +2,9 @@ import type { EngineInterface, Register, Timer } from 'claude-code'
 import { buildArgv, hasWorking, isPaneId, resolveProgram, type ReportEvent } from './accept'
 
 const CHECK_EVERY_MS = 10_000
+// After a subagent's turn ends, Claude Code may wake the main session at once. Waiting this long
+// before reporting idle keeps that wake-up from showing as idle in between.
+const SETTLE_MS = 3_000
 
 // Reports leave one at a time, in the order the events fired. A report that had to wait behind
 // one that failed or timed out is skipped, so a turn is held for one bounded call, not several.
@@ -76,6 +79,13 @@ async function reportAfterEnd($: EngineInterface, idleEvent: ReportEvent): Promi
   return enqueue($, idleEvent)
 }
 
+// Reports a subagent's end once nothing has woken the main session for SETTLE_MS.
+function settleAfterSubagentEnd($: EngineInterface): void {
+  $.clock.after(SETTLE_MS, () => {
+    void reportAfterEnd($, 'subagents-finished')
+  })
+}
+
 async function check($: EngineInterface): Promise<void> {
   if (isMainTurnRunning) {
     await enqueue($, 'still-working')
@@ -106,7 +116,7 @@ export const register: Register = on => {
       isMainTurnRunning = false
       sent = reportAfterEnd($, 'turn-completed')
     } else if (!isMainTurnRunning && checks !== undefined) {
-      sent = reportAfterEnd($, 'subagents-finished')
+      settleAfterSubagentEnd($)
     }
     const result = await next(e)
     await sent

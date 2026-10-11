@@ -10,7 +10,7 @@ working while its main session's turn is running, or while one of its subagents 
 | Every 10 seconds | The pane is working | `still-working` | Busy |
 | A main-session turn ends (`turn.complete`, no `agentId`) | No subagent is working | `turn-completed` | Idle |
 | A main-session turn ends | A subagent is working | `still-working` | Busy |
-| A subagent's turn ends (`turn.complete` with an `agentId`), or a 10-second check runs | No main turn is running, and no subagent is working | `subagents-finished` | Idle |
+| 3 seconds after a subagent's turn ends (`turn.complete` with an `agentId`), or when a 10-second check runs | No main turn is running, and no subagent is working | `subagents-finished` | Idle |
 
 Every run has the form `harold accept <event> --pane <id> --adapter claude.lifecycle`. The pane
 is the `TMUX_PANE` environment variable. Unless it is `%` plus digits, the mod sends nothing.
@@ -26,7 +26,9 @@ one timer. The repeat tells Harold the mod is still there: Harold lets a busy re
 against its screen reading for `agent_monitor.report_grace_ms` (30 seconds), so the mod has to
 miss three reports in a row before the screen reading takes over. The check also notices a
 subagent that ended without an event reaching the mod. A subagent's turn that ends after the
-pane was reported idle sends nothing.
+pane was reported idle sends nothing. The 3-second wait after a subagent's turn ends lets a
+main-session turn that Claude Code starts at once for that subagent's result begin first, so the
+pane is not reported idle in between.
 
 ## Finding the program
 
@@ -39,7 +41,7 @@ program, for a mod run from a checkout.
 Each hook starts its report, calls `next(e)`, then waits for the report before returning.
 `turn.start` fires before the first model call, so the turn most likely waits for the report:
 a few milliseconds normally. One promise chain carries all four events in the order they were raised, and a report that had to wait
-behind one that failed or timed out is skipped (the next 10-second check sends the state again). A dead or
+behind one that failed or timed out is skipped (while the pane is still working, the next 10-second check sends its state again; an idle report that is skipped is corrected by Harold's screen reading after `agent_monitor.report_grace_ms`). A dead or
 hung Harold therefore costs a turn at most the one bounded call: `harold accept` gives up
 after 3 seconds and the mod after 4. Every failure is swallowed and nothing is shown to the
 person.

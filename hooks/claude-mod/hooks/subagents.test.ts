@@ -60,6 +60,9 @@ test('the last subagent turn to end with no main turn running reports subagents-
   await $.turn.complete(MAIN_END)
   rows = [row('a1', 'completed')]
   await $.turn.complete(subagentEnd('a1'))
+  expect(sent).toEqual(['turn-started', 'still-working'])
+  await clock.advance(3_000)
+  expect(sent).toEqual(['turn-started', 'still-working', 'subagents-finished'])
   await clock.advance(60_000)
   expect(sent).toEqual(['turn-started', 'still-working', 'subagents-finished'])
 })
@@ -93,13 +96,14 @@ test('one of two subagents finishing keeps the pane on still-working', async ($,
   expect(sent.at(-1)).toBe('still-working')
 })
 
-test('a stopped subagent reports subagents-finished when its turn ends', async ($, on) => {
+test('a stopped subagent reports subagents-finished 3 seconds after its turn ends', async ($, on) => {
   let rows = [row('a1', 'running')]
-  const { sent } = bottom(on, () => rows)
+  const { sent, clock } = bottom(on, () => rows)
   await $.turn.start(START)
   await $.turn.complete(MAIN_END)
   rows = [row('a1', 'killed')]
   await $.turn.complete(subagentEnd('a1'))
+  await clock.advance(3_000)
   expect(sent).toEqual(['turn-started', 'still-working', 'subagents-finished'])
 })
 
@@ -201,4 +205,20 @@ test('a main turn that starts while the subagent list is being read is not repor
   await clock.advance(50)
   await ended
   expect(sent).toEqual(['turn-started'])
+})
+
+test('a main turn that wakes within 3 seconds of the last subagent ending is never reported idle', async ($, on) => {
+  let rows = [row('a1', 'running')]
+  const { sent, clock } = bottom(on, () => rows)
+  await $.turn.start(START)
+  await $.turn.complete(MAIN_END)
+  rows = [row('a1', 'completed')]
+  await $.turn.complete(subagentEnd('a1'))
+  await clock.advance(500)
+  await $.turn.start({ text: 'woken', turnId: 't2' })
+  await clock.advance(5_000)
+  expect(sent).toEqual(['turn-started', 'still-working', 'turn-started'])
+  await $.turn.complete({ ...MAIN_END, turnId: 't2' })
+  await clock.advance(60_000)
+  expect(sent.slice(3)).toEqual(['turn-completed'])
 })
