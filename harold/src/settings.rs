@@ -360,6 +360,66 @@ pub struct TelegramSettings {
     pub chat_id: Option<i64>,
 }
 
+/// Which side this Mac is on when the away channel lets only one Mac read replies.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum PeerRole {
+    /// Reads the channel and forwards each reply to the Mac that owns it. A hub with no
+    /// members is a single Mac.
+    #[default]
+    Hub,
+    /// Does not read the channel. Reports its notifications to the hub and takes the
+    /// replies the hub forwards.
+    Member,
+}
+
+/// A member, as the hub knows it.
+#[derive(Clone, Deserialize, PartialEq, Eq)]
+pub(crate) struct PeerMember {
+    /// The member's `machine_name`.
+    pub name: String,
+    /// Where the member's Harold listens, for example `http://laptop.tailnet:50060`.
+    pub url: String,
+    pub secret: String,
+}
+
+/// The hub, as a member knows it.
+#[derive(Clone, Deserialize, PartialEq, Eq)]
+pub(crate) struct PeerHub {
+    pub url: String,
+    pub secret: String,
+}
+
+// Written by hand so a secret is never printed with the settings.
+impl std::fmt::Debug for PeerMember {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PeerMember")
+            .field("name", &self.name)
+            .field("url", &self.url)
+            .field("secret", &"[redacted]")
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for PeerHub {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PeerHub")
+            .field("url", &self.url)
+            .field("secret", &"[redacted]")
+            .finish()
+    }
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub(crate) struct PeersSettings {
+    pub role: PeerRole,
+    /// The members, on the hub.
+    pub members: Vec<PeerMember>,
+    /// The hub, on a member.
+    pub hub: Option<PeerHub>,
+}
+
 /// Whether `name` can identify a Mac in a reply tag. `/` and the brackets delimit the tag
 /// (`[machine/pane]`). `:` is in every pane label (`session:window.pane`), so a name
 /// without one is never mistaken for a label.
@@ -399,6 +459,75 @@ fn machines_errors(machine_name: &str, machines: &[String]) -> Vec<String> {
         errors.push(format!(
             "machines must include this Mac's machine_name \"{machine_name}\", got {machines:?}"
         ));
+    }
+    errors
+}
+
+/// What is wrong with a peer's `url`. Calls between Macs are plain gRPC over HTTP.
+fn peer_url_error(field: &str, url: &str) -> Option<String> {
+    let has_host = url
+        .strip_prefix("http://")
+        .is_some_and(|host| !host.is_empty());
+    if has_host {
+        return None;
+    }
+    Some(format!(
+        "{field} must be a plain HTTP address such as \"http://laptop.tailnet:50060\", got \"{url}\""
+    ))
+}
+
+/// What is wrong with the `peers` settings, one error for each problem. The default, a hub
+/// with no members, is valid: it is a single Mac.
+fn peers_errors(machine_name: &str, machines: &[String], peers: &PeersSettings) -> Vec<String> {
+    let same = |a: &str, b: &str| a.to_lowercase() == b.to_lowercase();
+    let mut errors = Vec::new();
+
+    if peers.role == PeerRole::Member {
+        if peers.hub.is_none() {
+            errors.push("peers.hub is required when peers.role = \"member\"".into());
+        }
+        if !peers.members.is_empty() {
+            errors.push("peers.members must be empty when peers.role = \"member\"".into());
+            return errors;
+        }
+    }
+    if let Some(hub) = &peers.hub {
+        errors.extend(peer_url_error("peers.hub.url", &hub.url));
+        if hub.secret.trim().is_empty() {
+            errors.push("peers.hub.secret must not be empty".into());
+        }
+    }
+
+    if !peers.members.is_empty() && machines.is_empty() {
+        errors.push("peers.members requires machines to be set".into());
+        return errors;
+    }
+    for (index, member) in peers.members.iter().enumerate() {
+        let name = &member.name;
+        if same(name, machine_name) {
+            errors.push(format!(
+                "peers.members must not include this Mac's machine_name \"{machine_name}\""
+            ));
+        } else if !machines.iter().any(|listed| same(listed, name)) {
+            errors.push(format!(
+                "peers.members name \"{name}\" must be in machines, got {machines:?}"
+            ));
+        }
+        if peers.members[..index]
+            .iter()
+            .any(|earlier| same(&earlier.name, name))
+        {
+            errors.push(format!("peers.members lists \"{name}\" more than once"));
+        }
+        errors.extend(peer_url_error(
+            &format!("peers.members url for \"{name}\""),
+            &member.url,
+        ));
+        if member.secret.trim().is_empty() {
+            errors.push(format!(
+                "peers.members secret for \"{name}\" must not be empty"
+            ));
+        }
     }
     errors
 }
@@ -447,6 +576,9 @@ pub struct Settings {
     pub notify: NotifySettings,
     #[serde(default)]
     pub telegram: TelegramSettings,
+    /// The other Macs, for an away channel only one Mac can read.
+    #[serde(default)]
+    pub(crate) peers: PeersSettings,
 }
 
 impl Settings {
@@ -454,6 +586,11 @@ impl Settings {
         let mut errors = Vec::new();
         errors.extend(machine_name_error(&self.machine_name));
         errors.extend(machines_errors(&self.machine_name, &self.machines));
+        errors.extend(peers_errors(
+            &self.machine_name,
+            &self.machines,
+            &self.peers,
+        ));
         errors.extend(self.agents.validate(&self.agent_monitor));
         errors.extend(self.activity_summary.validate());
         match self.notify.away_channel.as_str() {
@@ -958,5 +1095,214 @@ mod tests {
         assert_eq!(errors.len(), 2, "{errors:?}");
         assert!(errors[0].contains("\"my mac\""), "{errors:?}");
         assert!(errors[1].contains("\"a/b\""), "{errors:?}");
+    }
+
+    use super::{PeerHub, PeerMember, PeerRole};
+
+    /// A hub named `studio` with one member `laptop`, as TOML laid over the defaults.
+    const HUB: &str = r#"
+        machine_name = "studio"
+        machines = ["studio", "laptop"]
+        [[peers.members]]
+        name = "laptop"
+        url = "http://laptop.tailnet:50060"
+        secret = "s3cret"
+    "#;
+
+    /// A member named `laptop`, as TOML laid over the defaults.
+    const MEMBER: &str = r#"
+        machine_name = "laptop"
+        machines = ["studio", "laptop"]
+        [peers]
+        role = "member"
+        [peers.hub]
+        url = "http://studio.tailnet:50060"
+        secret = "s3cret"
+    "#;
+
+    /// The errors `validate()` reports about `peers` for the default configuration with
+    /// `overrides` laid over it.
+    fn peers_errors_with(overrides: &str) -> Vec<String> {
+        default_settings_with(overrides)
+            .validate()
+            .into_iter()
+            .filter(|error| error.starts_with("peers."))
+            .collect()
+    }
+
+    #[test]
+    fn peers_default_to_a_hub_with_no_members_which_is_valid() {
+        let settings = default_settings_with("machine_name = \"studio\"");
+
+        assert_eq!(settings.peers.role, PeerRole::Hub);
+        assert!(settings.peers.members.is_empty());
+        assert_eq!(settings.peers.hub, None);
+        assert!(peers_errors_with("machine_name = \"studio\"").is_empty());
+    }
+
+    #[test]
+    fn hub_with_a_listed_member_is_valid() {
+        let settings = default_settings_with(HUB);
+
+        assert_eq!(
+            settings.peers.members,
+            [PeerMember {
+                name: "laptop".into(),
+                url: "http://laptop.tailnet:50060".into(),
+                secret: "s3cret".into(),
+            }]
+        );
+        assert!(peers_errors_with(HUB).is_empty());
+    }
+
+    #[test]
+    fn member_with_a_hub_is_valid() {
+        let settings = default_settings_with(MEMBER);
+
+        assert_eq!(settings.peers.role, PeerRole::Member);
+        assert_eq!(
+            settings.peers.hub,
+            Some(PeerHub {
+                url: "http://studio.tailnet:50060".into(),
+                secret: "s3cret".into(),
+            })
+        );
+        assert!(peers_errors_with(MEMBER).is_empty());
+    }
+
+    #[test]
+    fn member_name_matches_machines_ignoring_case() {
+        let errors = peers_errors_with(&HUB.replace("name = \"laptop\"", "name = \"Laptop\""));
+
+        assert!(errors.is_empty(), "{errors:?}");
+    }
+
+    #[test]
+    fn unknown_role_is_rejected_when_the_configuration_is_read() {
+        let default = format!("{}/config/default", env!("CARGO_MANIFEST_DIR"));
+        let result = Config::builder()
+            .add_source(File::new(&default, FileFormat::Toml))
+            .add_source(File::from_str("[peers]\nrole = \"boss\"", FileFormat::Toml))
+            .build()
+            .and_then(Config::try_deserialize::<super::Settings>);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_reports_a_member_without_a_hub() {
+        let errors = peers_errors_with("machine_name = \"laptop\"\n[peers]\nrole = \"member\"");
+
+        assert_eq!(
+            errors,
+            ["peers.hub is required when peers.role = \"member\""]
+        );
+    }
+
+    #[test]
+    fn validate_reports_a_member_that_lists_members() {
+        let overrides = format!(
+            "{MEMBER}\n[[peers.members]]\nname = \"studio\"\nurl = \"http://studio.tailnet:50060\"\nsecret = \"x\""
+        );
+
+        let errors = peers_errors_with(&overrides);
+
+        assert_eq!(
+            errors,
+            ["peers.members must be empty when peers.role = \"member\""]
+        );
+    }
+
+    #[test]
+    fn validate_reports_members_when_machines_is_not_set() {
+        let errors = peers_errors_with(&HUB.replace("machines = [\"studio\", \"laptop\"]", ""));
+
+        assert_eq!(errors, ["peers.members requires machines to be set"]);
+    }
+
+    #[test]
+    fn validate_reports_a_member_that_is_not_in_machines() {
+        let errors = peers_errors_with(&HUB.replace("name = \"laptop\"", "name = \"mini\""));
+
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(errors[0].starts_with("peers.members name \"mini\" must be in machines"));
+    }
+
+    #[test]
+    fn validate_reports_this_mac_listed_as_its_own_member() {
+        let errors = peers_errors_with(&HUB.replace("name = \"laptop\"", "name = \"Studio\""));
+
+        assert_eq!(
+            errors,
+            ["peers.members must not include this Mac's machine_name \"studio\""]
+        );
+    }
+
+    #[test]
+    fn validate_reports_a_member_listed_twice() {
+        let overrides = format!(
+            "{HUB}\n[[peers.members]]\nname = \"LAPTOP\"\nurl = \"http://other.tailnet:50060\"\nsecret = \"x\""
+        );
+
+        let errors = peers_errors_with(&overrides);
+
+        assert_eq!(errors, ["peers.members lists \"LAPTOP\" more than once"]);
+    }
+
+    #[test]
+    fn validate_reports_an_empty_member_secret() {
+        for secret in ["", "  "] {
+            let errors = peers_errors_with(
+                &HUB.replace("secret = \"s3cret\"", &format!("secret = \"{secret}\"")),
+            );
+
+            assert_eq!(
+                errors,
+                ["peers.members secret for \"laptop\" must not be empty"],
+                "{secret:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_reports_an_empty_hub_secret() {
+        let errors = peers_errors_with(&MEMBER.replace("secret = \"s3cret\"", "secret = \"\""));
+
+        assert_eq!(errors, ["peers.hub.secret must not be empty"]);
+    }
+
+    #[test]
+    fn validate_reports_a_peer_url_that_is_not_plain_http() {
+        for url in [
+            "",
+            "http://",
+            "https://laptop.tailnet:50060",
+            "laptop.tailnet:50060",
+        ] {
+            let member = peers_errors_with(&HUB.replace("http://laptop.tailnet:50060", url));
+            assert_eq!(member.len(), 1, "{url:?}: {member:?}");
+            assert!(
+                member[0]
+                    .starts_with("peers.members url for \"laptop\" must be a plain HTTP address"),
+                "{member:?}"
+            );
+
+            let hub = peers_errors_with(&MEMBER.replace("http://studio.tailnet:50060", url));
+            assert_eq!(hub.len(), 1, "{url:?}: {hub:?}");
+            assert!(
+                hub[0].starts_with("peers.hub.url must be a plain HTTP address"),
+                "{hub:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn peer_secrets_are_not_printed_by_debug() {
+        let hub = format!("{:?}", default_settings_with(HUB));
+        let member = format!("{:?}", default_settings_with(MEMBER));
+
+        assert!(!hub.contains("s3cret"), "{hub}");
+        assert!(!member.contains("s3cret"), "{member}");
+        assert!(hub.contains("laptop.tailnet"), "{hub}");
     }
 }
