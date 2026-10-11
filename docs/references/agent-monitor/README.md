@@ -343,6 +343,7 @@ An inventory failure preserves current panes and never infers mass departure. A 
 - History recovery is bounded and starts with a baseline that emits no existing prompt. Lost fingerprint overlap also establishes a new baseline without adopting its contents. These rules can leave late-attached or older work without a recovered summary.
 - Harold does not infer busy/idle from CPU use, tmux window activity, or elapsed silence.
 - Harold does not navigate tmux for the dashboard and does not implement dashboard search.
+- The Claude Code lifecycle mod (`hooks/claude-mod/`) reports turn start and end through `harold accept`; the installer loads it through `CLAUDE_CODE_PLUGIN_DIRS`, and sessions without it rely on the screen reading.
 - The OpenCode lifecycle plugin is opt-in and is not installed by `make deploy`; its screen provider has no fallback-summary prefix.
 - The `TurnComplete` RPC is the notification ingress. Empty prompts preserve summaries and cannot explicitly clear them.
 

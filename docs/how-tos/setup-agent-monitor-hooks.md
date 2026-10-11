@@ -131,7 +131,32 @@ OpenCode's shipped provider configuration uses `generic-v1` with busy/idle scree
 
 The plugin removes complete ESC and C1 CSI, OSC, DCS, SOS, PM, and APC terminal sequences before it collapses whitespace, rejects placeholders, and applies the 160-scalar bound. Harold applies its own sanitizer again at durable ingress.
 
-## 6. Verify the snapshot stream
+## 6. Use the Claude Code lifecycle mod
+
+Claude Code's `Stop` hook tells Harold when a turn ends, but nothing tells it when a turn starts, and a turn Claude Code starts by itself (a background subagent finishing and waking the session) has no start hook at all. The repository's Claude Code mod in `hooks/claude-mod/` fills the gap. It runs `harold accept turn-started` when a main-session turn starts and `harold accept turn-completed` when it ends, both with `--pane "$TMUX_PANE" --adapter claude.lifecycle`, and ignores subagent turns. `accept` makes one `ReportAgentState` call to the running daemon and sends no work summary, so the summary Harold holds is kept. The mod only watches; it never changes a prompt, a reply or a tool call.
+
+The installer copies the mod to `~/bin/harold/hooks/claude-mod/` and names that folder in `CLAUDE_CODE_PLUGIN_DIRS`, in the `env` block of `~/.claude/settings.json`. It follows five rules:
+
+| State of the file before the install | The installer |
+|---|---|
+| Any state in which it will write | Copies the file to `settings.json.before-harold` first, unless that copy exists |
+| No `CLAUDE_CODE_PLUGIN_DIRS` | Adds it with the mod's folder and leaves every other key as it was |
+| It names other folders | Appends `:` and the mod's folder |
+| It already names the mod's folder | Writes nothing |
+| The file is missing or is not valid JSON | Writes nothing, prints the line to add, and finishes the install |
+
+A Claude Code session that is already running loads the mod the next time it starts. To load it in one session from a checkout, run `claude --plugin-dir hooks/claude-mod` and set `HAROLD_BIN` to the `harold` program to run.
+
+The mod interface is early access: a Claude Code release can stop the mod from loading. Harold then falls back to reading the screen, which remains the only source for a session without the mod. Harold's lifecycle report wins for `agent_monitor.hook_grace_ms` (2 seconds); a screen reading that clearly shows the other state replaces it after that. Keep the `Stop` hook from section 3: it sends the `TurnComplete` call that produces notifications, which the mod does not.
+
+Check the mod without a session:
+
+```sh
+claude plugin validate hooks/claude-mod
+claude plugin test hooks/claude-mod
+```
+
+## 7. Verify the snapshot stream
 
 Start a watcher in a second terminal:
 
@@ -177,7 +202,7 @@ If a state edge is missed, allow the 30-second Busy retry. A prompt already in t
 
 Record provider versions, process and pane identities, configuration, snapshot revisions, and sanitized synthetic task wording. Keep raw terminal captures ephemeral. These checks establish Codex screen recovery; they do not establish Claude-specific parsing or three-provider hook acceptance.
 
-## 7. Run real-provider dashboard acceptance
+## 8. Run real-provider dashboard acceptance
 
 Fixtures and fake provider processes do not satisfy this check. Use the real installed Claude Code, Codex, and OpenCode CLIs, their real hook/plugin paths, the real `WatchAgentStates` stream, and the dashboard that consumes it.
 

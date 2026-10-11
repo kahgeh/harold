@@ -115,7 +115,7 @@ Reinstall archives the previous installation, including its data, and prints the
 
 ## 5. Connect agent hooks
 
-Starting with v0.1.1, the installer provides both Claude Code and Codex completion scripts, plus the shared notifier. Register the installed scripts using the commands below. The installer does not overwrite your Claude, Codex, or OpenCode settings. The [agent-monitor hook guide](setup-agent-monitor-hooks.md) covers lifecycle reporting and the opt-in OpenCode plugin.
+Starting with v0.1.1, the installer provides both Claude Code and Codex completion scripts, plus the shared notifier. Register the installed scripts using the commands below. The installer does not overwrite your Claude, Codex, or OpenCode settings; the one exception is that it adds the Claude Code lifecycle mod's folder to `CLAUDE_CODE_PLUGIN_DIRS` in `~/.claude/settings.json`, after saving a copy as `settings.json.before-harold`. The [agent-monitor hook guide](setup-agent-monitor-hooks.md) covers lifecycle reporting, the Claude Code lifecycle mod and the opt-in OpenCode plugin.
 
 Harold is notified of completed turns by agent-specific Stop hooks. The hook layout keeps Harold integration shared and leaves transcript parsing to each agent adapter:
 
