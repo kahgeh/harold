@@ -24,6 +24,7 @@ use super::domain::{
     ObservedAgentState, WorkSummaryUpdate,
 };
 use super::inventory::{AgentInventoryPort, InventoryError};
+use super::reducer::GraceWindows;
 use super::screen::{PromptScan, ScreenError, VisibleScreenPort, normalize_fallback_summary};
 use super::summary::completion_summary_update;
 
@@ -191,7 +192,7 @@ struct AgentMonitorRuntime {
     inventory: Arc<dyn AgentInventoryPort>,
     screen: Arc<dyn VisibleScreenPort>,
     providers: HashMap<String, AgentProviderSettings>,
-    hook_grace_ms: u64,
+    graces: GraceWindows,
     acquisition_timeout: Duration,
     inventory_timeout: Duration,
     inventory_gate: Arc<Semaphore>,
@@ -207,6 +208,7 @@ pub(crate) struct AgentMonitorRuntimeConfig {
     pub(crate) inventory_interval: Duration,
     pub(crate) screen_interval: Duration,
     pub(crate) hook_grace_ms: u64,
+    pub(crate) report_grace_ms: u64,
     pub(crate) acquisition_timeout: Duration,
     pub(crate) inventory_timeout: Duration,
 }
@@ -217,7 +219,7 @@ struct RuntimeInputs {
     screen: Arc<dyn VisibleScreenPort>,
     providers: Vec<AgentProviderSettings>,
     initial_snapshot: AgentSnapshot,
-    hook_grace_ms: u64,
+    graces: GraceWindows,
     acquisition_timeout: Duration,
     inventory_timeout: Duration,
     intervals: Option<(Duration, Duration)>,
@@ -295,7 +297,10 @@ pub(crate) fn spawn_agent_monitor(
             screen,
             providers,
             initial_snapshot,
-            hook_grace_ms: config.hook_grace_ms,
+            graces: GraceWindows {
+                hook_ms: config.hook_grace_ms,
+                report_ms: config.report_grace_ms,
+            },
             acquisition_timeout: config.acquisition_timeout,
             inventory_timeout: config.inventory_timeout,
             intervals: Some((config.inventory_interval, config.screen_interval)),
@@ -318,6 +323,29 @@ where
     I: AgentInventoryPort + 'static,
     S: VisibleScreenPort + 'static,
 {
+    spawn_agent_monitor_with_graces_for_test(
+        store,
+        inventory,
+        screen,
+        providers,
+        GraceWindows::same(hook_grace_ms),
+        shutdown,
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn spawn_agent_monitor_with_graces_for_test<I, S>(
+    store: Arc<HaroldStore>,
+    inventory: Arc<I>,
+    screen: Arc<S>,
+    providers: Vec<AgentProviderSettings>,
+    graces: GraceWindows,
+    shutdown: watch::Receiver<()>,
+) -> (AgentMonitorHandle, tokio::task::JoinHandle<()>)
+where
+    I: AgentInventoryPort + 'static,
+    S: VisibleScreenPort + 'static,
+{
     spawn_runtime(
         RuntimeInputs {
             store,
@@ -325,7 +353,7 @@ where
             screen,
             providers,
             initial_snapshot: empty_snapshot(),
-            hook_grace_ms,
+            graces,
             acquisition_timeout: Duration::from_millis(100),
             inventory_timeout: Duration::from_millis(100),
             intervals: None,
@@ -355,7 +383,7 @@ where
             screen,
             providers,
             initial_snapshot: seed.snapshot,
-            hook_grace_ms: seed.hook_grace_ms,
+            graces: GraceWindows::same(seed.hook_grace_ms),
             acquisition_timeout: seed.acquisition_timeout,
             inventory_timeout: seed.acquisition_timeout,
             intervals: None,
@@ -375,7 +403,7 @@ fn spawn_runtime(
         screen,
         providers,
         initial_snapshot,
-        hook_grace_ms,
+        graces,
         acquisition_timeout,
         inventory_timeout,
         intervals,
@@ -411,12 +439,12 @@ fn spawn_runtime(
                 .into_iter()
                 .map(|provider| (provider.id.clone(), provider))
                 .collect(),
-            hook_grace_ms,
+            graces,
             acquisition_timeout,
             inventory_timeout,
             inventory_gate: Arc::new(Semaphore::new(1)),
             screen_gate: Arc::new(Semaphore::new(1)),
-            panes: panes_from_snapshot(&initial_snapshot, hook_grace_ms),
+            panes: panes_from_snapshot(&initial_snapshot, graces),
             health: health_from_snapshot(&initial_snapshot),
             logged_health: HashMap::new(),
             summaries: activity_summary
@@ -474,7 +502,7 @@ fn spawn_tick(tick: CoalescedTick, interval: Duration, mut shutdown: watch::Rece
 
 fn panes_from_snapshot(
     snapshot: &AgentSnapshot,
-    hook_grace_ms: u64,
+    graces: GraceWindows,
 ) -> HashMap<String, TrackedPane> {
     snapshot
         .panes
@@ -489,7 +517,7 @@ fn panes_from_snapshot(
                 last_hook: projection.hook_state.zip(projection.hook_observed_at_ms),
                 lifecycle_adapter_id: projection.lifecycle_adapter_id.clone(),
                 explicit_summary: projection.explicit_work_summary.clone(),
-                screen_state: seeded_screen_state(projection, hook_grace_ms),
+                screen_state: seeded_screen_state(projection, graces),
                 screen_summary: projection.screen_work_summary.clone(),
                 summary_basis_version: projection.summary_basis_version,
             };
@@ -500,14 +528,14 @@ fn panes_from_snapshot(
 
 fn seeded_screen_state(
     projection: &super::domain::AgentPaneProjection,
-    hook_grace_ms: u64,
+    graces: GraceWindows,
 ) -> Option<ObservedAgentState> {
     let screen_state = projection.screen_state?;
     let Some(hook_observed_at_ms) = projection.hook_observed_at_ms else {
         return Some(screen_state);
     };
     let screen_observed_at_ms = projection.screen_observed_at_ms?;
-    let grace_ms = i64::try_from(hook_grace_ms).unwrap_or(i64::MAX);
+    let grace_ms = graces.for_pane(projection.lifecycle_adapter_id.is_some());
     (screen_observed_at_ms >= hook_observed_at_ms.saturating_add(grace_ms)).then_some(screen_state)
 }
 
@@ -1022,7 +1050,7 @@ impl AgentMonitorRuntime {
                 tracked,
                 observation.state,
                 observation.observed_at_ms,
-                self.hook_grace_ms,
+                self.graces,
             );
             let recovered = recovery
                 .as_ref()
@@ -1253,11 +1281,11 @@ fn screen_state_delta(
     tracked: &TrackedPane,
     observed: Option<ObservedAgentState>,
     observed_at_ms: i64,
-    hook_grace_ms: u64,
+    graces: GraceWindows,
 ) -> Option<ObservedAgentState> {
     let state = observed?;
     if let Some((_, hook_observed_at_ms)) = tracked.last_hook {
-        let grace = i64::try_from(hook_grace_ms).unwrap_or(i64::MAX);
+        let grace = graces.for_pane(tracked.lifecycle_adapter_id.is_some());
         if observed_at_ms < hook_observed_at_ms.saturating_add(grace) {
             return None;
         }

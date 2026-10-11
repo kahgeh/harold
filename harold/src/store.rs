@@ -19,7 +19,7 @@ use crate::agent::domain::{
 };
 #[cfg(test)]
 use crate::agent::reducer::DEFAULT_HOOK_GRACE_MS;
-use crate::agent::reducer::{reduce_agent_event, reduce_turn_completed};
+use crate::agent::reducer::{GraceWindows, reduce_agent_event, reduce_turn_completed};
 use crate::agent::summary::{normalize_work_summary, sanitize_bounded_metadata};
 
 const NAMESPACE: &str = "harold";
@@ -69,7 +69,7 @@ pub(crate) struct ProjectionBatch {
 pub struct HaroldStore {
     stream: EventStream,
     state: Database,
-    hook_grace_ms: u64,
+    graces: GraceWindows,
     #[cfg(test)]
     fail_projection_before_checkpoint: std::sync::atomic::AtomicBool,
     #[cfg(test)]
@@ -121,12 +121,12 @@ fn rotation_policy() -> RotationPolicy {
 impl HaroldStore {
     #[cfg(test)]
     pub async fn open(path: impl AsRef<Path>) -> events::Result<Self> {
-        Self::open_with_hook_grace(path, DEFAULT_HOOK_GRACE_MS).await
+        Self::open_with_graces(path, GraceWindows::same(DEFAULT_HOOK_GRACE_MS)).await
     }
 
-    pub(crate) async fn open_with_hook_grace(
+    pub(crate) async fn open_with_graces(
         path: impl AsRef<Path>,
-        hook_grace_ms: u64,
+        graces: GraceWindows,
     ) -> events::Result<Self> {
         let root = path.as_ref();
         tokio::fs::create_dir_all(root).await?;
@@ -148,7 +148,7 @@ impl HaroldStore {
         Ok(Self {
             stream,
             state,
-            hook_grace_ms,
+            graces,
             #[cfg(test)]
             fail_projection_before_checkpoint: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)]
@@ -193,7 +193,7 @@ impl HaroldStore {
                     "TurnCompleted" => {
                         stage_delivery_event(&conn, event).await?;
                         snapshot_changed |=
-                            project_turn_completed(&conn, event, self.hook_grace_ms).await?;
+                            project_turn_completed(&conn, event, self.graces).await?;
                     }
                     "InboundMessageReceived" => {
                         stage_delivery_event(&conn, event).await?;
@@ -203,8 +203,7 @@ impl HaroldStore {
                     | "AgentLifecycleObserved"
                     | "AgentScreenObserved"
                     | "AgentActivitySummaryGenerated" => {
-                        snapshot_changed |=
-                            project_agent_event(&conn, event, self.hook_grace_ms).await?;
+                        snapshot_changed |= project_agent_event(&conn, event, self.graces).await?;
                     }
                     "AgentMonitorHealthChanged" => {
                         let health = serde_json::from_value::<AgentMonitorHealthChanged>(
@@ -493,7 +492,7 @@ async fn stage_delivery_event(
 async fn project_agent_event(
     conn: &turso::Connection,
     event: &events::EventEnvelope,
-    hook_grace_ms: u64,
+    graces: GraceWindows,
 ) -> events::Result<bool> {
     let agent_event = match event.r#type.as_str() {
         "AgentPaneObserved" => {
@@ -520,7 +519,7 @@ async fn project_agent_event(
     };
     let pane_id = agent_event_pane_id(&agent_event);
     let current = load_agent_pane(conn, pane_id).await?;
-    match reduce_agent_event(current, &agent_event, event.version, hook_grace_ms) {
+    match reduce_agent_event(current, &agent_event, event.version, graces) {
         ProjectionChange::Upsert(projection) => {
             upsert_agent_pane(conn, &projection).await?;
             Ok(true)
@@ -541,7 +540,7 @@ async fn project_agent_event(
 async fn project_turn_completed(
     conn: &turso::Connection,
     event: &events::EventEnvelope,
-    hook_grace_ms: u64,
+    graces: GraceWindows,
 ) -> events::Result<bool> {
     let Ok(turn) = serde_json::from_value::<TurnCompleted>(event.payload.clone()) else {
         // The delivery outbox remains the compatibility boundary for malformed notification
@@ -577,7 +576,7 @@ async fn project_turn_completed(
         &work_summary,
         observed_at_ms,
         event.version,
-        hook_grace_ms,
+        graces,
     ) {
         ProjectionChange::Upsert(projection) => {
             upsert_agent_pane(conn, &projection).await?;
@@ -1128,10 +1127,12 @@ async fn apply_migrations(conn: &turso::Connection) -> events::Result<()> {
 }
 
 pub async fn open_store(path: impl AsRef<Path>) -> events::Result<Arc<HaroldStore>> {
-    let hook_grace_ms = crate::settings::get_settings().agent_monitor.hook_grace_ms;
-    Ok(Arc::new(
-        HaroldStore::open_with_hook_grace(path, hook_grace_ms).await?,
-    ))
+    let monitor = &crate::settings::get_settings().agent_monitor;
+    let graces = GraceWindows {
+        hook_ms: monitor.hook_grace_ms,
+        report_ms: monitor.report_grace_ms,
+    };
+    Ok(Arc::new(HaroldStore::open_with_graces(path, graces).await?))
 }
 
 #[cfg(test)]

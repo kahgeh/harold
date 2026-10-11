@@ -11,6 +11,44 @@ use super::domain::{
 };
 
 pub(crate) const DEFAULT_HOOK_GRACE_MS: u64 = 2_000;
+pub(crate) const DEFAULT_REPORT_GRACE_MS: u64 = 30_000;
+
+/// How long a state report stands against the screen reading.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct GraceWindows {
+    /// For a turn-complete on a pane no lifecycle adapter reports on.
+    pub hook_ms: u64,
+    /// For a pane a lifecycle adapter reports on.
+    pub report_ms: u64,
+}
+
+impl GraceWindows {
+    #[cfg(test)]
+    pub(crate) const fn same(ms: u64) -> Self {
+        Self {
+            hook_ms: ms,
+            report_ms: ms,
+        }
+    }
+
+    pub(crate) fn for_pane(self, has_lifecycle_adapter: bool) -> i64 {
+        let ms = if has_lifecycle_adapter {
+            self.report_ms
+        } else {
+            self.hook_ms
+        };
+        i64::try_from(ms).unwrap_or(i64::MAX)
+    }
+}
+
+impl Default for GraceWindows {
+    fn default() -> Self {
+        Self {
+            hook_ms: DEFAULT_HOOK_GRACE_MS,
+            report_ms: DEFAULT_REPORT_GRACE_MS,
+        }
+    }
+}
 
 /// This classifier certifies a new submitted occurrence, including identical repeated text.
 pub(crate) const SUBMITTED_PROMPT_CLASSIFIER_ID: &str = "tmux-submitted-prompt-v1";
@@ -19,7 +57,7 @@ pub(crate) fn reduce_agent_event(
     current: Option<AgentPaneProjection>,
     event: &AgentEvent,
     event_version: EventStreamVersion,
-    hook_grace_ms: u64,
+    graces: GraceWindows,
 ) -> ProjectionChange {
     match event {
         AgentEvent::PaneObserved(observed) => {
@@ -39,7 +77,15 @@ pub(crate) fn reduce_agent_event(
                 return ProjectionChange::Ignore;
             }
 
-            invalidate_generated(&mut projection, event_version);
+            // The same adapter repeating the pane's state, with no summary, says only that
+            // it is still there. It restarts the grace and is not new work.
+            let is_repeat = projection.hook_state == Some(lifecycle.state)
+                && projection.lifecycle_adapter_id.as_deref()
+                    == Some(lifecycle.adapter_id.as_str())
+                && lifecycle.work_summary == WorkSummaryUpdate::Unchanged;
+            if !is_repeat {
+                invalidate_generated(&mut projection, event_version);
+            }
             projection.lifecycle_adapter_id = Some(lifecycle.adapter_id.clone());
             set_hook_state(&mut projection, lifecycle.state, lifecycle.observed_at_ms);
             apply_work_summary(
@@ -51,7 +97,7 @@ pub(crate) fn reduce_agent_event(
                 projection,
                 lifecycle.observed_at_ms,
                 event_version,
-                hook_grace_ms,
+                graces,
             ))
         }
         AgentEvent::ScreenObserved(screen) => {
@@ -75,7 +121,7 @@ pub(crate) fn reduce_agent_event(
             if let Some(state) = screen.state {
                 let state_needs_revalidation = projection.screen_state != Some(state)
                     || projection.effective_state != observed_to_effective(state)
-                    || revalidates_hook_epoch(&projection, screen.observed_at_ms, hook_grace_ms);
+                    || revalidates_hook_epoch(&projection, screen.observed_at_ms, graces);
                 if state_needs_revalidation {
                     projection.screen_state = Some(state);
                     projection.screen_classifier_id = Some(screen.classifier_id.clone());
@@ -93,7 +139,7 @@ pub(crate) fn reduce_agent_event(
                 projection,
                 screen.observed_at_ms,
                 event_version,
-                hook_grace_ms,
+                graces,
             ))
         }
         AgentEvent::ActivitySummaryGenerated(generated) => {
@@ -158,7 +204,7 @@ pub(crate) fn reduce_turn_completed(
     work_summary: &WorkSummaryUpdate,
     observed_at_ms: i64,
     event_version: EventStreamVersion,
-    hook_grace_ms: u64,
+    graces: GraceWindows,
 ) -> ProjectionChange {
     let Some(mut projection) = current else {
         return ProjectionChange::Ignore;
@@ -172,23 +218,18 @@ pub(crate) fn reduce_turn_completed(
         set_hook_state(&mut projection, ObservedAgentState::Idle, observed_at_ms);
     }
     apply_work_summary(&mut projection, work_summary, observed_at_ms);
-    ProjectionChange::Upsert(reconcile(
-        projection,
-        observed_at_ms,
-        event_version,
-        hook_grace_ms,
-    ))
+    ProjectionChange::Upsert(reconcile(projection, observed_at_ms, event_version, graces))
 }
 
 fn revalidates_hook_epoch(
     projection: &AgentPaneProjection,
     screen_observed_at_ms: i64,
-    hook_grace_ms: u64,
+    graces: GraceWindows,
 ) -> bool {
     let Some(hook_observed_at_ms) = projection.hook_observed_at_ms else {
         return false;
     };
-    let grace_ms = i64::try_from(hook_grace_ms).unwrap_or(i64::MAX);
+    let grace_ms = graces.for_pane(projection.lifecycle_adapter_id.is_some());
     let grace_ends_at_ms = hook_observed_at_ms.saturating_add(grace_ms);
     screen_observed_at_ms >= grace_ends_at_ms
         && projection
@@ -246,9 +287,9 @@ fn reconcile(
     mut projection: AgentPaneProjection,
     observed_at_ms: i64,
     event_version: EventStreamVersion,
-    hook_grace_ms: u64,
+    graces: GraceWindows,
 ) -> AgentPaneProjection {
-    let effective_state = effective_state(&projection, hook_grace_ms);
+    let effective_state = effective_state(&projection, graces);
     if projection.effective_state != effective_state {
         projection.effective_state = effective_state;
         projection.last_transition_at_ms = observed_at_ms;
@@ -280,14 +321,14 @@ fn reconcile(
     projection
 }
 
-fn effective_state(projection: &AgentPaneProjection, hook_grace_ms: u64) -> EffectiveAgentState {
+fn effective_state(projection: &AgentPaneProjection, graces: GraceWindows) -> EffectiveAgentState {
     let Some(hook_state) = projection.hook_state else {
         return projection
             .screen_state
             .map_or(EffectiveAgentState::Unknown, observed_to_effective);
     };
     let hook_observed_at_ms = projection.hook_observed_at_ms.unwrap_or(i64::MAX);
-    let grace_ms = i64::try_from(hook_grace_ms).unwrap_or(i64::MAX);
+    let grace_ms = graces.for_pane(projection.lifecycle_adapter_id.is_some());
     let hook_grace_ends_at_ms = hook_observed_at_ms.saturating_add(grace_ms);
     if let (Some(screen_state), Some(screen_observed_at_ms)) =
         (projection.screen_state, projection.screen_observed_at_ms)

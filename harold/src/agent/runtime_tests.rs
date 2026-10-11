@@ -15,6 +15,7 @@ use super::domain::{
     ScreenObservation, WorkSummaryUpdate,
 };
 use super::inventory::{AgentInventoryPort, InventoryError};
+use super::reducer::GraceWindows;
 use super::runtime::{
     AgentMonitorHandle, AgentMonitorSeed, MonitorCommandError, coalesced_tick_channel_for_test,
     spawn_agent_monitor_for_test, spawn_agent_monitor_seeded_for_test,
@@ -1930,7 +1931,7 @@ async fn restart_seed_revalidates_same_screen_state_once_when_it_predates_lifecy
 async fn zero_grace_same_millisecond_lifecycle_revalidates_once_across_two_restarts() {
     let directory = TestDirectory::new();
     let store = Arc::new(
-        HaroldStore::open_with_hook_grace(&directory.0, 0)
+        HaroldStore::open_with_graces(&directory.0, GraceWindows::same(0))
             .await
             .unwrap(),
     );
@@ -2313,6 +2314,7 @@ async fn slow_inventory_uses_its_own_budget_while_screen_keeps_the_short_deadlin
             inventory_interval: Duration::from_secs(86_400),
             screen_interval: Duration::from_secs(86_400),
             hook_grace_ms: 2_000,
+            report_grace_ms: 2_000,
             acquisition_timeout: Duration::from_millis(20),
             inventory_timeout: Duration::from_secs(1),
         },
@@ -2684,6 +2686,7 @@ impl Fixture {
                 inventory_interval: Duration::from_secs(86_400),
                 screen_interval: Duration::from_secs(86_400),
                 hook_grace_ms: 2_000,
+                report_grace_ms: 2_000,
                 acquisition_timeout: Duration::from_millis(100),
                 inventory_timeout: Duration::from_millis(100),
             },
@@ -3236,6 +3239,7 @@ exec /bin/sleep 60
             inventory_interval: Duration::from_secs(86_400),
             screen_interval: Duration::from_secs(86_400),
             hook_grace_ms: 2_000,
+            report_grace_ms: 2_000,
             acquisition_timeout: Duration::from_secs(60),
             inventory_timeout: Duration::from_secs(60),
         },

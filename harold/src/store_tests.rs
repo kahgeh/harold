@@ -876,9 +876,12 @@ async fn projection_preserves_summary_candidates_across_restart_without_raw_scre
 #[tokio::test]
 async fn configured_hook_grace_governs_replay_after_restart() {
     let directory = TestDirectory::new();
-    let store = HaroldStore::open_with_hook_grace(directory.path(), 0)
-        .await
-        .unwrap();
+    let store = HaroldStore::open_with_graces(
+        directory.path(),
+        crate::agent::reducer::GraceWindows::same(0),
+    )
+    .await
+    .unwrap();
     append_agent_events(
         &store,
         vec![
@@ -903,9 +906,12 @@ async fn configured_hook_grace_governs_replay_after_restart() {
     .unwrap();
     drop(store);
 
-    let reopened = HaroldStore::open_with_hook_grace(directory.path(), 0)
-        .await
-        .unwrap();
+    let reopened = HaroldStore::open_with_graces(
+        directory.path(),
+        crate::agent::reducer::GraceWindows::same(0),
+    )
+    .await
+    .unwrap();
     reopened.project_unhandled_events(500).await.unwrap();
     let snapshot = reopened.load_agent_snapshot().await.unwrap();
     assert_eq!(snapshot.panes[0].effective_state, EffectiveAgentState::Idle);

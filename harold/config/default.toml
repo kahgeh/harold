@@ -29,6 +29,7 @@ inventory_interval_ms = 1000
 inventory_timeout_ms = 3000
 screen_interval_ms = 500
 hook_grace_ms = 2000
+report_grace_ms = 30000
 
 [[agents]]
 id = "codex"

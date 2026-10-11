@@ -305,6 +305,8 @@ pub(crate) struct AgentMonitorSettings {
     pub inventory_timeout_ms: u64,
     pub screen_interval_ms: u64,
     pub hook_grace_ms: u64,
+    /// How long an adapter's report stands against the screen reading.
+    pub report_grace_ms: u64,
 }
 
 impl Default for AgentMonitorSettings {
@@ -314,6 +316,7 @@ impl Default for AgentMonitorSettings {
             inventory_timeout_ms: 3_000,
             screen_interval_ms: 500,
             hook_grace_ms: 2_000,
+            report_grace_ms: 30_000,
         }
     }
 }
@@ -735,6 +738,22 @@ mod tests {
         assert!(
             opencode.summary_line_prefixes.is_empty(),
             "OpenCode's prompt and user-message rows share the same visible prefix"
+        );
+    }
+
+    #[test]
+    fn report_grace_defaults_to_30_seconds_and_accepts_any_value() {
+        let shipped = parse_agent_config(&[include_str!("../config/default.toml")]);
+        assert_eq!(shipped.agent_monitor.report_grace_ms, 30_000);
+        assert_eq!(AgentMonitorSettings::default().report_grace_ms, 30_000);
+        assert!(include_str!("../config/default.toml").contains("report_grace_ms = 30000"));
+
+        let configured = parse_agent_config(&["agents = []\n[agent_monitor]\nreport_grace_ms = 0"]);
+        assert_eq!(configured.agent_monitor.report_grace_ms, 0);
+        assert!(
+            AgentSettings::default()
+                .validate(&configured.agent_monitor)
+                .is_empty()
         );
     }
 

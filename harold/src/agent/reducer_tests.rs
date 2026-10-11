@@ -5,7 +5,9 @@ use super::domain::{
     AgentPaneObserved, AgentScreenObserved, EffectiveAgentState, ObservedAgentState,
     ProjectionChange, WorkSummaryUpdate,
 };
-use super::reducer::{DEFAULT_HOOK_GRACE_MS, reduce_agent_event, reduce_turn_completed};
+use super::reducer::{
+    DEFAULT_HOOK_GRACE_MS, GraceWindows, reduce_agent_event, reduce_turn_completed,
+};
 
 fn version(value: i64) -> EventStreamVersion {
     EventStreamVersion::new(value).unwrap()
@@ -55,12 +57,65 @@ fn apply_with_grace(
     event_version: i64,
     hook_grace_ms: u64,
 ) -> super::domain::AgentPaneProjection {
+    apply_with_graces(
+        current,
+        event,
+        event_version,
+        GraceWindows::same(hook_grace_ms),
+    )
+}
+
+fn apply_with_graces(
+    current: Option<super::domain::AgentPaneProjection>,
+    event: AgentEvent,
+    event_version: i64,
+    graces: GraceWindows,
+) -> super::domain::AgentPaneProjection {
     upsert(reduce_agent_event(
         current,
         &event,
         version(event_version),
-        hook_grace_ms,
+        graces,
     ))
+}
+
+/// The shipped windows: 2 seconds for a turn-complete, 30 seconds for an adapter's report.
+fn apply_default(
+    current: Option<super::domain::AgentPaneProjection>,
+    event: AgentEvent,
+    event_version: i64,
+) -> super::domain::AgentPaneProjection {
+    apply_with_graces(current, event, event_version, GraceWindows::default())
+}
+
+fn mod_report(state: ObservedAgentState, observed_at_ms: i64) -> AgentEvent {
+    AgentEvent::LifecycleObserved(AgentLifecycleObserved {
+        incarnation: incarnation(1_000),
+        state,
+        adapter_id: "claude.lifecycle".into(),
+        work_summary: WorkSummaryUpdate::Unchanged,
+        observed_at_ms,
+    })
+}
+
+fn screen_reading(state: ObservedAgentState, observed_at_ms: i64) -> AgentEvent {
+    AgentEvent::ScreenObserved(AgentScreenObserved {
+        incarnation: incarnation(1_000),
+        state: Some(state),
+        classifier_id: "screen-v1".into(),
+        fallback_summary: None,
+        observed_at_ms,
+    })
+}
+
+fn observed_pane() -> super::domain::AgentPaneProjection {
+    apply_default(
+        None,
+        AgentEvent::PaneObserved(AgentPaneObserved {
+            pane: pane(1_000, 100),
+        }),
+        1,
+    )
 }
 
 #[test]
@@ -516,7 +571,7 @@ fn screen_facts_update_independently_and_absence_preserves_candidates() {
                 observed_at_ms: 140,
             }),
             version(5),
-            DEFAULT_HOOK_GRACE_MS,
+            GraceWindows::same(DEFAULT_HOOK_GRACE_MS),
         ),
         ProjectionChange::Ignore
     );
@@ -600,7 +655,7 @@ fn replacement_clears_evidence_and_delayed_old_incarnation_events_are_ignored() 
                 observed_at_ms: 130,
             }),
             version(4),
-            DEFAULT_HOOK_GRACE_MS,
+            GraceWindows::same(DEFAULT_HOOK_GRACE_MS),
         ),
         ProjectionChange::Ignore
     );
@@ -624,7 +679,7 @@ fn only_a_matching_departure_removes_the_current_incarnation() {
                 observed_at_ms: 110,
             }),
             version(2),
-            DEFAULT_HOOK_GRACE_MS,
+            GraceWindows::default(),
         ),
         ProjectionChange::Ignore
     );
@@ -636,7 +691,7 @@ fn only_a_matching_departure_removes_the_current_incarnation() {
                 observed_at_ms: 120,
             }),
             version(3),
-            DEFAULT_HOOK_GRACE_MS,
+            GraceWindows::same(DEFAULT_HOOK_GRACE_MS),
         ),
         ProjectionChange::Remove(incarnation(2_000))
     );
@@ -684,7 +739,7 @@ fn generated_activity_requires_current_basis_and_preserves_source() {
             Some(repeated.clone()),
             &generated,
             version(5),
-            DEFAULT_HOOK_GRACE_MS
+            GraceWindows::same(DEFAULT_HOOK_GRACE_MS)
         ),
         ProjectionChange::Ignore
     );
@@ -700,12 +755,17 @@ fn generated_activity_requires_current_basis_and_preserves_source() {
             Some(replaced),
             &generated,
             version(7),
-            DEFAULT_HOOK_GRACE_MS
+            GraceWindows::same(DEFAULT_HOOK_GRACE_MS)
         ),
         ProjectionChange::Ignore
     );
     assert_eq!(
-        reduce_agent_event(None, &generated, version(8), DEFAULT_HOOK_GRACE_MS),
+        reduce_agent_event(
+            None,
+            &generated,
+            version(8),
+            GraceWindows::same(DEFAULT_HOOK_GRACE_MS)
+        ),
         ProjectionChange::Ignore
     );
 }
@@ -929,7 +989,7 @@ fn a_turn_complete_leaves_the_state_of_a_pane_an_adapter_reports_on() {
         &WorkSummaryUpdate::Set("fix the parser".into()),
         4_000,
         version(3),
-        DEFAULT_HOOK_GRACE_MS,
+        GraceWindows::default(),
     ));
 
     assert_eq!(completed.effective_state, EffectiveAgentState::Busy);
@@ -959,7 +1019,7 @@ fn a_turn_complete_sets_idle_for_a_pane_without_an_adapter() {
         &WorkSummaryUpdate::Unchanged,
         4_000,
         version(2),
-        DEFAULT_HOOK_GRACE_MS,
+        GraceWindows::default(),
     ));
 
     assert_eq!(completed.effective_state, EffectiveAgentState::Idle);
@@ -985,8 +1045,178 @@ fn a_turn_complete_for_another_agent_process_is_ignored() {
             &WorkSummaryUpdate::Unchanged,
             4_000,
             version(2),
-            DEFAULT_HOOK_GRACE_MS,
+            GraceWindows::default(),
         ),
         ProjectionChange::Ignore
     );
+}
+
+#[test]
+fn a_busy_report_stands_against_the_screen_at_29_seconds_and_yields_at_30() {
+    let reported = apply_default(
+        Some(observed_pane()),
+        mod_report(ObservedAgentState::Busy, 1_000),
+        2,
+    );
+
+    let at_29_s = apply_default(
+        Some(reported),
+        screen_reading(ObservedAgentState::Idle, 30_000),
+        3,
+    );
+    assert_eq!(at_29_s.effective_state, EffectiveAgentState::Busy);
+
+    let at_30_s = apply_default(
+        Some(at_29_s),
+        screen_reading(ObservedAgentState::Idle, 31_000),
+        4,
+    );
+    assert_eq!(at_30_s.effective_state, EffectiveAgentState::Idle);
+    assert_eq!(at_30_s.last_transition_at_ms, 31_000);
+}
+
+#[test]
+fn an_idle_report_stands_against_the_screen_at_29_seconds_and_yields_at_30() {
+    let reported = apply_default(
+        Some(observed_pane()),
+        mod_report(ObservedAgentState::Idle, 1_000),
+        2,
+    );
+
+    let at_29_s = apply_default(
+        Some(reported),
+        screen_reading(ObservedAgentState::Busy, 30_000),
+        3,
+    );
+    assert_eq!(at_29_s.effective_state, EffectiveAgentState::Idle);
+
+    let at_30_s = apply_default(
+        Some(at_29_s),
+        screen_reading(ObservedAgentState::Busy, 31_000),
+        4,
+    );
+    assert_eq!(at_30_s.effective_state, EffectiveAgentState::Busy);
+
+    // The mod reports again: its report stands and the screen reading is dropped.
+    let reported_again = apply_default(
+        Some(at_30_s),
+        mod_report(ObservedAgentState::Idle, 40_000),
+        5,
+    );
+    assert_eq!(reported_again.effective_state, EffectiveAgentState::Idle);
+    assert_eq!(reported_again.screen_state, None);
+}
+
+#[test]
+fn a_repeated_busy_report_restarts_the_30_seconds() {
+    let reported = apply_default(
+        Some(observed_pane()),
+        mod_report(ObservedAgentState::Busy, 1_000),
+        2,
+    );
+    let repeated = apply_default(
+        Some(reported),
+        mod_report(ObservedAgentState::Busy, 11_000),
+        3,
+    );
+    assert_eq!(repeated.hook_observed_at_ms, Some(11_000));
+    assert_eq!(repeated.last_transition_at_ms, 1_000);
+
+    let at_29_s = apply_default(
+        Some(repeated),
+        screen_reading(ObservedAgentState::Idle, 40_000),
+        4,
+    );
+    assert_eq!(at_29_s.effective_state, EffectiveAgentState::Busy);
+    let at_30_s = apply_default(
+        Some(at_29_s),
+        screen_reading(ObservedAgentState::Idle, 41_000),
+        5,
+    );
+    assert_eq!(at_30_s.effective_state, EffectiveAgentState::Idle);
+
+    // A report after the screen took over puts the mod's state back.
+    let back = apply_default(
+        Some(at_30_s),
+        mod_report(ObservedAgentState::Busy, 45_000),
+        6,
+    );
+    assert_eq!(back.effective_state, EffectiveAgentState::Busy);
+}
+
+#[test]
+fn a_repeated_report_keeps_the_generated_summary_and_a_changed_one_drops_it() {
+    let reported = apply_default(
+        Some(observed_pane()),
+        mod_report(ObservedAgentState::Busy, 1_000),
+        2,
+    );
+    let generated = apply_default(
+        Some(reported.clone()),
+        AgentEvent::ActivitySummaryGenerated(super::domain::AgentActivitySummaryGenerated {
+            incarnation: incarnation(1_000),
+            basis_version: reported.summary_basis_version,
+            description: "Fixing the parser".into(),
+            generated_at_ms: 2_000,
+        }),
+        3,
+    );
+    assert_eq!(generated.work_summary.as_deref(), Some("Fixing the parser"));
+
+    let repeated = apply_default(
+        Some(generated.clone()),
+        mod_report(ObservedAgentState::Busy, 11_000),
+        4,
+    );
+    assert_eq!(repeated.work_summary.as_deref(), Some("Fixing the parser"));
+    assert_eq!(
+        repeated.summary_basis_version,
+        generated.summary_basis_version
+    );
+
+    let from_another_adapter = apply_default(
+        Some(repeated.clone()),
+        AgentEvent::LifecycleObserved(AgentLifecycleObserved {
+            incarnation: incarnation(1_000),
+            state: ObservedAgentState::Busy,
+            adapter_id: "opencode.lifecycle".into(),
+            work_summary: WorkSummaryUpdate::Unchanged,
+            observed_at_ms: 12_000,
+        }),
+        5,
+    );
+    assert_eq!(from_another_adapter.generated_work_summary, None);
+
+    let changed = apply_default(
+        Some(repeated),
+        mod_report(ObservedAgentState::Idle, 12_000),
+        5,
+    );
+    assert_eq!(changed.generated_work_summary, None);
+    assert_eq!(changed.summary_basis_version, version(5));
+}
+
+#[test]
+fn a_turn_complete_without_an_adapter_keeps_the_2_second_window() {
+    let completed = upsert(reduce_turn_completed(
+        Some(observed_pane()),
+        &incarnation(1_000),
+        &WorkSummaryUpdate::Unchanged,
+        1_000,
+        version(2),
+        GraceWindows::default(),
+    ));
+
+    let just_inside = apply_default(
+        Some(completed),
+        screen_reading(ObservedAgentState::Busy, 2_999),
+        3,
+    );
+    assert_eq!(just_inside.effective_state, EffectiveAgentState::Idle);
+    let at_2_s = apply_default(
+        Some(just_inside),
+        screen_reading(ObservedAgentState::Busy, 3_000),
+        4,
+    );
+    assert_eq!(at_2_s.effective_state, EffectiveAgentState::Busy);
 }
