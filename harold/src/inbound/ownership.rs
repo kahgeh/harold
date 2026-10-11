@@ -1,8 +1,9 @@
 //! Which Mac owns a reply.
 //!
-//! Several Macs can read the same reply. Each message Harold sends names its Mac, and
-//! each Harold keeps the name from the last notification it saw. A reply that names no
-//! Mac belongs to the Mac that notified last.
+//! Several Macs can read the same reply. Each message Harold sends names its Mac. When the
+//! `machines` setting lists your Macs, each Harold keeps the name from the latest
+//! notification it saw, and a reply that names no Mac belongs to the Mac that notified
+//! last.
 
 use std::sync::{LazyLock, Mutex};
 
@@ -50,20 +51,31 @@ pub(crate) fn same_machine(a: &str, b: &str) -> bool {
 // Latest notifier — which Mac sent the last notification
 // ---------------------------------------------------------------------------
 
-/// The machine names seen in markers, and the one from the last notification.
+/// The `machines` setting, and the Mac that sent the latest notification.
+///
+/// Multi-Mac routing is on only when `machines` is set. While it is empty the record
+/// accepts nothing: it keeps no latest notifier and knows no machine name, so this Mac owns
+/// every untagged reply, as a single Mac always has.
 #[derive(Debug)]
 pub(crate) struct NotifierRecord {
-    /// The `machines` setting. When it is not empty, only these names are machine names.
+    /// The `machines` setting. Only these names are machine names.
     machines: Vec<String>,
-    known: Vec<String>,
-    latest: Option<String>,
+    latest: Option<Latest>,
+}
+
+/// The latest notification recorded.
+#[derive(Debug)]
+struct Latest {
+    machine: String,
+    /// The `date` of the row it was read from. `None` when it was recorded by name with
+    /// `record_notification`, which has no row.
+    date: Option<i64>,
 }
 
 impl NotifierRecord {
     pub(crate) const fn new() -> Self {
         Self {
             machines: Vec::new(),
-            known: Vec::new(),
             latest: None,
         }
     }
@@ -76,68 +88,82 @@ impl NotifierRecord {
         }
     }
 
-    /// Record a message Harold sent, as read back from the conversation. Text that is
-    /// not a marker, or that names a machine `machines` does not list, changes nothing.
-    pub(crate) fn record_marker(&mut self, text: &str) {
+    /// Record a message Harold sent, as read back from the conversation, with the `date`
+    /// Messages stored with its row. Only a notification from a listed machine counts.
+    ///
+    /// The latest notifier is the one with the greatest `date`; two rows with the same
+    /// `date` are ordered by machine name, ignoring case, and the greater name wins. So rows
+    /// can be fed in any order and give the same latest notifier. A row replaces a latest
+    /// notifier recorded by name (`record_notification`), which has no date.
+    pub(crate) fn record_marker(&mut self, text: &str, date: i64) {
         let Some(marker) = parse_marker(text) else {
             return;
         };
-        if !self.is_machine_name(marker.machine) {
+        if !marker.is_notification || !self.is_listed(marker.machine) {
             return;
         }
-        self.learn(marker.machine);
-        if marker.is_notification {
-            self.latest = Some(marker.machine.to_string());
+        let is_later = match &self.latest {
+            Some(Latest {
+                machine,
+                date: Some(latest_date),
+            }) => (date, marker.machine.to_lowercase()) > (*latest_date, machine.to_lowercase()),
+            _ => true,
+        };
+        if is_later {
+            self.latest = Some(Latest {
+                machine: marker.machine.to_string(),
+                date: Some(date),
+            });
         }
     }
 
-    /// Record that `machine` sent a notification just now.
+    /// Record that `machine` sent a notification just now. A name that is not listed or is
+    /// not a valid machine name changes nothing, and so does every name while `machines` is
+    /// empty.
+    ///
+    /// It has no row and so no `date`: it is ordered by arrival. It replaces any latest
+    /// notifier, from a row or by name, and the next row recorded replaces it.
     pub(crate) fn record_notification(&mut self, machine: &str) {
-        if !is_valid_machine_name(machine) || !self.is_machine_name(machine) {
+        if !is_valid_machine_name(machine) || !self.is_listed(machine) {
             return;
         }
-        self.learn(machine);
-        self.latest = Some(machine.to_string());
+        self.latest = Some(Latest {
+            machine: machine.to_string(),
+            date: None,
+        });
     }
 
     pub(crate) fn latest_notifier(&self) -> Option<&str> {
-        self.latest.as_deref()
+        self.latest.as_ref().map(|latest| latest.machine.as_str())
     }
 
-    /// The `machines` setting when it is set, otherwise the names seen in markers.
+    /// The `machines` setting. This Mac's own name is not added: `decide_ownership`
+    /// recognises it as `this_machine`.
     pub(crate) fn known_machine_names(&self) -> &[String] {
-        if self.machines.is_empty() {
-            &self.known
-        } else {
-            &self.machines
-        }
+        &self.machines
     }
 
-    /// Whether `machine` can name a Mac: any name while `machines` is empty, otherwise
-    /// only a listed one.
-    fn is_machine_name(&self, machine: &str) -> bool {
-        self.machines.is_empty()
-            || self
-                .machines
-                .iter()
-                .any(|listed| same_machine(listed, machine))
-    }
-
-    fn learn(&mut self, machine: &str) {
-        if !self.known.iter().any(|known| same_machine(known, machine)) {
-            self.known.push(machine.to_string());
-        }
+    fn is_listed(&self, machine: &str) -> bool {
+        self.machines
+            .iter()
+            .any(|listed| same_machine(listed, machine))
     }
 }
 
-/// The record of this process. It takes the `machines` setting when it is first used, so
-/// the listed names are known before any marker is read.
+/// The record of this process, built from the `machines` setting when it is first used.
 static NOTIFIERS: LazyLock<Mutex<NotifierRecord>> =
     LazyLock::new(|| Mutex::new(NotifierRecord::for_machines(&get_settings().machines)));
 
-/// Record a `🤖 [...]` message read from the conversation.
-pub(crate) fn record_marker(text: &str) {
-    NOTIFIERS.lock().unwrap().record_marker(text);
+/// Every marker fed to `record_marker`, so a test can see that a caller feeds the
+/// process-wide record while the test settings list no machines and the record keeps none.
+#[cfg(test)]
+static FED_MARKERS: Mutex<Vec<(String, i64)>> = Mutex::new(Vec::new());
+
+/// Record a `🤖 [...]` message read from the conversation, with the `date` of its row.
+pub(crate) fn record_marker(text: &str, date: i64) {
+    #[cfg(test)]
+    FED_MARKERS.lock().unwrap().push((text.to_string(), date));
+    NOTIFIERS.lock().unwrap().record_marker(text, date);
 }
 
 /// Record a notification by the name of the Mac that sent it.
@@ -158,10 +184,22 @@ pub(crate) fn latest_notifier() -> Option<String> {
         .map(String::from)
 }
 
-/// The known machine names: the `machines` setting when it is set, otherwise every name
-/// recorded so far. This Mac's own name is not added to the recorded names.
+/// The known machine names: the `machines` setting. This Mac's own name is not added.
 pub(crate) fn known_machine_names() -> Vec<String> {
     NOTIFIERS.lock().unwrap().known_machine_names().to_vec()
+}
+
+/// The markers fed to the process-wide record so far, in order.
+#[cfg(test)]
+pub(crate) fn fed_markers() -> Vec<(String, i64)> {
+    FED_MARKERS.lock().unwrap().clone()
+}
+
+/// Replace the process-wide record with one for `machines`, as if the setting listed them.
+/// Only the test of the process-wide record calls it.
+#[cfg(test)]
+pub(crate) fn list_machines_for_test(machines: &[String]) {
+    *NOTIFIERS.lock().unwrap() = NotifierRecord::for_machines(machines);
 }
 
 // ---------------------------------------------------------------------------

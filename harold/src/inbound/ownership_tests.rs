@@ -1,7 +1,7 @@
 use super::{
     Marker, NotifierRecord, Ownership, decide_ownership, delivered_text, error_text,
-    known_machine_names, latest_notifier, notification_text, pane_address, parse_marker,
-    record_marker, record_notification,
+    known_machine_names, latest_notifier, list_machines_for_test, notification_text, pane_address,
+    parse_marker, record_marker, record_notification,
 };
 
 fn notification(machine: &str) -> Option<Marker<'_>> {
@@ -72,57 +72,94 @@ fn record_starts_with_no_notifier_and_no_names() {
     assert!(record.known_machine_names().is_empty());
 }
 
-#[test]
-fn latest_notifier_is_the_machine_of_the_last_notification_recorded() {
-    let mut record = NotifierRecord::new();
+fn listed(names: &[&str]) -> Vec<String> {
+    names.iter().map(ToString::to_string).collect()
+}
 
-    record.record_marker("🤖 [studio/alir-app main:0.1] Tests pass (alir)");
-    record.record_marker("🤖 [laptop/harold main:0.0] Build done (harold)");
-    assert_eq!(record.latest_notifier(), Some("laptop"));
-
-    record.record_notification("studio");
-    assert_eq!(record.latest_notifier(), Some("studio"));
-    assert_eq!(record.known_machine_names(), ["studio", "laptop"]);
+/// A record for a hub and two Macs, as the `machines` setting would list them.
+fn three_macs() -> NotifierRecord {
+    NotifierRecord::for_machines(&listed(&["studio", "laptop", "mini"]))
 }
 
 #[test]
-fn error_reply_adds_a_known_name_without_becoming_the_latest_notifier() {
-    let mut record = NotifierRecord::new();
+fn latest_notifier_is_the_machine_of_the_notification_with_the_greatest_date() {
+    let mut record = three_macs();
 
-    record.record_marker("🤖 [studio/alir-app main:0.1] Tests pass (alir)");
-    record.record_marker("🤖 [laptop] No active agent sessions found.");
+    record.record_marker("🤖 [studio/alir-app main:0.1] Tests pass (alir)", 100);
+    record.record_marker("🤖 [laptop/harold main:0.0] Build done (harold)", 200);
+    assert_eq!(record.latest_notifier(), Some("laptop"));
+
+    // Read later, sent earlier: the date decides, not the order rows are read in.
+    record.record_marker("🤖 [mini/x:0.0] done (x)", 150);
+    assert_eq!(record.latest_notifier(), Some("laptop"));
+}
+
+#[test]
+fn rows_fed_in_any_order_give_the_same_latest_notifier() {
+    // Two machines notify at the same date: the greater name wins. A third notified
+    // earlier.
+    let rows = [
+        ("🤖 [laptop/harold main:0.0] Build done (harold)", 300),
+        ("🤖 [Studio/alir-app main:0.1] Tests pass (alir)", 300),
+        ("🤖 [mini/x:0.0] done (x)", 100),
+    ];
+    let orders: [[usize; 3]; 6] = [
+        [0, 1, 2],
+        [0, 2, 1],
+        [1, 0, 2],
+        [1, 2, 0],
+        [2, 0, 1],
+        [2, 1, 0],
+    ];
+    for order in orders {
+        let mut record = three_macs();
+        for index in order {
+            let (text, date) = rows[index];
+            record.record_marker(text, date);
+        }
+        assert_eq!(record.latest_notifier(), Some("Studio"), "{order:?}");
+    }
+}
+
+#[test]
+fn notification_recorded_by_name_is_latest_until_the_next_row() {
+    let mut record = three_macs();
+
+    record.record_marker("🤖 [laptop/harold main:0.0] Build done (harold)", 200);
+    record.record_notification("studio");
+    assert_eq!(record.latest_notifier(), Some("studio"));
+
+    record.record_notification("mini");
+    assert_eq!(record.latest_notifier(), Some("mini"));
+
+    // It has no date, so any row read after it replaces it, even an older one.
+    record.record_marker("🤖 [laptop/harold main:0.0] Build done (harold)", 100);
+    assert_eq!(record.latest_notifier(), Some("laptop"));
+}
+
+#[test]
+fn error_reply_changes_nothing() {
+    let mut record = three_macs();
+
+    record.record_marker("🤖 [studio/alir-app main:0.1] Tests pass (alir)", 100);
+    record.record_marker("🤖 [laptop] No active agent sessions found.", 200);
 
     assert_eq!(record.latest_notifier(), Some("studio"));
-    assert_eq!(record.known_machine_names(), ["studio", "laptop"]);
+    assert_eq!(record.known_machine_names(), ["studio", "laptop", "mini"]);
 }
 
 #[test]
 fn unmarked_and_invalid_input_leaves_the_record_unchanged() {
-    let mut record = NotifierRecord::new();
+    let mut record = three_macs();
 
-    record.record_marker("yes, merge it");
-    record.record_marker("🤖 [harold:0.1] Work is done. (harold)");
-    record.record_marker("🤖 ✓ Delivered to [studio/alir-app main:0.1]");
+    record.record_marker("yes, merge it", 100);
+    record.record_marker("🤖 [harold:0.1] Work is done. (harold)", 100);
+    record.record_marker("🤖 ✓ Delivered to [studio/alir-app main:0.1]", 100);
     record.record_notification("");
     record.record_notification("my mac");
 
     assert_eq!(record.latest_notifier(), None);
-    assert!(record.known_machine_names().is_empty());
-}
-
-#[test]
-fn a_name_seen_in_another_case_is_known_once() {
-    let mut record = NotifierRecord::new();
-
-    record.record_notification("Studio");
-    record.record_marker("🤖 [studio/a:0.0] done (a)");
-
-    assert_eq!(record.known_machine_names(), ["Studio"]);
-    assert_eq!(record.latest_notifier(), Some("studio"));
-}
-
-fn listed(names: &[&str]) -> Vec<String> {
-    names.iter().map(ToString::to_string).collect()
+    assert_eq!(record.known_machine_names(), ["studio", "laptop", "mini"]);
 }
 
 #[test]
@@ -137,12 +174,12 @@ fn listed_machines_are_known_before_any_marker_is_read() {
 fn marker_with_a_name_that_is_not_listed_changes_nothing() {
     let mut record = NotifierRecord::for_machines(&listed(&["studio", "laptop"]));
 
-    record.record_marker("🤖 [laptop/harold main:0.0] Build done (harold)");
+    record.record_marker("🤖 [laptop/harold main:0.0] Build done (harold)", 100);
     // A question that starts with a bracket, a notification in the earlier format from a
     // tmux session named feature/x, and two messages from a Mac that is not listed.
-    record.record_marker("🤖 [1/2] Should I deploy?");
-    record.record_marker("🤖 [feature/x:0.0] done (x)");
-    record.record_marker("🤖 [mini] No active agent sessions found.");
+    record.record_marker("🤖 [1/2] Should I deploy?", 200);
+    record.record_marker("🤖 [feature/x:0.0] done (x)", 200);
+    record.record_marker("🤖 [mini/a:0.0] done (a)", 200);
     record.record_notification("mini");
 
     assert_eq!(record.latest_notifier(), Some("laptop"));
@@ -153,20 +190,34 @@ fn marker_with_a_name_that_is_not_listed_changes_nothing() {
 fn listed_name_counts_in_any_case() {
     let mut record = NotifierRecord::for_machines(&listed(&["Studio", "laptop"]));
 
-    record.record_marker("🤖 [studio/a:0.0] done (a)");
+    record.record_marker("🤖 [studio/a:0.0] done (a)", 100);
 
     assert_eq!(record.latest_notifier(), Some("studio"));
     assert_eq!(record.known_machine_names(), ["Studio", "laptop"]);
 }
 
 #[test]
-fn with_no_machines_listed_every_machine_name_in_a_marker_counts() {
+fn with_no_machines_listed_the_record_accepts_nothing() {
     let mut record = NotifierRecord::for_machines(&[]);
 
-    record.record_marker("🤖 [mini/a:0.0] done (a)");
+    record.record_marker("🤖 [mini/a:0.0] done (a)", 100);
+    record.record_marker("🤖 [1/2] Should I deploy?", 200);
+    record.record_marker("🤖 [mini] No active agent sessions found.", 300);
+    record.record_notification("mini");
 
-    assert_eq!(record.latest_notifier(), Some("mini"));
-    assert_eq!(record.known_machine_names(), ["mini"]);
+    assert_eq!(record.latest_notifier(), None);
+    assert!(record.known_machine_names().is_empty());
+    // So this Mac owns an untagged reply, as a single Mac always has.
+    assert_eq!(
+        decide_ownership(
+            "yes",
+            false,
+            "studio",
+            record.known_machine_names(),
+            record.latest_notifier()
+        ),
+        owned(None, "yes")
+    );
 }
 
 #[test]
@@ -185,18 +236,25 @@ fn tag_for_a_listed_mac_that_has_not_notified_is_left_to_that_mac() {
 }
 
 #[test]
-fn process_wide_record_is_fed_and_read_through_the_four_functions() {
+fn process_wide_record_is_built_from_the_settings_and_fed_through_the_four_functions() {
     crate::settings::init_settings_for_test();
-    // The only test that touches the process-wide record. The names are unique to it.
-    record_marker("🤖 [ownership-test-a/x:0.0] done (x)");
-    assert_eq!(latest_notifier().as_deref(), Some("ownership-test-a"));
+    // The only test that changes the process-wide record. The names are unique to it.
+    // The test settings list no machines, so the record accepts nothing.
+    assert!(crate::settings::get_settings().machines.is_empty());
+    record_marker("🤖 [ownership-test-a/x:0.0] done (x)", 100);
+    record_notification("ownership-test-a");
+    assert_eq!(latest_notifier(), None);
+    assert!(known_machine_names().is_empty());
 
+    list_machines_for_test(&listed(&["ownership-test-a", "ownership-test-b"]));
+    record_marker("🤖 [ownership-test-a/x:0.0] done (x)", 100);
+    assert_eq!(latest_notifier().as_deref(), Some("ownership-test-a"));
     record_notification("ownership-test-b");
     assert_eq!(latest_notifier().as_deref(), Some("ownership-test-b"));
-
-    let known = known_machine_names();
-    assert!(known.contains(&"ownership-test-a".to_string()), "{known:?}");
-    assert!(known.contains(&"ownership-test-b".to_string()), "{known:?}");
+    assert_eq!(
+        known_machine_names(),
+        ["ownership-test-a", "ownership-test-b"]
+    );
 }
 
 fn known() -> Vec<String> {

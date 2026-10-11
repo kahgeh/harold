@@ -273,20 +273,20 @@ fn db_path() -> String {
     get_settings().chat_db.resolved_path()
 }
 
-/// The newest row in chat.db, or why it could not be read. An empty table reads as
-/// row 0; a failed read must not, or every stored message would later look new.
-fn get_max_rowid() -> Result<i64, String> {
-    max_rowid_of(&db_path())
-}
-
+/// The newest row in the database at `db`, or why it could not be read. An empty table
+/// reads as row 0; a failed read must not, or every stored message would later look new.
 fn max_rowid_of(db: &str) -> Result<i64, String> {
     let out = Command::new("sqlite3")
         .arg(db)
         .arg("SELECT COALESCE(MAX(ROWID), 0) FROM message;")
         .output()
         .map_err(|error| format!("sqlite3 did not start: {error}"))?;
-    parse_max_rowid(out.status.success(), &out.stdout)
-        .ok_or_else(|| first_line(&String::from_utf8_lossy(&out.stderr)))
+    parse_max_rowid(out.status.success(), &out.stdout).ok_or_else(|| {
+        first_line(
+            &String::from_utf8_lossy(&out.stderr),
+            "sqlite3 gave no row number",
+        )
+    })
 }
 
 fn parse_max_rowid(succeeded: bool, stdout: &[u8]) -> Option<i64> {
@@ -296,25 +296,26 @@ fn parse_max_rowid(succeeded: bool, stdout: &[u8]) -> Option<i64> {
     String::from_utf8_lossy(stdout).trim().parse().ok()
 }
 
-fn first_line(text: &str) -> String {
+/// The first line of `text`, or `when_empty` if it has none.
+fn first_line(text: &str, when_empty: &str) -> String {
     let line = text.lines().next().unwrap_or("").trim();
     if line.is_empty() {
-        return "sqlite3 gave no row number".into();
+        return when_empty.into();
     }
     line.chars().take(200).collect()
 }
 
-/// Reads the newest row until a read succeeds, so the listener never starts from a row
-/// it did not read. Returns `None` if shutdown is signalled first.
-async fn wait_for_start_row(
-    mut read: impl FnMut() -> Result<i64, String>,
+/// Calls `read` until it succeeds, so the listener never starts from what it did not read.
+/// A failure is logged once. Returns `None` if shutdown is signalled first.
+async fn wait_for_start_row<T>(
+    mut read: impl FnMut() -> Result<T, String>,
     retry_every: Duration,
     shutdown: &mut watch::Receiver<()>,
-) -> Option<i64> {
+) -> Option<T> {
     let mut warned = false;
     loop {
         match read() {
-            Ok(rowid) => return Some(rowid),
+            Ok(start) => return Some(start),
             Err(cause) if !warned => {
                 warn!(
                     %cause,
@@ -331,6 +332,23 @@ async fn wait_for_start_row(
             () = tokio::time::sleep(retry_every) => {}
         }
     }
+}
+
+/// A row a Harold sent, as the listener reads it to find the latest notifier.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MarkedRow {
+    rowid: i64,
+    /// The send time Messages stores with the row. A row with none reads as 0.
+    date: i64,
+    text: String,
+}
+
+/// What the listener reads before its first poll: the newest row, which every cursor
+/// starts after, and the last marked rows up to it.
+fn read_start(db: &ChatDb) -> Result<(i64, Vec<MarkedRow>), String> {
+    let initial = max_rowid_of(&db.path)?;
+    let marked = db.latest_marked(initial, STARTUP_MARKED_ROWS)?;
+    Ok((initial, marked))
 }
 
 /// The Messages database and the conversations in it that Harold reads.
@@ -366,27 +384,28 @@ impl ChatDb {
     }
 
     /// The rows after `last_rowid` that a Harold sent, from this Mac or another, in both
-    /// directions, oldest first.
-    fn marked_after(&self, last_rowid: i64) -> Vec<(i64, String)> {
+    /// directions, oldest first, or why they could not be read.
+    fn marked_after(&self, last_rowid: i64) -> Result<Vec<MarkedRow>, String> {
         let Some(id_list) = self.id_list() else {
-            return vec![];
+            return Ok(vec![]);
         };
-        self.query(&format!(
-            "SELECT ROWID, text FROM message \
+        self.query_marked(&format!(
+            "SELECT ROWID, COALESCE(date, 0) AS date, text FROM message \
              WHERE ROWID > {last_rowid} AND handle_id IN ({id_list}) \
                AND text LIKE '{HAROLD_MARKER}%' \
              ORDER BY ROWID ASC;"
         ))
     }
 
-    /// The last `limit` rows a Harold sent, up to row `up_to_rowid`, oldest first.
-    fn latest_marked(&self, up_to_rowid: i64, limit: usize) -> Vec<(i64, String)> {
+    /// The last `limit` rows a Harold sent, up to row `up_to_rowid`, oldest first, or why
+    /// they could not be read.
+    fn latest_marked(&self, up_to_rowid: i64, limit: usize) -> Result<Vec<MarkedRow>, String> {
         let Some(id_list) = self.id_list() else {
-            return vec![];
+            return Ok(vec![]);
         };
-        self.query(&format!(
-            "SELECT ROWID, text FROM (\
-               SELECT ROWID, text FROM message \
+        self.query_marked(&format!(
+            "SELECT ROWID, date, text FROM (\
+               SELECT ROWID, COALESCE(date, 0) AS date, text FROM message \
                WHERE ROWID <= {up_to_rowid} AND handle_id IN ({id_list}) \
                  AND text LIKE '{HAROLD_MARKER}%' \
                ORDER BY ROWID DESC LIMIT {limit}\
@@ -411,29 +430,54 @@ impl ChatDb {
 
     /// The (ROWID, trimmed text) of each row `sql` selects. A failed read gives no rows.
     fn query(&self, sql: &str) -> Vec<(i64, String)> {
-        let out = match Command::new("sqlite3")
+        let rows = self.select(sql).unwrap_or_default();
+        rows.iter()
+            .filter_map(|row| Some((row.get("ROWID")?.as_i64()?, trimmed_text(row)?)))
+            .collect()
+    }
+
+    /// The marked row of each row `sql` selects, or why they could not be read.
+    fn query_marked(&self, sql: &str) -> Result<Vec<MarkedRow>, String> {
+        let rows = self.select(sql)?;
+        Ok(rows
+            .iter()
+            .filter_map(|row| {
+                Some(MarkedRow {
+                    rowid: row.get("ROWID")?.as_i64()?,
+                    date: row.get("date")?.as_i64()?,
+                    text: trimmed_text(row)?,
+                })
+            })
+            .collect())
+    }
+
+    /// The rows `sql` selects, or why sqlite3 could not read them. `sqlite3 -json` prints
+    /// nothing when no row matches, which is no rows, not a failure.
+    fn select(&self, sql: &str) -> Result<Vec<serde_json::Value>, String> {
+        let out = Command::new("sqlite3")
             .arg("-json")
             .arg(&self.path)
             .arg(sql)
             .output()
-        {
-            Ok(o) if o.status.success() => o,
-            _ => return vec![],
-        };
-        let Ok(rows) = serde_json::from_slice::<Vec<serde_json::Value>>(&out.stdout) else {
-            return vec![];
-        };
-        rows.into_iter()
-            .filter_map(|row| {
-                let rowid = row.get("ROWID")?.as_i64()?;
-                let text = row.get("text")?.as_str()?.trim().to_string();
-                if text.is_empty() {
-                    return None;
-                }
-                Some((rowid, text))
-            })
-            .collect()
+            .map_err(|error| format!("sqlite3 did not start: {error}"))?;
+        if !out.status.success() {
+            return Err(first_line(
+                &String::from_utf8_lossy(&out.stderr),
+                &format!("sqlite3 exited unsuccessfully: {}", out.status),
+            ));
+        }
+        if out.stdout.trim_ascii().is_empty() {
+            return Ok(vec![]);
+        }
+        serde_json::from_slice(&out.stdout)
+            .map_err(|error| format!("sqlite3 printed JSON that cannot be read: {error}"))
     }
+}
+
+/// The trimmed `text` of `row`, or `None` when it has none.
+fn trimmed_text(row: &serde_json::Value) -> Option<String> {
+    let text = row.get("text")?.as_str()?.trim();
+    (!text.is_empty()).then(|| text.to_string())
 }
 
 /// Record one fetched row as an inbound event and move `cursor` past it. While messaging
@@ -480,67 +524,68 @@ async fn record_row(
     }
 }
 
-/// Feed the rows a Harold sent to `record_marker`, oldest first, and move `cursor` past
-/// them. They are never recorded as replies.
-fn read_marked_rows(rows: Vec<(i64, String)>, cursor: &AtomicI64, record_marker: impl Fn(&str)) {
-    for (rowid, text) in rows {
-        record_marker(&text);
-        cursor.store(rowid, Ordering::Relaxed);
+/// Feed the rows a Harold sent to `record_marker` with their dates, oldest first, and move
+/// `cursor` past them. They are never recorded as replies.
+fn read_marked_rows(rows: Vec<MarkedRow>, cursor: &AtomicI64, record_marker: impl Fn(&str, i64)) {
+    for row in rows {
+        record_marker(&row.text, row.date);
+        cursor.store(row.rowid, Ordering::Relaxed);
     }
 }
 
-/// The cursors of a listener that starts after row `initial`. The last marked rows stored
-/// up to that row are fed to `record_marker` first, so a restart keeps the latest notifier.
-fn start_cursors(db: &ChatDb, initial: i64, record_marker: impl Fn(&str)) -> Cursors {
-    for (_, text) in db.latest_marked(initial, STARTUP_MARKED_ROWS) {
-        record_marker(&text);
+/// The cursors of a listener that starts after row `initial`. `marked`, the last marked
+/// rows stored up to that row, are fed to `record_marker` first, so a restart keeps the
+/// latest notifier.
+fn start_cursors(
+    initial: i64,
+    marked: Vec<MarkedRow>,
+    record_marker: impl Fn(&str, i64),
+) -> Cursors {
+    for row in marked {
+        record_marker(&row.text, row.date);
     }
     Cursors::starting_at(initial)
 }
 
 async fn poll(store: &HaroldStore) {
-    poll_db(
-        store,
-        ChatDb::configured(),
-        cursors(),
-        is_messaging_paused(),
-    )
-    .await;
+    poll_db(store, ChatDb::configured(), cursors(), is_messaging_paused).await;
 }
 
 /// One poll of `db` with the process-wide notifier record and recent rows.
-async fn poll_db(store: &HaroldStore, db: ChatDb, cursors: &Cursors, messaging_paused: bool) {
+async fn poll_db(store: &HaroldStore, db: ChatDb, cursors: &Cursors, is_paused: impl Fn() -> bool) {
     poll_chat_db(
         store,
         db,
         cursors,
         ownership::record_marker,
         &RECENT_ROWS,
-        messaging_paused,
+        is_paused,
     )
     .await;
 }
 
-/// The listener's cursors, seeding the process-wide notifier record from `db`.
-fn start_listener_cursors(db: &ChatDb, initial: i64) -> Cursors {
-    start_cursors(db, initial, ownership::record_marker)
+/// The listener's cursors, seeding the process-wide notifier record with `marked`.
+fn start_listener_cursors(initial: i64, marked: Vec<MarkedRow>) -> Cursors {
+    start_cursors(initial, marked, ownership::record_marker)
 }
 
 /// One poll of `db`. Marked rows are read before any reply is recorded, and while
-/// messaging is paused too, so the latest notifier is current when a reply is routed.
+/// messaging is paused too, so the latest notifier is current when a reply is routed. If
+/// they cannot be read, no reply is recorded and no cursor moves, so the next poll reads
+/// the same rows again. `is_paused` is asked after the rows are fetched.
 async fn poll_chat_db(
     store: &HaroldStore,
     db: ChatDb,
     cursors: &Cursors,
-    record_marker: impl Fn(&str),
+    record_marker: impl Fn(&str, i64),
     recent: &Mutex<RecentRows>,
-    messaging_paused: bool,
+    is_paused: impl Fn() -> bool,
 ) {
     let inbound_rowid = cursors.inbound.load(Ordering::Relaxed);
     let self_rowid = cursors.self_sent.load(Ordering::Relaxed);
     let marked_rowid = cursors.marked.load(Ordering::Relaxed);
 
-    let (inbound, self_msgs, marked) = tokio::task::spawn_blocking(move || {
+    let fetched = tokio::task::spawn_blocking(move || {
         // The replies are fetched first: a notification stored while these two queries
         // run is then among the marked rows of this poll.
         let inbound = db.replies_after(inbound_rowid, 0);
@@ -548,11 +593,19 @@ async fn poll_chat_db(
         let marked = db.marked_after(marked_rowid);
         (inbound, self_msgs, marked)
     })
-    .await
-    .unwrap_or_else(|e| {
-        tracing::warn!(error = %e, "fetch task panicked");
-        (vec![], vec![], vec![])
-    });
+    .await;
+    let (inbound, self_msgs, marked) = match fetched {
+        Ok((inbound, self_msgs, Ok(marked))) => (inbound, self_msgs, marked),
+        Ok((_, _, Err(cause))) => {
+            warn!(%cause, "cannot read Harold's messages; replies wait for the next poll");
+            return;
+        }
+        Err(error) => {
+            warn!(%error, "fetch task panicked; replies wait for the next poll");
+            return;
+        }
+    };
+    let messaging_paused = is_paused();
     read_marked_rows(marked, &cursors.marked, record_marker);
     let now = Instant::now();
 
@@ -645,8 +698,9 @@ fn start_watcher(chat_db_path: &str) -> Option<(RecommendedWatcher, mpsc::Unboun
 }
 
 pub(crate) async fn listen(store: Arc<HaroldStore>, mut shutdown: watch::Receiver<()>) {
-    let Some(initial) = wait_for_start_row(
-        || tokio::task::block_in_place(get_max_rowid),
+    let db = ChatDb::configured();
+    let Some((initial, marked)) = wait_for_start_row(
+        || tokio::task::block_in_place(|| read_start(&db)),
         START_ROW_RETRY,
         &mut shutdown,
     )
@@ -655,8 +709,7 @@ pub(crate) async fn listen(store: Arc<HaroldStore>, mut shutdown: watch::Receive
         info!("iMessage listener shutting down before the Messages database was readable");
         return;
     };
-    let cursors =
-        tokio::task::block_in_place(|| start_listener_cursors(&ChatDb::configured(), initial));
+    let cursors = start_listener_cursors(initial, marked);
     CURSORS.set(cursors).expect("listen called more than once");
     info!(initial_rowid = initial, "iMessage listener started");
 

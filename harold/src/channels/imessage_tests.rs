@@ -3,16 +3,18 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::channels::{split_body, truncate_body};
-use crate::inbound::ownership::NotifierRecord;
-use crate::inbound::ownership::{delivered_text, error_text, notification_text, parse_marker};
+use crate::inbound::ownership::{
+    NotifierRecord, Ownership, decide_ownership, delivered_text, error_text, fed_markers,
+    notification_text, parse_marker,
+};
 use crate::store::{HaroldStore, TurnCompleted};
 use crate::util::sanitise_for_applescript;
 
 use super::{
-    ChatDb, Cursors, Direction, FetchedRow, NotificationPlan, RecentRows, TWIN_WINDOW,
+    ChatDb, Cursors, Direction, FetchedRow, MarkedRow, NotificationPlan, RecentRows, TWIN_WINDOW,
     is_marked_as_harold, max_rowid_of, notification_message, notification_plan, parse_max_rowid,
-    poll_chat_db, poll_db, record_row, send_script, start_cursors, start_listener_cursors,
-    wait_for_start_row,
+    poll_chat_db, poll_db, read_start, record_row, send_script, start_cursors,
+    start_listener_cursors, wait_for_start_row,
 };
 
 #[test]
@@ -200,6 +202,14 @@ const HANDLE: i64 = 7;
 /// the listener reads. `ROWID` is declared as chat.db declares it, so `sqlite3 -json`
 /// names the column the same way.
 fn chat_db(directory: &TestDirectory) -> ChatDb {
+    let db = chat_db_without_date(directory);
+    add_date_column(&db);
+    db
+}
+
+/// A database like `chat_db` whose `message` table has no `date` column, so the reply
+/// queries succeed and the marked queries fail.
+fn chat_db_without_date(directory: &TestDirectory) -> ChatDb {
     let db = ChatDb {
         path: directory.0.join("chat.db").to_str().unwrap().to_string(),
         handle_ids: vec![HANDLE],
@@ -212,6 +222,10 @@ fn chat_db(directory: &TestDirectory) -> ChatDb {
     db
 }
 
+fn add_date_column(db: &ChatDb) {
+    run_sql(db, "ALTER TABLE message ADD COLUMN date INTEGER;");
+}
+
 fn run_sql(db: &ChatDb, sql: &str) {
     let status = std::process::Command::new("sqlite3")
         .arg(&db.path)
@@ -221,8 +235,8 @@ fn run_sql(db: &ChatDb, sql: &str) {
     assert!(status.success(), "{sql}");
 }
 
-/// Appends `rows`, each a (handle id, is_from_me, text), in order. The first row of a new
-/// database gets ROWID 1.
+/// Appends `rows`, each a (handle id, is_from_me, text), in order, with no date. The first
+/// row of a new database gets ROWID 1.
 fn insert(db: &ChatDb, rows: &[(i64, u8, &str)]) {
     for (handle_id, is_from_me, text) in rows {
         let text = text.replace('\'', "''");
@@ -234,6 +248,38 @@ fn insert(db: &ChatDb, rows: &[(i64, u8, &str)]) {
             ),
         );
     }
+}
+
+/// Appends `rows`, each a (handle id, is_from_me, text, date), in order.
+fn insert_dated(db: &ChatDb, rows: &[(i64, u8, &str, i64)]) {
+    for (handle_id, is_from_me, text, date) in rows {
+        let text = text.replace('\'', "''");
+        run_sql(
+            db,
+            &format!(
+                "INSERT INTO message(text, handle_id, is_from_me, date) \
+                 VALUES ('{text}', {handle_id}, {is_from_me}, {date});"
+            ),
+        );
+    }
+}
+
+fn marked(rows: &[(i64, i64, &str)]) -> Vec<MarkedRow> {
+    rows.iter()
+        .map(|(rowid, date, text)| MarkedRow {
+            rowid: *rowid,
+            date: *date,
+            text: text.to_string(),
+        })
+        .collect()
+}
+
+/// A notifier record for a Mac whose `machines` setting lists studio and laptop.
+fn studio_and_laptop() -> Mutex<NotifierRecord> {
+    Mutex::new(NotifierRecord::for_machines(&[
+        "studio".to_string(),
+        "laptop".to_string(),
+    ]))
 }
 
 fn texts(rows: &[(i64, &str)]) -> Vec<(i64, String)> {
@@ -280,69 +326,118 @@ const STUDIO_ERROR: &str = "🤖 [studio] No active agent sessions found.";
 fn marked_rows_are_read_in_both_directions_for_the_configured_handles() {
     let directory = TestDirectory::new();
     let db = chat_db(&directory);
+    insert_dated(
+        &db,
+        &[
+            (HANDLE, 1, STUDIO_NOTIFICATION, 500),
+            (HANDLE, 0, "yes, merge it", 600),
+        ],
+    );
     insert(
         &db,
         &[
-            (HANDLE, 1, STUDIO_NOTIFICATION),
-            (HANDLE, 0, "yes, merge it"),
             (HANDLE, 0, LAPTOP_NOTIFICATION),
             (99, 0, "🤖 [mini/x:0.0] another conversation (x)"),
-            (HANDLE, 1, STUDIO_ERROR),
         ],
     );
+    insert_dated(&db, &[(HANDLE, 1, STUDIO_ERROR, 400)]);
     run_sql(
         &db,
         "INSERT INTO message(text, handle_id, is_from_me) VALUES (NULL, 7, 0);",
     );
 
+    // A row with no date reads as date 0.
     assert_eq!(
         db.marked_after(0),
-        texts(&[
-            (1, STUDIO_NOTIFICATION),
-            (3, LAPTOP_NOTIFICATION),
-            (5, STUDIO_ERROR)
-        ])
+        Ok(marked(&[
+            (1, 500, STUDIO_NOTIFICATION),
+            (3, 0, LAPTOP_NOTIFICATION),
+            (5, 400, STUDIO_ERROR)
+        ]))
     );
     assert_eq!(
         db.marked_after(1),
-        texts(&[(3, LAPTOP_NOTIFICATION), (5, STUDIO_ERROR)])
+        Ok(marked(&[
+            (3, 0, LAPTOP_NOTIFICATION),
+            (5, 400, STUDIO_ERROR)
+        ]))
     );
-    assert!(db.marked_after(5).is_empty());
+    // sqlite3 prints nothing when no row matches: that is no rows, not a failure.
+    assert_eq!(db.marked_after(5), Ok(vec![]));
 
     // The last rows up to a row, oldest first.
     assert_eq!(
         db.latest_marked(6, 2),
-        texts(&[(3, LAPTOP_NOTIFICATION), (5, STUDIO_ERROR)])
+        Ok(marked(&[
+            (3, 0, LAPTOP_NOTIFICATION),
+            (5, 400, STUDIO_ERROR)
+        ]))
     );
     assert_eq!(
         db.latest_marked(4, 50),
-        texts(&[(1, STUDIO_NOTIFICATION), (3, LAPTOP_NOTIFICATION)])
+        Ok(marked(&[
+            (1, 500, STUDIO_NOTIFICATION),
+            (3, 0, LAPTOP_NOTIFICATION)
+        ]))
     );
+    assert_eq!(db.latest_marked(0, 50), Ok(vec![]));
 
     let no_handles = ChatDb {
         handle_ids: Vec::new(),
         ..db.clone()
     };
-    assert!(no_handles.marked_after(0).is_empty());
-    assert!(no_handles.latest_marked(6, 50).is_empty());
+    assert_eq!(no_handles.marked_after(0), Ok(vec![]));
+    assert_eq!(no_handles.latest_marked(6, 50), Ok(vec![]));
+}
+
+#[test]
+fn a_marked_read_that_fails_is_an_error_and_the_reply_read_is_no_rows() {
+    let directory = TestDirectory::new();
+    let db = chat_db_without_date(&directory);
+    insert(&db, &[(HANDLE, 1, STUDIO_NOTIFICATION), (HANDLE, 0, "yes")]);
+    let missing = ChatDb {
+        path: directory
+            .0
+            .join("no-such-folder/chat.db")
+            .to_str()
+            .unwrap()
+            .to_string(),
+        ..db.clone()
+    };
+
+    let no_date = db.marked_after(0);
+    assert!(
+        no_date.as_ref().is_err_and(|cause| cause.contains("date")),
+        "{no_date:?}"
+    );
+    assert!(db.latest_marked(2, 50).is_err());
+    assert!(missing.marked_after(0).is_err());
+    assert!(missing.latest_marked(2, 50).is_err());
+    // The reply queries keep giving no rows when they fail.
+    assert_eq!(db.replies_after(0, 0), texts(&[(2, "yes")]));
+    assert!(missing.replies_after(0, 0).is_empty());
 }
 
 #[test]
 fn startup_reads_the_marked_rows_already_stored_and_starts_every_cursor_after_them() {
     let directory = TestDirectory::new();
     let db = chat_db(&directory);
-    insert(
+    insert_dated(
         &db,
         &[
-            (HANDLE, 1, STUDIO_NOTIFICATION),
-            (HANDLE, 0, "yes, merge it"),
-            (HANDLE, 0, LAPTOP_NOTIFICATION),
+            (HANDLE, 1, STUDIO_NOTIFICATION, 100),
+            (HANDLE, 0, "yes, merge it", 150),
+            (HANDLE, 0, LAPTOP_NOTIFICATION, 200),
         ],
     );
-    let record = Mutex::new(NotifierRecord::new());
+    let record = studio_and_laptop();
 
-    let cursors = start_cursors(&db, 3, |text| record.lock().unwrap().record_marker(text));
+    let (initial, rows) = read_start(&db).unwrap();
+    let cursors = start_cursors(initial, rows, |text, date| {
+        record.lock().unwrap().record_marker(text, date);
+    });
 
+    assert_eq!(initial, 3);
     assert_eq!(record.lock().unwrap().latest_notifier(), Some("laptop"));
     assert_eq!(cursors.inbound.load(Ordering::Relaxed), 3);
     assert_eq!(cursors.self_sent.load(Ordering::Relaxed), 3);
@@ -357,13 +452,146 @@ fn startup_reads_only_the_last_50_marked_rows_oldest_first() {
     rows.extend([(HANDLE, 1, STUDIO_NOTIFICATION); 49]);
     rows.push((HANDLE, 0, LAPTOP_NOTIFICATION));
     insert(&db, &rows);
-    let record = Mutex::new(NotifierRecord::new());
+    let fed = Mutex::new(Vec::new());
 
-    start_cursors(&db, 51, |text| record.lock().unwrap().record_marker(text));
+    let (initial, rows) = read_start(&db).unwrap();
+    start_cursors(initial, rows, |text, _| {
+        fed.lock().unwrap().push(text.to_string());
+    });
+
+    let mut expected = vec![STUDIO_NOTIFICATION.to_string(); 49];
+    expected.push(LAPTOP_NOTIFICATION.to_string());
+    assert_eq!(*fed.lock().unwrap(), expected);
+}
+
+#[test]
+fn startup_orders_the_latest_notifier_by_date_not_by_row() {
+    let directory = TestDirectory::new();
+    let db = chat_db(&directory);
+    // The row read later was sent earlier.
+    insert_dated(
+        &db,
+        &[
+            (HANDLE, 1, STUDIO_NOTIFICATION, 200),
+            (HANDLE, 0, LAPTOP_NOTIFICATION, 100),
+        ],
+    );
+    let record = studio_and_laptop();
+
+    let (initial, rows) = read_start(&db).unwrap();
+    start_cursors(initial, rows, |text, date| {
+        record.lock().unwrap().record_marker(text, date);
+    });
+
+    assert_eq!(record.lock().unwrap().latest_notifier(), Some("studio"));
+}
+
+#[tokio::test]
+async fn poll_orders_the_latest_notifier_by_date_not_by_row() {
+    let store_directory = TestDirectory::new();
+    let store = HaroldStore::open(&store_directory.0).await.unwrap();
+    let directory = TestDirectory::new();
+    let db = chat_db(&directory);
+    insert_dated(&db, &[(HANDLE, 1, STUDIO_NOTIFICATION, 200)]);
+    let record = studio_and_laptop();
+    let (initial, rows) = read_start(&db).unwrap();
+    let feed = |text: &str, date| record.lock().unwrap().record_marker(text, date);
+    let cursors = start_cursors(initial, rows, feed);
+    let recent = Mutex::new(RecentRows::new());
+
+    // Stored after the studio row but sent before it.
+    insert_dated(&db, &[(HANDLE, 0, LAPTOP_NOTIFICATION, 150)]);
+    poll_chat_db(&store, db.clone(), &cursors, feed, &recent, || false).await;
+    assert_eq!(record.lock().unwrap().latest_notifier(), Some("studio"));
+    assert_eq!(cursors.marked.load(Ordering::Relaxed), 2);
+
+    insert_dated(&db, &[(HANDLE, 0, LAPTOP_NOTIFICATION, 250)]);
+    poll_chat_db(&store, db, &cursors, feed, &recent, || false).await;
+    assert_eq!(record.lock().unwrap().latest_notifier(), Some("laptop"));
+}
+
+#[tokio::test]
+async fn with_no_machines_listed_an_untagged_reply_after_notifications_is_owned() {
+    let store_directory = TestDirectory::new();
+    let store = HaroldStore::open(&store_directory.0).await.unwrap();
+    let directory = TestDirectory::new();
+    let db = chat_db(&directory);
+    let record = Mutex::new(NotifierRecord::for_machines(&[]));
+    let cursors = Cursors::starting_at(0);
+    let recent = Mutex::new(RecentRows::new());
+    insert_dated(
+        &db,
+        &[
+            (
+                HANDLE,
+                1,
+                "🤖 [studio/alir-app main:0.1] Two options. (alir)",
+                100,
+            ),
+            (HANDLE, 1, "🤖 [1/2] Should I deploy?", 200),
+            (HANDLE, 0, "yes", 300),
+        ],
+    );
+
+    let feed = |text: &str, date| record.lock().unwrap().record_marker(text, date);
+    poll_chat_db(&store, db, &cursors, feed, &recent, || false).await;
+    assert_eq!(store.project_unhandled_events(10).await.unwrap().applied, 1);
 
     let record = record.lock().unwrap();
-    assert_eq!(record.latest_notifier(), Some("laptop"));
-    assert_eq!(record.known_machine_names(), ["studio", "laptop"]);
+    assert_eq!(cursors.marked.load(Ordering::Relaxed), 2);
+    assert_eq!(record.latest_notifier(), None);
+    assert_eq!(
+        decide_ownership(
+            "yes",
+            false,
+            "studio",
+            record.known_machine_names(),
+            record.latest_notifier()
+        ),
+        Ownership::Owned {
+            pane_tag: None,
+            body: "yes"
+        }
+    );
+}
+
+#[tokio::test]
+async fn poll_that_cannot_read_the_marked_rows_records_no_reply_and_keeps_its_cursors() {
+    let store_directory = TestDirectory::new();
+    let store = HaroldStore::open(&store_directory.0).await.unwrap();
+    let directory = TestDirectory::new();
+    let db = chat_db_without_date(&directory);
+    insert(&db, &[(HANDLE, 1, STUDIO_NOTIFICATION), (HANDLE, 0, "yes")]);
+    let cursors = Cursors::starting_at(0);
+    let recent = Mutex::new(RecentRows::new());
+
+    // The closure is written in the call so that its return type is taken from the parameter.
+    poll_chat_db(
+        &store,
+        db.clone(),
+        &cursors,
+        |text, _| panic!("{text:?} was read"),
+        &recent,
+        || false,
+    )
+    .await;
+
+    assert_eq!(cursors.marked.load(Ordering::Relaxed), 0);
+    assert_eq!(cursors.inbound.load(Ordering::Relaxed), 0);
+    assert_eq!(cursors.self_sent.load(Ordering::Relaxed), 0);
+    assert_eq!(store.project_unhandled_events(10).await.unwrap().applied, 0);
+
+    // Once the marked rows can be read, the next poll records the reply, once.
+    add_date_column(&db);
+    let record = studio_and_laptop();
+    let feed = |text: &str, date| record.lock().unwrap().record_marker(text, date);
+    poll_chat_db(&store, db.clone(), &cursors, feed, &recent, || false).await;
+    poll_chat_db(&store, db, &cursors, feed, &recent, || false).await;
+
+    assert_eq!(record.lock().unwrap().latest_notifier(), Some("studio"));
+    assert_eq!(cursors.marked.load(Ordering::Relaxed), 1);
+    assert_eq!(cursors.inbound.load(Ordering::Relaxed), 2);
+    assert_eq!(store.project_unhandled_events(10).await.unwrap().applied, 1);
 }
 
 #[tokio::test]
@@ -372,27 +600,30 @@ async fn poll_reads_marked_rows_before_it_records_a_reply_and_never_records_them
     let store = HaroldStore::open(&store_directory.0).await.unwrap();
     let directory = TestDirectory::new();
     let db = chat_db(&directory);
-    insert(&db, &[(HANDLE, 1, STUDIO_NOTIFICATION)]);
-    let record = Mutex::new(NotifierRecord::new());
-    let cursors = start_cursors(&db, 1, |text| record.lock().unwrap().record_marker(text));
+    insert_dated(&db, &[(HANDLE, 1, STUDIO_NOTIFICATION, 100)]);
+    let record = studio_and_laptop();
+    let (initial, rows) = read_start(&db).unwrap();
+    let cursors = start_cursors(initial, rows, |text, date| {
+        record.lock().unwrap().record_marker(text, date);
+    });
     let recent = Mutex::new(RecentRows::new());
     assert_eq!(record.lock().unwrap().latest_notifier(), Some("studio"));
 
-    insert(
+    insert_dated(
         &db,
         &[
-            (HANDLE, 0, LAPTOP_NOTIFICATION),
-            (HANDLE, 0, "yes, merge it"),
-            (HANDLE, 1, STUDIO_ERROR),
+            (HANDLE, 0, LAPTOP_NOTIFICATION, 200),
+            (HANDLE, 0, "yes, merge it", 300),
+            (HANDLE, 1, STUDIO_ERROR, 400),
         ],
     );
-    let before_any_reply = |text: &str| {
+    let before_any_reply = |text: &str, date| {
         assert_eq!(
             cursors.inbound.load(Ordering::Relaxed),
             1,
             "a reply was recorded before the marked rows were read"
         );
-        record.lock().unwrap().record_marker(text);
+        record.lock().unwrap().record_marker(text, date);
     };
     poll_chat_db(
         &store,
@@ -400,7 +631,7 @@ async fn poll_reads_marked_rows_before_it_records_a_reply_and_never_records_them
         &cursors,
         before_any_reply,
         &recent,
-        false,
+        || false,
     )
     .await;
 
@@ -417,9 +648,9 @@ async fn poll_reads_marked_rows_before_it_records_a_reply_and_never_records_them
         &store,
         db,
         &cursors,
-        |text| panic!("{text:?} {read_again}"),
+        |text, _| panic!("{text:?} {read_again}"),
         &recent,
-        false,
+        || false,
     )
     .await;
     assert_eq!(store.project_unhandled_events(10).await.unwrap().applied, 0);
@@ -438,12 +669,12 @@ async fn paused_poll_still_reads_marked_rows_and_discards_the_reply() {
             (HANDLE, 0, "yes, merge it"),
         ],
     );
-    let record = Mutex::new(NotifierRecord::new());
+    let record = studio_and_laptop();
     let cursors = Cursors::starting_at(0);
     let recent = Mutex::new(RecentRows::new());
 
-    let feed = |text: &str| record.lock().unwrap().record_marker(text);
-    poll_chat_db(&store, db, &cursors, feed, &recent, true).await;
+    let feed = |text: &str, date| record.lock().unwrap().record_marker(text, date);
+    poll_chat_db(&store, db, &cursors, feed, &recent, || true).await;
 
     assert_eq!(record.lock().unwrap().latest_notifier(), Some("laptop"));
     assert_eq!(cursors.marked.load(Ordering::Relaxed), 1);
@@ -470,9 +701,9 @@ async fn poll_of_a_database_it_cannot_read_records_nothing_and_keeps_its_cursors
         &store,
         db,
         &cursors,
-        |text| panic!("{text:?} was read"),
+        |text, _| panic!("{text:?} was read"),
         &recent,
-        false,
+        || false,
     )
     .await;
 
@@ -837,6 +1068,49 @@ async fn the_listener_waits_for_a_readable_database_before_it_picks_its_start_ro
 }
 
 #[tokio::test]
+async fn startup_read_that_fails_is_retried_and_its_rows_recorded_once() {
+    let (_keep, mut shutdown) = tokio::sync::watch::channel(());
+    let directory = TestDirectory::new();
+    let db = chat_db_without_date(&directory);
+    insert(
+        &db,
+        &[
+            (HANDLE, 1, STUDIO_NOTIFICATION),
+            (HANDLE, 0, LAPTOP_NOTIFICATION),
+        ],
+    );
+    // The newest row can be read, the marked rows cannot until the third read.
+    let mut reads = 0;
+    let start = wait_for_start_row(
+        || {
+            reads += 1;
+            if reads == 3 {
+                add_date_column(&db);
+            }
+            read_start(&db)
+        },
+        Duration::from_millis(1),
+        &mut shutdown,
+    )
+    .await;
+    let (initial, rows) = start.expect("a start row");
+    let fed = Mutex::new(Vec::new());
+    let cursors = start_cursors(initial, rows, |text, date| {
+        fed.lock().unwrap().push((text.to_string(), date));
+    });
+
+    assert_eq!(reads, 3);
+    assert_eq!(
+        *fed.lock().unwrap(),
+        [
+            (STUDIO_NOTIFICATION.to_string(), 0),
+            (LAPTOP_NOTIFICATION.to_string(), 0)
+        ]
+    );
+    assert_eq!(cursors.marked.load(Ordering::Relaxed), 2);
+}
+
+#[tokio::test]
 async fn a_shutdown_while_the_database_is_unreadable_ends_the_wait_without_a_start_row() {
     // Harold signals shutdown by dropping the sender.
     let (stop, mut shutdown) = tokio::sync::watch::channel(());
@@ -849,7 +1123,7 @@ async fn a_shutdown_while_the_database_is_unreadable_ends_the_wait_without_a_sta
     let start = tokio::time::timeout(Duration::from_secs(5), wait)
         .await
         .expect("the wait did not end on shutdown");
-    assert_eq!(start, None);
+    assert_eq!(start, None::<i64>);
 }
 
 #[test]
@@ -873,16 +1147,17 @@ fn notification_is_sent_naming_the_machine_and_the_pane() {
     );
 }
 
+// The test settings list no machines, so the process-wide record keeps nothing it is fed.
+// These tests see what it was fed instead. The texts and dates are unique to each test.
+
 #[test]
 fn listener_startup_seeds_the_process_wide_notifier_record() {
     crate::settings::init_settings_for_test();
-    let directory = TestDirectory::new();
-    let db = chat_db(&directory);
-    insert(&db, &[(HANDLE, 1, "🤖 [seed-test-a/x main:0.0] done (x)")]);
+    let text = "🤖 [seed-test-a/x main:0.0] done (x)";
 
-    start_listener_cursors(&db, 1);
+    start_listener_cursors(1, marked(&[(1, 9_001, text)]));
 
-    assert!(crate::inbound::ownership::known_machine_names().contains(&"seed-test-a".to_string()));
+    assert!(fed_markers().contains(&(text.to_string(), 9_001)));
 }
 
 #[tokio::test]
@@ -893,9 +1168,70 @@ async fn listener_poll_feeds_marked_rows_to_the_process_wide_notifier_record() {
     let directory = TestDirectory::new();
     let db = chat_db(&directory);
     let cursors = Cursors::starting_at(0);
-    insert(&db, &[(HANDLE, 0, "🤖 [poll-test-b/x main:0.0] done (x)")]);
+    let text = "🤖 [poll-test-b/x main:0.0] done (x)";
+    insert_dated(&db, &[(HANDLE, 0, text, 9_002)]);
 
-    poll_db(&store, db, &cursors, false).await;
+    poll_db(&store, db, &cursors, || false).await;
 
-    assert!(crate::inbound::ownership::known_machine_names().contains(&"poll-test-b".to_string()));
+    assert!(fed_markers().contains(&(text.to_string(), 9_002)));
+}
+
+#[tokio::test]
+async fn paused_listener_poll_discards_the_reply_and_still_reads_marked_rows() {
+    crate::settings::init_settings_for_test();
+    let store_directory = TestDirectory::new();
+    let store = HaroldStore::open(&store_directory.0).await.unwrap();
+    let directory = TestDirectory::new();
+    let db = chat_db(&directory);
+    let cursors = Cursors::starting_at(0);
+    let text = "🤖 [pause-test-c/x main:0.0] done (x)";
+    insert_dated(
+        &db,
+        &[
+            (HANDLE, 0, text, 9_003),
+            (HANDLE, 0, "carry on", 9_004),
+            (HANDLE, 1, "and stop", 9_005),
+        ],
+    );
+
+    poll_db(&store, db, &cursors, || true).await;
+
+    assert!(fed_markers().contains(&(text.to_string(), 9_003)));
+    assert_eq!(cursors.marked.load(Ordering::Relaxed), 1);
+    assert_eq!(cursors.inbound.load(Ordering::Relaxed), 2);
+    assert_eq!(cursors.self_sent.load(Ordering::Relaxed), 3);
+    assert_eq!(store.project_unhandled_events(10).await.unwrap().applied, 0);
+}
+
+#[tokio::test]
+async fn pause_is_read_after_the_rows_are_fetched() {
+    let store_directory = TestDirectory::new();
+    let store = HaroldStore::open(&store_directory.0).await.unwrap();
+    let directory = TestDirectory::new();
+    let db = chat_db(&directory);
+    let cursors = Cursors::starting_at(0);
+    let recent = Mutex::new(RecentRows::new());
+    insert(&db, &[(HANDLE, 0, "first")]);
+
+    // A reply stored when the pause is read was not fetched, so it waits for the next
+    // poll. Were the pause read before the fetch, it would be recorded in this one.
+    let store_a_reply = || {
+        insert(&db, &[(HANDLE, 0, "stored while the pause is read")]);
+        false
+    };
+    poll_chat_db(
+        &store,
+        db.clone(),
+        &cursors,
+        |_, _| {},
+        &recent,
+        store_a_reply,
+    )
+    .await;
+    assert_eq!(cursors.inbound.load(Ordering::Relaxed), 1);
+    assert_eq!(store.project_unhandled_events(10).await.unwrap().applied, 1);
+
+    poll_chat_db(&store, db, &cursors, |_, _| {}, &recent, || false).await;
+    assert_eq!(cursors.inbound.load(Ordering::Relaxed), 2);
+    assert_eq!(store.project_unhandled_events(10).await.unwrap().applied, 1);
 }
