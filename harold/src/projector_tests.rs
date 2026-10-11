@@ -79,6 +79,7 @@ async fn handler_dispatches_staged_events_in_stream_version_order() {
         &store,
         &InboundMessage {
             text: "continue".into(),
+            forwarded: false,
         },
     )
     .await
@@ -131,6 +132,7 @@ async fn retryable_delivery_failure_remains_pending_for_a_later_attempt() {
         &store,
         &InboundMessage {
             text: "retry me".into(),
+            forwarded: false,
         },
     )
     .await
@@ -173,6 +175,7 @@ async fn permanently_invalid_event_does_not_block_later_deliveries() {
         &store,
         &InboundMessage {
             text: "still deliver me".into(),
+            forwarded: false,
         },
     )
     .await
@@ -211,6 +214,7 @@ async fn malformed_known_event_does_not_block_a_valid_later_delivery() {
         &store,
         &InboundMessage {
             text: "deliver after malformed event".into(),
+            forwarded: false,
         },
     )
     .await
@@ -392,6 +396,7 @@ async fn non_agent_batch_publishes_the_advanced_durable_checkpoint() {
         &store,
         &InboundMessage {
             text: "continue".into(),
+            forwarded: false,
         },
     )
     .await

@@ -299,6 +299,7 @@ async fn staging_is_ordered_checkpointed_and_idempotent() {
         &store,
         &InboundMessage {
             text: "second".into(),
+            forwarded: false,
         },
     )
     .await
@@ -336,6 +337,7 @@ async fn failed_delivery_remains_pending_until_marked_delivered() {
         &store,
         &InboundMessage {
             text: "retry me".into(),
+            forwarded: false,
         },
     )
     .await
@@ -385,6 +387,7 @@ async fn reopening_preserves_checkpoint_and_pending_delivery_without_duplication
         &store,
         &InboundMessage {
             text: "survive restart".into(),
+            forwarded: false,
         },
     )
     .await
@@ -499,6 +502,7 @@ async fn unknown_schema_record_is_rejected_without_modifying_pending_delivery() 
         &store,
         &InboundMessage {
             text: "keep pending".into(),
+            forwarded: false,
         },
     )
     .await
@@ -636,6 +640,7 @@ async fn projection_stages_only_deliveries_and_projects_agent_events_in_one_batc
         &store,
         &InboundMessage {
             text: "continue".into(),
+            forwarded: false,
         },
     )
     .await
@@ -706,6 +711,7 @@ async fn failed_projection_rolls_back_all_changes_and_replays_after_restart() {
         &store,
         &InboundMessage {
             text: "replay me".into(),
+            forwarded: false,
         },
     )
     .await
@@ -913,6 +919,7 @@ async fn snapshot_reader_does_not_reserve_the_projection_writer_lock() {
         &store,
         &InboundMessage {
             text: "write while snapshot is open".into(),
+            forwarded: false,
         },
     )
     .await
@@ -1160,4 +1167,35 @@ async fn messaging_pause_event_creates_no_delivery() {
     append_messaging_paused_changed(&store, true).await.unwrap();
     store.project_unhandled_events(10).await.unwrap();
     assert!(store.next_pending_delivery().await.unwrap().is_none());
+}
+
+#[test]
+fn inbound_message_without_the_forwarded_field_reads_as_not_forwarded() {
+    // The shape of every InboundMessageReceived event stored before the field existed.
+    let message: InboundMessage = serde_json::from_value(json!({ "text": "carry on" })).unwrap();
+
+    assert_eq!(message.text, "carry on");
+    assert!(!message.forwarded);
+}
+
+#[tokio::test]
+async fn forwarded_flag_reaches_the_pending_delivery() {
+    let directory = TestDirectory::new();
+    let store = HaroldStore::open(directory.path()).await.unwrap();
+    append_inbound_message(
+        &store,
+        &InboundMessage {
+            text: "carry on".into(),
+            forwarded: true,
+        },
+    )
+    .await
+    .unwrap();
+    store.project_unhandled_events(10).await.unwrap();
+
+    let delivery = store.next_pending_delivery().await.unwrap().unwrap();
+    let message: InboundMessage = serde_json::from_value(delivery.payload).unwrap();
+
+    assert_eq!(message.text, "carry on");
+    assert!(message.forwarded);
 }

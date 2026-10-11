@@ -361,7 +361,11 @@ pub(crate) async fn listen(store: Arc<HaroldStore>, mut shutdown: watch::Receive
 
             async {
                 info!("Telegram message received");
-                match append_inbound_message(&store, &InboundMessage { text }).await {
+                let message = InboundMessage {
+                    text,
+                    forwarded: false,
+                };
+                match append_inbound_message(&store, &message).await {
                     Ok(()) => {}
                     Err(e) => warn!(error = %e, "failed to append InboundMessageReceived event"),
                 }

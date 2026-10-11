@@ -50,6 +50,10 @@ pub struct TurnCompleted {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InboundMessage {
     pub text: String,
+    /// True when the hub forwarded this reply from another Mac. Events stored before the
+    /// field existed have none and read as false.
+    #[serde(default)]
+    pub forwarded: bool,
 }
 
 #[derive(Debug)]

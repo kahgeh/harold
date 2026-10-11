@@ -775,6 +775,7 @@ async fn watch_reconnect_observes_a_non_agent_checkpoint_revision() {
         &store,
         &store::InboundMessage {
             text: "continue".into(),
+            forwarded: false,
         },
     )
     .await
