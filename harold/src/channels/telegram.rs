@@ -8,10 +8,13 @@ use tracing::{Instrument, info, info_span, warn};
 
 use super::{AwayNotification, split_body, summarise_for_notification};
 use crate::inbound::AgentAddress;
-use crate::inbound::ownership::{notification_text, record_notification};
+use crate::inbound::ownership::{
+    Ownership, decide_ownership, error_text, known_machine_names, latest_notifier,
+    notification_text, record_notification, same_machine,
+};
 use crate::outbound::is_messaging_paused;
-use crate::peers::report_notification_blocking;
-use crate::settings::{PeerRole, PeersSettings, get_settings};
+use crate::peers::{forward_reply, report_notification_blocking};
+use crate::settings::{PeerMember, PeerRole, PeersSettings, get_settings};
 use crate::store::{HaroldStore, InboundMessage, TurnCompleted, append_inbound_message};
 
 // ===========================================================================
@@ -279,6 +282,145 @@ fn routable_text(
     Some(text)
 }
 
+/// What the hub needs around it to place a reply: who the Macs are, which one notified
+/// last, and a way to tell the user. A seam so forwarding is tested without Telegram.
+trait HubEnv {
+    fn machine(&self) -> &str;
+    fn known_machines(&self) -> Vec<String>;
+    fn latest_notifier(&self) -> Option<String>;
+    fn members(&self) -> &[PeerMember];
+    async fn tell_user(&self, text: String);
+}
+
+struct LiveHub;
+
+impl HubEnv for LiveHub {
+    fn machine(&self) -> &str {
+        &get_settings().machine_name
+    }
+
+    fn known_machines(&self) -> Vec<String> {
+        known_machine_names()
+    }
+
+    fn latest_notifier(&self) -> Option<String> {
+        latest_notifier()
+    }
+
+    fn members(&self) -> &[PeerMember] {
+        &get_settings().peers.members
+    }
+
+    async fn tell_user(&self, text: String) {
+        // The send blocks, so it runs off the async workers.
+        match tokio::task::spawn_blocking(move || super::send(&text)).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => warn!(error, "telegram_listener: could not tell the user"),
+            Err(error) => warn!(error = %error, "telegram_listener: send task panicked"),
+        }
+    }
+}
+
+/// Where a reply read from Telegram goes.
+#[derive(Debug, PartialEq, Eq)]
+enum ReplyPlace {
+    /// This Mac routes it.
+    Here,
+    /// The member with this machine name routes it.
+    Member(String),
+}
+
+/// Decide which Mac owns `text`. The hub is the only Mac that reads the reply, so it
+/// decides for all of them, against the latest notifier at this moment.
+fn place_reply(text: &str, env: &impl HubEnv) -> ReplyPlace {
+    let ownership = decide_ownership(
+        text,
+        false,
+        env.machine(),
+        &env.known_machines(),
+        env.latest_notifier().as_deref(),
+    );
+    match ownership {
+        Ownership::Owned { .. } => ReplyPlace::Here,
+        Ownership::NotOwned { owner } => ReplyPlace::Member(owner),
+    }
+}
+
+/// Keep `text` for this Mac or forward it to the member that owns it. A reply that cannot
+/// be forwarded is not routed here: the user is told once which Mac could not be reached.
+async fn handle_reply(store: &HaroldStore, env: &impl HubEnv, text: String) {
+    let owner = match place_reply(&text, env) {
+        ReplyPlace::Member(owner) => owner,
+        ReplyPlace::Here => {
+            // forwarded = true records that ownership is decided. Without it the event
+            // handler would decide again, and a member's report that arrived in between
+            // would make it drop a reply no other Mac ever sees.
+            let message = InboundMessage {
+                text,
+                forwarded: true,
+            };
+            if let Err(e) = append_inbound_message(store, &message).await {
+                warn!(error = %e, "failed to append InboundMessageReceived event");
+            }
+            return;
+        }
+    };
+
+    let member = env
+        .members()
+        .iter()
+        .find(|member| same_machine(&member.name, &owner));
+    let forwarded = match member {
+        Some(member) => forward_reply(member, &text).await,
+        None => Err("not in peers.members".to_string()),
+    };
+    match forwarded {
+        Ok(()) => info!(owner, "reply forwarded"),
+        Err(error) => {
+            warn!(
+                owner,
+                error, "telegram_listener: could not forward the reply"
+            );
+            let notice = error_text(env.machine(), &format!("could not reach {owner}"));
+            env.tell_user(notice).await;
+        }
+    }
+}
+
+/// Handle one batch of updates. Returns the offset to poll from next: one past the last
+/// update, or `offset` unchanged for an empty batch.
+async fn handle_updates(
+    store: &HaroldStore,
+    env: &impl HubEnv,
+    updates: Vec<Update>,
+    mut offset: i64,
+    expected_chat_id: i64,
+    messaging_paused: impl Fn() -> bool,
+) -> i64 {
+    for update in updates {
+        offset = update.update_id + 1;
+
+        let Some(text) = routable_text(update.message, expected_chat_id, messaging_paused()) else {
+            continue;
+        };
+
+        let trace_id = uuid::Uuid::new_v4().to_string();
+        let span = info_span!(
+            "telegram_listener_inbound",
+            trace_id = %trace_id,
+            update_id = update.update_id,
+        );
+
+        async {
+            info!("Telegram message received");
+            handle_reply(store, env, text).await;
+        }
+        .instrument(span)
+        .await;
+    }
+    offset
+}
+
 fn poll_updates(client: &Client, token: &str, offset: i64, timeout: u64) -> Option<Vec<Update>> {
     let url = format!("https://api.telegram.org/bot{token}/getUpdates");
     let res = client
@@ -393,43 +535,23 @@ pub(crate) async fn listen(store: Arc<HaroldStore>, mut shutdown: watch::Receive
             }
         };
 
-        for update in updates {
-            offset = update.update_id + 1;
-
-            let Some(text) = routable_text(update.message, expected_chat_id, is_messaging_paused())
-            else {
-                continue;
-            };
-
-            let trace_id = uuid::Uuid::new_v4().to_string();
-            let span = info_span!(
-                "telegram_listener_inbound",
-                trace_id = %trace_id,
-                update_id = update.update_id,
-            );
-
-            async {
-                info!("Telegram message received");
-                let message = InboundMessage {
-                    text,
-                    forwarded: false,
-                };
-                match append_inbound_message(&store, &message).await {
-                    Ok(()) => {}
-                    Err(e) => warn!(error = %e, "failed to append InboundMessageReceived event"),
-                }
-            }
-            .instrument(span)
-            .await;
-        }
+        offset = handle_updates(
+            &store,
+            &LiveHub,
+            updates,
+            offset,
+            expected_chat_id,
+            is_messaging_paused,
+        )
+        .await;
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        Chat, Message, marked, notification_message, routable_text, send_message_body,
-        send_notification,
+        Chat, HubEnv, Message, ReplyPlace, Update, handle_updates, marked, notification_message,
+        place_reply, routable_text, send_message_body, send_notification,
     };
     use crate::inbound::ownership::{delivered_text, error_text, notification_text, parse_marker};
     use crate::store::TurnCompleted;
@@ -660,5 +782,372 @@ mod tests {
         );
 
         assert_eq!(result.err(), Some("telegram down".to_string()));
+    }
+
+    use std::sync::Arc;
+
+    use crate::store::HaroldStore;
+    use crate::tests::inbound_messages;
+
+    /// A hub named `studio` whose `machines` are `studio`, `laptop` and `mini`.
+    struct FakeHub {
+        latest_notifier: Option<String>,
+        members: Vec<PeerMember>,
+        told: Mutex<Vec<String>>,
+    }
+
+    impl FakeHub {
+        fn new(latest_notifier: Option<&str>, members: Vec<PeerMember>) -> Self {
+            Self {
+                latest_notifier: latest_notifier.map(String::from),
+                members,
+                told: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn told(&self) -> Vec<String> {
+            self.told.lock().unwrap().clone()
+        }
+    }
+
+    impl HubEnv for FakeHub {
+        fn machine(&self) -> &str {
+            "studio"
+        }
+
+        fn known_machines(&self) -> Vec<String> {
+            vec!["studio".into(), "laptop".into(), "mini".into()]
+        }
+
+        fn latest_notifier(&self) -> Option<String> {
+            self.latest_notifier.clone()
+        }
+
+        fn members(&self) -> &[PeerMember] {
+            &self.members
+        }
+
+        async fn tell_user(&self, text: String) {
+            self.told.lock().unwrap().push(text);
+        }
+    }
+
+    struct TestStore {
+        store: Arc<HaroldStore>,
+        path: std::path::PathBuf,
+    }
+
+    impl Drop for TestStore {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+
+    async fn hub_store() -> TestStore {
+        let path = std::env::temp_dir().join(format!("harold-hub-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&path).unwrap();
+        let store = Arc::new(HaroldStore::open(&path).await.unwrap());
+        TestStore { store, path }
+    }
+
+    fn update(update_id: i64, text: &str) -> Update {
+        Update {
+            update_id,
+            message: message(7, text),
+        }
+    }
+
+    fn laptop_at(name: &str, url: &str, secret: &str) -> PeerMember {
+        PeerMember {
+            name: name.into(),
+            url: url.into(),
+            secret: secret.into(),
+        }
+    }
+
+    fn a_member() -> PeerEndpoint {
+        PeerEndpoint::Member {
+            hub: PeerHub {
+                url: "http://127.0.0.1:1".into(),
+                secret: "s3cret".into(),
+            },
+        }
+    }
+
+    #[test]
+    fn reply_is_placed_by_its_tag_and_then_by_the_latest_notifier() {
+        let after_laptop = FakeHub::new(Some("laptop"), Vec::new());
+        let after_studio = FakeHub::new(Some("studio"), Vec::new());
+        let before_any = FakeHub::new(None, Vec::new());
+        let member = |name: &str| ReplyPlace::Member(name.to_string());
+
+        assert_eq!(
+            place_reply("yes, merge it", &after_laptop),
+            member("laptop")
+        );
+        assert_eq!(
+            place_reply("yes, merge it", &after_studio),
+            ReplyPlace::Here
+        );
+        assert_eq!(place_reply("yes, merge it", &before_any), ReplyPlace::Here);
+        assert_eq!(
+            place_reply("[alir-app] go", &after_laptop),
+            member("laptop")
+        );
+        // A tag that names a Mac settles it, whoever notified last.
+        assert_eq!(
+            place_reply("[studio/alir] go", &after_laptop),
+            ReplyPlace::Here
+        );
+        assert_eq!(place_reply("[studio] go", &after_laptop), ReplyPlace::Here);
+        assert_eq!(
+            place_reply("[laptop/harold] go", &after_studio),
+            member("laptop")
+        );
+        assert_eq!(place_reply("[MINI] go", &after_studio), member("mini"));
+    }
+
+    #[tokio::test]
+    async fn reply_the_hub_owns_is_stored_as_already_decided() {
+        let hub = hub_store().await;
+        let env = FakeHub::new(Some("studio"), Vec::new());
+
+        let offset = handle_updates(
+            &hub.store,
+            &env,
+            vec![update(41, " yes, merge it ")],
+            0,
+            7,
+            || false,
+        )
+        .await;
+
+        assert_eq!(offset, 42);
+        let stored = inbound_messages(&hub.store).await;
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].text, "yes, merge it");
+        // forwarded = true: a member's report that lands before the event handler runs
+        // must not make the handler drop a reply the hub already decided to keep.
+        assert!(stored[0].forwarded);
+        assert!(env.told().is_empty());
+    }
+
+    #[tokio::test]
+    async fn untagged_reply_after_a_member_notified_is_forwarded_and_not_kept() {
+        let hub = hub_store().await;
+        let laptop = start_peer_server(a_member()).await;
+        let env = FakeHub::new(
+            Some("laptop"),
+            vec![laptop_at("laptop", &laptop.url, "s3cret")],
+        );
+
+        handle_updates(
+            &hub.store,
+            &env,
+            vec![update(1, "yes, merge it")],
+            0,
+            7,
+            || false,
+        )
+        .await;
+
+        let forwarded = inbound_messages(&laptop.store).await;
+        assert_eq!(forwarded.len(), 1);
+        assert_eq!(forwarded[0].text, "yes, merge it");
+        assert!(forwarded[0].forwarded);
+        assert!(inbound_messages(&hub.store).await.is_empty());
+        assert!(env.told().is_empty());
+    }
+
+    #[tokio::test]
+    async fn reply_tagged_for_the_hub_stays_on_the_hub_after_a_member_notified() {
+        let hub = hub_store().await;
+        let laptop = start_peer_server(a_member()).await;
+        let env = FakeHub::new(
+            Some("laptop"),
+            vec![laptop_at("laptop", &laptop.url, "s3cret")],
+        );
+
+        handle_updates(
+            &hub.store,
+            &env,
+            vec![update(1, "[studio/alir] go")],
+            0,
+            7,
+            || false,
+        )
+        .await;
+
+        let kept = inbound_messages(&hub.store).await;
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].text, "[studio/alir] go");
+        assert!(inbound_messages(&laptop.store).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn forwarded_reply_carries_the_text_as_typed() {
+        let hub = hub_store().await;
+        let laptop = start_peer_server(a_member()).await;
+        let env = FakeHub::new(
+            Some("studio"),
+            vec![laptop_at("laptop", &laptop.url, "s3cret")],
+        );
+        let text = "[laptop/harold main:0.0] revert that\nthen say “done” ✅";
+
+        handle_updates(&hub.store, &env, vec![update(1, text)], 0, 7, || false).await;
+
+        let forwarded = inbound_messages(&laptop.store).await;
+        assert_eq!(forwarded.len(), 1);
+        assert_eq!(forwarded[0].text, text);
+        assert!(inbound_messages(&hub.store).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn reply_is_forwarded_to_a_member_whose_name_differs_in_case() {
+        let hub = hub_store().await;
+        let laptop = start_peer_server(a_member()).await;
+        let env = FakeHub::new(
+            Some("LAPTOP"),
+            vec![laptop_at("Laptop", &laptop.url, "s3cret")],
+        );
+
+        handle_updates(&hub.store, &env, vec![update(1, "go on")], 0, 7, || false).await;
+
+        assert_eq!(inbound_messages(&laptop.store).await.len(), 1);
+        assert!(env.told().is_empty());
+    }
+
+    #[tokio::test]
+    async fn reply_for_an_unreachable_member_tells_the_user_and_is_not_kept() {
+        let hub = hub_store().await;
+        let env = FakeHub::new(
+            Some("laptop"),
+            vec![laptop_at("laptop", &closed_port_url(), "s3cret")],
+        );
+
+        handle_updates(
+            &hub.store,
+            &env,
+            vec![update(1, "yes, merge it")],
+            0,
+            7,
+            || false,
+        )
+        .await;
+
+        assert_eq!(env.told(), ["[studio] could not reach laptop"]);
+        assert!(inbound_messages(&hub.store).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn reply_for_a_mac_that_is_not_a_member_tells_the_user() {
+        let hub = hub_store().await;
+        let laptop = start_peer_server(a_member()).await;
+        let env = FakeHub::new(
+            Some("studio"),
+            vec![laptop_at("laptop", &laptop.url, "s3cret")],
+        );
+
+        handle_updates(&hub.store, &env, vec![update(1, "[mini] go")], 0, 7, || {
+            false
+        })
+        .await;
+
+        assert_eq!(env.told(), ["[studio] could not reach mini"]);
+        assert!(inbound_messages(&hub.store).await.is_empty());
+        assert!(inbound_messages(&laptop.store).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn reply_a_member_refuses_tells_the_user() {
+        let hub = hub_store().await;
+        let laptop = start_peer_server(a_member()).await;
+        let env = FakeHub::new(
+            Some("laptop"),
+            vec![laptop_at("laptop", &laptop.url, "not-the-secret")],
+        );
+
+        handle_updates(
+            &hub.store,
+            &env,
+            vec![update(1, "yes, merge it")],
+            0,
+            7,
+            || false,
+        )
+        .await;
+
+        assert_eq!(env.told(), ["[studio] could not reach laptop"]);
+        assert!(inbound_messages(&hub.store).await.is_empty());
+        assert!(inbound_messages(&laptop.store).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn paused_hub_moves_past_updates_without_keeping_or_forwarding_them() {
+        let hub = hub_store().await;
+        let laptop = start_peer_server(a_member()).await;
+        let env = FakeHub::new(
+            Some("laptop"),
+            vec![laptop_at("laptop", &laptop.url, "s3cret")],
+        );
+
+        let offset = handle_updates(
+            &hub.store,
+            &env,
+            vec![update(8, "yes, merge it"), update(9, "[studio] go")],
+            0,
+            7,
+            || true,
+        )
+        .await;
+
+        assert_eq!(offset, 10);
+        assert!(inbound_messages(&hub.store).await.is_empty());
+        assert!(inbound_messages(&laptop.store).await.is_empty());
+        assert!(env.told().is_empty());
+    }
+
+    #[tokio::test]
+    async fn hub_skips_harold_messages_and_other_chats_and_keeps_the_rest_in_order() {
+        let hub = hub_store().await;
+        let env = FakeHub::new(None, Vec::new());
+        let other_chat = Update {
+            update_id: 3,
+            message: message(8, "not for this bot"),
+        };
+
+        let offset = handle_updates(
+            &hub.store,
+            &env,
+            vec![
+                update(1, "first"),
+                update(2, "🤖 [studio] echo"),
+                other_chat,
+                update(4, "second"),
+            ],
+            0,
+            7,
+            || false,
+        )
+        .await;
+
+        assert_eq!(offset, 5);
+        let texts: Vec<String> = inbound_messages(&hub.store)
+            .await
+            .into_iter()
+            .map(|message| message.text)
+            .collect();
+        assert_eq!(texts, ["first", "second"]);
+    }
+
+    #[tokio::test]
+    async fn no_updates_leave_the_offset_where_it_was() {
+        let hub = hub_store().await;
+        let env = FakeHub::new(None, Vec::new());
+
+        assert_eq!(
+            handle_updates(&hub.store, &env, Vec::new(), 17, 7, || false).await,
+            17
+        );
     }
 }

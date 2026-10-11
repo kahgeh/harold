@@ -174,7 +174,6 @@ pub(crate) fn report_notification_blocking(hub: &PeerHub, machine: &str) -> Resu
 }
 
 /// Hand `member` a reply it owns, as the user typed it. One attempt.
-#[allow(dead_code, reason = "called by the Telegram listener in the next task")]
 pub(crate) async fn forward_reply(member: &PeerMember, text: &str) -> Result<(), String> {
     let mut client = connect(&member.url, PEER_TIMEOUT).await?;
     let response = client
