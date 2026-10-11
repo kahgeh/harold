@@ -1,7 +1,7 @@
 use super::{
-    Marker, NotifierRecord, Ownership, decide_ownership, delivered_text, error_text,
-    known_machine_names, latest_notifier, list_machines_for_test, notification_text, pane_address,
-    parse_marker, record_marker, record_notification,
+    Marker, NotifierRecord, Ownership, decide_ownership, delivered_text, error_text, fed_markers,
+    known_machine_names, latest_notifier, notification_text, pane_address, parse_marker,
+    record_marker, record_notification,
 };
 
 fn notification(machine: &str) -> Option<Marker<'_>> {
@@ -236,25 +236,18 @@ fn tag_for_a_listed_mac_that_has_not_notified_is_left_to_that_mac() {
 }
 
 #[test]
-fn process_wide_record_is_built_from_the_settings_and_fed_through_the_four_functions() {
+fn process_wide_record_is_built_from_the_settings_and_keeps_nothing_with_no_machines() {
     crate::settings::init_settings_for_test();
-    // The only test that changes the process-wide record. The names are unique to it.
-    // The test settings list no machines, so the record accepts nothing.
+    // The test settings list no machines, so the record accepts nothing. Other tests route
+    // replies through this record, so no test changes what it holds.
     assert!(crate::settings::get_settings().machines.is_empty());
-    record_marker("🤖 [ownership-test-a/x:0.0] done (x)", 100);
+    let text = "🤖 [ownership-test-a/x:0.0] done (x)";
+    record_marker(text, 9_100);
     record_notification("ownership-test-a");
+
+    assert!(fed_markers().contains(&(text.to_string(), 9_100)));
     assert_eq!(latest_notifier(), None);
     assert!(known_machine_names().is_empty());
-
-    list_machines_for_test(&listed(&["ownership-test-a", "ownership-test-b"]));
-    record_marker("🤖 [ownership-test-a/x:0.0] done (x)", 100);
-    assert_eq!(latest_notifier().as_deref(), Some("ownership-test-a"));
-    record_notification("ownership-test-b");
-    assert_eq!(latest_notifier().as_deref(), Some("ownership-test-b"));
-    assert_eq!(
-        known_machine_names(),
-        ["ownership-test-a", "ownership-test-b"]
-    );
 }
 
 fn known() -> Vec<String> {

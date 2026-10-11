@@ -200,7 +200,7 @@ const HANDLE: i64 = 7;
 
 /// An empty database in `directory` with the columns of chat.db's `message` table that
 /// the listener reads. `ROWID` is declared as chat.db declares it, so `sqlite3 -json`
-/// names the column the same way.
+/// names the column the same way. Marked rows are read, as when `machines` is set.
 fn chat_db(directory: &TestDirectory) -> ChatDb {
     let db = chat_db_without_date(directory);
     add_date_column(&db);
@@ -213,6 +213,7 @@ fn chat_db_without_date(directory: &TestDirectory) -> ChatDb {
     let db = ChatDb {
         path: directory.0.join("chat.db").to_str().unwrap().to_string(),
         handle_ids: vec![HANDLE],
+        read_marked: true,
     };
     run_sql(
         &db,
@@ -220,6 +221,14 @@ fn chat_db_without_date(directory: &TestDirectory) -> ChatDb {
          handle_id INTEGER, is_from_me INTEGER);",
     );
     db
+}
+
+/// `db` as a Mac whose `machines` setting is empty reads it: no marked row is read.
+fn without_marked_rows(db: &ChatDb) -> ChatDb {
+    ChatDb {
+        read_marked: false,
+        ..db.clone()
+    }
 }
 
 fn add_date_column(db: &ChatDb) {
@@ -595,6 +604,37 @@ async fn poll_that_cannot_read_the_marked_rows_records_no_reply_and_keeps_its_cu
 }
 
 #[tokio::test]
+async fn with_no_machines_listed_no_marked_row_is_read_so_a_failing_marked_query_holds_nothing_back()
+ {
+    let store_directory = TestDirectory::new();
+    let store = HaroldStore::open(&store_directory.0).await.unwrap();
+    let directory = TestDirectory::new();
+    // The marked queries would fail on this database: it has no `date` column.
+    let db = without_marked_rows(&chat_db_without_date(&directory));
+    insert(&db, &[(HANDLE, 1, STUDIO_NOTIFICATION), (HANDLE, 0, "yes")]);
+
+    assert_eq!(read_start(&db), Ok((2, vec![])));
+    assert_eq!(db.marked_after(0), Ok(vec![]));
+
+    let cursors = Cursors::starting_at(0);
+    let recent = Mutex::new(RecentRows::new());
+    // The closure is written in the call so that its return type is taken from the parameter.
+    poll_chat_db(
+        &store,
+        db,
+        &cursors,
+        |text, _| panic!("{text:?} was read"),
+        &recent,
+        || false,
+    )
+    .await;
+
+    assert_eq!(cursors.inbound.load(Ordering::Relaxed), 2);
+    assert_eq!(cursors.marked.load(Ordering::Relaxed), 0);
+    assert_eq!(store.project_unhandled_events(10).await.unwrap().applied, 1);
+}
+
+#[tokio::test]
 async fn poll_reads_marked_rows_before_it_records_a_reply_and_never_records_them() {
     let store_directory = TestDirectory::new();
     let store = HaroldStore::open(&store_directory.0).await.unwrap();
@@ -692,6 +732,7 @@ async fn poll_of_a_database_it_cannot_read_records_nothing_and_keeps_its_cursors
     let db = ChatDb {
         path: not_a_database.to_str().unwrap().to_string(),
         handle_ids: vec![HANDLE],
+        read_marked: true,
     };
     let cursors = Cursors::starting_at(10);
     let recent = Mutex::new(RecentRows::new());

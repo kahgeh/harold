@@ -356,6 +356,10 @@ fn read_start(db: &ChatDb) -> Result<(i64, Vec<MarkedRow>), String> {
 struct ChatDb {
     path: String,
     handle_ids: Vec<i64>,
+    /// Whether the rows a Harold sent are read. Only when the `machines` setting is set:
+    /// a single Mac keeps no latest notifier, so it runs no marked query that could fail
+    /// and hold back its replies.
+    read_marked: bool,
 }
 
 impl ChatDb {
@@ -364,6 +368,7 @@ impl ChatDb {
         Self {
             path: cfg.chat_db.resolved_path(),
             handle_ids: cfg.imessage.handle_ids.clone(),
+            read_marked: !cfg.machines.is_empty(),
         }
     }
 
@@ -384,9 +389,10 @@ impl ChatDb {
     }
 
     /// The rows after `last_rowid` that a Harold sent, from this Mac or another, in both
-    /// directions, oldest first, or why they could not be read.
+    /// directions, oldest first, or why they could not be read. None while `read_marked`
+    /// is off.
     fn marked_after(&self, last_rowid: i64) -> Result<Vec<MarkedRow>, String> {
-        let Some(id_list) = self.id_list() else {
+        let Some(id_list) = self.marked_id_list() else {
             return Ok(vec![]);
         };
         self.query_marked(&format!(
@@ -398,9 +404,9 @@ impl ChatDb {
     }
 
     /// The last `limit` rows a Harold sent, up to row `up_to_rowid`, oldest first, or why
-    /// they could not be read.
+    /// they could not be read. None while `read_marked` is off.
     fn latest_marked(&self, up_to_rowid: i64, limit: usize) -> Result<Vec<MarkedRow>, String> {
-        let Some(id_list) = self.id_list() else {
+        let Some(id_list) = self.marked_id_list() else {
             return Ok(vec![]);
         };
         self.query_marked(&format!(
@@ -411,6 +417,11 @@ impl ChatDb {
                ORDER BY ROWID DESC LIMIT {limit}\
              ) ORDER BY ROWID ASC;"
         ))
+    }
+
+    /// The handle ids for a marked query, or `None` when no marked row is to be read.
+    fn marked_id_list(&self) -> Option<String> {
+        self.read_marked.then(|| self.id_list()).flatten()
     }
 
     /// The handle ids as an SQL list, or `None` when none is configured. Every value put

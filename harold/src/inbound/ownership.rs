@@ -195,13 +195,6 @@ pub(crate) fn fed_markers() -> Vec<(String, i64)> {
     FED_MARKERS.lock().unwrap().clone()
 }
 
-/// Replace the process-wide record with one for `machines`, as if the setting listed them.
-/// Only the test of the process-wide record calls it.
-#[cfg(test)]
-pub(crate) fn list_machines_for_test(machines: &[String]) {
-    *NOTIFIERS.lock().unwrap() = NotifierRecord::for_machines(machines);
-}
-
 // ---------------------------------------------------------------------------
 // Ownership — does this Mac route the reply?
 // ---------------------------------------------------------------------------
