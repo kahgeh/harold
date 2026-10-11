@@ -1,0 +1,6 @@
+{
+  "name": "harold-lifecycle",
+  "version": "0.1.0",
+  "description": "Reports a Claude Code pane's busy and idle state to Harold from turn.start and turn.complete.",
+  "author": { "name": "kahgeh" }
+}
