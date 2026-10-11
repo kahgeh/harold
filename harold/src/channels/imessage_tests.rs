@@ -3,14 +3,15 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::channels::{split_body, truncate_body};
+use crate::inbound::ownership::NotifierRecord;
 use crate::inbound::ownership::{delivered_text, error_text, notification_text, parse_marker};
 use crate::store::{HaroldStore, TurnCompleted};
 use crate::util::sanitise_for_applescript;
 
 use super::{
-    ChatDb, Direction, FetchedRow, NotificationPlan, RecentRows, TWIN_WINDOW, is_marked_as_harold,
-    max_rowid_of, notification_message, notification_plan, parse_max_rowid, record_row,
-    send_script, wait_for_start_row,
+    ChatDb, Cursors, Direction, FetchedRow, NotificationPlan, RecentRows, TWIN_WINDOW,
+    is_marked_as_harold, max_rowid_of, notification_message, notification_plan, parse_max_rowid,
+    poll_chat_db, record_row, send_script, start_cursors, wait_for_start_row,
 };
 
 #[test]
@@ -268,6 +269,216 @@ fn replies_are_read_per_direction_for_the_configured_handles_without_harolds_mes
         ..db.clone()
     };
     assert!(no_handles.replies_after(0, 0).is_empty());
+}
+
+const STUDIO_NOTIFICATION: &str = "🤖 [studio/alir-app main:0.1] Tests pass (alir)";
+const LAPTOP_NOTIFICATION: &str = "🤖 [laptop/harold main:0.0] it's \"done\" (harold)";
+const STUDIO_ERROR: &str = "🤖 [studio] No active agent sessions found.";
+
+#[test]
+fn marked_rows_are_read_in_both_directions_for_the_configured_handles() {
+    let directory = TestDirectory::new();
+    let db = chat_db(&directory);
+    insert(
+        &db,
+        &[
+            (HANDLE, 1, STUDIO_NOTIFICATION),
+            (HANDLE, 0, "yes, merge it"),
+            (HANDLE, 0, LAPTOP_NOTIFICATION),
+            (99, 0, "🤖 [mini/x:0.0] another conversation (x)"),
+            (HANDLE, 1, STUDIO_ERROR),
+        ],
+    );
+    run_sql(
+        &db,
+        "INSERT INTO message(text, handle_id, is_from_me) VALUES (NULL, 7, 0);",
+    );
+
+    assert_eq!(
+        db.marked_after(0),
+        texts(&[
+            (1, STUDIO_NOTIFICATION),
+            (3, LAPTOP_NOTIFICATION),
+            (5, STUDIO_ERROR)
+        ])
+    );
+    assert_eq!(
+        db.marked_after(1),
+        texts(&[(3, LAPTOP_NOTIFICATION), (5, STUDIO_ERROR)])
+    );
+    assert!(db.marked_after(5).is_empty());
+
+    // The last rows up to a row, oldest first.
+    assert_eq!(
+        db.latest_marked(6, 2),
+        texts(&[(3, LAPTOP_NOTIFICATION), (5, STUDIO_ERROR)])
+    );
+    assert_eq!(
+        db.latest_marked(4, 50),
+        texts(&[(1, STUDIO_NOTIFICATION), (3, LAPTOP_NOTIFICATION)])
+    );
+
+    let no_handles = ChatDb {
+        handle_ids: Vec::new(),
+        ..db.clone()
+    };
+    assert!(no_handles.marked_after(0).is_empty());
+    assert!(no_handles.latest_marked(6, 50).is_empty());
+}
+
+#[test]
+fn startup_reads_the_marked_rows_already_stored_and_starts_every_cursor_after_them() {
+    let directory = TestDirectory::new();
+    let db = chat_db(&directory);
+    insert(
+        &db,
+        &[
+            (HANDLE, 1, STUDIO_NOTIFICATION),
+            (HANDLE, 0, "yes, merge it"),
+            (HANDLE, 0, LAPTOP_NOTIFICATION),
+        ],
+    );
+    let record = Mutex::new(NotifierRecord::new());
+
+    let cursors = start_cursors(&db, 3, |text| record.lock().unwrap().record_marker(text));
+
+    assert_eq!(record.lock().unwrap().latest_notifier(), Some("laptop"));
+    assert_eq!(cursors.inbound.load(Ordering::Relaxed), 3);
+    assert_eq!(cursors.self_sent.load(Ordering::Relaxed), 3);
+    assert_eq!(cursors.marked.load(Ordering::Relaxed), 3);
+}
+
+#[test]
+fn startup_reads_only_the_last_50_marked_rows_oldest_first() {
+    let directory = TestDirectory::new();
+    let db = chat_db(&directory);
+    let mut rows = vec![(HANDLE, 1, "🤖 [old/a:0.0] done (a)")];
+    rows.extend([(HANDLE, 1, STUDIO_NOTIFICATION); 49]);
+    rows.push((HANDLE, 0, LAPTOP_NOTIFICATION));
+    insert(&db, &rows);
+    let record = Mutex::new(NotifierRecord::new());
+
+    start_cursors(&db, 51, |text| record.lock().unwrap().record_marker(text));
+
+    let record = record.lock().unwrap();
+    assert_eq!(record.latest_notifier(), Some("laptop"));
+    assert_eq!(record.known_machine_names(), ["studio", "laptop"]);
+}
+
+#[tokio::test]
+async fn poll_reads_marked_rows_before_it_records_a_reply_and_never_records_them() {
+    let store_directory = TestDirectory::new();
+    let store = HaroldStore::open(&store_directory.0).await.unwrap();
+    let directory = TestDirectory::new();
+    let db = chat_db(&directory);
+    insert(&db, &[(HANDLE, 1, STUDIO_NOTIFICATION)]);
+    let record = Mutex::new(NotifierRecord::new());
+    let cursors = start_cursors(&db, 1, |text| record.lock().unwrap().record_marker(text));
+    let recent = Mutex::new(RecentRows::new());
+    assert_eq!(record.lock().unwrap().latest_notifier(), Some("studio"));
+
+    insert(
+        &db,
+        &[
+            (HANDLE, 0, LAPTOP_NOTIFICATION),
+            (HANDLE, 0, "yes, merge it"),
+            (HANDLE, 1, STUDIO_ERROR),
+        ],
+    );
+    let before_any_reply = |text: &str| {
+        assert_eq!(
+            cursors.inbound.load(Ordering::Relaxed),
+            1,
+            "a reply was recorded before the marked rows were read"
+        );
+        record.lock().unwrap().record_marker(text);
+    };
+    poll_chat_db(
+        &store,
+        db.clone(),
+        &cursors,
+        before_any_reply,
+        &recent,
+        false,
+    )
+    .await;
+
+    assert_eq!(record.lock().unwrap().latest_notifier(), Some("laptop"));
+    assert_eq!(cursors.marked.load(Ordering::Relaxed), 4);
+    assert_eq!(cursors.inbound.load(Ordering::Relaxed), 3);
+    assert_eq!(cursors.self_sent.load(Ordering::Relaxed), 1);
+    assert_eq!(store.project_unhandled_events(10).await.unwrap().applied, 1);
+
+    // Nothing new: no marked row is read a second time. The closure is written in the
+    // call so that its return type is taken from the parameter.
+    let read_again = "was read twice";
+    poll_chat_db(
+        &store,
+        db,
+        &cursors,
+        |text| panic!("{text:?} {read_again}"),
+        &recent,
+        false,
+    )
+    .await;
+    assert_eq!(store.project_unhandled_events(10).await.unwrap().applied, 0);
+}
+
+#[tokio::test]
+async fn paused_poll_still_reads_marked_rows_and_discards_the_reply() {
+    let store_directory = TestDirectory::new();
+    let store = HaroldStore::open(&store_directory.0).await.unwrap();
+    let directory = TestDirectory::new();
+    let db = chat_db(&directory);
+    insert(
+        &db,
+        &[
+            (HANDLE, 0, LAPTOP_NOTIFICATION),
+            (HANDLE, 0, "yes, merge it"),
+        ],
+    );
+    let record = Mutex::new(NotifierRecord::new());
+    let cursors = Cursors::starting_at(0);
+    let recent = Mutex::new(RecentRows::new());
+
+    let feed = |text: &str| record.lock().unwrap().record_marker(text);
+    poll_chat_db(&store, db, &cursors, feed, &recent, true).await;
+
+    assert_eq!(record.lock().unwrap().latest_notifier(), Some("laptop"));
+    assert_eq!(cursors.marked.load(Ordering::Relaxed), 1);
+    assert_eq!(cursors.inbound.load(Ordering::Relaxed), 2);
+    assert_eq!(store.project_unhandled_events(10).await.unwrap().applied, 0);
+}
+
+#[tokio::test]
+async fn poll_of_a_database_it_cannot_read_records_nothing_and_keeps_its_cursors() {
+    let store_directory = TestDirectory::new();
+    let store = HaroldStore::open(&store_directory.0).await.unwrap();
+    let directory = TestDirectory::new();
+    let not_a_database = directory.0.join("chat.db");
+    std::fs::write(&not_a_database, "this is not a database").unwrap();
+    let db = ChatDb {
+        path: not_a_database.to_str().unwrap().to_string(),
+        handle_ids: vec![HANDLE],
+    };
+    let cursors = Cursors::starting_at(10);
+    let recent = Mutex::new(RecentRows::new());
+
+    // The closure is written in the call so that its return type is taken from the parameter.
+    poll_chat_db(
+        &store,
+        db,
+        &cursors,
+        |text| panic!("{text:?} was read"),
+        &recent,
+        false,
+    )
+    .await;
+
+    assert_eq!(cursors.marked.load(Ordering::Relaxed), 10);
+    assert_eq!(cursors.inbound.load(Ordering::Relaxed), 10);
+    assert_eq!(cursors.self_sent.load(Ordering::Relaxed), 10);
+    assert_eq!(store.project_unhandled_events(10).await.unwrap().applied, 0);
 }
 
 fn row(rowid: i64, text: &str, direction: Direction) -> FetchedRow {

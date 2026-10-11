@@ -11,7 +11,7 @@ use tracing::{Instrument, info, info_span, warn};
 
 use super::{AwayNotification, split_body, summarise_for_notification};
 use crate::inbound::AgentAddress;
-use crate::inbound::ownership::notification_text;
+use crate::inbound::ownership::{self, notification_text};
 use crate::outbound::is_messaging_paused;
 use crate::settings::get_settings;
 use crate::store::{HaroldStore, InboundMessage, TurnCompleted, append_inbound_message};
@@ -187,15 +187,32 @@ pub(crate) fn notify_away(
 
 const START_ROW_RETRY: Duration = Duration::from_secs(5);
 
-static LAST_INBOUND_ROWID: OnceLock<AtomicI64> = OnceLock::new();
-static LAST_SELF_ROWID: OnceLock<AtomicI64> = OnceLock::new();
+/// How many of the last marked rows the listener reads when it starts.
+const STARTUP_MARKED_ROWS: usize = 50;
 
-fn last_inbound_rowid() -> &'static AtomicI64 {
-    LAST_INBOUND_ROWID.get().expect("listener not initialised")
+/// The last row read by each of the listener's three queries.
+#[derive(Debug)]
+struct Cursors {
+    inbound: AtomicI64,
+    self_sent: AtomicI64,
+    /// Rows a Harold sent, in both directions. They name the Mac that notified last.
+    marked: AtomicI64,
 }
 
-fn last_self_rowid() -> &'static AtomicI64 {
-    LAST_SELF_ROWID.get().expect("listener not initialised")
+impl Cursors {
+    fn starting_at(rowid: i64) -> Self {
+        Self {
+            inbound: AtomicI64::new(rowid),
+            self_sent: AtomicI64::new(rowid),
+            marked: AtomicI64::new(rowid),
+        }
+    }
+}
+
+static CURSORS: OnceLock<Cursors> = OnceLock::new();
+
+fn cursors() -> &'static Cursors {
+    CURSORS.get().expect("listener not initialised")
 }
 
 /// Which of the two queries a row came from.
@@ -348,6 +365,35 @@ impl ChatDb {
         rows
     }
 
+    /// The rows after `last_rowid` that a Harold sent, from this Mac or another, in both
+    /// directions, oldest first.
+    fn marked_after(&self, last_rowid: i64) -> Vec<(i64, String)> {
+        let Some(id_list) = self.id_list() else {
+            return vec![];
+        };
+        self.query(&format!(
+            "SELECT ROWID, text FROM message \
+             WHERE ROWID > {last_rowid} AND handle_id IN ({id_list}) \
+               AND text LIKE '{HAROLD_MARKER}%' \
+             ORDER BY ROWID ASC;"
+        ))
+    }
+
+    /// The last `limit` rows a Harold sent, up to row `up_to_rowid`, oldest first.
+    fn latest_marked(&self, up_to_rowid: i64, limit: usize) -> Vec<(i64, String)> {
+        let Some(id_list) = self.id_list() else {
+            return vec![];
+        };
+        self.query(&format!(
+            "SELECT ROWID, text FROM (\
+               SELECT ROWID, text FROM message \
+               WHERE ROWID <= {up_to_rowid} AND handle_id IN ({id_list}) \
+                 AND text LIKE '{HAROLD_MARKER}%' \
+               ORDER BY ROWID DESC LIMIT {limit}\
+             ) ORDER BY ROWID ASC;"
+        ))
+    }
+
     /// The handle ids as an SQL list, or `None` when none is configured. Every value put
     /// into a query is an integer from the configuration or from internal state, never
     /// user input.
@@ -434,23 +480,64 @@ async fn record_row(
     }
 }
 
-async fn poll(store: &HaroldStore) {
-    let inbound_rowid = last_inbound_rowid().load(Ordering::Relaxed);
-    let self_rowid = last_self_rowid().load(Ordering::Relaxed);
+/// Feed the rows a Harold sent to `record_marker`, oldest first, and move `cursor` past
+/// them. They are never recorded as replies.
+fn read_marked_rows(rows: Vec<(i64, String)>, cursor: &AtomicI64, record_marker: impl Fn(&str)) {
+    for (rowid, text) in rows {
+        record_marker(&text);
+        cursor.store(rowid, Ordering::Relaxed);
+    }
+}
 
-    let db = ChatDb::configured();
-    let (inbound, self_msgs) = tokio::task::spawn_blocking(move || {
-        (
-            db.replies_after(inbound_rowid, 0),
-            db.replies_after(self_rowid, 1),
-        )
+/// The cursors of a listener that starts after row `initial`. The last marked rows stored
+/// up to that row are fed to `record_marker` first, so a restart keeps the latest notifier.
+fn start_cursors(db: &ChatDb, initial: i64, record_marker: impl Fn(&str)) -> Cursors {
+    for (_, text) in db.latest_marked(initial, STARTUP_MARKED_ROWS) {
+        record_marker(&text);
+    }
+    Cursors::starting_at(initial)
+}
+
+async fn poll(store: &HaroldStore) {
+    poll_chat_db(
+        store,
+        ChatDb::configured(),
+        cursors(),
+        ownership::record_marker,
+        &RECENT_ROWS,
+        is_messaging_paused(),
+    )
+    .await;
+}
+
+/// One poll of `db`. Marked rows are read before any reply is recorded, and while
+/// messaging is paused too, so the latest notifier is current when a reply is routed.
+async fn poll_chat_db(
+    store: &HaroldStore,
+    db: ChatDb,
+    cursors: &Cursors,
+    record_marker: impl Fn(&str),
+    recent: &Mutex<RecentRows>,
+    messaging_paused: bool,
+) {
+    let inbound_rowid = cursors.inbound.load(Ordering::Relaxed);
+    let self_rowid = cursors.self_sent.load(Ordering::Relaxed);
+    let marked_rowid = cursors.marked.load(Ordering::Relaxed);
+
+    let (inbound, self_msgs, marked) = tokio::task::spawn_blocking(move || {
+        // The replies are fetched first: a notification stored while these two queries
+        // run is then among the marked rows of this poll.
+        let inbound = db.replies_after(inbound_rowid, 0);
+        let self_msgs = db.replies_after(self_rowid, 1);
+        let marked = db.marked_after(marked_rowid);
+        (inbound, self_msgs, marked)
     })
     .await
     .unwrap_or_else(|e| {
         tracing::warn!(error = %e, "fetch task panicked");
-        (vec![], vec![])
+        (vec![], vec![], vec![])
     });
-    let messaging_paused = is_messaging_paused();
+    read_marked_rows(marked, &cursors.marked, record_marker);
     let now = Instant::now();
 
     for (rowid, text) in inbound {
@@ -464,8 +551,7 @@ async fn poll(store: &HaroldStore) {
                 text,
                 direction: Direction::Inbound,
             };
-            let cursor = last_inbound_rowid();
-            record_row(store, row, cursor, &RECENT_ROWS, messaging_paused, now).await;
+            record_row(store, row, &cursors.inbound, recent, messaging_paused, now).await;
         }
         .instrument(span)
         .await;
@@ -482,8 +568,15 @@ async fn poll(store: &HaroldStore) {
                 text,
                 direction: Direction::SelfSent,
             };
-            let cursor = last_self_rowid();
-            record_row(store, row, cursor, &RECENT_ROWS, messaging_paused, now).await;
+            record_row(
+                store,
+                row,
+                &cursors.self_sent,
+                recent,
+                messaging_paused,
+                now,
+            )
+            .await;
         }
         .instrument(span)
         .await;
@@ -546,12 +639,10 @@ pub(crate) async fn listen(store: Arc<HaroldStore>, mut shutdown: watch::Receive
         info!("iMessage listener shutting down before the Messages database was readable");
         return;
     };
-    LAST_INBOUND_ROWID
-        .set(AtomicI64::new(initial))
-        .expect("listen called more than once");
-    LAST_SELF_ROWID
-        .set(AtomicI64::new(initial))
-        .expect("listen called more than once");
+    let cursors = tokio::task::block_in_place(|| {
+        start_cursors(&ChatDb::configured(), initial, ownership::record_marker)
+    });
+    CURSORS.set(cursors).expect("listen called more than once");
     info!(initial_rowid = initial, "iMessage listener started");
 
     // Keep _watcher alive (dropping it stops watching). In the fallback path,

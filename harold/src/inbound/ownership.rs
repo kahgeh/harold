@@ -136,10 +136,6 @@ static NOTIFIERS: LazyLock<Mutex<NotifierRecord>> =
     LazyLock::new(|| Mutex::new(NotifierRecord::for_machines(&get_settings().machines)));
 
 /// Record a `🤖 [...]` message read from the conversation.
-#[allow(
-    dead_code,
-    reason = "called by the iMessage listener once it reads marked rows (piece 2)"
-)]
 pub(crate) fn record_marker(text: &str) {
     NOTIFIERS.lock().unwrap().record_marker(text);
 }
