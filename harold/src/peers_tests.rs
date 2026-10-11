@@ -291,12 +291,16 @@ async fn hung_peer_fails_within_the_timeout_and_is_called_once() {
     });
 
     let started = Instant::now();
-    let result = report_notification_within(
-        &hub_at(&url, "s3cret"),
-        "laptop",
-        Duration::from_millis(300),
+    let result = tokio::time::timeout(
+        Duration::from_secs(3),
+        report_notification_within(
+            &hub_at(&url, "s3cret"),
+            "laptop",
+            Duration::from_millis(300),
+        ),
     )
-    .await;
+    .await
+    .expect("the call outlived its timeout");
 
     assert!(result.is_err());
     assert!(

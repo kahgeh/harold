@@ -138,7 +138,7 @@ A reply with `forwarded = true` skips this rule: this Mac owns it, as described 
 
 On iMessage the Macs need no network between them. The listener already reads `chat.db`. With `machines` set, it also reads the marked rows: the rows whose text starts with `🤖 [name/…]`. These are the copies this Mac sent and the copies that other Macs' sends leave in this Mac's `chat.db` through Messages in iCloud. The latest notifier is the machine named by the marked row with the greatest `date`, the send time Messages stores with the row. Rows with equal dates are ordered by machine name, ignoring case, and the greater name wins. Two Macs that hold the same rows therefore name the same latest notifier whatever order the rows arrived in.
 
-At startup the listener reads the last 50 marked rows. If the marked rows cannot be read during a poll, no reply is recorded in that poll and no cursor moves, so the replies are judged on the next poll. Paused messaging still reads marked rows, so the latest notifier is current on resume.
+At startup the listener reads the last 50 marked rows. If the marked rows cannot be read during a poll, no reply is recorded in that poll and no cursor moves, so the replies are judged on the next poll. If the startup read fails, Harold logs it once and retries every 5 seconds, and the listener does not start until the read succeeds. Paused messaging still reads marked rows, so the latest notifier is current on resume.
 
 ### Telegram: the hub and members
 
@@ -176,6 +176,7 @@ Every Harold runs a gRPC server, `harold-api`, on `grpc.host` and `grpc.port` (d
 
 - Each call opens one connection to the configured `url`, sends one request and closes. Connecting and the call each time out after 5 seconds. A failed call is not retried.
 - The calls are plain gRPC over HTTP. Tailscale provides the encryption and limits who can reach the port.
+- With `grpc.host` on a Tailscale address, Harold no longer listens on `127.0.0.1`. Clients on the same Mac that default to `127.0.0.1` or `localhost` cannot reach it: start `tmx-agent-dash` with `--endpoint http://<tailscale-ip>:50060`, and set `HAROLD_ADDR=<tailscale-ip>:50060` for the OpenCode plugin. The Claude hooks read the address from the service metadata and keep working.
 - Only `ReportNotification` and `ForwardReply` check the secret. Harold compares it in constant time, and an empty secret never matches. The existing RPCs check nothing. See the [security audit follow-up](../../security-audit-2026-02-27.md#follow-up-2026-10-11-grpc-beyond-loopback-for-several-macs).
 
 ### Settings
@@ -195,8 +196,8 @@ Harold refuses to start with an error that names the setting when any of these h
 - `peers.role = "member"` and `peers.hub` is missing, or `peers.members` is not empty.
 - `peers.members` is not empty and `machines` is empty.
 - A `peers.members` name is this Mac's own name, is not in `machines`, or appears twice.
-- A `url` does not start with `http://`.
-- A `secret` is empty.
+- A peer `url` does not start with `http://`, or has nothing after it.
+- A `secret` is empty or only whitespace.
 
 ### Failure modes
 
@@ -212,6 +213,8 @@ Harold refuses to start with an error that names the setting when any of these h
 - **The hub restarts.** It keeps its latest notifier in memory only. Until the next notification from any Mac, the hub keeps every untagged reply itself.
 - **A member's report fails.** The hub is unreachable. The notification is still sent, and the hub's latest notifier is stale until the next notification.
 - **A member is unreachable or not in `peers.members`.** The hub sends `🤖 [<hub>] could not reach <machine>` and does not route the reply itself.
+- **A forward times out after the member stored the reply.** The hub waits 5 seconds and then reports `could not reach <machine>`, even though the member may already have stored and routed the reply. You can receive both that message and a `✓ Delivered` from the member. The member does not deliver the reply twice.
+- **The hub is paused.** The hub discards every reply it reads, including replies meant for members, because it checks for pause before it decides ownership. A paused Mac discards a reply whether or not it owns it.
 - **A member is paused.** It accepts the forwarded reply and discards it, as a paused Mac discards any reply.
 - **A member notifies between the hub reading a reply and handling it.** This cannot change the decision. The hub decides once and stores the reply with `forwarded = true`.
 

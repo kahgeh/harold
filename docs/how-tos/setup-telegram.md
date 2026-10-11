@@ -103,6 +103,8 @@ The examples use two Macs: `studio` is the hub and `laptop` is a member.
 1. Choose the hub.
 2. On every Mac, set `machines` to the names of all your Macs and, if the hostname is not the name you want, `machine_name`. Use the same `[telegram]` settings and `away_channel = "telegram"` on every Mac. See [Several Macs on iMessage](setup.md#several-macs-on-imessage) for the name rules.
 3. On every Mac, set `[grpc] host` to that Mac's Tailscale address. The default, `127.0.0.1`, cannot be reached from the other Mac. Restart Harold on every Mac after you change it.
+
+   Harold then listens only on that address, not on `127.0.0.1`. Local clients that default to `127.0.0.1` or `localhost` stop reaching it. Start the dashboard with `tmx-agent-dash --endpoint http://<tailscale-ip>:50060`, and set `HAROLD_ADDR=<tailscale-ip>:50060` for the OpenCode plugin. The Claude hooks keep working, because they read the address from the service metadata.
 4. Generate one secret for each member. The hub and that member share it:
 
    ```bash
