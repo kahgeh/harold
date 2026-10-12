@@ -5,9 +5,14 @@ use tokio::sync::watch;
 use tracing::{info, info_span, warn};
 
 use crate::agent::snapshot::AgentSnapshotHub;
-use crate::inbound::route_inbound_message;
+use crate::inbound::{
+    AgentAddress, route_inbound_message, set_last_away_notification_source_agent,
+};
 use crate::outbound::{DeliveryOutcome, notify};
-use crate::store::{HaroldStore, InboundMessage, PendingDelivery, ProjectionBatch, TurnCompleted};
+use crate::store::{
+    AwayMessageRequested, HaroldStore, InboundMessage, PendingDelivery, ProjectionBatch,
+    TurnCompleted,
+};
 
 pub(crate) trait DeliveryDispatcher: Send + Sync + 'static {
     fn dispatch(&self, delivery: &PendingDelivery) -> Result<DeliveryOutcome, DispatchError>;
@@ -58,6 +63,12 @@ impl ProductionDispatcher {
                     })?;
                 route_message(&message, route_inbound_message)
             }
+            "AwayMessageRequested" => dispatch_away_message(
+                delivery,
+                messaging_paused,
+                crate::channels::send_away_message,
+                set_last_away_notification_source_agent,
+            ),
             other => Err(DispatchError::Permanent(format!(
                 "unknown event type: {other}"
             ))),
@@ -71,6 +82,33 @@ fn route_message(
     route: impl FnOnce(&str, bool) -> Result<DeliveryOutcome, String>,
 ) -> Result<DeliveryOutcome, DispatchError> {
     route(&message.text, message.forwarded).map_err(DispatchError::Retryable)
+}
+
+/// Send a stored agent message through `send`, then hand its pane to `record_source` as the
+/// one an untagged reply goes to. None of a notification's presence checks apply: the
+/// message is sent whether the screen is locked or not, and the voice mute does not cover it.
+fn dispatch_away_message(
+    delivery: &PendingDelivery,
+    messaging_paused: bool,
+    send: impl FnOnce(&AwayMessageRequested) -> Result<(), String>,
+    record_source: impl FnOnce(AgentAddress),
+) -> Result<DeliveryOutcome, DispatchError> {
+    // Checked before the payload is read, as for a reply: a paused message is dropped, not
+    // sent later.
+    if messaging_paused {
+        info!("away message skipped (messaging paused)");
+        return Ok(DeliveryOutcome::Skipped);
+    }
+    let message = serde_json::from_value::<AwayMessageRequested>(delivery.payload.clone())
+        .map_err(|error| {
+            DispatchError::Permanent(format!("invalid AwayMessageRequested payload: {error}"))
+        })?;
+    send(&message).map_err(DispatchError::Retryable)?;
+    record_source(AgentAddress::TmuxPane {
+        pane_id: message.pane_id,
+        label: message.pane_label,
+    });
+    Ok(DeliveryOutcome::Delivered)
 }
 
 #[derive(Debug, thiserror::Error)]

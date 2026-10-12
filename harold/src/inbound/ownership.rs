@@ -293,6 +293,12 @@ pub(crate) fn notification_text(
     )
 }
 
+/// A message an agent sends in its own words: the pane's address, then the text as it was
+/// stored. Unlike a notification it has no `(context)` suffix.
+pub(crate) fn agent_message_text(machine: &str, pane_label: &str, text: &str) -> String {
+    format!("{} {text}", pane_address(machine, pane_label))
+}
+
 pub(crate) fn delivered_text(machine: &str, pane_label: &str) -> String {
     format!("✓ Delivered to {}", pane_address(machine, pane_label))
 }

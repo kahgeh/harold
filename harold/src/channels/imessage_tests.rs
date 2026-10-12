@@ -1448,3 +1448,20 @@ async fn startup_waits_for_an_unreadable_database_then_feeds_its_rows() {
     assert_eq!(*fed.lock().unwrap(), [(STUDIO_NOTIFICATION.to_string(), 0)]);
     assert_eq!(cursors.inbound.load(Ordering::Relaxed), 1);
 }
+
+#[test]
+fn agent_message_goes_out_with_one_marker() {
+    let text = crate::inbound::ownership::agent_message_text(
+        "PasM4MBP",
+        "pods:0.1",
+        "Pod 3 is blocked on a merge conflict in store.rs",
+    );
+
+    let script = send_script(&text, "+61400000000");
+
+    assert_eq!(
+        script,
+        "tell application \"Messages\" to send \"🤖 [PasM4MBP/pods:0.1] Pod 3 is blocked on a merge conflict in store.rs\" to buddy \"+61400000000\""
+    );
+    assert_eq!(script.matches('🤖').count(), 1);
+}

@@ -244,6 +244,20 @@ fn notify_with(
     send_notification(turn, &settings.machine_name, &settings.peers, body, send)
 }
 
+/// Send a message an agent asked for. It is announced first, as a notification is, so the
+/// hub knows which Mac an untagged reply belongs to.
+pub(crate) fn send_agent_message(
+    peers: &PeersSettings,
+    machine: &str,
+    text: &str,
+    send: impl FnOnce(&str) -> Result<(), String>,
+) -> Result<(), String> {
+    announce_notification(peers, machine);
+    send(text)?;
+    info!("Telegram agent message sent");
+    Ok(())
+}
+
 // ===========================================================================
 // Listening
 // ===========================================================================
@@ -598,7 +612,7 @@ mod tests {
     use super::{
         Chat, HubEnv, LiveHub, Message, ReplyPlace, Update, handle_updates, marked,
         notification_message, notify_with, pause_check, place_reply, routable_text,
-        send_message_body, send_notification, tell_user_with,
+        send_agent_message, send_message_body, send_notification, tell_user_with,
     };
     use crate::inbound::ownership::{delivered_text, error_text, notification_text, parse_marker};
     use crate::store::TurnCompleted;
@@ -829,6 +843,95 @@ mod tests {
         );
 
         assert_eq!(result.err(), Some("telegram down".to_string()));
+    }
+
+    #[test]
+    fn agent_message_is_sent_marked_once() {
+        let text = crate::inbound::ownership::agent_message_text(
+            "PasM4MBP",
+            "pods:0.1",
+            "Deploy now? See https://example.com/a?b=1",
+        );
+
+        assert_eq!(
+            send_message_body(7, &text)["text"],
+            "🤖 [PasM4MBP/pods:0.1] Deploy now? See https://example.com/a?b=1"
+        );
+    }
+
+    #[test]
+    fn hub_records_itself_before_sending_an_agent_message() {
+        crate::settings::init_settings_for_test();
+        let mut seen = None;
+
+        let result = send_agent_message(
+            &PeersSettings::default(),
+            "studio-agent-message-hub",
+            "[studio-agent-message-hub/pods:0.1] Pod 3 is blocked",
+            |text| {
+                let recorded =
+                    recorded_notifications().contains(&"studio-agent-message-hub".to_string());
+                seen = Some((text.to_string(), recorded));
+                Ok(())
+            },
+        );
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(
+            seen,
+            Some((
+                "[studio-agent-message-hub/pods:0.1] Pod 3 is blocked".to_string(),
+                true
+            ))
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn member_reports_to_the_hub_before_sending_an_agent_message() {
+        crate::settings::init_settings_for_test();
+        let hub = start_peer_server(PeerEndpoint::Hub {
+            members: vec![PeerMember {
+                name: "laptop-agent-message-member".into(),
+                url: "http://127.0.0.1:1".into(),
+                secret: "s3cret".into(),
+            }],
+        })
+        .await;
+        let peers = member_of(&hub.url);
+
+        // On a blocking thread, as the event handler sends.
+        let reported_before_send = tokio::task::spawn_blocking(move || {
+            let mut reported = None;
+            let result = send_agent_message(&peers, "laptop-agent-message-member", "text", |_| {
+                reported = Some(
+                    recorded_notifications()
+                        .iter()
+                        .filter(|name| *name == "laptop-agent-message-member")
+                        .count(),
+                );
+                Ok(())
+            });
+            assert_eq!(result, Ok(()));
+            reported
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(reported_before_send, Some(1));
+    }
+
+    #[test]
+    fn failed_agent_message_send_is_reported_to_the_caller() {
+        crate::settings::init_settings_for_test();
+
+        let result = send_agent_message(
+            &PeersSettings::default(),
+            "studio-agent-message-fail",
+            "text",
+            |_| Err("telegram down".to_string()),
+        );
+
+        assert_eq!(result, Err("telegram down".to_string()));
     }
 
     use crate::peers::settings_with;

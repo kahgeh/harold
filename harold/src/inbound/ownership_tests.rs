@@ -1,7 +1,7 @@
 use super::{
-    Marker, NotifierRecord, Ownership, decide_ownership, delivered_text, error_text, fed_markers,
-    known_machine_names, latest_notifier, notification_text, pane_address, parse_marker,
-    record_marker, record_notification, recorded_notifications,
+    Marker, NotifierRecord, Ownership, agent_message_text, decide_ownership, delivered_text,
+    error_text, fed_markers, known_machine_names, latest_notifier, notification_text, pane_address,
+    parse_marker, record_marker, record_notification, recorded_notifications,
 };
 
 fn notification(machine: &str) -> Option<Marker<'_>> {
@@ -518,4 +518,32 @@ fn process_wide_record_notification_logs_the_name_for_tests() {
     record_notification("ownership-test-mac");
 
     assert!(recorded_notifications().contains(&"ownership-test-mac".to_string()));
+}
+
+#[test]
+fn agent_message_is_the_pane_address_then_the_text_as_stored() {
+    for text in [
+        "Pod 3 is blocked on a merge conflict in store.rs",
+        "Deploy now?",
+        "Done. Should I deploy?",
+        "See https://example.com/a?b=1 (draft) [wip] \"quoted\"",
+        "🤖 beep",
+    ] {
+        assert_eq!(
+            agent_message_text("PasM4MBP", "pods:0.1", text),
+            format!("[PasM4MBP/pods:0.1] {text}")
+        );
+    }
+}
+
+#[test]
+fn sent_agent_message_is_read_back_as_a_notification_from_its_mac() {
+    let sent = format!(
+        "🤖 {}",
+        agent_message_text("PasM4MBP", "pods:0.1", "Pod 3 is blocked")
+    );
+
+    let marker = parse_marker(&sent).expect("an agent message carries a marker");
+    assert_eq!(marker.machine, "PasM4MBP");
+    assert!(marker.is_notification);
 }

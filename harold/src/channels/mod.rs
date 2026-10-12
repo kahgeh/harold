@@ -10,8 +10,9 @@ use tokio::sync::watch;
 use tracing::{info, warn};
 
 use crate::inbound::AgentAddress;
+use crate::inbound::ownership::agent_message_text;
 use crate::settings::{PeerRole, Settings, get_settings};
-use crate::store::{HaroldStore, TurnCompleted};
+use crate::store::{AwayMessageRequested, HaroldStore, TurnCompleted};
 use crate::util::ai_cli_env;
 
 pub(crate) enum AwayNotification {
@@ -184,6 +185,23 @@ pub fn notify_away(turn: &TurnCompleted, trace_id: &str) -> Result<AwayNotificat
     match cfg.notify.away_channel.as_str() {
         "telegram" => telegram::notify_away(turn, trace_id),
         _ => imessage::notify_away(turn, trace_id),
+    }
+}
+
+/// Send a message an agent asked for through the configured away channel. The caller has
+/// already checked the messaging pause. Unlike a notification the text is not summarised or
+/// split, and no duplicate check applies: the agent chose to send it.
+pub(crate) fn send_away_message(message: &AwayMessageRequested) -> Result<(), String> {
+    let cfg = get_settings();
+    let text = agent_message_text(&cfg.machine_name, &message.pane_label, &message.text);
+    match cfg.notify.away_channel.as_str() {
+        "telegram" => telegram::send_agent_message(
+            &cfg.peers,
+            &cfg.machine_name,
+            &text,
+            telegram::send_telegram,
+        ),
+        _ => imessage::send_imessage(&text),
     }
 }
 

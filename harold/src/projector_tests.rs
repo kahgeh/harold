@@ -5,17 +5,19 @@ use events::{ActorType, ExpectedVersion, NewEvent, WorkflowRef};
 use serde_json::json;
 
 use super::{
-    DeliveryDispatcher, DispatchError, ProductionDispatcher, handle_next_delivery,
-    project_and_publish_agent_snapshot, route_message, run_event_handler,
+    DeliveryDispatcher, DispatchError, ProductionDispatcher, dispatch_away_message,
+    handle_next_delivery, project_and_publish_agent_snapshot, route_message, run_event_handler,
 };
 use crate::agent::domain::{
     AgentEvent, AgentIncarnation, AgentPaneObservation, AgentPaneObserved, CompletionSummaryUpdate,
 };
 use crate::agent::snapshot::AgentSnapshotHub;
+use crate::inbound::AgentAddress;
 use crate::outbound::DeliveryOutcome;
 use crate::store::{
-    HaroldStore, InboundMessage, PendingDelivery, TurnCompleted, append_agent_events,
-    append_inbound_message, append_messaging_paused_changed, append_turn_completed,
+    AwayMessageRequested, HaroldStore, InboundMessage, PendingDelivery, TurnCompleted,
+    append_agent_events, append_away_message_requested, append_inbound_message,
+    append_messaging_paused_changed, append_turn_completed,
 };
 
 struct TestDirectory(std::path::PathBuf);
@@ -506,4 +508,242 @@ fn routing_failure_of_a_stored_reply_is_retryable() {
     let outcome = route_message(&message, |_, _| Err("tmux failed".to_string()));
 
     assert!(matches!(outcome, Err(DispatchError::Retryable(error)) if error == "tmux failed"));
+}
+
+fn away_delivery(payload: serde_json::Value) -> PendingDelivery {
+    PendingDelivery {
+        event_id: "event-1".into(),
+        event_version: events::EventStreamVersion::new(1).unwrap(),
+        event_type: "AwayMessageRequested".into(),
+        payload,
+        trace_id: "trace".into(),
+    }
+}
+
+fn pod_message(text: &str) -> AwayMessageRequested {
+    AwayMessageRequested {
+        pane_id: "%47".into(),
+        pane_label: "pods:0.1".into(),
+        text: text.into(),
+    }
+}
+
+#[test]
+fn away_message_is_sent_as_stored_and_then_its_pane_is_recorded() {
+    for text in [
+        "Pod 3 is blocked",
+        "Deploy now?",
+        "See https://example.com/a?b=1",
+    ] {
+        let steps = Mutex::new(Vec::new());
+        let mut recorded: Option<AgentAddress> = None;
+
+        let outcome = dispatch_away_message(
+            &away_delivery(json!(pod_message(text))),
+            false,
+            |message| {
+                steps.lock().unwrap().push(format!("send {}", message.text));
+                assert_eq!(message, &pod_message(text));
+                Ok(())
+            },
+            |source| {
+                steps.lock().unwrap().push("record".to_string());
+                recorded = Some(source);
+            },
+        );
+
+        assert!(matches!(outcome, Ok(DeliveryOutcome::Delivered)));
+        assert_eq!(
+            *steps.lock().unwrap(),
+            [format!("send {text}"), "record".to_string()]
+        );
+        let recorded = recorded.expect("the source pane is recorded");
+        assert_eq!(recorded.pane_id(), "%47");
+        assert_eq!(recorded.label(), "pods:0.1");
+    }
+}
+
+#[test]
+fn failed_away_message_send_is_retryable_and_records_no_pane() {
+    let outcome = dispatch_away_message(
+        &away_delivery(json!(pod_message("Pod 3 is blocked"))),
+        false,
+        |_| Err("channel down".to_string()),
+        |_| panic!("a failed send must not record its pane"),
+    );
+
+    assert!(matches!(outcome, Err(DispatchError::Retryable(error)) if error == "channel down"));
+}
+
+#[test]
+fn paused_away_message_is_skipped_without_sending() {
+    let outcome = dispatch_away_message(
+        &away_delivery(json!(pod_message("Pod 3 is blocked"))),
+        true,
+        |_| panic!("a paused message must not be sent"),
+        |_| panic!("a paused message must not record its pane"),
+    );
+
+    assert!(matches!(outcome, Ok(DeliveryOutcome::Skipped)));
+}
+
+#[test]
+fn malformed_away_message_payload_is_a_terminal_failure() {
+    let outcome = dispatch_away_message(
+        &away_delivery(json!({"pane_id": 7})),
+        false,
+        |_| panic!("a malformed message must not be sent"),
+        |_| panic!("a malformed message must not record its pane"),
+    );
+
+    assert!(
+        matches!(outcome, Err(DispatchError::Permanent(error)) if error.starts_with("invalid AwayMessageRequested payload"))
+    );
+}
+
+#[test]
+fn production_dispatcher_handles_away_messages_and_reads_the_pause() {
+    // The payload is unreadable on purpose: were either gate removed, this fails on the
+    // payload and never reaches the real away channel.
+    let delivery = away_delivery(json!(null));
+
+    let outcome = ProductionDispatcher.dispatch_with_pause(&delivery, true);
+    assert!(matches!(outcome, Ok(DeliveryOutcome::Skipped)));
+
+    let outcome = ProductionDispatcher.dispatch_with_pause(&delivery, false);
+    assert!(
+        matches!(outcome, Err(DispatchError::Permanent(error)) if error.starts_with("invalid AwayMessageRequested payload"))
+    );
+}
+
+/// Sends through a fake that fails once, then succeeds.
+struct FlakyAwayDispatcher {
+    fail_next: std::sync::atomic::AtomicBool,
+    sent: Mutex<Vec<String>>,
+}
+
+impl DeliveryDispatcher for FlakyAwayDispatcher {
+    fn dispatch(&self, delivery: &PendingDelivery) -> Result<DeliveryOutcome, DispatchError> {
+        dispatch_away_message(
+            delivery,
+            false,
+            |message| {
+                if self
+                    .fail_next
+                    .swap(false, std::sync::atomic::Ordering::SeqCst)
+                {
+                    return Err("channel down".to_string());
+                }
+                self.sent.lock().unwrap().push(message.text.clone());
+                Ok(())
+            },
+            |_| {},
+        )
+    }
+}
+
+#[tokio::test]
+async fn failed_away_message_stays_pending_and_is_sent_on_the_next_attempt() {
+    let directory = TestDirectory::new();
+    let store = HaroldStore::open(&directory.0).await.unwrap();
+    append_away_message_requested(&store, &pod_message("Pod 3 is blocked"))
+        .await
+        .unwrap();
+    let dispatcher = Arc::new(FlakyAwayDispatcher {
+        fail_next: std::sync::atomic::AtomicBool::new(true),
+        sent: Mutex::new(Vec::new()),
+    });
+
+    let error = handle_next_delivery(&store, dispatcher.clone())
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("channel down"));
+    assert!(store.next_pending_delivery().await.unwrap().is_some());
+
+    assert!(
+        handle_next_delivery(&store, dispatcher.clone())
+            .await
+            .unwrap()
+    );
+    assert_eq!(*dispatcher.sent.lock().unwrap(), ["Pod 3 is blocked"]);
+    assert!(store.next_pending_delivery().await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn away_message_is_staged_and_dispatched_in_stream_version_order() {
+    let directory = TestDirectory::new();
+    let store = HaroldStore::open(&directory.0).await.unwrap();
+    append_away_message_requested(&store, &pod_message("first"))
+        .await
+        .unwrap();
+    append_inbound_message(
+        &store,
+        &InboundMessage {
+            text: "second".into(),
+            forwarded: false,
+        },
+    )
+    .await
+    .unwrap();
+    let dispatcher = Arc::new(RecordingDispatcher::default());
+
+    while handle_next_delivery(&store, dispatcher.clone())
+        .await
+        .unwrap()
+    {}
+
+    assert_eq!(
+        *dispatcher.event_types.lock().unwrap(),
+        ["AwayMessageRequested", "InboundMessageReceived"]
+    );
+}
+
+#[tokio::test]
+async fn malformed_away_message_does_not_block_a_valid_later_delivery() {
+    let directory = TestDirectory::new();
+    let store = HaroldStore::open(&directory.0).await.unwrap();
+    store
+        .stream()
+        .append(
+            ExpectedVersion::Any,
+            [NewEvent {
+                r#type: "AwayMessageRequested".into(),
+                payload: json!({"pane_id": 7}),
+                workflow_kind: None,
+                workflow: WorkflowRef::None,
+                request_id: None,
+                actor_id: "system:test".into(),
+                actor_type: ActorType::System,
+            }],
+        )
+        .await
+        .unwrap();
+    append_inbound_message(
+        &store,
+        &InboundMessage {
+            text: "deliver after malformed message".into(),
+            forwarded: false,
+        },
+    )
+    .await
+    .unwrap();
+
+    // The real dispatcher is safe here: the payload cannot be read, so nothing is sent.
+    assert!(
+        handle_next_delivery(&store, Arc::new(ProductionDispatcher))
+            .await
+            .unwrap()
+    );
+
+    let dispatcher = Arc::new(RecordingDispatcher::default());
+    assert!(
+        handle_next_delivery(&store, dispatcher.clone())
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        *dispatcher.event_types.lock().unwrap(),
+        ["InboundMessageReceived"]
+    );
+    assert!(store.next_pending_delivery().await.unwrap().is_none());
 }
