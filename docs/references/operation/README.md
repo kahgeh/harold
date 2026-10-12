@@ -114,7 +114,8 @@ Harold has a kill switch for the away channel. While messaging is paused the dae
 
 - no away notification, confirmation or error reply is sent;
 - no inbound message is routed to a pane, including messages already waiting in the delivery outbox;
-- messages that arrive are discarded, not queued. The listener still moves its cursor past them, so nothing is replayed on resume.
+- messages that arrive are discarded, not queued. The listener still moves its cursor past them, so nothing is replayed on resume;
+- `harold send-message-to-away-device` is refused: it prints `messaging is paused` and exits 1. A message the daemon stored before the pause is skipped and is not sent on resume.
 
 Use it when the away channel misbehaves, for example when Harold keeps answering its own messages. `haroldctl stop` does not hold in that case, because the next turn-complete hook starts the service again. The pause is stored as a `MessagingPausedChanged` stream event and projected into the `settings` table of the Turso state database, so it survives a restart and stays on until you resume.
 

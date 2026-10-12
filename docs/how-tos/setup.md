@@ -61,6 +61,7 @@ The default layout is:
   hooks/harold_turn_complete.py
   hooks/claude_turn_complete.py
   hooks/codex_turn_complete.py
+  skills/send-message-to-away-device/SKILL.md
   data/events/
   harold.log
 ~/bin/haroldctl
@@ -141,7 +142,7 @@ Reinstall archives the previous installation, including its data, and prints the
 
 ## 5. Connect agent hooks
 
-Starting with v0.1.1, the installer provides both Claude Code and Codex completion scripts, plus the shared notifier. Register the installed scripts using the commands below. The installer does not overwrite your Claude, Codex, or OpenCode settings; the one exception is that it adds the Claude Code lifecycle mod's folder to `CLAUDE_CODE_PLUGIN_DIRS` in `~/.claude/settings.json`, after saving a copy as `settings.json.before-harold`. The [agent-monitor hook guide](setup-agent-monitor-hooks.md) covers lifecycle reporting, the Claude Code lifecycle mod and the opt-in OpenCode plugin.
+Starting with v0.1.1, the installer provides both Claude Code and Codex completion scripts, plus the shared notifier. Register the installed scripts using the commands below. The installer does not overwrite your Claude, Codex, or OpenCode settings. It changes two things there. It adds the Claude Code lifecycle mod's folder to `CLAUDE_CODE_PLUGIN_DIRS` in `~/.claude/settings.json`, after saving a copy as `settings.json.before-harold`. And it creates a link named `send-message-to-away-device` in each of `~/.claude/skills` and `~/.codex/skills` that points to `~/bin/harold/skills/send-message-to-away-device`, so Claude Code and Codex agents can message your phone with `harold send-message-to-away-device`. A skills folder that does not exist is not created, and anything already at the link's path is left alone; the installer then prints the `ln -s` command to run yourself. The [agent-monitor hook guide](setup-agent-monitor-hooks.md) covers lifecycle reporting, the Claude Code lifecycle mod and the opt-in OpenCode plugin.
 
 Harold is notified of completed turns by agent-specific Stop hooks. The hook layout keeps Harold integration shared and leaves transcript parsing to each agent adapter:
 

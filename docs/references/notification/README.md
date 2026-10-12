@@ -114,6 +114,32 @@ Config keys (`[telegram]`):
 | `bot_token` | Telegram bot token from @BotFather         |
 | `chat_id`   | Numeric chat ID for the notification chat  |
 
+## Messages an agent sends
+
+A notification is Harold's summary of a finished turn. An agent can also send the user text of its own, at a moment it chooses, with one command:
+
+```
+~/bin/harold/harold send-message-to-away-device --src-id "$TMUX_PANE" 'Pod 3 is blocked on a merge conflict in store.rs'
+```
+
+The phone shows `🤖 [<machine_name>/<pane_label>] Pod 3 is blocked on a merge conflict in store.rs`. A reply to it is routed like a reply to a notification: an untagged reply goes back to the pane that sent the message.
+
+The command calls the daemon's `SendMessageToAwayDevice` RPC and waits up to 3 seconds. The daemon makes the text one line, checks that it has 1 to 1,000 characters, that messaging is not paused and that the pane hosts an agent the monitor tracks, and then stores an `AwayMessageRequested` event. The command exits 0 once the event is stored, which is before the phone has the message. Otherwise it prints one line on standard error and exits 1. The event handler takes the event from the delivery outbox in stream-version order and sends it through the away channel.
+
+It differs from a turn-end notification in these ways:
+
+| | Turn-end notification | Agent message |
+|---|---|---|
+| Started by | The agent's turn ending | The agent running the command |
+| Text | Harold's summary of the agent's final reply, 280 characters at most | The agent's text as written, made one line, 1,000 characters at most |
+| Form | `🤖 [machine_name/pane_label] body (context)`, with a trailing question sent separately | `🤖 [machine_name/pane_label] text`, one message |
+| Presence checks | Sent to the phone only when the screen is locked; skipped when the session or pane is active | None: sent whether the screen is locked or not |
+| Voice mute | Silences the at-desk path | Does not apply |
+| Duplicate checks | The 30-second window, and on iMessage the recent-outgoing check | None: the same text sent twice arrives twice |
+| Messaging pause | Recorded as an intentional skip | The command is refused with `messaging is paused`; a message already stored is skipped and not sent later |
+
+A send that fails stays pending and is retried, as a failed notification is. The `send-message-to-away-device` skill, which the installer links for Claude Code and Codex, teaches an agent the command; see [setup](../../how-tos/setup.md).
+
 ## Sequences
 
 ### At desk

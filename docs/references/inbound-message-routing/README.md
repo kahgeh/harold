@@ -108,6 +108,7 @@ Every message Harold sends to the away channel starts with `🤖`, so the listen
 |---|---|
 | Notification | `🤖 [<machine_name>/<pane_label>] <body>` |
 | Question follow-up | `🤖 <question>`, unchanged |
+| Agent message | `🤖 [<machine_name>/<pane_label>] <text>` |
 | Confirmation | `🤖 ✓ Delivered to [<machine_name>/<pane_label>]` |
 | Error reply | `🤖 [<machine_name>] <detail>` |
 | Forwarding failure (Telegram) | `🤖 [<hub machine_name>] could not reach <machine>` |
