@@ -583,6 +583,17 @@ class SkillTests(unittest.TestCase):
         self.install.write_skill(source, destination, Path('/Users/u/my bin/harold/harold'))
         self.assertIn("Run '/Users/u/my bin/harold/harold' send", destination.read_text())
 
+    def test_an_unreadable_parent_folder_is_reported_and_not_raised(self):
+        self.skills.mkdir(parents=True)
+        self.addCleanup(self.skills.parent.chmod, 0o700)
+        self.skills.parent.chmod(0o000)
+        try:
+            outcome = self.link()
+        finally:
+            self.skills.parent.chmod(0o700)
+        self.assertIsInstance(outcome, str)
+        self.assertTrue(outcome.startswith('not linked ('), outcome)
+
     def test_a_missing_skills_folder_is_not_created(self):
         self.assertEqual(self.link(), 'not linked ({} not found)'.format(self.skills))
         self.assertFalse(self.skills.exists())

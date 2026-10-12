@@ -180,15 +180,15 @@ def link_skill(skills_folder, target):
     that already exists is replaced, and a failure is reported, not raised.
     """
     path = skills_folder / SKILL_NAME
-    if not skills_folder.is_dir():
-        return 'not linked ({} not found)'.format(shown(skills_folder))
-    if os.path.islink(path) and os.readlink(path) == str(target):
-        return 'unchanged'
-    # lexists: a link whose target is gone is still something there.
-    if os.path.lexists(path):
-        return 'not linked, {} already exists. To link it: ln -s {} {}'.format(
-            shown(path), shlex.quote(str(target)), shlex.quote(str(path)))
     try:
+        if not skills_folder.is_dir():
+            return 'not linked ({} not found)'.format(shown(skills_folder))
+        if os.path.islink(path) and os.readlink(path) == str(target):
+            return 'unchanged'
+        # lexists: a link whose target is gone is still something there.
+        if os.path.lexists(path):
+            return 'not linked, {} already exists. To link it: ln -s {} {}'.format(
+                shown(path), shlex.quote(str(target)), shlex.quote(str(path)))
         os.symlink(target, path)
     except OSError as error:
         return 'not linked ({})'.format(error.strerror or error)
