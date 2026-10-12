@@ -81,7 +81,12 @@ impl ProductionDispatcher {
                 delivery,
                 messaging_paused,
                 |message| self.environment.send_away_message(message),
-                |source| self.environment.record_reply_target(source),
+                |source| {
+                    // The pane's mark: its turn-end update for this turn is left out.
+                    self.notify_state
+                        .mark_requested_message(source.pane_id(), self.environment.now());
+                    self.environment.record_reply_target(source);
+                },
             ),
             other => Err(DispatchError::Permanent(format!(
                 "unknown event type: {other}"

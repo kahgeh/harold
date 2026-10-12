@@ -788,3 +788,116 @@ fn turn_completed_is_sent_through_the_dispatchers_environment() {
     assert_eq!(environment.delivered().len(), 1);
     assert_eq!(environment.reply_targets(), ["%47"]);
 }
+
+// ---------------------------------------------------------------------------
+// Rule A: the dispatcher marks a pane when it sends the pane's message
+// ---------------------------------------------------------------------------
+
+fn turn_delivery(pane_id: &str, prompt: &str) -> PendingDelivery {
+    PendingDelivery {
+        event_id: "event-1".into(),
+        event_version: events::EventStreamVersion::new(1).unwrap(),
+        event_type: "TurnCompleted".into(),
+        payload: json!(crate::outbound::fake::turn(pane_id, prompt)),
+        trace_id: "trace".into(),
+    }
+}
+
+#[test]
+fn pane_that_sent_a_message_gets_no_update_for_that_turn_only() {
+    let environment = Arc::new(FakeEnvironment::locked(""));
+    let dispatcher = dispatcher_with(&environment);
+
+    // pod_message comes from pane %47.
+    let sent = dispatcher.dispatch(&away_delivery(json!(pod_message("Pod 3 is blocked"))));
+    assert!(matches!(sent, Ok(DeliveryOutcome::Delivered)));
+    let update = dispatcher.dispatch(&turn_delivery("%47", "watch the pods"));
+    assert!(matches!(update, Ok(DeliveryOutcome::Skipped)));
+
+    assert_eq!(environment.away_messages(), ["Pod 3 is blocked"]);
+    assert!(environment.delivered().is_empty());
+    // The message made %47 the reply target; the left-out update recorded nothing more.
+    assert_eq!(environment.reply_targets(), ["%47"]);
+
+    let next = dispatcher.dispatch(&turn_delivery("%47", "carry on"));
+    assert!(matches!(next, Ok(DeliveryOutcome::Delivered)));
+    assert_eq!(environment.delivered().len(), 1);
+}
+
+#[test]
+fn two_messages_in_one_turn_are_both_sent_and_the_update_is_left_out() {
+    let environment = Arc::new(FakeEnvironment::locked(""));
+    let dispatcher = dispatcher_with(&environment);
+
+    for text in ["first", "second"] {
+        let sent = dispatcher.dispatch(&away_delivery(json!(pod_message(text))));
+        assert!(matches!(sent, Ok(DeliveryOutcome::Delivered)));
+    }
+    let update = dispatcher.dispatch(&turn_delivery("%47", "watch the pods"));
+
+    assert!(matches!(update, Ok(DeliveryOutcome::Skipped)));
+    assert_eq!(environment.away_messages(), ["first", "second"]);
+    assert!(environment.delivered().is_empty());
+}
+
+#[test]
+fn message_dropped_by_the_pause_leaves_no_mark() {
+    let environment = Arc::new(FakeEnvironment::locked(""));
+    let dispatcher = dispatcher_with(&environment);
+
+    let dropped = dispatcher
+        .dispatch_with_pause(&away_delivery(json!(pod_message("Pod 3 is blocked"))), true);
+    assert!(matches!(dropped, Ok(DeliveryOutcome::Skipped)));
+    assert!(environment.away_messages().is_empty());
+
+    let update = dispatcher.dispatch(&turn_delivery("%47", "watch the pods"));
+    assert!(matches!(update, Ok(DeliveryOutcome::Delivered)));
+}
+
+#[test]
+fn update_10_minutes_after_the_message_is_sent() {
+    let environment = Arc::new(FakeEnvironment::locked(""));
+    let dispatcher = dispatcher_with(&environment);
+
+    dispatcher
+        .dispatch(&away_delivery(json!(pod_message("Pod 3 is blocked"))))
+        .unwrap();
+    environment.advance(Duration::from_secs(600));
+    let update = dispatcher.dispatch(&turn_delivery("%47", "watch the pods"));
+
+    assert!(matches!(update, Ok(DeliveryOutcome::Delivered)));
+}
+
+#[tokio::test]
+async fn update_waits_behind_a_message_whose_send_fails_and_is_then_left_out() {
+    let directory = TestDirectory::new();
+    let store = HaroldStore::open(&directory.0).await.unwrap();
+    append_away_message_requested(&store, &pod_message("Pod 3 is blocked"))
+        .await
+        .unwrap();
+    append_turn_completed(
+        &store,
+        &crate::outbound::fake::turn("%47", "watch the pods"),
+    )
+    .await
+    .unwrap();
+    let environment = Arc::new(FakeEnvironment::locked(""));
+    let dispatcher: Arc<dyn DeliveryDispatcher> = Arc::new(dispatcher_with(&environment));
+
+    environment.set_fail_sends(true);
+    let error = handle_next_delivery(&store, dispatcher.clone())
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("channel down"));
+    assert!(environment.delivered().is_empty());
+
+    environment.set_fail_sends(false);
+    while handle_next_delivery(&store, dispatcher.clone())
+        .await
+        .unwrap()
+    {}
+
+    assert_eq!(environment.away_messages(), ["Pod 3 is blocked"]);
+    assert!(environment.delivered().is_empty());
+    assert!(store.next_pending_delivery().await.unwrap().is_none());
+}

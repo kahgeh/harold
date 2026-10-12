@@ -1,10 +1,13 @@
 pub mod tts;
 
+pub(crate) mod left_out;
+
 #[cfg(test)]
 pub(crate) mod fake;
 #[cfg(test)]
 mod notify_tests;
 
+use std::collections::HashMap;
 use std::process::Command;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -231,9 +234,25 @@ impl NotifyEnvironment for SystemEnvironment {
 pub(crate) struct NotifyState {
     /// The pane and prompt of the last turn recorded, for the duplicate check.
     last_notify: Mutex<Option<(String, Instant)>>,
+    /// For each pane, when it last sent a message it asked Harold to send. The pane's
+    /// next `TurnCompleted` removes the entry.
+    requested_message_marks: Mutex<HashMap<String, Instant>>,
 }
 
 impl NotifyState {
+    /// Record that `pane_id` sent a message it asked Harold to send at `now`. A later
+    /// message from the same pane replaces the record.
+    pub(crate) fn mark_requested_message(&self, pane_id: &str, now: Instant) {
+        self.requested_message_marks
+            .lock()
+            .unwrap()
+            .insert(pane_id.to_string(), now);
+    }
+
+    fn take_requested_message_mark(&self, pane_id: &str) -> Option<Instant> {
+        self.requested_message_marks.lock().unwrap().remove(pane_id)
+    }
+
     fn is_duplicate(&self, dedup_key: &str, now: Instant) -> bool {
         self.last_notify
             .lock()
@@ -250,15 +269,35 @@ impl NotifyState {
     }
 }
 
+/// Leave a turn-end update out of the away device: nothing is sent, no reply target is
+/// recorded, and the turn is recorded in the duplicate check so that a repeat of it is left
+/// out as well.
+fn leave_out(
+    state: &NotifyState,
+    dedup_key: String,
+    now: Instant,
+    reason: &str,
+) -> Result<DeliveryOutcome, String> {
+    info!("{reason}");
+    state.record_turn(dedup_key, now);
+    Ok(DeliveryOutcome::Skipped)
+}
+
 pub(crate) fn notify(
     turn: &TurnCompleted,
     trace_id: &str,
     state: &NotifyState,
     environment: &dyn NotifyEnvironment,
 ) -> Result<DeliveryOutcome, String> {
+    let now = environment.now();
+    // Removed before any other check, so a mark affects one turn at most.
+    let messaged_this_turn = state
+        .take_requested_message_mark(&turn.pane_id)
+        .is_some_and(|marked_at| left_out::mark_is_fresh(marked_at, now));
+
     // Dedup: skip if same pane+prompt was notified within the window.
     let dedup_key = format!("{}:{}", turn.pane_id, turn.last_user_prompt);
-    if state.is_duplicate(&dedup_key, environment.now()) {
+    if state.is_duplicate(&dedup_key, now) {
         info!("notification skipped (duplicate within dedup window)");
         return Ok(DeliveryOutcome::Skipped);
     }
@@ -290,6 +329,17 @@ pub(crate) fn notify(
     } else {
         OutboundChannel::Tts
     };
+
+    // The voice mute and the messaging pause skip as they always have, before either rule
+    // below is looked at: a paused update would not go to the phone.
+    if let Some(reason) = channel.skip_reason(is_tts_muted(), is_messaging_paused()) {
+        info!("{reason}");
+        return Ok(DeliveryOutcome::Skipped);
+    }
+
+    if screen_locked && messaged_this_turn {
+        return leave_out(state, dedup_key, now, left_out::MESSAGED_THIS_TURN);
+    }
 
     let (outcome, source_agent) = environment.deliver(&channel, turn, trace_id)?;
     if let Some(source_agent) = source_agent {
