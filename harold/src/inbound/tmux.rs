@@ -38,10 +38,16 @@ pub(crate) fn is_pane_alive(pane_id: &str) -> bool {
     }
 }
 
+/// The label Harold shows for a pane and matches a reply's tag against:
+/// `<session_name>:<window_index>.<pane_index>`.
+pub(crate) fn pane_label(observation: &AgentPaneObservation) -> String {
+    sanitize_bounded_metadata(&observation.tmux_target, INBOUND_PANE_LABEL_MAX_SCALARS)
+}
+
 fn observation_to_address(observation: AgentPaneObservation) -> super::directory::AgentAddress {
     super::directory::AgentAddress::TmuxPane {
+        label: pane_label(&observation),
         pane_id: observation.incarnation.pane_id,
-        label: sanitize_bounded_metadata(&observation.tmux_target, INBOUND_PANE_LABEL_MAX_SCALARS),
     }
 }
 

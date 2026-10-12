@@ -46,6 +46,10 @@ pub(crate) enum AgentMonitorCommand {
         turn: TurnCompleted,
         reply: oneshot::Sender<events::Result<events::AppendResult>>,
     },
+    ResolvePane {
+        pane_id: String,
+        reply: oneshot::Sender<Result<AgentPaneObservation, MonitorCommandError>>,
+    },
     #[cfg(test)]
     InventoryTick {
         reply: Option<oneshot::Sender<Result<(), MonitorCommandError>>>,
@@ -126,6 +130,24 @@ impl AgentMonitorHandle {
         response
             .await
             .map_err(|_| events::EsError::Migration("agent monitor runtime stopped".into()))?
+    }
+
+    /// The agent pane with this id, by the lookup a lifecycle report makes.
+    pub(crate) async fn resolve_agent_pane(
+        &self,
+        pane_id: String,
+    ) -> Result<AgentPaneObservation, MonitorCommandError> {
+        if !valid_pane_id(&pane_id) {
+            return Err(MonitorCommandError::InvalidInput);
+        }
+        let (reply, response) = oneshot::channel();
+        self.sender
+            .send(AgentMonitorCommand::ResolvePane { pane_id, reply })
+            .await
+            .map_err(|_| MonitorCommandError::RuntimeStopped)?;
+        response
+            .await
+            .map_err(|_| MonitorCommandError::RuntimeStopped)?
     }
 
     #[cfg(test)]
@@ -650,6 +672,13 @@ impl AgentMonitorRuntime {
             }
             AgentMonitorCommand::TurnCompleted { turn, reply } => {
                 let _ = reply.send(self.turn_completed(turn).await);
+            }
+            AgentMonitorCommand::ResolvePane { pane_id, reply } => {
+                let pane = self
+                    .resolve_pane(pane_id)
+                    .await
+                    .and_then(|pane| pane.ok_or(MonitorCommandError::AgentNotFound));
+                let _ = reply.send(pane);
             }
             #[cfg(test)]
             AgentMonitorCommand::InventoryTick { reply } => {
@@ -1475,7 +1504,7 @@ fn screen_reason(error: ScreenError) -> &'static str {
     dead_code,
     reason = "the ReportAgentState RPC activates lifecycle validation in the next ingress slice"
 )]
-fn valid_pane_id(value: &str) -> bool {
+pub(crate) fn valid_pane_id(value: &str) -> bool {
     value.strip_prefix('%').is_some_and(|suffix| {
         !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit())
     })

@@ -17,8 +17,8 @@ use super::harold::harold_client::HaroldClient;
 use super::harold::harold_server::{Harold, HaroldServer};
 use super::harold::{
     AgentState, ForwardReplyRequest, MonitorHealthState, ReportAgentStateRequest,
-    ReportNotificationRequest, SetMessagingPausedRequest, SetTtsMutedRequest,
-    WatchAgentStatesRequest,
+    ReportNotificationRequest, SendMessageToAwayDeviceRequest, SetMessagingPausedRequest,
+    SetTtsMutedRequest, WatchAgentStatesRequest,
 };
 use super::inbound::ownership::recorded_notifications;
 use super::peers::PeerEndpoint;
@@ -1568,4 +1568,190 @@ async fn service_answers_the_peer_calls_its_settings_call_for() {
     );
     let imessage = WIRING_MEMBER.replace("telegram", "imessage");
     assert_eq!(served_peers(&imessage).await, PeerEndpoint::Off);
+}
+
+/// Every agent message stored in `store`, in order, and the count of all stored events.
+async fn away_messages(store: &store::HaroldStore) -> (Vec<store::AwayMessageRequested>, usize) {
+    let events = store
+        .stream()
+        .load_after_version(EventStreamVersion::start(), 100)
+        .await
+        .unwrap();
+    let total = events.len();
+    let messages = events
+        .into_iter()
+        .filter(|event| event.r#type == "AwayMessageRequested")
+        .map(|event| serde_json::from_value(event.payload).unwrap())
+        .collect();
+    (messages, total)
+}
+
+fn away_request(src_id: &str, text: &str) -> Request<SendMessageToAwayDeviceRequest> {
+    Request::new(SendMessageToAwayDeviceRequest {
+        src_id: src_id.into(),
+        text: text.into(),
+    })
+}
+
+/// A service whose monitor tracks the one agent pane `%8`, labelled `harold:2.3`.
+fn service_tracking_a_pane(
+    store: &Arc<store::HaroldStore>,
+) -> (
+    HaroldService,
+    watch::Sender<()>,
+    tokio::task::JoinHandle<()>,
+) {
+    let inventory = Arc::new(ResolvingInventory {
+        pane: Some(resolved_pane()),
+    });
+    test_service_with_inventory(Arc::clone(store), empty_snapshot(), inventory)
+}
+
+#[tokio::test]
+async fn accepted_away_message_stores_one_event_with_the_monitors_label_and_one_line_text() {
+    let directory = TestDirectory::new();
+    let store = Arc::new(store::HaroldStore::open(&directory.0).await.unwrap());
+    let (service, _shutdown, task) = service_tracking_a_pane(&store);
+
+    let response = service
+        .send_message_to_away_device(away_request(
+            "%8",
+            "  approval:\n\thttps://example.com\u{7}  ",
+        ))
+        .await
+        .unwrap();
+
+    assert!(response.into_inner().accepted);
+    let (messages, total) = away_messages(&store).await;
+    assert_eq!(total, 1, "exactly one event is stored");
+    assert_eq!(
+        messages,
+        [store::AwayMessageRequested {
+            pane_id: "%8".into(),
+            pane_label: "harold:2.3".into(),
+            text: "approval: https://example.com".into(),
+        }]
+    );
+    task.abort();
+}
+
+#[tokio::test]
+async fn away_message_of_one_and_of_a_thousand_characters_is_accepted_and_longer_is_refused() {
+    let directory = TestDirectory::new();
+    let store = Arc::new(store::HaroldStore::open(&directory.0).await.unwrap());
+    let (service, _shutdown, task) = service_tracking_a_pane(&store);
+
+    for text in ["x".to_string(), "x".repeat(1_000), "🤖".repeat(1_000)] {
+        let response = service
+            .send_message_to_away_device(away_request("%8", &text))
+            .await
+            .unwrap();
+        assert!(response.into_inner().accepted);
+    }
+    for text in ["x".repeat(1_001), String::new(), " \n\t ".to_string()] {
+        let error = service
+            .send_message_to_away_device(away_request("%8", &text))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::InvalidArgument);
+        assert_eq!(error.message(), "invalid message length");
+    }
+
+    let (messages, total) = away_messages(&store).await;
+    assert_eq!(total, 3);
+    assert_eq!(messages[1].text.chars().count(), 1_000);
+    task.abort();
+}
+
+#[tokio::test]
+async fn each_away_message_refusal_returns_its_status_and_stores_nothing() {
+    let directory = TestDirectory::new();
+    let store = Arc::new(store::HaroldStore::open(&directory.0).await.unwrap());
+    let (service, _shutdown, task) = service_tracking_a_pane(&store);
+
+    for src_id in ["8", "%", "%8a", "", "pane"] {
+        let error = service
+            .send_message_to_away_device(away_request(src_id, "sensitive text"))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::InvalidArgument, "{src_id:?}");
+        assert_eq!(error.message(), "invalid source id");
+    }
+
+    let too_long = service
+        .send_message_to_away_device(away_request("%8", &"x".repeat(1_001)))
+        .await
+        .unwrap_err();
+    assert_eq!(too_long.code(), tonic::Code::InvalidArgument);
+    assert_eq!(too_long.message(), "invalid message length");
+
+    // The switch is per thread under test, and this test runs on one thread.
+    crate::outbound::set_messaging_paused(true);
+    let paused = service
+        .send_message_to_away_device(away_request("%8", "sensitive text"))
+        .await
+        .unwrap_err();
+    crate::outbound::set_messaging_paused(false);
+    assert_eq!(paused.code(), tonic::Code::FailedPrecondition);
+    assert_eq!(paused.message(), "messaging paused");
+
+    let unknown = service
+        .send_message_to_away_device(away_request("%9", "sensitive text"))
+        .await
+        .unwrap_err();
+    assert_eq!(unknown.code(), tonic::Code::FailedPrecondition);
+    assert_eq!(unknown.message(), "agent not found");
+
+    let (messages, total) = away_messages(&store).await;
+    assert!(messages.is_empty());
+    assert_eq!(total, 0, "a refusal stores no event");
+    task.abort();
+}
+
+#[tokio::test]
+async fn away_message_checks_run_in_the_order_the_spec_gives() {
+    let directory = TestDirectory::new();
+    let store = Arc::new(store::HaroldStore::open(&directory.0).await.unwrap());
+    let (service, _shutdown, task) = service_tracking_a_pane(&store);
+
+    // A bad source id wins over an empty text, and an empty text over the pause.
+    crate::outbound::set_messaging_paused(true);
+    let bad_source = service
+        .send_message_to_away_device(away_request("8", ""))
+        .await
+        .unwrap_err();
+    let empty = service
+        .send_message_to_away_device(away_request("%9", ""))
+        .await
+        .unwrap_err();
+    // The pause wins over a pane that hosts no agent.
+    let paused = service
+        .send_message_to_away_device(away_request("%9", "text"))
+        .await
+        .unwrap_err();
+    crate::outbound::set_messaging_paused(false);
+
+    assert_eq!(bad_source.message(), "invalid source id");
+    assert_eq!(empty.message(), "invalid message length");
+    assert_eq!(paused.message(), "messaging paused");
+    task.abort();
+}
+
+#[tokio::test]
+async fn away_message_is_unavailable_when_the_monitor_has_stopped() {
+    let directory = TestDirectory::new();
+    let store = Arc::new(store::HaroldStore::open(&directory.0).await.unwrap());
+    let (service, shutdown, task) = service_tracking_a_pane(&store);
+    drop(shutdown);
+    task.await.unwrap();
+
+    let error = service
+        .send_message_to_away_device(away_request("%8", "sensitive text"))
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.code(), tonic::Code::Unavailable);
+    assert!(!error.message().contains("sensitive text"));
+    let (messages, _) = away_messages(&store).await;
+    assert!(messages.is_empty());
 }

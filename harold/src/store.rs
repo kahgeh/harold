@@ -52,6 +52,17 @@ pub struct InboundMessage {
     pub forwarded: bool,
 }
 
+/// A message an agent asked Harold to send to the user's away device.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AwayMessageRequested {
+    /// The source pane's id, such as `%47`.
+    pub pane_id: String,
+    /// The pane label when the request was accepted, such as `pods:0.1`.
+    pub pane_label: String,
+    /// The one-line text, 1 to 1,000 characters.
+    pub text: String,
+}
+
 #[derive(Debug)]
 pub struct PendingDelivery {
     pub event_id: String,
@@ -197,7 +208,7 @@ impl HaroldStore {
                         snapshot_changed |=
                             project_turn_completed(&conn, event, self.graces).await?;
                     }
-                    "InboundMessageReceived" => {
+                    "InboundMessageReceived" | "AwayMessageRequested" => {
                         stage_delivery_event(&conn, event).await?;
                     }
                     "AgentPaneObserved"
@@ -1215,6 +1226,28 @@ pub async fn append_inbound_message(
             ExpectedVersion::Any,
             [NewEvent {
                 r#type: "InboundMessageReceived".into(),
+                payload: json!(event),
+                workflow_kind: None,
+                workflow: WorkflowRef::None,
+                request_id: None,
+                actor_id: "system:harold".into(),
+                actor_type: ActorType::System,
+            }],
+        )
+        .await?;
+    Ok(())
+}
+
+pub async fn append_away_message_requested(
+    store: &HaroldStore,
+    event: &AwayMessageRequested,
+) -> events::Result<()> {
+    store
+        .stream
+        .append(
+            ExpectedVersion::Any,
+            [NewEvent {
+                r#type: "AwayMessageRequested".into(),
                 payload: json!(event),
                 workflow_kind: None,
                 workflow: WorkflowRef::None,

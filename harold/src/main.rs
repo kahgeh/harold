@@ -1,5 +1,6 @@
 mod activity_summary;
 mod agent;
+mod away_message;
 mod channels;
 mod cli;
 mod inbound;
@@ -28,9 +29,10 @@ use harold::harold_server::{Harold, HaroldServer};
 use harold::{
     AgentMonitorHealth, AgentPaneState, AgentState, AgentStateSnapshot, ForwardReplyRequest,
     ForwardReplyResponse, MonitorHealthState, ReportAgentStateRequest, ReportAgentStateResponse,
-    ReportNotificationRequest, ReportNotificationResponse, SetMessagingPausedRequest,
-    SetMessagingPausedResponse, SetTtsMutedRequest, SetTtsMutedResponse, TurnCompleteRequest,
-    TurnCompleteResponse, WatchAgentStatesRequest,
+    ReportNotificationRequest, ReportNotificationResponse, SendMessageToAwayDeviceRequest,
+    SendMessageToAwayDeviceResponse, SetMessagingPausedRequest, SetMessagingPausedResponse,
+    SetTtsMutedRequest, SetTtsMutedResponse, TurnCompleteRequest, TurnCompleteResponse,
+    WatchAgentStatesRequest,
 };
 
 struct HaroldService {
@@ -321,6 +323,58 @@ impl Harold for HaroldService {
             })?;
         info!("forwarded reply stored");
         Ok(Response::new(ForwardReplyResponse { accepted: true }))
+    }
+
+    async fn send_message_to_away_device(
+        &self,
+        request: Request<SendMessageToAwayDeviceRequest>,
+    ) -> Result<Response<SendMessageToAwayDeviceResponse>, Status> {
+        let req = request.into_inner();
+        if !agent::runtime::valid_pane_id(&req.src_id) {
+            return Err(Status::invalid_argument(away_message::INVALID_SOURCE_ID));
+        }
+        let text = away_message::one_line(&req.text);
+        if !away_message::is_sendable_length(&text) {
+            return Err(Status::invalid_argument(
+                away_message::INVALID_MESSAGE_LENGTH,
+            ));
+        }
+        if outbound::is_messaging_paused() {
+            return Err(Status::failed_precondition(away_message::MESSAGING_PAUSED));
+        }
+        let pane =
+            self.monitor
+                .resolve_agent_pane(req.src_id)
+                .await
+                .map_err(|error| match error {
+                    agent::runtime::MonitorCommandError::InvalidInput => {
+                        Status::invalid_argument(away_message::INVALID_SOURCE_ID)
+                    }
+                    agent::runtime::MonitorCommandError::AgentNotFound => {
+                        Status::failed_precondition(away_message::AGENT_NOT_FOUND)
+                    }
+                    agent::runtime::MonitorCommandError::InventoryUnavailable
+                    | agent::runtime::MonitorCommandError::EventAppend(_)
+                    | agent::runtime::MonitorCommandError::RuntimeStopped => {
+                        Status::unavailable("agent lookup unavailable")
+                    }
+                })?;
+        let event = store::AwayMessageRequested {
+            pane_label: inbound::tmux::pane_label(&pane),
+            pane_id: pane.incarnation.pane_id,
+            text,
+        };
+        store::append_away_message_requested(&self.store, &event)
+            .await
+            .map_err(|error| {
+                tracing::error!(pane_id = %event.pane_id, result = "append_failed", error = %error, "away message rejected");
+                Status::internal("event store write failed")
+            })?;
+        // The text is the agent's own words to the user: it is stored, not logged here.
+        info!(pane_id = %event.pane_id, result = "accepted", "away message stored");
+        Ok(Response::new(SendMessageToAwayDeviceResponse {
+            accepted: true,
+        }))
     }
 }
 

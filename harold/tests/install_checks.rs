@@ -9,9 +9,9 @@ use std::time::{Duration, Instant};
 use harold_api::harold::{
     AgentPaneState, AgentStateSnapshot, ForwardReplyRequest, ForwardReplyResponse,
     ReportAgentStateRequest, ReportAgentStateResponse, ReportNotificationRequest,
-    ReportNotificationResponse, SetMessagingPausedRequest, SetMessagingPausedResponse,
-    SetTtsMutedRequest, SetTtsMutedResponse, TurnCompleteRequest, TurnCompleteResponse,
-    WatchAgentStatesRequest,
+    ReportNotificationResponse, SendMessageToAwayDeviceRequest, SendMessageToAwayDeviceResponse,
+    SetMessagingPausedRequest, SetMessagingPausedResponse, SetTtsMutedRequest, SetTtsMutedResponse,
+    TurnCompleteRequest, TurnCompleteResponse, WatchAgentStatesRequest,
     harold_server::{Harold, HaroldServer},
 };
 use tokio::sync::mpsc;
@@ -203,6 +203,14 @@ impl Harold for ProbeServer {
         Err(Status::permission_denied("probe must not write"))
     }
 
+    async fn send_message_to_away_device(
+        &self,
+        _: Request<SendMessageToAwayDeviceRequest>,
+    ) -> Result<Response<SendMessageToAwayDeviceResponse>, Status> {
+        self.writes.fetch_add(1, Ordering::SeqCst);
+        Err(Status::permission_denied("probe must not write"))
+    }
+
     async fn watch_agent_states(
         &self,
         _: Request<WatchAgentStatesRequest>,
@@ -376,6 +384,13 @@ impl Harold for RecordingServer {
         &self,
         _: Request<ForwardReplyRequest>,
     ) -> Result<Response<ForwardReplyResponse>, Status> {
+        Err(Status::unimplemented("not used"))
+    }
+
+    async fn send_message_to_away_device(
+        &self,
+        _: Request<SendMessageToAwayDeviceRequest>,
+    ) -> Result<Response<SendMessageToAwayDeviceResponse>, Status> {
         Err(Status::unimplemented("not used"))
     }
 

@@ -1,8 +1,9 @@
 use harold_api::FILE_DESCRIPTOR_SET;
 use harold_api::harold::{
     AgentPaneState, AgentState, ForwardReplyRequest, ForwardReplyResponse, ReportAgentStateRequest,
-    ReportNotificationRequest, ReportNotificationResponse, SetMessagingPausedRequest,
-    SetMessagingPausedResponse, SetTtsMutedRequest, SetTtsMutedResponse, TurnCompleteRequest,
+    ReportNotificationRequest, ReportNotificationResponse, SendMessageToAwayDeviceRequest,
+    SendMessageToAwayDeviceResponse, SetMessagingPausedRequest, SetMessagingPausedResponse,
+    SetTtsMutedRequest, SetTtsMutedResponse, TurnCompleteRequest,
 };
 use prost::Message;
 
@@ -205,6 +206,7 @@ fn harold_service_exposes_only_the_approved_rpcs() {
             "SetMessagingPaused".to_string(),
             "ReportNotification".to_string(),
             "ForwardReply".to_string(),
+            "SendMessageToAwayDevice".to_string(),
         ]
     );
 }
@@ -270,6 +272,24 @@ fn peer_rpcs_carry_the_secret_in_field_two() {
     );
     assert_eq!(
         message_fields("ForwardReplyResponse"),
+        [("accepted".to_string(), 1)]
+    );
+}
+
+#[test]
+fn send_message_to_away_device_carries_the_source_pane_and_the_text() {
+    let request = SendMessageToAwayDeviceRequest {
+        src_id: "%47".to_string(),
+        text: "Pod 3 is blocked".to_string(),
+    };
+    assert_eq!(round_trip(&request), request);
+    assert!(round_trip(&SendMessageToAwayDeviceResponse { accepted: true }).accepted);
+    assert_eq!(
+        message_fields("SendMessageToAwayDeviceRequest"),
+        [("src_id".to_string(), 1), ("text".to_string(), 2)]
+    );
+    assert_eq!(
+        message_fields("SendMessageToAwayDeviceResponse"),
         [("accepted".to_string(), 1)]
     );
 }
