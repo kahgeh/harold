@@ -106,11 +106,28 @@ pub(crate) fn only_from_reason(
     ))
 }
 
+/// The log line for leaving out the turn-end update of `pane_id`, when either rule
+/// applies. Rule A is looked at first, so its line is the one written when both apply.
+pub(crate) fn left_out_reason(
+    messaged_this_turn: bool,
+    update_folder: Option<&str>,
+    agents: &TrackedAgents,
+    pane_id: &str,
+) -> Option<String> {
+    if messaged_this_turn {
+        return Some(MESSAGED_THIS_TURN.to_string());
+    }
+    only_from_reason(update_folder, agents, pane_id)
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::{Duration, Instant};
 
-    use super::{MARK_LIFETIME, TrackedAgents, mark_is_fresh, only_from_reason, same_folder};
+    use super::{
+        MARK_LIFETIME, MESSAGED_THIS_TURN, TrackedAgents, left_out_reason, mark_is_fresh,
+        only_from_reason, same_folder,
+    };
 
     #[test]
     fn mark_counts_until_it_is_10_minutes_old() {
@@ -208,5 +225,19 @@ mod tests {
             only_from_reason(Some(setting), &agents, "%2"),
             Some("notification skipped (updates come from /work/chief-of-pods/ only)".to_string())
         );
+    }
+
+    #[test]
+    fn rule_a_line_is_the_one_written_when_both_rules_apply() {
+        let agents = TrackedAgents::in_folders(&[("%1", CHIEF), ("%2", "/work/harold")]);
+
+        // Pane %2 is outside the update folder, so rule B applies to it as well.
+        assert_eq!(only_from_reason(Some(CHIEF), &agents, "%2"), reason());
+        assert_eq!(
+            left_out_reason(true, Some(CHIEF), &agents, "%2"),
+            Some(MESSAGED_THIS_TURN.to_string())
+        );
+        assert_eq!(left_out_reason(false, Some(CHIEF), &agents, "%2"), reason());
+        assert_eq!(left_out_reason(false, Some(CHIEF), &agents, "%1"), None);
     }
 }

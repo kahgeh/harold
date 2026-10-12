@@ -297,6 +297,33 @@ fn repeat_of_a_left_out_turn_is_left_out_as_a_duplicate() {
 }
 
 #[test]
+fn duplicate_turn_still_removes_the_mark() {
+    let environment = FakeEnvironment::locked("");
+    let state = NotifyState::default();
+    let finished = turn("%1", "report in");
+    assert_eq!(
+        notify_turn(&environment, &state, &finished),
+        Ok(DeliveryOutcome::Delivered)
+    );
+
+    // The pane is marked, then the turn already sent comes again inside 30 seconds. The
+    // duplicate check stops it, and the mark must be gone all the same: it is removed
+    // before any other check.
+    state.mark_requested_message("%1", super::NotifyEnvironment::now(&environment));
+    environment.advance(Duration::from_secs(10));
+    assert_eq!(
+        notify_turn(&environment, &state, &finished),
+        Ok(DeliveryOutcome::Skipped)
+    );
+
+    assert_eq!(
+        notify_turn(&environment, &state, &turn("%1", "carry on")),
+        Ok(DeliveryOutcome::Delivered)
+    );
+    assert_eq!(environment.delivered().len(), 2);
+}
+
+#[test]
 fn paused_update_is_skipped_as_before_and_removes_the_mark() {
     let (environment, state) = marked_pane();
     let finished = turn("%1", "report in");

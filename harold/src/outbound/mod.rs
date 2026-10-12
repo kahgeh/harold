@@ -338,12 +338,13 @@ pub(crate) fn notify(
         return Ok(DeliveryOutcome::Skipped);
     }
 
-    if screen_locked && messaged_this_turn {
-        return leave_out(state, dedup_key, now, left_out::MESSAGED_THIS_TURN);
-    }
     if screen_locked
-        && let Some(reason) =
-            left_out::only_from_reason(cfg.away_updates_only_from.as_deref(), agents, &turn.pane_id)
+        && let Some(reason) = left_out::left_out_reason(
+            messaged_this_turn,
+            cfg.away_updates_only_from.as_deref(),
+            agents,
+            &turn.pane_id,
+        )
     {
         return leave_out(state, dedup_key, now, &reason);
     }

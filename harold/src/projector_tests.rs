@@ -1087,6 +1087,31 @@ async fn update_is_sent_while_harold_cannot_list_the_tmux_panes() {
 }
 
 #[tokio::test]
+async fn failure_of_another_monitor_component_leaves_the_update_folder_rule_on() {
+    let directory = TestDirectory::new();
+    let mut events = chief_and_pod();
+    events.push(AgentEvent::MonitorHealthChanged(
+        AgentMonitorHealthChanged {
+            component: "screen".into(),
+            healthy: false,
+            reason_code: "capture_failed".into(),
+            observed_at_ms: 200,
+        },
+    ));
+    let (store, snapshots, environment, dispatcher) = only_from_chief(&directory, events).await;
+    append_turn_completed(&store, &crate::outbound::fake::turn("%2", "build it"))
+        .await
+        .unwrap();
+
+    drain(&store, &snapshots, &dispatcher).await;
+
+    // Harold can still list the panes, so the agent in the update folder counts.
+    assert!(environment.delivered().is_empty());
+    assert!(environment.reply_targets().is_empty());
+    assert!(store.next_pending_delivery().await.unwrap().is_none());
+}
+
+#[tokio::test]
 async fn agent_that_starts_in_the_update_folder_is_seen_by_the_next_update() {
     let directory = TestDirectory::new();
     let (store, snapshots, environment, dispatcher) =
