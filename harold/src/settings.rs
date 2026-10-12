@@ -352,6 +352,10 @@ pub struct NotifySettings {
     pub skip_if_session_active: bool,
     pub skip_if_pane_active: bool,
     pub away_channel: String,
+    /// The folder turn-end updates for the away device come from while an agent runs in
+    /// it. An absolute path, compared as text with a pane's working directory.
+    #[serde(default)]
+    pub away_updates_only_from: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -436,6 +440,16 @@ fn machine_name_error(name: &str) -> Option<String> {
     }
     Some(format!(
         "machine_name must not be empty or contain whitespace, '/', '[', ']' or ':', got \"{name}\""
+    ))
+}
+
+fn away_updates_only_from_error(folder: Option<&str>) -> Option<String> {
+    let folder = folder?;
+    if folder.starts_with('/') {
+        return None;
+    }
+    Some(format!(
+        "notify.away_updates_only_from must be an absolute path starting with \"/\", got \"{folder}\""
     ))
 }
 
@@ -593,6 +607,9 @@ impl Settings {
         ));
         errors.extend(self.agents.validate(&self.agent_monitor));
         errors.extend(self.activity_summary.validate());
+        errors.extend(away_updates_only_from_error(
+            self.notify.away_updates_only_from.as_deref(),
+        ));
         match self.notify.away_channel.as_str() {
             "imessage" => {
                 if self.imessage.recipient.is_none() {
@@ -1033,6 +1050,60 @@ mod tests {
             .build()
             .and_then(Config::try_deserialize)
             .expect("default configuration with overrides should deserialize")
+    }
+
+    /// The errors `validate()` reports about the update folder for the default
+    /// configuration with `overrides` laid over it.
+    fn update_folder_errors(overrides: &str) -> Vec<String> {
+        default_settings_with(overrides)
+            .validate()
+            .into_iter()
+            .filter(|error| error.starts_with("notify.away_updates_only_from "))
+            .collect()
+    }
+
+    #[test]
+    fn update_folder_is_optional_and_read_as_written() {
+        assert_eq!(
+            default_settings_with("").notify.away_updates_only_from,
+            None
+        );
+        let settings =
+            default_settings_with("[notify]\naway_updates_only_from = \"/work/chief-of-pods/\"");
+        assert_eq!(
+            settings.notify.away_updates_only_from.as_deref(),
+            Some("/work/chief-of-pods/")
+        );
+    }
+
+    #[test]
+    fn validate_accepts_no_update_folder_or_an_absolute_one() {
+        assert!(update_folder_errors("").is_empty());
+        for folder in ["/work/chief-of-pods", "/work/chief-of-pods/", "/"] {
+            let overrides = format!("[notify]\naway_updates_only_from = \"{folder}\"");
+            assert!(update_folder_errors(&overrides).is_empty(), "{folder:?}");
+        }
+    }
+
+    #[test]
+    fn validate_reports_an_update_folder_that_is_not_an_absolute_path() {
+        for folder in [
+            "",
+            "chief-of-pods",
+            "~/chief-of-pods",
+            "./chief",
+            " /work",
+            "  ",
+        ] {
+            let overrides = format!("[notify]\naway_updates_only_from = \"{folder}\"");
+            assert_eq!(
+                update_folder_errors(&overrides),
+                [format!(
+                    "notify.away_updates_only_from must be an absolute path starting with \"/\", got \"{folder}\""
+                )],
+                "{folder:?}"
+            );
+        }
     }
 
     #[test]
