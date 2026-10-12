@@ -28,9 +28,14 @@ TurnCompleted event (pane_id from $TMUX_PANE in stop hook)
        ▼
   notify()
   │
+  ├─ remove the pane's mark (set when the pane sent a message with
+  │   send-message-to-away-device); remember whether it was under 10 minutes old
+  │
+  ├─ same pane and prompt recorded in the last 30 seconds? → skip (return)
+  │
   ├─ skip_if_session_active = true?
   │   └─ tmux display-message -t <session> -p #{session_attached}
-  │      attached ≠ 0 → skip (return)
+  │      attached ≠ 0 and screen unlocked → skip (return)
   │
   ├─ skip_if_pane_active = true?
   │   └─ ioreg → screen unlocked?
@@ -39,7 +44,11 @@ TurnCompleted event (pane_id from $TMUX_PANE in stop hook)
   │
   ├─ ioreg → IOConsoleLocked = true?
   │   ├─ no  → notify_at_desk()
-  │   └─ yes → channels::notify_away() (iMessage or Telegram per config)
+  │   └─ yes → messaging paused? → skip (return)
+  │           mark was under 10 minutes old? → leave out (return)
+  │           away_updates_only_from set, an agent in that folder,
+  │             and this pane outside it? → leave out (return)
+  │           channels::notify_away() (iMessage or Telegram per config)
 ```
 
 `<session>` is resolved from the completing pane via `tmux display-message -t <pane_id> -p #{session_name}`.
@@ -114,6 +123,40 @@ Config keys (`[telegram]`):
 | `bot_token` | Telegram bot token from @BotFather         |
 | `chat_id`   | Numeric chat ID for the notification chat  |
 
+## Updates Harold leaves out while you are away
+
+With the screen locked, every agent's finished turn sends an update to the phone. Two rules leave an update out. Both apply only to an update that would go to the phone: the spoken update at the desk is given for every pane.
+
+### After a message the agent sent itself
+
+An agent that runs `harold send-message-to-away-device` and then ends its turn would put two messages on the phone: its own, and Harold's summary of a turn that only reports the message was sent. Harold sends the agent's message and leaves the update out.
+
+When Harold sends an agent's message, it records the pane and the time. The pane's next `TurnCompleted` removes the record, and if the record is under 10 minutes old the update is left out with the log line `notification skipped (pane messaged the phone this turn)`. The record affects one turn: the pane's following turn sends its update. The 10-minute limit is there because Harold is not told about every turn end (Claude Code runs no hook for a turn you interrupt), and without it an old record would hide the update of a later turn. The record is kept in memory, so after a daemon restart between the message and the end of the turn the update is sent.
+
+### From agents outside one folder
+
+When one agent reports to the phone for the others, name the folder it runs in:
+
+```toml
+[notify]
+away_updates_only_from = "/Users/you/Dev/chief-of-pods"
+```
+
+While an agent Harold tracks is running in that folder, only panes in that folder send a turn-end update. Every other pane's update is left out with the log line `notification skipped (updates come from <folder> only)`. While no agent is running in the folder, every pane sends its update as before.
+
+| Key | Description |
+| --- | --- |
+| `away_updates_only_from` | Optional. An absolute path. Harold compares it as text with the working directory tmux reports for a pane (`pane_current_path`), ignoring one trailing `/`. It does not resolve symbolic links, and a subfolder counts as another folder. A value that is empty or does not start with `/` stops the daemon at start. |
+
+- A message an agent sends with `harold send-message-to-away-device` is always sent, whichever folder the agent is in.
+- The rule covers every turn of a pane outside the folder, including one you started in that pane yourself.
+- Each Mac's Harold checks its own panes. An agent in the folder on another Mac is not seen.
+- While the agent monitor cannot list tmux panes, the rule leaves nothing out.
+
+### What leaving an update out means
+
+Harold sends nothing to the phone for that turn: no summary and no trailing question. The event is marked handled and is not retried. The pane does not become the one an untagged reply goes to. The turn is recorded in the 30-second duplicate check, so a repeat of the same `TurnCompleted` is left out as well. The `TurnCompleted` event is still stored, so the dashboard and the pane's work summary update as usual.
+
 ## Messages an agent sends
 
 A notification is Harold's summary of a finished turn. An agent can also send the user text of its own, at a moment it chooses, with one command:
@@ -133,7 +176,7 @@ It differs from a turn-end notification in these ways:
 | Started by | The agent's turn ending | The agent running the command |
 | Text | Harold's summary of the agent's final reply, 280 characters at most | The agent's text as written, made one line, 1,000 characters at most |
 | Form | `🤖 [machine_name/pane_label] body (context)`, with a trailing question sent separately | `🤖 [machine_name/pane_label] text`, one message |
-| Presence checks | Sent to the phone only when the screen is locked; skipped when the session or pane is active | None: sent whether the screen is locked or not |
+| Presence checks | Sent to the phone only when the screen is locked; skipped when the session or pane is active; left out by the two rules in "Updates Harold leaves out while you are away" | None: sent whether the screen is locked or not |
 | Voice mute | Silences the at-desk path | Does not apply |
 | Duplicate checks | The 30-second window, and on iMessage the recent-outgoing check | None: the same text sent twice arrives twice |
 | Messaging pause | Recorded as an intentional skip | The command is refused with `messaging is paused`; a message already stored is skipped and not sent later |
@@ -189,6 +232,7 @@ sequenceDiagram
     Handler->>Store: stage event and checkpoint in one transaction
     Store-->>Handler: pending TurnCompleted delivery
     Handler->>Handler: ioreg → IOConsoleLocked = true
+    note over Handler: left out here if the pane messaged the phone this turn,<br/>or if updates come from another folder only
     Handler->>Handler: summarise_for_notification() via AI CLI (fallback: truncate to 280 chars)
     Handler->>Handler: split_body() → main body + trailing question (if ends in ?)
     Handler->>Channel: send "🤖 [studio/harold:0.3] <body> (harold)"

@@ -58,6 +58,7 @@ command = "say"
 # skip_if_session_active = true  # skip if completing pane is in the active tmux session
 # skip_if_pane_active = false    # skip if completing pane is the active pane and screen is unlocked
 # away_channel = "telegram"      # "imessage" or "telegram"
+# away_updates_only_from = "/Users/you/Dev/chief-of-pods"  # while an agent runs in this folder, only its panes send turn-end updates to the phone
 
 # Several Macs on Telegram. One Mac, the hub, reads the bot's replies; the others are
 # members. Not used when away_channel = "imessage". Set [grpc] host on every Mac to its
