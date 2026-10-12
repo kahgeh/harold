@@ -144,6 +144,15 @@ fn dispatch_away_message(
     Ok(DeliveryOutcome::Delivered)
 }
 
+/// The dispatcher the daemon runs: it reads the tracked agent panes from `snapshots`, the
+/// hub the event handler publishes to before each delivery.
+fn production_dispatcher(
+    environment: Arc<dyn NotifyEnvironment>,
+    snapshots: &AgentSnapshotHub,
+) -> ProductionDispatcher {
+    ProductionDispatcher::new(environment, Some(snapshots.clone()))
+}
+
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum HandlerError {
     #[error(transparent)]
@@ -258,9 +267,9 @@ pub async fn run_event_handler(
     snapshots: AgentSnapshotHub,
     mut shutdown: watch::Receiver<()>,
 ) {
-    let dispatcher: Arc<dyn DeliveryDispatcher> = Arc::new(ProductionDispatcher::new(
+    let dispatcher: Arc<dyn DeliveryDispatcher> = Arc::new(production_dispatcher(
         Arc::new(SystemEnvironment),
-        Some(snapshots.clone()),
+        &snapshots,
     ));
     info!("event handler starting");
 

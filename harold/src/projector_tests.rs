@@ -6,8 +6,8 @@ use serde_json::json;
 
 use super::{
     DeliveryDispatcher, DispatchError, ProductionDispatcher, dispatch_away_message,
-    handle_next_delivery, handle_next_delivery_inner, project_and_publish_agent_snapshot,
-    route_message, run_event_handler,
+    handle_next_delivery, handle_next_delivery_inner, production_dispatcher,
+    project_and_publish_agent_snapshot, route_message, run_event_handler,
 };
 use crate::agent::domain::{
     AgentEvent, AgentIncarnation, AgentMonitorHealthChanged, AgentPaneDeparted,
@@ -950,10 +950,10 @@ async fn only_from_chief(
     append_agent_events(&store, events).await.unwrap();
     let snapshots = AgentSnapshotHub::new(store.load_agent_snapshot().await.unwrap());
     let environment = Arc::new(FakeEnvironment::locked(ONLY_FROM_CHIEF));
-    let dispatcher: Arc<dyn DeliveryDispatcher> = Arc::new(ProductionDispatcher::new(
-        environment.clone(),
-        Some(snapshots.clone()),
-    ));
+    // Built the way `run_event_handler` builds it, so these tests cover the daemon's wiring
+    // of the hub into the dispatcher.
+    let dispatcher: Arc<dyn DeliveryDispatcher> =
+        Arc::new(production_dispatcher(environment.clone(), &snapshots));
     (store, snapshots, environment, dispatcher)
 }
 

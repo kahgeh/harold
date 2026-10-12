@@ -142,7 +142,7 @@ When one agent reports to the phone for the others, name the folder it runs in:
 away_updates_only_from = "/Users/you/Dev/chief-of-pods"
 ```
 
-While an agent Harold tracks is running in that folder, only panes in that folder send a turn-end update. Every other pane's update is left out with the log line `notification skipped (updates come from <folder> only)`. While no agent is running in the folder, every pane sends its update as before.
+While an agent Harold tracks is running in that folder, only panes in that folder send a turn-end update. Every other pane's update is left out with the log line `notification skipped (updates come from <folder> only)`. While no agent is running in the folder, every pane sends its update.
 
 | Key | Description |
 | --- | --- |

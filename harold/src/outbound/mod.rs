@@ -253,6 +253,16 @@ impl NotifyState {
         self.requested_message_marks.lock().unwrap().remove(pane_id)
     }
 
+    /// Put back a mark `notify` removed for a turn whose delivery then failed, with the
+    /// time it was set, so that the retry of the same turn finds it.
+    fn restore_requested_message_mark(&self, pane_id: &str, marked_at: Instant) {
+        self.requested_message_marks
+            .lock()
+            .unwrap()
+            .entry(pane_id.to_string())
+            .or_insert(marked_at);
+    }
+
     fn is_duplicate(&self, dedup_key: &str, now: Instant) -> bool {
         self.last_notify
             .lock()
@@ -292,9 +302,8 @@ pub(crate) fn notify(
 ) -> Result<DeliveryOutcome, String> {
     let now = environment.now();
     // Removed before any other check, so a mark affects one turn at most.
-    let messaged_this_turn = state
-        .take_requested_message_mark(&turn.pane_id)
-        .is_some_and(|marked_at| left_out::mark_is_fresh(marked_at, now));
+    let mark = state.take_requested_message_mark(&turn.pane_id);
+    let messaged_this_turn = mark.is_some_and(|marked_at| left_out::mark_is_fresh(marked_at, now));
 
     // Dedup: skip if same pane+prompt was notified within the window.
     let dedup_key = format!("{}:{}", turn.pane_id, turn.last_user_prompt);
@@ -349,7 +358,17 @@ pub(crate) fn notify(
         return leave_out(state, dedup_key, now, &reason);
     }
 
-    let (outcome, source_agent) = environment.deliver(&channel, turn, trace_id)?;
+    let (outcome, source_agent) = match environment.deliver(&channel, turn, trace_id) {
+        Ok(delivered) => delivered,
+        Err(error) => {
+            // The event stays pending and this turn comes again: its mark must still be
+            // there then, or a retry made after the screen is locked would go to the phone.
+            if let Some(marked_at) = mark {
+                state.restore_requested_message_mark(&turn.pane_id, marked_at);
+            }
+            return Err(error);
+        }
+    };
     if let Some(source_agent) = source_agent {
         environment.record_reply_target(source_agent);
     }

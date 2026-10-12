@@ -324,6 +324,57 @@ fn duplicate_turn_still_removes_the_mark() {
 }
 
 #[test]
+fn failed_delivery_keeps_the_mark_for_the_retry_of_the_same_turn() {
+    let (environment, state) = marked_pane();
+    let finished = turn("%1", "report in");
+
+    // The turn ends at the desk and the spoken update fails.
+    environment.set_screen_locked(false);
+    environment.set_fail_sends(true);
+    assert_eq!(
+        notify_turn(&environment, &state, &finished),
+        Err("channel down".to_string())
+    );
+
+    // The screen is locked before the retry: the pane messaged the phone this turn, so
+    // the retry is left out.
+    environment.set_screen_locked(true);
+    environment.set_fail_sends(false);
+    environment.advance(Duration::from_secs(5));
+    assert_eq!(
+        notify_turn(&environment, &state, &finished),
+        Ok(DeliveryOutcome::Skipped)
+    );
+    assert!(environment.delivered().is_empty());
+
+    // The retry removed the mark: the pane's next turn sends its update.
+    assert_eq!(
+        notify_turn(&environment, &state, &turn("%1", "carry on")),
+        Ok(DeliveryOutcome::Delivered)
+    );
+}
+
+#[test]
+fn mark_put_back_after_a_failed_delivery_keeps_the_time_it_was_set() {
+    let (environment, state) = marked_pane();
+    let finished = turn("%1", "report in");
+
+    environment.set_screen_locked(false);
+    environment.set_fail_sends(true);
+    environment.advance(Duration::from_secs(590));
+    assert!(notify_turn(&environment, &state, &finished).is_err());
+
+    // 600 seconds after the message: the limit runs from the message, not from the retry.
+    environment.set_screen_locked(true);
+    environment.set_fail_sends(false);
+    environment.advance(Duration::from_secs(10));
+    assert_eq!(
+        notify_turn(&environment, &state, &finished),
+        Ok(DeliveryOutcome::Delivered)
+    );
+}
+
+#[test]
 fn paused_update_is_skipped_as_before_and_removes_the_mark() {
     let (environment, state) = marked_pane();
     let finished = turn("%1", "report in");
