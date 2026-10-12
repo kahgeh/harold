@@ -1,5 +1,10 @@
 pub mod tts;
 
+#[cfg(test)]
+pub(crate) mod fake;
+#[cfg(test)]
+mod notify_tests;
+
 use std::process::Command;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -9,8 +14,8 @@ use tracing::info;
 
 use crate::channels;
 use crate::inbound::{AgentAddress, set_last_away_notification_source_agent};
-use crate::settings::get_settings;
-use crate::store::TurnCompleted;
+use crate::settings::{NotifySettings, get_settings};
+use crate::store::{AwayMessageRequested, TurnCompleted};
 use crate::tmux;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -23,7 +28,6 @@ pub(crate) enum DeliveryOutcome {
 // Deduplication — suppress repeated notifications for the same turn
 // ---------------------------------------------------------------------------
 
-static LAST_NOTIFY: Mutex<Option<(String, Instant)>> = Mutex::new(None);
 const DEDUP_WINDOW_SECS: u64 = 30;
 
 // Tests run in parallel and several of them flip these switches through the production
@@ -78,6 +82,7 @@ pub fn is_messaging_paused() -> bool {
 // OutboundChannel — notification to human
 // ---------------------------------------------------------------------------
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutboundChannel {
     Tts,
     Away,
@@ -156,30 +161,115 @@ pub fn is_screen_locked() -> bool {
 // Notify orchestrator
 // ---------------------------------------------------------------------------
 
-pub fn notify(turn: &TurnCompleted, trace_id: &str) -> Result<DeliveryOutcome, String> {
-    // Dedup: skip if same pane+prompt was notified within the window.
-    let dedup_key = format!("{}:{}", turn.pane_id, turn.last_user_prompt);
-    {
-        let last = LAST_NOTIFY.lock().unwrap();
-        if let Some((ref prev_key, ref ts)) = *last
-            && prev_key == &dedup_key
-            && ts.elapsed().as_secs() < DEDUP_WINDOW_SECS
-        {
-            info!("notification skipped (duplicate within dedup window)");
-            return Ok(DeliveryOutcome::Skipped);
-        }
+/// What a turn-end update and a message an agent asked for read from, and do to, the
+/// world outside the decision: the clock, the settings, the screen lock, tmux and the
+/// channels. The daemon uses `SystemEnvironment`; tests pass a fake.
+pub(crate) trait NotifyEnvironment: Send + Sync {
+    fn now(&self) -> Instant;
+    fn notify_settings(&self) -> &NotifySettings;
+    fn screen_locked(&self) -> bool;
+    /// Whether the session containing `pane_id` has an attached client.
+    fn session_attached(&self, pane_id: &str) -> bool;
+    /// The active pane of the session containing `pane_id`, if a client is attached.
+    fn active_pane(&self, pane_id: &str) -> Option<String>;
+    /// Send a turn-end update through `channel`.
+    fn deliver(
+        &self,
+        channel: &OutboundChannel,
+        turn: &TurnCompleted,
+        trace_id: &str,
+    ) -> Result<(DeliveryOutcome, Option<AgentAddress>), String>;
+    /// Send a message an agent asked for through the away channel.
+    fn send_away_message(&self, message: &AwayMessageRequested) -> Result<(), String>;
+    /// Make `agent` the one an untagged reply goes to.
+    fn record_reply_target(&self, agent: AgentAddress);
+}
+
+pub(crate) struct SystemEnvironment;
+
+impl NotifyEnvironment for SystemEnvironment {
+    fn now(&self) -> Instant {
+        Instant::now()
     }
 
-    let cfg = get_settings();
-    let screen_locked = is_screen_locked();
+    fn notify_settings(&self) -> &NotifySettings {
+        &get_settings().notify
+    }
+
+    fn screen_locked(&self) -> bool {
+        is_screen_locked()
+    }
+
+    fn session_attached(&self, pane_id: &str) -> bool {
+        tmux::is_session_attached(pane_id)
+    }
+
+    fn active_pane(&self, pane_id: &str) -> Option<String> {
+        tmux::active_pane_in_session(pane_id)
+    }
+
+    fn deliver(
+        &self,
+        channel: &OutboundChannel,
+        turn: &TurnCompleted,
+        trace_id: &str,
+    ) -> Result<(DeliveryOutcome, Option<AgentAddress>), String> {
+        channel.notify(turn, trace_id)
+    }
+
+    fn send_away_message(&self, message: &AwayMessageRequested) -> Result<(), String> {
+        channels::send_away_message(message)
+    }
+
+    fn record_reply_target(&self, agent: AgentAddress) {
+        set_last_away_notification_source_agent(agent);
+    }
+}
+
+/// What `notify` remembers between events. Kept in memory: a restart forgets it.
+#[derive(Default)]
+pub(crate) struct NotifyState {
+    /// The pane and prompt of the last turn recorded, for the duplicate check.
+    last_notify: Mutex<Option<(String, Instant)>>,
+}
+
+impl NotifyState {
+    fn is_duplicate(&self, dedup_key: &str, now: Instant) -> bool {
+        self.last_notify
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|(previous_key, at)| {
+                previous_key == dedup_key
+                    && now.saturating_duration_since(*at).as_secs() < DEDUP_WINDOW_SECS
+            })
+    }
+
+    fn record_turn(&self, dedup_key: String, now: Instant) {
+        *self.last_notify.lock().unwrap() = Some((dedup_key, now));
+    }
+}
+
+pub(crate) fn notify(
+    turn: &TurnCompleted,
+    trace_id: &str,
+    state: &NotifyState,
+    environment: &dyn NotifyEnvironment,
+) -> Result<DeliveryOutcome, String> {
+    // Dedup: skip if same pane+prompt was notified within the window.
+    let dedup_key = format!("{}:{}", turn.pane_id, turn.last_user_prompt);
+    if state.is_duplicate(&dedup_key, environment.now()) {
+        info!("notification skipped (duplicate within dedup window)");
+        return Ok(DeliveryOutcome::Skipped);
+    }
+
+    let cfg = environment.notify_settings();
+    let screen_locked = environment.screen_locked();
 
     // Session-level skip: if completing pane's session has an attached client AND the
     // screen is not locked, skip entirely.  When the screen is locked the user is away
     // from the desk, so we must still notify even though tmux is attached.
-    if cfg.notify.skip_if_session_active
-        && !screen_locked
-        && tmux::is_session_attached(&turn.pane_id)
-    {
+    if cfg.skip_if_session_active && !screen_locked && environment.session_attached(&turn.pane_id) {
         info!("notification skipped (session is active, screen unlocked)");
         return Ok(DeliveryOutcome::Skipped);
     }
@@ -187,10 +277,9 @@ pub fn notify(turn: &TurnCompleted, trace_id: &str) -> Result<DeliveryOutcome, S
     // Pane-level skip: skip only when the completing pane is the active pane
     // AND the screen is not locked (user is at desk looking at it).
     // If screen is locked, always notify even if pane matches.
-    if cfg.notify.skip_if_pane_active
+    if cfg.skip_if_pane_active
         && !screen_locked
-        && let Some(active_pane) = tmux::active_pane_in_session(&turn.pane_id)
-        && active_pane == turn.pane_id
+        && environment.active_pane(&turn.pane_id).as_deref() == Some(turn.pane_id.as_str())
     {
         info!("notification skipped (pane is active and screen unlocked)");
         return Ok(DeliveryOutcome::Skipped);
@@ -202,13 +291,13 @@ pub fn notify(turn: &TurnCompleted, trace_id: &str) -> Result<DeliveryOutcome, S
         OutboundChannel::Tts
     };
 
-    let (outcome, source_agent) = channel.notify(turn, trace_id)?;
+    let (outcome, source_agent) = environment.deliver(&channel, turn, trace_id)?;
     if let Some(source_agent) = source_agent {
-        set_last_away_notification_source_agent(source_agent);
+        environment.record_reply_target(source_agent);
     }
 
     if outcome == DeliveryOutcome::Delivered {
-        *LAST_NOTIFY.lock().unwrap() = Some((dedup_key, Instant::now()));
+        state.record_turn(dedup_key, environment.now());
     }
     Ok(outcome)
 }

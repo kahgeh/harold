@@ -13,7 +13,8 @@ use crate::agent::domain::{
 };
 use crate::agent::snapshot::AgentSnapshotHub;
 use crate::inbound::AgentAddress;
-use crate::outbound::DeliveryOutcome;
+use crate::outbound::fake::FakeEnvironment;
+use crate::outbound::{DeliveryOutcome, SystemEnvironment};
 use crate::store::{
     AwayMessageRequested, HaroldStore, InboundMessage, PendingDelivery, TurnCompleted,
     append_agent_events, append_away_message_requested, append_inbound_message,
@@ -57,6 +58,16 @@ impl DeliveryDispatcher for FailingDispatcher {
     fn dispatch(&self, _delivery: &PendingDelivery) -> Result<DeliveryOutcome, DispatchError> {
         Err(DispatchError::Retryable("temporary failure".into()))
     }
+}
+
+/// The dispatcher the daemon runs. Use it only where the event cannot reach a send.
+fn system_dispatcher() -> ProductionDispatcher {
+    ProductionDispatcher::new(Arc::new(SystemEnvironment))
+}
+
+/// The daemon's dispatcher over a fake environment the test keeps a handle to.
+fn dispatcher_with(environment: &Arc<FakeEnvironment>) -> ProductionDispatcher {
+    ProductionDispatcher::new(environment.clone())
 }
 
 #[tokio::test]
@@ -184,7 +195,7 @@ async fn permanently_invalid_event_does_not_block_later_deliveries() {
     .unwrap();
 
     assert!(
-        handle_next_delivery(&store, Arc::new(ProductionDispatcher))
+        handle_next_delivery(&store, Arc::new(system_dispatcher()))
             .await
             .unwrap()
     );
@@ -223,7 +234,7 @@ async fn malformed_known_event_does_not_block_a_valid_later_delivery() {
     .unwrap();
 
     assert!(
-        handle_next_delivery(&store, Arc::new(ProductionDispatcher))
+        handle_next_delivery(&store, Arc::new(system_dispatcher()))
             .await
             .unwrap()
     );
@@ -430,10 +441,10 @@ fn paused_inbound_delivery_is_skipped_without_routing() {
         trace_id: "trace".into(),
     };
 
-    let outcome = ProductionDispatcher.dispatch_with_pause(&delivery, true);
+    let outcome = system_dispatcher().dispatch_with_pause(&delivery, true);
     assert!(matches!(outcome, Ok(DeliveryOutcome::Skipped)));
 
-    let outcome = ProductionDispatcher.dispatch_with_pause(&delivery, false);
+    let outcome = system_dispatcher().dispatch_with_pause(&delivery, false);
     assert!(matches!(outcome, Err(DispatchError::Permanent(_))));
 }
 
@@ -471,11 +482,11 @@ fn production_dispatcher_reads_the_messaging_switch() {
     };
 
     crate::outbound::set_messaging_paused(true);
-    let outcome = ProductionDispatcher.dispatch(&delivery);
+    let outcome = system_dispatcher().dispatch(&delivery);
     assert!(matches!(outcome, Ok(DeliveryOutcome::Skipped)));
 
     crate::outbound::set_messaging_paused(false);
-    let outcome = ProductionDispatcher.dispatch(&delivery);
+    let outcome = system_dispatcher().dispatch(&delivery);
     assert!(matches!(outcome, Err(DispatchError::Permanent(_))));
 }
 
@@ -607,10 +618,10 @@ fn production_dispatcher_handles_away_messages_and_reads_the_pause() {
     // payload and never reaches the real away channel.
     let delivery = away_delivery(json!(null));
 
-    let outcome = ProductionDispatcher.dispatch_with_pause(&delivery, true);
+    let outcome = system_dispatcher().dispatch_with_pause(&delivery, true);
     assert!(matches!(outcome, Ok(DeliveryOutcome::Skipped)));
 
-    let outcome = ProductionDispatcher.dispatch_with_pause(&delivery, false);
+    let outcome = system_dispatcher().dispatch_with_pause(&delivery, false);
     assert!(
         matches!(outcome, Err(DispatchError::Permanent(error)) if error.starts_with("invalid AwayMessageRequested payload"))
     );
@@ -730,7 +741,7 @@ async fn malformed_away_message_does_not_block_a_valid_later_delivery() {
 
     // The real dispatcher is safe here: the payload cannot be read, so nothing is sent.
     assert!(
-        handle_next_delivery(&store, Arc::new(ProductionDispatcher))
+        handle_next_delivery(&store, Arc::new(system_dispatcher()))
             .await
             .unwrap()
     );
@@ -746,4 +757,34 @@ async fn malformed_away_message_does_not_block_a_valid_later_delivery() {
         ["InboundMessageReceived"]
     );
     assert!(store.next_pending_delivery().await.unwrap().is_none());
+}
+
+#[test]
+fn away_message_is_sent_through_the_dispatchers_environment() {
+    let environment = Arc::new(FakeEnvironment::locked(""));
+
+    let outcome = dispatcher_with(&environment)
+        .dispatch(&away_delivery(json!(pod_message("Pod 3 is blocked"))));
+
+    assert!(matches!(outcome, Ok(DeliveryOutcome::Delivered)));
+    assert_eq!(environment.away_messages(), ["Pod 3 is blocked"]);
+    assert_eq!(environment.reply_targets(), ["%47"]);
+}
+
+#[test]
+fn turn_completed_is_sent_through_the_dispatchers_environment() {
+    let environment = Arc::new(FakeEnvironment::locked(""));
+    let delivery = PendingDelivery {
+        event_id: "event-1".into(),
+        event_version: events::EventStreamVersion::new(1).unwrap(),
+        event_type: "TurnCompleted".into(),
+        payload: json!(crate::outbound::fake::turn("%47", "build it")),
+        trace_id: "trace".into(),
+    };
+
+    let outcome = dispatcher_with(&environment).dispatch(&delivery);
+
+    assert!(matches!(outcome, Ok(DeliveryOutcome::Delivered)));
+    assert_eq!(environment.delivered().len(), 1);
+    assert_eq!(environment.reply_targets(), ["%47"]);
 }

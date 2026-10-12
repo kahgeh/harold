@@ -5,10 +5,8 @@ use tokio::sync::watch;
 use tracing::{info, info_span, warn};
 
 use crate::agent::snapshot::AgentSnapshotHub;
-use crate::inbound::{
-    AgentAddress, route_inbound_message, set_last_away_notification_source_agent,
-};
-use crate::outbound::{DeliveryOutcome, notify};
+use crate::inbound::{AgentAddress, route_inbound_message};
+use crate::outbound::{DeliveryOutcome, NotifyEnvironment, NotifyState, SystemEnvironment, notify};
 use crate::store::{
     AwayMessageRequested, HaroldStore, InboundMessage, PendingDelivery, ProjectionBatch,
     TurnCompleted,
@@ -27,7 +25,10 @@ pub(crate) enum DispatchError {
     Permanent(String),
 }
 
-struct ProductionDispatcher;
+struct ProductionDispatcher {
+    environment: Arc<dyn NotifyEnvironment>,
+    notify_state: NotifyState,
+}
 
 impl DeliveryDispatcher for ProductionDispatcher {
     fn dispatch(&self, delivery: &PendingDelivery) -> Result<DeliveryOutcome, DispatchError> {
@@ -36,6 +37,13 @@ impl DeliveryDispatcher for ProductionDispatcher {
 }
 
 impl ProductionDispatcher {
+    fn new(environment: Arc<dyn NotifyEnvironment>) -> Self {
+        Self {
+            environment,
+            notify_state: NotifyState::default(),
+        }
+    }
+
     fn dispatch_with_pause(
         &self,
         delivery: &PendingDelivery,
@@ -47,7 +55,13 @@ impl ProductionDispatcher {
                     .map_err(|error| {
                         DispatchError::Permanent(format!("invalid TurnCompleted payload: {error}"))
                     })?;
-                notify(&turn, &delivery.trace_id).map_err(DispatchError::Retryable)
+                notify(
+                    &turn,
+                    &delivery.trace_id,
+                    &self.notify_state,
+                    self.environment.as_ref(),
+                )
+                .map_err(DispatchError::Retryable)
             }
             "InboundMessageReceived" => {
                 // Checked before the payload is read, so a backlog queued before the
@@ -66,8 +80,8 @@ impl ProductionDispatcher {
             "AwayMessageRequested" => dispatch_away_message(
                 delivery,
                 messaging_paused,
-                crate::channels::send_away_message,
-                set_last_away_notification_source_agent,
+                |message| self.environment.send_away_message(message),
+                |source| self.environment.record_reply_target(source),
             ),
             other => Err(DispatchError::Permanent(format!(
                 "unknown event type: {other}"
@@ -225,7 +239,8 @@ pub async fn run_event_handler(
     snapshots: AgentSnapshotHub,
     mut shutdown: watch::Receiver<()>,
 ) {
-    let dispatcher: Arc<dyn DeliveryDispatcher> = Arc::new(ProductionDispatcher);
+    let dispatcher: Arc<dyn DeliveryDispatcher> =
+        Arc::new(ProductionDispatcher::new(Arc::new(SystemEnvironment)));
     info!("event handler starting");
 
     loop {
