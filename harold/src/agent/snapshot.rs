@@ -23,6 +23,11 @@ impl AgentSnapshotHub {
         self.sender.subscribe()
     }
 
+    /// A copy of the snapshot last published.
+    pub(crate) fn current(&self) -> AgentSnapshot {
+        self._receiver.borrow().clone()
+    }
+
     pub(crate) fn through_event_version(&self) -> EventStreamVersion {
         self._receiver.borrow().through_event_version
     }

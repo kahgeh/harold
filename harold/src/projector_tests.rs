@@ -6,10 +6,12 @@ use serde_json::json;
 
 use super::{
     DeliveryDispatcher, DispatchError, ProductionDispatcher, dispatch_away_message,
-    handle_next_delivery, project_and_publish_agent_snapshot, route_message, run_event_handler,
+    handle_next_delivery, handle_next_delivery_inner, project_and_publish_agent_snapshot,
+    route_message, run_event_handler,
 };
 use crate::agent::domain::{
-    AgentEvent, AgentIncarnation, AgentPaneObservation, AgentPaneObserved, CompletionSummaryUpdate,
+    AgentEvent, AgentIncarnation, AgentMonitorHealthChanged, AgentPaneDeparted,
+    AgentPaneObservation, AgentPaneObserved, CompletionSummaryUpdate,
 };
 use crate::agent::snapshot::AgentSnapshotHub;
 use crate::inbound::AgentAddress;
@@ -62,12 +64,12 @@ impl DeliveryDispatcher for FailingDispatcher {
 
 /// The dispatcher the daemon runs. Use it only where the event cannot reach a send.
 fn system_dispatcher() -> ProductionDispatcher {
-    ProductionDispatcher::new(Arc::new(SystemEnvironment))
+    ProductionDispatcher::new(Arc::new(SystemEnvironment), None)
 }
 
 /// The daemon's dispatcher over a fake environment the test keeps a handle to.
 fn dispatcher_with(environment: &Arc<FakeEnvironment>) -> ProductionDispatcher {
-    ProductionDispatcher::new(environment.clone())
+    ProductionDispatcher::new(environment.clone(), None)
 }
 
 #[tokio::test]
@@ -900,4 +902,208 @@ async fn update_waits_behind_a_message_whose_send_fails_and_is_then_left_out() {
     assert_eq!(environment.away_messages(), ["Pod 3 is blocked"]);
     assert!(environment.delivered().is_empty());
     assert!(store.next_pending_delivery().await.unwrap().is_none());
+}
+
+// ---------------------------------------------------------------------------
+// Rule B: the dispatcher reads the tracked agent panes from the snapshot hub
+// ---------------------------------------------------------------------------
+
+const ONLY_FROM_CHIEF: &str = "[notify]\naway_updates_only_from = \"/work/chief-of-pods\"";
+
+fn incarnation(pane_id: &str, pid: u32) -> AgentIncarnation {
+    AgentIncarnation {
+        pane_id: pane_id.into(),
+        pane_pid: pid,
+        agent_pid: pid + 1,
+        agent_started_at_ms: 1_000,
+        provider_id: "codex".into(),
+    }
+}
+
+fn agent_observed(pane_id: &str, pid: u32, folder: &str) -> AgentEvent {
+    AgentEvent::PaneObserved(AgentPaneObserved {
+        pane: AgentPaneObservation {
+            incarnation: incarnation(pane_id, pid),
+            tmux_target: format!("work:0.{pid}"),
+            session_name: "work".into(),
+            window_index: 0,
+            pane_index: pid,
+            working_directory: folder.into(),
+            provider_display_name: "Codex".into(),
+            observed_at_ms: 100,
+        },
+    })
+}
+
+/// A store with `events` appended, a hub over it, and the daemon's dispatcher reading
+/// that hub with the screen locked and the update folder set to /work/chief-of-pods.
+async fn only_from_chief(
+    directory: &TestDirectory,
+    events: Vec<AgentEvent>,
+) -> (
+    HaroldStore,
+    AgentSnapshotHub,
+    Arc<FakeEnvironment>,
+    Arc<dyn DeliveryDispatcher>,
+) {
+    let store = HaroldStore::open(&directory.0).await.unwrap();
+    append_agent_events(&store, events).await.unwrap();
+    let snapshots = AgentSnapshotHub::new(store.load_agent_snapshot().await.unwrap());
+    let environment = Arc::new(FakeEnvironment::locked(ONLY_FROM_CHIEF));
+    let dispatcher: Arc<dyn DeliveryDispatcher> = Arc::new(ProductionDispatcher::new(
+        environment.clone(),
+        Some(snapshots.clone()),
+    ));
+    (store, snapshots, environment, dispatcher)
+}
+
+/// Pane %1 runs an agent in the update folder, pane %2 runs one in another folder.
+fn chief_and_pod() -> Vec<AgentEvent> {
+    vec![
+        agent_observed("%1", 10, "/work/chief-of-pods"),
+        agent_observed("%2", 20, "/work/harold"),
+    ]
+}
+
+async fn drain(
+    store: &HaroldStore,
+    snapshots: &AgentSnapshotHub,
+    dispatcher: &Arc<dyn DeliveryDispatcher>,
+) {
+    while handle_next_delivery_inner(store, Arc::clone(dispatcher), Some(snapshots))
+        .await
+        .unwrap()
+    {}
+}
+
+#[tokio::test]
+async fn update_from_outside_the_update_folder_is_handled_without_a_phone_message() {
+    let directory = TestDirectory::new();
+    let (store, snapshots, environment, dispatcher) =
+        only_from_chief(&directory, chief_and_pod()).await;
+    append_turn_completed(&store, &crate::outbound::fake::turn("%2", "build it"))
+        .await
+        .unwrap();
+
+    drain(&store, &snapshots, &dispatcher).await;
+
+    assert!(environment.delivered().is_empty());
+    assert!(environment.reply_targets().is_empty());
+    assert!(store.next_pending_delivery().await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn update_from_the_update_folder_is_sent() {
+    let directory = TestDirectory::new();
+    let (store, snapshots, environment, dispatcher) =
+        only_from_chief(&directory, chief_and_pod()).await;
+    append_turn_completed(&store, &crate::outbound::fake::turn("%1", "report"))
+        .await
+        .unwrap();
+
+    drain(&store, &snapshots, &dispatcher).await;
+
+    assert_eq!(environment.delivered().len(), 1);
+    assert_eq!(environment.reply_targets(), ["%1"]);
+}
+
+#[tokio::test]
+async fn two_agents_in_the_update_folder_both_send_their_updates() {
+    let directory = TestDirectory::new();
+    let mut events = chief_and_pod();
+    events.push(agent_observed("%3", 30, "/work/chief-of-pods/"));
+    let (store, snapshots, environment, dispatcher) = only_from_chief(&directory, events).await;
+    for pane_id in ["%1", "%3"] {
+        append_turn_completed(&store, &crate::outbound::fake::turn(pane_id, "report"))
+            .await
+            .unwrap();
+    }
+
+    drain(&store, &snapshots, &dispatcher).await;
+
+    assert_eq!(environment.reply_targets(), ["%1", "%3"]);
+}
+
+#[tokio::test]
+async fn requested_message_from_outside_the_update_folder_is_sent() {
+    let directory = TestDirectory::new();
+    let (store, snapshots, environment, dispatcher) =
+        only_from_chief(&directory, chief_and_pod()).await;
+    append_away_message_requested(
+        &store,
+        &AwayMessageRequested {
+            pane_id: "%2".into(),
+            pane_label: "work:0.20".into(),
+            text: "Pod 3 is blocked".into(),
+        },
+    )
+    .await
+    .unwrap();
+
+    drain(&store, &snapshots, &dispatcher).await;
+
+    assert_eq!(environment.away_messages(), ["Pod 3 is blocked"]);
+    assert_eq!(environment.reply_targets(), ["%2"]);
+}
+
+#[tokio::test]
+async fn update_is_sent_once_the_agent_in_the_update_folder_has_exited() {
+    let directory = TestDirectory::new();
+    let mut events = chief_and_pod();
+    events.push(AgentEvent::PaneDeparted(AgentPaneDeparted {
+        incarnation: incarnation("%1", 10),
+        observed_at_ms: 200,
+    }));
+    let (store, snapshots, environment, dispatcher) = only_from_chief(&directory, events).await;
+    append_turn_completed(&store, &crate::outbound::fake::turn("%2", "build it"))
+        .await
+        .unwrap();
+
+    drain(&store, &snapshots, &dispatcher).await;
+
+    assert_eq!(environment.reply_targets(), ["%2"]);
+}
+
+#[tokio::test]
+async fn update_is_sent_while_harold_cannot_list_the_tmux_panes() {
+    let directory = TestDirectory::new();
+    let mut events = chief_and_pod();
+    events.push(AgentEvent::MonitorHealthChanged(
+        AgentMonitorHealthChanged {
+            component: "inventory".into(),
+            healthy: false,
+            reason_code: "timeout".into(),
+            observed_at_ms: 200,
+        },
+    ));
+    let (store, snapshots, environment, dispatcher) = only_from_chief(&directory, events).await;
+    append_turn_completed(&store, &crate::outbound::fake::turn("%2", "build it"))
+        .await
+        .unwrap();
+
+    drain(&store, &snapshots, &dispatcher).await;
+
+    assert_eq!(environment.reply_targets(), ["%2"]);
+}
+
+#[tokio::test]
+async fn agent_that_starts_in_the_update_folder_is_seen_by_the_next_update() {
+    let directory = TestDirectory::new();
+    let (store, snapshots, environment, dispatcher) =
+        only_from_chief(&directory, vec![agent_observed("%2", 20, "/work/harold")]).await;
+
+    // The chief starts after the hub was created: the handler's projection publishes it.
+    append_agent_events(
+        &store,
+        vec![agent_observed("%1", 10, "/work/chief-of-pods")],
+    )
+    .await
+    .unwrap();
+    append_turn_completed(&store, &crate::outbound::fake::turn("%2", "build it"))
+        .await
+        .unwrap();
+
+    drain(&store, &snapshots, &dispatcher).await;
+
+    assert!(environment.delivered().is_empty());
 }

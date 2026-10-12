@@ -287,6 +287,7 @@ pub(crate) fn notify(
     turn: &TurnCompleted,
     trace_id: &str,
     state: &NotifyState,
+    agents: &left_out::TrackedAgents,
     environment: &dyn NotifyEnvironment,
 ) -> Result<DeliveryOutcome, String> {
     let now = environment.now();
@@ -339,6 +340,12 @@ pub(crate) fn notify(
 
     if screen_locked && messaged_this_turn {
         return leave_out(state, dedup_key, now, left_out::MESSAGED_THIS_TURN);
+    }
+    if screen_locked
+        && let Some(reason) =
+            left_out::only_from_reason(cfg.away_updates_only_from.as_deref(), agents, &turn.pane_id)
+    {
+        return leave_out(state, dedup_key, now, &reason);
     }
 
     let (outcome, source_agent) = environment.deliver(&channel, turn, trace_id)?;

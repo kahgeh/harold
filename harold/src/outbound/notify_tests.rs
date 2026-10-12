@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use super::fake::{FakeEnvironment, turn};
+use super::left_out::TrackedAgents;
 use super::{DeliveryOutcome, NotifyState, OutboundChannel, notify};
 use crate::store::TurnCompleted;
 
@@ -9,7 +10,16 @@ fn notify_turn(
     state: &NotifyState,
     turn: &TurnCompleted,
 ) -> Result<DeliveryOutcome, String> {
-    notify(turn, "trace", state, environment)
+    notify_turn_among(environment, state, &TrackedAgents::default(), turn)
+}
+
+fn notify_turn_among(
+    environment: &FakeEnvironment,
+    state: &NotifyState,
+    agents: &TrackedAgents,
+    turn: &TurnCompleted,
+) -> Result<DeliveryOutcome, String> {
+    notify(turn, "trace", state, agents, environment)
 }
 
 #[test]
@@ -304,4 +314,115 @@ fn paused_update_is_skipped_as_before_and_removes_the_mark() {
         notify_turn(&environment, &state, &finished),
         Ok(DeliveryOutcome::Delivered)
     );
+}
+
+// ---------------------------------------------------------------------------
+// Rule B: updates from one folder only
+// ---------------------------------------------------------------------------
+
+const ONLY_FROM_CHIEF: &str = "[notify]\naway_updates_only_from = \"/work/chief-of-pods\"";
+
+/// Pane %1 runs an agent in the update folder, pane %2 runs one in another folder.
+fn chief_and_pod() -> TrackedAgents {
+    TrackedAgents::in_folders(&[("%1", "/work/chief-of-pods"), ("%2", "/work/harold")])
+}
+
+#[test]
+fn pane_outside_the_update_folder_sends_nothing_to_the_phone() {
+    let environment = FakeEnvironment::locked(ONLY_FROM_CHIEF);
+    let state = NotifyState::default();
+    let finished = turn("%2", "build it");
+
+    let outcome = notify_turn_among(&environment, &state, &chief_and_pod(), &finished);
+
+    assert_eq!(outcome, Ok(DeliveryOutcome::Skipped));
+    assert!(environment.delivered().is_empty());
+    assert!(environment.reply_targets().is_empty());
+
+    // Recorded in the duplicate check: the repeat is left out even once the agent in the
+    // update folder has gone.
+    let pod_only = TrackedAgents::in_folders(&[("%2", "/work/harold")]);
+    assert_eq!(
+        notify_turn_among(&environment, &state, &pod_only, &finished),
+        Ok(DeliveryOutcome::Skipped)
+    );
+    assert!(environment.delivered().is_empty());
+}
+
+#[test]
+fn pane_in_the_update_folder_sends_its_update() {
+    let environment = FakeEnvironment::locked(ONLY_FROM_CHIEF);
+    let state = NotifyState::default();
+
+    let outcome = notify_turn_among(
+        &environment,
+        &state,
+        &chief_and_pod(),
+        &turn("%1", "report"),
+    );
+
+    assert_eq!(outcome, Ok(DeliveryOutcome::Delivered));
+    assert_eq!(environment.reply_targets(), ["%1"]);
+}
+
+#[test]
+fn every_pane_sends_its_update_while_no_agent_is_in_the_update_folder() {
+    let environment = FakeEnvironment::locked(ONLY_FROM_CHIEF);
+    let state = NotifyState::default();
+    let pod_only = TrackedAgents::in_folders(&[("%2", "/work/harold")]);
+
+    let outcome = notify_turn_among(&environment, &state, &pod_only, &turn("%2", "build it"));
+
+    assert_eq!(outcome, Ok(DeliveryOutcome::Delivered));
+}
+
+#[test]
+fn update_at_the_desk_is_spoken_for_a_pane_outside_the_update_folder() {
+    let environment = FakeEnvironment::new(ONLY_FROM_CHIEF);
+    let state = NotifyState::default();
+
+    let outcome = notify_turn_among(
+        &environment,
+        &state,
+        &chief_and_pod(),
+        &turn("%2", "build it"),
+    );
+
+    assert_eq!(outcome, Ok(DeliveryOutcome::Delivered));
+    assert_eq!(
+        environment.delivered(),
+        [(OutboundChannel::Tts, "%2".to_string())]
+    );
+}
+
+#[test]
+fn without_the_setting_every_pane_sends_its_update() {
+    let environment = FakeEnvironment::locked("");
+    let state = NotifyState::default();
+
+    let outcome = notify_turn_among(
+        &environment,
+        &state,
+        &chief_and_pod(),
+        &turn("%2", "build it"),
+    );
+
+    assert_eq!(outcome, Ok(DeliveryOutcome::Delivered));
+}
+
+#[test]
+fn agent_in_the_update_folder_that_messaged_this_turn_gets_no_update() {
+    let environment = FakeEnvironment::locked(ONLY_FROM_CHIEF);
+    let state = NotifyState::default();
+    state.mark_requested_message("%1", super::NotifyEnvironment::now(&environment));
+
+    let outcome = notify_turn_among(
+        &environment,
+        &state,
+        &chief_and_pod(),
+        &turn("%1", "report"),
+    );
+
+    assert_eq!(outcome, Ok(DeliveryOutcome::Skipped));
+    assert!(environment.delivered().is_empty());
 }

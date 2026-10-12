@@ -6,6 +6,7 @@ use tracing::{info, info_span, warn};
 
 use crate::agent::snapshot::AgentSnapshotHub;
 use crate::inbound::{AgentAddress, route_inbound_message};
+use crate::outbound::left_out::TrackedAgents;
 use crate::outbound::{DeliveryOutcome, NotifyEnvironment, NotifyState, SystemEnvironment, notify};
 use crate::store::{
     AwayMessageRequested, HaroldStore, InboundMessage, PendingDelivery, ProjectionBatch,
@@ -28,6 +29,9 @@ pub(crate) enum DispatchError {
 struct ProductionDispatcher {
     environment: Arc<dyn NotifyEnvironment>,
     notify_state: NotifyState,
+    /// Where the tracked agent panes are read from. Without it no agent is seen, so the
+    /// update-folder rule leaves nothing out.
+    snapshots: Option<AgentSnapshotHub>,
 }
 
 impl DeliveryDispatcher for ProductionDispatcher {
@@ -37,11 +41,20 @@ impl DeliveryDispatcher for ProductionDispatcher {
 }
 
 impl ProductionDispatcher {
-    fn new(environment: Arc<dyn NotifyEnvironment>) -> Self {
+    fn new(environment: Arc<dyn NotifyEnvironment>, snapshots: Option<AgentSnapshotHub>) -> Self {
         Self {
             environment,
             notify_state: NotifyState::default(),
+            snapshots,
         }
+    }
+
+    /// The agent panes in the snapshot the handler published before this delivery.
+    fn tracked_agents(&self) -> TrackedAgents {
+        self.snapshots
+            .as_ref()
+            .map(|snapshots| TrackedAgents::from_snapshot(&snapshots.current()))
+            .unwrap_or_default()
     }
 
     fn dispatch_with_pause(
@@ -59,6 +72,7 @@ impl ProductionDispatcher {
                     &turn,
                     &delivery.trace_id,
                     &self.notify_state,
+                    &self.tracked_agents(),
                     self.environment.as_ref(),
                 )
                 .map_err(DispatchError::Retryable)
@@ -244,8 +258,10 @@ pub async fn run_event_handler(
     snapshots: AgentSnapshotHub,
     mut shutdown: watch::Receiver<()>,
 ) {
-    let dispatcher: Arc<dyn DeliveryDispatcher> =
-        Arc::new(ProductionDispatcher::new(Arc::new(SystemEnvironment)));
+    let dispatcher: Arc<dyn DeliveryDispatcher> = Arc::new(ProductionDispatcher::new(
+        Arc::new(SystemEnvironment),
+        Some(snapshots.clone()),
+    ));
     info!("event handler starting");
 
     loop {
