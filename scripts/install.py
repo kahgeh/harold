@@ -24,6 +24,13 @@ PLUGIN_DIRS = 'CLAUDE_CODE_PLUGIN_DIRS'
 # What the mod loads at runtime; a release or checkout missing any of these loads nothing.
 CLAUDE_MOD_FILES = tuple('hooks/claude-mod/' + name for name in (
     '.claude-plugin/plugin.json', 'hooks/hooks.json', 'hooks/register.ts', 'hooks/accept.ts'))
+SKILL_NAME = 'send-message-to-away-device'
+SKILL_FILE = 'skills/{}/SKILL.md'.format(SKILL_NAME)
+# What the skill source writes where the installed harold binary's path goes.
+BIN_PLACEHOLDER = '{{HAROLD_BIN}}'
+# Each agent that reads SKILL.md, and the folder it reads skills from.
+AGENT_SKILL_FOLDERS = (('Claude Code', Path.home() / '.claude/skills'),
+                       ('Codex', Path.home() / '.codex/skills'))
 
 
 def reject_symlinks(path):
@@ -87,7 +94,7 @@ def prebuilt_files(directory):
     required = ('harold', 'tmx-agent-dash', 'harold.proto',
                 'hooks/harold_turn_complete.py', 'hooks/claude_turn_complete.py',
                 'hooks/codex_turn_complete.py', 'scripts/harold_service.py',
-                'config/default.toml', 'config/local.template.toml') + CLAUDE_MOD_FILES
+                'config/default.toml', 'config/local.template.toml') + CLAUDE_MOD_FILES + (SKILL_FILE,)
     for name in required:
         path = directory / name
         if not path.is_file() or path.is_symlink():
@@ -148,6 +155,44 @@ def link_claude_mod(settings_path, mod_dir):
             pass
         return manual('The settings file could not be written ({})'.format(getattr(error, 'strerror', None) or error))
     return 'appended' if folders else 'added'
+
+
+def write_skill(source, destination, binary):
+    """Write the skill at `destination`, naming the installed harold binary where the source has
+    the placeholder. The path is quoted for the shell, which leaves a path without spaces as it is."""
+    text = source.read_text(encoding='utf-8').replace(BIN_PLACEHOLDER, shlex.quote(str(binary)))
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(text, encoding='utf-8')
+
+
+def shown(path):
+    """`path` as printed to the person: with `~` for their home folder."""
+    try:
+        return '~/' + str(path.relative_to(Path.home()))
+    except ValueError:
+        return str(path)
+
+
+def link_skill(skills_folder, target):
+    """Link `skills_folder/send-message-to-away-device` to the installed skill folder `target`.
+
+    Returns the outcome to print: 'linked', 'unchanged', or 'not linked' with the reason. Nothing
+    that already exists is replaced, and a failure is reported, not raised.
+    """
+    path = skills_folder / SKILL_NAME
+    if not skills_folder.is_dir():
+        return 'not linked ({} not found)'.format(shown(skills_folder))
+    if os.path.islink(path) and os.readlink(path) == str(target):
+        return 'unchanged'
+    # lexists: a link whose target is gone is still something there.
+    if os.path.lexists(path):
+        return 'not linked, {} already exists. To link it: ln -s {} {}'.format(
+            shown(path), shlex.quote(str(target)), shlex.quote(str(path)))
+    try:
+        os.symlink(target, path)
+    except OSError as error:
+        return 'not linked ({})'.format(error.strerror or error)
+    return 'linked'
 
 
 def choose_config(supplied, bundle):
@@ -314,6 +359,7 @@ def install(args, repo):
             shutil.copy2(assets / 'scripts/harold_service.py', stage / 'service.py')
             for name in ('default.toml', 'local.template.toml'):
                 shutil.copy2(assets / ('config' if prebuilt is not None else 'harold/config') / name, stage / 'config' / name)
+            write_skill(assets / SKILL_FILE, stage / SKILL_FILE, bundle / 'harold')
             (stage / 'config/local.toml').write_bytes(local)
             (stage / 'config/local.toml').chmod(0o600)
             metadata = make_metadata(prefix, '')
@@ -360,6 +406,9 @@ def install(args, repo):
                 metadata['grpc_addr'], pid, prefix / 'haroldctl', bundle / 'config/local.toml', bundle / 'harold.log'))
             outcome = link_claude_mod(CLAUDE_SETTINGS, bundle / 'hooks/claude-mod')
             print('Claude Code mod: {}'.format(outcome), flush=True)
+            for agent, skills_folder in AGENT_SKILL_FOLDERS:
+                print('{} skill: {}'.format(agent, link_skill(skills_folder, bundle / 'skills' / SKILL_NAME)),
+                      flush=True)
 
 
 def main():

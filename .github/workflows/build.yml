@@ -50,7 +50,7 @@ jobs:
         run: |
           set -euo pipefail
           package="harold-aarch64-apple-darwin"
-          mkdir -p "dist/$package/config" "dist/$package/scripts" "dist/$package/hooks"
+          mkdir -p "dist/$package/config" "dist/$package/scripts" "dist/$package/hooks" "dist/$package/skills/send-message-to-away-device"
           for binary in harold tmx-agent-dash; do
             source="target/aarch64-apple-darwin/release/$binary"
             lipo "$source" -verify_arch arm64
@@ -69,6 +69,8 @@ jobs:
           for file in .claude-plugin/plugin.json hooks/hooks.json hooks/register.ts hooks/accept.ts; do
             test -f "dist/$package/hooks/claude-mod/$file"
           done
+          cp skills/send-message-to-away-device/SKILL.md "dist/$package/skills/send-message-to-away-device/"
+          test -f "dist/$package/skills/send-message-to-away-device/SKILL.md"
           cp README.md "dist/$package/"
           printf '%s\n' "$GITHUB_SHA" > "dist/$package/REVISION"
           tar -czf "dist/$package.tar.gz" -C dist "$package"

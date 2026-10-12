@@ -1,4 +1,7 @@
+import contextlib
+import io
 import json
+import os
 import re
 import argparse
 import plistlib
@@ -14,6 +17,10 @@ sys.path.insert(0, str(SCRIPTS))
 
 RUNTIME_FILES = ('.claude-plugin/plugin.json', 'hooks/hooks.json',
                  'hooks/register.ts', 'hooks/accept.ts')
+
+
+SKILL_FILE = 'skills/send-message-to-away-device/SKILL.md'
+SKILL_SOURCE = 'Run {{HAROLD_BIN}} send-message-to-away-device. Again: {{HAROLD_BIN}}\n'
 
 
 def artifact_output(repo, directory):
@@ -39,6 +46,13 @@ class InstallTests(unittest.TestCase):
         self.claude_settings.parent.mkdir()
         self.claude_settings.write_text('{}')
         patcher = patch.object(install, 'CLAUDE_SETTINGS', self.claude_settings)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        # Never the real ~/.claude/skills or ~/.codex/skills.
+        self.claude_skills = Path(self.temp.name).resolve() / 'claude/skills'
+        self.codex_skills = Path(self.temp.name).resolve() / 'codex/skills'
+        patcher = patch.object(install, 'AGENT_SKILL_FOLDERS', (
+            ('Claude Code', self.claude_skills), ('Codex', self.codex_skills)))
         patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -110,7 +124,7 @@ class InstallTests(unittest.TestCase):
                      'hooks/claude-mod/hooks/accept.ts', 'hooks/claude-mod/hooks/hooks.json',
                      'hooks/claude-mod/.claude-plugin/plugin.json',
                      'scripts/harold_service.py', 'harold/config/default.toml',
-                     'harold/config/local.template.toml'):
+                     'harold/config/local.template.toml', SKILL_FILE):
             path = repo / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text('fixture')
@@ -145,10 +159,12 @@ class InstallTests(unittest.TestCase):
                      'hooks/claude-mod/hooks/register.ts', 'hooks/claude-mod/hooks/register.test.ts', 'hooks/claude-mod/hooks/accept.ts', 'hooks/claude-mod/hooks/hooks.json',
                      'hooks/claude-mod/.claude-plugin/plugin.json',
                      'scripts/harold_service.py', 'harold/config/default.toml',
-                     'harold/config/local.template.toml'):
+                     'harold/config/local.template.toml', SKILL_FILE):
             path = repo / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text('stale')
+        (repo / SKILL_FILE).write_text(SKILL_SOURCE)
+        self.claude_skills.mkdir()
         artifacts = self.prefix / 'custom target/aarch64-apple-darwin/release'
         artifacts.mkdir(parents=True)
         for name in ('harold', 'tmx-agent-dash'):
@@ -172,13 +188,15 @@ class InstallTests(unittest.TestCase):
                 output = ''
             return subprocess.CompletedProcess(argv, 0, output, '')
 
+        printed = io.StringIO()
         with patch.object(self.install, 'prerequisites'), \
              patch.object(subprocess, 'run', side_effect=process), \
              patch.object(self.install.service, 'listener_pids', return_value=set()), \
              patch.object(self.install.service, 'stop'), \
              patch.object(self.install.service, 'stop_unmanaged'), \
              patch.object(self.install.service, 'start', return_value=123):
-            self.install.install(args, repo)
+            with contextlib.redirect_stdout(printed):
+                self.install.install(args, repo)
         self.assertEqual((self.prefix / 'harold/harold').read_text(), 'built harold')
         self.assertEqual((self.prefix / 'tmx-agent-dash').read_text(), 'built tmx-agent-dash')
         for name in ('claude_turn_complete.py', 'codex_turn_complete.py'):
@@ -189,6 +207,18 @@ class InstallTests(unittest.TestCase):
             self.assertTrue((mod / runtime).is_file(), runtime)
         self.assertFalse((mod / 'hooks/register.test.ts').exists())
         self.assertIn(str(mod), self.claude_settings.read_text())
+        binary = self.prefix / 'harold/harold'
+        skill = self.prefix / 'harold' / SKILL_FILE
+        # The prefix has spaces, so the path is quoted for the shell.
+        self.assertEqual(skill.read_text(),
+                         "Run '{0}' send-message-to-away-device. Again: '{0}'\n".format(binary))
+        link = self.claude_skills / 'send-message-to-away-device'
+        self.assertEqual(os.readlink(link), str(skill.parent))
+        self.assertEqual((link / 'SKILL.md').read_text(), skill.read_text())
+        self.assertIn('Claude Code skill: linked\n', printed.getvalue())
+        self.assertIn('Codex skill: not linked ({} not found)\n'.format(self.codex_skills),
+                      printed.getvalue())
+        self.assertFalse(self.codex_skills.exists())
 
 
     def test_prebuilt_install_needs_no_source_or_build_tools(self):
@@ -198,7 +228,7 @@ class InstallTests(unittest.TestCase):
                      'hooks/codex_turn_complete.py', 'scripts/harold_service.py',
                      'hooks/claude-mod/hooks/register.ts', 'hooks/claude-mod/hooks/accept.ts', 'hooks/claude-mod/hooks/hooks.json',
                      'hooks/claude-mod/.claude-plugin/plugin.json',
-                     'config/default.toml', 'config/local.template.toml'):
+                     'config/default.toml', 'config/local.template.toml', SKILL_FILE):
             path = release / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text('release ' + name)
@@ -248,6 +278,10 @@ class InstallTests(unittest.TestCase):
         for runtime in RUNTIME_FILES:
             self.assertTrue((mod / runtime).is_file(), runtime)
         self.assertIn(str(mod), self.claude_settings.read_text())
+        skill = self.prefix / 'harold' / SKILL_FILE
+        self.assertEqual(skill.read_text(), 'release ' + SKILL_FILE)
+        self.assertFalse(self.claude_skills.exists())
+        self.assertFalse(self.codex_skills.exists())
 
 
     def test_prebuilt_requires_runtime_tools(self):
@@ -265,7 +299,7 @@ class InstallTests(unittest.TestCase):
             for name in ('harold', 'tmx-agent-dash', 'harold.proto',
                          'hooks/harold_turn_complete.py', 'hooks/claude_turn_complete.py',
                          'hooks/codex_turn_complete.py', 'scripts/harold_service.py',
-                         'config/default.toml', 'config/local.template.toml',
+                         'config/default.toml', 'config/local.template.toml', SKILL_FILE,
                          *('hooks/claude-mod/' + f for f in RUNTIME_FILES if f != missing)):
                 path = release / name
                 path.parent.mkdir(parents=True, exist_ok=True)
@@ -277,6 +311,23 @@ class InstallTests(unittest.TestCase):
     def test_incomplete_release_rejected(self):
         with self.assertRaisesRegex(RuntimeError, 'Missing regular release file'):
             self.install.prebuilt_files(self.prefix)
+
+    def test_release_without_the_skill_is_rejected(self):
+        release = self.prefix / 'release-no-skill'
+        for name in ('harold', 'tmx-agent-dash', 'harold.proto',
+                     'hooks/harold_turn_complete.py', 'hooks/claude_turn_complete.py',
+                     'hooks/codex_turn_complete.py', 'scripts/harold_service.py',
+                     'config/default.toml', 'config/local.template.toml',
+                     *('hooks/claude-mod/' + f for f in RUNTIME_FILES)):
+            path = release / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text('x')
+            path.chmod(0o755)
+        with self.assertRaisesRegex(RuntimeError, re.escape(SKILL_FILE)):
+            self.install.prebuilt_files(release)
+        (release / SKILL_FILE).parent.mkdir(parents=True)
+        (release / SKILL_FILE).write_text('x')
+        self.install.prebuilt_files(release)
 
     def test_missing_cargo_artifact_fails_without_falling_back_to_stale_file(self):
         repo = self.prefix / 'repo'
@@ -491,6 +542,119 @@ class ClaudeSettingsTests(unittest.TestCase):
         self.assertEqual(victim.read_text(), 'keep')
         self.assertIn(self.MOD, self.path.read_text())
         self.assertFalse(self.path.is_symlink())
+
+
+class SkillTests(unittest.TestCase):
+    NAME = 'send-message-to-away-device'
+
+    def setUp(self):
+        import install
+        self.install = install
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        root = Path(self.temp.name).resolve()
+        self.target = root / 'bin/harold/skills' / self.NAME
+        self.target.mkdir(parents=True)
+        (self.target / 'SKILL.md').write_text('skill')
+        self.skills = root / 'agent/skills'
+        self.path = self.skills / self.NAME
+
+    def link(self):
+        return self.install.link_skill(self.skills, self.target)
+
+    def assert_manual(self, outcome):
+        self.assertEqual(outcome, 'not linked, {} already exists. To link it: ln -s {} {}'.format(
+            self.path, self.target, self.path))
+
+    def test_the_repository_skill_names_the_binary_by_its_placeholder(self):
+        text = (SCRIPTS.parent / SKILL_FILE).read_text(encoding='utf-8')
+        self.assertTrue(text.startswith('---\nname: send-message-to-away-device\ndescription: '))
+        self.assertIn('{{HAROLD_BIN}} send-message-to-away-device --src-id "$TMUX_PANE" \'', text)
+        self.assertNotIn('~/bin/harold/harold', text)
+
+    def test_write_replaces_every_placeholder_with_the_quoted_binary(self):
+        source = Path(self.temp.name) / 'SKILL.md'
+        source.write_text(SKILL_SOURCE)
+        destination = Path(self.temp.name) / 'stage/skills' / self.NAME / 'SKILL.md'
+        self.install.write_skill(source, destination, Path('/Users/u/bin/harold/harold'))
+        self.assertEqual(destination.read_text(),
+                         'Run /Users/u/bin/harold/harold send-message-to-away-device. '
+                         'Again: /Users/u/bin/harold/harold\n')
+        self.install.write_skill(source, destination, Path('/Users/u/my bin/harold/harold'))
+        self.assertIn("Run '/Users/u/my bin/harold/harold' send", destination.read_text())
+
+    def test_a_missing_skills_folder_is_not_created(self):
+        self.assertEqual(self.link(), 'not linked ({} not found)'.format(self.skills))
+        self.assertFalse(self.skills.exists())
+
+    def test_nothing_there_creates_the_link(self):
+        self.skills.mkdir(parents=True)
+        self.assertEqual(self.link(), 'linked')
+        self.assertEqual(os.readlink(self.path), str(self.target))
+        self.assertEqual((self.path / 'SKILL.md').read_text(), 'skill')
+
+    def test_a_link_to_the_installed_folder_is_unchanged(self):
+        self.skills.mkdir(parents=True)
+        self.link()
+        self.assertEqual(self.link(), 'unchanged')
+        self.assertEqual(os.readlink(self.path), str(self.target))
+
+    def test_anything_else_there_is_left_alone(self):
+        self.skills.mkdir(parents=True)
+        elsewhere = Path(self.temp.name) / 'elsewhere'
+        elsewhere.mkdir()
+
+        self.path.mkdir()
+        self.assert_manual(self.link())
+        self.assertTrue(self.path.is_dir() and not self.path.is_symlink())
+        self.path.rmdir()
+
+        self.path.write_text('mine')
+        self.assert_manual(self.link())
+        self.assertEqual(self.path.read_text(), 'mine')
+        self.assertFalse(self.path.is_symlink())
+        self.path.unlink()
+
+        self.path.symlink_to(elsewhere)
+        self.assert_manual(self.link())
+        self.assertEqual(os.readlink(self.path), str(elsewhere))
+
+    def test_a_broken_link_counts_as_already_there(self):
+        self.skills.mkdir(parents=True)
+        self.path.symlink_to(Path(self.temp.name) / 'gone')
+        self.assert_manual(self.link())
+        self.assertEqual(os.readlink(self.path), str(Path(self.temp.name) / 'gone'))
+
+    def test_a_skills_folder_that_is_a_link_is_linked_into(self):
+        real = Path(self.temp.name).resolve() / 'dotfiles/skills'
+        real.mkdir(parents=True)
+        self.skills.parent.mkdir(parents=True)
+        self.skills.symlink_to(real)
+        self.assertEqual(self.link(), 'linked')
+        self.assertEqual(os.readlink(real / self.NAME), str(self.target))
+
+    def test_paths_under_home_are_shown_with_a_tilde_and_quoted_in_the_command(self):
+        home = Path(self.temp.name).resolve() / 'home dir'
+        skills = home / '.claude/skills'
+        target = home / 'bin/harold/skills' / self.NAME
+        with patch.object(Path, 'home', return_value=home):
+            self.assertEqual(self.install.link_skill(skills, target),
+                             'not linked (~/.claude/skills not found)')
+            skills.mkdir(parents=True)
+            (skills / self.NAME).mkdir()
+            self.assertEqual(
+                self.install.link_skill(skills, target),
+                "not linked, ~/.claude/skills/{0} already exists. To link it: ln -s '{1}' '{2}'".format(
+                    self.NAME, target, skills / self.NAME))
+
+    def test_a_failure_to_link_is_reported_and_not_raised(self):
+        self.skills.mkdir(parents=True)
+        self.skills.chmod(0o500)
+        self.addCleanup(self.skills.chmod, 0o700)
+        outcome = self.link()
+        self.skills.chmod(0o700)
+        self.assertTrue(outcome.startswith('not linked ('), outcome)
+        self.assertFalse(os.path.lexists(self.path))
 
 
 if __name__ == '__main__':
