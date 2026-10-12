@@ -327,9 +327,20 @@ enum ReportKind {
     Hang,
 }
 
+/// How the test server answers `SendMessageToAwayDevice`.
+#[derive(Clone, Copy)]
+enum AwayAnswer {
+    Accepted,
+    NotAccepted,
+    Refused(tonic::Code, &'static str),
+    Hang,
+}
+
 struct RecordingServer {
     kind: ReportKind,
-    requests: Arc<std::sync::Mutex<Vec<ReportAgentStateRequest>>>,
+    requests: Recorded,
+    away: AwayAnswer,
+    messages: AwayRecorded,
 }
 
 #[tonic::async_trait]
@@ -389,9 +400,19 @@ impl Harold for RecordingServer {
 
     async fn send_message_to_away_device(
         &self,
-        _: Request<SendMessageToAwayDeviceRequest>,
+        request: Request<SendMessageToAwayDeviceRequest>,
     ) -> Result<Response<SendMessageToAwayDeviceResponse>, Status> {
-        Err(Status::unimplemented("not used"))
+        self.messages.lock().unwrap().push(request.into_inner());
+        let accepted = |accepted| Ok(Response::new(SendMessageToAwayDeviceResponse { accepted }));
+        match self.away {
+            AwayAnswer::Accepted => accepted(true),
+            AwayAnswer::NotAccepted => accepted(false),
+            AwayAnswer::Refused(code, message) => Err(Status::new(code, message)),
+            AwayAnswer::Hang => {
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                Err(Status::unavailable("hung"))
+            }
+        }
     }
 
     async fn watch_agent_states(
@@ -403,6 +424,7 @@ impl Harold for RecordingServer {
 }
 
 type Recorded = Arc<std::sync::Mutex<Vec<ReportAgentStateRequest>>>;
+type AwayRecorded = Arc<std::sync::Mutex<Vec<SendMessageToAwayDeviceRequest>>>;
 
 struct ServerGuard(Vec<tokio::task::JoinHandle<()>>);
 
@@ -414,7 +436,7 @@ impl Drop for ServerGuard {
     }
 }
 
-async fn serve_recording(kind: ReportKind) -> (u16, Recorded, ServerGuard) {
+async fn serve(service: RecordingServer) -> (u16, ServerGuard) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let (incoming, connections) = mpsc::channel(1);
@@ -429,18 +451,37 @@ async fn serve_recording(kind: ReportKind) -> (u16, Recorded, ServerGuard) {
             }
         }
     });
-    let requests: Recorded = Arc::default();
-    let service = RecordingServer {
-        kind,
-        requests: Arc::clone(&requests),
-    };
     let server = tokio::spawn(async move {
         let _ = tonic::transport::Server::builder()
             .add_service(HaroldServer::new(service))
             .serve_with_incoming(ReceiverStream::new(connections))
             .await;
     });
-    (port, requests, ServerGuard(vec![accept, server]))
+    (port, ServerGuard(vec![accept, server]))
+}
+
+async fn serve_recording(kind: ReportKind) -> (u16, Recorded, ServerGuard) {
+    let requests: Recorded = Arc::default();
+    let (port, guard) = serve(RecordingServer {
+        kind,
+        requests: Arc::clone(&requests),
+        away: AwayAnswer::Refused(tonic::Code::Unimplemented, "not used"),
+        messages: Arc::default(),
+    })
+    .await;
+    (port, requests, guard)
+}
+
+async fn serve_away(away: AwayAnswer) -> (u16, AwayRecorded, ServerGuard) {
+    let messages: AwayRecorded = Arc::default();
+    let (port, guard) = serve(RecordingServer {
+        kind: ReportKind::Refused,
+        requests: Arc::default(),
+        away,
+        messages: Arc::clone(&messages),
+    })
+    .await;
+    (port, messages, guard)
 }
 
 fn accept_args(event: &'static str) -> Vec<&'static str> {
@@ -546,4 +587,156 @@ fn accept_with_bad_arguments_or_configuration_discloses_nothing() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("invalid configuration"));
     assert!(!stderr.contains("review-sentinel-secret"));
+}
+
+const AWAY: &str = "send-message-to-away-device";
+
+/// What the command printed on standard error, without the final line break.
+fn printed(output: &Output) -> String {
+    String::from_utf8_lossy(&output.stderr)
+        .trim_end_matches('\n')
+        .to_string()
+}
+
+fn fixture_for(port: u16) -> Fixture {
+    Fixture::new(&format!("{VALID}\n[grpc]\nport = {port}\n"))
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn away_message_sends_one_request_and_exits_zero_when_accepted() {
+    for args in [
+        [AWAY, "--src-id", "%47", "Pod 3 is blocked\non store.rs"],
+        [AWAY, "Pod 3 is blocked\non store.rs", "--src-id", "%47"],
+    ] {
+        let (port, messages, _guard) = serve_away(AwayAnswer::Accepted).await;
+        let output = fixture_for(port).run(&args);
+        assert!(output.status.success(), "{output:?}");
+        assert!(output.stdout.is_empty());
+        assert!(output.stderr.is_empty());
+        let seen = messages.lock().unwrap().clone();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].src_id, "%47");
+        // The daemon, not the command, makes the text one line.
+        assert_eq!(seen[0].text, "Pod 3 is blocked\non store.rs");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn away_message_prints_the_line_for_each_refusal_and_exits_one() {
+    use tonic::Code;
+    const NOT_STORED: &str = "the Harold daemon could not store the message";
+    for (answer, line) in [
+        (
+            AwayAnswer::Refused(Code::InvalidArgument, "invalid source id"),
+            "--src-id must be a tmux pane id such as %47",
+        ),
+        (
+            AwayAnswer::Refused(Code::InvalidArgument, "invalid message length"),
+            "the message must be 1 to 1,000 characters",
+        ),
+        (
+            AwayAnswer::Refused(Code::FailedPrecondition, "messaging paused"),
+            "messaging is paused",
+        ),
+        (
+            AwayAnswer::Refused(Code::FailedPrecondition, "agent not found"),
+            "no agent is running in pane %47",
+        ),
+        (
+            AwayAnswer::Refused(Code::Internal, "event store write failed"),
+            NOT_STORED,
+        ),
+        (
+            AwayAnswer::Refused(Code::Unavailable, "agent lookup unavailable"),
+            NOT_STORED,
+        ),
+        // An older daemon without the RPC.
+        (AwayAnswer::Refused(Code::Unimplemented, ""), NOT_STORED),
+        (AwayAnswer::NotAccepted, NOT_STORED),
+    ] {
+        let (port, _messages, _guard) = serve_away(answer).await;
+        let output = fixture_for(port).run(&[AWAY, "--src-id", "%47", "Pod 3 is blocked"]);
+        assert_eq!(output.status.code(), Some(1), "{line}");
+        assert!(output.stdout.is_empty());
+        assert_eq!(printed(&output), line);
+    }
+}
+
+#[test]
+fn away_message_says_the_daemon_is_not_reachable_at_once() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    let started = Instant::now();
+    let output = fixture_for(port).run(&[AWAY, "--src-id", "%47", "Pod 3 is blocked"]);
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(printed(&output), "the Harold daemon is not reachable");
+    assert!(started.elapsed() < Duration::from_secs(2));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn away_message_gives_up_after_three_seconds_when_the_daemon_does_not_answer() {
+    let (port, _messages, _guard) = serve_away(AwayAnswer::Hang).await;
+    let started = Instant::now();
+    let output = fixture_for(port).run(&[AWAY, "--src-id", "%47", "Pod 3 is blocked"]);
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        printed(&output),
+        "the Harold daemon did not answer within 3 seconds"
+    );
+    assert!(started.elapsed() < Duration::from_secs(5));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn away_message_checks_its_arguments_without_calling_the_daemon() {
+    const USAGE: &str = "invalid argument: usage is send-message-to-away-device --src-id ID TEXT";
+    let (port, messages, _guard) = serve_away(AwayAnswer::Accepted).await;
+    let fixture = fixture_for(port);
+    for (args, line) in [
+        (vec![AWAY], USAGE),
+        (vec![AWAY, "text"], USAGE),
+        (vec![AWAY, "--src-id", "%47"], USAGE),
+        (
+            vec![AWAY, "--src-id", "%1", "--src-id", "%2", "text"],
+            USAGE,
+        ),
+        (vec![AWAY, "--src-id", "%47", "one", "two"], USAGE),
+        (vec![AWAY, "--src-id", "%47", "text", "--loud"], USAGE),
+        (vec![AWAY, "--src-id", "", "text"], USAGE),
+        (
+            vec![AWAY, "--src-id", "47", "text"],
+            "--src-id must be a tmux pane id such as %47",
+        ),
+        (
+            vec![AWAY, "--src-id", "%47", ""],
+            "the message must be 1 to 1,000 characters",
+        ),
+    ] {
+        let output = fixture.run(&args);
+        assert_eq!(output.status.code(), Some(1), "{args:?}");
+        assert!(output.stdout.is_empty());
+        assert_eq!(printed(&output), line, "{args:?}");
+    }
+    assert!(messages.lock().unwrap().is_empty(), "the daemon was called");
+}
+
+#[test]
+fn away_message_with_bad_configuration_discloses_nothing() {
+    let output = Fixture::new("[telegram]\nchat_id = 'review-sentinel-secret'\n")
+        .run(&[AWAY, "--src-id", "%47", "text"]);
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("invalid configuration"));
+    assert!(!stderr.contains("review-sentinel-secret"));
+}
+
+#[test]
+fn help_lists_the_away_message_command() {
+    let output = Fixture::new(VALID).run(&["--help"]);
+    assert!(output.status.success());
+    let help = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        help.contains("harold send-message-to-away-device --src-id ID TEXT"),
+        "{help}"
+    );
 }

@@ -1500,10 +1500,6 @@ fn screen_reason(error: ScreenError) -> &'static str {
     }
 }
 
-#[allow(
-    dead_code,
-    reason = "the ReportAgentState RPC activates lifecycle validation in the next ingress slice"
-)]
 pub(crate) fn valid_pane_id(value: &str) -> bool {
     value.strip_prefix('%').is_some_and(|suffix| {
         !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit())

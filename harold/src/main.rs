@@ -589,6 +589,13 @@ fn run_diagnostics(delay_secs: u64) {
     println!("\nDone.");
 }
 
+/// Print the one line a command failed with and exit 1. Returning the error from `main`
+/// would print it as `Error: "…"`.
+fn exit_with_line(line: &str) -> ! {
+    eprintln!("{line}");
+    std::process::exit(1)
+}
+
 fn print_help() {
     println!("harold — agent notification and inbound message routing daemon\n");
     println!("USAGE:");
@@ -598,6 +605,9 @@ fn print_help() {
     println!("  harold accept EVENT --pane ID --adapter NAME");
     println!("                          Report a pane busy (turn-started, still-working) or idle");
     println!("                          (turn-completed, subagents-finished); 3s timeout");
+    println!("  harold send-message-to-away-device --src-id ID TEXT");
+    println!("                          Send TEXT to the away device from tmux pane ID;");
+    println!("                          exit 0 once the daemon has stored it; 3s timeout");
     println!("  harold --diagnostics [--delay [N]]  Test screen lock, TTS, and iMessage config");
     println!("                                      --delay defaults to 10s if no value given");
     println!("  harold --help           Show this help\n");
@@ -609,7 +619,13 @@ fn print_help() {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let mode = cli::Mode::parse(&args)?;
+    let mode = match cli::Mode::parse(&args) {
+        Ok(mode) => mode,
+        Err(line) if args.first().map(String::as_str) == Some(cli::AWAY_MESSAGE_COMMAND) => {
+            exit_with_line(&line)
+        }
+        Err(error) => return Err(error.into()),
+    };
 
     if mode == cli::Mode::Help {
         print_help();
@@ -625,7 +641,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
     let is_probe = matches!(
         mode,
-        cli::Mode::CheckConfig | cli::Mode::CheckReady | cli::Mode::Accept(_)
+        cli::Mode::CheckConfig
+            | cli::Mode::CheckReady
+            | cli::Mode::Accept(_)
+            | cli::Mode::SendMessageToAwayDevice(_)
     );
     let settings = settings::Settings::load().map_err(|error| -> Box<dyn std::error::Error> {
         if is_probe {
@@ -646,6 +665,12 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
         cli::Mode::CheckConfig => return cli::check_config(&settings),
         cli::Mode::CheckReady => return cli::check_ready(&settings).await,
         cli::Mode::Accept(ref args) => return cli::accept(&settings, args).await,
+        cli::Mode::SendMessageToAwayDevice(ref args) => {
+            if let Err(line) = cli::send_message_to_away_device(&settings, args).await {
+                exit_with_line(&line);
+            }
+            return Ok(());
+        }
         _ => {}
     }
 
