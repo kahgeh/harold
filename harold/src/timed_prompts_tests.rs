@@ -1,3 +1,7 @@
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+
 use events::EventStreamVersion;
 
 use super::*;
@@ -5,7 +9,9 @@ use crate::agent::domain::{
     AgentIncarnation, AgentPaneObservation, AgentPaneProjection, AgentSnapshot,
     EffectiveAgentState, MonitorHealthProjection,
 };
+use crate::settings::TimedPromptSettings;
 use crate::settings::{AgentProviderSettings, ScreenAdapter};
+use crate::store::{HaroldStore, TimedPromptHandled, TimedPromptOutcome};
 
 const CHIEF: &str = "/work/chief-of-pods";
 
@@ -461,4 +467,701 @@ fn agents_view_says_the_listing_failed_only_while_the_inventory_is_unhealthy() {
     let mut screen_unhealthy = snapshot(Some(false), panes());
     screen_unhealthy.monitor_health[0].component = "screen".into();
     assert!(!agents_view(&screen_unhealthy, &providers).listing_failed);
+}
+
+// --- the round ---
+
+const DAY: &str = "2026-10-14";
+const NEXT_DAY: &str = "2026-10-15";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Key {
+    /// Pane id and text.
+    Text(String, String),
+    /// Pane id.
+    Enter(String),
+}
+
+struct FakeState {
+    now: Option<LocalNow>,
+    view: AgentsView,
+    screen: Option<String>,
+    fail_text: bool,
+    fail_enter: bool,
+    keys: Vec<Key>,
+    now_reads: usize,
+    screen_reads: usize,
+}
+
+/// Every port, faked. It starts with the chief idle in pane `%2` with an empty box.
+#[derive(Clone)]
+struct Fake(Arc<Mutex<FakeState>>);
+
+impl Fake {
+    fn at(day: &str, time: &str) -> Self {
+        let fake = Self(Arc::new(Mutex::new(FakeState {
+            now: None,
+            view: view(vec![chief("%2")]),
+            screen: Some(screen_with_box(&["❯ "])),
+            fail_text: false,
+            fail_enter: false,
+            keys: Vec::new(),
+            now_reads: 0,
+            screen_reads: 0,
+        })));
+        fake.clock(day, time);
+        fake
+    }
+
+    fn set(&self, change: impl FnOnce(&mut FakeState)) {
+        change(&mut self.0.lock().unwrap());
+    }
+
+    fn clock(&self, day: &str, time: &str) {
+        let now = parse_local_now(&format!("{day} {time}")).expect("a valid test time");
+        self.set(|state| state.now = Some(now));
+    }
+
+    fn keys(&self) -> Vec<Key> {
+        self.0.lock().unwrap().keys.clone()
+    }
+
+    fn screen_reads(&self) -> usize {
+        self.0.lock().unwrap().screen_reads
+    }
+
+    fn now_reads(&self) -> usize {
+        self.0.lock().unwrap().now_reads
+    }
+}
+
+impl Ports for Fake {
+    async fn now(&self) -> Option<LocalNow> {
+        let mut state = self.0.lock().unwrap();
+        state.now_reads += 1;
+        state.now.clone()
+    }
+
+    fn agents(&self) -> AgentsView {
+        self.0.lock().unwrap().view.clone()
+    }
+
+    async fn read_screen(&self, _pane_id: &str) -> Option<String> {
+        let mut state = self.0.lock().unwrap();
+        state.screen_reads += 1;
+        state.screen.clone()
+    }
+
+    async fn type_text(&self, pane_id: &str, text: &str) -> Result<(), String> {
+        let mut state = self.0.lock().unwrap();
+        if state.fail_text {
+            return Err("pane closed".into());
+        }
+        state.keys.push(Key::Text(pane_id.into(), text.into()));
+        Ok(())
+    }
+
+    async fn press_enter(&self, pane_id: &str) -> Result<(), String> {
+        let mut state = self.0.lock().unwrap();
+        if state.fail_enter {
+            return Err("enter refused".into());
+        }
+        state.keys.push(Key::Enter(pane_id.into()));
+        Ok(())
+    }
+}
+
+/// A real event store in a temporary folder, removed when dropped.
+struct TestStore {
+    path: PathBuf,
+    store: Arc<HaroldStore>,
+}
+
+impl TestStore {
+    async fn new() -> Self {
+        let path =
+            std::env::temp_dir().join(format!("harold-timed-prompts-{}", uuid::Uuid::new_v4()));
+        let store = Arc::new(HaroldStore::open(&path).await.expect("open test store"));
+        Self { path, store }
+    }
+}
+
+impl Drop for TestStore {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
+/// The `TimedPromptHandled` events in the store, oldest first.
+async fn handled(store: &TestStore) -> Vec<TimedPromptHandled> {
+    store
+        .store
+        .stream()
+        .load_after_version(EventStreamVersion::start(), 100)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|event| event.r#type.as_str() == "TimedPromptHandled")
+        .map(|event| serde_json::from_value(event.payload).unwrap())
+        .collect()
+}
+
+fn entry(name: &str, at: &str) -> TimedPromptSettings {
+    TimedPromptSettings {
+        name: name.into(),
+        at: at.into(),
+        folder: CHIEF.into(),
+        text: "digest".into(),
+        give_up_after_minutes: 120,
+    }
+}
+
+fn prompts(fake: &Fake, store: &TestStore, entries: &[TimedPromptSettings]) -> TimedPrompts<Fake> {
+    TimedPrompts::new(
+        entries,
+        &HashMap::new(),
+        fake.clone(),
+        Arc::clone(&store.store),
+    )
+}
+
+fn digest_keys() -> Vec<Key> {
+    vec![
+        Key::Text("%2".into(), "digest".into()),
+        Key::Enter("%2".into()),
+    ]
+}
+
+fn delayed(name: &str, reason: Reason) -> Report {
+    Report::Delayed {
+        name: name.into(),
+        reason,
+    }
+}
+
+fn skipped(name: &str, reason: Reason) -> Report {
+    Report::Skipped {
+        name: name.into(),
+        reason,
+    }
+}
+
+#[tokio::test]
+async fn due_prompt_is_typed_once_into_the_right_pane_and_stored() {
+    let store = TestStore::new().await;
+    let fake = Fake::at(DAY, "09:00:04");
+    fake.set(|state| {
+        state.view.panes.insert(
+            0,
+            AgentPane {
+                folder: "/work/harold".into(),
+                ..chief("%1")
+            },
+        )
+    });
+    let mut prompts = prompts(&fake, &store, &[entry("digest", "09:00")]);
+
+    let reports = prompts.round().await;
+
+    assert_eq!(
+        reports,
+        [Report::Typed {
+            name: "digest".into(),
+            pane: "%2".into(),
+            late_s: 4,
+        }]
+    );
+    assert_eq!(fake.keys(), digest_keys());
+    assert_eq!(
+        handled(&store).await,
+        [TimedPromptHandled {
+            name: "digest".into(),
+            day: DAY.into(),
+            outcome: TimedPromptOutcome::Typed,
+            reason: None,
+            pane_id: Some("%2".into()),
+        }]
+    );
+
+    fake.clock(DAY, "09:00:09");
+    assert!(prompts.round().await.is_empty());
+    fake.clock(DAY, "10:59:59");
+    assert!(prompts.round().await.is_empty());
+    assert_eq!(fake.keys(), digest_keys());
+    assert_eq!(handled(&store).await.len(), 1);
+}
+
+#[tokio::test]
+async fn prompt_is_left_alone_before_its_time() {
+    let store = TestStore::new().await;
+    let fake = Fake::at(DAY, "08:59:59");
+    let mut prompts = prompts(&fake, &store, &[entry("digest", "09:00")]);
+
+    assert!(prompts.round().await.is_empty());
+    assert!(fake.keys().is_empty());
+    assert_eq!(fake.screen_reads(), 0);
+    assert!(handled(&store).await.is_empty());
+}
+
+#[tokio::test]
+async fn each_failing_check_types_nothing_and_gives_its_reason() {
+    type Break = fn(&mut FakeState);
+    // A function argument is where a closure becomes a `fn` pointer.
+    fn case(break_one_check: Break, reason: Reason, screen_reads: usize) -> (Break, Reason, usize) {
+        (break_one_check, reason, screen_reads)
+    }
+    // Whether the screen is read tells checks 1 to 5 from checks 6 and 7.
+    let cases = [
+        case(
+            |state| state.view.listing_failed = true,
+            Reason::PaneListFailing,
+            0,
+        ),
+        case(|state| state.view.panes.clear(), Reason::NoAgentInFolder, 0),
+        case(
+            |state| state.view.panes.push(chief("%3")),
+            Reason::SeveralAgentsInFolder { agents: 2 },
+            0,
+        ),
+        case(
+            |state| state.view.panes[0].reads_as_claude = false,
+            Reason::InputBoxUnreadable,
+            0,
+        ),
+        case(
+            |state| state.view.panes[0].state = EffectiveAgentState::Busy,
+            Reason::AgentBusy,
+            0,
+        ),
+        case(
+            |state| state.view.panes[0].state = EffectiveAgentState::Unknown,
+            Reason::AgentStateUnknown,
+            0,
+        ),
+        case(|state| state.screen = None, Reason::InputBoxNotFound, 1),
+        case(
+            |state| state.screen = Some(screen_with_box(&["❯ half a sentence"])),
+            Reason::InputBoxHoldsText,
+            1,
+        ),
+    ];
+    for (break_one_check, reason, screen_reads) in cases {
+        let store = TestStore::new().await;
+        let fake = Fake::at(DAY, "09:00:00");
+        fake.set(break_one_check);
+        let mut prompts = prompts(&fake, &store, &[entry("digest", "09:00")]);
+
+        let reports = prompts.round().await;
+
+        assert_eq!(reports, [delayed("digest", reason.clone())], "{reason:?}");
+        assert!(fake.keys().is_empty(), "{reason:?}");
+        assert_eq!(fake.screen_reads(), screen_reads, "{reason:?}");
+        assert!(handled(&store).await.is_empty(), "{reason:?}");
+    }
+}
+
+#[tokio::test]
+async fn waiting_is_reported_once_for_each_reason() {
+    let store = TestStore::new().await;
+    let fake = Fake::at(DAY, "09:00:00");
+    fake.set(|state| state.view.panes[0].state = EffectiveAgentState::Busy);
+    let mut prompts = prompts(&fake, &store, &[entry("digest", "09:00")]);
+
+    let mut reports = Vec::new();
+    for _ in 0..10 {
+        reports.extend(prompts.round().await);
+    }
+    assert_eq!(reports, [delayed("digest", Reason::AgentBusy)]);
+
+    fake.set(|state| {
+        state.view.panes[0].state = EffectiveAgentState::Idle;
+        state.screen = Some(screen_with_box(&["❯ half a sentence"]));
+    });
+    let mut reports = Vec::new();
+    for _ in 0..10 {
+        reports.extend(prompts.round().await);
+    }
+    assert_eq!(reports, [delayed("digest", Reason::InputBoxHoldsText)]);
+
+    // Going back to an earlier reason is a change, and is reported.
+    fake.set(|state| state.view.panes[0].state = EffectiveAgentState::Busy);
+    assert_eq!(
+        prompts.round().await,
+        [delayed("digest", Reason::AgentBusy)]
+    );
+    assert!(fake.keys().is_empty());
+    assert!(handled(&store).await.is_empty());
+}
+
+#[tokio::test]
+async fn a_changed_count_of_agents_is_not_a_changed_reason() {
+    let store = TestStore::new().await;
+    let fake = Fake::at(DAY, "09:00:00");
+    fake.set(|state| state.view.panes.push(chief("%3")));
+    let mut prompts = prompts(&fake, &store, &[entry("digest", "09:00")]);
+
+    assert_eq!(
+        prompts.round().await,
+        [delayed(
+            "digest",
+            Reason::SeveralAgentsInFolder { agents: 2 }
+        )]
+    );
+    fake.set(|state| state.view.panes.push(chief("%4")));
+    assert!(prompts.round().await.is_empty());
+}
+
+#[tokio::test]
+async fn waiting_prompt_is_typed_once_the_checks_pass() {
+    let store = TestStore::new().await;
+    let fake = Fake::at(DAY, "09:00:00");
+    fake.set(|state| state.view.panes[0].state = EffectiveAgentState::Busy);
+    let mut prompts = prompts(&fake, &store, &[entry("digest", "09:00")]);
+    prompts.round().await;
+
+    fake.clock(DAY, "09:07:02");
+    fake.set(|state| state.view.panes[0].state = EffectiveAgentState::Idle);
+
+    assert_eq!(
+        prompts.round().await,
+        [Report::Typed {
+            name: "digest".into(),
+            pane: "%2".into(),
+            late_s: 422,
+        }]
+    );
+    assert_eq!(fake.keys(), digest_keys());
+}
+
+#[tokio::test]
+async fn prompt_still_waiting_when_its_window_ends_is_skipped_with_its_last_reason() {
+    let store = TestStore::new().await;
+    let fake = Fake::at(DAY, "09:00:00");
+    fake.set(|state| state.view.panes[0].state = EffectiveAgentState::Busy);
+    let mut prompts = prompts(&fake, &store, &[entry("digest", "09:00")]);
+    prompts.round().await;
+    fake.clock(DAY, "10:59:55");
+    fake.set(|state| {
+        state.view.panes[0].state = EffectiveAgentState::Idle;
+        state.screen = Some(screen_with_box(&["❯ half a sentence"]));
+    });
+    prompts.round().await;
+
+    fake.clock(DAY, "11:00:00");
+    // The box is empty again, one round too late.
+    fake.set(|state| state.screen = Some(screen_with_box(&["❯ "])));
+    let reports = prompts.round().await;
+
+    assert_eq!(reports, [skipped("digest", Reason::InputBoxHoldsText)]);
+    assert!(fake.keys().is_empty());
+    assert_eq!(
+        handled(&store).await,
+        [TimedPromptHandled {
+            name: "digest".into(),
+            day: DAY.into(),
+            outcome: TimedPromptOutcome::Skipped,
+            reason: Some("input_box_holds_text".into()),
+            pane_id: None,
+        }]
+    );
+    fake.clock(DAY, "11:00:05");
+    assert!(prompts.round().await.is_empty());
+    assert_eq!(handled(&store).await.len(), 1);
+}
+
+#[tokio::test]
+async fn prompt_never_seen_due_is_skipped_as_window_passed_and_typed_the_next_day() {
+    let store = TestStore::new().await;
+    let fake = Fake::at(DAY, "15:00:00");
+    let mut prompts = prompts(&fake, &store, &[entry("digest", "09:00")]);
+
+    assert_eq!(
+        prompts.round().await,
+        [skipped("digest", Reason::WindowPassed)]
+    );
+    assert!(prompts.round().await.is_empty());
+    assert!(fake.keys().is_empty());
+    let stored = handled(&store).await;
+    assert_eq!(stored.len(), 1);
+    assert_eq!(stored[0].outcome, TimedPromptOutcome::Skipped);
+    assert_eq!(stored[0].reason.as_deref(), Some("window_passed"));
+    assert_eq!(stored[0].pane_id, None);
+
+    fake.clock(NEXT_DAY, "09:00:00");
+    assert_eq!(
+        prompts.round().await,
+        [Report::Typed {
+            name: "digest".into(),
+            pane: "%2".into(),
+            late_s: 0,
+        }]
+    );
+    assert_eq!(fake.keys(), digest_keys());
+}
+
+#[tokio::test]
+async fn typed_prompt_is_not_typed_again_after_a_restart_and_is_typed_the_next_day() {
+    let store = TestStore::new().await;
+    let fake = Fake::at(DAY, "09:00:00");
+    let entries = [entry("digest", "09:00")];
+    prompts(&fake, &store, &entries).round().await;
+    assert_eq!(fake.keys(), digest_keys());
+
+    // A restart: Harold reads the whole stream into its state database, then starts
+    // the task from the stored rows.
+    while store
+        .store
+        .project_unhandled_events(500)
+        .await
+        .unwrap()
+        .applied
+        > 0
+    {}
+    let last_days = store.store.timed_prompt_last_days().await.unwrap();
+    assert_eq!(last_days.get("digest").map(String::as_str), Some(DAY));
+    let mut restarted =
+        TimedPrompts::new(&entries, &last_days, fake.clone(), Arc::clone(&store.store));
+
+    fake.clock(DAY, "09:05:00");
+    assert!(restarted.round().await.is_empty());
+    assert_eq!(fake.keys(), digest_keys());
+
+    fake.clock(NEXT_DAY, "09:00:00");
+    assert_eq!(restarted.round().await.len(), 1);
+    assert_eq!(fake.keys().len(), 4);
+    assert_eq!(handled(&store).await.len(), 2);
+}
+
+#[tokio::test]
+async fn renamed_entry_counts_as_a_new_prompt() {
+    let store = TestStore::new().await;
+    let fake = Fake::at(DAY, "09:05:00");
+    let last_days = HashMap::from([("digest".to_string(), DAY.to_string())]);
+    let mut renamed = TimedPrompts::new(
+        &[entry("morning-digest", "09:00")],
+        &last_days,
+        fake.clone(),
+        Arc::clone(&store.store),
+    );
+
+    assert_eq!(renamed.round().await.len(), 1);
+    assert_eq!(fake.keys(), digest_keys());
+}
+
+#[tokio::test]
+async fn prompt_waiting_at_midnight_is_skipped_for_the_earlier_date() {
+    let store = TestStore::new().await;
+    let fake = Fake::at(DAY, "23:59:59");
+    fake.set(|state| state.screen = Some(screen_with_box(&["❯ half a sentence"])));
+    let mut prompts = prompts(&fake, &store, &[entry("digest", "23:30")]);
+    assert_eq!(
+        prompts.round().await,
+        [delayed("digest", Reason::InputBoxHoldsText)]
+    );
+
+    fake.clock(NEXT_DAY, "00:00:04");
+    assert_eq!(
+        prompts.round().await,
+        [skipped("digest", Reason::InputBoxHoldsText)]
+    );
+    assert!(prompts.round().await.is_empty());
+    let stored = handled(&store).await;
+    assert_eq!(stored.len(), 1);
+    assert_eq!(stored[0].day, DAY);
+    assert_eq!(stored[0].outcome, TimedPromptOutcome::Skipped);
+    assert!(fake.keys().is_empty());
+
+    // The earlier date's skip does not stand in for the new date.
+    fake.clock(NEXT_DAY, "23:30:00");
+    fake.set(|state| state.screen = Some(screen_with_box(&["❯ "])));
+    assert_eq!(prompts.round().await.len(), 1);
+    assert_eq!(fake.keys(), digest_keys());
+    assert_eq!(handled(&store).await[1].day, NEXT_DAY);
+}
+
+#[tokio::test]
+async fn text_that_fails_to_type_is_stored_as_nothing_and_tried_again() {
+    let store = TestStore::new().await;
+    let fake = Fake::at(DAY, "09:00:00");
+    fake.set(|state| state.fail_text = true);
+    let mut prompts = prompts(&fake, &store, &[entry("digest", "09:00")]);
+
+    assert_eq!(
+        prompts.round().await,
+        [delayed("digest", Reason::TypingFailed)]
+    );
+    assert!(fake.keys().is_empty());
+    assert!(handled(&store).await.is_empty());
+
+    fake.set(|state| state.fail_text = false);
+    fake.clock(DAY, "09:00:05");
+    assert_eq!(prompts.round().await.len(), 1);
+    assert_eq!(fake.keys(), digest_keys());
+    assert_eq!(handled(&store).await[0].outcome, TimedPromptOutcome::Typed);
+}
+
+#[tokio::test]
+async fn text_that_cannot_be_typed_is_delayed_once_and_skipped_with_that_reason() {
+    let store = TestStore::new().await;
+    let fake = Fake::at(DAY, "09:00:00");
+    fake.set(|state| state.fail_text = true);
+    let mut prompts = prompts(&fake, &store, &[entry("digest", "09:00")]);
+
+    let mut reports = Vec::new();
+    for _ in 0..10 {
+        reports.extend(prompts.round().await);
+    }
+    assert_eq!(reports, [delayed("digest", Reason::TypingFailed)]);
+
+    fake.clock(DAY, "11:00:00");
+    assert_eq!(
+        prompts.round().await,
+        [skipped("digest", Reason::TypingFailed)]
+    );
+    assert_eq!(
+        handled(&store).await[0].reason.as_deref(),
+        Some("typing_failed")
+    );
+}
+
+#[tokio::test]
+async fn enter_that_fails_is_stored_as_failed_and_never_typed_again() {
+    let store = TestStore::new().await;
+    let fake = Fake::at(DAY, "09:00:00");
+    fake.set(|state| state.fail_enter = true);
+    let mut prompts = prompts(&fake, &store, &[entry("digest", "09:00")]);
+
+    assert_eq!(
+        prompts.round().await,
+        [Report::Failed {
+            name: "digest".into(),
+            pane: "%2".into(),
+            error: "enter refused".into(),
+        }]
+    );
+    assert_eq!(fake.keys(), [Key::Text("%2".into(), "digest".into())]);
+    assert_eq!(
+        handled(&store).await,
+        [TimedPromptHandled {
+            name: "digest".into(),
+            day: DAY.into(),
+            outcome: TimedPromptOutcome::Failed,
+            reason: None,
+            pane_id: Some("%2".into()),
+        }]
+    );
+
+    fake.set(|state| state.fail_enter = false);
+    fake.clock(DAY, "09:00:05");
+    assert!(prompts.round().await.is_empty());
+    assert_eq!(fake.keys().len(), 1);
+    assert_eq!(handled(&store).await.len(), 1);
+}
+
+#[tokio::test]
+async fn prompt_is_not_typed_again_when_its_event_cannot_be_stored() {
+    let store = TestStore::new().await;
+    let fake = Fake::at(DAY, "09:00:00");
+    let mut prompts = prompts(&fake, &store, &[entry("digest", "09:00")]);
+    store.store.fail_next_monitor_append_for_test();
+
+    let reports = prompts.round().await;
+
+    assert_eq!(reports.len(), 2, "{reports:?}");
+    assert!(matches!(reports[0], Report::Typed { .. }));
+    assert!(
+        matches!(&reports[1], Report::RecordFailed { name, .. } if name == "digest"),
+        "{reports:?}"
+    );
+    assert!(handled(&store).await.is_empty());
+
+    fake.clock(DAY, "09:00:05");
+    assert!(prompts.round().await.is_empty());
+    assert_eq!(fake.keys(), digest_keys());
+}
+
+#[tokio::test]
+async fn two_entries_for_one_folder_and_time_are_typed_in_list_order() {
+    let store = TestStore::new().await;
+    let fake = Fake::at(DAY, "09:00:00");
+    let second = TimedPromptSettings {
+        text: "second text".into(),
+        ..entry("second", "09:00")
+    };
+    let mut prompts = prompts(&fake, &store, &[entry("first", "09:00"), second]);
+
+    let reports = prompts.round().await;
+    assert_eq!(reports.len(), 2, "{reports:?}");
+    assert!(matches!(&reports[0], Report::Typed { name, .. } if name == "first"));
+    assert_eq!(reports[1], delayed("second", Reason::AgentBusy));
+    assert_eq!(fake.keys(), digest_keys());
+
+    // The agent is working on the first text.
+    fake.set(|state| state.view.panes[0].state = EffectiveAgentState::Busy);
+    fake.clock(DAY, "09:00:05");
+    assert!(prompts.round().await.is_empty());
+    assert_eq!(fake.keys().len(), 2);
+
+    fake.set(|state| state.view.panes[0].state = EffectiveAgentState::Idle);
+    fake.clock(DAY, "09:03:00");
+    let reports = prompts.round().await;
+    assert!(matches!(&reports[..], [Report::Typed { name, .. }] if name == "second"));
+    assert_eq!(
+        fake.keys()[2..],
+        [
+            Key::Text("%2".into(), "second text".into()),
+            Key::Enter("%2".into())
+        ]
+    );
+}
+
+#[tokio::test]
+async fn empty_list_does_nothing() {
+    let store = TestStore::new().await;
+    let fake = Fake::at(DAY, "09:00:00");
+    let mut prompts = prompts(&fake, &store, &[]);
+
+    assert!(prompts.is_empty());
+    assert!(prompts.round().await.is_empty());
+    assert_eq!(fake.now_reads(), 0);
+}
+
+#[tokio::test]
+async fn unreadable_clock_is_reported_once_and_nothing_is_typed() {
+    let store = TestStore::new().await;
+    let fake = Fake::at(DAY, "09:00:00");
+    fake.set(|state| state.now = None);
+    let mut prompts = prompts(&fake, &store, &[entry("digest", "09:00")]);
+
+    assert_eq!(prompts.round().await, [Report::ClockUnreadable]);
+    assert!(prompts.round().await.is_empty());
+    assert!(fake.keys().is_empty());
+
+    fake.clock(DAY, "09:00:10");
+    assert_eq!(prompts.round().await.len(), 1);
+    fake.set(|state| state.now = None);
+    assert_eq!(prompts.round().await, [Report::ClockUnreadable]);
+}
+
+#[tokio::test]
+async fn no_report_carries_the_text() {
+    let store = TestStore::new().await;
+    let fake = Fake::at(DAY, "09:00:00");
+    let secret = TimedPromptSettings {
+        text: "SENTINEL-TEXT".into(),
+        ..entry("digest", "09:00")
+    };
+    let never_typed = TimedPromptSettings {
+        text: "SENTINEL-TEXT".into(),
+        ..entry("later", "09:00")
+    };
+    let mut prompts = prompts(&fake, &store, &[secret, never_typed]);
+
+    let mut reports = prompts.round().await;
+    fake.clock(DAY, "11:00:00");
+    reports.extend(prompts.round().await);
+
+    assert_eq!(reports.len(), 3, "{reports:?}");
+    assert!(!format!("{reports:?}").contains("SENTINEL-TEXT"));
+    assert!(!format!("{:?}", handled(&store).await).contains("SENTINEL-TEXT"));
 }

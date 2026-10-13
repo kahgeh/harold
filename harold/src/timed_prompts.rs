@@ -7,9 +7,16 @@
     reason = "wired into the daemon in the last timed-prompts code task"
 )]
 
+use std::collections::HashMap;
+use std::future::Future;
+use std::sync::Arc;
+
+use tracing::{error, info, warn};
+
 use crate::agent::domain::{AgentSnapshot, EffectiveAgentState};
 use crate::outbound::left_out::same_folder;
-use crate::settings::{AgentProviderSettings, ScreenAdapter};
+use crate::settings::{AgentProviderSettings, ScreenAdapter, TimedPromptSettings, minute_of_day};
+use crate::store::{self, HaroldStore, TimedPromptHandled, TimedPromptOutcome};
 
 const SECONDS_IN_A_DAY: u32 = 86_400;
 
@@ -275,6 +282,339 @@ pub(crate) fn box_reason(screen: Option<&str>) -> Option<Reason> {
         None | Some(InputBox::NotFound) => Some(Reason::InputBoxNotFound),
         Some(InputBox::HoldsText) => Some(Reason::InputBoxHoldsText),
         Some(InputBox::Empty) => None,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The ports
+// ---------------------------------------------------------------------------
+
+/// Everything a round reads or does outside this module. The daemon's implementation is
+/// `TmuxPorts`; the tests use a fake.
+pub(crate) trait Ports: Send + Sync + 'static {
+    /// The Mac's local date and time, or `None` when it cannot be read.
+    fn now(&self) -> impl Future<Output = Option<LocalNow>> + Send;
+
+    /// The agent panes Harold tracks now.
+    fn agents(&self) -> AgentsView;
+
+    /// A fresh read of the pane's visible screen, or `None` when the read fails or takes
+    /// more than 2 seconds.
+    fn read_screen(&self, pane_id: &str) -> impl Future<Output = Option<String>> + Send;
+
+    /// Types `text` into the pane as literal keys, without Enter.
+    fn type_text(
+        &self,
+        pane_id: &str,
+        text: &str,
+    ) -> impl Future<Output = Result<(), String>> + Send;
+
+    /// Sends Enter to the pane.
+    fn press_enter(&self, pane_id: &str) -> impl Future<Output = Result<(), String>> + Send;
+}
+
+// ---------------------------------------------------------------------------
+// Reports
+// ---------------------------------------------------------------------------
+
+/// One thing a round has to say. `log_report` writes each as a log line; none carries a
+/// prompt's text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Report {
+    Typed {
+        name: String,
+        pane: String,
+        /// Seconds after the prompt's time.
+        late_s: u32,
+    },
+    /// The prompt is waiting, and for a reason other than the last one reported.
+    Delayed {
+        name: String,
+        reason: Reason,
+    },
+    Skipped {
+        name: String,
+        reason: Reason,
+    },
+    /// The text was typed and Enter failed.
+    Failed {
+        name: String,
+        pane: String,
+        error: String,
+    },
+    /// The local time could not be read, so this round did nothing.
+    ClockUnreadable,
+    /// The event for a handled prompt could not be stored.
+    RecordFailed {
+        name: String,
+        error: String,
+    },
+}
+
+pub(crate) fn log_report(report: &Report) {
+    match report {
+        Report::Typed { name, pane, late_s } => {
+            info!(name = %name, pane = %pane, late_s, "timed prompt typed");
+        }
+        Report::Delayed {
+            name,
+            reason: reason @ Reason::SeveralAgentsInFolder { agents },
+        } => {
+            info!(name = %name, reason = reason.as_str(), agents, "timed prompt delayed");
+        }
+        Report::Delayed { name, reason } => {
+            info!(name = %name, reason = reason.as_str(), "timed prompt delayed");
+        }
+        Report::Skipped { name, reason } => {
+            warn!(name = %name, reason = reason.as_str(), "timed prompt skipped");
+        }
+        Report::Failed { name, pane, error } => {
+            warn!(name = %name, pane = %pane, error = %error, "timed prompt failed");
+        }
+        Report::ClockUnreadable => {
+            warn!("timed prompts cannot read the local time from /bin/date");
+        }
+        Report::RecordFailed { name, error } => {
+            error!(name = %name, error = %error, "timed prompt record not stored");
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The round
+// ---------------------------------------------------------------------------
+
+struct Prompt {
+    name: String,
+    window: Window,
+    folder: String,
+    text: String,
+}
+
+/// A prompt that was due and not typed, and the reason last reported for it.
+struct Waiting {
+    day: String,
+    reason: Reason,
+}
+
+/// What the task remembers about one prompt between rounds.
+struct Progress {
+    /// The last local date the prompt was typed, skipped or failed on.
+    handled_day: Option<String>,
+    waiting: Option<Waiting>,
+}
+
+/// How one try at a due prompt ended.
+enum Attempt {
+    Wait(Reason),
+    Typed { pane: String },
+    EnterFailed { pane: String, error: String },
+}
+
+/// The configured prompts and what has become of each.
+pub(crate) struct TimedPrompts<P> {
+    prompts: Vec<(Prompt, Progress)>,
+    ports: P,
+    store: Arc<HaroldStore>,
+    clock_unreadable: bool,
+}
+
+impl<P: Ports> TimedPrompts<P> {
+    /// `settings` has passed `Settings::validate`. `last_days` is the last date each
+    /// prompt was handled on, from `HaroldStore::timed_prompt_last_days`.
+    pub(crate) fn new(
+        settings: &[TimedPromptSettings],
+        last_days: &HashMap<String, String>,
+        ports: P,
+        store: Arc<HaroldStore>,
+    ) -> Self {
+        let prompts = settings
+            .iter()
+            .filter_map(|entry| {
+                let at_minute = minute_of_day(&entry.at)?;
+                let give_up_after_minutes = u32::try_from(entry.give_up_after_minutes).ok()?;
+                let prompt = Prompt {
+                    name: entry.name.clone(),
+                    window: Window::new(at_minute, give_up_after_minutes),
+                    folder: entry.folder.clone(),
+                    text: entry.text.clone(),
+                };
+                let progress = Progress {
+                    handled_day: last_days.get(&entry.name).cloned(),
+                    waiting: None,
+                };
+                Some((prompt, progress))
+            })
+            .collect();
+        Self {
+            prompts,
+            ports,
+            store,
+            clock_unreadable: false,
+        }
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.prompts.is_empty()
+    }
+
+    /// One pass over the prompts, in the order of the configuration list. Returns what
+    /// there is to log.
+    pub(crate) async fn round(&mut self) -> Vec<Report> {
+        let mut reports = Vec::new();
+        if self.prompts.is_empty() {
+            return reports;
+        }
+        let Some(now) = self.ports.now().await else {
+            if !std::mem::replace(&mut self.clock_unreadable, true) {
+                reports.push(Report::ClockUnreadable);
+            }
+            return reports;
+        };
+        self.clock_unreadable = false;
+        let view = self.ports.agents();
+        // The panes typed into this round. See `pick_pane`.
+        let mut typed_into: Vec<String> = Vec::new();
+        let ports = &self.ports;
+        let store: &HaroldStore = &self.store;
+
+        for (prompt, progress) in self.prompts.iter_mut() {
+            // Still waiting from an earlier date: that date's window ran to midnight, so
+            // it never had a moment on its own date when it had ended.
+            if let Some(waiting) = progress.waiting.take_if(|waiting| waiting.day != now.day) {
+                reports.push(Report::Skipped {
+                    name: prompt.name.clone(),
+                    reason: waiting.reason.clone(),
+                });
+                let event = TimedPromptHandled {
+                    name: prompt.name.clone(),
+                    day: waiting.day.clone(),
+                    outcome: TimedPromptOutcome::Skipped,
+                    reason: Some(waiting.reason.as_str().to_string()),
+                    pane_id: None,
+                };
+                record(store, event, &mut reports).await;
+                progress.handled_day = Some(waiting.day);
+            }
+            if progress.handled_day.as_deref() == Some(now.day.as_str()) {
+                continue;
+            }
+            match prompt.window.phase(now.seconds_of_day) {
+                Phase::Before => {}
+                Phase::Ended => {
+                    let reason = progress
+                        .waiting
+                        .take()
+                        .map_or(Reason::WindowPassed, |waiting| waiting.reason);
+                    reports.push(Report::Skipped {
+                        name: prompt.name.clone(),
+                        reason: reason.clone(),
+                    });
+                    let event = TimedPromptHandled {
+                        name: prompt.name.clone(),
+                        day: now.day.clone(),
+                        outcome: TimedPromptOutcome::Skipped,
+                        reason: Some(reason.as_str().to_string()),
+                        pane_id: None,
+                    };
+                    record(store, event, &mut reports).await;
+                    progress.handled_day = Some(now.day.clone());
+                }
+                Phase::Due => match attempt(ports, prompt, &view, &typed_into).await {
+                    Attempt::Wait(reason) => {
+                        let already_reported = progress
+                            .waiting
+                            .as_ref()
+                            .is_some_and(|waiting| waiting.reason.as_str() == reason.as_str());
+                        if !already_reported {
+                            reports.push(Report::Delayed {
+                                name: prompt.name.clone(),
+                                reason: reason.clone(),
+                            });
+                        }
+                        progress.waiting = Some(Waiting {
+                            day: now.day.clone(),
+                            reason,
+                        });
+                    }
+                    Attempt::Typed { pane } => {
+                        reports.push(Report::Typed {
+                            name: prompt.name.clone(),
+                            pane: pane.clone(),
+                            late_s: now.seconds_of_day - prompt.window.at_s,
+                        });
+                        let event = TimedPromptHandled {
+                            name: prompt.name.clone(),
+                            day: now.day.clone(),
+                            outcome: TimedPromptOutcome::Typed,
+                            reason: None,
+                            pane_id: Some(pane.clone()),
+                        };
+                        record(store, event, &mut reports).await;
+                        progress.handled_day = Some(now.day.clone());
+                        progress.waiting = None;
+                        typed_into.push(pane);
+                    }
+                    Attempt::EnterFailed { pane, error } => {
+                        reports.push(Report::Failed {
+                            name: prompt.name.clone(),
+                            pane: pane.clone(),
+                            error,
+                        });
+                        let event = TimedPromptHandled {
+                            name: prompt.name.clone(),
+                            day: now.day.clone(),
+                            outcome: TimedPromptOutcome::Failed,
+                            reason: None,
+                            pane_id: Some(pane.clone()),
+                        };
+                        record(store, event, &mut reports).await;
+                        // Not retried: the text is in the box, and typing it again would
+                        // put it there twice.
+                        progress.handled_day = Some(now.day.clone());
+                        progress.waiting = None;
+                        typed_into.push(pane);
+                    }
+                },
+            }
+        }
+        reports
+    }
+}
+
+/// Runs the seven checks for a due prompt and types it when all pass.
+async fn attempt<P: Ports>(
+    ports: &P,
+    prompt: &Prompt,
+    view: &AgentsView,
+    typed_into: &[String],
+) -> Attempt {
+    let pane = match pick_pane(view, &prompt.folder, typed_into) {
+        Ok(pane) => pane.pane_id.clone(),
+        Err(reason) => return Attempt::Wait(reason),
+    };
+    let screen = ports.read_screen(&pane).await;
+    if let Some(reason) = box_reason(screen.as_deref()) {
+        return Attempt::Wait(reason);
+    }
+    // Nothing is in the box yet, so a failure here is safe to try again next round.
+    if ports.type_text(&pane, &prompt.text).await.is_err() {
+        return Attempt::Wait(Reason::TypingFailed);
+    }
+    match ports.press_enter(&pane).await {
+        Ok(()) => Attempt::Typed { pane },
+        Err(error) => Attempt::EnterFailed { pane, error },
+    }
+}
+
+/// Appends the event. When that fails the round still counts the prompt as handled, so
+/// it is not typed again while Harold keeps running.
+async fn record(store: &HaroldStore, event: TimedPromptHandled, reports: &mut Vec<Report>) {
+    if let Err(error) = store::append_timed_prompt_handled(store, &event).await {
+        reports.push(Report::RecordFailed {
+            name: event.name,
+            error: error.to_string(),
+        });
     }
 }
 
