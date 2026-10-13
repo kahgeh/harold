@@ -47,7 +47,9 @@ Every 5 seconds Harold reads the Mac's local date and time. A prompt is due when
 - the local time is before the end of its window, which is `at` plus `give_up_after_minutes`, or midnight if that comes first;
 - Harold has no record of handling it on this local date.
 
-Harold compares the clock with `at` each time and counts nothing, so sleep, a restart and a clock change need no special handling. A Mac that wakes at 09:40 finds a 09:00 prompt still due. A Mac that wakes at 11:30 finds its window ended and skips it for the day.
+Harold compares the clock with `at` each time and counts nothing, so sleep and a clock change need no special handling. A Mac that wakes at 09:40 finds a 09:00 prompt still due. A Mac that wakes at 11:30 finds its window ended and skips it for the day.
+
+After a restart a prompt is still due by the same three rules, and the first check comes about 10 seconds after Harold starts. A prompt due at the moment Harold starts is typed about 10 seconds later. Harold waits because the list of panes it starts with is the one from before it stopped. The wait gives the agent monitor time for two listings of the tmux panes and one pass over their screens. Its length is twice the sum of `inventory_interval_ms` and `inventory_timeout_ms`, plus `screen_interval_ms`, plus 2 seconds, with all three keys from `[agent_monitor]`: 10.5 seconds with the shipped settings. After that first check Harold checks every 5 seconds.
 
 ## The seven checks
 
@@ -67,7 +69,7 @@ When all seven pass, Harold types `text` into the pane as literal keys and then 
 
 Two more things make a prompt wait:
 
-- A pane Harold typed into counts as busy until Harold has seen its agent in a state other than idle or the pane is gone, for at most one minute. Two entries for one folder and one time are typed in list order, the second once the agent is idle again.
+- A pane Harold typed into counts as busy until Harold has seen its agent in a state other than idle or the pane is gone, for at most the next 12 checks. When the agent never leaves idle, a second text can go into the pane about 65 seconds after the first at the earliest. Two entries for one folder and one time are typed in list order, the second once the agent is idle again.
 - If typing the text fails, nothing is recorded and Harold tries again 5 seconds later. The reason logged is `typing_failed`.
 
 If the text is typed and Enter fails, Harold records the prompt as failed and does not try again that day. Trying again would put the text in the box twice.
