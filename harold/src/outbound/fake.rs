@@ -2,9 +2,11 @@
 //! moves, a screen lock and tmux answers the test sets, and sends that are recorded
 //! instead of made. `CapturedLogs` collects the log lines a test writes.
 
+use std::cell::RefCell;
 use std::io::Write;
+use std::marker::PhantomData;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Mutex, Once};
 use std::time::{Duration, Instant};
 
 use super::{DeliveryOutcome, NotifyEnvironment, OutboundChannel};
@@ -162,11 +164,22 @@ impl NotifyEnvironment for FakeEnvironment {
     }
 }
 
-struct CapturedLogWriter(Arc<Mutex<Vec<u8>>>);
+thread_local! {
+    /// The lines captured on this thread. `Some` while a `CapturedLogs` is alive on it.
+    static CAPTURED: RefCell<Option<Vec<u8>>> = const { RefCell::new(None) };
+}
+
+/// Appends to the current thread's capture, and discards what is written while the thread
+/// has none.
+struct CapturedLogWriter;
 
 impl Write for CapturedLogWriter {
     fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().unwrap().extend(buffer);
+        CAPTURED.with(|captured| {
+            if let Some(bytes) = captured.borrow_mut().as_mut() {
+                bytes.extend(buffer);
+            }
+        });
         Ok(buffer.len())
     }
 
@@ -175,31 +188,52 @@ impl Write for CapturedLogWriter {
     }
 }
 
+/// Installs the test binary's one log subscriber, once. Every thread writes through it,
+/// and `CapturedLogWriter` keeps only the lines of a thread that is capturing.
+fn install_capturing_subscriber() {
+    static INSTALLED: Once = Once::new();
+    INSTALLED.call_once(|| {
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(|| CapturedLogWriter)
+            .finish();
+        tracing::subscriber::set_global_default(subscriber)
+            .expect("no other process-wide log subscriber is set in the test binary");
+    });
+}
+
 /// The log lines written on the current thread from `start` until this is dropped. Code
 /// that runs on another thread, such as a `spawn_blocking` task, is not captured.
+///
+/// All captures share one process-wide subscriber. A subscriber for each capture, set for
+/// its thread alone, raced with the other test threads setting and dropping theirs, and
+/// now and then a line was not written.
 pub(crate) struct CapturedLogs {
-    bytes: Arc<Mutex<Vec<u8>>>,
-    _subscriber: tracing::subscriber::DefaultGuard,
+    /// Keeps this on the thread whose lines it holds: a raw pointer is not `Send`.
+    _on_this_thread: PhantomData<*const ()>,
 }
 
 impl CapturedLogs {
     pub(crate) fn start() -> Self {
-        let bytes = Arc::new(Mutex::new(Vec::new()));
-        let writer = Arc::clone(&bytes);
-        let subscriber = tracing_subscriber::fmt()
-            .without_time()
-            .with_ansi(false)
-            .with_writer(move || CapturedLogWriter(Arc::clone(&writer)))
-            .finish();
+        install_capturing_subscriber();
+        CAPTURED.with(|captured| *captured.borrow_mut() = Some(Vec::new()));
         Self {
-            bytes,
-            _subscriber: tracing::subscriber::set_default(subscriber),
+            _on_this_thread: PhantomData,
         }
     }
 
     /// Everything logged so far, one line for each event: the level, the module, the
     /// message and then the fields, as in `INFO harold::outbound: text pane_id=%2`.
     pub(crate) fn text(&self) -> String {
-        String::from_utf8_lossy(&self.bytes.lock().unwrap()).into_owned()
+        CAPTURED.with(|captured| {
+            String::from_utf8_lossy(captured.borrow().as_deref().unwrap_or_default()).into_owned()
+        })
+    }
+}
+
+impl Drop for CapturedLogs {
+    fn drop(&mut self) {
+        CAPTURED.with(|captured| *captured.borrow_mut() = None);
     }
 }
