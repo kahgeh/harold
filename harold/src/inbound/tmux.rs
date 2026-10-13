@@ -83,30 +83,58 @@ pub(crate) fn strip_control(text: &str) -> String {
 // tmux relay
 // ---------------------------------------------------------------------------
 
-pub(crate) fn relay_to_tmux_pane(pane_id: &str, text: &str) -> Result<(), String> {
-    info!(pane_id, text, "relay_to_tmux_pane");
+const TMUX: &str = "tmux";
+
+fn literal_text_args<'a>(pane_id: &'a str, text: &'a str) -> [&'a str; 5] {
+    ["send-keys", "-t", pane_id, "-l", text]
+}
+
+fn enter_args(pane_id: &str) -> [&str; 4] {
+    ["send-keys", "-t", pane_id, "Enter"]
+}
+
+fn type_text_with(program: &str, pane_id: &str, text: &str) -> Result<(), String> {
     let safe = strip_control(text);
-    let literal_status = Command::new("tmux")
-        .args(["send-keys", "-t", pane_id, "-l", &safe])
+    let status = Command::new(program)
+        .args(literal_text_args(pane_id, &safe))
         .status()
         .map_err(|error| format!("failed to start tmux send-keys for {pane_id}: {error}"))?;
-    if !literal_status.success() {
+    if !status.success() {
         return Err(format!(
-            "tmux send-keys text failed for {pane_id}: {literal_status}"
+            "tmux send-keys text failed for {pane_id}: {status}"
         ));
     }
+    Ok(())
+}
 
-    let enter_status = Command::new("tmux")
-        .args(["send-keys", "-t", pane_id, "Enter"])
+fn press_enter_with(program: &str, pane_id: &str) -> Result<(), String> {
+    let status = Command::new(program)
+        .args(enter_args(pane_id))
         .status()
         .map_err(|error| format!("failed to start tmux Enter for {pane_id}: {error}"))?;
-    if !enter_status.success() {
+    if !status.success() {
         return Err(format!(
-            "tmux send-keys Enter failed for {pane_id}: {enter_status}"
+            "tmux send-keys Enter failed for {pane_id}: {status}"
         ));
     }
-
     Ok(())
+}
+
+/// Types `text` into the pane as literal keys, without Enter. Writes no log line: the
+/// caller decides whether the text may be logged.
+pub(crate) fn type_text_into_tmux_pane(pane_id: &str, text: &str) -> Result<(), String> {
+    type_text_with(TMUX, pane_id, text)
+}
+
+/// Sends Enter to the pane.
+pub(crate) fn press_enter_in_tmux_pane(pane_id: &str) -> Result<(), String> {
+    press_enter_with(TMUX, pane_id)
+}
+
+pub(crate) fn relay_to_tmux_pane(pane_id: &str, text: &str) -> Result<(), String> {
+    info!(pane_id, text, "relay_to_tmux_pane");
+    type_text_into_tmux_pane(pane_id, text)?;
+    press_enter_in_tmux_pane(pane_id)
 }
 
 #[cfg(test)]

@@ -65,3 +65,47 @@ fn inventory_observation_sanitizes_and_bounds_inbound_pane_label() {
     assert!(!address.label().chars().any(char::is_control));
     assert!(!format!("{address:?}").contains(sentinel));
 }
+
+#[test]
+fn typing_sends_the_text_as_literal_keys_and_enter_as_a_key_name() {
+    assert_eq!(
+        literal_text_args("%7", "digest"),
+        ["send-keys", "-t", "%7", "-l", "digest"]
+    );
+    assert_eq!(enter_args("%7"), ["send-keys", "-t", "%7", "Enter"]);
+}
+
+#[test]
+fn each_typing_step_succeeds_when_its_command_does() {
+    assert_eq!(type_text_with("/usr/bin/true", "%7", "digest"), Ok(()));
+    assert_eq!(press_enter_with("/usr/bin/true", "%7"), Ok(()));
+}
+
+#[test]
+fn each_typing_step_reports_its_own_failure() {
+    let text = type_text_with("/usr/bin/false", "%7", "digest").unwrap_err();
+    assert!(
+        text.starts_with("tmux send-keys text failed for %7: "),
+        "{text}"
+    );
+    let enter = press_enter_with("/usr/bin/false", "%7").unwrap_err();
+    assert!(
+        enter.starts_with("tmux send-keys Enter failed for %7: "),
+        "{enter}"
+    );
+}
+
+#[test]
+fn each_typing_step_reports_a_command_that_cannot_start() {
+    let missing = "/nonexistent/harold-test-tmux";
+    let text = type_text_with(missing, "%7", "digest").unwrap_err();
+    assert!(
+        text.starts_with("failed to start tmux send-keys for %7: "),
+        "{text}"
+    );
+    let enter = press_enter_with(missing, "%7").unwrap_err();
+    assert!(
+        enter.starts_with("failed to start tmux Enter for %7: "),
+        "{enter}"
+    );
+}
