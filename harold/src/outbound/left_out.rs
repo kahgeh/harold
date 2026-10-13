@@ -1,7 +1,8 @@
-//! The decisions behind the two rules that leave a turn-end update out of the away
-//! device. Rule A: the pane sent a message with `harold send-message-to-away-device`
-//! this turn. Rule B: `[notify] away_messages_only_from` names a folder with an agent
-//! running in it, and the pane is outside that folder.
+//! The decisions behind the two rules that keep a message off the away device. Rule A: the
+//! pane sent a message with `harold send-message-to-away-device` this turn, so its
+//! turn-end update is left out. Rule B: `[notify] away_messages_only_from` names a folder
+//! with an agent running in it, and the pane is outside that folder, so its turn-end
+//! update is left out and its requested message is dropped.
 
 use std::time::{Duration, Instant};
 
@@ -43,8 +44,8 @@ pub(crate) struct TrackedAgents {
 
 impl TrackedAgents {
     /// The panes in `snapshot`. Empty while the monitor's last listing of tmux panes
-    /// failed: the snapshot then holds panes Harold saw earlier, and rule B leaves an
-    /// update out only for an agent Harold can see now.
+    /// failed: the snapshot then holds panes Harold saw earlier, and rule B acts only for
+    /// an agent Harold can see now.
     pub(crate) fn from_snapshot(snapshot: &AgentSnapshot) -> Self {
         let listing_failed = snapshot
             .monitor_health
@@ -90,19 +91,42 @@ impl TrackedAgents {
     }
 }
 
-/// Rule B. The log line for leaving out the update of `pane_id`, when all three hold:
-/// `update_folder` is set, a tracked agent pane is in it, and `pane_id` is not in it.
-pub(crate) fn only_from_reason(
-    update_folder: Option<&str>,
+/// Rule B's condition. The folder, as written in the setting, when all three hold:
+/// `only_from` is set, a tracked agent pane is in it, and `pane_id` is not in it.
+fn folder_pane_is_outside<'a>(
+    only_from: Option<&'a str>,
     agents: &TrackedAgents,
     pane_id: &str,
-) -> Option<String> {
-    let folder = update_folder?;
+) -> Option<&'a str> {
+    let folder = only_from?;
     if !agents.any_in(folder) || agents.pane_is_in(pane_id, folder) {
         return None;
     }
+    Some(folder)
+}
+
+/// Rule B for a turn-end update. The log line for leaving out the update of `pane_id`.
+pub(crate) fn only_from_reason(
+    only_from: Option<&str>,
+    agents: &TrackedAgents,
+    pane_id: &str,
+) -> Option<String> {
+    let folder = folder_pane_is_outside(only_from, agents, pane_id)?;
     Some(format!(
         "notification skipped (updates come from {folder} only)"
+    ))
+}
+
+/// Rule B for a message a pane asked Harold to send. The log line for dropping the
+/// message of `pane_id`. The line never holds the message's text.
+pub(crate) fn message_dropped_reason(
+    only_from: Option<&str>,
+    agents: &TrackedAgents,
+    pane_id: &str,
+) -> Option<String> {
+    let folder = folder_pane_is_outside(only_from, agents, pane_id)?;
+    Some(format!(
+        "away message dropped (messages come from {folder} only)"
     ))
 }
 
@@ -110,14 +134,14 @@ pub(crate) fn only_from_reason(
 /// applies. Rule A is looked at first, so its line is the one written when both apply.
 pub(crate) fn left_out_reason(
     messaged_this_turn: bool,
-    update_folder: Option<&str>,
+    only_from: Option<&str>,
     agents: &TrackedAgents,
     pane_id: &str,
 ) -> Option<String> {
     if messaged_this_turn {
         return Some(MESSAGED_THIS_TURN.to_string());
     }
-    only_from_reason(update_folder, agents, pane_id)
+    only_from_reason(only_from, agents, pane_id)
 }
 
 #[cfg(test)]
@@ -126,7 +150,7 @@ mod tests {
 
     use super::{
         MARK_LIFETIME, MESSAGED_THIS_TURN, TrackedAgents, left_out_reason, mark_is_fresh,
-        only_from_reason, same_folder,
+        message_dropped_reason, only_from_reason, same_folder,
     };
 
     #[test]
@@ -239,5 +263,72 @@ mod tests {
         );
         assert_eq!(left_out_reason(false, Some(CHIEF), &agents, "%2"), reason());
         assert_eq!(left_out_reason(false, Some(CHIEF), &agents, "%1"), None);
+    }
+
+    fn dropped() -> Option<String> {
+        Some("away message dropped (messages come from /work/chief-of-pods only)".to_string())
+    }
+
+    #[test]
+    fn message_rule_does_nothing_without_the_setting() {
+        let agents = TrackedAgents::in_folders(&[("%1", CHIEF), ("%2", "/work/harold")]);
+        assert_eq!(message_dropped_reason(None, &agents, "%2"), None);
+    }
+
+    #[test]
+    fn message_from_outside_the_folder_is_dropped_while_an_agent_is_in_it() {
+        let agents = TrackedAgents::in_folders(&[("%1", CHIEF), ("%2", "/work/harold")]);
+        assert_eq!(
+            message_dropped_reason(Some(CHIEF), &agents, "%2"),
+            dropped()
+        );
+    }
+
+    #[test]
+    fn messages_from_panes_in_the_folder_are_never_dropped() {
+        let agents =
+            TrackedAgents::in_folders(&[("%1", CHIEF), ("%3", CHIEF), ("%2", "/work/harold")]);
+        assert_eq!(message_dropped_reason(Some(CHIEF), &agents, "%1"), None);
+        assert_eq!(message_dropped_reason(Some(CHIEF), &agents, "%3"), None);
+    }
+
+    #[test]
+    fn no_message_is_dropped_while_no_agent_is_in_the_folder() {
+        let agents = TrackedAgents::in_folders(&[("%2", "/work/harold")]);
+        assert_eq!(message_dropped_reason(Some(CHIEF), &agents, "%2"), None);
+        assert_eq!(
+            message_dropped_reason(Some(CHIEF), &TrackedAgents::default(), "%2"),
+            None
+        );
+    }
+
+    #[test]
+    fn message_from_a_subfolder_is_dropped() {
+        let agents = TrackedAgents::in_folders(&[("%1", CHIEF), ("%2", "/work/chief-of-pods/sub")]);
+        assert_eq!(
+            message_dropped_reason(Some(CHIEF), &agents, "%2"),
+            dropped()
+        );
+    }
+
+    #[test]
+    fn message_from_an_untracked_pane_is_dropped_while_an_agent_is_in_the_folder() {
+        let agents = TrackedAgents::in_folders(&[("%1", CHIEF)]);
+        assert_eq!(
+            message_dropped_reason(Some(CHIEF), &agents, "%9"),
+            dropped()
+        );
+    }
+
+    #[test]
+    fn message_rule_matches_a_setting_with_a_trailing_slash_and_logs_it_as_written() {
+        let agents = TrackedAgents::in_folders(&[("%1", CHIEF), ("%2", "/work/harold")]);
+        let setting = "/work/chief-of-pods/";
+
+        assert_eq!(message_dropped_reason(Some(setting), &agents, "%1"), None);
+        assert_eq!(
+            message_dropped_reason(Some(setting), &agents, "%2"),
+            Some("away message dropped (messages come from /work/chief-of-pods/ only)".to_string())
+        );
     }
 }

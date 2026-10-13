@@ -6,7 +6,7 @@ use tracing::{info, info_span, warn};
 
 use crate::agent::snapshot::AgentSnapshotHub;
 use crate::inbound::{AgentAddress, route_inbound_message};
-use crate::outbound::left_out::TrackedAgents;
+use crate::outbound::left_out::{TrackedAgents, message_dropped_reason};
 use crate::outbound::{DeliveryOutcome, NotifyEnvironment, NotifyState, SystemEnvironment, notify};
 use crate::store::{
     AwayMessageRequested, HaroldStore, InboundMessage, PendingDelivery, ProjectionBatch,
@@ -30,7 +30,7 @@ struct ProductionDispatcher {
     environment: Arc<dyn NotifyEnvironment>,
     notify_state: NotifyState,
     /// Where the tracked agent panes are read from. Without it no agent is seen, so the
-    /// update-folder rule leaves nothing out.
+    /// folder rule leaves no update out and drops no message.
     snapshots: Option<AgentSnapshotHub>,
 }
 
@@ -94,6 +94,16 @@ impl ProductionDispatcher {
             "AwayMessageRequested" => dispatch_away_message(
                 delivery,
                 messaging_paused,
+                |pane_id| {
+                    message_dropped_reason(
+                        self.environment
+                            .notify_settings()
+                            .away_messages_only_from
+                            .as_deref(),
+                        &self.tracked_agents(),
+                        pane_id,
+                    )
+                },
                 |message| self.environment.send_away_message(message),
                 |source| {
                     // The pane's mark: its turn-end update for this turn is left out.
@@ -118,11 +128,15 @@ fn route_message(
 }
 
 /// Send a stored agent message through `send`, then hand its pane to `record_source` as the
-/// one an untagged reply goes to. None of a notification's presence checks apply: the
-/// message is sent whether the screen is locked or not, and the voice mute does not cover it.
+/// one an untagged reply goes to. `drop_reason` is asked first, with the message's pane id:
+/// when it gives a log line, the message is dropped with that line and neither `send` nor
+/// `record_source` runs. None of a notification's presence checks apply: the message is
+/// sent, or dropped, whether the screen is locked or not, and the voice mute does not
+/// cover it.
 fn dispatch_away_message(
     delivery: &PendingDelivery,
     messaging_paused: bool,
+    drop_reason: impl FnOnce(&str) -> Option<String>,
     send: impl FnOnce(&AwayMessageRequested) -> Result<(), String>,
     record_source: impl FnOnce(AgentAddress),
 ) -> Result<DeliveryOutcome, DispatchError> {
@@ -136,6 +150,12 @@ fn dispatch_away_message(
         .map_err(|error| {
             DispatchError::Permanent(format!("invalid AwayMessageRequested payload: {error}"))
         })?;
+    // Asked on every try, so a message whose send failed earlier is dropped once the rule
+    // applies. The line names the pane and never holds the message's text.
+    if let Some(reason) = drop_reason(&message.pane_id) {
+        info!(pane_id = %message.pane_id, "{reason}");
+        return Ok(DeliveryOutcome::Skipped);
+    }
     send(&message).map_err(DispatchError::Retryable)?;
     record_source(AgentAddress::TmuxPane {
         pane_id: message.pane_id,

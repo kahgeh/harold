@@ -15,7 +15,7 @@ use crate::agent::domain::{
 };
 use crate::agent::snapshot::AgentSnapshotHub;
 use crate::inbound::AgentAddress;
-use crate::outbound::fake::FakeEnvironment;
+use crate::outbound::fake::{CapturedLogs, FakeEnvironment};
 use crate::outbound::{DeliveryOutcome, SystemEnvironment};
 use crate::store::{
     AwayMessageRequested, HaroldStore, InboundMessage, PendingDelivery, TurnCompleted,
@@ -554,6 +554,7 @@ fn away_message_is_sent_as_stored_and_then_its_pane_is_recorded() {
         let outcome = dispatch_away_message(
             &away_delivery(json!(pod_message(text))),
             false,
+            |_| None,
             |message| {
                 steps.lock().unwrap().push(format!("send {}", message.text));
                 assert_eq!(message, &pod_message(text));
@@ -581,6 +582,7 @@ fn failed_away_message_send_is_retryable_and_records_no_pane() {
     let outcome = dispatch_away_message(
         &away_delivery(json!(pod_message("Pod 3 is blocked"))),
         false,
+        |_| None,
         |_| Err("channel down".to_string()),
         |_| panic!("a failed send must not record its pane"),
     );
@@ -593,6 +595,7 @@ fn paused_away_message_is_skipped_without_sending() {
     let outcome = dispatch_away_message(
         &away_delivery(json!(pod_message("Pod 3 is blocked"))),
         true,
+        |_| panic!("a paused message must not be checked against the folder"),
         |_| panic!("a paused message must not be sent"),
         |_| panic!("a paused message must not record its pane"),
     );
@@ -605,6 +608,7 @@ fn malformed_away_message_payload_is_a_terminal_failure() {
     let outcome = dispatch_away_message(
         &away_delivery(json!({"pane_id": 7})),
         false,
+        |_| panic!("a malformed message must not be checked against the folder"),
         |_| panic!("a malformed message must not be sent"),
         |_| panic!("a malformed message must not record its pane"),
     );
@@ -612,6 +616,25 @@ fn malformed_away_message_payload_is_a_terminal_failure() {
     assert!(
         matches!(outcome, Err(DispatchError::Permanent(error)) if error.starts_with("invalid AwayMessageRequested payload"))
     );
+}
+
+#[test]
+fn away_message_the_drop_check_names_is_skipped_without_sending() {
+    let mut checked = None;
+
+    let outcome = dispatch_away_message(
+        &away_delivery(json!(pod_message("Pod 3 is blocked"))),
+        false,
+        |pane_id| {
+            checked = Some(pane_id.to_string());
+            Some("away message dropped (messages come from /work/chief-of-pods only)".to_string())
+        },
+        |_| panic!("a dropped message must not be sent"),
+        |_| panic!("a dropped message must not record its pane"),
+    );
+
+    assert!(matches!(outcome, Ok(DeliveryOutcome::Skipped)));
+    assert_eq!(checked.as_deref(), Some("%47"));
 }
 
 #[test]
@@ -640,6 +663,7 @@ impl DeliveryDispatcher for FlakyAwayDispatcher {
         dispatch_away_message(
             delivery,
             false,
+            |_| None,
             |message| {
                 if self
                     .fail_next
@@ -936,9 +960,10 @@ fn agent_observed(pane_id: &str, pid: u32, folder: &str) -> AgentEvent {
 }
 
 /// A store with `events` appended, a hub over it, and the daemon's dispatcher reading
-/// that hub with the screen locked and the update folder set to /work/chief-of-pods.
-async fn only_from_chief(
+/// that hub with the screen locked and `overrides` (TOML) laid over the default settings.
+async fn dispatcher_over(
     directory: &TestDirectory,
+    overrides: &str,
     events: Vec<AgentEvent>,
 ) -> (
     HaroldStore,
@@ -949,12 +974,25 @@ async fn only_from_chief(
     let store = HaroldStore::open(&directory.0).await.unwrap();
     append_agent_events(&store, events).await.unwrap();
     let snapshots = AgentSnapshotHub::new(store.load_agent_snapshot().await.unwrap());
-    let environment = Arc::new(FakeEnvironment::locked(ONLY_FROM_CHIEF));
+    let environment = Arc::new(FakeEnvironment::locked(overrides));
     // Built the way `run_event_handler` builds it, so these tests cover the daemon's wiring
     // of the hub into the dispatcher.
     let dispatcher: Arc<dyn DeliveryDispatcher> =
         Arc::new(production_dispatcher(environment.clone(), &snapshots));
     (store, snapshots, environment, dispatcher)
+}
+
+/// As `dispatcher_over`, with the message folder set to /work/chief-of-pods.
+async fn only_from_chief(
+    directory: &TestDirectory,
+    events: Vec<AgentEvent>,
+) -> (
+    HaroldStore,
+    AgentSnapshotHub,
+    Arc<FakeEnvironment>,
+    Arc<dyn DeliveryDispatcher>,
+) {
+    dispatcher_over(directory, ONLY_FROM_CHIEF, events).await
 }
 
 /// Pane %1 runs an agent in the update folder, pane %2 runs one in another folder.
@@ -1022,28 +1060,6 @@ async fn two_agents_in_the_update_folder_both_send_their_updates() {
     drain(&store, &snapshots, &dispatcher).await;
 
     assert_eq!(environment.reply_targets(), ["%1", "%3"]);
-}
-
-#[tokio::test]
-async fn requested_message_from_outside_the_update_folder_is_sent() {
-    let directory = TestDirectory::new();
-    let (store, snapshots, environment, dispatcher) =
-        only_from_chief(&directory, chief_and_pod()).await;
-    append_away_message_requested(
-        &store,
-        &AwayMessageRequested {
-            pane_id: "%2".into(),
-            pane_label: "work:0.20".into(),
-            text: "Pod 3 is blocked".into(),
-        },
-    )
-    .await
-    .unwrap();
-
-    drain(&store, &snapshots, &dispatcher).await;
-
-    assert_eq!(environment.away_messages(), ["Pod 3 is blocked"]);
-    assert_eq!(environment.reply_targets(), ["%2"]);
 }
 
 #[tokio::test]
@@ -1131,4 +1147,322 @@ async fn agent_that_starts_in_the_update_folder_is_seen_by_the_next_update() {
     drain(&store, &snapshots, &dispatcher).await;
 
     assert!(environment.delivered().is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// Rule B for requested messages: a pane outside the folder has its message dropped
+// ---------------------------------------------------------------------------
+
+fn message_from(pane_id: &str, text: &str) -> AwayMessageRequested {
+    AwayMessageRequested {
+        pane_id: pane_id.into(),
+        pane_label: format!("work:{pane_id}"),
+        text: text.into(),
+    }
+}
+
+async fn request_message(store: &HaroldStore, pane_id: &str, text: &str) {
+    append_away_message_requested(store, &message_from(pane_id, text))
+        .await
+        .unwrap();
+}
+
+fn chief_departed() -> AgentEvent {
+    AgentEvent::PaneDeparted(AgentPaneDeparted {
+        incarnation: incarnation("%1", 10),
+        observed_at_ms: 200,
+    })
+}
+
+#[tokio::test]
+async fn requested_message_from_outside_the_folder_is_dropped() {
+    let directory = TestDirectory::new();
+    let (store, snapshots, environment, dispatcher) =
+        only_from_chief(&directory, chief_and_pod()).await;
+    request_message(&store, "%2", "Pod 3 is blocked").await;
+
+    drain(&store, &snapshots, &dispatcher).await;
+
+    assert!(environment.away_messages().is_empty());
+    assert!(environment.reply_targets().is_empty());
+    assert!(store.next_pending_delivery().await.unwrap().is_none());
+
+    // The drop set no mark. Once the chief has gone the folder rule no longer applies,
+    // so only a mark could leave out the pane's turn-end update, and the update is sent.
+    append_agent_events(&store, vec![chief_departed()])
+        .await
+        .unwrap();
+    append_turn_completed(&store, &crate::outbound::fake::turn("%2", "build it"))
+        .await
+        .unwrap();
+
+    drain(&store, &snapshots, &dispatcher).await;
+
+    assert_eq!(environment.delivered().len(), 1);
+    assert_eq!(environment.reply_targets(), ["%2"]);
+    assert!(environment.away_messages().is_empty());
+}
+
+#[tokio::test]
+async fn requested_message_from_inside_the_folder_is_sent() {
+    let directory = TestDirectory::new();
+    let (store, snapshots, environment, dispatcher) =
+        only_from_chief(&directory, chief_and_pod()).await;
+    request_message(&store, "%1", "All pods are green").await;
+
+    drain(&store, &snapshots, &dispatcher).await;
+
+    assert_eq!(environment.away_messages(), ["All pods are green"]);
+    assert_eq!(environment.reply_targets(), ["%1"]);
+}
+
+#[tokio::test]
+async fn two_agents_in_the_folder_both_send_their_messages() {
+    let directory = TestDirectory::new();
+    let mut events = chief_and_pod();
+    events.push(agent_observed("%3", 30, "/work/chief-of-pods/"));
+    let (store, snapshots, environment, dispatcher) = only_from_chief(&directory, events).await;
+    request_message(&store, "%1", "first").await;
+    request_message(&store, "%3", "second").await;
+
+    drain(&store, &snapshots, &dispatcher).await;
+
+    assert_eq!(environment.away_messages(), ["first", "second"]);
+    assert_eq!(environment.reply_targets(), ["%1", "%3"]);
+}
+
+#[tokio::test]
+async fn requested_message_from_a_subfolder_is_dropped() {
+    let directory = TestDirectory::new();
+    let mut events = chief_and_pod();
+    events.push(agent_observed("%4", 40, "/work/chief-of-pods/sub"));
+    let (store, snapshots, environment, dispatcher) = only_from_chief(&directory, events).await;
+    request_message(&store, "%4", "Pod 3 is blocked").await;
+
+    drain(&store, &snapshots, &dispatcher).await;
+
+    assert!(environment.away_messages().is_empty());
+    assert!(store.next_pending_delivery().await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn requested_message_from_outside_the_folder_is_dropped_with_the_screen_unlocked() {
+    let directory = TestDirectory::new();
+    let (store, snapshots, environment, dispatcher) =
+        only_from_chief(&directory, chief_and_pod()).await;
+    environment.set_screen_locked(false);
+    request_message(&store, "%2", "Pod 3 is blocked").await;
+
+    drain(&store, &snapshots, &dispatcher).await;
+
+    assert!(environment.away_messages().is_empty());
+    assert!(environment.reply_targets().is_empty());
+    assert!(store.next_pending_delivery().await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn requested_message_is_sent_while_no_agent_is_in_the_folder() {
+    let directory = TestDirectory::new();
+    let (store, snapshots, environment, dispatcher) =
+        only_from_chief(&directory, vec![agent_observed("%2", 20, "/work/harold")]).await;
+    request_message(&store, "%2", "Pod 3 is blocked").await;
+
+    drain(&store, &snapshots, &dispatcher).await;
+
+    assert_eq!(environment.away_messages(), ["Pod 3 is blocked"]);
+    assert_eq!(environment.reply_targets(), ["%2"]);
+}
+
+#[tokio::test]
+async fn requested_message_is_sent_without_the_setting() {
+    let directory = TestDirectory::new();
+    let (store, snapshots, environment, dispatcher) =
+        dispatcher_over(&directory, "", chief_and_pod()).await;
+    request_message(&store, "%2", "Pod 3 is blocked").await;
+
+    drain(&store, &snapshots, &dispatcher).await;
+
+    assert_eq!(environment.away_messages(), ["Pod 3 is blocked"]);
+    assert_eq!(environment.reply_targets(), ["%2"]);
+}
+
+#[tokio::test]
+async fn requested_message_is_sent_while_harold_cannot_list_the_tmux_panes() {
+    let directory = TestDirectory::new();
+    let mut events = chief_and_pod();
+    events.push(AgentEvent::MonitorHealthChanged(
+        AgentMonitorHealthChanged {
+            component: "inventory".into(),
+            healthy: false,
+            reason_code: "timeout".into(),
+            observed_at_ms: 200,
+        },
+    ));
+    let (store, snapshots, environment, dispatcher) = only_from_chief(&directory, events).await;
+    request_message(&store, "%2", "Pod 3 is blocked").await;
+
+    drain(&store, &snapshots, &dispatcher).await;
+
+    assert_eq!(environment.away_messages(), ["Pod 3 is blocked"]);
+    assert_eq!(environment.reply_targets(), ["%2"]);
+}
+
+#[tokio::test]
+async fn message_whose_send_failed_is_dropped_once_an_agent_runs_in_the_folder() {
+    let directory = TestDirectory::new();
+    let (store, snapshots, environment, dispatcher) =
+        only_from_chief(&directory, vec![agent_observed("%2", 20, "/work/harold")]).await;
+    request_message(&store, "%2", "Pod 3 is blocked").await;
+
+    // No agent is in the folder, so the message is tried, and the send fails.
+    environment.set_fail_sends(true);
+    let error = handle_next_delivery_inner(&store, Arc::clone(&dispatcher), Some(&snapshots))
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("channel down"));
+    assert!(store.next_pending_delivery().await.unwrap().is_some());
+
+    // The chief starts and the channel works again: the next try drops the message.
+    environment.set_fail_sends(false);
+    append_agent_events(
+        &store,
+        vec![agent_observed("%1", 10, "/work/chief-of-pods")],
+    )
+    .await
+    .unwrap();
+
+    drain(&store, &snapshots, &dispatcher).await;
+
+    assert!(environment.away_messages().is_empty());
+    assert!(environment.reply_targets().is_empty());
+    assert!(store.next_pending_delivery().await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn message_stored_while_the_chief_ran_is_sent_once_the_chief_has_exited() {
+    let directory = TestDirectory::new();
+    let (store, snapshots, environment, dispatcher) =
+        only_from_chief(&directory, chief_and_pod()).await;
+    request_message(&store, "%2", "Pod 3 is blocked").await;
+    // The chief exits before the handler comes to the message.
+    append_agent_events(&store, vec![chief_departed()])
+        .await
+        .unwrap();
+
+    drain(&store, &snapshots, &dispatcher).await;
+
+    assert_eq!(environment.away_messages(), ["Pod 3 is blocked"]);
+    assert_eq!(environment.reply_targets(), ["%2"]);
+}
+
+/// The dispatcher of `only_from_chief` once a handler round has published pane %1 (in the
+/// folder) and pane %2 (outside it) to the hub. For tests that read the log: they call
+/// `dispatch` on the test thread, the only thread `CapturedLogs` sees.
+async fn chief_and_pod_published(
+    directory: &TestDirectory,
+) -> (Arc<FakeEnvironment>, Arc<dyn DeliveryDispatcher>) {
+    let (store, snapshots, environment, dispatcher) =
+        only_from_chief(directory, chief_and_pod()).await;
+    drain(&store, &snapshots, &dispatcher).await;
+    (environment, dispatcher)
+}
+
+#[tokio::test]
+async fn dropped_message_is_logged_with_its_pane_and_without_its_text() {
+    let directory = TestDirectory::new();
+    let (environment, dispatcher) = chief_and_pod_published(&directory).await;
+    let logs = CapturedLogs::start();
+
+    let outcome = dispatcher.dispatch(&away_delivery(json!(message_from(
+        "%2",
+        "Pod 3 is blocked"
+    ))));
+
+    assert!(matches!(outcome, Ok(DeliveryOutcome::Skipped)));
+    assert!(environment.away_messages().is_empty());
+    let text = logs.text();
+    assert!(
+        text.contains(
+            "away message dropped (messages come from /work/chief-of-pods only) pane_id=%2"
+        ),
+        "{text}"
+    );
+    assert!(!text.contains("Pod 3 is blocked"), "{text}");
+}
+
+#[tokio::test]
+async fn update_after_a_dropped_message_is_left_out_by_the_folder_rule_not_the_mark() {
+    let directory = TestDirectory::new();
+    let (environment, dispatcher) = chief_and_pod_published(&directory).await;
+    let logs = CapturedLogs::start();
+
+    let dropped = dispatcher.dispatch(&away_delivery(json!(message_from(
+        "%2",
+        "Pod 3 is blocked"
+    ))));
+    let update = dispatcher.dispatch(&turn_delivery("%2", "build it"));
+
+    assert!(matches!(dropped, Ok(DeliveryOutcome::Skipped)));
+    assert!(matches!(update, Ok(DeliveryOutcome::Skipped)));
+    assert!(environment.delivered().is_empty());
+    assert!(environment.reply_targets().is_empty());
+    let text = logs.text();
+    assert!(
+        text.contains(
+            "notification skipped (updates come from /work/chief-of-pods only) pane_id=%2"
+        ),
+        "{text}"
+    );
+    assert!(
+        !text.contains("pane messaged the phone this turn"),
+        "{text}"
+    );
+}
+
+#[tokio::test]
+async fn paused_message_from_outside_the_folder_is_skipped_by_the_pause() {
+    let directory = TestDirectory::new();
+    let (environment, dispatcher) = chief_and_pod_published(&directory).await;
+    let logs = CapturedLogs::start();
+
+    crate::outbound::set_messaging_paused(true);
+    let outcome = dispatcher.dispatch(&away_delivery(json!(message_from(
+        "%2",
+        "Pod 3 is blocked"
+    ))));
+    crate::outbound::set_messaging_paused(false);
+
+    assert!(matches!(outcome, Ok(DeliveryOutcome::Skipped)));
+    assert!(environment.away_messages().is_empty());
+    let text = logs.text();
+    assert!(
+        text.contains("away message skipped (messaging paused)"),
+        "{text}"
+    );
+    assert!(!text.contains("away message dropped"), "{text}");
+}
+
+#[tokio::test]
+async fn agent_in_the_folder_that_sent_a_message_gets_no_update_for_that_turn() {
+    let directory = TestDirectory::new();
+    let (environment, dispatcher) = chief_and_pod_published(&directory).await;
+    let logs = CapturedLogs::start();
+
+    let sent = dispatcher.dispatch(&away_delivery(json!(message_from(
+        "%1",
+        "All pods are green"
+    ))));
+    let update = dispatcher.dispatch(&turn_delivery("%1", "watch the pods"));
+
+    assert!(matches!(sent, Ok(DeliveryOutcome::Delivered)));
+    assert!(matches!(update, Ok(DeliveryOutcome::Skipped)));
+    assert_eq!(environment.away_messages(), ["All pods are green"]);
+    assert!(environment.delivered().is_empty());
+    assert_eq!(environment.reply_targets(), ["%1"]);
+    let text = logs.text();
+    assert!(
+        text.contains("notification skipped (pane messaged the phone this turn) pane_id=%1"),
+        "{text}"
+    );
+    assert!(!text.contains("away message dropped"), "{text}");
 }
