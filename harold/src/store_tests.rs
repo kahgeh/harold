@@ -12,8 +12,9 @@ use crate::agent::domain::{
 };
 
 use super::{
-    HaroldStore, InboundMessage, TurnCompleted, append_agent_events, append_inbound_message,
-    append_messaging_paused_changed, append_tts_mute_changed, append_turn_completed,
+    HaroldStore, InboundMessage, TimedPromptHandled, TimedPromptOutcome, TurnCompleted,
+    append_agent_events, append_inbound_message, append_messaging_paused_changed,
+    append_timed_prompt_handled, append_tts_mute_changed, append_turn_completed,
 };
 
 struct TestDirectory(PathBuf);
@@ -1289,4 +1290,158 @@ fn the_store_takes_both_windows_from_the_monitor_settings() {
 
     assert_eq!(graces.hook_ms, 1_234);
     assert_eq!(graces.report_ms, 56_789);
+}
+
+fn timed_prompt_typed(name: &str, day: &str) -> TimedPromptHandled {
+    TimedPromptHandled {
+        name: name.into(),
+        day: day.into(),
+        outcome: TimedPromptOutcome::Typed,
+        reason: None,
+        pane_id: Some("%2".into()),
+    }
+}
+
+#[tokio::test]
+async fn timed_prompt_event_is_stored_with_the_payload_the_spec_gives() {
+    let directory = TestDirectory::new();
+    let store = HaroldStore::open(directory.path()).await.unwrap();
+
+    append_timed_prompt_handled(&store, &timed_prompt_typed("digest", "2026-10-14"))
+        .await
+        .unwrap();
+    append_timed_prompt_handled(
+        &store,
+        &TimedPromptHandled {
+            name: "digest".into(),
+            day: "2026-10-15".into(),
+            outcome: TimedPromptOutcome::Skipped,
+            reason: Some("agent_busy".into()),
+            pane_id: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    let events = store
+        .stream()
+        .load_after_version(EventStreamVersion::start(), 10)
+        .await
+        .unwrap();
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0].r#type.as_str(), "TimedPromptHandled");
+    assert_eq!(
+        events[0].payload,
+        json!({"name": "digest", "day": "2026-10-14", "outcome": "typed", "reason": null, "pane_id": "%2"})
+    );
+    assert_eq!(
+        events[1].payload,
+        json!({"name": "digest", "day": "2026-10-15", "outcome": "skipped", "reason": "agent_busy", "pane_id": null})
+    );
+    assert_eq!(
+        serde_json::to_value(TimedPromptOutcome::Failed).unwrap(),
+        json!("failed")
+    );
+}
+
+#[tokio::test]
+async fn timed_prompt_event_is_projected_into_one_row_for_each_name_and_creates_no_delivery() {
+    let directory = TestDirectory::new();
+    let store = HaroldStore::open(directory.path()).await.unwrap();
+    assert!(store.timed_prompt_last_days().await.unwrap().is_empty());
+
+    append_timed_prompt_handled(&store, &timed_prompt_typed("digest", "2026-10-14"))
+        .await
+        .unwrap();
+    append_timed_prompt_handled(&store, &timed_prompt_typed("stand-up", "2026-10-14"))
+        .await
+        .unwrap();
+    append_timed_prompt_handled(&store, &timed_prompt_typed("digest", "2026-10-15"))
+        .await
+        .unwrap();
+    // The mute setting shares the table and is not a timed prompt row.
+    append_tts_mute_changed(&store, true).await.unwrap();
+    let batch = store.project_unhandled_events(10).await.unwrap();
+
+    assert_eq!(batch.applied, 4);
+    let days = store.timed_prompt_last_days().await.unwrap();
+    assert_eq!(days.len(), 2, "{days:?}");
+    assert_eq!(days["digest"], "2026-10-15");
+    assert_eq!(days["stand-up"], "2026-10-14");
+    assert!(store.next_pending_delivery().await.unwrap().is_none());
+
+    drop(store);
+    let reopened = HaroldStore::open(directory.path()).await.unwrap();
+    assert_eq!(reopened.timed_prompt_last_days().await.unwrap(), days);
+}
+
+#[tokio::test]
+async fn replaying_the_stream_into_a_fresh_state_database_reproduces_the_timed_prompt_rows() {
+    let directory = TestDirectory::new();
+    let store = HaroldStore::open(directory.path()).await.unwrap();
+    append_timed_prompt_handled(&store, &timed_prompt_typed("digest", "2026-10-14"))
+        .await
+        .unwrap();
+    append_timed_prompt_handled(&store, &timed_prompt_typed("stand-up", "2026-10-15"))
+        .await
+        .unwrap();
+    store.project_unhandled_events(10).await.unwrap();
+    let projected = store.timed_prompt_last_days().await.unwrap();
+    assert_eq!(projected.len(), 2);
+    drop(store);
+
+    for suffix in ["", "-shm", "-wal"] {
+        let path = directory.path().join(format!("harold-state.db{suffix}"));
+        if path.exists() {
+            std::fs::remove_file(path).unwrap();
+        }
+    }
+    let replayed = HaroldStore::open(directory.path()).await.unwrap();
+    assert!(replayed.timed_prompt_last_days().await.unwrap().is_empty());
+    replayed.project_unhandled_events(500).await.unwrap();
+    assert_eq!(replayed.timed_prompt_last_days().await.unwrap(), projected);
+}
+
+#[tokio::test]
+async fn timed_prompt_event_with_an_unreadable_payload_does_not_block_later_events() {
+    let directory = TestDirectory::new();
+    let store = HaroldStore::open(directory.path()).await.unwrap();
+    store
+        .stream()
+        .append(
+            ExpectedVersion::Any,
+            [NewEvent {
+                r#type: "TimedPromptHandled".into(),
+                payload: json!({"name": 7}),
+                workflow_kind: None,
+                workflow: WorkflowRef::None,
+                request_id: None,
+                actor_id: "system:harold".into(),
+                actor_type: ActorType::System,
+            }],
+        )
+        .await
+        .unwrap();
+    append_timed_prompt_handled(&store, &timed_prompt_typed("digest", "2026-10-14"))
+        .await
+        .unwrap();
+
+    let batch = store.project_unhandled_events(10).await.unwrap();
+
+    assert_eq!(batch.applied, 2);
+    let days = store.timed_prompt_last_days().await.unwrap();
+    assert_eq!(days.len(), 1);
+    assert_eq!(days["digest"], "2026-10-14");
+    assert!(store.next_pending_delivery().await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn timed_prompt_append_fails_once_when_the_test_asks_for_it() {
+    let directory = TestDirectory::new();
+    let store = HaroldStore::open(directory.path()).await.unwrap();
+    store.fail_next_monitor_append_for_test();
+
+    let event = timed_prompt_typed("digest", "2026-10-14");
+    assert!(append_timed_prompt_handled(&store, &event).await.is_err());
+    assert!(append_timed_prompt_handled(&store, &event).await.is_ok());
 }

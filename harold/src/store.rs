@@ -63,6 +63,36 @@ pub struct AwayMessageRequested {
     pub text: String,
 }
 
+/// How one timed prompt ended on one local date.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum TimedPromptOutcome {
+    /// The text and Enter were typed.
+    Typed,
+    /// The window ended and nothing was typed.
+    Skipped,
+    /// The text was typed and Enter failed.
+    Failed,
+}
+
+/// What became of one timed prompt on one local date. The projection keeps the date, so
+/// a prompt is not typed twice on one date across restarts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct TimedPromptHandled {
+    /// The entry's `name`.
+    pub name: String,
+    /// The local date, such as `2026-10-14`.
+    pub day: String,
+    pub outcome: TimedPromptOutcome,
+    /// Why it was skipped; none for the other outcomes.
+    pub reason: Option<String>,
+    /// The pane typed into; none when skipped.
+    pub pane_id: Option<String>,
+}
+
+const TIMED_PROMPT_KEY_PREFIX: &str = "timed_prompt.";
+const TIMED_PROMPT_KEY_SUFFIX: &str = ".last_day";
+
 #[derive(Debug)]
 pub struct PendingDelivery {
     pub event_id: String,
@@ -252,6 +282,19 @@ impl HaroldStore {
                             .await?;
                         snapshot_changed = true;
                     }
+                    "TimedPromptHandled" => {
+                        // Only Harold writes this event. A payload it cannot read is passed
+                        // over, so it cannot block the events after it.
+                        if let Ok(handled) =
+                            serde_json::from_value::<TimedPromptHandled>(event.payload.clone())
+                        {
+                            let key = format!(
+                                "{TIMED_PROMPT_KEY_PREFIX}{}{TIMED_PROMPT_KEY_SUFFIX}",
+                                handled.name
+                            );
+                            upsert_text_setting(&conn, &key, &handled.day, event.version).await?;
+                        }
+                    }
                     _ => {
                         // Unknown stream facts stay visible to the existing permanent-delivery
                         // path; advancing without an outbox record would silently lose them.
@@ -319,6 +362,31 @@ impl HaroldStore {
         #[cfg(test)]
         pause_snapshot_read_after_query(&self.snapshot_read_gate).await;
         Ok(snapshot)
+    }
+
+    /// The local date each timed prompt was last handled on, by prompt name, as far as
+    /// the projection has read the stream.
+    #[allow(
+        dead_code,
+        reason = "read by the timed-prompt task, wired into the daemon in a later task"
+    )]
+    pub(crate) async fn timed_prompt_last_days(
+        &self,
+    ) -> events::Result<std::collections::HashMap<String, String>> {
+        let conn = self.state.connect()?;
+        let mut rows = conn.query("SELECT key, value FROM settings", ()).await?;
+        let mut days = std::collections::HashMap::new();
+        while let Some(row) = rows.next().await? {
+            let key = required_text(&row, 0)?;
+            let Some(name) = key
+                .strip_prefix(TIMED_PROMPT_KEY_PREFIX)
+                .and_then(|rest| rest.strip_suffix(TIMED_PROMPT_KEY_SUFFIX))
+            else {
+                continue;
+            };
+            days.insert(name.to_string(), required_text(&row, 1)?);
+        }
+        Ok(days)
     }
 
     #[cfg(test)]
@@ -1049,10 +1117,10 @@ async fn initialize_state_schema(conn: &turso::Connection) -> events::Result<()>
     Ok(())
 }
 
-async fn upsert_bool_setting(
+async fn upsert_text_setting(
     conn: &turso::Connection,
     key: &str,
-    value: bool,
+    value: &str,
     event_version: EventStreamVersion,
 ) -> events::Result<()> {
     conn.execute(
@@ -1063,14 +1131,20 @@ async fn upsert_bool_setting(
             value = excluded.value,
             last_event_version = excluded.last_event_version
         "#,
-        (
-            key,
-            if value { "true" } else { "false" },
-            event_version.get(),
-        ),
+        (key, value, event_version.get()),
     )
     .await?;
     Ok(())
+}
+
+async fn upsert_bool_setting(
+    conn: &turso::Connection,
+    key: &str,
+    value: bool,
+    event_version: EventStreamVersion,
+) -> events::Result<()> {
+    let value = if value { "true" } else { "false" };
+    upsert_text_setting(conn, key, value, event_version).await
 }
 
 async fn load_bool_setting(conn: &turso::Connection, key: &str) -> events::Result<bool> {
@@ -1248,6 +1322,34 @@ pub async fn append_away_message_requested(
             ExpectedVersion::Any,
             [NewEvent {
                 r#type: "AwayMessageRequested".into(),
+                payload: json!(event),
+                workflow_kind: None,
+                workflow: WorkflowRef::None,
+                request_id: None,
+                actor_id: "system:harold".into(),
+                actor_type: ActorType::System,
+            }],
+        )
+        .await?;
+    Ok(())
+}
+
+#[allow(
+    dead_code,
+    reason = "called by the timed-prompt task, wired into the daemon in a later task"
+)]
+pub(crate) async fn append_timed_prompt_handled(
+    store: &HaroldStore,
+    event: &TimedPromptHandled,
+) -> events::Result<()> {
+    // The tests' switch for a failing append, shared with the monitor's appends.
+    fail_monitor_append_for_test(store)?;
+    store
+        .stream
+        .append(
+            ExpectedVersion::Any,
+            [NewEvent {
+                r#type: "TimedPromptHandled".into(),
                 payload: json!(event),
                 workflow_kind: None,
                 workflow: WorkflowRef::None,
