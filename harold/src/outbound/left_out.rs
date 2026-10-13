@@ -1,6 +1,6 @@
 //! The decisions behind the two rules that leave a turn-end update out of the away
 //! device. Rule A: the pane sent a message with `harold send-message-to-away-device`
-//! this turn. Rule B: `[notify] away_updates_only_from` names a folder with an agent
+//! this turn. Rule B: `[notify] away_messages_only_from` names a folder with an agent
 //! running in it, and the pane is outside that folder.
 
 use std::time::{Duration, Instant};

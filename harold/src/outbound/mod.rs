@@ -350,7 +350,7 @@ pub(crate) fn notify(
     if screen_locked
         && let Some(reason) = left_out::left_out_reason(
             messaged_this_turn,
-            cfg.away_updates_only_from.as_deref(),
+            cfg.away_messages_only_from.as_deref(),
             agents,
             &turn.pane_id,
         )

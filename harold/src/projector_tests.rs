@@ -908,7 +908,7 @@ async fn update_waits_behind_a_message_whose_send_fails_and_is_then_left_out() {
 // Rule B: the dispatcher reads the tracked agent panes from the snapshot hub
 // ---------------------------------------------------------------------------
 
-const ONLY_FROM_CHIEF: &str = "[notify]\naway_updates_only_from = \"/work/chief-of-pods\"";
+const ONLY_FROM_CHIEF: &str = "[notify]\naway_messages_only_from = \"/work/chief-of-pods\"";
 
 fn incarnation(pane_id: &str, pid: u32) -> AgentIncarnation {
     AgentIncarnation {

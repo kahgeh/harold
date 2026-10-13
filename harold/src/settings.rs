@@ -352,10 +352,15 @@ pub struct NotifySettings {
     pub skip_if_session_active: bool,
     pub skip_if_pane_active: bool,
     pub away_channel: String,
-    /// The folder turn-end updates for the away device come from while an agent runs in
-    /// it. An absolute path, compared as text with a pane's working directory.
+    /// The folder messages for the away device come from while an agent runs in it:
+    /// turn-end updates and the messages agents ask Harold to send. An absolute path,
+    /// compared as text with a pane's working directory.
     #[serde(default)]
-    pub away_updates_only_from: Option<String>,
+    pub away_messages_only_from: Option<String>,
+    /// The name `away_messages_only_from` had while it covered turn-end updates only.
+    /// Read only so that `validate` can report it.
+    #[serde(default)]
+    away_updates_only_from: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -443,14 +448,24 @@ fn machine_name_error(name: &str) -> Option<String> {
     ))
 }
 
-fn away_updates_only_from_error(folder: Option<&str>) -> Option<String> {
+fn away_messages_only_from_error(folder: Option<&str>) -> Option<String> {
     let folder = folder?;
     if folder.starts_with('/') {
         return None;
     }
     Some(format!(
-        "notify.away_updates_only_from must be an absolute path starting with \"/\", got \"{folder}\""
+        "notify.away_messages_only_from must be an absolute path starting with \"/\", got \"{folder}\""
     ))
+}
+
+/// The error for a configuration that still has the key's old name, whatever its value
+/// and whether or not the new key is there as well.
+fn away_updates_only_from_error(old_key: Option<&str>) -> Option<String> {
+    old_key?;
+    Some(
+        "notify.away_updates_only_from is now notify.away_messages_only_from; rename the key"
+            .to_string(),
+    )
 }
 
 /// What is wrong with the `machines` list, one error for each problem. An empty list is
@@ -703,6 +718,9 @@ impl Settings {
         ));
         errors.extend(self.agents.validate(&self.agent_monitor));
         errors.extend(self.activity_summary.validate());
+        errors.extend(away_messages_only_from_error(
+            self.notify.away_messages_only_from.as_deref(),
+        ));
         errors.extend(away_updates_only_from_error(
             self.notify.away_updates_only_from.as_deref(),
         ));
@@ -1149,41 +1167,45 @@ mod tests {
             .expect("default configuration with overrides should deserialize")
     }
 
-    /// The errors `validate()` reports about the update folder for the default
-    /// configuration with `overrides` laid over it.
-    fn update_folder_errors(overrides: &str) -> Vec<String> {
+    /// The errors `validate()` reports about the message folder, under its new key or
+    /// its old one, for the default configuration with `overrides` laid over it.
+    fn message_folder_errors(overrides: &str) -> Vec<String> {
         default_settings_with(overrides)
             .validate()
             .into_iter()
-            .filter(|error| error.starts_with("notify.away_updates_only_from "))
+            .filter(|error| error.starts_with("notify.away_"))
+            .filter(|error| !error.starts_with("notify.away_channel"))
             .collect()
     }
 
+    const OLD_KEY_ERROR: &str =
+        "notify.away_updates_only_from is now notify.away_messages_only_from; rename the key";
+
     #[test]
-    fn update_folder_is_optional_and_read_as_written() {
+    fn message_folder_is_optional_and_read_as_written() {
         assert_eq!(
-            default_settings_with("").notify.away_updates_only_from,
+            default_settings_with("").notify.away_messages_only_from,
             None
         );
         let settings =
-            default_settings_with("[notify]\naway_updates_only_from = \"/work/chief-of-pods/\"");
+            default_settings_with("[notify]\naway_messages_only_from = \"/work/chief-of-pods/\"");
         assert_eq!(
-            settings.notify.away_updates_only_from.as_deref(),
+            settings.notify.away_messages_only_from.as_deref(),
             Some("/work/chief-of-pods/")
         );
     }
 
     #[test]
-    fn validate_accepts_no_update_folder_or_an_absolute_one() {
-        assert!(update_folder_errors("").is_empty());
+    fn validate_accepts_no_message_folder_or_an_absolute_one() {
+        assert!(message_folder_errors("").is_empty());
         for folder in ["/work/chief-of-pods", "/work/chief-of-pods/", "/"] {
-            let overrides = format!("[notify]\naway_updates_only_from = \"{folder}\"");
-            assert!(update_folder_errors(&overrides).is_empty(), "{folder:?}");
+            let overrides = format!("[notify]\naway_messages_only_from = \"{folder}\"");
+            assert!(message_folder_errors(&overrides).is_empty(), "{folder:?}");
         }
     }
 
     #[test]
-    fn validate_reports_an_update_folder_that_is_not_an_absolute_path() {
+    fn validate_reports_a_message_folder_that_is_not_an_absolute_path() {
         for folder in [
             "",
             "chief-of-pods",
@@ -1192,15 +1214,49 @@ mod tests {
             " /work",
             "  ",
         ] {
-            let overrides = format!("[notify]\naway_updates_only_from = \"{folder}\"");
+            let overrides = format!("[notify]\naway_messages_only_from = \"{folder}\"");
             assert_eq!(
-                update_folder_errors(&overrides),
+                message_folder_errors(&overrides),
                 [format!(
-                    "notify.away_updates_only_from must be an absolute path starting with \"/\", got \"{folder}\""
+                    "notify.away_messages_only_from must be an absolute path starting with \"/\", got \"{folder}\""
                 )],
                 "{folder:?}"
             );
         }
+    }
+
+    #[test]
+    fn validate_reports_the_old_key_with_and_without_the_new_one() {
+        for overrides in [
+            "[notify]\naway_updates_only_from = \"/work/chief-of-pods\"",
+            "[notify]\naway_updates_only_from = \"\"",
+            "[notify]\naway_updates_only_from = \"/work/chief-of-pods\"\naway_messages_only_from = \"/work/chief-of-pods\"",
+        ] {
+            assert_eq!(
+                message_folder_errors(overrides),
+                [OLD_KEY_ERROR],
+                "{overrides}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_reports_the_old_key_and_an_invalid_new_key_together() {
+        let overrides = "[notify]\naway_updates_only_from = \"/work/chief-of-pods\"\naway_messages_only_from = \"chief-of-pods\"";
+        assert_eq!(
+            message_folder_errors(overrides),
+            [
+                "notify.away_messages_only_from must be an absolute path starting with \"/\", got \"chief-of-pods\"",
+                OLD_KEY_ERROR,
+            ]
+        );
+    }
+
+    #[test]
+    fn old_key_does_not_set_the_message_folder() {
+        let settings =
+            default_settings_with("[notify]\naway_updates_only_from = \"/work/chief-of-pods\"");
+        assert_eq!(settings.notify.away_messages_only_from, None);
     }
 
     #[test]

@@ -398,7 +398,7 @@ fn paused_update_is_skipped_as_before_and_removes_the_mark() {
 // Rule B: updates from one folder only
 // ---------------------------------------------------------------------------
 
-const ONLY_FROM_CHIEF: &str = "[notify]\naway_updates_only_from = \"/work/chief-of-pods\"";
+const ONLY_FROM_CHIEF: &str = "[notify]\naway_messages_only_from = \"/work/chief-of-pods\"";
 
 /// Pane %1 runs an agent in the update folder, pane %2 runs one in another folder.
 fn chief_and_pod() -> TrackedAgents {
