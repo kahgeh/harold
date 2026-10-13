@@ -60,6 +60,15 @@ command = "say"
 # away_channel = "telegram"      # "imessage" or "telegram"
 # away_updates_only_from = "/Users/you/Dev/chief-of-pods"  # while an agent runs in this folder, only its panes send turn-end updates to the phone
 
+# A text Harold types into an agent's pane at a set local time each day, only when the
+# agent is idle and its input box is empty. Claude Code agents only. One block for each.
+# [[timed_prompts]]
+# name = "digest"                              # letters, digits, "-" and "_"; names the prompt in the log
+# at = "09:00"                                 # local time, 24-hour HH:MM
+# folder = "/Users/you/Dev/chief-of-pods"      # the agent running in this folder gets the text
+# text = "digest"                              # typed exactly, then Enter
+# give_up_after_minutes = 120                  # how long after `at` Harold keeps trying; 1 to 1439
+
 # Several Macs on Telegram. One Mac, the hub, reads the bot's replies; the others are
 # members. Not used when away_channel = "imessage". Set [grpc] host on every Mac to its
 # Tailscale address so the Macs can call each other. The calls are plain HTTP.

@@ -565,6 +565,99 @@ fn default_machine_name() -> String {
     }
 }
 
+fn default_give_up_after_minutes() -> i64 {
+    120
+}
+
+/// One `[[timed_prompts]]` entry: a text Harold types into the pane of the agent running
+/// in `folder` at `at` each day. Every key defaults to empty when the entry is read, so
+/// `validate` reports a missing key by the entry's position like any other invalid value.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+pub(crate) struct TimedPromptSettings {
+    /// Names the prompt in the log and in the stored record.
+    #[serde(default)]
+    pub name: String,
+    /// Local time of day, `HH:MM`.
+    #[serde(default)]
+    pub at: String,
+    /// An absolute path, compared as text with a pane's working directory.
+    #[serde(default)]
+    pub folder: String,
+    /// What is typed, followed by Enter.
+    #[serde(default)]
+    pub text: String,
+    /// How long after `at` the prompt stays due.
+    #[serde(default = "default_give_up_after_minutes")]
+    pub give_up_after_minutes: i64,
+}
+
+/// The minute of the day a 24-hour `HH:MM` names, from 0 for `00:00` to 1439 for `23:59`.
+pub(crate) fn minute_of_day(at: &str) -> Option<u32> {
+    let bytes = at.as_bytes();
+    if bytes.len() != 5 || bytes[2] != b':' {
+        return None;
+    }
+    let two_digits = |pair: &[u8]| {
+        pair.iter()
+            .all(u8::is_ascii_digit)
+            .then(|| u32::from(pair[0] - b'0') * 10 + u32::from(pair[1] - b'0'))
+    };
+    let hours = two_digits(&bytes[..2])?;
+    let minutes = two_digits(&bytes[3..])?;
+    (hours <= 23 && minutes <= 59).then_some(hours * 60 + minutes)
+}
+
+/// What is wrong with the `timed_prompts` list, one error for each invalid value. Each
+/// error starts with the entry's position and the key.
+fn timed_prompts_errors(prompts: &[TimedPromptSettings]) -> Vec<String> {
+    let mut errors = Vec::new();
+    for (index, prompt) in prompts.iter().enumerate() {
+        let name = &prompt.name;
+        let name_is_valid = (1..=64).contains(&name.len())
+            && name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_');
+        let earlier = prompts[..index]
+            .iter()
+            .position(|earlier| earlier.name == *name);
+        if !name_is_valid {
+            errors.push(format!(
+                "timed_prompts[{index}].name must be 1 to 64 characters from letters, digits, \"-\" and \"_\", got \"{name}\""
+            ));
+        } else if let Some(earlier) = earlier {
+            errors.push(format!(
+                "timed_prompts[{index}].name \"{name}\" is already used by timed_prompts[{earlier}]"
+            ));
+        }
+        if minute_of_day(&prompt.at).is_none() {
+            errors.push(format!(
+                "timed_prompts[{index}].at must be a time of day \"HH:MM\" from 00:00 to 23:59, got \"{}\"",
+                prompt.at
+            ));
+        }
+        if !prompt.folder.starts_with('/') {
+            errors.push(format!(
+                "timed_prompts[{index}].folder must be an absolute path starting with \"/\", got \"{}\"",
+                prompt.folder
+            ));
+        }
+        // The error gives the length, not the text: the text never goes to a log.
+        let length = prompt.text.chars().count();
+        if !(1..=2_000).contains(&length) || prompt.text.chars().any(char::is_control) {
+            errors.push(format!(
+                "timed_prompts[{index}].text must be 1 to 2000 characters on one line with no control characters, got {length} characters"
+            ));
+        }
+        if !(1..=1439).contains(&prompt.give_up_after_minutes) {
+            errors.push(format!(
+                "timed_prompts[{index}].give_up_after_minutes must be from 1 to 1439, got {}",
+                prompt.give_up_after_minutes
+            ));
+        }
+    }
+    errors
+}
+
 #[derive(Debug, Deserialize)]
 pub struct Settings {
     /// Names this Mac in every message Harold sends and in reply tags.
@@ -593,6 +686,9 @@ pub struct Settings {
     /// The other Macs, for an away channel only one Mac can read.
     #[serde(default)]
     pub(crate) peers: PeersSettings,
+    /// Texts Harold types into an agent's pane at a set time each day.
+    #[serde(default)]
+    pub(crate) timed_prompts: Vec<TimedPromptSettings>,
 }
 
 impl Settings {
@@ -610,6 +706,7 @@ impl Settings {
         errors.extend(away_updates_only_from_error(
             self.notify.away_updates_only_from.as_deref(),
         ));
+        errors.extend(timed_prompts_errors(&self.timed_prompts));
         match self.notify.away_channel.as_str() {
             "imessage" => {
                 if self.imessage.recipient.is_none() {
@@ -1375,5 +1472,160 @@ mod tests {
         assert!(!hub.contains("s3cret"), "{hub}");
         assert!(!member.contains("s3cret"), "{member}");
         assert!(hub.contains("laptop.tailnet"), "{hub}");
+    }
+
+    /// The errors `validate()` reports about timed prompts for the default
+    /// configuration with `overrides` laid over it.
+    fn timed_prompt_errors(overrides: &str) -> Vec<String> {
+        default_settings_with(overrides)
+            .validate()
+            .into_iter()
+            .filter(|error| error.starts_with("timed_prompts["))
+            .collect()
+    }
+
+    /// One valid entry as TOML, with `key = value` replaced by `replacement`.
+    fn digest_entry_with(key: &str, replacement: &str) -> String {
+        let entry = [
+            ("name", "name = \"digest\""),
+            ("at", "at = \"09:00\""),
+            ("folder", "folder = \"/work/chief-of-pods\""),
+            ("text", "text = \"digest\""),
+        ]
+        .map(|(name, line)| if name == key { replacement } else { line })
+        .join("\n");
+        format!("[[timed_prompts]]\n{entry}\n")
+    }
+
+    #[test]
+    fn timed_prompts_default_to_an_empty_list_which_is_valid() {
+        assert!(default_settings_with("").timed_prompts.is_empty());
+        assert!(timed_prompt_errors("").is_empty());
+    }
+
+    #[test]
+    fn timed_prompt_entry_is_read_as_written_with_120_minutes_by_default() {
+        let settings = default_settings_with(&digest_entry_with("", ""));
+
+        assert_eq!(
+            settings.timed_prompts,
+            [super::TimedPromptSettings {
+                name: "digest".into(),
+                at: "09:00".into(),
+                folder: "/work/chief-of-pods".into(),
+                text: "digest".into(),
+                give_up_after_minutes: 120,
+            }]
+        );
+        assert!(timed_prompt_errors(&digest_entry_with("", "")).is_empty());
+
+        let own = format!("{}give_up_after_minutes = 30", digest_entry_with("", ""));
+        assert_eq!(
+            default_settings_with(&own).timed_prompts[0].give_up_after_minutes,
+            30
+        );
+    }
+
+    #[test]
+    fn minute_of_day_reads_only_a_24_hour_hh_mm() {
+        assert_eq!(super::minute_of_day("00:00"), Some(0));
+        assert_eq!(super::minute_of_day("09:00"), Some(540));
+        assert_eq!(super::minute_of_day("23:59"), Some(1439));
+        for at in [
+            "", "9am", "9:00", "24:00", "09:60", "09-00", "09:00:00", " 09:00", "0९:00",
+        ] {
+            assert_eq!(super::minute_of_day(at), None, "{at:?}");
+        }
+    }
+
+    #[test]
+    fn validate_reports_each_invalid_timed_prompt_value_by_position_and_key() {
+        let long_name = "n".repeat(65);
+        let long_text = "t".repeat(2_001);
+        let cases = [
+            ("name", "name = \"\"".to_string(), "timed_prompts[0].name must be 1 to 64 characters from letters, digits, \"-\" and \"_\", got \"\"".to_string()),
+            ("name", "name = \"daily digest\"".to_string(), "timed_prompts[0].name must be 1 to 64 characters from letters, digits, \"-\" and \"_\", got \"daily digest\"".to_string()),
+            ("name", format!("name = \"{long_name}\""), format!("timed_prompts[0].name must be 1 to 64 characters from letters, digits, \"-\" and \"_\", got \"{long_name}\"")),
+            ("at", "at = \"9am\"".to_string(), "timed_prompts[0].at must be a time of day \"HH:MM\" from 00:00 to 23:59, got \"9am\"".to_string()),
+            ("at", "at = \"24:00\"".to_string(), "timed_prompts[0].at must be a time of day \"HH:MM\" from 00:00 to 23:59, got \"24:00\"".to_string()),
+            ("folder", "folder = \"chief-of-pods\"".to_string(), "timed_prompts[0].folder must be an absolute path starting with \"/\", got \"chief-of-pods\"".to_string()),
+            ("folder", "folder = \"~/chief-of-pods\"".to_string(), "timed_prompts[0].folder must be an absolute path starting with \"/\", got \"~/chief-of-pods\"".to_string()),
+            ("text", "text = \"\"".to_string(), "timed_prompts[0].text must be 1 to 2000 characters on one line with no control characters, got 0 characters".to_string()),
+            ("text", format!("text = \"{long_text}\""), "timed_prompts[0].text must be 1 to 2000 characters on one line with no control characters, got 2001 characters".to_string()),
+            ("text", "text = \"two\\nlines\"".to_string(), "timed_prompts[0].text must be 1 to 2000 characters on one line with no control characters, got 9 characters".to_string()),
+            ("text", "text = \"bell\\u0007\"".to_string(), "timed_prompts[0].text must be 1 to 2000 characters on one line with no control characters, got 5 characters".to_string()),
+        ];
+        for (key, replacement, expected) in cases {
+            assert_eq!(
+                timed_prompt_errors(&digest_entry_with(key, &replacement)),
+                [expected],
+                "{replacement}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_accepts_the_longest_name_and_text_and_a_trailing_slash() {
+        let overrides = digest_entry_with("name", &format!("name = \"{}\"", "n".repeat(64)));
+        assert!(timed_prompt_errors(&overrides).is_empty());
+        let overrides = digest_entry_with("name", "name = \"Daily_digest-2\"");
+        assert!(timed_prompt_errors(&overrides).is_empty());
+        let overrides = digest_entry_with("text", &format!("text = \"{}\"", "t".repeat(2_000)));
+        assert!(timed_prompt_errors(&overrides).is_empty());
+        let overrides = digest_entry_with("folder", "folder = \"/work/chief-of-pods/\"");
+        assert!(timed_prompt_errors(&overrides).is_empty());
+    }
+
+    #[test]
+    fn validate_reports_give_up_after_minutes_outside_1_to_1439() {
+        for minutes in [0, -1, 1440] {
+            let overrides = format!(
+                "{}give_up_after_minutes = {minutes}",
+                digest_entry_with("", "")
+            );
+            assert_eq!(
+                timed_prompt_errors(&overrides),
+                [format!(
+                    "timed_prompts[0].give_up_after_minutes must be from 1 to 1439, got {minutes}"
+                )]
+            );
+        }
+        for minutes in [1, 1439] {
+            let overrides = format!(
+                "{}give_up_after_minutes = {minutes}",
+                digest_entry_with("", "")
+            );
+            assert!(timed_prompt_errors(&overrides).is_empty(), "{minutes}");
+        }
+    }
+
+    #[test]
+    fn validate_reports_two_timed_prompts_with_one_name() {
+        let overrides = format!(
+            "{}{}",
+            digest_entry_with("", ""),
+            digest_entry_with("at", "at = \"17:00\"")
+        );
+
+        assert_eq!(
+            timed_prompt_errors(&overrides),
+            ["timed_prompts[1].name \"digest\" is already used by timed_prompts[0]"]
+        );
+    }
+
+    #[test]
+    fn validate_reports_a_missing_key_by_position_and_key() {
+        let second_without_text = format!(
+            "{}{}",
+            digest_entry_with("", ""),
+            digest_entry_with("text", "").replace("name = \"digest\"", "name = \"evening\"")
+        );
+
+        assert_eq!(
+            timed_prompt_errors(&second_without_text),
+            [
+                "timed_prompts[1].text must be 1 to 2000 characters on one line with no control characters, got 0 characters"
+            ]
+        );
     }
 }

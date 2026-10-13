@@ -80,3 +80,6 @@ path = "~/.harold/events"
 skip_if_session_active = true
 skip_if_pane_active = false
 away_channel = "imessage"
+
+# Timed prompts: none by default. Add [[timed_prompts]] entries in local.toml.
+# See docs/references/timed-prompts/README.md.
