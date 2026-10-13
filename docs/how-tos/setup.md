@@ -72,16 +72,16 @@ The default layout is:
 
 Add `~/bin` to your shell's PATH if needed, or use the absolute commands below. The installer prints the service definition and installation paths. The service definition stays inside the installation rather than the auto-loaded LaunchAgents directory. A custom location can be selected with `--prefix /absolute/path/to/bin`.
 
-### Optional: updates from one agent only
+### Optional: messages from one agent only
 
-If one agent reports to your phone on behalf of the others, name the folder it runs in. While an agent is running there, only panes in that folder send a turn-end update when the screen is locked:
+If one agent reports to your phone on behalf of the others, name the folder it runs in. While an agent is running there, only panes in that folder send to your phone. For every other pane Harold leaves out the turn-end update it would send with the screen locked, and drops any message the pane's agent sends with `harold send-message-to-away-device`:
 
 ```toml
 [notify]
-away_updates_only_from = "/Users/you/Dev/chief-of-pods"
+away_messages_only_from = "/Users/you/Dev/chief-of-pods"
 ```
 
-The value is an absolute path. See [Updates Harold leaves out while you are away](../references/notification/README.md#updates-harold-leaves-out-while-you-are-away).
+The value is an absolute path. An agent whose message is dropped is not told: its command still exits 0. See [Updates Harold leaves out while you are away](../references/notification/README.md#updates-harold-leaves-out-while-you-are-away).
 
 ### Several Macs on iMessage
 

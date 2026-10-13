@@ -46,7 +46,7 @@ TurnCompleted event (pane_id from $TMUX_PANE in stop hook)
   │   ├─ no  → notify_at_desk()
   │   └─ yes → messaging paused? → skip (return)
   │           mark was under 10 minutes old? → leave out (return)
-  │           away_updates_only_from set, an agent in that folder,
+  │           away_messages_only_from set, an agent in that folder,
   │             and this pane outside it? → leave out (return)
   │           channels::notify_away() (iMessage or Telegram per config)
 ```
@@ -125,7 +125,7 @@ Config keys (`[telegram]`):
 
 ## Updates Harold leaves out while you are away
 
-With the screen locked, every agent's finished turn sends an update to the phone. Two rules leave an update out. Both apply only to an update that would go to the phone: the spoken update at the desk is given for every pane.
+With the screen locked, every agent's finished turn sends an update to the phone. Two rules leave an update out. Both leave out only an update that would go to the phone: the spoken update at the desk is given for every pane. The second rule also drops a message an agent asked Harold to send.
 
 ### After a message the agent sent itself
 
@@ -139,19 +139,32 @@ When one agent reports to the phone for the others, name the folder it runs in:
 
 ```toml
 [notify]
-away_updates_only_from = "/Users/you/Dev/chief-of-pods"
+away_messages_only_from = "/Users/you/Dev/chief-of-pods"
 ```
 
-While an agent Harold tracks is running in that folder, only panes in that folder send a turn-end update. Every other pane's update is left out with the log line `notification skipped (updates come from <folder> only)`. While no agent is running in the folder, every pane sends its update.
+While an agent Harold tracks is running in that folder, only panes in that folder send to the phone. The rule covers both kinds of message a pane sends:
+
+| Kind | From a pane in the folder | From a pane outside the folder | Log line for the pane outside |
+| --- | --- | --- | --- |
+| Turn-end update, with the screen locked | Sent | Left out | `notification skipped (updates come from <folder> only)` |
+| Message sent with `harold send-message-to-away-device`, with the screen locked or not | Sent | Dropped | `away message dropped (messages come from <folder> only)` |
+
+Harold writes each line at `INFO` with the pane in a `pane_id` field. `<folder>` is the setting as written. Neither line holds the text of a message. While no agent is running in the folder, every pane sends both kinds.
+
+The agent that sent a dropped message is not told. Its command prints nothing and exits 0, as it does when the message is sent: Harold stores the request first and drops it when it comes to send it. Nothing is sent later. The pane does not become the one an untagged reply goes to, and the drop does not set the record described in "After a message the agent sent itself". An agent that messages the phone and then waits for a reply waits without knowing none will come.
 
 | Key | Description |
 | --- | --- |
-| `away_updates_only_from` | Optional. An absolute path. Harold compares it as text with the working directory tmux reports for a pane (`pane_current_path`), ignoring one trailing `/`. It does not resolve symbolic links, and a subfolder counts as another folder. A value that is empty or does not start with `/` stops the daemon at start. |
+| `away_messages_only_from` | Optional. An absolute path. Harold compares it as text with the working directory tmux reports for a pane (`pane_current_path`), ignoring one trailing `/`. It does not resolve symbolic links, and a subfolder counts as another folder. A value that is empty or does not start with `/` stops the daemon at start. Harold reads it at start, so a change takes effect at the next restart. |
 
-- A message an agent sends with `harold send-message-to-away-device` is always sent, whichever folder the agent is in.
+The key was named `away_updates_only_from` while it covered turn-end updates only. Harold does not start with the old name in the configuration: it prints `notify.away_updates_only_from is now notify.away_messages_only_from; rename the key`.
+
 - The rule covers every turn of a pane outside the folder, including one you started in that pane yourself.
+- A pane the agent monitor has not listed yet counts as outside the folder.
+- A pane in the folder is never affected. After it sends a message of its own, its turn-end update for that turn is still left out by the first rule.
+- Harold's own answers to a reply from your phone, such as `🤖 ✓ Delivered to […]`, are still sent.
 - Each Mac's Harold checks its own panes. An agent in the folder on another Mac is not seen.
-- While the agent monitor cannot list tmux panes, the rule leaves nothing out.
+- While the agent monitor cannot list tmux panes, the rule leaves nothing out and drops nothing.
 
 ### What leaving an update out means
 
@@ -167,7 +180,7 @@ A notification is Harold's summary of a finished turn. An agent can also send th
 
 The phone shows `🤖 [<machine_name>/<pane_label>] Pod 3 is blocked on a merge conflict in store.rs`. A reply to it is routed like a reply to a notification: an untagged reply goes back to the pane that sent the message.
 
-The command calls the daemon's `SendMessageToAwayDevice` RPC and waits up to 3 seconds. The daemon makes the text one line, checks that it has 1 to 1,000 characters, that messaging is not paused and that the pane hosts an agent the monitor tracks, and then stores an `AwayMessageRequested` event. The command exits 0 once the event is stored, which is before the phone has the message. Otherwise it prints one line on standard error and exits 1. The event handler takes the event from the delivery outbox in stream-version order and sends it through the away channel.
+The command calls the daemon's `SendMessageToAwayDevice` RPC and waits up to 3 seconds. The daemon makes the text one line, checks that it has 1 to 1,000 characters, that messaging is not paused and that the pane hosts an agent the monitor tracks, and then stores an `AwayMessageRequested` event. The command exits 0 once the event is stored, which is before the phone has the message. Otherwise it prints one line on standard error and exits 1. The event handler takes the event from the delivery outbox in stream-version order and sends it through the away channel. Before it sends, the handler checks the messaging pause and then the folder rule in [From agents outside one folder](#from-agents-outside-one-folder). A message that rule drops is never sent, and its command has already exited 0.
 
 It differs from a turn-end notification in these ways:
 
@@ -177,6 +190,7 @@ It differs from a turn-end notification in these ways:
 | Text | Harold's summary of the agent's final reply, 280 characters at most | The agent's text as written, made one line, 1,000 characters at most |
 | Form | `🤖 [machine_name/pane_label] body (context)`, with a trailing question sent separately | `🤖 [machine_name/pane_label] text`, one message |
 | Presence checks | Sent to the phone only when the screen is locked; skipped when the session or pane is active; left out by the two rules in "Updates Harold leaves out while you are away" | None: sent whether the screen is locked or not |
+| Folder rule (`away_messages_only_from`) | Left out for a pane outside the folder, while the screen is locked | Dropped for a pane outside the folder, whether the screen is locked or not; the command still exits 0 |
 | Voice mute | Silences the at-desk path | Does not apply |
 | Duplicate checks | The 30-second window, and on iMessage the recent-outgoing check | None: the same text sent twice arrives twice |
 | Messaging pause | Recorded as an intentional skip | The command is refused with `messaging is paused`; a message already stored is skipped and not sent later |

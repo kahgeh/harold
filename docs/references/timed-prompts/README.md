@@ -4,7 +4,7 @@ A timed prompt is a text Harold types into an agent's pane at a set local time e
 
 ## Problem
 
-A scheduled job outside Harold can send a text to a pane at 09:00, but it cannot see the pane. It cannot tell whether the agent is in the middle of a turn, or whether you have half a sentence typed in the input box. A text sent then is added to the end of your sentence and submitted with it.
+A scheduled job outside Harold can send a text to a pane at 07:50, but it cannot see the pane. It cannot tell whether the agent is in the middle of a turn, or whether you have half a sentence typed in the input box. A text sent then is added to the end of your sentence and submitted with it.
 
 Harold already lists the tmux panes that run agents and knows for each whether its agent is busy or idle. A timed prompt uses that, and reads the pane's screen once more before typing.
 
@@ -15,7 +15,7 @@ Add one `[[timed_prompts]]` block to `local.toml` for each prompt. The list is e
 ```toml
 [[timed_prompts]]
 name = "digest"
-at = "09:00"
+at = "07:50"
 folder = "/Users/you/Dev/chief-of-pods"
 text = "digest"
 # give_up_after_minutes = 120
