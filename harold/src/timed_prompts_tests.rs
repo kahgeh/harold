@@ -1096,9 +1096,14 @@ async fn two_entries_for_one_folder_and_time_are_typed_in_list_order() {
     assert_eq!(reports[1], delayed("second", Reason::AgentBusy));
     assert_eq!(fake.keys(), digest_keys());
 
+    // The snapshot has not caught up: it still says idle on the next round.
+    fake.clock(DAY, "09:00:05");
+    assert!(prompts.round().await.is_empty());
+    assert_eq!(fake.keys().len(), 2);
+
     // The agent is working on the first text.
     fake.set(|state| state.view.panes[0].state = EffectiveAgentState::Busy);
-    fake.clock(DAY, "09:00:05");
+    fake.clock(DAY, "09:00:10");
     assert!(prompts.round().await.is_empty());
     assert_eq!(fake.keys().len(), 2);
 
@@ -1106,13 +1111,71 @@ async fn two_entries_for_one_folder_and_time_are_typed_in_list_order() {
     fake.clock(DAY, "09:03:00");
     let reports = prompts.round().await;
     assert!(matches!(&reports[..], [Report::Typed { name, .. }] if name == "second"));
-    assert_eq!(
-        fake.keys()[2..],
-        [
-            Key::Text("%2".into(), "second text".into()),
-            Key::Enter("%2".into())
-        ]
+    assert_eq!(fake.keys()[2..], second_keys());
+}
+
+fn second_keys() -> Vec<Key> {
+    vec![
+        Key::Text("%2".into(), "second text".into()),
+        Key::Enter("%2".into()),
+    ]
+}
+
+/// Two entries for the chief's folder, both at 09:00, after the round at 09:00:00 that
+/// types the first and reports the second as waiting with `agent_busy`.
+async fn first_of_two_typed(fake: &Fake, store: &TestStore) -> TimedPrompts<Fake> {
+    let second = TimedPromptSettings {
+        text: "second text".into(),
+        ..entry("second", "09:00")
+    };
+    let mut prompts = prompts(fake, store, &[entry("first", "09:00"), second]);
+    let reports = prompts.round().await;
+    assert_eq!(reports.len(), 2, "{reports:?}");
+    assert_eq!(reports[1], delayed("second", Reason::AgentBusy));
+    assert_eq!(fake.keys(), digest_keys());
+    prompts
+}
+
+#[tokio::test]
+async fn pane_typed_into_counts_as_busy_for_twelve_more_rounds_while_it_reads_idle() {
+    let store = TestStore::new().await;
+    let fake = Fake::at(DAY, "09:00:00");
+    let mut prompts = first_of_two_typed(&fake, &store).await;
+
+    for round in 1..=12 {
+        assert!(prompts.round().await.is_empty(), "round {round}");
+        assert_eq!(fake.keys(), digest_keys(), "round {round}");
+    }
+
+    let reports = prompts.round().await;
+    assert!(
+        matches!(&reports[..], [Report::Typed { name, .. }] if name == "second"),
+        "{reports:?}"
     );
+    assert_eq!(fake.keys()[2..], second_keys());
+}
+
+#[tokio::test]
+async fn pane_typed_into_that_goes_away_and_comes_back_idle_is_free_again() {
+    let store = TestStore::new().await;
+    let fake = Fake::at(DAY, "09:00:00");
+    let mut prompts = first_of_two_typed(&fake, &store).await;
+
+    assert!(prompts.round().await.is_empty());
+    fake.set(|state| state.view.panes.clear());
+    assert_eq!(
+        prompts.round().await,
+        [delayed("second", Reason::NoAgentInFolder)]
+    );
+    assert_eq!(fake.keys(), digest_keys());
+
+    fake.set(|state| state.view.panes.push(chief("%2")));
+    let reports = prompts.round().await;
+    assert!(
+        matches!(&reports[..], [Report::Typed { name, .. }] if name == "second"),
+        "{reports:?}"
+    );
+    assert_eq!(fake.keys()[2..], second_keys());
 }
 
 #[tokio::test]

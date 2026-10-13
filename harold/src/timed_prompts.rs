@@ -20,6 +20,10 @@ use crate::store::{self, HaroldStore, TimedPromptHandled, TimedPromptOutcome};
 
 const SECONDS_IN_A_DAY: u32 = 86_400;
 
+/// How many rounds after typing into a pane it still counts as busy when the snapshot
+/// has not yet shown it busy: 12 rounds of 5 seconds, one minute.
+const TYPED_PANE_HOLD_ROUNDS: u32 = 12;
+
 /// The monitor health component that reports whether the last listing of tmux panes
 /// worked (`set_health("inventory", ..)` in `agent/runtime.rs`).
 const INVENTORY_COMPONENT: &str = "inventory";
@@ -242,8 +246,10 @@ pub(crate) fn agents_view(
 }
 
 /// Checks 1 to 5: the pane a prompt for `folder` is typed into, or the reason of the
-/// first check that fails. A pane in `typed_into` was typed into earlier in this round
-/// and counts as busy: the snapshot still says idle for a moment after Harold types.
+/// first check that fails. A pane in `typed_into` counts as busy: Harold typed into it
+/// earlier in this round or in an earlier round, and the snapshot still says idle for a
+/// moment after Harold types. The round keeps a pane in `typed_into` until a round has
+/// seen it not idle, for at most a minute.
 pub(crate) fn pick_pane<'a>(
     view: &'a AgentsView,
     folder: &str,
@@ -404,6 +410,13 @@ struct Progress {
     waiting: Option<Waiting>,
 }
 
+/// A pane Harold typed into, which counts as busy until a round sees it not idle.
+struct TypedPane {
+    pane_id: String,
+    /// Rounds it still counts as busy for while the snapshot keeps saying idle.
+    rounds_left: u32,
+}
+
 /// How one try at a due prompt ended.
 enum Attempt {
     Wait(Reason),
@@ -417,6 +430,7 @@ pub(crate) struct TimedPrompts<P> {
     ports: P,
     store: Arc<HaroldStore>,
     clock_unreadable: bool,
+    typed_panes: Vec<TypedPane>,
 }
 
 impl<P: Ports> TimedPrompts<P> {
@@ -451,6 +465,7 @@ impl<P: Ports> TimedPrompts<P> {
             ports,
             store,
             clock_unreadable: false,
+            typed_panes: Vec::new(),
         }
     }
 
@@ -473,8 +488,24 @@ impl<P: Ports> TimedPrompts<P> {
         };
         self.clock_unreadable = false;
         let view = self.ports.agents();
-        // The panes typed into this round. See `pick_pane`.
-        let mut typed_into: Vec<String> = Vec::new();
+        // A pane typed into in an earlier round stops counting as busy once the snapshot
+        // has caught up or the pane is gone, and after `TYPED_PANE_HOLD_ROUNDS` rounds.
+        let typed_panes = &mut self.typed_panes;
+        typed_panes.retain_mut(|typed| {
+            let reads_idle = view.panes.iter().any(|pane| {
+                pane.pane_id == typed.pane_id && pane.state == EffectiveAgentState::Idle
+            });
+            if !reads_idle || typed.rounds_left == 0 {
+                return false;
+            }
+            typed.rounds_left -= 1;
+            true
+        });
+        // The panes that count as busy this round. See `pick_pane`.
+        let mut typed_into: Vec<String> = typed_panes
+            .iter()
+            .map(|typed| typed.pane_id.clone())
+            .collect();
         let ports = &self.ports;
         let store: &HaroldStore = &self.store;
 
@@ -553,6 +584,10 @@ impl<P: Ports> TimedPrompts<P> {
                         record(store, event, &mut reports).await;
                         progress.handled_day = Some(now.day.clone());
                         progress.waiting = None;
+                        typed_panes.push(TypedPane {
+                            pane_id: pane.clone(),
+                            rounds_left: TYPED_PANE_HOLD_ROUNDS,
+                        });
                         typed_into.push(pane);
                     }
                     Attempt::EnterFailed { pane, error } => {
@@ -573,6 +608,10 @@ impl<P: Ports> TimedPrompts<P> {
                         // put it there twice.
                         progress.handled_day = Some(now.day.clone());
                         progress.waiting = None;
+                        typed_panes.push(TypedPane {
+                            pane_id: pane.clone(),
+                            rounds_left: TYPED_PANE_HOLD_ROUNDS,
+                        });
                         typed_into.push(pane);
                     }
                 },
