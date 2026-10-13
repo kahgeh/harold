@@ -761,7 +761,7 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
         })
         .await;
 
-    // Wait for the handler and listener to stop before returning.
+    // Wait for the handler, the listener and the timed-prompt task to stop before returning.
     let _ = event_handler_handle.await;
     let _ = listener_handle.await;
     let _ = timed_prompts_handle.await;

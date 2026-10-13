@@ -18,7 +18,8 @@ use crate::agent::snapshot::AgentSnapshotHub;
 use crate::inbound::tmux::{press_enter_in_tmux_pane, type_text_into_tmux_pane};
 use crate::outbound::left_out::same_folder;
 use crate::settings::{
-    AgentProviderSettings, ScreenAdapter, Settings, TimedPromptSettings, minute_of_day,
+    AgentMonitorSettings, AgentProviderSettings, ScreenAdapter, Settings, TimedPromptSettings,
+    minute_of_day,
 };
 use crate::store::{self, HaroldStore, TimedPromptHandled, TimedPromptOutcome};
 
@@ -744,15 +745,24 @@ impl Ports for TmuxPorts {
 // The task
 // ---------------------------------------------------------------------------
 
-/// Runs a round when it starts and every `ROUND_INTERVAL` after, until shutdown. With no
-/// prompts it ends at once and logs nothing. Shutdown is looked at between rounds only:
-/// a round is never dropped between typing a text and pressing Enter.
-pub(crate) async fn run<P: Ports>(mut prompts: TimedPrompts<P>, mut shutdown: watch::Receiver<()>) {
+/// Runs the first round `first_round_after` after it starts and then a round every
+/// `ROUND_INTERVAL`, until shutdown. With no prompts it ends at once and logs nothing.
+/// Shutdown ends the wait for the first round at once. After that it is looked at between
+/// rounds only: a round is never dropped between typing a text and pressing Enter.
+pub(crate) async fn run<P: Ports>(
+    mut prompts: TimedPrompts<P>,
+    first_round_after: Duration,
+    mut shutdown: watch::Receiver<()>,
+) {
     if prompts.is_empty() {
         return;
     }
-    let mut ticker = tokio::time::interval(ROUND_INTERVAL);
-    // After the Mac wakes, one round runs; the rounds missed while asleep are not made up.
+    let mut ticker = tokio::time::interval_at(
+        tokio::time::Instant::now() + first_round_after,
+        ROUND_INTERVAL,
+    );
+    // A round that runs longer than `ROUND_INTERVAL` is not followed by a burst of rounds
+    // to make up for the ones it ran over.
     ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
     loop {
         tokio::select! {
@@ -764,6 +774,16 @@ pub(crate) async fn run<P: Ports>(mut prompts: TimedPrompts<P>, mut shutdown: wa
             log_report(&report);
         }
     }
+}
+
+/// How long after Harold starts the first round waits. The snapshot Harold starts with is
+/// from before it stopped, so the first round waits until the agent monitor has had time
+/// for two listings of the tmux panes (a pane that is gone is removed after two) and one
+/// pass over the screens.
+pub(crate) fn startup_wait(monitor: &AgentMonitorSettings) -> Duration {
+    let listing = Duration::from_millis(monitor.inventory_interval_ms)
+        + Duration::from_millis(monitor.inventory_timeout_ms);
+    listing * 2 + Duration::from_millis(monitor.screen_interval_ms) + COMMAND_TIMEOUT
 }
 
 /// Starts the task for the prompts in `settings`. The caller has already read the whole
@@ -784,7 +804,11 @@ pub(crate) async fn start(
         providers: settings.agents.0.clone(),
     };
     let prompts = TimedPrompts::new(&settings.timed_prompts, &last_days, ports, store);
-    Ok(tokio::spawn(run(prompts, shutdown)))
+    Ok(tokio::spawn(run(
+        prompts,
+        startup_wait(&settings.agent_monitor),
+        shutdown,
+    )))
 }
 
 #[cfg(test)]

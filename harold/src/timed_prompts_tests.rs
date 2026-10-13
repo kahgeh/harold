@@ -13,7 +13,7 @@ use crate::agent::domain::{
 };
 use crate::agent::snapshot::AgentSnapshotHub;
 use crate::settings::TimedPromptSettings;
-use crate::settings::{AgentProviderSettings, ScreenAdapter};
+use crate::settings::{AgentMonitorSettings, AgentProviderSettings, ScreenAdapter};
 use crate::store::{HaroldStore, TimedPromptHandled, TimedPromptOutcome};
 
 const CHIEF: &str = "/work/chief-of-pods";
@@ -1298,6 +1298,7 @@ async fn task_types_a_due_prompt_and_stops_at_once_on_shutdown() {
     let (shutdown_tx, shutdown_rx) = watch::channel(());
     let task = tokio::spawn(run(
         prompts(&fake, &store, &[entry("digest", "09:00")]),
+        Duration::ZERO,
         shutdown_rx,
     ));
 
@@ -1320,6 +1321,7 @@ async fn task_stops_at_once_while_a_prompt_is_waiting() {
     let (shutdown_tx, shutdown_rx) = watch::channel(());
     let task = tokio::spawn(run(
         prompts(&fake, &store, &[entry("digest", "09:00")]),
+        Duration::ZERO,
         shutdown_rx,
     ));
     wait_until("the first round has run", || fake.now_reads() >= 1).await;
@@ -1378,9 +1380,78 @@ async fn task_with_no_prompts_ends_without_reading_the_clock() {
 
     tokio::time::timeout(
         Duration::from_secs(1),
-        run(prompts(&fake, &store, &[]), shutdown_rx),
+        run(prompts(&fake, &store, &[]), Duration::ZERO, shutdown_rx),
     )
     .await
     .expect("a task with nothing to do ends at once");
     assert_eq!(fake.now_reads(), 0);
+}
+
+// --- the wait before the first round ---
+
+#[test]
+fn startup_wait_covers_two_pane_listings_and_a_screen_pass() {
+    let shipped = AgentMonitorSettings::default();
+    assert_eq!(startup_wait(&shipped), Duration::from_millis(10_500));
+
+    // Each listing may take its interval and its timeout, and there are two.
+    let slower_interval = AgentMonitorSettings {
+        inventory_interval_ms: 2_000,
+        ..AgentMonitorSettings::default()
+    };
+    assert_eq!(
+        startup_wait(&slower_interval),
+        Duration::from_millis(12_500)
+    );
+    let slower_timeout = AgentMonitorSettings {
+        inventory_timeout_ms: 5_000,
+        ..AgentMonitorSettings::default()
+    };
+    assert_eq!(startup_wait(&slower_timeout), Duration::from_millis(14_500));
+    let slower_screen = AgentMonitorSettings {
+        screen_interval_ms: 1_500,
+        ..AgentMonitorSettings::default()
+    };
+    assert_eq!(startup_wait(&slower_screen), Duration::from_millis(11_500));
+}
+
+#[tokio::test]
+async fn first_round_waits_until_the_startup_wait_has_passed() {
+    let store = TestStore::new().await;
+    let fake = Fake::at(DAY, "09:00:00");
+    let (_shutdown_tx, shutdown_rx) = watch::channel(());
+    let task = tokio::spawn(run(
+        prompts(&fake, &store, &[entry("digest", "09:00")]),
+        Duration::from_millis(300),
+        shutdown_rx,
+    ));
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(fake.now_reads(), 0);
+    assert!(fake.keys().is_empty());
+
+    wait_until("the prompt is typed", || fake.keys().len() == 2).await;
+    assert_eq!(fake.keys(), digest_keys());
+    task.abort();
+}
+
+#[tokio::test]
+async fn task_stops_at_once_on_shutdown_during_the_startup_wait() {
+    let store = TestStore::new().await;
+    let fake = Fake::at(DAY, "09:00:00");
+    let (shutdown_tx, shutdown_rx) = watch::channel(());
+    let task = tokio::spawn(run(
+        prompts(&fake, &store, &[entry("digest", "09:00")]),
+        Duration::from_secs(30),
+        shutdown_rx,
+    ));
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    drop(shutdown_tx);
+    tokio::time::timeout(Duration::from_secs(1), task)
+        .await
+        .expect("the task stops within a second of shutdown")
+        .unwrap();
+    assert_eq!(fake.now_reads(), 0);
+    assert!(fake.keys().is_empty());
 }
