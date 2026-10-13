@@ -366,10 +366,6 @@ impl HaroldStore {
 
     /// The local date each timed prompt was last handled on, by prompt name, as far as
     /// the projection has read the stream.
-    #[allow(
-        dead_code,
-        reason = "read by the timed-prompt task, wired into the daemon in a later task"
-    )]
     pub(crate) async fn timed_prompt_last_days(
         &self,
     ) -> events::Result<std::collections::HashMap<String, String>> {
@@ -1334,10 +1330,6 @@ pub async fn append_away_message_requested(
     Ok(())
 }
 
-#[allow(
-    dead_code,
-    reason = "called by the timed-prompt task, wired into the daemon in a later task"
-)]
 pub(crate) async fn append_timed_prompt_handled(
     store: &HaroldStore,
     event: &TimedPromptHandled,

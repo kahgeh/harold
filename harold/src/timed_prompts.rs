@@ -2,20 +2,24 @@
 //! the Claude Code agent running in a set folder, only when that agent is idle and its
 //! input box is empty. The list is `[[timed_prompts]]` in the configuration.
 
-#![allow(
-    dead_code,
-    reason = "wired into the daemon in the last timed-prompts code task"
-)]
-
 use std::collections::HashMap;
 use std::future::Future;
+use std::process::Stdio;
 use std::sync::Arc;
+use std::time::Duration;
 
+use tokio::sync::watch;
+use tokio::task::JoinHandle;
+use tokio::time::MissedTickBehavior;
 use tracing::{error, info, warn};
 
 use crate::agent::domain::{AgentSnapshot, EffectiveAgentState};
+use crate::agent::snapshot::AgentSnapshotHub;
+use crate::inbound::tmux::{press_enter_in_tmux_pane, type_text_into_tmux_pane};
 use crate::outbound::left_out::same_folder;
-use crate::settings::{AgentProviderSettings, ScreenAdapter, TimedPromptSettings, minute_of_day};
+use crate::settings::{
+    AgentProviderSettings, ScreenAdapter, Settings, TimedPromptSettings, minute_of_day,
+};
 use crate::store::{self, HaroldStore, TimedPromptHandled, TimedPromptOutcome};
 
 const SECONDS_IN_A_DAY: u32 = 86_400;
@@ -27,6 +31,17 @@ const TYPED_PANE_HOLD_ROUNDS: u32 = 12;
 /// The monitor health component that reports whether the last listing of tmux panes
 /// worked (`set_health("inventory", ..)` in `agent/runtime.rs`).
 const INVENTORY_COMPONENT: &str = "inventory";
+
+/// How often the task looks at the clock and at each due prompt.
+pub(crate) const ROUND_INTERVAL: Duration = Duration::from_secs(5);
+
+/// The longest the task waits for `/bin/date` or for a screen capture.
+const COMMAND_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// The local date and time come from `/bin/date`: the `time` crate refuses to read the
+/// local offset in a process with more than one thread.
+const DATE_PROGRAM: &str = "/bin/date";
+const DATE_ARGS: [&str; 1] = ["+%Y-%m-%d %H:%M:%S"];
 
 // ---------------------------------------------------------------------------
 // The clock
@@ -655,6 +670,121 @@ async fn record(store: &HaroldStore, event: TimedPromptHandled, reports: &mut Ve
             error: error.to_string(),
         });
     }
+}
+
+// ---------------------------------------------------------------------------
+// The daemon's ports
+// ---------------------------------------------------------------------------
+
+/// What `program` prints, or `None` when it cannot start, fails, prints text that is not
+/// UTF-8, or takes longer than `timeout`. A command that runs out of time is killed.
+async fn bounded_stdout(program: &str, args: &[&str], timeout: Duration) -> Option<String> {
+    let mut command = tokio::process::Command::new(program);
+    command
+        .args(args)
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    let output = tokio::time::timeout(timeout, command.output())
+        .await
+        .ok()?
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8(output.stdout).ok()
+}
+
+/// The visible screen of one pane, as plain text.
+fn capture_args(pane_id: &str) -> [&str; 4] {
+    ["capture-pane", "-p", "-t", pane_id]
+}
+
+/// Runs one of the blocking typing steps off the async threads.
+async fn typing_step(
+    step: impl FnOnce() -> Result<(), String> + Send + 'static,
+) -> Result<(), String> {
+    tokio::task::spawn_blocking(step)
+        .await
+        .unwrap_or_else(|error| Err(format!("typing step did not finish: {error}")))
+}
+
+/// The ports of the running daemon: `/bin/date`, the agent monitor's snapshot, and tmux.
+pub(crate) struct TmuxPorts {
+    snapshots: AgentSnapshotHub,
+    providers: Vec<AgentProviderSettings>,
+}
+
+impl Ports for TmuxPorts {
+    async fn now(&self) -> Option<LocalNow> {
+        let text = bounded_stdout(DATE_PROGRAM, &DATE_ARGS, COMMAND_TIMEOUT).await?;
+        parse_local_now(&text)
+    }
+
+    fn agents(&self) -> AgentsView {
+        agents_view(&self.snapshots.current(), &self.providers)
+    }
+
+    async fn read_screen(&self, pane_id: &str) -> Option<String> {
+        bounded_stdout("tmux", &capture_args(pane_id), COMMAND_TIMEOUT).await
+    }
+
+    async fn type_text(&self, pane_id: &str, text: &str) -> Result<(), String> {
+        let (pane_id, text) = (pane_id.to_string(), text.to_string());
+        typing_step(move || type_text_into_tmux_pane(&pane_id, &text)).await
+    }
+
+    async fn press_enter(&self, pane_id: &str) -> Result<(), String> {
+        let pane_id = pane_id.to_string();
+        typing_step(move || press_enter_in_tmux_pane(&pane_id)).await
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The task
+// ---------------------------------------------------------------------------
+
+/// Runs a round when it starts and every `ROUND_INTERVAL` after, until shutdown. With no
+/// prompts it ends at once and logs nothing. Shutdown is looked at between rounds only:
+/// a round is never dropped between typing a text and pressing Enter.
+pub(crate) async fn run<P: Ports>(mut prompts: TimedPrompts<P>, mut shutdown: watch::Receiver<()>) {
+    if prompts.is_empty() {
+        return;
+    }
+    let mut ticker = tokio::time::interval(ROUND_INTERVAL);
+    // After the Mac wakes, one round runs; the rounds missed while asleep are not made up.
+    ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            biased;
+            _ = shutdown.changed() => break,
+            _ = ticker.tick() => {}
+        }
+        for report in prompts.round().await {
+            log_report(&report);
+        }
+    }
+}
+
+/// Starts the task for the prompts in `settings`. The caller has already read the whole
+/// event stream into the state database, so the stored dates are current.
+pub(crate) async fn start(
+    settings: &Settings,
+    store: Arc<HaroldStore>,
+    snapshots: AgentSnapshotHub,
+    shutdown: watch::Receiver<()>,
+) -> events::Result<JoinHandle<()>> {
+    let last_days = if settings.timed_prompts.is_empty() {
+        HashMap::new()
+    } else {
+        store.timed_prompt_last_days().await?
+    };
+    let ports = TmuxPorts {
+        snapshots,
+        providers: settings.agents.0.clone(),
+    };
+    let prompts = TimedPrompts::new(&settings.timed_prompts, &last_days, ports, store);
+    Ok(tokio::spawn(run(prompts, shutdown)))
 }
 
 #[cfg(test)]

@@ -1,14 +1,17 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use events::EventStreamVersion;
+use tokio::sync::watch;
 
 use super::*;
 use crate::agent::domain::{
     AgentIncarnation, AgentPaneObservation, AgentPaneProjection, AgentSnapshot,
     EffectiveAgentState, MonitorHealthProjection,
 };
+use crate::agent::snapshot::AgentSnapshotHub;
 use crate::settings::TimedPromptSettings;
 use crate::settings::{AgentProviderSettings, ScreenAdapter};
 use crate::store::{HaroldStore, TimedPromptHandled, TimedPromptOutcome};
@@ -1227,4 +1230,157 @@ async fn no_report_carries_the_text() {
     assert_eq!(reports.len(), 3, "{reports:?}");
     assert!(!format!("{reports:?}").contains("SENTINEL-TEXT"));
     assert!(!format!("{:?}", handled(&store).await).contains("SENTINEL-TEXT"));
+}
+
+// --- the real ports and the loop ---
+
+#[tokio::test]
+async fn bounded_stdout_gives_the_output_of_a_command_that_succeeds_in_time() {
+    let second = Duration::from_secs(1);
+
+    assert_eq!(
+        bounded_stdout("/bin/sh", &["-c", "printf safe"], second).await,
+        Some("safe".to_string())
+    );
+    assert_eq!(
+        bounded_stdout("/bin/sh", &["-c", "printf lost; exit 3"], second).await,
+        None
+    );
+    assert_eq!(
+        bounded_stdout("/nonexistent/harold-test-command", &[], second).await,
+        None
+    );
+
+    let started = std::time::Instant::now();
+    assert_eq!(
+        bounded_stdout("/bin/sleep", &["5"], Duration::from_millis(50)).await,
+        None
+    );
+    assert!(started.elapsed() < Duration::from_secs(2));
+}
+
+#[tokio::test]
+async fn the_local_time_is_read_from_bin_date() {
+    let text = bounded_stdout(DATE_PROGRAM, &DATE_ARGS, COMMAND_TIMEOUT)
+        .await
+        .expect("/bin/date runs");
+    let now = parse_local_now(&text).expect("its output is a date and a time");
+
+    assert_eq!(now.day.len(), 10);
+    assert!(now.seconds_of_day < 86_400);
+}
+
+#[test]
+fn screen_is_read_as_the_visible_rows_of_one_pane() {
+    assert_eq!(capture_args("%7"), ["capture-pane", "-p", "-t", "%7"]);
+}
+
+#[test]
+fn the_round_runs_every_5_seconds_and_a_capture_may_take_2() {
+    assert_eq!(ROUND_INTERVAL, Duration::from_secs(5));
+    assert_eq!(COMMAND_TIMEOUT, Duration::from_secs(2));
+}
+
+async fn wait_until(what: &str, mut holds: impl FnMut() -> bool) {
+    for _ in 0..200 {
+        if holds() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("timed out waiting until {what}");
+}
+
+#[tokio::test]
+async fn task_types_a_due_prompt_and_stops_at_once_on_shutdown() {
+    let store = TestStore::new().await;
+    let fake = Fake::at(DAY, "09:00:00");
+    let (shutdown_tx, shutdown_rx) = watch::channel(());
+    let task = tokio::spawn(run(
+        prompts(&fake, &store, &[entry("digest", "09:00")]),
+        shutdown_rx,
+    ));
+
+    // The first round runs when the task starts, not 5 seconds later.
+    wait_until("the prompt is typed", || fake.keys().len() == 2).await;
+    assert_eq!(fake.keys(), digest_keys());
+
+    drop(shutdown_tx);
+    tokio::time::timeout(Duration::from_secs(1), task)
+        .await
+        .expect("the task stops within a second of shutdown")
+        .unwrap();
+}
+
+#[tokio::test]
+async fn task_stops_at_once_while_a_prompt_is_waiting() {
+    let store = TestStore::new().await;
+    let fake = Fake::at(DAY, "09:00:00");
+    fake.set(|state| state.view.panes[0].state = EffectiveAgentState::Busy);
+    let (shutdown_tx, shutdown_rx) = watch::channel(());
+    let task = tokio::spawn(run(
+        prompts(&fake, &store, &[entry("digest", "09:00")]),
+        shutdown_rx,
+    ));
+    wait_until("the first round has run", || fake.now_reads() >= 1).await;
+
+    drop(shutdown_tx);
+    tokio::time::timeout(Duration::from_secs(1), task)
+        .await
+        .expect("the task stops within a second of shutdown")
+        .unwrap();
+    assert!(fake.keys().is_empty());
+    assert!(handled(&store).await.is_empty());
+}
+
+#[tokio::test]
+async fn daemon_ports_read_the_panes_from_the_published_snapshot() {
+    let hub = AgentSnapshotHub::new(snapshot(
+        Some(false),
+        vec![projection("%2", "claude", CHIEF, EffectiveAgentState::Idle)],
+    ));
+    let ports = TmuxPorts {
+        snapshots: hub,
+        providers: vec![provider("claude", ScreenAdapter::ClaudeV1)],
+    };
+
+    let agents = ports.agents();
+
+    assert!(agents.listing_failed);
+    assert_eq!(agents.panes, [chief("%2")]);
+}
+
+#[tokio::test]
+async fn start_with_no_prompts_gives_a_task_that_ends_at_once() {
+    crate::settings::init_settings_for_test();
+    let settings = crate::settings::get_settings();
+    // With a prompt configured, `start` would run the real ports. This test must not.
+    assert!(settings.timed_prompts.is_empty());
+    let store = TestStore::new().await;
+    let hub = AgentSnapshotHub::new(snapshot(None, Vec::new()));
+    let (_shutdown_tx, shutdown_rx) = watch::channel(());
+
+    let task = start(settings, Arc::clone(&store.store), hub, shutdown_rx)
+        .await
+        .unwrap();
+
+    tokio::time::timeout(Duration::from_secs(1), task)
+        .await
+        .expect("a task with nothing to do ends at once")
+        .unwrap();
+}
+
+#[tokio::test]
+async fn task_with_no_prompts_ends_without_reading_the_clock() {
+    let store = TestStore::new().await;
+    let fake = Fake::at(DAY, "09:00:00");
+    let (_shutdown_tx, shutdown_rx) = watch::channel(());
+
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        run(prompts(&fake, &store, &[]), shutdown_rx),
+    )
+    .await
+    .expect("a task with nothing to do ends at once");
+    assert_eq!(fake.now_reads(), 0);
 }

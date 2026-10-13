@@ -735,6 +735,13 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
         Arc::clone(&store),
         shutdown_rx.clone(),
     ));
+    let timed_prompts_handle = timed_prompts::start(
+        cfg,
+        Arc::clone(&store),
+        snapshots.clone(),
+        shutdown_rx.clone(),
+    )
+    .await?;
 
     info!(address = %addr, "Harold listening");
     let service = harold_service(
@@ -757,6 +764,7 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
     // Wait for the handler and listener to stop before returning.
     let _ = event_handler_handle.await;
     let _ = listener_handle.await;
+    let _ = timed_prompts_handle.await;
     stop_agent_monitor(monitor_task, activity_provider, Duration::from_secs(1)).await;
     server_result?;
     Ok(())
