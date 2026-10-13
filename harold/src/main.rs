@@ -10,6 +10,7 @@ mod projector;
 mod settings;
 mod store;
 mod telemetry;
+mod timed_prompts;
 mod tmux;
 mod util;
 
