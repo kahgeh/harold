@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use super::fake::{FakeEnvironment, turn};
+use super::fake::{CapturedLogs, FakeEnvironment, turn};
 use super::left_out::TrackedAgents;
 use super::{DeliveryOutcome, NotifyState, OutboundChannel, notify};
 use crate::store::TurnCompleted;
@@ -503,4 +503,46 @@ fn agent_in_the_update_folder_that_messaged_this_turn_gets_no_update() {
 
     assert_eq!(outcome, Ok(DeliveryOutcome::Skipped));
     assert!(environment.delivered().is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// The log line for a left-out update names the pane
+// ---------------------------------------------------------------------------
+
+#[test]
+fn update_left_out_after_a_requested_message_is_logged_with_its_pane() {
+    let (environment, state) = marked_pane();
+    let logs = CapturedLogs::start();
+
+    let outcome = notify_turn(&environment, &state, &turn("%1", "report in"));
+
+    assert_eq!(outcome, Ok(DeliveryOutcome::Skipped));
+    let text = logs.text();
+    assert!(
+        text.contains("notification skipped (pane messaged the phone this turn) pane_id=%1"),
+        "{text}"
+    );
+}
+
+#[test]
+fn update_left_out_by_the_folder_rule_is_logged_with_its_pane() {
+    let environment = FakeEnvironment::locked(ONLY_FROM_CHIEF);
+    let state = NotifyState::default();
+    let logs = CapturedLogs::start();
+
+    let outcome = notify_turn_among(
+        &environment,
+        &state,
+        &chief_and_pod(),
+        &turn("%2", "build it"),
+    );
+
+    assert_eq!(outcome, Ok(DeliveryOutcome::Skipped));
+    let text = logs.text();
+    assert!(
+        text.contains(
+            "notification skipped (updates come from /work/chief-of-pods only) pane_id=%2"
+        ),
+        "{text}"
+    );
 }

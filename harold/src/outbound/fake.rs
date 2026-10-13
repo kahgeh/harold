@@ -1,8 +1,10 @@
-//! A `NotifyEnvironment` for tests: a clock the test moves, a screen lock and tmux answers
-//! the test sets, and sends that are recorded instead of made.
+//! Fakes for tests. `FakeEnvironment` is a `NotifyEnvironment` with a clock the test
+//! moves, a screen lock and tmux answers the test sets, and sends that are recorded
+//! instead of made. `CapturedLogs` collects the log lines a test writes.
 
-use std::sync::Mutex;
+use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use super::{DeliveryOutcome, NotifyEnvironment, OutboundChannel};
@@ -157,5 +159,47 @@ impl NotifyEnvironment for FakeEnvironment {
             .lock()
             .unwrap()
             .push(agent.pane_id().to_string());
+    }
+}
+
+struct CapturedLogWriter(Arc<Mutex<Vec<u8>>>);
+
+impl Write for CapturedLogWriter {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend(buffer);
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// The log lines written on the current thread from `start` until this is dropped. Code
+/// that runs on another thread, such as a `spawn_blocking` task, is not captured.
+pub(crate) struct CapturedLogs {
+    bytes: Arc<Mutex<Vec<u8>>>,
+    _subscriber: tracing::subscriber::DefaultGuard,
+}
+
+impl CapturedLogs {
+    pub(crate) fn start() -> Self {
+        let bytes = Arc::new(Mutex::new(Vec::new()));
+        let writer = Arc::clone(&bytes);
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(move || CapturedLogWriter(Arc::clone(&writer)))
+            .finish();
+        Self {
+            bytes,
+            _subscriber: tracing::subscriber::set_default(subscriber),
+        }
+    }
+
+    /// Everything logged so far, one line for each event: the level, the module, the
+    /// message and then the fields, as in `INFO harold::outbound: text pane_id=%2`.
+    pub(crate) fn text(&self) -> String {
+        String::from_utf8_lossy(&self.bytes.lock().unwrap()).into_owned()
     }
 }

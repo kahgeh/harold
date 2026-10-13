@@ -281,14 +281,15 @@ impl NotifyState {
 
 /// Leave a turn-end update out of the away device: nothing is sent, no reply target is
 /// recorded, and the turn is recorded in the duplicate check so that a repeat of it is left
-/// out as well.
+/// out as well. The log line names the pane.
 fn leave_out(
     state: &NotifyState,
     dedup_key: String,
     now: Instant,
+    pane_id: &str,
     reason: &str,
 ) -> Result<DeliveryOutcome, String> {
-    info!("{reason}");
+    info!(pane_id = %pane_id, "{reason}");
     state.record_turn(dedup_key, now);
     Ok(DeliveryOutcome::Skipped)
 }
@@ -355,7 +356,7 @@ pub(crate) fn notify(
             &turn.pane_id,
         )
     {
-        return leave_out(state, dedup_key, now, &reason);
+        return leave_out(state, dedup_key, now, &turn.pane_id, &reason);
     }
 
     let (outcome, source_agent) = match environment.deliver(&channel, turn, trace_id) {
