@@ -718,5 +718,82 @@ class CommandTests(ReleaseTestCase):
         self.assertIn('gh release delete v0.6.0 --cleanup-tag --yes', err)
 
 
+OPTIONS = ('VERSION', 'NOTES', 'PREFIX', 'SIGNING_IDENTITY')
+
+
+@unittest.skipUnless(shutil.which('make'), 'make is not installed')
+class MakefileTests(unittest.TestCase):
+    """The make targets pass their options to release.py, each as one argument.
+
+    make exports variables given on its command line to the recipe's shell; the recipe turns
+    each one that is set into an option."""
+
+    def make(self, *arguments):
+        with tempfile.TemporaryDirectory() as folder:
+            stub = Path(folder) / 'python'
+            stub.write_text('#!/bin/sh\nprintf \'%s\\n\' "$@" > "$ARGUMENTS"\n')
+            stub.chmod(0o755)
+            env = {key: value for key, value in os.environ.items()
+                   if key not in OPTIONS + ('MAKEFLAGS', 'MFLAGS', 'MAKELEVEL')}
+            env['ARGUMENTS'] = str(Path(folder) / 'arguments')
+            result = subprocess.run(['make', '-s', '-C', str(release.REPO_ROOT), 'PYTHON=' + str(stub)]
+                                    + list(arguments), env=env, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            return (Path(folder) / 'arguments').read_text().splitlines()
+
+    def test_release_passes_every_option_given(self):
+        self.assertEqual(
+            self.make('release', 'VERSION=0.5.1', 'NOTES=notes.md', 'PREFIX=/tmp/a prefix',
+                      'SIGNING_IDENTITY=Some Cert'),
+            ['scripts/release.py', 'release', '--version', '0.5.1', '--notes', 'notes.md',
+             '--prefix', '/tmp/a prefix', '--signing-identity', 'Some Cert'])
+
+    def test_release_with_no_option_passes_none(self):
+        self.assertEqual(self.make('release'), ['scripts/release.py', 'release'])
+
+    def test_install_release_passes_its_options_and_not_notes(self):
+        self.assertEqual(
+            self.make('install-release', 'VERSION=0.6.0', 'NOTES=notes.md', 'SIGNING_IDENTITY=Some Cert'),
+            ['scripts/release.py', 'install', '--version', '0.6.0', '--signing-identity', 'Some Cert'])
+
+    def test_an_empty_signing_identity_passes_none(self):
+        self.assertEqual(self.make('install-release', 'SIGNING_IDENTITY='), ['scripts/release.py', 'install'])
+
+
+class NothingRunsItTests(unittest.TestCase):
+    """Only a person runs make release and make install-release."""
+
+    PATTERN = re.compile(r'make release|install-release|release\.py')
+
+    def test_no_hook_workflow_or_script_mentions_them(self):
+        own = {SCRIPTS / 'release.py', SCRIPTS / 'tests/test_release.py'}
+        found = []
+        for folder in ('hooks', '.github', 'scripts'):
+            for path in sorted((release.REPO_ROOT / folder).rglob('*')):
+                if (not path.is_file() or path in own
+                        or {'__pycache__', 'node_modules'} & set(path.parts)):
+                    continue
+                for number, line in enumerate(path.read_text(errors='ignore').splitlines(), 1):
+                    if self.PATTERN.search(line):
+                        found.append('{}:{}'.format(path.relative_to(release.REPO_ROOT), number))
+        self.assertEqual(found, [])
+
+    def test_no_other_make_target_runs_them(self):
+        targets, found = [], []
+        lines = (release.REPO_ROOT / 'Makefile').read_text().splitlines()
+        for number, line in enumerate(lines, 1):
+            rule = re.match(r'([^\s:=#][^:=]*):(?!=)(.*)', line)
+            if rule:
+                targets = rule.group(1).split()
+                body = rule.group(2)
+            elif line.startswith('\t'):
+                body = line
+            else:
+                continue
+            if set(targets) - {'release', 'install-release', '.PHONY'} and self.PATTERN.search(body):
+                found.append('Makefile:{}'.format(number))
+        self.assertEqual(found, [])
+
+
 if __name__ == '__main__':
     unittest.main()
