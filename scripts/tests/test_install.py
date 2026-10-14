@@ -1174,7 +1174,6 @@ class SkillTests(unittest.TestCase):
         self.assertFalse(os.path.lexists(self.path))
 
 
-
 class ReleaseArchiveTests(unittest.TestCase):
     """The archive the build workflow packs, which `--prebuilt-dir` installs from."""
 

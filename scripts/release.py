@@ -40,7 +40,7 @@ sleep = time.sleep
 
 
 class Stopped(Exception):
-    """A step failed. The message, when there is one, says which step and why."""
+    """A step failed. The message says which step and why, or how to try again."""
 
 
 class Interrupted(Exception):
@@ -139,7 +139,7 @@ def origin_check(cwd):
 
 
 def signed_in_check(cwd):
-    if run(('gh', 'auth', 'status'), cwd).returncode:
+    if run(('gh', 'auth', 'status', '--hostname', 'github.com'), cwd).returncode:
         return 'Not released: gh is not signed in to GitHub.'
     return None
 
@@ -237,7 +237,9 @@ def publish(cwd, tag, sha, notes):
         raise Stopped('\n'.join([
             '{} was created as a pre-release, but {}'.format(tag, error),
             '  withdraw it: gh release delete {} --cleanup-tag --yes'.format(tag),
-            '  or, when its build on GitHub succeeds: make install-release VERSION={}'.format(tag[1:])])) from None
+            '  or, when its build on GitHub succeeds, mark it latest'
+            ' (gh release edit {} --prerelease=false --latest)'.format(tag),
+            '    and install it: make install-release VERSION={}'.format(tag[1:])])) from None
     print('Published {} as a pre-release: {}'.format(tag, created['url']), flush=True)
     return created['url'], created['publishedAt']
 
@@ -247,7 +249,9 @@ def build_failed(tag, url, what):
         'The build {}: {}'.format(what, url),
         '{} stays a pre-release with no build, and nothing was installed. Either:'.format(tag),
         '  withdraw it: gh release delete {} --cleanup-tag --yes'.format(tag),
-        '  or re-run the workflow on GitHub, then: make install-release VERSION={}'.format(tag[1:])])
+        '  or re-run the workflow on GitHub; when it succeeds, mark it latest'
+        ' (gh release edit {} --prerelease=false --latest)'.format(tag),
+        '    and install it: make install-release VERSION={}'.format(tag[1:])])
 
 
 def poll(cwd, *args):
@@ -362,14 +366,14 @@ def download(cwd, tag, folder):
     return folder / PACKAGE
 
 
-def run_installer(cwd, package, prefix, identity):
+def run_installer(cwd, tag, package, prefix, identity):
     """Run the release's own installer with the Python running this command. The installer
-    prints its own failure, so a failure here adds nothing."""
+    prints its own failure first; the line after it says how to try again."""
     command = [sys.executable, package / 'scripts/install.py', '--prebuilt-dir', package, '--prefix', prefix]
     if identity:
         command += ['--signing-identity', identity]
     if run(command, cwd, inherit=True).returncode:
-        raise Stopped('')
+        raise Stopped(retry(tag))
 
 
 def installed(bundle, name):
@@ -418,7 +422,7 @@ def install_tag(cwd, tag, prefix, identity):
     with tempfile.TemporaryDirectory(prefix='harold-release-') as folder:
         print('Downloading {}'.format(tag), flush=True)
         package = download(cwd, tag, Path(folder))
-        run_installer(cwd, package, prefix, identity)
+        run_installer(cwd, tag, package, prefix, identity)
     print(report(cwd, prefix, tag), flush=True)
     return 0
 
@@ -477,8 +481,7 @@ def main(argv=None, cwd=REPO_ROOT):
     try:
         return cut(cwd, args) if args.command == 'release' else install_existing(cwd, args)
     except Stopped as error:
-        if str(error):
-            print(error, file=sys.stderr)
+        print(error, file=sys.stderr)
         return 1
     except Interrupted as error:
         print(error, file=sys.stderr)

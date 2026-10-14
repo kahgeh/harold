@@ -341,6 +341,7 @@ class CheckTests(ReleaseTestCase):
     def test_signed_out_of_gh_is_refused(self):
         self.github.signed_in = False
         self.assert_refused('Not released: gh is not signed in to GitHub.')
+        self.assertIn(['gh', 'auth', 'status', '--hostname', 'github.com'], self.calls)
 
     def test_an_existing_local_tag_is_refused(self):
         git(self.work, 'tag', 'v0.6.0')
@@ -497,7 +498,9 @@ class BuildTests(ReleaseTestCase):
             'The build {}: {}'.format(what, url),
             'v0.6.0 stays a pre-release with no build, and nothing was installed. Either:',
             '  withdraw it: gh release delete v0.6.0 --cleanup-tag --yes',
-            '  or re-run the workflow on GitHub, then: make install-release VERSION=0.6.0']))
+            '  or re-run the workflow on GitHub; when it succeeds, mark it latest'
+            ' (gh release edit v0.6.0 --prerelease=false --latest)',
+            '    and install it: make install-release VERSION=0.6.0']))
         self.assertTrue(self.github.releases['v0.6.0']['isPrerelease'])
         self.assertNotIn('edit v0.6.0', self.github.events)
 
@@ -516,7 +519,9 @@ class BuildTests(ReleaseTestCase):
         self.assertEqual(str(failed.exception), '\n'.join([
             'v0.6.0 was created as a pre-release, but gh release view failed: HTTP 502: Bad Gateway',
             '  withdraw it: gh release delete v0.6.0 --cleanup-tag --yes',
-            '  or, when its build on GitHub succeeds: make install-release VERSION=0.6.0']))
+            '  or, when its build on GitHub succeeds, mark it latest'
+            ' (gh release edit v0.6.0 --prerelease=false --latest)',
+            '    and install it: make install-release VERSION=0.6.0']))
         self.assertTrue(self.github.releases['v0.6.0']['isPrerelease'])
 
     def test_each_step_is_printed_once_as_it_finishes(self):
@@ -634,6 +639,7 @@ class CommandTests(ReleaseTestCase):
         self.assertIsNone(self.installer)
         self.assertIn('https://github.com/kahgeh/harold/actions/runs/2', err)
         self.assertIn('gh release delete v0.6.0 --cleanup-tag --yes', err)
+        self.assertIn('gh release edit v0.6.0 --prerelease=false --latest', err)
         self.assertIn('make install-release VERSION=0.6.0', err)
 
     def test_a_checksum_mismatch_runs_no_installer(self):
@@ -663,10 +669,10 @@ class CommandTests(ReleaseTestCase):
                 self.assertIsNone(self.installer)
                 self.assertIn('unsafe entry in the archive of v0.6.0', err)
 
-    def test_a_failed_installer_exits_1_and_adds_nothing(self):
+    def test_a_failed_installer_exits_1_and_says_how_to_retry(self):
         self.installer_code = 1
         code, out, err = self.main('release', '--prefix', str(self.prefix))
-        self.assertEqual((code, err), (1, ''))
+        self.assertEqual((code, err), (1, 'v0.6.0 is on GitHub; try again with: make install-release VERSION=0.6.0\n'))
         self.assertNotIn('is running', out)
 
     def test_an_installed_version_other_than_the_tag_is_a_failure(self):
@@ -687,7 +693,7 @@ class CommandTests(ReleaseTestCase):
         self.assertEqual(code, 0, err)
         self.assertEqual(self.github.events, ['download v0.6.0'])
         self.assertFalse([argv for argv in self.calls if argv[0] == 'git'])
-        self.assertNotIn(['gh', 'auth', 'status'], self.calls)
+        self.assertFalse([argv for argv in self.calls if argv[:2] == ['gh', 'auth']])
         self.assertFalse([argv for argv in self.calls if tuple(argv) in release.TESTS])
         self.assertEqual(self.last_line(out), 'Harold v0.6.0 (31323b9) is running, PID 16897.')
 
