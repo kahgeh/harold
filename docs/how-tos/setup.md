@@ -75,7 +75,7 @@ launchd starts `~/bin/harold/harold` itself, so macOS charges Full Disk Access a
 | Harold is signed with | Rule macOS stores | After installing a new build |
 | --- | --- | --- |
 | No certificate (ad-hoc, `-`) | `cdhash H"…"`: a fingerprint of this exact file | The fingerprint differs, so both permissions must be granted again |
-| A certificate | `identifier "harold" and certificate leaf = H"…"` | The name and certificate are the same, so both permissions carry over |
+| A certificate | `identifier harold and certificate leaf = H"…"` | The name and certificate are the same, so both permissions carry over |
 
 The installer always signs with the identifiers `harold` and `tmx-agent-dash`, so only the certificate decides.
 
