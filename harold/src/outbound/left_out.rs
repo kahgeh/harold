@@ -130,6 +130,19 @@ pub(crate) fn message_dropped_reason(
     ))
 }
 
+/// Rule B for a line a pane asked Harold to speak. The log line for dropping the line of
+/// `pane_id`. The line never holds the spoken text.
+pub(crate) fn spoken_line_dropped_reason(
+    only_from: Option<&str>,
+    agents: &TrackedAgents,
+    pane_id: &str,
+) -> Option<String> {
+    let folder = folder_pane_is_outside(only_from, agents, pane_id)?;
+    Some(format!(
+        "spoken line dropped (lines come from {folder} only)"
+    ))
+}
+
 /// The log line for leaving out the turn-end update of `pane_id`, when either rule
 /// applies. Rule A is looked at first, so its line is the one written when both apply.
 pub(crate) fn left_out_reason(
@@ -150,7 +163,7 @@ mod tests {
 
     use super::{
         MARK_LIFETIME, MESSAGED_THIS_TURN, TrackedAgents, left_out_reason, mark_is_fresh,
-        message_dropped_reason, only_from_reason, same_folder,
+        message_dropped_reason, only_from_reason, same_folder, spoken_line_dropped_reason,
     };
 
     #[test]
@@ -329,6 +342,22 @@ mod tests {
         assert_eq!(
             message_dropped_reason(Some(setting), &agents, "%2"),
             Some("away message dropped (messages come from /work/chief-of-pods/ only)".to_string())
+        );
+    }
+
+    #[test]
+    fn spoken_line_from_outside_the_folder_is_dropped_while_an_agent_is_in_it() {
+        let agents = TrackedAgents::in_folders(&[("%1", CHIEF), ("%2", "/work/harold")]);
+        assert_eq!(
+            spoken_line_dropped_reason(Some(CHIEF), &agents, "%2"),
+            Some("spoken line dropped (lines come from /work/chief-of-pods only)".to_string())
+        );
+        assert_eq!(spoken_line_dropped_reason(Some(CHIEF), &agents, "%1"), None);
+        assert_eq!(spoken_line_dropped_reason(None, &agents, "%2"), None);
+        let no_chief = TrackedAgents::in_folders(&[("%2", "/work/harold")]);
+        assert_eq!(
+            spoken_line_dropped_reason(Some(CHIEF), &no_chief, "%2"),
+            None
         );
     }
 }

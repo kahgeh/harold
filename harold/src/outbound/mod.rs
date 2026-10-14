@@ -186,6 +186,11 @@ pub(crate) trait NotifyEnvironment: Send + Sync {
     ) -> Result<(DeliveryOutcome, Option<AgentAddress>), String>;
     /// Send a message an agent asked for through the away channel.
     fn send_away_message(&self, message: &AwayMessageRequested) -> Result<(), String>;
+    /// Say a spoken line at the desk with the `[tts]` command, adding nothing to it.
+    fn speak_line(&self, line: &str) -> Result<(), String>;
+    /// Send a spoken line to the away device: a voice note with iMessage, text with
+    /// Telegram.
+    fn send_spoken_line(&self, line: &str) -> Result<(), String>;
     /// Make `agent` the one an untagged reply goes to.
     fn record_reply_target(&self, agent: AgentAddress);
 }
@@ -224,6 +229,18 @@ impl NotifyEnvironment for SystemEnvironment {
 
     fn send_away_message(&self, message: &AwayMessageRequested) -> Result<(), String> {
         channels::send_away_message(message)
+    }
+
+    fn speak_line(&self, line: &str) -> Result<(), String> {
+        if tts::speak_line(line) {
+            Ok(())
+        } else {
+            Err("TTS command failed".into())
+        }
+    }
+
+    fn send_spoken_line(&self, line: &str) -> Result<(), String> {
+        channels::send_spoken_line(line)
     }
 
     fn record_reply_target(&self, agent: AgentAddress) {

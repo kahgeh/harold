@@ -6,7 +6,7 @@ use serde_json::json;
 
 use super::{
     DeliveryDispatcher, DispatchError, ProductionDispatcher, dispatch_away_message,
-    handle_next_delivery, handle_next_delivery_inner, production_dispatcher,
+    dispatch_spoken_line, handle_next_delivery, handle_next_delivery_inner, production_dispatcher,
     project_and_publish_agent_snapshot, route_message, run_event_handler,
 };
 use crate::agent::domain::{
@@ -18,9 +18,9 @@ use crate::inbound::AgentAddress;
 use crate::outbound::fake::{CapturedLogs, FakeEnvironment};
 use crate::outbound::{DeliveryOutcome, SystemEnvironment};
 use crate::store::{
-    AwayMessageRequested, HaroldStore, InboundMessage, PendingDelivery, TurnCompleted,
-    append_agent_events, append_away_message_requested, append_inbound_message,
-    append_messaging_paused_changed, append_turn_completed,
+    AwayMessageRequested, HaroldStore, InboundMessage, PendingDelivery, SpokenLineRequested,
+    TurnCompleted, append_agent_events, append_away_message_requested, append_inbound_message,
+    append_messaging_paused_changed, append_spoken_line_requested, append_turn_completed,
 };
 
 struct TestDirectory(std::path::PathBuf);
@@ -1465,4 +1465,196 @@ async fn agent_in_the_folder_that_sent_a_message_gets_no_update_for_that_turn() 
         "{text}"
     );
     assert!(!text.contains("away message dropped"), "{text}");
+}
+
+// ---------------------------------------------------------------------------
+// Spoken lines: away device when the screen is locked, the desk otherwise
+// ---------------------------------------------------------------------------
+
+fn spoken_delivery(payload: serde_json::Value) -> PendingDelivery {
+    PendingDelivery {
+        event_id: "event-1".into(),
+        event_version: events::EventStreamVersion::new(1).unwrap(),
+        event_type: "SpokenLineRequested".into(),
+        payload,
+        trace_id: "trace".into(),
+    }
+}
+
+fn chief_line(text: &str) -> SpokenLineRequested {
+    SpokenLineRequested {
+        pane_id: "%1".into(),
+        text: text.into(),
+    }
+}
+
+fn dispatch_line(
+    environment: &FakeEnvironment,
+    line: &SpokenLineRequested,
+    messaging_paused: bool,
+    voice_muted: bool,
+) -> Result<DeliveryOutcome, DispatchError> {
+    dispatch_spoken_line(
+        &spoken_delivery(json!(line)),
+        messaging_paused,
+        voice_muted,
+        |_| None,
+        environment,
+    )
+}
+
+#[test]
+fn locked_screen_sends_the_line_to_the_away_device_and_logs_no_text() {
+    let environment = FakeEnvironment::locked("");
+    let logs = CapturedLogs::start();
+
+    let outcome = dispatch_line(
+        &environment,
+        &chief_line("All pods are green."),
+        false,
+        false,
+    );
+
+    assert!(matches!(outcome, Ok(DeliveryOutcome::Delivered)));
+    assert_eq!(environment.voice_notes(), ["All pods are green."]);
+    assert!(environment.spoken_lines().is_empty());
+    assert!(
+        environment.reply_targets().is_empty(),
+        "a voice note sets no reply target"
+    );
+    assert!(
+        logs.text()
+            .contains("spoken line sent to the away device pane_id=%1")
+    );
+    assert!(!logs.text().contains("All pods are green."));
+}
+
+#[test]
+fn locked_screen_with_messaging_paused_drops_the_line() {
+    let environment = FakeEnvironment::locked("");
+    let logs = CapturedLogs::start();
+
+    let outcome = dispatch_line(&environment, &chief_line("hi"), true, false);
+
+    assert!(matches!(outcome, Ok(DeliveryOutcome::Skipped)));
+    assert!(environment.voice_notes().is_empty());
+    assert!(
+        logs.text()
+            .contains("spoken line dropped (messaging paused) pane_id=%1")
+    );
+}
+
+#[test]
+fn unlocked_screen_with_voice_on_says_exactly_the_line() {
+    let environment = FakeEnvironment::new("");
+
+    let outcome = dispatch_line(
+        &environment,
+        &chief_line("Release install is done."),
+        true,
+        false,
+    );
+
+    assert!(matches!(outcome, Ok(DeliveryOutcome::Delivered)));
+    assert_eq!(environment.spoken_lines(), ["Release install is done."]);
+    assert!(environment.voice_notes().is_empty());
+}
+
+#[test]
+fn unlocked_screen_with_voice_off_drops_the_line_and_runs_nothing() {
+    let environment = FakeEnvironment::new("");
+    let logs = CapturedLogs::start();
+
+    let outcome = dispatch_line(&environment, &chief_line("hi"), false, true);
+
+    assert!(matches!(outcome, Ok(DeliveryOutcome::Skipped)));
+    assert!(environment.spoken_lines().is_empty());
+    assert!(environment.voice_notes().is_empty());
+    assert!(
+        logs.text()
+            .contains("spoken line dropped (voice off) pane_id=%1")
+    );
+}
+
+#[test]
+fn failed_voice_note_is_retried_and_said_at_the_desk_once_unlocked() {
+    let environment = FakeEnvironment::locked("");
+    environment.set_fail_sends(true);
+    let line = chief_line("hi");
+
+    let first = dispatch_line(&environment, &line, false, false);
+    assert!(matches!(first, Err(DispatchError::Retryable(_))));
+
+    environment.set_fail_sends(false);
+    environment.set_screen_locked(false);
+    let retry = dispatch_line(&environment, &line, false, false);
+    assert!(matches!(retry, Ok(DeliveryOutcome::Delivered)));
+    assert_eq!(environment.spoken_lines(), ["hi"]);
+    assert!(environment.voice_notes().is_empty());
+}
+
+#[test]
+fn malformed_spoken_line_payload_is_a_terminal_failure() {
+    let environment = FakeEnvironment::locked("");
+    let outcome = dispatch_spoken_line(
+        &spoken_delivery(json!({"pane_id": 1})),
+        false,
+        false,
+        |_| None,
+        &environment,
+    );
+    assert!(
+        matches!(outcome, Err(DispatchError::Permanent(error)) if error.starts_with("invalid SpokenLineRequested payload"))
+    );
+}
+
+#[tokio::test]
+async fn spoken_line_from_outside_the_chiefs_folder_is_dropped_without_its_text() {
+    let directory = TestDirectory::new();
+    let (store, snapshots, environment, dispatcher) =
+        only_from_chief(&directory, chief_and_pod()).await;
+    append_spoken_line_requested(
+        &store,
+        &SpokenLineRequested {
+            pane_id: "%2".into(),
+            text: "secret words".into(),
+        },
+    )
+    .await
+    .unwrap();
+    append_spoken_line_requested(&store, &chief_line("All pods are green."))
+        .await
+        .unwrap();
+
+    drain(&store, &snapshots, &dispatcher).await;
+
+    // The screen is locked in `dispatcher_over`: the chief's line becomes a voice note.
+    assert_eq!(environment.voice_notes(), ["All pods are green."]);
+    assert!(store.next_pending_delivery().await.unwrap().is_none());
+}
+
+#[test]
+fn dropped_spoken_line_logs_the_reason_and_the_pane_only() {
+    let environment = FakeEnvironment::locked("");
+    let logs = CapturedLogs::start();
+    let line = SpokenLineRequested {
+        pane_id: "%2".into(),
+        text: "secret words".into(),
+    };
+
+    let outcome = dispatch_spoken_line(
+        &spoken_delivery(json!(line)),
+        false,
+        false,
+        |_| Some("spoken line dropped (lines come from /work/chief-of-pods only)".into()),
+        &environment,
+    );
+
+    assert!(matches!(outcome, Ok(DeliveryOutcome::Skipped)));
+    assert!(environment.voice_notes().is_empty());
+    assert!(
+        logs.text()
+            .contains("spoken line dropped (lines come from /work/chief-of-pods only) pane_id=%2")
+    );
+    assert!(!logs.text().contains("secret words"));
 }

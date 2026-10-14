@@ -6,11 +6,13 @@ use tracing::{info, info_span, warn};
 
 use crate::agent::snapshot::AgentSnapshotHub;
 use crate::inbound::{AgentAddress, route_inbound_message};
-use crate::outbound::left_out::{TrackedAgents, message_dropped_reason};
+use crate::outbound::left_out::{
+    TrackedAgents, message_dropped_reason, spoken_line_dropped_reason,
+};
 use crate::outbound::{DeliveryOutcome, NotifyEnvironment, NotifyState, SystemEnvironment, notify};
 use crate::store::{
     AwayMessageRequested, HaroldStore, InboundMessage, PendingDelivery, ProjectionBatch,
-    TurnCompleted,
+    SpokenLineRequested, TurnCompleted,
 };
 
 pub(crate) trait DeliveryDispatcher: Send + Sync + 'static {
@@ -112,6 +114,22 @@ impl ProductionDispatcher {
                     self.environment.record_reply_target(source);
                 },
             ),
+            "SpokenLineRequested" => dispatch_spoken_line(
+                delivery,
+                messaging_paused,
+                crate::outbound::is_tts_muted(),
+                |pane_id| {
+                    spoken_line_dropped_reason(
+                        self.environment
+                            .notify_settings()
+                            .away_messages_only_from
+                            .as_deref(),
+                        &self.tracked_agents(),
+                        pane_id,
+                    )
+                },
+                self.environment.as_ref(),
+            ),
             other => Err(DispatchError::Permanent(format!(
                 "unknown event type: {other}"
             ))),
@@ -161,6 +179,49 @@ fn dispatch_away_message(
         pane_id: message.pane_id,
         label: message.pane_label,
     });
+    Ok(DeliveryOutcome::Delivered)
+}
+
+/// Say a stored spoken line at the desk or send it to the away device. `drop_reason` is
+/// asked first, with the line's pane id: when it gives a log line, the line is dropped.
+/// Then the screen lock decides: locked, the line goes to the away device unless messaging
+/// is paused; unlocked, it is said unless the voice is muted. Both are asked on every try,
+/// so a line whose send failed while away is said if the user is back for the retry. Log
+/// lines name the pane and never hold the text.
+fn dispatch_spoken_line(
+    delivery: &PendingDelivery,
+    messaging_paused: bool,
+    voice_muted: bool,
+    drop_reason: impl FnOnce(&str) -> Option<String>,
+    environment: &dyn NotifyEnvironment,
+) -> Result<DeliveryOutcome, DispatchError> {
+    let line = serde_json::from_value::<SpokenLineRequested>(delivery.payload.clone()).map_err(
+        |error| DispatchError::Permanent(format!("invalid SpokenLineRequested payload: {error}")),
+    )?;
+    let pane_id = line.pane_id.as_str();
+    if let Some(reason) = drop_reason(pane_id) {
+        info!(pane_id = %pane_id, "{reason}");
+        return Ok(DeliveryOutcome::Skipped);
+    }
+    if environment.screen_locked() {
+        if messaging_paused {
+            info!(pane_id = %pane_id, "spoken line dropped (messaging paused)");
+            return Ok(DeliveryOutcome::Skipped);
+        }
+        environment
+            .send_spoken_line(&line.text)
+            .map_err(DispatchError::Retryable)?;
+        info!(pane_id = %pane_id, "spoken line sent to the away device");
+        return Ok(DeliveryOutcome::Delivered);
+    }
+    if voice_muted {
+        info!(pane_id = %pane_id, "spoken line dropped (voice off)");
+        return Ok(DeliveryOutcome::Skipped);
+    }
+    environment
+        .speak_line(&line.text)
+        .map_err(DispatchError::Retryable)?;
+    info!(pane_id = %pane_id, "spoken line said at the desk");
     Ok(DeliveryOutcome::Delivered)
 }
 
