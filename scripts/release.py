@@ -43,6 +43,10 @@ class Stopped(Exception):
     """A step failed. The message, when there is one, says which step and why."""
 
 
+class Interrupted(Exception):
+    """Ctrl-C while waiting for the build; the message says what is left on GitHub."""
+
+
 def run(argv, cwd, inherit=False, merge=False):
     """Run `argv` in `cwd` and return the finished process; a missing program exits 127.
 
@@ -149,7 +153,12 @@ def tag_check(cwd, tag):
 
 
 def notes_check(cwd, notes):
-    if notes and not (Path(cwd) / notes).is_file():
+    """Refuses a NOTES file that is missing, unreadable or not UTF-8."""
+    if not notes:
+        return None
+    try:
+        (Path(cwd) / notes).read_text(encoding='utf-8')
+    except (OSError, ValueError):
         return 'Not released: NOTES file {} cannot be read.'.format(notes)
     return None
 
@@ -222,7 +231,13 @@ def publish(cwd, tag, sha, notes):
                       '--title', 'Harold ' + tag, '--prerelease', '--notes-file', path), cwd)
     if result.returncode:
         raise Stopped('Not released: gh release create failed: {}'.format(result.stderr.strip()))
-    created = gh_json(cwd, 'release', 'view', tag, '--json', 'url,publishedAt')
+    try:
+        created = gh_json(cwd, 'release', 'view', tag, '--json', 'url,publishedAt')
+    except Stopped as error:
+        raise Stopped('\n'.join([
+            '{} was created as a pre-release, but {}'.format(tag, error),
+            '  withdraw it: gh release delete {} --cleanup-tag --yes'.format(tag),
+            '  or, when its build on GitHub succeeds: make install-release VERSION={}'.format(tag[1:])])) from None
     print('Published {} as a pre-release: {}'.format(tag, created['url']), flush=True)
     return created['url'], created['publishedAt']
 
@@ -290,7 +305,10 @@ def wait_for_build(cwd, tag, release_url, published):
         raise Stopped(build_failed(tag, found['url'], 'did not finish within 45 minutes'))
     if conclusion != 'success':
         raise Stopped(build_failed(tag, found['url'], 'ended in {}'.format(conclusion)))
-    assets = gh_json(cwd, 'release', 'view', tag, '--json', 'assets')['assets']
+    try:
+        assets = gh_json(cwd, 'release', 'view', tag, '--json', 'assets')['assets']
+    except Stopped:
+        raise Stopped(build_failed(tag, found['url'], 'finished, but its files could not be read')) from None
     if not {ARCHIVE, CHECKSUM} <= {asset['name'] for asset in assets}:
         raise Stopped(build_failed(tag, found['url'], 'finished without both files attached'))
 
@@ -303,3 +321,175 @@ def mark_latest(cwd, tag):
                       'Mark it latest on GitHub, then: make install-release VERSION={}'.format(
                           tag, result.stderr.strip(), tag[1:]))
     print('{} is the latest release.'.format(tag), flush=True)
+
+
+def retry(tag):
+    return '{} is on GitHub; try again with: make install-release VERSION={}'.format(tag, tag[1:])
+
+
+def download(cwd, tag, folder):
+    """Step 7: fetch the archive and its checksum into `folder`, check the archive against it,
+    and extract it with the path checks bootstrap.sh applies. Returns the extracted package."""
+    result = run(('gh', 'release', 'download', tag, '--repo', REPO, '--pattern', ARCHIVE,
+                  '--pattern', CHECKSUM, '--dir', folder), cwd)
+    if result.returncode:
+        raise Stopped('Not installed: gh release download failed: {}\n{}'.format(result.stderr.strip(), retry(tag)))
+    try:
+        # Bytes that are not text fail the format check below, not the read.
+        text = (folder / CHECKSUM).read_text(errors='replace')
+        data = (folder / ARCHIVE).read_bytes()
+    except OSError as error:
+        raise Stopped('Not installed: {} has no {}.\n{}'.format(tag, Path(error.filename).name, retry(tag))) from None
+    match = re.fullmatch(r'([0-9a-fA-F]{64})  ' + re.escape(ARCHIVE) + r'\n?', text)
+    if match is None:
+        raise Stopped('Not installed: the checksum file of {} is not valid.\n{}'.format(tag, retry(tag)))
+    if hashlib.sha256(data).hexdigest() != match.group(1).lower():
+        raise Stopped('Not installed: the archive of {} does not match its checksum.\n{}'.format(tag, retry(tag)))
+    try:
+        with tarfile.open(folder / ARCHIVE) as archive:
+            for item in archive.getmembers():
+                path = PurePosixPath(item.name)
+                if (path.is_absolute() or '..' in path.parts or not path.parts
+                        or path.parts[0] != PACKAGE or not (item.isfile() or item.isdir())):
+                    raise Stopped('Not installed: unsafe entry in the archive of {}: {}'.format(tag, item.name))
+            # Python 3.12 and later warn without a filter; every entry is checked above.
+            if hasattr(tarfile, 'data_filter'):
+                archive.extractall(folder, filter='data')
+            else:
+                archive.extractall(folder)
+    except tarfile.TarError as error:
+        raise Stopped('Not installed: the archive of {} cannot be read: {}\n{}'.format(tag, error, retry(tag))) from None
+    return folder / PACKAGE
+
+
+def run_installer(cwd, package, prefix, identity):
+    """Run the release's own installer with the Python running this command. The installer
+    prints its own failure, so a failure here adds nothing."""
+    command = [sys.executable, package / 'scripts/install.py', '--prebuilt-dir', package, '--prefix', prefix]
+    if identity:
+        command += ['--signing-identity', identity]
+    if run(command, cwd, inherit=True).returncode:
+        raise Stopped('')
+
+
+def installed(bundle, name):
+    """The text of the installed bundle's VERSION or REVISION file, or None."""
+    try:
+        return (bundle / name).read_text().strip() or None
+    except OSError:
+        return None
+
+
+def report(cwd, prefix, tag):
+    """Step 8: the line naming what runs, or Stopped naming what is wrong.
+
+    A bundle without VERSION (releases up to v0.5.0) is reported as not recorded, not as wrong.
+    """
+    bundle = prefix / 'harold'
+    version, revision = installed(bundle, 'VERSION'), installed(bundle, 'REVISION')
+    result = run((prefix / 'haroldctl', 'status'), cwd)
+    try:
+        status = json.loads(result.stdout)
+    except ValueError:
+        status = None
+    problems = []
+    if version is not None and version != tag:
+        problems.append('Installed VERSION is {}, not {}.'.format(version, tag))
+    if not (isinstance(status, dict) and status.get('ready') is True):
+        said = ((result.stdout or '') + (result.stderr or '')).strip() or 'nothing'
+        problems.append('Harold is not ready: haroldctl status said {}'.format(said))
+    if problems:
+        raise Stopped('\n'.join(problems))
+    name = 'Harold ' + (version or '(version not recorded)')
+    if revision:
+        name += ' ({})'.format(revision[:7])
+    return '{} is running, PID {}.'.format(name, status['pid'])
+
+
+def prefix_of(cwd, prefix):
+    """The folder to install under: PREFIX, relative to the checkout, or ~/bin."""
+    if not prefix:
+        return DEFAULT_PREFIX
+    return Path(os.path.abspath(str(Path(cwd) / Path(prefix).expanduser())))
+
+
+def install_tag(cwd, tag, prefix, identity):
+    """Steps 7 and 8 for `tag`."""
+    with tempfile.TemporaryDirectory(prefix='harold-release-') as folder:
+        print('Downloading {}'.format(tag), flush=True)
+        package = download(cwd, tag, Path(folder))
+        run_installer(cwd, package, prefix, identity)
+    print(report(cwd, prefix, tag), flush=True)
+    return 0
+
+
+def cut(cwd, args):
+    """`make release`: steps 1 to 8."""
+    tag, latest = checks(cwd, args.version, args.notes)
+    sha = git(cwd, 'rev-parse', 'HEAD').strip()
+    notes = release_notes(cwd, latest, args.notes)
+    url, published = publish(cwd, tag, sha, notes)
+    try:
+        wait_for_build(cwd, tag, url, published)
+    except KeyboardInterrupt:
+        raise Interrupted('\n'.join([
+            'Interrupted: {} stays a pre-release and its build continues on GitHub: {}'.format(tag, url),
+            'When the build succeeds, mark it latest (gh release edit {} --prerelease=false --latest)'.format(tag),
+            '  and install it: make install-release VERSION={}'.format(tag[1:]),
+            'Or withdraw it: gh release delete {} --cleanup-tag --yes'.format(tag)])) from None
+    mark_latest(cwd, tag)
+    return install_tag(cwd, tag, prefix_of(cwd, args.prefix), args.signing_identity)
+
+
+def install_existing(cwd, args):
+    """`make install-release`: steps 7 and 8 for the latest release or VERSION, with no checks."""
+    if args.version is None:
+        try:
+            tag = latest_release(cwd)
+        except Stopped as error:
+            raise Stopped('Not installed: {}'.format(error)) from None
+        if tag is None:
+            raise Stopped('Not installed: no release is marked latest.')
+    else:
+        numbers = parse_version(args.version)
+        if numbers is None:
+            raise Stopped('Not installed: VERSION must be three numbers, such as 0.6.0.')
+        tag = tag_of(numbers)
+    return install_tag(cwd, tag, prefix_of(cwd, args.prefix), args.signing_identity)
+
+
+def main(argv=None, cwd=REPO_ROOT):
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    commands = parser.add_subparsers(dest='command', metavar='{release,install}')
+    commands.required = True
+    for name, text in (('release', 'check, publish, build, mark latest and install'),
+                       ('install', 'install a release that exists, with no checks')):
+        command = commands.add_parser(name, help=text)
+        command.add_argument('--version', help='three numbers, such as 0.6.0 (default: '
+                             + ('the latest release with its middle number raised)' if name == 'release'
+                                else 'the latest release)'))
+        if name == 'release':
+            command.add_argument('--notes', help='file holding the release notes '
+                                 '(default: the subject of every commit since the previous release)')
+        command.add_argument('--prefix', help='install under this folder instead of ~/bin')
+        command.add_argument('--signing-identity', help='certificate the installer signs with and saves')
+    args = parser.parse_args(argv)
+    try:
+        return cut(cwd, args) if args.command == 'release' else install_existing(cwd, args)
+    except Stopped as error:
+        if str(error):
+            print(error, file=sys.stderr)
+        return 1
+    except Interrupted as error:
+        print(error, file=sys.stderr)
+        return 130
+    except KeyboardInterrupt:
+        print('Interrupted.', file=sys.stderr)
+        return 130
+    except OSError as error:
+        print('Stopped: {}'.format(error), file=sys.stderr)
+        return 1
+
+
+if __name__ == '__main__':
+    sys.exit(main())

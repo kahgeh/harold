@@ -78,6 +78,8 @@ class FakeGitHub:
         self.new_run = None
         self.outcome, self.polls, self.attach, self.appears_after = 'success', 3, True, 0
         self.failing_views = 0
+        # The `--json` fields for which `gh release view` fails.
+        self.failing_release_views = ()
         self.files = {}
         self.events = []
         self.created = None
@@ -108,6 +110,8 @@ class FakeGitHub:
             item = self.releases.get(args[2])
             if item is None:
                 return done(argv, 1, '', 'release not found\n')
+            if option(args, '--json') in self.failing_release_views:
+                return done(argv, 1, '', 'HTTP 502: Bad Gateway\n')
             return self.printed(argv, {field: item[field] for field in option(args, '--json').split(',')})
         if verb == ('release', 'create'):
             return self.create(argv, args)
@@ -265,12 +269,41 @@ class ReleaseTestCase(unittest.TestCase):
             (bundle / 'VERSION').write_text(self.installed_version + '\n')
         return done(argv, self.installer_code, None, None)
 
+    def main(self, *argv):
+        """Run release.py with `argv`; returns (exit status, stdout, stderr)."""
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = release.main(list(argv), cwd=self.work)
+        return code, out.getvalue(), err.getvalue()
+
     def assert_refused(self, expected):
-        """Step 1 refuses with exactly `expected` and changes nothing on GitHub."""
-        with self.assertRaises(release.Stopped) as refused:
-            release.checks(self.work, None, None)
-        self.assertEqual(str(refused.exception), expected)
+        """`release` exits 1 with exactly `expected` and changes nothing on GitHub."""
+        code, _, err = self.main('release', '--prefix', str(self.prefix))
+        self.assertEqual((code, err), (1, expected + '\n'))
         self.assertEqual(self.github.events, [])
+        self.assertIsNone(self.installer)
+
+    def pack(self, version='v0.6.0', checksum=None, entry=None):
+        """Give the release the two files its build attaches: an archive holding the installer,
+        VERSION (unless None) and REVISION, and its checksum (or `checksum` in its place).
+        `entry` adds one more archive member with that name."""
+        shutil.rmtree(str(self.root / 'pack'), ignore_errors=True)
+        package = self.root / 'pack' / release.PACKAGE
+        (package / 'scripts').mkdir(parents=True)
+        (package / 'scripts/install.py').write_text('# the release installer\n')
+        if version:
+            (package / 'VERSION').write_text(version + '\n')
+        (package / 'REVISION').write_text(REVISION + '\n')
+        buffer = io.BytesIO()
+        with tarfile.open(fileobj=buffer, mode='w:gz') as archive:
+            archive.add(str(package), arcname=release.PACKAGE)
+            if entry:
+                extra = tarfile.TarInfo(entry)
+                archive.addfile(extra, io.BytesIO(b''))
+        data = buffer.getvalue()
+        digest = checksum or hashlib.sha256(data).hexdigest()
+        self.github.files = {release.ARCHIVE: data,
+                             release.CHECKSUM: '{}  {}\n'.format(digest, release.ARCHIVE).encode()}
 
 
 class CheckTests(ReleaseTestCase):
@@ -381,9 +414,9 @@ class CheckTests(ReleaseTestCase):
     def test_a_version_not_higher_than_the_latest_is_refused(self):
         for version in ('0.5.0', '0.4.9', 'abc', '0.6', '0.6.0.1', ''):
             with self.subTest(version=version):
-                with self.assertRaises(release.Stopped) as refused:
-                    release.checks(self.work, version, None)
-                self.assertEqual(str(refused.exception), 'Not released: VERSION must be higher than v0.5.0.')
+                code, _, err = self.main('release', '--version', version, '--prefix', str(self.prefix))
+                self.assertEqual((code, err), (1, 'Not released: VERSION must be higher than v0.5.0.\n'))
+                self.assertEqual(self.github.events, [])
 
     def test_a_given_version_is_used(self):
         self.assertEqual(release.checks(self.work, '0.5.1', None), ('v0.5.1', 'v0.5.0'))
@@ -394,9 +427,18 @@ class CheckTests(ReleaseTestCase):
         self.assertEqual(release.checks(self.work, None, None), ('v0.1.0', None))
 
     def test_an_unreadable_notes_file_is_refused(self):
-        with self.assertRaises(release.Stopped) as refused:
-            release.checks(self.work, None, 'missing.md')
-        self.assertEqual(str(refused.exception), 'Not released: NOTES file missing.md cannot be read.')
+        code, _, err = self.main('release', '--notes', 'missing.md', '--prefix', str(self.prefix))
+        self.assertEqual((code, err), (1, 'Not released: NOTES file missing.md cannot be read.\n'))
+        self.assertEqual(self.github.events, [])
+
+    def test_a_notes_file_that_is_not_utf_8_is_refused(self):
+        (self.work / 'notes.md').write_bytes(b'\xff\xfe')
+        git(self.work, 'add', 'notes.md')
+        git(self.work, 'commit', '-q', '-m', 'Notes')
+        git(self.work, 'push', '-q', 'origin', 'main')
+        code, _, err = self.main('release', '--notes', 'notes.md', '--prefix', str(self.prefix))
+        self.assertEqual((code, err), (1, 'Not released: NOTES file notes.md cannot be read.\n'))
+        self.assertEqual(self.github.events, [])
 
 
 class VersionTests(unittest.TestCase):
@@ -467,6 +509,16 @@ class BuildTests(ReleaseTestCase):
         self.assertTrue(self.github.releases['v0.5.0']['isLatest'])
         self.assertFalse(self.github.releases['v0.6.0']['isLatest'])
 
+    def test_a_failed_view_after_creating_says_the_release_is_public(self):
+        self.github.failing_release_views = ('url,publishedAt',)
+        with self.assertRaises(release.Stopped) as failed:
+            self.publish()
+        self.assertEqual(str(failed.exception), '\n'.join([
+            'v0.6.0 was created as a pre-release, but gh release view failed: HTTP 502: Bad Gateway',
+            '  withdraw it: gh release delete v0.6.0 --cleanup-tag --yes',
+            '  or, when its build on GitHub succeeds: make install-release VERSION=0.6.0']))
+        self.assertTrue(self.github.releases['v0.6.0']['isPrerelease'])
+
     def test_each_step_is_printed_once_as_it_finishes(self):
         output = self.wait()
         steps = [line for line in output.splitlines() if line.startswith('  build: ')]
@@ -507,6 +559,11 @@ class BuildTests(ReleaseTestCase):
         self.assert_failed_build('finished without both files attached',
                                  'https://github.com/kahgeh/harold/actions/runs/2')
 
+    def test_files_that_cannot_be_read_after_the_build_are_a_failed_build(self):
+        self.github.failing_release_views = ('assets',)
+        self.assert_failed_build('finished, but its files could not be read',
+                                 'https://github.com/kahgeh/harold/actions/runs/2')
+
     def test_marking_latest_clears_the_pre_release_mark(self):
         self.wait()
         with contextlib.redirect_stdout(io.StringIO()):
@@ -515,6 +572,150 @@ class BuildTests(ReleaseTestCase):
         self.assertFalse(self.github.releases['v0.6.0']['isPrerelease'])
         self.assertTrue(self.github.releases['v0.6.0']['isLatest'])
         self.assertFalse(self.github.releases['v0.5.0']['isLatest'])
+
+
+class CommandTests(ReleaseTestCase):
+    def setUp(self):
+        super().setUp()
+        self.pack()
+
+    def last_line(self, out):
+        return out.rstrip('\n').splitlines()[-1]
+
+    def test_a_release_is_published_built_marked_latest_and_installed(self):
+        code, out, err = self.main('release', '--prefix', str(self.prefix))
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.github.events, ['create v0.6.0', 'build success', 'edit v0.6.0', 'download v0.6.0'])
+        self.assertEqual(self.github.created['notes'], 'Second\nThird\n')
+        self.assertEqual(self.last_line(out), 'Harold v0.6.0 (31323b9) is running, PID 16897.')
+
+    def test_the_installer_is_the_archives_own_run_with_this_python(self):
+        self.main('release', '--prefix', str(self.prefix))
+        package = Path(self.installer[1]).parents[1]
+        self.assertEqual(self.installer, [sys.executable, str(package / 'scripts/install.py'),
+                                          '--prebuilt-dir', str(package), '--prefix', str(self.prefix)])
+        self.assertEqual(package.name, release.PACKAGE)
+
+    def test_a_signing_identity_reaches_the_installer_from_both_commands(self):
+        # The release command creates v0.6.0 on the fake GitHub; the install command then installs it.
+        code, _, err = self.main('release', '--prefix', str(self.prefix), '--signing-identity', 'Some Cert')
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.installer[-2:], ['--signing-identity', 'Some Cert'])
+        self.installer = None
+        code, _, err = self.main('install', '--version', '0.6.0', '--prefix', str(self.prefix),
+                                 '--signing-identity', 'Some Cert')
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.installer[-2:], ['--signing-identity', 'Some Cert'])
+
+    def test_without_a_signing_identity_none_is_passed(self):
+        self.main('release', '--prefix', str(self.prefix))
+        self.assertNotIn('--signing-identity', self.installer)
+
+    def test_with_no_prefix_the_default_prefix_is_used(self):
+        code, out, err = self.main('release')
+        self.assertEqual(code, 0, err)
+        self.assertEqual(option(self.installer, '--prefix'), str(self.root / 'default prefix'))
+
+    def test_a_notes_file_becomes_the_release_notes(self):
+        (self.work / 'notes.md').write_text('Faster agent monitor.\n')
+        git(self.work, 'add', 'notes.md')
+        git(self.work, 'commit', '-q', '-m', 'Notes')
+        git(self.work, 'push', '-q', 'origin', 'main')
+        code, _, err = self.main('release', '--notes', 'notes.md', '--prefix', str(self.prefix))
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.github.created['notes'], 'Faster agent monitor.\n')
+
+    def test_a_failed_build_downloads_and_installs_nothing(self):
+        self.github.outcome = 'failure'
+        code, _, err = self.main('release', '--prefix', str(self.prefix))
+        self.assertEqual(code, 1)
+        self.assertEqual(self.github.events, ['create v0.6.0', 'build failure'])
+        self.assertTrue(self.github.releases['v0.6.0']['isPrerelease'])
+        self.assertIsNone(self.installer)
+        self.assertIn('https://github.com/kahgeh/harold/actions/runs/2', err)
+        self.assertIn('gh release delete v0.6.0 --cleanup-tag --yes', err)
+        self.assertIn('make install-release VERSION=0.6.0', err)
+
+    def test_a_checksum_mismatch_runs_no_installer(self):
+        self.pack(checksum='0' * 64)
+        code, _, err = self.main('release', '--prefix', str(self.prefix))
+        self.assertEqual(code, 1)
+        self.assertIsNone(self.installer)
+        self.assertEqual(err, 'Not installed: the archive of v0.6.0 does not match its checksum.\n'
+                              'v0.6.0 is on GitHub; try again with: make install-release VERSION=0.6.0\n')
+        self.assertTrue(self.github.releases['v0.6.0']['isLatest'])
+
+    def test_a_checksum_file_that_is_not_text_runs_no_installer(self):
+        self.github.files[release.CHECKSUM] = b'\xff\xfe'
+        code, _, err = self.main('release', '--prefix', str(self.prefix))
+        self.assertEqual(code, 1)
+        self.assertIsNone(self.installer)
+        self.assertEqual(err, 'Not installed: the checksum file of v0.6.0 is not valid.\n'
+                              'v0.6.0 is on GitHub; try again with: make install-release VERSION=0.6.0\n')
+
+    def test_an_archive_entry_outside_the_package_runs_no_installer(self):
+        self.github.releases['v0.6.0'] = self.github.release('v0.6.0', assets=(release.ARCHIVE, release.CHECKSUM))
+        for entry in ('../escape', '/etc/escape', 'other/file'):
+            with self.subTest(entry=entry):
+                self.pack(entry=entry)
+                code, _, err = self.main('install', '--version', '0.6.0', '--prefix', str(self.prefix))
+                self.assertEqual(code, 1)
+                self.assertIsNone(self.installer)
+                self.assertIn('unsafe entry in the archive of v0.6.0', err)
+
+    def test_a_failed_installer_exits_1_and_adds_nothing(self):
+        self.installer_code = 1
+        code, out, err = self.main('release', '--prefix', str(self.prefix))
+        self.assertEqual((code, err), (1, ''))
+        self.assertNotIn('is running', out)
+
+    def test_an_installed_version_other_than_the_tag_is_a_failure(self):
+        self.installed_version = 'v0.5.0'
+        code, _, err = self.main('release', '--prefix', str(self.prefix))
+        self.assertEqual((code, err), (1, 'Installed VERSION is v0.5.0, not v0.6.0.\n'))
+
+    def test_harold_not_ready_is_a_failure(self):
+        self.ready = False
+        code, _, err = self.main('release', '--prefix', str(self.prefix))
+        self.assertEqual(code, 1)
+        self.assertTrue(err.startswith('Harold is not ready: haroldctl status said {"ready": false'), err)
+
+    def test_install_release_makes_no_check_and_publishes_nothing(self):
+        self.github.releases['v0.6.0'] = self.github.release('v0.6.0', prerelease=True,
+                                                             assets=(release.ARCHIVE, release.CHECKSUM))
+        code, out, err = self.main('install', '--version', '0.6.0', '--prefix', str(self.prefix))
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.github.events, ['download v0.6.0'])
+        self.assertFalse([argv for argv in self.calls if argv[0] == 'git'])
+        self.assertNotIn(['gh', 'auth', 'status'], self.calls)
+        self.assertFalse([argv for argv in self.calls if tuple(argv) in release.TESTS])
+        self.assertEqual(self.last_line(out), 'Harold v0.6.0 (31323b9) is running, PID 16897.')
+
+    def test_install_release_with_no_version_installs_the_latest(self):
+        self.pack(version=None)
+        code, out, err = self.main('install', '--prefix', str(self.prefix))
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.github.events, ['download v0.5.0'])
+        self.assertEqual(self.last_line(out), 'Harold (version not recorded) (31323b9) is running, PID 16897.')
+
+    def test_install_release_refuses_a_version_that_is_not_three_numbers(self):
+        code, _, err = self.main('install', '--version', 'abc', '--prefix', str(self.prefix))
+        self.assertEqual((code, err), (1, 'Not installed: VERSION must be three numbers, such as 0.6.0.\n'))
+        self.assertEqual(self.github.events, [])
+
+    def test_ctrl_c_while_waiting_leaves_the_pre_release(self):
+        def interrupt(seconds):
+            raise KeyboardInterrupt
+        self.github.appears_after = 1
+        with patch.object(release, 'sleep', interrupt):
+            code, _, err = self.main('release', '--prefix', str(self.prefix))
+        self.assertEqual(code, 130)
+        self.assertEqual(self.github.events, ['create v0.6.0'])
+        self.assertTrue(self.github.releases['v0.6.0']['isPrerelease'])
+        self.assertIsNone(self.installer)
+        self.assertIn('v0.6.0 stays a pre-release and its build continues on GitHub', err)
+        self.assertIn('make install-release VERSION=0.6.0', err)
+        self.assertIn('gh release delete v0.6.0 --cleanup-tag --yes', err)
 
 
 if __name__ == '__main__':
