@@ -288,7 +288,7 @@ def make_metadata(prefix, grpc_addr):
 def write_plist(path, metadata):
     bundle = Path(metadata['bundle'])
     value = {'Label': metadata['label'],
-             'ProgramArguments': [sys.executable, str(bundle / 'service.py'), 'run'],
+             'ProgramArguments': [str(bundle / 'harold')],
              'WorkingDirectory': str(bundle), 'RunAtLoad': False,
              'ProcessType': 'Background', 'ExitTimeOut': 10,
              'EnvironmentVariables': metadata['env'],

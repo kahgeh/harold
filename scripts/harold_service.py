@@ -177,7 +177,7 @@ def service_lock(prefix, timeout=40):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command', choices=['start', 'stop', 'restart', 'status', 'run'])
+    parser.add_argument('command', choices=['start', 'stop', 'restart', 'status'])
     args = parser.parse_args()
     bundle = Path(__file__).resolve().parent
     try:
@@ -185,10 +185,6 @@ def main():
         environment = managed_environment(metadata['env'])
         os.environ.clear()
         os.environ.update(environment)
-        if args.command == 'run':
-            os.chdir(bundle)
-            os.execve(str(bundle / 'harold'), [str(bundle / 'harold')],
-                      managed_environment(metadata['env']))
         with service_lock(bundle.parent):
             if args.command in ('start', 'restart'):
                 updated = validated_metadata(metadata)

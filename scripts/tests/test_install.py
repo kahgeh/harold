@@ -339,6 +339,115 @@ class InstallTests(unittest.TestCase):
                 self.install.build_binaries(repo, offline=True)
 
 
+# Leaves `signing_identity` out of an installed service.json, as installs before it did.
+NOT_RECORDED = object()
+
+
+class InstalledServiceTests(unittest.TestCase):
+    """A whole install from a release fixture, with codesign, launchctl and lsof faked."""
+
+    def setUp(self):
+        import install
+        self.install = install
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        root = Path(self.temp.name).resolve()
+        self.prefix = root / 'prefix with spaces'
+        self.prefix.mkdir()
+        self.bundle = self.prefix / 'harold'
+        # Never the real ~/.claude/settings.json, ~/.claude/skills or ~/.codex/skills.
+        for name, value in (('CLAUDE_SETTINGS', root / 'claude/settings.json'),
+                            ('AGENT_SKILL_FOLDERS', ())):
+            patcher = patch.object(install, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.release = root / 'release'
+        for name in ('harold', 'tmx-agent-dash', 'harold.proto',
+                     'hooks/harold_turn_complete.py', 'hooks/claude_turn_complete.py',
+                     'hooks/codex_turn_complete.py', 'scripts/harold_service.py',
+                     'config/default.toml', 'config/local.template.toml', SKILL_FILE,
+                     *('hooks/claude-mod/' + f for f in RUNTIME_FILES)):
+            path = self.release / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text('release ' + name)
+        for name in ('harold', 'tmx-agent-dash'):
+            (self.release / name).chmod(0o755)
+        (self.release / 'config/default.toml').write_text('[notify]\naway_channel = "imessage"\n')
+        self.config = root / 'import.toml'
+        self.config.write_text('[imessage]\nrecipient = "me@example.com"\nhandle_ids = [1]\n')
+        self.requirements = {}
+        self.sign_error = None
+        self.calls = []
+
+    def process(self, argv, **kwargs):
+        self.calls.append(list(argv))
+        if argv[:2] == ['codesign', '-dr']:
+            requirement = self.requirements.get('new' if '.harold-stage-' in argv[-1] else 'old')
+            if requirement is None:
+                return subprocess.CompletedProcess(argv, 1, '', argv[-1] + ': code object is not signed at all\n')
+            return subprocess.CompletedProcess(argv, 0, '# designated => {}\n'.format(requirement),
+                                               'Executable={}\n'.format(argv[-1]))
+        if argv[:2] == ['codesign', '--force'] and self.sign_error:
+            return subprocess.CompletedProcess(argv, 1, '', self.sign_error + '\n')
+        if '--check-config' in argv:
+            return subprocess.CompletedProcess(argv, 0, json.dumps({
+                'grpc_addr': '127.0.0.1:50123', 'store_path': str(self.bundle / 'data/events')}), '')
+        return subprocess.CompletedProcess(argv, 0, '', '')
+
+    def install_existing(self, saved=NOT_RECORDED):
+        (self.bundle / 'config').mkdir(parents=True)
+        (self.bundle / 'harold').write_text('old harold')
+        (self.bundle / 'config/local.toml').write_text(self.config.read_text())
+        metadata = self.install.make_metadata(self.prefix, '127.0.0.1:50123')
+        if saved is not NOT_RECORDED:
+            metadata['signing_identity'] = saved
+        (self.bundle / 'service.json').write_text(json.dumps(metadata))
+
+    def run_install(self, identity='-'):
+        self.printed = io.StringIO()
+        args = argparse.Namespace(prefix=str(self.prefix), config=str(self.config), reinstall=False,
+                                  offline=False, signing_identity=identity, prebuilt_dir=str(self.release))
+        with patch.object(self.install, 'prerequisites'), \
+             patch.object(subprocess, 'run', side_effect=self.process), \
+             patch.object(self.install.service, 'listener_pids', return_value=set()), \
+             patch.object(self.install.service, 'stop') as self.stop, \
+             patch.object(self.install.service, 'stop_unmanaged'), \
+             patch.object(self.install.service, 'start', return_value=123), \
+             contextlib.redirect_stdout(self.printed):
+            self.install.install(args, self.prefix / 'no source')
+        return self.printed.getvalue()
+
+    def installed_metadata(self):
+        return json.loads((self.bundle / 'service.json').read_text())
+
+    def test_launchd_starts_harold_itself(self):
+        self.run_install()
+        plist = plistlib.loads((self.bundle / 'service.plist').read_bytes())
+        # One item, the whole path, although the prefix has a space in it.
+        self.assertEqual(plist['ProgramArguments'], [str(self.bundle / 'harold')])
+        for item in plist['ProgramArguments']:
+            self.assertNotIn('python', item)
+            self.assertNotIn('service.py', item)
+
+    def test_every_other_service_file_key_keeps_its_value(self):
+        self.run_install()
+        plist = plistlib.loads((self.bundle / 'service.plist').read_bytes())
+        metadata = self.installed_metadata()
+        self.assertEqual(plist, {
+            'Label': metadata['label'],
+            'ProgramArguments': [str(self.bundle / 'harold')],
+            'WorkingDirectory': str(self.bundle),
+            'RunAtLoad': False,
+            'ProcessType': 'Background',
+            'ExitTimeOut': 10,
+            'EnvironmentVariables': metadata['env'],
+            'StandardOutPath': str(self.bundle / 'harold.log'),
+            'StandardErrorPath': str(self.bundle / 'harold.log'),
+        })
+        self.assertEqual(sorted(metadata['env']), sorted([
+            'HAROLD_CONFIG_DIR', 'HAROLD_ENV', 'HAROLD__STORE__PATH', 'PATH', 'LANG', 'LC_ALL']))
+
+
 class ServiceTests(unittest.TestCase):
     def setUp(self):
         import harold_service
@@ -400,6 +509,27 @@ class ServiceTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, '^Configuration validation failed') as error:
                 self.service.validated_metadata(metadata)
         self.assertNotIn('secret', str(error.exception))
+
+    def test_run_is_no_longer_a_command(self):
+        error = io.StringIO()
+        with patch.object(sys, 'argv', ['service.py', 'run']), \
+             patch.object(self.service.os, 'execve') as execve, \
+             contextlib.redirect_stderr(error):
+            with self.assertRaises(SystemExit) as exit:
+                self.service.main()
+        self.assertEqual(exit.exception.code, 2)
+        self.assertIn("invalid choice: 'run'", error.getvalue())
+        execve.assert_not_called()
+
+    def test_revalidation_keeps_every_other_key(self):
+        metadata = {'bundle': '/bundle', 'label': 'test.harold', 'plist': '/bundle/service.plist',
+                    'grpc_addr': '127.0.0.1:50060', 'env': {'HAROLD_ENV': 'local'},
+                    'signing_identity': 'Kah Geh Tan'}
+        reply = subprocess.CompletedProcess(
+            [], 0, '{"grpc_addr":"127.0.0.1:50123","store_path":"/bundle/data/events"}', '')
+        with patch.object(self.service, 'run', return_value=reply):
+            updated = self.service.validated_metadata(metadata)
+        self.assertEqual(updated, dict(metadata, grpc_addr='127.0.0.1:50123'))
 
 
 class ClaudeSettingsTests(unittest.TestCase):
