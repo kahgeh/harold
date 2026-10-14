@@ -5,8 +5,8 @@ use crate::away_message::{
     AGENT_NOT_FOUND, INVALID_MESSAGE_LENGTH, INVALID_SOURCE_ID, MESSAGING_PAUSED,
 };
 use crate::harold::{
-    AgentState, ReportAgentStateRequest, SendMessageToAwayDeviceRequest, WatchAgentStatesRequest,
-    harold_client::HaroldClient,
+    AgentState, ReportAgentStateRequest, SendMessageToAwayDeviceRequest, SpeakLineRequest,
+    WatchAgentStatesRequest, harold_client::HaroldClient,
 };
 use crate::settings::Settings;
 
@@ -19,6 +19,7 @@ pub(crate) enum Mode {
     CheckReady,
     Accept(AcceptArgs),
     SendMessageToAwayDevice(AwayMessageArgs),
+    Speak(AwayMessageArgs),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -103,9 +104,20 @@ const SOURCE_ID_LINE: &str = "--src-id must be a tmux pane id such as %47";
 const MESSAGE_LENGTH_LINE: &str = "the message must be 1 to 1,000 characters";
 const NOT_STORED_LINE: &str = "the Harold daemon could not store the message";
 
-/// The arguments after the command name. `Err` is the one line the command prints.
-/// An argument that starts with `--` is a flag, so a text cannot start with `--`.
-fn parse_away_message(args: &[&str]) -> Result<AwayMessageArgs, String> {
+pub(crate) const SPEAK_COMMAND: &str = "speak";
+const SPEAK_ARGUMENTS: &str = "invalid argument: usage is speak --src-id ID TEXT";
+const SPOKEN_LENGTH_LINE: &str = "the spoken line must be 1 to 300 characters";
+const SPOKEN_NOT_STORED_LINE: &str = "the Harold daemon could not store the spoken line";
+
+/// The arguments after the command name: one `--src-id ID` and one text, in either order.
+/// `Err` is the one line the command prints: `usage` for a malformed command,
+/// `length_line` for an empty text. An argument that starts with `--` is a flag, so a text
+/// cannot start with `--`.
+fn parse_source_and_text(
+    args: &[&str],
+    usage: &str,
+    length_line: &str,
+) -> Result<AwayMessageArgs, String> {
     let (mut src_id, mut text) = (None, None);
     let mut rest = args.iter();
     while let Some(arg) = rest.next() {
@@ -116,28 +128,32 @@ fn parse_away_message(args: &[&str]) -> Result<AwayMessageArgs, String> {
                 {
                     src_id = Some(*value)
                 }
-                _ => return Err(AWAY_MESSAGE_ARGUMENTS.into()),
+                _ => return Err(usage.into()),
             }
         } else if arg.starts_with("--") || text.is_some() {
-            return Err(AWAY_MESSAGE_ARGUMENTS.into());
+            return Err(usage.into());
         } else {
             text = Some(*arg);
         }
     }
     let (Some(src_id), Some(text)) = (src_id, text) else {
-        return Err(AWAY_MESSAGE_ARGUMENTS.into());
+        return Err(usage.into());
     };
     if !valid_pane_id(src_id) {
         return Err(SOURCE_ID_LINE.into());
     }
     // The daemon alone makes the text one line and checks its length.
     if text.trim().is_empty() {
-        return Err(MESSAGE_LENGTH_LINE.into());
+        return Err(length_line.into());
     }
     Ok(AwayMessageArgs {
         src_id: src_id.to_string(),
         text: text.to_string(),
     })
+}
+
+fn parse_away_message(args: &[&str]) -> Result<AwayMessageArgs, String> {
+    parse_source_and_text(args, AWAY_MESSAGE_ARGUMENTS, MESSAGE_LENGTH_LINE)
 }
 
 /// The line the command prints for a refusal with this gRPC code and status message.
@@ -154,6 +170,19 @@ fn refusal_line(code: tonic::Code, message: &str, src_id: &str) -> String {
     }
 }
 
+/// The line `harold speak` prints for a refusal with this gRPC code and status message.
+fn speak_refusal_line(code: tonic::Code, message: &str, src_id: &str) -> String {
+    match (code, message) {
+        (tonic::Code::InvalidArgument, INVALID_SOURCE_ID) => SOURCE_ID_LINE.into(),
+        (tonic::Code::InvalidArgument, INVALID_MESSAGE_LENGTH) => SPOKEN_LENGTH_LINE.into(),
+        (tonic::Code::FailedPrecondition, AGENT_NOT_FOUND) => {
+            format!("no agent is running in pane {src_id}")
+        }
+        // Includes an older daemon that does not have the RPC.
+        _ => SPOKEN_NOT_STORED_LINE.into(),
+    }
+}
+
 impl Mode {
     pub(crate) fn parse(args: &[String]) -> Result<Self, String> {
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
@@ -165,6 +194,9 @@ impl Mode {
             ["accept", rest @ ..] => parse_accept(rest).map(Self::Accept),
             [AWAY_MESSAGE_COMMAND, rest @ ..] => {
                 parse_away_message(rest).map(Self::SendMessageToAwayDevice)
+            }
+            [SPEAK_COMMAND, rest @ ..] => {
+                parse_source_and_text(rest, SPEAK_ARGUMENTS, SPOKEN_LENGTH_LINE).map(Self::Speak)
             }
             ["--diagnostic" | "--diagnostics"] => Ok(Self::Diagnostics { delay_seconds: 0 }),
             ["--diagnostic" | "--diagnostics", "--delay"] => {
@@ -274,6 +306,30 @@ pub(crate) async fn send_message_to_away_device(
     if !response.into_inner().accepted {
         return Err(NOT_STORED_LINE.into());
     }
+    Ok(())
+}
+
+/// Ask the daemon to say `args.text` or send it as a voice note. `Ok` means the daemon
+/// stored the line, not that it was heard. `Err` is the one line to print.
+pub(crate) async fn speak(settings: &Settings, args: &AwayMessageArgs) -> Result<(), String> {
+    let address = settings
+        .grpc
+        .addr()
+        .map_err(|_| "invalid configuration".to_string())?;
+    tokio::time::timeout(Duration::from_secs(3), async {
+        let mut client = HaroldClient::connect(format!("http://{address}"))
+            .await
+            .map_err(|_| "the Harold daemon is not reachable".to_string())?;
+        client
+            .speak_line(SpeakLineRequest {
+                src_id: args.src_id.clone(),
+                text: args.text.clone(),
+            })
+            .await
+            .map_err(|status| speak_refusal_line(status.code(), status.message(), &args.src_id))
+    })
+    .await
+    .map_err(|_| "the Harold daemon did not answer within 3 seconds".to_string())??;
     Ok(())
 }
 
@@ -543,5 +599,63 @@ mod tests {
                 "{code:?} {message}"
             );
         }
+    }
+
+    const SPEAK_USAGE: &str = "invalid argument: usage is speak --src-id ID TEXT";
+
+    fn speak(text: &str) -> Mode {
+        Mode::Speak(AwayMessageArgs {
+            src_id: "%47".into(),
+            text: text.into(),
+        })
+    }
+
+    #[test]
+    fn speak_takes_the_source_and_the_text_in_either_order() {
+        assert_eq!(
+            parse(&["speak", "--src-id", "%47", "All green."]),
+            Ok(speak("All green."))
+        );
+        assert_eq!(
+            parse(&["speak", "All green.", "--src-id", "%47"]),
+            Ok(speak("All green."))
+        );
+    }
+
+    #[test]
+    fn speak_rejects_malformed_forms_with_its_own_usage_line() {
+        for args in [
+            vec!["speak"],
+            vec!["speak", "text"],
+            vec!["speak", "--src-id", "%47"],
+            vec!["speak", "--src-id", "%47", "one", "two"],
+            vec!["speak", "--src-id", "", "text"],
+        ] {
+            assert_eq!(parse(&args), Err(SPEAK_USAGE.to_string()), "{args:?}");
+        }
+        assert_eq!(
+            parse(&["speak", "--src-id", "47", "text"]),
+            Err("--src-id must be a tmux pane id such as %47".to_string())
+        );
+        assert_eq!(
+            parse(&["speak", "--src-id", "%47", " \n "]),
+            Err("the spoken line must be 1 to 300 characters".to_string())
+        );
+    }
+
+    #[test]
+    fn speak_refusals_print_the_spoken_line_wording() {
+        assert_eq!(
+            speak_refusal_line(tonic::Code::InvalidArgument, INVALID_MESSAGE_LENGTH, "%47"),
+            "the spoken line must be 1 to 300 characters"
+        );
+        assert_eq!(
+            speak_refusal_line(tonic::Code::FailedPrecondition, AGENT_NOT_FOUND, "%47"),
+            "no agent is running in pane %47"
+        );
+        assert_eq!(
+            speak_refusal_line(tonic::Code::Unimplemented, "", "%47"),
+            "the Harold daemon could not store the spoken line"
+        );
     }
 }

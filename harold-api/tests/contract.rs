@@ -3,7 +3,8 @@ use harold_api::harold::{
     AgentPaneState, AgentState, ForwardReplyRequest, ForwardReplyResponse, ReportAgentStateRequest,
     ReportNotificationRequest, ReportNotificationResponse, SendMessageToAwayDeviceRequest,
     SendMessageToAwayDeviceResponse, SetMessagingPausedRequest, SetMessagingPausedResponse,
-    SetTtsMutedRequest, SetTtsMutedResponse, TurnCompleteRequest,
+    SetTtsMutedRequest, SetTtsMutedResponse, SpeakLineRequest, SpeakLineResponse,
+    TurnCompleteRequest,
 };
 use prost::Message;
 
@@ -207,6 +208,7 @@ fn harold_service_exposes_only_the_approved_rpcs() {
             "ReportNotification".to_string(),
             "ForwardReply".to_string(),
             "SendMessageToAwayDevice".to_string(),
+            "SpeakLine".to_string(),
         ]
     );
 }
@@ -292,4 +294,19 @@ fn send_message_to_away_device_carries_the_source_pane_and_the_text() {
         message_fields("SendMessageToAwayDeviceResponse"),
         [("accepted".to_string(), 1)]
     );
+}
+
+#[test]
+fn speak_line_carries_the_source_pane_and_the_text() {
+    let request = SpeakLineRequest {
+        src_id: "%47".to_string(),
+        text: "Release install is on task five of six.".to_string(),
+    };
+    assert_eq!(round_trip(&request), request);
+    assert_eq!(
+        message_fields("SpeakLineRequest"),
+        [("src_id".to_string(), 1), ("text".to_string(), 2)]
+    );
+    assert!(message_fields("SpeakLineResponse").is_empty());
+    let _ = round_trip(&SpeakLineResponse {});
 }

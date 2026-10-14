@@ -11,7 +11,8 @@ use harold_api::harold::{
     ReportAgentStateRequest, ReportAgentStateResponse, ReportNotificationRequest,
     ReportNotificationResponse, SendMessageToAwayDeviceRequest, SendMessageToAwayDeviceResponse,
     SetMessagingPausedRequest, SetMessagingPausedResponse, SetTtsMutedRequest, SetTtsMutedResponse,
-    TurnCompleteRequest, TurnCompleteResponse, WatchAgentStatesRequest,
+    SpeakLineRequest, SpeakLineResponse, TurnCompleteRequest, TurnCompleteResponse,
+    WatchAgentStatesRequest,
     harold_server::{Harold, HaroldServer},
 };
 use tokio::sync::mpsc;
@@ -207,6 +208,14 @@ impl Harold for ProbeServer {
         &self,
         _: Request<SendMessageToAwayDeviceRequest>,
     ) -> Result<Response<SendMessageToAwayDeviceResponse>, Status> {
+        self.writes.fetch_add(1, Ordering::SeqCst);
+        Err(Status::permission_denied("probe must not write"))
+    }
+
+    async fn speak_line(
+        &self,
+        _: Request<SpeakLineRequest>,
+    ) -> Result<Response<SpeakLineResponse>, Status> {
         self.writes.fetch_add(1, Ordering::SeqCst);
         Err(Status::permission_denied("probe must not write"))
     }
@@ -413,6 +422,13 @@ impl Harold for RecordingServer {
                 Err(Status::unavailable("hung"))
             }
         }
+    }
+
+    async fn speak_line(
+        &self,
+        _: Request<SpeakLineRequest>,
+    ) -> Result<Response<SpeakLineResponse>, Status> {
+        Err(Status::unimplemented("not used"))
     }
 
     async fn watch_agent_states(

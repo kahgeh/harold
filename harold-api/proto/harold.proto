@@ -14,6 +14,8 @@ service Harold {
   rpc ForwardReply (ForwardReplyRequest) returns (ForwardReplyResponse);
   // An agent asks Harold to send text to the user's away device.
   rpc SendMessageToAwayDevice (SendMessageToAwayDeviceRequest) returns (SendMessageToAwayDeviceResponse);
+  // The chief asks Harold to say a line at the desk or send it as a voice note when away.
+  rpc SpeakLine (SpeakLineRequest) returns (SpeakLineResponse);
 }
 
 message TurnCompleteRequest {
@@ -132,3 +134,11 @@ message SendMessageToAwayDeviceRequest {
 message SendMessageToAwayDeviceResponse {
   bool accepted = 1;
 }
+
+message SpeakLineRequest {
+  // The tmux pane id of the sending agent, such as "%47".
+  string src_id = 1;
+  string text = 2;
+}
+
+message SpeakLineResponse {}

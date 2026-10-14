@@ -18,7 +18,7 @@ use super::harold::harold_server::{Harold, HaroldServer};
 use super::harold::{
     AgentState, ForwardReplyRequest, MonitorHealthState, ReportAgentStateRequest,
     ReportNotificationRequest, SendMessageToAwayDeviceRequest, SetMessagingPausedRequest,
-    SetTtsMutedRequest, WatchAgentStatesRequest,
+    SetTtsMutedRequest, SpeakLineRequest, WatchAgentStatesRequest,
 };
 use super::inbound::ownership::recorded_notifications;
 use super::peers::PeerEndpoint;
@@ -1754,4 +1754,120 @@ async fn away_message_is_unavailable_when_the_monitor_has_stopped() {
     assert!(!error.message().contains("sensitive text"));
     let (messages, _) = away_messages(&store).await;
     assert!(messages.is_empty());
+}
+
+/// Every spoken line stored in `store`, in order, and the count of all stored events.
+async fn spoken_lines(store: &store::HaroldStore) -> (Vec<store::SpokenLineRequested>, usize) {
+    let events = store
+        .stream()
+        .load_after_version(EventStreamVersion::start(), 100)
+        .await
+        .unwrap();
+    let total = events.len();
+    let lines = events
+        .into_iter()
+        .filter(|event| event.r#type == "SpokenLineRequested")
+        .map(|event| serde_json::from_value(event.payload).unwrap())
+        .collect();
+    (lines, total)
+}
+
+fn speak_request(src_id: &str, text: &str) -> Request<SpeakLineRequest> {
+    Request::new(SpeakLineRequest {
+        src_id: src_id.into(),
+        text: text.into(),
+    })
+}
+
+#[tokio::test]
+async fn accepted_spoken_line_stores_one_event_with_one_line_text() {
+    let directory = TestDirectory::new();
+    let store = Arc::new(store::HaroldStore::open(&directory.0).await.unwrap());
+    let (service, _shutdown, task) = service_tracking_a_pane(&store);
+
+    service
+        .speak_line(speak_request("%8", "  Release install\n\tis done.  "))
+        .await
+        .unwrap();
+
+    let (lines, total) = spoken_lines(&store).await;
+    assert_eq!(total, 1);
+    assert_eq!(
+        lines,
+        [store::SpokenLineRequested {
+            pane_id: "%8".into(),
+            text: "Release install is done.".into(),
+        }]
+    );
+    task.abort();
+}
+
+#[tokio::test]
+async fn spoken_line_of_300_characters_is_accepted_and_0_or_301_is_refused() {
+    let directory = TestDirectory::new();
+    let store = Arc::new(store::HaroldStore::open(&directory.0).await.unwrap());
+    let (service, _shutdown, task) = service_tracking_a_pane(&store);
+
+    for text in ["", " \n\t", &"x".repeat(301)] {
+        let status = service
+            .speak_line(speak_request("%8", text))
+            .await
+            .unwrap_err();
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+        assert_eq!(
+            status.message(),
+            crate::away_message::INVALID_MESSAGE_LENGTH
+        );
+    }
+    let (lines, total) = spoken_lines(&store).await;
+    assert_eq!(
+        (lines.len(), total),
+        (0, 0),
+        "a refused line stores nothing"
+    );
+
+    service
+        .speak_line(speak_request("%8", &"x".repeat(300)))
+        .await
+        .unwrap();
+    assert_eq!(spoken_lines(&store).await.0.len(), 1);
+    task.abort();
+}
+
+#[tokio::test]
+async fn spoken_line_from_a_bad_or_unknown_pane_is_refused_and_stores_nothing() {
+    let directory = TestDirectory::new();
+    let store = Arc::new(store::HaroldStore::open(&directory.0).await.unwrap());
+    let (service, _shutdown, task) = service_tracking_a_pane(&store);
+
+    let bad = service
+        .speak_line(speak_request("8", "hi"))
+        .await
+        .unwrap_err();
+    assert_eq!(bad.code(), tonic::Code::InvalidArgument);
+    assert_eq!(bad.message(), crate::away_message::INVALID_SOURCE_ID);
+    let unknown = service
+        .speak_line(speak_request("%9", "hi"))
+        .await
+        .unwrap_err();
+    assert_eq!(unknown.code(), tonic::Code::FailedPrecondition);
+    assert_eq!(unknown.message(), crate::away_message::AGENT_NOT_FOUND);
+
+    assert_eq!(spoken_lines(&store).await.1, 0);
+    task.abort();
+}
+
+#[tokio::test]
+async fn spoken_line_is_accepted_while_messaging_is_paused() {
+    // The pause covers the phone only; at the desk the line is still said.
+    let directory = TestDirectory::new();
+    let store = Arc::new(store::HaroldStore::open(&directory.0).await.unwrap());
+    let (service, _shutdown, task) = service_tracking_a_pane(&store);
+    crate::outbound::set_messaging_paused(true);
+
+    let result = service.speak_line(speak_request("%8", "hi")).await;
+
+    crate::outbound::set_messaging_paused(false);
+    assert!(result.is_ok());
+    task.abort();
 }

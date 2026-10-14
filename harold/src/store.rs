@@ -63,6 +63,15 @@ pub struct AwayMessageRequested {
     pub text: String,
 }
 
+/// A line the chief asked Harold to say at the desk or send as a voice note.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpokenLineRequested {
+    /// The source pane's id, such as `%47`.
+    pub pane_id: String,
+    /// The one-line text, 1 to 300 characters.
+    pub text: String,
+}
+
 /// How one timed prompt ended on one local date.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -238,7 +247,7 @@ impl HaroldStore {
                         snapshot_changed |=
                             project_turn_completed(&conn, event, self.graces).await?;
                     }
-                    "InboundMessageReceived" | "AwayMessageRequested" => {
+                    "InboundMessageReceived" | "AwayMessageRequested" | "SpokenLineRequested" => {
                         stage_delivery_event(&conn, event).await?;
                     }
                     "AgentPaneObserved"
@@ -1318,6 +1327,28 @@ pub async fn append_away_message_requested(
             ExpectedVersion::Any,
             [NewEvent {
                 r#type: "AwayMessageRequested".into(),
+                payload: json!(event),
+                workflow_kind: None,
+                workflow: WorkflowRef::None,
+                request_id: None,
+                actor_id: "system:harold".into(),
+                actor_type: ActorType::System,
+            }],
+        )
+        .await?;
+    Ok(())
+}
+
+pub async fn append_spoken_line_requested(
+    store: &HaroldStore,
+    event: &SpokenLineRequested,
+) -> events::Result<()> {
+    store
+        .stream
+        .append(
+            ExpectedVersion::Any,
+            [NewEvent {
+                r#type: "SpokenLineRequested".into(),
                 payload: json!(event),
                 workflow_kind: None,
                 workflow: WorkflowRef::None,

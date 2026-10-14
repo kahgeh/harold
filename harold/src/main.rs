@@ -32,8 +32,8 @@ use harold::{
     ForwardReplyResponse, MonitorHealthState, ReportAgentStateRequest, ReportAgentStateResponse,
     ReportNotificationRequest, ReportNotificationResponse, SendMessageToAwayDeviceRequest,
     SendMessageToAwayDeviceResponse, SetMessagingPausedRequest, SetMessagingPausedResponse,
-    SetTtsMutedRequest, SetTtsMutedResponse, TurnCompleteRequest, TurnCompleteResponse,
-    WatchAgentStatesRequest,
+    SetTtsMutedRequest, SetTtsMutedResponse, SpeakLineRequest, SpeakLineResponse,
+    TurnCompleteRequest, TurnCompleteResponse, WatchAgentStatesRequest,
 };
 
 struct HaroldService {
@@ -377,6 +377,53 @@ impl Harold for HaroldService {
             accepted: true,
         }))
     }
+
+    async fn speak_line(
+        &self,
+        request: Request<SpeakLineRequest>,
+    ) -> Result<Response<SpeakLineResponse>, Status> {
+        let req = request.into_inner();
+        if !agent::runtime::valid_pane_id(&req.src_id) {
+            return Err(Status::invalid_argument(away_message::INVALID_SOURCE_ID));
+        }
+        let text = away_message::one_line(&req.text);
+        if !outbound::spoken_line::is_speakable_length(&text) {
+            return Err(Status::invalid_argument(
+                away_message::INVALID_MESSAGE_LENGTH,
+            ));
+        }
+        // No pause check: the pause covers the phone, and at the desk the line is said.
+        let pane =
+            self.monitor
+                .resolve_agent_pane(req.src_id)
+                .await
+                .map_err(|error| match error {
+                    agent::runtime::MonitorCommandError::InvalidInput => {
+                        Status::invalid_argument(away_message::INVALID_SOURCE_ID)
+                    }
+                    agent::runtime::MonitorCommandError::AgentNotFound => {
+                        Status::failed_precondition(away_message::AGENT_NOT_FOUND)
+                    }
+                    agent::runtime::MonitorCommandError::InventoryUnavailable
+                    | agent::runtime::MonitorCommandError::EventAppend(_)
+                    | agent::runtime::MonitorCommandError::RuntimeStopped => {
+                        Status::unavailable("agent lookup unavailable")
+                    }
+                })?;
+        let event = store::SpokenLineRequested {
+            pane_id: pane.incarnation.pane_id,
+            text,
+        };
+        store::append_spoken_line_requested(&self.store, &event)
+            .await
+            .map_err(|error| {
+                tracing::error!(pane_id = %event.pane_id, result = "append_failed", error = %error, "spoken line rejected");
+                Status::internal("event store write failed")
+            })?;
+        // The text is the chief's own words: it is stored, not logged.
+        info!(pane_id = %event.pane_id, result = "accepted", "spoken line stored");
+        Ok(Response::new(SpeakLineResponse {}))
+    }
 }
 
 async fn forward_agent_snapshots(
@@ -609,6 +656,9 @@ fn print_help() {
     println!("  harold send-message-to-away-device --src-id ID TEXT");
     println!("                          Send TEXT to the away device from tmux pane ID;");
     println!("                          exit 0 once the daemon has stored it; 3s timeout");
+    println!("  harold speak --src-id ID TEXT");
+    println!("                          Say TEXT from tmux pane ID, or send it as a voice note;");
+    println!("                          exit 0 once the daemon has stored it; 3s timeout");
     println!("  harold --diagnostics [--delay [N]]  Test screen lock, TTS, and iMessage config");
     println!("                                      --delay defaults to 10s if no value given");
     println!("  harold --help           Show this help\n");
@@ -622,7 +672,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mode = match cli::Mode::parse(&args) {
         Ok(mode) => mode,
-        Err(line) if args.first().map(String::as_str) == Some(cli::AWAY_MESSAGE_COMMAND) => {
+        Err(line)
+            if matches!(
+                args.first().map(String::as_str),
+                Some(cli::AWAY_MESSAGE_COMMAND | cli::SPEAK_COMMAND)
+            ) =>
+        {
             exit_with_line(&line)
         }
         Err(error) => return Err(error.into()),
@@ -646,6 +701,7 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
             | cli::Mode::CheckReady
             | cli::Mode::Accept(_)
             | cli::Mode::SendMessageToAwayDevice(_)
+            | cli::Mode::Speak(_)
     );
     let settings = settings::Settings::load().map_err(|error| -> Box<dyn std::error::Error> {
         if is_probe {
@@ -668,6 +724,12 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
         cli::Mode::Accept(ref args) => return cli::accept(&settings, args).await,
         cli::Mode::SendMessageToAwayDevice(ref args) => {
             if let Err(line) = cli::send_message_to_away_device(&settings, args).await {
+                exit_with_line(&line);
+            }
+            return Ok(());
+        }
+        cli::Mode::Speak(ref args) => {
+            if let Err(line) = cli::speak(&settings, args).await {
                 exit_with_line(&line);
             }
             return Ok(());
