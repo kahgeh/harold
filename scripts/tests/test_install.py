@@ -508,7 +508,7 @@ class InstalledServiceTests(unittest.TestCase):
         self.assertEqual((self.bundle / 'harold').read_text(), 'old harold')
         self.assertNotIn(['codesign', '--force'], [argv[:2] for argv in self.calls])
 
-    CERTIFICATE ='identifier "harold" and certificate leaf = H"ab12"'
+    CERTIFICATE = 'identifier "harold" and certificate leaf = H"ab12"'
 
     def assert_after_ready(self, output, text):
         self.assertIn(text, output)
