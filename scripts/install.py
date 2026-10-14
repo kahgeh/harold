@@ -255,7 +255,10 @@ def saved_signing_identity(bundle):
     path = bundle / 'service.json'
     if not path.is_file():
         return '-'
-    return json.loads(path.read_text()).get('signing_identity', '-')
+    identity = json.loads(path.read_text()).get('signing_identity', '-')
+    if not isinstance(identity, str):
+        raise RuntimeError('service.json signing_identity must be text; pass --signing-identity')
+    return identity
 
 
 def sign(binary, identity):

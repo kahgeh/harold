@@ -500,7 +500,15 @@ class InstalledServiceTests(unittest.TestCase):
         # The installed record is untouched: it still names the saved identity.
         self.assertEqual(self.installed_metadata()['signing_identity'], 'Kah Geh Tan')
 
-    CERTIFICATE = 'identifier "harold" and certificate leaf = H"ab12"'
+    def test_a_saved_identity_that_is_not_text_stops_the_install(self):
+        self.install_existing(saved=None)
+        with self.assertRaisesRegex(RuntimeError, 'signing_identity must be text'):
+            self.run_install(None)
+        self.stop.assert_not_called()
+        self.assertEqual((self.bundle / 'harold').read_text(), 'old harold')
+        self.assertNotIn(['codesign', '--force'], [argv[:2] for argv in self.calls])
+
+    CERTIFICATE ='identifier "harold" and certificate leaf = H"ab12"'
 
     def assert_after_ready(self, output, text):
         self.assertIn(text, output)
