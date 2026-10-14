@@ -329,6 +329,12 @@ class InstallTests(unittest.TestCase):
         (release / SKILL_FILE).write_text('x')
         self.install.prebuilt_files(release)
 
+    def test_no_signing_identity_argument_means_the_saved_one(self):
+        with patch.object(sys, 'argv', ['install.py', '--prefix', str(self.prefix)]), \
+             patch.object(self.install, 'install') as install:
+            self.assertEqual(self.install.main(), 0)
+        self.assertIsNone(install.call_args.args[0].signing_identity)
+
     def test_missing_cargo_artifact_fails_without_falling_back_to_stale_file(self):
         repo = self.prefix / 'repo'
         (repo / 'target/release').mkdir(parents=True)
@@ -446,6 +452,51 @@ class InstalledServiceTests(unittest.TestCase):
         })
         self.assertEqual(sorted(metadata['env']), sorted([
             'HAROLD_CONFIG_DIR', 'HAROLD_ENV', 'HAROLD__STORE__PATH', 'PATH', 'LANG', 'LC_ALL']))
+
+    def signed(self):
+        """(identity, identifier, file name) for each signing call, in order."""
+        return [(argv[3], argv[5], Path(argv[6]).name) for argv in self.calls
+                if argv[:2] == ['codesign', '--force']]
+
+    def test_a_named_identity_signs_both_programs_with_fixed_identifiers_and_is_saved(self):
+        self.run_install('Kah Geh Tan')
+        self.assertEqual(self.signed(), [('Kah Geh Tan', 'harold', 'harold'),
+                                         ('Kah Geh Tan', 'tmx-agent-dash', 'tmx-agent-dash')])
+        self.assertEqual(self.installed_metadata()['signing_identity'], 'Kah Geh Tan')
+
+    def test_without_a_name_the_saved_identity_is_used_and_kept(self):
+        self.install_existing(saved='Kah Geh Tan')
+        self.run_install(None)
+        self.assertEqual({identity for identity, _, _ in self.signed()}, {'Kah Geh Tan'})
+        self.assertEqual(self.installed_metadata()['signing_identity'], 'Kah Geh Tan')
+
+    def test_a_name_given_wins_over_the_saved_one(self):
+        self.install_existing(saved='Kah Geh Tan')
+        self.run_install('-')
+        self.assertEqual({identity for identity, _, _ in self.signed()}, {'-'})
+        self.assertEqual(self.installed_metadata()['signing_identity'], '-')
+
+    def test_with_no_name_and_nothing_installed_signing_is_ad_hoc(self):
+        self.run_install(None)
+        self.assertEqual(self.signed(), [('-', 'harold', 'harold'),
+                                         ('-', 'tmx-agent-dash', 'tmx-agent-dash')])
+        self.assertEqual(self.installed_metadata()['signing_identity'], '-')
+
+    def test_an_install_from_before_saved_identities_reads_as_ad_hoc(self):
+        self.install_existing(saved=NOT_RECORDED)
+        self.run_install(None)
+        self.assertEqual({identity for identity, _, _ in self.signed()}, {'-'})
+        self.assertEqual(self.installed_metadata()['signing_identity'], '-')
+
+    def test_a_signing_failure_shows_codesign_and_leaves_the_running_harold_alone(self):
+        self.install_existing(saved='Kah Geh Tan')
+        self.sign_error = 'Kah Geh Tan: no identity found'
+        with self.assertRaisesRegex(RuntimeError, 'Kah Geh Tan: no identity found'):
+            self.run_install(None)
+        self.stop.assert_not_called()
+        self.assertEqual((self.bundle / 'harold').read_text(), 'old harold')
+        # The installed record is untouched: it still names the saved identity.
+        self.assertEqual(self.installed_metadata()['signing_identity'], 'Kah Geh Tan')
 
 
 class ServiceTests(unittest.TestCase):

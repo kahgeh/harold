@@ -234,6 +234,29 @@ def checked(args, **kwargs):
     subprocess.run(args, check=True, **kwargs)
 
 
+def saved_signing_identity(bundle):
+    """The identity the installed bundle was signed with: `-` (ad-hoc) when none is recorded."""
+    path = bundle / 'service.json'
+    if not path.is_file():
+        return '-'
+    return json.loads(path.read_text()).get('signing_identity', '-')
+
+
+def sign(binary, identity):
+    """Sign `binary` with `identity` and an identifier that is its file name.
+
+    A fixed identifier keeps a certificate-signed program's designated requirement the same
+    across builds, and with it the privacy grants macOS keys to that requirement.
+    No timeout: codesign may wait for the person to answer the keychain question.
+    """
+    result = subprocess.run(['codesign', '--force', '--sign', identity, '--identifier', binary.name,
+                             str(binary)], capture_output=True, text=True)
+    if result.returncode:
+        raise RuntimeError('codesign could not sign {} with "{}": {}'.format(
+            binary.name, identity, result.stderr.strip()))
+    checked(['codesign', '--verify', '--strict', str(binary)])
+
+
 def build_binaries(repo, offline):
     names = ('harold', 'tmx-agent-dash')
     command = ['cargo', 'build', '--locked', '--release',
@@ -364,9 +387,10 @@ def install(args, repo):
             (stage / 'config/local.toml').chmod(0o600)
             metadata = make_metadata(prefix, '')
             reject_symlinks(Path(metadata['plist']))
+            identity = args.signing_identity if args.signing_identity is not None else saved_signing_identity(bundle)
+            metadata['signing_identity'] = identity
             for binary in (stage / 'harold', staging / 'tmx-agent-dash'):
-                checked(['codesign', '--force', '--sign', args.signing_identity, str(binary)])
-                checked(['codesign', '--verify', '--strict', str(binary)])
+                sign(binary, identity)
             env = service.managed_environment(metadata['env'])
             env['HAROLD_CONFIG_DIR'] = str(stage / 'config')
             probe = subprocess.run([str(stage / 'harold'), '--check-config'], cwd=stage, env=env,
@@ -416,7 +440,8 @@ def main():
     parser.add_argument('--reinstall', action='store_true', help='archive the old bundle and start with fresh managed data')
     parser.add_argument('--config', help='import a TOML local configuration')
     parser.add_argument('--prefix', default=str(Path.home() / 'bin'), help='executable directory (default: ~/bin)')
-    parser.add_argument('--signing-identity', default='-', help='codesign identity (default: ad-hoc signing)')
+    parser.add_argument('--signing-identity',
+                        help='codesign identity, saved for later installs (default: the saved one, else ad-hoc -)')
     parser.add_argument('--offline', action='store_true', help='build using cached Cargo dependencies only')
     parser.add_argument('--prebuilt-dir', help='install binaries and assets from an extracted release instead of building')
     args = parser.parse_args()
