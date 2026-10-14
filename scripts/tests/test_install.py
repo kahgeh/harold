@@ -4,6 +4,7 @@ import io
 import json
 import os
 import re
+import shlex
 import argparse
 import plistlib
 from pathlib import Path
@@ -364,6 +365,13 @@ class InstallTests(unittest.TestCase):
         self.assertEqual((stage / 'VERSION').read_text(), 'source\n')
         self.assertFalse((stage / 'REVISION').exists())
 
+    def test_an_unreadable_service_file_names_no_python(self):
+        bundle = self.prefix / 'old'
+        bundle.mkdir()
+        self.assertIsNone(self.install.plist_python(bundle))
+        (bundle / 'service.plist').write_text('not a plist')
+        self.assertIsNone(self.install.plist_python(bundle))
+
 
 # Leaves `signing_identity` out of an installed service.json, as installs before it did.
 NOT_RECORDED = object()
@@ -430,9 +438,26 @@ class InstalledServiceTests(unittest.TestCase):
             metadata['signing_identity'] = saved
         (self.bundle / 'service.json').write_text(json.dumps(metadata))
 
-    def run_install(self, identity='-'):
+    def install_existing_programs(self, log):
+        """The rest of an install from v0.5.0: its haroldctl, dashboard, data, version and revision.
+        The old haroldctl writes `old <command>` to `log`."""
+        (self.prefix / 'haroldctl').write_text('#!/bin/sh\necho "old $*" >> {}\n'.format(shlex.quote(str(log))))
+        (self.prefix / 'haroldctl').chmod(0o755)
+        (self.prefix / 'tmx-agent-dash').write_text('old dash')
+        (self.bundle / 'data/events').mkdir(parents=True)
+        (self.bundle / 'data/events/marker').write_text('history')
+        (self.bundle / 'VERSION').write_text('v0.5.0\n')
+        (self.bundle / 'REVISION').write_text('08095dde67ea035ff4e0aaa3109a344d39ceb019\n')
+
+    def rollback(self):
+        """The one backup folder and the commands its ROLLBACK.md gives."""
+        backup, = self.prefix.glob('harold.backup-*')
+        note = (backup / 'ROLLBACK.md').read_text()
+        return backup, note, note.split('```sh\n', 1)[1].split('\n```', 1)[0]
+
+    def run_install(self, identity='-', reinstall=False):
         self.printed = io.StringIO()
-        args = argparse.Namespace(prefix=str(self.prefix), config=str(self.config), reinstall=False,
+        args = argparse.Namespace(prefix=str(self.prefix), config=str(self.config), reinstall=reinstall,
                                   offline=False, signing_identity=identity, prebuilt_dir=str(self.release))
         with patch.object(self.install, 'prerequisites'), \
              patch.object(subprocess, 'run', side_effect=self.process), \
@@ -596,6 +621,92 @@ class InstalledServiceTests(unittest.TestCase):
             self.run_install(None)
         self.assertNotIn('macOS permissions', self.printed.getvalue())
         self.stop.assert_not_called()
+
+    def test_the_backup_keeps_haroldctl_the_dashboard_and_a_rollback_note(self):
+        self.install_existing(saved='-')
+        self.install_existing_programs(self.prefix.parent / 'haroldctl.log')
+        output = self.run_install('-')
+        backup, note, _ = self.rollback()
+        self.assertIn('Previous installation archived at {}\n'.format(backup), output)
+        self.assertEqual((backup / 'tmx-agent-dash').read_text(), 'old dash')
+        self.assertIn('echo "old $*"', (backup / 'haroldctl').read_text())
+        self.assertIn('- Version: v0.5.0\n', note)
+        self.assertIn('- Revision: 08095dde67ea035ff4e0aaa3109a344d39ceb019\n', note)
+        self.assertRegex(note, r'- Replaced: \d{4}-\d\d-\d\d \d\d:\d\d UTC\n')
+        self.assertEqual((self.prefix / 'tmx-agent-dash').read_text(), 'release tmx-agent-dash')
+
+    def test_the_rollback_commands_put_the_old_install_back(self):
+        log = self.prefix.parent / 'haroldctl.log'
+        self.install_existing(saved='-')
+        self.install_existing_programs(log)
+        # The new haroldctl runs the bundle's service.py, which here only writes `new <command>`.
+        (self.release / 'scripts/harold_service.py').write_text(
+            'import sys\nwith open({!r}, "a") as log:\n'
+            '    log.write("new " + " ".join(sys.argv[1:]) + "\\n")\n'.format(str(log)))
+        self.run_install('-')
+        (self.bundle / 'harold.log').write_text('new log\n')
+        backup, _, commands = self.rollback()
+        result = subprocess.run(['sh', '-e', '-c', commands], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(log.read_text().splitlines(), ['new stop', 'old start'])
+        self.assertEqual((self.bundle / 'harold').read_text(), 'old harold')
+        self.assertEqual((self.prefix / 'tmx-agent-dash').read_text(), 'old dash')
+        self.assertIn('echo "old $*"', (self.prefix / 'haroldctl').read_text())
+        self.assertEqual((self.bundle / 'data/events/marker').read_text(), 'history')
+        self.assertEqual((self.bundle / 'harold.log').read_text(), 'new log\n')
+        self.assertFalse((self.bundle / 'haroldctl').exists())
+        self.assertFalse(backup.exists())
+        replaced, = self.prefix.glob('harold.replaced-*')
+        self.assertEqual((replaced / 'harold').read_text(), 'release harold')
+
+    def test_a_reinstall_rollback_leaves_the_new_data_aside(self):
+        self.install_existing(saved='-')
+        self.install_existing_programs(self.prefix.parent / 'haroldctl.log')
+        self.run_install('-', reinstall=True)
+        backup, note, commands = self.rollback()
+        self.assertEqual((backup / 'data/events/marker').read_text(), 'history')
+        self.assertNotIn('/data harold/data', commands)
+        self.assertNotIn('harold.log', commands)
+
+    def test_a_first_install_creates_no_backup_folder(self):
+        output = self.run_install('-')
+        self.assertEqual(list(self.prefix.glob('harold.backup-*')), [])
+        self.assertNotIn('Previous installation archived', output)
+
+    def test_an_install_from_before_versions_says_they_were_not_recorded(self):
+        self.install_existing(saved='-')
+        self.run_install('-')
+        _, note, commands = self.rollback()
+        self.assertIn('- Version: not recorded\n', note)
+        self.assertIn('- Revision: not recorded\n', note)
+        # No haroldctl or dashboard was installed, so none is moved back.
+        self.assertNotIn('harold/haroldctl', commands)
+
+    def test_a_bundle_started_through_python_names_that_python(self):
+        self.install_existing(saved='-')
+        (self.bundle / 'service.plist').write_bytes(plistlib.dumps({'ProgramArguments': [
+            '/opt/homebrew/bin/python3.13', str(self.bundle / 'service.py'), 'run']}))
+        self.run_install('-')
+        _, note, _ = self.rollback()
+        self.assertIn('Full Disk Access and Messages control must be on for /opt/homebrew/bin/python3.13', note)
+
+    def test_a_bundle_started_directly_needs_no_python_line(self):
+        self.install_existing(saved='-')
+        (self.bundle / 'service.plist').write_bytes(plistlib.dumps({'ProgramArguments': [
+            str(self.bundle / 'harold')]}))
+        self.run_install('-')
+        _, note, _ = self.rollback()
+        self.assertNotIn('Python', note)
+
+    def test_a_failed_rollback_copy_still_starts_harold(self):
+        self.install_existing(saved='-')
+        self.install_existing_programs(self.prefix.parent / 'haroldctl.log')
+        with patch.object(self.install, 'keep_rollback_copy',
+                          side_effect=OSError(28, 'No space left on device')):
+            output = self.run_install('-')
+        self.assertIn('Rollback copy incomplete (No space left on device)', output)
+        self.assertIn('Harold ready at', output)
+        self.assertEqual((self.prefix / 'tmx-agent-dash').read_text(), 'release tmx-agent-dash')
 
 
 class PermissionsTests(unittest.TestCase):

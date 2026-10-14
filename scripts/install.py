@@ -403,6 +403,74 @@ def write_plist(path, metadata):
     path.write_bytes(plistlib.dumps(value))
 
 
+def recorded(bundle, name):
+    """The text of a bundle's VERSION or REVISION file, or None when it has none."""
+    try:
+        return (bundle / name).read_text().strip() or None
+    except OSError:
+        return None
+
+
+def plist_python(bundle):
+    """The Python a bundle's service.plist starts Harold through (bundles from before
+    direct-launch run `python service.py run`), or None."""
+    try:
+        arguments = plistlib.loads((bundle / 'service.plist').read_bytes()).get('ProgramArguments')
+    except (OSError, ValueError, AttributeError):
+        return None
+    if (isinstance(arguments, list) and len(arguments) >= 2
+            and all(isinstance(item, str) for item in arguments[:2])
+            and Path(arguments[1]).name == 'service.py'):
+        return arguments[0]
+    return None
+
+
+def rollback_note(prefix, backup, copied, reinstall):
+    """ROLLBACK.md for `backup`: what it holds and the commands that put it back.
+
+    `copied` names the files from `prefix` kept in `backup`. The commands set the new bundle
+    aside as harold.replaced-<time> and, unless this was a reinstall, move its data and log back.
+    """
+    aside = 'harold.replaced-' + backup.name[len('harold.backup-'):]
+    commands = ['cd ' + shlex.quote(str(prefix)), './haroldctl stop',
+                'mv harold ' + aside, 'mv {} harold'.format(backup.name)]
+    if reinstall:
+        holds = ('It holds the programs, configuration, scripts and data from before the reinstall. '
+                 'The new data stays in {}.'.format(aside))
+    else:
+        holds = ('It holds the programs, configuration and scripts. The data and log moved to the new '
+                 'install, and the commands move them back.')
+        commands += ['mv {}/data harold/data'.format(aside), 'mv {}/harold.log harold/harold.log'.format(aside)]
+    if copied:
+        commands.append('mv {} .'.format(' '.join('harold/' + name for name in copied)))
+    commands.append('./haroldctl start')
+    lines = ['# Roll back Harold', '',
+             'This folder holds the Harold that was installed in {}.'.format(prefix), '',
+             '- Version: {}'.format(recorded(backup, 'VERSION') or 'not recorded'),
+             '- Revision: {}'.format(recorded(backup, 'REVISION') or 'not recorded'),
+             '- Replaced: {}'.format(datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')), '',
+             holds, '',
+             'To roll back, run these commands. They stop the new Harold, set it aside as {}, '
+             'put this one back and start it.'.format(aside), '',
+             '```sh'] + commands + ['```']
+    python = plist_python(backup)
+    if python:
+        lines += ['', 'This Harold starts through Python. After rolling back, Full Disk Access and Messages '
+                  'control must be on for {} (System Settings > Privacy & Security).'.format(python)]
+    return '\n'.join(lines) + '\n'
+
+
+def keep_rollback_copy(prefix, backup, reinstall):
+    """Copy haroldctl and tmx-agent-dash into `backup`, which holds the old bundle, and write
+    ROLLBACK.md there. Raises OSError when a copy or the note cannot be written."""
+    copied = []
+    for name in ('haroldctl', 'tmx-agent-dash'):
+        if (prefix / name).is_file():
+            shutil.copy2(prefix / name, backup / name)
+            copied.append(name)
+    (backup / 'ROLLBACK.md').write_text(rollback_note(prefix, backup, copied, reinstall))
+
+
 def replace_bundle(stage, bundle, reinstall):
     backup = None
     moved = []
@@ -508,6 +576,13 @@ def install(args, repo):
             service.stop_unmanaged(old_metadata)
             backup = replace_bundle(stage, bundle, args.reinstall)
             if backup:
+                # Before haroldctl and tmx-agent-dash are overwritten below. Harold is stopped and
+                # the old bundle has moved, so a failed copy is reported and the install goes on.
+                try:
+                    keep_rollback_copy(prefix, backup, args.reinstall)
+                except OSError as error:
+                    print('Rollback copy incomplete ({}); the old bundle is still in the folder below.'.format(
+                        error.strerror or error), flush=True)
                 print('Previous installation archived at {}'.format(backup), flush=True)
             os.replace(staging / 'tmx-agent-dash', prefix / 'tmx-agent-dash')
             os.replace(staging / 'haroldctl', prefix / 'haroldctl')
