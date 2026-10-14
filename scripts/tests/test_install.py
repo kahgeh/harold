@@ -1,4 +1,5 @@
 import contextlib
+import importlib.util
 import io
 import json
 import os
@@ -498,7 +499,7 @@ class InstalledServiceTests(unittest.TestCase):
         # The installed record is untouched: it still names the saved identity.
         self.assertEqual(self.installed_metadata()['signing_identity'], 'Kah Geh Tan')
 
-    CERTIFICATE ='identifier "harold" and certificate leaf = H"ab12"'
+    CERTIFICATE = 'identifier "harold" and certificate leaf = H"ab12"'
 
     def assert_after_ready(self, output, text):
         self.assertIn(text, output)
@@ -534,6 +535,7 @@ class InstalledServiceTests(unittest.TestCase):
         steps = self.install.GRANT_STEPS.format(binary=self.bundle / 'harold')
         self.assert_after_ready(output, steps + '\n' + self.install.AD_HOC_NOTE + '\n')
 
+    @unittest.skipUnless(importlib.util.find_spec('tomllib'), 'tomllib needs Python 3.11 or later')
     def test_telegram_prints_neither(self):
         self.config.write_text('[telegram]\nbot_token = "t"\nchat_id = 5\n\n[notify]\naway_channel = "telegram"\n')
         self.requirements = {'new': 'cdhash H"9a9a"'}
@@ -589,11 +591,16 @@ class PermissionsTests(unittest.TestCase):
             (folder / 'local.toml').write_text(local)
         return self.install.away_channel(folder)
 
+    @unittest.skipUnless(importlib.util.find_spec('tomllib'), 'tomllib needs Python 3.11 or later')
     def test_the_channel_is_local_over_default(self):
         imessage = '[notify]\naway_channel = "imessage"\n'
         self.assertEqual(self.config(imessage, '[notify]\naway_channel = "telegram"\n'), 'telegram')
         self.assertEqual(self.config(imessage, '[imessage]\nrecipient = "me"\n'), 'imessage')
         self.assertEqual(self.config('[notify]\naway_channel = "telegram"\n'), 'telegram')
+
+    def test_without_tomllib_the_channel_counts_as_imessage(self):
+        with patch.dict(sys.modules, {'tomllib': None}):
+            self.assertEqual(self.config('[notify]\naway_channel = "telegram"\n'), 'imessage')
 
     def test_a_config_that_cannot_be_read_counts_as_imessage(self):
         self.assertEqual(self.config('not = [toml'), 'imessage')
