@@ -434,5 +434,88 @@ class NotesTests(ReleaseTestCase):
                          '# Harold v0.6.0\n\nFaster agent monitor.\n')
 
 
+class BuildTests(ReleaseTestCase):
+    def publish(self):
+        sha = git(self.work, 'rev-parse', 'HEAD').strip()
+        with contextlib.redirect_stdout(io.StringIO()):
+            url, published = release.publish(self.work, 'v0.6.0', sha, 'Second\nThird\n')
+        return sha, url, published
+
+    def wait(self):
+        _, url, published = self.publish()
+        printed = io.StringIO()
+        with contextlib.redirect_stdout(printed):
+            release.wait_for_build(self.work, 'v0.6.0', url, published)
+        return printed.getvalue()
+
+    def assert_failed_build(self, what, url):
+        with self.assertRaises(release.Stopped) as failed:
+            self.wait()
+        self.assertEqual(str(failed.exception), '\n'.join([
+            'The build {}: {}'.format(what, url),
+            'v0.6.0 stays a pre-release with no build, and nothing was installed. Either:',
+            '  withdraw it: gh release delete v0.6.0 --cleanup-tag --yes',
+            '  or re-run the workflow on GitHub, then: make install-release VERSION=0.6.0']))
+        self.assertTrue(self.github.releases['v0.6.0']['isPrerelease'])
+        self.assertNotIn('edit v0.6.0', self.github.events)
+
+    def test_the_release_is_a_pre_release_of_head_titled_by_its_tag(self):
+        sha, url, published = self.publish()
+        self.assertEqual(self.github.created, {'tag': 'v0.6.0', 'target': sha, 'title': 'Harold v0.6.0',
+                                               'prerelease': True, 'notes': 'Second\nThird\n'})
+        self.assertEqual((url, published), ('https://github.com/kahgeh/harold/releases/tag/v0.6.0', PUBLISHED))
+        self.assertTrue(self.github.releases['v0.5.0']['isLatest'])
+        self.assertFalse(self.github.releases['v0.6.0']['isLatest'])
+
+    def test_each_step_is_printed_once_as_it_finishes(self):
+        output = self.wait()
+        steps = [line for line in output.splitlines() if line.startswith('  build: ')]
+        self.assertEqual(steps, ['  build: {} (success)'.format(name) for name in STEPS])
+        self.assertIn('Following the build: https://github.com/kahgeh/harold/actions/runs/2\n', output)
+
+    def test_an_older_run_on_the_same_tag_is_not_followed(self):
+        # FakeGitHub fails the test if run 1, from the withdrawn v0.6.0, is viewed.
+        self.github.appears_after = 3
+        self.wait()
+        self.assertEqual(self.github.listings, 4)
+
+    def test_a_failed_poll_is_retried(self):
+        self.github.failing_views = 2
+        self.wait()
+        self.assertEqual(self.github.events[-1], 'build success')
+
+    def test_a_failed_build_names_the_run_and_both_ways_on(self):
+        self.github.outcome = 'failure'
+        self.assert_failed_build('ended in failure', 'https://github.com/kahgeh/harold/actions/runs/2')
+
+    def test_a_build_past_45_minutes_is_a_failed_build(self):
+        self.github.polls = 10 ** 6
+        self.assert_failed_build('did not finish within 45 minutes',
+                                 'https://github.com/kahgeh/harold/actions/runs/2')
+        self.assertGreaterEqual(self.clock.now, release.BUILD_LIMIT)
+        self.assertLess(self.clock.now, release.BUILD_LIMIT + 2 * release.POLL)
+
+    def test_a_run_not_found_within_2_minutes_names_the_release(self):
+        self.github.appears_after = 10 ** 6
+        self.assert_failed_build('was not found within 2 minutes',
+                                 'https://github.com/kahgeh/harold/releases/tag/v0.6.0')
+        self.assertGreaterEqual(self.clock.now, release.FIND_LIMIT)
+        self.assertLess(self.clock.now, release.FIND_LIMIT + 2 * release.POLL)
+
+    def test_a_build_without_both_files_is_a_failed_build(self):
+        self.github.attach = False
+        self.assert_failed_build('finished without both files attached',
+                                 'https://github.com/kahgeh/harold/actions/runs/2')
+
+    def test_marking_latest_clears_the_pre_release_mark(self):
+        self.wait()
+        with contextlib.redirect_stdout(io.StringIO()):
+            release.mark_latest(self.work, 'v0.6.0')
+        self.assertEqual(self.github.events, ['create v0.6.0', 'build success', 'edit v0.6.0'])
+        self.assertFalse(self.github.releases['v0.6.0']['isPrerelease'])
+        self.assertTrue(self.github.releases['v0.6.0']['isLatest'])
+        self.assertFalse(self.github.releases['v0.5.0']['isLatest'])
+
+
 if __name__ == '__main__':
     unittest.main()

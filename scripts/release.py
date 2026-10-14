@@ -210,3 +210,96 @@ def release_notes(cwd, latest, notes):
     if run(('git', 'rev-parse', '--quiet', '--verify', 'refs/tags/' + latest), cwd).returncode:
         git(cwd, 'fetch', '--quiet', 'origin', 'refs/tags/{0}:refs/tags/{0}'.format(latest))
     return git(cwd, 'log', '--reverse', '--format=%s', latest + '..HEAD')
+
+
+def publish(cwd, tag, sha, notes):
+    """Step 4: create the release of `sha` as a pre-release, which GitHub's latest-release link
+    skips while it has no build. Returns the release's URL and when it was published."""
+    with tempfile.TemporaryDirectory(prefix='harold-notes-') as folder:
+        path = Path(folder) / 'notes.md'
+        path.write_text(notes, encoding='utf-8')
+        result = run(('gh', 'release', 'create', tag, '--repo', REPO, '--target', sha,
+                      '--title', 'Harold ' + tag, '--prerelease', '--notes-file', path), cwd)
+    if result.returncode:
+        raise Stopped('Not released: gh release create failed: {}'.format(result.stderr.strip()))
+    created = gh_json(cwd, 'release', 'view', tag, '--json', 'url,publishedAt')
+    print('Published {} as a pre-release: {}'.format(tag, created['url']), flush=True)
+    return created['url'], created['publishedAt']
+
+
+def build_failed(tag, url, what):
+    return '\n'.join([
+        'The build {}: {}'.format(what, url),
+        '{} stays a pre-release with no build, and nothing was installed. Either:'.format(tag),
+        '  withdraw it: gh release delete {} --cleanup-tag --yes'.format(tag),
+        '  or re-run the workflow on GitHub, then: make install-release VERSION={}'.format(tag[1:])])
+
+
+def poll(cwd, *args):
+    """gh_json while waiting: a failed call, such as a network blip, returns None and the
+    next poll tries again."""
+    try:
+        return gh_json(cwd, *args)
+    except Stopped:
+        return None
+
+
+def find_run(cwd, tag, published, deadline):
+    """The run this release started: a release run of the workflow on `tag`, created at or after
+    `published`. An earlier run on the same tag, from a withdrawn release, is older. None by
+    `deadline`."""
+    while True:
+        runs = poll(cwd, 'run', 'list', '--workflow', WORKFLOW, '--event', 'release', '--limit', '20',
+                    '--json', 'databaseId,headBranch,createdAt,url') or []
+        started = [item for item in runs if item['headBranch'] == tag and item['createdAt'] >= published]
+        if started:
+            return max(started, key=lambda item: item['createdAt'])
+        if clock() >= deadline:
+            return None
+        sleep(POLL)
+
+
+def follow(cwd, run_id, deadline):
+    """Print each job step once, as it finishes. Returns the run's conclusion, or None when it
+    has not finished by `deadline`."""
+    printed = set()
+    while True:
+        view = poll(cwd, 'run', 'view', str(run_id), '--json', 'status,conclusion,jobs')
+        for job in (view or {}).get('jobs', []):
+            for step in job.get('steps', []):
+                key = (job['name'], step['number'])
+                if step.get('status') == 'completed' and key not in printed:
+                    printed.add(key)
+                    print('  {}: {} ({})'.format(job['name'], step['name'], step['conclusion']), flush=True)
+        if view and view.get('status') == 'completed':
+            return view.get('conclusion')
+        if clock() >= deadline:
+            return None
+        sleep(POLL)
+
+
+def wait_for_build(cwd, tag, release_url, published):
+    """Step 5. Returns when the run succeeded and both files are attached to the release."""
+    start = clock()
+    found = find_run(cwd, tag, published, start + FIND_LIMIT)
+    if found is None:
+        raise Stopped(build_failed(tag, release_url, 'was not found within 2 minutes'))
+    print('Following the build: ' + found['url'], flush=True)
+    conclusion = follow(cwd, found['databaseId'], start + BUILD_LIMIT)
+    if conclusion is None:
+        raise Stopped(build_failed(tag, found['url'], 'did not finish within 45 minutes'))
+    if conclusion != 'success':
+        raise Stopped(build_failed(tag, found['url'], 'ended in {}'.format(conclusion)))
+    assets = gh_json(cwd, 'release', 'view', tag, '--json', 'assets')['assets']
+    if not {ARCHIVE, CHECKSUM} <= {asset['name'] for asset in assets}:
+        raise Stopped(build_failed(tag, found['url'], 'finished without both files attached'))
+
+
+def mark_latest(cwd, tag):
+    """Step 6: clear the pre-release mark and make this the latest release."""
+    result = run(('gh', 'release', 'edit', tag, '--repo', REPO, '--prerelease=false', '--latest'), cwd)
+    if result.returncode:
+        raise Stopped('{} is built, but gh release edit failed: {}\n'
+                      'Mark it latest on GitHub, then: make install-release VERSION={}'.format(
+                          tag, result.stderr.strip(), tag[1:]))
+    print('{} is the latest release.'.format(tag), flush=True)
