@@ -205,6 +205,23 @@ pub(crate) fn send_away_message(message: &AwayMessageRequested) -> Result<(), St
     }
 }
 
+/// Send a spoken line to the away device: a voice note with iMessage, the line as text
+/// with Telegram. The caller has already checked the messaging pause.
+pub(crate) fn send_spoken_line(line: &str) -> Result<(), String> {
+    let cfg = get_settings();
+    match cfg.notify.away_channel.as_str() {
+        "telegram" => telegram::send_telegram(line),
+        _ => crate::outbound::voice_note::send_voice_note_in(
+            &crate::outbound::voice_note::notes_parent(),
+            std::time::SystemTime::now(),
+            &cfg.tts,
+            line,
+            &crate::outbound::voice_note::SystemRunner,
+            imessage::send_attachment,
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{InboundListener, inbound_listener, inbound_listener_for, send_unless_paused};

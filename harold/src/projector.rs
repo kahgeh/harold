@@ -291,6 +291,11 @@ pub async fn run_event_handler(
         Arc::new(SystemEnvironment),
         &snapshots,
     ));
+    // Voice notes sent before a restart are kept for Messages to read; remove the old ones.
+    crate::outbound::voice_note::remove_old_notes(
+        &crate::outbound::voice_note::notes_parent(),
+        std::time::SystemTime::now(),
+    );
     info!("event handler starting");
 
     loop {

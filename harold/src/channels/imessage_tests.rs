@@ -12,8 +12,8 @@ use crate::util::sanitise_for_applescript;
 
 use super::{
     ChatDb, Cursors, Direction, FetchedRow, MarkedRow, NotificationPlan, RecentRows, TWIN_WINDOW,
-    is_marked_as_harold, max_rowid_of, notification_message, notification_plan, parse_max_rowid,
-    poll_chat_db, poll_db, read_start, record_row, send_script, start_cursors,
+    attachment_args, is_marked_as_harold, max_rowid_of, notification_message, notification_plan,
+    parse_max_rowid, poll_chat_db, poll_db, read_start, record_row, send_script, start_cursors,
     start_listener_cursors, start_listener_reading, wait_for_start_row,
 };
 
@@ -1464,4 +1464,27 @@ fn agent_message_goes_out_with_one_marker() {
         "tell application \"Messages\" to send \"🤖 [PasM4MBP/pods:0.1] Pod 3 is blocked on a merge conflict in store.rs\" to buddy \"+61400000000\""
     );
     assert_eq!(script.matches('🤖').count(), 1);
+}
+
+#[test]
+fn attachment_script_is_fixed_text_and_takes_the_path_and_recipient_as_arguments() {
+    let args = attachment_args(
+        std::path::Path::new("/tmp/harold-voice-1/line.m4a"),
+        "me@example.com",
+    );
+    assert_eq!(
+        args,
+        [
+            "-e",
+            "on run argv",
+            "-e",
+            "set theFile to POSIX file (item 1 of argv)",
+            "-e",
+            "tell application \"Messages\" to send theFile to buddy (item 2 of argv)",
+            "-e",
+            "end run",
+            "/tmp/harold-voice-1/line.m4a",
+            "me@example.com",
+        ]
+    );
 }

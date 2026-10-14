@@ -166,6 +166,12 @@ pub fn notify_at_desk(turn: &TurnCompleted, _trace_id: &str) -> bool {
     notify_with_fallback(tts, &message)
 }
 
+/// Say `line` with the `[tts]` command, falling back as a turn-end update does. Nothing is
+/// added to the line.
+pub(crate) fn speak_line(line: &str) -> bool {
+    notify_with_fallback(&get_settings().tts, line)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -196,5 +202,32 @@ mod tests {
         };
 
         assert!(!notify_with_fallback(&tts, "test message"));
+    }
+
+    #[test]
+    fn tts_command_receives_exactly_the_line_as_its_last_argument() {
+        let out = std::env::temp_dir().join(format!("harold-tts-{}", uuid::Uuid::new_v4()));
+        let tts = TtsSettings {
+            command: "/bin/sh".into(),
+            voice: None,
+            args: Some(vec![
+                "-c".into(),
+                format!("printf %s \"$1\" > '{}'", out.display()),
+                "sh".into(),
+            ]),
+            fallback_command: None,
+            fallback_voice: None,
+            fallback_args: None,
+        };
+
+        assert!(notify_with_fallback(
+            &tts,
+            "Release install is done. Nothing needs you."
+        ));
+        assert_eq!(
+            std::fs::read_to_string(&out).unwrap(),
+            "Release install is done. Nothing needs you."
+        );
+        let _ = std::fs::remove_file(out);
     }
 }

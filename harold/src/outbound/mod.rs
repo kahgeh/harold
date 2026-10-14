@@ -2,6 +2,7 @@ pub mod tts;
 
 pub(crate) mod left_out;
 pub(crate) mod spoken_line;
+pub(crate) mod voice_note;
 
 #[cfg(test)]
 pub(crate) mod fake;
