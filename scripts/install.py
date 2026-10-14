@@ -31,6 +31,22 @@ BIN_PLACEHOLDER = '{{HAROLD_BIN}}'
 # Each agent that reads SKILL.md, and the folder it reads skills from.
 AGENT_SKILL_FOLDERS = (('Claude Code', Path.home() / '.claude/skills'),
                        ('Codex', Path.home() / '.codex/skills'))
+# Printed after an iMessage install. macOS keys Full Disk Access and Messages control to the
+# designated requirement of harold's signature, so a matching requirement keeps both.
+CARRY_OVER = ('macOS permissions: this harold is signed like the one it replaced; '
+              'Full Disk Access and Messages control carry over.')
+GRANT_STEPS = '\n'.join([
+    'macOS permissions for this build of harold:',
+    '  Full Disk Access (needed to read replies from the phone):',
+    '    System Settings > Privacy & Security > Full Disk Access.',
+    '    If "harold" is in the list, select it and click "−".',
+    '    Click "+", press Cmd+Shift+G, enter {binary}, press Enter, click Open.',
+    '    Check that the switch next to "harold" is on. No restart is needed.',
+    '  Messages: the first time Harold sends a message, macOS asks whether "harold" may control',
+    '    "Messages". Click Allow. Until then Harold cannot send.',
+    '  If you switched on python3.13 for Harold before, you can switch it off now.'])
+AD_HOC_NOTE = ('Signed with no certificate: these steps are needed after every install of a new build. '
+               'See "Keep permissions across installs" in docs/how-tos/setup.md.')
 
 
 def reject_symlinks(path):
@@ -257,6 +273,51 @@ def sign(binary, identity):
     checked(['codesign', '--verify', '--strict', str(binary)])
 
 
+def designated_requirement(binary):
+    """The rule macOS stores with a privacy grant for `binary`, or None when there is none to read."""
+    if not binary.is_file():
+        return None
+    result = subprocess.run(['codesign', '-dr', '-', str(binary)], capture_output=True, text=True)
+    if result.returncode:
+        return None
+    for line in result.stdout.splitlines():
+        text = line.lstrip('# ')
+        if text.startswith('designated => '):
+            return text[len('designated => '):].strip() or None
+    return None
+
+
+def away_channel(config_dir):
+    """`notify.away_channel` as Harold resolves it: local.toml over default.toml.
+
+    iMessage when it cannot be read, so the permission steps are printed rather than missed.
+    """
+    try:
+        import tomllib
+    except ImportError:  # Python before 3.11
+        return 'imessage'
+    channel = 'imessage'
+    for name in ('default.toml', 'local.toml'):
+        try:
+            with open(config_dir / name, 'rb') as handle:
+                notify = tomllib.load(handle).get('notify')
+        except (OSError, tomllib.TOMLDecodeError):
+            continue
+        if isinstance(notify, dict) and isinstance(notify.get('away_channel'), str):
+            channel = notify['away_channel']
+    return channel
+
+
+def permissions_message(channel, old, new, identity, binary):
+    """What to tell the person about macOS permissions after an install, or None for Telegram."""
+    if channel == 'telegram':
+        return None
+    if old is not None and old == new:
+        return CARRY_OVER
+    steps = GRANT_STEPS.format(binary=binary)
+    return steps + '\n' + AD_HOC_NOTE if identity == '-' else steps
+
+
 def build_binaries(repo, offline):
     names = ('harold', 'tmx-agent-dash')
     command = ['cargo', 'build', '--locked', '--release',
@@ -391,6 +452,8 @@ def install(args, repo):
             metadata['signing_identity'] = identity
             for binary in (stage / 'harold', staging / 'tmx-agent-dash'):
                 sign(binary, identity)
+            old_requirement = designated_requirement(bundle / 'harold')
+            new_requirement = designated_requirement(stage / 'harold')
             env = service.managed_environment(metadata['env'])
             env['HAROLD_CONFIG_DIR'] = str(stage / 'config')
             probe = subprocess.run([str(stage / 'harold'), '--check-config'], cwd=stage, env=env,
@@ -428,6 +491,10 @@ def install(args, repo):
             pid = service.start(metadata)
             print('Harold ready at {} (LaunchAgent PID {}).\nControl: {}\nConfig: {}\nLog: {}'.format(
                 metadata['grpc_addr'], pid, prefix / 'haroldctl', bundle / 'config/local.toml', bundle / 'harold.log'))
+            message = permissions_message(away_channel(bundle / 'config'), old_requirement,
+                                          new_requirement, identity, bundle / 'harold')
+            if message:
+                print(message, flush=True)
             outcome = link_claude_mod(CLAUDE_SETTINGS, bundle / 'hooks/claude-mod')
             print('Claude Code mod: {}'.format(outcome), flush=True)
             for agent, skills_folder in AGENT_SKILL_FOLDERS:

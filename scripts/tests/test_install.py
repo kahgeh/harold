@@ -498,6 +498,146 @@ class InstalledServiceTests(unittest.TestCase):
         # The installed record is untouched: it still names the saved identity.
         self.assertEqual(self.installed_metadata()['signing_identity'], 'Kah Geh Tan')
 
+    CERTIFICATE ='identifier "harold" and certificate leaf = H"ab12"'
+
+    def assert_after_ready(self, output, text):
+        self.assertIn(text, output)
+        self.assertLess(output.index('Harold ready at'), output.index(text))
+        self.assertLess(output.index(text), output.index('Claude Code mod:'))
+
+    def test_the_same_signature_says_the_grants_carry_over(self):
+        self.install_existing(saved='Kah Geh Tan')
+        self.requirements = {'old': self.CERTIFICATE, 'new': self.CERTIFICATE}
+        output = self.run_install(None)
+        self.assert_after_ready(output, self.install.CARRY_OVER + '\n')
+        self.assertNotIn('macOS permissions for this build', output)
+
+    def test_a_new_signature_prints_the_steps_with_the_installed_path(self):
+        self.install_existing(saved='-')
+        self.requirements = {'old': 'cdhash H"315d"', 'new': self.CERTIFICATE}
+        output = self.run_install('Kah Geh Tan')
+        self.assert_after_ready(output, self.install.GRANT_STEPS.format(binary=self.bundle / 'harold') + '\n')
+        self.assertIn('enter {}, press Enter'.format(self.bundle / 'harold'), output)
+        self.assertNotIn(self.install.AD_HOC_NOTE, output)
+        self.assertNotIn(self.install.CARRY_OVER, output)
+
+    def test_an_installed_harold_without_a_readable_signature_prints_the_steps(self):
+        self.install_existing(saved='Kah Geh Tan')
+        self.requirements = {'new': self.CERTIFICATE}
+        output = self.run_install(None)
+        self.assertIn('macOS permissions for this build of harold:', output)
+        self.assertNotIn(self.install.CARRY_OVER, output)
+
+    def test_a_first_ad_hoc_install_prints_the_steps_and_the_note(self):
+        self.requirements = {'new': 'cdhash H"9a9a"'}
+        output = self.run_install('-')
+        steps = self.install.GRANT_STEPS.format(binary=self.bundle / 'harold')
+        self.assert_after_ready(output, steps + '\n' + self.install.AD_HOC_NOTE + '\n')
+
+    def test_telegram_prints_neither(self):
+        self.config.write_text('[telegram]\nbot_token = "t"\nchat_id = 5\n\n[notify]\naway_channel = "telegram"\n')
+        self.requirements = {'new': 'cdhash H"9a9a"'}
+        output = self.run_install('-')
+        self.assertIn('Harold ready at', output)
+        self.assertNotIn('macOS permissions', output)
+
+    def test_a_failed_install_prints_neither(self):
+        self.install_existing(saved='Kah Geh Tan')
+        self.sign_error = 'Kah Geh Tan: ambiguous (matches "Kah Geh Tan" and "Kah Geh Tan")'
+        with self.assertRaisesRegex(RuntimeError, 'ambiguous'):
+            self.run_install(None)
+        self.assertNotIn('macOS permissions', self.printed.getvalue())
+        self.stop.assert_not_called()
+
+
+class PermissionsTests(unittest.TestCase):
+    def setUp(self):
+        import install
+        self.install = install
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name).resolve()
+
+    def requirement(self, stdout, returncode=0):
+        binary = self.root / 'harold'
+        binary.write_text('binary')
+        reply = subprocess.CompletedProcess([], returncode, stdout, 'Executable={}\n'.format(binary))
+        with patch.object(subprocess, 'run', return_value=reply) as run:
+            value = self.install.designated_requirement(binary)
+        self.assertEqual(run.call_args.args[0], ['codesign', '-dr', '-', str(binary)])
+        return value
+
+    def test_the_requirement_is_read_from_codesign_output(self):
+        self.assertEqual(self.requirement('# designated => identifier "harold" and certificate leaf = H"ab12"\n'),
+                         'identifier "harold" and certificate leaf = H"ab12"')
+        self.assertEqual(self.requirement('designated => cdhash H"315d"\n'), 'cdhash H"315d"')
+
+    def test_an_unreadable_signature_has_no_requirement(self):
+        self.assertIsNone(self.requirement('', returncode=1))
+        self.assertIsNone(self.requirement('nothing useful\n'))
+        with patch.object(subprocess, 'run') as run:
+            self.assertIsNone(self.install.designated_requirement(self.root / 'missing'))
+        run.assert_not_called()
+
+    def config(self, default, local=None):
+        folder = self.root / 'config'
+        folder.mkdir(exist_ok=True)
+        (folder / 'default.toml').write_text(default)
+        if local is None:
+            (folder / 'local.toml').unlink(missing_ok=True)
+        else:
+            (folder / 'local.toml').write_text(local)
+        return self.install.away_channel(folder)
+
+    def test_the_channel_is_local_over_default(self):
+        imessage = '[notify]\naway_channel = "imessage"\n'
+        self.assertEqual(self.config(imessage, '[notify]\naway_channel = "telegram"\n'), 'telegram')
+        self.assertEqual(self.config(imessage, '[imessage]\nrecipient = "me"\n'), 'imessage')
+        self.assertEqual(self.config('[notify]\naway_channel = "telegram"\n'), 'telegram')
+
+    def test_a_config_that_cannot_be_read_counts_as_imessage(self):
+        self.assertEqual(self.config('not = [toml'), 'imessage')
+        self.assertEqual(self.install.away_channel(self.root / 'absent'), 'imessage')
+
+    def message(self, channel='imessage', old='same', new='same', identity='Kah Geh Tan'):
+        return self.install.permissions_message(channel, old, new, identity, Path('/Users/u/my bin/harold/harold'))
+
+    def test_matching_requirements_carry_over(self):
+        self.assertEqual(self.message(), self.install.CARRY_OVER)
+
+    def test_a_changed_or_missing_requirement_prints_the_steps(self):
+        steps = self.install.GRANT_STEPS.format(binary='/Users/u/my bin/harold/harold')
+        self.assertEqual(self.message(new='other'), steps)
+        self.assertEqual(self.message(old=None), steps)
+        self.assertEqual(self.message(old=None, new=None), steps)
+        self.assertIn('enter /Users/u/my bin/harold/harold, press Enter', steps)
+
+    def test_ad_hoc_steps_end_with_the_note(self):
+        steps = self.install.GRANT_STEPS.format(binary='/Users/u/my bin/harold/harold')
+        self.assertEqual(self.message(new='other', identity='-'), steps + '\n' + self.install.AD_HOC_NOTE)
+
+    def test_telegram_needs_no_permissions(self):
+        self.assertIsNone(self.message(channel='telegram'))
+        self.assertIsNone(self.message(channel='telegram', new='other', identity='-'))
+
+    def test_the_printed_text_matches_the_spec(self):
+        self.assertEqual(self.install.CARRY_OVER,
+                         'macOS permissions: this harold is signed like the one it replaced; '
+                         'Full Disk Access and Messages control carry over.')
+        self.assertEqual(self.install.GRANT_STEPS.format(binary='/B/harold'), '\n'.join([
+            'macOS permissions for this build of harold:',
+            '  Full Disk Access (needed to read replies from the phone):',
+            '    System Settings > Privacy & Security > Full Disk Access.',
+            '    If "harold" is in the list, select it and click "−".',
+            '    Click "+", press Cmd+Shift+G, enter /B/harold, press Enter, click Open.',
+            '    Check that the switch next to "harold" is on. No restart is needed.',
+            '  Messages: the first time Harold sends a message, macOS asks whether "harold" may control',
+            '    "Messages". Click Allow. Until then Harold cannot send.',
+            '  If you switched on python3.13 for Harold before, you can switch it off now.']))
+        self.assertEqual(self.install.AD_HOC_NOTE,
+                         'Signed with no certificate: these steps are needed after every install of a new build. '
+                         'See "Keep permissions across installs" in docs/how-tos/setup.md.')
+
 
 class ServiceTests(unittest.TestCase):
     def setUp(self):
