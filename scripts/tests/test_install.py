@@ -372,6 +372,18 @@ class InstallTests(unittest.TestCase):
         (bundle / 'service.plist').write_text('not a plist')
         self.assertIsNone(self.install.plist_python(bundle))
 
+    def test_a_truncated_service_file_names_no_python(self):
+        bundle = self.prefix / 'old'
+        bundle.mkdir()
+        (bundle / 'service.plist').write_bytes(b'<?xml version="1.0"?><plist><dict>')
+        self.assertIsNone(self.install.plist_python(bundle))
+
+    def test_a_version_file_that_is_not_text_reads_as_not_recorded(self):
+        bundle = self.prefix / 'old'
+        bundle.mkdir()
+        (bundle / 'VERSION').write_bytes(b'\xff\xfe')
+        self.assertIsNone(self.install.recorded(bundle, 'VERSION'))
+
 
 # Leaves `signing_identity` out of an installed service.json, as installs before it did.
 NOT_RECORDED = object()
@@ -705,6 +717,15 @@ class InstalledServiceTests(unittest.TestCase):
                           side_effect=OSError(28, 'No space left on device')):
             output = self.run_install('-')
         self.assertIn('Rollback copy incomplete (No space left on device)', output)
+        self.assertIn('Harold ready at', output)
+        self.assertEqual((self.prefix / 'tmx-agent-dash').read_text(), 'release tmx-agent-dash')
+
+    def test_any_rollback_copy_failure_still_starts_harold(self):
+        self.install_existing(saved='-')
+        self.install_existing_programs(self.prefix.parent / 'haroldctl.log')
+        with patch.object(self.install, 'keep_rollback_copy', side_effect=RuntimeError('boom')):
+            output = self.run_install('-')
+        self.assertIn('Rollback copy incomplete (boom)', output)
         self.assertIn('Harold ready at', output)
         self.assertEqual((self.prefix / 'tmx-agent-dash').read_text(), 'release tmx-agent-dash')
 

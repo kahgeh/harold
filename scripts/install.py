@@ -407,7 +407,7 @@ def recorded(bundle, name):
     """The text of a bundle's VERSION or REVISION file, or None when it has none."""
     try:
         return (bundle / name).read_text().strip() or None
-    except OSError:
+    except (OSError, ValueError):
         return None
 
 
@@ -416,7 +416,8 @@ def plist_python(bundle):
     direct-launch run `python service.py run`), or None."""
     try:
         arguments = plistlib.loads((bundle / 'service.plist').read_bytes()).get('ProgramArguments')
-    except (OSError, ValueError, AttributeError):
+    except Exception:
+        # A damaged plist can raise almost anything (ExpatError among them); any of it means no Python.
         return None
     if (isinstance(arguments, list) and len(arguments) >= 2
             and all(isinstance(item, str) for item in arguments[:2])
@@ -580,9 +581,9 @@ def install(args, repo):
                 # the old bundle has moved, so a failed copy is reported and the install goes on.
                 try:
                     keep_rollback_copy(prefix, backup, args.reinstall)
-                except OSError as error:
+                except Exception as error:
                     print('Rollback copy incomplete ({}); the old bundle is still in the folder below.'.format(
-                        error.strerror or error), flush=True)
+                        getattr(error, 'strerror', None) or error), flush=True)
                 print('Previous installation archived at {}'.format(backup), flush=True)
             os.replace(staging / 'tmx-agent-dash', prefix / 'tmx-agent-dash')
             os.replace(staging / 'haroldctl', prefix / 'haroldctl')
