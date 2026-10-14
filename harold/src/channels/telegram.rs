@@ -65,6 +65,18 @@ fn send_message_body(chat_id: i64, msg: &str) -> serde_json::Value {
 /// Send a plain text message to the configured Telegram chat.
 /// Must be called from a `spawn_blocking` context.
 pub(crate) fn send_telegram(msg: &str) -> Result<(), String> {
+    send_message(msg, || info!(msg, "sending Telegram message"))
+}
+
+/// Send a line the chief asked Harold to speak, as text, to the configured Telegram chat.
+/// Unlike `send_telegram`, nothing logged holds the line.
+/// Must be called from a `spawn_blocking` context.
+pub(crate) fn send_spoken_line(line: &str) -> Result<(), String> {
+    send_message(line, || info!("sending Telegram spoken line"))
+}
+
+/// Send `msg`, calling `log_send` once the chat is configured and before the request.
+fn send_message(msg: &str, log_send: impl FnOnce()) -> Result<(), String> {
     let cfg = get_settings();
     let Some(token) = cfg.telegram.bot_token.as_deref() else {
         warn!("telegram: bot_token not configured");
@@ -75,7 +87,7 @@ pub(crate) fn send_telegram(msg: &str) -> Result<(), String> {
         return Err("telegram chat_id is not configured".into());
     };
 
-    info!(msg, "sending Telegram message");
+    log_send();
     let body = send_message_body(chat_id, msg);
 
     let res = client()
