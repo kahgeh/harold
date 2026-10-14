@@ -211,6 +211,8 @@ pub(crate) fn send_spoken_line(line: &str) -> Result<(), String> {
     let cfg = get_settings();
     match cfg.notify.away_channel.as_str() {
         "telegram" => telegram::send_spoken_line(line),
+        // Checked before the note is made, so a retry does not rerun the model for nothing.
+        _ if cfg.imessage.recipient.is_none() => Err("iMessage recipient is not configured".into()),
         _ => crate::outbound::voice_note::send_voice_note_in(
             &crate::outbound::voice_note::notes_parent(),
             std::time::SystemTime::now(),
