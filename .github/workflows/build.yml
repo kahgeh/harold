@@ -47,6 +47,8 @@ jobs:
 
       - name: Package and smoke test
         shell: bash
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
           set -euo pipefail
           package="harold-aarch64-apple-darwin"
@@ -73,6 +75,7 @@ jobs:
           test -f "dist/$package/skills/send-message-to-away-device/SKILL.md"
           cp README.md "dist/$package/"
           printf '%s\n' "$GITHUB_SHA" > "dist/$package/REVISION"
+          printf '%s\n' "$RELEASE_TAG" > "dist/$package/VERSION"
           tar -czf "dist/$package.tar.gz" -C dist "$package"
           cd dist
           shasum -a 256 "$package.tar.gz" > "$package.tar.gz.sha256"

@@ -250,6 +250,25 @@ def checked(args, **kwargs):
     subprocess.run(args, check=True, **kwargs)
 
 
+def record_version(stage, prebuilt, repo):
+    """Say in the bundle what was installed: a release's VERSION and REVISION files, copied, or
+    for a source install `source` and the checkout's commit. No commit is recorded without git."""
+    if prebuilt is not None:
+        for name in ('VERSION', 'REVISION'):
+            source = prebuilt / name
+            if source.is_file() and not source.is_symlink():
+                shutil.copy2(source, stage / name)
+        return
+    (stage / 'VERSION').write_text('source\n')
+    try:
+        result = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=repo, capture_output=True, text=True)
+    except OSError:
+        return
+    revision = result.stdout.strip()
+    if result.returncode == 0 and revision:
+        (stage / 'REVISION').write_text(revision + '\n')
+
+
 def saved_signing_identity(bundle):
     """The identity the installed bundle was signed with: `-` (ad-hoc) when none is recorded."""
     path = bundle / 'service.json'
@@ -377,7 +396,7 @@ def write_plist(path, metadata):
     value = {'Label': metadata['label'],
              'ProgramArguments': [str(bundle / 'harold')],
              'WorkingDirectory': str(bundle), 'RunAtLoad': False,
-             'ProcessType': 'Background', 'ExitTimeOut': 10,
+             'ExitTimeOut': 10,
              'EnvironmentVariables': metadata['env'],
              'StandardOutPath': str(bundle / 'harold.log'),
              'StandardErrorPath': str(bundle / 'harold.log')}
@@ -447,6 +466,7 @@ def install(args, repo):
             for name in ('default.toml', 'local.template.toml'):
                 shutil.copy2(assets / ('config' if prebuilt is not None else 'harold/config') / name, stage / 'config' / name)
             write_skill(assets / SKILL_FILE, stage / SKILL_FILE, bundle / 'harold')
+            record_version(stage, prebuilt, repo)
             (stage / 'config/local.toml').write_bytes(local)
             (stage / 'config/local.toml').chmod(0o600)
             metadata = make_metadata(prefix, '')

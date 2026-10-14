@@ -345,6 +345,25 @@ class InstallTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, 'did not report'):
                 self.install.build_binaries(repo, offline=True)
 
+    def test_a_source_install_records_its_commit_and_source_as_its_version(self):
+        stage = self.prefix / 'stage'
+        stage.mkdir()
+        reply = subprocess.CompletedProcess([], 0, 'b4142e9f00d5\n', '')
+        with patch.object(subprocess, 'run', return_value=reply) as run:
+            self.install.record_version(stage, None, self.prefix / 'repo')
+        self.assertEqual(run.call_args.args[0], ['git', 'rev-parse', 'HEAD'])
+        self.assertEqual(run.call_args.kwargs['cwd'], self.prefix / 'repo')
+        self.assertEqual((stage / 'VERSION').read_text(), 'source\n')
+        self.assertEqual((stage / 'REVISION').read_text(), 'b4142e9f00d5\n')
+
+    def test_a_source_install_without_git_records_no_revision(self):
+        stage = self.prefix / 'stage'
+        stage.mkdir()
+        with patch.object(subprocess, 'run', side_effect=FileNotFoundError('git')):
+            self.install.record_version(stage, None, self.prefix / 'repo')
+        self.assertEqual((stage / 'VERSION').read_text(), 'source\n')
+        self.assertFalse((stage / 'REVISION').exists())
+
 
 # Leaves `signing_identity` out of an installed service.json, as installs before it did.
 NOT_RECORDED = object()
@@ -446,7 +465,6 @@ class InstalledServiceTests(unittest.TestCase):
             'ProgramArguments': [str(self.bundle / 'harold')],
             'WorkingDirectory': str(self.bundle),
             'RunAtLoad': False,
-            'ProcessType': 'Background',
             'ExitTimeOut': 10,
             'EnvironmentVariables': metadata['env'],
             'StandardOutPath': str(self.bundle / 'harold.log'),
@@ -454,6 +472,25 @@ class InstalledServiceTests(unittest.TestCase):
         })
         self.assertEqual(sorted(metadata['env']), sorted([
             'HAROLD_CONFIG_DIR', 'HAROLD_ENV', 'HAROLD__STORE__PATH', 'PATH', 'LANG', 'LC_ALL']))
+
+    def test_the_service_runs_at_normal_priority(self):
+        self.run_install()
+        plist = plistlib.loads((self.bundle / 'service.plist').read_bytes())
+        self.assertNotIn('ProcessType', plist)
+
+    def test_a_release_records_its_version_and_revision_in_the_bundle(self):
+        (self.release / 'VERSION').write_text('v0.6.0\n')
+        (self.release / 'REVISION').write_text('31323b9f00d5c0ffee\n')
+        self.run_install()
+        self.assertEqual((self.bundle / 'VERSION').read_text(), 'v0.6.0\n')
+        self.assertEqual((self.bundle / 'REVISION').read_text(), '31323b9f00d5c0ffee\n')
+
+    def test_a_release_without_a_version_installs_without_one(self):
+        (self.release / 'REVISION').write_text('08095dde67ea035ff4e0aaa3109a344d39ceb019\n')
+        self.run_install()
+        self.assertFalse((self.bundle / 'VERSION').exists())
+        self.assertEqual((self.bundle / 'REVISION').read_text(),
+                         '08095dde67ea035ff4e0aaa3109a344d39ceb019\n')
 
     def signed(self):
         """(identity, identifier, file name) for each signing call, in order."""
@@ -1003,6 +1040,19 @@ class SkillTests(unittest.TestCase):
         self.skills.chmod(0o700)
         self.assertTrue(outcome.startswith('not linked ('), outcome)
         self.assertFalse(os.path.lexists(self.path))
+
+
+
+class ReleaseArchiveTests(unittest.TestCase):
+    """The archive the build workflow packs, which `--prebuilt-dir` installs from."""
+
+    def test_the_archive_carries_the_release_tag_in_a_version_file(self):
+        workflow = (SCRIPTS.parent / '.github/workflows/build.yml').read_text()
+        start = workflow.index('- name: Package and smoke test')
+        package = workflow[start:workflow.index('- name: Upload release assets')]
+        self.assertIn('RELEASE_TAG: ${{ github.event.release.tag_name }}', package)
+        self.assertIn('printf \'%s\\n\' "$RELEASE_TAG" > "dist/$package/VERSION"', package)
+        self.assertLess(package.index('/VERSION"'), package.index('tar -czf'))
 
 
 if __name__ == '__main__':

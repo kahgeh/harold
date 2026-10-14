@@ -50,8 +50,8 @@ tmx-agent-dash
 Publishing a GitHub release triggers the **Build macOS ARM64** workflow. After
 its tests and build succeed, it attaches `harold-aarch64-apple-darwin.tar.gz`
 and its `.sha256` checksum to that release. The archive contains `harold`,
-`tmx-agent-dash`, configuration templates, the gRPC schema, and the source
-revision. Draft releases, pushes, and pull requests do not trigger builds.
+`tmx-agent-dash`, configuration templates, the gRPC schema, the source
+revision and the release version. Draft releases, pushes, and pull requests do not trigger builds.
 Re-running a release workflow replaces its matching assets.
 
 These builds target Apple Silicon Macs running macOS 15 or newer. Binaries are
