@@ -38,13 +38,9 @@ curl -fsSL https://raw.githubusercontent.com/kahgeh/harold/main/scripts/bootstra
 
 Without a terminal, supply `--config PATH` for the first installation. Existing configuration is retained by default.
 
-The installer validates configuration before replacing the installed program. It uses ad-hoc code signing by default; to use your own signing identity:
+The installer validates configuration before replacing the installed program. It signs Harold with the code-signing certificate you name once, and with no certificate (ad-hoc) until you name one; see [Keep permissions across installs](#keep-permissions-across-installs).
 
-```sh
-curl -fsSL https://raw.githubusercontent.com/kahgeh/harold/main/scripts/bootstrap.sh | sh -s -- --signing-identity 'My Code Signing Certificate'
-```
-
-Signing does not grant macOS privacy permissions. For iMessage, configure the installed Harold process's access to the Messages database and approve Messages automation when macOS requests it. A service managed by launchd does not run inside your terminal.
+For iMessage, Harold needs two macOS permissions: Full Disk Access, to read your replies from the Messages database, and permission to control Messages, to send. After an install, the installer says whether both carried over from the previous install or prints the steps to grant them.
 
 The default layout is:
 
@@ -68,9 +64,62 @@ The default layout is:
 ~/bin/tmx-agent-dash
 ```
 
-`local.toml` holds your channel and optional feature settings. The installed service uses its own `config` directory and `data/events` store, regardless of paths copied from another machine or Harold overrides in the invoking shell. It records the PATH and UTF-8 locale needed by its tools.
+`local.toml` holds your channel and optional feature settings. The installed service uses its own `config` directory and `data/events` store, regardless of paths copied from another machine or Harold overrides in the invoking shell. It records the PATH and UTF-8 locale needed by its tools. Variables set for all of launchd with `launchctl setenv`, such as `HAROLD__GRPC__PORT`, also reach the service; the six variables the service sets itself (`HAROLD_CONFIG_DIR`, `HAROLD_ENV`, `HAROLD__STORE__PATH`, `PATH`, `LANG` and `LC_ALL`) win on a clash.
 
 Add `~/bin` to your shell's PATH if needed, or use the absolute commands below. The installer prints the service definition and installation paths. The service definition stays inside the installation rather than the auto-loaded LaunchAgents directory. A custom location can be selected with `--prefix /absolute/path/to/bin`.
+
+### Keep permissions across installs
+
+launchd starts `~/bin/harold/harold` itself, so macOS charges Full Disk Access and Messages control to `harold`. macOS stores each grant with a rule that names the program by its signature. `codesign -dr - ~/bin/harold/harold` prints that rule, the program's designated requirement:
+
+| Harold is signed with | Rule macOS stores | After installing a new build |
+| --- | --- | --- |
+| No certificate (ad-hoc, `-`) | `cdhash H"…"`: a fingerprint of this exact file | The fingerprint differs, so both permissions must be granted again |
+| A certificate | `identifier "harold" and certificate leaf = H"…"` | The name and certificate are the same, so both permissions carry over |
+
+The installer always signs with the identifiers `harold` and `tmx-agent-dash`, so only the certificate decides.
+
+#### Create a self-signed certificate
+
+Once per Mac, in Keychain Access:
+
+1. Choose Keychain Access > Certificate Assistant > Create a Certificate.
+2. Enter a name, for example your own. Set Identity Type to Self Signed Root and Certificate Type to Code Signing. Click Create.
+3. Check that it is listed:
+
+   ```sh
+   security find-identity -v -p codesigning
+   ```
+
+The certificate expires on the date set when it is created. A new certificate means granting both permissions once more. Other Macs do not trust it, which Harold does not need. For a second Mac, create one there the same way, or export this one from Keychain Access (File > Export, `.p12`) and import it there.
+
+#### Name it once
+
+Give the certificate's name on one install:
+
+```sh
+./scripts/install.sh --signing-identity 'Your Certificate Name'
+make install INSTALL_ARGS="--signing-identity 'Your Certificate Name'"
+curl -fsSL https://raw.githubusercontent.com/kahgeh/harold/main/scripts/bootstrap.sh | sh -s -- --signing-identity 'Your Certificate Name'
+```
+
+The installer saves the name in `~/bin/harold/service.json`, and later installs use it when none is given. `--signing-identity -` goes back to signing with no certificate and saves that.
+
+The first time, macOS may ask "codesign wants to sign using key … in your keychain". Enter your login password and click Always Allow; Allow on its own asks again at every install. The installer waits until the question is answered.
+
+If the keychain has no certificate by that name, or two with the same name, `codesign` refuses and the install stops with `Install failed:` and `codesign`'s message, before the running Harold is touched. For two certificates with one name, pass the certificate's SHA-1 fingerprint from `security find-identity` instead of the name.
+
+An Apple Developer ID Application certificate works the same way: pass its name. It costs US$99 a year through the Apple Developer Program. It adds trust on other Macs and Apple notarisation, which matter only if other people install Harold builds you sign.
+
+#### After an install
+
+With iMessage, the installer prints whether the permissions carried over. When they did not, after a first install, a new certificate, or any new build signed with no certificate, it prints these steps:
+
+1. Full Disk Access: open System Settings > Privacy & Security > Full Disk Access. If `harold` is in the list, select it and click "−". Click "+", press Cmd+Shift+G, enter the path the installer printed (`/Users/<you>/bin/harold/harold`), press Enter and click Open. Check that the switch next to `harold` is on. Harold retries every 5 seconds, so no restart is needed: `iMessage listener started` appears in `~/bin/harold/harold.log` after the `cannot read the Messages database` line.
+2. Messages: the first time Harold sends a message, macOS asks whether `harold` may control Messages. Click Allow; until then Harold cannot send. If it was answered Don't Allow, switch it on in System Settings > Privacy & Security > Automation > harold > Messages.
+3. Once per Mac, after the first install that starts `harold` directly: earlier installs started Harold through Python, so macOS charged both permissions to Python. In Full Disk Access, switch `python3.13` off, or select it and click "−" if nothing else on the Mac needs it. Under Automation, `python3.13` > Messages can be switched off too.
+
+The installer cannot check that these steps were done: reading macOS's permission records needs Full Disk Access itself.
 
 ### Optional: messages from one agent only
 

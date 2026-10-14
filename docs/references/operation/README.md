@@ -8,7 +8,7 @@ A listening port alone does not tell you which Harold process owns it or which c
 
 ## Architecture
 
-The installed `service.plist` stays inside the Harold bundle. `haroldctl start` loads it into the current user's graphical launchd domain and starts the service on demand. Its launcher applies the managed environment and replaces itself with the Harold binary. The service remains in that login session until stopped; the plist is not placed in `~/Library/LaunchAgents`.
+The installed `service.plist` stays inside the Harold bundle. `haroldctl start` loads it into the current user's graphical launchd domain and starts the service on demand. launchd starts the `harold` binary itself, with the environment, working directory and log file the plist names. The service remains in that login session until stopped; the plist is not placed in `~/Library/LaunchAgents`.
 
 | Component | Responsibility |
 | --- | --- |
@@ -21,6 +21,12 @@ The installed `service.plist` stays inside the Harold bundle. `haroldctl start` 
 
 The runtime components share Harold's store and shutdown signal. See [Harold Architecture](../../explanations/architecture.md) for their data flow.
 
+## macOS permissions
+
+Harold with the iMessage channel needs two macOS permissions: Full Disk Access, to read `~/Library/Messages/chat.db`, and control of Messages, to send. macOS charges a permission to the program launchd started, which is `harold`. It stores each grant with `harold`'s designated requirement, the rule `codesign -dr -` prints. The installer signs `harold` and `tmx-agent-dash` with the fixed identifiers `harold` and `tmx-agent-dash`, so a build signed with the same certificate keeps both grants; an ad-hoc build does not. [Keep permissions across installs](../../how-tos/setup.md#keep-permissions-across-installs) has the steps.
+
+`haroldctl` stays a Python script and needs neither permission: `start`, `stop`, `restart` and `status` do not read the Messages database or send to Messages.
+
 ## Installation commands
 
 Run these from the repository:
@@ -31,7 +37,7 @@ Run these from the repository:
 | `./scripts/install.sh --reinstall` | Archive the old bundle; retain settings and create fresh managed data |
 | `--config PATH` | Import local TOML settings instead of retaining or prompting for them |
 | `--prefix PATH` | Set executable directory; defaults to `~/bin` |
-| `--signing-identity ID` | Choose a signing identity; defaults to ad-hoc `-` |
+| `--signing-identity ID` | Sign with this keychain identity and save it for later installs; defaults to the saved identity, else ad-hoc `-` |
 | `--offline` | Build with cached locked Cargo dependencies |
 
 `make install` and `make deploy` call the normal installer. `make reinstall` selects fresh storage. Pass installer flags using `INSTALL_ARGS`. Missing prerequisites and invalid configuration stop installation before the running service is replaced. A readiness failure returns nonzero and reports where to find the installed log and configuration.
@@ -48,9 +54,9 @@ The daemon loads configuration in this order:
 
 For a directly run binary, `HAROLD_CONFIG_DIR` selects the directory and `HAROLD_ENV` selects the overlay name. By default, configuration is adjacent to the executable.
 
-The installed service controls its own config directory, `local` overlay, PATH, UTF-8 locale, and store at `<prefix>/harold/data/events`. It clears inherited Harold settings overrides before applying that environment. This keeps startup, configuration checks, readiness checks, and hooks pointed at the same installation even when the invoking shell contains development overrides.
+The installed service controls its own config directory, `local` overlay, PATH, UTF-8 locale, and store at `<prefix>/harold/data/events`. `haroldctl` and the installer clear inherited Harold settings overrides before applying that environment to their configuration and readiness checks, so they stay pointed at the installation even when the invoking shell contains development overrides. launchd gives the daemon the same environment from the plist. A variable set for all of launchd with `launchctl setenv` also reaches the daemon; the plist's own variables win on a clash.
 
-`service.json` records the service identity and environment. Channel credentials belong in `config/local.toml`, which the installer writes with owner-only permissions. Edit that file and run `haroldctl restart` to apply changes.
+`service.json` records the service identity, its environment, and the signing identity the installer used. Channel credentials belong in `config/local.toml`, which the installer writes with owner-only permissions. Edit that file and run `haroldctl restart` to apply changes.
 
 ## Start, stop, and inspect
 
@@ -76,7 +82,7 @@ sequenceDiagram
     Caller->>Control: start
     opt Service is not running
         Control->>Launchd: load bundled plist and start job
-        Launchd->>Harold: exec with managed environment
+        Launchd->>Harold: start harold with the plist's environment
         Harold->>Harold: validate config, open store, catch up snapshot
     end
     Control->>Launchd: find managed PID
