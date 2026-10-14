@@ -1,0 +1,438 @@
+import contextlib
+import hashlib
+import io
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import sys
+import tarfile
+import tempfile
+import unittest
+from unittest.mock import patch
+
+SCRIPTS = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(SCRIPTS))
+
+import release  # noqa: E402
+
+REAL_RUN = release.run
+# The build steps of a real v0.5.0 run (gh run view 38243819261), in order.
+STEPS = ('Set up job', 'Run actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd',
+         'Install build prerequisites', 'Test', 'Build release binaries',
+         'Package and smoke test', 'Upload release assets')
+PUBLISHED = '2026-10-15T09:00:00Z'
+REVISION = '31323b9f00d5c0ffee31323b9f00d5c0ffee3132'
+
+
+def git(cwd, *args):
+    return subprocess.run(['git'] + list(args), cwd=str(cwd), check=True,
+                          capture_output=True, text=True).stdout
+
+
+def commit(cwd, subject, name):
+    (Path(cwd) / name).write_text(subject + '\n')
+    git(cwd, 'add', name)
+    git(cwd, 'commit', '-q', '-m', subject)
+
+
+def done(argv, code=0, stdout='', stderr=''):
+    return subprocess.CompletedProcess(argv, code, stdout, stderr)
+
+
+def option(args, name):
+    """The value after `name` in `args`, or None."""
+    return args[args.index(name) + 1] if name in args else None
+
+
+class FakeClock:
+    """Time that passes only when the command sleeps."""
+
+    def __init__(self):
+        self.now = 0.0
+
+    def __call__(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.now += seconds
+
+
+class FakeGitHub:
+    """kahgeh/harold as the `gh` calls under test see it, in the JSON shapes gh 2.73 prints.
+
+    `gh release create` starts a build run, id 2, on the new tag. The run shows in `gh run list`
+    from listing `appears_after + 1`; `gh run view` reports it finished at view `polls`, with
+    `outcome`, and a successful run attaches both files when `attach` is set. `events` lists
+    what changed on GitHub, and every download, in order.
+    """
+
+    def __init__(self):
+        self.signed_in = True
+        self.releases = {'v0.5.0': self.release('v0.5.0', latest=True)}
+        # A run of an earlier v0.6.0, withdrawn with --cleanup-tag before this one was cut.
+        self.runs = [{'databaseId': 1, 'headBranch': 'v0.6.0', 'createdAt': '2026-10-01T08:00:00Z',
+                      'url': 'https://github.com/kahgeh/harold/actions/runs/1'}]
+        self.new_run = None
+        self.outcome, self.polls, self.attach, self.appears_after = 'success', 3, True, 0
+        self.failing_views = 0
+        self.files = {}
+        self.events = []
+        self.created = None
+        self.listings = self.views = 0
+
+    @staticmethod
+    def release(tag, latest=False, prerelease=False, assets=()):
+        return {'tagName': tag, 'isLatest': latest, 'isPrerelease': prerelease,
+                'assets': [{'name': name} for name in assets], 'publishedAt': PUBLISHED,
+                'url': 'https://github.com/kahgeh/harold/releases/tag/' + tag}
+
+    @staticmethod
+    def printed(argv, value):
+        return done(argv, 0, json.dumps(value) + '\n')
+
+    def __call__(self, argv):
+        args = argv[1:]
+        if args[:2] == ['auth', 'status']:
+            if self.signed_in:
+                return done(argv, 0)
+            return done(argv, 1, '', 'You are not logged into any GitHub hosts.\n')
+        assert option(args, '--repo') == 'kahgeh/harold', argv
+        verb = tuple(args[:2])
+        if verb == ('release', 'list'):
+            return self.printed(argv, [{'tagName': item['tagName'], 'isLatest': item['isLatest']}
+                                       for item in self.releases.values()])
+        if verb == ('release', 'view'):
+            item = self.releases.get(args[2])
+            if item is None:
+                return done(argv, 1, '', 'release not found\n')
+            return self.printed(argv, {field: item[field] for field in option(args, '--json').split(',')})
+        if verb == ('release', 'create'):
+            return self.create(argv, args)
+        if verb == ('release', 'edit'):
+            tag = args[2]
+            assert '--prerelease=false' in args and '--latest' in args, argv
+            for item in self.releases.values():
+                item['isLatest'] = False
+            self.releases[tag].update(isLatest=True, isPrerelease=False)
+            self.events.append('edit ' + tag)
+            return done(argv, 0, self.releases[tag]['url'] + '\n')
+        if verb == ('release', 'download'):
+            return self.download(argv, args)
+        if verb == ('run', 'list'):
+            assert (option(args, '--workflow'), option(args, '--event')) == ('build.yml', 'release'), argv
+            self.listings += 1
+            runs = list(self.runs)
+            if self.new_run and self.listings > self.appears_after:
+                runs.append(self.new_run)
+            fields = option(args, '--json').split(',')
+            return self.printed(argv, [{field: item[field] for field in fields} for item in reversed(runs)])
+        if verb == ('run', 'view'):
+            return self.view(argv, args)
+        raise AssertionError('unexpected gh call: {}'.format(argv))
+
+    def create(self, argv, args):
+        tag = args[2]
+        self.created = {'tag': tag, 'target': option(args, '--target'), 'title': option(args, '--title'),
+                        'prerelease': '--prerelease' in args,
+                        'notes': Path(option(args, '--notes-file')).read_text()}
+        self.releases[tag] = self.release(tag, prerelease='--prerelease' in args)
+        self.new_run = {'databaseId': 2, 'headBranch': tag, 'createdAt': '2026-10-15T09:00:02Z',
+                        'url': 'https://github.com/kahgeh/harold/actions/runs/2'}
+        self.events.append('create ' + tag)
+        return done(argv, 0, self.releases[tag]['url'] + '\n')
+
+    def view(self, argv, args):
+        assert args[2] == '2', 'followed run {}, not the one this release started'.format(args[2])
+        if self.failing_views:
+            self.failing_views -= 1
+            return done(argv, 1, '', 'HTTP 502: Bad Gateway\n')
+        self.views += 1
+        finished = self.views >= self.polls
+        count = len(STEPS) if finished else len(STEPS) * self.views // self.polls
+        steps = []
+        for number, name in enumerate(STEPS, 1):
+            if number <= count:
+                last = finished and number == len(STEPS)
+                steps.append({'name': name, 'number': number, 'status': 'completed',
+                              'conclusion': self.outcome if last else 'success'})
+            else:
+                steps.append({'name': name, 'number': number, 'status': 'queued', 'conclusion': ''})
+        if finished and self.views == self.polls:
+            self.events.append('build ' + self.outcome)
+            if self.outcome == 'success' and self.attach:
+                self.releases[self.created['tag']]['assets'] = [
+                    {'name': release.ARCHIVE}, {'name': release.CHECKSUM}]
+        value = {'status': 'completed' if finished else 'in_progress',
+                 'conclusion': self.outcome if finished else '',
+                 'url': self.new_run['url'], 'jobs': [{'name': 'build', 'steps': steps}]}
+        return self.printed(argv, {field: value[field] for field in option(args, '--json').split(',')})
+
+    def download(self, argv, args):
+        tag = args[2]
+        self.events.append('download ' + tag)
+        if tag not in self.releases:
+            return done(argv, 1, '', 'release not found\n')
+        folder = Path(option(args, '--dir'))
+        for name, data in self.files.items():
+            (folder / name).write_bytes(data)
+        return done(argv, 0)
+
+
+class ReleaseTestCase(unittest.TestCase):
+    """A checkout whose `origin` is a local bare repository standing in for kahgeh/harold.
+
+    git is real and runs only in the scratch folder, with the user's git configuration hidden.
+    gh, the tests, the installer and haroldctl are fakes. Nothing contacts GitHub or touches ~/bin.
+    """
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name).resolve()
+        (self.root / 'gitconfig').write_text('')
+        self.patch(patch.dict(os.environ, {
+            'GIT_CONFIG_GLOBAL': str(self.root / 'gitconfig'), 'GIT_CONFIG_NOSYSTEM': '1',
+            'GIT_AUTHOR_NAME': 'Test', 'GIT_AUTHOR_EMAIL': 'test@example.com',
+            'GIT_COMMITTER_NAME': 'Test', 'GIT_COMMITTER_EMAIL': 'test@example.com'}))
+        self.origin = self.root / 'origin.git'
+        git(self.root, 'init', '-q', '--bare', '-b', 'main', str(self.origin))
+        self.work = self.root / 'work'
+        git(self.root, 'init', '-q', '-b', 'main', str(self.work))
+        git(self.work, 'remote', 'add', 'origin', str(self.origin))
+        commit(self.work, 'First', 'README.md')
+        git(self.work, 'tag', 'v0.5.0')
+        commit(self.work, 'Second', 'second.txt')
+        commit(self.work, 'Third', 'third.txt')
+        git(self.work, 'push', '-q', 'origin', 'main', 'v0.5.0')
+        # GitHub has the tag; this checkout gets it back only by fetching.
+        git(self.work, 'tag', '-d', 'v0.5.0')
+        self.github = FakeGitHub()
+        self.clock = FakeClock()
+        self.failing = None
+        self.missing = ()
+        self.calls = []
+        self.prefix = self.root / 'prefix with spaces'
+        self.installer = None
+        self.installer_code = 0
+        self.installed_version = None
+        self.ready = True
+        # What the command prints, kept out of the test output.
+        self.stdout = io.StringIO()
+        self.patch(patch.object(sys, 'stdout', self.stdout))
+        self.patch(patch.object(release, 'run', self.fake_run))
+        self.patch(patch.object(release, 'clock', self.clock))
+        self.patch(patch.object(release, 'sleep', self.clock.sleep))
+        self.patch(patch.object(release, 'DEFAULT_PREFIX', self.root / 'default prefix'))
+        self.patch(patch.object(release.shutil, 'which',
+                                lambda name: None if name in self.missing else '/usr/bin/' + name))
+
+    def patch(self, patcher):
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def fake_run(self, argv, cwd, inherit=False, merge=False):
+        argv = [str(item) for item in argv]
+        self.calls.append(argv)
+        if argv[0] == 'git':
+            return REAL_RUN(argv, cwd, inherit=inherit, merge=merge)
+        if argv[0] == 'gh':
+            return self.github(argv)
+        if tuple(argv) in release.TESTS:
+            failed = tuple(argv) == self.failing
+            return done(argv, 1 if failed else 0, 'FAILED (failures=1)\n' if failed else 'OK\n', None)
+        if argv[0] == sys.executable and argv[1].endswith('/scripts/install.py'):
+            return self.fake_installer(argv)
+        if argv[1:] == ['status'] and argv[0].endswith('/haroldctl'):
+            status = {'ready': self.ready, 'pid': 16897 if self.ready else None, 'grpc_addr': '127.0.0.1:50060'}
+            return done(argv, 0 if self.ready else 1, json.dumps(status) + '\n', '')
+        raise AssertionError('unexpected command: {}'.format(argv))
+
+    def fake_installer(self, argv):
+        """Copies VERSION and REVISION as scripts/install.py does, or writes `installed_version`."""
+        self.installer = argv
+        installer = Path(argv[1])
+        assert installer.is_file(), 'the installer was not extracted'
+        package = installer.parents[1]
+        bundle = Path(option(argv, '--prefix')) / 'harold'
+        bundle.mkdir(parents=True, exist_ok=True)
+        for name in ('VERSION', 'REVISION'):
+            if (package / name).is_file():
+                shutil.copy(str(package / name), str(bundle / name))
+        if self.installed_version:
+            (bundle / 'VERSION').write_text(self.installed_version + '\n')
+        return done(argv, self.installer_code, None, None)
+
+    def assert_refused(self, expected):
+        """Step 1 refuses with exactly `expected` and changes nothing on GitHub."""
+        with self.assertRaises(release.Stopped) as refused:
+            release.checks(self.work, None, None)
+        self.assertEqual(str(refused.exception), expected)
+        self.assertEqual(self.github.events, [])
+
+
+class CheckTests(ReleaseTestCase):
+    def test_another_branch_is_refused(self):
+        git(self.work, 'checkout', '-q', '-b', 'topic')
+        self.assert_refused('Not released: this checkout is on topic, not main.')
+
+    def test_a_modified_tracked_file_is_refused(self):
+        (self.work / 'README.md').write_text('changed\n')
+        self.assert_refused('Not released: uncommitted changes in README.md.')
+
+    def test_a_staged_new_file_is_refused(self):
+        (self.work / 'new.txt').write_text('new\n')
+        git(self.work, 'add', 'new.txt')
+        self.assert_refused('Not released: uncommitted changes in new.txt.')
+
+    def test_only_the_first_three_changed_paths_are_named(self):
+        for name in ('README.md', 'second.txt', 'third.txt'):
+            (self.work / name).write_text('changed\n')
+        (self.work / 'fourth.txt').write_text('new\n')
+        git(self.work, 'add', 'fourth.txt')
+        self.assert_refused('Not released: uncommitted changes in README.md, fourth.txt, second.txt.')
+
+    def test_an_unpushed_commit_is_refused(self):
+        commit(self.work, 'Fourth', 'fourth.txt')
+        self.assert_refused('Not released: main is 1 ahead of and 0 behind origin/main. Push or pull first.')
+
+    def test_a_commit_only_on_origin_is_refused(self):
+        other = self.root / 'other'
+        git(self.root, 'clone', '-q', str(self.origin), str(other))
+        commit(other, 'Elsewhere', 'elsewhere.txt')
+        git(other, 'push', '-q', 'origin', 'main')
+        self.assert_refused('Not released: main is 0 ahead of and 1 behind origin/main. Push or pull first.')
+
+    def test_signed_out_of_gh_is_refused(self):
+        self.github.signed_in = False
+        self.assert_refused('Not released: gh is not signed in to GitHub.')
+
+    def test_an_existing_local_tag_is_refused(self):
+        git(self.work, 'tag', 'v0.6.0')
+        self.assert_refused('Not released: v0.6.0 already exists.')
+
+    def test_a_tag_only_on_github_is_refused(self):
+        # A tag on a commit that no branch holds, so fetching main does not bring it here.
+        other = self.root / 'other'
+        git(self.root, 'clone', '-q', str(self.origin), str(other))
+        commit(other, 'Side', 'side.txt')
+        git(other, 'push', '-q', 'origin', 'HEAD:refs/tags/v0.6.0')
+        self.assert_refused('Not released: v0.6.0 already exists.')
+
+    def test_a_failing_test_is_refused_with_its_output(self):
+        self.failing = ('python3', '-m', 'unittest', 'discover', '-s', 'scripts/tests')
+        self.assert_refused('Not released: tests failed in python3 -m unittest discover -s scripts/tests.\n'
+                            'FAILED (failures=1)')
+        ran = [tuple(argv) for argv in self.calls if tuple(argv) in release.TESTS]
+        self.assertEqual(ran, list(release.TESTS[:2]))
+
+    def test_the_tests_are_the_workflows_in_its_order(self):
+        tag, latest = release.checks(self.work, None, None)
+        self.assertEqual((tag, latest), ('v0.6.0', 'v0.5.0'))
+        self.assertEqual([tuple(argv) for argv in self.calls if tuple(argv) in release.TESTS], list(release.TESTS))
+        self.assertEqual(release.TESTS, (
+            ('cargo', 'test', '--workspace', '--locked'),
+            ('python3', '-m', 'unittest', 'discover', '-s', 'scripts/tests'),
+            ('python3', '-m', 'unittest', 'hooks.shared.harold_turn_complete_test'),
+            ('python3', '-m', 'unittest', 'hooks.providers.test_turn_complete')))
+
+    def test_every_failing_check_is_printed_and_no_test_runs(self):
+        git(self.work, 'checkout', '-q', '-b', 'topic')
+        (self.work / 'README.md').write_text('changed\n')
+        self.github.signed_in = False
+        self.assert_refused('Not released: this checkout is on topic, not main.\n'
+                            'Not released: uncommitted changes in README.md.\n'
+                            'Not released: gh is not signed in to GitHub.')
+        self.assertFalse([argv for argv in self.calls if tuple(argv) in release.TESTS])
+
+    def test_a_missing_tool_is_refused(self):
+        self.missing = ('gh',)
+        self.assert_refused('Not released: gh is not installed.')
+        self.assertEqual(self.calls, [])
+
+    def test_an_untracked_folder_is_not_a_change(self):
+        (self.work / 'tasks').mkdir()
+        (self.work / 'tasks/todo.md').write_text('later\n')
+        self.assertEqual(release.checks(self.work, None, None), ('v0.6.0', 'v0.5.0'))
+
+    def add_events_submodule(self):
+        events = self.root / 'events.git'
+        git(self.root, 'init', '-q', '--bare', '-b', 'main', str(events))
+        source = self.root / 'events-source'
+        git(self.root, 'init', '-q', '-b', 'main', str(source))
+        commit(source, 'Events', 'Cargo.toml')
+        git(source, 'push', '-q', str(events), 'main')
+        git(self.work, '-c', 'protocol.file.allow=always', 'submodule', 'add', '-q', str(events), 'events')
+        git(self.work, 'commit', '-q', '-m', 'Add events')
+        git(self.work, 'push', '-q', 'origin', 'main')
+
+    def test_a_change_inside_the_events_submodule_is_refused(self):
+        self.add_events_submodule()
+        (self.work / 'events/Cargo.toml').write_text('changed\n')
+        self.assert_refused('Not released: uncommitted changes in events.')
+
+    def test_an_untracked_file_in_the_submodule_is_not_a_change(self):
+        self.add_events_submodule()
+        (self.work / 'events/scratch.txt').write_text('mine\n')
+        self.assertEqual(release.checks(self.work, None, None), ('v0.6.0', 'v0.5.0'))
+
+    def test_a_version_not_higher_than_the_latest_is_refused(self):
+        for version in ('0.5.0', '0.4.9', 'abc', '0.6', '0.6.0.1', ''):
+            with self.subTest(version=version):
+                with self.assertRaises(release.Stopped) as refused:
+                    release.checks(self.work, version, None)
+                self.assertEqual(str(refused.exception), 'Not released: VERSION must be higher than v0.5.0.')
+
+    def test_a_given_version_is_used(self):
+        self.assertEqual(release.checks(self.work, '0.5.1', None), ('v0.5.1', 'v0.5.0'))
+        self.assertEqual(release.checks(self.work, 'v0.7.0', None), ('v0.7.0', 'v0.5.0'))
+
+    def test_with_no_release_the_version_is_v0_1_0(self):
+        self.github.releases = {}
+        self.assertEqual(release.checks(self.work, None, None), ('v0.1.0', None))
+
+    def test_an_unreadable_notes_file_is_refused(self):
+        with self.assertRaises(release.Stopped) as refused:
+            release.checks(self.work, None, 'missing.md')
+        self.assertEqual(str(refused.exception), 'Not released: NOTES file missing.md cannot be read.')
+
+
+class VersionTests(unittest.TestCase):
+    def test_the_middle_number_is_raised_and_the_last_set_to_zero(self):
+        self.assertEqual(release.new_tag('v0.5.0', None), 'v0.6.0')
+        self.assertEqual(release.new_tag('v0.9.3', None), 'v0.10.0')
+        self.assertEqual(release.new_tag('v1.2.3', None), 'v1.3.0')
+
+    def test_no_release_means_v0_1_0(self):
+        self.assertEqual(release.new_tag(None, None), 'v0.1.0')
+
+    def test_a_requested_version_must_be_three_numbers_and_higher(self):
+        self.assertEqual(release.new_tag('v0.5.0', '0.5.1'), 'v0.5.1')
+        self.assertEqual(release.new_tag('v0.5.0', 'v1.0.0'), 'v1.0.0')
+        self.assertEqual(release.new_tag(None, '0.0.1'), 'v0.0.1')
+        for requested in ('0.5.0', '0.4.10', 'abc', '1.2', '1.2.3.4', 'v', ' 0.6.0'):
+            with self.subTest(requested=requested):
+                self.assertIsNone(release.new_tag('v0.5.0', requested))
+
+
+class NotesTests(ReleaseTestCase):
+    def test_the_notes_are_the_subjects_since_the_previous_tag_oldest_first(self):
+        tag, latest = release.checks(self.work, None, None)
+        self.assertEqual(release.release_notes(self.work, latest, None), 'Second\nThird\n')
+
+    def test_the_previous_tag_is_fetched_when_this_checkout_lacks_it(self):
+        self.assertEqual(release.release_notes(self.work, 'v0.5.0', None), 'Second\nThird\n')
+
+    def test_with_no_previous_release_every_subject_is_listed(self):
+        self.assertEqual(release.release_notes(self.work, None, None), 'First\nSecond\nThird\n')
+
+    def test_a_notes_file_is_used_as_it_is(self):
+        (self.work / 'notes.md').write_text('# Harold v0.6.0\n\nFaster agent monitor.\n')
+        self.assertEqual(release.release_notes(self.work, 'v0.5.0', 'notes.md'),
+                         '# Harold v0.6.0\n\nFaster agent monitor.\n')
+
+
+if __name__ == '__main__':
+    unittest.main()
