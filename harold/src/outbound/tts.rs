@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::process::Command;
 
 use tracing::{info, warn};
@@ -166,10 +167,25 @@ pub fn notify_at_desk(turn: &TurnCompleted, _trace_id: &str) -> bool {
     notify_with_fallback(tts, &message)
 }
 
-/// Say `line` with the `[tts]` command, falling back as a turn-end update does. Nothing is
-/// added to the line.
+/// `line` as it is passed as a program's last argument: a line that starts with `-` gets
+/// one space in front, so `say` and the model do not read it as an option. The space is
+/// not heard.
+pub(crate) fn as_last_argument(line: &str) -> Cow<'_, str> {
+    if line.starts_with('-') {
+        Cow::Owned(format!(" {line}"))
+    } else {
+        Cow::Borrowed(line)
+    }
+}
+
+/// Say `line` with the `[tts]` command, falling back as a turn-end update does. Nothing
+/// heard is added to the line.
 pub(crate) fn speak_line(line: &str) -> bool {
-    notify_with_fallback(&get_settings().tts, line)
+    speak_line_with(&get_settings().tts, line)
+}
+
+fn speak_line_with(tts: &TtsSettings, line: &str) -> bool {
+    notify_with_fallback(tts, &as_last_argument(line))
 }
 
 #[cfg(test)]
@@ -204,10 +220,9 @@ mod tests {
         assert!(!notify_with_fallback(&tts, "test message"));
     }
 
-    #[test]
-    fn tts_command_receives_exactly_the_line_as_its_last_argument() {
-        let out = std::env::temp_dir().join(format!("harold-tts-{}", uuid::Uuid::new_v4()));
-        let tts = TtsSettings {
+    /// A `[tts]` that writes its last argument to `out`.
+    fn writes_last_argument_to(out: &std::path::Path) -> TtsSettings {
+        TtsSettings {
             command: "/bin/sh".into(),
             voice: None,
             args: Some(vec![
@@ -218,7 +233,32 @@ mod tests {
             fallback_command: None,
             fallback_voice: None,
             fallback_args: None,
-        };
+        }
+    }
+
+    #[test]
+    fn a_line_starting_with_a_dash_gets_one_space_in_front() {
+        assert_eq!(as_last_argument("-3 tests failing"), " -3 tests failing");
+        assert_eq!(as_last_argument("a-b"), "a-b");
+        assert_eq!(as_last_argument(""), "");
+    }
+
+    #[test]
+    fn spoken_line_starting_with_a_dash_is_not_passed_as_an_option() {
+        let out = std::env::temp_dir().join(format!("harold-tts-{}", uuid::Uuid::new_v4()));
+        let tts = writes_last_argument_to(&out);
+
+        assert!(speak_line_with(&tts, "-o x"));
+        assert_eq!(std::fs::read_to_string(&out).unwrap(), " -o x");
+        assert!(speak_line_with(&tts, "All green."));
+        assert_eq!(std::fs::read_to_string(&out).unwrap(), "All green.");
+        let _ = std::fs::remove_file(out);
+    }
+
+    #[test]
+    fn tts_command_receives_exactly_the_line_as_its_last_argument() {
+        let out = std::env::temp_dir().join(format!("harold-tts-{}", uuid::Uuid::new_v4()));
+        let tts = writes_last_argument_to(&out);
 
         assert!(notify_with_fallback(
             &tts,

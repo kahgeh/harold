@@ -8,6 +8,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use tracing::warn;
 
+use crate::outbound::tts::as_last_argument;
 use crate::settings::TtsSettings;
 
 /// The module `[tts]` runs when it speaks with the local model.
@@ -58,8 +59,9 @@ pub(crate) fn run_with_timeout(program: &str, args: &[String], timeout: Duration
 
 /// The `[tts]` arguments that make the model write `<prefix>.wav` and play nothing:
 /// every `--play` removed, `--file_prefix <prefix> --join_audio --audio_format wav` put
-/// before the last `--text` (or at the end when there is none), then `line`. `None` when
-/// `[tts]` does not run the model.
+/// before the last `--text` (or at the end when there is none), then `line` (after one
+/// space when it starts with `-`, so it is not read as an option). `None` when `[tts]`
+/// does not run the model.
 pub(crate) fn model_args(tts: &TtsSettings, prefix: &Path, line: &str) -> Option<Vec<String>> {
     let args = tts.args.as_deref().unwrap_or_default();
     let runs_model = tts.command.contains(MODEL_MODULE) || args.iter().any(|a| a == MODEL_MODULE);
@@ -79,7 +81,7 @@ pub(crate) fn model_args(tts: &TtsSettings, prefix: &Path, line: &str) -> Option
         "wav".to_string(),
     ];
     model.splice(at..at, file);
-    model.push(line.to_string());
+    model.push(as_last_argument(line).into_owned());
     Some(model)
 }
 
@@ -368,6 +370,12 @@ mod tests {
         assert!(!args.contains(&"--play".to_string()));
         assert_eq!(args.last().unwrap(), "hi");
         assert_eq!(args[args.len() - 2], "--text");
+    }
+
+    #[test]
+    fn model_args_pass_a_line_starting_with_a_dash_after_one_space() {
+        let args = model_args(&mlx(), Path::new("/f/line"), "- merged pod 3").unwrap();
+        assert_eq!(args[args.len() - 2..], ["--text", " - merged pod 3"]);
     }
 
     #[test]

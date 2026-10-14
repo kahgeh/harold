@@ -1594,6 +1594,17 @@ fn failed_voice_note_is_retried_and_said_at_the_desk_once_unlocked() {
 }
 
 #[test]
+fn failed_speak_at_the_desk_is_retried_and_says_nothing() {
+    let environment = FakeEnvironment::new("");
+    environment.set_fail_sends(true);
+
+    let outcome = dispatch_line(&environment, &chief_line("hi"), false, false);
+
+    assert!(matches!(outcome, Err(DispatchError::Retryable(_))));
+    assert!(environment.spoken_lines().is_empty());
+}
+
+#[test]
 fn malformed_spoken_line_payload_is_a_terminal_failure() {
     let environment = FakeEnvironment::locked("");
     let outcome = dispatch_spoken_line(
