@@ -389,7 +389,8 @@ class InstalledServiceTests(unittest.TestCase):
     def process(self, argv, **kwargs):
         self.calls.append(list(argv))
         if argv[:2] == ['codesign', '-dr']:
-            requirement = self.requirements.get('new' if '.harold-stage-' in argv[-1] else 'old')
+            requirement = self.requirements.get(
+                'old' if Path(argv[-1]).read_text() == 'old harold' else 'new')
             if requirement is None:
                 return subprocess.CompletedProcess(argv, 1, '', argv[-1] + ': code object is not signed at all\n')
             return subprocess.CompletedProcess(argv, 0, '# designated => {}\n'.format(requirement),
