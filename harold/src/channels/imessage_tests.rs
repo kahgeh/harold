@@ -351,6 +351,48 @@ fn replies_are_read_per_direction_for_the_configured_handles_without_harolds_mes
     assert!(no_handles.replies_after(0, 0).is_empty());
 }
 
+#[test]
+fn a_row_that_is_only_attachment_placeholders_is_not_a_reply() {
+    let directory = TestDirectory::new();
+    let db = chat_db(&directory);
+    insert(
+        &db,
+        &[
+            (HANDLE, 0, "\u{FFFC}"),
+            (HANDLE, 0, " \u{FFFC}\n\u{FFFC} "),
+            (HANDLE, 1, "\u{FFFC}"),
+            (HANDLE, 0, "ok \u{FFFC}"),
+            (HANDLE, 0, "yes"),
+        ],
+    );
+
+    assert_eq!(
+        db.replies_after(0, 0),
+        texts(&[(4, "ok \u{FFFC}"), (5, "yes")])
+    );
+    assert!(db.replies_after(0, 1).is_empty());
+}
+
+#[tokio::test]
+async fn a_voice_note_echo_is_never_recorded_as_a_reply() {
+    let store_directory = TestDirectory::new();
+    let store = HaroldStore::open(&store_directory.0).await.unwrap();
+    let directory = TestDirectory::new();
+    let db = chat_db(&directory);
+    let record = Mutex::new(NotifierRecord::for_machines(&[]));
+    let cursors = Cursors::starting_at(0);
+    let recent = Mutex::new(RecentRows::new());
+    insert_dated(
+        &db,
+        &[(HANDLE, 0, "\u{FFFC}", 100), (HANDLE, 1, "\u{FFFC}", 101)],
+    );
+
+    let feed = |text: &str, date| record.lock().unwrap().record_marker(text, date);
+    poll_chat_db(&store, db, &cursors, feed, &recent, || false).await;
+
+    assert_eq!(store.project_unhandled_events(10).await.unwrap().applied, 0);
+}
+
 const STUDIO_NOTIFICATION: &str = "🤖 [studio/alir-app main:0.1] Tests pass (alir)";
 const LAPTOP_NOTIFICATION: &str = "🤖 [laptop/harold main:0.0] it's \"done\" (harold)";
 const STUDIO_ERROR: &str = "🤖 [studio] No active agent sessions found.";

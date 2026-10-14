@@ -43,7 +43,10 @@ TurnCompleted event (pane_id from $TMUX_PANE in stop hook)
   │      active pane == completing pane → skip (return)
   │
   ├─ ioreg → IOConsoleLocked = true?
-  │   ├─ no  → notify_at_desk()
+  │   ├─ no  → away_messages_only_from set, an agent in that folder,
+  │   │          and this pane the chief's, a build worker's or a pod session's?
+  │   │          → leave out (return)
+  │   │        notify_at_desk()
   │   └─ yes → messaging paused? → skip (return)
   │           mark was under 10 minutes old? → leave out (return)
   │           away_messages_only_from set, an agent in that folder,
@@ -125,7 +128,7 @@ Config keys (`[telegram]`):
 
 ## Updates Harold leaves out while you are away
 
-With the screen locked, every agent's finished turn sends an update to the phone. Two rules leave an update out. Both leave out only an update that would go to the phone: the spoken update at the desk is given for every pane. The second rule also drops a message an agent asked Harold to send.
+With the screen locked, every agent's finished turn sends an update to the phone. Two rules leave an update out. Both leave out only an update that would go to the phone. At the desk, a separate rule keeps some panes quiet; see [Updates Harold does not speak while the chief runs](#updates-harold-does-not-speak-while-the-chief-runs). The second rule also drops a message an agent asked Harold to send.
 
 ### After a message the agent sent itself
 
@@ -170,6 +173,24 @@ The key was named `away_updates_only_from` while it covered turn-end updates onl
 
 Harold sends nothing to the phone for that turn: no summary and no trailing question. The event is marked handled and is not retried. The pane does not become the one an untagged reply goes to. The turn is recorded in the 30-second duplicate check, so a repeat of the same `TurnCompleted` is left out as well. The `TurnCompleted` event is still stored, so the dashboard and the pane's work summary update as usual.
 
+## Updates Harold does not speak while the chief runs
+
+At the desk, Harold says a short update each time an agent's turn ends. When one agent, the chief, tells the user what the others are doing with [`harold speak`](#lines-the-chief-speaks), those updates would talk over it. So while the chief runs, Harold says no turn-end update for the chief itself, the build workers and the pod sessions. Any other pane, such as a session the user drives, is spoken as before.
+
+The chief is any agent in the folder `[notify] away_messages_only_from` names (see [From agents outside one folder](#from-agents-outside-one-folder)), and it runs while an agent Harold tracks is running in that folder. Harold sorts the pane whose turn ended by its folder, the working directory tmux reports for it (`pane_current_path`):
+
+| Pane | How Harold recognises it | Log line |
+| --- | --- | --- |
+| The chief | Its folder is the one `away_messages_only_from` names | `spoken update left out (chief)` |
+| A build worker | `<pane folder>/.superpowers/baton/agent-pane` has a line that is the pane's id, such as `%47`. Baton writes this file in the worker's worktree. | `spoken update left out (build worker)` |
+| A pod session (pod-coordination or a product manager) | `<pane folder>/.superpowers/pod/agent-panes` has a line that is the pane's id. Pod sessions run in the product's base checkout itself, and `pod start` is to write the file there; until it does, pod sessions are spoken. | `spoken update left out (pod session)` |
+
+Harold writes each line at `INFO` with the pane in a `pane_id` field. It only reads the two files: it trims each line before comparing it with the pane's id, and a file that is missing or cannot be read names no pane. A pane listed in a file after it has closed changes nothing, because Harold asks only about the pane whose turn ended. While no agent runs in the folder, or the setting is not set, or the agent monitor cannot list tmux panes, every pane is spoken.
+
+The rule is checked after the voice mute and the two skips for an active session or pane, so an update those skip is logged by them instead. An update the rule leaves out is handled as in [What leaving an update out means](#what-leaving-an-update-out-means): nothing is said, the event is not retried, and a repeat of the turn within 30 seconds is left out too.
+
+The rule applies only with the screen unlocked. Updates to the phone while away are unchanged: `away_messages_only_from` already keeps every pane but the chief's off the phone.
+
 ## Messages an agent sends
 
 A notification is Harold's summary of a finished turn. An agent can also send the user text of its own, at a moment it chooses, with one command:
@@ -196,6 +217,44 @@ It differs from a turn-end notification in these ways:
 | Messaging pause | Recorded as an intentional skip | The command is refused with `messaging is paused`; a message already stored is skipped and not sent later |
 
 A send that fails stays pending and is retried, as a failed notification is. The `send-message-to-away-device` skill, which the installer links for Claude Code and Codex, teaches an agent the command; see [setup](../../how-tos/setup.md).
+
+## Lines the chief speaks
+
+The chief hands Harold a sentence or two of its own for the user to hear:
+
+```
+~/bin/harold/harold speak --src-id "$TMUX_PANE" 'Release install is on task five of six. Nothing needs you.'
+```
+
+At the desk Harold says the line; away from it, Harold sends the line to the phone as a voice note. Harold adds nothing to the line, and its model writes no summary of it.
+
+The command calls the daemon's `SpeakLine` RPC and waits up to 3 seconds. The daemon makes the text one line (line breaks and tabs become spaces), checks that it has 1 to 300 characters and that the pane hosts an agent the monitor tracks, and then stores a `SpokenLineRequested` event. The command exits 0 once the event is stored, which is before the line is said or sent. Otherwise it prints one line on standard error, stores nothing and exits 1:
+
+| Refusal | Line printed |
+| --- | --- |
+| A malformed command, including a text that starts with `--`, which is read as a flag | `invalid argument: usage is speak --src-id ID TEXT` |
+| A `--src-id` that is not a tmux pane id | `--src-id must be a tmux pane id such as %47` |
+| A text out of range | `the spoken line must be 1 to 300 characters` |
+| A pane with no agent | `no agent is running in pane <ID>` |
+| A daemon that does not answer | `the Harold daemon is not reachable`, `the Harold daemon did not answer within 3 seconds` or `the Harold daemon could not store the spoken line` |
+
+The command is not refused while messaging is paused, as `send-message-to-away-device` is: the pause covers only the phone, and at the desk the line is said.
+
+Harold stores the line and then handles it:
+
+| Situation | What Harold does |
+|---|---|
+| `away_messages_only_from` is set, an agent runs there, and the line comes from a pane outside that folder | Drops it and logs `spoken line dropped (lines come from <folder> only) pane_id=…` |
+| Screen locked (away), messaging not paused | Makes a voice note of the line (described below) and sends it to the configured iMessage recipient with Messages, as an attachment in the same chat. With Telegram, it sends the line as text. |
+| Screen locked, messaging paused | Dropped and logged, as other away messages are |
+| Screen unlocked (at the desk), voice on | Says the line with the configured `[tts]` command, as turn-end updates are said, without adding anything to it |
+| Screen unlocked, voice off | Dropped and logged |
+
+The event handler takes the event from the delivery outbox in stream-version order, like an agent's message. It looks at the screen lock, the pause and the voice mute on every try, so a line whose send failed while the user was away is said if they are back at the desk for the retry. A line that was said or sent is logged as `spoken line said at the desk` or `spoken line sent to the away device`; the drops are `spoken line dropped (messaging paused)` and `spoken line dropped (voice off)`. Each of these log lines is written at `INFO` with the pane in a `pane_id` field and never holds the spoken text.
+
+Harold makes the voice note with the model it speaks with at the desk: it runs the `[tts]` command and arguments with every `--play` removed, so nothing is heard, and with `--file_prefix <folder>/line --join_audio --audio_format wav` added before the last `--text`, then the line, so the model writes `<folder>/line.wav`. `afconvert -f m4af -d aac` turns `line.wav` into the AAC file `line.m4a`, which Harold sends with a fixed AppleScript that takes the file's path and the recipient as arguments, so the line's text never enters the script. When the model exits non-zero, writes no `line.wav` or takes over 120 seconds, Harold makes `line.m4a` with `say` instead and logs `voice note made with say (the model failed)`; when `[tts]` does not run `mlx_audio.tts.generate`, it uses `say` directly, and when `say`, `afconvert` or the send fails, the line stays pending and is retried. Each note is made in its own folder under `$TMPDIR/harold-voice-notes/`, which is kept after a send, because Messages may read the file after `osascript` returns, and removed once 10 minutes old, when a later note is made or the event handler starts; a note that could not be made or sent has its folder removed at once.
+
+The chat is with the user's own Apple ID, so the voice note also comes back into `chat.db` as a received row, with no `🤖` marker and with the attachment placeholder U+FFFC as its text; when Harold reads replies it skips any row whose text, with whitespace removed, is only U+FFFC characters, so the echo is never typed into a pane, while a reply the user types always has other characters.
 
 ## Sequences
 

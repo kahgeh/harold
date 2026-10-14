@@ -397,6 +397,18 @@ struct ChatDb {
     read_marked: bool,
 }
 
+/// The text Messages stores for an attachment (U+FFFC, OBJECT REPLACEMENT CHARACTER).
+const ATTACHMENT_PLACEHOLDER: char = '\u{FFFC}';
+
+/// Whether `text` is only attachment placeholders once whitespace is removed: the echo of
+/// a voice note Harold sent, which carries no marker. A reply the user types has other
+/// characters.
+fn is_attachment_only(text: &str) -> bool {
+    text.chars()
+        .filter(|c| !c.is_whitespace())
+        .all(|c| c == ATTACHMENT_PLACEHOLDER)
+}
+
 impl ChatDb {
     fn configured() -> Self {
         let cfg = get_settings();
@@ -418,7 +430,7 @@ impl ChatDb {
     }
 
     /// The rows after `last_rowid` in one direction that the user wrote, oldest first.
-    /// Rows Harold sent are left out.
+    /// Rows Harold sent, and attachment-only rows, are left out.
     fn replies_after(&self, last_rowid: i64, is_from_me: u8) -> Vec<(i64, String)> {
         let Some(id_list) = self.id_list() else {
             return vec![];
@@ -429,7 +441,7 @@ impl ChatDb {
                AND text IS NOT NULL AND length(text) > 0 \
              ORDER BY ROWID ASC;"
         ));
-        rows.retain(|(_, text)| !is_marked_as_harold(text));
+        rows.retain(|(_, text)| !is_marked_as_harold(text) && !is_attachment_only(text));
         rows
     }
 
