@@ -2,8 +2,11 @@
 //! pane sent a message with `harold send-message-to-away-device` this turn, so its
 //! turn-end update is left out. Rule B: `[notify] away_messages_only_from` names a folder
 //! with an agent running in it, and the pane is outside that folder, so its turn-end
-//! update is left out and its requested message is dropped.
+//! update is left out and its requested message is dropped. The quiet rule: while an
+//! agent runs in that folder, the turn-end updates of the chief's panes, build workers and
+//! pod sessions are not spoken at the desk.
 
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use crate::agent::domain::AgentSnapshot;
@@ -89,6 +92,13 @@ impl TrackedAgents {
             .iter()
             .any(|(id, pane_folder)| id == pane_id && same_folder(pane_folder, folder))
     }
+
+    fn folder_of(&self, pane_id: &str) -> Option<&str> {
+        self.folder_by_pane
+            .iter()
+            .find(|(id, _)| id == pane_id)
+            .map(|(_, folder)| folder.as_str())
+    }
 }
 
 /// Rule B's condition. The folder, as written in the setting, when all three hold:
@@ -143,6 +153,47 @@ pub(crate) fn spoken_line_dropped_reason(
     ))
 }
 
+/// The file in a build worker's folder that names its pane, written by baton.
+const BATON_AGENT_PANE: &str = ".superpowers/baton/agent-pane";
+/// The file in a product's base checkout, where pod sessions run, that lists their panes,
+/// written by `pod start`.
+const POD_AGENT_PANES: &str = ".superpowers/pod/agent-panes";
+
+/// Whether the file at `path` has a line that is `pane_id` once trimmed. A missing or
+/// unreadable file names no pane.
+fn names_pane(path: &Path, pane_id: &str) -> bool {
+    std::fs::read_to_string(path).is_ok_and(|text| text.lines().any(|line| line.trim() == pane_id))
+}
+
+/// The quiet rule. The log line for not speaking the turn-end update of `pane_id` at the
+/// desk: while an agent runs in `only_from`, a pane in that folder is the chief's, a pane
+/// whose folder's baton file names it is a build worker's, and a pane listed in its own
+/// folder's `agent-panes` is a pod session's (pod sessions run in the base checkout). Any
+/// other pane, and every pane while no agent runs in the folder, is spoken.
+pub(crate) fn quiet_reason(
+    only_from: Option<&str>,
+    agents: &TrackedAgents,
+    pane_id: &str,
+) -> Option<String> {
+    let folder = only_from?;
+    if !agents.any_in(folder) {
+        return None;
+    }
+    let role = if agents.pane_is_in(pane_id, folder) {
+        "chief"
+    } else {
+        let pane_folder = Path::new(agents.folder_of(pane_id)?);
+        if names_pane(&pane_folder.join(BATON_AGENT_PANE), pane_id) {
+            "build worker"
+        } else if names_pane(&pane_folder.join(POD_AGENT_PANES), pane_id) {
+            "pod session"
+        } else {
+            return None;
+        }
+    };
+    Some(format!("spoken update left out ({role})"))
+}
+
 /// The log line for leaving out the turn-end update of `pane_id`, when either rule
 /// applies. Rule A is looked at first, so its line is the one written when both apply.
 pub(crate) fn left_out_reason(
@@ -163,7 +214,8 @@ mod tests {
 
     use super::{
         MARK_LIFETIME, MESSAGED_THIS_TURN, TrackedAgents, left_out_reason, mark_is_fresh,
-        message_dropped_reason, only_from_reason, same_folder, spoken_line_dropped_reason,
+        message_dropped_reason, names_pane, only_from_reason, same_folder,
+        spoken_line_dropped_reason,
     };
 
     #[test]
@@ -359,5 +411,16 @@ mod tests {
             spoken_line_dropped_reason(Some(CHIEF), &no_chief, "%2"),
             None
         );
+    }
+
+    #[test]
+    fn a_pane_file_names_a_pane_on_any_line_ignoring_whitespace() {
+        let path = std::env::temp_dir().join(format!("harold-panes-{}", uuid::Uuid::new_v4()));
+        std::fs::write(&path, "%2610\n  %7  \n").unwrap();
+        assert!(names_pane(&path, "%2610"));
+        assert!(names_pane(&path, "%7"));
+        assert!(!names_pane(&path, "%26"));
+        assert!(!names_pane(std::path::Path::new("/no/such/file"), "%1"));
+        let _ = std::fs::remove_file(path);
     }
 }

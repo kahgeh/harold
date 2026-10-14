@@ -298,8 +298,8 @@ impl NotifyState {
     }
 }
 
-/// Leave a turn-end update out of the away device: nothing is sent, no reply target is
-/// recorded, and the turn is recorded in the duplicate check so that a repeat of it is left
+/// Leave a turn-end update out: nothing is sent or said, no reply target is recorded,
+/// and the turn is recorded in the duplicate check so that a repeat of it is left
 /// out as well. The log line names the pane.
 fn leave_out(
     state: &NotifyState,
@@ -360,7 +360,7 @@ pub(crate) fn notify(
         OutboundChannel::Tts
     };
 
-    // The voice mute and the messaging pause skip as they always have, before either rule
+    // The voice mute and the messaging pause skip as they always have, before any rule
     // below is looked at: a paused update would not go to the phone.
     if let Some(reason) = channel.skip_reason(is_tts_muted(), is_messaging_paused()) {
         info!("{reason}");
@@ -370,6 +370,16 @@ pub(crate) fn notify(
     if screen_locked
         && let Some(reason) = left_out::left_out_reason(
             messaged_this_turn,
+            cfg.away_messages_only_from.as_deref(),
+            agents,
+            &turn.pane_id,
+        )
+    {
+        return leave_out(state, dedup_key, now, &turn.pane_id, &reason);
+    }
+
+    if !screen_locked
+        && let Some(reason) = left_out::quiet_reason(
             cfg.away_messages_only_from.as_deref(),
             agents,
             &turn.pane_id,

@@ -546,3 +546,124 @@ fn update_left_out_by_the_folder_rule_is_logged_with_its_pane() {
         "{text}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// The quiet rule: the chief's panes, build workers and pod sessions are not spoken
+// ---------------------------------------------------------------------------
+
+struct TestDirectory(std::path::PathBuf);
+
+impl TestDirectory {
+    fn new() -> Self {
+        let path = std::env::temp_dir().join(format!("harold-quiet-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&path).unwrap();
+        Self(path)
+    }
+
+    /// `<this>/<name>`, made, as a string.
+    fn folder(&self, name: &str) -> String {
+        let path = self.0.join(name);
+        std::fs::create_dir_all(&path).unwrap();
+        path.to_string_lossy().into_owned()
+    }
+}
+
+impl Drop for TestDirectory {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn write(folder: &str, relative: &str, text: &str) {
+    let path = std::path::Path::new(folder).join(relative);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, text).unwrap();
+}
+
+/// A chief %1 in `chief`; a build worker %2 in a worktree whose baton file names it; a
+/// pod session %3 in the product's base checkout, listed in its `agent-panes`; a session
+/// %4 the user drives in the same base checkout; and %5, the user's own session in the
+/// worktree, which the baton file does not name.
+fn pod(directory: &TestDirectory) -> (String, TrackedAgents) {
+    let chief = directory.folder("chief-of-pods");
+    let product = directory.folder("harold/main");
+    let worktree = directory.folder("harold/chief-voice");
+    write(&worktree, ".superpowers/baton/agent-pane", "%2\n");
+    write(&product, ".superpowers/pod/agent-panes", "%3\n%99\n");
+    let agents = TrackedAgents::in_folders(&[
+        ("%1", chief.as_str()),
+        ("%2", worktree.as_str()),
+        ("%3", product.as_str()),
+        ("%4", product.as_str()),
+        ("%5", worktree.as_str()),
+    ]);
+    (chief, agents)
+}
+
+#[test]
+fn while_the_chief_runs_only_the_sessions_the_user_drives_are_spoken() {
+    let directory = TestDirectory::new();
+    let (chief, agents) = pod(&directory);
+    let environment =
+        FakeEnvironment::new(&format!("[notify]\naway_messages_only_from = \"{chief}\""));
+    let logs = CapturedLogs::start();
+
+    for pane in ["%1", "%2", "%3", "%4", "%5"] {
+        let state = NotifyState::default();
+        notify_turn_among(&environment, &state, &agents, &turn(pane, "build it")).unwrap();
+    }
+
+    assert_eq!(
+        environment.delivered(),
+        [
+            (OutboundChannel::Tts, "%4".to_string()),
+            (OutboundChannel::Tts, "%5".to_string()),
+        ]
+    );
+    let text = logs.text();
+    assert!(text.contains("spoken update left out (chief) pane_id=%1"));
+    assert!(text.contains("spoken update left out (build worker) pane_id=%2"));
+    assert!(text.contains("spoken update left out (pod session) pane_id=%3"));
+}
+
+#[test]
+fn with_no_agent_in_the_chiefs_folder_every_pane_is_spoken() {
+    let directory = TestDirectory::new();
+    let (chief, agents) = pod(&directory);
+    let environment = FakeEnvironment::new(&format!(
+        "[notify]\naway_messages_only_from = \"{chief}/elsewhere\""
+    ));
+
+    for pane in ["%1", "%2", "%3", "%4", "%5"] {
+        notify_turn_among(
+            &environment,
+            &NotifyState::default(),
+            &agents,
+            &turn(pane, "x"),
+        )
+        .unwrap();
+    }
+
+    assert_eq!(environment.delivered().len(), 5);
+}
+
+#[test]
+fn quiet_rule_does_not_change_updates_to_the_phone() {
+    let directory = TestDirectory::new();
+    let (chief, agents) = pod(&directory);
+    let environment =
+        FakeEnvironment::locked(&format!("[notify]\naway_messages_only_from = \"{chief}\""));
+
+    notify_turn_among(
+        &environment,
+        &NotifyState::default(),
+        &agents,
+        &turn("%1", "x"),
+    )
+    .unwrap();
+
+    assert_eq!(
+        environment.delivered(),
+        [(OutboundChannel::Away, "%1".to_string())]
+    );
+}
