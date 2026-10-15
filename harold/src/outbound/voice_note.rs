@@ -120,7 +120,41 @@ fn arg(path: &Path) -> String {
     path.to_string_lossy().into_owned()
 }
 
-/// `<folder>/line.m4a` made from `line`: by the model and `afconvert` when `[tts]` runs
+/// The longest a note's name may be before `.m4a`, in characters.
+const NAME_LIMIT: usize = 60;
+
+/// The file name of the voice note of `line`, so the phone shows what it says: its letters
+/// and digits, apostrophes removed and every run of anything else one space, cut after the
+/// last whole word within `NAME_LIMIT` characters (a longer first word is cut at the limit),
+/// then `.m4a`. `voice note.m4a` when the line has no letter or digit. The name never holds
+/// `/` or `:`, never starts with `-` or `.` and is at most 244 bytes.
+pub(crate) fn note_name(line: &str) -> String {
+    let words: String = line
+        .chars()
+        .filter(|c| !matches!(c, '\'' | '\u{2019}'))
+        .map(|c| if c.is_alphanumeric() { c } else { ' ' })
+        .collect();
+    let mut name = String::new();
+    for word in words.split_whitespace() {
+        let joined = name.chars().count() + usize::from(!name.is_empty()) + word.chars().count();
+        if joined > NAME_LIMIT {
+            if name.is_empty() {
+                name = word.chars().take(NAME_LIMIT).collect();
+            }
+            break;
+        }
+        if !name.is_empty() {
+            name.push(' ');
+        }
+        name.push_str(word);
+    }
+    if name.is_empty() {
+        name.push_str("voice note");
+    }
+    format!("{name}.m4a")
+}
+
+/// `<folder>/<note_name(line)>` made from `line`: by the model and `afconvert` when `[tts]` runs
 /// the model and the model writes `line.wav`, otherwise by `say`.
 fn make_note(
     folder: &Path,
@@ -128,7 +162,7 @@ fn make_note(
     line: &str,
     runner: &dyn Runner,
 ) -> Result<PathBuf, String> {
-    let note = folder.join("line.m4a");
+    let note = folder.join(note_name(line));
     if let Some(args) = model_args(tts, &folder.join("line"), line) {
         let wav = folder.join("line.wav");
         if runner.run(&tts.command, &args, MODEL_TIMEOUT) && wav.is_file() {
@@ -198,8 +232,8 @@ mod tests {
     use std::time::{Duration, SystemTime};
 
     use super::{
-        MODEL_TIMEOUT, NOTE_LIFETIME, Runner, model_args, notes_parent, remove_old_notes,
-        run_with_timeout, send_voice_note_in,
+        MODEL_TIMEOUT, NOTE_LIFETIME, Runner, model_args, note_name, notes_parent,
+        remove_old_notes, run_with_timeout, send_voice_note_in,
     };
     use crate::outbound::fake::CapturedLogs;
     use crate::settings::TtsSettings;
@@ -420,13 +454,13 @@ mod tests {
         let convert = runner.args_of("afconvert");
         assert_eq!(&convert[..4], ["-f", "m4af", "-d", "aac"]);
         assert!(convert[4].ends_with("/line.wav"));
-        assert!(convert[5].ends_with("/line.m4a"));
-        assert_eq!(sent, [("line.m4a".to_string(), true)]);
+        assert!(convert[5].ends_with("/All green.m4a"));
+        assert_eq!(sent, [("All green.m4a".to_string(), true)]);
         // Messages may read the file after osascript returns, so a sent note is kept
         // until a later clean-up finds it older than 10 minutes.
         let kept = folders(&parent.0);
         assert_eq!(kept.len(), 1);
-        assert!(kept[0].join("line.m4a").is_file());
+        assert!(kept[0].join("All green.m4a").is_file());
     }
 
     #[test]
@@ -439,12 +473,12 @@ mod tests {
 
         assert_eq!(result, Ok(()));
         assert_eq!(runner.programs(), ["/venv/bin/python", "say"]);
-        assert_eq!(sent, [("line.m4a".to_string(), true)]);
+        assert_eq!(sent, [("All green.m4a".to_string(), true)]);
         assert!(
             logs.text()
                 .contains("voice note made with say (the model failed)")
         );
-        assert!(!logs.text().contains("All green."));
+        assert!(!logs.text().contains("All green"));
     }
 
     #[test]
@@ -484,6 +518,64 @@ mod tests {
         assert!(args.contains(&"--file-format=m4af".to_string()));
         assert!(args.contains(&"--data-format=aac".to_string()));
         assert_eq!(text_file, line);
+        assert!(value_after(&args, "-f").ends_with("/line.txt"));
+        assert!(value_after(&args, "-o").ends_with("/merged pod 3.m4a"));
+    }
+
+    #[test]
+    fn note_name_follows_the_naming_rule() {
+        // 50 five-letter words and a full stop make a 300-character line.
+        let five_letter_words = format!("{}.", ["alpha"; 50].join(" "));
+        assert_eq!(five_letter_words.chars().count(), 300);
+        let eighty = "a".repeat(80);
+        let sixty = "a".repeat(60);
+        let cases = [
+            (
+                "Release install is on task five of six. Nothing needs you.",
+                "Release install is on task five of six Nothing needs you.m4a".to_string(),
+            ),
+            (
+                "don't wait / merge: done",
+                "dont wait merge done.m4a".into(),
+            ),
+            ("don’t", "dont.m4a".into()),
+            ("-rf ../..", "rf.m4a".into()),
+            ("🎉🎉", "voice note.m4a".into()),
+            ("'’...", "voice note.m4a".into()),
+            ("", "voice note.m4a".into()),
+            (
+                five_letter_words.as_str(),
+                format!("{}.m4a", ["alpha"; 10].join(" ")),
+            ),
+            (eighty.as_str(), format!("{sixty}.m4a")),
+            ("Café à 9h", "Café à 9h.m4a".into()),
+            ("Build\n\tdone", "Build done.m4a".into()),
+            (".env changed", "env changed.m4a".into()),
+        ];
+        for (line, name) in cases {
+            assert_eq!(note_name(line), name, "{line:?}");
+        }
+    }
+
+    #[test]
+    fn note_name_counts_characters_not_bytes_and_keeps_exactly_60() {
+        let exactly = format!("{} {}", "a".repeat(29), "b".repeat(30));
+        assert_eq!(note_name(&exactly), format!("{exactly}.m4a"));
+        let one_over = format!("{} {}", "a".repeat(29), "b".repeat(31));
+        assert_eq!(note_name(&one_over), format!("{}.m4a", "a".repeat(29)));
+        let accents = "é".repeat(60);
+        assert_eq!(note_name(&accents), format!("{accents}.m4a"));
+        assert_eq!(note_name(&"é".repeat(61)), format!("{accents}.m4a"));
+    }
+
+    #[test]
+    fn a_long_line_name_ends_on_a_whole_word_within_the_limit() {
+        let line = "Release install is on task five of six and the next step waits on review";
+        let name = note_name(line);
+        let stem = name.strip_suffix(".m4a").unwrap();
+        assert!(stem.chars().count() <= 60, "{name}");
+        assert!(line.starts_with(stem), "{name}");
+        assert_eq!(line.as_bytes()[stem.len()], b' ', "{name} ends mid-word");
     }
 
     #[test]
