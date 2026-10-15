@@ -589,11 +589,6 @@ def install(args, repo):
             pid = service.start(metadata)
             print('Harold ready at {} (LaunchAgent PID {}).\nControl: {}\nConfig: {}\nLog: {}'.format(
                 metadata['grpc_addr'], pid, prefix / 'haroldctl', bundle / 'config/local.toml', bundle / 'harold.log'))
-            if fresh_store:
-                print('New store: {}\nNot carried over from {}: messages still waiting to be delivered, '
-                      'and the mute and pause settings (voice is on, messaging unpaused). '
-                      'That folder is left as it was.'.format(bundle / 'data/store', bundle / 'data/events'),
-                      flush=True)
             message = permissions_message(away_channel(bundle / 'config'), old_requirement,
                                           new_requirement, identity, bundle / 'harold')
             if message:
@@ -602,6 +597,11 @@ def install(args, repo):
             print('Claude Code mod: {}'.format(outcome), flush=True)
             for agent, skills_folder in AGENT_SKILL_FOLDERS:
                 print('{} skill: {}'.format(agent, link_skill(skills_folder, bundle / 'skills' / SKILL_NAME)),
+                      flush=True)
+            if fresh_store:
+                print('New store: {}\nNot carried over from {}: messages still waiting to be delivered, '
+                      'and the mute and pause settings (voice is on, messaging unpaused). '
+                      'That folder is left as it was.'.format(bundle / 'data/store', bundle / 'data/events'),
                       flush=True)
 
 

@@ -514,12 +514,12 @@ class InstalledServiceTests(unittest.TestCase):
         self.assertEqual(len(before), 2)
         output = self.run_install('-')
         self.assertEqual(self.old_events(), before)
-        # The old data/ moves in whole, so Harold makes data/store itself when it starts.
         self.assertEqual(self.installed_metadata()['env']['HAROLD__STORE__PATH'], str(self.bundle / 'data/store'))
-        self.assertIn('New store: {}\n'.format(self.bundle / 'data/store'), output)
-        self.assertIn(self.not_carried_over() + ' (voice is on, messaging unpaused). '
-                      'That folder is left as it was.\n', output)
-        self.assertLess(output.index('Harold ready at'), output.index('New store:'))
+        # The note is the installer's last output, after the mod and skill lines.
+        self.assertTrue(output.endswith(
+            'New store: {}\n'.format(self.bundle / 'data/store') + self.not_carried_over() +
+            ' (voice is on, messaging unpaused). That folder is left as it was.\n'), output)
+        self.assertLess(output.index('Claude Code mod:'), output.index('New store:'))
 
     def test_an_install_onto_a_bundle_that_already_has_the_new_store_says_nothing_about_it(self):
         self.install_existing(saved='-')
@@ -528,6 +528,14 @@ class InstalledServiceTests(unittest.TestCase):
         (self.bundle / 'data/store/marker').write_text('new history')
         output = self.run_install('-')
         self.assertEqual((self.bundle / 'data/store/marker').read_text(), 'new history')
+        self.assertIn('Harold ready at', output)
+        self.assertNotIn('New store:', output)
+        self.assertNotIn('Not carried over', output)
+
+    def test_upgrading_a_bundle_without_old_events_says_nothing_about_the_old_store(self):
+        self.install_existing(saved='-')
+        self.assertFalse((self.bundle / 'data/events').exists())
+        output = self.run_install('-')
         self.assertIn('Harold ready at', output)
         self.assertNotIn('New store:', output)
         self.assertNotIn('Not carried over', output)
