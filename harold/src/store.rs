@@ -112,6 +112,12 @@ pub struct PendingDelivery {
     pub event_type: String,
     pub payload: serde_json::Value,
     pub trace_id: String,
+    /// The failed tries recorded for the row so far, kept across restarts.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "read by the retry cap in projector.rs (Task 3)")
+    )]
+    pub attempt_count: i64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -507,7 +513,7 @@ impl HaroldStore {
         let mut rows = conn
             .query(
                 r#"
-                SELECT event_id, event_version, event_type, payload, trace_id
+                SELECT event_id, event_version, event_type, payload, trace_id, attempt_count
                 FROM delivery_outbox
                 WHERE delivered_at_ms IS NULL
                 ORDER BY event_version
@@ -531,6 +537,11 @@ impl HaroldStore {
             .as_integer()
             .copied()
             .ok_or_else(|| StoreError::Data("outbox version is not an integer".into()))?;
+        let attempt_count = row
+            .get_value(5)?
+            .as_integer()
+            .copied()
+            .ok_or_else(|| StoreError::Data("outbox attempt_count is not an integer".into()))?;
         let payload = serde_json::from_str(&text(3)?)?;
         Ok(Some(PendingDelivery {
             event_id: text(0)?,
@@ -538,6 +549,7 @@ impl HaroldStore {
             event_type: text(2)?,
             payload,
             trace_id: text(4)?,
+            attempt_count,
         }))
     }
 

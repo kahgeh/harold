@@ -475,6 +475,7 @@ fn paused_inbound_delivery_is_skipped_without_routing() {
         event_type: "InboundMessageReceived".into(),
         payload: json!(null),
         trace_id: "trace".into(),
+        attempt_count: 0,
     };
 
     let outcome = system_dispatcher().dispatch_with_pause(&delivery, None, true);
@@ -515,6 +516,7 @@ fn production_dispatcher_reads_the_messaging_switch() {
         event_type: "InboundMessageReceived".into(),
         payload: json!(null),
         trace_id: "trace".into(),
+        attempt_count: 0,
     };
 
     crate::outbound::set_messaging_paused(true);
@@ -575,6 +577,7 @@ fn away_delivery(payload: serde_json::Value) -> PendingDelivery {
         event_type: "AwayMessageRequested".into(),
         payload,
         trace_id: "trace".into(),
+        attempt_count: 0,
     }
 }
 
@@ -840,6 +843,7 @@ fn turn_completed_is_sent_through_the_dispatchers_environment() {
         event_type: "TurnCompleted".into(),
         payload: json!(crate::outbound::fake::turn("%47", "build it")),
         trace_id: "trace".into(),
+        attempt_count: 0,
     };
 
     let outcome = dispatcher_with(&environment).dispatch(&delivery);
@@ -860,6 +864,7 @@ fn turn_delivery(pane_id: &str, prompt: &str) -> PendingDelivery {
         event_type: "TurnCompleted".into(),
         payload: json!(crate::outbound::fake::turn(pane_id, prompt)),
         trace_id: "trace".into(),
+        attempt_count: 0,
     }
 }
 
@@ -1515,6 +1520,7 @@ fn spoken_delivery(payload: serde_json::Value) -> PendingDelivery {
         event_type: "SpokenLineRequested".into(),
         payload,
         trace_id: "trace".into(),
+        attempt_count: 0,
     }
 }
 

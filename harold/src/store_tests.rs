@@ -365,6 +365,46 @@ async fn failed_delivery_remains_pending_until_marked_delivered() {
 }
 
 #[tokio::test]
+async fn a_pending_delivery_carries_its_failures_across_a_reopen() {
+    let directory = TestDirectory::new();
+    let store = HaroldStore::open(directory.path()).await.unwrap();
+    append_inbound_message(
+        &store,
+        &InboundMessage {
+            text: "count me".into(),
+            forwarded: false,
+        },
+    )
+    .await
+    .unwrap();
+    store.project_unhandled_events(500).await.unwrap();
+    let pending = store.next_pending_delivery().await.unwrap().unwrap();
+    assert_eq!(pending.attempt_count, 0);
+
+    for _ in 0..2 {
+        store
+            .record_delivery_failure(&pending.event_id, "temporary failure")
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        store
+            .next_pending_delivery()
+            .await
+            .unwrap()
+            .unwrap()
+            .attempt_count,
+        2
+    );
+    drop(store);
+
+    let reopened = HaroldStore::open(directory.path()).await.unwrap();
+    let retry = reopened.next_pending_delivery().await.unwrap().unwrap();
+    assert_eq!(retry.event_id, pending.event_id);
+    assert_eq!(retry.attempt_count, 2);
+}
+
+#[tokio::test]
 async fn state_migrations_are_idempotent_and_reject_changed_checksums() {
     let directory = TestDirectory::new();
     let store = HaroldStore::open(directory.path()).await.unwrap();
