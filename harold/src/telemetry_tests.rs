@@ -1,0 +1,599 @@
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use opentelemetry::trace::{Status, TraceContextExt};
+use tracing_opentelemetry::OpenTelemetrySpanExt;
+use tracing_subscriber::Layer as _;
+use tracing_subscriber::layer::SubscriberExt;
+
+use super::*;
+
+fn unique_pane() -> String {
+    format!("%test-{}", uuid::Uuid::new_v4())
+}
+
+// ---------------------------------------------------------------------------
+// Allowed fields
+// ---------------------------------------------------------------------------
+
+#[test]
+fn only_allowed_fields_leave_a_span() {
+    test_support::install();
+    let pane = unique_pane();
+    {
+        let span = tracing::info_span!(target: TRACE_TARGET, "harold.route",
+            pane_id = %pane, text = "TELEMETRY-CANARY-7731", error = "TELEMETRY-CANARY-7731");
+        let _entered = span.enter();
+        tracing::info!(pane_id = %pane, msg = "TELEMETRY-CANARY-7731", "inside");
+        tracing::error!(pane_id = %pane, "send failed");
+    }
+    let spans = test_support::spans();
+    let span = spans
+        .iter()
+        .find(|s| s.attributes.iter().any(|kv| kv.value.as_str() == pane))
+        .unwrap();
+    assert!(
+        span.attributes
+            .iter()
+            .all(|kv| ALLOWED_FIELDS.contains(&kv.key.as_str())),
+        "{:?}",
+        span.attributes
+    );
+    assert!(span.events.is_empty());
+    assert!(span.links.is_empty());
+    // The error event inside it marks it as failed.
+    assert_eq!(span.status, Status::error(""));
+    let exported = test_support::exported_text();
+    assert!(exported.contains(&pane));
+    assert!(!exported.contains("TELEMETRY-CANARY-7731"));
+}
+
+#[test]
+fn an_error_status_keeps_the_error_and_drops_its_description() {
+    test_support::install();
+    let pane = unique_pane();
+    tracing::info_span!(target: TRACE_TARGET, "harold.delivery",
+        pane_id = %pane, otel.status_description = "TELEMETRY-CANARY-4410")
+    .in_scope(|| {});
+    let spans = test_support::spans();
+    let span = spans
+        .iter()
+        .find(|s| s.attributes.iter().any(|kv| kv.value.as_str() == pane))
+        .unwrap();
+    assert_eq!(span.status, Status::error(""));
+    assert!(!test_support::exported_text().contains("TELEMETRY-CANARY-4410"));
+}
+
+#[test]
+fn only_allowed_fields_leave_a_log_record_and_its_body_stays() {
+    test_support::install();
+    let pane = unique_pane();
+    tracing::warn!(pane_id = %pane, reason = "busy", text = "TELEMETRY-CANARY-5520", recipient = "TELEMETRY-CANARY-5520", "reply not typed");
+    let logs = test_support::logs();
+    let record = logs
+        .iter()
+        .find(|l| format!("{:?}", l.record).contains(&pane))
+        .unwrap();
+    let keys: Vec<&str> = record
+        .record
+        .attributes_iter()
+        .map(|(key, _)| key.as_str())
+        .collect();
+    assert_eq!(keys, vec!["pane_id", "reason"]);
+    assert_eq!(
+        record.record.body(),
+        Some(&opentelemetry::logs::AnyValue::from("reply not typed"))
+    );
+    assert_eq!(
+        record.record.severity_number(),
+        Some(opentelemetry::logs::Severity::Warn)
+    );
+    assert!(!test_support::exported_text().contains("TELEMETRY-CANARY-5520"));
+}
+
+#[test]
+fn every_export_carries_the_service_and_machine() {
+    test_support::install();
+    let pane = unique_pane();
+    tracing::info!(pane_id = %pane, "resource probe");
+    let logs = test_support::logs();
+    let record = logs
+        .iter()
+        .find(|l| format!("{:?}", l.record).contains(&pane))
+        .unwrap();
+    let attribute = |key: &'static str| {
+        record
+            .resource
+            .get(&opentelemetry::Key::from_static_str(key))
+            .map(|value| value.to_string())
+    };
+    assert_eq!(attribute("service.name").as_deref(), Some("harold"));
+    assert_eq!(
+        attribute("harold.machine").as_deref(),
+        Some(test_support::MACHINE)
+    );
+}
+
+#[test]
+fn internal_and_health_targets_are_not_exported_as_logs() {
+    test_support::install();
+    let pane = unique_pane();
+    tracing::warn!(target: HEALTH_TARGET, pane_id = %pane, "health probe");
+    tracing::warn!(target: "tonic::transport", pane_id = %pane, "tonic probe");
+    tracing::warn!(target: "h2::codec", pane_id = %pane, "h2 probe");
+    tracing::warn!(target: "opentelemetry_sdk", pane_id = %pane, "sdk probe");
+    assert!(!test_support::exported_text().contains(&pane));
+}
+
+// ---------------------------------------------------------------------------
+// Traces and harold.log
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_log_inside_a_harold_span_carries_its_trace_and_no_span_prefix_in_harold_log() {
+    test_support::install();
+    let logs = crate::outbound::fake::CapturedLogs::start();
+    let pane = unique_pane();
+    let span = tracing::info_span!(target: TRACE_TARGET, "harold.route", pane_id = %pane);
+    let trace_id = span.context().span().span_context().trace_id();
+    span.in_scope(|| tracing::info!(pane_id = %pane, "routing reply"));
+    drop(span);
+    assert!(logs.text().contains("routing reply"));
+    assert!(!logs.text().contains("harold.route"), "{}", logs.text());
+    let exported = test_support::logs();
+    let record = exported
+        .iter()
+        .find(|l| format!("{:?}", l.record).contains(&pane))
+        .unwrap();
+    assert_eq!(record.record.trace_context().unwrap().trace_id, trace_id);
+}
+
+/// A `MakeWriter` that appends to a shared buffer.
+#[derive(Clone, Default)]
+struct SharedBuffer(Arc<Mutex<Vec<u8>>>);
+
+impl std::io::Write for SharedBuffer {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl SharedBuffer {
+    fn lines_without_timestamps(&self) -> Vec<String> {
+        String::from_utf8(self.0.lock().unwrap().clone())
+            .unwrap()
+            .lines()
+            .map(|line| {
+                let (timestamp, rest) = line.split_once(' ').unwrap();
+                assert!(timestamp.ends_with('Z'), "{line}");
+                rest.to_string()
+            })
+            .collect()
+    }
+}
+
+fn write_sample_lines() {
+    let pane = "%7";
+    let outer = tracing::info_span!("listener", pane_id = pane);
+    let _outer = outer.enter();
+    tracing::info!(pane_id = pane, "reply stored");
+    let traced = tracing::info_span!(target: TRACE_TARGET, "harold.route", pane_id = pane);
+    traced.in_scope(|| {
+        tracing::warn!(reason = "busy", "reply not typed");
+        tracing::debug!("not at info");
+        tracing::error!(error = "boom", "send failed");
+    });
+}
+
+#[test]
+fn harold_log_lines_are_those_of_the_old_subscriber_without_harold_trace_spans() {
+    let old = SharedBuffer::default();
+    let old_writer = old.clone();
+    let old_subscriber = tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::new("info"))
+        .with_ansi(false)
+        .with_writer(move || old_writer.clone())
+        .finish();
+    tracing::subscriber::with_default(old_subscriber, write_sample_lines);
+
+    let new = SharedBuffer::default();
+    let new_writer = new.clone();
+    let new_subscriber = tracing_subscriber::registry().with(
+        tracing_subscriber::fmt::layer()
+            .with_ansi(false)
+            .with_writer(move || new_writer.clone())
+            .with_filter(harold_log_filter(tracing_subscriber::EnvFilter::new(
+                "info",
+            ))),
+    );
+    tracing::subscriber::with_default(new_subscriber, write_sample_lines);
+
+    let old_lines = old.lines_without_timestamps();
+    let new_lines = new.lines_without_timestamps();
+    assert_eq!(old_lines.len(), 3, "{old_lines:#?}");
+    assert_eq!(new_lines[0], old_lines[0]);
+    // The old subscriber prints the `harold.route` span as a prefix; the new one does not.
+    for (old_line, new_line) in old_lines.iter().zip(&new_lines).skip(1) {
+        let without_route = old_line.replace("harold.route{pane_id=\"%7\"}:", "");
+        assert_eq!(*new_line, without_route);
+        assert_ne!(*new_line, *old_line);
+    }
+    assert_eq!(new_lines.len(), old_lines.len());
+}
+
+// ---------------------------------------------------------------------------
+// Collector health
+// ---------------------------------------------------------------------------
+
+#[test]
+fn health_reports_one_failing_line_across_failures_and_one_recovered_line() {
+    let changes = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&changes);
+    let health = ExportHealth::new(Box::new(move |c| sink.lock().unwrap().push(c)));
+    for ok in [false, false, false, true, true, false] {
+        health.observe(ok);
+    }
+    assert_eq!(
+        *changes.lock().unwrap(),
+        vec![
+            HealthChange::Failing,
+            HealthChange::Recovered,
+            HealthChange::Failing
+        ]
+    );
+}
+
+#[test]
+fn the_health_lines_are_written_to_harold_log() {
+    test_support::install();
+    let logs = crate::outbound::fake::CapturedLogs::start();
+    let health = ExportHealth::logging("http://127.0.0.1:9");
+    health.observe(false);
+    health.observe(false);
+    health.observe(true);
+    let text = logs.text();
+    assert_eq!(
+        text.matches("WARN harold::telemetry_health: telemetry export failing (collector unreachable at http://127.0.0.1:9)")
+            .count(),
+        1,
+        "{text}"
+    );
+    assert_eq!(
+        text.matches("INFO harold::telemetry_health: telemetry export recovered")
+            .count(),
+        1,
+        "{text}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_closed_collector_port_does_not_slow_harold_and_logs_one_failing_line() {
+    // A port nobody listens on: bind, read the port, drop the listener.
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let endpoint = format!("http://127.0.0.1:{port}");
+    let changes = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&changes);
+    let pipeline = Pipeline::otlp(
+        &endpoint,
+        "test-mac",
+        ExportHealth::new(Box::new(move |c| sink.lock().unwrap().push(c))),
+    )
+    .unwrap();
+    let subscriber = pipeline.subscriber_for_test();
+    let started = std::time::Instant::now();
+    tracing::subscriber::with_default(subscriber, || {
+        // Task 6 replaces these with a delivery through the production dispatcher.
+        for _ in 0..100 {
+            let span =
+                tracing::info_span!(target: TRACE_TARGET, "harold.delivery", kind = "turn_end");
+            span.in_scope(|| tracing::info!("turn-end update sent"));
+        }
+    });
+    assert!(started.elapsed() < Duration::from_secs(1));
+    for _ in 0..3 {
+        let _ = pipeline.force_flush();
+    }
+    assert_eq!(*changes.lock().unwrap(), vec![HealthChange::Failing]);
+    let stopping = std::time::Instant::now();
+    pipeline.shutdown_within(Duration::from_secs(2));
+    assert!(stopping.elapsed() < Duration::from_millis(2500));
+    assert!(started.elapsed() < Duration::from_secs(1 + 2 + 3 * 5 + 1));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_collector_that_never_answers_does_not_hold_up_shutdown() {
+    // Accepts connections and never answers on them, so each send waits for its timeout.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let silent = tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Ok((socket, _)) = listener.accept().await {
+            held.push(socket);
+        }
+    });
+    let pipeline =
+        Pipeline::otlp(&endpoint, "test-mac", ExportHealth::new(Box::new(|_| {}))).unwrap();
+    tracing::subscriber::with_default(pipeline.subscriber_for_test(), || {
+        for _ in 0..10 {
+            let span =
+                tracing::info_span!(target: TRACE_TARGET, "harold.delivery", kind = "turn_end");
+            span.in_scope(|| tracing::info!("turn-end update sent"));
+        }
+    });
+    let guard = TelemetryGuard {
+        pipeline: Some(pipeline),
+    };
+    let stopping = std::time::Instant::now();
+    guard.shutdown().await;
+    let took = stopping.elapsed();
+    assert!(took < Duration::from_millis(2500), "{took:?}");
+    silent.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn telemetry_off_shuts_down_at_once() {
+    let started = std::time::Instant::now();
+    TelemetryGuard::off().shutdown().await;
+    assert!(started.elapsed() < Duration::from_millis(100));
+}
+
+// ---------------------------------------------------------------------------
+// Local time
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_local_offset_is_utc_until_main_sets_it() {
+    // The test binary's `main` is the harness's, so nothing sets it.
+    assert_eq!(local_offset(), time::UtcOffset::UTC);
+}
+
+// ---------------------------------------------------------------------------
+// Fixed log messages
+// ---------------------------------------------------------------------------
+
+#[test]
+fn every_log_message_is_fixed_text() {
+    const ALLOWED: &[(&str, &str)] = &[
+        ("events/src/migration.rs", "Applying migration: {}"),
+        ("events/src/migration.rs", "Applied migration: {}"),
+        ("events/src/migration.rs", "Migration {} already applied"),
+        ("harold/src/outbound/mod.rs", "{reason}"),
+        ("harold/src/projector.rs", "{reason}"),
+        (
+            "harold/src/settings.rs",
+            "HOME env var not set; cannot expand tilde in path: {path}",
+        ),
+        (
+            "harold/src/telemetry.rs",
+            "telemetry export failing (collector unreachable at {endpoint})",
+        ),
+    ];
+    let offenders = scan_log_macros(
+        Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap(),
+        ALLOWED,
+    );
+    assert!(
+        offenders.is_empty(),
+        "log messages must be fixed text; put values in fields: {offenders:#?}"
+    );
+}
+
+#[test]
+fn the_scan_finds_interpolating_calls_and_skips_the_rest() {
+    let source = r#"
+        info!("fixed");
+        tracing::warn!(pane_id = %pane, "sent to {pane}");
+        error!(
+            error = %error,
+            "nested (parens) and {{escaped}} braces"
+        );
+        debug!("{}", x);
+        otel_info!("{not a log macro}");
+        let s = format!("{ignored}");
+        // info!("{in a comment}");
+        trace!(r"raw {value}", c = ')');
+    "#;
+    assert_eq!(
+        interpolating_literals(source),
+        vec![
+            "sent to {pane}".to_string(),
+            "{}".to_string(),
+            "raw {value}".to_string()
+        ]
+    );
+}
+
+/// Each `(file, literal)` of a log macro call in `harold/src` and `events/src` whose
+/// string literal interpolates a value and is not in `allowed`. Test files and the test
+/// fakes are skipped.
+fn scan_log_macros(root: &Path, allowed: &[(&str, &str)]) -> Vec<(String, String)> {
+    let mut files = Vec::new();
+    for dir in ["harold/src", "events/src"] {
+        collect_rust_files(&root.join(dir), &mut files);
+    }
+    files.sort();
+    let mut offenders = Vec::new();
+    for file in files {
+        let name = file.file_name().unwrap().to_string_lossy();
+        if name.ends_with("_tests.rs") || name == "fake.rs" {
+            continue;
+        }
+        let relative = file
+            .strip_prefix(root)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let source = std::fs::read_to_string(&file).unwrap();
+        for literal in interpolating_literals(&source) {
+            if !allowed.contains(&(relative.as_str(), literal.as_str())) {
+                offenders.push((relative.clone(), literal));
+            }
+        }
+    }
+    offenders
+}
+
+fn collect_rust_files(dir: &Path, files: &mut Vec<PathBuf>) {
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            collect_rust_files(&path, files);
+        } else if path.extension().is_some_and(|ext| ext == "rs") {
+            files.push(path);
+        }
+    }
+}
+
+const LOG_MACROS: [&str; 5] = ["info!(", "warn!(", "error!(", "debug!(", "trace!("];
+
+/// The string literals with a `{...}` placeholder inside each log macro call of `source`.
+fn interpolating_literals(source: &str) -> Vec<String> {
+    let bytes = source.as_bytes();
+    let mut found = Vec::new();
+    let mut at = 0;
+    while at < bytes.len() {
+        if source[at..].starts_with("//") {
+            at += source[at..].find('\n').unwrap_or(source.len() - at);
+            continue;
+        }
+        if bytes[at] == b'"' || source[at..].starts_with("r\"") || source[at..].starts_with("r#\"")
+        {
+            at = read_string(source, at).0;
+            continue;
+        }
+        if bytes[at] == b'\'' {
+            at = skip_char_literal(source, at);
+            continue;
+        }
+        let preceded_by_word =
+            at > 0 && (bytes[at - 1].is_ascii_alphanumeric() || bytes[at - 1] == b'_');
+        let Some(name) = LOG_MACROS
+            .iter()
+            .find(|name| source[at..].starts_with(**name))
+        else {
+            at += 1;
+            continue;
+        };
+        if preceded_by_word {
+            at += 1;
+            continue;
+        }
+        let (end, literals) = read_call(source, at + name.len());
+        found.extend(
+            literals
+                .into_iter()
+                .filter(|literal| has_placeholder(literal)),
+        );
+        at = end;
+    }
+    found
+}
+
+/// Reads a macro call's arguments from just after its `(` to its matching `)`. Returns
+/// the offset after the `)` and the string literals inside.
+fn read_call(source: &str, start: usize) -> (usize, Vec<String>) {
+    let bytes = source.as_bytes();
+    let mut depth = 1;
+    let mut at = start;
+    let mut literals = Vec::new();
+    while at < bytes.len() && depth > 0 {
+        if source[at..].starts_with("//") {
+            at += source[at..].find('\n').unwrap_or(source.len() - at);
+            continue;
+        }
+        if bytes[at] == b'"' || source[at..].starts_with("r\"") || source[at..].starts_with("r#\"")
+        {
+            let (end, literal) = read_string(source, at);
+            literals.push(literal);
+            at = end;
+            continue;
+        }
+        if bytes[at] == b'\'' {
+            at = skip_char_literal(source, at);
+            continue;
+        }
+        match bytes[at] {
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => depth -= 1,
+            _ => {}
+        }
+        at += 1;
+    }
+    (at, literals)
+}
+
+/// Reads a string literal (plain or raw) starting at `start`. Returns the offset after it
+/// and its text, with escapes left as written.
+fn read_string(source: &str, start: usize) -> (usize, String) {
+    let bytes = source.as_bytes();
+    if bytes[start] == b'r' {
+        let hashes = source[start + 1..]
+            .bytes()
+            .take_while(|byte| *byte == b'#')
+            .count();
+        let open = start + 1 + hashes;
+        if bytes.get(open) != Some(&b'"') {
+            return (start + 1, String::new());
+        }
+        let close = format!("\"{}", "#".repeat(hashes));
+        let end = source[open + 1..]
+            .find(&close)
+            .map_or(source.len(), |offset| open + 1 + offset);
+        return (
+            (end + close.len()).min(source.len()),
+            source[open + 1..end].to_string(),
+        );
+    }
+    let mut at = start + 1;
+    while at < bytes.len() && bytes[at] != b'"' {
+        at += if bytes[at] == b'\\' { 2 } else { 1 };
+    }
+    let end = at.min(source.len());
+    (
+        (end + 1).min(source.len()),
+        source[start + 1..end].to_string(),
+    )
+}
+
+/// Skips a character literal such as `'('`, `'"'` or `'\''`; a lifetime is skipped by
+/// its quote alone.
+fn skip_char_literal(source: &str, start: usize) -> usize {
+    let rest = &source[start + 1..];
+    let mut chars = rest.char_indices();
+    match chars.next() {
+        Some((_, '\\')) => {
+            let close = rest[1..].find('\'').map_or(rest.len(), |offset| offset + 1);
+            start + 1 + close + 1
+        }
+        Some((_, c)) if rest[c.len_utf8()..].starts_with('\'') => start + 1 + c.len_utf8() + 1,
+        _ => start + 1,
+    }
+}
+
+/// Whether `literal` has a format placeholder: a `{` that is not `{{`, closed by `}`.
+fn has_placeholder(literal: &str) -> bool {
+    let mut chars = literal.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '{' {
+            continue;
+        }
+        if chars.peek() == Some(&'{') {
+            chars.next();
+            continue;
+        }
+        if chars.any(|c| c == '}') {
+            return true;
+        }
+    }
+    false
+}

@@ -688,6 +688,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
+    // Read before the runtime starts threads: the `time` crate refuses it after.
+    telemetry::set_local_offset(
+        time::UtcOffset::current_local_offset().unwrap_or(time::UtcOffset::UTC),
+    );
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?
@@ -737,12 +741,17 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
         _ => {}
     }
 
-    init_telemetry(&settings.log.level);
+    let telemetry = init_telemetry(
+        &settings.log.level,
+        &settings.telemetry,
+        &settings.machine_name,
+    );
     init_settings(settings);
     let cfg = get_settings();
 
     if let cli::Mode::Diagnostics { delay_seconds } = mode {
         run_diagnostics(delay_seconds);
+        telemetry.shutdown().await;
         return Ok(());
     }
 
@@ -828,6 +837,7 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
     let _ = listener_handle.await;
     let _ = timed_prompts_handle.await;
     stop_agent_monitor(monitor_task, activity_provider, Duration::from_secs(1)).await;
+    telemetry.shutdown().await;
     server_result?;
     Ok(())
 }

@@ -5,8 +5,8 @@
 use std::cell::RefCell;
 use std::io::Write;
 use std::marker::PhantomData;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, Once};
 use std::time::{Duration, Instant};
 
 use super::{DeliveryOutcome, NotifyEnvironment, OutboundChannel};
@@ -201,7 +201,7 @@ thread_local! {
 
 /// Appends to the current thread's capture, and discards what is written while the thread
 /// has none.
-struct CapturedLogWriter;
+pub(crate) struct CapturedLogWriter;
 
 impl Write for CapturedLogWriter {
     fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
@@ -219,18 +219,10 @@ impl Write for CapturedLogWriter {
 }
 
 /// Installs the test binary's one log subscriber, once. Every thread writes through it,
-/// and `CapturedLogWriter` keeps only the lines of a thread that is capturing.
+/// and `CapturedLogWriter` keeps only the lines of a thread that is capturing. The same
+/// subscriber also exports to the in-memory telemetry exporters.
 fn install_capturing_subscriber() {
-    static INSTALLED: Once = Once::new();
-    INSTALLED.call_once(|| {
-        let subscriber = tracing_subscriber::fmt()
-            .without_time()
-            .with_ansi(false)
-            .with_writer(|| CapturedLogWriter)
-            .finish();
-        tracing::subscriber::set_global_default(subscriber)
-            .expect("no other process-wide log subscriber is set in the test binary");
-    });
+    crate::telemetry::test_support::install();
 }
 
 /// The log lines written on the current thread from `start` until this is dropped. Code
