@@ -58,13 +58,14 @@ The default layout is:
   hooks/claude_turn_complete.py
   hooks/codex_turn_complete.py
   skills/send-message-to-away-device/SKILL.md
-  data/events/
+  data/store/
+  data/events/     kept from an earlier install, if present
   harold.log
 ~/bin/haroldctl
 ~/bin/tmx-agent-dash
 ```
 
-`local.toml` holds your channel and optional feature settings. The installed service uses its own `config` directory and `data/events` store, regardless of paths copied from another machine or Harold overrides in the invoking shell. It records the PATH and UTF-8 locale needed by its tools. Variables set for all of launchd with `launchctl setenv`, such as `HAROLD__GRPC__PORT`, also reach the service; the six variables the service sets itself (`HAROLD_CONFIG_DIR`, `HAROLD_ENV`, `HAROLD__STORE__PATH`, `PATH`, `LANG` and `LC_ALL`) win on a clash.
+`local.toml` holds your channel and optional feature settings. The installed service uses its own `config` directory and its store in `data/store`, regardless of paths copied from another machine or Harold overrides in the invoking shell. It records the PATH and UTF-8 locale needed by its tools. Variables set for all of launchd with `launchctl setenv`, such as `HAROLD__GRPC__PORT`, also reach the service; the six variables the service sets itself (`HAROLD_CONFIG_DIR`, `HAROLD_ENV`, `HAROLD__STORE__PATH`, `PATH`, `LANG` and `LC_ALL`) win on a clash.
 
 Add `~/bin` to your shell's PATH if needed, or use the absolute commands below. The installer prints the service definition and installation paths. The service definition stays inside the installation rather than the auto-loaded LaunchAgents directory. A custom location can be selected with `--prefix /absolute/path/to/bin`.
 
@@ -200,6 +201,15 @@ curl -fsSL https://raw.githubusercontent.com/kahgeh/harold/main/scripts/bootstra
 
 Reinstall archives the previous installation, including its data, and prints the backup location. It creates a fresh managed store; it does not convert old schemas or delete an external store named in a copied configuration. Use `--config` as well if you want to replace the local settings.
 
+### Upgrading from a build with data/events
+
+An install whose bundle has `data/events/` and no `data/store/` starts Harold on an empty store in `data/store/` and leaves `data/events/` as it is. [Starting fresh](../references/operation/README.md#starting-fresh) lists what the empty store does not carry over. Two steps keep the loss small:
+
+1. Install when nothing is waiting to be delivered. Messages still waiting in the delivery outbox of `data/events/` are not sent; the outbox normally empties within seconds of a message arriving.
+2. After the install, set mute or pause again in `tmx-agent-dash` if you want them. Both start off.
+
+To go back, install the earlier build again. It opens `data/events/`, which holds no event recorded only in `data/store/`.
+
 ## 5. Connect agent hooks
 
 Starting with v0.1.1, the installer provides both Claude Code and Codex completion scripts, plus the shared notifier. Register the installed scripts using the commands below. The installer does not overwrite your Claude, Codex, or OpenCode settings. It changes two things there. It adds the Claude Code lifecycle mod's folder to `CLAUDE_CODE_PLUGIN_DIRS` in `~/.claude/settings.json`, after saving a copy as `settings.json.before-harold`. And it creates a link named `send-message-to-away-device` in each of `~/.claude/skills` and `~/.codex/skills` that points to `~/bin/harold/skills/send-message-to-away-device`, so Claude Code and Codex agents can message your phone with `harold send-message-to-away-device`. A skills folder that does not exist is not created. Anything already at the link's path is left alone, and the installer then prints the `ln -s` command to run yourself. The [agent-monitor hook guide](setup-agent-monitor-hooks.md) covers lifecycle reporting, the Claude Code lifecycle mod and the opt-in OpenCode plugin.
@@ -299,12 +309,12 @@ brew install rust protobuf
 Get the source and its dependency:
 
 ```sh
-git clone --recurse-submodules https://github.com/kahgeh/harold.git
+git clone https://github.com/kahgeh/harold.git
 cd harold
 ./scripts/install.sh
 ```
 
-If an existing checkout is missing `events`, run `git submodule update --init --recursive` first. The source installer builds both programs using the checked-in Cargo lockfile, then performs the same configuration and readiness checks as the release installer.
+The source installer builds both programs using the checked-in Cargo lockfile, then performs the same configuration and readiness checks as the release installer.
 
 Run `./scripts/install.sh` again to install the current checkout while retaining settings and data. Use `./scripts/install.sh --reinstall` for fresh storage with retained settings.
 

@@ -38,7 +38,7 @@ effort = "low"
 # screen_history_lines = 2000 # positive, at most 10000 history rows
 
 [store]
-path = "~/bin/harold/data/events"
+path = "~/bin/harold/data/store"
 
 [tts]
 command = "say"

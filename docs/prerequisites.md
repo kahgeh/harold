@@ -23,7 +23,7 @@ xcode-select --install
 brew install rust protobuf
 ```
 
-Clone with `--recurse-submodules` to include `events`. The source installer uses the checked-in Cargo lockfile; `--offline` requires those dependencies to be cached already. See [Build from source](how-tos/setup.md#build-from-source).
+The source installer uses the checked-in Cargo lockfile; `--offline` requires those dependencies to be cached already. See [Build from source](how-tos/setup.md#build-from-source).
 
 ## Away channel
 
