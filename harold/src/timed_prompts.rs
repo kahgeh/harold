@@ -27,7 +27,7 @@ const SECONDS_IN_A_DAY: u32 = 86_400;
 
 /// How many rounds after typing into a pane it still counts as busy when the snapshot
 /// has not yet shown it busy: 12 rounds of 5 seconds, one minute.
-const TYPED_PANE_HOLD_ROUNDS: u32 = 12;
+pub(crate) const TYPED_PANE_HOLD_ROUNDS: u32 = 12;
 
 /// The monitor health component that reports whether the last listing of tmux panes
 /// worked (`set_health("inventory", ..)` in `agent/runtime.rs`).
@@ -433,8 +433,8 @@ struct TypedPane {
     rounds_left: u32,
 }
 
-/// How one try at a due prompt ended.
-enum Attempt {
+/// How one try at typing a text ended.
+pub(crate) enum Attempt {
     Wait(Reason),
     Typed { pane: String },
     EnterFailed { pane: String, error: String },
@@ -644,7 +644,30 @@ async fn attempt<P: Ports>(
     view: &AgentsView,
     typed_into: &[String],
 ) -> Attempt {
-    let pane = match pick_pane(view, &prompt.folder, typed_into) {
+    let attempt = type_when_ready(ports, &prompt.folder, &prompt.text, view, typed_into).await;
+    if let Attempt::Typed { pane } = &attempt {
+        // The next turn end on the pane starts at this typing, unless the hook sends its
+        // transcript time.
+        crate::telemetry::prompt_typed(
+            pane,
+            crate::telemetry::StartedBy::TimedPrompt,
+            None,
+            time::OffsetDateTime::now_utc(),
+        );
+    }
+    attempt
+}
+
+/// Checks 1 to 7 for `folder` and types `text` when they pass. Shared by timed prompts and
+/// alerts. A pane in `typed_into` counts as busy (see `pick_pane`).
+pub(crate) async fn type_when_ready<P: Ports>(
+    ports: &P,
+    folder: &str,
+    text: &str,
+    view: &AgentsView,
+    typed_into: &[String],
+) -> Attempt {
+    let pane = match pick_pane(view, folder, typed_into) {
         Ok(pane) => pane.pane_id.clone(),
         Err(reason) => return Attempt::Wait(reason),
     };
@@ -652,22 +675,12 @@ async fn attempt<P: Ports>(
     if let Some(reason) = box_reason(screen.as_deref()) {
         return Attempt::Wait(reason);
     }
-    // Nothing is in the box yet, so a failure here is safe to try again next round.
-    if ports.type_text(&pane, &prompt.text).await.is_err() {
+    // Nothing is in the box yet, so a failure here is safe to try again later.
+    if ports.type_text(&pane, text).await.is_err() {
         return Attempt::Wait(Reason::TypingFailed);
     }
     match ports.press_enter(&pane).await {
-        Ok(()) => {
-            // The next turn end on the pane starts at this typing, unless the hook sends
-            // its transcript time.
-            crate::telemetry::prompt_typed(
-                &pane,
-                crate::telemetry::StartedBy::TimedPrompt,
-                None,
-                time::OffsetDateTime::now_utc(),
-            );
-            Attempt::Typed { pane }
-        }
+        Ok(()) => Attempt::Typed { pane },
         Err(error) => Attempt::EnterFailed { pane, error },
     }
 }
@@ -724,6 +737,17 @@ async fn typing_step(
 pub(crate) struct TmuxPorts {
     snapshots: AgentSnapshotHub,
     providers: Vec<AgentProviderSettings>,
+}
+
+impl TmuxPorts {
+    /// `providers` are the configured agent providers, which say whose input box Harold
+    /// can read.
+    pub(crate) fn new(snapshots: AgentSnapshotHub, providers: Vec<AgentProviderSettings>) -> Self {
+        Self {
+            snapshots,
+            providers,
+        }
+    }
 }
 
 impl Ports for TmuxPorts {
@@ -809,10 +833,7 @@ pub(crate) async fn start(
     } else {
         store.timed_prompt_last_days().await?
     };
-    let ports = TmuxPorts {
-        snapshots,
-        providers: settings.agents.0.clone(),
-    };
+    let ports = TmuxPorts::new(snapshots, settings.agents.0.clone());
     let prompts = TimedPrompts::new(&settings.timed_prompts, &last_days, ports, store);
     Ok(tokio::spawn(run(
         prompts,
@@ -823,4 +844,4 @@ pub(crate) async fn start(
 
 #[cfg(test)]
 #[path = "timed_prompts_tests.rs"]
-mod tests;
+pub(crate) mod tests;

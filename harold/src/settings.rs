@@ -351,10 +351,6 @@ pub struct TelemetrySettings {
 
 impl TelemetrySettings {
     /// The alert address. `Settings::validate` reports one that does not parse.
-    #[allow(
-        dead_code,
-        reason = "the alert address reads this in a later telemetry task"
-    )]
     pub fn alert_addr(&self) -> Option<SocketAddr> {
         self.alert_listen.as_deref()?.parse().ok()
     }

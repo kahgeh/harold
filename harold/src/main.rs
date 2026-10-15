@@ -1,5 +1,6 @@
 mod activity_summary;
 mod agent;
+mod alerts;
 mod away_message;
 mod channels;
 mod cli;
@@ -850,6 +851,22 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
         .telemetry
         .pod_registry_path()
         .map(|registry| pod_stats::start(registry, shutdown_rx.clone()));
+    // The alert address is opened only when `alert_listen` is set.
+    let alerts_handle = match cfg.telemetry.alert_addr() {
+        Some(alert_addr) => Some(
+            alerts::start(
+                alert_addr,
+                cfg.notify.away_messages_only_from.clone(),
+                timed_prompts::TmuxPorts::new(snapshots.clone(), cfg.agents.0.clone()),
+                shutdown_rx.clone(),
+            )
+            .await
+            .map_err(|error| {
+                format!("telemetry.alert_listen: cannot listen on {alert_addr}: {error}")
+            })?,
+        ),
+        None => None,
+    };
 
     info!(address = %addr, "Harold listening");
     let service = harold_service(
@@ -869,12 +886,15 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
         })
         .await;
 
-    // Wait for the handler, the listener, the timed-prompt task and the pod facts to stop
-    // before returning.
+    // Wait for the handler, the listener, the timed-prompt task, the pod facts and the
+    // alert address to stop before returning.
     let _ = event_handler_handle.await;
     let _ = listener_handle.await;
     let _ = timed_prompts_handle.await;
     if let Some(handle) = pod_stats_handle {
+        let _ = handle.await;
+    }
+    if let Some(handle) = alerts_handle {
         let _ = handle.await;
     }
     stop_agent_monitor(monitor_task, activity_provider, Duration::from_secs(1)).await;

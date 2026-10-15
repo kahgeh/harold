@@ -16,7 +16,7 @@ use crate::settings::TimedPromptSettings;
 use crate::settings::{AgentMonitorSettings, AgentProviderSettings, ScreenAdapter};
 use crate::store::{HaroldStore, TimedPromptHandled, TimedPromptOutcome};
 
-const CHIEF: &str = "/work/chief-of-pods";
+pub(crate) const CHIEF: &str = "/work/chief-of-pods";
 
 // --- the clock ---
 
@@ -399,7 +399,7 @@ fn provider(id: &str, screen_adapter: ScreenAdapter) -> AgentProviderSettings {
     }
 }
 
-fn snapshot(healthy: Option<bool>, panes: Vec<AgentPaneProjection>) -> AgentSnapshot {
+pub(crate) fn snapshot(healthy: Option<bool>, panes: Vec<AgentPaneProjection>) -> AgentSnapshot {
     AgentSnapshot {
         through_event_version: EventStreamVersion::start(),
         server_time_ms: 3_000,
@@ -478,19 +478,19 @@ const DAY: &str = "2026-10-14";
 const NEXT_DAY: &str = "2026-10-15";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum Key {
+pub(crate) enum Key {
     /// Pane id and text.
     Text(String, String),
     /// Pane id.
     Enter(String),
 }
 
-struct FakeState {
+pub(crate) struct FakeState {
     now: Option<LocalNow>,
-    view: AgentsView,
+    pub(crate) view: AgentsView,
     screen: Option<String>,
     fail_text: bool,
-    fail_enter: bool,
+    pub(crate) fail_enter: bool,
     keys: Vec<Key>,
     now_reads: usize,
     screen_reads: usize,
@@ -498,10 +498,10 @@ struct FakeState {
 
 /// Every port, faked. It starts with the chief idle in pane `%2` with an empty box.
 #[derive(Clone)]
-struct Fake(Arc<Mutex<FakeState>>);
+pub(crate) struct Fake(Arc<Mutex<FakeState>>);
 
 impl Fake {
-    fn at(day: &str, time: &str) -> Self {
+    pub(crate) fn at(day: &str, time: &str) -> Self {
         let fake = Self(Arc::new(Mutex::new(FakeState {
             now: None,
             view: view(vec![chief("%2")]),
@@ -516,7 +516,7 @@ impl Fake {
         fake
     }
 
-    fn set(&self, change: impl FnOnce(&mut FakeState)) {
+    pub(crate) fn set(&self, change: impl FnOnce(&mut FakeState)) {
         change(&mut self.0.lock().unwrap());
     }
 
@@ -525,7 +525,7 @@ impl Fake {
         self.set(|state| state.now = Some(now));
     }
 
-    fn keys(&self) -> Vec<Key> {
+    pub(crate) fn keys(&self) -> Vec<Key> {
         self.0.lock().unwrap().keys.clone()
     }
 
@@ -1281,7 +1281,7 @@ fn the_round_runs_every_5_seconds_and_a_capture_may_take_2() {
     assert_eq!(COMMAND_TIMEOUT, Duration::from_secs(2));
 }
 
-async fn wait_until(what: &str, mut holds: impl FnMut() -> bool) {
+pub(crate) async fn wait_until(what: &str, mut holds: impl FnMut() -> bool) {
     for _ in 0..200 {
         if holds() {
             return;
