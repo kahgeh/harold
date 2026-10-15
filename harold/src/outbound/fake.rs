@@ -35,6 +35,8 @@ pub(crate) struct FakeEnvironment {
     session_attached: AtomicBool,
     active_pane: Mutex<Option<String>>,
     fail_sends: AtomicBool,
+    /// The error the next turn-end send fails with, once.
+    fail_next: Mutex<Option<String>>,
     delivered: Mutex<Vec<(OutboundChannel, String)>>,
     away_messages: Mutex<Vec<String>>,
     reply_targets: Mutex<Vec<String>>,
@@ -54,6 +56,7 @@ impl FakeEnvironment {
             session_attached: AtomicBool::new(false),
             active_pane: Mutex::new(None),
             fail_sends: AtomicBool::new(false),
+            fail_next: Mutex::new(None),
             delivered: Mutex::new(Vec::new()),
             away_messages: Mutex::new(Vec::new()),
             reply_targets: Mutex::new(Vec::new()),
@@ -87,6 +90,11 @@ impl FakeEnvironment {
 
     pub(crate) fn set_fail_sends(&self, fail: bool) {
         self.fail_sends.store(fail, Ordering::SeqCst);
+    }
+
+    /// Makes the next turn-end send fail with `error`, and the ones after it succeed.
+    pub(crate) fn fail_next_send_with(&self, error: &str) {
+        *self.fail_next.lock().unwrap() = Some(error.to_string());
     }
 
     /// Each turn-end update delivered: the channel and the pane.
@@ -142,6 +150,9 @@ impl NotifyEnvironment for FakeEnvironment {
         turn: &TurnCompleted,
         _trace_id: &str,
     ) -> Result<(DeliveryOutcome, Option<AgentAddress>), String> {
+        if let Some(error) = self.fail_next.lock().unwrap().take() {
+            return Err(error);
+        }
         if self.fail_sends.load(Ordering::SeqCst) {
             return Err("channel down".into());
         }

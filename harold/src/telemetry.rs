@@ -178,16 +178,8 @@ pub(crate) struct Instruments {
     /// `harold.phone_request.latency`, seconds.
     pub phone_request_latency: Histogram<f64>,
     /// `harold.turns`, `{turn}`.
-    #[allow(
-        dead_code,
-        reason = "the turn end records turns in a later telemetry task"
-    )]
     pub turns: Counter<u64>,
     /// `harold.turn.duration`, seconds.
-    #[allow(
-        dead_code,
-        reason = "the turn end records turn durations in a later telemetry task"
-    )]
     pub turn_duration: Histogram<f64>,
     /// `pod.merges`, `{merge}`.
     #[allow(
@@ -665,10 +657,6 @@ pub(crate) fn prompt_typed(
 
 /// The prompt Harold last typed into `pane_id`, if it was typed within `PROMPT_KEPT` of
 /// `now`. It is taken once.
-#[allow(
-    dead_code,
-    reason = "the turn end takes the pane's prompt in a later telemetry task"
-)]
 pub(crate) fn take_prompt(
     pane_id: &str,
     now: OffsetDateTime,
@@ -682,10 +670,6 @@ pub(crate) fn take_prompt(
 // ---------------------------------------------------------------------------
 
 /// What started a turn: the `started_by` attribute.
-#[allow(
-    dead_code,
-    reason = "the turn span and turn metrics use the turn start in a later telemetry task"
-)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum StartedBy {
     Phone,
@@ -694,11 +678,18 @@ pub(crate) enum StartedBy {
     Unknown,
 }
 
+impl StartedBy {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Phone => "phone",
+            Self::TimedPrompt => "timed_prompt",
+            Self::Desk => "desk",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
 /// When a turn started, if known, and what started it.
-#[allow(
-    dead_code,
-    reason = "the turn span and turn metrics use the turn start in a later telemetry task"
-)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct TurnStart {
     pub at: Option<OffsetDateTime>,
@@ -709,10 +700,6 @@ pub(crate) struct TurnStart {
 /// A hook time that is not RFC 3339 counts as absent, and any time after `hook_reached`
 /// is skipped. `started_by` is the typing's when Harold typed the prompt at or before
 /// `hook_reached`; otherwise `Desk` when the start is known, and `Unknown` when it is not.
-#[allow(
-    dead_code,
-    reason = "the turn span and turn metrics use the turn start in a later telemetry task"
-)]
 pub(crate) fn turn_start(
     hook_time: Option<&str>,
     typed: Option<(OffsetDateTime, StartedBy)>,
@@ -731,6 +718,140 @@ pub(crate) fn turn_start(
         (None, None) => StartedBy::Unknown,
     };
     TurnStart { at, started_by }
+}
+
+// ---------------------------------------------------------------------------
+// Turns
+// ---------------------------------------------------------------------------
+
+/// When each pane first turned busy since its last turn end, with when that was kept.
+static BUSY_SINCE: Mutex<BTreeMap<String, (OffsetDateTime, OffsetDateTime)>> =
+    Mutex::new(BTreeMap::new());
+
+/// Each turn end waiting to be delivered, by its event id: the `harold.turn_complete`
+/// context its delivery continues, with when it was kept.
+static TURN_DELIVERIES: Mutex<BTreeMap<String, (OffsetDateTime, Context)>> =
+    Mutex::new(BTreeMap::new());
+
+/// Records that the agent monitor saw `pane_id` busy at `at_ms` (milliseconds since the
+/// Unix epoch). Only the first since the pane's last turn end is kept.
+pub(crate) fn pane_turned_busy(pane_id: &str, at_ms: i64) {
+    let Ok(at) = OffsetDateTime::from_unix_timestamp_nanos(i128::from(at_ms) * 1_000_000) else {
+        return;
+    };
+    let now = OffsetDateTime::now_utc();
+    let mut busy = locked(&BUSY_SINCE);
+    busy.retain(|_, (kept_at, _)| !expired(*kept_at, now));
+    busy.entry(pane_id.to_string()).or_insert((now, at));
+}
+
+/// When `pane_id` first turned busy since its last turn end, if that was kept within
+/// `PROMPT_KEPT`. It is taken once: the turn end that takes it starts the next run.
+pub(crate) fn take_busy_since(pane_id: &str) -> Option<OffsetDateTime> {
+    let (kept_at, at) = locked(&BUSY_SINCE).remove(pane_id)?;
+    (!expired(kept_at, OffsetDateTime::now_utc())).then_some(at)
+}
+
+/// A turn end's trace: the live `harold.turn_complete` span, parented on `harold.turn`.
+pub(crate) struct TurnTrace {
+    pub turn_complete: tracing::Span,
+}
+
+/// Opens and ends `harold.turn` (from the turn's start to `hook_reached`), records
+/// `harold.turns` and `harold.turn.duration`, and returns `harold.turn_complete` parented
+/// on it.
+///
+/// - The start is the first known of the hook's transcript time, the prompt Harold typed
+///   into the pane, and when the pane first turned busy (`turn_start`).
+/// - `harold.turn` continues the typed prompt's trace when it has one, and starts a new
+///   trace otherwise. A prompt typed after `hook_reached` belongs to the next turn: it is
+///   kept for that turn and this one does not join it.
+/// - `session.id` is `session_id`, or the pane id with `session.source = "pane"`.
+/// - An unknown start gives a span that starts at `hook_reached` with
+///   `turn.start = "unknown"`, and no duration.
+pub(crate) fn begin_turn_complete(
+    pane_id: &str,
+    session_id: Option<&str>,
+    hook_time: Option<&str>,
+    hook_reached: OffsetDateTime,
+) -> TurnTrace {
+    let prompt = match take_prompt(pane_id, hook_reached) {
+        Some((typed_at, started_by, cx)) if typed_at > hook_reached => {
+            prompt_typed(pane_id, started_by, cx, typed_at);
+            None
+        }
+        prompt => prompt,
+    };
+    let (typed, parent) = match prompt {
+        Some((typed_at, started_by, cx)) => (Some((typed_at, started_by)), cx),
+        None => (None, None),
+    };
+    let start = turn_start(hook_time, typed, take_busy_since(pane_id), hook_reached);
+
+    let session = session_id.unwrap_or(pane_id).to_string();
+    let started_by = start.started_by.as_str();
+    let mut attributes = vec![
+        KeyValue::new("pane_id", pane_id.to_string()),
+        KeyValue::new("session.id", session.clone()),
+        KeyValue::new("started_by", started_by),
+    ];
+    if session_id.is_none() {
+        attributes.push(KeyValue::new("session.source", "pane"));
+    }
+    if start.at.is_none() {
+        attributes.push(KeyValue::new("turn.start", "unknown"));
+    }
+    let parent = parent.unwrap_or_default();
+    let turn = tracer().build_with_context(
+        SpanBuilder::from_name("harold.turn")
+            .with_start_time(start.at.unwrap_or(hook_reached))
+            .with_attributes(attributes),
+        &parent,
+    );
+    let turn_cx = parent.with_span(turn);
+    turn_cx.span().end_with_timestamp(hook_reached.into());
+
+    let instruments = instruments();
+    instruments.turns.add(
+        1,
+        &[
+            KeyValue::new("session.id", session),
+            KeyValue::new("pane_id", pane_id.to_string()),
+            KeyValue::new("started_by", started_by),
+        ],
+    );
+    if let Some(at) = start.at {
+        let duration = Duration::try_from(hook_reached - at).unwrap_or(Duration::ZERO);
+        instruments.turn_duration.record(
+            duration.as_secs_f64(),
+            &[KeyValue::new("started_by", started_by)],
+        );
+    }
+
+    let turn_complete =
+        tracing::info_span!(target: TRACE_TARGET, "harold.turn_complete", pane_id = %pane_id);
+    // Fails only when no export layer is installed, and then there is no trace to join.
+    let _ = turn_complete.set_parent(turn_cx);
+    TurnTrace { turn_complete }
+}
+
+/// Keeps the `harold.turn_complete` context `cx` for the delivery of the turn end
+/// `event_id`. A context with no trace is not kept.
+pub(crate) fn keep_turn_delivery(event_id: uuid::Uuid, cx: Context) {
+    if !cx.span().span_context().is_valid() {
+        return;
+    }
+    let now = OffsetDateTime::now_utc();
+    let mut deliveries = locked(&TURN_DELIVERIES);
+    deliveries.retain(|_, (kept_at, _)| !expired(*kept_at, now));
+    deliveries.insert(event_id.to_string(), (now, cx));
+}
+
+/// The trace kept for the delivery of the turn end `event_id`, if it was kept within
+/// `PROMPT_KEPT`. It is taken once.
+pub(crate) fn take_turn_delivery(event_id: &str) -> Option<Context> {
+    let (kept_at, cx) = locked(&TURN_DELIVERIES).remove(event_id)?;
+    (!expired(kept_at, OffsetDateTime::now_utc())).then_some(cx)
 }
 
 // ---------------------------------------------------------------------------

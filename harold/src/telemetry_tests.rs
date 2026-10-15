@@ -334,12 +334,22 @@ async fn a_closed_collector_port_does_not_slow_harold_and_logs_one_failing_line(
     let subscriber = pipeline.subscriber_for_test();
     let started = std::time::Instant::now();
     tracing::subscriber::with_default(subscriber, || {
-        // Task 6 replaces these with a delivery through the production dispatcher.
-        for _ in 0..100 {
-            let span =
-                tracing::info_span!(target: TRACE_TARGET, "harold.delivery", kind = "turn_end");
-            span.in_scope(|| tracing::info!("turn-end update sent"));
+        // Turn-end updates delivered as the event handler delivers them, through the
+        // daemon's dispatcher and a fake environment.
+        let environment = Arc::new(crate::outbound::fake::FakeEnvironment::new(""));
+        for _ in 0..20 {
+            let delivering = std::time::Instant::now();
+            let delivered = crate::projector::tests::dispatch_turn_end_with_fake_environment(
+                &unique_pane(),
+                &environment,
+            );
+            assert!(matches!(
+                delivered,
+                Ok(crate::outbound::DeliveryOutcome::Delivered)
+            ));
+            assert!(delivering.elapsed() < Duration::from_secs(1));
         }
+        assert_eq!(environment.delivered().len(), 20);
     });
     assert!(started.elapsed() < Duration::from_secs(1));
     for _ in 0..3 {

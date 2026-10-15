@@ -23,6 +23,7 @@ use tokio::sync::{mpsc, watch};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, transport::Server};
 use tracing::{Instrument, info, info_span};
+use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 
 pub use harold_api::harold;
 
@@ -199,6 +200,14 @@ impl Harold for HaroldService {
         let req = request.into_inner();
         let trace_id = uuid::Uuid::new_v4().to_string();
         let span = info_span!("grpc_turn_complete", trace_id = %trace_id);
+        let hook_reached = time::OffsetDateTime::now_utc();
+        let trace = telemetry::begin_turn_complete(
+            &req.pane_id,
+            non_empty(&req.session_id),
+            non_empty(&req.turn_started_at),
+            hook_reached,
+        );
+        let turn_complete = trace.turn_complete.clone();
 
         async {
             let pane_id = req.pane_id.clone();
@@ -215,18 +224,28 @@ impl Harold for HaroldService {
                 work_summary: agent::domain::CompletionSummaryUpdate::Unchanged,
             };
 
-            self.monitor
+            let appended = self.monitor
                 .turn_completed(event)
                 .await
                 .map_err(|e| {
                     tracing::error!(pane_id = %pane_id_log, result = "append_failed", error = %e, "turn complete rejected");
                     Status::internal("event store write failed")
                 })?;
+            if let Some(stored) = appended
+                .events
+                .iter()
+                .find(|envelope| envelope.r#type == "TurnCompleted")
+            {
+                telemetry::keep_turn_delivery(stored.id, turn_complete.context());
+            }
 
             info!(pane_id = %pane_id_log, result = "accepted", "turn complete persisted");
 
             Ok(Response::new(TurnCompleteResponse { accepted: true }))
         }
+        // `harold.turn_complete` is entered inside `grpc_turn_complete`, so the lines
+        // written along the way carry the turn's trace.
+        .instrument(trace.turn_complete)
         .instrument(span)
         .await
     }
@@ -518,6 +537,13 @@ fn map_agent_snapshot(snapshot: agent::domain::AgentSnapshot) -> AgentStateSnaps
             })
             .collect(),
     }
+}
+
+/// `value` trimmed, or `None` when that is empty: an old hook sends an empty string for a
+/// field it does not know.
+fn non_empty(value: &str) -> Option<&str> {
+    let value = value.trim();
+    (!value.is_empty()).then_some(value)
 }
 
 fn pane_id_for_log(value: &str) -> &str {

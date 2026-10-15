@@ -1455,3 +1455,39 @@ async fn task_stops_at_once_on_shutdown_during_the_startup_wait() {
     assert_eq!(fake.now_reads(), 0);
     assert!(fake.keys().is_empty());
 }
+
+#[tokio::test]
+async fn a_typed_prompt_starts_the_next_turn_on_its_pane() {
+    let store = TestStore::new().await;
+    let fake = Fake::at(DAY, "09:00:04");
+    // A pane no other test uses: the typed prompts are kept process-wide.
+    let pane = format!("%{}", uuid::Uuid::new_v4().as_u128() % 10u128.pow(18));
+    fake.set(|state| state.view = view(vec![chief(&pane)]));
+    let mut prompts = prompts(&fake, &store, &[entry("digest", "09:00")]);
+
+    let before = time::OffsetDateTime::now_utc();
+    prompts.round().await;
+
+    let now = time::OffsetDateTime::now_utc();
+    let (typed_at, started_by, cx) =
+        crate::telemetry::take_prompt(&pane, now).expect("the typed prompt is kept");
+    assert_eq!(started_by, crate::telemetry::StartedBy::TimedPrompt);
+    assert!(before <= typed_at && typed_at <= now, "{typed_at}");
+    assert!(cx.is_none(), "a timed prompt starts its own trace");
+}
+
+#[tokio::test]
+async fn a_prompt_whose_enter_fails_starts_no_turn() {
+    let store = TestStore::new().await;
+    let fake = Fake::at(DAY, "09:00:04");
+    let pane = format!("%{}", uuid::Uuid::new_v4().as_u128() % 10u128.pow(18));
+    fake.set(|state| {
+        state.view = view(vec![chief(&pane)]);
+        state.fail_enter = true;
+    });
+    let mut prompts = prompts(&fake, &store, &[entry("digest", "09:00")]);
+
+    prompts.round().await;
+
+    assert!(crate::telemetry::take_prompt(&pane, time::OffsetDateTime::now_utc()).is_none());
+}

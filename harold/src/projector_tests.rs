@@ -2110,3 +2110,220 @@ async fn a_paused_reply_finishes_its_open_request_without_counting_it() {
         "a paused reply is not counted"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Turn-end deliveries
+// ---------------------------------------------------------------------------
+
+/// A turn-end delivery for `pane_id` under the event id `event_id`.
+fn turn_end_delivery(event_id: &str, pane_id: &str) -> PendingDelivery {
+    PendingDelivery {
+        event_id: event_id.into(),
+        ..turn_delivery(pane_id, "build it")
+    }
+}
+
+/// Dispatches a turn end on `pane_id` through `dispatcher`, on this thread, inside the
+/// spans the event handler opens around it.
+fn dispatch_turn_end(
+    dispatcher: &dyn DeliveryDispatcher,
+    event_id: &str,
+    pane_id: &str,
+) -> Result<DeliveryOutcome, DispatchError> {
+    let event = tracing::info_span!("event", event_type = "TurnCompleted");
+    super::dispatch_in_spans(
+        dispatcher,
+        &turn_end_delivery(event_id, pane_id),
+        None,
+        &event,
+    )
+}
+
+/// Delivers a turn end on `pane_id` as the event handler does, on this thread, through the
+/// daemon's dispatcher over the fake `environment`.
+pub(crate) fn dispatch_turn_end_with_fake_environment(
+    pane_id: &str,
+    environment: &Arc<FakeEnvironment>,
+) -> Result<DeliveryOutcome, DispatchError> {
+    let event_id = uuid::Uuid::new_v4().to_string();
+    dispatch_turn_end(&Unpaused(dispatcher_with(environment)), &event_id, pane_id)
+}
+
+/// The daemon's dispatcher over the fake `environment`, never paused, with `router` in
+/// place of tmux routing.
+pub(crate) fn fake_dispatcher(
+    environment: &Arc<FakeEnvironment>,
+    router: Router,
+) -> Arc<dyn DeliveryDispatcher> {
+    Arc::new(Unpaused(dispatcher_with(environment).with_router(router)))
+}
+
+/// A live span standing in for a turn's `harold.turn_complete`, kept for the turn end
+/// `event_id`. Returns the span's trace and span ids.
+fn keep_a_turn_for(
+    event_id: uuid::Uuid,
+) -> (opentelemetry::trace::TraceId, opentelemetry::trace::SpanId) {
+    use opentelemetry::trace::TraceContextExt as _;
+    use tracing_opentelemetry::OpenTelemetrySpanExt as _;
+    telemetry::test_support::install();
+    let turn = tracing::info_span!(target: telemetry::TRACE_TARGET, "test.turn_complete");
+    let cx = turn.context();
+    let ids = {
+        let span = cx.span();
+        let context = span.span_context();
+        (context.trace_id(), context.span_id())
+    };
+    telemetry::keep_turn_delivery(event_id, cx);
+    ids
+}
+
+/// The exported `harold.delivery` spans whose parent is the span `parent`.
+fn deliveries_under(
+    parent: opentelemetry::trace::SpanId,
+) -> Vec<opentelemetry_sdk::trace::SpanData> {
+    telemetry::test_support::spans()
+        .into_iter()
+        .filter(|span| span.name == "harold.delivery" && span.parent_span_id == parent)
+        .collect()
+}
+
+#[test]
+fn a_turn_end_delivery_continues_the_trace_kept_for_its_event() {
+    let event_id = uuid::Uuid::new_v4();
+    let (trace_id, parent) = keep_a_turn_for(event_id);
+    let environment = Arc::new(FakeEnvironment::new(""));
+    let dispatcher = Unpaused(dispatcher_with(&environment));
+
+    let outcome = dispatch_turn_end(&dispatcher, &event_id.to_string(), &unique_pane());
+
+    assert!(matches!(outcome, Ok(DeliveryOutcome::Delivered)));
+    let deliveries = deliveries_under(parent);
+    assert_eq!(deliveries.len(), 1);
+    assert_eq!(deliveries[0].span_context.trace_id(), trace_id);
+    assert_eq!(attr(&deliveries[0], "kind"), "turn_end");
+    assert_eq!(attr(&deliveries[0], "channel"), "tts");
+    assert_eq!(attr(&deliveries[0], "outcome"), "delivered");
+    assert!(
+        telemetry::take_turn_delivery(&event_id.to_string()).is_none(),
+        "a delivered turn end is no longer kept"
+    );
+}
+
+#[test]
+fn a_turn_end_sent_while_away_records_the_away_channel() {
+    for (overrides, channel) in [
+        ("", "imessage"),
+        ("[notify]\naway_channel = \"telegram\"", "telegram"),
+    ] {
+        let event_id = uuid::Uuid::new_v4();
+        let (_, parent) = keep_a_turn_for(event_id);
+        let environment = Arc::new(FakeEnvironment::locked(overrides));
+
+        let outcome = dispatch_turn_end(
+            &Unpaused(dispatcher_with(&environment)),
+            &event_id.to_string(),
+            &unique_pane(),
+        );
+
+        assert!(matches!(outcome, Ok(DeliveryOutcome::Delivered)));
+        let deliveries = deliveries_under(parent);
+        assert_eq!(deliveries.len(), 1, "{channel}");
+        assert_eq!(attr(&deliveries[0], "channel"), channel);
+    }
+}
+
+#[test]
+fn a_skipped_turn_end_records_skipped() {
+    let event_id = uuid::Uuid::new_v4();
+    let (_, parent) = keep_a_turn_for(event_id);
+    let environment = Arc::new(FakeEnvironment::new(""));
+    environment.set_session_attached(true);
+
+    let outcome = dispatch_turn_end(
+        &Unpaused(dispatcher_with(&environment)),
+        &event_id.to_string(),
+        &unique_pane(),
+    );
+
+    assert!(matches!(outcome, Ok(DeliveryOutcome::Skipped)));
+    let deliveries = deliveries_under(parent);
+    assert_eq!(deliveries.len(), 1);
+    assert_eq!(attr(&deliveries[0], "outcome"), "skipped");
+}
+
+#[test]
+fn a_failed_turn_end_records_failed_and_its_retry_stays_in_the_trace() {
+    let event_id = uuid::Uuid::new_v4();
+    let (trace_id, parent) = keep_a_turn_for(event_id);
+    let environment = Arc::new(FakeEnvironment::new(""));
+    let dispatcher = Unpaused(dispatcher_with(&environment));
+    let pane = unique_pane();
+
+    environment.set_fail_sends(true);
+    let failed = dispatch_turn_end(&dispatcher, &event_id.to_string(), &pane);
+    environment.set_fail_sends(false);
+    let retried = dispatch_turn_end(&dispatcher, &event_id.to_string(), &pane);
+
+    assert!(matches!(failed, Err(DispatchError::Retryable(_))));
+    assert!(matches!(retried, Ok(DeliveryOutcome::Delivered)));
+    let deliveries = deliveries_under(parent);
+    let outcomes: Vec<String> = deliveries
+        .iter()
+        .map(|span| attr(span, "outcome"))
+        .collect();
+    assert_eq!(outcomes, ["failed", "delivered"]);
+    assert!(
+        deliveries
+            .iter()
+            .all(|span| span.span_context.trace_id() == trace_id)
+    );
+}
+
+#[test]
+fn a_turn_end_with_no_kept_trace_starts_its_own() {
+    telemetry::test_support::install();
+    let environment = Arc::new(FakeEnvironment::new(""));
+    let pane = unique_pane();
+    let before = telemetry::test_support::spans().len();
+
+    let outcome = dispatch_turn_end_with_fake_environment(&pane, &environment);
+
+    assert!(matches!(outcome, Ok(DeliveryOutcome::Delivered)));
+    assert_eq!(
+        environment.delivered(),
+        [(crate::outbound::OutboundChannel::Tts, pane)]
+    );
+    let started_own = telemetry::test_support::spans()
+        .into_iter()
+        .skip(before)
+        .any(|span| {
+            span.name == "harold.delivery"
+                && span.parent_span_id == opentelemetry::trace::SpanId::INVALID
+                && attr(&span, "outcome") == "delivered"
+        });
+    assert!(started_own);
+}
+
+#[test]
+fn only_a_turn_end_gets_a_delivery_span() {
+    use opentelemetry::trace::TraceContextExt as _;
+    use tracing_opentelemetry::OpenTelemetrySpanExt as _;
+    telemetry::test_support::install();
+    let environment = Arc::new(FakeEnvironment::locked(""));
+    let dispatcher = Unpaused(dispatcher_with(&environment));
+    let around = tracing::info_span!(target: telemetry::TRACE_TARGET, "test.around");
+    let parent = around.context().span().span_context().span_id();
+
+    let outcome = around.in_scope(|| {
+        let event = tracing::info_span!("event", event_type = "AwayMessageRequested");
+        super::dispatch_in_spans(
+            &dispatcher,
+            &away_delivery(json!(pod_message("Pod 3 is blocked"))),
+            None,
+            &event,
+        )
+    });
+
+    assert!(matches!(outcome, Ok(DeliveryOutcome::Delivered)));
+    assert!(deliveries_under(parent).is_empty());
+}

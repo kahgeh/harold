@@ -765,6 +765,9 @@ impl AgentMonitorRuntime {
         tracked.screen_state = None;
         tracked.screen_busy_since_ms = None;
         let pane_id = tracked.pane.incarnation.pane_id.clone();
+        if state == ObservedAgentState::Busy {
+            crate::telemetry::pane_turned_busy(&pane_id, observed_at_ms);
+        }
         // A repeat starts no new work, so the summary in progress stands.
         if !is_repeat {
             if let Some(basis) = source_version(&appended, &["AgentLifecycleObserved"]) {
@@ -1341,6 +1344,9 @@ fn screen_state_delta(
         if observed != Some(ObservedAgentState::Busy) {
             tracked.screen_busy_since_ms = None;
             return None;
+        }
+        if tracked.screen_busy_since_ms.is_none() {
+            crate::telemetry::pane_turned_busy(&tracked.pane.incarnation.pane_id, observed_at_ms);
         }
         let busy_since_ms = *tracked
             .screen_busy_since_ms

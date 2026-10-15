@@ -298,6 +298,16 @@ impl NotifyState {
     }
 }
 
+/// The `channel` attribute of a turn-end update sent through `channel`: `tts`, or the
+/// configured away channel, `imessage` or `telegram`.
+fn channel_name(channel: OutboundChannel, away_channel: &str) -> &'static str {
+    match channel {
+        OutboundChannel::Tts => "tts",
+        OutboundChannel::Away if away_channel == "telegram" => "telegram",
+        OutboundChannel::Away => "imessage",
+    }
+}
+
 /// Leave a turn-end update out: nothing is sent or said, no reply target is recorded,
 /// and the turn is recorded in the duplicate check so that a repeat of it is left
 /// out as well. The log line names the pane.
@@ -359,6 +369,8 @@ pub(crate) fn notify(
     } else {
         OutboundChannel::Tts
     };
+    // Recorded on `harold.delivery` when the update is delivered inside it.
+    tracing::Span::current().record("channel", channel_name(channel, &cfg.away_channel));
 
     // The voice mute and the messaging pause skip as they always have, before any rule
     // below is looked at: a paused update would not go to the phone.

@@ -657,7 +657,17 @@ async fn attempt<P: Ports>(
         return Attempt::Wait(Reason::TypingFailed);
     }
     match ports.press_enter(&pane).await {
-        Ok(()) => Attempt::Typed { pane },
+        Ok(()) => {
+            // The next turn end on the pane starts at this typing, unless the hook sends
+            // its transcript time.
+            crate::telemetry::prompt_typed(
+                &pane,
+                crate::telemetry::StartedBy::TimedPrompt,
+                None,
+                time::OffsetDateTime::now_utc(),
+            );
+            Attempt::Typed { pane }
+        }
         Err(error) => Attempt::EnterFailed { pane, error },
     }
 }

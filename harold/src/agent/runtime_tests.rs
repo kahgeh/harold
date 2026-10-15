@@ -1613,6 +1613,7 @@ async fn grpc_fallback_explicit_clear_and_replacement_converge_in_projection_ord
             last_user_prompt: " \u{1b}[31m\t ".into(),
             assistant_message: "assistant result".into(),
             main_context: "harold".into(),
+            ..Default::default()
         }))
         .await
         .unwrap();
@@ -4211,4 +4212,79 @@ async fn a_second_idle_report_restarts_the_busy_run() {
 
     sample(&fixture, Some(ObservedAgentState::Busy), 56_000).await;
     assert_eq!(screen_events(&fixture).await, 1);
+}
+
+// ---------------------------------------------------------------------------
+// When a pane turned busy, for the turn's start
+// ---------------------------------------------------------------------------
+
+/// A valid pane id (`%` and digits) no other test uses, so this test's busy time is its
+/// own in the process-wide map.
+fn unique_numeric_pane() -> String {
+    format!("%{}", uuid::Uuid::new_v4().as_u128() % 10u128.pow(18))
+}
+
+fn ms(at_ms: i64) -> time::OffsetDateTime {
+    time::OffsetDateTime::from_unix_timestamp_nanos(i128::from(at_ms) * 1_000_000).unwrap()
+}
+
+#[tokio::test]
+async fn a_pane_whose_screen_turns_busy_reports_the_first_busy_reading() {
+    let fixture = Fixture::with_default_graces().await;
+    let pane_id = unique_numeric_pane();
+    let observed = pane(&pane_id, 80, 800, 1_000, 100);
+    fixture
+        .inventory
+        .push_resolution(Ok(Some(observed.clone())));
+    fixture
+        .handle
+        .report_lifecycle(
+            pane_id.clone(),
+            ObservedAgentState::Idle,
+            "claude.lifecycle".into(),
+            WorkSummaryUpdate::Unchanged,
+        )
+        .await
+        .unwrap();
+    assert_eq!(crate::telemetry::take_busy_since(&pane_id), None);
+
+    for observed_at_ms in [5_000, 6_000] {
+        fixture.screen.push(Ok(screen(
+            &observed,
+            Some(ObservedAgentState::Busy),
+            None,
+            observed_at_ms,
+        )));
+        fixture.handle.screen_tick().await.unwrap();
+    }
+
+    assert_eq!(crate::telemetry::take_busy_since(&pane_id), Some(ms(5_000)));
+    assert_eq!(
+        crate::telemetry::take_busy_since(&pane_id),
+        None,
+        "taken once"
+    );
+}
+
+#[tokio::test]
+async fn a_busy_report_from_the_hook_reports_the_pane_busy() {
+    let fixture = Fixture::with_default_graces().await;
+    let pane_id = unique_numeric_pane();
+    for observed_at_ms in [2_000, 3_000] {
+        fixture
+            .inventory
+            .push_resolution(Ok(Some(pane(&pane_id, 80, 800, 1_000, observed_at_ms))));
+        fixture
+            .handle
+            .report_lifecycle(
+                pane_id.clone(),
+                ObservedAgentState::Busy,
+                "claude.lifecycle".into(),
+                WorkSummaryUpdate::Unchanged,
+            )
+            .await
+            .unwrap();
+    }
+
+    assert_eq!(crate::telemetry::take_busy_since(&pane_id), Some(ms(2_000)));
 }

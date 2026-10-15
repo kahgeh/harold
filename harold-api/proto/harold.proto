@@ -24,6 +24,10 @@ message TurnCompleteRequest {
   string last_user_prompt = 3;
   string assistant_message = 4;
   string main_context = 5;
+  // The agent's own session id, when the hook has one.
+  string session_id = 6;
+  // When the turn's prompt was written, RFC 3339, from the transcript line.
+  string turn_started_at = 7;
 }
 
 message TurnCompleteResponse {

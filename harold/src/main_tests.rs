@@ -474,6 +474,7 @@ async fn turn_complete_accepts_only_after_appending_every_request_field() {
         last_user_prompt: "refresh events".into(),
         assistant_message: "events refreshed".into(),
         main_context: "harold".into(),
+        ..Default::default()
     };
 
     let response = service
@@ -688,6 +689,7 @@ async fn report_agent_state_keeps_normalized_empty_completion_summary_unchanged(
             last_user_prompt: " \u{1b}[31m \t".into(),
             assistant_message: "done".into(),
             main_context: "harold".into(),
+            ..Default::default()
         }))
         .await
         .unwrap()
@@ -1870,4 +1872,300 @@ async fn spoken_line_is_accepted_while_messaging_is_paused() {
     crate::outbound::set_messaging_paused(false);
     assert!(result.is_ok());
     task.abort();
+}
+
+// ---------------------------------------------------------------------------
+// One trace per turn
+// ---------------------------------------------------------------------------
+
+mod one_trace_per_turn {
+    use std::sync::Arc;
+
+    use opentelemetry::trace::TraceId;
+    use opentelemetry_sdk::trace::SpanData;
+    use time::OffsetDateTime;
+    use time::format_description::well_known::Rfc3339;
+
+    use super::{
+        Harold, Request, TestDirectory, TurnCompleteRequest, empty_snapshot, store, test_service,
+    };
+    use crate::inbound::RouteReport;
+    use crate::outbound::fake::FakeEnvironment;
+    use crate::outbound::{DeliveryOutcome, OutboundChannel};
+    use crate::projector::tests::fake_dispatcher;
+    use crate::projector::{Router, handle_next_delivery};
+    use crate::telemetry::test_support::{self, span_attr};
+    use crate::telemetry::{ResolvedBy, Routing};
+
+    /// A valid pane id (`%` and digits, so the log lines name it) no other test uses.
+    fn unique_pane() -> String {
+        format!("%{}", uuid::Uuid::new_v4().as_u128() % 10u128.pow(18))
+    }
+
+    /// A router that types every reply into `pane`.
+    fn typing_router(pane: &str) -> Router {
+        let pane = pane.to_string();
+        Arc::new(move |_, _| {
+            Ok(RouteReport {
+                outcome: DeliveryOutcome::Delivered,
+                routing: Routing::Typed {
+                    pane_id: pane.clone(),
+                    resolved_by: ResolvedBy::LatestNotifier,
+                    tagged: false,
+                    typed_at: OffsetDateTime::now_utc(),
+                },
+            })
+        })
+    }
+
+    /// Stores a reply as the listener does, sent at `reply_at`.
+    async fn store_reply(store: &store::HaroldStore, text: &str, reply_at: OffsetDateTime) {
+        let message = store::InboundMessage {
+            text: text.into(),
+            forwarded: false,
+        };
+        let stored = crate::telemetry::store_phone_reply("imessage", reply_at, async {
+            store::append_inbound_message(store, &message).await.is_ok()
+        })
+        .await;
+        assert!(stored);
+    }
+
+    /// The one exported span called `name` whose `pane_id` is `pane`.
+    fn span_on(name: &str, pane: &str) -> SpanData {
+        let mut found: Vec<_> = test_support::spans()
+            .into_iter()
+            .filter(|span| span.name == name && span_attr(span, "pane_id").as_deref() == Some(pane))
+            .collect();
+        assert_eq!(found.len(), 1, "{name} spans on {pane}");
+        found.remove(0)
+    }
+
+    /// The exported spans called `name` in the trace `trace_id`.
+    fn in_trace(name: &str, trace_id: TraceId) -> Vec<SpanData> {
+        test_support::spans()
+            .into_iter()
+            .filter(|span| span.name == name && span.span_context.trace_id() == trace_id)
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_reply_a_turn_end_and_its_delivery_form_one_trace() {
+        test_support::install();
+        let pane = unique_pane();
+        let session = format!("session-{}", uuid::Uuid::new_v4());
+        let directory = TestDirectory::new();
+        let store = Arc::new(store::HaroldStore::open(&directory.0).await.unwrap());
+        let (service, _shutdown, task) = test_service(Arc::clone(&store), empty_snapshot());
+        let environment = Arc::new(FakeEnvironment::new(""));
+        let dispatcher = fake_dispatcher(&environment, typing_router(&pane));
+
+        // 1. A reply, stored as the listener stores it and typed into the pane.
+        let now = OffsetDateTime::now_utc();
+        store_reply(&store, "please build it", now - time::Duration::seconds(5)).await;
+        assert!(
+            handle_next_delivery(&store, Arc::clone(&dispatcher))
+                .await
+                .unwrap()
+        );
+
+        // 2. The stop hook reports the turn's end, with the transcript time of its prompt.
+        let started = now.replace_nanosecond(0).unwrap() - time::Duration::seconds(30);
+        service
+            .turn_complete(Request::new(TurnCompleteRequest {
+                pane_id: pane.clone(),
+                pane_label: "harold:0.9".into(),
+                last_user_prompt: "please build it".into(),
+                assistant_message: "built".into(),
+                main_context: "harold".into(),
+                session_id: session.clone(),
+                turn_started_at: started.format(&Rfc3339).unwrap(),
+            }))
+            .await
+            .unwrap();
+
+        // 3. The turn-end update is delivered.
+        assert!(handle_next_delivery(&store, dispatcher).await.unwrap());
+        assert_eq!(
+            environment.delivered(),
+            [(OutboundChannel::Tts, pane.clone())]
+        );
+
+        let request = span_on("harold.phone_request", &pane);
+        let trace_id = request.span_context.trace_id();
+        let routes = in_trace("harold.route", trace_id);
+        let turns = in_trace("harold.turn", trace_id);
+        let completes = in_trace("harold.turn_complete", trace_id);
+        let deliveries = in_trace("harold.delivery", trace_id);
+        assert_eq!(
+            (routes.len(), turns.len(), completes.len(), deliveries.len()),
+            (1, 1, 1, 1)
+        );
+        let turn = &turns[0];
+        assert_eq!(turn.parent_span_id, request.span_context.span_id());
+        assert_eq!(completes[0].parent_span_id, turn.span_context.span_id());
+        assert_eq!(
+            deliveries[0].parent_span_id,
+            completes[0].span_context.span_id()
+        );
+        assert_eq!(turn.start_time, std::time::SystemTime::from(started));
+        assert_eq!(span_attr(turn, "pane_id").as_deref(), Some(pane.as_str()));
+        assert_eq!(
+            span_attr(turn, "session.id").as_deref(),
+            Some(session.as_str())
+        );
+        assert_eq!(span_attr(turn, "started_by").as_deref(), Some("phone"));
+        assert_eq!(span_attr(turn, "session.source"), None);
+        assert_eq!(span_attr(turn, "turn.start"), None);
+        assert_eq!(
+            span_attr(&completes[0], "pane_id").as_deref(),
+            Some(pane.as_str())
+        );
+        assert_eq!(
+            span_attr(&deliveries[0], "outcome").as_deref(),
+            Some("delivered")
+        );
+
+        let naming_pane: Vec<_> = test_support::logs()
+            .into_iter()
+            .filter(|log| {
+                log.record
+                    .attributes_iter()
+                    .any(|(_, value)| format!("{value:?}").contains(&pane))
+            })
+            .collect();
+        assert!(
+            !naming_pane.is_empty(),
+            "the turn's log lines name the pane"
+        );
+        for log in &naming_pane {
+            assert_eq!(
+                log.record.trace_context().map(|trace| trace.trace_id),
+                Some(trace_id),
+                "{:?}",
+                log.record
+            );
+        }
+
+        assert_eq!(
+            test_support::counter_value(
+                "harold.turns",
+                &[
+                    ("pane_id", pane.as_str()),
+                    ("session.id", session.as_str()),
+                    ("started_by", "phone"),
+                ],
+            ),
+            Some(1)
+        );
+        let durations =
+            test_support::histogram_sum("harold.turn.duration", &[("started_by", "phone")])
+                .expect("the turn's duration is recorded");
+        assert!(durations >= 30.0, "{durations}");
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn a_turn_end_with_no_start_information_is_marked_unknown() {
+        test_support::install();
+        let pane = unique_pane();
+        let directory = TestDirectory::new();
+        let store = Arc::new(store::HaroldStore::open(&directory.0).await.unwrap());
+        let (service, _shutdown, task) = test_service(Arc::clone(&store), empty_snapshot());
+
+        service
+            .turn_complete(Request::new(TurnCompleteRequest {
+                pane_id: pane.clone(),
+                ..Default::default()
+            }))
+            .await
+            .unwrap();
+
+        let turn = span_on("harold.turn", &pane);
+        assert_eq!(span_attr(&turn, "turn.start").as_deref(), Some("unknown"));
+        assert_eq!(span_attr(&turn, "started_by").as_deref(), Some("unknown"));
+        assert_eq!(
+            span_attr(&turn, "session.id").as_deref(),
+            Some(pane.as_str())
+        );
+        assert_eq!(span_attr(&turn, "session.source").as_deref(), Some("pane"));
+        assert_eq!(
+            turn.start_time, turn.end_time,
+            "it starts at the turn's end"
+        );
+        assert_eq!(turn.parent_span_id, opentelemetry::trace::SpanId::INVALID);
+        assert_eq!(
+            test_support::counter_value(
+                "harold.turns",
+                &[
+                    ("pane_id", pane.as_str()),
+                    ("session.id", pane.as_str()),
+                    ("started_by", "unknown"),
+                ],
+            ),
+            Some(1)
+        );
+        assert_eq!(
+            test_support::histogram_sum("harold.turn.duration", &[("started_by", "unknown")]),
+            None
+        );
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn no_text_leaves_harold() {
+        test_support::install();
+        let canary = format!("TELEMETRY-CANARY-7731-{}", uuid::Uuid::new_v4().simple());
+        let pane = unique_pane();
+        let directory = TestDirectory::new();
+        let store = Arc::new(store::HaroldStore::open(&directory.0).await.unwrap());
+        let (service, _shutdown, task) = test_service(Arc::clone(&store), empty_snapshot());
+        let environment = Arc::new(FakeEnvironment::new(""));
+        let dispatcher = fake_dispatcher(&environment, typing_router(&pane));
+
+        store_reply(&store, &canary, OffsetDateTime::now_utc()).await;
+        assert!(
+            handle_next_delivery(&store, Arc::clone(&dispatcher))
+                .await
+                .unwrap()
+        );
+        service
+            .turn_complete(Request::new(TurnCompleteRequest {
+                pane_id: pane.clone(),
+                pane_label: canary.clone(),
+                last_user_prompt: canary.clone(),
+                assistant_message: canary.clone(),
+                main_context: canary.clone(),
+                ..Default::default()
+            }))
+            .await
+            .unwrap();
+        environment.fail_next_send_with(&format!("send failed: {canary}"));
+        let failed = handle_next_delivery(&store, Arc::clone(&dispatcher)).await;
+        assert!(
+            failed
+                .as_ref()
+                .is_err_and(|error| error.to_string().contains(&canary)),
+            "the first delivery fails with an error holding the canary"
+        );
+        assert!(handle_next_delivery(&store, dispatcher).await.unwrap());
+        assert_eq!(
+            environment.delivered(),
+            [(OutboundChannel::Tts, pane.clone())]
+        );
+
+        let trace_id = span_on("harold.phone_request", &pane)
+            .span_context
+            .trace_id();
+        let outcomes: Vec<_> = in_trace("harold.delivery", trace_id)
+            .iter()
+            .map(|span| span_attr(span, "outcome").unwrap_or_default())
+            .collect();
+        assert_eq!(outcomes, ["failed", "delivered"]);
+        assert!(
+            !test_support::exported_text().contains(&canary),
+            "the canary was exported"
+        );
+        task.abort();
+    }
 }

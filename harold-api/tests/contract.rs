@@ -163,6 +163,7 @@ fn turn_complete_preserves_legacy_wire_fields() {
         last_user_prompt: "refresh events".to_string(),
         assistant_message: "events refreshed".to_string(),
         main_context: "harold".to_string(),
+        ..Default::default()
     };
 
     let decoded = round_trip(&request);
@@ -180,7 +181,40 @@ fn turn_complete_preserves_legacy_wire_fields() {
             ("last_user_prompt".to_string(), 3),
             ("assistant_message".to_string(), 4),
             ("main_context".to_string(), 5),
+            ("session_id".to_string(), 6),
+            ("turn_started_at".to_string(), 7),
         ]
+    );
+}
+
+#[test]
+fn turn_complete_request_carries_session_and_start() {
+    let request = TurnCompleteRequest {
+        session_id: "abc".into(),
+        turn_started_at: "2026-10-15T08:00:00Z".into(),
+        ..Default::default()
+    };
+    let bytes = request.encode_to_vec();
+    let decoded = TurnCompleteRequest::decode(&bytes[..]).unwrap();
+    assert_eq!(
+        (
+            decoded.session_id.as_str(),
+            decoded.turn_started_at.as_str()
+        ),
+        ("abc", "2026-10-15T08:00:00Z")
+    );
+    // An old hook sends neither field.
+    let old_hook = TurnCompleteRequest {
+        pane_id: "%8".into(),
+        ..Default::default()
+    };
+    let decoded = TurnCompleteRequest::decode(&old_hook.encode_to_vec()[..]).unwrap();
+    assert_eq!(
+        (
+            decoded.session_id.as_str(),
+            decoded.turn_started_at.as_str()
+        ),
+        ("", "")
     );
 }
 

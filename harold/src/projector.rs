@@ -406,11 +406,12 @@ async fn handle_next_delivery_inner(
     );
     let blocking_dispatcher = Arc::clone(&dispatcher);
     let result = tokio::task::spawn_blocking(move || {
-        let _guard = span.enter();
-        match &origin {
-            Some(origin) => blocking_dispatcher.dispatch_reply(&delivery, origin),
-            None => blocking_dispatcher.dispatch(&delivery),
-        }
+        dispatch_in_spans(
+            blocking_dispatcher.as_ref(),
+            &delivery,
+            origin.as_ref(),
+            &span,
+        )
     })
     .await?;
 
@@ -445,6 +446,51 @@ async fn handle_next_delivery_inner(
             }
         },
     }
+}
+
+/// Dispatches `delivery` inside `event_span` and, for a turn end, inside
+/// `harold.delivery`, which records the channel and the outcome. The delivery continues
+/// the turn's trace when it is kept, and starts its own otherwise (after a restart, say).
+/// A failed delivery is tried again, so the turn's trace is kept for the retry.
+fn dispatch_in_spans(
+    dispatcher: &dyn DeliveryDispatcher,
+    delivery: &PendingDelivery,
+    origin: Option<&ReplyOrigin>,
+    event_span: &tracing::Span,
+) -> Result<DeliveryOutcome, DispatchError> {
+    let _event = event_span.enter();
+    let dispatch = || match origin {
+        Some(origin) => dispatcher.dispatch_reply(delivery, origin),
+        None => dispatcher.dispatch(delivery),
+    };
+    if delivery.event_type != "TurnCompleted" {
+        return dispatch();
+    }
+    let delivering = info_span!(
+        target: TRACE_TARGET,
+        "harold.delivery",
+        kind = "turn_end",
+        channel = tracing::field::Empty,
+        outcome = tracing::field::Empty,
+    );
+    let turn = telemetry::take_turn_delivery(&delivery.event_id);
+    if let Some(turn) = &turn {
+        // Fails only when no export layer is installed, and then there is no trace to join.
+        let _ = delivering.set_parent(turn.clone());
+    }
+    let result = delivering.in_scope(dispatch);
+    let outcome = match &result {
+        Ok(DeliveryOutcome::Delivered) => "delivered",
+        Ok(DeliveryOutcome::Skipped) => "skipped",
+        Err(_) => "failed",
+    };
+    delivering.record("outcome", outcome);
+    if let (Some(turn), Err(DispatchError::Retryable(_))) = (turn, &result)
+        && let Ok(event_id) = uuid::Uuid::parse_str(&delivery.event_id)
+    {
+        telemetry::keep_turn_delivery(event_id, turn);
+    }
+    result
 }
 
 /// The trace and time the stored reply at `version` recorded. When its event cannot be
@@ -548,4 +594,4 @@ pub async fn run_event_handler(
 
 #[cfg(test)]
 #[path = "projector_tests.rs"]
-mod tests;
+pub(crate) mod tests;

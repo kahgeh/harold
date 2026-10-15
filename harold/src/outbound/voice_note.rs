@@ -175,17 +175,20 @@ pub(crate) fn send_voice_note_in(
     runner: &dyn Runner,
     send: impl FnOnce(&Path) -> Result<(), String>,
 ) -> Result<(), String> {
-    std::fs::create_dir_all(parent)
-        .map_err(|error| format!("could not make the voice notes folder: {error}"))?;
-    remove_old_notes(parent, now);
-    let folder = parent.join(uuid::Uuid::new_v4().to_string());
-    std::fs::create_dir(&folder)
-        .map_err(|error| format!("could not make the voice note folder: {error}"))?;
-    let sent = make_note(&folder, tts, line, runner).and_then(|note| send(&note));
-    if sent.is_err() {
-        let _ = std::fs::remove_dir_all(&folder);
-    }
-    sent
+    let span = tracing::info_span!(target: crate::telemetry::TRACE_TARGET, "harold.voice_note");
+    span.in_scope(|| {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("could not make the voice notes folder: {error}"))?;
+        remove_old_notes(parent, now);
+        let folder = parent.join(uuid::Uuid::new_v4().to_string());
+        std::fs::create_dir(&folder)
+            .map_err(|error| format!("could not make the voice note folder: {error}"))?;
+        let sent = make_note(&folder, tts, line, runner).and_then(|note| send(&note));
+        if sent.is_err() {
+            let _ = std::fs::remove_dir_all(&folder);
+        }
+        sent
+    })
 }
 
 #[cfg(test)]
@@ -333,6 +336,28 @@ mod tests {
         std::fs::read_dir(parent)
             .map(|entries| entries.map(|entry| entry.unwrap().path()).collect())
             .unwrap_or_default()
+    }
+
+    #[test]
+    fn making_and_sending_a_note_is_one_voice_note_span() {
+        use opentelemetry::trace::TraceContextExt as _;
+        use tracing_opentelemetry::OpenTelemetrySpanExt as _;
+        crate::telemetry::test_support::install();
+        let directory = TestDirectory::new();
+        let runner = FakeRunner::new(&[]);
+        let around = tracing::info_span!(target: crate::telemetry::TRACE_TARGET, "test.delivery");
+        let parent = around.context().span().span_context().span_id();
+
+        let (result, _) =
+            around.in_scope(|| send_with(&directory.0, &mlx(), "All green.", &runner));
+
+        assert!(result.is_ok());
+        let notes: Vec<_> = crate::telemetry::test_support::spans()
+            .into_iter()
+            .filter(|span| span.name == "harold.voice_note" && span.parent_span_id == parent)
+            .collect();
+        assert_eq!(notes.len(), 1);
+        assert!(notes[0].attributes.is_empty(), "{:?}", notes[0].attributes);
     }
 
     #[test]
