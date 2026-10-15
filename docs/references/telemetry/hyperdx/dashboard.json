@@ -1,0 +1,447 @@
+{
+  "name": "Harold",
+  "tags": [
+    "harold"
+  ],
+  "containers": [
+    {
+      "id": "pods",
+      "title": "Pods",
+      "collapsed": false
+    },
+    {
+      "id": "phone",
+      "title": "Phone requests",
+      "collapsed": false
+    },
+    {
+      "id": "turns",
+      "title": "Turns",
+      "collapsed": false
+    },
+    {
+      "id": "specs",
+      "title": "Specs",
+      "collapsed": false
+    }
+  ],
+  "filters": [
+    {
+      "type": "QUERY_EXPRESSION",
+      "name": "Product",
+      "expression": "Attributes['pod.product']",
+      "sourceId": "@METRICS_SOURCE_ID@",
+      "sourceMetricType": "gauge",
+      "appliesToSourceIds": [
+        "@METRICS_SOURCE_ID@"
+      ]
+    }
+  ],
+  "tiles": [
+    {
+      "id": "free-slots-average",
+      "name": "Free slots, average",
+      "x": 0,
+      "y": 0,
+      "w": 4,
+      "h": 3,
+      "containerId": "pods",
+      "config": {
+        "displayType": "number",
+        "sourceId": "@METRICS_SOURCE_ID@",
+        "select": [
+          {
+            "aggFn": "avg",
+            "valueExpression": "Value",
+            "metricName": "pod.slots.free",
+            "metricType": "gauge",
+            "where": "TimeUnix >= now() - INTERVAL 24 HOUR",
+            "whereLanguage": "sql"
+          }
+        ]
+      }
+    },
+    {
+      "id": "busy-slots-p95",
+      "name": "Busy slots, p95",
+      "x": 4,
+      "y": 0,
+      "w": 4,
+      "h": 3,
+      "containerId": "pods",
+      "config": {
+        "displayType": "number",
+        "sourceId": "@METRICS_SOURCE_ID@",
+        "select": [
+          {
+            "aggFn": "quantile",
+            "level": 0.95,
+            "valueExpression": "Value",
+            "metricName": "pod.slots.busy",
+            "metricType": "gauge",
+            "where": "TimeUnix >= now() - INTERVAL 24 HOUR",
+            "whereLanguage": "sql"
+          }
+        ]
+      }
+    },
+    {
+      "id": "merges-to-main",
+      "name": "Merges to main",
+      "x": 8,
+      "y": 0,
+      "w": 4,
+      "h": 3,
+      "containerId": "pods",
+      "config": {
+        "displayType": "number",
+        "sourceId": "@METRICS_SOURCE_ID@",
+        "select": [
+          {
+            "aggFn": "sum",
+            "valueExpression": "Value",
+            "metricName": "pod.merges",
+            "metricType": "sum",
+            "where": "TimeUnix >= now() - INTERVAL 24 HOUR",
+            "whereLanguage": "sql"
+          }
+        ]
+      }
+    },
+    {
+      "id": "lines-merged",
+      "name": "Lines merged",
+      "x": 12,
+      "y": 0,
+      "w": 4,
+      "h": 3,
+      "containerId": "pods",
+      "config": {
+        "displayType": "number",
+        "sourceId": "@METRICS_SOURCE_ID@",
+        "select": [
+          {
+            "aggFn": "sum",
+            "valueExpression": "Value",
+            "metricName": "pod.merged_lines",
+            "metricType": "sum",
+            "where": "TimeUnix >= now() - INTERVAL 24 HOUR",
+            "whereLanguage": "sql"
+          }
+        ]
+      }
+    },
+    {
+      "id": "lines-merged-last-hour",
+      "name": "Lines merged, last hour",
+      "x": 16,
+      "y": 0,
+      "w": 4,
+      "h": 3,
+      "containerId": "pods",
+      "config": {
+        "displayType": "number",
+        "sourceId": "@METRICS_SOURCE_ID@",
+        "select": [
+          {
+            "aggFn": "sum",
+            "valueExpression": "Value",
+            "metricName": "pod.merged_lines",
+            "metricType": "sum",
+            "where": "TimeUnix >= now() - INTERVAL 1 HOUR",
+            "whereLanguage": "sql"
+          }
+        ]
+      }
+    },
+    {
+      "id": "requests",
+      "name": "Requests",
+      "x": 0,
+      "y": 3,
+      "w": 4,
+      "h": 3,
+      "containerId": "phone",
+      "config": {
+        "displayType": "number",
+        "sourceId": "@METRICS_SOURCE_ID@",
+        "select": [
+          {
+            "aggFn": "sum",
+            "valueExpression": "Value",
+            "metricName": "harold.phone_requests",
+            "metricType": "sum",
+            "where": "TimeUnix >= now() - INTERVAL 24 HOUR",
+            "whereLanguage": "sql"
+          }
+        ]
+      }
+    },
+    {
+      "id": "availability",
+      "name": "Availability",
+      "x": 4,
+      "y": 3,
+      "w": 4,
+      "h": 3,
+      "containerId": "phone",
+      "config": {
+        "displayType": "number",
+        "sourceId": "@METRICS_SOURCE_ID@",
+        "select": [
+          {
+            "aggFn": "sum",
+            "valueExpression": "Value",
+            "metricName": "harold.phone_requests",
+            "metricType": "sum",
+            "where": "Attributes['outcome'] = 'typed' AND TimeUnix >= now() - INTERVAL 24 HOUR",
+            "whereLanguage": "sql",
+            "alias": "typed"
+          },
+          {
+            "aggFn": "sum",
+            "valueExpression": "Value",
+            "metricName": "harold.phone_requests",
+            "metricType": "sum",
+            "where": "TimeUnix >= now() - INTERVAL 24 HOUR",
+            "whereLanguage": "sql",
+            "alias": "all"
+          }
+        ],
+        "formulas": [
+          {
+            "expression": "A / B",
+            "alias": "Availability",
+            "numberFormat": {
+              "output": "percent",
+              "mantissa": 1
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "right-agent",
+      "name": "Right agent",
+      "x": 8,
+      "y": 3,
+      "w": 4,
+      "h": 3,
+      "containerId": "phone",
+      "config": {
+        "displayType": "number",
+        "sourceId": "@METRICS_SOURCE_ID@",
+        "select": [
+          {
+            "aggFn": "sum",
+            "valueExpression": "Value",
+            "metricName": "harold.phone_requests",
+            "metricType": "sum",
+            "where": "Attributes['outcome'] = 'typed' AND TimeUnix >= now() - INTERVAL 24 HOUR",
+            "whereLanguage": "sql",
+            "alias": "typed"
+          },
+          {
+            "aggFn": "sum",
+            "valueExpression": "Value",
+            "metricName": "harold.phone_requests.wrong",
+            "metricType": "sum",
+            "where": "TimeUnix >= now() - INTERVAL 24 HOUR",
+            "whereLanguage": "sql",
+            "alias": "wrong"
+          },
+          {
+            "aggFn": "sum",
+            "valueExpression": "Value",
+            "metricName": "harold.phone_requests",
+            "metricType": "sum",
+            "where": "TimeUnix >= now() - INTERVAL 24 HOUR",
+            "whereLanguage": "sql",
+            "alias": "all"
+          }
+        ],
+        "formulas": [
+          {
+            "expression": "(A - B) / C",
+            "alias": "Right agent",
+            "numberFormat": {
+              "output": "percent",
+              "mantissa": 1
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "latency-p95",
+      "name": "Latency, p95",
+      "x": 12,
+      "y": 3,
+      "w": 4,
+      "h": 3,
+      "containerId": "phone",
+      "config": {
+        "displayType": "number",
+        "sourceId": "@METRICS_SOURCE_ID@",
+        "select": [
+          {
+            "aggFn": "quantile",
+            "level": 0.95,
+            "valueExpression": "Value",
+            "metricName": "harold.phone_request.latency",
+            "metricType": "histogram",
+            "where": "TimeUnix >= now() - INTERVAL 24 HOUR",
+            "whereLanguage": "sql"
+          }
+        ],
+        "numberFormat": {
+          "output": "time",
+          "factor": 1
+        }
+      }
+    },
+    {
+      "id": "turns",
+      "name": "Turns",
+      "x": 0,
+      "y": 6,
+      "w": 4,
+      "h": 3,
+      "containerId": "turns",
+      "config": {
+        "displayType": "number",
+        "sourceId": "@METRICS_SOURCE_ID@",
+        "select": [
+          {
+            "aggFn": "sum",
+            "valueExpression": "Value",
+            "metricName": "harold.turns",
+            "metricType": "sum",
+            "where": "TimeUnix >= now() - INTERVAL 24 HOUR",
+            "whereLanguage": "sql"
+          }
+        ]
+      }
+    },
+    {
+      "id": "turns-per-session-median",
+      "name": "Turns per session, median",
+      "x": 4,
+      "y": 6,
+      "w": 4,
+      "h": 3,
+      "containerId": "turns",
+      "config": {
+        "configType": "sql",
+        "displayType": "number",
+        "connectionId": "@CLICKHOUSE_CONNECTION_ID@",
+        "sourceId": "@TRACES_SOURCE_ID@",
+        "sqlTemplate": "SELECT median(turns) FROM (SELECT SpanAttributes['session.id'] AS session, count() AS turns FROM $__sourceTable WHERE ServiceName = 'harold' AND SpanName = 'harold.turn' AND Timestamp >= now() - INTERVAL 24 HOUR GROUP BY session)"
+      }
+    },
+    {
+      "id": "waiting-for-approval",
+      "name": "Waiting for approval",
+      "x": 0,
+      "y": 9,
+      "w": 4,
+      "h": 3,
+      "containerId": "specs",
+      "config": {
+        "configType": "sql",
+        "displayType": "number",
+        "connectionId": "@CLICKHOUSE_CONNECTION_ID@",
+        "sourceId": "@METRICS_SOURCE_ID@",
+        "sqlTemplate": "SELECT sum(specs) FROM (SELECT argMax(Value, TimeUnix) AS specs FROM $__sourceTable(gauge) WHERE MetricName = 'pod.specs' AND Attributes['state'] = 'waiting_for_approval' AND TimeUnix >= now() - INTERVAL 24 HOUR AND $__filters GROUP BY ResourceAttributes['harold.machine'], Attributes['pod.product'])"
+      }
+    },
+    {
+      "id": "merged",
+      "name": "Merged",
+      "x": 4,
+      "y": 9,
+      "w": 4,
+      "h": 3,
+      "containerId": "specs",
+      "config": {
+        "configType": "sql",
+        "displayType": "number",
+        "connectionId": "@CLICKHOUSE_CONNECTION_ID@",
+        "sourceId": "@METRICS_SOURCE_ID@",
+        "sqlTemplate": "SELECT count() FROM (SELECT min(TimeUnix) AS first_merged FROM $__sourceTable(gauge) WHERE MetricName = 'pod.spec.words' AND Attributes['state'] = 'merged' AND $__filters GROUP BY Attributes['pod.product'], Attributes['spec.id']) WHERE first_merged >= now() - INTERVAL 24 HOUR"
+      }
+    },
+    {
+      "id": "spec-size-median-words",
+      "name": "Spec size, median words",
+      "x": 8,
+      "y": 9,
+      "w": 4,
+      "h": 3,
+      "containerId": "specs",
+      "config": {
+        "configType": "sql",
+        "displayType": "number",
+        "connectionId": "@CLICKHOUSE_CONNECTION_ID@",
+        "sourceId": "@METRICS_SOURCE_ID@",
+        "sqlTemplate": "SELECT median(words) FROM (SELECT argMax(Value, TimeUnix) AS words, min(TimeUnix) AS first_ready FROM $__sourceTable(gauge) WHERE MetricName = 'pod.spec.words' AND Attributes['state'] != 'drafted' AND $__filters GROUP BY Attributes['pod.product'], Attributes['spec.id']) WHERE first_ready >= now() - INTERVAL 24 HOUR"
+      }
+    },
+    {
+      "id": "waiting-for-you-p50",
+      "name": "Waiting for you, p50",
+      "x": 12,
+      "y": 9,
+      "w": 4,
+      "h": 3,
+      "containerId": "specs",
+      "config": {
+        "displayType": "number",
+        "sourceId": "@METRICS_SOURCE_ID@",
+        "select": [
+          {
+            "aggFn": "quantile",
+            "level": 0.5,
+            "valueExpression": "Value",
+            "metricName": "pod.spec.lead_time",
+            "metricType": "histogram",
+            "where": "Attributes['phase'] = 'waiting_for_user' AND TimeUnix >= now() - INTERVAL 24 HOUR",
+            "whereLanguage": "sql"
+          }
+        ],
+        "numberFormat": {
+          "output": "time",
+          "factor": 1
+        }
+      }
+    },
+    {
+      "id": "build-p50",
+      "name": "Build, p50",
+      "x": 16,
+      "y": 9,
+      "w": 4,
+      "h": 3,
+      "containerId": "specs",
+      "config": {
+        "displayType": "number",
+        "sourceId": "@METRICS_SOURCE_ID@",
+        "select": [
+          {
+            "aggFn": "quantile",
+            "level": 0.5,
+            "valueExpression": "Value",
+            "metricName": "pod.spec.lead_time",
+            "metricType": "histogram",
+            "where": "Attributes['phase'] = 'build' AND TimeUnix >= now() - INTERVAL 24 HOUR",
+            "whereLanguage": "sql"
+          }
+        ],
+        "numberFormat": {
+          "output": "time",
+          "factor": 1
+        }
+      }
+    }
+  ]
+}

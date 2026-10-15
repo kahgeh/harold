@@ -1,0 +1,32 @@
+{
+  "name": "phone-request-slow",
+  "note": "phone-request-slow",
+  "message": "The 95th percentile phone request latency was above 60 seconds in the last hour.",
+  "source": "inline",
+  "chartConfig": {
+    "name": "phone-request-slow",
+    "displayType": "line",
+    "sourceId": "@METRICS_SOURCE_ID@",
+    "select": [
+      {
+        "aggFn": "quantile",
+        "level": 0.95,
+        "valueExpression": "Value",
+        "metricName": "harold.phone_request.latency",
+        "metricType": "histogram",
+        "where": "",
+        "whereLanguage": "sql"
+      }
+    ]
+  },
+  "threshold": 60,
+  "thresholdType": "above_exclusive",
+  "interval": "1h",
+  "channel": {
+    "type": "webhook",
+    "webhookId": "@WEBHOOK_ID@"
+  },
+  "tags": [
+    "harold"
+  ]
+}

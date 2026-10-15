@@ -846,27 +846,7 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
         shutdown_rx.clone(),
     )
     .await?;
-    // The pod facts are read only when the chief's registry is named.
-    let pod_stats_handle = cfg
-        .telemetry
-        .pod_registry_path()
-        .map(|registry| pod_stats::start(registry, shutdown_rx.clone()));
-    // The alert address is opened only when `alert_listen` is set.
-    let alerts_handle = match cfg.telemetry.alert_addr() {
-        Some(alert_addr) => Some(
-            alerts::start(
-                alert_addr,
-                cfg.notify.away_messages_only_from.clone(),
-                timed_prompts::TmuxPorts::new(snapshots.clone(), cfg.agents.0.clone()),
-                shutdown_rx.clone(),
-            )
-            .await
-            .map_err(|error| {
-                format!("telemetry.alert_listen: cannot listen on {alert_addr}: {error}")
-            })?,
-        ),
-        None => None,
-    };
+    let telemetry_tasks = start_telemetry_tasks(cfg, &snapshots, &shutdown_rx).await?;
 
     info!(address = %addr, "Harold listening");
     let service = harold_service(
@@ -891,16 +871,61 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
     let _ = event_handler_handle.await;
     let _ = listener_handle.await;
     let _ = timed_prompts_handle.await;
-    if let Some(handle) = pod_stats_handle {
-        let _ = handle.await;
-    }
-    if let Some(handle) = alerts_handle {
-        let _ = handle.await;
-    }
+    telemetry_tasks.stopped().await;
     stop_agent_monitor(monitor_task, activity_provider, Duration::from_secs(1)).await;
     telemetry.shutdown().await;
     server_result?;
     Ok(())
+}
+
+/// The pod facts and the alert address, each started only when its `[telemetry]` key is
+/// set. With neither set, nothing starts: no `git` command runs and no address is opened.
+struct TelemetryTasks {
+    pod_stats: Option<tokio::task::JoinHandle<()>>,
+    alerts: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl TelemetryTasks {
+    /// Waits for the pod facts and the alert address to stop, after shutdown.
+    async fn stopped(self) {
+        if let Some(handle) = self.pod_stats {
+            let _ = handle.await;
+        }
+        if let Some(handle) = self.alerts {
+            let _ = handle.await;
+        }
+    }
+}
+
+/// Starts the pod facts when `pod_registry` is set and opens the alert address when
+/// `alert_listen` is set. An address that cannot be listened on stops Harold.
+async fn start_telemetry_tasks(
+    cfg: &settings::Settings,
+    snapshots: &agent::snapshot::AgentSnapshotHub,
+    shutdown_rx: &watch::Receiver<()>,
+) -> Result<TelemetryTasks, Box<dyn std::error::Error>> {
+    // The pod facts are read only when the chief's registry is named.
+    let pod_stats = cfg
+        .telemetry
+        .pod_registry_path()
+        .map(|registry| pod_stats::start(registry, shutdown_rx.clone()));
+    // The alert address is opened only when `alert_listen` is set.
+    let alerts = match cfg.telemetry.alert_addr() {
+        Some(alert_addr) => Some(
+            alerts::start(
+                alert_addr,
+                cfg.notify.away_messages_only_from.clone(),
+                timed_prompts::TmuxPorts::new(snapshots.clone(), cfg.agents.0.clone()),
+                shutdown_rx.clone(),
+            )
+            .await
+            .map_err(|error| {
+                format!("telemetry.alert_listen: cannot listen on {alert_addr}: {error}")
+            })?,
+        ),
+        None => None,
+    };
+    Ok(TelemetryTasks { pod_stats, alerts })
 }
 
 async fn stop_agent_monitor(

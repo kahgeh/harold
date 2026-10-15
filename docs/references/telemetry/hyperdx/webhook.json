@@ -1,0 +1,10 @@
+{
+  "name": "harold-alerts",
+  "service": "generic",
+  "url": "http://host.containers.internal:4320/alert",
+  "description": "Posts each Harold alert to Harold's alert address, which types it into the chief's pane.",
+  "headers": {
+    "Content-Type": "application/json"
+  },
+  "body": "{\"alert\": \"{{note}}\", \"state\": \"{{#if (eq status 'resolved')}}cleared{{else}}firing{{/if}}\"}"
+}

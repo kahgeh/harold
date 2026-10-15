@@ -1255,3 +1255,359 @@ async fn a_reply_is_kept_open_before_it_is_stored_and_dropped_if_it_is_not() {
     );
     assert!(open_reply_for(&trace).is_none(), "dropped once not stored");
 }
+
+// ---------------------------------------------------------------------------
+// HyperDX definition files
+// ---------------------------------------------------------------------------
+
+/// The spec's Metrics table.
+const METRICS: &[&str] = &[
+    "pod.slots.busy",
+    "pod.slots.free",
+    "pod.merges",
+    "pod.merged_lines",
+    "harold.phone_requests",
+    "harold.phone_requests.wrong",
+    "harold.phone_request.latency",
+    "harold.turns",
+    "harold.turn.duration",
+    "pod.specs",
+    "pod.spec.words",
+    "pod.spec.lead_time",
+];
+
+/// The Metrics table's attributes, plus the two resource attributes every export carries.
+const ATTRIBUTES: &[&str] = &[
+    "pod.product",
+    "spec.id",
+    "change",
+    "channel",
+    "outcome",
+    "resolved_by",
+    "session.id",
+    "pane_id",
+    "started_by",
+    "state",
+    "phase",
+    "spec.revisions",
+    "harold.machine",
+    "service.name",
+];
+
+/// The spec's span table. The trends panel "One turn, end to end" lists `harold.turn`.
+const SPANS: &[&str] = &[
+    "harold.phone_request",
+    "harold.route",
+    "harold.turn",
+    "harold.turn_complete",
+    "harold.delivery",
+    "harold.voice_note",
+];
+
+/// The spec's cards table: group and card, in order.
+const CARDS: [(&str, &str); 16] = [
+    ("Pods", "Free slots, average"),
+    ("Pods", "Busy slots, p95"),
+    ("Pods", "Merges to main"),
+    ("Pods", "Lines merged"),
+    ("Pods", "Lines merged, last hour"),
+    ("Phone requests", "Requests"),
+    ("Phone requests", "Availability"),
+    ("Phone requests", "Right agent"),
+    ("Phone requests", "Latency, p95"),
+    ("Turns", "Turns"),
+    ("Turns", "Turns per session, median"),
+    ("Specs", "Waiting for approval"),
+    ("Specs", "Merged"),
+    ("Specs", "Spec size, median words"),
+    ("Specs", "Waiting for you, p50"),
+    ("Specs", "Build, p50"),
+];
+
+/// The card read over the last hour; every other card reads the last 24 hours (choice 10).
+const LAST_HOUR_CARD: &str = "Lines merged, last hour";
+
+/// The spec's trends table, in order.
+const TREND_PANELS: [&str; 9] = [
+    "Slots",
+    "Merges to main",
+    "Phone requests reaching the right agent",
+    "Phone request latency",
+    "One turn, end to end",
+    "Turns per session",
+    "Specs by state",
+    "Spec size",
+    "Start to completion",
+];
+
+fn definitions() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../docs/references/telemetry/hyperdx")
+}
+
+fn definition(file: &str) -> serde_json::Value {
+    let path = definitions().join(file);
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|error| panic!("{path:?}: {error}"));
+    serde_json::from_str(&text).unwrap_or_else(|error| panic!("{path:?}: {error}"))
+}
+
+/// Every string in `value`, object keys included.
+fn strings_in(value: &serde_json::Value, out: &mut Vec<String>) {
+    match value {
+        serde_json::Value::String(text) => out.push(text.clone()),
+        serde_json::Value::Array(items) => items.iter().for_each(|item| strings_in(item, out)),
+        serde_json::Value::Object(map) => {
+            for (key, item) in map {
+                out.push(key.clone());
+                strings_in(item, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The dotted names starting `pod.` or `harold.` in `text`, such as `pod.slots.free` in
+/// `MetricName = 'pod.slots.free'`.
+fn dotted_names(text: &str) -> Vec<String> {
+    let is_name_char = |c: char| c.is_ascii_lowercase() || c == '_' || c == '.';
+    let mut names = Vec::new();
+    for (start, _) in text.char_indices() {
+        let rest = &text[start..];
+        if !(rest.starts_with("pod.") || rest.starts_with("harold.")) {
+            continue;
+        }
+        let before = text[..start].chars().next_back();
+        if before.is_some_and(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.' || c == '-') {
+            continue;
+        }
+        let end = rest.find(|c: char| !is_name_char(c)).unwrap_or(rest.len());
+        names.push(rest[..end].trim_end_matches('.').to_owned());
+    }
+    names
+}
+
+/// The keys read from an attribute map, such as `outcome` in `Attributes['outcome']`.
+fn attribute_keys(text: &str) -> Vec<String> {
+    text.split("Attributes['")
+        .skip(1)
+        .map(|rest| rest.split('\'').next().unwrap_or_default().to_owned())
+        .collect()
+}
+
+fn tiles(dashboard: &serde_json::Value) -> &Vec<serde_json::Value> {
+    dashboard["tiles"].as_array().expect("tiles")
+}
+
+fn tile_names(dashboard: &serde_json::Value) -> Vec<&str> {
+    tiles(dashboard)
+        .iter()
+        .map(|tile| tile["name"].as_str().expect("tile name"))
+        .collect()
+}
+
+/// The time conditions of a tile: each select item's `where`, or the raw SQL.
+fn tile_queries(tile: &serde_json::Value) -> Vec<String> {
+    let config = &tile["config"];
+    if let Some(sql) = config["sqlTemplate"].as_str() {
+        return vec![sql.to_owned()];
+    }
+    config["select"]
+        .as_array()
+        .expect("select")
+        .iter()
+        .map(|item| item["where"].as_str().unwrap_or_default().to_owned())
+        .collect()
+}
+
+#[test]
+fn every_definition_is_valid_json_naming_only_known_metrics_and_attributes() {
+    let mut files: Vec<String> = std::fs::read_dir(definitions())
+        .expect("the definitions folder")
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect();
+    files.sort();
+    assert_eq!(
+        files,
+        [
+            "alert-phone-request-slow.json",
+            "alert-phone-request-unavailable.json",
+            "alert-slot-idle.json",
+            "alert-wrong-agent.json",
+            "dashboard.json",
+            "trends.json",
+            "webhook.json",
+        ]
+    );
+
+    for file in &files {
+        let mut texts = Vec::new();
+        strings_in(&definition(file), &mut texts);
+        for text in &texts {
+            for name in dotted_names(text) {
+                assert!(
+                    METRICS.contains(&name.as_str())
+                        || ATTRIBUTES.contains(&name.as_str())
+                        || SPANS.contains(&name.as_str()),
+                    "{file} names {name:?}, which is not in the spec's Metrics or span tables"
+                );
+            }
+            for key in attribute_keys(text) {
+                assert!(
+                    ATTRIBUTES.contains(&key.as_str()),
+                    "{file} reads attribute {key:?}, which is not in the spec's Metrics table"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn the_cards_dashboard_has_one_number_tile_per_card_and_nothing_else() {
+    let dashboard = definition("dashboard.json");
+    assert_eq!(dashboard["name"], "Harold");
+    let mut keys: Vec<&str> = dashboard
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort_unstable();
+    assert_eq!(keys, ["containers", "filters", "name", "tags", "tiles"]);
+
+    let names: Vec<&str> = CARDS.iter().map(|(_, card)| *card).collect();
+    assert_eq!(tile_names(&dashboard), names);
+
+    let containers: BTreeMap<&str, &str> = dashboard["containers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|container| {
+            (
+                container["id"].as_str().unwrap(),
+                container["title"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    let mut groups: Vec<&str> = containers.values().copied().collect();
+    groups.sort_unstable();
+    assert_eq!(groups, ["Phone requests", "Pods", "Specs", "Turns"]);
+
+    for (tile, (group, card)) in tiles(&dashboard).iter().zip(CARDS) {
+        assert_eq!(tile["config"]["displayType"], "number", "{card}");
+        let container = tile["containerId"].as_str().unwrap_or_default();
+        assert_eq!(containers.get(container), Some(&group), "{card}");
+        let (period, other) = if card == LAST_HOUR_CARD {
+            ("now() - INTERVAL 1 HOUR", "INTERVAL 24 HOUR")
+        } else {
+            ("now() - INTERVAL 24 HOUR", "INTERVAL 1 HOUR")
+        };
+        for query in tile_queries(tile) {
+            assert!(query.contains(period), "{card} must read {period}: {query}");
+            assert!(
+                !query.contains(other),
+                "{card} reads another period: {query}"
+            );
+        }
+    }
+
+    let filters = dashboard["filters"].as_array().unwrap();
+    assert_eq!(filters.len(), 1, "only the product filter");
+    assert_eq!(filters[0]["name"], "Product");
+    assert_eq!(filters[0]["expression"], "Attributes['pod.product']");
+}
+
+#[test]
+fn the_trends_dashboard_has_the_nine_panels() {
+    let trends = definition("trends.json");
+    assert_eq!(trends["name"], "Harold trends");
+    assert_eq!(tile_names(&trends), TREND_PANELS);
+}
+
+#[test]
+fn the_alert_files_carry_the_spec_thresholds() {
+    // (alert, metric, threshold, comparison, minutes the condition must hold)
+    let expected = [
+        (
+            "phone-request-unavailable",
+            "harold.phone_requests",
+            0.0,
+            "above_exclusive",
+            5,
+        ),
+        (
+            "phone-request-slow",
+            "harold.phone_request.latency",
+            60.0,
+            "above_exclusive",
+            60,
+        ),
+        (
+            "wrong-agent",
+            "harold.phone_requests.wrong",
+            0.0,
+            "above_exclusive",
+            5,
+        ),
+        ("slot-idle", "pod.slots.free", 1.0, "above", 120),
+    ];
+    assert_eq!(
+        expected.map(|(name, ..)| name),
+        crate::alerts::ALERT_NAMES,
+        "one file per alert Harold accepts"
+    );
+    for (name, metric, threshold, comparison, minutes) in expected {
+        let alert = definition(&format!("alert-{name}.json"));
+        assert_eq!(alert["name"], name);
+        assert_eq!(
+            alert["note"], name,
+            "the webhook body sends the note as the alert"
+        );
+        assert_eq!(alert["source"], "inline", "{name}");
+        assert_eq!(alert["channel"]["type"], "webhook", "{name}");
+        assert_eq!(alert["threshold"].as_f64(), Some(threshold), "{name}");
+        assert_eq!(alert["thresholdType"], comparison, "{name}");
+        let interval = match alert["interval"].as_str().unwrap() {
+            "5m" => 5,
+            "15m" => 15,
+            "1h" => 60,
+            other => panic!("{name}: unexpected interval {other}"),
+        };
+        let windows = alert["numConsecutiveWindows"].as_i64().unwrap_or(1);
+        assert_eq!(interval * windows, minutes, "{name}");
+        let select = alert["chartConfig"]["select"].as_array().unwrap();
+        assert_eq!(select.len(), 1, "{name}");
+        assert_eq!(select[0]["metricName"], metric, "{name}");
+    }
+
+    let select = |name: &str| definition(&format!("alert-{name}.json"))["chartConfig"].clone();
+    assert!(
+        select("phone-request-unavailable")["select"][0]["where"]
+            .as_str()
+            .unwrap()
+            .contains("Attributes['outcome'] = 'unavailable'")
+    );
+    let slow = select("phone-request-slow");
+    assert_eq!(slow["select"][0]["aggFn"], "quantile");
+    assert_eq!(slow["select"][0]["level"].as_f64(), Some(0.95));
+    let idle = select("slot-idle");
+    assert_eq!(idle["select"][0]["aggFn"], "min");
+    assert_eq!(idle["groupBy"], "Attributes['pod.product']");
+}
+
+#[test]
+fn the_webhook_posts_what_the_alert_address_accepts() {
+    let webhook = definition("webhook.json");
+    assert_eq!(webhook["service"], "generic");
+    assert_eq!(webhook["url"], "http://host.containers.internal:4320/alert");
+    let body = webhook["body"].as_str().unwrap();
+    let state = "{{#if (eq status 'resolved')}}cleared{{else}}firing{{/if}}";
+    assert!(body.contains(state), "{body}");
+    for name in crate::alerts::ALERT_NAMES {
+        for rendered in ["firing", "cleared"] {
+            let post = body.replace("{{note}}", name).replace(state, rendered);
+            assert_eq!(
+                crate::alerts::alert_line(post.as_bytes()),
+                Ok(format!("harold alert: {name} {rendered}"))
+            );
+        }
+    }
+}

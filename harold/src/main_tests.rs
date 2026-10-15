@@ -2268,3 +2268,45 @@ mod one_trace_per_turn {
         task.abort();
     }
 }
+
+#[tokio::test]
+async fn with_no_telemetry_section_nothing_is_opened_or_run() {
+    let cfg = crate::peers::settings_with("");
+    assert!(cfg.telemetry.otlp_endpoint.is_none());
+
+    let (guard, build_failed) =
+        crate::telemetry::TelemetryGuard::for_settings(&cfg.telemetry, &cfg.machine_name);
+    assert!(!guard.exporting(), "no export pipeline is built");
+    assert!(build_failed.is_none());
+
+    let (_shutdown_tx, shutdown_rx) = watch::channel(());
+    let tasks =
+        super::start_telemetry_tasks(&cfg, &AgentSnapshotHub::new(empty_snapshot()), &shutdown_rx)
+            .await
+            .expect("nothing to start");
+    assert!(tasks.pod_stats.is_none(), "no pod facts, so no git command");
+    assert!(tasks.alerts.is_none(), "no alert address");
+    tasks.stopped().await;
+    guard.shutdown().await;
+}
+
+#[tokio::test]
+async fn each_telemetry_key_starts_its_own_task() {
+    let missing = std::env::temp_dir().join(format!("no-registry-{}.toml", uuid::Uuid::new_v4()));
+    let cfg = crate::peers::settings_with(&format!(
+        "[telemetry]\nalert_listen = \"127.0.0.1:0\"\npod_registry = {:?}\n",
+        missing.display().to_string()
+    ));
+
+    let (shutdown_tx, shutdown_rx) = watch::channel(());
+    let tasks =
+        super::start_telemetry_tasks(&cfg, &AgentSnapshotHub::new(empty_snapshot()), &shutdown_rx)
+            .await
+            .expect("both start");
+    assert!(tasks.pod_stats.is_some());
+    assert!(tasks.alerts.is_some());
+    drop(shutdown_tx);
+    tokio::time::timeout(std::time::Duration::from_secs(5), tasks.stopped())
+        .await
+        .expect("both stop at shutdown");
+}

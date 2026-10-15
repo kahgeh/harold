@@ -939,6 +939,33 @@ impl TelemetryGuard {
         Self { pipeline: None }
     }
 
+    /// The guard `telemetry` asks for: the OTLP pipeline when `otlp_endpoint` is set, and
+    /// none otherwise. With an endpoint that cannot be used, also the reason, and no
+    /// pipeline.
+    pub(crate) fn for_settings(
+        telemetry: &TelemetrySettings,
+        machine: &str,
+    ) -> (Self, Option<opentelemetry_otlp::ExporterBuildError>) {
+        let Some(endpoint) = telemetry.otlp_endpoint.as_deref() else {
+            return (Self::off(), None);
+        };
+        match Pipeline::otlp(endpoint, machine, ExportHealth::logging(endpoint)) {
+            Ok(pipeline) => (
+                Self {
+                    pipeline: Some(pipeline),
+                },
+                None,
+            ),
+            Err(error) => (Self::off(), Some(error)),
+        }
+    }
+
+    /// Whether this guard's pipeline exports spans, logs and metrics.
+    #[cfg(test)]
+    pub(crate) fn exporting(&self) -> bool {
+        self.pipeline.is_some()
+    }
+
     /// Flushes and stops the exporters, waiting at most `SHUTDOWN_BUDGET` (2 s) in all.
     pub async fn shutdown(self) {
         let Some(pipeline) = self.pipeline else {
@@ -957,18 +984,16 @@ impl TelemetryGuard {
 /// Must run inside the tokio runtime: the exporters' gRPC channel is made here and its
 /// connection task runs on the runtime.
 pub fn init_telemetry(level: &str, telemetry: &TelemetrySettings, machine: &str) -> TelemetryGuard {
-    let mut build_failed = None;
-    let pipeline = telemetry.otlp_endpoint.as_deref().and_then(|endpoint| {
-        Pipeline::otlp(endpoint, machine, ExportHealth::logging(endpoint))
-            .map_err(|error| build_failed = Some(error))
-            .ok()
-    });
+    let (guard, build_failed) = TelemetryGuard::for_settings(telemetry, machine);
 
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(level));
     let harold_log = fmt::layer()
         .log_internal_errors(true)
         .with_filter(harold_log_filter(env_filter));
-    let export = pipeline.as_ref().map(|pipeline| pipeline.layers(level));
+    let export = guard
+        .pipeline
+        .as_ref()
+        .map(|pipeline| pipeline.layers(level));
     tracing_subscriber::registry()
         .with(harold_log)
         .with(export)
@@ -977,13 +1002,10 @@ pub fn init_telemetry(level: &str, telemetry: &TelemetrySettings, machine: &str)
     if let Some(error) = build_failed {
         warn!(error = %error, "telemetry export off: the collector address could not be used");
     }
-    let Some(pipeline) = pipeline else {
-        return TelemetryGuard::off();
-    };
-    pipeline.install_global_providers();
-    TelemetryGuard {
-        pipeline: Some(pipeline),
+    if let Some(pipeline) = &guard.pipeline {
+        pipeline.install_global_providers();
     }
+    guard
 }
 
 // ---------------------------------------------------------------------------

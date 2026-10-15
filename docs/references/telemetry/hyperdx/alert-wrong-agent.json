@@ -1,0 +1,31 @@
+{
+  "name": "wrong-agent",
+  "note": "wrong-agent",
+  "message": "A phone request reached the wrong agent.",
+  "source": "inline",
+  "chartConfig": {
+    "name": "wrong-agent",
+    "displayType": "line",
+    "sourceId": "@METRICS_SOURCE_ID@",
+    "select": [
+      {
+        "aggFn": "sum",
+        "valueExpression": "Value",
+        "metricName": "harold.phone_requests.wrong",
+        "metricType": "sum",
+        "where": "",
+        "whereLanguage": "sql"
+      }
+    ]
+  },
+  "threshold": 0,
+  "thresholdType": "above_exclusive",
+  "interval": "5m",
+  "channel": {
+    "type": "webhook",
+    "webhookId": "@WEBHOOK_ID@"
+  },
+  "tags": [
+    "harold"
+  ]
+}

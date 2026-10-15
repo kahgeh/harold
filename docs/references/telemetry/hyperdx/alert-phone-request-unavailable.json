@@ -1,0 +1,31 @@
+{
+  "name": "phone-request-unavailable",
+  "note": "phone-request-unavailable",
+  "message": "A phone request was dropped with no pane, or typed more than 10 minutes after it was sent.",
+  "source": "inline",
+  "chartConfig": {
+    "name": "phone-request-unavailable",
+    "displayType": "line",
+    "sourceId": "@METRICS_SOURCE_ID@",
+    "select": [
+      {
+        "aggFn": "sum",
+        "valueExpression": "Value",
+        "metricName": "harold.phone_requests",
+        "metricType": "sum",
+        "where": "Attributes['outcome'] = 'unavailable'",
+        "whereLanguage": "sql"
+      }
+    ]
+  },
+  "threshold": 0,
+  "thresholdType": "above_exclusive",
+  "interval": "5m",
+  "channel": {
+    "type": "webhook",
+    "webhookId": "@WEBHOOK_ID@"
+  },
+  "tags": [
+    "harold"
+  ]
+}

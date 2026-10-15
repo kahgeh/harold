@@ -1,0 +1,33 @@
+{
+  "name": "slot-idle",
+  "note": "slot-idle",
+  "message": "A build slot has been free for 2 hours in a row.",
+  "source": "inline",
+  "chartConfig": {
+    "name": "slot-idle",
+    "displayType": "line",
+    "sourceId": "@METRICS_SOURCE_ID@",
+    "select": [
+      {
+        "aggFn": "min",
+        "valueExpression": "Value",
+        "metricName": "pod.slots.free",
+        "metricType": "gauge",
+        "where": "",
+        "whereLanguage": "sql"
+      }
+    ],
+    "groupBy": "Attributes['pod.product']"
+  },
+  "threshold": 1,
+  "thresholdType": "above",
+  "interval": "15m",
+  "numConsecutiveWindows": 8,
+  "channel": {
+    "type": "webhook",
+    "webhookId": "@WEBHOOK_ID@"
+  },
+  "tags": [
+    "harold"
+  ]
+}
