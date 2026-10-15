@@ -5,12 +5,12 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::process::Stdio;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock, PoisonError};
 use std::time::Duration;
 
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
-use tokio::time::MissedTickBehavior;
+use tokio::time::{Instant, MissedTickBehavior};
 use tracing::{error, info, warn};
 
 use crate::agent::domain::{AgentSnapshot, EffectiveAgentState};
@@ -28,6 +28,10 @@ const SECONDS_IN_A_DAY: u32 = 86_400;
 /// How many rounds after typing into a pane it still counts as busy when the snapshot
 /// has not yet shown it busy: 12 rounds of 5 seconds, one minute.
 pub(crate) const TYPED_PANE_HOLD_ROUNDS: u32 = 12;
+
+/// How long a pane another writer typed into counts as busy while it still reads idle:
+/// the same minute as `TYPED_PANE_HOLD_ROUNDS` rounds.
+pub(crate) const TYPED_PANE_HOLD: Duration = ROUND_INTERVAL.saturating_mul(TYPED_PANE_HOLD_ROUNDS);
 
 /// The monitor health component that reports whether the last listing of tmux panes
 /// worked (`set_health("inventory", ..)` in `agent/runtime.rs`).
@@ -308,6 +312,82 @@ pub(crate) fn box_reason(screen: Option<&str>) -> Option<Reason> {
 }
 
 // ---------------------------------------------------------------------------
+// One writer at a time
+// ---------------------------------------------------------------------------
+
+/// Who types into a pane through `type_when_ready`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Writer {
+    TimedPrompt,
+    Alert,
+}
+
+/// What the writers share about one pane.
+#[derive(Default)]
+pub(crate) struct PaneRecord {
+    /// The writer that last typed into the pane, and when its hold ends.
+    typed: Option<(Writer, Instant)>,
+}
+
+impl PaneRecord {
+    /// Whether the pane counts as busy for `writer` because another writer typed into it
+    /// a moment ago. Each writer keeps its own hold on the panes it typed into.
+    fn held_against(&self, writer: Writer, now: Instant) -> bool {
+        self.typed
+            .is_some_and(|(by, until)| by != writer && now < until)
+    }
+}
+
+/// One lock for each pane, held across the checks, the typing and Enter, so two writers
+/// never put their keys into one pane at once. The map's own lock is never held across an
+/// await.
+#[derive(Default)]
+pub(crate) struct PaneLocks {
+    panes: std::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<PaneRecord>>>>,
+}
+
+impl PaneLocks {
+    fn for_pane(&self, pane_id: &str) -> Arc<tokio::sync::Mutex<PaneRecord>> {
+        let mut panes = self.panes.lock().unwrap_or_else(PoisonError::into_inner);
+        let now = Instant::now();
+        // Forgets the panes no writer holds or waits for that have no hold left.
+        panes.retain(|_, lock| {
+            Arc::strong_count(lock) > 1
+                || lock.try_lock().map_or(true, |record| {
+                    record.typed.is_some_and(|(_, until)| now < until)
+                })
+        });
+        Arc::clone(panes.entry(pane_id.to_string()).or_default())
+    }
+
+    /// Ends the hold on each pane `view` shows not idle or does not show: the agent took
+    /// the text, or the pane is gone. A pane a writer holds now is left alone.
+    fn observe(&self, view: &AgentsView) {
+        if view.listing_failed {
+            return;
+        }
+        let panes = self.panes.lock().unwrap_or_else(PoisonError::into_inner);
+        for (pane_id, lock) in panes.iter() {
+            if reads_idle(view, pane_id) {
+                continue;
+            }
+            if let Ok(mut record) = lock.try_lock() {
+                record.typed = None;
+            }
+        }
+    }
+}
+
+fn reads_idle(view: &AgentsView, pane_id: &str) -> bool {
+    view.panes
+        .iter()
+        .any(|pane| pane.pane_id == pane_id && pane.state == EffectiveAgentState::Idle)
+}
+
+/// The daemon's pane locks, shared by the timed prompts and the alerts.
+static TMUX_PANE_LOCKS: LazyLock<PaneLocks> = LazyLock::new(PaneLocks::default);
+
+// ---------------------------------------------------------------------------
 // The ports
 // ---------------------------------------------------------------------------
 
@@ -333,6 +413,9 @@ pub(crate) trait Ports: Send + Sync + 'static {
 
     /// Sends Enter to the pane.
     fn press_enter(&self, pane_id: &str) -> impl Future<Output = Result<(), String>> + Send;
+
+    /// The pane locks every writer through these ports shares.
+    fn pane_locks(&self) -> &PaneLocks;
 }
 
 // ---------------------------------------------------------------------------
@@ -644,7 +727,15 @@ async fn attempt<P: Ports>(
     view: &AgentsView,
     typed_into: &[String],
 ) -> Attempt {
-    let attempt = type_when_ready(ports, &prompt.folder, &prompt.text, view, typed_into).await;
+    let attempt = type_when_ready(
+        ports,
+        Writer::TimedPrompt,
+        &prompt.folder,
+        &prompt.text,
+        view,
+        typed_into,
+    )
+    .await;
     if let Attempt::Typed { pane } = &attempt {
         // The next turn end on the pane starts at this typing, unless the hook sends its
         // transcript time.
@@ -659,18 +750,40 @@ async fn attempt<P: Ports>(
 }
 
 /// Checks 1 to 7 for `folder` and types `text` when they pass. Shared by timed prompts and
-/// alerts. A pane in `typed_into` counts as busy (see `pick_pane`).
+/// alerts. A pane in `typed_into` counts as busy (see `pick_pane`), and so does a pane
+/// another writer typed into in the last minute while it still reads idle.
+///
+/// The pane's lock is held from the checks to Enter. A writer that waited for it checks
+/// again on a fresh view, so it sees the pane the other writer just typed into as busy.
 pub(crate) async fn type_when_ready<P: Ports>(
     ports: &P,
+    writer: Writer,
     folder: &str,
     text: &str,
     view: &AgentsView,
     typed_into: &[String],
 ) -> Attempt {
+    let locks = ports.pane_locks();
+    locks.observe(view);
     let pane = match pick_pane(view, folder, typed_into) {
         Ok(pane) => pane.pane_id.clone(),
         Err(reason) => return Attempt::Wait(reason),
     };
+    let lock = locks.for_pane(&pane);
+    let mut record = lock.lock().await;
+    let view = ports.agents();
+    if !view.listing_failed && !reads_idle(&view, &pane) {
+        record.typed = None;
+    }
+    match pick_pane(&view, folder, typed_into) {
+        Ok(picked) if picked.pane_id == pane => {}
+        // The folder's pane changed while this writer waited; the next try looks again.
+        Ok(_) => return Attempt::Wait(Reason::AgentStateUnknown),
+        Err(reason) => return Attempt::Wait(reason),
+    }
+    if record.held_against(writer, Instant::now()) {
+        return Attempt::Wait(Reason::AgentBusy);
+    }
     let screen = ports.read_screen(&pane).await;
     if let Some(reason) = box_reason(screen.as_deref()) {
         return Attempt::Wait(reason);
@@ -679,6 +792,8 @@ pub(crate) async fn type_when_ready<P: Ports>(
     if ports.type_text(&pane, text).await.is_err() {
         return Attempt::Wait(Reason::TypingFailed);
     }
+    // Typed, whether or not Enter goes through: the text is in the box either way.
+    record.typed = Some((writer, Instant::now() + TYPED_PANE_HOLD));
     match ports.press_enter(&pane).await {
         Ok(()) => Attempt::Typed { pane },
         Err(error) => Attempt::EnterFailed { pane, error },
@@ -772,6 +887,10 @@ impl Ports for TmuxPorts {
     async fn press_enter(&self, pane_id: &str) -> Result<(), String> {
         let pane_id = pane_id.to_string();
         typing_step(move || press_enter_in_tmux_pane(&pane_id)).await
+    }
+
+    fn pane_locks(&self) -> &PaneLocks {
+        &TMUX_PANE_LOCKS
     }
 }
 

@@ -432,3 +432,97 @@ async fn shutdown_abandons_an_alert_waiting_for_the_chief() {
     assert!(start.elapsed() < Duration::from_secs(1));
     assert!(fake.keys().is_empty());
 }
+
+// --- one writer at a time ---
+
+#[tokio::test]
+async fn an_alert_and_a_timed_prompt_at_once_type_two_whole_lines() {
+    let fake = idle_chief();
+    let view = fake.agents();
+
+    // The fake yields after typing, so without the pane lock the keys would interleave.
+    let (alert, prompt) = tokio::join!(
+        type_when_ready(&fake, Writer::Alert, CHIEF, SLOT_IDLE_FIRING, &view, &[]),
+        type_when_ready(&fake, Writer::TimedPrompt, CHIEF, "digest", &view, &[]),
+    );
+
+    assert_eq!(fake.keys(), typed(SLOT_IDLE_FIRING));
+    assert!(matches!(alert, Attempt::Typed { .. }));
+    // The second saw, on a fresh view inside the lock, the pane the first just typed into.
+    assert!(matches!(prompt, Attempt::Wait(Reason::AgentBusy)));
+
+    // Once the pane has been seen busy and is idle again, the second types its whole line.
+    set_chief_state(&fake, EffectiveAgentState::Busy);
+    let busy = type_when_ready(
+        &fake,
+        Writer::TimedPrompt,
+        CHIEF,
+        "digest",
+        &fake.agents(),
+        &[],
+    )
+    .await;
+    assert!(matches!(busy, Attempt::Wait(Reason::AgentBusy)));
+    set_chief_state(&fake, EffectiveAgentState::Idle);
+    let prompt = type_when_ready(
+        &fake,
+        Writer::TimedPrompt,
+        CHIEF,
+        "digest",
+        &fake.agents(),
+        &[],
+    )
+    .await;
+
+    assert!(matches!(prompt, Attempt::Typed { .. }));
+    let mut both = typed(SLOT_IDLE_FIRING);
+    both.extend(typed("digest"));
+    assert_eq!(fake.keys(), both);
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_alert_posted_as_a_timed_prompt_is_typed_waits_and_follows_it_whole() {
+    let fake = idle_chief();
+    let (queue, _shutdown_tx, _handle) = deliver_to(&fake, Some(CHIEF));
+    queue.send(SLOT_IDLE_FIRING.into()).await.unwrap();
+
+    // The timed prompt takes the pane first; the delivery task runs while it types.
+    let prompt = type_when_ready(
+        &fake,
+        Writer::TimedPrompt,
+        CHIEF,
+        "digest",
+        &fake.agents(),
+        &[],
+    )
+    .await;
+    assert!(matches!(prompt, Attempt::Typed { .. }));
+    tokio::time::sleep(Duration::from_secs(20)).await;
+    // The snapshot still reads idle, and the pane counts as busy for the alert.
+    assert_eq!(fake.keys(), typed("digest"));
+
+    set_chief_state(&fake, EffectiveAgentState::Busy);
+    tokio::time::sleep(Duration::from_secs(6)).await;
+    set_chief_state(&fake, EffectiveAgentState::Idle);
+    tokio::time::sleep(Duration::from_secs(6)).await;
+
+    let mut both = typed("digest");
+    both.extend(typed(SLOT_IDLE_FIRING));
+    assert_eq!(fake.keys(), both);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_pane_another_writer_typed_into_is_free_again_after_a_minute() {
+    let fake = idle_chief();
+    let view = fake.agents();
+    let alert = type_when_ready(&fake, Writer::Alert, CHIEF, SLOT_IDLE_FIRING, &view, &[]).await;
+    assert!(matches!(alert, Attempt::Typed { .. }));
+
+    tokio::time::sleep(Duration::from_secs(59)).await;
+    let early = type_when_ready(&fake, Writer::TimedPrompt, CHIEF, "digest", &view, &[]).await;
+    assert!(matches!(early, Attempt::Wait(Reason::AgentBusy)));
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let late = type_when_ready(&fake, Writer::TimedPrompt, CHIEF, "digest", &view, &[]).await;
+
+    assert!(matches!(late, Attempt::Typed { .. }));
+}

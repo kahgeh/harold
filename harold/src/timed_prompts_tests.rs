@@ -498,20 +498,23 @@ pub(crate) struct FakeState {
 
 /// Every port, faked. It starts with the chief idle in pane `%2` with an empty box.
 #[derive(Clone)]
-pub(crate) struct Fake(Arc<Mutex<FakeState>>);
+pub(crate) struct Fake(Arc<Mutex<FakeState>>, Arc<PaneLocks>);
 
 impl Fake {
     pub(crate) fn at(day: &str, time: &str) -> Self {
-        let fake = Self(Arc::new(Mutex::new(FakeState {
-            now: None,
-            view: view(vec![chief("%2")]),
-            screen: Some(screen_with_box(&["❯ "])),
-            fail_text: false,
-            fail_enter: false,
-            keys: Vec::new(),
-            now_reads: 0,
-            screen_reads: 0,
-        })));
+        let fake = Self(
+            Arc::new(Mutex::new(FakeState {
+                now: None,
+                view: view(vec![chief("%2")]),
+                screen: Some(screen_with_box(&["❯ "])),
+                fail_text: false,
+                fail_enter: false,
+                keys: Vec::new(),
+                now_reads: 0,
+                screen_reads: 0,
+            })),
+            Arc::default(),
+        );
         fake.clock(day, time);
         fake
     }
@@ -556,11 +559,15 @@ impl Ports for Fake {
     }
 
     async fn type_text(&self, pane_id: &str, text: &str) -> Result<(), String> {
-        let mut state = self.0.lock().unwrap();
-        if state.fail_text {
-            return Err("pane closed".into());
+        {
+            let mut state = self.0.lock().unwrap();
+            if state.fail_text {
+                return Err("pane closed".into());
+            }
+            state.keys.push(Key::Text(pane_id.into(), text.into()));
         }
-        state.keys.push(Key::Text(pane_id.into(), text.into()));
+        // Typing takes time: another task may run before Enter is pressed.
+        tokio::task::yield_now().await;
         Ok(())
     }
 
@@ -571,6 +578,10 @@ impl Ports for Fake {
         }
         state.keys.push(Key::Enter(pane_id.into()));
         Ok(())
+    }
+
+    fn pane_locks(&self) -> &PaneLocks {
+        &self.1
     }
 }
 

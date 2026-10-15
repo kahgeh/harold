@@ -24,7 +24,7 @@ use tracing::{error, info, warn};
 
 use crate::agent::domain::EffectiveAgentState;
 use crate::timed_prompts::{
-    AgentsView, Attempt, Ports, ROUND_INTERVAL, Reason, TYPED_PANE_HOLD_ROUNDS, TmuxPorts,
+    AgentsView, Attempt, Ports, ROUND_INTERVAL, Reason, TYPED_PANE_HOLD, TmuxPorts, Writer,
     type_when_ready,
 };
 
@@ -147,7 +147,7 @@ impl HeldPane {
     fn new(pane_id: String) -> Self {
         Self {
             pane_id,
-            until: Instant::now() + ROUND_INTERVAL * TYPED_PANE_HOLD_ROUNDS,
+            until: Instant::now() + TYPED_PANE_HOLD,
         }
     }
 }
@@ -203,7 +203,7 @@ pub(crate) async fn deliver<P: Ports>(
         loop {
             let view = ports.agents();
             let typed_into = held_panes(&mut held, &view);
-            match type_when_ready(&ports, folder, &line, &view, &typed_into).await {
+            match type_when_ready(&ports, Writer::Alert, folder, &line, &view, &typed_into).await {
                 Attempt::Typed { pane } => {
                     info!(alert, state, pane_id = %pane, outcome = "typed", "alert typed");
                     held = Some(HeldPane::new(pane));
