@@ -113,10 +113,6 @@ pub struct PendingDelivery {
     pub payload: serde_json::Value,
     pub trace_id: String,
     /// The failed tries recorded for the row so far, kept across restarts.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "read by the retry cap in projector.rs (Task 3)")
-    )]
     pub attempt_count: i64,
 }
 

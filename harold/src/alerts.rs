@@ -44,10 +44,6 @@ const LINE_PREFIX: &str = "harold alert: ";
 
 /// The alert Harold queues itself when it gives up a delivery. The address does not
 /// accept it: it is not in `ALERT_NAMES`.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "used when a delivery is given up (Task 3)")
-)]
 pub(crate) const DELIVERY_GIVEN_UP: &str = "delivery-given-up";
 
 /// Where Harold queues its own alert lines, for the same typing as posted ones.
@@ -63,10 +59,6 @@ impl AlertQueue {
 
     /// Queues `harold alert: <alert> firing`. A full or closed queue drops the line with
     /// the same log line as a post's.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "used when a delivery is given up (Task 3)")
-    )]
     pub(crate) fn firing(&self, alert: &str) {
         queue_line(&self.0, format!("{LINE_PREFIX}{alert} firing"));
     }

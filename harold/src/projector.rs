@@ -7,6 +7,7 @@ use tracing::{info, info_span, warn};
 use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 
 use crate::agent::snapshot::AgentSnapshotHub;
+use crate::alerts::AlertQueue;
 use crate::inbound::{AgentAddress, RouteReport, route_inbound_message};
 use crate::outbound::left_out::{
     TrackedAgents, message_dropped_reason, spoken_line_dropped_reason,
@@ -252,6 +253,19 @@ fn phone_request(
     reply
 }
 
+/// A reply given up is one Harold dropped: its open request, found as `phone_request`
+/// finds it, is finished at once as unavailable.
+fn finish_given_up_request(event_id: &str, origin: &ReplyOrigin) {
+    let open = origin
+        .trace_id
+        .as_deref()
+        .and_then(telemetry::open_reply_for)
+        .or_else(|| telemetry::open_reply_for(&event_key(event_id)));
+    if let Some(reply) = open {
+        telemetry::finish_phone_request(&reply, &Routing::NoPane, OffsetDateTime::now_utc());
+    }
+}
+
 /// A reply handled while messaging is paused is not routed: its open request, if any,
 /// ends uncounted.
 fn finish_paused_request(origin: Option<&ReplyOrigin>) {
@@ -352,6 +366,20 @@ fn production_dispatcher(
     ProductionDispatcher::new(environment, Some(snapshots.clone()))
 }
 
+/// A delivery whose send fails this many times is given up.
+const MAX_TRIES: i64 = 10;
+
+/// The longest wait between two tries of a delivery.
+const LONGEST_RETRY_WAIT: Duration = Duration::from_secs(60);
+
+/// The wait after a delivery's `failures`-th failure: 1 second, doubling up to a minute.
+fn retry_wait(failures: i64) -> Duration {
+    let doublings = u32::try_from(failures.saturating_sub(1))
+        .unwrap_or(0)
+        .min(6);
+    Duration::from_secs(1_u64 << doublings).min(LONGEST_RETRY_WAIT)
+}
+
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum HandlerError {
     #[error(transparent)]
@@ -360,8 +388,8 @@ pub(crate) enum HandlerError {
     #[error("delivery task failed: {0}")]
     Join(#[from] tokio::task::JoinError),
 
-    #[error("delivery failed: {0}")]
-    Delivery(String),
+    #[error("delivery failed: {error}")]
+    Delivery { error: String, retry_in: Duration },
 }
 
 #[cfg(test)]
@@ -369,13 +397,24 @@ pub(crate) async fn handle_next_delivery(
     store: &HaroldStore,
     dispatcher: Arc<dyn DeliveryDispatcher>,
 ) -> Result<bool, HandlerError> {
-    handle_next_delivery_inner(store, dispatcher, None).await
+    handle_next_delivery_inner(store, dispatcher, None, None).await
+}
+
+/// `handle_next_delivery` with the alert address on, queueing into `alerts`.
+#[cfg(test)]
+pub(crate) async fn handle_next_delivery_alerting(
+    store: &HaroldStore,
+    dispatcher: Arc<dyn DeliveryDispatcher>,
+    alerts: &AlertQueue,
+) -> Result<bool, HandlerError> {
+    handle_next_delivery_inner(store, dispatcher, None, Some(alerts)).await
 }
 
 async fn handle_next_delivery_inner(
     store: &HaroldStore,
     dispatcher: Arc<dyn DeliveryDispatcher>,
     snapshots: Option<&AgentSnapshotHub>,
+    alerts: Option<&AlertQueue>,
 ) -> Result<bool, HandlerError> {
     match snapshots {
         Some(snapshots) => {
@@ -390,6 +429,8 @@ async fn handle_next_delivery_inner(
     };
 
     let event_id = delivery.event_id.clone();
+    let attempt_count = delivery.attempt_count;
+    let last_try = attempt_count + 1 >= MAX_TRIES;
     let event_version = delivery.event_version;
     let event_type = delivery.event_type.clone();
     let trace_id = delivery.trace_id.clone();
@@ -398,6 +439,7 @@ async fn handle_next_delivery_inner(
     } else {
         None
     };
+    let given_up_origin = origin.clone();
     let span = info_span!(
         "event",
         trace_id = %trace_id,
@@ -411,6 +453,7 @@ async fn handle_next_delivery_inner(
             &delivery,
             origin.as_ref(),
             &span,
+            last_try,
         )
     })
     .await?;
@@ -445,8 +488,32 @@ async fn handle_next_delivery_inner(
                 Ok(true)
             }
             DispatchError::Retryable(error) => {
-                store.record_delivery_failure(&event_id, &error).await?;
-                Err(HandlerError::Delivery(error))
+                if !last_try {
+                    store.record_delivery_failure(&event_id, &error).await?;
+                    return Err(HandlerError::Delivery {
+                        error,
+                        retry_in: retry_wait(attempt_count + 1),
+                    });
+                }
+                // Stored before anything is said, so a give-up that was not stored is
+                // tried again and said then.
+                store.mark_undeliverable(&event_id, &error).await?;
+                if let Some(origin) = &given_up_origin {
+                    finish_given_up_request(&event_id, origin);
+                }
+                in_delivery(delivering.as_ref(), || {
+                    warn!(
+                        event_type,
+                        event_version = event_version.get(),
+                        outcome = "given_up",
+                        reason = "too_many_tries",
+                        "delivery given up"
+                    );
+                });
+                if let Some(alerts) = alerts {
+                    alerts.firing(crate::alerts::DELIVERY_GIVEN_UP);
+                }
+                Ok(true)
             }
         },
     }
@@ -459,7 +526,8 @@ async fn handle_next_delivery_inner(
 /// - The delivery continues the turn's trace, found by the event id, or by the turn's pane
 ///   when the handler that stored the turn end has not yet learned its event id. With
 ///   neither (after a restart, say), it starts its own trace.
-/// - A failed delivery is tried again, so the turn's trace is kept for the retry.
+/// - A failed delivery is tried again, so the turn's trace is kept for the retry, unless
+///   this was its last try, which records `given_up`.
 /// - `harold.delivery` has no `tracing` parent, so a line written in it after `event_span`
 ///   is left gets no span prefix in harold.log.
 fn dispatch_in_spans(
@@ -467,6 +535,7 @@ fn dispatch_in_spans(
     delivery: &PendingDelivery,
     origin: Option<&ReplyOrigin>,
     event_span: &tracing::Span,
+    last_try: bool,
 ) -> (
     Result<DeliveryOutcome, DispatchError>,
     Option<tracing::Span>,
@@ -502,10 +571,12 @@ fn dispatch_in_spans(
     let outcome = match &result {
         Ok(DeliveryOutcome::Delivered) => "delivered",
         Ok(DeliveryOutcome::Skipped) => "skipped",
+        Err(DispatchError::Retryable(_)) if last_try => "given_up",
         Err(_) => "failed",
     };
     delivering.record("outcome", outcome);
-    if let (Some(turn), Err(DispatchError::Retryable(_))) = (turn, &result)
+    if !last_try
+        && let (Some(turn), Err(DispatchError::Retryable(_))) = (turn, &result)
         && let Ok(event_id) = uuid::Uuid::parse_str(&delivery.event_id)
     {
         telemetry::keep_turn_delivery(event_id, turn);
@@ -578,7 +649,7 @@ async fn wait_or_shutdown(shutdown: &mut watch::Receiver<()>, delay: Duration) -
 pub async fn run_event_handler(
     store: Arc<HaroldStore>,
     snapshots: AgentSnapshotHub,
-    _alerts: Option<crate::alerts::AlertQueue>,
+    alerts: Option<crate::alerts::AlertQueue>,
     mut shutdown: watch::Receiver<()>,
 ) {
     let dispatcher: Arc<dyn DeliveryDispatcher> = Arc::new(production_dispatcher(
@@ -597,7 +668,14 @@ pub async fn run_event_handler(
             break;
         }
 
-        match handle_next_delivery_inner(&store, Arc::clone(&dispatcher), Some(&snapshots)).await {
+        match handle_next_delivery_inner(
+            &store,
+            Arc::clone(&dispatcher),
+            Some(&snapshots),
+            alerts.as_ref(),
+        )
+        .await
+        {
             Ok(true) => continue,
             Ok(false) => {
                 if wait_or_shutdown(&mut shutdown, Duration::from_millis(100)).await {

@@ -65,6 +65,64 @@ impl DeliveryDispatcher for FailingDispatcher {
     }
 }
 
+/// Fails each delivery whose `event_type` is `failing_type`, retryably, and delivers the
+/// rest. Records every event type it is handed.
+struct FailsOneType {
+    failing_type: &'static str,
+    handed: Mutex<Vec<String>>,
+}
+
+impl FailsOneType {
+    fn new(failing_type: &'static str) -> Self {
+        Self {
+            failing_type,
+            handed: Mutex::new(Vec::new()),
+        }
+    }
+}
+
+impl DeliveryDispatcher for FailsOneType {
+    fn dispatch(&self, delivery: &PendingDelivery) -> Result<DeliveryOutcome, DispatchError> {
+        self.handed
+            .lock()
+            .unwrap()
+            .push(delivery.event_type.clone());
+        if delivery.event_type == self.failing_type {
+            return Err(DispatchError::Retryable(
+                "osascript said: secret text".into(),
+            ));
+        }
+        Ok(DeliveryOutcome::Delivered)
+    }
+}
+
+/// A turn end and then a reply, stored in that order.
+async fn a_turn_end_then_a_reply(store: &HaroldStore) {
+    append_turn_completed(
+        store,
+        &TurnCompleted {
+            pane_id: "%4".into(),
+            pane_label: "harold:0.4".into(),
+            last_user_prompt: "Run the task".into(),
+            assistant_message: "private answer".into(),
+            main_context: "harold".into(),
+            agent_incarnation: None,
+            work_summary: CompletionSummaryUpdate::Unchanged,
+        },
+    )
+    .await
+    .unwrap();
+    append_inbound_message(
+        store,
+        &InboundMessage {
+            text: "continue".into(),
+            forwarded: false,
+        },
+    )
+    .await
+    .unwrap();
+}
+
 /// The dispatcher the daemon runs. Use it only where the event cannot reach a send.
 fn system_dispatcher() -> ProductionDispatcher {
     ProductionDispatcher::new(Arc::new(SystemEnvironment), None)
@@ -169,10 +227,178 @@ async fn retryable_delivery_failure_remains_pending_for_a_later_attempt() {
     assert!(store.next_pending_delivery().await.unwrap().is_none());
 }
 
+#[test]
+fn waits_double_from_one_second_to_a_minute() {
+    let waits: Vec<u64> = (1..=9).map(|n| super::retry_wait(n).as_secs()).collect();
+    assert_eq!(waits, [1, 2, 4, 8, 16, 32, 60, 60, 60]);
+}
+
+#[tokio::test]
+async fn a_delivery_failing_ten_times_is_given_up_and_the_next_is_delivered() {
+    let directory = TestDirectory::new();
+    let store = HaroldStore::open(&directory.0).await.unwrap();
+    a_turn_end_then_a_reply(&store).await;
+    let dispatcher = Arc::new(FailsOneType::new("TurnCompleted"));
+    let logs = CapturedLogs::start();
+
+    for failure in 1..=9 {
+        let error = handle_next_delivery(&store, dispatcher.clone())
+            .await
+            .unwrap_err();
+        let super::HandlerError::Delivery { retry_in, .. } = error else {
+            panic!("failure {failure} was {error}");
+        };
+        assert_eq!(retry_in, super::retry_wait(failure));
+    }
+    assert!(
+        handle_next_delivery(&store, dispatcher.clone())
+            .await
+            .unwrap()
+    );
+    assert!(
+        handle_next_delivery(&store, dispatcher.clone())
+            .await
+            .unwrap()
+    );
+    assert!(
+        !handle_next_delivery(&store, dispatcher.clone())
+            .await
+            .unwrap()
+    );
+
+    let handed = dispatcher.handed.lock().unwrap().clone();
+    assert_eq!(handed.len(), 11);
+    assert!(handed[..10].iter().all(|kind| kind == "TurnCompleted"));
+    assert_eq!(handed[10], "InboundMessageReceived");
+    let text = logs.text();
+    assert_eq!(text.matches("delivery given up").count(), 1, "{text}");
+    for field in [
+        "event_type=\"TurnCompleted\"",
+        "event_version=1",
+        "outcome=\"given_up\"",
+        "reason=\"too_many_tries\"",
+    ] {
+        assert!(text.contains(field), "{field} missing: {text}");
+    }
+    // Neither the error's text nor the payload's reaches the new line.
+    let given_up_line = text
+        .lines()
+        .find(|line| line.contains("delivery given up"))
+        .unwrap();
+    assert!(!given_up_line.contains("secret text"), "{given_up_line}");
+    assert!(!given_up_line.contains("private answer"), "{given_up_line}");
+    assert!(!given_up_line.contains("event_id"), "{given_up_line}");
+}
+
+#[tokio::test]
+async fn a_delivery_that_fails_twice_then_succeeds_is_delivered_and_not_given_up() {
+    let directory = TestDirectory::new();
+    let store = HaroldStore::open(&directory.0).await.unwrap();
+    append_inbound_message(
+        &store,
+        &InboundMessage {
+            text: "third time".into(),
+            forwarded: false,
+        },
+    )
+    .await
+    .unwrap();
+    let logs = CapturedLogs::start();
+
+    for _ in 0..2 {
+        assert!(
+            handle_next_delivery(&store, Arc::new(FailingDispatcher))
+                .await
+                .is_err()
+        );
+    }
+    assert!(
+        handle_next_delivery(&store, Arc::new(RecordingDispatcher::default()))
+            .await
+            .unwrap()
+    );
+
+    assert!(store.next_pending_delivery().await.unwrap().is_none());
+    assert!(!logs.text().contains("delivery given up"));
+}
+
+#[tokio::test]
+async fn failures_before_a_restart_count_toward_the_ten() {
+    let directory = TestDirectory::new();
+    let store = HaroldStore::open(&directory.0).await.unwrap();
+    a_turn_end_then_a_reply(&store).await;
+    let dispatcher = Arc::new(FailsOneType::new("TurnCompleted"));
+    for _ in 0..7 {
+        assert!(
+            handle_next_delivery(&store, dispatcher.clone())
+                .await
+                .is_err()
+        );
+    }
+    drop(store);
+
+    let store = HaroldStore::open(&directory.0).await.unwrap();
+    assert_eq!(
+        store
+            .next_pending_delivery()
+            .await
+            .unwrap()
+            .unwrap()
+            .attempt_count,
+        7
+    );
+    assert!(
+        handle_next_delivery(&store, dispatcher.clone())
+            .await
+            .is_err()
+    );
+    assert!(
+        handle_next_delivery(&store, dispatcher.clone())
+            .await
+            .is_err()
+    );
+    assert!(
+        handle_next_delivery(&store, dispatcher.clone())
+            .await
+            .unwrap()
+    );
+
+    let next = store.next_pending_delivery().await.unwrap().unwrap();
+    assert_eq!(next.event_type, "InboundMessageReceived");
+}
+
+#[tokio::test]
+async fn giving_up_queues_the_alert_line_when_the_address_is_on() {
+    let directory = TestDirectory::new();
+    let store = HaroldStore::open(&directory.0).await.unwrap();
+    a_turn_end_then_a_reply(&store).await;
+    let dispatcher = Arc::new(FailsOneType::new("TurnCompleted"));
+    let (alerts, mut alert_rx) = crate::alerts::AlertQueue::new();
+
+    for _ in 0..9 {
+        assert!(
+            super::handle_next_delivery_alerting(&store, dispatcher.clone(), &alerts)
+                .await
+                .is_err()
+        );
+        assert!(alert_rx.try_recv().is_err(), "no line before giving up");
+    }
+    assert!(
+        super::handle_next_delivery_alerting(&store, dispatcher.clone(), &alerts)
+            .await
+            .unwrap()
+    );
+
+    let (line, _) = alert_rx.try_recv().unwrap();
+    assert_eq!(line, "harold alert: delivery-given-up firing");
+    assert!(alert_rx.try_recv().is_err());
+}
+
 #[tokio::test]
 async fn permanently_invalid_event_does_not_block_later_deliveries() {
     let directory = TestDirectory::new();
     let store = HaroldStore::open(&directory.0).await.unwrap();
+    let logs = CapturedLogs::start();
     store
         .stream()
         .append([NewEvent::new("Unknown", json!({"unexpected": true}))])
@@ -195,6 +421,8 @@ async fn permanently_invalid_event_does_not_block_later_deliveries() {
     );
     let next = store.next_pending_delivery().await.unwrap().unwrap();
     assert_eq!(next.event_version.get(), 2);
+    // Undeliverable on its first try, and not as a give-up.
+    assert!(!logs.text().contains("delivery given up"));
 }
 
 #[tokio::test]
@@ -1050,7 +1278,7 @@ async fn drain(
     snapshots: &AgentSnapshotHub,
     dispatcher: &Arc<dyn DeliveryDispatcher>,
 ) {
-    while handle_next_delivery_inner(store, Arc::clone(dispatcher), Some(snapshots))
+    while handle_next_delivery_inner(store, Arc::clone(dispatcher), Some(snapshots), None)
         .await
         .unwrap()
     {}
@@ -1358,7 +1586,7 @@ async fn message_whose_send_failed_is_dropped_once_an_agent_runs_in_the_folder()
 
     // No agent is in the folder, so the message is tried, and the send fails.
     environment.set_fail_sends(true);
-    let error = handle_next_delivery_inner(&store, Arc::clone(&dispatcher), Some(&snapshots))
+    let error = handle_next_delivery_inner(&store, Arc::clone(&dispatcher), Some(&snapshots), None)
         .await
         .unwrap_err();
     assert!(error.to_string().contains("channel down"));
@@ -1841,6 +2069,98 @@ fn attr(span: &opentelemetry_sdk::trace::SpanData, key: &str) -> String {
 }
 
 #[tokio::test]
+async fn a_given_up_reply_is_counted_unavailable() {
+    telemetry::test_support::install();
+    let channel = unique_channel();
+    let router: Router = Arc::new(|_, _| Err("tmux failed".into()));
+    let (fixture, dispatcher) = fixture_with_router(router).await;
+    store_reply_as_listener(
+        &fixture.store,
+        channel,
+        time::OffsetDateTime::now_utc(),
+        "hi",
+    )
+    .await;
+
+    for _ in 0..9 {
+        assert!(
+            handle_next_delivery(&fixture.store, dispatcher.clone())
+                .await
+                .is_err()
+        );
+    }
+    assert!(
+        handle_next_delivery(&fixture.store, dispatcher.clone())
+            .await
+            .unwrap()
+    );
+
+    let trace_id = first_envelope(&fixture.store).await.trace_id.unwrap();
+    let requests = spans_in_trace("harold.phone_request", &trace_id);
+    assert_eq!(requests.len(), 1);
+    assert_eq!(attr(&requests[0], "outcome"), "unavailable");
+    assert_eq!(
+        telemetry::test_support::counter_value(
+            "harold.phone_requests",
+            &[
+                ("channel", channel),
+                ("outcome", "unavailable"),
+                ("resolved_by", "none"),
+            ],
+        ),
+        Some(1)
+    );
+}
+
+#[tokio::test]
+async fn a_given_up_reply_with_no_listener_request_is_counted_unavailable() {
+    use opentelemetry::trace::TraceContextExt as _;
+    telemetry::test_support::install();
+    let router: Router = Arc::new(|_, _| Err("tmux failed".into()));
+    let (fixture, dispatcher) = fixture_with_router(router).await;
+    // Stored as after a restart: no listener opened a request for it.
+    append_inbound_message(
+        &fixture.store,
+        &InboundMessage {
+            text: "hi".into(),
+            forwarded: true,
+        },
+    )
+    .await
+    .unwrap();
+    // Projected as the handler projects it, so its outbox row exists to read.
+    fixture.store.project_unhandled_events(500).await.unwrap();
+    let event_id = fixture
+        .store
+        .next_pending_delivery()
+        .await
+        .unwrap()
+        .unwrap()
+        .event_id;
+
+    for _ in 0..9 {
+        assert!(
+            handle_next_delivery(&fixture.store, dispatcher.clone())
+                .await
+                .is_err()
+        );
+    }
+    let open = telemetry::open_reply_for(&format!("event:{event_id}"))
+        .expect("the first try opened a request under the event's key");
+    let trace_id = open.cx.span().span_context().trace_id().to_string();
+    assert!(
+        handle_next_delivery(&fixture.store, dispatcher.clone())
+            .await
+            .unwrap()
+    );
+
+    let requests = spans_in_trace("harold.phone_request", &trace_id);
+    assert_eq!(requests.len(), 1);
+    assert_eq!(attr(&requests[0], "outcome"), "unavailable");
+    assert_eq!(attr(&requests[0], "channel"), "forwarded");
+}
+
+#[tokio::test]
 async fn a_routed_reply_records_typed_with_latency_from_its_own_time() {
     telemetry::test_support::install();
     let pane = unique_pane();
@@ -2161,6 +2481,7 @@ fn dispatch_turn_end(
         &turn_end_delivery(event_id, pane_id),
         None,
         &event,
+        false,
     )
     .0
 }
@@ -2221,6 +2542,33 @@ fn deliveries_under(
         .into_iter()
         .filter(|span| span.name == "harold.delivery" && span.parent_span_id == parent)
         .collect()
+}
+
+#[test]
+fn a_given_up_turn_end_records_given_up_and_keeps_no_trace() {
+    let event_id = uuid::Uuid::new_v4();
+    let (_, parent) = keep_a_turn_for(event_id);
+    let environment = Arc::new(FakeEnvironment::new(""));
+    let dispatcher = Unpaused(dispatcher_with(&environment));
+    let pane = unique_pane();
+    environment.set_fail_sends(true);
+
+    let event = tracing::info_span!("event", event_type = "TurnCompleted");
+    let (result, _) = super::dispatch_in_spans(
+        &dispatcher,
+        &turn_end_delivery(&event_id.to_string(), &pane),
+        None,
+        &event,
+        true,
+    );
+
+    assert!(matches!(result, Err(DispatchError::Retryable(_))));
+    let outcomes: Vec<String> = deliveries_under(parent)
+        .iter()
+        .map(|span| attr(span, "outcome"))
+        .collect();
+    assert_eq!(outcomes, ["given_up"]);
+    assert!(telemetry::take_turn_delivery(&event_id.to_string()).is_none());
 }
 
 #[test]
@@ -2357,6 +2705,7 @@ fn only_a_turn_end_gets_a_delivery_span() {
             &away_delivery(json!(pod_message("Pod 3 is blocked"))),
             None,
             &event,
+            false,
         )
         .0
     });
