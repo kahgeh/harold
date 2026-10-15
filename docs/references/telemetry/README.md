@@ -406,14 +406,14 @@ Harold answers:
 - `204` for a post naming one of the four alerts with state `firing` or `cleared`. It then types exactly `harold alert: <name> <state>` into the pane of the agent running in the chief's folder, `[notify] away_messages_only_from`.
 - `400` for anything else, including another path or method. It logs `alert ignored (unknown alert)` and types nothing.
 
-Harold types one line of its own the same way: `harold alert: delivery-given-up firing`, when it gives up a delivery after 10 failed tries (see the [notification reference](../notification/README.md#architecture)). It carries no message text. It is typed only when `alert_listen` is set, with the checks and the 10 minutes below, as a posted line is. A post naming `delivery-given-up` is answered `400`.
+Harold types one line of its own the same way: `harold alert: delivery-given-up firing`, when it gives up a delivery after 10 failed tries (see the [notification reference](../notification/README.md#architecture)). It carries no message text. It is typed only when `alert_listen` is set and the address opened, with the checks and the 10 minutes below, as a posted line is. A post naming `delivery-given-up` is answered `400`.
 
 No log line carries any part of a posted body.
 
 Typing follows the timed prompts' checks: the pane must be idle and its input box empty. Harold tries every 5 seconds. A line is dropped, and logged as `alert not delivered (<reason>)`, when:
 
 - no agent runs in the chief's folder (`no_chief`);
-- the chief's pane stays busy for 10 minutes, counted from the post (`agent_busy`), or another check keeps failing that long. Lines are typed one at a time, so a line queued behind one that waited may find its 10 minutes already up;
+- the chief's pane stays busy for 10 minutes, counted from the post, or for Harold's own line from when it was queued (`agent_busy`), or another check keeps failing that long. Lines are typed one at a time, so a line queued behind one that waited may find its 10 minutes already up;
 - the queue of 32 lines waiting to be typed is full (`queue_full`). The post is still answered 204.
 
 One writer at a time types into a pane. Alerts, timed prompts and phone replies share a lock per pane around typing and Enter. Alerts and timed prompts also treat a pane as busy for a minute after anyone typed into it, because the agents view can still read idle just after typing.
