@@ -405,7 +405,7 @@ async fn handle_next_delivery_inner(
         event_type = %event_type,
     );
     let blocking_dispatcher = Arc::clone(&dispatcher);
-    let result = tokio::task::spawn_blocking(move || {
+    let (result, delivering) = tokio::task::spawn_blocking(move || {
         dispatch_in_spans(
             blocking_dispatcher.as_ref(),
             &delivery,
@@ -419,25 +419,29 @@ async fn handle_next_delivery_inner(
         Ok(outcome) => {
             store.mark_delivered(&event_id).await?;
             if outcome == DeliveryOutcome::Skipped {
-                info!(
-                    event_id,
-                    event_version = event_version.get(),
-                    event_type,
-                    "delivery intentionally skipped"
-                );
+                in_delivery(delivering.as_ref(), || {
+                    info!(
+                        event_id,
+                        event_version = event_version.get(),
+                        event_type,
+                        "delivery intentionally skipped"
+                    );
+                });
             }
             Ok(true)
         }
         Err(error) => match error {
             DispatchError::Permanent(error) => {
                 store.mark_undeliverable(&event_id, &error).await?;
-                warn!(
-                    event_id,
-                    event_version = event_version.get(),
-                    event_type,
-                    error,
-                    "event is permanently undeliverable; continuing"
-                );
+                in_delivery(delivering.as_ref(), || {
+                    warn!(
+                        event_id,
+                        event_version = event_version.get(),
+                        event_type,
+                        error,
+                        "event is permanently undeliverable; continuing"
+                    );
+                });
                 Ok(true)
             }
             DispatchError::Retryable(error) => {
@@ -449,31 +453,47 @@ async fn handle_next_delivery_inner(
 }
 
 /// Dispatches `delivery` inside `event_span` and, for a turn end, inside
-/// `harold.delivery`, which records the channel and the outcome. The delivery continues
-/// the turn's trace when it is kept, and starts its own otherwise (after a restart, say).
-/// A failed delivery is tried again, so the turn's trace is kept for the retry.
+/// `harold.delivery`, which records the channel and the outcome. Returns the result and
+/// the delivery span, if any, for the lines written about the result.
+///
+/// - The delivery continues the turn's trace, found by the event id, or by the turn's pane
+///   when the handler that stored the turn end has not yet learned its event id. With
+///   neither (after a restart, say), it starts its own trace.
+/// - A failed delivery is tried again, so the turn's trace is kept for the retry.
+/// - `harold.delivery` has no `tracing` parent, so a line written in it after `event_span`
+///   is left gets no span prefix in harold.log.
 fn dispatch_in_spans(
     dispatcher: &dyn DeliveryDispatcher,
     delivery: &PendingDelivery,
     origin: Option<&ReplyOrigin>,
     event_span: &tracing::Span,
-) -> Result<DeliveryOutcome, DispatchError> {
+) -> (
+    Result<DeliveryOutcome, DispatchError>,
+    Option<tracing::Span>,
+) {
     let _event = event_span.enter();
     let dispatch = || match origin {
         Some(origin) => dispatcher.dispatch_reply(delivery, origin),
         None => dispatcher.dispatch(delivery),
     };
     if delivery.event_type != "TurnCompleted" {
-        return dispatch();
+        return (dispatch(), None);
     }
     let delivering = info_span!(
         target: TRACE_TARGET,
+        parent: None,
         "harold.delivery",
         kind = "turn_end",
         channel = tracing::field::Empty,
         outcome = tracing::field::Empty,
     );
-    let turn = telemetry::take_turn_delivery(&delivery.event_id);
+    let turn = telemetry::take_turn_delivery(&delivery.event_id).or_else(|| {
+        delivery
+            .payload
+            .get("pane_id")
+            .and_then(serde_json::Value::as_str)
+            .and_then(telemetry::take_pending_turn)
+    });
     if let Some(turn) = &turn {
         // Fails only when no export layer is installed, and then there is no trace to join.
         let _ = delivering.set_parent(turn.clone());
@@ -490,7 +510,16 @@ fn dispatch_in_spans(
     {
         telemetry::keep_turn_delivery(event_id, turn);
     }
-    result
+    (result, Some(delivering))
+}
+
+/// Runs `log` inside the delivery span `delivering`, when there is one, so the line
+/// carries the turn's trace.
+fn in_delivery(delivering: Option<&tracing::Span>, log: impl FnOnce()) {
+    match delivering {
+        Some(span) => span.in_scope(log),
+        None => log(),
+    }
 }
 
 /// The trace and time the stored reply at `version` recorded. When its event cannot be

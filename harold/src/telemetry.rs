@@ -733,6 +733,13 @@ static BUSY_SINCE: Mutex<BTreeMap<String, (OffsetDateTime, OffsetDateTime)>> =
 static TURN_DELIVERIES: Mutex<BTreeMap<String, (OffsetDateTime, Context)>> =
     Mutex::new(BTreeMap::new());
 
+/// Turn ends whose event is being stored, by pane, oldest first: each
+/// `harold.turn_complete` context with when it was kept. The event handler may deliver a
+/// stored turn end before the handler that stored it learns its event id; it then finds
+/// the turn here, by the pane.
+static PENDING_TURNS: Mutex<BTreeMap<String, Vec<(OffsetDateTime, Context)>>> =
+    Mutex::new(BTreeMap::new());
+
 /// Records that the agent monitor saw `pane_id` busy at `at_ms` (milliseconds since the
 /// Unix epoch). Only the first since the pane's last turn end is kept.
 pub(crate) fn pane_turned_busy(pane_id: &str, at_ms: i64) {
@@ -767,6 +774,8 @@ pub(crate) struct TurnTrace {
 ///   trace otherwise. A prompt typed after `hook_reached` belongs to the next turn: it is
 ///   kept for that turn and this one does not join it.
 /// - `session.id` is `session_id`, or the pane id with `session.source = "pane"`.
+/// - The exported pane id is the one `harold.log` writes: a malformed one is
+///   `<invalid-pane-id>`.
 /// - An unknown start gives a span that starts at `hook_reached` with
 ///   `turn.start = "unknown"`, and no duration.
 pub(crate) fn begin_turn_complete(
@@ -788,6 +797,9 @@ pub(crate) fn begin_turn_complete(
     };
     let start = turn_start(hook_time, typed, take_busy_since(pane_id), hook_reached);
 
+    // Exported as harold.log writes it, so a malformed pane id cannot grow the metric's
+    // labels without bound.
+    let pane_id = crate::pane_id_for_log(pane_id);
     let session = session_id.unwrap_or(pane_id).to_string();
     let started_by = start.started_by.as_str();
     let mut attributes = vec![
@@ -833,6 +845,72 @@ pub(crate) fn begin_turn_complete(
     // Fails only when no export layer is installed, and then there is no trace to join.
     let _ = turn_complete.set_parent(turn_cx);
     TurnTrace { turn_complete }
+}
+
+/// Whether `a` and `b` hold the same span.
+fn same_span(a: &Context, b: &Context) -> bool {
+    a.span().span_context().span_id() == b.span().span_context().span_id()
+}
+
+/// Keeps the `harold.turn_complete` context `cx` under `pane_id` while its turn end is
+/// being stored. A context with no trace is not kept.
+pub(crate) fn keep_pending_turn(pane_id: &str, cx: Context) {
+    if !cx.span().span_context().is_valid() {
+        return;
+    }
+    let now = OffsetDateTime::now_utc();
+    let mut pending = locked(&PENDING_TURNS);
+    for turns in pending.values_mut() {
+        turns.retain(|(kept_at, _)| !expired(*kept_at, now));
+    }
+    pending.retain(|_, turns| !turns.is_empty());
+    pending
+        .entry(pane_id.to_string())
+        .or_default()
+        .push((now, cx));
+}
+
+/// Removes the turn `cx` from the pane's pending turns, and says whether it was there.
+fn remove_pending_turn(pane_id: &str, cx: &Context) -> bool {
+    let mut pending = locked(&PENDING_TURNS);
+    let Some(turns) = pending.get_mut(pane_id) else {
+        return false;
+    };
+    let before = turns.len();
+    turns.retain(|(_, kept)| !same_span(kept, cx));
+    let removed = turns.len() < before;
+    if turns.is_empty() {
+        pending.remove(pane_id);
+    }
+    removed
+}
+
+/// The turn end `cx` on `pane_id` is stored as `event_id`: its delivery finds it by the
+/// event id from now on. When the delivery has already taken it by the pane, it is not
+/// kept again.
+pub(crate) fn settle_pending_turn(pane_id: &str, event_id: uuid::Uuid, cx: &Context) {
+    if remove_pending_turn(pane_id, cx) {
+        keep_turn_delivery(event_id, cx.clone());
+    }
+}
+
+/// The turn end `cx` on `pane_id` was not stored: no delivery joins it.
+pub(crate) fn forget_pending_turn(pane_id: &str, cx: &Context) {
+    remove_pending_turn(pane_id, cx);
+}
+
+/// The oldest turn on `pane_id` whose turn end is still being stored, if it was kept
+/// within `PROMPT_KEPT`. It is taken once.
+pub(crate) fn take_pending_turn(pane_id: &str) -> Option<Context> {
+    let now = OffsetDateTime::now_utc();
+    let mut pending = locked(&PENDING_TURNS);
+    let turns = pending.get_mut(pane_id)?;
+    turns.retain(|(kept_at, _)| !expired(*kept_at, now));
+    let taken = (!turns.is_empty()).then(|| turns.remove(0).1);
+    if turns.is_empty() {
+        pending.remove(pane_id);
+    }
+    taken
 }
 
 /// Keeps the `harold.turn_complete` context `cx` for the delivery of the turn end

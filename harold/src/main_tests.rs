@@ -2168,4 +2168,103 @@ mod one_trace_per_turn {
         );
         task.abort();
     }
+
+    #[tokio::test]
+    async fn a_skipped_turn_end_is_logged_inside_the_turns_trace() {
+        test_support::install();
+        let pane = unique_pane();
+        let directory = TestDirectory::new();
+        let store = Arc::new(store::HaroldStore::open(&directory.0).await.unwrap());
+        let (service, _shutdown, task) = test_service(Arc::clone(&store), empty_snapshot());
+        let environment = Arc::new(FakeEnvironment::new(""));
+        environment.set_session_attached(true);
+        let dispatcher = fake_dispatcher(&environment, typing_router(&pane));
+
+        store_reply(&store, "please build it", OffsetDateTime::now_utc()).await;
+        assert!(
+            handle_next_delivery(&store, Arc::clone(&dispatcher))
+                .await
+                .unwrap()
+        );
+        service
+            .turn_complete(Request::new(TurnCompleteRequest {
+                pane_id: pane.clone(),
+                ..Default::default()
+            }))
+            .await
+            .unwrap();
+        let logs = crate::outbound::fake::CapturedLogs::start();
+        assert!(handle_next_delivery(&store, dispatcher).await.unwrap());
+
+        assert!(environment.delivered().is_empty());
+        let trace_id = span_on("harold.phone_request", &pane)
+            .span_context
+            .trace_id();
+        let deliveries = in_trace("harold.delivery", trace_id);
+        assert_eq!(deliveries.len(), 1);
+        assert_eq!(
+            span_attr(&deliveries[0], "outcome").as_deref(),
+            Some("skipped")
+        );
+        let skipped_in_trace = test_support::logs().iter().any(|log| {
+            log.record
+                .body()
+                .is_some_and(|body| format!("{body:?}").contains("delivery intentionally skipped"))
+                && log.record.trace_context().map(|trace| trace.trace_id) == Some(trace_id)
+        });
+        assert!(
+            skipped_in_trace,
+            "the skipped line carries the turn's trace"
+        );
+        // harold.log writes the line as before, with no span prefix.
+        assert!(
+            logs.text()
+                .contains("INFO harold::projector: delivery intentionally skipped event_id="),
+            "{}",
+            logs.text()
+        );
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn the_turn_exports_the_pane_id_as_harold_log_shows_it() {
+        test_support::install();
+        let session = format!("session-{}", uuid::Uuid::new_v4());
+        let directory = TestDirectory::new();
+        let store = Arc::new(store::HaroldStore::open(&directory.0).await.unwrap());
+        let (service, _shutdown, task) = test_service(Arc::clone(&store), empty_snapshot());
+
+        service
+            .turn_complete(Request::new(TurnCompleteRequest {
+                pane_id: format!("not-a-pane-{}", uuid::Uuid::new_v4()),
+                session_id: session.clone(),
+                ..Default::default()
+            }))
+            .await
+            .unwrap();
+
+        let turns: Vec<_> = test_support::spans()
+            .into_iter()
+            .filter(|span| {
+                span.name == "harold.turn"
+                    && span_attr(span, "session.id").as_deref() == Some(session.as_str())
+            })
+            .collect();
+        assert_eq!(turns.len(), 1);
+        assert_eq!(
+            span_attr(&turns[0], "pane_id").as_deref(),
+            Some("<invalid-pane-id>")
+        );
+        assert_eq!(
+            test_support::counter_value(
+                "harold.turns",
+                &[
+                    ("session.id", session.as_str()),
+                    ("pane_id", "<invalid-pane-id>")
+                ],
+            ),
+            Some(1)
+        );
+        task.abort();
+    }
 }

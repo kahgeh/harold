@@ -2137,6 +2137,7 @@ fn dispatch_turn_end(
         None,
         &event,
     )
+    .0
 }
 
 /// Delivers a turn end on `pane_id` as the event handler does, on this thread, through the
@@ -2158,23 +2159,33 @@ pub(crate) fn fake_dispatcher(
     Arc::new(Unpaused(dispatcher_with(environment).with_router(router)))
 }
 
-/// A live span standing in for a turn's `harold.turn_complete`, kept for the turn end
-/// `event_id`. Returns the span's trace and span ids.
-fn keep_a_turn_for(
-    event_id: uuid::Uuid,
-) -> (opentelemetry::trace::TraceId, opentelemetry::trace::SpanId) {
+/// A live span standing in for a turn's `harold.turn_complete`: its trace id, span id
+/// and context.
+fn a_live_turn() -> (
+    opentelemetry::trace::TraceId,
+    opentelemetry::trace::SpanId,
+    opentelemetry::Context,
+) {
     use opentelemetry::trace::TraceContextExt as _;
     use tracing_opentelemetry::OpenTelemetrySpanExt as _;
     telemetry::test_support::install();
     let turn = tracing::info_span!(target: telemetry::TRACE_TARGET, "test.turn_complete");
     let cx = turn.context();
-    let ids = {
+    let (trace_id, span_id) = {
         let span = cx.span();
         let context = span.span_context();
         (context.trace_id(), context.span_id())
     };
+    (trace_id, span_id, cx)
+}
+
+/// A live turn, kept for the turn end `event_id`. Returns the span's trace and span ids.
+fn keep_a_turn_for(
+    event_id: uuid::Uuid,
+) -> (opentelemetry::trace::TraceId, opentelemetry::trace::SpanId) {
+    let (trace_id, span_id, cx) = a_live_turn();
     telemetry::keep_turn_delivery(event_id, cx);
-    ids
+    (trace_id, span_id)
 }
 
 /// The exported `harold.delivery` spans whose parent is the span `parent`.
@@ -2322,8 +2333,139 @@ fn only_a_turn_end_gets_a_delivery_span() {
             None,
             &event,
         )
+        .0
     });
 
     assert!(matches!(outcome, Ok(DeliveryOutcome::Delivered)));
     assert!(deliveries_under(parent).is_empty());
+}
+
+#[test]
+fn a_turn_end_delivered_before_its_event_id_is_kept_joins_the_turn_by_its_pane() {
+    let (trace_id, parent, cx) = a_live_turn();
+    let pane = unique_pane();
+    let event_id = uuid::Uuid::new_v4();
+    let environment = Arc::new(FakeEnvironment::new(""));
+    // The handler keeps the turn under its pane before it asks the monitor to store it.
+    telemetry::keep_pending_turn(&pane, cx.clone());
+
+    // The event handler delivers the stored turn end before the handler has its event id.
+    let outcome = dispatch_turn_end(
+        &Unpaused(dispatcher_with(&environment)),
+        &event_id.to_string(),
+        &pane,
+    );
+    telemetry::settle_pending_turn(&pane, event_id, &cx);
+
+    assert!(matches!(outcome, Ok(DeliveryOutcome::Delivered)));
+    let deliveries = deliveries_under(parent);
+    assert_eq!(deliveries.len(), 1);
+    assert_eq!(deliveries[0].span_context.trace_id(), trace_id);
+    assert!(
+        telemetry::take_turn_delivery(&event_id.to_string()).is_none(),
+        "a turn its delivery already joined is not kept again"
+    );
+
+    // A later turn end on the same pane does not join this turn.
+    let later = dispatch_turn_end(
+        &Unpaused(dispatcher_with(&Arc::new(FakeEnvironment::new("")))),
+        &uuid::Uuid::new_v4().to_string(),
+        &pane,
+    );
+    assert!(matches!(later, Ok(DeliveryOutcome::Delivered)));
+    assert_eq!(deliveries_under(parent).len(), 1);
+}
+
+#[test]
+fn a_turn_stored_before_its_delivery_is_kept_by_its_event_id_only() {
+    let (_, parent, cx) = a_live_turn();
+    let pane = unique_pane();
+    let event_id = uuid::Uuid::new_v4();
+    telemetry::keep_pending_turn(&pane, cx.clone());
+    telemetry::settle_pending_turn(&pane, event_id, &cx);
+
+    // Another turn end on the pane, with another event id, does not take it.
+    let other = dispatch_turn_end(
+        &Unpaused(dispatcher_with(&Arc::new(FakeEnvironment::new("")))),
+        &uuid::Uuid::new_v4().to_string(),
+        &pane,
+    );
+    assert!(matches!(other, Ok(DeliveryOutcome::Delivered)));
+    assert!(deliveries_under(parent).is_empty());
+
+    let own = dispatch_turn_end(
+        &Unpaused(dispatcher_with(&Arc::new(FakeEnvironment::new("")))),
+        &event_id.to_string(),
+        &pane,
+    );
+    assert!(matches!(own, Ok(DeliveryOutcome::Delivered)));
+    assert_eq!(deliveries_under(parent).len(), 1);
+}
+
+#[test]
+fn a_turn_whose_store_failed_is_not_joined_by_a_later_turn_end() {
+    let (_, parent, cx) = a_live_turn();
+    let pane = unique_pane();
+    telemetry::keep_pending_turn(&pane, cx.clone());
+    telemetry::forget_pending_turn(&pane, &cx);
+
+    let later = dispatch_turn_end(
+        &Unpaused(dispatcher_with(&Arc::new(FakeEnvironment::new("")))),
+        &uuid::Uuid::new_v4().to_string(),
+        &pane,
+    );
+    assert!(matches!(later, Ok(DeliveryOutcome::Delivered)));
+    assert!(deliveries_under(parent).is_empty());
+}
+
+/// Whether an exported log record with the body `body` carries the trace `trace_id`.
+fn logged_in_trace(body: &str, trace_id: opentelemetry::trace::TraceId) -> bool {
+    telemetry::test_support::logs().iter().any(|log| {
+        log.record
+            .body()
+            .is_some_and(|value| format!("{value:?}").contains(body))
+            && log.record.trace_context().map(|trace| trace.trace_id) == Some(trace_id)
+    })
+}
+
+#[tokio::test]
+async fn an_undeliverable_turn_end_is_logged_inside_its_trace() {
+    let directory = TestDirectory::new();
+    let store = HaroldStore::open(&directory.0).await.unwrap();
+    let appended = store
+        .stream()
+        .append(
+            ExpectedVersion::Any,
+            [NewEvent {
+                r#type: "TurnCompleted".into(),
+                payload: json!({"pane_id": 7}),
+                workflow_kind: None,
+                workflow: WorkflowRef::None,
+                request_id: None,
+                actor_id: "system:test".into(),
+                actor_type: ActorType::System,
+            }],
+        )
+        .await
+        .unwrap();
+    let (trace_id, _) = keep_a_turn_for(appended.events[0].id);
+    let logs = CapturedLogs::start();
+
+    assert!(
+        handle_next_delivery(&store, Arc::new(system_dispatcher()))
+            .await
+            .unwrap()
+    );
+
+    assert!(logged_in_trace(
+        "event is permanently undeliverable",
+        trace_id
+    ));
+    // harold.log writes the line as before, with no span prefix.
+    assert!(
+        logs.text()
+            .contains("WARN harold::projector: event is permanently undeliverable"),
+        "{}",
+        logs.text()
+    );
 }

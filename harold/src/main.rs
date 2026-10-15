@@ -207,7 +207,10 @@ impl Harold for HaroldService {
             non_empty(&req.turn_started_at),
             hook_reached,
         );
-        let turn_complete = trace.turn_complete.clone();
+        let turn_cx = trace.turn_complete.context();
+        // Kept by the pane before the monitor stores the turn end: the event handler may
+        // deliver it before the monitor answers with its event id.
+        telemetry::keep_pending_turn(&req.pane_id, turn_cx.clone());
 
         async {
             let pane_id = req.pane_id.clone();
@@ -228,15 +231,17 @@ impl Harold for HaroldService {
                 .turn_completed(event)
                 .await
                 .map_err(|e| {
+                    telemetry::forget_pending_turn(&pane_id, &turn_cx);
                     tracing::error!(pane_id = %pane_id_log, result = "append_failed", error = %e, "turn complete rejected");
                     Status::internal("event store write failed")
                 })?;
-            if let Some(stored) = appended
+            match appended
                 .events
                 .iter()
                 .find(|envelope| envelope.r#type == "TurnCompleted")
             {
-                telemetry::keep_turn_delivery(stored.id, turn_complete.context());
+                Some(stored) => telemetry::settle_pending_turn(&pane_id, stored.id, &turn_cx),
+                None => telemetry::forget_pending_turn(&pane_id, &turn_cx),
             }
 
             info!(pane_id = %pane_id_log, result = "accepted", "turn complete persisted");
