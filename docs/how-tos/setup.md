@@ -203,12 +203,12 @@ Reinstall archives the previous installation, including its data, and prints the
 
 ### Upgrading from a build with data/events
 
-An install whose bundle has `data/events/` and no `data/store/` starts Harold on an empty store in `data/store/` and leaves `data/events/` as it is. [Starting fresh](../references/operation/README.md#starting-fresh) lists what the empty store does not carry over. Two steps keep the loss small:
+A normal install (without `--reinstall`) whose bundle has `data/events/` and no `data/store/` starts Harold on an empty store in `data/store/` and leaves `data/events/` as it is. `--reinstall` moves the whole bundle, `data/events/` included, to the `harold.backup-*` folder it prints. [Starting fresh](../references/operation/README.md#starting-fresh) lists what the empty store does not carry over. Two steps keep the loss small:
 
 1. Install when nothing is waiting to be delivered. Messages still waiting in the delivery outbox of `data/events/` are not sent; the outbox normally empties within seconds of a message arriving.
 2. After the install, set mute or pause again in `tmx-agent-dash` if you want them. Both start off.
 
-To go back, install the earlier build again. It opens `data/events/`, which holds no event recorded only in `data/store/`.
+To go back, install the earlier build again with a normal install. It opens `data/events/`, which holds no event recorded only in `data/store/`. After a `--reinstall`, `data/events/` is in the backup folder, not in the bundle.
 
 ## 5. Connect agent hooks
 
@@ -306,7 +306,7 @@ xcode-select --install
 brew install rust protobuf
 ```
 
-Get the source and its dependency:
+Get the source:
 
 ```sh
 git clone https://github.com/kahgeh/harold.git

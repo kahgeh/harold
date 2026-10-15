@@ -35,7 +35,7 @@ flowchart TD
 
 The **monitor** checks running processes, accepts hook reports, and reads terminal evidence. It handles agent observations one at a time so competing inputs cannot independently overwrite the current state.
 
-The **event stream** stores accepted observations and messages in order. The `events` library supplies this storage inside the Harold process; it does not require another service.
+The **event stream** stores accepted observations and messages in order. Harold keeps the event stream in an OpenData log (`opendata-log`, which stores its data with SlateDB on local disk) and its state in the turso database `harold-state.db`, both inside the Harold process, with no other service.
 
 The **projector** reads that history and updates the application database. For agent observations, a set of decision rules called the **reducer** determines the resulting state. The projector saves that state along with its position in the history, called a **checkpoint**. This records how far it has processed.
 

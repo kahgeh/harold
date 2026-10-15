@@ -67,13 +67,13 @@ Harold keeps everything it records in one folder: `<prefix>/harold/data/store/` 
 | `log/` | The event stream. Each event, such as a reply arriving or an agent finishing a turn, is one record in an OpenData log under the key `harold/main`. Its value is a JSON envelope with the event's `id`, `type`, `payload`, `created_at_ms`, `trace_id`, `span_id` and `actor`. The log stores its data with SlateDB on the local filesystem, under the prefix `harold` inside `log/`. Harold sets no retention, so the log keeps every event. |
 | `log-settings.toml` | The log's SlateDB settings. Harold writes this file each time it opens the store, with no settings in it, so SlateDB's defaults apply. Neither an edit to this file nor a `SlateDb.toml` in the working directory changes the log. |
 | `harold.lock` | A lock Harold holds while it runs. A second Harold started on the same folder stops at start with `store is in use by another Harold`. macOS releases the lock when Harold exits, including when it is killed. |
-| `harold-state.db` and `harold-state.db-wal` | The state database, opened with turso 0.8.3. Its five tables hold the agent panes and monitor health, the delivery outbox, the settings (mute, pause and each timed prompt's last day), and the cursor: the version of the last event projected into these tables. |
+| `harold-state.db` and `harold-state.db-wal` | The state database, opened with turso 0.8.3. Its five data tables hold the agent panes and monitor health, the delivery outbox, the settings (mute, pause and each timed prompt's last day), and the cursor: the version of the last event projected into these tables. |
 
 An event's version is its log sequence number plus one, so the first event in an empty store is version 1 and version 0 means no event yet. Versions only rise, but they have gaps, because the log reserves sequence numbers in blocks each time it opens: in a store whose first event is version 1, the first event after a restart is version 4097. `harold --check-ready` prints `through_event_version` in these numbers.
 
 Harold delivers only events that are on disk. Each append returns after the log's `flush()` has written the record to disk, and Harold opens the log so that its reads return only flushed records (`ReadVisibility::Remote`). An event a crash could lose is therefore never projected or delivered.
 
-Each event is delivered once. Harold projects an event into `harold-state.db` and moves the cursor past it in one transaction, so a crash between the two rolls both back, and the next start projects that event again from the cursor. If the same envelope is ever written to the log twice, both copies carry one `id`, and the delivery outbox keeps one row per `event_id`, so the second copy is not delivered. No other table records which ids Harold has seen.
+Each event is projected once and has one row in the delivery outbox. Harold projects an event into `harold-state.db` and moves the cursor past it in one transaction, so a crash between the two rolls both back, and the next start projects that event again from the cursor. If the same envelope is ever written to the log twice, both copies carry one `id`, and the delivery outbox keeps one row per `event_id`, so the second copy adds no row. No other table records which ids Harold has seen. Delivery is a separate step: the event handler sends a message and then marks its row delivered, so a crash after the send and before the mark sends that message again at the next start.
 
 A record whose value is not a Harold envelope does not stop the events after it. Harold reads such a record as an event of type `UndecodableEvent` and logs `stored record is not a Harold event`. The event goes to the delivery outbox like any other. The event handler has no delivery for that type, so it marks the event permanently undeliverable and logs `event is permanently undeliverable; continuing`. The events after it are projected and delivered as usual.
 
@@ -81,21 +81,23 @@ A record whose value is not a Harold envelope does not stop the events after it.
 
 Builds before the OpenData log keep their store in `<prefix>/harold/data/events/`. Harold never reads or deletes that folder. When Harold opens a store folder with no `harold-state.db`, it creates an empty store there, so the first start on `data/store/` keeps none of `data/events/`:
 
-- **Event history.** It stays in `data/events/`, where only an earlier build reads it. Nothing Harold does reads past events.
+- **Event history.** It stays in `data/events/`, where only an earlier build reads it. No feature of Harold needs that history.
 - **Waiting messages.** Messages still waiting in the delivery outbox of `data/events/` are not sent.
 - **Mute and pause.** Both start off: voice is on and messaging is unpaused.
 - **Timed prompts.** Harold counts each timed prompt whose time today has passed as handled today. It records the prompt with the reason `new_store` and logs `timed prompt marked handled (new store)` with the prompt's name. An install at 08:30 therefore does not type a 07:50 prompt a second time, and a prompt set for later in the day still runs. If the earlier Harold had not yet typed a prompt whose time had passed, that prompt is skipped for the day.
 
-An install over a bundle that has `data/events/` and no `data/store/` ends with these lines, with the bundle's own paths:
+A normal install (without `--reinstall`) over a bundle that has `data/events/` and no `data/store/` keeps `data/events/` in the bundle and ends with these lines, with the bundle's own paths:
 
 ```text
 New store: ~/bin/harold/data/store
 Not carried over from ~/bin/harold/data/events: messages still waiting to be delivered, and the mute and pause settings (voice is on, messaging unpaused). That folder is left as it was.
 ```
 
+`--reinstall` prints neither line: it moves the whole bundle, `data/events/` included, to the `harold.backup-*` folder it names.
+
 ## Rollback
 
-To go back to a build that uses `data/events/`, install that build again. It opens `data/events/`, which holds no event recorded only in `data/store/`.
+To go back to a build that uses `data/events/`, install that build again with a normal install. It opens `data/events/`, which holds no event recorded only in `data/store/`. After a `--reinstall`, `data/events/` is in the `harold.backup-*` folder, not in the bundle.
 
 ## Accepted dependency exceptions
 
