@@ -27,35 +27,11 @@
       "w": 12,
       "h": 6,
       "config": {
+        "configType": "sql",
         "displayType": "line",
+        "connectionId": "@CLICKHOUSE_CONNECTION_ID@",
         "sourceId": "@METRICS_SOURCE_ID@",
-        "select": [
-          {
-            "aggFn": "sum",
-            "valueExpression": "Value",
-            "metricName": "pod.merges",
-            "metricType": "sum",
-            "where": "",
-            "whereLanguage": "sql",
-            "alias": "merges"
-          },
-          {
-            "aggFn": "sum",
-            "valueExpression": "Value",
-            "metricName": "pod.merged_lines",
-            "metricType": "sum",
-            "where": "",
-            "whereLanguage": "sql",
-            "alias": "lines merged"
-          }
-        ],
-        "formulas": [
-          {
-            "expression": "B / A",
-            "alias": "lines per merge"
-          }
-        ],
-        "showOperandSeries": true
+        "sqlTemplate": "SELECT $__timeInterval(TimeUnix) AS ts, sumIf(rise, MetricName = 'pod.merges') AS merges, sumIf(rise, MetricName = 'pod.merged_lines') AS lines_merged, if(merges = 0, NULL, lines_merged / merges) AS lines_per_merge FROM (SELECT TimeUnix, MetricName, Attributes, if(Value >= before, Value - before, Value) AS rise FROM (SELECT TimeUnix, MetricName, Attributes, Value, lagInFrame(Value, 1, toFloat64(0)) OVER (PARTITION BY cityHash64(MetricName, ResourceAttributes, Attributes) ORDER BY TimeUnix ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS before FROM $__sourceTable(sum) WHERE MetricName IN ('pod.merges', 'pod.merged_lines') AND TimeUnix >= $__fromTime - INTERVAL 1 DAY AND TimeUnix <= $__toTime AND $__filters)) WHERE $__timeFilter(TimeUnix) GROUP BY ts ORDER BY ts"
       }
     },
     {
@@ -127,27 +103,23 @@
       "h": 6,
       "config": {
         "displayType": "line",
-        "sourceId": "@METRICS_SOURCE_ID@",
+        "sourceId": "@TRACES_SOURCE_ID@",
         "select": [
           {
             "aggFn": "quantile",
             "level": 0.5,
-            "valueExpression": "Value",
-            "metricName": "harold.phone_request.latency",
-            "metricType": "histogram",
-            "where": "",
-            "whereLanguage": "sql",
-            "alias": "median"
+            "valueExpression": "Duration / 1e9",
+            "alias": "median",
+            "where": "ServiceName = 'harold' AND SpanName = 'harold.phone_request' AND SpanAttributes['pane_id'] != ''",
+            "whereLanguage": "sql"
           },
           {
             "aggFn": "quantile",
             "level": 0.95,
-            "valueExpression": "Value",
-            "metricName": "harold.phone_request.latency",
-            "metricType": "histogram",
-            "where": "",
-            "whereLanguage": "sql",
-            "alias": "p95"
+            "valueExpression": "Duration / 1e9",
+            "alias": "p95",
+            "where": "ServiceName = 'harold' AND SpanName = 'harold.phone_request' AND SpanAttributes['pane_id'] != ''",
+            "whereLanguage": "sql"
           }
         ],
         "numberFormat": {
@@ -179,20 +151,11 @@
       "w": 12,
       "h": 6,
       "config": {
+        "configType": "sql",
         "displayType": "stacked_bar",
+        "connectionId": "@CLICKHOUSE_CONNECTION_ID@",
         "sourceId": "@METRICS_SOURCE_ID@",
-        "select": [
-          {
-            "aggFn": "sum",
-            "valueExpression": "Value",
-            "metricName": "harold.turns",
-            "metricType": "sum",
-            "where": "",
-            "whereLanguage": "sql",
-            "alias": "turns"
-          }
-        ],
-        "groupBy": "Attributes['session.id']"
+        "sqlTemplate": "SELECT $__timeInterval(TimeUnix) AS ts, Attributes['session.id'] AS session, sum(rise) AS turns FROM (SELECT TimeUnix, MetricName, Attributes, if(Value >= before, Value - before, Value) AS rise FROM (SELECT TimeUnix, MetricName, Attributes, Value, lagInFrame(Value, 1, toFloat64(0)) OVER (PARTITION BY cityHash64(MetricName, ResourceAttributes, Attributes) ORDER BY TimeUnix ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS before FROM $__sourceTable(sum) WHERE MetricName IN ('harold.turns') AND TimeUnix >= $__fromTime - INTERVAL 1 DAY AND TimeUnix <= $__toTime)) WHERE $__timeFilter(TimeUnix) GROUP BY ts, session ORDER BY ts"
       }
     },
     {
@@ -251,35 +214,11 @@
       "w": 12,
       "h": 6,
       "config": {
+        "configType": "sql",
         "displayType": "table",
+        "connectionId": "@CLICKHOUSE_CONNECTION_ID@",
         "sourceId": "@METRICS_SOURCE_ID@",
-        "select": [
-          {
-            "aggFn": "quantile",
-            "level": 0.5,
-            "valueExpression": "Value",
-            "metricName": "pod.spec.lead_time",
-            "metricType": "histogram",
-            "where": "",
-            "whereLanguage": "sql",
-            "alias": "p50"
-          },
-          {
-            "aggFn": "quantile",
-            "level": 0.95,
-            "valueExpression": "Value",
-            "metricName": "pod.spec.lead_time",
-            "metricType": "histogram",
-            "where": "",
-            "whereLanguage": "sql",
-            "alias": "p95"
-          }
-        ],
-        "groupBy": "Attributes['pod.product'], Attributes['phase']",
-        "numberFormat": {
-          "output": "time",
-          "factor": 1
-        }
+        "sqlTemplate": "SELECT Attributes['pod.product'] AS product, Attributes['phase'] AS phase, quantileExactWeighted(0.5)(total_rise / count_rise, toUInt64(count_rise)) AS p50, quantileExactWeighted(0.95)(total_rise / count_rise, toUInt64(count_rise)) AS p95 FROM (SELECT TimeUnix, Attributes, if(count < count_before, count, count - count_before) AS count_rise, if(count < count_before, total, total - total_before) AS total_rise FROM (SELECT TimeUnix, Attributes, toFloat64(Count) AS count, Sum AS total, lagInFrame(toFloat64(Count), 1, toFloat64(0)) OVER (PARTITION BY cityHash64(MetricName, ResourceAttributes, Attributes) ORDER BY TimeUnix ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS count_before, lagInFrame(Sum, 1, toFloat64(0)) OVER (PARTITION BY cityHash64(MetricName, ResourceAttributes, Attributes) ORDER BY TimeUnix ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS total_before FROM $__sourceTable(histogram) WHERE MetricName = 'pod.spec.lead_time' AND TimeUnix >= $__fromTime - INTERVAL 1 DAY AND TimeUnix <= $__toTime AND $__filters)) WHERE $__timeFilter(TimeUnix) AND count_rise > 0 GROUP BY product, phase ORDER BY product, phase"
       }
     }
   ]

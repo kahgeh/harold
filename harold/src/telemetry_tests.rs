@@ -1304,28 +1304,146 @@ const SPANS: &[&str] = &[
     "harold.voice_note",
 ];
 
-/// The spec's cards table: group and card, in order.
-const CARDS: [(&str, &str); 16] = [
-    ("Pods", "Free slots, average"),
-    ("Pods", "Busy slots, p95"),
-    ("Pods", "Merges to main"),
-    ("Pods", "Lines merged"),
-    ("Pods", "Lines merged, last hour"),
-    ("Phone requests", "Requests"),
-    ("Phone requests", "Availability"),
-    ("Phone requests", "Right agent"),
-    ("Phone requests", "Latency, p95"),
-    ("Turns", "Turns"),
-    ("Turns", "Turns per session, median"),
-    ("Specs", "Waiting for approval"),
-    ("Specs", "Merged"),
-    ("Specs", "Spec size, median words"),
-    ("Specs", "Waiting for you, p50"),
-    ("Specs", "Build, p50"),
+/// The spec's cards table: group, card, the metrics or spans its tile reads, and how it
+/// reads them. For a builder tile, the first phrase is its `aggFn` and level; for a SQL
+/// tile, every phrase is in its SQL.
+const CARDS: [(&str, &str, &[&str], &[&str]); 16] = [
+    ("Pods", "Free slots, average", &["pod.slots.free"], &["avg"]),
+    (
+        "Pods",
+        "Busy slots, p95",
+        &["pod.slots.busy"],
+        &["quantile 0.95"],
+    ),
+    (
+        "Pods",
+        "Merges to main",
+        &["pod.merges"],
+        &["SELECT sum(rise)"],
+    ),
+    (
+        "Pods",
+        "Lines merged",
+        &["pod.merged_lines"],
+        &["SELECT sum(rise)"],
+    ),
+    (
+        "Pods",
+        "Lines merged, last hour",
+        &["pod.merged_lines"],
+        &["SELECT sum(rise)"],
+    ),
+    (
+        "Phone requests",
+        "Requests",
+        &["harold.phone_requests"],
+        &["SELECT sum(rise)"],
+    ),
+    (
+        "Phone requests",
+        "Availability",
+        &["harold.phone_requests"],
+        &[
+            "sumIf(rise, MetricName = 'harold.phone_requests' AND Attributes['outcome'] = 'typed') / sumIf(rise, MetricName = 'harold.phone_requests')",
+        ],
+    ),
+    (
+        "Phone requests",
+        "Right agent",
+        &["harold.phone_requests", "harold.phone_requests.wrong"],
+        &[
+            "(sumIf(rise, MetricName = 'harold.phone_requests' AND Attributes['outcome'] = 'typed') - sumIf(rise, MetricName = 'harold.phone_requests.wrong')) / sumIf(rise, MetricName = 'harold.phone_requests')",
+        ],
+    ),
+    (
+        "Phone requests",
+        "Latency, p95",
+        &["harold.phone_request"],
+        &[
+            "quantile(0.95)(Duration / 1e9)",
+            "SpanAttributes['pane_id'] != ''",
+        ],
+    ),
+    ("Turns", "Turns", &["harold.turns"], &["SELECT sum(rise)"]),
+    (
+        "Turns",
+        "Turns per session, median",
+        &["harold.turn"],
+        &[
+            "SELECT median(turns)",
+            "count() AS turns",
+            "GROUP BY session",
+        ],
+    ),
+    (
+        "Specs",
+        "Waiting for approval",
+        &["pod.specs"],
+        &[
+            "SELECT sum(specs)",
+            "argMax(Value, TimeUnix)",
+            "Attributes['state'] = 'waiting_for_approval'",
+        ],
+    ),
+    (
+        "Specs",
+        "Merged",
+        &["pod.spec.words"],
+        &[
+            "SELECT count()",
+            "min(TimeUnix) AS first_merged",
+            "Attributes['state'] = 'merged'",
+        ],
+    ),
+    (
+        "Specs",
+        "Spec size, median words",
+        &["pod.spec.words"],
+        &[
+            "SELECT median(words)",
+            "min(TimeUnix) AS first_ready",
+            "Attributes['state'] != 'drafted'",
+        ],
+    ),
+    (
+        "Specs",
+        "Waiting for you, p50",
+        &["pod.spec.lead_time"],
+        &[
+            "quantileExactWeighted(0.5)",
+            "Attributes['phase'] = 'waiting_for_user'",
+        ],
+    ),
+    (
+        "Specs",
+        "Build, p50",
+        &["pod.spec.lead_time"],
+        &[
+            "quantileExactWeighted(0.5)",
+            "Attributes['phase'] = 'build'",
+        ],
+    ),
 ];
 
 /// The card read over the last hour; every other card reads the last 24 hours (choice 10).
 const LAST_HOUR_CARD: &str = "Lines merged, last hour";
+
+/// The counter rule in the SQL of every tile that counts a running total: each series
+/// rises by its value minus its previous point, and a first point or a drop rises by its
+/// whole value.
+const COUNTER_RULE: [&str; 3] = [
+    "lagInFrame(Value, 1, toFloat64(0)) OVER (PARTITION BY cityHash64(MetricName, ResourceAttributes, Attributes) ORDER BY TimeUnix ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS before",
+    "if(Value >= before, Value - before, Value) AS rise",
+    "FROM $__sourceTable(sum)",
+];
+
+/// The same rule over a histogram's count and sum, judged by the count.
+const HISTOGRAM_RULE: [&str; 4] = [
+    "lagInFrame(toFloat64(Count), 1, toFloat64(0)) OVER (PARTITION BY cityHash64(MetricName, ResourceAttributes, Attributes) ORDER BY TimeUnix ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS count_before",
+    "if(count < count_before, count, count - count_before) AS count_rise",
+    "if(count < count_before, total, total - total_before) AS total_rise",
+    "FROM $__sourceTable(histogram)",
+];
 
 /// The spec's trends table, in order.
 const TREND_PANELS: [&str; 9] = [
@@ -1460,8 +1578,22 @@ fn every_definition_is_valid_json_naming_only_known_metrics_and_attributes() {
     }
 }
 
+/// The metrics and spans `value` names.
+fn metrics_read(value: &serde_json::Value) -> Vec<String> {
+    let mut texts = Vec::new();
+    strings_in(value, &mut texts);
+    let mut names: Vec<String> = texts
+        .iter()
+        .flat_map(|text| dotted_names(text))
+        .filter(|name| METRICS.contains(&name.as_str()) || SPANS.contains(&name.as_str()))
+        .collect();
+    names.sort();
+    names.dedup();
+    names
+}
+
 #[test]
-fn the_cards_dashboard_has_one_number_tile_per_card_and_nothing_else() {
+fn the_cards_dashboard_shows_each_card_beside_its_earlier_number_and_nothing_else() {
     let dashboard = definition("dashboard.json");
     assert_eq!(dashboard["name"], "Harold");
     let mut keys: Vec<&str> = dashboard
@@ -1473,7 +1605,17 @@ fn the_cards_dashboard_has_one_number_tile_per_card_and_nothing_else() {
     keys.sort_unstable();
     assert_eq!(keys, ["containers", "filters", "name", "tags", "tiles"]);
 
-    let names: Vec<&str> = CARDS.iter().map(|(_, card)| *card).collect();
+    let names: Vec<String> = CARDS
+        .iter()
+        .flat_map(|(_, card, ..)| {
+            let earlier = if *card == LAST_HOUR_CARD {
+                "previous hour"
+            } else {
+                "previous 24 h"
+            };
+            [card.to_string(), format!("{card}, {earlier}")]
+        })
+        .collect();
     assert_eq!(tile_names(&dashboard), names);
 
     let containers: BTreeMap<&str, &str> = dashboard["containers"]
@@ -1491,28 +1633,168 @@ fn the_cards_dashboard_has_one_number_tile_per_card_and_nothing_else() {
     groups.sort_unstable();
     assert_eq!(groups, ["Phone requests", "Pods", "Specs", "Turns"]);
 
-    for (tile, (group, card)) in tiles(&dashboard).iter().zip(CARDS) {
-        assert_eq!(tile["config"]["displayType"], "number", "{card}");
-        let container = tile["containerId"].as_str().unwrap_or_default();
-        assert_eq!(containers.get(container), Some(&group), "{card}");
-        let (period, other) = if card == LAST_HOUR_CARD {
-            ("now() - INTERVAL 1 HOUR", "INTERVAL 24 HOUR")
+    for (pair, (group, card, reads, how)) in tiles(&dashboard).chunks(2).zip(CARDS) {
+        let (current, earlier) = (&pair[0], &pair[1]);
+        let hours = if card == LAST_HOUR_CARD { 1 } else { 24 };
+        let other_periods: &[&str] = if hours == 1 {
+            &["INTERVAL 24 HOUR", "INTERVAL 48 HOUR", "INTERVAL 72 HOUR"]
         } else {
-            ("now() - INTERVAL 24 HOUR", "INTERVAL 1 HOUR")
+            &["INTERVAL 1 HOUR", "INTERVAL 2 HOUR", "INTERVAL 3 HOUR"]
         };
-        for query in tile_queries(tile) {
-            assert!(query.contains(period), "{card} must read {period}: {query}");
-            assert!(
-                !query.contains(other),
-                "{card} reads another period: {query}"
+        for (tile, previous) in [(current, false), (earlier, true)] {
+            let name = tile["name"].as_str().unwrap();
+            assert_eq!(tile["config"]["displayType"], "number", "{name}");
+            let container = tile["containerId"].as_str().unwrap_or_default();
+            assert_eq!(containers.get(container), Some(&group), "{name}");
+            assert_eq!(
+                metrics_read(&tile["config"]),
+                *reads,
+                "{name} reads the wrong metric"
             );
+
+            let config = &tile["config"];
+            if let Some(sql) = config["sqlTemplate"].as_str() {
+                for phrase in how {
+                    assert!(sql.contains(phrase), "{name} must read {phrase}: {sql}");
+                }
+            } else {
+                let select = config["select"].as_array().unwrap();
+                assert_eq!(select.len(), 1, "{name}");
+                let aggregation = match select[0]["level"].as_f64() {
+                    Some(level) => format!("{} {level}", select[0]["aggFn"].as_str().unwrap()),
+                    None => select[0]["aggFn"].as_str().unwrap().to_owned(),
+                };
+                assert_eq!(aggregation, how[0], "{name}");
+            }
+
+            for query in tile_queries(tile) {
+                if previous {
+                    let from = format!(">= now() - INTERVAL {} HOUR", 2 * hours);
+                    let to = format!("< now() - INTERVAL {hours} HOUR");
+                    assert!(query.contains(&from), "{name} must start {from}: {query}");
+                    assert!(query.contains(&to), "{name} must end {to}: {query}");
+                } else {
+                    let from = format!(">= now() - INTERVAL {hours} HOUR");
+                    assert!(query.contains(&from), "{name} must start {from}: {query}");
+                    assert!(
+                        !query.contains("< now() - INTERVAL"),
+                        "{name} must end now: {query}"
+                    );
+                }
+                for other in other_periods {
+                    assert!(
+                        !query.contains(other),
+                        "{name} reads another period: {query}"
+                    );
+                }
+            }
         }
+        assert_eq!(
+            earlier["y"], current["y"],
+            "{card}: the earlier number sits beside it"
+        );
+        assert_eq!(
+            earlier["x"].as_i64().unwrap(),
+            current["x"].as_i64().unwrap() + current["w"].as_i64().unwrap(),
+            "{card}: the earlier number sits beside it"
+        );
     }
 
     let filters = dashboard["filters"].as_array().unwrap();
     assert_eq!(filters.len(), 1, "only the product filter");
-    assert_eq!(filters[0]["name"], "Product");
+    assert_eq!(filters[0]["name"], "Product (pod and spec cards only)");
     assert_eq!(filters[0]["expression"], "Attributes['pod.product']");
+}
+
+#[test]
+fn the_product_filter_reaches_the_pod_and_spec_tiles_only() {
+    let dashboard = definition("dashboard.json");
+    let containers = BTreeMap::from([
+        ("pods", true),
+        ("specs", true),
+        ("phone", false),
+        ("turns", false),
+    ]);
+    for tile in tiles(&dashboard) {
+        let name = tile["name"].as_str().unwrap();
+        let filtered = containers[tile["containerId"].as_str().unwrap()];
+        let config = &tile["config"];
+        match config["sqlTemplate"].as_str() {
+            // A SQL tile takes the filter only through `$__filters`.
+            Some(sql) => assert_eq!(sql.contains("$__filters"), filtered, "{name}"),
+            // A builder tile on the metrics source always takes it.
+            None => assert!(
+                filtered,
+                "{name} is a builder tile, which the filter reaches"
+            ),
+        }
+    }
+}
+
+/// The counter rule the dashboards' SQL applies, in Rust: the rise of one series in a
+/// window starting at `start`, from its points in time order from the lookback on.
+fn rise_in_window(points: &[(i64, f64)], start: i64) -> f64 {
+    let mut before = 0.0;
+    let mut total = 0.0;
+    for &(time, value) in points {
+        // `if(Value >= before, Value - before, Value)`, with `before` 0 for a first point.
+        let rise = if value >= before {
+            value - before
+        } else {
+            value
+        };
+        if time >= start {
+            total += rise;
+        }
+        before = value;
+    }
+    total
+}
+
+#[test]
+fn the_counter_rule_counts_rises_new_series_and_resets_from_zero() {
+    // A series that rose from 5 before the window to 7 in it.
+    assert_eq!(rise_in_window(&[(0, 5.0), (10, 7.0)], 5), 2.0);
+    // A series whose first point is in the window, such as a merge naming a new spec.id.
+    assert_eq!(rise_in_window(&[(10, 1.0)], 5), 1.0);
+    // A reset after a restart: never negative, and counted from 0.
+    assert_eq!(rise_in_window(&[(0, 10.0), (10, 0.0), (20, 2.0)], 5), 2.0);
+    assert_eq!(rise_in_window(&[(0, 10.0), (10, 3.0)], 5), 3.0);
+    // Points before the window only set the baseline.
+    assert_eq!(rise_in_window(&[(0, 3.0), (2, 4.0)], 5), 0.0);
+    // A point written twice adds nothing the second time.
+    assert_eq!(rise_in_window(&[(10, 4.0), (10, 4.0)], 5), 4.0);
+}
+
+#[test]
+fn every_tile_that_counts_a_running_total_uses_the_counter_rule() {
+    let mut counted = 0;
+    for file in ["dashboard.json", "trends.json"] {
+        let dashboard = definition(file);
+        for tile in tiles(&dashboard) {
+            let name = tile["name"].as_str().unwrap();
+            let Some(sql) = tile["config"]["sqlTemplate"].as_str() else {
+                continue;
+            };
+            let rule: &[&str] = if sql.contains("count_rise") {
+                &HISTOGRAM_RULE
+            } else if sql.contains("rise") {
+                &COUNTER_RULE
+            } else {
+                continue;
+            };
+            counted += 1;
+            for piece in rule {
+                assert!(
+                    sql.contains(piece),
+                    "{file} {name} must have {piece}: {sql}"
+                );
+            }
+        }
+    }
+    // Seven counter cards and two lead-time cards, each with its earlier number, and
+    // three trends panels.
+    assert_eq!(counted, 21);
 }
 
 #[test]
@@ -1524,11 +1806,12 @@ fn the_trends_dashboard_has_the_nine_panels() {
 
 #[test]
 fn the_alert_files_carry_the_spec_thresholds() {
-    // (alert, metric, threshold, comparison, minutes the condition must hold)
+    // (alert, metric, aggregation, threshold, comparison, minutes the condition must hold)
     let expected = [
         (
             "phone-request-unavailable",
             "harold.phone_requests",
+            "sum",
             0.0,
             "above_exclusive",
             5,
@@ -1536,6 +1819,7 @@ fn the_alert_files_carry_the_spec_thresholds() {
         (
             "phone-request-slow",
             "harold.phone_request.latency",
+            "quantile 0.95",
             60.0,
             "above_exclusive",
             60,
@@ -1543,18 +1827,19 @@ fn the_alert_files_carry_the_spec_thresholds() {
         (
             "wrong-agent",
             "harold.phone_requests.wrong",
+            "sum",
             0.0,
             "above_exclusive",
             5,
         ),
-        ("slot-idle", "pod.slots.free", 1.0, "above", 120),
+        ("slot-idle", "pod.slots.free", "min", 1.0, "above", 120),
     ];
     assert_eq!(
         expected.map(|(name, ..)| name),
         crate::alerts::ALERT_NAMES,
         "one file per alert Harold accepts"
     );
-    for (name, metric, threshold, comparison, minutes) in expected {
+    for (name, metric, aggregation, threshold, comparison, minutes) in expected {
         let alert = definition(&format!("alert-{name}.json"));
         assert_eq!(alert["name"], name);
         assert_eq!(
@@ -1576,21 +1861,20 @@ fn the_alert_files_carry_the_spec_thresholds() {
         let select = alert["chartConfig"]["select"].as_array().unwrap();
         assert_eq!(select.len(), 1, "{name}");
         assert_eq!(select[0]["metricName"], metric, "{name}");
+        let read = match select[0]["level"].as_f64() {
+            Some(level) => format!("{} {level}", select[0]["aggFn"].as_str().unwrap()),
+            None => select[0]["aggFn"].as_str().unwrap().to_owned(),
+        };
+        assert_eq!(read, aggregation, "{name}");
     }
 
-    let select = |name: &str| definition(&format!("alert-{name}.json"))["chartConfig"].clone();
-    assert!(
-        select("phone-request-unavailable")["select"][0]["where"]
-            .as_str()
-            .unwrap()
-            .contains("Attributes['outcome'] = 'unavailable'")
+    let config = |name: &str| definition(&format!("alert-{name}.json"))["chartConfig"].clone();
+    assert_eq!(
+        config("phone-request-unavailable")["select"][0]["where"],
+        "Attributes['outcome'] = 'unavailable'"
     );
-    let slow = select("phone-request-slow");
-    assert_eq!(slow["select"][0]["aggFn"], "quantile");
-    assert_eq!(slow["select"][0]["level"].as_f64(), Some(0.95));
-    let idle = select("slot-idle");
-    assert_eq!(idle["select"][0]["aggFn"], "min");
-    assert_eq!(idle["groupBy"], "Attributes['pod.product']");
+    assert_eq!(config("wrong-agent")["select"][0]["where"], "");
+    assert_eq!(config("slot-idle")["groupBy"], "Attributes['pod.product']");
 }
 
 #[test]
@@ -1599,15 +1883,26 @@ fn the_webhook_posts_what_the_alert_address_accepts() {
     assert_eq!(webhook["service"], "generic");
     assert_eq!(webhook["url"], "http://host.containers.internal:4320/alert");
     let body = webhook["body"].as_str().unwrap();
-    let state = "{{#if (eq status 'resolved')}}cleared{{else}}firing{{/if}}";
+    let state = "{{#if (eq status 'firing')}}firing{{else if (eq status 'resolved')}}cleared{{else}}{{status}}{{/if}}";
     assert!(body.contains(state), "{body}");
+    // HyperDX's statuses, and the state the template renders for each.
+    let rendered = [
+        ("firing", "firing"),
+        ("resolved", "cleared"),
+        ("no_data", "no_data"),
+        ("pending", "pending"),
+        ("error", "error"),
+    ];
     for name in crate::alerts::ALERT_NAMES {
-        for rendered in ["firing", "cleared"] {
-            let post = body.replace("{{note}}", name).replace(state, rendered);
-            assert_eq!(
-                crate::alerts::alert_line(post.as_bytes()),
-                Ok(format!("harold alert: {name} {rendered}"))
-            );
+        for (status, state_sent) in rendered {
+            let post = body.replace("{{note}}", name).replace(state, state_sent);
+            let line = crate::alerts::alert_line(post.as_bytes());
+            match status {
+                "firing" | "resolved" => {
+                    assert_eq!(line, Ok(format!("harold alert: {name} {state_sent}")));
+                }
+                _ => assert_eq!(line, Err(()), "{status} is refused and nothing is typed"),
+            }
         }
     }
 }

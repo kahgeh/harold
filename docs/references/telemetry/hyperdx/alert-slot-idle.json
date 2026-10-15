@@ -1,7 +1,7 @@
 {
   "name": "slot-idle",
   "note": "slot-idle",
-  "message": "A build slot has been free for 2 hours in a row.",
+  "message": "The last sample of each 15-minute window has had at least 1 slot free, for 8 windows in a row.",
   "source": "inline",
   "chartConfig": {
     "name": "slot-idle",

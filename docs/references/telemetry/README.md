@@ -232,30 +232,40 @@ The definition files are in [`hyperdx/`](hyperdx/), in the shape HyperDX 2.40's 
 
 ### Harold: the cards
 
-`dashboard.json` is the "Harold" dashboard. It holds one number tile per card, in four groups, and a product filter. Each card reads the last 24 hours, apart from "Lines merged, last hour". The window is written into each tile's query as `TimeUnix >= now() - INTERVAL 24 HOUR`, so open the dashboard with a time range of at least the last 24 hours. A shorter range cuts every card down to it.
+`dashboard.json` is the "Harold" dashboard. It holds the cards in four groups, and a product filter. Each card is two number tiles side by side: the card's number over the last 24 hours, and beside it the same number over the 24 hours before, named "<card>, previous 24 h". "Lines merged, last hour" reads the last hour, and its "previous hour" tile reads the hour before.
+
+Each tile's window is written into its query: `TimeUnix >= now() - INTERVAL 24 HOUR` for a current tile, and `TimeUnix >= now() - INTERVAL 48 HOUR AND TimeUnix < now() - INTERVAL 24 HOUR` for an earlier one. Open the dashboard with a time range of at least the last 48 hours. A shorter range cuts the tiles down to it.
 
 | Group | Card | The number | How the tile reads it |
 |---|---|---|---|
-| Pods | Free slots, average | `pod.slots.free` averaged over the period | average |
-| Pods | Busy slots, p95 | the 95th percentile of `pod.slots.busy` over the period | 95th percentile |
-| Pods | Merges to main | `pod.merges` in the period | sum |
-| Pods | Lines merged | `pod.merged_lines` in the period | sum |
-| Pods | Lines merged, last hour | `pod.merged_lines` in the last hour | sum over `now() - INTERVAL 1 HOUR` |
-| Phone requests | Requests | `harold.phone_requests` in the period | sum |
-| Phone requests | Availability | typed divided by all requests | formula `A / B` |
-| Phone requests | Right agent | typed minus wrong, divided by all requests | formula `(A - B) / C` |
-| Phone requests | Latency, p95 | the 95th percentile of `harold.phone_request.latency` | 95th percentile |
-| Turns | Turns | `harold.turns` in the period | sum |
+| Pods | Free slots, average | `pod.slots.free` averaged over the period | builder: average |
+| Pods | Busy slots, p95 | the 95th percentile of `pod.slots.busy` over the period | builder: 95th percentile |
+| Pods | Merges to main | `pod.merges` in the period | SQL: the counter rule |
+| Pods | Lines merged | `pod.merged_lines` in the period | SQL: the counter rule |
+| Pods | Lines merged, last hour | `pod.merged_lines` in the last hour | SQL: the counter rule over the last hour |
+| Phone requests | Requests | `harold.phone_requests` in the period | SQL: the counter rule |
+| Phone requests | Availability | typed divided by all requests | SQL: the counter rule, typed rises over all rises |
+| Phone requests | Right agent | typed minus wrong, divided by all requests | SQL: the counter rule, over both counters |
+| Phone requests | Latency, p95 | the 95th percentile of the phone-request latency | SQL: the 95th percentile of the duration of `harold.phone_request` spans that were typed (they carry `pane_id`) |
+| Turns | Turns | `harold.turns` in the period | SQL: the counter rule |
 | Turns | Turns per session, median | the median of turns per `session.id` | SQL: `harold.turn` spans counted per `session.id`, one span per turn |
 | Specs | Waiting for approval | `pod.specs` in that state at the end of the period | SQL: the last value per product, summed |
 | Specs | Merged | specs that reached merged in the period | SQL: specs whose first `pod.spec.words` sample in state `merged` falls in the period |
 | Specs | Spec size, median words | the median `pod.spec.words` of specs first ready in the period | SQL: specs whose first sample past `drafted` falls in the period |
-| Specs | Waiting for you, p50 | the median `pod.spec.lead_time`, phase `waiting_for_user` | median |
-| Specs | Build, p50 | the median `pod.spec.lead_time`, phase `build` | median |
+| Specs | Waiting for you, p50 | the median `pod.spec.lead_time`, phase `waiting_for_user` | SQL: the counter rule over the histogram's count and sum |
+| Specs | Build, p50 | the median `pod.spec.lead_time`, phase `build` | SQL: the counter rule over the histogram's count and sum |
 
-The four SQL cards need a query HyperDX's builder cannot express, such as a median of per-session counts. They read ClickHouse through the connection directly. The "Merged" and "Spec size" cards look back as far as ClickHouse keeps data, 30 days in the local stack. On the first day the pod facts are on, every spec already merged counts as merged that day.
+Fourteen of the sixteen cards are raw SQL tiles. Only the two slot cards use HyperDX's builder. The SQL tiles read ClickHouse through the connection, for three reasons:
 
-The product filter reads `Attributes['pod.product']` and applies to the tiles on the metrics source. The phone-request and turn metrics carry no product, so with one product chosen, those cards read no data. With all products, a pod card reads the products together: "Free slots, average" averages harold's and turso-object-store's numbers.
+- HyperDX's builder cannot express some cards, such as a median of per-session counts.
+- HyperDX's own counter reading loses the first point of every new series ([Counters in HyperDX](#counters-in-hyperdx)).
+- A card's number can be computed for any window, so each card can show its earlier number.
+
+"Merged" and "Spec size" look back as far as ClickHouse keeps data, 30 days in the local stack. So on the first day the pod facts are on, every spec already merged counts as merged that day, and every spec already past `drafted` counts as first ready that day.
+
+The latency card reads spans, not the `harold.phone_request.latency` histogram. A typed request's `harold.phone_request` span runs from the reply's own time to Enter, which is exactly its latency, and spans have no first-point loss.
+
+**The product filter** is named "Product (pod and spec cards only)". It applies to the pod and spec cards only. The phone-request and turn tiles ignore it, because those metrics and spans carry no product: they are SQL tiles that leave out the `$__filters` macro, through which a SQL tile takes a filter, or they read the traces source, which the filter does not apply to. With all products, a pod card reads the products together: "Free slots, average" averages harold's and turso-object-store's numbers.
 
 **How a card shows its change.** The spec asks each card to show, under its number, its change against the previous period: the last 24 hours against the 24 hours before.
 
@@ -275,7 +285,7 @@ Special cases:
 - The current period has no data: the number reads `–` and the line reads `no data in this period`.
 - A percentile from fewer than 5 values in either period shows its number, and the change reads `too few to compare`.
 
-**HyperDX 2.40 cannot show the change.** Its number tiles have no setting to compare with the previous period; only line tiles have `compareToPreviousPeriod`. The spec's fallback is a card showing the earlier number beside the current one. That takes a second tile per card, and the dashboard holds one tile per card and nothing else, so in this version each card shows its current number only. The rules above are what a card should show once HyperDX's number tiles can compare. Until then the trends dashboard shows each metric over time.
+**HyperDX 2.40 number tiles cannot show a change line.** Only its line tiles have `compareToPreviousPeriod`. So each card shows the earlier number beside the current one, the spec's fallback, and the reader compares the two. The change line and the special cases above are what a card should show once HyperDX's number tiles can compare.
 
 ### Harold trends
 
@@ -284,20 +294,67 @@ Special cases:
 | Panel | The question | Behind it | The tile |
 |---|---|---|---|
 | Slots | How often is a slot free, and how many are busy at the busy times? | `pod.slots.busy` over time per product; per day, its 95th percentile and the share of time with at least one slot free | SQL line, per product: busy, busy p95, and the share of samples with `pod.slots.free` at 1 or more. Set the dashboard's granularity to a day for the per-day reading |
-| Merges to main | How much landed on main, and how much in the last hour? | `pod.merges` per day; `pod.merged_lines` summed over the last hour, and per merge | line: merges, lines merged, and lines per merge |
-| Phone requests reaching the right agent | When I reply from the phone, does it reach the agent I meant? | `harold.phone_requests` and `.wrong` per day: right, wrong, unavailable; availability and right-agent rate | line: typed, unavailable, wrong, availability and right agent |
-| Phone request latency | How long from my reply to the agent seeing it? | `harold.phone_request.latency`, median and 95th percentile | line |
+| Merges to main | How much landed on main, and how much in the last hour? | `pod.merges` per day; `pod.merged_lines` summed over the last hour, and per merge | SQL line, the counter rule: merges, lines merged, and lines per merge |
+| Phone requests reaching the right agent | When I reply from the phone, does it reach the agent I meant? | `harold.phone_requests` and `.wrong` per day: right, wrong, unavailable; availability and right-agent rate | builder line: typed, unavailable, wrong, availability and right agent |
+| Phone request latency | How long from my reply to the agent seeing it? | `harold.phone_request.latency`, median and 95th percentile | builder line over the typed `harold.phone_request` spans, as the latency card |
 | One turn, end to end | What happened between my reply and the update on my phone? | the list of `harold.turn` traces, newest first; each opens as a waterfall with its logs | search over the traces source |
-| Turns per session | Which sessions do the most work? | `harold.turns` grouped by `session.id`, and per day | stacked bars per `session.id` |
-| Specs by state | How many specs are where, in each pod? | `pod.specs` per product and state, over time | line per product and state |
-| Spec size | How big are the specs, and does a bigger spec mean a bigger change? | `pod.spec.words` per spec, with `pod.merged_lines` for the merged ones | table of words per product, spec and state |
-| Start to completion | How long from a spec being ready to it being on main, and how much of that is waiting for me? | `pod.spec.lead_time` per phase, p50 and p95 | table per product and phase |
+| Turns per session | Which sessions do the most work? | `harold.turns` grouped by `session.id`, and per day | SQL stacked bars per `session.id`, the counter rule |
+| Specs by state | How many specs are where, in each pod? | `pod.specs` per product and state, over time | builder line per product and state |
+| Spec size | How big are the specs, and does a bigger spec mean a bigger change? | `pod.spec.words` per spec, with `pod.merged_lines` for the merged ones | builder table of words per product, spec and state |
+| Start to completion | How long from a spec being ready to it being on main, and how much of that is waiting for me? | `pod.spec.lead_time` per phase, p50 and p95 | SQL table per product and phase, the counter rule over the histogram's count and sum |
+
+The SQL panels read the time range's points and, for the counter rule, the day before it.
 
 The "Spec size" panel cannot show lines merged per spec: `pod.merged_lines` carries `pod.product` and `change` but no `spec.id`, so the two cannot be joined. Read a merged spec's lines from "Merges to main" at the time of its merge.
 
 ### Counters in HyperDX
 
-Harold sends counters and histograms as running totals, the OpenTelemetry default. HyperDX turns a running total into per-period increases by taking the difference from the previous sample. A series' first sample has no previous one, so HyperDX counts it as 0. The local stack's own provisioning notes the same undercount. So the first increase of each series after Harold starts can be missing from the cards, the trends and the alerts: for example the first `unavailable` request on a channel after a restart. Sending deltas instead is a change to Harold's metric exporter, not made here.
+Harold sends counters and histograms as running totals, the OpenTelemetry default. HyperDX turns a running total into increases by taking each point's difference from the series' previous point. It counts a series' first point as 0, because there is no previous one. The local stack's own provisioning notes the same undercount. Two things work around it.
+
+**Counting from 0 at start.** With export on, Harold records 0 once, at start, for every attribute set of the counters the alerts read:
+
+- `harold.phone_requests`, for each `outcome` (`typed`, `unavailable`), `channel` and `resolved_by`;
+- `harold.phone_requests.wrong`, for each `channel` and `resolved_by`.
+
+The pod facts do the same for each product on its first poll: `pod.merges` with no `spec.id`, and `pod.merged_lines` for each `change`. Each series then has a first point of 0 before anything happens, and the first real request after a restart is a rise HyperDX can see.
+
+This cannot cover every series:
+
+- A counter keyed by `session.id` (`harold.turns`) or by `spec.id` (a merge naming a spec) gets a new series for each new value, which cannot be known at start.
+- A histogram cannot be given a 0 point, because recording a value adds an observation. The `phone-request-slow` alert reads the `harold.phone_request.latency` histogram, so it misses the first request of each `channel` and `resolved_by` after a restart.
+
+**The counter rule.** So every card and panel that counts a running total uses raw SQL with its own rule instead of HyperDX's. Each series is one metric with one set of resource attributes and attributes. Its points are read in time order, from one window length before the window (a day before for the trends panels). Each point rises by:
+
+| Case | Rise |
+|---|---|
+| the point is at or above the series' previous point | its value minus the previous point |
+| the series has no previous point: it first appears, such as a merge naming a new `spec.id` | its whole value, counting from 0 |
+| the point is below the previous point: the counter reset when Harold restarted | its whole value, counting from 0, never negative |
+
+The card's number is the sum of the rises of the points in its window. In SQL:
+
+```sql
+SELECT sum(rise) FROM (
+  SELECT TimeUnix, if(Value >= before, Value - before, Value) AS rise
+  FROM (
+    SELECT TimeUnix, Value,
+      lagInFrame(Value, 1, toFloat64(0)) OVER (
+        PARTITION BY cityHash64(MetricName, ResourceAttributes, Attributes)
+        ORDER BY TimeUnix ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS before
+    FROM $__sourceTable(sum)
+    WHERE MetricName IN ('pod.merges') AND TimeUnix >= <lookback> AND TimeUnix < <end>
+  )
+) WHERE TimeUnix >= <start>
+```
+
+`lagInFrame(..., toFloat64(0))` gives a series' first point a previous value of 0. A point written twice rises by 0 the second time. The test `the_counter_rule_counts_rises_new_series_and_resets_from_zero` in `harold/src/telemetry_tests.rs` runs the same rule in Rust on sample series: a rise, a new series, and a reset.
+
+The lead-time cards and the "Start to completion" panel apply the rule to the histogram's count and sum, judging a reset by the count. Each rise in the count, with its rise in the sum, gives the lead times recorded since the previous point. Their median is weighted by the count's rise. Merges are minutes apart and Harold exports every 30 seconds, so a rise holds one merge. Two merges within one export would stand as their mean.
+
+Two limits remain:
+
+- A series whose previous point is older than the lookback counts from 0. After a restart that is right, because the counter starts again at 0. If the collector was unreachable for longer than the lookback while Harold kept running, the rise during the outage is counted when export resumes.
+- The builder panel "Phone requests reaching the right agent" and the alerts still use HyperDX's reading. They depend on the counting from 0 above.
 
 ## The alerts
 
@@ -306,7 +363,7 @@ Harold sends counters and histograms as running totals, the OpenTelemetry defaul
 | `phone-request-unavailable` | Any phone request dropped with no pane, or not typed within 10 minutes | sum of `harold.phone_requests` with `outcome = unavailable` above 0, every 5 minutes |
 | `phone-request-slow` | The 95th percentile latency is above 60 seconds in an hour with at least 3 requests | 95th percentile of `harold.phone_request.latency` above 60, every hour |
 | `wrong-agent` | A request is counted as wrong | sum of `harold.phone_requests.wrong` above 0, every 5 minutes |
-| `slot-idle` | A slot is free for more than 2 hours in a row between 08:00 and 23:00 local | the lowest `pod.slots.free` of each product at 1 or more, in 8 windows of 15 minutes in a row |
+| `slot-idle` | A slot is free for more than 2 hours in a row between 08:00 and 23:00 local | for each product, the last sample of each 15-minute window has at least 1 slot free, for 8 windows in a row |
 
 Their basis is the period the spec drew, 11 to 15 October:
 
@@ -325,14 +382,14 @@ HyperDX 2.40 cannot express three parts of these conditions:
 - **At least 3 requests.** An alert has one condition, so `phone-request-slow` fires on the 95th percentile alone. The chief applies "at least 3 requests" by checking the count on the trends dashboard before it tells anyone.
 - **08:00 to 23:00.** An alert has no time-of-day window, so `slot-idle` fires at any hour. The chief ignores a `slot-idle` line outside 08:00 to 23:00 local.
 
-`slot-idle` is grouped by `pod.product`, so a free slot in one product is not hidden by a full one in another. Each product fires and clears on its own, and each sends its own post.
+`slot-idle` is grouped by `pod.product`, so a free slot in one product is not hidden by a full one in another. Each product fires and clears on its own, and each sends its own post. HyperDX 2.40 reduces a gauge to its last sample in each alert window, so a slot taken and freed again within 15 minutes, between two samples, does not break the run.
 
 ## How an alert reaches the chief
 
 `webhook.json` is one generic HyperDX webhook, used by all four alerts:
 
 - It posts to `http://host.containers.internal:4320/alert`, Harold's `alert_listen` port as the stack's containers see this Mac with Podman. With Docker, change the host to `host.docker.internal`. The port must match `alert_listen`.
-- Its body is `{"alert": "{{note}}", "state": "{{#if (eq status 'resolved')}}cleared{{else}}firing{{/if}}"}`. Each alert's `note` is its name, and HyperDX's `status` is `resolved` when an alert clears. HyperDX sends a post when an alert fires and when it clears, never for its other states.
+- Its body is `{"alert": "{{note}}", "state": "{{#if (eq status 'firing')}}firing{{else if (eq status 'resolved')}}cleared{{else}}{{status}}{{/if}}"}`. Each alert's `note` is its name. HyperDX's `status` `firing` is sent as `firing`, and `resolved` as `cleared`. Any other status (`no_data`, `pending`, `error`) is passed through as it is, so Harold answers 400 and types nothing. HyperDX 2.40 documents posts only for firing and resolving, but the body does not rely on that.
 
 Harold answers:
 
@@ -404,7 +461,7 @@ dashboard() { hdx "$HYPERDX_URL/api/v2/dashboards" | jq -c --arg name "$1" '.dat
 # "Harold": an update must keep the product filter's id. The tiles keep theirs by the ids in the file.
 old=$(dashboard "Harold")
 fill dashboard.json \
-  | jq --argjson old "$old" '.filters[0].id = ($old.filters[] | select(.name == "Product") | .id)' \
+  | jq --argjson old "$old" '.filters[0].id = ($old.filters[] | select(.name == "Product (pod and spec cards only)") | .id)' \
   | hdx -X PUT "$HYPERDX_URL/api/v2/dashboards/$(echo "$old" | jq -r .id)" --data-binary @-
 
 # "Harold trends" has no filters.
@@ -421,7 +478,7 @@ done
 The definitions were written from HyperDX 2.40's API source and the local stack's own provisioning, and checked only by tests that read the files. Nothing was sent to the running stack. Untested until then:
 
 - data arriving in HyperDX from either Mac;
-- the dashboards, panels and alerts working as written in HyperDX 2.40, including the field names and the four SQL cards;
-- the cards' change against the previous period, which HyperDX 2.40's number tiles cannot show;
+- the dashboards, panels and alerts working as written in HyperDX 2.40, including the field names, the SQL tiles and the counter rule's SQL in ClickHouse;
+- the counting from 0 at start reaching HyperDX as a first point of 0;
 - the stack's containers reaching Harold's alert address, and the webhook's body arriving as written;
 - the hooks' new fields on the installed agents.

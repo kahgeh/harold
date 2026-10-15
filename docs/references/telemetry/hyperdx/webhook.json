@@ -6,5 +6,5 @@
   "headers": {
     "Content-Type": "application/json"
   },
-  "body": "{\"alert\": \"{{note}}\", \"state\": \"{{#if (eq status 'resolved')}}cleared{{else}}firing{{/if}}\"}"
+  "body": "{\"alert\": \"{{note}}\", \"state\": \"{{#if (eq status 'firing')}}firing{{else if (eq status 'resolved')}}cleared{{else}}{{status}}{{/if}}\"}"
 }
