@@ -578,6 +578,7 @@ async fn wait_or_shutdown(shutdown: &mut watch::Receiver<()>, delay: Duration) -
 pub async fn run_event_handler(
     store: Arc<HaroldStore>,
     snapshots: AgentSnapshotHub,
+    _alerts: Option<crate::alerts::AlertQueue>,
     mut shutdown: watch::Receiver<()>,
 ) {
     let dispatcher: Arc<dyn DeliveryDispatcher> = Arc::new(production_dispatcher(

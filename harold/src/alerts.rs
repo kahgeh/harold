@@ -2,7 +2,9 @@
 //! `{"alert": "<name>", "state": "firing" | "cleared"}` to `POST /alert`. Harold accepts
 //! only the four alerts below and types `harold alert: <name> <state>` into the pane of
 //! the agent running in the chief's folder, with the same checks and typing as timed
-//! prompts. The chief decides what to do with the line.
+//! prompts. The chief decides what to do with the line. Harold also queues one line of
+//! its own, `harold alert: delivery-given-up firing`, through `AlertQueue`; the address
+//! refuses that name.
 //!
 //! No log line carries any part of a posted body. A refused post logs a fixed line, and
 //! the alert and state of an accepted one are fields, from the fixed lists below.
@@ -39,6 +41,36 @@ pub(crate) const ALERT_NAMES: [&str; 4] = [
 const ALERT_STATES: [&str; 2] = ["firing", "cleared"];
 
 const LINE_PREFIX: &str = "harold alert: ";
+
+/// The alert Harold queues itself when it gives up a delivery. The address does not
+/// accept it: it is not in `ALERT_NAMES`.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "used when a delivery is given up (Task 3)")
+)]
+pub(crate) const DELIVERY_GIVEN_UP: &str = "delivery-given-up";
+
+/// Where Harold queues its own alert lines, for the same typing as posted ones.
+#[derive(Clone, Debug)]
+pub(crate) struct AlertQueue(mpsc::Sender<Queued>);
+
+impl AlertQueue {
+    /// A queue, and the receiver `deliver` reads.
+    pub(crate) fn new() -> (Self, mpsc::Receiver<Queued>) {
+        let (queue_tx, queue_rx) = mpsc::channel(QUEUE_CAPACITY);
+        (Self(queue_tx), queue_rx)
+    }
+
+    /// Queues `harold alert: <alert> firing`. A full or closed queue drops the line with
+    /// the same log line as a post's.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "used when a delivery is given up (Task 3)")
+    )]
+    pub(crate) fn firing(&self, alert: &str) {
+        queue_line(&self.0, format!("{LINE_PREFIX}{alert} firing"));
+    }
+}
 
 /// Lines accepted and not yet typed. A post that finds it full is answered 204 and the
 /// alert is dropped.
@@ -105,25 +137,31 @@ async fn take_alert(State(queue): State<mpsc::Sender<Queued>>, request: Request)
         return refuse().await;
     };
     // The post is answered at once; typing waits in the background for an idle chief.
-    if let Err(dropped) = queue.try_send((line, Instant::now())) {
-        let (TrySendError::Full((line, _)) | TrySendError::Closed((line, _))) = &dropped;
-        let (alert, state) = alert_and_state(line);
-        match dropped {
-            TrySendError::Full(_) => warn!(
-                alert,
-                state,
-                reason = "queue_full",
-                "alert not delivered (queue_full)"
-            ),
-            TrySendError::Closed(_) => warn!(
-                alert,
-                state,
-                reason = "shutting_down",
-                "alert not delivered (shutting_down)"
-            ),
-        }
-    }
+    queue_line(&queue, line);
     StatusCode::NO_CONTENT
+}
+
+/// Queues `line`, stamped now. A full or closed queue drops it and logs the drop.
+fn queue_line(queue: &mpsc::Sender<Queued>, line: String) {
+    let Err(dropped) = queue.try_send((line, Instant::now())) else {
+        return;
+    };
+    let (TrySendError::Full((line, _)) | TrySendError::Closed((line, _))) = &dropped;
+    let (alert, state) = alert_and_state(line);
+    match dropped {
+        TrySendError::Full(_) => warn!(
+            alert,
+            state,
+            reason = "queue_full",
+            "alert not delivered (queue_full)"
+        ),
+        TrySendError::Closed(_) => warn!(
+            alert,
+            state,
+            reason = "shutting_down",
+            "alert not delivered (shutting_down)"
+        ),
+    }
 }
 
 async fn refuse() -> StatusCode {
@@ -329,28 +367,29 @@ pub(crate) async fn start(
     chief_folder: Option<String>,
     ports: TmuxPorts,
     shutdown: watch::Receiver<()>,
-) -> std::io::Result<JoinHandle<()>> {
+) -> std::io::Result<(JoinHandle<()>, AlertQueue)> {
     let listener = TcpListener::bind(addr).await?;
     info!(address = %addr, "alert address listening");
     Ok(serve_on(listener, chief_folder, ports, shutdown))
 }
 
 /// Serves the address on `listener` and runs the delivery, both until shutdown. The handle
-/// ends when both have stopped.
+/// ends when both have stopped. The queue is Harold's own way in.
 fn serve_on<P: Ports>(
     listener: TcpListener,
     chief_folder: Option<String>,
     ports: P,
     shutdown: watch::Receiver<()>,
-) -> JoinHandle<()> {
-    let (queue_tx, queue_rx) = mpsc::channel(QUEUE_CAPACITY);
+) -> (JoinHandle<()>, AlertQueue) {
+    let (queue, queue_rx) = AlertQueue::new();
     let delivery = tokio::spawn(deliver(ports, chief_folder, queue_rx, shutdown.clone()));
     let mut server_shutdown = shutdown;
-    let server = axum::serve(listener, router(queue_tx)).with_graceful_shutdown(async move {
-        let _ = server_shutdown.changed().await;
-    });
+    let server =
+        axum::serve(listener, router(queue.0.clone())).with_graceful_shutdown(async move {
+            let _ = server_shutdown.changed().await;
+        });
     let mut server = tokio::spawn(async move { server.await });
-    tokio::spawn(async move {
+    let handle = tokio::spawn(async move {
         let _ = delivery.await;
         // Delivery stops at shutdown, when the address stops taking connections too. A
         // client that holds its connection open is not waited for.
@@ -359,7 +398,8 @@ fn serve_on<P: Ports>(
             Ok(_) => {}
             Err(_) => server.abort(),
         }
-    })
+    });
+    (handle, queue)
 }
 
 #[cfg(test)]

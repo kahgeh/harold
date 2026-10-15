@@ -34,7 +34,7 @@ async fn serve_fake(
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let (shutdown_tx, shutdown_rx) = watch::channel(());
-    let handle = serve_on(
+    let (handle, _queue) = serve_on(
         listener,
         chief_folder.map(str::to_string),
         fake.clone(),
@@ -126,6 +126,7 @@ fn anything_else_is_refused() {
         br#"["slot-idle","firing"]"#,
         b"not json",
         b"",
+        br#"{"alert":"delivery-given-up","state":"firing"}"#,
     ] {
         assert_eq!(alert_line(body), Err(()));
     }
@@ -171,6 +172,10 @@ async fn a_bad_post_gets_400_and_types_nothing() {
         ("/alert", b"not json"),
         ("/alert", b""),
         ("/other", br#"{"alert":"slot-idle","state":"firing"}"#),
+        (
+            "/alert",
+            &br#"{"alert":"delivery-given-up","state":"firing"}"#[..],
+        ),
     ] {
         assert_eq!(post(addr, path, body).await, 400, "{path} {body:?}");
     }
@@ -186,7 +191,7 @@ async fn a_bad_post_gets_400_and_types_nothing() {
     let text = logs.text();
     assert_eq!(
         text.matches("alert ignored (unknown alert)").count(),
-        6,
+        7,
         "{text}"
     );
     // No part of a refused body reaches the log.
@@ -574,4 +579,48 @@ async fn a_phone_reply_and_an_alert_at_once_type_two_whole_lines() {
     let mut both = typed("📱 reply");
     both.extend(typed(SLOT_IDLE_FIRING));
     assert_eq!(fake.keys(), both);
+}
+
+#[tokio::test]
+async fn harolds_own_line_is_typed_into_the_chief_pane() {
+    let fake = idle_chief();
+    let (queue, queue_rx) = AlertQueue::new();
+    let (_shutdown_tx, shutdown_rx) = watch::channel(());
+    let _handle = tokio::spawn(deliver(
+        fake.clone(),
+        Some(CHIEF.into()),
+        queue_rx,
+        shutdown_rx,
+    ));
+
+    queue.firing(DELIVERY_GIVEN_UP);
+
+    wait_until("the line is typed", || fake.keys().len() == 2).await;
+    assert_eq!(fake.keys(), typed("harold alert: delivery-given-up firing"));
+}
+
+#[tokio::test]
+async fn a_full_queue_drops_harolds_own_line_and_logs_it() {
+    let logs = CapturedLogs::start();
+    let (queue, mut queue_rx) = AlertQueue::new();
+    for _ in 0..QUEUE_CAPACITY {
+        queue.firing(DELIVERY_GIVEN_UP);
+    }
+
+    queue.firing(DELIVERY_GIVEN_UP);
+
+    let text = logs.text();
+    assert_eq!(
+        text.matches("alert not delivered (queue_full)").count(),
+        1,
+        "{text}"
+    );
+    assert!(text.contains("alert=\"delivery-given-up\""), "{text}");
+    let (line, _) = queue_rx.recv().await.unwrap();
+    assert_eq!(line, "harold alert: delivery-given-up firing");
+}
+
+#[test]
+fn harolds_own_alert_is_not_one_hyperdx_may_post() {
+    assert!(!ALERT_NAMES.contains(&DELIVERY_GIVEN_UP));
 }

@@ -132,7 +132,7 @@ async fn idle_handler_stops_when_shutdown_channel_closes() {
     let store = Arc::new(HaroldStore::open(&directory.0).await.unwrap());
     let snapshots = AgentSnapshotHub::new(store.load_agent_snapshot().await.unwrap());
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(());
-    let task = tokio::spawn(run_event_handler(store, snapshots, shutdown_rx));
+    let task = tokio::spawn(run_event_handler(store, snapshots, None, shutdown_rx));
 
     drop(shutdown_tx);
 

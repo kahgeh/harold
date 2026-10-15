@@ -849,9 +849,11 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
         shutdown_rx.clone(),
     );
 
+    let telemetry_tasks = start_telemetry_tasks(cfg, &snapshots, &shutdown_rx).await;
     let event_handler_handle = tokio::spawn(projector::run_event_handler(
         Arc::clone(&store),
         snapshots.clone(),
+        telemetry_tasks.alert_queue.clone(),
         shutdown_rx.clone(),
     ));
     let listener_handle = tokio::spawn(channels::listen_for_inbound_messages(
@@ -865,7 +867,6 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
         shutdown_rx.clone(),
     )
     .await?;
-    let telemetry_tasks = start_telemetry_tasks(cfg, &snapshots, &shutdown_rx).await;
 
     info!(address = %addr, "Harold listening");
     let service = harold_service(
@@ -902,6 +903,7 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
 struct TelemetryTasks {
     pod_stats: Option<tokio::task::JoinHandle<()>>,
     alerts: Option<tokio::task::JoinHandle<()>>,
+    alert_queue: Option<alerts::AlertQueue>,
 }
 
 impl TelemetryTasks {
@@ -930,7 +932,7 @@ async fn start_telemetry_tasks(
         .pod_registry_path()
         .map(|registry| pod_stats::start(registry, shutdown_rx.clone()));
     // The alert address is opened only when `alert_listen` is set.
-    let alerts = match cfg.telemetry.alert_addr() {
+    let (alerts, alert_queue) = match cfg.telemetry.alert_addr() {
         Some(alert_addr) => alerts::start(
             alert_addr,
             cfg.notify.away_messages_only_from.clone(),
@@ -946,10 +948,15 @@ async fn start_telemetry_tasks(
                 "alert address unavailable"
             );
         })
-        .ok(),
-        None => None,
+        .ok()
+        .unzip(),
+        None => (None, None),
     };
-    TelemetryTasks { pod_stats, alerts }
+    TelemetryTasks {
+        pod_stats,
+        alerts,
+        alert_queue,
+    }
 }
 
 async fn stop_agent_monitor(
