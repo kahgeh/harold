@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 use opentelemetry::KeyValue;
 use opentelemetry::global::{self, BoxedTracer};
 use opentelemetry::logs::{LogRecord as _, Logger as _, LoggerProvider as _};
+use opentelemetry::metrics::{Counter, Histogram};
 use opentelemetry::trace::{Status, TracerProvider as _};
 use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
 use opentelemetry_sdk::Resource;
@@ -28,6 +29,8 @@ use opentelemetry_sdk::trace::{
     BatchSpanProcessor, SdkTracerProvider, SimpleSpanProcessor, SpanData, SpanEvents, SpanExporter,
     SpanLinks,
 };
+use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
 use tracing::{Level, Metadata, Subscriber, info, warn};
 use tracing_subscriber::filter::{EnvFilter, FilterExt, FilterFn, LevelFilter, filter_fn};
 use tracing_subscriber::layer::{Filter, SubscriberExt};
@@ -158,6 +161,324 @@ pub(crate) fn enabled() -> bool {
     #[cfg(test)]
     test_support::install();
     ENABLED.load(Ordering::SeqCst)
+}
+
+// ---------------------------------------------------------------------------
+// Instruments
+// ---------------------------------------------------------------------------
+
+/// Harold's counters and histograms, with the names, units and buckets of the spec's
+/// Metrics table. The four pod gauges are observable gauges that `pod_stats` registers,
+/// because it owns their data.
+#[allow(
+    dead_code,
+    reason = "the phone-request, turn and pod tasks record into the instruments later"
+)]
+pub(crate) struct Instruments {
+    /// `harold.phone_requests`, `{request}`.
+    pub phone_requests: Counter<u64>,
+    /// `harold.phone_requests.wrong`, `{request}`.
+    pub phone_requests_wrong: Counter<u64>,
+    /// `harold.phone_request.latency`, seconds.
+    pub phone_request_latency: Histogram<f64>,
+    /// `harold.turns`, `{turn}`.
+    pub turns: Counter<u64>,
+    /// `harold.turn.duration`, seconds.
+    pub turn_duration: Histogram<f64>,
+    /// `pod.merges`, `{merge}`.
+    pub pod_merges: Counter<u64>,
+    /// `pod.merged_lines`, `{line}`.
+    pub pod_merged_lines: Counter<u64>,
+    /// `pod.spec.lead_time`, seconds.
+    pub pod_spec_lead_time: Histogram<f64>,
+}
+
+static INSTRUMENTS: OnceLock<Instruments> = OnceLock::new();
+
+/// Harold's instruments, made once from the global meter. With telemetry off that is
+/// the no-op meter, so nothing is recorded.
+#[allow(
+    dead_code,
+    reason = "the phone-request, turn and pod tasks record into the instruments later"
+)]
+pub(crate) fn instruments() -> &'static Instruments {
+    // A test that ran before the test providers were set would otherwise bind the
+    // instruments to the no-op meter for the whole test binary.
+    #[cfg(test)]
+    test_support::install();
+    INSTRUMENTS.get_or_init(|| {
+        let meter = global::meter(SCOPE);
+        let counter = |name: &'static str, unit: &'static str| {
+            meter.u64_counter(name).with_unit(unit).build()
+        };
+        let seconds = |name: &'static str, buckets: &[f64]| {
+            meter
+                .f64_histogram(name)
+                .with_unit("s")
+                .with_boundaries(buckets.to_vec())
+                .build()
+        };
+        Instruments {
+            phone_requests: counter("harold.phone_requests", "{request}"),
+            phone_requests_wrong: counter("harold.phone_requests.wrong", "{request}"),
+            phone_request_latency: seconds(
+                "harold.phone_request.latency",
+                &[1.0, 2.0, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0],
+            ),
+            turns: counter("harold.turns", "{turn}"),
+            turn_duration: seconds(
+                "harold.turn.duration",
+                &[10.0, 30.0, 60.0, 120.0, 300.0, 600.0, 1800.0, 3600.0],
+            ),
+            pod_merges: counter("pod.merges", "{merge}"),
+            pod_merged_lines: counter("pod.merged_lines", "{line}"),
+            pod_spec_lead_time: seconds(
+                "pod.spec.lead_time",
+                &[
+                    600.0, 1800.0, 3600.0, 7200.0, 14400.0, 43200.0, 86400.0, 172800.0,
+                ],
+            ),
+        }
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Phone requests
+// ---------------------------------------------------------------------------
+
+/// A reply typed within this long of being sent is on time. One typed later, or never,
+/// is unavailable. A tag for another pane within this long of a reply Harold routed
+/// marks that reply as having gone to the wrong agent.
+#[allow(
+    dead_code,
+    reason = "the listener and projector judge phone requests in a later telemetry task"
+)]
+pub(crate) const ON_TIME: Duration = Duration::from_secs(600);
+
+/// A prompt Harold typed joins the next turn end on its pane within this long.
+#[allow(
+    dead_code,
+    reason = "the prompt map keeps prompts this long in a later telemetry task"
+)]
+pub(crate) const PROMPT_KEPT: Duration = Duration::from_secs(3600);
+
+/// How a phone reply's pane was found: the `resolved_by` attribute.
+#[allow(
+    dead_code,
+    reason = "the listener and projector judge phone requests in a later telemetry task"
+)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ResolvedBy {
+    ExactTag,
+    TagSubstring,
+    AiModel,
+    LatestNotifier,
+    MyAgent,
+    None,
+}
+
+#[allow(
+    dead_code,
+    reason = "the listener and projector judge phone requests in a later telemetry task"
+)]
+impl ResolvedBy {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::ExactTag => "exact_tag",
+            Self::TagSubstring => "tag_substring",
+            Self::AiModel => "ai_model",
+            Self::LatestNotifier => "latest_notifier",
+            Self::MyAgent => "my_agent",
+            Self::None => "none",
+        }
+    }
+
+    /// Harold chose the pane (`latest_notifier`, `ai_model`, `my_agent`), rather than
+    /// the user's tag.
+    pub(crate) fn harold_chose(self) -> bool {
+        matches!(self, Self::LatestNotifier | Self::AiModel | Self::MyAgent)
+    }
+}
+
+/// What happened to a phone reply on this Mac.
+#[allow(
+    dead_code,
+    reason = "the listener and projector judge phone requests in a later telemetry task"
+)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Routing {
+    /// Another Mac owns the reply and counts it.
+    NotOwned,
+    /// Messaging is paused: not counted.
+    Paused,
+    /// No pane, an unmatched tag, or the pane is gone.
+    NoPane,
+    /// Typed into `pane_id`. `tagged` is whether the reply carried a tag.
+    Typed {
+        pane_id: String,
+        resolved_by: ResolvedBy,
+        tagged: bool,
+    },
+}
+
+/// How one phone reply counts.
+#[allow(
+    dead_code,
+    reason = "the listener and projector judge phone requests in a later telemetry task"
+)]
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct PhoneVerdict {
+    /// `Some("typed")`, `Some("unavailable")`, or `None` when the reply is not counted.
+    pub outcome: Option<&'static str>,
+    /// From the reply's own time to typing, when it was typed, on time or late.
+    pub latency: Option<Duration>,
+    /// The channel and `resolved_by` of the earlier request this one shows went to the
+    /// wrong agent.
+    pub wrong: Option<(String, ResolvedBy)>,
+}
+
+/// The last reply typed on this Mac, which a later tag may show went to the wrong pane.
+#[allow(
+    dead_code,
+    reason = "the listener and projector judge phone requests in a later telemetry task"
+)]
+#[derive(Clone, Debug)]
+struct LastTyped {
+    channel: String,
+    reply_at: OffsetDateTime,
+    pane_id: String,
+    resolved_by: ResolvedBy,
+}
+
+/// Judges each phone reply in turn, remembering the last one typed.
+#[allow(
+    dead_code,
+    reason = "the listener and projector judge phone requests in a later telemetry task"
+)]
+#[derive(Default)]
+pub(crate) struct PhoneBook {
+    last_typed: Option<LastTyped>,
+}
+
+#[allow(
+    dead_code,
+    reason = "the listener and projector judge phone requests in a later telemetry task"
+)]
+impl PhoneBook {
+    /// Counts a reply sent at `reply_at` and handled at `typed_at`.
+    ///
+    /// - `NotOwned` and `Paused` are not counted, and leave the last typed reply as it was.
+    /// - `NoPane` is unavailable.
+    /// - `Typed` is typed when it was typed within `ON_TIME`, and unavailable otherwise.
+    /// - A tagged `Typed` reply marks the last typed reply as wrong when that one went to
+    ///   another pane, Harold chose its pane, and it was sent at most `ON_TIME` earlier.
+    ///   A reply the user tagged went where the user said, so a later tag for another
+    ///   pane is the user moving on, not a misroute.
+    pub(crate) fn judge(
+        &mut self,
+        channel: &str,
+        reply_at: OffsetDateTime,
+        typed_at: OffsetDateTime,
+        routing: &Routing,
+    ) -> PhoneVerdict {
+        let Routing::Typed {
+            pane_id,
+            resolved_by,
+            tagged,
+        } = routing
+        else {
+            let outcome = matches!(routing, Routing::NoPane).then_some("unavailable");
+            return PhoneVerdict {
+                outcome,
+                latency: None,
+                wrong: None,
+            };
+        };
+        // A reply handled before its own time (a clock difference) took no time.
+        let latency = Duration::try_from(typed_at - reply_at).unwrap_or(Duration::ZERO);
+        let outcome = if latency > ON_TIME {
+            "unavailable"
+        } else {
+            "typed"
+        };
+        let wrong = self
+            .last_typed
+            .as_ref()
+            .filter(|last| {
+                *tagged
+                    && last.pane_id != *pane_id
+                    && last.resolved_by.harold_chose()
+                    && Duration::try_from(reply_at - last.reply_at)
+                        .is_ok_and(|since| since <= ON_TIME)
+            })
+            .map(|last| (last.channel.clone(), last.resolved_by));
+        self.last_typed = Some(LastTyped {
+            channel: channel.to_string(),
+            reply_at,
+            pane_id: pane_id.clone(),
+            resolved_by: *resolved_by,
+        });
+        PhoneVerdict {
+            outcome: Some(outcome),
+            latency: Some(latency),
+            wrong,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Turn starts
+// ---------------------------------------------------------------------------
+
+/// What started a turn: the `started_by` attribute.
+#[allow(
+    dead_code,
+    reason = "the turn span and turn metrics use the turn start in a later telemetry task"
+)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum StartedBy {
+    Phone,
+    TimedPrompt,
+    Desk,
+    Unknown,
+}
+
+/// When a turn started, if known, and what started it.
+#[allow(
+    dead_code,
+    reason = "the turn span and turn metrics use the turn start in a later telemetry task"
+)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct TurnStart {
+    pub at: Option<OffsetDateTime>,
+    pub started_by: StartedBy,
+}
+
+/// The spec's order: the hook's transcript time, then Harold's typing, then first busy.
+/// A hook time that is not RFC 3339 counts as absent, and any time after `hook_reached`
+/// is skipped. `started_by` is the typing's when Harold typed the prompt; otherwise
+/// `Desk` when the start is known, and `Unknown` when it is not.
+#[allow(
+    dead_code,
+    reason = "the turn span and turn metrics use the turn start in a later telemetry task"
+)]
+pub(crate) fn turn_start(
+    hook_time: Option<&str>,
+    typed: Option<(OffsetDateTime, StartedBy)>,
+    busy_since: Option<OffsetDateTime>,
+    hook_reached: OffsetDateTime,
+) -> TurnStart {
+    let hook = hook_time.and_then(|text| OffsetDateTime::parse(text, &Rfc3339).ok());
+    let at = [hook, typed.map(|(at, _)| at), busy_since]
+        .into_iter()
+        .flatten()
+        .find(|at| *at <= hook_reached);
+    let started_by = match (typed, at) {
+        (Some((_, started_by)), _) => started_by,
+        (None, Some(_)) => StartedBy::Desk,
+        (None, None) => StartedBy::Unknown,
+    };
+    TurnStart { at, started_by }
 }
 
 // ---------------------------------------------------------------------------

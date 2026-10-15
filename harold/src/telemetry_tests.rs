@@ -400,6 +400,299 @@ fn the_local_offset_is_utc_until_main_sets_it() {
 }
 
 // ---------------------------------------------------------------------------
+// Phone requests
+// ---------------------------------------------------------------------------
+
+/// `minute` minutes after 2026-10-14 08:00 UTC. The `time` crate's `macros` feature is
+/// off, so this parses rather than using `datetime!`.
+fn at(minute: i64) -> OffsetDateTime {
+    OffsetDateTime::parse(
+        "2026-10-14T08:00:00Z",
+        &time::format_description::well_known::Rfc3339,
+    )
+    .unwrap()
+        + time::Duration::minutes(minute)
+}
+
+fn typed(pane: &str, tagged: bool) -> Routing {
+    Routing::Typed {
+        pane_id: pane.into(),
+        resolved_by: if tagged {
+            ResolvedBy::ExactTag
+        } else {
+            ResolvedBy::LatestNotifier
+        },
+        tagged,
+    }
+}
+
+#[test]
+fn resolved_by_has_the_spec_names_and_harold_chose_only_its_own_routes() {
+    let all = [
+        (ResolvedBy::ExactTag, "exact_tag", false),
+        (ResolvedBy::TagSubstring, "tag_substring", false),
+        (ResolvedBy::AiModel, "ai_model", true),
+        (ResolvedBy::LatestNotifier, "latest_notifier", true),
+        (ResolvedBy::MyAgent, "my_agent", true),
+        (ResolvedBy::None, "none", false),
+    ];
+    for (resolved_by, name, chose) in all {
+        assert_eq!(
+            (resolved_by.as_str(), resolved_by.harold_chose()),
+            (name, chose)
+        );
+    }
+}
+
+#[test]
+fn a_reply_typed_on_time_is_typed_with_its_latency() {
+    let v = PhoneBook::default().judge(
+        "imessage",
+        at(0),
+        at(0) + time::Duration::seconds(8),
+        &typed("%1", false),
+    );
+    assert_eq!(
+        (v.outcome, v.latency),
+        (Some("typed"), Some(Duration::from_secs(8)))
+    );
+}
+
+#[test]
+fn a_reply_with_no_pane_is_unavailable() {
+    assert_eq!(
+        PhoneBook::default()
+            .judge("imessage", at(0), at(0), &Routing::NoPane)
+            .outcome,
+        Some("unavailable")
+    );
+}
+
+#[test]
+fn a_reply_typed_eleven_minutes_late_is_unavailable() {
+    assert_eq!(
+        PhoneBook::default()
+            .judge("imessage", at(0), at(11), &typed("%1", false))
+            .outcome,
+        Some("unavailable")
+    );
+}
+
+#[test]
+fn a_tagged_reply_for_another_pane_within_ten_minutes_adds_one_wrong() {
+    let mut book = PhoneBook::default();
+    book.judge("imessage", at(0), at(0), &typed("%1", false));
+    let v = book.judge("imessage", at(7), at(7), &typed("%2", true));
+    assert_eq!(
+        v.wrong,
+        Some(("imessage".into(), ResolvedBy::LatestNotifier))
+    );
+    assert_eq!(v.outcome, Some("typed"));
+}
+
+#[test]
+fn a_tag_for_the_same_pane_or_after_eleven_minutes_adds_no_wrong() {
+    let mut book = PhoneBook::default();
+    book.judge("imessage", at(0), at(0), &typed("%1", false));
+    assert_eq!(
+        book.judge("imessage", at(5), at(5), &typed("%1", true))
+            .wrong,
+        None
+    );
+    let mut book = PhoneBook::default();
+    book.judge("imessage", at(0), at(0), &typed("%1", false));
+    assert_eq!(
+        book.judge("imessage", at(11), at(11), &typed("%2", true))
+            .wrong,
+        None
+    );
+}
+
+#[test]
+fn a_tagged_reply_after_a_user_tagged_reply_to_another_pane_adds_no_wrong() {
+    // The earlier reply went where the user's tag said; a new tag for another pane is the user moving on.
+    let mut book = PhoneBook::default();
+    book.judge("imessage", at(0), at(0), &typed("%1", true));
+    assert_eq!(
+        book.judge("imessage", at(3), at(3), &typed("%2", true))
+            .wrong,
+        None
+    );
+    let mut book = PhoneBook::default();
+    book.judge(
+        "imessage",
+        at(0),
+        at(0),
+        &Routing::Typed {
+            pane_id: "%1".into(),
+            resolved_by: ResolvedBy::TagSubstring,
+            tagged: true,
+        },
+    );
+    assert_eq!(
+        book.judge("imessage", at(3), at(3), &typed("%2", true))
+            .wrong,
+        None
+    );
+}
+
+#[test]
+fn a_tagged_reply_after_an_ai_model_or_my_agent_route_adds_one_wrong() {
+    for chose in [ResolvedBy::AiModel, ResolvedBy::MyAgent] {
+        let mut book = PhoneBook::default();
+        book.judge(
+            "imessage",
+            at(0),
+            at(0),
+            &Routing::Typed {
+                pane_id: "%1".into(),
+                resolved_by: chose,
+                tagged: false,
+            },
+        );
+        assert_eq!(
+            book.judge("imessage", at(2), at(2), &typed("%2", true))
+                .wrong,
+            Some(("imessage".into(), chose))
+        );
+    }
+}
+
+#[test]
+fn a_reply_another_mac_owns_or_while_paused_is_not_counted() {
+    let mut book = PhoneBook::default();
+    assert_eq!(
+        book.judge("imessage", at(0), at(0), &Routing::NotOwned)
+            .outcome,
+        None
+    );
+    assert_eq!(
+        book.judge("imessage", at(0), at(0), &Routing::Paused)
+            .outcome,
+        None
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Turn starts
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_turn_starts_at_the_first_known_source() {
+    let reached = at(30);
+    let s = turn_start(
+        Some("2026-10-14T08:05:00Z"),
+        Some((at(3), StartedBy::Phone)),
+        Some(at(4)),
+        reached,
+    );
+    assert_eq!((s.at, s.started_by), (Some(at(5)), StartedBy::Phone));
+    let s = turn_start(
+        None,
+        Some((at(3), StartedBy::TimedPrompt)),
+        Some(at(4)),
+        reached,
+    );
+    assert_eq!((s.at, s.started_by), (Some(at(3)), StartedBy::TimedPrompt));
+    let s = turn_start(None, None, Some(at(4)), reached);
+    assert_eq!((s.at, s.started_by), (Some(at(4)), StartedBy::Desk));
+    let s = turn_start(None, None, None, reached);
+    assert_eq!((s.at, s.started_by), (None, StartedBy::Unknown));
+}
+
+#[test]
+fn a_malformed_or_future_hook_time_counts_as_not_sent() {
+    let reached = at(30);
+    for bad in ["yesterday", "", "2026-10-14T09:00:00Z"] {
+        let s = turn_start(Some(bad), None, Some(at(4)), reached);
+        assert_eq!(s.at, Some(at(4)), "{bad}");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Instruments
+// ---------------------------------------------------------------------------
+
+/// The unit and histogram bounds of `name`, from the export that carries `product`.
+/// Counters have no bounds. `None` when no such export exists.
+fn exported_metric(name: &str, product: &str) -> Option<(String, Option<Vec<f64>>)> {
+    use opentelemetry_sdk::metrics::data::{AggregatedMetrics, MetricData};
+    fn carries<'a>(mut attributes: impl Iterator<Item = &'a KeyValue>, product: &str) -> bool {
+        attributes.any(|kv| kv.key.as_str() == "pod.product" && kv.value.as_str() == product)
+    }
+    for resource in test_support::metrics() {
+        for scope in resource.scope_metrics() {
+            for metric in scope.metrics().filter(|m| m.name() == name) {
+                let found = match metric.data() {
+                    AggregatedMetrics::U64(MetricData::Sum(sum)) => sum
+                        .data_points()
+                        .any(|p| carries(p.attributes(), product))
+                        .then_some(None),
+                    AggregatedMetrics::F64(MetricData::Histogram(histogram)) => histogram
+                        .data_points()
+                        .find(|p| carries(p.attributes(), product))
+                        .map(|p| Some(p.bounds().collect())),
+                    _ => None,
+                };
+                if let Some(bounds) = found {
+                    return Some((metric.unit().to_string(), bounds));
+                }
+            }
+        }
+    }
+    None
+}
+
+#[test]
+fn instruments_have_the_spec_names_units_and_buckets() {
+    test_support::install();
+    let product = format!("p-{}", uuid::Uuid::new_v4());
+    let ours = [KeyValue::new("pod.product", product.clone())];
+    let i = instruments();
+    i.phone_requests.add(1, &ours);
+    i.phone_requests_wrong.add(1, &ours);
+    i.phone_request_latency.record(3.0, &ours);
+    i.turns.add(1, &ours);
+    i.turn_duration.record(42.0, &ours);
+    i.pod_merges.add(1, &ours);
+    i.pod_merged_lines.add(12, &ours);
+    i.pod_spec_lead_time.record(
+        700.0,
+        &[
+            KeyValue::new("pod.product", product.clone()),
+            KeyValue::new("phase", "build"),
+            KeyValue::new("spec.revisions", 0i64),
+        ],
+    );
+    let counter = |unit: &str| Some((unit.to_string(), None));
+    let histogram = |bounds: &[f64]| Some(("s".to_string(), Some(bounds.to_vec())));
+    let expected = [
+        ("harold.phone_requests", counter("{request}")),
+        ("harold.phone_requests.wrong", counter("{request}")),
+        (
+            "harold.phone_request.latency",
+            histogram(&[1.0, 2.0, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0]),
+        ),
+        ("harold.turns", counter("{turn}")),
+        (
+            "harold.turn.duration",
+            histogram(&[10.0, 30.0, 60.0, 120.0, 300.0, 600.0, 1800.0, 3600.0]),
+        ),
+        ("pod.merges", counter("{merge}")),
+        ("pod.merged_lines", counter("{line}")),
+        (
+            "pod.spec.lead_time",
+            histogram(&[
+                600.0, 1800.0, 3600.0, 7200.0, 14400.0, 43200.0, 86400.0, 172800.0,
+            ]),
+        ),
+    ];
+    for (name, want) in expected {
+        assert_eq!(exported_metric(name, &product), want, "{name}");
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Fixed log messages
 // ---------------------------------------------------------------------------
 
