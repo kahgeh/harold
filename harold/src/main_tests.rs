@@ -2332,3 +2332,30 @@ async fn each_telemetry_key_starts_its_own_task() {
         .await
         .expect("both stop at shutdown");
 }
+
+#[tokio::test]
+async fn a_store_in_use_stops_harold_with_the_error_text_not_its_debug_form() {
+    let directory = std::env::temp_dir().join(format!("harold-in-use-{}", uuid::Uuid::new_v4()));
+    let first = store::HaroldStore::open(&directory).await.unwrap();
+    let Err(error) = store::HaroldStore::open(&directory).await else {
+        panic!("a second store on the same folder must be refused");
+    };
+    let logs = crate::outbound::fake::CapturedLogs::start();
+
+    let line = super::report_store_open_failure(&directory.display().to_string(), &error);
+
+    assert_eq!(line, "store is in use by another Harold");
+    let lines = logs.text();
+    let logged = lines
+        .lines()
+        .find(|line| line.contains("store could not be opened"))
+        .unwrap_or_else(|| panic!("no error in {lines}"));
+    assert!(logged.trim_start().starts_with("ERROR"), "{logged}");
+    assert!(
+        logged.contains("error=store is in use by another Harold"),
+        "{logged}"
+    );
+    assert!(!lines.contains("InUse"), "{lines}");
+    drop(first);
+    let _ = std::fs::remove_dir_all(&directory);
+}

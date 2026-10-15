@@ -677,6 +677,15 @@ fn exit_with_line(line: &str) -> ! {
     std::process::exit(1)
 }
 
+/// Logs why the store at `path` could not be opened and returns the line Harold stops with:
+/// the error's own text, such as `store is in use by another Harold`. Returning the error
+/// from `main` would print its Debug form instead, such as `Error: InUse`.
+fn report_store_open_failure(path: &str, error: &store::StoreError) -> String {
+    let line = error.to_string();
+    tracing::error!(path, error = %line, "store could not be opened");
+    line
+}
+
 fn print_help() {
     println!("harold — agent notification and inbound message routing daemon\n");
     println!("USAGE:");
@@ -792,7 +801,14 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let store_path = cfg.store.resolved_path();
-    let store = store::open_store(&store_path).await?;
+    let store = match store::open_store(&store_path).await {
+        Ok(store) => store,
+        Err(error) => {
+            let line = report_store_open_failure(&store_path, &error);
+            telemetry.shutdown().await;
+            exit_with_line(&line);
+        }
+    };
 
     let addr = cfg.grpc.addr()?;
 
