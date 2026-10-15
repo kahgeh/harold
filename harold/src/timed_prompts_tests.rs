@@ -600,6 +600,17 @@ impl TestStore {
     }
 }
 
+impl TestStore {
+    /// A store Harold opened before: created, closed and opened again, so it is not new.
+    async fn existing() -> Self {
+        let path =
+            std::env::temp_dir().join(format!("harold-timed-prompts-{}", uuid::Uuid::new_v4()));
+        drop(HaroldStore::open(&path).await.expect("create test store"));
+        let store = Arc::new(HaroldStore::open(&path).await.expect("reopen test store"));
+        Self { path, store }
+    }
+}
+
 impl Drop for TestStore {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.path);
@@ -1551,4 +1562,36 @@ async fn marking_does_nothing_before_any_prompt_time() {
     let mut prompts = prompts(&fake, &store, &[entry("digest", "07:50")]);
     assert!(prompts.mark_passed_on_new_store().await.is_empty());
     assert!(handled(&store).await.is_empty());
+}
+
+#[tokio::test]
+async fn an_existing_store_is_opened_as_it_is_and_no_prompt_is_marked() {
+    let store = TestStore::existing().await;
+    assert!(!store.store.is_new());
+    let fake = Fake::at("2026-10-16", "08:30:00");
+    let mut prompts = prompts(&fake, &store, &[entry("digest", "07:50")]);
+
+    let reports = mark_passed_if_new_store(&mut prompts, store.store.is_new()).await;
+
+    assert!(reports.is_empty(), "{reports:?}");
+    assert!(handled(&store).await.is_empty());
+    assert_eq!(fake.now_reads(), 0, "the clock is not read");
+}
+
+#[tokio::test]
+async fn a_new_store_runs_the_marking_at_start() {
+    let store = TestStore::new().await;
+    assert!(store.store.is_new());
+    let fake = Fake::at("2026-10-16", "08:30:00");
+    let mut prompts = prompts(&fake, &store, &[entry("digest", "07:50")]);
+
+    let reports = mark_passed_if_new_store(&mut prompts, store.store.is_new()).await;
+
+    assert_eq!(
+        reports,
+        vec![Report::MarkedOnNewStore {
+            name: "digest".into()
+        }]
+    );
+    assert_eq!(handled(&store).await.len(), 1);
 }

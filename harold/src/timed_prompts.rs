@@ -997,6 +997,18 @@ pub(crate) fn startup_wait(monitor: &AgentMonitorSettings) -> Duration {
     listing * 2 + Duration::from_millis(monitor.screen_interval_ms) + COMMAND_TIMEOUT
 }
 
+/// On a new store, marks the prompts whose time today has passed. A store that already
+/// exists is opened as it is: nothing is marked and the clock is not read.
+pub(crate) async fn mark_passed_if_new_store<P: Ports>(
+    prompts: &mut TimedPrompts<P>,
+    is_new: bool,
+) -> Vec<Report> {
+    if !is_new {
+        return Vec::new();
+    }
+    prompts.mark_passed_on_new_store().await
+}
+
 /// Starts the task for the prompts in `settings`. The caller has already read the whole
 /// event stream into the state database, so the stored dates are current.
 /// On a new store, prompts whose time today has passed are first marked handled.
@@ -1014,10 +1026,8 @@ pub(crate) async fn start(
     let ports = TmuxPorts::new(snapshots, settings.agents.0.clone());
     let is_new = store.is_new();
     let mut prompts = TimedPrompts::new(&settings.timed_prompts, &last_days, ports, store);
-    if is_new {
-        for report in prompts.mark_passed_on_new_store().await {
-            log_report(&report);
-        }
+    for report in mark_passed_if_new_store(&mut prompts, is_new).await {
+        log_report(&report);
     }
     Ok(tokio::spawn(run(
         prompts,
