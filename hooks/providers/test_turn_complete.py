@@ -105,6 +105,42 @@ class ProviderHooksTest(unittest.TestCase):
                             self.assertEqual(module.main(), 0)
                             self.assertEqual(stderr.getvalue(), "")
 
+    def test_claude_sends_session_and_last_prompt_time(self):
+        self.write_records([
+            {"type": "user", "timestamp": "2026-10-15T08:00:00.000Z", "message": {"content": "old"}},
+            {"type": "user", "timestamp": "2026-10-15T08:05:00.000Z", "message": {"content": "new prompt"}},
+            {"type": "user", "timestamp": "2026-10-15T08:06:00.000Z", "message": {"content": "<system reminder>"}},
+        ])
+        notify = self.invoke(claude_turn_complete, {"cwd": "/p", "session_id": "s-1", "transcript_path": str(self.transcript)})
+        turn = notify.call_args.args[0]
+        self.assertEqual((turn.session_id, turn.turn_started_at), ("s-1", "2026-10-15T08:05:00.000Z"))
+
+    def test_codex_sends_session_and_last_prompt_time(self):
+        self.write_records([
+            {"timestamp": "2026-10-15T08:05:00.000Z", "type": "event_msg", "payload": {"type": "user_message", "message": "new prompt"}},
+        ])
+        notify = self.invoke(codex_turn_complete, {"cwd": "/p", "session_id": "c-1", "transcript_path": str(self.transcript)})
+        turn = notify.call_args.args[0]
+        self.assertEqual((turn.session_id, turn.turn_started_at), ("c-1", "2026-10-15T08:05:00.000Z"))
+
+    def test_nothing_new_is_sent_without_session_or_timestamp(self):
+        self.write_records([{"type": "user", "message": {"content": "p"}}])
+        notify = self.invoke(claude_turn_complete, {"cwd": "/p", "transcript_path": str(self.transcript)})
+        turn = notify.call_args.args[0]
+        self.assertEqual((turn.session_id, turn.turn_started_at), ("", ""))
+
+    def test_non_string_session_or_timestamp_is_sent_empty(self):
+        cases = (
+            (claude_turn_complete, {"type": "user", "timestamp": 1760515500, "message": {"content": "p"}}),
+            (codex_turn_complete, {"timestamp": None, "type": "event_msg", "payload": {"type": "user_message", "message": "p"}}),
+        )
+        for module, record in cases:
+            with self.subTest(module=module.__name__):
+                self.write_records([record])
+                notify = self.invoke(module, {"cwd": "/p", "session_id": 42, "transcript_path": str(self.transcript)})
+                turn = notify.call_args.args[0]
+                self.assertEqual((turn.last_user_prompt, turn.session_id, turn.turn_started_at), ("p", "", ""))
+
     def test_installed_scripts_find_shared_notifier_in_custom_prefix(self):
         hooks = Path(self.temporary.name) / "custom prefix" / "harold" / "hooks"
         hooks.mkdir(parents=True)

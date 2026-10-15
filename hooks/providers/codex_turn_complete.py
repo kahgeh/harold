@@ -46,11 +46,15 @@ def text_from_content(content: Any) -> str:
     return "\n".join(parts)
 
 
-def extract_last_user_prompt(transcript_path: str | None) -> str:
-    if not isinstance(transcript_path, str) or not transcript_path or not os.path.isfile(transcript_path):
-        return ""
+def string_or_empty(value: Any) -> str:
+    return value if isinstance(value, str) else ""
 
-    prompts: list[str] = []
+
+def extract_last_user_prompt_and_time(transcript_path: str | None) -> tuple[str, str]:
+    if not isinstance(transcript_path, str) or not transcript_path or not os.path.isfile(transcript_path):
+        return "", ""
+
+    prompts: list[tuple[str, str]] = []
     with open(transcript_path, encoding="utf-8") as f:
         for line in f:
             try:
@@ -73,9 +77,9 @@ def extract_last_user_prompt(transcript_path: str | None) -> str:
 
             prompt = prompt.strip()
             if prompt and not prompt.startswith("<") and "tool_use_id" not in prompt:
-                prompts.append(prompt)
+                prompts.append((prompt, string_or_empty(data.get("timestamp"))))
 
-    return prompts[-1] if prompts else ""
+    return prompts[-1] if prompts else ("", "")
 
 
 def extract_last_assistant_message(transcript_path: str | None) -> str:
@@ -120,12 +124,15 @@ def main() -> int:
         if not assistant_message:
             assistant_message = extract_last_assistant_message(transcript_path)
 
+        last_user_prompt, turn_started_at = extract_last_user_prompt_and_time(transcript_path)
         cwd = input_data.get("cwd")
         notify_harold(
             TurnComplete(
                 cwd=cwd if isinstance(cwd, str) else os.getcwd(),
-                last_user_prompt=extract_last_user_prompt(transcript_path),
+                last_user_prompt=last_user_prompt,
                 assistant_message=assistant_message,
+                session_id=string_or_empty(input_data.get("session_id")),
+                turn_started_at=turn_started_at,
             )
         )
     except Exception:

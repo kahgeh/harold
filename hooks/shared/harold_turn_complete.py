@@ -35,6 +35,8 @@ class TurnComplete:
     cwd: str
     last_user_prompt: str
     assistant_message: str
+    session_id: str = ""
+    turn_started_at: str = ""
 
 
 def clean_text(value: str, limit: int) -> str:
@@ -128,16 +130,22 @@ def call_harold(
     assistant_message: str,
     main_context: str,
     grpc_addr: str,
+    session_id: str = "",
+    turn_started_at: str = "",
 ) -> None:
-    payload = json.dumps(
-        {
-            "pane_id": pane_id,
-            "pane_label": pane_label,
-            "last_user_prompt": last_user_prompt,
-            "assistant_message": assistant_message,
-            "main_context": main_context,
-        }
-    )
+    fields = {
+        "pane_id": pane_id,
+        "pane_label": pane_label,
+        "last_user_prompt": last_user_prompt,
+        "assistant_message": assistant_message,
+        "main_context": main_context,
+    }
+    # Sent only when set, so a new hook still works with an older installed harold.proto.
+    if session_id:
+        fields["session_id"] = session_id
+    if turn_started_at:
+        fields["turn_started_at"] = turn_started_at
+    payload = json.dumps(fields)
     subprocess.run(
         [
             "grpcurl",
@@ -166,4 +174,6 @@ def notify_harold(turn: TurnComplete) -> None:
         assistant_message=clean_text(turn.assistant_message, 2000),
         main_context=get_main_context(turn.cwd),
         grpc_addr=grpc_addr,
+        session_id=turn.session_id,
+        turn_started_at=turn.turn_started_at,
     )

@@ -67,6 +67,43 @@ class HaroldTurnCompleteTest(unittest.TestCase):
         self.assertNotIn("work_summary", payload)
 
 
+    @patch.object(harold_turn_complete.subprocess, "run")
+    def test_call_harold_leaves_out_empty_session_and_turn_start(self, run) -> None:
+        harold_turn_complete.call_harold(
+            pane_id="%8",
+            pane_label="harold:2.3",
+            last_user_prompt="refresh events",
+            assistant_message="events refreshed",
+            main_context="harold",
+            grpc_addr="127.0.0.1:55060",
+            session_id="",
+            turn_started_at="",
+        )
+
+        command = run.call_args.args[0]
+        payload = json.loads(command[command.index("-d") + 1])
+        self.assertNotIn("session_id", payload)
+        self.assertNotIn("turn_started_at", payload)
+
+    @patch.object(harold_turn_complete.subprocess, "run")
+    def test_call_harold_sends_session_and_turn_start_when_set(self, run) -> None:
+        harold_turn_complete.call_harold(
+            pane_id="%8",
+            pane_label="harold:2.3",
+            last_user_prompt="refresh events",
+            assistant_message="events refreshed",
+            main_context="harold",
+            grpc_addr="127.0.0.1:55060",
+            session_id="s-1",
+            turn_started_at="2026-10-15T08:05:00.000Z",
+        )
+
+        command = run.call_args.args[0]
+        payload = json.loads(command[command.index("-d") + 1])
+        self.assertEqual(payload["session_id"], "s-1")
+        self.assertEqual(payload["turn_started_at"], "2026-10-15T08:05:00.000Z")
+
+
 class ManagedHookTest(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory(prefix="Harold's test ")
@@ -103,6 +140,19 @@ class ManagedHookTest(unittest.TestCase):
         self.assertEqual(command[command.index("-import-path") + 1], str(self.bundle))
         self.assertEqual(command[-2], "127.0.0.1:55060")
         self.assertEqual(command[-1], "harold.Harold/TurnComplete")
+
+    def test_notify_harold_passes_session_and_turn_start_through(self) -> None:
+        turn = self.hook.TurnComplete(
+            "/project", "refresh", "finished", session_id="s-1", turn_started_at="2026-10-15T08:05:00.000Z"
+        )
+        with patch.object(subprocess, "run", return_value=subprocess.CompletedProcess([], 0)) as run:
+            self.hook.notify_harold(turn)
+
+        command = run.call_args_list[-1].args[0]
+        payload = json.loads(command[command.index("-d") + 1])
+        self.assertEqual(
+            (payload["session_id"], payload["turn_started_at"]), ("s-1", "2026-10-15T08:05:00.000Z")
+        )
 
     def test_failed_managed_start_never_delivers_to_an_unrelated_listener(self) -> None:
         error = subprocess.CalledProcessError(1, ["haroldctl", "start"])
