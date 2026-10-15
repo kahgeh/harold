@@ -71,15 +71,17 @@ Harold keeps everything it records in one folder: `<prefix>/harold/data/store/` 
 
 An event's version is its log sequence number plus one, so the first event in an empty store is version 1 and version 0 means no event yet. Versions only rise, but they have gaps, because the log reserves sequence numbers in blocks each time it opens: in a store whose first event is version 1, the first event after a restart is version 4097. `harold --check-ready` prints `through_event_version` in these numbers.
 
-Harold delivers only events that are on disk. Each append returns after the log's `flush()` has written the record to disk, and Harold opens the log so that its reads return only flushed records (`ReadVisibility::Remote`). An event a crash could lose is therefore never projected or delivered.
+Harold delivers only events that the log has written to the filesystem. Each append returns after the log's `flush()` has written the record to the filesystem, and Harold opens the log so that its reads return only flushed records (`ReadVisibility::Remote`). A record the log has not flushed is therefore never projected or delivered. Flushed records survive Harold being killed. The log's local store does not call `fsync`, so whether they survive a power loss is untested.
 
 Each event is projected once and has one row in the delivery outbox. Harold projects an event into `harold-state.db` and moves the cursor past it in one transaction, so a crash between the two rolls both back, and the next start projects that event again from the cursor. If the same envelope is ever written to the log twice, both copies carry one `id`, and the delivery outbox keeps one row per `event_id`, so the second copy adds no row. No other table records which ids Harold has seen. Delivery is a separate step: the event handler sends a message and then marks its row delivered, so a crash after the send and before the mark sends that message again at the next start.
+
+Harold refuses to start on a folder whose `harold-state.db` cursor is past every version its `log/` can hold, as after `log/` is deleted, or replaced with an older log or another folder's log. It stops with `harold-state.db has read the event log up to version <cursor>, but the log in <folder>/log ends before it; the store folder is inconsistent`. A folder with a log and no `harold-state.db` opens: Harold builds a new `harold-state.db` from every event in the log.
 
 A record whose value is not a Harold envelope does not stop the events after it. Harold reads such a record as an event of type `UndecodableEvent` and logs `stored record is not a Harold event`. The event goes to the delivery outbox like any other. The event handler has no delivery for that type, so it marks the event permanently undeliverable and logs `event is permanently undeliverable; continuing`. The events after it are projected and delivered as usual.
 
 ## Starting fresh
 
-Builds before the OpenData log keep their store in `<prefix>/harold/data/events/`. Harold never reads or deletes that folder. When Harold opens a store folder with no `harold-state.db`, it creates an empty store there, so the first start on `data/store/` keeps none of `data/events/`:
+Builds before the OpenData log keep their store in `<prefix>/harold/data/events/`. Harold never reads or deletes that folder. When Harold opens a store folder that holds neither `harold-state.db` nor a log, it creates an empty store there, so the first start on `data/store/` keeps none of `data/events/`:
 
 - **Event history.** It stays in `data/events/`, where only an earlier build reads it. No feature of Harold needs that history.
 - **Waiting messages.** Messages still waiting in the delivery outbox of `data/events/` are not sent.
