@@ -533,7 +533,7 @@ fn routing_failure_of_a_stored_reply_is_retryable() {
 fn not_owned_report() -> RouteReport {
     RouteReport {
         outcome: DeliveryOutcome::Skipped,
-        routing: Routing::NotOwned,
+        routing: Routing::NotOwned { tagged: false },
     }
 }
 

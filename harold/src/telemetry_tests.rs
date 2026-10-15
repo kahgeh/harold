@@ -576,8 +576,13 @@ fn a_tagged_reply_after_an_ai_model_or_my_agent_route_adds_one_wrong() {
 fn a_reply_another_mac_owns_or_while_paused_is_not_counted() {
     let mut book = PhoneBook::default();
     assert_eq!(
-        book.judge("imessage", at(0), at(0), &Routing::NotOwned)
-            .outcome,
+        book.judge(
+            "imessage",
+            at(0),
+            at(0),
+            &Routing::NotOwned { tagged: false }
+        )
+        .outcome,
         None
     );
     assert_eq!(
@@ -627,11 +632,91 @@ fn a_tag_after_a_reply_with_no_pane_adds_no_wrong() {
 fn a_reply_another_mac_owns_leaves_the_last_typed_reply_to_be_judged() {
     let mut book = PhoneBook::default();
     book.judge("imessage", at(0), at(0), &harold_chose("%1"));
-    book.judge("imessage", at(1), at(1), &Routing::NotOwned);
+    book.judge(
+        "imessage",
+        at(1),
+        at(1),
+        &Routing::NotOwned { tagged: false },
+    );
     assert_eq!(
         book.judge("imessage", at(2), at(2), &typed("%2", true))
             .wrong,
         Some(("imessage".into(), ResolvedBy::LatestNotifier))
+    );
+}
+
+const OTHER_MAC_TAGGED: Routing = Routing::NotOwned { tagged: true };
+
+#[test]
+fn a_reply_tagged_for_another_mac_within_ten_minutes_adds_one_wrong() {
+    let mut book = PhoneBook::default();
+    book.judge("imessage", at(0), at(0), &harold_chose("%1"));
+    let v = book.judge("imessage", at(7), at(7), &OTHER_MAC_TAGGED);
+    assert_eq!(
+        v,
+        PhoneVerdict {
+            outcome: None,
+            latency: None,
+            wrong: Some(("imessage".into(), ResolvedBy::LatestNotifier)),
+        }
+    );
+}
+
+#[test]
+fn a_reply_tagged_for_another_mac_after_eleven_minutes_or_a_user_tag_adds_no_wrong() {
+    let mut book = PhoneBook::default();
+    book.judge("imessage", at(0), at(0), &harold_chose("%1"));
+    assert_eq!(
+        book.judge("imessage", at(11), at(11), &OTHER_MAC_TAGGED)
+            .wrong,
+        None
+    );
+    let mut book = PhoneBook::default();
+    book.judge("imessage", at(0), at(0), &typed("%1", true));
+    assert_eq!(
+        book.judge("imessage", at(3), at(3), &OTHER_MAC_TAGGED)
+            .wrong,
+        None
+    );
+}
+
+#[test]
+fn a_reply_tagged_for_another_mac_after_a_late_reply_adds_no_wrong() {
+    let mut book = PhoneBook::default();
+    book.judge("imessage", at(0), at(11), &harold_chose("%1"));
+    assert_eq!(
+        book.judge("imessage", at(5), at(5), &OTHER_MAC_TAGGED)
+            .wrong,
+        None
+    );
+}
+
+#[test]
+fn an_untagged_reply_another_mac_owns_adds_no_wrong() {
+    let mut book = PhoneBook::default();
+    book.judge("imessage", at(0), at(0), &harold_chose("%1"));
+    assert_eq!(
+        book.judge(
+            "imessage",
+            at(2),
+            at(2),
+            &Routing::NotOwned { tagged: false }
+        )
+        .wrong,
+        None
+    );
+}
+
+#[test]
+fn a_reply_tagged_for_another_mac_leaves_the_last_typed_reply_to_be_judged() {
+    let mut book = PhoneBook::default();
+    book.judge("imessage", at(0), at(0), &harold_chose("%1"));
+    book.judge("imessage", at(1), at(1), &OTHER_MAC_TAGGED);
+    assert_eq!(
+        book.judge("imessage", at(2), at(2), &typed("%2", true))
+            .wrong,
+        Some(("imessage".into(), ResolvedBy::LatestNotifier)),
+        "a reply another Mac owns does not replace the last typed reply"
     );
 }
 
@@ -1069,6 +1154,44 @@ fn a_tag_for_another_pane_after_harolds_choice_counts_the_earlier_request_wrong(
             .iter()
             .all(|span| test_support::span_attr(span, "outcome").as_deref() == Some("typed"))
     );
+}
+
+#[test]
+fn a_tag_for_another_mac_after_harolds_choice_counts_the_earlier_request_wrong() {
+    let channel = unique_channel();
+    let mut book = PhoneBook::default();
+    let now = OffsetDateTime::now_utc();
+    let first = open_phone_request(channel, now - time::Duration::seconds(60));
+    finish_phone_request_in(
+        &mut book,
+        &first,
+        &typed("%wrong-mac", false),
+        now - time::Duration::seconds(50),
+    );
+    let second = open_phone_request(channel, now - time::Duration::seconds(10));
+    finish_phone_request_in(&mut book, &second, &Routing::NotOwned { tagged: true }, now);
+
+    assert_eq!(
+        test_support::counter_value(
+            "harold.phone_requests.wrong",
+            &[("channel", channel), ("resolved_by", "latest_notifier")],
+        ),
+        Some(1)
+    );
+    // The reply another Mac owns is counted there, not here.
+    assert_eq!(
+        test_support::counter_value(
+            "harold.phone_requests",
+            &[("channel", channel), ("outcome", "typed")],
+        ),
+        Some(1)
+    );
+    let outcomes: Vec<_> = phone_requests_on(channel)
+        .iter()
+        .filter_map(|span| test_support::span_attr(span, "outcome"))
+        .collect();
+    assert_eq!(outcomes.len(), 2);
+    assert!(outcomes.iter().any(|outcome| outcome == "not_owned"));
 }
 
 #[test]

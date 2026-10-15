@@ -342,8 +342,9 @@ impl ResolvedBy {
 /// What happened to a phone reply on this Mac.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Routing {
-    /// Another Mac owns the reply and counts it.
-    NotOwned,
+    /// Another Mac owns the reply and counts it. `tagged` is whether the reply's tag
+    /// named that Mac, rather than the reply following the latest notifier there.
+    NotOwned { tagged: bool },
     /// Messaging is paused: not counted.
     Paused,
     /// No pane, an unmatched tag, or the pane is gone.
@@ -402,6 +403,8 @@ impl PhoneBook {
     ///   another pane, Harold chose its pane, and it was sent at most `ON_TIME` earlier.
     ///   A reply the user tagged went where the user said, so a later tag for another
     ///   pane is the user moving on, not a misroute.
+    /// - A tagged `NotOwned` reply names a pane on another Mac, so it marks the last typed
+    ///   reply as wrong under the same rules, though it is not counted itself.
     /// - Only the reply right after a typed one can mark it wrong, so every counted reply
     ///   replaces the last typed reply: with itself when it was typed on time, and with
     ///   none otherwise. A late reply is never wrong, because the right-agent rate is
@@ -424,26 +427,18 @@ impl PhoneBook {
             if counted {
                 self.last_typed = None;
             }
+            // Any pane on another Mac is another pane than this Mac's last typed reply.
+            let names_another_mac = matches!(routing, Routing::NotOwned { tagged: true });
             return PhoneVerdict {
                 outcome: counted.then_some("unavailable"),
                 latency: None,
-                wrong: None,
+                wrong: self.wrong_before(reply_at, |_| names_another_mac),
             };
         };
         // A reply handled before its own time (a clock difference) took no time.
         let latency = Duration::try_from(typed_at - reply_at).unwrap_or(Duration::ZERO);
         let on_time = latency <= ON_TIME;
-        let wrong = self
-            .last_typed
-            .as_ref()
-            .filter(|last| {
-                *tagged
-                    && last.pane_id != *pane_id
-                    && last.resolved_by.harold_chose()
-                    && Duration::try_from(reply_at - last.reply_at)
-                        .is_ok_and(|since| since <= ON_TIME)
-            })
-            .map(|last| (last.channel.clone(), last.resolved_by));
+        let wrong = self.wrong_before(reply_at, |last| *tagged && last.pane_id != *pane_id);
         self.last_typed = on_time.then(|| LastTyped {
             channel: channel.to_string(),
             reply_at,
@@ -455,6 +450,25 @@ impl PhoneBook {
             latency: Some(latency),
             wrong,
         }
+    }
+
+    /// The channel and `resolved_by` of the last typed reply, when a reply sent at
+    /// `reply_at` that `elsewhere` says went to another pane shows it was wrong: Harold
+    /// chose its pane and it was sent at most `ON_TIME` earlier.
+    fn wrong_before(
+        &self,
+        reply_at: OffsetDateTime,
+        elsewhere: impl FnOnce(&LastTyped) -> bool,
+    ) -> Option<(String, ResolvedBy)> {
+        self.last_typed
+            .as_ref()
+            .filter(|last| {
+                last.resolved_by.harold_chose()
+                    && Duration::try_from(reply_at - last.reply_at)
+                        .is_ok_and(|since| since <= ON_TIME)
+                    && elsewhere(last)
+            })
+            .map(|last| (last.channel.clone(), last.resolved_by))
     }
 }
 
@@ -596,7 +610,7 @@ pub(crate) fn finish_phone_request(
 fn ended_at(routing: &Routing, handled_at: OffsetDateTime) -> OffsetDateTime {
     match routing {
         Routing::Typed { typed_at, .. } => *typed_at,
-        Routing::NotOwned | Routing::Paused | Routing::NoPane => handled_at,
+        Routing::NotOwned { .. } | Routing::Paused | Routing::NoPane => handled_at,
     }
 }
 
@@ -622,7 +636,7 @@ fn record_finished(
 ) {
     let resolved_by = match routing {
         Routing::Typed { resolved_by, .. } => *resolved_by,
-        Routing::NotOwned | Routing::Paused | Routing::NoPane => ResolvedBy::None,
+        Routing::NotOwned { .. } | Routing::Paused | Routing::NoPane => ResolvedBy::None,
     };
     let instruments = instruments();
     let channel = KeyValue::new("channel", reply.channel);
@@ -656,7 +670,7 @@ fn record_finished(
     // counted outcome.
     let outcome = verdict
         .outcome
-        .unwrap_or(if matches!(routing, Routing::NotOwned) {
+        .unwrap_or(if matches!(routing, Routing::NotOwned { .. }) {
             "not_owned"
         } else {
             "paused"

@@ -236,14 +236,16 @@ pub(crate) fn route_inbound_message(text: &str, forwarded: bool) -> Result<Route
         &ownership::known_machine_names(),
         ownership::latest_notifier().as_deref(),
     );
-    route_if_owned(ownership, |pane_tag, body| {
+    route_if_owned(text, ownership, |pane_tag, body| {
         route_owned_reply(&TmuxEnv, machine, pane_tag, body)
     })
 }
 
 /// Hand an owned reply to `route`. A reply another Mac owns is skipped here, before any
-/// pane discovery, tmux call or message to the user.
+/// pane discovery, tmux call or message to the user. It is `tagged` when the tag of
+/// `text` named the owning Mac.
 fn route_if_owned(
+    text: &str,
     ownership: Ownership<'_>,
     route: impl FnOnce(Option<&str>, &str) -> Result<RouteReport, String>,
 ) -> Result<RouteReport, String> {
@@ -253,10 +255,22 @@ fn route_if_owned(
             info!(owner, "reply dropped (another Mac owns it)");
             Ok(RouteReport {
                 outcome: DeliveryOutcome::Skipped,
-                routing: Routing::NotOwned,
+                routing: Routing::NotOwned {
+                    tagged: tag_names_machine(text, &owner),
+                },
             })
         }
     }
+}
+
+/// Whether the tag of `text` (`[machine]` or `[machine/pane]`) names `machine`. A reply
+/// another Mac owns either named it so, or carried no machine and followed the latest
+/// notifier there.
+fn tag_names_machine(text: &str, machine: &str) -> bool {
+    parse_tag(text).0.is_some_and(|tag| {
+        let named = tag.split_once('/').map_or(tag, |(named, _)| named);
+        ownership::same_machine(named.trim(), machine)
+    })
 }
 
 /// What routing an owned reply needs from the machine around it: the panes, the relay and

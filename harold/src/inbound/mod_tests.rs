@@ -94,15 +94,34 @@ fn reply_owned_by_another_mac_is_skipped_without_routing() {
         owner: "laptop".to_string(),
     };
 
-    let report = route_if_owned(another_macs, |_, _| {
+    let report = route_if_owned("go on", another_macs, |_, _| {
         routed = true;
         Ok(typed_report())
     })
     .unwrap();
 
     assert_eq!(report.outcome, DeliveryOutcome::Skipped);
-    assert_eq!(report.routing, Routing::NotOwned);
+    assert_eq!(report.routing, Routing::NotOwned { tagged: false });
     assert!(!routed, "an unowned reply reached pane discovery");
+}
+
+#[test]
+fn a_reply_another_mac_owns_is_tagged_only_when_its_tag_named_that_mac() {
+    let cases = [
+        ("[laptop/work:0.1] revert that", true),
+        ("[Laptop] revert that", true),
+        ("[ laptop / work:0.1 ] revert that", true),
+        // No tag, or a pane tag: the reply followed the latest notifier there.
+        ("revert that", false),
+        ("[work:0.1] revert that", false),
+    ];
+    for (text, tagged) in cases {
+        let ownership = Ownership::NotOwned {
+            owner: "laptop".to_string(),
+        };
+        let report = route_if_owned(text, ownership, |_, _| Ok(typed_report())).unwrap();
+        assert_eq!(report.routing, Routing::NotOwned { tagged }, "{text}");
+    }
 }
 
 #[test]
@@ -113,10 +132,14 @@ fn owned_reply_is_routed_with_its_pane_tag_and_body() {
         body: "revert that",
     };
 
-    let report = route_if_owned(ownership, |pane_tag, body| {
-        routed.push((pane_tag.map(String::from), body.to_string()));
-        Ok(typed_report())
-    });
+    let report = route_if_owned(
+        "[alir-app main:0.1] revert that",
+        ownership,
+        |pane_tag, body| {
+            routed.push((pane_tag.map(String::from), body.to_string()));
+            Ok(typed_report())
+        },
+    );
 
     assert_eq!(report, Ok(typed_report()));
     assert_eq!(
@@ -135,7 +158,7 @@ fn routing_failure_of_an_owned_reply_is_returned() {
         body: "go",
     };
 
-    let report = route_if_owned(ownership, |_, _| Err("tmux failed".to_string()));
+    let report = route_if_owned("go", ownership, |_, _| Err("tmux failed".to_string()));
 
     assert_eq!(report, Err("tmux failed".to_string()));
 }
@@ -162,7 +185,7 @@ fn chosen(routing: &Routing) -> Option<(&str, ResolvedBy, bool)> {
             tagged,
             ..
         } => Some((pane_id.as_str(), *resolved_by, *tagged)),
-        Routing::NotOwned | Routing::Paused | Routing::NoPane => None,
+        Routing::NotOwned { .. } | Routing::Paused | Routing::NoPane => None,
     }
 }
 

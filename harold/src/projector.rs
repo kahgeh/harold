@@ -210,7 +210,7 @@ fn route_message(
         .map_err(DispatchError::Retryable)?;
     let resolved_by = match &report.routing {
         Routing::Typed { resolved_by, .. } => *resolved_by,
-        Routing::NotOwned | Routing::Paused | Routing::NoPane => ResolvedBy::None,
+        Routing::NotOwned { .. } | Routing::Paused | Routing::NoPane => ResolvedBy::None,
     };
     routing.record("resolved_by", resolved_by.as_str());
     drop(routing);
