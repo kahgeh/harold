@@ -95,13 +95,19 @@ fn is_allowed(key: &str) -> bool {
     ALLOWED_FIELDS.contains(&key)
 }
 
-/// Targets whose log events are never exported: the exporter's own libraries, which
-/// would otherwise feed their export logs back into the export, and the health lines.
-fn is_internal_target(target: &str) -> bool {
-    target == HEALTH_TARGET
-        || ["opentelemetry", "tonic", "h2", "hyper", "tower"]
-            .iter()
-            .any(|prefix| target.starts_with(prefix))
+/// Whether a log event with `target` is exported. Only Harold's and the `events`
+/// crate's own events are: a target that is `harold` or starts with `harold::`, or is
+/// `events` or starts with `events::`, apart from the health lines. Other crates, such
+/// as turso and reqwest, interpolate errors and paths into their messages, so their
+/// events (including `log` records the LogTracer bridges) stay in `harold.log` only.
+fn is_exported_log_target(target: &str) -> bool {
+    let ours = |name: &str| {
+        target == name
+            || target
+                .strip_prefix(name)
+                .is_some_and(|rest| rest.starts_with("::"))
+    };
+    target != HEALTH_TARGET && (ours("harold") || ours("events"))
 }
 
 // ---------------------------------------------------------------------------
@@ -250,14 +256,16 @@ fn span_export_filter() -> FilterFn<impl Fn(&Metadata<'_>) -> bool + Send + Sync
     .with_max_level_hint(LevelFilter::INFO)
 }
 
-/// What becomes an OpenTelemetry log record: the events `level` enables, apart from the
-/// exporter's own libraries and the health lines.
+/// What becomes an OpenTelemetry log record: the events `level` enables whose target
+/// passes the allow-list in `is_exported_log_target` (Harold's and the `events` crate's
+/// own targets, apart from the health lines). Every other target, including the
+/// exporter's own libraries, is written to `harold.log` only.
 fn log_export_filter<S>(level: &str) -> impl Filter<S> + Send + Sync + use<S>
 where
     S: Subscriber + for<'a> LookupSpan<'a>,
 {
     EnvFilter::new(level).and(
-        filter_fn(|meta: &Metadata<'_>| !is_internal_target(meta.target()))
+        filter_fn(|meta: &Metadata<'_>| is_exported_log_target(meta.target()))
             .with_max_level_hint(LevelFilter::TRACE),
     )
 }

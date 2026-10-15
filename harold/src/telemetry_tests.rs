@@ -117,6 +117,10 @@ fn every_export_carries_the_service_and_machine() {
 
 #[test]
 fn internal_and_health_targets_are_not_exported_as_logs() {
+    assert!(!is_exported_log_target("harold_api"));
+    assert!(!is_exported_log_target("eventsource::x"));
+    assert!(is_exported_log_target("harold"));
+    assert!(is_exported_log_target("events::store"));
     test_support::install();
     let pane = unique_pane();
     tracing::warn!(target: HEALTH_TARGET, pane_id = %pane, "health probe");
@@ -124,6 +128,44 @@ fn internal_and_health_targets_are_not_exported_as_logs() {
     tracing::warn!(target: "h2::codec", pane_id = %pane, "h2 probe");
     tracing::warn!(target: "opentelemetry_sdk", pane_id = %pane, "sdk probe");
     assert!(!test_support::exported_text().contains(&pane));
+}
+
+#[test]
+fn only_harold_and_events_log_records_are_exported() {
+    test_support::install();
+    let logs = crate::outbound::fake::CapturedLogs::start();
+    let canary = format!("TELEMETRY-CANARY-{}", uuid::Uuid::new_v4());
+    let pane = unique_pane();
+    // Other crates interpolate errors and paths into their messages, as turso_core does.
+    tracing::error!(target: "turso_core::statement", "{}", canary);
+    tracing::error!(target: "reqwest::blocking::client", "request failed: {}", canary);
+    tracing::error!(target: "harold_api", "{}", canary);
+    tracing::error!(target: "eventsource", "{}", canary);
+    tracing::error!(target: "harold::projector", pane_id = %pane, "harold probe");
+    tracing::error!(target: "events::store", pane_id = %pane, "events probe");
+    tracing::error!(target: "events", pane_id = %pane, "events root probe");
+    tracing::error!(pane_id = %pane, "module target probe");
+    // Records from other crates still reach harold.log.
+    assert!(logs.text().contains(&canary), "{}", logs.text());
+    let exported = test_support::exported_text();
+    assert!(!exported.contains(&canary));
+    let bodies: Vec<String> = test_support::logs()
+        .iter()
+        .filter(|l| format!("{:?}", l.record).contains(&pane))
+        .map(|l| format!("{:?}", l.record.body().unwrap()))
+        .collect();
+    assert_eq!(bodies.len(), 4, "{bodies:#?}");
+    for probe in [
+        "harold probe",
+        "events probe",
+        "events root probe",
+        "module target probe",
+    ] {
+        assert!(
+            bodies.iter().any(|body| body.contains(probe)),
+            "{probe}: {bodies:#?}"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
