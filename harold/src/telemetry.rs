@@ -366,6 +366,9 @@ struct LastTyped {
     reply_at: OffsetDateTime,
     pane_id: String,
     resolved_by: ResolvedBy,
+    /// A later reply has already counted this one wrong. A request is counted wrong at
+    /// most once.
+    counted_wrong: bool,
 }
 
 /// Judges each phone reply in turn, remembering the last counted one when it was typed
@@ -392,6 +395,8 @@ impl PhoneBook {
     ///   pane is the user moving on, not a misroute.
     /// - A tagged `NotOwned` reply names a pane on another Mac, so it marks the last typed
     ///   reply as wrong under the same rules, though it is not counted itself.
+    /// - A reply is counted wrong at most once, however many later replies name another
+    ///   pane.
     /// - Only the reply right after a typed one can mark it wrong, so every counted reply
     ///   replaces the last typed reply: with itself when it was typed on time, and with
     ///   none otherwise. A late reply is never wrong, because the right-agent rate is
@@ -431,6 +436,7 @@ impl PhoneBook {
             reply_at,
             pane_id: pane_id.clone(),
             resolved_by: *resolved_by,
+            counted_wrong: false,
         });
         PhoneVerdict {
             outcome: Some(if on_time { "typed" } else { "unavailable" }),
@@ -441,21 +447,21 @@ impl PhoneBook {
 
     /// The channel and `resolved_by` of the last typed reply, when a reply sent at
     /// `reply_at` that `elsewhere` says went to another pane shows it was wrong: Harold
-    /// chose its pane and it was sent at most `ON_TIME` earlier.
+    /// chose its pane, it was sent at most `ON_TIME` earlier, and no reply has counted it
+    /// wrong yet. Counting it marks it, so it is never counted again.
     fn wrong_before(
-        &self,
+        &mut self,
         reply_at: OffsetDateTime,
         elsewhere: impl FnOnce(&LastTyped) -> bool,
     ) -> Option<(String, ResolvedBy)> {
-        self.last_typed
-            .as_ref()
-            .filter(|last| {
-                last.resolved_by.harold_chose()
-                    && Duration::try_from(reply_at - last.reply_at)
-                        .is_ok_and(|since| since <= ON_TIME)
-                    && elsewhere(last)
-            })
-            .map(|last| (last.channel.clone(), last.resolved_by))
+        let last = self.last_typed.as_mut().filter(|last| {
+            !last.counted_wrong
+                && last.resolved_by.harold_chose()
+                && Duration::try_from(reply_at - last.reply_at).is_ok_and(|since| since <= ON_TIME)
+                && elsewhere(last)
+        })?;
+        last.counted_wrong = true;
+        Some((last.channel.clone(), last.resolved_by))
     }
 }
 

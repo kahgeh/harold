@@ -708,16 +708,39 @@ fn an_untagged_reply_another_mac_owns_adds_no_wrong() {
 }
 
 #[test]
-fn a_reply_tagged_for_another_mac_leaves_the_last_typed_reply_to_be_judged() {
+fn two_replies_tagged_for_another_mac_count_the_earlier_request_wrong_once() {
     let mut book = PhoneBook::default();
     book.judge("imessage", at(0), at(0), &harold_chose("%1"));
-    book.judge("imessage", at(1), at(1), &OTHER_MAC_TAGGED);
     assert_eq!(
-        book.judge("imessage", at(2), at(2), &typed("%2", true))
+        book.judge("imessage", at(1), at(1), &OTHER_MAC_TAGGED)
             .wrong,
-        Some(("imessage".into(), ResolvedBy::LatestNotifier)),
+        Some(("imessage".into(), ResolvedBy::LatestNotifier))
+    );
+    assert_eq!(
+        book.judge("imessage", at(2), at(2), &OTHER_MAC_TAGGED)
+            .wrong,
+        None,
+        "a request is counted wrong at most once"
+    );
+    assert_eq!(
+        book.last_typed.as_ref().map(|last| last.pane_id.as_str()),
+        Some("%1"),
         "a reply another Mac owns does not replace the last typed reply"
     );
+}
+
+#[test]
+fn a_local_tag_after_a_tag_for_another_mac_does_not_count_the_request_wrong_again() {
+    let mut book = PhoneBook::default();
+    book.judge("imessage", at(0), at(0), &harold_chose("%1"));
+    assert_eq!(
+        book.judge("imessage", at(1), at(1), &OTHER_MAC_TAGGED)
+            .wrong,
+        Some(("imessage".into(), ResolvedBy::LatestNotifier))
+    );
+    let local = book.judge("imessage", at(2), at(2), &typed("%2", true));
+    assert_eq!(local.wrong, None, "a request is counted wrong at most once");
+    assert_eq!(local.outcome, Some("typed"));
 }
 
 #[test]
