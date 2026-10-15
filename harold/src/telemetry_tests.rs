@@ -1611,3 +1611,33 @@ fn the_webhook_posts_what_the_alert_address_accepts() {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Counting from 0
+// ---------------------------------------------------------------------------
+
+#[test]
+fn every_phone_counter_set_the_alerts_read_is_exported_from_zero() {
+    register_phone_counters();
+    for channel in PHONE_CHANNELS {
+        for resolved_by in ResolvedBy::ALL {
+            let resolved_by = resolved_by.as_str();
+            for outcome in ["typed", "unavailable"] {
+                let set = [
+                    ("channel", channel),
+                    ("outcome", outcome),
+                    ("resolved_by", resolved_by),
+                ];
+                assert!(
+                    test_support::exact_counter_value("harold.phone_requests", &set).is_some(),
+                    "{set:?}"
+                );
+            }
+            let set = [("channel", channel), ("resolved_by", resolved_by)];
+            assert!(
+                test_support::exact_counter_value("harold.phone_requests.wrong", &set).is_some(),
+                "{set:?}"
+            );
+        }
+    }
+}

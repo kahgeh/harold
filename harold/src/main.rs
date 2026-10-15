@@ -779,6 +779,9 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
         &settings.telemetry,
         &settings.machine_name,
     );
+    if telemetry.exporting() {
+        crate::telemetry::register_phone_counters();
+    }
     init_settings(settings);
     let cfg = get_settings();
 

@@ -239,6 +239,55 @@ pub(crate) fn instruments() -> &'static Instruments {
 }
 
 // ---------------------------------------------------------------------------
+// Counting from 0
+// ---------------------------------------------------------------------------
+
+/// Every `channel` a phone request can carry.
+pub(crate) const PHONE_CHANNELS: [&str; 4] = ["imessage", "telegram", "forwarded", "unknown"];
+
+/// Records 0 once for every attribute set of the phone-request counters the alerts read.
+/// HyperDX reads the first point of a running total as 0, so without this the first
+/// request of each set after a start would never show as a rise. `main` calls it once,
+/// after `init_telemetry`, when export is on.
+pub(crate) fn register_phone_counters() {
+    let instruments = instruments();
+    for channel in PHONE_CHANNELS {
+        for resolved_by in ResolvedBy::ALL {
+            let channel = KeyValue::new("channel", channel);
+            let resolved = KeyValue::new("resolved_by", resolved_by.as_str());
+            for outcome in ["typed", "unavailable"] {
+                instruments.phone_requests.add(
+                    0,
+                    &[
+                        channel.clone(),
+                        KeyValue::new("outcome", outcome),
+                        resolved.clone(),
+                    ],
+                );
+            }
+            instruments
+                .phone_requests_wrong
+                .add(0, &[channel, resolved]);
+        }
+    }
+}
+
+/// Records 0 once for `product`'s merge counters with no `spec.id`: `pod.merges`, and
+/// `pod.merged_lines` for each `change`. The pod facts call it on a product's first poll.
+pub(crate) fn register_merge_counters(product: &str) {
+    let instruments = instruments();
+    let product = KeyValue::new("pod.product", product.to_owned());
+    instruments
+        .pod_merges
+        .add(0, std::slice::from_ref(&product));
+    for change in ["added", "removed"] {
+        instruments
+            .pod_merged_lines
+            .add(0, &[product.clone(), KeyValue::new("change", change)]);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Phone requests
 // ---------------------------------------------------------------------------
 
@@ -262,6 +311,16 @@ pub(crate) enum ResolvedBy {
 }
 
 impl ResolvedBy {
+    /// Every value, for counting each attribute set from 0.
+    pub(crate) const ALL: [Self; 6] = [
+        Self::ExactTag,
+        Self::TagSubstring,
+        Self::AiModel,
+        Self::LatestNotifier,
+        Self::MyAgent,
+        Self::None,
+    ];
+
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::ExactTag => "exact_tag",
@@ -961,7 +1020,6 @@ impl TelemetryGuard {
     }
 
     /// Whether this guard's pipeline exports spans, logs and metrics.
-    #[cfg(test)]
     pub(crate) fn exporting(&self) -> bool {
         self.pipeline.is_some()
     }
@@ -1635,6 +1693,22 @@ pub(crate) mod test_support {
                 .find(|metric| metric.name() == name)
                 .map(|metric| read(metric.data()))
         })?
+    }
+
+    /// The value of the counter `name`'s data point whose attributes are exactly
+    /// `wanted`, or `None` when there is no such point.
+    pub(crate) fn exact_counter_value(name: &str, wanted: &[(&str, &str)]) -> Option<u64> {
+        read_latest(name, |data| {
+            let AggregatedMetrics::U64(MetricData::Sum(sum)) = data else {
+                return None;
+            };
+            sum.data_points()
+                .find(|point| {
+                    point.attributes().count() == wanted.len()
+                        && carries_all(point.attributes(), wanted)
+                })
+                .map(|point| point.value())
+        })
     }
 
     /// The total of the counter `name` over the data points that carry every attribute

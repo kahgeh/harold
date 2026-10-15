@@ -467,6 +467,36 @@ async fn a_poll_records_slots_and_merges() {
 }
 
 #[tokio::test]
+async fn a_products_first_poll_records_its_merge_counters_from_zero() {
+    let pod = Pod::new();
+    let repo = pod.repo("main");
+    let path = registry(
+        &pod,
+        &format!(
+            "[products.{}]\nrepo = \"{}\"\nbase = \"main\"\n",
+            pod.name,
+            repo.display()
+        ),
+    );
+    let (mut stats, _snapshot) = stats(path);
+
+    stats.poll().await;
+
+    let product = ("pod.product", pod.name.as_str());
+    assert_eq!(
+        test_support::exact_counter_value("pod.merges", &[product]),
+        Some(0)
+    );
+    for change in ["added", "removed"] {
+        assert_eq!(
+            test_support::exact_counter_value("pod.merged_lines", &[product, ("change", change)]),
+            Some(0),
+            "{change}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn a_missing_repo_skips_that_product_only() {
     let pod = Pod::new();
     let repo = pod.repo("main");

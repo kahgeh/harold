@@ -812,6 +812,8 @@ pub(crate) struct PodStats<G: Git> {
     gone_merged: HashMap<String, HashMap<String, OffsetDateTime>>,
     /// The Mac's UTC offset, for rejection dates and the times logged.
     offset: UtcOffset,
+    /// The products whose merge counters have been recorded from 0.
+    counted_from_zero: HashSet<String>,
 }
 
 /// A spec worktree that went.
@@ -843,6 +845,7 @@ impl<G: Git> PodStats<G> {
             gone: HashMap::new(),
             gone_merged: HashMap::new(),
             offset,
+            counted_from_zero: HashSet::new(),
         }
     }
 
@@ -867,6 +870,11 @@ impl<G: Git> PodStats<G> {
         };
         let mut snapshot = PodSnapshot::default();
         for product in &products {
+            // HyperDX reads a running total's first point as 0, so each product's merge
+            // counters start at 0 before its first merge can be counted.
+            if self.counted_from_zero.insert(product.name.clone()) {
+                telemetry::register_merge_counters(&product.name);
+            }
             let slots = match slots(&self.git, product).await {
                 Ok(slots) => {
                     self.unavailable.remove(&product.name);
