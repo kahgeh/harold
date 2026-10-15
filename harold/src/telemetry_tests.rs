@@ -93,6 +93,51 @@ fn only_allowed_fields_leave_a_log_record_and_its_body_stays() {
 }
 
 #[test]
+fn an_exported_log_record_carries_the_time_it_was_logged() {
+    test_support::install();
+    let pane = unique_pane();
+    let before = std::time::SystemTime::now();
+    tracing::info!(pane_id = %pane, "timestamp probe");
+    let after = std::time::SystemTime::now();
+    let logs = test_support::logs();
+    let record = logs
+        .iter()
+        .find(|l| format!("{:?}", l.record).contains(&pane))
+        .unwrap();
+    let timestamp = record.record.timestamp().expect("a record time is set");
+    assert!(before <= timestamp && timestamp <= after);
+}
+
+#[test]
+fn allowed_record_keeps_a_record_time_and_fills_a_missing_one() {
+    use opentelemetry::logs::{LogRecord as _, Logger as _, LoggerProvider as _};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let logger = SdkLoggerProvider::builder().build().logger("test");
+    let logged = UNIX_EPOCH + Duration::from_secs(1_760_559_413);
+    let observed = logged + Duration::from_secs(5);
+
+    let mut both = logger.create_log_record();
+    both.set_timestamp(logged);
+    both.set_observed_timestamp(observed);
+    let allowed = allowed_record(&both);
+    assert_eq!(allowed.timestamp(), Some(logged));
+    assert_eq!(allowed.observed_timestamp(), Some(observed));
+
+    let mut only_observed = logger.create_log_record();
+    only_observed.set_observed_timestamp(observed);
+    let allowed = allowed_record(&only_observed);
+    assert_eq!(allowed.timestamp(), Some(observed));
+    assert_eq!(allowed.observed_timestamp(), Some(observed));
+
+    let before = SystemTime::now();
+    let allowed = allowed_record(&logger.create_log_record());
+    let after = SystemTime::now();
+    let timestamp = allowed.timestamp().expect("a record time is set");
+    assert!(before <= timestamp && timestamp <= after);
+}
+
+#[test]
 fn every_export_carries_the_service_and_machine() {
     test_support::install();
     let pane = unique_pane();
