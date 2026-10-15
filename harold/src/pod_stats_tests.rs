@@ -85,8 +85,14 @@ fn write(path: &Path, text: &str) {
 /// Runs test-setup `git` in `dir`, away from the user's own git configuration, and
 /// returns its trimmed output.
 fn git(dir: &Path, args: &[&str]) -> String {
+    git_with(dir, &[], args)
+}
+
+/// `git` with the environment variables `env` set as well.
+fn git_with(dir: &Path, env: &[(&str, &str)], args: &[&str]) -> String {
     let output = Command::new("git")
         .current_dir(dir)
+        .envs(env.iter().copied())
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .args([
@@ -190,7 +196,15 @@ async fn a_worktree_with_an_agent_pane_file_is_busy_and_others_are_not() {
 
     assert_eq!(slots.busy, 1);
     assert_eq!(slots.free, 2);
-    assert_eq!(slots.busy_worktrees, vec![("a".to_owned(), a)]);
+    let head = git(&a, &["rev-parse", "HEAD"]);
+    assert_eq!(
+        slots.busy_worktrees,
+        vec![BusyWorktree {
+            name: "a".to_owned(),
+            path: a,
+            head: Some(head),
+        }]
+    );
 }
 
 #[tokio::test]
@@ -207,13 +221,27 @@ async fn free_slots_never_go_below_zero() {
 
 // --- merges ---
 
+/// Reads the product's history and observes it, as a poll does.
+async fn observe(tips: &mut Tips, product: &Product) -> Result<TipMove, &'static str> {
+    let history = read_history(&SystemGit, product).await?;
+    tips.observe(&SystemGit, product, &history).await
+}
+
+#[test]
+fn a_reflog_time_comes_from_its_selector() {
+    assert_eq!(reflog_time("main@{1791989197}"), Some(1_791_989_197));
+    assert_eq!(reflog_time("refs/heads/main@{12}"), Some(12));
+    assert_eq!(reflog_time("main"), None);
+    assert_eq!(reflog_time("main@{0}x"), None);
+}
+
 #[tokio::test]
 async fn start_up_counts_no_merge() {
     let pod = Pod::new();
     let repo = pod.repo("main");
     let mut tips = Tips::default();
 
-    let moved = tips.observe(&SystemGit, &pod.product(&repo, 3)).await;
+    let moved = observe(&mut tips, &pod.product(&repo, 3)).await;
 
     assert_eq!(moved, Ok(TipMove::Unchanged));
 }
@@ -224,12 +252,9 @@ async fn an_unmoved_tip_counts_no_merge() {
     let repo = pod.repo("main");
     let product = pod.product(&repo, 3);
     let mut tips = Tips::default();
-    tips.observe(&SystemGit, &product).await.unwrap();
+    observe(&mut tips, &product).await.unwrap();
 
-    assert_eq!(
-        tips.observe(&SystemGit, &product).await,
-        Ok(TipMove::Unchanged)
-    );
+    assert_eq!(observe(&mut tips, &product).await, Ok(TipMove::Unchanged));
 }
 
 #[tokio::test]
@@ -238,13 +263,13 @@ async fn a_fast_forward_counts_one_merge_with_its_lines() {
     let repo = pod.repo("main");
     let product = pod.product(&repo, 3);
     let mut tips = Tips::default();
-    tips.observe(&SystemGit, &product).await.unwrap();
+    observe(&mut tips, &product).await.unwrap();
 
     // Lines 1, 2, 4 and 5 kept, 3 removed, three added.
     merge_branch(&repo, "spec-x", "1\n2\n4\n5\nx\ny\nz\n");
 
     assert_eq!(
-        tips.observe(&SystemGit, &product).await,
+        observe(&mut tips, &product).await,
         Ok(TipMove::Merges(vec![Merge {
             spec_id: Some("spec-x".into()),
             added: 3,
@@ -259,13 +284,13 @@ async fn two_merges_between_polls_count_as_two() {
     let repo = pod.repo("main");
     let product = pod.product(&repo, 3);
     let mut tips = Tips::default();
-    tips.observe(&SystemGit, &product).await.unwrap();
+    observe(&mut tips, &product).await.unwrap();
 
     merge_branch(&repo, "spec-x", "1\n2\n3\n4\n5\n6\n");
     merge_branch(&repo, "spec-y", "1\n2\n3\n4\n6\n");
 
     assert_eq!(
-        tips.observe(&SystemGit, &product).await,
+        observe(&mut tips, &product).await,
         Ok(TipMove::Merges(vec![
             Merge {
                 spec_id: Some("spec-x".into()),
@@ -289,13 +314,13 @@ async fn a_move_without_a_reflog_counts_one_merge_without_a_spec() {
     git(&repo, &["config", "core.logAllRefUpdates", "false"]);
     std::fs::remove_file(repo.join(".git/logs/refs/heads/main")).unwrap();
     let mut tips = Tips::default();
-    tips.observe(&SystemGit, &product).await.unwrap();
+    observe(&mut tips, &product).await.unwrap();
 
     merge_branch(&repo, "spec-x", "1\n2\n3\n4\n5\n6\n");
     merge_branch(&repo, "spec-y", "1\n2\n3\n4\n5\n6\n7\n");
 
     assert_eq!(
-        tips.observe(&SystemGit, &product).await,
+        observe(&mut tips, &product).await,
         Ok(TipMove::Merges(vec![Merge {
             spec_id: None,
             added: 2,
@@ -310,13 +335,13 @@ async fn a_rewrite_counts_nothing_and_is_logged() {
     let repo = pod.repo("main");
     let product = pod.product(&repo, 3);
     let mut tips = Tips::default();
-    tips.observe(&SystemGit, &product).await.unwrap();
+    observe(&mut tips, &product).await.unwrap();
     let tree = git(&repo, &["rev-parse", "HEAD^{tree}"]);
     let unrelated = git(&repo, &["commit-tree", &tree, "-m", "unrelated"]);
     git(&repo, &["update-ref", "refs/heads/main", &unrelated]);
     let logs = CapturedLogs::start();
 
-    let moved = tips.observe(&SystemGit, &product).await;
+    let moved = observe(&mut tips, &product).await;
 
     assert_eq!(moved, Ok(TipMove::Rewritten));
     let text = logs.text();
@@ -328,10 +353,7 @@ async fn a_rewrite_counts_nothing_and_is_logged() {
         "{text}"
     );
     // The new tip is known: the next poll counts nothing more.
-    assert_eq!(
-        tips.observe(&SystemGit, &product).await,
-        Ok(TipMove::Unchanged)
-    );
+    assert_eq!(observe(&mut tips, &product).await, Ok(TipMove::Unchanged));
 }
 
 #[test]
@@ -579,7 +601,7 @@ fn each_state_comes_from_its_file_at_that_files_time() {
     let merged = HashMap::from([("e".to_owned(), t2)]);
     let offset = UtcOffset::from_hms(11, 0, 0).unwrap();
 
-    let specs = by_id(read_specs(&dir, &building, &merged, offset));
+    let specs = by_id(read_specs(&dir, &building, &merged, offset).unwrap());
 
     let state = |id: &str| (specs[id].state, specs[id].state_at);
     assert_eq!(
@@ -620,7 +642,7 @@ fn a_pod_without_a_specs_folder_has_no_specs() {
         UtcOffset::UTC,
     );
 
-    assert_eq!(specs, Vec::new());
+    assert_eq!(specs, Ok(Vec::new()));
 }
 
 #[test]
@@ -633,7 +655,7 @@ fn a_merged_spec_stays_merged_though_its_approval_file_remains() {
     let merged_at = at("2026-10-14T11:34:00Z");
     let merged = HashMap::from([("g".to_owned(), merged_at)]);
 
-    let specs = read_specs(&dir, &HashMap::new(), &merged, UtcOffset::UTC);
+    let specs = read_specs(&dir, &HashMap::new(), &merged, UtcOffset::UTC).unwrap();
 
     assert_eq!(specs[0].state, SpecState::Merged);
     assert_eq!(specs[0].state_at, merged_at);
@@ -645,7 +667,7 @@ fn a_revision_keeps_ready_and_raises_revisions() {
     let dir = pod.root.join("pod");
     write(&dir.join("specs/b.md"), "# Spec\n");
     write(&dir.join("specs/b.url"), "https://example.com\n");
-    let read = || read_specs(&dir, &HashMap::new(), &HashMap::new(), UtcOffset::UTC);
+    let read = || read_specs(&dir, &HashMap::new(), &HashMap::new(), UtcOffset::UTC).unwrap();
     let before = read().remove(0);
     assert_eq!(before.revisions, 0);
 
@@ -688,6 +710,11 @@ fn a_rejection_counts_from_the_start_of_its_day() {
     );
     assert_eq!(rejected["f"], at("2026-10-14T00:00:00+11:00"));
     assert_eq!(rejected.len(), 1);
+
+    let west = UtcOffset::from_hms(-7, 0, 0).unwrap();
+    let rejected = rejections("- f, 2026-10-14, reason\n", west);
+    assert_eq!(rejected["f"], at("2026-10-14T00:00:00-07:00"));
+    assert_eq!(rejected["f"], at("2026-10-14T07:00:00Z"));
 }
 
 #[test]
@@ -882,12 +909,34 @@ async fn a_poll_reports_specs_by_state_and_their_words() {
     );
 }
 
-#[tokio::test]
-async fn a_worktree_gone_after_its_branch_merged_counts_as_merged_without_a_reflog() {
-    let pod = Pod::new();
+/// A product checkout `main` whose base branch keeps no reflog.
+fn repo_without_a_reflog(pod: &Pod) -> PathBuf {
     let repo = pod.repo("main");
     git(&repo, &["config", "core.logAllRefUpdates", "false"]);
     std::fs::remove_file(repo.join(".git/logs/refs/heads/main")).unwrap();
+    repo
+}
+
+/// Commits `f` as `text` in the worktree at `path`.
+fn commit(path: &Path, text: &str) {
+    write(&path.join("f"), text);
+    git(path, &["commit", "-q", "-a", "-m", "work"]);
+}
+
+fn remove_worktree(repo: &Path, path: &Path) {
+    git(
+        repo,
+        &["worktree", "remove", "--force", path.to_str().unwrap()],
+    );
+}
+
+const GONE_LINE: &str =
+    "worktree removed without its commit on the base branch; spec not counted as merged";
+
+#[tokio::test]
+async fn a_worktree_gone_after_its_commit_merged_counts_as_merged_without_a_reflog() {
+    let pod = Pod::new();
+    let repo = repo_without_a_reflog(&pod);
     for id in ["h", "k"] {
         write(
             &repo.join(format!(".superpowers/pod/specs/{id}.md")),
@@ -896,10 +945,8 @@ async fn a_worktree_gone_after_its_branch_merged_counts_as_merged_without_a_refl
     }
     let h = pod.worktree(&repo, "h", true);
     let k = pod.worktree(&repo, "k", true);
-    for (path, text) in [(&h, "1\n2\n3\n4\n5\nh\n"), (&k, "1\n2\n3\n4\n5\nk\n")] {
-        write(&path.join("f"), text);
-        git(path, &["commit", "-q", "-a", "-m", "work"]);
-    }
+    commit(&h, "1\n2\n3\n4\n5\nh\n");
+    commit(&k, "1\n2\n3\n4\n5\nk\n");
     let (mut stats, snapshot) = stats(one_product(&pod, &repo));
     stats.poll().await;
     let building = by_id(snapshot.lock().unwrap().specs[&pod.name].clone());
@@ -910,15 +957,13 @@ async fn a_worktree_gone_after_its_branch_merged_counts_as_merged_without_a_refl
     );
     let logs = CapturedLogs::start();
 
-    // h merges and goes; k goes without merging.
+    // h merges, then goes with its branch straight after, as baton's finish does; k goes
+    // without merging.
     git(&repo, &["merge", "-q", "--ff-only", "h"]);
     let before = OffsetDateTime::now_utc();
-    for path in [&h, &k] {
-        git(
-            &repo,
-            &["worktree", "remove", "--force", path.to_str().unwrap()],
-        );
-    }
+    remove_worktree(&repo, &h);
+    git(&repo, &["branch", "-d", "h"]);
+    remove_worktree(&repo, &k);
     stats.poll().await;
     stats.poll().await;
 
@@ -926,12 +971,195 @@ async fn a_worktree_gone_after_its_branch_merged_counts_as_merged_without_a_refl
     assert_eq!(specs["h"].state, SpecState::Merged);
     assert!(specs["h"].state_at >= before);
     assert_eq!(specs["k"].state, SpecState::Drafted);
+    let line = format!("{GONE_LINE} pod.product={} spec.id=k", pod.name);
+    // Within the hour k is still asked about, and nothing is logged.
+    let text = logs.text();
+    assert_eq!(text.matches(&line).count(), 0, "{text}");
+
+    // After an hour k is given up and logged once.
+    for gone in stats.gone.get_mut(&pod.name).unwrap().values_mut() {
+        gone.seen_at -= time::Duration::hours(2);
+    }
+    stats.poll().await;
+    stats.poll().await;
+
+    let text = logs.text();
+    assert_eq!(text.matches(&line).count(), 1, "{text}");
+    assert!(stats.gone[&pod.name].is_empty());
+    let specs = by_id(snapshot.lock().unwrap().specs[&pod.name].clone());
+    assert_eq!(specs["h"].state, SpecState::Merged);
+    assert_eq!(specs["k"].state, SpecState::Drafted);
+}
+
+#[tokio::test]
+async fn a_gone_worktree_is_asked_about_again_until_its_commit_merges() {
+    let pod = Pod::new();
+    let repo = repo_without_a_reflog(&pod);
+    write(&repo.join(".superpowers/pod/specs/m.md"), "# Spec\n");
+    let m = pod.worktree(&repo, "m", true);
+    commit(&m, "1\n2\n3\n4\n5\nm\n");
+    let (mut stats, snapshot) = stats(one_product(&pod, &repo));
+    stats.poll().await;
+    remove_worktree(&repo, &m);
+    let before = OffsetDateTime::now_utc();
+    stats.poll().await;
+    let seen_by = OffsetDateTime::now_utc();
+    let specs = by_id(snapshot.lock().unwrap().specs[&pod.name].clone());
+    assert_eq!(specs["m"].state, SpecState::Drafted);
+
+    // The merge lands a poll later: it counts from when the worktree was seen gone.
+    git(&repo, &["merge", "-q", "--ff-only", "m"]);
+    stats.poll().await;
+
+    let specs = by_id(snapshot.lock().unwrap().specs[&pod.name].clone());
+    assert_eq!(specs["m"].state, SpecState::Merged);
+    assert!(specs["m"].state_at >= before && specs["m"].state_at <= seen_by);
+}
+
+#[tokio::test]
+async fn a_spec_merged_by_the_reflog_counts_from_the_move_not_the_commit() {
+    let pod = Pod::new();
+    let repo = pod.repo("main");
+    write(
+        &repo.join(".superpowers/pod/specs/spec-late.md"),
+        "# Spec\n",
+    );
+    let (mut stats, snapshot) = stats(one_product(&pod, &repo));
+    stats.poll().await;
+    git(&repo, &["checkout", "-q", "-b", "spec-late"]);
+    write(&repo.join("f"), "1\n2\n3\n4\n5\nlate\n");
+    let old = "2020-01-01T00:00:00Z";
+    git_with(
+        &repo,
+        &[("GIT_COMMITTER_DATE", old), ("GIT_AUTHOR_DATE", old)],
+        &["commit", "-q", "-a", "-m", "late"],
+    );
+    git(&repo, &["checkout", "-q", "main"]);
+    let before = OffsetDateTime::now_utc() - time::Duration::seconds(1);
+
+    git(&repo, &["merge", "-q", "--ff-only", "spec-late"]);
+    stats.poll().await;
+
+    let specs = by_id(snapshot.lock().unwrap().specs[&pod.name].clone());
+    assert_eq!(specs["spec-late"].state, SpecState::Merged);
+    assert!(
+        specs["spec-late"].state_at >= before,
+        "{}",
+        specs["spec-late"].state_at
+    );
+}
+
+#[tokio::test]
+async fn an_unreadable_specs_folder_waits_for_the_next_poll() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let pod = Pod::new();
+    let repo = pod.repo("main");
+    let specs = repo.join(".superpowers/pod/specs");
+    write(&specs.join("spec-u.md"), "# Spec\n");
+    write(&specs.join("spec-u.url"), "https://example.com\n");
+    let (mut stats, snapshot) = stats(one_product(&pod, &repo));
+    stats.poll().await;
+    let logs = CapturedLogs::start();
+
+    std::fs::set_permissions(&specs, std::fs::Permissions::from_mode(0o000)).unwrap();
+    stats.poll().await;
+    std::fs::set_permissions(&specs, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let unreadable = snapshot.lock().unwrap().clone();
+    stats.poll().await;
+
+    assert_eq!(
+        unreadable.slots.get(&pod.name),
+        Some(&SlotCounts { busy: 0, free: 3 })
+    );
+    assert_eq!(unreadable.specs.get(&pod.name), None);
+    let specs = by_id(snapshot.lock().unwrap().specs[&pod.name].clone());
+    assert_eq!(specs["spec-u"].state, SpecState::Waiting);
+    let text = logs.text();
+    assert_eq!(
+        text.matches(&format!(
+            "pod merges and specs unavailable pod.product={} reason=\"pod folder unreadable\"",
+            pod.name
+        ))
+        .count(),
+        1,
+        "{text}"
+    );
+    // The specs were not taken as gone and back again.
+    assert_eq!(text.matches("spec state changed").count(), 0, "{text}");
+}
+
+#[test]
+fn a_merged_spec_seen_again_records_its_lead_time_once() {
+    test_support::install();
+    let product = format!("pod-test-{}", uuid::Uuid::new_v4());
+    let mut book = SpecBook::default();
+    book.observe(
+        &product,
+        &[spec("g", SpecState::Approved, "2026-10-14T10:31:00Z")],
+    );
+    let mut merged = spec("g", SpecState::Merged, "2026-10-14T11:34:00Z");
+    merged.merged_at = Some(at("2026-10-14T11:34:00Z"));
+    book.observe(&product, std::slice::from_ref(&merged));
+
+    book.observe(&product, &[]);
+    let changes = book.observe(&product, &[merged]);
+
+    assert_eq!(changes, vec![("g".to_owned(), SpecState::Merged)]);
+    assert_eq!(
+        test_support::histogram_sum(
+            "pod.spec.lead_time",
+            &[("pod.product", product.as_str()), ("phase", "build")]
+        ),
+        Some(3780.0)
+    );
+}
+
+/// The `git` on the PATH, but every `git reflog` fails.
+struct NoReflog;
+
+impl Git for NoReflog {
+    async fn run(&self, repo: &Path, args: &[&str]) -> Option<GitOutput> {
+        if args.first() == Some(&"reflog") {
+            return Some(GitOutput {
+                success: false,
+                stdout: String::new(),
+            });
+        }
+        SystemGit.run(repo, args).await
+    }
+}
+
+#[tokio::test]
+async fn a_reflog_that_cannot_be_read_keeps_the_slots() {
+    let pod = Pod::new();
+    let repo = pod.repo("main");
+    pod.worktree(&repo, "a", true);
+    write(&repo.join(".superpowers/pod/specs/a.md"), "# Spec\n");
+    let snapshot = Arc::new(Mutex::new(PodSnapshot::default()));
+    let mut stats = PodStats::new(
+        one_product(&pod, &repo),
+        NoReflog,
+        Arc::clone(&snapshot),
+        UtcOffset::UTC,
+    );
+    let logs = CapturedLogs::start();
+
+    stats.poll().await;
+    stats.poll().await;
+
+    assert_eq!(
+        snapshot.lock().unwrap().slots.get(&pod.name),
+        Some(&SlotCounts { busy: 1, free: 2 })
+    );
+    assert_eq!(snapshot.lock().unwrap().specs.get(&pod.name), None);
     let text = logs.text();
     let line = format!(
-        "worktree removed without its branch on the base branch; spec not counted as merged pod.product={} spec.id=k",
+        "pod merges and specs unavailable pod.product={} reason=\"git failed\"",
         pod.name
     );
     assert_eq!(text.matches(&line).count(), 1, "{text}");
+    assert!(!text.contains("pod facts unavailable"), "{text}");
 }
 
 #[tokio::test]

@@ -45,6 +45,11 @@ const POD_FOLDER: &str = ".superpowers/pod";
 const NO_ANSWER: &str = "git gave no answer";
 const GIT_FAILED: &str = "git failed";
 const REGISTRY_UNREADABLE: &str = "registry unreadable";
+const POD_UNREADABLE: &str = "pod folder unreadable";
+
+/// How long Harold keeps asking whether a spec worktree that went had its commit merged
+/// to the base branch, when git cannot yet say so.
+const GONE_RETRY: time::Duration = time::Duration::hours(1);
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
@@ -170,8 +175,18 @@ async fn git_stdout(git: &impl Git, repo: &Path, args: &[&str]) -> Result<String
 pub(crate) struct Slots {
     pub busy: u32,
     pub free: u32,
-    /// The busy worktrees as (folder name, path), in `git worktree list` order.
-    pub busy_worktrees: Vec<(String, PathBuf)>,
+    /// The busy worktrees, in `git worktree list` order.
+    pub busy_worktrees: Vec<BusyWorktree>,
+}
+
+/// A worktree holding the agent-pane file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct BusyWorktree {
+    /// The folder name, which is the spec id.
+    pub name: String,
+    pub path: PathBuf,
+    /// The commit checked out there (the `HEAD <sha>` line), when listed.
+    pub head: Option<String>,
 }
 
 /// The product's busy and free slots. A busy slot is a worktree, other than the base
@@ -180,11 +195,7 @@ pub(crate) async fn slots(git: &impl Git, product: &Product) -> Result<Slots, &'
     let listing = git_stdout(git, &product.repo, &["worktree", "list", "--porcelain"]).await?;
     let base = canonical(&product.repo).await;
     let mut busy_worktrees = Vec::new();
-    for path in listing
-        .lines()
-        .filter_map(|line| line.strip_prefix("worktree "))
-        .map(PathBuf::from)
-    {
+    for (path, head) in worktrees(&listing) {
         if canonical(&path).await == base || !is_file(&path.join(AGENT_PANE)).await {
             continue;
         }
@@ -192,7 +203,7 @@ pub(crate) async fn slots(git: &impl Git, product: &Product) -> Result<Slots, &'
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_default();
-        busy_worktrees.push((name, path));
+        busy_worktrees.push(BusyWorktree { name, path, head });
     }
     let busy = u32::try_from(busy_worktrees.len()).unwrap_or(u32::MAX);
     Ok(Slots {
@@ -200,6 +211,21 @@ pub(crate) async fn slots(git: &impl Git, product: &Product) -> Result<Slots, &'
         free: product.slots.saturating_sub(busy),
         busy_worktrees,
     })
+}
+
+/// The (path, HEAD commit) of each worktree in `git worktree list --porcelain` output.
+fn worktrees(listing: &str) -> Vec<(PathBuf, Option<String>)> {
+    let mut worktrees: Vec<(PathBuf, Option<String>)> = Vec::new();
+    for line in listing.lines() {
+        if let Some(path) = line.strip_prefix("worktree ") {
+            worktrees.push((PathBuf::from(path), None));
+        } else if let (Some(head), Some((_, current))) =
+            (line.strip_prefix("HEAD "), worktrees.last_mut())
+        {
+            *current = Some(head.trim().to_owned());
+        }
+    }
+    worktrees
 }
 
 async fn canonical(path: &Path) -> PathBuf {
@@ -239,7 +265,7 @@ pub(crate) enum TipMove {
 pub(crate) struct ReflogEntry {
     /// The commit the branch moved to.
     pub hash: String,
-    /// The committer time of that commit, in seconds since the epoch (`%ct`).
+    /// When the branch moved, in seconds since the epoch: the reflog entry's own time.
     pub time: i64,
     /// The reflog subject, such as `merge chief-voice: Fast-forward`.
     pub subject: String,
@@ -255,7 +281,13 @@ pub(crate) async fn read_reflog(
     let text = git_stdout(
         git,
         &product.repo,
-        &["reflog", "show", "--format=%H%x09%ct%x09%gs", &branch],
+        &[
+            "reflog",
+            "show",
+            "--date=unix",
+            "--format=%H%x09%gd%x09%gs",
+            &branch,
+        ],
     )
     .await?;
     Ok(text
@@ -263,7 +295,7 @@ pub(crate) async fn read_reflog(
         .filter_map(|line| {
             let mut fields = line.splitn(3, '\t');
             let hash = fields.next()?.to_owned();
-            let time = fields.next()?.parse().ok()?;
+            let time = reflog_time(fields.next()?)?;
             let subject = fields.next().unwrap_or_default().to_owned();
             Some(ReflogEntry {
                 hash,
@@ -272,6 +304,34 @@ pub(crate) async fn read_reflog(
             })
         })
         .collect())
+}
+
+/// The time in a reflog selector printed with `--date=unix`, such as the
+/// `1791989197` of `main@{1791989197}`.
+pub(crate) fn reflog_time(selector: &str) -> Option<i64> {
+    let (_, braced) = selector.rsplit_once("@{")?;
+    braced.strip_suffix('}')?.parse().ok()
+}
+
+/// The base branch's tip and its reflog, read once a poll and shared by the merges and
+/// the specs.
+pub(crate) struct History {
+    pub tip: String,
+    /// Newest first. Read after the tip, so it holds the tip.
+    pub reflog: Vec<ReflogEntry>,
+}
+
+pub(crate) async fn read_history(
+    git: &impl Git,
+    product: &Product,
+) -> Result<History, &'static str> {
+    let branch = format!("refs/heads/{}", product.base);
+    let tip = git_stdout(git, &product.repo, &["rev-parse", "--verify", &branch])
+        .await?
+        .trim()
+        .to_owned();
+    let reflog = read_reflog(git, product).await?;
+    Ok(History { tip, reflog })
 }
 
 /// `<id>` when `subject` is `merge <id>: ...`.
@@ -312,12 +372,9 @@ impl Tips {
         &mut self,
         git: &impl Git,
         product: &Product,
+        history: &History,
     ) -> Result<TipMove, &'static str> {
-        let branch = format!("refs/heads/{}", product.base);
-        let tip = git_stdout(git, &product.repo, &["rev-parse", "--verify", &branch])
-            .await?
-            .trim()
-            .to_owned();
+        let tip = history.tip.clone();
         let Some(old) = self.0.get(&product.name).cloned() else {
             self.0.insert(product.name.clone(), tip);
             return Ok(TipMove::Unchanged);
@@ -331,7 +388,7 @@ impl Tips {
             .ok_or(NO_ANSWER)?
             .success;
         let moved = if contains_old {
-            TipMove::Merges(merges(git, product, &old, &tip).await?)
+            TipMove::Merges(merges(git, product, &old, &tip, &history.reflog).await?)
         } else {
             warn!(pod.product = %product.name, "base branch rewritten; not counted");
             TipMove::Rewritten
@@ -348,8 +405,8 @@ async fn merges(
     product: &Product,
     old: &str,
     new: &str,
+    reflog: &[ReflogEntry],
 ) -> Result<Vec<Merge>, &'static str> {
-    let reflog = read_reflog(git, product).await?;
     let newest = reflog.iter().position(|entry| entry.hash == new);
     let oldest = newest.and_then(|newest| {
         let after = reflog[newest..]
@@ -483,15 +540,18 @@ fn read_text(path: &Path) -> Option<String> {
 /// writes). `building` = busy worktree folder names -> the creation time of their
 /// agent-pane file; `merged` = spec id -> time from the reflog (`%ct` of `merge <id>:`)
 /// or from seeing the worktree go. A spec is a `specs/<id>.md` file: an id with no spec
-/// file is not a spec.
+/// file is not a spec. A pod without a `specs` folder has no specs; one whose `specs`
+/// folder cannot be read is an error.
 pub(crate) fn read_specs(
     pod: &Path,
     building: &HashMap<String, OffsetDateTime>,
     merged: &HashMap<String, OffsetDateTime>,
     offset: UtcOffset,
-) -> Vec<SpecFacts> {
-    let Ok(entries) = std::fs::read_dir(pod.join("specs")) else {
-        return Vec::new();
+) -> Result<Vec<SpecFacts>, &'static str> {
+    let entries = match std::fs::read_dir(pod.join("specs")) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(_) => return Err(POD_UNREADABLE),
     };
     let mut ids: Vec<String> = entries
         .filter_map(Result::ok)
@@ -507,9 +567,10 @@ pub(crate) fn read_specs(
     let rejected = read_text(&pod.join("rejections.md"))
         .map(|text| rejections(&text, offset))
         .unwrap_or_default();
-    ids.into_iter()
+    Ok(ids
+        .into_iter()
         .filter_map(|id| spec_facts(pod, id, building, merged, &rejected, offset))
-        .collect()
+        .collect())
 }
 
 fn spec_facts(
@@ -601,7 +662,7 @@ fn parse_date(text: &str) -> Option<Date> {
     Date::from_calendar_date(year, month, day).ok()
 }
 
-/// The specs merged by name in the reflog: `<id>` -> the committer time of its newest
+/// The specs merged by name in the reflog: `<id>` -> the time of its newest
 /// `merge <id>:` entry.
 fn reflog_merges(reflog: &[ReflogEntry]) -> HashMap<String, OffsetDateTime> {
     let mut merged = HashMap::new();
@@ -626,8 +687,10 @@ pub(crate) struct SpecBook {
 
 impl SpecBook {
     /// The first call per product records states and reports nothing. Later calls log one
-    /// line per change and, on a change to Merged, record pod.spec.lead_time for each
-    /// phase it can compute. Returns the changes as (spec id, new state).
+    /// line per change and, on a change from a known state to Merged, record
+    /// pod.spec.lead_time for each phase it can compute. A spec first seen merged records
+    /// none, so a spec seen again records its lead time once. Returns the changes as
+    /// (spec id, new state).
     pub(crate) fn observe(
         &mut self,
         product: &str,
@@ -657,7 +720,7 @@ impl SpecBook {
                 },
                 "spec state changed"
             );
-            if spec.state == SpecState::Merged {
+            if spec.state == SpecState::Merged && before.is_some() {
                 record_lead_time(product, spec);
             }
             changes.push((spec.id.clone(), spec.state));
@@ -727,13 +790,28 @@ pub(crate) struct PodStats<G: Git> {
     registry_unreadable: bool,
     /// The products whose failure has been logged since they last worked.
     unavailable: HashSet<String>,
+    /// The products whose merges and specs could not be read, logged since they last
+    /// were.
+    history_unavailable: HashSet<String>,
     specs: SpecBook,
-    /// The busy worktrees' folder names of each product at its last poll.
-    busy_before: HashMap<String, HashSet<String>>,
+    /// The busy worktrees of each product at its last poll: folder name -> HEAD commit.
+    busy_before: HashMap<String, HashMap<String, Option<String>>>,
+    /// The spec worktrees of each product that went and are waiting for git to say their
+    /// commit is on the base branch: id -> what was seen.
+    gone: HashMap<String, HashMap<String, Gone>>,
     /// The specs of each product seen merged by their worktree going: id -> when.
     gone_merged: HashMap<String, HashMap<String, OffsetDateTime>>,
     /// The Mac's UTC offset, for rejection dates and the times logged.
     offset: UtcOffset,
+}
+
+/// A spec worktree that went.
+#[derive(Debug, Clone)]
+struct Gone {
+    /// The commit it had checked out.
+    head: String,
+    /// When Harold saw it gone: its merge time if its commit is on the base branch.
+    seen_at: OffsetDateTime,
 }
 
 impl<G: Git> PodStats<G> {
@@ -750,15 +828,19 @@ impl<G: Git> PodStats<G> {
             snapshot,
             registry_unreadable: false,
             unavailable: HashSet::new(),
+            history_unavailable: HashSet::new(),
             specs: SpecBook::default(),
             busy_before: HashMap::new(),
+            gone: HashMap::new(),
             gone_merged: HashMap::new(),
             offset,
         }
     }
 
     /// Reads the registry and every product once, records the merges and replaces the
-    /// snapshot. A product that fails is skipped and logged once until it works again.
+    /// snapshot. A product that fails is skipped and logged once until it works again. A
+    /// product whose slots were read but whose merges or specs were not keeps its slots;
+    /// its merges and specs wait for the next poll.
     pub(crate) async fn poll(&mut self) {
         let products = match read_registry(&self.registry) {
             Ok(products) => {
@@ -776,15 +858,33 @@ impl<G: Git> PodStats<G> {
         };
         let mut snapshot = PodSnapshot::default();
         for product in &products {
-            match self.poll_product(product).await {
-                Ok((counts, specs)) => {
+            let slots = match slots(&self.git, product).await {
+                Ok(slots) => {
                     self.unavailable.remove(&product.name);
-                    snapshot.slots.insert(product.name.clone(), counts);
-                    snapshot.specs.insert(product.name.clone(), specs);
+                    slots
                 }
                 Err(reason) => {
                     if self.unavailable.insert(product.name.clone()) {
                         warn!(pod.product = %product.name, reason, "pod facts unavailable");
+                    }
+                    continue;
+                }
+            };
+            snapshot.slots.insert(
+                product.name.clone(),
+                SlotCounts {
+                    busy: slots.busy,
+                    free: slots.free,
+                },
+            );
+            match self.poll_history(product, &slots).await {
+                Ok(specs) => {
+                    self.history_unavailable.remove(&product.name);
+                    snapshot.specs.insert(product.name.clone(), specs);
+                }
+                Err(reason) => {
+                    if self.history_unavailable.insert(product.name.clone()) {
+                        warn!(pod.product = %product.name, reason, "pod merges and specs unavailable");
                     }
                 }
             }
@@ -792,80 +892,101 @@ impl<G: Git> PodStats<G> {
         *lock(&self.snapshot) = snapshot;
     }
 
-    async fn poll_product(
+    /// Records the product's merges and reads its specs, from one read of the base
+    /// branch's tip and reflog.
+    async fn poll_history(
         &mut self,
         product: &Product,
-    ) -> Result<(SlotCounts, Vec<SpecFacts>), &'static str> {
-        let slots = slots(&self.git, product).await?;
-        if let TipMove::Merges(merges) = self.tips.observe(&self.git, product).await? {
+        slots: &Slots,
+    ) -> Result<Vec<SpecFacts>, &'static str> {
+        let history = read_history(&self.git, product).await?;
+        if let TipMove::Merges(merges) = self.tips.observe(&self.git, product, &history).await? {
             record_merges(&product.name, &merges);
         }
         let pod = product.repo.join(POD_FOLDER);
-        let reflog = read_reflog(&self.git, product).await?;
         // Where the base branch keeps no reflog, a spec merges when its worktree goes
-        // after its branch was merged.
-        self.see_worktrees_go(product, &slots, &pod, reflog.is_empty())
-            .await;
+        // after its commit was merged.
+        self.see_worktrees_go(
+            product,
+            slots,
+            &pod,
+            history.reflog.is_empty(),
+            OffsetDateTime::now_utc(),
+        )
+        .await;
         let mut merged = self
             .gone_merged
             .get(&product.name)
             .cloned()
             .unwrap_or_default();
-        merged.extend(reflog_merges(&reflog));
+        merged.extend(reflog_merges(&history.reflog));
         let building = slots
             .busy_worktrees
             .iter()
-            .filter_map(|(name, path)| {
-                Some((
-                    name.clone(),
-                    file_time(&path.join(AGENT_PANE), self.offset)?,
-                ))
+            .filter_map(|worktree| {
+                let created = file_time(&worktree.path.join(AGENT_PANE), self.offset)?;
+                Some((worktree.name.clone(), created))
             })
             .collect();
-        let specs = read_specs(&pod, &building, &merged, self.offset);
+        let specs = read_specs(&pod, &building, &merged, self.offset)?;
         self.specs.observe(&product.name, &specs);
-        Ok((
-            SlotCounts {
-                busy: slots.busy,
-                free: slots.free,
-            },
-            specs,
-        ))
+        Ok(specs)
     }
 
-    /// Notes the busy worktrees and, when `check` is set, takes each spec whose worktree
-    /// went since the last poll as merged now if its branch is on the base branch. One
-    /// that is not, or that git cannot answer for, is logged and not counted.
+    /// Notes the busy worktrees and, when `check` is set, waits on each spec worktree that
+    /// went since the last poll: once `git merge-base --is-ancestor <its commit> <base>`
+    /// succeeds, the spec counts as merged at the time Harold saw the worktree gone. The
+    /// branch itself is usually deleted straight after its worktree, so its commit is
+    /// what is checked. A worktree git has not placed on the base branch within an hour
+    /// is logged once and not counted.
     async fn see_worktrees_go(
         &mut self,
         product: &Product,
         slots: &Slots,
         pod: &Path,
         check: bool,
+        now: OffsetDateTime,
     ) {
-        let busy: HashSet<String> = slots
+        let busy: HashMap<String, Option<String>> = slots
             .busy_worktrees
             .iter()
-            .map(|(name, _)| name.clone())
+            .map(|worktree| (worktree.name.clone(), worktree.head.clone()))
             .collect();
         let before = self
             .busy_before
             .insert(product.name.clone(), busy.clone())
             .unwrap_or_default();
         if !check {
+            self.gone.remove(&product.name);
             return;
         }
-        let base = format!("refs/heads/{}", product.base);
-        for id in before.difference(&busy) {
-            if !is_file(&pod.join("specs").join(format!("{id}.md"))).await {
+        let gone = self.gone.entry(product.name.clone()).or_default();
+        for (id, head) in before {
+            if busy.contains_key(&id) || !is_file(&pod.join("specs").join(format!("{id}.md"))).await
+            {
                 continue;
             }
-            let branch = format!("refs/heads/{id}");
+            let Some(head) = head else {
+                info!(
+                    pod.product = %product.name,
+                    spec.id = %id,
+                    "worktree removed without its commit on the base branch; spec not counted as merged"
+                );
+                continue;
+            };
+            gone.insert(id, Gone { head, seen_at: now });
+        }
+        let base = format!("refs/heads/{}", product.base);
+        let waiting: Vec<(String, Gone)> = gone
+            .iter()
+            .map(|(id, gone)| (id.clone(), gone.clone()))
+            .collect();
+        for (id, waiting) in waiting {
             let merged = self
                 .git
                 .run(
                     &product.repo,
-                    &["merge-base", "--is-ancestor", &branch, &base],
+                    &["merge-base", "--is-ancestor", &waiting.head, &base],
                 )
                 .await
                 .is_some_and(|output| output.success);
@@ -873,13 +994,18 @@ impl<G: Git> PodStats<G> {
                 self.gone_merged
                     .entry(product.name.clone())
                     .or_default()
-                    .insert(id.clone(), OffsetDateTime::now_utc());
+                    .insert(id.clone(), waiting.seen_at);
+            } else if now - waiting.seen_at < GONE_RETRY {
+                continue;
             } else {
                 info!(
                     pod.product = %product.name,
                     spec.id = %id,
-                    "worktree removed without its branch on the base branch; spec not counted as merged"
+                    "worktree removed without its commit on the base branch; spec not counted as merged"
                 );
+            }
+            if let Some(gone) = self.gone.get_mut(&product.name) {
+                gone.remove(&id);
             }
         }
     }
