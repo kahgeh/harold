@@ -138,25 +138,12 @@ pub(crate) fn local_offset() -> time::UtcOffset {
 // Global access
 // ---------------------------------------------------------------------------
 
-static ENABLED: AtomicBool = AtomicBool::new(false);
-
 /// Harold's tracer, for spans that start in the past. It is a no-op tracer when
 /// telemetry is off.
 pub(crate) fn tracer() -> BoxedTracer {
     #[cfg(test)]
     test_support::install();
     global::tracer(SCOPE)
-}
-
-/// Whether spans, logs and metrics are being exported.
-#[allow(
-    dead_code,
-    reason = "later telemetry tasks skip telemetry-only work when export is off"
-)]
-pub(crate) fn enabled() -> bool {
-    #[cfg(test)]
-    test_support::install();
-    ENABLED.load(Ordering::SeqCst)
 }
 
 // ---------------------------------------------------------------------------
@@ -1266,7 +1253,6 @@ impl Pipeline {
     fn install_global_providers(&self) {
         global::set_tracer_provider(self.tracer_provider.clone());
         global::set_meter_provider(self.meter_provider.clone());
-        ENABLED.store(true, Ordering::SeqCst);
     }
 
     /// Stops the three providers together, each sending what it has queued, and returns
