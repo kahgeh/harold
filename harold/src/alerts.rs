@@ -317,7 +317,7 @@ fn log_not_delivered(alert: &str, state: &str, reason: &Reason) {
 // ---------------------------------------------------------------------------
 
 /// Listens on `addr` and types accepted alerts into the chief's pane until shutdown. A
-/// failure to listen is returned, and stops Harold.
+/// failure to listen is returned; Harold then logs it and runs without the alert address.
 pub(crate) async fn start(
     addr: SocketAddr,
     chief_folder: Option<String>,

@@ -2282,12 +2282,35 @@ async fn with_no_telemetry_section_nothing_is_opened_or_run() {
     let (_shutdown_tx, shutdown_rx) = watch::channel(());
     let tasks =
         super::start_telemetry_tasks(&cfg, &AgentSnapshotHub::new(empty_snapshot()), &shutdown_rx)
-            .await
-            .expect("nothing to start");
+            .await;
     assert!(tasks.pod_stats.is_none(), "no pod facts, so no git command");
     assert!(tasks.alerts.is_none(), "no alert address");
     tasks.stopped().await;
     guard.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_taken_alert_address_logs_a_warning_and_harold_runs_without_it() {
+    let taken = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = taken.local_addr().unwrap();
+    let cfg = crate::peers::settings_with(&format!("[telemetry]\nalert_listen = \"{address}\"\n"));
+    let logs = crate::outbound::fake::CapturedLogs::start();
+
+    let (_shutdown_tx, shutdown_rx) = watch::channel(());
+    let tasks =
+        super::start_telemetry_tasks(&cfg, &AgentSnapshotHub::new(empty_snapshot()), &shutdown_rx)
+            .await;
+
+    assert!(tasks.alerts.is_none(), "no alert address");
+    let lines = logs.text();
+    let warning = lines
+        .lines()
+        .find(|line| line.contains("alert address unavailable"))
+        .unwrap_or_else(|| panic!("no warning in {lines}"));
+    assert!(warning.trim_start().starts_with("WARN"), "{warning}");
+    assert!(warning.contains("reason=\"bind_failed\""), "{warning}");
+    tasks.stopped().await;
+    drop(taken);
 }
 
 #[tokio::test]
@@ -2301,8 +2324,7 @@ async fn each_telemetry_key_starts_its_own_task() {
     let (shutdown_tx, shutdown_rx) = watch::channel(());
     let tasks =
         super::start_telemetry_tasks(&cfg, &AgentSnapshotHub::new(empty_snapshot()), &shutdown_rx)
-            .await
-            .expect("both start");
+            .await;
     assert!(tasks.pod_stats.is_some());
     assert!(tasks.alerts.is_some());
     drop(shutdown_tx);

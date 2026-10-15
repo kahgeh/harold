@@ -849,7 +849,7 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
         shutdown_rx.clone(),
     )
     .await?;
-    let telemetry_tasks = start_telemetry_tasks(cfg, &snapshots, &shutdown_rx).await?;
+    let telemetry_tasks = start_telemetry_tasks(cfg, &snapshots, &shutdown_rx).await;
 
     info!(address = %addr, "Harold listening");
     let service = harold_service(
@@ -901,12 +901,13 @@ impl TelemetryTasks {
 }
 
 /// Starts the pod facts when `pod_registry` is set and opens the alert address when
-/// `alert_listen` is set. An address that cannot be listened on stops Harold.
+/// `alert_listen` is set. An address that cannot be listened on, such as a port another
+/// program holds, logs a warning and Harold runs with the alert address off.
 async fn start_telemetry_tasks(
     cfg: &settings::Settings,
     snapshots: &agent::snapshot::AgentSnapshotHub,
     shutdown_rx: &watch::Receiver<()>,
-) -> Result<TelemetryTasks, Box<dyn std::error::Error>> {
+) -> TelemetryTasks {
     // The pod facts are read only when the chief's registry is named.
     let pod_stats = cfg
         .telemetry
@@ -914,21 +915,25 @@ async fn start_telemetry_tasks(
         .map(|registry| pod_stats::start(registry, shutdown_rx.clone()));
     // The alert address is opened only when `alert_listen` is set.
     let alerts = match cfg.telemetry.alert_addr() {
-        Some(alert_addr) => Some(
-            alerts::start(
-                alert_addr,
-                cfg.notify.away_messages_only_from.clone(),
-                timed_prompts::TmuxPorts::new(snapshots.clone(), cfg.agents.0.clone()),
-                shutdown_rx.clone(),
-            )
-            .await
-            .map_err(|error| {
-                format!("telemetry.alert_listen: cannot listen on {alert_addr}: {error}")
-            })?,
-        ),
+        Some(alert_addr) => alerts::start(
+            alert_addr,
+            cfg.notify.away_messages_only_from.clone(),
+            timed_prompts::TmuxPorts::new(snapshots.clone(), cfg.agents.0.clone()),
+            shutdown_rx.clone(),
+        )
+        .await
+        .inspect_err(|error| {
+            tracing::warn!(
+                reason = "bind_failed",
+                address = %alert_addr,
+                error = %error,
+                "alert address unavailable"
+            );
+        })
+        .ok(),
         None => None,
     };
-    Ok(TelemetryTasks { pod_stats, alerts })
+    TelemetryTasks { pod_stats, alerts }
 }
 
 async fn stop_agent_monitor(

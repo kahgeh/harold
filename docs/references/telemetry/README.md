@@ -35,7 +35,7 @@ telemetry.alert_listen must be an address and port such as 127.0.0.1:4320
 telemetry.pod_registry must be the path of the chief's products.toml
 ```
 
-An alert address that cannot be listened on also stops Harold, with `telemetry.alert_listen: cannot listen on <address>: <error>`.
+A well-formed alert address that cannot be listened on, such as a port another program already holds, does not stop Harold. Harold logs `alert address unavailable` with `reason = bind_failed` and runs with the alert address off until it restarts. Every other part of Harold, telemetry included, runs as usual.
 
 Every export carries the resource attributes `service.name = "harold"` and `harold.machine = <machine_name>`, so the data of PasM4MBP and PasM1Mac stays apart. Set `pod_registry` on one Mac only. Both Macs reading the same pods would count every merge twice.
 
@@ -393,6 +393,8 @@ HyperDX 2.40 cannot express three parts of these conditions:
 
 - It posts to `http://host.containers.internal:4320/alert`, Harold's `alert_listen` port as the stack's containers see this Mac with Podman. With Docker, change the host to `host.docker.internal`. The port must match `alert_listen`.
 - Its body is `{"alert": "{{note}}", "state": "{{#if (eq status 'firing')}}firing{{else if (eq status 'resolved')}}cleared{{else}}{{status}}{{/if}}"}`. Each alert's `note` is its name. HyperDX's `status` `firing` is sent as `firing`, and `resolved` as `cleared`. Any other status (`no_data`, `pending`, `error`) is passed through as it is, so Harold answers 400 and types nothing. HyperDX 2.40 documents posts only for firing and resolving, but the body does not rely on that.
+
+When the port is taken at start, Harold logs `alert address unavailable` (`reason = bind_failed`) and takes no alerts until it restarts with the port free. HyperDX's posts then fail, and no line reaches the chief.
 
 Harold answers:
 
