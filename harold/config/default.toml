@@ -69,7 +69,7 @@ command = "say"
 level = "info"
 
 [store]
-path = "~/.harold/events"
+path = "~/.harold/store"
 
 [telegram]
 # bot_token and chat_id set in local.toml or env vars:
