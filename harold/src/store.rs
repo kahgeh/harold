@@ -212,7 +212,6 @@ impl HaroldStore {
         })
     }
 
-    #[cfg(test)]
     pub(crate) fn stream(&self) -> &EventStream {
         &self.stream
     }
