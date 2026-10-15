@@ -11,15 +11,11 @@ pub enum StoreError {
     #[error(transparent)]
     Json(#[from] serde_json::Error),
 
-    #[allow(
-        dead_code,
-        reason = "the OpenData log reports its errors here from Task 2"
-    )]
     #[error("event log: {0}")]
     Log(String),
 
     /// Another Harold holds the store folder's lock.
-    #[allow(
+    #[expect(
         dead_code,
         reason = "the store folder's lock refuses a second Harold from Task 3"
     )]
@@ -33,10 +29,6 @@ pub enum StoreError {
     /// The task that owns an operation has stopped.
     #[error("{0}")]
     Stopped(&'static str),
-
-    // Removed in Task 2 with the `events` crate.
-    #[error(transparent)]
-    Events(#[from] events::EsError),
 }
 
 pub type Result<T> = std::result::Result<T, StoreError>;

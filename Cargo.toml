@@ -1,6 +1,6 @@
 [workspace]
-members = ["harold", "harold-api", "events", "tmx-agent-dash"]
+members = ["harold", "harold-api", "tmx-agent-dash"]
 resolver = "2"
 
 [workspace.dependencies]
-turso = { version = "=0.5.1" }
+turso = { version = "=0.8.3", default-features = false, features = ["mimalloc"] }

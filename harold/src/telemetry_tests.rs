@@ -888,9 +888,6 @@ fn instruments_have_the_spec_names_units_and_buckets() {
 #[test]
 fn every_log_message_is_fixed_text() {
     const ALLOWED: &[(&str, &str)] = &[
-        ("events/src/migration.rs", "Applying migration: {}"),
-        ("events/src/migration.rs", "Applied migration: {}"),
-        ("events/src/migration.rs", "Migration {} already applied"),
         ("harold/src/outbound/mod.rs", "{reason}"),
         ("harold/src/projector.rs", "{reason}"),
         (
@@ -937,14 +934,11 @@ fn the_scan_finds_interpolating_calls_and_skips_the_rest() {
     );
 }
 
-/// Each `(file, literal)` of a log macro call in `harold/src` and `events/src` whose
-/// string literal interpolates a value and is not in `allowed`. Test files and the test
-/// fakes are skipped.
+/// Each `(file, literal)` of a log macro call in `harold/src` whose string literal
+/// interpolates a value and is not in `allowed`. Test files and the test fakes are skipped.
 fn scan_log_macros(root: &Path, allowed: &[(&str, &str)]) -> Vec<(String, String)> {
     let mut files = Vec::new();
-    for dir in ["harold/src", "events/src"] {
-        collect_rust_files(&root.join(dir), &mut files);
-    }
+    collect_rust_files(&root.join("harold/src"), &mut files);
     files.sort();
     let mut offenders = Vec::new();
     for file in files {

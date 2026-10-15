@@ -1433,3 +1433,77 @@ async fn timed_prompt_append_fails_once_when_the_test_asks_for_it() {
     assert!(append_timed_prompt_handled(&store, &event).await.is_err());
     assert!(append_timed_prompt_handled(&store, &event).await.is_ok());
 }
+
+/// `target` as a path relative to `base`; both absolute.
+fn relative_to(base: &Path, target: &Path) -> PathBuf {
+    let base: Vec<_> = base.components().collect();
+    let target: Vec<_> = target.components().collect();
+    let shared = base.iter().zip(&target).take_while(|(a, b)| a == b).count();
+    let mut relative = PathBuf::new();
+    for _ in shared..base.len() {
+        relative.push("..");
+    }
+    for part in &target[shared..] {
+        relative.push(part);
+    }
+    relative
+}
+
+#[test]
+fn log_config_uses_absolute_local_paths_and_a_harold_settings_file() {
+    let directory = TestDirectory::new();
+    // A relative path, as `[store] path` may be in development.
+    let cwd = std::fs::canonicalize(std::env::current_dir().unwrap()).unwrap();
+    let relative = relative_to(&cwd, &std::fs::canonicalize(directory.path()).unwrap());
+    assert!(relative.is_relative());
+    let config = super::event_log::log_config(&relative).expect("config");
+    let opendata_common::StorageConfig::SlateDb(slate) = config.storage else {
+        panic!("Harold's log is on SlateDB");
+    };
+    let opendata_common::ObjectStoreConfig::Local(local) = slate.object_store else {
+        panic!("Harold's log is on the local filesystem");
+    };
+    let log_dir = std::fs::canonicalize(directory.path()).unwrap().join("log");
+    assert_eq!(Path::new(&local.path), log_dir);
+    let settings = slate.settings_path.expect("an explicit settings path");
+    assert!(Path::new(&settings).is_absolute());
+    assert_eq!(
+        Path::new(&settings),
+        std::fs::canonicalize(directory.path())
+            .unwrap()
+            .join("log-settings.toml")
+    );
+    assert_eq!(config.read_visibility, opendata_log::ReadVisibility::Remote);
+    assert!(config.retention.retention.is_none());
+}
+
+#[tokio::test]
+async fn an_edited_settings_file_is_rewritten_on_open() {
+    let directory = TestDirectory::new();
+    drop(HaroldStore::open(directory.path()).await.unwrap());
+    let settings = directory.path().join("log-settings.toml");
+    std::fs::write(&settings, "[not]\nharold = true\n").unwrap();
+    drop(HaroldStore::open(directory.path()).await.unwrap());
+    assert!(
+        !std::fs::read_to_string(&settings)
+            .unwrap()
+            .contains("harold = true")
+    );
+}
+
+#[tokio::test]
+async fn event_versions_stay_within_their_bounds_and_a_fresh_store_starts_at_one() {
+    assert!(EventVersion::new(0).is_err());
+    assert!(EventVersion::new(i64::MAX as u64 + 1).is_err());
+    assert!(EventVersion::from_column(0).unwrap().is_start());
+    assert!(EventVersion::from_column(-1).is_err());
+
+    let directory = TestDirectory::new();
+    let store = HaroldStore::open(directory.path()).await.unwrap();
+    let appended = store
+        .stream()
+        .append([NewEvent::new("TtsMuteChanged", json!({"muted": true}))])
+        .await
+        .unwrap();
+    assert_eq!(appended.first_version.get(), 1);
+}
