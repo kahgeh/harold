@@ -547,10 +547,10 @@ fn read_text(path: &Path) -> Option<String> {
 
 /// The specs of the pod folder `pod`, by id. Reads <repo>/.superpowers/pod/ (never
 /// writes). `building` = busy worktree folder names -> the creation time of their
-/// agent-pane file; `merged` = spec id -> time from the reflog (`%ct` of `merge <id>:`)
-/// or from seeing the worktree go. A spec is a `specs/<id>.md` file: an id with no spec
-/// file is not a spec. A pod without a `specs` folder has no specs; one whose `specs`
-/// folder cannot be read is an error.
+/// agent-pane file; `merged` = spec id -> the time of the reflog entry `merge <id>: ...`
+/// (the entry's own time, not the commit's), or from seeing the worktree go. A spec is a
+/// `specs/<id>.md` file: an id with no spec file is not a spec. A pod without a `specs`
+/// folder has no specs; one whose `specs` folder cannot be read is an error.
 pub(crate) fn read_specs(
     pod: &Path,
     building: &HashMap<String, OffsetDateTime>,
