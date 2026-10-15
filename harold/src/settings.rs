@@ -7,7 +7,7 @@ use tracing::warn;
 
 static SETTINGS: OnceLock<Arc<Settings>> = OnceLock::new();
 
-fn expand_tilde(path: &str) -> String {
+pub(crate) fn expand_tilde(path: &str) -> String {
     let Some(rest) = path.strip_prefix("~/") else {
         return path.to_string();
     };
@@ -349,12 +349,12 @@ pub struct TelemetrySettings {
     pub pod_registry: Option<String>,
 }
 
-#[allow(
-    dead_code,
-    reason = "the alert address and the pod facts read these in later telemetry tasks"
-)]
 impl TelemetrySettings {
     /// The alert address. `Settings::validate` reports one that does not parse.
+    #[allow(
+        dead_code,
+        reason = "the alert address reads this in a later telemetry task"
+    )]
     pub fn alert_addr(&self) -> Option<SocketAddr> {
         self.alert_listen.as_deref()?.parse().ok()
     }

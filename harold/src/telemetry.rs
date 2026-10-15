@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use opentelemetry::global::{self, BoxedTracer};
 use opentelemetry::logs::{LogRecord as _, Logger as _, LoggerProvider as _};
-use opentelemetry::metrics::{Counter, Histogram};
+use opentelemetry::metrics::{Counter, Histogram, Meter};
 use opentelemetry::trace::{
     SpanBuilder, Status, TraceContextExt, Tracer as _, TracerProvider as _,
 };
@@ -182,16 +182,8 @@ pub(crate) struct Instruments {
     /// `harold.turn.duration`, seconds.
     pub turn_duration: Histogram<f64>,
     /// `pod.merges`, `{merge}`.
-    #[allow(
-        dead_code,
-        reason = "the pod facts record merges in a later telemetry task"
-    )]
     pub pod_merges: Counter<u64>,
     /// `pod.merged_lines`, `{line}`.
-    #[allow(
-        dead_code,
-        reason = "the pod facts record merged lines in a later telemetry task"
-    )]
     pub pod_merged_lines: Counter<u64>,
     /// `pod.spec.lead_time`, seconds.
     #[allow(
@@ -202,6 +194,14 @@ pub(crate) struct Instruments {
 }
 
 static INSTRUMENTS: OnceLock<Instruments> = OnceLock::new();
+
+/// Harold's meter, for instruments another module owns, such as the pod gauges. It is the
+/// no-op meter when telemetry is off.
+pub(crate) fn meter() -> Meter {
+    #[cfg(test)]
+    test_support::install();
+    global::meter(SCOPE)
+}
 
 /// Harold's instruments, made once from the global meter. With telemetry off that is
 /// the no-op meter, so nothing is recorded.
@@ -1636,6 +1636,20 @@ pub(crate) mod test_support {
                 .map(|point| point.value())
                 .collect();
             (!values.is_empty()).then(|| values.iter().sum())
+        })
+    }
+
+    /// The value of the `u64` gauge `name` at its data point that carries every attribute
+    /// in `wanted`, or `None` when none does.
+    pub(crate) fn gauge_value(name: &str, wanted: &[(&str, &str)]) -> Option<u64> {
+        read_latest(name, |data| {
+            let AggregatedMetrics::U64(MetricData::Gauge(gauge)) = data else {
+                return None;
+            };
+            gauge
+                .data_points()
+                .find(|point| carries_all(point.attributes(), wanted))
+                .map(|point| point.value())
         })
     }
 

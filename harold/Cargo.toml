@@ -32,4 +32,5 @@ opentelemetry-appender-tracing = "=0.31.1"
 axum = { version = "0.8.8", default-features = false, features = ["http1", "tokio"] }
 
 [dev-dependencies]
+tokio = { version = "1.49.0", features = ["test-util"] }
 opentelemetry_sdk = { version = "=0.31.0", default-features = false, features = ["trace", "logs", "metrics", "testing"] }

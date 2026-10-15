@@ -6,6 +6,7 @@ mod cli;
 mod inbound;
 mod outbound;
 mod peers;
+mod pod_stats;
 mod projector;
 mod settings;
 mod store;
@@ -844,6 +845,11 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
         shutdown_rx.clone(),
     )
     .await?;
+    // The pod facts are read only when the chief's registry is named.
+    let pod_stats_handle = cfg
+        .telemetry
+        .pod_registry_path()
+        .map(|registry| pod_stats::start(registry, shutdown_rx.clone()));
 
     info!(address = %addr, "Harold listening");
     let service = harold_service(
@@ -863,10 +869,14 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
         })
         .await;
 
-    // Wait for the handler, the listener and the timed-prompt task to stop before returning.
+    // Wait for the handler, the listener, the timed-prompt task and the pod facts to stop
+    // before returning.
     let _ = event_handler_handle.await;
     let _ = listener_handle.await;
     let _ = timed_prompts_handle.await;
+    if let Some(handle) = pod_stats_handle {
+        let _ = handle.await;
+    }
     stop_agent_monitor(monitor_task, activity_provider, Duration::from_secs(1)).await;
     telemetry.shutdown().await;
     server_result?;
