@@ -9,6 +9,7 @@ use tracing::{info, warn};
 
 use crate::outbound::{DeliveryOutcome, send_reply};
 use crate::settings::get_settings;
+use crate::telemetry::{ResolvedBy, Routing};
 use crate::util::ai_cli_env;
 
 pub use directory::AgentAddress;
@@ -140,25 +141,29 @@ pub(crate) fn semantic_resolve(body: &str, panes: &[AgentAddress]) -> Option<(us
 // Pane resolution
 // ---------------------------------------------------------------------------
 
+/// The pane `tag` or `body` names, the text to type into it, and how it was chosen: by
+/// the tag (exact, then as part of a label), by the AI model, as the pane that last sent
+/// an away notification, or as the `my-agent` pane. A tag that matches no pane is not
+/// tried any other way.
 pub(crate) fn resolve_pane<'a>(
     tag: Option<&str>,
     body: &str,
     panes: &'a [AgentAddress],
-) -> Option<(&'a AgentAddress, String)> {
+) -> Option<(&'a AgentAddress, String, ResolvedBy)> {
     let pane_labels: Vec<&str> = panes.iter().map(|p| p.label()).collect();
     info!(available_panes = ?pane_labels, tag = ?tag, "resolving pane");
 
     if let Some(tag) = tag {
         if let Some(p) = panes.iter().find(|p| p.label() == tag) {
             info!(pane = %p.label(), "resolved via exact tag match");
-            return Some((p, body.to_string()));
+            return Some((p, body.to_string(), ResolvedBy::ExactTag));
         }
         let tag_lc = tag.to_lowercase();
         let result = panes
             .iter()
             .find(|p| p.label().to_lowercase().contains(&tag_lc))
-            .map(|p| (p, body.to_string()));
-        if let Some((p, _)) = &result {
+            .map(|p| (p, body.to_string(), ResolvedBy::TagSubstring));
+        if let Some((p, _, _)) = &result {
             info!(pane = %p.label(), "resolved via tag substring match");
         } else {
             info!(tag, "no pane matched tag");
@@ -168,14 +173,14 @@ pub(crate) fn resolve_pane<'a>(
 
     if let Some((idx, cleaned)) = semantic_resolve(body, panes) {
         info!(pane = %panes[idx].label(), "resolved via semantic match");
-        return Some((&panes[idx], cleaned));
+        return Some((&panes[idx], cleaned, ResolvedBy::AiModel));
     }
     info!("semantic resolve returned none");
 
     if let Some(last) = get_last_away_notification_source_agent() {
         if let Some(p) = panes.iter().find(|p| p.same_target(&last)) {
             info!(pane = %p.label(), "resolved via last notification source agent");
-            return Some((p, body.to_string()));
+            return Some((p, body.to_string(), ResolvedBy::LatestNotifier));
         }
         info!(last_agent = %last.label(), "last notification source agent no longer alive");
     } else {
@@ -187,7 +192,7 @@ pub(crate) fn resolve_pane<'a>(
         .find(|p| p.label().to_lowercase().contains("my-agent"))
     {
         info!(pane = %p.label(), "resolved via my-agent fallback");
-        return Some((p, body.to_string()));
+        return Some((p, body.to_string(), ResolvedBy::MyAgent));
     }
 
     info!("resolution failed — no matching agent");
@@ -198,12 +203,29 @@ pub(crate) fn resolve_pane<'a>(
 // Route a received reply — called from the event handler.
 // ---------------------------------------------------------------------------
 
+/// What routing one reply did: the delivery's outcome, and how the phone request counts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RouteReport {
+    pub outcome: DeliveryOutcome,
+    pub routing: Routing,
+}
+
+impl RouteReport {
+    /// The reply was not typed: no pane, a tag that matches none, or a pane that is gone.
+    fn no_pane() -> Self {
+        Self {
+            outcome: DeliveryOutcome::Skipped,
+            routing: Routing::NoPane,
+        }
+    }
+}
+
 /// Route a received reply to the appropriate agent pane, if this Mac owns it.
 ///
 /// **Must be called from `spawn_blocking`** — this function uses
 /// `Handle::block_on` internally and will deadlock if called from an
 /// async task on the tokio worker pool.
-pub fn route_inbound_message(text: &str, forwarded: bool) -> Result<DeliveryOutcome, String> {
+pub(crate) fn route_inbound_message(text: &str, forwarded: bool) -> Result<RouteReport, String> {
     info!(text, forwarded, "route_inbound_message entered");
     let machine = get_settings().machine_name.as_str();
     let ownership = decide_ownership(
@@ -222,13 +244,16 @@ pub fn route_inbound_message(text: &str, forwarded: bool) -> Result<DeliveryOutc
 /// pane discovery, tmux call or message to the user.
 fn route_if_owned(
     ownership: Ownership<'_>,
-    route: impl FnOnce(Option<&str>, &str) -> Result<DeliveryOutcome, String>,
-) -> Result<DeliveryOutcome, String> {
+    route: impl FnOnce(Option<&str>, &str) -> Result<RouteReport, String>,
+) -> Result<RouteReport, String> {
     match ownership {
         Ownership::Owned { pane_tag, body } => route(pane_tag, body),
         Ownership::NotOwned { owner } => {
             info!(owner, "reply dropped (another Mac owns it)");
-            Ok(DeliveryOutcome::Skipped)
+            Ok(RouteReport {
+                outcome: DeliveryOutcome::Skipped,
+                routing: Routing::NotOwned,
+            })
         }
     }
 }
@@ -267,12 +292,12 @@ fn route_owned_reply(
     machine: &str,
     tag: Option<&str>,
     body: &str,
-) -> Result<DeliveryOutcome, String> {
+) -> Result<RouteReport, String> {
     let panes = env.discover();
 
     if panes.is_empty() {
         env.send_reply(&error_text(machine, "No active agent sessions found."))?;
-        return Ok(DeliveryOutcome::Skipped);
+        return Ok(RouteReport::no_pane());
     }
 
     match resolve_pane(tag, body, &panes) {
@@ -287,9 +312,9 @@ fn route_owned_reply(
                 None => format!("No active pane found. Available: {available}"),
             };
             env.send_reply(&error_text(machine, &msg))?;
-            Ok(DeliveryOutcome::Skipped)
+            Ok(RouteReport::no_pane())
         }
-        Some((agent, cleaned_body)) => {
+        Some((agent, cleaned_body, resolved_by)) => {
             if !env.is_alive(agent) {
                 let available = panes
                     .iter()
@@ -303,14 +328,21 @@ fn route_owned_reply(
                     available
                 );
                 env.send_reply(&error_text(machine, &msg))?;
-                return Ok(DeliveryOutcome::Skipped);
+                return Ok(RouteReport::no_pane());
             }
             info!(label = %agent.label(), "routing reply");
             env.relay(agent, &format!("📱 {cleaned_body}"))?;
             if let Err(error) = env.send_reply(&delivered_text(machine, agent.label())) {
                 warn!(error, "routed message but failed to send confirmation");
             }
-            Ok(DeliveryOutcome::Delivered)
+            Ok(RouteReport {
+                outcome: DeliveryOutcome::Delivered,
+                routing: Routing::Typed {
+                    pane_id: agent.pane_id().to_string(),
+                    resolved_by,
+                    tagged: tag.is_some(),
+                },
+            })
         }
     }
 }

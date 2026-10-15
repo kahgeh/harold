@@ -6,15 +6,18 @@
 //! missing collector never slows Harold down. An unreachable collector is reported in
 //! `harold.log` once when exports start failing and once when they recover.
 
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, OnceLock, mpsc};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, mpsc};
 use std::time::{Duration, Instant};
 
-use opentelemetry::KeyValue;
 use opentelemetry::global::{self, BoxedTracer};
 use opentelemetry::logs::{LogRecord as _, Logger as _, LoggerProvider as _};
 use opentelemetry::metrics::{Counter, Histogram};
-use opentelemetry::trace::{Status, TracerProvider as _};
+use opentelemetry::trace::{
+    SpanBuilder, Status, TraceContextExt, Tracer as _, TracerProvider as _,
+};
+use opentelemetry::{Context, KeyValue};
 use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
 use opentelemetry_sdk::Resource;
 use opentelemetry_sdk::error::OTelSdkResult;
@@ -31,7 +34,8 @@ use opentelemetry_sdk::trace::{
 };
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
-use tracing::{Level, Metadata, Subscriber, info, warn};
+use tracing::{Instrument as _, Level, Metadata, Subscriber, info, warn};
+use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 use tracing_subscriber::filter::{EnvFilter, FilterExt, FilterFn, LevelFilter, filter_fn};
 use tracing_subscriber::layer::{Filter, SubscriberExt};
 use tracing_subscriber::registry::LookupSpan;
@@ -142,10 +146,6 @@ static ENABLED: AtomicBool = AtomicBool::new(false);
 
 /// Harold's tracer, for spans that start in the past. It is a no-op tracer when
 /// telemetry is off.
-#[allow(
-    dead_code,
-    reason = "the phone-request and turn spans use the tracer in later telemetry tasks"
-)]
 pub(crate) fn tracer() -> BoxedTracer {
     #[cfg(test)]
     test_support::install();
@@ -170,10 +170,6 @@ pub(crate) fn enabled() -> bool {
 /// Harold's counters and histograms, with the names, units and buckets of the spec's
 /// Metrics table. The four pod gauges are observable gauges that `pod_stats` registers,
 /// because it owns their data.
-#[allow(
-    dead_code,
-    reason = "the phone-request, turn and pod tasks record into the instruments later"
-)]
 pub(crate) struct Instruments {
     /// `harold.phone_requests`, `{request}`.
     pub phone_requests: Counter<u64>,
@@ -182,14 +178,34 @@ pub(crate) struct Instruments {
     /// `harold.phone_request.latency`, seconds.
     pub phone_request_latency: Histogram<f64>,
     /// `harold.turns`, `{turn}`.
+    #[allow(
+        dead_code,
+        reason = "the turn end records turns in a later telemetry task"
+    )]
     pub turns: Counter<u64>,
     /// `harold.turn.duration`, seconds.
+    #[allow(
+        dead_code,
+        reason = "the turn end records turn durations in a later telemetry task"
+    )]
     pub turn_duration: Histogram<f64>,
     /// `pod.merges`, `{merge}`.
+    #[allow(
+        dead_code,
+        reason = "the pod facts record merges in a later telemetry task"
+    )]
     pub pod_merges: Counter<u64>,
     /// `pod.merged_lines`, `{line}`.
+    #[allow(
+        dead_code,
+        reason = "the pod facts record merged lines in a later telemetry task"
+    )]
     pub pod_merged_lines: Counter<u64>,
     /// `pod.spec.lead_time`, seconds.
+    #[allow(
+        dead_code,
+        reason = "the pod facts record spec lead times in a later telemetry task"
+    )]
     pub pod_spec_lead_time: Histogram<f64>,
 }
 
@@ -197,10 +213,6 @@ static INSTRUMENTS: OnceLock<Instruments> = OnceLock::new();
 
 /// Harold's instruments, made once from the global meter. With telemetry off that is
 /// the no-op meter, so nothing is recorded.
-#[allow(
-    dead_code,
-    reason = "the phone-request, turn and pod tasks record into the instruments later"
-)]
 pub(crate) fn instruments() -> &'static Instruments {
     // A test that ran before the test providers were set would otherwise bind the
     // instruments to the no-op meter for the whole test binary.
@@ -249,24 +261,12 @@ pub(crate) fn instruments() -> &'static Instruments {
 /// A reply typed within this long of being sent is on time. One typed later, or never,
 /// is unavailable. A tag for another pane within this long of a reply Harold routed
 /// marks that reply as having gone to the wrong agent.
-#[allow(
-    dead_code,
-    reason = "the listener and projector judge phone requests in a later telemetry task"
-)]
 pub(crate) const ON_TIME: Duration = Duration::from_secs(600);
 
 /// A prompt Harold typed joins the next turn end on its pane within this long.
-#[allow(
-    dead_code,
-    reason = "the prompt map keeps prompts this long in a later telemetry task"
-)]
 pub(crate) const PROMPT_KEPT: Duration = Duration::from_secs(3600);
 
 /// How a phone reply's pane was found: the `resolved_by` attribute.
-#[allow(
-    dead_code,
-    reason = "the listener and projector judge phone requests in a later telemetry task"
-)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ResolvedBy {
     ExactTag,
@@ -277,10 +277,6 @@ pub(crate) enum ResolvedBy {
     None,
 }
 
-#[allow(
-    dead_code,
-    reason = "the listener and projector judge phone requests in a later telemetry task"
-)]
 impl ResolvedBy {
     pub(crate) fn as_str(self) -> &'static str {
         match self {
@@ -301,10 +297,6 @@ impl ResolvedBy {
 }
 
 /// What happened to a phone reply on this Mac.
-#[allow(
-    dead_code,
-    reason = "the listener and projector judge phone requests in a later telemetry task"
-)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Routing {
     /// Another Mac owns the reply and counts it.
@@ -322,10 +314,6 @@ pub(crate) enum Routing {
 }
 
 /// How one phone reply counts.
-#[allow(
-    dead_code,
-    reason = "the listener and projector judge phone requests in a later telemetry task"
-)]
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct PhoneVerdict {
     /// `Some("typed")`, `Some("unavailable")`, or `None` when the reply is not counted.
@@ -339,10 +327,6 @@ pub(crate) struct PhoneVerdict {
 
 /// The last counted reply on this Mac, when it was typed on time. The next reply, if it
 /// is a tag for another pane, may show it went to the wrong agent.
-#[allow(
-    dead_code,
-    reason = "the listener and projector judge phone requests in a later telemetry task"
-)]
 #[derive(Clone, Debug)]
 struct LastTyped {
     channel: String,
@@ -353,20 +337,17 @@ struct LastTyped {
 
 /// Judges each phone reply in turn, remembering the last counted one when it was typed
 /// on time.
-#[allow(
-    dead_code,
-    reason = "the listener and projector judge phone requests in a later telemetry task"
-)]
 #[derive(Default)]
 pub(crate) struct PhoneBook {
     last_typed: Option<LastTyped>,
 }
 
-#[allow(
-    dead_code,
-    reason = "the listener and projector judge phone requests in a later telemetry task"
-)]
 impl PhoneBook {
+    /// A phone book that has judged no reply yet.
+    const fn new() -> Self {
+        Self { last_typed: None }
+    }
+
     /// Counts a reply sent at `reply_at` and handled at `typed_at`.
     ///
     /// - `NotOwned` and `Paused` are not counted, and leave the last typed reply as it was.
@@ -429,6 +410,232 @@ impl PhoneBook {
             wrong,
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Open phone requests
+// ---------------------------------------------------------------------------
+
+/// A phone request that has started and is not finished: its `harold.phone_request`
+/// span, which started at the reply's own time, and what the request is judged by.
+#[derive(Clone, Debug)]
+pub(crate) struct OpenReply {
+    pub cx: Context,
+    pub channel: &'static str,
+    pub reply_at: OffsetDateTime,
+}
+
+impl OpenReply {
+    fn trace_id(&self) -> String {
+        self.cx.span().span_context().trace_id().to_string()
+    }
+}
+
+/// A prompt Harold typed into a pane, waiting for the next turn end there.
+struct PanePrompt {
+    typed_at: OffsetDateTime,
+    started_by: StartedBy,
+    cx: Option<Context>,
+}
+
+/// Requests whose reply is stored and not yet routed, by trace id (or, for a request the
+/// event handler opened, by its event's key), each with when it was kept.
+static OPEN_REPLIES: Mutex<BTreeMap<String, (OffsetDateTime, OpenReply)>> =
+    Mutex::new(BTreeMap::new());
+
+/// Judges every phone reply this Mac counts, in the order they are routed.
+static PHONE_BOOK: Mutex<PhoneBook> = Mutex::new(PhoneBook::new());
+
+/// The last prompt Harold typed into each pane.
+static PANE_PROMPTS: Mutex<BTreeMap<String, PanePrompt>> = Mutex::new(BTreeMap::new());
+
+/// A map's lock. A test that panicked while holding it leaves the map usable.
+fn locked<T>(map: &Mutex<T>) -> MutexGuard<'_, T> {
+    map.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Whether something from `at` is older than `PROMPT_KEPT` at `now`.
+fn expired(at: OffsetDateTime, now: OffsetDateTime) -> bool {
+    Duration::try_from(now - at).is_ok_and(|age| age > PROMPT_KEPT)
+}
+
+/// Opens `harold.phone_request` at the reply's own time, as the root of a new trace.
+pub(crate) fn open_phone_request(channel: &'static str, reply_at: OffsetDateTime) -> OpenReply {
+    let span = tracer().build_with_context(
+        SpanBuilder::from_name("harold.phone_request")
+            .with_start_time(reply_at)
+            .with_attributes([KeyValue::new("channel", channel)]),
+        &Context::new(),
+    );
+    OpenReply {
+        cx: Context::new().with_span(span),
+        channel,
+        reply_at,
+    }
+}
+
+/// Opens the request for a reply sent at `reply_at` and runs `store` inside
+/// `harold.reply_stored`, so the event it stores records the request's trace. A stored
+/// reply's request stays open for the event handler; otherwise it ends as `ignored`.
+/// Returns whether the reply was stored.
+pub(crate) async fn store_phone_reply(
+    channel: &'static str,
+    reply_at: OffsetDateTime,
+    store: impl Future<Output = bool>,
+) -> bool {
+    let reply = open_phone_request(channel, reply_at);
+    let storing = tracing::info_span!(target: TRACE_TARGET, "harold.reply_stored");
+    // Fails only when no export layer is installed, and then there is no trace to join.
+    let _ = storing.set_parent(reply.cx.clone());
+    let stored = store.instrument(storing).await;
+    if stored {
+        keep_open_reply(reply);
+    } else {
+        let span = reply.cx.span();
+        span.set_attribute(KeyValue::new("outcome", "ignored"));
+        span.end();
+    }
+    stored
+}
+
+/// Keeps `reply` open under its trace id until it is finished.
+pub(crate) fn keep_open_reply(reply: OpenReply) {
+    let key = reply.trace_id();
+    keep_open_reply_as(key, reply);
+}
+
+/// Keeps `reply` open under `key` until it is finished.
+pub(crate) fn keep_open_reply_as(key: String, reply: OpenReply) {
+    let now = OffsetDateTime::now_utc();
+    let mut open = locked(&OPEN_REPLIES);
+    open.retain(|_, (kept_at, _)| !expired(*kept_at, now));
+    open.insert(key, (now, reply));
+}
+
+/// The open request kept under `key`, a trace id or an event's key. It stays open until
+/// it is finished.
+pub(crate) fn open_reply_for(key: &str) -> Option<OpenReply> {
+    locked(&OPEN_REPLIES)
+        .get(key)
+        .map(|(_, reply)| reply.clone())
+}
+
+/// Finishes a request routed as `routing` at `typed_at`: judges it, records its metrics,
+/// ends its span with `outcome`, `resolved_by` and `pane_id`, and stops keeping it open.
+/// A typed request keeps the pane's prompt for the next turn end there.
+pub(crate) fn finish_phone_request(reply: &OpenReply, routing: &Routing, typed_at: OffsetDateTime) {
+    let verdict = locked(&PHONE_BOOK).judge(reply.channel, reply.reply_at, typed_at, routing);
+    record_finished(reply, routing, typed_at, verdict);
+}
+
+/// `finish_phone_request`, judged by `book` rather than the process-wide one, so a test's
+/// wrong-agent results are its own.
+#[cfg(test)]
+pub(crate) fn finish_phone_request_in(
+    book: &mut PhoneBook,
+    reply: &OpenReply,
+    routing: &Routing,
+    typed_at: OffsetDateTime,
+) {
+    let verdict = book.judge(reply.channel, reply.reply_at, typed_at, routing);
+    record_finished(reply, routing, typed_at, verdict);
+}
+
+fn record_finished(
+    reply: &OpenReply,
+    routing: &Routing,
+    typed_at: OffsetDateTime,
+    verdict: PhoneVerdict,
+) {
+    let resolved_by = match routing {
+        Routing::Typed { resolved_by, .. } => *resolved_by,
+        Routing::NotOwned | Routing::Paused | Routing::NoPane => ResolvedBy::None,
+    };
+    let instruments = instruments();
+    let channel = KeyValue::new("channel", reply.channel);
+    let resolved = KeyValue::new("resolved_by", resolved_by.as_str());
+    if let Some(outcome) = verdict.outcome {
+        instruments.phone_requests.add(
+            1,
+            &[
+                channel.clone(),
+                KeyValue::new("outcome", outcome),
+                resolved.clone(),
+            ],
+        );
+    }
+    if let Some(latency) = verdict.latency {
+        instruments
+            .phone_request_latency
+            .record(latency.as_secs_f64(), &[channel, resolved.clone()]);
+    }
+    if let Some((channel, resolved_by)) = verdict.wrong {
+        instruments.phone_requests_wrong.add(
+            1,
+            &[
+                KeyValue::new("channel", channel),
+                KeyValue::new("resolved_by", resolved_by.as_str()),
+            ],
+        );
+    }
+
+    // Only a reply another Mac owns, or one routed while messaging is paused, has no
+    // counted outcome.
+    let outcome = verdict
+        .outcome
+        .unwrap_or(if matches!(routing, Routing::NotOwned) {
+            "not_owned"
+        } else {
+            "paused"
+        });
+    let span = reply.cx.span();
+    span.set_attribute(KeyValue::new("outcome", outcome));
+    span.set_attribute(resolved);
+    if let Routing::Typed { pane_id, .. } = routing {
+        span.set_attribute(KeyValue::new("pane_id", pane_id.clone()));
+    }
+    span.end_with_timestamp(typed_at.into());
+
+    let trace_id = reply.trace_id();
+    locked(&OPEN_REPLIES).retain(|_, (_, open)| open.trace_id() != trace_id);
+    if let Routing::Typed { pane_id, .. } = routing {
+        prompt_typed(pane_id, StartedBy::Phone, Some(reply.cx.clone()), typed_at);
+    }
+}
+
+/// Records that Harold typed a prompt into `pane_id` at `at`, for the next turn end there.
+/// `cx` is the trace the turn joins, when the prompt has one.
+pub(crate) fn prompt_typed(
+    pane_id: &str,
+    started_by: StartedBy,
+    cx: Option<Context>,
+    at: OffsetDateTime,
+) {
+    let now = OffsetDateTime::now_utc();
+    let mut prompts = locked(&PANE_PROMPTS);
+    prompts.retain(|_, prompt| !expired(prompt.typed_at, now));
+    prompts.insert(
+        pane_id.to_string(),
+        PanePrompt {
+            typed_at: at,
+            started_by,
+            cx,
+        },
+    );
+}
+
+/// The prompt Harold last typed into `pane_id`, if it was typed within `PROMPT_KEPT` of
+/// `now`. It is taken once.
+#[allow(
+    dead_code,
+    reason = "the turn end takes the pane's prompt in a later telemetry task"
+)]
+pub(crate) fn take_prompt(
+    pane_id: &str,
+    now: OffsetDateTime,
+) -> Option<(OffsetDateTime, StartedBy, Option<Context>)> {
+    let prompt = locked(&PANE_PROMPTS).remove(pane_id)?;
+    (!expired(prompt.typed_at, now)).then_some((prompt.typed_at, prompt.started_by, prompt.cx))
 }
 
 // ---------------------------------------------------------------------------
@@ -1067,7 +1274,7 @@ pub(crate) mod test_support {
     use opentelemetry_sdk::logs::InMemoryLogExporter;
     use opentelemetry_sdk::logs::in_memory_exporter::LogDataWithResource;
     use opentelemetry_sdk::metrics::InMemoryMetricExporter;
-    use opentelemetry_sdk::metrics::data::ResourceMetrics;
+    use opentelemetry_sdk::metrics::data::{AggregatedMetrics, MetricData, ResourceMetrics};
     use opentelemetry_sdk::trace::{InMemorySpanExporter, SpanData};
     use tracing_subscriber::Layer as _;
     use tracing_subscriber::filter::{FilterExt as _, LevelFilter};
@@ -1144,6 +1351,70 @@ pub(crate) mod test_support {
         let installed = installed();
         let _ = installed.pipeline.meter_provider.force_flush();
         installed.metrics.get_finished_metrics().unwrap()
+    }
+
+    /// The value of `span`'s attribute `key`, as text.
+    pub(crate) fn span_attr(span: &SpanData, key: &str) -> Option<String> {
+        span.attributes
+            .iter()
+            .find(|kv| kv.key.as_str() == key)
+            .map(|kv| kv.value.as_str().into_owned())
+    }
+
+    fn carries_all<'a>(
+        attributes: impl Iterator<Item = &'a opentelemetry::KeyValue>,
+        wanted: &[(&str, &str)],
+    ) -> bool {
+        let attributes: Vec<_> = attributes.collect();
+        wanted.iter().all(|(key, value)| {
+            attributes
+                .iter()
+                .any(|kv| kv.key.as_str() == *key && kv.value.as_str() == *value)
+        })
+    }
+
+    /// `read` applied to the latest export of the metric `name`. Exports are cumulative,
+    /// so it holds every data point recorded so far.
+    fn read_latest<T>(name: &str, read: impl Fn(&AggregatedMetrics) -> Option<T>) -> Option<T> {
+        metrics().iter().rev().find_map(|resource| {
+            resource
+                .scope_metrics()
+                .flat_map(|scope| scope.metrics())
+                .find(|metric| metric.name() == name)
+                .map(|metric| read(metric.data()))
+        })?
+    }
+
+    /// The total of the counter `name` over the data points that carry every attribute
+    /// in `wanted`, or `None` when none does.
+    pub(crate) fn counter_value(name: &str, wanted: &[(&str, &str)]) -> Option<u64> {
+        read_latest(name, |data| {
+            let AggregatedMetrics::U64(MetricData::Sum(sum)) = data else {
+                return None;
+            };
+            let values: Vec<u64> = sum
+                .data_points()
+                .filter(|point| carries_all(point.attributes(), wanted))
+                .map(|point| point.value())
+                .collect();
+            (!values.is_empty()).then(|| values.iter().sum())
+        })
+    }
+
+    /// The sum of the histogram `name` over the data points that carry every attribute in
+    /// `wanted`, or `None` when none does.
+    pub(crate) fn histogram_sum(name: &str, wanted: &[(&str, &str)]) -> Option<f64> {
+        read_latest(name, |data| {
+            let AggregatedMetrics::F64(MetricData::Histogram(histogram)) = data else {
+                return None;
+            };
+            let sums: Vec<f64> = histogram
+                .data_points()
+                .filter(|point| carries_all(point.attributes(), wanted))
+                .map(|point| point.sum())
+                .collect();
+            (!sums.is_empty()).then(|| sums.iter().sum())
+        })
     }
 
     /// Debug text of every exported span, log record and metric, for searching.

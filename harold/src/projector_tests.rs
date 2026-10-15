@@ -5,9 +5,10 @@ use events::{ActorType, ExpectedVersion, NewEvent, WorkflowRef};
 use serde_json::json;
 
 use super::{
-    DeliveryDispatcher, DispatchError, ProductionDispatcher, dispatch_away_message,
-    dispatch_spoken_line, handle_next_delivery, handle_next_delivery_inner, production_dispatcher,
-    project_and_publish_agent_snapshot, route_message, run_event_handler,
+    DeliveryDispatcher, DispatchError, ProductionDispatcher, ReplyOrigin, Router,
+    dispatch_away_message, dispatch_spoken_line, handle_next_delivery, handle_next_delivery_inner,
+    production_dispatcher, project_and_publish_agent_snapshot, route_message, run_event_handler,
+    stored_envelope,
 };
 use crate::agent::domain::{
     AgentEvent, AgentIncarnation, AgentMonitorHealthChanged, AgentPaneDeparted,
@@ -15,6 +16,7 @@ use crate::agent::domain::{
 };
 use crate::agent::snapshot::AgentSnapshotHub;
 use crate::inbound::AgentAddress;
+use crate::inbound::RouteReport;
 use crate::outbound::fake::{CapturedLogs, FakeEnvironment};
 use crate::outbound::{DeliveryOutcome, SystemEnvironment};
 use crate::store::{
@@ -22,6 +24,7 @@ use crate::store::{
     TurnCompleted, append_agent_events, append_away_message_requested, append_inbound_message,
     append_messaging_paused_changed, append_spoken_line_requested, append_turn_completed,
 };
+use crate::telemetry::{self, ResolvedBy, Routing};
 
 struct TestDirectory(std::path::PathBuf);
 
@@ -443,10 +446,10 @@ fn paused_inbound_delivery_is_skipped_without_routing() {
         trace_id: "trace".into(),
     };
 
-    let outcome = system_dispatcher().dispatch_with_pause(&delivery, true);
+    let outcome = system_dispatcher().dispatch_with_pause(&delivery, None, true);
     assert!(matches!(outcome, Ok(DeliveryOutcome::Skipped)));
 
-    let outcome = system_dispatcher().dispatch_with_pause(&delivery, false);
+    let outcome = system_dispatcher().dispatch_with_pause(&delivery, None, false);
     assert!(matches!(outcome, Err(DispatchError::Permanent(_))));
 }
 
@@ -501,12 +504,12 @@ fn stored_reply_reaches_routing_with_its_forwarded_flag() {
         };
         let mut routed = None;
 
-        let outcome = route_message(&message, |text, flag| {
+        let outcome = route_message(&message, "event-1", None, |text, flag| {
             routed = Some((text.to_string(), flag));
-            Ok(DeliveryOutcome::Delivered)
+            Ok(not_owned_report())
         });
 
-        assert!(matches!(outcome, Ok(DeliveryOutcome::Delivered)));
+        assert!(matches!(outcome, Ok(DeliveryOutcome::Skipped)));
         assert_eq!(routed, Some(("[studio] carry on".to_string(), forwarded)));
     }
 }
@@ -518,9 +521,20 @@ fn routing_failure_of_a_stored_reply_is_retryable() {
         forwarded: false,
     };
 
-    let outcome = route_message(&message, |_, _| Err("tmux failed".to_string()));
+    let outcome = route_message(&message, "event-1", None, |_, _| {
+        Err("tmux failed".to_string())
+    });
 
     assert!(matches!(outcome, Err(DispatchError::Retryable(error)) if error == "tmux failed"));
+}
+
+/// What routing returns for a reply another Mac owns. It is not counted, so these tests
+/// leave the process-wide phone book as it was.
+fn not_owned_report() -> RouteReport {
+    RouteReport {
+        outcome: DeliveryOutcome::Skipped,
+        routing: Routing::NotOwned,
+    }
 }
 
 fn away_delivery(payload: serde_json::Value) -> PendingDelivery {
@@ -643,10 +657,10 @@ fn production_dispatcher_handles_away_messages_and_reads_the_pause() {
     // payload and never reaches the real away channel.
     let delivery = away_delivery(json!(null));
 
-    let outcome = system_dispatcher().dispatch_with_pause(&delivery, true);
+    let outcome = system_dispatcher().dispatch_with_pause(&delivery, None, true);
     assert!(matches!(outcome, Ok(DeliveryOutcome::Skipped)));
 
-    let outcome = system_dispatcher().dispatch_with_pause(&delivery, false);
+    let outcome = system_dispatcher().dispatch_with_pause(&delivery, None, false);
     assert!(
         matches!(outcome, Err(DispatchError::Permanent(error)) if error.starts_with("invalid AwayMessageRequested payload"))
     );
@@ -871,8 +885,11 @@ fn message_dropped_by_the_pause_leaves_no_mark() {
     let environment = Arc::new(FakeEnvironment::locked(""));
     let dispatcher = dispatcher_with(&environment);
 
-    let dropped = dispatcher
-        .dispatch_with_pause(&away_delivery(json!(pod_message("Pod 3 is blocked"))), true);
+    let dropped = dispatcher.dispatch_with_pause(
+        &away_delivery(json!(pod_message("Pod 3 is blocked"))),
+        None,
+        true,
+    );
     assert!(matches!(dropped, Ok(DeliveryOutcome::Skipped)));
     assert!(environment.away_messages().is_empty());
 
@@ -1668,4 +1685,427 @@ fn dropped_spoken_line_logs_the_reason_and_the_pane_only() {
             .contains("spoken line dropped (lines come from /work/chief-of-pods only) pane_id=%2")
     );
     assert!(!logs.text().contains("secret words"));
+}
+
+// ---------------------------------------------------------------------------
+// Phone requests
+// ---------------------------------------------------------------------------
+
+/// The daemon's dispatcher, never paused: other tests flip the process-wide pause switch.
+struct Unpaused(ProductionDispatcher);
+
+impl DeliveryDispatcher for Unpaused {
+    fn dispatch(&self, delivery: &PendingDelivery) -> Result<DeliveryOutcome, DispatchError> {
+        self.0.dispatch_with_pause(delivery, None, false)
+    }
+
+    fn dispatch_reply(
+        &self,
+        delivery: &PendingDelivery,
+        origin: &ReplyOrigin,
+    ) -> Result<DeliveryOutcome, DispatchError> {
+        self.0.dispatch_with_pause(delivery, Some(origin), false)
+    }
+}
+
+/// A store in a test directory that is removed with it.
+struct Fixture {
+    store: HaroldStore,
+    _directory: TestDirectory,
+}
+
+/// A store and the daemon's dispatcher with `router` in place of tmux routing.
+async fn fixture_with_router(router: Router) -> (Fixture, Arc<dyn DeliveryDispatcher>) {
+    let directory = TestDirectory::new();
+    let store = HaroldStore::open(&directory.0).await.unwrap();
+    let dispatcher =
+        ProductionDispatcher::new(Arc::new(SystemEnvironment), None).with_router(router);
+    (
+        Fixture {
+            store,
+            _directory: directory,
+        },
+        Arc::new(Unpaused(dispatcher)),
+    )
+}
+
+/// A pane id no other test uses.
+fn unique_pane() -> String {
+    format!("%t{}", uuid::Uuid::new_v4().simple())
+}
+
+/// A channel name no other test uses, so this test's metrics are its own.
+fn unique_channel() -> &'static str {
+    Box::leak(format!("imessage-{}", uuid::Uuid::new_v4().simple()).into_boxed_str())
+}
+
+/// The report of a reply Harold typed into `pane`, choosing it as the latest notifier.
+fn typed_into(pane: &str) -> RouteReport {
+    RouteReport {
+        outcome: DeliveryOutcome::Delivered,
+        routing: Routing::Typed {
+            pane_id: pane.to_string(),
+            resolved_by: ResolvedBy::LatestNotifier,
+            tagged: false,
+        },
+    }
+}
+
+/// A router that types every reply into `pane`.
+fn typing_router(pane: &str) -> Router {
+    let pane = pane.to_string();
+    Arc::new(move |_, _| Ok(typed_into(&pane)))
+}
+
+/// Stores a reply as the listener does: the request opens at `reply_at`, and the reply is
+/// stored inside `harold.reply_stored`, so the stored event records the request's trace.
+async fn store_reply_as_listener(
+    store: &HaroldStore,
+    channel: &'static str,
+    reply_at: time::OffsetDateTime,
+    text: &str,
+) {
+    let message = InboundMessage {
+        text: text.into(),
+        forwarded: false,
+    };
+    let stored = telemetry::store_phone_reply(channel, reply_at, async {
+        append_inbound_message(store, &message).await.is_ok()
+    })
+    .await;
+    assert!(stored);
+}
+
+/// The first stored event's trace id and stored time, read as the event handler reads
+/// them.
+async fn first_envelope(store: &HaroldStore) -> ReplyOrigin {
+    let (trace_id, created_at) =
+        stored_envelope(store, events::EventStreamVersion::new(1).unwrap())
+            .await
+            .expect("the first event can be read");
+    ReplyOrigin {
+        trace_id,
+        created_at,
+    }
+}
+
+/// The exported spans called `name` in the trace with id `trace_id`.
+fn spans_in_trace(name: &str, trace_id: &str) -> Vec<opentelemetry_sdk::trace::SpanData> {
+    telemetry::test_support::spans()
+        .into_iter()
+        .filter(|span| span.name == name && span.span_context.trace_id().to_string() == trace_id)
+        .collect()
+}
+
+/// The one exported `harold.phone_request` span that typed into `pane`.
+fn phone_request_typed_into(pane: &str) -> opentelemetry_sdk::trace::SpanData {
+    let mut found: Vec<_> = telemetry::test_support::spans()
+        .into_iter()
+        .filter(|span| {
+            span.name == "harold.phone_request"
+                && telemetry::test_support::span_attr(span, "pane_id").as_deref() == Some(pane)
+        })
+        .collect();
+    assert_eq!(found.len(), 1, "phone requests typed into {pane}");
+    found.remove(0)
+}
+
+fn attr(span: &opentelemetry_sdk::trace::SpanData, key: &str) -> String {
+    telemetry::test_support::span_attr(span, key).unwrap_or_default()
+}
+
+#[tokio::test]
+async fn a_routed_reply_records_typed_with_latency_from_its_own_time() {
+    telemetry::test_support::install();
+    let pane = unique_pane();
+    let channel = unique_channel();
+    let (fixture, dispatcher) = fixture_with_router(typing_router(&pane)).await;
+    let sent = time::OffsetDateTime::now_utc() - time::Duration::seconds(8);
+    store_reply_as_listener(&fixture.store, channel, sent, "hi").await;
+
+    assert!(
+        handle_next_delivery(&fixture.store, dispatcher)
+            .await
+            .unwrap()
+    );
+
+    let span = phone_request_typed_into(&pane);
+    assert_eq!(attr(&span, "outcome"), "typed");
+    assert_eq!(attr(&span, "channel"), channel);
+    assert_eq!(attr(&span, "resolved_by"), "latest_notifier");
+    assert_eq!(span.start_time, std::time::SystemTime::from(sent));
+    let took = span.end_time.duration_since(span.start_time).unwrap();
+    assert!(took >= Duration::from_secs(8), "{took:?}");
+    let latency = telemetry::test_support::histogram_sum(
+        "harold.phone_request.latency",
+        &[("channel", channel), ("resolved_by", "latest_notifier")],
+    )
+    .expect("the latency is recorded");
+    assert!(latency >= 8.0, "{latency}");
+    assert_eq!(
+        telemetry::test_support::counter_value(
+            "harold.phone_requests",
+            &[
+                ("channel", channel),
+                ("outcome", "typed"),
+                ("resolved_by", "latest_notifier"),
+            ],
+        ),
+        Some(1)
+    );
+    let trace_id = span.span_context.trace_id().to_string();
+    let routes = spans_in_trace("harold.route", &trace_id);
+    assert_eq!(routes.len(), 1);
+    assert_eq!(attr(&routes[0], "resolved_by"), "latest_notifier");
+    assert_eq!(
+        first_envelope(&fixture.store).await.trace_id.as_deref(),
+        Some(trace_id.as_str())
+    );
+    assert!(
+        telemetry::open_reply_for(&trace_id).is_none(),
+        "a finished request is no longer open"
+    );
+}
+
+#[tokio::test]
+async fn a_reply_with_no_pane_records_unavailable() {
+    telemetry::test_support::install();
+    let channel = unique_channel();
+    let router: Router = Arc::new(|_, _| {
+        Ok(RouteReport {
+            outcome: DeliveryOutcome::Skipped,
+            routing: Routing::NoPane,
+        })
+    });
+    let (fixture, dispatcher) = fixture_with_router(router).await;
+    store_reply_as_listener(
+        &fixture.store,
+        channel,
+        time::OffsetDateTime::now_utc(),
+        "hi",
+    )
+    .await;
+
+    assert!(
+        handle_next_delivery(&fixture.store, dispatcher)
+            .await
+            .unwrap()
+    );
+
+    let trace_id = first_envelope(&fixture.store).await.trace_id.unwrap();
+    let requests = spans_in_trace("harold.phone_request", &trace_id);
+    assert_eq!(requests.len(), 1);
+    assert_eq!(attr(&requests[0], "outcome"), "unavailable");
+    assert_eq!(attr(&requests[0], "resolved_by"), "none");
+    assert_eq!(
+        telemetry::test_support::counter_value(
+            "harold.phone_requests",
+            &[
+                ("channel", channel),
+                ("outcome", "unavailable"),
+                ("resolved_by", "none"),
+            ],
+        ),
+        Some(1)
+    );
+    assert_eq!(
+        telemetry::test_support::histogram_sum(
+            "harold.phone_request.latency",
+            &[("channel", channel), ("resolved_by", "none")],
+        ),
+        None,
+        "a reply that was never typed has no latency"
+    );
+}
+
+#[tokio::test]
+async fn a_relay_that_fails_then_succeeds_is_one_request() {
+    telemetry::test_support::install();
+    let pane = unique_pane();
+    let channel = unique_channel();
+    let failed_once = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let router: Router = {
+        let pane = pane.clone();
+        let failed_once = Arc::clone(&failed_once);
+        Arc::new(move |_, _| {
+            if !failed_once.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                return Err("tmux failed".to_string());
+            }
+            Ok(typed_into(&pane))
+        })
+    };
+    let (fixture, dispatcher) = fixture_with_router(router).await;
+    store_reply_as_listener(
+        &fixture.store,
+        channel,
+        time::OffsetDateTime::now_utc(),
+        "hi",
+    )
+    .await;
+    let trace_id = first_envelope(&fixture.store).await.trace_id.unwrap();
+
+    let error = handle_next_delivery(&fixture.store, Arc::clone(&dispatcher))
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("tmux failed"));
+    assert!(
+        telemetry::open_reply_for(&trace_id).is_some(),
+        "the request stays open for the retry"
+    );
+    assert!(spans_in_trace("harold.phone_request", &trace_id).is_empty());
+
+    assert!(
+        handle_next_delivery(&fixture.store, dispatcher)
+            .await
+            .unwrap()
+    );
+
+    let requests = spans_in_trace("harold.phone_request", &trace_id);
+    assert_eq!(requests.len(), 1);
+    assert_eq!(attr(&requests[0], "outcome"), "typed");
+    assert_eq!(attr(&requests[0], "pane_id"), pane);
+    assert_eq!(spans_in_trace("harold.route", &trace_id).len(), 2);
+    assert_eq!(
+        telemetry::test_support::counter_value(
+            "harold.phone_requests",
+            &[
+                ("channel", channel),
+                ("outcome", "typed"),
+                ("resolved_by", "latest_notifier"),
+            ],
+        ),
+        Some(1)
+    );
+}
+
+#[tokio::test]
+async fn a_reply_with_no_open_request_starts_at_its_event_time() {
+    telemetry::test_support::install();
+    let pane = unique_pane();
+    let (fixture, dispatcher) = fixture_with_router(typing_router(&pane)).await;
+    // Stored outside any span, as a member stores a reply its hub forwarded.
+    append_inbound_message(
+        &fixture.store,
+        &InboundMessage {
+            text: "carry on".into(),
+            forwarded: true,
+        },
+    )
+    .await
+    .unwrap();
+    let envelope = first_envelope(&fixture.store).await;
+    assert_eq!(envelope.trace_id, None);
+
+    assert!(
+        handle_next_delivery(&fixture.store, dispatcher)
+            .await
+            .unwrap()
+    );
+
+    let span = phone_request_typed_into(&pane);
+    assert_eq!(attr(&span, "channel"), "forwarded");
+    assert_eq!(attr(&span, "outcome"), "typed");
+    assert_eq!(
+        span.start_time,
+        std::time::SystemTime::from(envelope.created_at)
+    );
+    let trace_id = span.span_context.trace_id().to_string();
+    assert_eq!(spans_in_trace("harold.route", &trace_id).len(), 1);
+}
+
+#[tokio::test]
+async fn a_reply_that_is_not_forwarded_and_has_no_open_request_is_on_the_unknown_channel() {
+    telemetry::test_support::install();
+    let pane = unique_pane();
+    let (fixture, dispatcher) = fixture_with_router(typing_router(&pane)).await;
+    append_inbound_message(
+        &fixture.store,
+        &InboundMessage {
+            text: "carry on".into(),
+            forwarded: false,
+        },
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        handle_next_delivery(&fixture.store, dispatcher)
+            .await
+            .unwrap()
+    );
+
+    assert_eq!(attr(&phone_request_typed_into(&pane), "channel"), "unknown");
+}
+
+#[tokio::test]
+async fn a_failed_relay_of_a_reply_with_no_open_request_is_still_one_request() {
+    telemetry::test_support::install();
+    let pane = unique_pane();
+    let failed_once = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let router: Router = {
+        let pane = pane.clone();
+        let failed_once = Arc::clone(&failed_once);
+        Arc::new(move |_, _| {
+            if !failed_once.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                return Err("tmux failed".to_string());
+            }
+            Ok(typed_into(&pane))
+        })
+    };
+    let (fixture, dispatcher) = fixture_with_router(router).await;
+    append_inbound_message(
+        &fixture.store,
+        &InboundMessage {
+            text: "carry on".into(),
+            forwarded: true,
+        },
+    )
+    .await
+    .unwrap();
+    let envelope = first_envelope(&fixture.store).await;
+
+    assert!(
+        handle_next_delivery(&fixture.store, Arc::clone(&dispatcher))
+            .await
+            .is_err()
+    );
+    assert!(
+        handle_next_delivery(&fixture.store, dispatcher)
+            .await
+            .unwrap()
+    );
+
+    let span = phone_request_typed_into(&pane);
+    let trace_id = span.span_context.trace_id().to_string();
+    assert_eq!(spans_in_trace("harold.phone_request", &trace_id).len(), 1);
+    assert_eq!(spans_in_trace("harold.route", &trace_id).len(), 2);
+    assert_eq!(
+        span.start_time,
+        std::time::SystemTime::from(envelope.created_at)
+    );
+}
+
+#[tokio::test]
+async fn a_paused_reply_finishes_its_open_request_without_counting_it() {
+    telemetry::test_support::install();
+    let channel = unique_channel();
+    let directory = TestDirectory::new();
+    let store = HaroldStore::open(&directory.0).await.unwrap();
+    store_reply_as_listener(&store, channel, time::OffsetDateTime::now_utc(), "hi").await;
+    let envelope = first_envelope(&store).await;
+    let trace_id = envelope.trace_id.clone().unwrap();
+    store.project_unhandled_events(10).await.unwrap();
+    let delivery = store.next_pending_delivery().await.unwrap().unwrap();
+    let outcome = system_dispatcher().dispatch_with_pause(&delivery, Some(&envelope), true);
+
+    assert!(matches!(outcome, Ok(DeliveryOutcome::Skipped)));
+    let requests = spans_in_trace("harold.phone_request", &trace_id);
+    assert_eq!(requests.len(), 1);
+    assert_eq!(attr(&requests[0], "outcome"), "paused");
+    assert!(telemetry::open_reply_for(&trace_id).is_none());
+    assert_eq!(
+        telemetry::test_support::counter_value("harold.phone_requests", &[("channel", channel)]),
+        None,
+        "a paused reply is not counted"
+    );
 }

@@ -12,9 +12,9 @@ use crate::util::sanitise_for_applescript;
 
 use super::{
     ChatDb, Cursors, Direction, FetchedRow, MarkedRow, NotificationPlan, RecentRows, TWIN_WINDOW,
-    attachment_args, is_marked_as_harold, max_rowid_of, notification_message, notification_plan,
-    parse_max_rowid, poll_chat_db, poll_db, read_start, record_row, send_script, start_cursors,
-    start_listener_cursors, start_listener_reading, wait_for_start_row,
+    apple_date_to_utc, attachment_args, is_marked_as_harold, max_rowid_of, notification_message,
+    notification_plan, parse_max_rowid, poll_chat_db, poll_db, read_start, record_row, send_script,
+    start_cursors, start_listener_cursors, start_listener_reading, wait_for_start_row,
 };
 
 #[test]
@@ -315,9 +315,10 @@ fn studio_and_laptop() -> Mutex<NotifierRecord> {
     ]))
 }
 
-fn texts(rows: &[(i64, &str)]) -> Vec<(i64, String)> {
+/// The replies `replies_after` gives for rows stored with no date: (ROWID, 0, text).
+fn texts(rows: &[(i64, &str)]) -> Vec<(i64, i64, String)> {
     rows.iter()
-        .map(|(rowid, text)| (*rowid, text.to_string()))
+        .map(|(rowid, text)| (*rowid, 0, text.to_string()))
         .collect()
 }
 
@@ -488,8 +489,9 @@ fn a_marked_read_that_fails_is_an_error_and_the_reply_read_is_no_rows() {
     assert!(db.latest_marked(2, 50).is_err());
     assert!(missing.marked_after(0).is_err());
     assert!(missing.latest_marked(2, 50).is_err());
-    // The reply queries keep giving no rows when they fail.
-    assert_eq!(db.replies_after(0, 0), texts(&[(2, "yes")]));
+    // The reply queries read the date too, so they fail on this database, and keep
+    // giving no rows when they fail.
+    assert!(db.replies_after(0, 0).is_empty());
     assert!(missing.replies_after(0, 0).is_empty());
 }
 
@@ -681,6 +683,9 @@ async fn with_no_machines_listed_no_marked_row_is_read_so_a_failing_marked_query
 
     assert_eq!(read_start(&db), Ok((2, vec![])));
     assert_eq!(db.marked_after(0), Ok(vec![]));
+    // The reply queries read the date, so the poll needs it; the marked rows still are
+    // never read.
+    add_date_column(&db);
 
     let cursors = Cursors::starting_at(0);
     let recent = Mutex::new(RecentRows::new());
@@ -1529,4 +1534,73 @@ fn attachment_script_is_fixed_text_and_takes_the_path_and_recipient_as_arguments
             "me@example.com",
         ]
     );
+}
+
+#[test]
+fn an_apple_date_is_read_as_nanoseconds_or_as_seconds_since_2001() {
+    use time::format_description::well_known::Rfc3339;
+    let start_of_2001 = time::OffsetDateTime::parse("2001-01-01T00:00:00Z", &Rfc3339).unwrap();
+
+    assert_eq!(apple_date_to_utc(0), start_of_2001);
+    assert_eq!(
+        apple_date_to_utc(718_000_000_000_000_000),
+        apple_date_to_utc(718_000_000)
+    );
+    assert_eq!(
+        apple_date_to_utc(718_000_000),
+        start_of_2001 + time::Duration::seconds(718_000_000)
+    );
+}
+
+#[tokio::test]
+async fn a_stored_reply_opens_its_phone_request_at_the_rows_own_time() {
+    crate::telemetry::test_support::install();
+    let store_directory = TestDirectory::new();
+    let store = HaroldStore::open(&store_directory.0).await.unwrap();
+    let directory = TestDirectory::new();
+    let db = without_marked_rows(&chat_db(&directory));
+    let sent = 718_000_000_000_000_000;
+    insert_dated(&db, &[(HANDLE, 0, "carry on", sent)]);
+    let cursors = Cursors::starting_at(0);
+    let recent = Mutex::new(RecentRows::new());
+
+    poll_chat_db(&store, db, &cursors, |_, _| {}, &recent, || false).await;
+
+    let stored = store
+        .stream()
+        .load_after_version(events::EventStreamVersion::start(), 1)
+        .await
+        .unwrap();
+    let trace_id = stored[0]
+        .trace_id
+        .clone()
+        .expect("the stored reply records its phone request's trace");
+    let reply = crate::telemetry::open_reply_for(&trace_id).expect("the request is kept open");
+    assert_eq!(reply.channel, "imessage");
+    assert_eq!(reply.reply_at, apple_date_to_utc(sent));
+}
+
+#[tokio::test]
+async fn a_self_sent_reply_is_a_phone_request_on_the_imessage_channel() {
+    crate::telemetry::test_support::install();
+    let store_directory = TestDirectory::new();
+    let store = HaroldStore::open(&store_directory.0).await.unwrap();
+    let directory = TestDirectory::new();
+    let db = without_marked_rows(&chat_db(&directory));
+    let sent = 718_000_000_000_000_000;
+    insert_dated(&db, &[(HANDLE, 1, "typed on the Mac", sent)]);
+    let cursors = Cursors::starting_at(0);
+    let recent = Mutex::new(RecentRows::new());
+
+    poll_chat_db(&store, db, &cursors, |_, _| {}, &recent, || false).await;
+
+    let stored = store
+        .stream()
+        .load_after_version(events::EventStreamVersion::start(), 1)
+        .await
+        .unwrap();
+    let trace_id = stored[0].trace_id.clone().expect("trace");
+    let reply = crate::telemetry::open_reply_for(&trace_id).expect("the request is kept open");
+    assert_eq!(reply.channel, "imessage");
+    assert_eq!(reply.reply_at, apple_date_to_utc(sent));
 }

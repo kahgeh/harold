@@ -998,3 +998,181 @@ fn has_placeholder(literal: &str) -> bool {
     }
     false
 }
+
+// ---------------------------------------------------------------------------
+// Open phone requests and prompts
+// ---------------------------------------------------------------------------
+
+/// A channel name no other test uses, so this test's metrics are its own.
+fn unique_channel() -> &'static str {
+    Box::leak(format!("test-{}", uuid::Uuid::new_v4().simple()).into_boxed_str())
+}
+
+fn phone_requests_on(channel: &str) -> Vec<SpanData> {
+    test_support::spans()
+        .into_iter()
+        .filter(|span| {
+            span.name == "harold.phone_request"
+                && test_support::span_attr(span, "channel").as_deref() == Some(channel)
+        })
+        .collect()
+}
+
+#[test]
+fn a_tag_for_another_pane_after_harolds_choice_counts_the_earlier_request_wrong() {
+    let channel = unique_channel();
+    let mut book = PhoneBook::default();
+    let now = OffsetDateTime::now_utc();
+    let first = open_phone_request(channel, now - time::Duration::seconds(60));
+    finish_phone_request_in(
+        &mut book,
+        &first,
+        &typed("%wrong-a", false),
+        now - time::Duration::seconds(50),
+    );
+    let second = open_phone_request(channel, now - time::Duration::seconds(10));
+    finish_phone_request_in(&mut book, &second, &typed("%wrong-b", true), now);
+
+    assert_eq!(
+        test_support::counter_value(
+            "harold.phone_requests.wrong",
+            &[("channel", channel), ("resolved_by", "latest_notifier")],
+        ),
+        Some(1)
+    );
+    assert_eq!(
+        test_support::counter_value(
+            "harold.phone_requests",
+            &[("channel", channel), ("outcome", "typed")],
+        ),
+        Some(2)
+    );
+    let requests = phone_requests_on(channel);
+    assert_eq!(requests.len(), 2);
+    assert!(
+        requests
+            .iter()
+            .all(|span| test_support::span_attr(span, "outcome").as_deref() == Some("typed"))
+    );
+}
+
+#[test]
+fn a_typed_request_keeps_its_prompt_for_the_next_turn_end_on_its_pane() {
+    let pane = unique_pane();
+    let now = OffsetDateTime::now_utc();
+    let reply = open_phone_request(unique_channel(), now - time::Duration::seconds(5));
+    let routing = Routing::Typed {
+        pane_id: pane.clone(),
+        resolved_by: ResolvedBy::MyAgent,
+        tagged: false,
+    };
+
+    finish_phone_request_in(&mut PhoneBook::default(), &reply, &routing, now);
+
+    let (typed_at, started_by, cx) = take_prompt(&pane, now).expect("the prompt is kept");
+    assert_eq!(typed_at, now);
+    assert_eq!(started_by, StartedBy::Phone);
+    assert_eq!(
+        cx.expect("the request's context")
+            .span()
+            .span_context()
+            .trace_id(),
+        reply.cx.span().span_context().trace_id()
+    );
+    assert!(take_prompt(&pane, now).is_none(), "a prompt is taken once");
+}
+
+#[test]
+fn a_reply_with_no_pane_keeps_no_prompt() {
+    let now = OffsetDateTime::now_utc();
+    let channel = unique_channel();
+    let reply = open_phone_request(channel, now);
+    finish_phone_request_in(&mut PhoneBook::default(), &reply, &Routing::NoPane, now);
+
+    let requests = phone_requests_on(channel);
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        test_support::span_attr(&requests[0], "outcome").as_deref(),
+        Some("unavailable")
+    );
+    assert_eq!(test_support::span_attr(&requests[0], "pane_id"), None);
+}
+
+#[test]
+fn a_prompt_older_than_an_hour_is_not_taken() {
+    let pane = unique_pane();
+    let now = OffsetDateTime::now_utc();
+
+    prompt_typed(
+        &pane,
+        StartedBy::TimedPrompt,
+        None,
+        now - time::Duration::seconds(3601),
+    );
+    assert!(take_prompt(&pane, now).is_none());
+
+    prompt_typed(
+        &pane,
+        StartedBy::TimedPrompt,
+        None,
+        now - time::Duration::seconds(3599),
+    );
+    let (_, started_by, cx) = take_prompt(&pane, now).expect("kept for an hour");
+    assert_eq!(started_by, StartedBy::TimedPrompt);
+    assert!(cx.is_none());
+}
+
+#[tokio::test]
+async fn a_stored_reply_is_kept_open_under_the_trace_the_store_sees() {
+    let channel = unique_channel();
+    let at = OffsetDateTime::now_utc() - time::Duration::seconds(3);
+    let seen = Mutex::new(None);
+
+    let stored = store_phone_reply(channel, at, async {
+        let trace = tracing::Span::current()
+            .context()
+            .span()
+            .span_context()
+            .trace_id();
+        *seen.lock().unwrap() = Some(trace.to_string());
+        true
+    })
+    .await;
+
+    assert!(stored);
+    let trace_id = seen.lock().unwrap().clone().unwrap();
+    let reply = open_reply_for(&trace_id).expect("kept open");
+    assert_eq!(reply.channel, channel);
+    assert_eq!(reply.reply_at, at);
+    let stored_spans: Vec<_> = test_support::spans()
+        .into_iter()
+        .filter(|span| {
+            span.name == "harold.reply_stored"
+                && span.span_context.trace_id().to_string() == trace_id
+        })
+        .collect();
+    assert_eq!(stored_spans.len(), 1);
+    assert!(
+        phone_requests_on(channel).is_empty(),
+        "the request ends when it is finished, not when it is stored"
+    );
+}
+
+#[tokio::test]
+async fn a_reply_that_is_not_stored_ends_its_request_as_ignored() {
+    let channel = unique_channel();
+
+    let stored = store_phone_reply(channel, OffsetDateTime::now_utc(), async { false }).await;
+
+    assert!(!stored);
+    let requests = phone_requests_on(channel);
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        test_support::span_attr(&requests[0], "outcome").as_deref(),
+        Some("ignored")
+    );
+    assert_eq!(
+        test_support::counter_value("harold.phone_requests", &[("channel", channel)]),
+        None
+    );
+}

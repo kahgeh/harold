@@ -6,6 +6,7 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use time::OffsetDateTime;
 use tokio::sync::{mpsc, watch};
 use tracing::{Instrument, info, info_span, warn};
 
@@ -15,6 +16,7 @@ use crate::inbound::ownership::{self, notification_text};
 use crate::outbound::is_messaging_paused;
 use crate::settings::get_settings;
 use crate::store::{HaroldStore, InboundMessage, TurnCompleted, append_inbound_message};
+use crate::telemetry;
 use crate::util::sanitise_for_applescript;
 
 // ===========================================================================
@@ -429,19 +431,20 @@ impl ChatDb {
         }
     }
 
-    /// The rows after `last_rowid` in one direction that the user wrote, oldest first.
-    /// Rows Harold sent, and attachment-only rows, are left out.
-    fn replies_after(&self, last_rowid: i64, is_from_me: u8) -> Vec<(i64, String)> {
+    /// The rows after `last_rowid` in one direction that the user wrote, oldest first, as
+    /// (ROWID, date, text). A row with no date reads as 0. Rows Harold sent, and
+    /// attachment-only rows, are left out.
+    fn replies_after(&self, last_rowid: i64, is_from_me: u8) -> Vec<(i64, i64, String)> {
         let Some(id_list) = self.id_list() else {
             return vec![];
         };
         let mut rows = self.query(&format!(
-            "SELECT ROWID, text FROM message \
+            "SELECT ROWID, COALESCE(date, 0) AS date, text FROM message \
              WHERE ROWID > {last_rowid} AND handle_id IN ({id_list}) AND is_from_me = {is_from_me} \
                AND text IS NOT NULL AND length(text) > 0 \
              ORDER BY ROWID ASC;"
         ));
-        rows.retain(|(_, text)| !is_marked_as_harold(text) && !is_attachment_only(text));
+        rows.retain(|(_, _, text)| !is_marked_as_harold(text) && !is_attachment_only(text));
         rows
     }
 
@@ -496,11 +499,18 @@ impl ChatDb {
         Some(ids.join(","))
     }
 
-    /// The (ROWID, trimmed text) of each row `sql` selects. A failed read gives no rows.
-    fn query(&self, sql: &str) -> Vec<(i64, String)> {
+    /// The (ROWID, date, trimmed text) of each row `sql` selects. A failed read gives no
+    /// rows.
+    fn query(&self, sql: &str) -> Vec<(i64, i64, String)> {
         let rows = self.select(sql).unwrap_or_default();
         rows.iter()
-            .filter_map(|row| Some((row.get("ROWID")?.as_i64()?, trimmed_text(row)?)))
+            .filter_map(|row| {
+                Some((
+                    row.get("ROWID")?.as_i64()?,
+                    row.get("date")?.as_i64()?,
+                    trimmed_text(row)?,
+                ))
+            })
             .collect()
     }
 
@@ -551,6 +561,7 @@ fn trimmed_text(row: &serde_json::Value) -> Option<String> {
 /// Record one fetched row as an inbound event and move `cursor` past it. While messaging
 /// is paused the row is discarded: the cursor still moves, so nothing is replayed on resume.
 /// A row whose text was just recorded from the other direction is skipped the same way.
+/// Returns whether the row was stored.
 async fn record_row(
     store: &HaroldStore,
     row: FetchedRow,
@@ -558,7 +569,7 @@ async fn record_row(
     recent: &Mutex<RecentRows>,
     messaging_paused: bool,
     now: Instant,
-) {
+) -> bool {
     let FetchedRow {
         rowid,
         text,
@@ -567,12 +578,12 @@ async fn record_row(
     if messaging_paused {
         info!("iMessage discarded (messaging paused)");
         cursor.store(rowid, Ordering::Relaxed);
-        return;
+        return false;
     }
     if recent.lock().unwrap().take_twin(direction, &text, now) {
         info!("iMessage skipped (same text already recorded from the other direction)");
         cursor.store(rowid, Ordering::Relaxed);
-        return;
+        return false;
     }
     let message = InboundMessage {
         text,
@@ -585,11 +596,38 @@ async fn record_row(
                 .lock()
                 .unwrap()
                 .remember(direction, message.text, now);
+            true
         }
         Err(e) => {
-            tracing::warn!(error = %e, "failed to append InboundMessageReceived event")
+            tracing::warn!(error = %e, "failed to append InboundMessageReceived event");
+            false
         }
     }
+}
+
+/// 2001-01-01T00:00:00Z, where Messages counts its dates from, as a Unix time.
+const APPLE_EPOCH_UNIX: i64 = 978_307_200;
+
+/// The instant a Messages `date` names: nanoseconds since 2001-01-01 UTC. Values under
+/// 10^12 are seconds, as older rows store them.
+fn apple_date_to_utc(date: i64) -> OffsetDateTime {
+    let apple_epoch =
+        OffsetDateTime::from_unix_timestamp(APPLE_EPOCH_UNIX).unwrap_or(OffsetDateTime::UNIX_EPOCH);
+    let since = if date < 1_000_000_000_000 {
+        time::Duration::seconds(date)
+    } else {
+        time::Duration::nanoseconds(date)
+    };
+    apple_epoch.checked_add(since).unwrap_or(apple_epoch)
+}
+
+/// When the user sent a reply, from its row's date. A row with no date was sent no later
+/// than it was read.
+fn reply_time(date: i64) -> OffsetDateTime {
+    if date == 0 {
+        return OffsetDateTime::now_utc();
+    }
+    apple_date_to_utc(date)
 }
 
 /// Feed the rows a Harold sent to `record_marker` with their dates, oldest first, and move
@@ -699,7 +737,7 @@ async fn poll_chat_db(
     read_marked_rows(marked, &cursors.marked, record_marker);
     let now = Instant::now();
 
-    for (rowid, text) in inbound {
+    for (rowid, date, text) in inbound {
         let trace_id = uuid::Uuid::new_v4().to_string();
         let span = info_span!("listener_inbound", trace_id = %trace_id, rowid = rowid);
 
@@ -710,13 +748,15 @@ async fn poll_chat_db(
                 text,
                 direction: Direction::Inbound,
             };
-            record_row(store, row, &cursors.inbound, recent, messaging_paused, now).await;
+            let stored = record_row(store, row, &cursors.inbound, recent, messaging_paused, now);
+            telemetry::store_phone_reply("imessage", reply_time(date), stored).await;
         }
         .instrument(span)
         .await;
     }
 
-    for (rowid, text) in self_msgs {
+    // A reply typed in Messages on a Mac is a phone request too, on the same channel.
+    for (rowid, date, text) in self_msgs {
         let trace_id = uuid::Uuid::new_v4().to_string();
         let span = info_span!("listener_self", trace_id = %trace_id, rowid = rowid);
 
@@ -727,15 +767,15 @@ async fn poll_chat_db(
                 text,
                 direction: Direction::SelfSent,
             };
-            record_row(
+            let stored = record_row(
                 store,
                 row,
                 &cursors.self_sent,
                 recent,
                 messaging_paused,
                 now,
-            )
-            .await;
+            );
+            telemetry::store_phone_reply("imessage", reply_time(date), stored).await;
         }
         .instrument(span)
         .await;

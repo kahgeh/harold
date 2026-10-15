@@ -290,6 +290,9 @@ struct Update {
 struct Message {
     chat: Chat,
     text: Option<String>,
+    /// When the user sent it, in Unix seconds. Telegram always sends it; 0 when absent.
+    #[serde(default)]
+    date: i64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -415,7 +418,8 @@ fn place_reply(text: &str, env: &impl HubEnv) -> ReplyPlace {
 
 /// Keep `text` for this Mac or forward it to the member that owns it. A reply that cannot
 /// be forwarded is not routed here: the user is told once which Mac could not be reached.
-async fn handle_reply(store: &HaroldStore, env: &impl HubEnv, text: String) {
+/// Returns whether the reply was stored here.
+async fn handle_reply(store: &HaroldStore, env: &impl HubEnv, text: String) -> bool {
     let owner = match place_reply(&text, env) {
         ReplyPlace::Member(owner) => owner,
         ReplyPlace::Here => {
@@ -428,8 +432,9 @@ async fn handle_reply(store: &HaroldStore, env: &impl HubEnv, text: String) {
             };
             if let Err(e) = append_inbound_message(store, &message).await {
                 warn!(error = %e, "failed to append InboundMessageReceived event");
+                return false;
             }
-            return;
+            return true;
         }
     };
 
@@ -452,6 +457,7 @@ async fn handle_reply(store: &HaroldStore, env: &impl HubEnv, text: String) {
             env.tell_user(notice).await;
         }
     }
+    false
 }
 
 /// Handle one batch of updates. Returns the offset to poll from next: one past the last
@@ -467,6 +473,7 @@ async fn handle_updates(
     for update in updates {
         offset = update.update_id + 1;
 
+        let sent = update.message.as_ref().map_or(0, |message| message.date);
         let Some(text) = routable_text(update.message, expected_chat_id, messaging_paused()) else {
             continue;
         };
@@ -480,12 +487,23 @@ async fn handle_updates(
 
         async {
             info!("Telegram message received");
-            handle_reply(store, env, text).await;
+            let stored = handle_reply(store, env, text);
+            crate::telemetry::store_phone_reply("telegram", sent_time(sent), stored).await;
         }
         .instrument(span)
         .await;
     }
     offset
+}
+
+/// When the user sent a message Telegram dated `date` (Unix seconds). One with no date
+/// was sent no later than it was read.
+fn sent_time(date: i64) -> time::OffsetDateTime {
+    if date == 0 {
+        return time::OffsetDateTime::now_utc();
+    }
+    time::OffsetDateTime::from_unix_timestamp(date)
+        .unwrap_or_else(|_| time::OffsetDateTime::now_utc())
 }
 
 fn poll_updates(client: &Client, token: &str, offset: i64, timeout: u64) -> Option<Vec<Update>> {
@@ -633,6 +651,7 @@ mod tests {
         Some(Message {
             chat: Chat { id: chat_id },
             text: Some(text.into()),
+            date: 0,
         })
     }
 
@@ -1256,6 +1275,35 @@ mod tests {
         // must not make the handler drop a reply the hub already decided to keep.
         assert!(stored[0].forwarded);
         assert!(env.told().is_empty());
+    }
+
+    #[tokio::test]
+    async fn reply_the_hub_keeps_opens_its_phone_request_at_the_time_telegram_sent_it() {
+        crate::telemetry::test_support::install();
+        let hub = hub_store().await;
+        let env = FakeHub::new(Some("studio"), Vec::new());
+        let sent = 1_760_000_000;
+        let mut kept = update(41, "yes, merge it");
+        kept.message.as_mut().unwrap().date = sent;
+
+        handle_updates(&hub.store, &env, vec![kept], 0, 7, || false).await;
+
+        let stored = hub
+            .store
+            .stream()
+            .load_after_version(events::EventStreamVersion::start(), 1)
+            .await
+            .unwrap();
+        let trace_id = stored[0]
+            .trace_id
+            .clone()
+            .expect("the stored reply records its phone request's trace");
+        let reply = crate::telemetry::open_reply_for(&trace_id).expect("the request is kept open");
+        assert_eq!(reply.channel, "telegram");
+        assert_eq!(
+            reply.reply_at,
+            time::OffsetDateTime::from_unix_timestamp(sent).unwrap()
+        );
     }
 
     #[tokio::test]

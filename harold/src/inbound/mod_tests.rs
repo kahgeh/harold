@@ -3,11 +3,12 @@ use std::sync::Mutex;
 
 use crate::inbound::ownership::Ownership;
 use crate::inbound::{
-    AgentAddress, RoutingEnv, clear_routing_state, parse_tag, resolve_pane, route_if_owned,
-    route_owned_reply, set_last_away_notification_source_agent,
+    AgentAddress, RouteReport, RoutingEnv, clear_routing_state, parse_tag, resolve_pane,
+    route_if_owned, route_owned_reply, set_last_away_notification_source_agent,
 };
 use crate::outbound::DeliveryOutcome;
 use crate::settings::init_settings_for_test;
+use crate::telemetry::{ResolvedBy, Routing};
 
 /// Serialises tests that mutate global routing state.
 static ROUTING_TEST_LOCK: Mutex<()> = Mutex::new(());
@@ -43,17 +44,17 @@ fn parse_tag_unclosed_bracket() {
 #[test]
 fn resolve_pane_exact_match() {
     let panes = vec![tmux("%1", "work:0.0"), tmux("%2", "home:0.1")];
-    let result = resolve_pane(Some("work:0.0"), "hi", &panes);
-    assert!(result.is_some());
-    assert_eq!(result.unwrap().0.pane_id(), "%1");
+    let (pane, _, resolved_by) = resolve_pane(Some("work:0.0"), "hi", &panes).unwrap();
+    assert_eq!(pane.pane_id(), "%1");
+    assert_eq!(resolved_by, ResolvedBy::ExactTag);
 }
 
 #[test]
 fn resolve_pane_substring_match() {
     let panes = vec![tmux("%1", "work:0.0"), tmux("%2", "home:0.1")];
-    let result = resolve_pane(Some("home"), "hi", &panes);
-    assert!(result.is_some());
-    assert_eq!(result.unwrap().0.pane_id(), "%2");
+    let (pane, _, resolved_by) = resolve_pane(Some("home"), "hi", &panes).unwrap();
+    assert_eq!(pane.pane_id(), "%2");
+    assert_eq!(resolved_by, ResolvedBy::TagSubstring);
 }
 
 #[test]
@@ -61,9 +62,9 @@ fn resolve_pane_no_tag_falls_back_to_my_agent() {
     let _lock = ROUTING_TEST_LOCK.lock().unwrap();
     clear_routing_state();
     let panes = vec![tmux("%1", "my-agent:0.0")];
-    let result = resolve_pane(None, "hi", &panes);
-    assert!(result.is_some());
-    assert_eq!(result.unwrap().0.pane_id(), "%1");
+    let (pane, _, resolved_by) = resolve_pane(None, "hi", &panes).unwrap();
+    assert_eq!(pane.pane_id(), "%1");
+    assert_eq!(resolved_by, ResolvedBy::MyAgent);
 }
 
 #[test]
@@ -73,9 +74,9 @@ fn resolve_pane_last_away_notification_source_beats_my_agent() {
     clear_routing_state();
     let panes = vec![tmux("%3", "alir-app:0.1"), tmux("%4", "my-agent:0.0")];
     set_last_away_notification_source_agent(tmux("%3", "alir-app:0.1"));
-    let result = resolve_pane(None, "hi", &panes);
-    assert!(result.is_some());
-    assert_eq!(result.unwrap().0.pane_id(), "%3");
+    let (pane, _, resolved_by) = resolve_pane(None, "hi", &panes).unwrap();
+    assert_eq!(pane.pane_id(), "%3");
+    assert_eq!(resolved_by, ResolvedBy::LatestNotifier);
 }
 
 #[test]
@@ -93,12 +94,14 @@ fn reply_owned_by_another_mac_is_skipped_without_routing() {
         owner: "laptop".to_string(),
     };
 
-    let outcome = route_if_owned(another_macs, |_, _| {
+    let report = route_if_owned(another_macs, |_, _| {
         routed = true;
-        Ok(DeliveryOutcome::Delivered)
-    });
+        Ok(typed_report())
+    })
+    .unwrap();
 
-    assert_eq!(outcome, Ok(DeliveryOutcome::Skipped));
+    assert_eq!(report.outcome, DeliveryOutcome::Skipped);
+    assert_eq!(report.routing, Routing::NotOwned);
     assert!(!routed, "an unowned reply reached pane discovery");
 }
 
@@ -110,12 +113,12 @@ fn owned_reply_is_routed_with_its_pane_tag_and_body() {
         body: "revert that",
     };
 
-    let outcome = route_if_owned(ownership, |pane_tag, body| {
+    let report = route_if_owned(ownership, |pane_tag, body| {
         routed.push((pane_tag.map(String::from), body.to_string()));
-        Ok(DeliveryOutcome::Delivered)
+        Ok(typed_report())
     });
 
-    assert_eq!(outcome, Ok(DeliveryOutcome::Delivered));
+    assert_eq!(report, Ok(typed_report()));
     assert_eq!(
         routed,
         [(
@@ -132,9 +135,21 @@ fn routing_failure_of_an_owned_reply_is_returned() {
         body: "go",
     };
 
-    let outcome = route_if_owned(ownership, |_, _| Err("tmux failed".to_string()));
+    let report = route_if_owned(ownership, |_, _| Err("tmux failed".to_string()));
 
-    assert_eq!(outcome, Err("tmux failed".to_string()));
+    assert_eq!(report, Err("tmux failed".to_string()));
+}
+
+/// What routing returns for a reply typed into pane `%1` by exact tag.
+fn typed_report() -> RouteReport {
+    RouteReport {
+        outcome: DeliveryOutcome::Delivered,
+        routing: Routing::Typed {
+            pane_id: "%1".into(),
+            resolved_by: ResolvedBy::ExactTag,
+            tagged: true,
+        },
+    }
 }
 
 /// A machine with the given panes that records what is relayed and replied.
@@ -180,9 +195,9 @@ impl RoutingEnv for FakeEnv {
 fn delivered_reply_is_confirmed_with_the_full_address_of_the_pane() {
     let env = FakeEnv::with_panes(vec![tmux("%1", "alir-app main:0.1")]);
 
-    let outcome = route_owned_reply(&env, "studio", Some("alir"), "revert that");
+    let report = route_owned_reply(&env, "studio", Some("alir"), "revert that").unwrap();
 
-    assert_eq!(outcome, Ok(DeliveryOutcome::Delivered));
+    assert_eq!(report.outcome, DeliveryOutcome::Delivered);
     assert_eq!(*env.relayed.borrow(), ["📱 revert that"]);
     assert_eq!(
         *env.replies.borrow(),
@@ -197,7 +212,7 @@ fn error_replies_name_the_machine_that_sends_them() {
 
     let none = FakeEnv::with_panes(Vec::new());
     assert_eq!(
-        route_owned_reply(&none, "studio", None, "go"),
+        route_owned_reply(&none, "studio", None, "go").map(|report| report.outcome),
         Ok(DeliveryOutcome::Skipped)
     );
     assert_eq!(
@@ -227,4 +242,74 @@ fn error_replies_name_the_machine_that_sends_them() {
         ["[studio] Pane work:0.0 is no longer active. Available: "]
     );
     assert!(gone.relayed.borrow().is_empty());
+}
+
+#[test]
+fn routing_reports_how_the_pane_was_chosen() {
+    let env = FakeEnv::with_panes(vec![tmux("%1", "harold:1.0"), tmux("%2", "chief:1.0")]);
+
+    let report = route_owned_reply(&env, "PasM4MBP", Some("chief"), "hello").unwrap();
+    assert_eq!(
+        report.routing,
+        Routing::Typed {
+            pane_id: "%2".into(),
+            resolved_by: ResolvedBy::TagSubstring,
+            tagged: true,
+        }
+    );
+    let report = route_owned_reply(&env, "PasM4MBP", Some("chief:1.0"), "hello").unwrap();
+    assert_eq!(
+        report.routing,
+        Routing::Typed {
+            pane_id: "%2".into(),
+            resolved_by: ResolvedBy::ExactTag,
+            tagged: true,
+        }
+    );
+    let report =
+        route_owned_reply(&FakeEnv::with_panes(Vec::new()), "PasM4MBP", None, "hello").unwrap();
+    assert_eq!(report.routing, Routing::NoPane);
+}
+
+#[test]
+fn an_untagged_reply_reports_the_latest_notifier_or_the_my_agent_fallback() {
+    let _lock = ROUTING_TEST_LOCK.lock().unwrap();
+    init_settings_for_test();
+    clear_routing_state();
+    let env = FakeEnv::with_panes(vec![tmux("%3", "alir-app:0.1"), tmux("%4", "my-agent:0.0")]);
+
+    let report = route_owned_reply(&env, "PasM4MBP", None, "hello").unwrap();
+    assert_eq!(
+        report.routing,
+        Routing::Typed {
+            pane_id: "%4".into(),
+            resolved_by: ResolvedBy::MyAgent,
+            tagged: false,
+        }
+    );
+
+    set_last_away_notification_source_agent(tmux("%3", "alir-app:0.1"));
+    let report = route_owned_reply(&env, "PasM4MBP", None, "hello").unwrap();
+    assert_eq!(
+        report.routing,
+        Routing::Typed {
+            pane_id: "%3".into(),
+            resolved_by: ResolvedBy::LatestNotifier,
+            tagged: false,
+        }
+    );
+    clear_routing_state();
+}
+
+#[test]
+fn a_tag_no_pane_matches_or_a_pane_that_is_gone_reports_no_pane() {
+    let work = FakeEnv::with_panes(vec![tmux("%1", "work:0.0")]);
+    let report = route_owned_reply(&work, "studio", Some("nonexistent"), "go").unwrap();
+    assert_eq!(report.routing, Routing::NoPane);
+    assert_eq!(report.outcome, DeliveryOutcome::Skipped);
+
+    let mut gone = FakeEnv::with_panes(vec![tmux("%1", "work:0.0")]);
+    gone.alive = false;
+    let report = route_owned_reply(&gone, "studio", Some("work"), "go").unwrap();
+    assert_eq!(report.routing, Routing::NoPane);
 }
