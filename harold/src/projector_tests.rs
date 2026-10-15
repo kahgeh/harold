@@ -200,6 +200,178 @@ async fn idle_handler_stops_when_shutdown_channel_closes() {
         .expect("handler task panicked");
 }
 
+/// Records when each delivery was handed to it, by event type. Fails `failing_type`
+/// retryably. Says on `done` when another type is delivered, or when `failing_type` is
+/// handed an 11th time (a give-up that never came).
+struct TimedDispatcher {
+    failing_type: &'static str,
+    handed: Mutex<Vec<(String, tokio::time::Instant)>>,
+    done: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    first_failure: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+}
+
+impl TimedDispatcher {
+    fn new(
+        failing_type: &'static str,
+    ) -> (
+        Arc<Self>,
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Receiver<()>,
+    ) {
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+        let (first_tx, first_rx) = tokio::sync::oneshot::channel();
+        let dispatcher = Arc::new(Self {
+            failing_type,
+            handed: Mutex::new(Vec::new()),
+            done: Mutex::new(Some(done_tx)),
+            first_failure: Mutex::new(Some(first_tx)),
+        });
+        (dispatcher, done_rx, first_rx)
+    }
+
+    fn handed(&self) -> Vec<(String, tokio::time::Instant)> {
+        self.handed.lock().unwrap().clone()
+    }
+}
+
+impl DeliveryDispatcher for TimedDispatcher {
+    fn dispatch(&self, delivery: &PendingDelivery) -> Result<DeliveryOutcome, DispatchError> {
+        let mut handed = self.handed.lock().unwrap();
+        handed.push((delivery.event_type.clone(), tokio::time::Instant::now()));
+        let failing = delivery.event_type == self.failing_type;
+        let tries = handed
+            .iter()
+            .filter(|(kind, _)| kind == self.failing_type)
+            .count();
+        if let Some(first) = self.first_failure.lock().unwrap().take() {
+            let _ = first.send(());
+        }
+        if (!failing || tries > 10)
+            && let Some(done) = self.done.lock().unwrap().take()
+        {
+            let _ = done.send(());
+        }
+        if failing {
+            return Err(DispatchError::Retryable("send failed".into()));
+        }
+        Ok(DeliveryOutcome::Delivered)
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_failing_delivery_waits_doubling_times_then_the_queue_moves_on() {
+    let directory = TestDirectory::new();
+    let store = Arc::new(HaroldStore::open(&directory.0).await.unwrap());
+    a_turn_end_then_a_reply(&store).await;
+    let (dispatcher, done, _first) = TimedDispatcher::new("TurnCompleted");
+    let (alerts, mut alert_rx) = crate::alerts::AlertQueue::new();
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(());
+    let task = tokio::spawn(super::run_deliveries(
+        Arc::clone(&store),
+        dispatcher.clone(),
+        None,
+        Some(alerts),
+        shutdown_rx,
+    ));
+
+    done.await.unwrap();
+    drop(shutdown_tx);
+    task.await.unwrap();
+
+    let handed = dispatcher.handed();
+    let kinds: Vec<&str> = handed.iter().map(|(kind, _)| kind.as_str()).collect();
+    // Ten tries of the turn end, then the reply: nothing later is tried meanwhile.
+    assert_eq!(kinds[..10], ["TurnCompleted"; 10]);
+    assert_eq!(kinds[10..], ["InboundMessageReceived"]);
+    let gaps: Vec<Duration> = handed
+        .windows(2)
+        .take(9)
+        .map(|pair| pair[1].1 - pair[0].1)
+        .collect();
+    for (gap, expected) in gaps.iter().zip([1, 2, 4, 8, 16, 32, 60, 60, 60]) {
+        let expected = Duration::from_secs(expected);
+        assert!(
+            *gap >= expected && *gap < expected + Duration::from_millis(200),
+            "gaps {gaps:?}"
+        );
+    }
+    // The reply goes at once after the give-up, not after another wait.
+    assert!(handed[10].1 - handed[9].1 < Duration::from_millis(200));
+    let (line, _) = alert_rx.try_recv().unwrap();
+    assert_eq!(line, "harold alert: delivery-given-up firing");
+}
+
+#[tokio::test(start_paused = true)]
+async fn snapshots_keep_publishing_while_a_row_waits() {
+    let directory = TestDirectory::new();
+    let store = Arc::new(HaroldStore::open(&directory.0).await.unwrap());
+    let hub = AgentSnapshotHub::new(store.load_agent_snapshot().await.unwrap());
+    let mut receiver = hub.subscribe();
+    a_turn_end_then_a_reply(&store).await;
+    let (dispatcher, _done, first_failure) = TimedDispatcher::new("TurnCompleted");
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(());
+    let task = tokio::spawn(super::run_deliveries(
+        Arc::clone(&store),
+        dispatcher.clone(),
+        Some(hub.clone()),
+        None,
+        shutdown_rx,
+    ));
+    first_failure.await.unwrap();
+    let _ = receiver.borrow_and_update();
+
+    append_agent_events(&store, vec![agent_observed("%42", 420, "/work/harold")])
+        .await
+        .unwrap();
+    receiver.changed().await.unwrap();
+
+    // Published during the first wait: the turn end has had one try only.
+    assert_eq!(dispatcher.handed().len(), 1);
+    assert!(
+        receiver
+            .borrow()
+            .panes
+            .iter()
+            .any(|pane| pane.pane.incarnation.pane_id == "%42")
+    );
+    drop(shutdown_tx);
+    task.await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn shutdown_ends_a_retry_wait_at_once() {
+    let directory = TestDirectory::new();
+    let store = Arc::new(HaroldStore::open(&directory.0).await.unwrap());
+    let hub = AgentSnapshotHub::new(store.load_agent_snapshot().await.unwrap());
+    let mut receiver = hub.subscribe();
+    a_turn_end_then_a_reply(&store).await;
+    let (dispatcher, _done, first_failure) = TimedDispatcher::new("TurnCompleted");
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(());
+    let task = tokio::spawn(super::run_deliveries(
+        Arc::clone(&store),
+        dispatcher.clone(),
+        Some(hub.clone()),
+        None,
+        shutdown_rx,
+    ));
+    first_failure.await.unwrap();
+    let failed_at = dispatcher.handed()[0].1;
+    let _ = receiver.borrow_and_update();
+    // A snapshot published after the failure shows the handler has reached its wait, so
+    // the shutdown below ends the wait and not the cycle before it.
+    append_agent_events(&store, vec![agent_observed("%42", 420, "/work/harold")])
+        .await
+        .unwrap();
+    receiver.changed().await.unwrap();
+    assert_eq!(dispatcher.handed().len(), 1);
+
+    drop(shutdown_tx);
+    task.await.unwrap();
+
+    assert!(tokio::time::Instant::now() - failed_at < Duration::from_secs(1));
+    assert_eq!(dispatcher.handed().len(), 1);
+}
+
 #[tokio::test]
 async fn retryable_delivery_failure_remains_pending_for_a_later_attempt() {
     let directory = TestDirectory::new();

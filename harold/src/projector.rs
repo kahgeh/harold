@@ -416,14 +416,7 @@ async fn handle_next_delivery_inner(
     snapshots: Option<&AgentSnapshotHub>,
     alerts: Option<&AlertQueue>,
 ) -> Result<bool, HandlerError> {
-    match snapshots {
-        Some(snapshots) => {
-            project_and_publish_agent_snapshot(store, snapshots, 500).await?;
-        }
-        None => {
-            store.project_unhandled_events(500).await?;
-        }
-    }
+    project(store, snapshots).await?;
     let Some(delivery) = store.next_pending_delivery().await? else {
         return Ok(false);
     };
@@ -646,11 +639,18 @@ async fn wait_or_shutdown(shutdown: &mut watch::Receiver<()>, delay: Duration) -
     }
 }
 
+/// How often the handler looks for work when idle, and projects events while a delivery
+/// waits for its next try.
+const POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+/// The pause after a cycle that failed for any reason but a delivery's send.
+const ERROR_PAUSE: Duration = Duration::from_secs(1);
+
 pub async fn run_event_handler(
     store: Arc<HaroldStore>,
     snapshots: AgentSnapshotHub,
-    alerts: Option<crate::alerts::AlertQueue>,
-    mut shutdown: watch::Receiver<()>,
+    alerts: Option<AlertQueue>,
+    shutdown: watch::Receiver<()>,
 ) {
     let dispatcher: Arc<dyn DeliveryDispatcher> = Arc::new(production_dispatcher(
         Arc::new(SystemEnvironment),
@@ -662,36 +662,80 @@ pub async fn run_event_handler(
         std::time::SystemTime::now(),
     );
     info!("event handler starting");
+    run_deliveries(store, dispatcher, Some(snapshots), alerts, shutdown).await;
+    info!("event handler shutting down");
+}
 
+/// Delivers the outbox oldest first through `dispatcher` until shutdown. After a failed
+/// send, the same row is tried again once its wait is up, and no later row is tried
+/// meanwhile. Events are still projected during the wait, every POLL_INTERVAL, so the
+/// agent snapshots stay current.
+async fn run_deliveries(
+    store: Arc<HaroldStore>,
+    dispatcher: Arc<dyn DeliveryDispatcher>,
+    snapshots: Option<AgentSnapshotHub>,
+    alerts: Option<AlertQueue>,
+    mut shutdown: watch::Receiver<()>,
+) {
+    let mut retry_at: Option<tokio::time::Instant> = None;
     loop {
         if shutdown.has_changed().unwrap_or(true) {
             break;
         }
-
-        match handle_next_delivery_inner(
-            &store,
-            Arc::clone(&dispatcher),
-            Some(&snapshots),
-            alerts.as_ref(),
-        )
-        .await
-        {
-            Ok(true) => continue,
-            Ok(false) => {
-                if wait_or_shutdown(&mut shutdown, Duration::from_millis(100)).await {
+        if let Some(at) = retry_at {
+            let now = tokio::time::Instant::now();
+            if now < at {
+                let pause = match project(&store, snapshots.as_ref()).await {
+                    Ok(()) => POLL_INTERVAL,
+                    Err(error) => {
+                        warn!(error = %error, "event handler cycle failed");
+                        ERROR_PAUSE
+                    }
+                };
+                if wait_or_shutdown(&mut shutdown, pause.min(at - now)).await {
                     break;
                 }
+                continue;
+            }
+            retry_at = None;
+        }
+        let handled = handle_next_delivery_inner(
+            &store,
+            Arc::clone(&dispatcher),
+            snapshots.as_ref(),
+            alerts.as_ref(),
+        )
+        .await;
+        let pause = match handled {
+            Ok(true) => continue,
+            Ok(false) => POLL_INTERVAL,
+            Err(HandlerError::Delivery { error, retry_in }) => {
+                warn!(error = %error, "event handler cycle failed");
+                retry_at = Some(tokio::time::Instant::now() + retry_in);
+                continue;
             }
             Err(error) => {
                 warn!(error = %error, "event handler cycle failed");
-                if wait_or_shutdown(&mut shutdown, Duration::from_secs(1)).await {
-                    break;
-                }
+                ERROR_PAUSE
             }
+        };
+        if wait_or_shutdown(&mut shutdown, pause).await {
+            break;
         }
     }
+}
 
-    info!("event handler shutting down");
+/// Projects new events, and publishes the agent snapshot when there is a hub.
+async fn project(
+    store: &HaroldStore,
+    snapshots: Option<&AgentSnapshotHub>,
+) -> crate::store::Result<()> {
+    match snapshots {
+        Some(snapshots) => project_and_publish_agent_snapshot(store, snapshots, 500)
+            .await
+            .map(drop),
+        None => store.project_unhandled_events(500).await.map(drop),
+    }
 }
 
 #[cfg(test)]
