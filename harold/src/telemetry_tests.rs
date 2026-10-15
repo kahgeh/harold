@@ -1737,7 +1737,10 @@ fn every_definition_is_valid_json_naming_only_known_metrics_and_attributes() {
             "alert-wrong-agent.json",
             "dashboard.json",
             "trends.json",
-            "webhook.json",
+            "webhook-phone-request-slow.json",
+            "webhook-phone-request-unavailable.json",
+            "webhook-slot-idle.json",
+            "webhook-wrong-agent.json",
         ]
     );
 
@@ -1745,6 +1748,10 @@ fn every_definition_is_valid_json_naming_only_known_metrics_and_attributes() {
         let mut texts = Vec::new();
         strings_in(&definition(file), &mut texts);
         for text in &texts {
+            assert!(
+                !text.contains("{{note}}"),
+                "{file} uses {{{{note}}}}, which HyperDX 2.40 renders empty in a webhook body"
+            );
             for name in dotted_names(text) {
                 assert!(
                     METRICS.contains(&name.as_str())
@@ -2041,12 +2048,23 @@ fn the_alert_files_carry_the_spec_thresholds() {
     for (name, source, reads, aggregation, threshold, comparison, minutes) in expected {
         let alert = definition(&format!("alert-{name}.json"));
         assert_eq!(alert["name"], name);
-        assert_eq!(
-            alert["note"], name,
-            "the webhook body sends the note as the alert"
-        );
+        assert_eq!(alert["note"], name, "{name}");
         assert_eq!(alert["source"], "inline", "{name}");
         assert_eq!(alert["channel"]["type"], "webhook", "{name}");
+        assert_eq!(
+            alert["channel"]["webhookId"], "@WEBHOOK_ID@",
+            "{name}: the README fills it with harold-alerts-{name}'s id"
+        );
+        let webhooks: Vec<String> = std::fs::read_dir(definitions())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .filter(|file| file == &format!("webhook-{name}.json"))
+            .collect();
+        assert_eq!(
+            webhooks.len(),
+            1,
+            "{name}: exactly one webhook file of its name"
+        );
         assert_eq!(alert["threshold"].as_f64(), Some(threshold), "{name}");
         assert_eq!(alert["thresholdType"], comparison, "{name}");
         let interval = match alert["interval"].as_str().unwrap() {
@@ -2086,13 +2104,8 @@ fn the_alert_files_carry_the_spec_thresholds() {
 }
 
 #[test]
-fn the_webhook_posts_what_the_alert_address_accepts() {
-    let webhook = definition("webhook.json");
-    assert_eq!(webhook["service"], "generic");
-    assert_eq!(webhook["url"], "http://host.containers.internal:4320/alert");
-    let body = webhook["body"].as_str().unwrap();
+fn each_alert_has_its_own_webhook_posting_what_the_alert_address_accepts() {
     let state = "{{#if (eq status 'firing')}}firing{{else if (eq status 'resolved')}}cleared{{else}}{{status}}{{/if}}";
-    assert!(body.contains(state), "{body}");
     // HyperDX's statuses, and the state the template renders for each.
     let rendered = [
         ("firing", "firing"),
@@ -2102,8 +2115,19 @@ fn the_webhook_posts_what_the_alert_address_accepts() {
         ("error", "error"),
     ];
     for name in crate::alerts::ALERT_NAMES {
+        let webhook = definition(&format!("webhook-{name}.json"));
+        assert_eq!(webhook["name"], format!("harold-alerts-{name}"));
+        assert_eq!(webhook["service"], "generic", "{name}");
+        assert_eq!(
+            webhook["url"], "http://host.containers.internal:4320/alert",
+            "{name}"
+        );
+        let body = webhook["body"].as_str().unwrap();
+        // HyperDX 2.40 leaves `note` out of what a webhook body sees, so it renders empty.
+        assert!(!body.contains("{{note}}"), "{name}: {body}");
+        assert!(body.contains(state), "{name}: {body}");
         for (status, state_sent) in rendered {
-            let post = body.replace("{{note}}", name).replace(state, state_sent);
+            let post = body.replace(state, state_sent);
             let line = crate::alerts::alert_line(post.as_bytes());
             match status {
                 "firing" | "resolved" => {
