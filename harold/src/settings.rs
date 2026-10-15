@@ -336,6 +336,62 @@ pub struct LogSettings {
     pub level: String,
 }
 
+/// Where Harold sends its telemetry and takes alerts. Each key is optional: with none
+/// set, nothing is exported, no alert address is opened and no pod is read.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct TelemetrySettings {
+    /// The OpenTelemetry collector's gRPC address, such as `http://localhost:4317`.
+    pub otlp_endpoint: Option<String>,
+    /// The address and port Harold takes alerts on, such as `127.0.0.1:4320`.
+    pub alert_listen: Option<String>,
+    /// The path of the chief's `products.toml`. Set it on one Mac only, or merges are
+    /// counted twice.
+    pub pod_registry: Option<String>,
+}
+
+#[allow(
+    dead_code,
+    reason = "the alert address and the pod facts read these in later telemetry tasks"
+)]
+impl TelemetrySettings {
+    /// The alert address. `Settings::validate` reports one that does not parse.
+    pub fn alert_addr(&self) -> Option<SocketAddr> {
+        self.alert_listen.as_deref()?.parse().ok()
+    }
+
+    /// The pod registry's path, with a leading `~/` expanded.
+    pub fn pod_registry_path(&self) -> Option<std::path::PathBuf> {
+        let path = self.pod_registry.as_deref()?;
+        Some(expand_tilde(path.trim()).into())
+    }
+}
+
+fn telemetry_errors(telemetry: &TelemetrySettings) -> Vec<String> {
+    let mut errors = Vec::new();
+    if let Some(endpoint) = &telemetry.otlp_endpoint {
+        let has_scheme = endpoint.starts_with("http://") || endpoint.starts_with("https://");
+        if !has_scheme || tonic::transport::Endpoint::from_shared(endpoint.clone()).is_err() {
+            errors.push(
+                "telemetry.otlp_endpoint must be an http:// or https:// address such as http://localhost:4317"
+                    .into(),
+            );
+        }
+    }
+    if let Some(listen) = &telemetry.alert_listen
+        && listen.parse::<SocketAddr>().is_err()
+    {
+        errors.push(
+            "telemetry.alert_listen must be an address and port such as 127.0.0.1:4320".into(),
+        );
+    }
+    if let Some(registry) = &telemetry.pod_registry
+        && registry.trim().is_empty()
+    {
+        errors.push("telemetry.pod_registry must be the path of the chief's products.toml".into());
+    }
+    errors
+}
+
 #[derive(Debug, Deserialize)]
 pub struct StoreSettings {
     pub path: String,
@@ -704,6 +760,9 @@ pub struct Settings {
     /// Texts Harold types into an agent's pane at a set time each day.
     #[serde(default)]
     pub(crate) timed_prompts: Vec<TimedPromptSettings>,
+    /// The collector, alert address and pod registry. Off when the section is absent.
+    #[serde(default)]
+    pub telemetry: TelemetrySettings,
 }
 
 impl Settings {
@@ -725,6 +784,7 @@ impl Settings {
             self.notify.away_updates_only_from.as_deref(),
         ));
         errors.extend(timed_prompts_errors(&self.timed_prompts));
+        errors.extend(telemetry_errors(&self.telemetry));
         match self.notify.away_channel.as_str() {
             "imessage" => {
                 if self.imessage.recipient.is_none() {
@@ -1319,6 +1379,112 @@ mod tests {
         assert_eq!(errors.len(), 2, "{errors:?}");
         assert!(errors[0].contains("\"my mac\""), "{errors:?}");
         assert!(errors[1].contains("\"a/b\""), "{errors:?}");
+    }
+
+    /// The errors `validate()` reports about `[telemetry]`, for the default
+    /// configuration with `overrides` laid over it.
+    fn telemetry_validate_errors(overrides: &str) -> Vec<String> {
+        default_settings_with(overrides)
+            .validate()
+            .into_iter()
+            .filter(|error| error.starts_with("telemetry."))
+            .collect()
+    }
+
+    #[test]
+    fn telemetry_is_off_when_the_section_is_absent() {
+        let settings = default_settings_with("");
+        assert!(settings.telemetry.otlp_endpoint.is_none());
+        assert!(settings.telemetry.alert_listen.is_none());
+        assert!(settings.telemetry.pod_registry.is_none());
+        assert_eq!(settings.telemetry.alert_addr(), None);
+        assert_eq!(settings.telemetry.pod_registry_path(), None);
+        assert!(telemetry_validate_errors("").is_empty());
+    }
+
+    #[test]
+    fn a_malformed_telemetry_value_names_its_key() {
+        for (key, value, expected) in [
+            (
+                "otlp_endpoint",
+                "localhost:4317",
+                "telemetry.otlp_endpoint must be an http:// or https:// address such as http://localhost:4317",
+            ),
+            (
+                "otlp_endpoint",
+                "",
+                "telemetry.otlp_endpoint must be an http:// or https:// address such as http://localhost:4317",
+            ),
+            (
+                "otlp_endpoint",
+                "http://",
+                "telemetry.otlp_endpoint must be an http:// or https:// address such as http://localhost:4317",
+            ),
+            (
+                "alert_listen",
+                "4320",
+                "telemetry.alert_listen must be an address and port such as 127.0.0.1:4320",
+            ),
+            (
+                "alert_listen",
+                "localhost:4320",
+                "telemetry.alert_listen must be an address and port such as 127.0.0.1:4320",
+            ),
+            (
+                "pod_registry",
+                "",
+                "telemetry.pod_registry must be the path of the chief's products.toml",
+            ),
+            (
+                "pod_registry",
+                "   ",
+                "telemetry.pod_registry must be the path of the chief's products.toml",
+            ),
+        ] {
+            let errors = telemetry_validate_errors(&format!("[telemetry]\n{key} = \"{value}\"\n"));
+            assert_eq!(errors, vec![expected.to_string()], "{key}={value:?}");
+        }
+    }
+
+    #[test]
+    fn well_formed_telemetry_values_pass() {
+        let overrides = "[telemetry]\notlp_endpoint = \"http://localhost:4317\"\nalert_listen = \"127.0.0.1:4320\"\npod_registry = \"~/products.toml\"\n";
+        let settings = default_settings_with(overrides);
+        assert!(telemetry_validate_errors(overrides).is_empty());
+        assert_eq!(
+            settings.telemetry.alert_addr(),
+            Some("127.0.0.1:4320".parse().unwrap())
+        );
+        let path = settings.telemetry.pod_registry_path().unwrap();
+        assert!(!path.starts_with("~"), "{path:?}");
+        assert!(path.ends_with("products.toml"), "{path:?}");
+
+        let https = "[telemetry]\notlp_endpoint = \"https://collector.example:4317\"\n";
+        assert!(telemetry_validate_errors(https).is_empty());
+    }
+
+    #[test]
+    fn telemetry_errors_lists_every_malformed_key() {
+        let telemetry = super::TelemetrySettings {
+            otlp_endpoint: Some("localhost:4317".into()),
+            alert_listen: Some("4320".into()),
+            pod_registry: Some(String::new()),
+        };
+        let errors = super::telemetry_errors(&telemetry);
+        let keys: Vec<&str> = errors
+            .iter()
+            .map(|error| error.split_whitespace().next().unwrap_or_default())
+            .collect();
+        assert_eq!(
+            keys,
+            [
+                "telemetry.otlp_endpoint",
+                "telemetry.alert_listen",
+                "telemetry.pod_registry"
+            ],
+            "{errors:?}"
+        );
+        assert!(super::telemetry_errors(&super::TelemetrySettings::default()).is_empty());
     }
 
     use super::{PeerHub, PeerMember, PeerRole};

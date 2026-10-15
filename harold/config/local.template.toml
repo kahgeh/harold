@@ -60,6 +60,12 @@ command = "say"
 # away_channel = "telegram"      # "imessage" or "telegram"
 # away_messages_only_from = "/Users/you/Dev/chief-of-pods"  # while an agent runs in this folder, only its panes send to the phone: turn-end updates and messages agents send
 
+# Telemetry: leave a key out to turn that part off. Set pod_registry on one Mac only, or merges are counted twice.
+# [telemetry]
+# otlp_endpoint = "http://localhost:4317"                          # the OpenTelemetry collector's gRPC address; Harold sends its traces, logs and metrics here
+# alert_listen = "127.0.0.1:4320"                                  # the address and port Harold takes alerts on
+# pod_registry = "/Users/you/Dev/p/chief-of-pods/products.toml"    # the chief's products.toml, read every minute for pod facts
+
 # A text Harold types into an agent's pane at a set local time each day, only when the
 # agent is idle and its input box is empty. Claude Code agents only. One block for each.
 # [[timed_prompts]]
