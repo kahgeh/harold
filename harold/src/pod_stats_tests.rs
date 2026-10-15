@@ -356,6 +356,50 @@ async fn a_rewrite_counts_nothing_and_is_logged() {
     assert_eq!(observe(&mut tips, &product).await, Ok(TipMove::Unchanged));
 }
 
+#[tokio::test]
+async fn a_rewrite_between_two_merges_in_one_poll_counts_the_two_merges_and_is_logged() {
+    let pod = Pod::new();
+    let repo = pod.repo("main");
+    let product = pod.product(&repo, 3);
+    let mut tips = Tips::default();
+    observe(&mut tips, &product).await.unwrap();
+
+    merge_branch(&repo, "spec-x", "1\n2\n3\n4\n5\n6\n");
+    let tree = git(&repo, &["rev-parse", "HEAD^{tree}"]);
+    let unrelated = git(&repo, &["commit-tree", &tree, "-m", "unrelated"]);
+    git(
+        &repo,
+        &["update-ref", "-m", "rewrite", "refs/heads/main", &unrelated],
+    );
+    git(&repo, &["reset", "-q", "--hard"]);
+    merge_branch(&repo, "spec-y", "1\n2\n3\n4\n5\n6\n7\n");
+    let logs = CapturedLogs::start();
+
+    let moved = observe(&mut tips, &product).await;
+
+    assert_eq!(
+        moved,
+        Ok(TipMove::Merges(vec![
+            Merge {
+                spec_id: Some("spec-x".into()),
+                added: 1,
+                removed: 0,
+            },
+            Merge {
+                spec_id: Some("spec-y".into()),
+                added: 1,
+                removed: 0,
+            },
+        ]))
+    );
+    let text = logs.text();
+    let line = format!(
+        "base branch rewritten; not counted pod.product={}",
+        pod.name
+    );
+    assert_eq!(text.matches(&line).count(), 1, "{text}");
+}
+
 #[test]
 fn a_spec_id_comes_from_a_merge_subject() {
     assert_eq!(

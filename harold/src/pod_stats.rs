@@ -382,16 +382,11 @@ impl Tips {
         if old == tip {
             return Ok(TipMove::Unchanged);
         }
-        let contains_old = git
-            .run(&product.repo, &["merge-base", "--is-ancestor", &old, &tip])
-            .await
-            .ok_or(NO_ANSWER)?
-            .success;
-        let moved = if contains_old {
-            TipMove::Merges(merges(git, product, &old, &tip, &history.reflog).await?)
-        } else {
-            warn!(pod.product = %product.name, "base branch rewritten; not counted");
+        let (merges, rewritten) = merges(git, product, &old, &tip, &history.reflog).await?;
+        let moved = if merges.is_empty() && rewritten {
             TipMove::Rewritten
+        } else {
+            TipMove::Merges(merges)
         };
         self.0.insert(product.name.clone(), tip);
         Ok(moved)
@@ -400,13 +395,15 @@ impl Tips {
 
 /// The merges from `old` to `new`: one for each reflog entry from just after `old` up to
 /// `new`, or one from `old` to `new` with no spec when the reflog does not hold both.
+/// Each step counts only when its new commit contains its old one; a step that does not,
+/// such as a rewrite, is logged and skipped. Also says whether any step was skipped.
 async fn merges(
     git: &impl Git,
     product: &Product,
     old: &str,
     new: &str,
     reflog: &[ReflogEntry],
-) -> Result<Vec<Merge>, &'static str> {
+) -> Result<(Vec<Merge>, bool), &'static str> {
     let newest = reflog.iter().position(|entry| entry.hash == new);
     let oldest = newest.and_then(|newest| {
         let after = reflog[newest..]
@@ -423,9 +420,21 @@ async fn merges(
         _ => vec![(new, None)],
     };
     let mut merges = Vec::new();
+    let mut rewritten = false;
     let mut from = old;
     for (to, spec_id) in steps {
         if to == from {
+            continue;
+        }
+        let contains_from = git
+            .run(&product.repo, &["merge-base", "--is-ancestor", from, to])
+            .await
+            .ok_or(NO_ANSWER)?
+            .success;
+        if !contains_from {
+            warn!(pod.product = %product.name, "base branch rewritten; not counted");
+            rewritten = true;
+            from = to;
             continue;
         }
         let shortstat = git_stdout(git, &product.repo, &["diff", "--shortstat", from, to]).await?;
@@ -437,7 +446,7 @@ async fn merges(
         });
         from = to;
     }
-    Ok(merges)
+    Ok((merges, rewritten))
 }
 
 fn record_merges(product: &str, merges: &[Merge]) {
