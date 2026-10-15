@@ -1604,3 +1604,38 @@ async fn a_self_sent_reply_is_a_phone_request_on_the_imessage_channel() {
     assert_eq!(reply.channel, "imessage");
     assert_eq!(reply.reply_at, apple_date_to_utc(sent));
 }
+
+#[test]
+fn a_failed_attachment_send_discards_osascript_error_output_and_logs_no_words() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let directory = TestDirectory::new();
+    let seen = directory.0.join("stderr");
+    let fake = directory.0.join("osascript");
+    // The file's path is the ninth argument, after the four `-e` lines of the script.
+    std::fs::write(
+        &fake,
+        format!(
+            "#!/bin/sh\nif [ /dev/fd/2 -ef /dev/null ]; then echo discarded > '{0}'; else echo kept > '{0}'; fi\necho \"cannot send $9\" >&2\nexit 1\n",
+            seen.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let note = directory.0.join("Release install is on task five.m4a");
+    let logs = crate::outbound::fake::CapturedLogs::start();
+
+    let error =
+        super::send_attachment_with(fake.to_str().unwrap(), &note, "me@example.com").unwrap_err();
+
+    assert!(
+        error.starts_with("osascript exited unsuccessfully"),
+        "{error}"
+    );
+    assert!(!error.contains("Release install"), "{error}");
+    assert_eq!(std::fs::read_to_string(&seen).unwrap(), "discarded\n");
+    assert!(!logs.text().contains("Release install"), "{}", logs.text());
+    assert_eq!(
+        super::send_attachment_with("true", &note, "me@example.com"),
+        Ok(())
+    );
+}
