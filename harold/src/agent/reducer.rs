@@ -3,7 +3,7 @@
     reason = "the projector consumes this pure reducer in the next monitor slice"
 )]
 
-use events::EventStreamVersion;
+use crate::store::EventVersion;
 
 use super::domain::{
     AgentEvent, AgentIncarnation, AgentPaneProjection, EffectiveAgentState, ObservedAgentState,
@@ -56,7 +56,7 @@ pub(crate) const SUBMITTED_PROMPT_CLASSIFIER_ID: &str = "tmux-submitted-prompt-v
 pub(crate) fn reduce_agent_event(
     current: Option<AgentPaneProjection>,
     event: &AgentEvent,
-    event_version: EventStreamVersion,
+    event_version: EventVersion,
     graces: GraceWindows,
 ) -> ProjectionChange {
     match event {
@@ -203,7 +203,7 @@ pub(crate) fn reduce_turn_completed(
     incarnation: &AgentIncarnation,
     work_summary: &WorkSummaryUpdate,
     observed_at_ms: i64,
-    event_version: EventStreamVersion,
+    event_version: EventVersion,
     graces: GraceWindows,
 ) -> ProjectionChange {
     let Some(mut projection) = current else {
@@ -240,7 +240,7 @@ fn revalidates_hook_epoch(
 fn reduce_pane_observed(
     current: Option<AgentPaneProjection>,
     observed: &super::domain::AgentPaneObserved,
-    event_version: EventStreamVersion,
+    event_version: EventVersion,
 ) -> ProjectionChange {
     let Some(mut current) = current else {
         return ProjectionChange::Upsert(new_projection(observed, event_version));
@@ -259,7 +259,7 @@ fn reduce_pane_observed(
 
 fn new_projection(
     observed: &super::domain::AgentPaneObserved,
-    event_version: EventStreamVersion,
+    event_version: EventVersion,
 ) -> AgentPaneProjection {
     AgentPaneProjection {
         pane: observed.pane.clone(),
@@ -286,7 +286,7 @@ fn new_projection(
 fn reconcile(
     mut projection: AgentPaneProjection,
     observed_at_ms: i64,
-    event_version: EventStreamVersion,
+    event_version: EventVersion,
     graces: GraceWindows,
 ) -> AgentPaneProjection {
     let effective_state = effective_state(&projection, graces);
@@ -346,7 +346,7 @@ fn observed_to_effective(state: super::domain::ObservedAgentState) -> EffectiveA
     }
 }
 
-fn invalidate_generated(projection: &mut AgentPaneProjection, event_version: EventStreamVersion) {
+fn invalidate_generated(projection: &mut AgentPaneProjection, event_version: EventVersion) {
     projection.summary_basis_version = event_version;
     projection.generated_work_summary = None;
     projection.generated_summary_basis_version = None;

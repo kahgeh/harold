@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use events::EventStreamVersion;
+use crate::store::EventVersion;
 use tokio::sync::watch;
 
 use super::*;
@@ -377,12 +377,12 @@ fn projection(
         explicit_work_summary_updated_at_ms: None,
         screen_work_summary: None,
         screen_work_summary_updated_at_ms: None,
-        summary_basis_version: EventStreamVersion::start(),
+        summary_basis_version: EventVersion::start(),
         generated_work_summary: None,
         generated_summary_basis_version: None,
         work_summary: None,
         last_transition_at_ms: 2_000,
-        last_event_version: EventStreamVersion::start(),
+        last_event_version: EventVersion::start(),
     }
 }
 
@@ -401,7 +401,7 @@ fn provider(id: &str, screen_adapter: ScreenAdapter) -> AgentProviderSettings {
 
 pub(crate) fn snapshot(healthy: Option<bool>, panes: Vec<AgentPaneProjection>) -> AgentSnapshot {
     AgentSnapshot {
-        through_event_version: EventStreamVersion::start(),
+        through_event_version: EventVersion::start(),
         server_time_ms: 3_000,
         monitor_health: healthy
             .map(|healthy| MonitorHealthProjection {
@@ -409,7 +409,7 @@ pub(crate) fn snapshot(healthy: Option<bool>, panes: Vec<AgentPaneProjection>) -
                 healthy,
                 reason_code: (if healthy { "ok" } else { "timeout" }).into(),
                 observed_at_ms: 2_500,
-                last_event_version: EventStreamVersion::start(),
+                last_event_version: EventVersion::start(),
             })
             .into_iter()
             .collect(),
@@ -611,7 +611,7 @@ async fn handled(store: &TestStore) -> Vec<TimedPromptHandled> {
     store
         .store
         .stream()
-        .load_after_version(EventStreamVersion::start(), 100)
+        .load_after_version(EventVersion::start(), 100)
         .await
         .unwrap()
         .into_iter()

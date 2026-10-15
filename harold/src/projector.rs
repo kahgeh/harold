@@ -13,8 +13,8 @@ use crate::outbound::left_out::{
 };
 use crate::outbound::{DeliveryOutcome, NotifyEnvironment, NotifyState, SystemEnvironment, notify};
 use crate::store::{
-    AwayMessageRequested, HaroldStore, InboundMessage, PendingDelivery, ProjectionBatch,
-    SpokenLineRequested, TurnCompleted,
+    AwayMessageRequested, EventVersion, HaroldStore, InboundMessage, PendingDelivery,
+    ProjectionBatch, SpokenLineRequested, StoreError, TurnCompleted,
 };
 use crate::telemetry::{self, OpenReply, ResolvedBy, Routing, TRACE_TARGET};
 
@@ -355,7 +355,7 @@ fn production_dispatcher(
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum HandlerError {
     #[error(transparent)]
-    Store(#[from] events::EsError),
+    Store(#[from] StoreError),
 
     #[error("delivery task failed: {0}")]
     Join(#[from] tokio::task::JoinError),
@@ -524,7 +524,7 @@ fn in_delivery(delivering: Option<&tracing::Span>, log: impl FnOnce()) {
 
 /// The trace and time the stored reply at `version` recorded. When its event cannot be
 /// read, the reply's request has no trace to continue and starts now.
-async fn reply_origin(store: &HaroldStore, version: events::EventStreamVersion) -> ReplyOrigin {
+async fn reply_origin(store: &HaroldStore, version: EventVersion) -> ReplyOrigin {
     match stored_envelope(store, version).await {
         Some((trace_id, created_at)) => ReplyOrigin {
             trace_id,
@@ -539,31 +539,25 @@ async fn reply_origin(store: &HaroldStore, version: events::EventStreamVersion) 
 
 /// The trace id and stored time of the event at `version`, read from its envelope, or
 /// `None` when it cannot be read. This is the event handler's only read of the event
-/// stream itself: a store that replaces `HaroldStore::stream()` swaps this function.
+/// stream itself.
 async fn stored_envelope(
     store: &HaroldStore,
-    version: events::EventStreamVersion,
+    version: EventVersion,
 ) -> Option<(Option<String>, OffsetDateTime)> {
-    let before = events::EventStreamVersion::new(version.get() - 1)
-        .unwrap_or_else(|_| events::EventStreamVersion::start());
-    let envelopes = match store.stream().load_after_version(before, 1).await {
-        Ok(envelopes) => envelopes,
+    match store.stream().read(version).await {
+        Ok(envelope) => envelope.map(|envelope| (envelope.trace_id, envelope.created_at)),
         Err(error) => {
             warn!(error = %error, "stored reply's event could not be read; its phone request starts now");
-            return None;
+            None
         }
-    };
-    envelopes
-        .into_iter()
-        .find(|envelope| envelope.version == version)
-        .map(|envelope| (envelope.trace_id, envelope.created_at))
+    }
 }
 
 pub(crate) async fn project_and_publish_agent_snapshot(
     store: &HaroldStore,
     snapshots: &AgentSnapshotHub,
     limit: usize,
-) -> events::Result<ProjectionBatch> {
+) -> crate::store::Result<ProjectionBatch> {
     let batch = store.project_unhandled_events(limit).await?;
     if batch.through_event_version.get() > snapshots.through_event_version().get() {
         let snapshot = store.load_agent_snapshot().await?;

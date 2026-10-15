@@ -645,7 +645,7 @@ mod tests {
         send_agent_message, send_message_body, send_notification, tell_user_with,
     };
     use crate::inbound::ownership::{delivered_text, error_text, notification_text, parse_marker};
-    use crate::store::TurnCompleted;
+    use crate::store::{EventVersion, TurnCompleted};
 
     fn message(chat_id: i64, text: &str) -> Option<Message> {
         Some(Message {
@@ -1291,7 +1291,7 @@ mod tests {
         let stored = hub
             .store
             .stream()
-            .load_after_version(events::EventStreamVersion::start(), 1)
+            .load_after_version(EventVersion::start(), 1)
             .await
             .unwrap();
         let trace_id = stored[0]

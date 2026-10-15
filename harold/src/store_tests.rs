@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use events::{ActorType, EventStreamVersion, ExpectedVersion, NewEvent, WorkflowRef};
+use crate::store::{EventVersion, NewEvent};
 use serde_json::json;
 
 use crate::agent::domain::{
@@ -146,7 +146,7 @@ async fn agent_events_round_trip_with_stable_types_and_normalized_payloads() {
 
     let stored = store
         .stream()
-        .load_after_version(EventStreamVersion::start(), 10)
+        .load_after_version(EventVersion::start(), 10)
         .await
         .unwrap();
     assert_eq!(stored[0].r#type, "AgentPaneObserved");
@@ -244,7 +244,14 @@ async fn all_absent_screen_observation_is_not_appended() {
     .unwrap();
 
     assert!(appended.events.is_empty());
-    assert_eq!(store.stream().current_version().await.unwrap().get(), 0);
+    assert!(
+        store
+            .stream()
+            .load_after_version(EventVersion::start(), 1)
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[tokio::test]
@@ -265,7 +272,7 @@ async fn appended_turn_completed_is_readable_from_refreshed_stream() {
 
     let events = store
         .stream()
-        .load_after_version(EventStreamVersion::start(), 10)
+        .load_after_version(EventVersion::start(), 10)
         .await
         .unwrap();
     assert_eq!(events.len(), 1);
@@ -794,7 +801,7 @@ async fn projection_preserves_summary_candidates_across_restart_without_raw_scre
 
     let events = store
         .stream()
-        .load_after_version(EventStreamVersion::start(), 500)
+        .load_after_version(EventVersion::start(), 500)
         .await
         .unwrap();
     assert!(
@@ -951,7 +958,7 @@ async fn snapshot_reader_does_not_reserve_the_projection_writer_lock() {
         .await
         .expect("snapshot task panicked")
         .expect("snapshot read failed");
-    assert_eq!(snapshot.through_event_version, EventStreamVersion::start());
+    assert_eq!(snapshot.through_event_version, EventVersion::start());
 }
 
 #[tokio::test]
@@ -968,23 +975,15 @@ async fn generated_activity_summary_survives_restart_and_projection_replay_witho
     .unwrap();
     store
         .stream()
-        .append(
-            ExpectedVersion::Any,
-            [NewEvent {
-                r#type: "AgentActivitySummaryGenerated".into(),
-                payload: json!({
-                    "incarnation": agent_incarnation(),
-                    "basis_version": 1,
-                    "description": "Reviewing projection persistence",
-                    "generated_at_ms": 120
-                }),
-                workflow_kind: None,
-                workflow: WorkflowRef::None,
-                request_id: None,
-                actor_id: "system:test".into(),
-                actor_type: ActorType::System,
-            }],
-        )
+        .append([NewEvent::new(
+            "AgentActivitySummaryGenerated",
+            json!({
+                "incarnation": agent_incarnation(),
+                "basis_version": 1,
+                "description": "Reviewing projection persistence",
+                "generated_at_ms": 120
+            }),
+        )])
         .await
         .unwrap();
     store.fail_projection_before_checkpoint_for_test();
@@ -992,7 +991,7 @@ async fn generated_activity_summary_survives_restart_and_projection_replay_witho
     assert!(store.load_agent_snapshot().await.unwrap().panes.is_empty());
     assert_eq!(
         store.last_processed_version().await.unwrap(),
-        EventStreamVersion::start()
+        EventVersion::start()
     );
     assert!(store.next_pending_delivery().await.unwrap().is_none());
     store.project_unhandled_events(500).await.unwrap();
@@ -1046,7 +1045,7 @@ async fn generated_activity_summary_append_normalizes_description_and_rejects_em
     let generated = |description: String| {
         AgentEvent::ActivitySummaryGenerated(AgentActivitySummaryGenerated {
             incarnation: agent_incarnation(),
-            basis_version: EventStreamVersion::new(1).unwrap(),
+            basis_version: EventVersion::new(1).unwrap(),
             description,
             generated_at_ms: 120,
         })
@@ -1064,7 +1063,7 @@ async fn generated_activity_summary_append_normalizes_description_and_rejects_em
     assert_eq!(appended.events.len(), 2);
     let stored = store
         .stream()
-        .load_after_version(EventStreamVersion::start(), 10)
+        .load_after_version(EventVersion::start(), 10)
         .await
         .unwrap();
     assert_eq!(stored.len(), 2);
@@ -1325,7 +1324,7 @@ async fn timed_prompt_event_is_stored_with_the_payload_the_spec_gives() {
 
     let events = store
         .stream()
-        .load_after_version(EventStreamVersion::start(), 10)
+        .load_after_version(EventVersion::start(), 10)
         .await
         .unwrap();
     assert_eq!(events.len(), 2);
@@ -1408,18 +1407,7 @@ async fn timed_prompt_event_with_an_unreadable_payload_does_not_block_later_even
     let store = HaroldStore::open(directory.path()).await.unwrap();
     store
         .stream()
-        .append(
-            ExpectedVersion::Any,
-            [NewEvent {
-                r#type: "TimedPromptHandled".into(),
-                payload: json!({"name": 7}),
-                workflow_kind: None,
-                workflow: WorkflowRef::None,
-                request_id: None,
-                actor_id: "system:harold".into(),
-                actor_type: ActorType::System,
-            }],
-        )
+        .append([NewEvent::new("TimedPromptHandled", json!({"name": 7}))])
         .await
         .unwrap();
     append_timed_prompt_handled(&store, &timed_prompt_typed("digest", "2026-10-14"))

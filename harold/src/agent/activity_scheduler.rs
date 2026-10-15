@@ -1,7 +1,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
-use events::EventStreamVersion;
+use crate::store::EventVersion;
 use tokio::task::JoinSet;
 
 use crate::activity_summary::{ActivitySummarizer, ActivitySummaryInput};
@@ -11,13 +11,13 @@ use super::super::domain::AgentIncarnation;
 
 pub(super) struct SummaryJob {
     pub incarnation: AgentIncarnation,
-    pub basis_version: EventStreamVersion,
+    pub basis_version: EventVersion,
     pub input: ActivitySummaryInput,
 }
 
 pub(super) struct SummaryResult {
     pub incarnation: AgentIncarnation,
-    pub basis_version: EventStreamVersion,
+    pub basis_version: EventVersion,
     pub description: Option<String>,
 }
 
@@ -146,7 +146,7 @@ mod tests {
             Ok("Investigating failures".into())
         }
     }
-    fn job(pane: &str, basis: i64, instruction: &str) -> SummaryJob {
+    fn job(pane: &str, basis: u64, instruction: &str) -> SummaryJob {
         SummaryJob {
             incarnation: AgentIncarnation {
                 pane_id: pane.into(),
@@ -155,7 +155,7 @@ mod tests {
                 agent_started_at_ms: 3,
                 provider_id: "test".into(),
             },
-            basis_version: EventStreamVersion::new(basis).unwrap(),
+            basis_version: EventVersion::new(basis).unwrap(),
             input: ActivitySummaryInput {
                 instruction: instruction.into(),
                 assistant_reply: None,

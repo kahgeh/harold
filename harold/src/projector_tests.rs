@@ -1,7 +1,6 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use events::{ActorType, ExpectedVersion, NewEvent, WorkflowRef};
 use serde_json::json;
 
 use super::{
@@ -20,9 +19,10 @@ use crate::inbound::RouteReport;
 use crate::outbound::fake::{CapturedLogs, FakeEnvironment};
 use crate::outbound::{DeliveryOutcome, SystemEnvironment};
 use crate::store::{
-    AwayMessageRequested, HaroldStore, InboundMessage, PendingDelivery, SpokenLineRequested,
-    TurnCompleted, append_agent_events, append_away_message_requested, append_inbound_message,
-    append_messaging_paused_changed, append_spoken_line_requested, append_turn_completed,
+    AwayMessageRequested, EventVersion, HaroldStore, InboundMessage, NewEvent, PendingDelivery,
+    SpokenLineRequested, TurnCompleted, append_agent_events, append_away_message_requested,
+    append_inbound_message, append_messaging_paused_changed, append_spoken_line_requested,
+    append_turn_completed,
 };
 use crate::telemetry::{self, ResolvedBy, Routing};
 
@@ -175,18 +175,7 @@ async fn permanently_invalid_event_does_not_block_later_deliveries() {
     let store = HaroldStore::open(&directory.0).await.unwrap();
     store
         .stream()
-        .append(
-            ExpectedVersion::Any,
-            [NewEvent {
-                r#type: "Unknown".into(),
-                payload: json!({"unexpected": true}),
-                workflow_kind: None,
-                workflow: WorkflowRef::None,
-                request_id: None,
-                actor_id: "system:test".into(),
-                actor_type: ActorType::System,
-            }],
-        )
+        .append([NewEvent::new("Unknown", json!({"unexpected": true}))])
         .await
         .unwrap();
     append_inbound_message(
@@ -214,18 +203,7 @@ async fn malformed_known_event_does_not_block_a_valid_later_delivery() {
     let store = HaroldStore::open(&directory.0).await.unwrap();
     store
         .stream()
-        .append(
-            ExpectedVersion::Any,
-            [NewEvent {
-                r#type: "TurnCompleted".into(),
-                payload: json!({"pane_id": 7}),
-                workflow_kind: None,
-                workflow: WorkflowRef::None,
-                request_id: None,
-                actor_id: "system:test".into(),
-                actor_type: ActorType::System,
-            }],
-        )
+        .append([NewEvent::new("TurnCompleted", json!({"pane_id": 7}))])
         .await
         .unwrap();
     append_inbound_message(
@@ -446,7 +424,7 @@ fn paused_inbound_delivery_is_skipped_without_routing() {
     // payload instead of relaying text to a real pane.
     let delivery = PendingDelivery {
         event_id: unique_event_id(),
-        event_version: events::EventStreamVersion::new(1).unwrap(),
+        event_version: EventVersion::new(1).unwrap(),
         event_type: "InboundMessageReceived".into(),
         payload: json!(null),
         trace_id: "trace".into(),
@@ -486,7 +464,7 @@ fn production_dispatcher_reads_the_messaging_switch() {
     // Unroutable on purpose, as above: without the switch this fails on the payload.
     let delivery = PendingDelivery {
         event_id: unique_event_id(),
-        event_version: events::EventStreamVersion::new(1).unwrap(),
+        event_version: EventVersion::new(1).unwrap(),
         event_type: "InboundMessageReceived".into(),
         payload: json!(null),
         trace_id: "trace".into(),
@@ -546,7 +524,7 @@ fn not_owned_report() -> RouteReport {
 fn away_delivery(payload: serde_json::Value) -> PendingDelivery {
     PendingDelivery {
         event_id: "event-1".into(),
-        event_version: events::EventStreamVersion::new(1).unwrap(),
+        event_version: EventVersion::new(1).unwrap(),
         event_type: "AwayMessageRequested".into(),
         payload,
         trace_id: "trace".into(),
@@ -761,18 +739,7 @@ async fn malformed_away_message_does_not_block_a_valid_later_delivery() {
     let store = HaroldStore::open(&directory.0).await.unwrap();
     store
         .stream()
-        .append(
-            ExpectedVersion::Any,
-            [NewEvent {
-                r#type: "AwayMessageRequested".into(),
-                payload: json!({"pane_id": 7}),
-                workflow_kind: None,
-                workflow: WorkflowRef::None,
-                request_id: None,
-                actor_id: "system:test".into(),
-                actor_type: ActorType::System,
-            }],
-        )
+        .append([NewEvent::new("AwayMessageRequested", json!({"pane_id": 7}))])
         .await
         .unwrap();
     append_inbound_message(
@@ -822,7 +789,7 @@ fn turn_completed_is_sent_through_the_dispatchers_environment() {
     let environment = Arc::new(FakeEnvironment::locked(""));
     let delivery = PendingDelivery {
         event_id: "event-1".into(),
-        event_version: events::EventStreamVersion::new(1).unwrap(),
+        event_version: EventVersion::new(1).unwrap(),
         event_type: "TurnCompleted".into(),
         payload: json!(crate::outbound::fake::turn("%47", "build it")),
         trace_id: "trace".into(),
@@ -842,7 +809,7 @@ fn turn_completed_is_sent_through_the_dispatchers_environment() {
 fn turn_delivery(pane_id: &str, prompt: &str) -> PendingDelivery {
     PendingDelivery {
         event_id: "event-1".into(),
-        event_version: events::EventStreamVersion::new(1).unwrap(),
+        event_version: EventVersion::new(1).unwrap(),
         event_type: "TurnCompleted".into(),
         payload: json!(crate::outbound::fake::turn(pane_id, prompt)),
         trace_id: "trace".into(),
@@ -1497,7 +1464,7 @@ async fn agent_in_the_folder_that_sent_a_message_gets_no_update_for_that_turn() 
 fn spoken_delivery(payload: serde_json::Value) -> PendingDelivery {
     PendingDelivery {
         event_id: "event-1".into(),
-        event_version: events::EventStreamVersion::new(1).unwrap(),
+        event_version: EventVersion::new(1).unwrap(),
         event_type: "SpokenLineRequested".into(),
         payload,
         trace_id: "trace".into(),
@@ -1786,10 +1753,9 @@ async fn store_reply_as_listener(
 /// The first stored event's trace id and stored time, read as the event handler reads
 /// them.
 async fn first_envelope(store: &HaroldStore) -> ReplyOrigin {
-    let (trace_id, created_at) =
-        stored_envelope(store, events::EventStreamVersion::new(1).unwrap())
-            .await
-            .expect("the first event can be read");
+    let (trace_id, created_at) = stored_envelope(store, EventVersion::new(1).unwrap())
+        .await
+        .expect("the first event can be read");
     ReplyOrigin {
         trace_id,
         created_at,
@@ -2440,18 +2406,7 @@ async fn an_undeliverable_turn_end_is_logged_inside_its_trace() {
     let store = HaroldStore::open(&directory.0).await.unwrap();
     let appended = store
         .stream()
-        .append(
-            ExpectedVersion::Any,
-            [NewEvent {
-                r#type: "TurnCompleted".into(),
-                payload: json!({"pane_id": 7}),
-                workflow_kind: None,
-                workflow: WorkflowRef::None,
-                request_id: None,
-                actor_id: "system:test".into(),
-                actor_type: ActorType::System,
-            }],
-        )
+        .append([NewEvent::new("TurnCompleted", json!({"pane_id": 7}))])
         .await
         .unwrap();
     let (trace_id, _) = keep_a_turn_for(appended.events[0].id);

@@ -7,7 +7,7 @@ use crate::inbound::ownership::{
     NotifierRecord, Ownership, decide_ownership, delivered_text, error_text, fed_markers,
     notification_text, parse_marker,
 };
-use crate::store::{HaroldStore, TurnCompleted};
+use crate::store::{EventVersion, HaroldStore, TurnCompleted};
 use crate::util::sanitise_for_applescript;
 
 use super::{
@@ -1568,7 +1568,7 @@ async fn a_stored_reply_opens_its_phone_request_at_the_rows_own_time() {
 
     let stored = store
         .stream()
-        .load_after_version(events::EventStreamVersion::start(), 1)
+        .load_after_version(EventVersion::start(), 1)
         .await
         .unwrap();
     let trace_id = stored[0]
@@ -1596,7 +1596,7 @@ async fn a_self_sent_reply_is_a_phone_request_on_the_imessage_channel() {
 
     let stored = store
         .stream()
-        .load_after_version(events::EventStreamVersion::start(), 1)
+        .load_after_version(EventVersion::start(), 1)
         .await
         .unwrap();
     let trace_id = stored[0].trace_id.clone().expect("trace");

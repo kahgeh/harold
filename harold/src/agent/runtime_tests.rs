@@ -5,7 +5,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use events::EventStreamVersion;
 use prost::Message;
 use tokio::sync::watch;
 
@@ -29,7 +28,7 @@ use super::snapshot::AgentSnapshotHub;
 use crate::harold::harold_server::Harold;
 use crate::harold::{AgentState, ReportAgentStateRequest, TurnCompleteRequest};
 use crate::settings::AgentProviderSettings;
-use crate::store::{HaroldStore, TurnCompleted};
+use crate::store::{EventEnvelope, EventVersion, HaroldStore, TurnCompleted};
 use crate::{HaroldService, Request};
 
 struct TestDirectory(std::path::PathBuf);
@@ -244,10 +243,10 @@ impl Fixture {
         }
     }
 
-    async fn events(&self) -> Vec<events::EventEnvelope> {
+    async fn events(&self) -> Vec<EventEnvelope> {
         self.store
             .stream()
-            .load_after_version(EventStreamVersion::start(), 100)
+            .load_after_version(EventVersion::start(), 100)
             .await
             .unwrap()
     }
@@ -262,7 +261,7 @@ impl Drop for Fixture {
 async fn fixture_event_count(store: &HaroldStore) -> usize {
     store
         .stream()
-        .load_after_version(EventStreamVersion::start(), 100)
+        .load_after_version(EventVersion::start(), 100)
         .await
         .unwrap()
         .len()
@@ -498,7 +497,7 @@ async fn later_explicit_ingress_rejects_exact_placeholders_and_preserves_update_
 
     let events = store
         .stream()
-        .load_after_version(EventStreamVersion::start(), 100)
+        .load_after_version(EventVersion::start(), 100)
         .await
         .unwrap();
     assert_eq!(
@@ -592,7 +591,7 @@ async fn configured_placeholder_ingress_is_rejected_before_every_event_payload()
 
     let events = store
         .stream()
-        .load_after_version(EventStreamVersion::start(), 100)
+        .load_after_version(EventVersion::start(), 100)
         .await
         .unwrap();
     assert_eq!(
@@ -672,7 +671,7 @@ async fn resolved_unknown_provider_lifecycle_rejects_every_configured_exact_plac
 
     let events = store
         .stream()
-        .load_after_version(EventStreamVersion::start(), 100)
+        .load_after_version(EventVersion::start(), 100)
         .await
         .unwrap();
     assert!(events.iter().all(|event| {
@@ -721,7 +720,7 @@ async fn unknown_provider_completion_rejects_configured_placeholder_when_resolve
 
     let events = store
         .stream()
-        .load_after_version(EventStreamVersion::start(), 100)
+        .load_after_version(EventVersion::start(), 100)
         .await
         .unwrap();
     assert!(events.iter().all(|event| {
@@ -839,7 +838,7 @@ async fn lifecycle_placeholder_cannot_leak_at_a_projection_page_boundary() {
     );
     let ingress = store
         .stream()
-        .load_after_version(EventStreamVersion::new(498).unwrap(), 10)
+        .load_after_version(EventVersion::new(498).unwrap(), 10)
         .await
         .unwrap();
     assert!(ingress.iter().all(|event| {
@@ -889,7 +888,7 @@ async fn completion_placeholder_cannot_leak_at_a_projection_page_boundary() {
     );
     let ingress = store
         .stream()
-        .load_after_version(EventStreamVersion::new(498).unwrap(), 10)
+        .load_after_version(EventVersion::new(498).unwrap(), 10)
         .await
         .unwrap();
     assert!(ingress.iter().all(|event| {
@@ -1202,7 +1201,7 @@ async fn configured_idle_placeholder_never_replaces_a_durable_screen_summary() {
 
     let events = store
         .stream()
-        .load_after_version(EventStreamVersion::start(), 100)
+        .load_after_version(EventVersion::start(), 100)
         .await
         .unwrap();
     assert!(events.iter().all(|event| {
@@ -1261,7 +1260,7 @@ async fn runtime_keeps_a_normalized_typed_summary_that_mentions_the_idle_placeho
 
     let events = store
         .stream()
-        .load_after_version(EventStreamVersion::start(), 100)
+        .load_after_version(EventVersion::start(), 100)
         .await
         .unwrap();
     assert_eq!(
@@ -1454,7 +1453,7 @@ async fn real_screen_adapter_keeps_unrelated_capture_out_of_every_published_boun
 
     let events = store
         .stream()
-        .load_after_version(EventStreamVersion::start(), 100)
+        .load_after_version(EventVersion::start(), 100)
         .await
         .unwrap();
     assert_eq!(
@@ -1708,7 +1707,7 @@ async fn restart_seed_departure_requires_two_new_successful_absence_scans() {
     assert_eq!(
         store
             .stream()
-            .load_after_version(EventStreamVersion::start(), 100)
+            .load_after_version(EventVersion::start(), 100)
             .await
             .unwrap()
             .len(),
@@ -1717,7 +1716,7 @@ async fn restart_seed_departure_requires_two_new_successful_absence_scans() {
     handle.inventory_tick().await.unwrap();
     let events = store
         .stream()
-        .load_after_version(EventStreamVersion::start(), 100)
+        .load_after_version(EventVersion::start(), 100)
         .await
         .unwrap();
     assert_eq!(events.last().unwrap().r#type, "AgentPaneDeparted");
@@ -1773,7 +1772,7 @@ async fn restart_seed_retains_screen_dedupe_for_a_live_incarnation() {
     handle.screen_tick().await.unwrap();
     let events = store
         .stream()
-        .load_after_version(EventStreamVersion::start(), 100)
+        .load_after_version(EventVersion::start(), 100)
         .await
         .unwrap();
     assert_eq!(events.len(), 2);
@@ -2134,7 +2133,7 @@ async fn restart_seed_preserves_one_pending_post_grace_screen_repair() {
     handle.screen_tick().await.unwrap();
     let events = store
         .stream()
-        .load_after_version(EventStreamVersion::start(), 100)
+        .load_after_version(EventVersion::start(), 100)
         .await
         .unwrap();
     assert_eq!(events.last().unwrap().r#type, "AgentScreenObserved");
@@ -2214,7 +2213,7 @@ async fn inventory_timeout_busy_retries_and_recovery_emit_only_actual_health_tra
     }
     let events = store
         .stream()
-        .load_after_version(EventStreamVersion::start(), 100)
+        .load_after_version(EventVersion::start(), 100)
         .await
         .unwrap();
     assert_eq!(event_types(&events), ["AgentMonitorHealthChanged"]);
@@ -2230,7 +2229,7 @@ async fn inventory_timeout_busy_retries_and_recovery_emit_only_actual_health_tra
     assert_eq!(inventory.scan_calls.load(Ordering::SeqCst), 2);
     let events = store
         .stream()
-        .load_after_version(EventStreamVersion::start(), 100)
+        .load_after_version(EventVersion::start(), 100)
         .await
         .unwrap();
     assert_eq!(events.len(), 2);
@@ -2525,7 +2524,7 @@ fn empty_snapshot() -> AgentSnapshot {
     AgentSnapshot {
         tts_muted: false,
         messaging_paused: false,
-        through_event_version: EventStreamVersion::start(),
+        through_event_version: EventVersion::start(),
         server_time_ms: 0,
         monitor_health: Vec::new(),
         panes: Vec::new(),
@@ -2643,7 +2642,7 @@ fn turn(last_user_prompt: &str) -> TurnCompleted {
     }
 }
 
-fn event_types(events: &[events::EventEnvelope]) -> Vec<&str> {
+fn event_types(events: &[EventEnvelope]) -> Vec<&str> {
     events.iter().map(|event| event.r#type.as_str()).collect()
 }
 
@@ -2686,7 +2685,7 @@ impl Fixture {
             AgentSnapshot {
                 tts_muted: false,
                 messaging_paused: false,
-                through_event_version: EventStreamVersion::start(),
+                through_event_version: EventVersion::start(),
                 server_time_ms: 0,
                 monitor_health: Vec::new(),
                 panes: Vec::new(),
@@ -4167,7 +4166,7 @@ async fn the_daemon_config_reaches_the_runtime_as_two_windows() {
     let screen_count = |store: Arc<HaroldStore>| async move {
         store
             .stream()
-            .load_after_version(EventStreamVersion::start(), 100)
+            .load_after_version(EventVersion::start(), 100)
             .await
             .unwrap()
             .iter()

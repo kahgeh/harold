@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use events::EventStreamVersion;
+use crate::store::EventVersion;
 use tokio::sync::watch;
 use tokio_stream::StreamExt;
 
@@ -151,7 +151,7 @@ fn empty_snapshot() -> AgentSnapshot {
     AgentSnapshot {
         tts_muted: false,
         messaging_paused: false,
-        through_event_version: EventStreamVersion::start(),
+        through_event_version: EventVersion::start(),
         server_time_ms: 1_000,
         monitor_health: Vec::new(),
         panes: Vec::new(),
@@ -162,14 +162,14 @@ fn populated_snapshot(revision: i64, summary: Option<&str>) -> AgentSnapshot {
     AgentSnapshot {
         tts_muted: false,
         messaging_paused: false,
-        through_event_version: EventStreamVersion::new(revision).expect("valid revision"),
+        through_event_version: EventVersion::from_column(revision).expect("valid revision"),
         server_time_ms: 10_000 + revision,
         monitor_health: vec![MonitorHealthProjection {
             component: "screen".into(),
             healthy: false,
             reason_code: "capture_failed".into(),
             observed_at_ms: 9_800,
-            last_event_version: EventStreamVersion::new(revision).expect("valid revision"),
+            last_event_version: EventVersion::from_column(revision).expect("valid revision"),
         }],
         panes: vec![AgentPaneProjection {
             pane: AgentPaneObservation {
@@ -199,12 +199,12 @@ fn populated_snapshot(revision: i64, summary: Option<&str>) -> AgentSnapshot {
             explicit_work_summary_updated_at_ms: summary.map(|_| 8_600),
             screen_work_summary: None,
             screen_work_summary_updated_at_ms: None,
-            summary_basis_version: EventStreamVersion::start(),
+            summary_basis_version: EventVersion::start(),
             generated_work_summary: None,
             generated_summary_basis_version: None,
             work_summary: summary.map(str::to_string),
             last_transition_at_ms: 8_700,
-            last_event_version: EventStreamVersion::new(revision).expect("valid revision"),
+            last_event_version: EventVersion::from_column(revision).expect("valid revision"),
         }],
     }
 }
@@ -268,7 +268,7 @@ pub(crate) async fn start_peer_server(peers: PeerEndpoint) -> PeerServer {
 pub(crate) async fn inbound_messages(store: &store::HaroldStore) -> Vec<store::InboundMessage> {
     store
         .stream()
-        .load_after_version(EventStreamVersion::start(), 100)
+        .load_after_version(EventVersion::start(), 100)
         .await
         .unwrap()
         .into_iter()
@@ -486,7 +486,7 @@ async fn turn_complete_accepts_only_after_appending_every_request_field() {
 
     let events = store
         .stream()
-        .load_after_version(EventStreamVersion::start(), 10)
+        .load_after_version(EventVersion::start(), 10)
         .await
         .unwrap();
     assert_eq!(events.len(), 1);
@@ -556,7 +556,7 @@ async fn report_agent_state_preserves_summary_presence_and_normalizes_before_dur
     let reopened = store::HaroldStore::open(&directory.0).await.unwrap();
     let events = reopened
         .stream()
-        .load_after_version(EventStreamVersion::start(), 20)
+        .load_after_version(EventVersion::start(), 20)
         .await
         .unwrap();
     assert_eq!(events.len(), cases.len() * 2);
@@ -612,7 +612,7 @@ async fn report_agent_state_rejects_malformed_inputs_without_durable_events() {
 
     let events = store
         .stream()
-        .load_after_version(EventStreamVersion::start(), 20)
+        .load_after_version(EventVersion::start(), 20)
         .await
         .unwrap();
     assert!(events.is_empty());
@@ -667,7 +667,7 @@ async fn report_agent_state_maps_unresolved_append_and_runtime_failures_to_bound
 
     let events = store
         .stream()
-        .load_after_version(EventStreamVersion::start(), 20)
+        .load_after_version(EventVersion::start(), 20)
         .await
         .unwrap();
     assert!(events.is_empty());
@@ -698,7 +698,7 @@ async fn report_agent_state_keeps_normalized_empty_completion_summary_unchanged(
 
     let events = store
         .stream()
-        .load_after_version(EventStreamVersion::start(), 10)
+        .load_after_version(EventVersion::start(), 10)
         .await
         .unwrap();
     assert_eq!(events.len(), 2);
@@ -733,7 +733,7 @@ async fn explicit_summary_survives_event_projection_watch_and_restart_with_full_
 
     let events = store
         .stream()
-        .load_after_version(EventStreamVersion::start(), 10)
+        .load_after_version(EventVersion::start(), 10)
         .await
         .unwrap();
     assert_eq!(events.len(), 2);
@@ -992,7 +992,7 @@ async fn startup_projects_every_page_before_the_first_watch_snapshot_without_app
     assert_eq!(initial.panes[0].work_summary.as_deref(), Some("Task 501"));
     let persisted = store
         .stream()
-        .load_after_version(EventStreamVersion::start(), 1_000)
+        .load_after_version(EventVersion::start(), 1_000)
         .await
         .unwrap();
     assert_eq!(persisted.len(), 502);
@@ -1576,7 +1576,7 @@ async fn service_answers_the_peer_calls_its_settings_call_for() {
 async fn away_messages(store: &store::HaroldStore) -> (Vec<store::AwayMessageRequested>, usize) {
     let events = store
         .stream()
-        .load_after_version(EventStreamVersion::start(), 100)
+        .load_after_version(EventVersion::start(), 100)
         .await
         .unwrap();
     let total = events.len();
@@ -1762,7 +1762,7 @@ async fn away_message_is_unavailable_when_the_monitor_has_stopped() {
 async fn spoken_lines(store: &store::HaroldStore) -> (Vec<store::SpokenLineRequested>, usize) {
     let events = store
         .stream()
-        .load_after_version(EventStreamVersion::start(), 100)
+        .load_after_version(EventVersion::start(), 100)
         .await
         .unwrap();
     let total = events.len();

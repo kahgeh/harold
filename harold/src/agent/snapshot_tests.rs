@@ -1,4 +1,4 @@
-use events::EventStreamVersion;
+use crate::store::EventVersion;
 
 use super::domain::{
     AgentIncarnation, AgentPaneObservation, AgentPaneProjection, AgentSnapshot, EffectiveAgentState,
@@ -9,7 +9,7 @@ fn snapshot(revision: i64, summary: Option<&str>) -> AgentSnapshot {
     AgentSnapshot {
         tts_muted: false,
         messaging_paused: false,
-        through_event_version: EventStreamVersion::new(revision).expect("valid revision"),
+        through_event_version: EventVersion::from_column(revision).expect("valid revision"),
         server_time_ms: 10_000 + revision,
         monitor_health: Vec::new(),
         panes: vec![AgentPaneProjection {
@@ -40,12 +40,12 @@ fn snapshot(revision: i64, summary: Option<&str>) -> AgentSnapshot {
             explicit_work_summary_updated_at_ms: summary.map(|_| 9_600),
             screen_work_summary: None,
             screen_work_summary_updated_at_ms: None,
-            summary_basis_version: EventStreamVersion::start(),
+            summary_basis_version: EventVersion::start(),
             generated_work_summary: None,
             generated_summary_basis_version: None,
             work_summary: summary.map(str::to_string),
             last_transition_at_ms: 9_700,
-            last_event_version: EventStreamVersion::new(revision).expect("valid revision"),
+            last_event_version: EventVersion::from_column(revision).expect("valid revision"),
         }],
     }
 }

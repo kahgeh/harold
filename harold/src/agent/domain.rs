@@ -3,7 +3,7 @@
     reason = "domain types are consumed by later monitor slices"
 )]
 
-use events::EventStreamVersion;
+use crate::store::EventVersion;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -109,7 +109,7 @@ pub(crate) struct AgentScreenObserved {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct AgentActivitySummaryGenerated {
     pub incarnation: AgentIncarnation,
-    pub basis_version: EventStreamVersion,
+    pub basis_version: EventVersion,
     pub description: String,
     pub generated_at_ms: i64,
 }
@@ -137,12 +137,12 @@ pub(crate) struct AgentPaneProjection {
     pub explicit_work_summary_updated_at_ms: Option<i64>,
     pub screen_work_summary: Option<String>,
     pub screen_work_summary_updated_at_ms: Option<i64>,
-    pub summary_basis_version: EventStreamVersion,
+    pub summary_basis_version: EventVersion,
     pub generated_work_summary: Option<String>,
-    pub generated_summary_basis_version: Option<EventStreamVersion>,
+    pub generated_summary_basis_version: Option<EventVersion>,
     pub work_summary: Option<String>,
     pub last_transition_at_ms: i64,
-    pub last_event_version: EventStreamVersion,
+    pub last_event_version: EventVersion,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -151,7 +151,7 @@ pub(crate) struct MonitorHealthProjection {
     pub healthy: bool,
     pub reason_code: String,
     pub observed_at_ms: i64,
-    pub last_event_version: EventStreamVersion,
+    pub last_event_version: EventVersion,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -167,7 +167,7 @@ pub(crate) enum ProjectionChange {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct AgentSnapshot {
-    pub through_event_version: EventStreamVersion,
+    pub through_event_version: EventVersion,
     pub server_time_ms: i64,
     pub monitor_health: Vec<MonitorHealthProjection>,
     pub panes: Vec<AgentPaneProjection>,

@@ -963,7 +963,7 @@ pub(crate) async fn start(
     store: Arc<HaroldStore>,
     snapshots: AgentSnapshotHub,
     shutdown: watch::Receiver<()>,
-) -> events::Result<JoinHandle<()>> {
+) -> store::Result<JoinHandle<()>> {
     let last_days = if settings.timed_prompts.is_empty() {
         HashMap::new()
     } else {

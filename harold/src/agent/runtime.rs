@@ -6,7 +6,6 @@ mod prompt_checkpoint;
 use crate::activity_summary::ActivitySummarizer;
 use crate::settings::ActivitySummarySettings;
 use activity_scheduler::{ActivityScheduler, SummaryJob, SummaryResult};
-use events::EventStreamVersion;
 use prompt_checkpoint::PromptAcquisitionCheckpoint;
 
 use std::collections::{HashMap, HashSet};
@@ -16,7 +15,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{Semaphore, mpsc, oneshot, watch};
 
 use crate::settings::AgentProviderSettings;
-use crate::store::{self, HaroldStore, TurnCompleted};
+use crate::store::{self, EventVersion, HaroldStore, StoreError, TurnCompleted};
 
 use super::domain::{
     AgentEvent, AgentIncarnation, AgentLifecycleObserved, AgentPaneDeparted, AgentPaneObservation,
@@ -44,7 +43,7 @@ pub(crate) enum AgentMonitorCommand {
     },
     TurnCompleted {
         turn: TurnCompleted,
-        reply: oneshot::Sender<events::Result<events::AppendResult>>,
+        reply: oneshot::Sender<store::Result<store::AppendResult>>,
     },
     ResolvePane {
         pane_id: String,
@@ -78,7 +77,7 @@ pub(crate) enum MonitorCommandError {
     #[error("agent inventory is unavailable")]
     InventoryUnavailable,
     #[error("event append failed: {0}")]
-    EventAppend(events::EsError),
+    EventAppend(StoreError),
     #[allow(
         dead_code,
         reason = "the ReportAgentState RPC maps stopped-runtime replies in the next ingress slice"
@@ -121,15 +120,15 @@ impl AgentMonitorHandle {
     pub(crate) async fn turn_completed(
         &self,
         turn: TurnCompleted,
-    ) -> events::Result<events::AppendResult> {
+    ) -> store::Result<store::AppendResult> {
         let (reply, response) = oneshot::channel();
         self.sender
             .send(AgentMonitorCommand::TurnCompleted { turn, reply })
             .await
-            .map_err(|_| events::EsError::Migration("agent monitor runtime stopped".into()))?;
+            .map_err(|_| StoreError::Stopped("agent monitor runtime stopped"))?;
         response
             .await
-            .map_err(|_| events::EsError::Migration("agent monitor runtime stopped".into()))?
+            .map_err(|_| StoreError::Stopped("agent monitor runtime stopped"))?
     }
 
     /// The agent pane with this id, by the lookup a lifecycle report makes.
@@ -191,7 +190,7 @@ struct TrackedPane {
     /// When the unbroken busy reading began, for a pane whose adapter reported idle.
     screen_busy_since_ms: Option<i64>,
     screen_summary: Option<String>,
-    summary_basis_version: EventStreamVersion,
+    summary_basis_version: EventVersion,
 }
 
 impl TrackedPane {
@@ -207,7 +206,7 @@ impl TrackedPane {
             screen_state: None,
             screen_busy_since_ms: None,
             screen_summary: None,
-            summary_basis_version: EventStreamVersion::start(),
+            summary_basis_version: EventVersion::start(),
         }
     }
 }
@@ -586,7 +585,7 @@ fn empty_snapshot() -> AgentSnapshot {
     AgentSnapshot {
         tts_muted: false,
         messaging_paused: false,
-        through_event_version: events::EventStreamVersion::start(),
+        through_event_version: EventVersion::start(),
         server_time_ms: 0,
         monitor_health: Vec::new(),
         panes: Vec::new(),
@@ -784,7 +783,7 @@ impl AgentMonitorRuntime {
     async fn turn_completed(
         &mut self,
         mut turn: TurnCompleted,
-    ) -> events::Result<events::AppendResult> {
+    ) -> store::Result<store::AppendResult> {
         let pane = match resolve(
             Arc::clone(&self.inventory),
             turn.pane_id.clone(),
@@ -1540,7 +1539,7 @@ async fn next_summary(summaries: &mut Option<ActivityScheduler>) -> SummaryResul
     }
 }
 
-fn source_version(appended: &events::AppendResult, types: &[&str]) -> Option<EventStreamVersion> {
+fn source_version(appended: &store::AppendResult, types: &[&str]) -> Option<EventVersion> {
     appended
         .events
         .iter()

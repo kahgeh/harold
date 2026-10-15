@@ -1,4 +1,4 @@
-use events::EventStreamVersion;
+use crate::store::EventVersion;
 
 use super::domain::{
     AgentEvent, AgentIncarnation, AgentLifecycleObserved, AgentPaneDeparted, AgentPaneObservation,
@@ -9,8 +9,8 @@ use super::reducer::{
     DEFAULT_HOOK_GRACE_MS, GraceWindows, reduce_agent_event, reduce_turn_completed,
 };
 
-fn version(value: i64) -> EventStreamVersion {
-    EventStreamVersion::new(value).unwrap()
+fn version(value: u64) -> EventVersion {
+    EventVersion::new(value).unwrap()
 }
 
 fn incarnation(agent_started_at_ms: i64) -> AgentIncarnation {
@@ -46,7 +46,7 @@ fn upsert(change: ProjectionChange) -> super::domain::AgentPaneProjection {
 fn apply(
     current: Option<super::domain::AgentPaneProjection>,
     event: AgentEvent,
-    event_version: i64,
+    event_version: u64,
 ) -> super::domain::AgentPaneProjection {
     apply_with_grace(current, event, event_version, DEFAULT_HOOK_GRACE_MS)
 }
@@ -54,7 +54,7 @@ fn apply(
 fn apply_with_grace(
     current: Option<super::domain::AgentPaneProjection>,
     event: AgentEvent,
-    event_version: i64,
+    event_version: u64,
     hook_grace_ms: u64,
 ) -> super::domain::AgentPaneProjection {
     apply_with_graces(
@@ -68,7 +68,7 @@ fn apply_with_grace(
 fn apply_with_graces(
     current: Option<super::domain::AgentPaneProjection>,
     event: AgentEvent,
-    event_version: i64,
+    event_version: u64,
     graces: GraceWindows,
 ) -> super::domain::AgentPaneProjection {
     upsert(reduce_agent_event(
@@ -83,7 +83,7 @@ fn apply_with_graces(
 fn apply_default(
     current: Option<super::domain::AgentPaneProjection>,
     event: AgentEvent,
-    event_version: i64,
+    event_version: u64,
 ) -> super::domain::AgentPaneProjection {
     apply_with_graces(current, event, event_version, GraceWindows::default())
 }

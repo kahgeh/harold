@@ -500,7 +500,7 @@ fn map_agent_snapshot(snapshot: agent::domain::AgentSnapshot) -> AgentStateSnaps
     AgentStateSnapshot {
         tts_muted: snapshot.tts_muted,
         messaging_paused: snapshot.messaging_paused,
-        through_event_version: snapshot.through_event_version.get() as u64,
+        through_event_version: snapshot.through_event_version.get(),
         server_time_ms: snapshot.server_time_ms,
         monitor_health: snapshot
             .monitor_health
@@ -960,7 +960,7 @@ async fn stop_agent_monitor(
 /// mute and pause hold before any listener or handler starts.
 async fn restore_startup_state(
     store: &store::HaroldStore,
-) -> events::Result<agent::domain::AgentSnapshot> {
+) -> store::Result<agent::domain::AgentSnapshot> {
     let snapshot = load_startup_agent_snapshot(store).await?;
     outbound::set_tts_muted(snapshot.tts_muted);
     outbound::set_messaging_paused(snapshot.messaging_paused);
@@ -969,7 +969,7 @@ async fn restore_startup_state(
 
 async fn load_startup_agent_snapshot(
     store: &store::HaroldStore,
-) -> events::Result<agent::domain::AgentSnapshot> {
+) -> store::Result<agent::domain::AgentSnapshot> {
     loop {
         let batch = store.project_unhandled_events(500).await?;
         if batch.applied == 0 {

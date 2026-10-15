@@ -1,11 +1,13 @@
+mod error;
+mod event_log;
+
+pub use error::{Result, StoreError};
+pub use event_log::{AppendResult, EventEnvelope, EventLog, EventVersion, NewEvent};
+
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use events::{
-    ActorType, EventNamespaces, EventStream, EventStreamVersion, ExpectedVersion, NewEvent,
-    RotationPolicy, WorkflowRef,
-};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -105,7 +107,7 @@ const TIMED_PROMPT_KEY_SUFFIX: &str = ".last_day";
 #[derive(Debug)]
 pub struct PendingDelivery {
     pub event_id: String,
-    pub event_version: EventStreamVersion,
+    pub event_version: EventVersion,
     pub event_type: String,
     pub payload: serde_json::Value,
     pub trace_id: String,
@@ -114,12 +116,12 @@ pub struct PendingDelivery {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ProjectionBatch {
     pub applied: usize,
-    pub through_event_version: EventStreamVersion,
+    pub through_event_version: EventVersion,
     pub snapshot_changed: bool,
 }
 
 pub struct HaroldStore {
-    stream: EventStream,
+    stream: EventLog,
     state: Database,
     graces: GraceWindows,
     #[cfg(test)]
@@ -163,35 +165,25 @@ impl SnapshotReadGateHandle {
     }
 }
 
-fn rotation_policy() -> RotationPolicy {
-    RotationPolicy::TimeWindow {
-        window: Duration::from_secs(24 * 3600),
-        max_bytes: Some(64 * 1024 * 1024),
-    }
-}
-
 impl HaroldStore {
     #[cfg(test)]
-    pub async fn open(path: impl AsRef<Path>) -> events::Result<Self> {
+    pub async fn open(path: impl AsRef<Path>) -> Result<Self> {
         Self::open_with_graces(path, GraceWindows::same(DEFAULT_HOOK_GRACE_MS)).await
     }
 
     pub(crate) async fn open_with_graces(
         path: impl AsRef<Path>,
         graces: GraceWindows,
-    ) -> events::Result<Self> {
+    ) -> Result<Self> {
         let root = path.as_ref();
         tokio::fs::create_dir_all(root).await?;
 
-        let namespaces = EventNamespaces::open(root, rotation_policy()).await?;
-        let namespace = namespaces.ensure_namespace(NAMESPACE).await?;
-        let partition = namespace.ensure_partition(PARTITION_KEY).await?;
-        let stream = partition.open().await?;
+        let stream = EventLog::open(root).await?;
 
         let state_path = root.join(STATE_DATABASE);
-        let state_path = state_path.to_str().ok_or_else(|| {
-            events::EsError::InvalidPath("Harold state path contains invalid UTF-8".into())
-        })?;
+        let state_path = state_path
+            .to_str()
+            .ok_or_else(|| StoreError::Data("Harold state path contains invalid UTF-8".into()))?;
         let state = turso::Builder::new_local(state_path).build().await?;
         let conn = state.connect()?;
         configure_state_database(&conn).await?;
@@ -212,19 +204,16 @@ impl HaroldStore {
         })
     }
 
-    pub(crate) fn stream(&self) -> &EventStream {
+    pub(crate) fn stream(&self) -> &EventLog {
         &self.stream
     }
 
-    pub(crate) async fn last_processed_version(&self) -> events::Result<EventStreamVersion> {
+    pub(crate) async fn last_processed_version(&self) -> Result<EventVersion> {
         let conn = self.state.connect()?;
         last_processed_version_from(&conn).await
     }
 
-    pub(crate) async fn project_unhandled_events(
-        &self,
-        limit: usize,
-    ) -> events::Result<ProjectionBatch> {
+    pub(crate) async fn project_unhandled_events(&self, limit: usize) -> Result<ProjectionBatch> {
         let cursor = self.last_processed_version().await?;
         let events = self.stream.load_after_version(cursor, limit).await?;
         let Some(last) = events.last() else {
@@ -269,9 +258,7 @@ impl HaroldStore {
                             .get("muted")
                             .and_then(serde_json::Value::as_bool)
                             .ok_or_else(|| {
-                                events::EsError::Migration(
-                                    "TtsMuteChanged payload missing muted".into(),
-                                )
+                                StoreError::Data("TtsMuteChanged payload missing muted".into())
                             })?;
                         upsert_bool_setting(&conn, "tts_muted", muted, event.version).await?;
                         snapshot_changed = true;
@@ -282,7 +269,7 @@ impl HaroldStore {
                             .get("paused")
                             .and_then(serde_json::Value::as_bool)
                             .ok_or_else(|| {
-                                events::EsError::Migration(
+                                StoreError::Data(
                                     "MessagingPausedChanged payload missing paused".into(),
                                 )
                             })?;
@@ -316,7 +303,7 @@ impl HaroldStore {
                 .fail_projection_before_checkpoint
                 .swap(false, std::sync::atomic::Ordering::SeqCst)
             {
-                return Err(events::EsError::Migration(
+                return Err(StoreError::Data(
                     "test projection failure before checkpoint".into(),
                 ));
             }
@@ -331,7 +318,7 @@ impl HaroldStore {
                     last_processed_event_version = excluded.last_processed_event_version,
                     updated_at_ms = excluded.updated_at_ms
                 "#,
-                (NAMESPACE, PARTITION_KEY, last.version.get(), now_ms),
+                (NAMESPACE, PARTITION_KEY, last.version.to_column(), now_ms),
             )
             .await?;
             conn.execute("COMMIT", ()).await?;
@@ -353,15 +340,13 @@ impl HaroldStore {
         })
     }
 
-    pub(crate) async fn load_agent_snapshot(&self) -> events::Result<AgentSnapshot> {
+    pub(crate) async fn load_agent_snapshot(&self) -> Result<AgentSnapshot> {
         #[cfg(test)]
         if self
             .fail_next_snapshot_load
             .swap(false, std::sync::atomic::Ordering::SeqCst)
         {
-            return Err(events::EsError::Migration(
-                "test snapshot load failure".into(),
-            ));
+            return Err(StoreError::Data("test snapshot load failure".into()));
         }
         let conn = self.state.connect()?;
         let mut snapshot = load_agent_snapshot_from_one_query(&conn).await?;
@@ -376,7 +361,7 @@ impl HaroldStore {
     /// the projection has read the stream.
     pub(crate) async fn timed_prompt_last_days(
         &self,
-    ) -> events::Result<std::collections::HashMap<String, String>> {
+    ) -> Result<std::collections::HashMap<String, String>> {
         let conn = self.state.connect()?;
         let mut rows = conn.query("SELECT key, value FROM settings", ()).await?;
         let mut days = std::collections::HashMap::new();
@@ -425,7 +410,7 @@ impl HaroldStore {
         }
     }
 
-    pub async fn next_pending_delivery(&self) -> events::Result<Option<PendingDelivery>> {
+    pub async fn next_pending_delivery(&self) -> Result<Option<PendingDelivery>> {
         let conn = self.state.connect()?;
         let mut rows = conn
             .query(
@@ -443,29 +428,28 @@ impl HaroldStore {
             return Ok(None);
         };
 
-        let text = |index| -> events::Result<String> {
+        let text = |index| -> Result<String> {
             row.get_value(index)?
                 .as_text()
                 .map(ToString::to_string)
-                .ok_or_else(|| {
-                    events::EsError::Cursor(format!("outbox column {index} is not text"))
-                })
+                .ok_or_else(|| StoreError::Data(format!("outbox column {index} is not text")))
         };
-        let version =
-            row.get_value(1)?.as_integer().copied().ok_or_else(|| {
-                events::EsError::Cursor("outbox version is not an integer".into())
-            })?;
+        let version = row
+            .get_value(1)?
+            .as_integer()
+            .copied()
+            .ok_or_else(|| StoreError::Data("outbox version is not an integer".into()))?;
         let payload = serde_json::from_str(&text(3)?)?;
         Ok(Some(PendingDelivery {
             event_id: text(0)?,
-            event_version: EventStreamVersion::new(version)?,
+            event_version: EventVersion::from_column(version)?,
             event_type: text(2)?,
             payload,
             trace_id: text(4)?,
         }))
     }
 
-    pub async fn mark_delivered(&self, event_id: &str) -> events::Result<()> {
+    pub async fn mark_delivered(&self, event_id: &str) -> Result<()> {
         let conn = self.state.connect()?;
         let now_ms = (time::OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000) as i64;
         conn.execute(
@@ -480,7 +464,7 @@ impl HaroldStore {
         Ok(())
     }
 
-    pub async fn record_delivery_failure(&self, event_id: &str, error: &str) -> events::Result<()> {
+    pub async fn record_delivery_failure(&self, event_id: &str, error: &str) -> Result<()> {
         let conn = self.state.connect()?;
         conn.execute(
             r#"
@@ -494,7 +478,7 @@ impl HaroldStore {
         Ok(())
     }
 
-    pub async fn mark_undeliverable(&self, event_id: &str, error: &str) -> events::Result<()> {
+    pub async fn mark_undeliverable(&self, event_id: &str, error: &str) -> Result<()> {
         let conn = self.state.connect()?;
         let now_ms = (time::OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000) as i64;
         conn.execute(
@@ -524,9 +508,7 @@ const AGENT_PANE_COLUMNS: &str = r#"
     lifecycle_adapter_id
 "#;
 
-async fn last_processed_version_from(
-    conn: &turso::Connection,
-) -> events::Result<EventStreamVersion> {
+async fn last_processed_version_from(conn: &turso::Connection) -> Result<EventVersion> {
     let mut rows = conn
         .query(
             r#"
@@ -538,22 +520,17 @@ async fn last_processed_version_from(
         )
         .await?;
     let Some(row) = rows.next().await? else {
-        return Ok(EventStreamVersion::start());
+        return Ok(EventVersion::start());
     };
-    let version =
-        row.get_value(0)?.as_integer().copied().ok_or_else(|| {
-            events::EsError::Cursor("checkpoint version is not an integer".into())
-        })?;
-    if version == 0 {
-        return Ok(EventStreamVersion::start());
-    }
-    EventStreamVersion::new(version)
+    let version = row
+        .get_value(0)?
+        .as_integer()
+        .copied()
+        .ok_or_else(|| StoreError::Data("checkpoint version is not an integer".into()))?;
+    EventVersion::from_column(version)
 }
 
-async fn stage_delivery_event(
-    conn: &turso::Connection,
-    event: &events::EventEnvelope,
-) -> events::Result<()> {
+async fn stage_delivery_event(conn: &turso::Connection, event: &EventEnvelope) -> Result<()> {
     let payload = serde_json::to_string(&event.payload)?;
     conn.execute(
         r#"
@@ -564,7 +541,7 @@ async fn stage_delivery_event(
         "#,
         (
             event.id.to_string(),
-            event.version.get(),
+            event.version.to_column(),
             event.r#type.as_str(),
             payload,
             event.id.to_string(),
@@ -576,9 +553,9 @@ async fn stage_delivery_event(
 
 async fn project_agent_event(
     conn: &turso::Connection,
-    event: &events::EventEnvelope,
+    event: &EventEnvelope,
     graces: GraceWindows,
-) -> events::Result<bool> {
+) -> Result<bool> {
     let agent_event = match event.r#type.as_str() {
         "AgentPaneObserved" => {
             AgentEvent::PaneObserved(serde_json::from_value(event.payload.clone())?)
@@ -596,7 +573,7 @@ async fn project_agent_event(
             AgentEvent::ActivitySummaryGenerated(serde_json::from_value(event.payload.clone())?)
         }
         _ => {
-            return Err(events::EsError::Migration(format!(
+            return Err(StoreError::Data(format!(
                 "unsupported agent projection event type: {}",
                 event.r#type
             )));
@@ -624,9 +601,9 @@ async fn project_agent_event(
 
 async fn project_turn_completed(
     conn: &turso::Connection,
-    event: &events::EventEnvelope,
+    event: &EventEnvelope,
     graces: GraceWindows,
-) -> events::Result<bool> {
+) -> Result<bool> {
     let Ok(turn) = serde_json::from_value::<TurnCompleted>(event.payload.clone()) else {
         // The delivery outbox remains the compatibility boundary for malformed notification
         // payloads. Projection must not let one poison delivery block later durable events.
@@ -648,7 +625,7 @@ async fn project_turn_completed(
                 (event.created_at.unix_timestamp_nanos() / 1_000_000)
                     .try_into()
                     .map_err(|_| {
-                        events::EsError::Cursor(
+                        StoreError::Data(
                             "TurnCompleted timestamp is outside i64 milliseconds".into(),
                         )
                     })
@@ -685,8 +662,8 @@ fn agent_event_pane_id(event: &AgentEvent) -> &str {
 async fn upsert_monitor_health(
     conn: &turso::Connection,
     health: &AgentMonitorHealthChanged,
-    event_version: EventStreamVersion,
-) -> events::Result<()> {
+    event_version: EventVersion,
+) -> Result<()> {
     conn.execute(
         r#"
         INSERT INTO agent_monitor_health
@@ -703,7 +680,7 @@ async fn upsert_monitor_health(
             i64::from(health.healthy),
             health.reason_code.as_str(),
             health.observed_at_ms,
-            event_version.get(),
+            event_version.to_column(),
         ),
     )
     .await?;
@@ -713,7 +690,7 @@ async fn upsert_monitor_health(
 async fn upsert_agent_pane(
     conn: &turso::Connection,
     projection: &AgentPaneProjection,
-) -> events::Result<()> {
+) -> Result<()> {
     let pane = &projection.pane;
     conn.execute(
         r#"
@@ -785,12 +762,12 @@ async fn upsert_agent_pane(
             projection.screen_work_summary_updated_at_ms,
             projection.work_summary.as_deref(),
             projection.last_transition_at_ms,
-            projection.last_event_version.get(),
-            projection.summary_basis_version.get(),
+            projection.last_event_version.to_column(),
+            projection.summary_basis_version.to_column(),
             projection.generated_work_summary.as_deref(),
             projection
                 .generated_summary_basis_version
-                .map(EventStreamVersion::get),
+                .map(EventVersion::to_column),
             projection.lifecycle_adapter_id.as_deref(),
         ],
     )
@@ -798,9 +775,7 @@ async fn upsert_agent_pane(
     Ok(())
 }
 
-async fn load_agent_snapshot_from_one_query(
-    conn: &turso::Connection,
-) -> events::Result<AgentSnapshot> {
+async fn load_agent_snapshot_from_one_query(conn: &turso::Connection) -> Result<AgentSnapshot> {
     let mut rows = conn
         .query(
             r#"
@@ -910,7 +885,7 @@ async fn load_agent_snapshot_from_one_query(
         .await?;
 
     let mut snapshot = AgentSnapshot {
-        through_event_version: EventStreamVersion::start(),
+        through_event_version: EventVersion::start(),
         server_time_ms: now_ms(),
         monitor_health: Vec::new(),
         panes: Vec::new(),
@@ -918,7 +893,7 @@ async fn load_agent_snapshot_from_one_query(
         messaging_paused: false,
     };
     while let Some(row) = rows.next().await? {
-        snapshot.through_event_version = event_stream_version(required_integer(&row, 1)?)?;
+        snapshot.through_event_version = EventVersion::from_column(required_integer(&row, 1)?)?;
         match required_text(&row, 0)?.as_str() {
             "checkpoint" => {}
             "health" => snapshot.monitor_health.push(MonitorHealthProjection {
@@ -926,11 +901,11 @@ async fn load_agent_snapshot_from_one_query(
                 healthy: required_integer(&row, 3)? != 0,
                 reason_code: required_text(&row, 4)?,
                 observed_at_ms: required_integer(&row, 5)?,
-                last_event_version: event_stream_version(required_integer(&row, 6)?)?,
+                last_event_version: EventVersion::from_column(required_integer(&row, 6)?)?,
             }),
             "pane" => snapshot.panes.push(agent_pane_from_row_at(&row, 7)?),
             row_kind => {
-                return Err(events::EsError::Cursor(format!(
+                return Err(StoreError::Data(format!(
                     "invalid snapshot row kind: {row_kind}"
                 )));
             }
@@ -942,7 +917,7 @@ async fn load_agent_snapshot_from_one_query(
 async fn load_agent_pane(
     conn: &turso::Connection,
     pane_id: &str,
-) -> events::Result<Option<AgentPaneProjection>> {
+) -> Result<Option<AgentPaneProjection>> {
     let mut rows = conn
         .query(
             format!("SELECT {AGENT_PANE_COLUMNS} FROM agent_panes WHERE pane_id = ?1"),
@@ -955,11 +930,11 @@ async fn load_agent_pane(
         .transpose()
 }
 
-fn agent_pane_from_row(row: &turso::Row) -> events::Result<AgentPaneProjection> {
+fn agent_pane_from_row(row: &turso::Row) -> Result<AgentPaneProjection> {
     agent_pane_from_row_at(row, 0)
 }
 
-fn agent_pane_from_row_at(row: &turso::Row, offset: usize) -> events::Result<AgentPaneProjection> {
+fn agent_pane_from_row_at(row: &turso::Row, offset: usize) -> Result<AgentPaneProjection> {
     Ok(AgentPaneProjection {
         pane: crate::agent::domain::AgentPaneObservation {
             incarnation: crate::agent::domain::AgentIncarnation {
@@ -993,24 +968,24 @@ fn agent_pane_from_row_at(row: &turso::Row, offset: usize) -> events::Result<Age
         screen_work_summary_updated_at_ms: optional_integer(row, offset + 21)?,
         work_summary: optional_text(row, offset + 22)?,
         last_transition_at_ms: required_integer(row, offset + 23)?,
-        last_event_version: EventStreamVersion::new(required_integer(row, offset + 24)?)?,
-        summary_basis_version: event_stream_version(required_integer(row, offset + 25)?)?,
+        last_event_version: EventVersion::from_column(required_integer(row, offset + 24)?)?,
+        summary_basis_version: EventVersion::from_column(required_integer(row, offset + 25)?)?,
         generated_work_summary: optional_text(row, offset + 26)?,
         generated_summary_basis_version: optional_integer(row, offset + 27)?
-            .map(event_stream_version)
+            .map(EventVersion::from_column)
             .transpose()?,
         lifecycle_adapter_id: optional_text(row, offset + 28)?,
     })
 }
 
-fn required_text(row: &turso::Row, index: usize) -> events::Result<String> {
+fn required_text(row: &turso::Row, index: usize) -> Result<String> {
     row.get_value(index)?
         .as_text()
         .map(ToString::to_string)
-        .ok_or_else(|| events::EsError::Cursor(format!("projection column {index} is not text")))
+        .ok_or_else(|| StoreError::Data(format!("projection column {index} is not text")))
 }
 
-fn optional_text(row: &turso::Row, index: usize) -> events::Result<Option<String>> {
+fn optional_text(row: &turso::Row, index: usize) -> Result<Option<String>> {
     let value = row.get_value(index)?;
     if value.is_null() {
         return Ok(None);
@@ -1018,36 +993,31 @@ fn optional_text(row: &turso::Row, index: usize) -> events::Result<Option<String
     value
         .as_text()
         .map(|text| Some(text.to_string()))
-        .ok_or_else(|| events::EsError::Cursor(format!("projection column {index} is not text")))
+        .ok_or_else(|| StoreError::Data(format!("projection column {index} is not text")))
 }
 
-fn required_integer(row: &turso::Row, index: usize) -> events::Result<i64> {
-    row.get_value(index)?.as_integer().copied().ok_or_else(|| {
-        events::EsError::Cursor(format!("projection column {index} is not an integer"))
-    })
+fn required_integer(row: &turso::Row, index: usize) -> Result<i64> {
+    row.get_value(index)?
+        .as_integer()
+        .copied()
+        .ok_or_else(|| StoreError::Data(format!("projection column {index} is not an integer")))
 }
 
-fn optional_integer(row: &turso::Row, index: usize) -> events::Result<Option<i64>> {
+fn optional_integer(row: &turso::Row, index: usize) -> Result<Option<i64>> {
     let value = row.get_value(index)?;
     if value.is_null() {
         return Ok(None);
     }
-    value.as_integer().copied().map(Some).ok_or_else(|| {
-        events::EsError::Cursor(format!("projection column {index} is not an integer"))
-    })
+    value
+        .as_integer()
+        .copied()
+        .map(Some)
+        .ok_or_else(|| StoreError::Data(format!("projection column {index} is not an integer")))
 }
 
-fn required_u32(row: &turso::Row, index: usize) -> events::Result<u32> {
+fn required_u32(row: &turso::Row, index: usize) -> Result<u32> {
     u32::try_from(required_integer(row, index)?)
-        .map_err(|_| events::EsError::Cursor(format!("projection column {index} is not a u32")))
-}
-
-fn event_stream_version(value: i64) -> events::Result<EventStreamVersion> {
-    if value == 0 {
-        Ok(EventStreamVersion::start())
-    } else {
-        EventStreamVersion::new(value)
-    }
+        .map_err(|_| StoreError::Data(format!("projection column {index} is not a u32")))
 }
 
 #[cfg(test)]
@@ -1066,11 +1036,11 @@ fn observed_state_text(state: ObservedAgentState) -> &'static str {
     }
 }
 
-fn parse_observed_state(value: String) -> events::Result<ObservedAgentState> {
+fn parse_observed_state(value: String) -> Result<ObservedAgentState> {
     match value.as_str() {
         "busy" => Ok(ObservedAgentState::Busy),
         "idle" => Ok(ObservedAgentState::Idle),
-        _ => Err(events::EsError::Cursor(format!(
+        _ => Err(StoreError::Data(format!(
             "invalid observed agent state: {value}"
         ))),
     }
@@ -1084,12 +1054,12 @@ fn effective_state_text(state: EffectiveAgentState) -> &'static str {
     }
 }
 
-fn parse_effective_state(value: &str) -> events::Result<EffectiveAgentState> {
+fn parse_effective_state(value: &str) -> Result<EffectiveAgentState> {
     match value {
         "busy" => Ok(EffectiveAgentState::Busy),
         "idle" => Ok(EffectiveAgentState::Idle),
         "unknown" => Ok(EffectiveAgentState::Unknown),
-        _ => Err(events::EsError::Cursor(format!(
+        _ => Err(StoreError::Data(format!(
             "invalid effective agent state: {value}"
         ))),
     }
@@ -1099,7 +1069,7 @@ fn now_ms() -> i64 {
     (time::OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000) as i64
 }
 
-async fn configure_state_database(conn: &turso::Connection) -> events::Result<()> {
+async fn configure_state_database(conn: &turso::Connection) -> Result<()> {
     conn.busy_timeout(Duration::from_millis(5_000))?;
     let mut rows = conn.query("PRAGMA journal_mode = WAL", ()).await?;
     while rows.next().await?.is_some() {}
@@ -1107,7 +1077,7 @@ async fn configure_state_database(conn: &turso::Connection) -> events::Result<()
     Ok(())
 }
 
-async fn initialize_state_schema(conn: &turso::Connection) -> events::Result<()> {
+async fn initialize_state_schema(conn: &turso::Connection) -> Result<()> {
     conn.execute("BEGIN IMMEDIATE", ()).await?;
     let result = apply_migrations(conn).await;
     if let Err(error) = result {
@@ -1125,8 +1095,8 @@ async fn upsert_text_setting(
     conn: &turso::Connection,
     key: &str,
     value: &str,
-    event_version: EventStreamVersion,
-) -> events::Result<()> {
+    event_version: EventVersion,
+) -> Result<()> {
     conn.execute(
         r#"
         INSERT INTO settings (key, value, last_event_version)
@@ -1135,7 +1105,7 @@ async fn upsert_text_setting(
             value = excluded.value,
             last_event_version = excluded.last_event_version
         "#,
-        (key, value, event_version.get()),
+        (key, value, event_version.to_column()),
     )
     .await?;
     Ok(())
@@ -1145,13 +1115,13 @@ async fn upsert_bool_setting(
     conn: &turso::Connection,
     key: &str,
     value: bool,
-    event_version: EventStreamVersion,
-) -> events::Result<()> {
+    event_version: EventVersion,
+) -> Result<()> {
     let value = if value { "true" } else { "false" };
     upsert_text_setting(conn, key, value, event_version).await
 }
 
-async fn load_bool_setting(conn: &turso::Connection, key: &str) -> events::Result<bool> {
+async fn load_bool_setting(conn: &turso::Connection, key: &str) -> Result<bool> {
     let mut rows = conn
         .query("SELECT value FROM settings WHERE key = ?1", [key])
         .await?;
@@ -1161,7 +1131,7 @@ async fn load_bool_setting(conn: &turso::Connection, key: &str) -> events::Resul
     })
 }
 
-async fn apply_migrations(conn: &turso::Connection) -> events::Result<()> {
+async fn apply_migrations(conn: &turso::Connection) -> Result<()> {
     conn.execute(
         r#"
         CREATE TABLE IF NOT EXISTS _migrations (
@@ -1190,9 +1160,7 @@ async fn apply_migrations(conn: &turso::Connection) -> events::Result<()> {
         .keys()
         .any(|name| !MIGRATIONS.iter().any(|(known, _)| known == name))
     {
-        return Err(events::EsError::Migration(
-            "incompatible state schema".into(),
-        ));
+        return Err(StoreError::Data("incompatible state schema".into()));
     }
 
     for (name, sql) in MIGRATIONS {
@@ -1200,7 +1168,7 @@ async fn apply_migrations(conn: &turso::Connection) -> events::Result<()> {
         match applied.get(name) {
             Some(existing) if *existing == checksum => {}
             Some(_) => {
-                return Err(events::EsError::Migration(format!(
+                return Err(StoreError::Data(format!(
                     "migration {name} checksum changed"
                 )));
             }
@@ -1225,93 +1193,43 @@ pub(crate) fn graces_from(monitor: &crate::settings::AgentMonitorSettings) -> Gr
     }
 }
 
-pub async fn open_store(path: impl AsRef<Path>) -> events::Result<Arc<HaroldStore>> {
+pub async fn open_store(path: impl AsRef<Path>) -> Result<Arc<HaroldStore>> {
     let graces = graces_from(&crate::settings::get_settings().agent_monitor);
     Ok(Arc::new(HaroldStore::open_with_graces(path, graces).await?))
 }
 
 #[cfg(test)]
-pub async fn append_turn_completed(
-    store: &HaroldStore,
-    event: &TurnCompleted,
-) -> events::Result<()> {
+pub async fn append_turn_completed(store: &HaroldStore, event: &TurnCompleted) -> Result<()> {
     store
         .stream
-        .append(
-            ExpectedVersion::Any,
-            [NewEvent {
-                r#type: "TurnCompleted".into(),
-                payload: json!(event),
-                workflow_kind: None,
-                workflow: WorkflowRef::None,
-                request_id: None,
-                actor_id: "system:harold".into(),
-                actor_type: ActorType::System,
-            }],
-        )
+        .append([NewEvent::new("TurnCompleted", json!(event))])
         .await?;
     Ok(())
 }
 
-pub async fn append_tts_mute_changed(store: &HaroldStore, muted: bool) -> events::Result<()> {
+pub async fn append_tts_mute_changed(store: &HaroldStore, muted: bool) -> Result<()> {
     store
         .stream
-        .append(
-            ExpectedVersion::Any,
-            [NewEvent {
-                r#type: "TtsMuteChanged".into(),
-                payload: json!({ "muted": muted }),
-                workflow_kind: None,
-                workflow: WorkflowRef::None,
-                request_id: None,
-                actor_id: "system:harold".into(),
-                actor_type: ActorType::System,
-            }],
-        )
+        .append([NewEvent::new("TtsMuteChanged", json!({ "muted": muted }))])
         .await?;
     Ok(())
 }
 
-pub async fn append_messaging_paused_changed(
-    store: &HaroldStore,
-    paused: bool,
-) -> events::Result<()> {
+pub async fn append_messaging_paused_changed(store: &HaroldStore, paused: bool) -> Result<()> {
     store
         .stream
-        .append(
-            ExpectedVersion::Any,
-            [NewEvent {
-                r#type: "MessagingPausedChanged".into(),
-                payload: json!({ "paused": paused }),
-                workflow_kind: None,
-                workflow: WorkflowRef::None,
-                request_id: None,
-                actor_id: "system:harold".into(),
-                actor_type: ActorType::System,
-            }],
-        )
+        .append([NewEvent::new(
+            "MessagingPausedChanged",
+            json!({ "paused": paused }),
+        )])
         .await?;
     Ok(())
 }
 
-pub async fn append_inbound_message(
-    store: &HaroldStore,
-    event: &InboundMessage,
-) -> events::Result<()> {
+pub async fn append_inbound_message(store: &HaroldStore, event: &InboundMessage) -> Result<()> {
     store
         .stream
-        .append(
-            ExpectedVersion::Any,
-            [NewEvent {
-                r#type: "InboundMessageReceived".into(),
-                payload: json!(event),
-                workflow_kind: None,
-                workflow: WorkflowRef::None,
-                request_id: None,
-                actor_id: "system:harold".into(),
-                actor_type: ActorType::System,
-            }],
-        )
+        .append([NewEvent::new("InboundMessageReceived", json!(event))])
         .await?;
     Ok(())
 }
@@ -1319,21 +1237,10 @@ pub async fn append_inbound_message(
 pub async fn append_away_message_requested(
     store: &HaroldStore,
     event: &AwayMessageRequested,
-) -> events::Result<()> {
+) -> Result<()> {
     store
         .stream
-        .append(
-            ExpectedVersion::Any,
-            [NewEvent {
-                r#type: "AwayMessageRequested".into(),
-                payload: json!(event),
-                workflow_kind: None,
-                workflow: WorkflowRef::None,
-                request_id: None,
-                actor_id: "system:harold".into(),
-                actor_type: ActorType::System,
-            }],
-        )
+        .append([NewEvent::new("AwayMessageRequested", json!(event))])
         .await?;
     Ok(())
 }
@@ -1341,21 +1248,10 @@ pub async fn append_away_message_requested(
 pub async fn append_spoken_line_requested(
     store: &HaroldStore,
     event: &SpokenLineRequested,
-) -> events::Result<()> {
+) -> Result<()> {
     store
         .stream
-        .append(
-            ExpectedVersion::Any,
-            [NewEvent {
-                r#type: "SpokenLineRequested".into(),
-                payload: json!(event),
-                workflow_kind: None,
-                workflow: WorkflowRef::None,
-                request_id: None,
-                actor_id: "system:harold".into(),
-                actor_type: ActorType::System,
-            }],
-        )
+        .append([NewEvent::new("SpokenLineRequested", json!(event))])
         .await?;
     Ok(())
 }
@@ -1363,23 +1259,12 @@ pub async fn append_spoken_line_requested(
 pub(crate) async fn append_timed_prompt_handled(
     store: &HaroldStore,
     event: &TimedPromptHandled,
-) -> events::Result<()> {
+) -> Result<()> {
     // The tests' switch for a failing append, shared with the monitor's appends.
     fail_monitor_append_for_test(store)?;
     store
         .stream
-        .append(
-            ExpectedVersion::Any,
-            [NewEvent {
-                r#type: "TimedPromptHandled".into(),
-                payload: json!(event),
-                workflow_kind: None,
-                workflow: WorkflowRef::None,
-                request_id: None,
-                actor_id: "system:harold".into(),
-                actor_type: ActorType::System,
-            }],
-        )
+        .append([NewEvent::new("TimedPromptHandled", json!(event))])
         .await?;
     Ok(())
 }
@@ -1391,21 +1276,21 @@ pub(crate) async fn append_timed_prompt_handled(
 pub(crate) async fn append_agent_events(
     store: &HaroldStore,
     events: Vec<AgentEvent>,
-) -> events::Result<events::AppendResult> {
+) -> Result<AppendResult> {
     fail_monitor_append_for_test(store)?;
     let events = events
         .into_iter()
         .filter_map(normalize_agent_event)
         .map(agent_new_event)
-        .collect::<events::Result<Vec<_>>>()?;
-    store.stream.append(ExpectedVersion::Any, events).await
+        .collect::<Result<Vec<_>>>()?;
+    store.stream.append(events).await
 }
 
 pub(crate) async fn append_monitor_turn_completed(
     store: &HaroldStore,
     pane: Option<AgentPaneObservation>,
     turn: &TurnCompleted,
-) -> events::Result<events::AppendResult> {
+) -> Result<AppendResult> {
     fail_monitor_append_for_test(store)?;
     let mut events = Vec::with_capacity(usize::from(pane.is_some()) + 1);
     if let Some(pane) = pane {
@@ -1414,33 +1299,23 @@ pub(crate) async fn append_monitor_turn_completed(
             crate::agent::domain::AgentPaneObserved { pane },
         ))?);
     }
-    events.push(NewEvent {
-        r#type: "TurnCompleted".into(),
-        payload: json!(turn),
-        workflow_kind: None,
-        workflow: WorkflowRef::None,
-        request_id: None,
-        actor_id: "system:harold".into(),
-        actor_type: ActorType::System,
-    });
-    store.stream.append(ExpectedVersion::Any, events).await
+    events.push(NewEvent::new("TurnCompleted", json!(turn)));
+    store.stream.append(events).await
 }
 
 #[cfg(test)]
-fn fail_monitor_append_for_test(store: &HaroldStore) -> events::Result<()> {
+fn fail_monitor_append_for_test(store: &HaroldStore) -> Result<()> {
     if store
         .fail_next_monitor_append
         .swap(false, std::sync::atomic::Ordering::SeqCst)
     {
-        return Err(events::EsError::Migration(
-            "test monitor append failure".into(),
-        ));
+        return Err(StoreError::Data("test monitor append failure".into()));
     }
     Ok(())
 }
 
 #[cfg(not(test))]
-fn fail_monitor_append_for_test(_store: &HaroldStore) -> events::Result<()> {
+fn fail_monitor_append_for_test(_store: &HaroldStore) -> Result<()> {
     Ok(())
 }
 
@@ -1509,7 +1384,7 @@ fn normalize_screen_event(mut screen: AgentScreenObserved) -> Option<AgentEvent>
     dead_code,
     reason = "called by the runtime-facing agent append boundary above"
 )]
-fn agent_new_event(event: AgentEvent) -> events::Result<NewEvent> {
+fn agent_new_event(event: AgentEvent) -> Result<NewEvent> {
     let (event_type, payload) = match event {
         AgentEvent::PaneObserved(event) => ("AgentPaneObserved", serde_json::to_value(event)?),
         AgentEvent::PaneDeparted(event) => ("AgentPaneDeparted", serde_json::to_value(event)?),
@@ -1525,15 +1400,7 @@ fn agent_new_event(event: AgentEvent) -> events::Result<NewEvent> {
             serde_json::to_value(event)?,
         ),
     };
-    Ok(NewEvent {
-        r#type: event_type.into(),
-        payload,
-        workflow_kind: None,
-        workflow: WorkflowRef::None,
-        request_id: None,
-        actor_id: "system:harold".into(),
-        actor_type: ActorType::System,
-    })
+    Ok(NewEvent::new(event_type, payload))
 }
 
 #[cfg(test)]
