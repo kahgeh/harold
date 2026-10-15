@@ -1806,10 +1806,14 @@ fn the_trends_dashboard_has_the_nine_panels() {
 
 #[test]
 fn the_alert_files_carry_the_spec_thresholds() {
-    // (alert, metric, aggregation, threshold, comparison, minutes the condition must hold)
+    const METRICS_SOURCE: &str = "@METRICS_SOURCE_ID@";
+    const TRACES_SOURCE: &str = "@TRACES_SOURCE_ID@";
+    // (alert, source, metric or span read, aggregation, threshold, comparison, minutes
+    // the condition must hold)
     let expected = [
         (
             "phone-request-unavailable",
+            METRICS_SOURCE,
             "harold.phone_requests",
             "sum",
             0.0,
@@ -1818,7 +1822,8 @@ fn the_alert_files_carry_the_spec_thresholds() {
         ),
         (
             "phone-request-slow",
-            "harold.phone_request.latency",
+            TRACES_SOURCE,
+            "harold.phone_request",
             "quantile 0.95",
             60.0,
             "above_exclusive",
@@ -1826,20 +1831,29 @@ fn the_alert_files_carry_the_spec_thresholds() {
         ),
         (
             "wrong-agent",
+            METRICS_SOURCE,
             "harold.phone_requests.wrong",
             "sum",
             0.0,
             "above_exclusive",
             5,
         ),
-        ("slot-idle", "pod.slots.free", "min", 1.0, "above", 120),
+        (
+            "slot-idle",
+            METRICS_SOURCE,
+            "pod.slots.free",
+            "min",
+            1.0,
+            "above",
+            120,
+        ),
     ];
     assert_eq!(
         expected.map(|(name, ..)| name),
         crate::alerts::ALERT_NAMES,
         "one file per alert Harold accepts"
     );
-    for (name, metric, aggregation, threshold, comparison, minutes) in expected {
+    for (name, source, reads, aggregation, threshold, comparison, minutes) in expected {
         let alert = definition(&format!("alert-{name}.json"));
         assert_eq!(alert["name"], name);
         assert_eq!(
@@ -1858,9 +1872,11 @@ fn the_alert_files_carry_the_spec_thresholds() {
         };
         let windows = alert["numConsecutiveWindows"].as_i64().unwrap_or(1);
         assert_eq!(interval * windows, minutes, "{name}");
-        let select = alert["chartConfig"]["select"].as_array().unwrap();
+        let config = &alert["chartConfig"];
+        assert_eq!(config["sourceId"], source, "{name}");
+        assert_eq!(metrics_read(config), [reads], "{name}");
+        let select = config["select"].as_array().unwrap();
         assert_eq!(select.len(), 1, "{name}");
-        assert_eq!(select[0]["metricName"], metric, "{name}");
         let read = match select[0]["level"].as_f64() {
             Some(level) => format!("{} {level}", select[0]["aggFn"].as_str().unwrap()),
             None => select[0]["aggFn"].as_str().unwrap().to_owned(),
@@ -1872,6 +1888,13 @@ fn the_alert_files_carry_the_spec_thresholds() {
     assert_eq!(
         config("phone-request-unavailable")["select"][0]["where"],
         "Attributes['outcome'] = 'unavailable'"
+    );
+    // The latency of a typed request: its span runs from the reply's own time to Enter.
+    let slow = config("phone-request-slow");
+    assert_eq!(slow["select"][0]["valueExpression"], "Duration / 1e9");
+    assert_eq!(
+        slow["select"][0]["where"],
+        "ServiceName = 'harold' AND SpanName = 'harold.phone_request' AND SpanAttributes['pane_id'] != ''"
     );
     assert_eq!(config("wrong-agent")["select"][0]["where"], "");
     assert_eq!(config("slot-idle")["groupBy"], "Attributes['pod.product']");

@@ -6,15 +6,13 @@
   "chartConfig": {
     "name": "phone-request-slow",
     "displayType": "line",
-    "sourceId": "@METRICS_SOURCE_ID@",
+    "sourceId": "@TRACES_SOURCE_ID@",
     "select": [
       {
         "aggFn": "quantile",
         "level": 0.95,
-        "valueExpression": "Value",
-        "metricName": "harold.phone_request.latency",
-        "metricType": "histogram",
-        "where": "",
+        "valueExpression": "Duration / 1e9",
+        "where": "ServiceName = 'harold' AND SpanName = 'harold.phone_request' AND SpanAttributes['pane_id'] != ''",
         "whereLanguage": "sql"
       }
     ]

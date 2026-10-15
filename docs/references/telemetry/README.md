@@ -321,7 +321,7 @@ The pod facts do the same for each product on its first poll: `pod.merges` with 
 This cannot cover every series:
 
 - A counter keyed by `session.id` (`harold.turns`) or by `spec.id` (a merge naming a spec) gets a new series for each new value, which cannot be known at start.
-- A histogram cannot be given a 0 point, because recording a value adds an observation. The `phone-request-slow` alert reads the `harold.phone_request.latency` histogram, so it misses the first request of each `channel` and `resolved_by` after a restart.
+- A histogram cannot be given a 0 point, because recording a value adds an observation. So nothing reads latency from the `harold.phone_request.latency` histogram: the latency card, panel and the `phone-request-slow` alert read the typed `harold.phone_request` spans.
 
 **The counter rule.** So every card and panel that counts a running total uses raw SQL with its own rule instead of HyperDX's. Each series is one metric with one set of resource attributes and attributes. Its points are read in time order, from one window length before the window (a day before for the trends panels). Each point rises by:
 
@@ -354,14 +354,14 @@ The lead-time cards and the "Start to completion" panel apply the rule to the hi
 Two limits remain:
 
 - A series whose previous point is older than the lookback counts from 0. After a restart that is right, because the counter starts again at 0. If the collector was unreachable for longer than the lookback while Harold kept running, the rise during the outage is counted when export resumes.
-- The builder panel "Phone requests reaching the right agent" and the alerts still use HyperDX's reading. They depend on the counting from 0 above.
+- The builder panel "Phone requests reaching the right agent" and the two counter alerts, `phone-request-unavailable` and `wrong-agent`, still use HyperDX's reading. They depend on the counting from 0 above.
 
 ## The alerts
 
 | Alert | Fires when | HyperDX definition |
 |---|---|---|
 | `phone-request-unavailable` | Any phone request dropped with no pane, or not typed within 10 minutes | sum of `harold.phone_requests` with `outcome = unavailable` above 0, every 5 minutes |
-| `phone-request-slow` | The 95th percentile latency is above 60 seconds in an hour with at least 3 requests | 95th percentile of `harold.phone_request.latency` above 60, every hour |
+| `phone-request-slow` | The 95th percentile latency is above 60 seconds in an hour with at least 3 requests | 95th percentile of the duration of typed `harold.phone_request` spans above 60 seconds, every hour, on the traces source |
 | `wrong-agent` | A request is counted as wrong | sum of `harold.phone_requests.wrong` above 0, every 5 minutes |
 | `slot-idle` | A slot is free for more than 2 hours in a row between 08:00 and 23:00 local | for each product, the last sample of each 15-minute window has at least 1 slot free, for 8 windows in a row |
 
@@ -375,6 +375,8 @@ Their basis is the period the spec drew, 11 to 15 October:
 Merges, turns per session and the spec facts have no alert. They describe throughput, and no level of them is wrong in itself.
 
 Each alert is an inline alert: it carries its own query, so it needs no dashboard tile. A tile alert would need a tile with exactly the alert's query, and the cards dashboard holds the cards only.
+
+`phone-request-slow` reads spans, as the latency card does. A typed request's `harold.phone_request` span carries `pane_id` and runs from the reply's own time to Enter, so its duration is the request's latency. Spans have none of the counters' first-point loss, so the first request after a restart counts.
 
 HyperDX 2.40 cannot express three parts of these conditions:
 
