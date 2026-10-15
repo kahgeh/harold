@@ -58,7 +58,7 @@ async fn post(addr: SocketAddr, path: &str, body: &'static [u8]) -> u16 {
 fn deliver_to(
     fake: &Fake,
     chief_folder: Option<&str>,
-) -> (mpsc::Sender<String>, watch::Sender<()>, JoinHandle<()>) {
+) -> (Poster, watch::Sender<()>, JoinHandle<()>) {
     let (queue_tx, queue_rx) = mpsc::channel(QUEUE_CAPACITY);
     let (shutdown_tx, shutdown_rx) = watch::channel(());
     let handle = tokio::spawn(deliver(
@@ -67,7 +67,16 @@ fn deliver_to(
         queue_rx,
         shutdown_rx,
     ));
-    (queue_tx, shutdown_tx, handle)
+    (Poster(queue_tx), shutdown_tx, handle)
+}
+
+/// Queues lines for `deliver` as the address does, stamped with the time of the post.
+struct Poster(mpsc::Sender<Queued>);
+
+impl Poster {
+    async fn send(&self, line: String) -> Result<(), mpsc::error::SendError<Queued>> {
+        self.0.send((line, Instant::now())).await
+    }
 }
 
 // --- the line ---
@@ -202,7 +211,12 @@ async fn a_full_queue_still_answers_204_and_logs_the_drop() {
     .await;
 
     assert_eq!((first, second), (204, 204));
-    assert_eq!(queue_rx.recv().await.as_deref(), Some(SLOT_IDLE_FIRING));
+    let before_check = Instant::now();
+    let (line, posted_at) = queue_rx.recv().await.unwrap();
+    assert_eq!(line, SLOT_IDLE_FIRING);
+    // Stamped when it was posted, which was just now.
+    assert!(posted_at <= before_check);
+    assert!(before_check - posted_at < Duration::from_secs(5));
     assert!(queue_rx.try_recv().is_err());
     let text = logs.text();
     assert!(text.contains("alert not delivered (queue_full)"), "{text}");
@@ -274,6 +288,65 @@ async fn a_chief_busy_for_ten_minutes_drops_the_alert() {
     assert!(text.contains("reason=\"agent_busy\""), "{text}");
 
     // The dropped line is not typed once the chief is idle; the next one is.
+    set_chief_state(&fake, EffectiveAgentState::Idle);
+    queue
+        .send("harold alert: wrong-agent cleared".into())
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert_eq!(fake.keys(), typed("harold alert: wrong-agent cleared"));
+}
+
+fn drops(logs: &CapturedLogs) -> usize {
+    logs.text()
+        .matches("alert not delivered (agent_busy)")
+        .count()
+}
+
+#[tokio::test(start_paused = true)]
+async fn ten_minutes_count_from_the_post_not_from_when_delivery_takes_the_line() {
+    let logs = CapturedLogs::start();
+    let fake = idle_chief();
+    set_chief_state(&fake, EffectiveAgentState::Busy);
+    let (queue, _shutdown_tx, _handle) = deliver_to(&fake, Some(CHIEF));
+
+    // Two posts a minute apart while the chief stays busy for 15 minutes.
+    queue.send(SLOT_IDLE_FIRING.into()).await.unwrap();
+    tokio::time::sleep(Duration::from_secs(60)).await;
+    queue
+        .send("harold alert: wrong-agent firing".into())
+        .await
+        .unwrap();
+
+    tokio::time::sleep(Duration::from_secs(9 * 60 + 5)).await;
+    assert_eq!(drops(&logs), 1, "the first line is dropped at 10 minutes");
+    tokio::time::sleep(Duration::from_secs(60)).await;
+    assert_eq!(
+        drops(&logs),
+        2,
+        "the second is dropped 10 minutes after its post"
+    );
+
+    tokio::time::sleep(Duration::from_secs(4 * 60)).await;
+    assert!(fake.keys().is_empty());
+    assert_eq!(drops(&logs), 2);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_line_whose_ten_minutes_ran_out_in_the_queue_is_dropped_at_once() {
+    let logs = CapturedLogs::start();
+    let fake = idle_chief();
+    set_chief_state(&fake, EffectiveAgentState::Busy);
+    let (queue, _shutdown_tx, _handle) = deliver_to(&fake, Some(CHIEF));
+
+    for _ in 0..3 {
+        queue.send(SLOT_IDLE_FIRING.into()).await.unwrap();
+    }
+    tokio::time::sleep(Duration::from_secs(10 * 60 + 1)).await;
+    // The two lines behind the first waited their 10 minutes in the queue.
+    assert_eq!(drops(&logs), 3);
+
+    // A fresh post is typed as soon as the chief is idle.
     set_chief_state(&fake, EffectiveAgentState::Idle);
     queue
         .send("harold alert: wrong-agent cleared".into())

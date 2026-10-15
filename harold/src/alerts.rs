@@ -44,7 +44,10 @@ const LINE_PREFIX: &str = "harold alert: ";
 /// alert is dropped.
 pub(crate) const QUEUE_CAPACITY: usize = 32;
 
-/// How long a line waits for the chief to be idle before it is dropped.
+/// A line waiting to be typed, and when it was posted.
+pub(crate) type Queued = (String, Instant);
+
+/// How long a line waits for the chief to be idle, from its post, before it is dropped.
 const GIVE_UP_AFTER: Duration = Duration::from_secs(10 * 60);
 
 /// The largest body read. A webhook's body is a few dozen bytes.
@@ -84,14 +87,14 @@ fn alert_and_state(line: &str) -> (&str, &str) {
 // ---------------------------------------------------------------------------
 
 /// `POST /alert`. Every other path and method is refused like an unknown alert.
-pub(crate) fn router(queue: mpsc::Sender<String>) -> Router {
+pub(crate) fn router(queue: mpsc::Sender<Queued>) -> Router {
     Router::new()
         .route("/alert", any(take_alert))
         .fallback(refuse)
         .with_state(queue)
 }
 
-async fn take_alert(State(queue): State<mpsc::Sender<String>>, request: Request) -> StatusCode {
+async fn take_alert(State(queue): State<mpsc::Sender<Queued>>, request: Request) -> StatusCode {
     if request.method() != Method::POST {
         return refuse().await;
     }
@@ -102,8 +105,8 @@ async fn take_alert(State(queue): State<mpsc::Sender<String>>, request: Request)
         return refuse().await;
     };
     // The post is answered at once; typing waits in the background for an idle chief.
-    if let Err(dropped) = queue.try_send(line) {
-        let (TrySendError::Full(line) | TrySendError::Closed(line)) = &dropped;
+    if let Err(dropped) = queue.try_send((line, Instant::now())) {
+        let (TrySendError::Full((line, _)) | TrySendError::Closed((line, _))) = &dropped;
         let (alert, state) = alert_and_state(line);
         match dropped {
             TrySendError::Full(_) => warn!(
@@ -166,22 +169,23 @@ fn held_panes(held: &mut Option<HeldPane>, view: &AgentsView) -> Vec<String> {
 }
 
 /// Types each queued line into the agent in `chief_folder`, trying every ROUND_INTERVAL
-/// for up to 10 minutes. Shutdown abandons a line still waiting; it is looked at between
+/// until 10 minutes after its post. Lines are typed one at a time, so a line behind one
+/// that waited may find its 10 minutes already up; it is dropped as `agent_busy`. Shutdown abandons a line still waiting; it is looked at between
 /// tries only, so a try is never stopped between typing and pressing Enter.
 pub(crate) async fn deliver<P: Ports>(
     ports: P,
     chief_folder: Option<String>,
-    mut queue: mpsc::Receiver<String>,
+    mut queue: mpsc::Receiver<Queued>,
     mut shutdown: watch::Receiver<()>,
 ) {
     let chief_folder = chief_folder.filter(|folder| !folder.trim().is_empty());
     let mut held = None;
     loop {
-        let line = tokio::select! {
+        let (line, posted_at) = tokio::select! {
             biased;
             _ = shutdown.changed() => return,
-            line = queue.recv() => match line {
-                Some(line) => line,
+            queued = queue.recv() => match queued {
+                Some(queued) => queued,
                 None => return,
             },
         };
@@ -190,7 +194,12 @@ pub(crate) async fn deliver<P: Ports>(
             log_not_delivered(alert, state, &Reason::NoAgentInFolder);
             continue;
         };
-        let give_up_at = Instant::now() + GIVE_UP_AFTER;
+        let give_up_at = posted_at + GIVE_UP_AFTER;
+        if Instant::now() >= give_up_at {
+            // Never tried: it waited its 10 minutes behind an earlier line.
+            log_not_delivered(alert, state, &Reason::AgentBusy);
+            continue;
+        }
         loop {
             let view = ports.agents();
             let typed_into = held_panes(&mut held, &view);
