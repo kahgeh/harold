@@ -529,22 +529,46 @@ async fn unknown_schema_record_is_rejected_without_modifying_pending_delivery() 
     )
     .await
     .unwrap();
+    // The store folder's lock lets one store open at a time.
+    drop(conn);
+    drop(store);
 
     let error = HaroldStore::open(directory.path())
         .await
         .err()
         .expect("unknown schema must fail");
     assert!(error.to_string().contains("incompatible state schema"));
-    assert_eq!(store.last_processed_version().await.unwrap().get(), 1);
+
+    let state_path = directory.path().join(super::STATE_DATABASE);
+    let database = turso::Builder::new_local(state_path.to_str().unwrap())
+        .build()
+        .await
+        .unwrap();
+    let conn = database.connect().unwrap();
     assert_eq!(
-        store
-            .next_pending_delivery()
+        super::last_processed_version_from(&conn)
             .await
             .unwrap()
-            .unwrap()
-            .event_id,
-        pending_id
+            .get(),
+        1
     );
+    let mut rows = conn
+        .query(
+            "SELECT event_id FROM delivery_outbox WHERE delivered_at_ms IS NULL",
+            (),
+        )
+        .await
+        .unwrap();
+    let row = rows
+        .next()
+        .await
+        .unwrap()
+        .expect("the delivery is still pending");
+    assert_eq!(
+        row.get_value(0).unwrap().as_text().map(String::as_str),
+        Some(pending_id.as_str())
+    );
+    assert!(rows.next().await.unwrap().is_none());
     let mut rows = conn
         .query("SELECT COUNT(*) FROM _migrations", ())
         .await
@@ -737,8 +761,25 @@ async fn failed_projection_rolls_back_all_changes_and_replays_after_restart() {
     assert_eq!(batch.applied, 2);
     assert_eq!(batch.through_event_version.get(), 2);
     assert_eq!(reopened.load_agent_snapshot().await.unwrap().panes.len(), 1);
-    let pending = reopened.next_pending_delivery().await.unwrap().unwrap();
-    assert_eq!(pending.event_type, "InboundMessageReceived");
+    let mut sent = Vec::new();
+    while let Some(pending) = reopened.next_pending_delivery().await.unwrap() {
+        reopened.mark_delivered(&pending.event_id).await.unwrap();
+        sent.push(pending.event_type);
+    }
+    assert_eq!(
+        sent,
+        ["InboundMessageReceived"],
+        "the retried delivery is sent once"
+    );
+    assert_eq!(
+        reopened
+            .project_unhandled_events(500)
+            .await
+            .unwrap()
+            .applied,
+        0
+    );
+    assert!(reopened.next_pending_delivery().await.unwrap().is_none());
 }
 
 #[tokio::test]
@@ -1506,4 +1547,216 @@ async fn event_versions_stay_within_their_bounds_and_a_fresh_store_starts_at_one
         .await
         .unwrap();
     assert_eq!(appended.first_version.get(), 1);
+    let read = store
+        .stream()
+        .read(appended.first_version)
+        .await
+        .unwrap()
+        .expect("the appended event reads back");
+    assert_eq!(read.id, appended.events[0].id);
+    assert_eq!(read.created_at, appended.events[0].created_at);
+}
+
+#[tokio::test]
+async fn a_record_with_a_time_out_of_range_reads_as_undecodable_and_later_events_still_load() {
+    let directory = TestDirectory::new();
+    let store = HaroldStore::open(directory.path()).await.unwrap();
+    let raw = format!(
+        r#"{{"id":"{}","type":"X","payload":{{}},"created_at_ms":9223372036854775807,"trace_id":null,"span_id":null,"actor":"a"}}"#,
+        uuid::Uuid::new_v4()
+    );
+    let raw_version = store
+        .stream()
+        .append_raw_for_test(raw.into_bytes())
+        .await
+        .unwrap();
+    append_tts_mute_changed(&store, true).await.unwrap();
+
+    let events = store
+        .stream()
+        .load_after_version(EventVersion::start(), 10)
+        .await
+        .unwrap();
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0].version, raw_version);
+    assert_eq!(events[0].r#type, "UndecodableEvent");
+    assert_eq!(events[1].r#type, "TtsMuteChanged");
+    let read = store.stream().read(raw_version).await.unwrap().unwrap();
+    assert_eq!(read.r#type, "UndecodableEvent");
+    assert_eq!(read.id, events[0].id);
+}
+
+#[tokio::test]
+async fn a_second_store_on_the_same_folder_is_refused_and_the_first_keeps_working() {
+    let directory = TestDirectory::new();
+    let first = HaroldStore::open(directory.path()).await.unwrap();
+    let Err(error) = HaroldStore::open(directory.path()).await else {
+        panic!("a second store on the same folder must be refused");
+    };
+    assert_eq!(error.to_string(), "store is in use by another Harold");
+    append_tts_mute_changed(&first, true).await.unwrap();
+    let batch = first.project_unhandled_events(10).await.unwrap();
+    assert_eq!(batch.applied, 1);
+    assert!(first.load_agent_snapshot().await.unwrap().tts_muted);
+}
+
+#[tokio::test]
+async fn a_dropped_store_releases_the_folder() {
+    let directory = TestDirectory::new();
+    drop(HaroldStore::open(directory.path()).await.unwrap());
+    HaroldStore::open(directory.path())
+        .await
+        .expect("reopened after drop");
+}
+
+#[tokio::test]
+async fn an_event_survives_reopening_and_later_versions_are_higher() {
+    let directory = TestDirectory::new();
+    let mut versions = Vec::new();
+    for muted in [true, false, true] {
+        let store = HaroldStore::open(directory.path()).await.unwrap();
+        append_tts_mute_changed(&store, muted).await.unwrap();
+        let events = store
+            .stream()
+            .load_after_version(EventVersion::start(), 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            events.len(),
+            versions.len() + 1,
+            "earlier events are all still there"
+        );
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| event.version)
+                .take(versions.len())
+                .collect::<Vec<_>>(),
+            versions
+        );
+        let newest = events.last().unwrap().version;
+        assert!(versions.iter().all(|earlier| newest > *earlier));
+        versions.push(newest);
+    }
+}
+
+#[tokio::test]
+async fn concurrent_appends_are_projected_once_in_version_order() {
+    let directory = TestDirectory::new();
+    let store = Arc::new(HaroldStore::open(directory.path()).await.unwrap());
+    let tasks: Vec<_> = (0..50)
+        .map(|n| {
+            let store = Arc::clone(&store);
+            tokio::spawn(async move {
+                append_inbound_message(
+                    &store,
+                    &InboundMessage {
+                        text: format!("m{n}"),
+                        forwarded: false,
+                    },
+                )
+                .await
+                .unwrap();
+            })
+        })
+        .collect();
+    for task in tasks {
+        task.await.unwrap();
+    }
+    let mut applied = 0;
+    loop {
+        let batch = store.project_unhandled_events(7).await.unwrap();
+        if batch.applied == 0 {
+            break;
+        }
+        applied += batch.applied;
+    }
+    assert_eq!(applied, 50);
+    let events = store
+        .stream()
+        .load_after_version(EventVersion::start(), 100)
+        .await
+        .unwrap();
+    assert!(
+        events
+            .windows(2)
+            .all(|pair| pair[0].version < pair[1].version)
+    );
+    assert_eq!(
+        store.last_processed_version().await.unwrap(),
+        events.last().unwrap().version
+    );
+    let mut delivered = 0;
+    while let Some(pending) = store.next_pending_delivery().await.unwrap() {
+        store.mark_delivered(&pending.event_id).await.unwrap();
+        delivered += 1;
+    }
+    assert_eq!(delivered, 50);
+}
+
+#[tokio::test]
+async fn an_event_appended_inside_a_span_stores_its_trace_and_span_ids() {
+    use opentelemetry::trace::{TraceContextExt, TracerProvider as _};
+    use tracing::Instrument;
+    use tracing_opentelemetry::OpenTelemetrySpanExt;
+    use tracing_subscriber::layer::SubscriberExt;
+
+    let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder().build();
+    let subscriber = tracing_subscriber::registry()
+        .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("store-test")));
+    let _guard = tracing::subscriber::set_default(subscriber);
+
+    let directory = TestDirectory::new();
+    let store = HaroldStore::open(directory.path()).await.unwrap();
+    append_tts_mute_changed(&store, false).await.unwrap();
+    let span = tracing::info_span!("append");
+    let expected = span.context().span().span_context().clone();
+    append_tts_mute_changed(&store, true)
+        .instrument(span)
+        .await
+        .unwrap();
+
+    let events = store
+        .stream()
+        .load_after_version(EventVersion::start(), 10)
+        .await
+        .unwrap();
+    assert_eq!(
+        events[0].trace_id, None,
+        "outside a span both ids are empty"
+    );
+    assert_eq!(events[0].span_id, None);
+    assert_eq!(events[1].trace_id, Some(expected.trace_id().to_string()));
+    assert_eq!(events[1].span_id, Some(expected.span_id().to_string()));
+}
+
+#[test]
+fn no_code_outside_tests_pauses_or_advances_tokio_time() {
+    // opendata-log turns on tokio's `test-util`, so a stray pause would compile into the
+    // daemon. Test files are `*_tests.rs` and `tests/`; everything else is daemon code.
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+    let mut offenders = Vec::new();
+    for crate_dir in ["harold/src", "harold-api/src", "tmx-agent-dash/src"] {
+        let mut pending = vec![workspace.join(crate_dir)];
+        while let Some(dir) = pending.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    pending.push(path);
+                    continue;
+                }
+                let name = path.file_name().unwrap().to_string_lossy();
+                if !name.ends_with(".rs") || name.ends_with("_tests.rs") {
+                    continue;
+                }
+                let text = std::fs::read_to_string(&path).unwrap();
+                for needle in ["time::pause", "time::advance", "start_paused"] {
+                    if text.contains(needle) {
+                        offenders.push(format!("{} uses {needle}", path.display()));
+                    }
+                }
+            }
+        }
+    }
+    assert!(offenders.is_empty(), "{offenders:?}");
 }

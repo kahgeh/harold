@@ -198,6 +198,53 @@ async fn permanently_invalid_event_does_not_block_later_deliveries() {
 }
 
 #[tokio::test]
+async fn an_undecodable_record_does_not_block_later_events() {
+    let directory = TestDirectory::new();
+    let store = HaroldStore::open(&directory.0).await.unwrap();
+    let raw_version = store
+        .stream()
+        .append_raw_for_test(b"not json".to_vec())
+        .await
+        .unwrap();
+    append_inbound_message(
+        &store,
+        &InboundMessage {
+            text: "deliver after the undecodable record".into(),
+            forwarded: false,
+        },
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        handle_next_delivery(&store, Arc::new(system_dispatcher()))
+            .await
+            .unwrap()
+    );
+    let dispatcher = Arc::new(RecordingDispatcher::default());
+    assert!(
+        handle_next_delivery(&store, dispatcher.clone())
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        *dispatcher.event_types.lock().unwrap(),
+        ["InboundMessageReceived"]
+    );
+    assert!(store.next_pending_delivery().await.unwrap().is_none());
+
+    let undecodable = store.stream().read(raw_version).await.unwrap().unwrap();
+    assert_eq!(undecodable.r#type, "UndecodableEvent");
+    let row = store
+        .outbox_row_for_test(&undecodable.id.to_string())
+        .await
+        .unwrap()
+        .expect("the undecodable record has an outbox row");
+    assert!(row.delivered_at_ms.is_some(), "marked undeliverable");
+    assert_eq!(row.attempt_count, 1);
+}
+
+#[tokio::test]
 async fn malformed_known_event_does_not_block_a_valid_later_delivery() {
     let directory = TestDirectory::new();
     let store = HaroldStore::open(&directory.0).await.unwrap();

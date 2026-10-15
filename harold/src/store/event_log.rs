@@ -103,9 +103,12 @@ pub struct EventEnvelope {
     pub version: EventVersion,
     pub created_at: OffsetDateTime,
     pub trace_id: Option<String>,
-    #[expect(
-        dead_code,
-        reason = "part of the stored envelope; nothing reads it yet"
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "part of the stored envelope; only tests read it yet"
+        )
     )]
     pub span_id: Option<String>,
     #[expect(
@@ -224,10 +227,16 @@ fn time_from_ms(created_at_ms: i64) -> Result<OffsetDateTime> {
 impl EventLog {
     pub(super) async fn open(root: &Path) -> Result<Self> {
         let config = log_config(root)?;
-        std::fs::write(
-            std::fs::canonicalize(root)?.join(LOG_SETTINGS_FILE),
-            LOG_SETTINGS,
-        )?;
+        let StorageConfig::SlateDb(SlateDbStorageConfig {
+            settings_path: Some(settings),
+            ..
+        }) = &config.storage
+        else {
+            return Err(StoreError::Data(
+                "the log's configuration names no settings file".into(),
+            ));
+        };
+        std::fs::write(settings, LOG_SETTINGS)?;
         let log = LogDb::open(config).await.map_err(log_error)?;
         Ok(Self { log })
     }
@@ -319,10 +328,6 @@ impl EventLog {
 
     /// Appends `value` as a record as it is, for tests of records Harold did not write.
     #[cfg(test)]
-    #[expect(
-        dead_code,
-        reason = "Task 3's undecodable-record test is the first to use it"
-    )]
     pub(crate) async fn append_raw_for_test(&self, value: Vec<u8>) -> Result<EventVersion> {
         let output = self
             .log
@@ -373,28 +378,36 @@ fn envelope(
     }
 }
 
-/// A record as an event. A record that is not a Harold envelope becomes an
-/// `UndecodableEvent`, so it cannot block the events after it.
+/// A record as an event. A record that is not a Harold envelope, or whose time Harold
+/// cannot read, becomes an `UndecodableEvent`, so it cannot block the events after it.
 fn decode(sequence: u64, value: &[u8]) -> Result<EventEnvelope> {
     let version = EventVersion::from_sequence(sequence)?;
-    match serde_json::from_slice::<StoredEnvelope>(value) {
-        Ok(stored) => {
-            let created_at = time_from_ms(stored.created_at_ms)
-                .map_err(|error| StoreError::Data(format!("event {version}: {error}")))?;
-            Ok(envelope(stored, version, created_at))
-        }
-        Err(error) => {
-            warn!(version = %version, error = %error, "stored record is not a Harold event");
-            Ok(EventEnvelope {
-                id: Uuid::from_u64_pair(0, sequence),
-                r#type: UNDECODABLE.into(),
-                payload: serde_json::json!({ "error": error.to_string() }),
-                version,
-                created_at: OffsetDateTime::UNIX_EPOCH,
-                trace_id: None,
-                span_id: None,
-                actor: String::new(),
-            })
-        }
+    let stored = match serde_json::from_slice::<StoredEnvelope>(value) {
+        Ok(stored) => stored,
+        Err(error) => return Ok(undecodable(sequence, version, error)),
+    };
+    match time_from_ms(stored.created_at_ms) {
+        Ok(created_at) => Ok(envelope(stored, version, created_at)),
+        Err(error) => Ok(undecodable(sequence, version, error)),
+    }
+}
+
+/// The event that stands in for the record at `sequence`, which Harold cannot read. Its
+/// id is the same at every read.
+fn undecodable(
+    sequence: u64,
+    version: EventVersion,
+    error: impl std::fmt::Display,
+) -> EventEnvelope {
+    warn!(version = %version, error = %error, "stored record is not a Harold event");
+    EventEnvelope {
+        id: Uuid::from_u64_pair(0, sequence),
+        r#type: UNDECODABLE.into(),
+        payload: serde_json::json!({ "error": error.to_string() }),
+        version,
+        created_at: OffsetDateTime::UNIX_EPOCH,
+        trace_id: None,
+        span_id: None,
+        actor: String::new(),
     }
 }

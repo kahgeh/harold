@@ -15,10 +15,6 @@ pub enum StoreError {
     Log(String),
 
     /// Another Harold holds the store folder's lock.
-    #[expect(
-        dead_code,
-        reason = "the store folder's lock refuses a second Harold from Task 3"
-    )]
     #[error("store is in use by another Harold")]
     InUse,
 

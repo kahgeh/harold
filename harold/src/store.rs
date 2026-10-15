@@ -27,6 +27,7 @@ use crate::agent::summary::{normalize_work_summary, sanitize_bounded_metadata};
 const NAMESPACE: &str = "harold";
 const PARTITION_KEY: &str = "main";
 const STATE_DATABASE: &str = "harold-state.db";
+const LOCK_FILE: &str = "harold.lock";
 const MIGRATIONS: [(&str, &str); 1] = [(
     "001_initial",
     include_str!("store/migrations/001_initial.sql"),
@@ -120,6 +121,32 @@ pub(crate) struct ProjectionBatch {
     pub snapshot_changed: bool,
 }
 
+/// Takes the store folder's lock, which the OS releases when this process ends. It is
+/// taken before the log opens: opening the log a second time would fence the first Harold.
+fn lock_store(root: &Path) -> Result<std::fs::File> {
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(root.join(LOCK_FILE))?;
+    match file.try_lock() {
+        Ok(()) => Ok(file),
+        Err(std::fs::TryLockError::WouldBlock) => Err(StoreError::InUse),
+        Err(std::fs::TryLockError::Error(error)) => Err(error.into()),
+    }
+}
+
+/// The store folder's lock, released when the store is dropped. Closing the file alone
+/// does not always release it at once: a child process another thread is starting holds a
+/// copy of the file until it runs its program, and the lock lasts until every copy closes.
+struct StoreLock(std::fs::File);
+
+impl Drop for StoreLock {
+    fn drop(&mut self) {
+        let _ = self.0.unlock();
+    }
+}
+
 pub struct HaroldStore {
     stream: EventLog,
     state: Database,
@@ -132,6 +159,15 @@ pub struct HaroldStore {
     fail_next_monitor_append: std::sync::atomic::AtomicBool,
     #[cfg(test)]
     fail_next_snapshot_load: std::sync::atomic::AtomicBool,
+    /// The store folder's lock. Declared last, so the log is dropped before it is released.
+    _lock: StoreLock,
+}
+
+/// What a test reads of one `delivery_outbox` row.
+#[cfg(test)]
+pub(crate) struct OutboxRow {
+    pub(crate) delivered_at_ms: Option<i64>,
+    pub(crate) attempt_count: i64,
 }
 
 #[cfg(test)]
@@ -178,6 +214,7 @@ impl HaroldStore {
         let root = path.as_ref();
         tokio::fs::create_dir_all(root).await?;
 
+        let lock = lock_store(root)?;
         let stream = EventLog::open(root).await?;
 
         let state_path = root.join(STATE_DATABASE);
@@ -201,6 +238,7 @@ impl HaroldStore {
             fail_next_monitor_append: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)]
             fail_next_snapshot_load: std::sync::atomic::AtomicBool::new(false),
+            _lock: StoreLock(lock),
         })
     }
 
@@ -382,6 +420,29 @@ impl HaroldStore {
     pub(crate) fn fail_projection_before_checkpoint_for_test(&self) {
         self.fail_projection_before_checkpoint
             .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// The outbox row for `event_id`, if there is one.
+    #[cfg(test)]
+    pub(crate) async fn outbox_row_for_test(&self, event_id: &str) -> Result<Option<OutboxRow>> {
+        let conn = self.state.connect()?;
+        let mut rows = conn
+            .query(
+                "SELECT delivered_at_ms, attempt_count FROM delivery_outbox WHERE event_id = ?1",
+                (event_id,),
+            )
+            .await?;
+        let Some(row) = rows.next().await? else {
+            return Ok(None);
+        };
+        Ok(Some(OutboxRow {
+            delivered_at_ms: row.get_value(0)?.as_integer().copied(),
+            attempt_count: row
+                .get_value(1)?
+                .as_integer()
+                .copied()
+                .ok_or_else(|| StoreError::Data("outbox attempt_count is not an integer".into()))?,
+        }))
     }
 
     #[cfg(test)]
