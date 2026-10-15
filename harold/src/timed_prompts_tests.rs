@@ -491,7 +491,7 @@ pub(crate) struct FakeState {
     screen: Option<String>,
     fail_text: bool,
     pub(crate) fail_enter: bool,
-    keys: Vec<Key>,
+    pub(crate) keys: Vec<Key>,
     now_reads: usize,
     screen_reads: usize,
 }

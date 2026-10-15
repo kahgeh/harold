@@ -315,12 +315,17 @@ pub(crate) fn box_reason(screen: Option<&str>) -> Option<Reason> {
 // One writer at a time
 // ---------------------------------------------------------------------------
 
-/// Who types into a pane through `type_when_ready`.
+/// Who types into a pane: timed prompts and alerts through `type_when_ready`, phone
+/// replies through `inbound::tmux::relay_to_tmux_pane`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Writer {
     TimedPrompt,
     Alert,
+    PhoneReply,
 }
+
+/// One pane's lock and what the writers share about the pane.
+pub(crate) type PaneLock = tokio::sync::Mutex<PaneRecord>;
 
 /// What the writers share about one pane.
 #[derive(Default)]
@@ -336,6 +341,12 @@ impl PaneRecord {
         self.typed
             .is_some_and(|(by, until)| by != writer && now < until)
     }
+
+    /// Records that `writer` has just typed into the pane: for a minute, while the pane
+    /// still reads idle, it counts as busy for the other writers.
+    pub(crate) fn typed_by(&mut self, writer: Writer) {
+        self.typed = Some((writer, Instant::now() + TYPED_PANE_HOLD));
+    }
 }
 
 /// One lock for each pane, held across the checks, the typing and Enter, so two writers
@@ -343,11 +354,11 @@ impl PaneRecord {
 /// await.
 #[derive(Default)]
 pub(crate) struct PaneLocks {
-    panes: std::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<PaneRecord>>>>,
+    panes: std::sync::Mutex<HashMap<String, Arc<PaneLock>>>,
 }
 
 impl PaneLocks {
-    fn for_pane(&self, pane_id: &str) -> Arc<tokio::sync::Mutex<PaneRecord>> {
+    pub(crate) fn for_pane(&self, pane_id: &str) -> Arc<PaneLock> {
         let mut panes = self.panes.lock().unwrap_or_else(PoisonError::into_inner);
         let now = Instant::now();
         // Forgets the panes no writer holds or waits for that have no hold left.
@@ -384,8 +395,14 @@ fn reads_idle(view: &AgentsView, pane_id: &str) -> bool {
         .any(|pane| pane.pane_id == pane_id && pane.state == EffectiveAgentState::Idle)
 }
 
-/// The daemon's pane locks, shared by the timed prompts and the alerts.
+/// The daemon's pane locks, shared by the timed prompts, the alerts and the phone relay.
 static TMUX_PANE_LOCKS: LazyLock<PaneLocks> = LazyLock::new(PaneLocks::default);
+
+/// The daemon's lock for one pane, for a writer that does not go through `Ports`: the
+/// phone relay. `TmuxPorts` hands out the same map.
+pub(crate) fn pane_lock(pane_id: &str) -> Arc<PaneLock> {
+    TMUX_PANE_LOCKS.for_pane(pane_id)
+}
 
 // ---------------------------------------------------------------------------
 // The ports
@@ -793,7 +810,7 @@ pub(crate) async fn type_when_ready<P: Ports>(
         return Attempt::Wait(Reason::TypingFailed);
     }
     // Typed, whether or not Enter goes through: the text is in the box either way.
-    record.typed = Some((writer, Instant::now() + TYPED_PANE_HOLD));
+    record.typed_by(writer);
     match ports.press_enter(&pane).await {
         Ok(()) => Attempt::Typed { pane },
         Err(error) => Attempt::EnterFailed { pane, error },

@@ -526,3 +526,52 @@ async fn a_pane_another_writer_typed_into_is_free_again_after_a_minute() {
 
     assert!(matches!(late, Attempt::Typed { .. }));
 }
+
+#[tokio::test]
+async fn a_phone_reply_and_an_alert_at_once_type_two_whole_lines() {
+    let fake = idle_chief();
+    let lock = fake.pane_locks().for_pane("%2");
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+
+    // The relay types its line, and takes a while before Enter.
+    let relay = tokio::task::spawn_blocking({
+        let fake = fake.clone();
+        move || {
+            crate::inbound::tmux::relay_holding_lock(&lock, || {
+                fake.set(|state| state.keys.push(Key::Text("%2".into(), "📱 reply".into())));
+                started_tx.send(()).unwrap();
+                std::thread::sleep(Duration::from_millis(100));
+                fake.set(|state| state.keys.push(Key::Enter("%2".into())));
+                Ok(())
+            })
+        }
+    });
+    started_rx.await.unwrap();
+    let alert = type_when_ready(
+        &fake,
+        Writer::Alert,
+        CHIEF,
+        SLOT_IDLE_FIRING,
+        &fake.agents(),
+        &[],
+    )
+    .await;
+    relay.await.unwrap().unwrap();
+
+    // The alert waited for the relay, and then counted the pane as busy.
+    assert_eq!(fake.keys(), typed("📱 reply"));
+    assert!(matches!(alert, Attempt::Wait(Reason::AgentBusy)));
+
+    // Once the pane has been seen busy and is idle again, the alert types its whole line.
+    set_chief_state(&fake, EffectiveAgentState::Busy);
+    let view = fake.agents();
+    let busy = type_when_ready(&fake, Writer::Alert, CHIEF, SLOT_IDLE_FIRING, &view, &[]).await;
+    assert!(matches!(busy, Attempt::Wait(Reason::AgentBusy)));
+    set_chief_state(&fake, EffectiveAgentState::Idle);
+    let view = fake.agents();
+    let alert = type_when_ready(&fake, Writer::Alert, CHIEF, SLOT_IDLE_FIRING, &view, &[]).await;
+    assert!(matches!(alert, Attempt::Typed { .. }));
+    let mut both = typed("📱 reply");
+    both.extend(typed(SLOT_IDLE_FIRING));
+    assert_eq!(fake.keys(), both);
+}

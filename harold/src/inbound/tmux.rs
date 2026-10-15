@@ -6,6 +6,7 @@ use crate::agent::domain::AgentPaneObservation;
 use crate::agent::inventory::{AgentInventoryPort, TmuxAgentInventory};
 use crate::agent::summary::sanitize_bounded_metadata;
 use crate::settings::get_settings;
+use crate::timed_prompts::{PaneLock, Writer, pane_lock};
 
 const INBOUND_PANE_LABEL_MAX_SCALARS: usize = 256;
 
@@ -131,10 +132,30 @@ pub(crate) fn press_enter_in_tmux_pane(pane_id: &str) -> Result<(), String> {
     press_enter_with(TMUX, pane_id)
 }
 
+/// Types `text` into the pane and presses Enter, holding the pane's lock so a timed prompt
+/// or an alert never puts its keys in between. There is no idle check. Blocks: call it from
+/// sync code, such as inside `spawn_blocking`, never from an async task.
 pub(crate) fn relay_to_tmux_pane(pane_id: &str, text: &str) -> Result<(), String> {
     info!(pane_id, text, "relay_to_tmux_pane");
-    type_text_into_tmux_pane(pane_id, text)?;
-    press_enter_in_tmux_pane(pane_id)
+    relay_holding_lock(&pane_lock(pane_id), || {
+        type_text_into_tmux_pane(pane_id, text)?;
+        press_enter_in_tmux_pane(pane_id)
+    })
+}
+
+/// Runs `type_and_enter` holding `lock`, waiting for a writer that holds it now. When it
+/// succeeds, the pane counts as busy for the timed prompts and alerts for a minute while it
+/// still reads idle. Blocks: never call it from an async task.
+pub(crate) fn relay_holding_lock(
+    lock: &PaneLock,
+    type_and_enter: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    let mut record = lock.blocking_lock();
+    let result = type_and_enter();
+    if result.is_ok() {
+        record.typed_by(Writer::PhoneReply);
+    }
+    result
 }
 
 #[cfg(test)]
