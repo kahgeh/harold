@@ -98,11 +98,12 @@ pub(crate) fn send_attachment(path: &Path) -> Result<(), String> {
 }
 
 /// Send the file at `path` to `recipient` by running `program`, which is `osascript`
-/// outside tests. Its error output is discarded: it can name the file, and a voice note's
-/// file name holds the words of its line.
+/// outside tests. Its output and error output are discarded: either can name the file, and
+/// a voice note's file name holds the words of its line.
 fn send_attachment_with(program: &str, path: &Path, recipient: &str) -> Result<(), String> {
     let status = Command::new(program)
         .args(attachment_args(path, recipient))
+        .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
         .map_err(|error| format!("failed to start osascript: {error}"))?;

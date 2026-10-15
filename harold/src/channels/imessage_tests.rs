@@ -1606,16 +1606,17 @@ async fn a_self_sent_reply_is_a_phone_request_on_the_imessage_channel() {
 }
 
 #[test]
-fn a_failed_attachment_send_discards_osascript_error_output_and_logs_no_words() {
+fn a_failed_attachment_send_discards_osascript_output_and_logs_no_words() {
     use std::os::unix::fs::PermissionsExt as _;
     let directory = TestDirectory::new();
-    let seen = directory.0.join("stderr");
+    let seen = directory.0.join("streams");
     let fake = directory.0.join("osascript");
-    // The file's path is the ninth argument, after the four `-e` lines of the script.
+    // The script writes how it found standard output, then standard error. The file's path
+    // is the ninth argument, after the four `-e` lines of the script.
     std::fs::write(
         &fake,
         format!(
-            "#!/bin/sh\nif [ /dev/fd/2 -ef /dev/null ]; then echo discarded > '{0}'; else echo kept > '{0}'; fi\necho \"cannot send $9\" >&2\nexit 1\n",
+            "#!/bin/sh\nout=kept; [ /dev/fd/1 -ef /dev/null ] && out=discarded\nerr=kept; [ /dev/fd/2 -ef /dev/null ] && err=discarded\necho \"$out $err\" > '{0}'\necho \"sent $9\"\necho \"cannot send $9\" >&2\nexit 1\n",
             seen.display()
         ),
     )
@@ -1632,7 +1633,10 @@ fn a_failed_attachment_send_discards_osascript_error_output_and_logs_no_words() 
         "{error}"
     );
     assert!(!error.contains("Release install"), "{error}");
-    assert_eq!(std::fs::read_to_string(&seen).unwrap(), "discarded\n");
+    assert_eq!(
+        std::fs::read_to_string(&seen).unwrap(),
+        "discarded discarded\n"
+    );
     assert!(!logs.text().contains("Release install"), "{}", logs.text());
     assert_eq!(
         super::send_attachment_with("true", &note, "me@example.com"),
