@@ -434,12 +434,18 @@ async fn non_agent_batch_publishes_the_advanced_durable_checkpoint() {
     assert!(receiver.borrow().panes.is_empty());
 }
 
+/// An event id no other test uses. A stored reply's phone request is kept under
+/// `event:<id>` in a process-wide map, so a shared id would let tests see each other's.
+fn unique_event_id() -> String {
+    uuid::Uuid::new_v4().to_string()
+}
+
 #[test]
 fn paused_inbound_delivery_is_skipped_without_routing() {
     // The payload is deliberately unroutable: were the gate removed, this fails on the
     // payload instead of relaying text to a real pane.
     let delivery = PendingDelivery {
-        event_id: "event-1".into(),
+        event_id: unique_event_id(),
         event_version: events::EventStreamVersion::new(1).unwrap(),
         event_type: "InboundMessageReceived".into(),
         payload: json!(null),
@@ -479,7 +485,7 @@ async fn projecting_a_pause_change_sets_the_messaging_switch() {
 fn production_dispatcher_reads_the_messaging_switch() {
     // Unroutable on purpose, as above: without the switch this fails on the payload.
     let delivery = PendingDelivery {
-        event_id: "event-1".into(),
+        event_id: unique_event_id(),
         event_version: events::EventStreamVersion::new(1).unwrap(),
         event_type: "InboundMessageReceived".into(),
         payload: json!(null),
@@ -504,7 +510,7 @@ fn stored_reply_reaches_routing_with_its_forwarded_flag() {
         };
         let mut routed = None;
 
-        let outcome = route_message(&message, "event-1", None, |text, flag| {
+        let outcome = route_message(&message, &unique_event_id(), None, |text, flag| {
             routed = Some((text.to_string(), flag));
             Ok(not_owned_report())
         });
@@ -521,7 +527,7 @@ fn routing_failure_of_a_stored_reply_is_retryable() {
         forwarded: false,
     };
 
-    let outcome = route_message(&message, "event-1", None, |_, _| {
+    let outcome = route_message(&message, &unique_event_id(), None, |_, _| {
         Err("tmux failed".to_string())
     });
 
