@@ -1,4 +1,5 @@
 import contextlib
+import hashlib
 import importlib.util
 import io
 import json
@@ -185,7 +186,7 @@ class InstallTests(unittest.TestCase):
             elif '--check-config' in argv:
                 self.assertEqual(Path(argv[0]).read_text(), 'built harold')
                 output = json.dumps({'grpc_addr': '127.0.0.1:50123',
-                                     'store_path': str(self.prefix / 'harold/data/events')})
+                                     'store_path': str(self.prefix / 'harold/data/store')})
             else:
                 output = ''
             return subprocess.CompletedProcess(argv, 0, output, '')
@@ -252,7 +253,7 @@ class InstallTests(unittest.TestCase):
             if '--check-config' in argv:
                 self.assertEqual(Path(argv[0]).read_text(), 'release harold')
                 output = json.dumps({'grpc_addr': '127.0.0.1:50123',
-                                     'store_path': str(self.prefix / 'harold/data/events')})
+                                     'store_path': str(self.prefix / 'harold/data/store')})
             return subprocess.CompletedProcess(argv, 0, output, '')
 
         with patch.object(sys, 'platform', 'darwin'), \
@@ -294,6 +295,16 @@ class InstallTests(unittest.TestCase):
                 self.install.prerequisites(self.prefix, prebuilt=True)
         self.assertNotIn('rustup', str(error.exception))
         self.assertNotIn('protobuf', str(error.exception))
+
+    def test_a_source_install_no_longer_needs_the_events_submodule(self):
+        repo = self.prefix / 'repo'
+        repo.mkdir()
+        (repo / 'Cargo.lock').write_text('# lock\n')
+        with patch.object(sys, 'platform', 'darwin'), \
+             patch.object(self.install.os, 'getuid', return_value=501), \
+             patch.object(self.install.shutil, 'which', return_value='/usr/bin/tool'):
+            self.install.prerequisites(repo)
+        self.assertFalse((repo / 'events').exists())
 
     def test_release_missing_any_mod_runtime_file_is_rejected(self):
         for missing in RUNTIME_FILES:
@@ -438,7 +449,7 @@ class InstalledServiceTests(unittest.TestCase):
             return subprocess.CompletedProcess(argv, 1, '', self.sign_error + '\n')
         if '--check-config' in argv:
             return subprocess.CompletedProcess(argv, 0, json.dumps({
-                'grpc_addr': '127.0.0.1:50123', 'store_path': str(self.bundle / 'data/events')}), '')
+                'grpc_addr': '127.0.0.1:50123', 'store_path': str(self.bundle / 'data/store')}), '')
         return subprocess.CompletedProcess(argv, 0, '', '')
 
     def install_existing(self, saved=NOT_RECORDED):
@@ -458,6 +469,8 @@ class InstalledServiceTests(unittest.TestCase):
         (self.prefix / 'tmx-agent-dash').write_text('old dash')
         (self.bundle / 'data/events').mkdir(parents=True)
         (self.bundle / 'data/events/marker').write_text('history')
+        (self.bundle / 'data/events/harold/main').mkdir(parents=True)
+        (self.bundle / 'data/events/harold/main/catalog.db').write_bytes(bytes(range(256)) * 64)
         (self.bundle / 'VERSION').write_text('v0.5.0\n')
         (self.bundle / 'REVISION').write_text('08095dde67ea035ff4e0aaa3109a344d39ceb019\n')
 
@@ -483,6 +496,53 @@ class InstalledServiceTests(unittest.TestCase):
 
     def installed_metadata(self):
         return json.loads((self.bundle / 'service.json').read_text())
+
+    def old_events(self):
+        """Every file under data/events, by its path there, with the SHA-256 of its bytes."""
+        events = self.bundle / 'data/events'
+        return {str(path.relative_to(events)): hashlib.sha256(path.read_bytes()).hexdigest()
+                for path in sorted(events.rglob('*')) if path.is_file()}
+
+    def not_carried_over(self):
+        return 'Not carried over from {}: messages still waiting to be delivered, and the mute and pause settings'.format(
+            self.bundle / 'data/events')
+
+    def test_an_upgrade_starts_a_new_store_and_leaves_the_old_events_byte_for_byte(self):
+        self.install_existing(saved='-')
+        self.install_existing_programs(self.prefix.parent / 'haroldctl.log')
+        before = self.old_events()
+        self.assertEqual(len(before), 2)
+        output = self.run_install('-')
+        self.assertEqual(self.old_events(), before)
+        # The old data/ moves in whole, so Harold makes data/store itself when it starts.
+        self.assertEqual(self.installed_metadata()['env']['HAROLD__STORE__PATH'], str(self.bundle / 'data/store'))
+        self.assertIn('New store: {}\n'.format(self.bundle / 'data/store'), output)
+        self.assertIn(self.not_carried_over() + ' (voice is on, messaging unpaused). '
+                      'That folder is left as it was.\n', output)
+        self.assertLess(output.index('Harold ready at'), output.index('New store:'))
+
+    def test_an_install_onto_a_bundle_that_already_has_the_new_store_says_nothing_about_it(self):
+        self.install_existing(saved='-')
+        self.install_existing_programs(self.prefix.parent / 'haroldctl.log')
+        (self.bundle / 'data/store').mkdir()
+        (self.bundle / 'data/store/marker').write_text('new history')
+        output = self.run_install('-')
+        self.assertEqual((self.bundle / 'data/store/marker').read_text(), 'new history')
+        self.assertIn('Harold ready at', output)
+        self.assertNotIn('New store:', output)
+        self.assertNotIn('Not carried over', output)
+
+    def test_a_fresh_reinstall_or_a_first_install_says_nothing_about_the_old_store(self):
+        output = self.run_install('-')
+        self.assertNotIn('Not carried over', output)
+        self.assertNotIn('New store:', output)
+        # Only the old events folder is left, as after an upgrade; --reinstall archives it all.
+        (self.bundle / 'data/store').rmdir()
+        self.install_existing_programs(self.prefix.parent / 'haroldctl.log')
+        output = self.run_install('-', reinstall=True)
+        self.assertIn('Harold ready at', output)
+        self.assertNotIn('Not carried over', output)
+        self.assertNotIn('New store:', output)
 
     def test_launchd_starts_harold_itself(self):
         self.run_install()
@@ -833,7 +893,7 @@ class ServiceTests(unittest.TestCase):
         inherited = {'HAROLD__GRPC__PORT': '9999', 'HAROLD_ENV': 'evil',
                      'LC_MESSAGES': 'C', 'LC_ALL': 'C', 'HOME': '/home/test'}
         controlled = {'HAROLD_ENV': 'local', 'HAROLD_CONFIG_DIR': '/bundle/config',
-                      'HAROLD__STORE__PATH': '/bundle/data/events', 'PATH': '/tools',
+                      'HAROLD__STORE__PATH': '/bundle/data/store', 'PATH': '/tools',
                       'LANG': 'en_US.UTF-8', 'LC_ALL': 'en_US.UTF-8'}
         env = self.service.managed_environment(controlled, inherited)
         self.assertNotIn('HAROLD__GRPC__PORT', env)
@@ -875,7 +935,7 @@ class ServiceTests(unittest.TestCase):
 
     def test_revalidation_refreshes_edited_endpoint_without_exposing_config_output(self):
         metadata = {'bundle': '/bundle', 'grpc_addr': '127.0.0.1:50060', 'env': {}}
-        reply = subprocess.CompletedProcess([], 0, '{"grpc_addr":"127.0.0.1:50123","store_path":"/bundle/data/events"}', '')
+        reply = subprocess.CompletedProcess([], 0, '{"grpc_addr":"127.0.0.1:50123","store_path":"/bundle/data/store"}', '')
         with patch.object(self.service, 'run', return_value=reply):
             updated = self.service.validated_metadata(metadata)
         self.assertEqual(updated['grpc_addr'], '127.0.0.1:50123')
@@ -885,6 +945,14 @@ class ServiceTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, '^Configuration validation failed') as error:
                 self.service.validated_metadata(metadata)
         self.assertNotIn('secret', str(error.exception))
+
+    def test_revalidation_refuses_the_old_events_folder_as_the_store(self):
+        metadata = {'bundle': '/bundle', 'grpc_addr': '127.0.0.1:50060', 'env': {}}
+        reply = subprocess.CompletedProcess(
+            [], 0, '{"grpc_addr":"127.0.0.1:50123","store_path":"/bundle/data/events"}', '')
+        with patch.object(self.service, 'run', return_value=reply):
+            with self.assertRaisesRegex(RuntimeError, '^Configuration does not use the managed store path$'):
+                self.service.validated_metadata(metadata)
 
     def test_run_is_no_longer_a_command(self):
         error = io.StringIO()
@@ -902,7 +970,7 @@ class ServiceTests(unittest.TestCase):
                     'grpc_addr': '127.0.0.1:50060', 'env': {'HAROLD_ENV': 'local'},
                     'signing_identity': 'Kah Geh Tan'}
         reply = subprocess.CompletedProcess(
-            [], 0, '{"grpc_addr":"127.0.0.1:50123","store_path":"/bundle/data/events"}', '')
+            [], 0, '{"grpc_addr":"127.0.0.1:50123","store_path":"/bundle/data/store"}', '')
         with patch.object(self.service, 'run', return_value=reply):
             updated = self.service.validated_metadata(metadata)
         self.assertEqual(updated, dict(metadata, grpc_addr='127.0.0.1:50123'))

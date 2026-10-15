@@ -120,7 +120,7 @@ def validated_metadata(metadata):
     if result.returncode:
         raise RuntimeError('Configuration validation failed; check config/local.toml')
     config = json.loads(result.stdout)
-    if config['store_path'] != str(bundle / 'data/events'):
+    if config['store_path'] != str(bundle / 'data/store'):
         raise RuntimeError('Configuration does not use the managed store path')
     return dict(metadata, grpc_addr=config['grpc_addr'])
 

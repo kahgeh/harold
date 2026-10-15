@@ -75,7 +75,7 @@ def validate_destination(prefix):
         path = prefix / name
         if path.exists() and not path.is_file():
             raise RuntimeError('Expected regular installed file: {}'.format(path))
-    for name in ('config', 'hooks', 'data', 'data/events'):
+    for name in ('config', 'hooks', 'data', 'data/events', 'data/store'):
         path = prefix / 'harold' / name
         if path.exists() and not path.is_dir():
             raise RuntimeError('Expected managed directory: {}'.format(path))
@@ -100,8 +100,6 @@ def prerequisites(repo, prebuilt=False):
                             '`xcode-select --install`.')
         raise RuntimeError('Missing tools: {}. {} Then rerun.'.format(', '.join(missing), instructions))
     if not prebuilt:
-        if not (repo / 'events/Cargo.toml').is_file():
-            raise RuntimeError('Missing events submodule. Run git submodule update --init --recursive')
         if not (repo / 'Cargo.lock').is_file():
             raise RuntimeError('Missing Cargo.lock; restore the checked-in lockfile before installing')
 
@@ -387,7 +385,7 @@ def make_metadata(prefix, grpc_addr):
     return {'bundle': str(bundle), 'label': label, 'grpc_addr': grpc_addr,
             'plist': str(bundle / 'service.plist'),
             'env': {'HAROLD_CONFIG_DIR': str(bundle / 'config'), 'HAROLD_ENV': 'local',
-                    'HAROLD__STORE__PATH': str(bundle / 'data/events'),
+                    'HAROLD__STORE__PATH': str(bundle / 'data/store'),
                     'PATH': ':'.join(dict.fromkeys(paths)), 'LANG': 'en_US.UTF-8', 'LC_ALL': 'en_US.UTF-8'}}
 
 
@@ -519,7 +517,7 @@ def install(args, repo):
             stage = staging / 'harold'
             (stage / 'config').mkdir(parents=True)
             (stage / 'hooks').mkdir()
-            (stage / 'data/events').mkdir(parents=True)
+            (stage / 'data/store').mkdir(parents=True)
             shutil.copy2(artifacts['harold'], stage / 'harold')
             shutil.copy2(artifacts['tmx-agent-dash'], staging / 'tmx-agent-dash')
             shutil.copy2(assets / ('harold.proto' if prebuilt is not None else 'harold-api/proto/harold.proto'),
@@ -555,7 +553,7 @@ def install(args, repo):
                 raise RuntimeError('Configuration validation failed; check the supplied TOML and required channel fields')
             config = json.loads(probe.stdout)
             metadata['grpc_addr'] = config['grpc_addr']
-            if config['store_path'] != str(bundle / 'data/events'):
+            if config['store_path'] != str(bundle / 'data/store'):
                 raise RuntimeError('Configuration probe did not use the managed store path')
             (stage / 'service.json').write_text(json.dumps(metadata, indent=2) + '\n')
             write_plist(stage / 'service.plist', metadata)
@@ -568,6 +566,7 @@ def install(args, repo):
                 old_metadata = json.loads((bundle / 'service.json').read_text())
                 if old_metadata['bundle'] != str(bundle) or old_metadata['label'] != metadata['label']:
                     raise RuntimeError('Existing service metadata does not belong to this prefix')
+            fresh_store = not args.reinstall and (bundle / 'data/events').is_dir() and not (bundle / 'data/store').exists()
             # Attribute listeners before stopping any currently running service.
             for current in (old_metadata, metadata):
                 for pid in service.listener_pids(current):
@@ -590,6 +589,11 @@ def install(args, repo):
             pid = service.start(metadata)
             print('Harold ready at {} (LaunchAgent PID {}).\nControl: {}\nConfig: {}\nLog: {}'.format(
                 metadata['grpc_addr'], pid, prefix / 'haroldctl', bundle / 'config/local.toml', bundle / 'harold.log'))
+            if fresh_store:
+                print('New store: {}\nNot carried over from {}: messages still waiting to be delivered, '
+                      'and the mute and pause settings (voice is on, messaging unpaused). '
+                      'That folder is left as it was.'.format(bundle / 'data/store', bundle / 'data/events'),
+                      flush=True)
             message = permissions_message(away_channel(bundle / 'config'), old_requirement,
                                           new_requirement, identity, bundle / 'harold')
             if message:
