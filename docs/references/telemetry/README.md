@@ -197,6 +197,8 @@ Metrics are sent every 30 seconds. Every metric also carries `harold.machine`.
 
 `pod.specs` reports every state of every product, 0 included, so a card can read 0.
 
+`harold.turns` keeps one series per session (`session.id`, `pane_id`, and each `started_by` seen) for the life of the Harold process, so a long-running Harold accumulates series until it restarts. Past the SDK's limit of 2000 series per instrument, new sessions fall into one overflow series, marked `otel.metric.overflow = true`.
+
 ## What leaves Harold
 
 No exported item carries what the user or an agent wrote, a voice line, the AI model's output, an error message, the recipient or a token.
