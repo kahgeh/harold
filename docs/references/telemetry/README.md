@@ -394,10 +394,10 @@ HyperDX 2.40 cannot express three parts of these conditions:
 
 ## How an alert reaches the chief
 
-`webhook.json` is one generic HyperDX webhook, used by all four alerts:
+Each alert has its own generic HyperDX webhook, `webhook-<name>.json`, named `harold-alerts-<name>`. The alert's name is written into the webhook's body, because HyperDX 2.40 leaves `note` out of what a webhook body can see, so `{{note}}` renders as an empty string. Each webhook:
 
-- It posts to `http://host.containers.internal:4320/alert`, Harold's `alert_listen` port as the stack's containers see this Mac with Podman. With Docker, change the host to `host.docker.internal`. The port must match `alert_listen`.
-- Its body is `{"alert": "{{note}}", "state": "{{#if (eq status 'firing')}}firing{{else if (eq status 'resolved')}}cleared{{else}}{{status}}{{/if}}"}`. Each alert's `note` is its name. HyperDX's `status` `firing` is sent as `firing`, and `resolved` as `cleared`. Any other status (`no_data`, `pending`, `error`) is passed through as it is, so Harold answers 400 and types nothing. HyperDX 2.40 documents posts only for firing and resolving, but the body does not rely on that.
+- posts to `http://host.containers.internal:4320/alert`, Harold's `alert_listen` port as the stack's containers see this Mac with Podman. With Docker, change the host to `host.docker.internal`. The port must match `alert_listen`.
+- has the body `{"alert": "<name>", "state": "{{#if (eq status 'firing')}}firing{{else if (eq status 'resolved')}}cleared{{else}}{{status}}{{/if}}"}`. HyperDX's `status` `firing` is sent as `firing`, and `resolved` as `cleared`. Any other status (`no_data`, `pending`, `error`) is passed through as it is, so Harold answers 400 and types nothing. HyperDX 2.40 documents posts only for firing and resolving, but the body does not rely on that.
 
 When the port is taken at start, Harold logs `alert address unavailable` (`reason = bind_failed`) and takes no alerts until it restarts with the port free. HyperDX's posts then fail, and no line reaches the chief.
 
@@ -447,17 +447,17 @@ fill() {
 
 Run them from the repository root.
 
-**Create** the webhook first, then the dashboards and the alerts:
+**Create** the dashboards, then each alert's webhook and the alert pointing at it:
 
 ```sh
-export WEBHOOK_ID=$(fill webhook.json | hdx -X POST "$HYPERDX_URL/api/v2/webhooks" --data-binary @- | jq -r '.data.id // .id')
-
 for file in dashboard.json trends.json; do
   fill "$file" | hdx -X POST "$HYPERDX_URL/api/v2/dashboards/validate" --data-binary @-   # HyperDX's own check
   fill "$file" | hdx -X POST "$HYPERDX_URL/api/v2/dashboards" --data-binary @- | jq -r '.data.id // .id'
 done
 
 for name in phone-request-unavailable phone-request-slow wrong-agent slot-idle; do
+  WEBHOOK_ID=$(fill "webhook-$name.json" | hdx -X POST "$HYPERDX_URL/api/v2/webhooks" --data-binary @- | jq -r '.data.id // .id')
+  [ -n "$WEBHOOK_ID" ] && [ "$WEBHOOK_ID" != null ] || { echo "webhook harold-alerts-$name not created" >&2; break; }
   fill "alert-$name.json" | hdx -X POST "$HYPERDX_URL/api/v2/alerts" --data-binary @- | jq -r '.data.id // .id'
 done
 ```
@@ -465,9 +465,6 @@ done
 **Update** an existing definition with `PUT` to its id. Find the ids by name:
 
 ```sh
-WEBHOOK_ID=$(hdx "$HYPERDX_URL/api/v2/webhooks" | jq -r '.data[] | select(.name == "harold-alerts") | .id')
-fill webhook.json | hdx -X PUT "$HYPERDX_URL/api/v2/webhooks/$WEBHOOK_ID" --data-binary @-
-
 dashboard() { hdx "$HYPERDX_URL/api/v2/dashboards" | jq -c --arg name "$1" '.data[] | select(.name == $name)'; }
 
 # "Harold": an update must keep the product filter's id. The tiles keep theirs by the ids in the file.
@@ -480,10 +477,15 @@ fill dashboard.json \
 fill trends.json | hdx -X PUT "$HYPERDX_URL/api/v2/dashboards/$(dashboard "Harold trends" | jq -r .id)" --data-binary @-
 
 for name in phone-request-unavailable phone-request-slow wrong-agent slot-idle; do
+  WEBHOOK_ID=$(hdx "$HYPERDX_URL/api/v2/webhooks" | jq -r --arg name "harold-alerts-$name" '.data[] | select(.name == $name) | .id')
+  [ -n "$WEBHOOK_ID" ] || { echo "no webhook harold-alerts-$name: create it first" >&2; break; }
+  fill "webhook-$name.json" | hdx -X PUT "$HYPERDX_URL/api/v2/webhooks/$WEBHOOK_ID" --data-binary @-
   id=$(hdx "$HYPERDX_URL/api/v2/alerts" | jq -r --arg name "$name" '.data[] | select(.name == $name) | .id')
   fill "alert-$name.json" | hdx -X PUT "$HYPERDX_URL/api/v2/alerts/$id" --data-binary @-
 done
 ```
+
+A HyperDX set up from the earlier single-webhook files has one webhook named `harold-alerts` and none of the four. Create the four with the create loop's `webhook-$name.json` line, then run the update loop. `harold-alerts` is then unused and may be deleted.
 
 ## Not tested until real use
 
@@ -492,5 +494,5 @@ The definitions were written from HyperDX 2.40's API source and the local stack'
 - data arriving in HyperDX from either Mac;
 - the dashboards, panels and alerts working as written in HyperDX 2.40, including the field names, the SQL tiles and the counter rule's SQL in ClickHouse;
 - the counting from 0 at start reaching HyperDX as a first point of 0;
-- the stack's containers reaching Harold's alert address, and the webhook's body arriving as written;
+- the stack's containers reaching Harold's alert address, and each webhook's body arriving as written;
 - the hooks' new fields on the installed agents.
