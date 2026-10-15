@@ -1121,6 +1121,32 @@ async fn generated_activity_summary_append_normalizes_description_and_rejects_em
 }
 
 #[tokio::test]
+async fn an_empty_folder_becomes_a_new_store_with_the_defaults() {
+    let directory = TestDirectory::new();
+    let store = HaroldStore::open(directory.path()).await.unwrap();
+    assert!(store.is_new());
+    assert!(directory.path().join("log").is_dir());
+    assert!(directory.path().join("harold-state.db").is_file());
+    let snapshot = store.load_agent_snapshot().await.unwrap();
+    assert!(!snapshot.tts_muted, "voice is on");
+    assert!(!snapshot.messaging_paused, "messaging is unpaused");
+    assert!(store.next_pending_delivery().await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn an_existing_store_is_opened_as_it_is() {
+    let directory = TestDirectory::new();
+    {
+        let store = HaroldStore::open(directory.path()).await.unwrap();
+        append_tts_mute_changed(&store, true).await.unwrap();
+        store.project_unhandled_events(10).await.unwrap();
+    }
+    let store = HaroldStore::open(directory.path()).await.unwrap();
+    assert!(!store.is_new());
+    assert!(store.load_agent_snapshot().await.unwrap().tts_muted);
+}
+
+#[tokio::test]
 async fn tts_mute_is_projected_into_the_snapshot_and_survives_reopen() {
     let directory = TestDirectory::new();
     let store = HaroldStore::open(directory.path()).await.unwrap();
@@ -1730,6 +1756,20 @@ async fn an_event_appended_inside_a_span_stores_its_trace_and_span_ids() {
     assert_eq!(events[1].span_id, Some(expected.span_id().to_string()));
 }
 
+/// Whether `text` calls `function` by its bare name: `function(` that is not a method call
+/// (`.function(`), a definition (`fn function(`), a path (`time::function(`, checked
+/// separately) or the end of a longer name.
+fn calls_bare(text: &str, function: &str) -> bool {
+    text.match_indices(&format!("{function}(")).any(|(at, _)| {
+        let before = &text[..at];
+        let joined = before
+            .chars()
+            .last()
+            .is_some_and(|c| c.is_alphanumeric() || matches!(c, '_' | '.' | ':'));
+        !joined && !before.ends_with("fn ")
+    })
+}
+
 #[test]
 fn no_code_outside_tests_pauses_or_advances_tokio_time() {
     // opendata-log turns on tokio's `test-util`, so a stray pause would compile into the
@@ -1753,6 +1793,12 @@ fn no_code_outside_tests_pauses_or_advances_tokio_time() {
                 for needle in ["time::pause", "time::advance", "start_paused"] {
                     if text.contains(needle) {
                         offenders.push(format!("{} uses {needle}", path.display()));
+                    }
+                }
+                // After `use tokio::time::{advance, pause}`, the calls are bare.
+                for function in ["pause", "advance"] {
+                    if calls_bare(&text, function) {
+                        offenders.push(format!("{} calls {function}(", path.display()));
                     }
                 }
             }

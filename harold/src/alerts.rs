@@ -302,12 +302,18 @@ fn log_not_delivered(alert: &str, state: &str, reason: &Reason) {
             reason = name,
             "alert not delivered (typing_failed)"
         ),
-        // Timed prompts only: a try at typing never gives this.
+        // Timed prompts only: a try at typing never gives these.
         Reason::WindowPassed => warn!(
             alert,
             state,
             reason = name,
             "alert not delivered (window_passed)"
+        ),
+        Reason::NewStore => warn!(
+            alert,
+            state,
+            reason = name,
+            "alert not delivered (new_store)"
         ),
     }
 }

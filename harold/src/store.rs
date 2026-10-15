@@ -123,22 +123,23 @@ pub(crate) struct ProjectionBatch {
 
 /// Takes the store folder's lock, which the OS releases when this process ends. It is
 /// taken before the log opens: opening the log a second time would fence the first Harold.
-fn lock_store(root: &Path) -> Result<std::fs::File> {
+fn lock_store(root: &Path) -> Result<StoreLock> {
     let file = std::fs::OpenOptions::new()
         .create(true)
         .truncate(false)
         .write(true)
         .open(root.join(LOCK_FILE))?;
     match file.try_lock() {
-        Ok(()) => Ok(file),
+        Ok(()) => Ok(StoreLock(file)),
         Err(std::fs::TryLockError::WouldBlock) => Err(StoreError::InUse),
         Err(std::fs::TryLockError::Error(error)) => Err(error.into()),
     }
 }
 
-/// The store folder's lock, released when the store is dropped. Closing the file alone
-/// does not always release it at once: a child process another thread is starting holds a
-/// copy of the file until it runs its program, and the lock lasts until every copy closes.
+/// The store folder's lock, released when the store is dropped, or as soon as a later step
+/// of opening the store fails. Closing the file alone does not always release it at once: a
+/// child process another thread is starting holds a copy of the file until it runs its
+/// program, and the lock lasts until every copy closes.
 struct StoreLock(std::fs::File);
 
 impl Drop for StoreLock {
@@ -151,6 +152,7 @@ pub struct HaroldStore {
     stream: EventLog,
     state: Database,
     graces: GraceWindows,
+    is_new: bool,
     #[cfg(test)]
     fail_projection_before_checkpoint: std::sync::atomic::AtomicBool,
     #[cfg(test)]
@@ -218,6 +220,8 @@ impl HaroldStore {
         let stream = EventLog::open(root).await?;
 
         let state_path = root.join(STATE_DATABASE);
+        // A store is new when Harold creates its state database now.
+        let is_new = !tokio::fs::try_exists(&state_path).await?;
         let state_path = state_path
             .to_str()
             .ok_or_else(|| StoreError::Data("Harold state path contains invalid UTF-8".into()))?;
@@ -230,6 +234,7 @@ impl HaroldStore {
             stream,
             state,
             graces,
+            is_new,
             #[cfg(test)]
             fail_projection_before_checkpoint: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)]
@@ -238,8 +243,13 @@ impl HaroldStore {
             fail_next_monitor_append: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)]
             fail_next_snapshot_load: std::sync::atomic::AtomicBool::new(false),
-            _lock: StoreLock(lock),
+            _lock: lock,
         })
+    }
+
+    /// Whether this open created the store's state database: a fresh start.
+    pub(crate) fn is_new(&self) -> bool {
+        self.is_new
     }
 
     pub(crate) fn stream(&self) -> &EventLog {

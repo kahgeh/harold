@@ -1502,3 +1502,53 @@ async fn a_prompt_whose_enter_fails_starts_no_turn() {
 
     assert!(crate::telemetry::take_prompt(&pane, time::OffsetDateTime::now_utc()).is_none());
 }
+
+#[tokio::test]
+async fn a_new_store_marks_prompts_already_past_and_leaves_later_ones() {
+    let store = TestStore::new().await;
+    assert!(store.store.is_new());
+    let fake = Fake::at("2026-10-16", "08:30:00");
+    let mut prompts = prompts(
+        &fake,
+        &store,
+        &[entry("digest", "07:50"), entry("evening", "21:00")],
+    );
+
+    let reports = prompts.mark_passed_on_new_store().await;
+    assert_eq!(
+        reports,
+        vec![Report::MarkedOnNewStore {
+            name: "digest".into()
+        }]
+    );
+    assert_eq!(
+        handled(&store).await,
+        vec![TimedPromptHandled {
+            name: "digest".into(),
+            day: "2026-10-16".into(),
+            outcome: TimedPromptOutcome::Skipped,
+            reason: Some("new_store".into()),
+            pane_id: None,
+        }]
+    );
+
+    // 08:30 is inside digest's 120-minute window, and it is not typed.
+    prompts.round().await;
+    assert!(fake.keys().is_empty());
+
+    fake.clock("2026-10-16", "21:00:00");
+    let reports = prompts.round().await;
+    assert!(
+        matches!(reports.as_slice(), [Report::Typed { name, .. }] if name == "evening"),
+        "{reports:?}"
+    );
+}
+
+#[tokio::test]
+async fn marking_does_nothing_before_any_prompt_time() {
+    let store = TestStore::new().await;
+    let fake = Fake::at("2026-10-16", "06:00:00");
+    let mut prompts = prompts(&fake, &store, &[entry("digest", "07:50")]);
+    assert!(prompts.mark_passed_on_new_store().await.is_empty());
+    assert!(handled(&store).await.is_empty());
+}

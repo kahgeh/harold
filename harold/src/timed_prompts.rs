@@ -196,6 +196,8 @@ pub(crate) enum Reason {
     TypingFailed,
     /// The window ended and Harold never saw the prompt due.
     WindowPassed,
+    /// Harold created a new store after the prompt's time today.
+    NewStore,
 }
 
 impl Reason {
@@ -212,6 +214,7 @@ impl Reason {
             Self::InputBoxHoldsText => "input_box_holds_text",
             Self::TypingFailed => "typing_failed",
             Self::WindowPassed => "window_passed",
+            Self::NewStore => "new_store",
         }
     }
 }
@@ -471,6 +474,10 @@ pub(crate) enum Report {
         name: String,
         error: String,
     },
+    /// On a new store, the prompt's time today had passed, so it counts as handled today.
+    MarkedOnNewStore {
+        name: String,
+    },
 }
 
 pub(crate) fn log_report(report: &Report) {
@@ -498,6 +505,9 @@ pub(crate) fn log_report(report: &Report) {
         }
         Report::RecordFailed { name, error } => {
             error!(name = %name, error = %error, "timed prompt record not stored");
+        }
+        Report::MarkedOnNewStore { name } => {
+            info!(name = %name, "timed prompt marked handled (new store)")
         }
     }
 }
@@ -587,6 +597,37 @@ impl<P: Ports> TimedPrompts<P> {
 
     pub(crate) fn is_empty(&self) -> bool {
         self.prompts.is_empty()
+    }
+
+    /// On a store Harold has just created, counts each prompt whose time today has passed as
+    /// handled today, so a restart onto a new store does not type it a second time. A prompt
+    /// whose time is later today still runs. Without a readable clock nothing is marked.
+    pub(crate) async fn mark_passed_on_new_store(&mut self) -> Vec<Report> {
+        let mut reports = Vec::new();
+        let Some(now) = self.ports.now().await else {
+            return reports;
+        };
+        let store: &HaroldStore = &self.store;
+        for (prompt, progress) in self.prompts.iter_mut() {
+            if matches!(prompt.window.phase(now.seconds_of_day), Phase::Before)
+                || progress.handled_day.as_deref() == Some(now.day.as_str())
+            {
+                continue;
+            }
+            reports.push(Report::MarkedOnNewStore {
+                name: prompt.name.clone(),
+            });
+            let event = TimedPromptHandled {
+                name: prompt.name.clone(),
+                day: now.day.clone(),
+                outcome: TimedPromptOutcome::Skipped,
+                reason: Some(Reason::NewStore.as_str().to_string()),
+                pane_id: None,
+            };
+            record(store, event, &mut reports).await;
+            progress.handled_day = Some(now.day.clone());
+        }
+        reports
     }
 
     /// One pass over the prompts, in the order of the configuration list. Returns what
@@ -958,6 +999,7 @@ pub(crate) fn startup_wait(monitor: &AgentMonitorSettings) -> Duration {
 
 /// Starts the task for the prompts in `settings`. The caller has already read the whole
 /// event stream into the state database, so the stored dates are current.
+/// On a new store, prompts whose time today has passed are first marked handled.
 pub(crate) async fn start(
     settings: &Settings,
     store: Arc<HaroldStore>,
@@ -970,7 +1012,13 @@ pub(crate) async fn start(
         store.timed_prompt_last_days().await?
     };
     let ports = TmuxPorts::new(snapshots, settings.agents.0.clone());
-    let prompts = TimedPrompts::new(&settings.timed_prompts, &last_days, ports, store);
+    let is_new = store.is_new();
+    let mut prompts = TimedPrompts::new(&settings.timed_prompts, &last_days, ports, store);
+    if is_new {
+        for report in prompts.mark_passed_on_new_store().await {
+            log_report(&report);
+        }
+    }
     Ok(tokio::spawn(run(
         prompts,
         startup_wait(&settings.agent_monitor),
