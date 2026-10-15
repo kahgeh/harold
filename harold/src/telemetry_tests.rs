@@ -573,6 +573,64 @@ fn a_reply_another_mac_owns_or_while_paused_is_not_counted() {
     );
 }
 
+fn harold_chose(pane: &str) -> Routing {
+    Routing::Typed {
+        pane_id: pane.into(),
+        resolved_by: ResolvedBy::LatestNotifier,
+        tagged: false,
+    }
+}
+
+#[test]
+fn a_tag_after_a_reply_typed_late_adds_no_wrong() {
+    // Only an on-time typed request can be counted wrong: typed minus wrong is the
+    // right-agent count.
+    let mut book = PhoneBook::default();
+    let late = book.judge("imessage", at(0), at(11), &harold_chose("%1"));
+    assert_eq!(late.outcome, Some("unavailable"));
+    assert_eq!(
+        book.judge("imessage", at(5), at(5), &typed("%2", true))
+            .wrong,
+        None
+    );
+}
+
+#[test]
+fn a_tag_after_a_reply_with_no_pane_adds_no_wrong() {
+    // The reply after the typed one is the no-pane reply, not the tag.
+    let mut book = PhoneBook::default();
+    book.judge("imessage", at(0), at(0), &harold_chose("%1"));
+    book.judge("imessage", at(1), at(1), &Routing::NoPane);
+    assert_eq!(
+        book.judge("imessage", at(2), at(2), &typed("%2", true))
+            .wrong,
+        None
+    );
+}
+
+#[test]
+fn a_reply_another_mac_owns_leaves_the_last_typed_reply_to_be_judged() {
+    let mut book = PhoneBook::default();
+    book.judge("imessage", at(0), at(0), &harold_chose("%1"));
+    book.judge("imessage", at(1), at(1), &Routing::NotOwned);
+    assert_eq!(
+        book.judge("imessage", at(2), at(2), &typed("%2", true))
+            .wrong,
+        Some(("imessage".into(), ResolvedBy::LatestNotifier))
+    );
+}
+
+#[test]
+fn an_untagged_reply_to_another_pane_adds_no_wrong() {
+    let mut book = PhoneBook::default();
+    book.judge("imessage", at(0), at(0), &harold_chose("%1"));
+    assert_eq!(
+        book.judge("imessage", at(2), at(2), &harold_chose("%2"))
+            .wrong,
+        None
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Turn starts
 // ---------------------------------------------------------------------------
@@ -597,6 +655,14 @@ fn the_turn_starts_at_the_first_known_source() {
     let s = turn_start(None, None, Some(at(4)), reached);
     assert_eq!((s.at, s.started_by), (Some(at(4)), StartedBy::Desk));
     let s = turn_start(None, None, None, reached);
+    assert_eq!((s.at, s.started_by), (None, StartedBy::Unknown));
+}
+
+#[test]
+fn a_typing_time_after_the_hook_is_ignored_with_what_it_started() {
+    let s = turn_start(None, Some((at(31), StartedBy::Phone)), Some(at(4)), at(30));
+    assert_eq!((s.at, s.started_by), (Some(at(4)), StartedBy::Desk));
+    let s = turn_start(None, Some((at(31), StartedBy::Phone)), None, at(30));
     assert_eq!((s.at, s.started_by), (None, StartedBy::Unknown));
 }
 

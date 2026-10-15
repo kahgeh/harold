@@ -337,7 +337,8 @@ pub(crate) struct PhoneVerdict {
     pub wrong: Option<(String, ResolvedBy)>,
 }
 
-/// The last reply typed on this Mac, which a later tag may show went to the wrong pane.
+/// The last counted reply on this Mac, when it was typed on time. The next reply, if it
+/// is a tag for another pane, may show it went to the wrong agent.
 #[allow(
     dead_code,
     reason = "the listener and projector judge phone requests in a later telemetry task"
@@ -350,7 +351,8 @@ struct LastTyped {
     resolved_by: ResolvedBy,
 }
 
-/// Judges each phone reply in turn, remembering the last one typed.
+/// Judges each phone reply in turn, remembering the last counted one when it was typed
+/// on time.
 #[allow(
     dead_code,
     reason = "the listener and projector judge phone requests in a later telemetry task"
@@ -374,6 +376,10 @@ impl PhoneBook {
     ///   another pane, Harold chose its pane, and it was sent at most `ON_TIME` earlier.
     ///   A reply the user tagged went where the user said, so a later tag for another
     ///   pane is the user moving on, not a misroute.
+    /// - Only the reply right after a typed one can mark it wrong, so every counted reply
+    ///   replaces the last typed reply: with itself when it was typed on time, and with
+    ///   none otherwise. A late reply is never wrong, because the right-agent rate is
+    ///   typed minus wrong.
     pub(crate) fn judge(
         &mut self,
         channel: &str,
@@ -387,20 +393,19 @@ impl PhoneBook {
             tagged,
         } = routing
         else {
-            let outcome = matches!(routing, Routing::NoPane).then_some("unavailable");
+            let counted = matches!(routing, Routing::NoPane);
+            if counted {
+                self.last_typed = None;
+            }
             return PhoneVerdict {
-                outcome,
+                outcome: counted.then_some("unavailable"),
                 latency: None,
                 wrong: None,
             };
         };
         // A reply handled before its own time (a clock difference) took no time.
         let latency = Duration::try_from(typed_at - reply_at).unwrap_or(Duration::ZERO);
-        let outcome = if latency > ON_TIME {
-            "unavailable"
-        } else {
-            "typed"
-        };
+        let on_time = latency <= ON_TIME;
         let wrong = self
             .last_typed
             .as_ref()
@@ -412,14 +417,14 @@ impl PhoneBook {
                         .is_ok_and(|since| since <= ON_TIME)
             })
             .map(|last| (last.channel.clone(), last.resolved_by));
-        self.last_typed = Some(LastTyped {
+        self.last_typed = on_time.then(|| LastTyped {
             channel: channel.to_string(),
             reply_at,
             pane_id: pane_id.clone(),
             resolved_by: *resolved_by,
         });
         PhoneVerdict {
-            outcome: Some(outcome),
+            outcome: Some(if on_time { "typed" } else { "unavailable" }),
             latency: Some(latency),
             wrong,
         }
@@ -456,8 +461,8 @@ pub(crate) struct TurnStart {
 
 /// The spec's order: the hook's transcript time, then Harold's typing, then first busy.
 /// A hook time that is not RFC 3339 counts as absent, and any time after `hook_reached`
-/// is skipped. `started_by` is the typing's when Harold typed the prompt; otherwise
-/// `Desk` when the start is known, and `Unknown` when it is not.
+/// is skipped. `started_by` is the typing's when Harold typed the prompt at or before
+/// `hook_reached`; otherwise `Desk` when the start is known, and `Unknown` when it is not.
 #[allow(
     dead_code,
     reason = "the turn span and turn metrics use the turn start in a later telemetry task"
@@ -469,6 +474,7 @@ pub(crate) fn turn_start(
     hook_reached: OffsetDateTime,
 ) -> TurnStart {
     let hook = hook_time.and_then(|text| OffsetDateTime::parse(text, &Rfc3339).ok());
+    let typed = typed.filter(|(at, _)| *at <= hook_reached);
     let at = [hook, typed.map(|(at, _)| at), busy_since]
         .into_iter()
         .flatten()
