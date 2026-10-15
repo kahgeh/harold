@@ -423,6 +423,8 @@ fn typed(pane: &str, tagged: bool) -> Routing {
             ResolvedBy::LatestNotifier
         },
         tagged,
+        // `judge` takes the typing time as its own argument.
+        typed_at: at(0),
     }
 }
 
@@ -527,6 +529,7 @@ fn a_tagged_reply_after_a_user_tagged_reply_to_another_pane_adds_no_wrong() {
             pane_id: "%1".into(),
             resolved_by: ResolvedBy::TagSubstring,
             tagged: true,
+            typed_at: at(0),
         },
     );
     assert_eq!(
@@ -548,6 +551,7 @@ fn a_tagged_reply_after_an_ai_model_or_my_agent_route_adds_one_wrong() {
                 pane_id: "%1".into(),
                 resolved_by: chose,
                 tagged: false,
+                typed_at: at(0),
             },
         );
         assert_eq!(
@@ -578,6 +582,7 @@ fn harold_chose(pane: &str) -> Routing {
         pane_id: pane.into(),
         resolved_by: ResolvedBy::LatestNotifier,
         tagged: false,
+        typed_at: at(0),
     }
 }
 
@@ -1065,9 +1070,16 @@ fn a_typed_request_keeps_its_prompt_for_the_next_turn_end_on_its_pane() {
         pane_id: pane.clone(),
         resolved_by: ResolvedBy::MyAgent,
         tagged: false,
+        typed_at: now,
     };
 
-    finish_phone_request_in(&mut PhoneBook::default(), &reply, &routing, now);
+    // Handled a second after it was typed: the request ends when it was typed.
+    finish_phone_request_in(
+        &mut PhoneBook::default(),
+        &reply,
+        &routing,
+        now + time::Duration::seconds(1),
+    );
 
     let (typed_at, started_by, cx) = take_prompt(&pane, now).expect("the prompt is kept");
     assert_eq!(typed_at, now);
@@ -1175,4 +1187,61 @@ async fn a_reply_that_is_not_stored_ends_its_request_as_ignored() {
         test_support::counter_value("harold.phone_requests", &[("channel", channel)]),
         None
     );
+}
+
+#[test]
+fn a_reply_with_no_trace_is_never_kept_and_finishing_it_leaves_the_others() {
+    // With telemetry off every request has the same all-zero trace id.
+    let untraced = OpenReply {
+        cx: Context::new(),
+        channel: "imessage",
+        reply_at: OffsetDateTime::now_utc(),
+    };
+    let zero_trace = untraced.trace_id();
+    let key = format!("event:{}", uuid::Uuid::new_v4());
+    let waiting = open_phone_request(unique_channel(), OffsetDateTime::now_utc());
+    keep_open_reply_as(key.clone(), waiting.clone());
+
+    keep_open_reply(untraced.clone());
+    keep_open_reply_as(format!("event:{}", uuid::Uuid::new_v4()), untraced.clone());
+    assert!(open_reply_for(&zero_trace).is_none());
+
+    finish_phone_request_in(
+        &mut PhoneBook::default(),
+        &untraced,
+        &Routing::NoPane,
+        OffsetDateTime::now_utc(),
+    );
+    assert!(
+        open_reply_for(&key).is_some(),
+        "a request waiting for its retry is still open"
+    );
+}
+
+#[tokio::test]
+async fn a_reply_is_kept_open_before_it_is_stored_and_dropped_if_it_is_not() {
+    let channel = unique_channel();
+    let seen = Mutex::new(None);
+
+    let stored = store_phone_reply(channel, OffsetDateTime::now_utc(), async {
+        let trace = tracing::Span::current()
+            .context()
+            .span()
+            .span_context()
+            .trace_id()
+            .to_string();
+        let open = open_reply_for(&trace).map(|reply| reply.channel);
+        *seen.lock().unwrap() = Some((trace, open));
+        false
+    })
+    .await;
+
+    assert!(!stored);
+    let (trace, open_while_storing) = seen.lock().unwrap().clone().unwrap();
+    assert_eq!(
+        open_while_storing,
+        Some(channel),
+        "open before the store commits"
+    );
+    assert!(open_reply_for(&trace).is_none(), "dropped once not stored");
 }

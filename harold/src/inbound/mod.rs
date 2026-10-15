@@ -5,6 +5,7 @@ pub(crate) mod tmux;
 use std::process::Command;
 use std::sync::Mutex;
 
+use time::OffsetDateTime;
 use tracing::{info, warn};
 
 use crate::outbound::{DeliveryOutcome, send_reply};
@@ -332,6 +333,8 @@ fn route_owned_reply(
             }
             info!(label = %agent.label(), "routing reply");
             env.relay(agent, &format!("📱 {cleaned_body}"))?;
+            // Typed and Enter pressed: the request ends here, before the user is told.
+            let typed_at = OffsetDateTime::now_utc();
             if let Err(error) = env.send_reply(&delivered_text(machine, agent.label())) {
                 warn!(error, "routed message but failed to send confirmation");
             }
@@ -341,6 +344,7 @@ fn route_owned_reply(
                     pane_id: agent.pane_id().to_string(),
                     resolved_by,
                     tagged: tag.is_some(),
+                    typed_at,
                 },
             })
         }

@@ -305,11 +305,13 @@ pub(crate) enum Routing {
     Paused,
     /// No pane, an unmatched tag, or the pane is gone.
     NoPane,
-    /// Typed into `pane_id`. `tagged` is whether the reply carried a tag.
+    /// Typed into `pane_id` at `typed_at`, when Enter was pressed and before the user
+    /// was told. `tagged` is whether the reply carried a tag.
     Typed {
         pane_id: String,
         resolved_by: ResolvedBy,
         tagged: bool,
+        typed_at: OffsetDateTime,
     },
 }
 
@@ -372,6 +374,7 @@ impl PhoneBook {
             pane_id,
             resolved_by,
             tagged,
+            ..
         } = routing
         else {
             let counted = matches!(routing, Routing::NoPane);
@@ -487,15 +490,23 @@ pub(crate) async fn store_phone_reply(
     let storing = tracing::info_span!(target: TRACE_TARGET, "harold.reply_stored");
     // Fails only when no export layer is installed, and then there is no trace to join.
     let _ = storing.set_parent(reply.cx.clone());
+    // Kept open before the reply is stored: the event handler may route it as soon as
+    // the store commits, and must find this request rather than open another.
+    keep_open_reply(reply.clone());
     let stored = store.instrument(storing).await;
-    if stored {
-        keep_open_reply(reply);
-    } else {
+    if !stored {
+        forget_open_reply(&reply);
         let span = reply.cx.span();
         span.set_attribute(KeyValue::new("outcome", "ignored"));
         span.end();
     }
     stored
+}
+
+/// Whether `reply` has a trace to be kept by. With telemetry off, every request has the
+/// same invalid (all-zero) trace id, so none is kept.
+fn has_trace(reply: &OpenReply) -> bool {
+    reply.cx.span().span_context().is_valid()
 }
 
 /// Keeps `reply` open under its trace id until it is finished.
@@ -504,8 +515,12 @@ pub(crate) fn keep_open_reply(reply: OpenReply) {
     keep_open_reply_as(key, reply);
 }
 
-/// Keeps `reply` open under `key` until it is finished.
+/// Keeps `reply` open under `key` until it is finished. A request with no trace is not
+/// kept.
 pub(crate) fn keep_open_reply_as(key: String, reply: OpenReply) {
+    if !has_trace(&reply) {
+        return;
+    }
     let now = OffsetDateTime::now_utc();
     let mut open = locked(&OPEN_REPLIES);
     open.retain(|_, (kept_at, _)| !expired(*kept_at, now));
@@ -520,12 +535,26 @@ pub(crate) fn open_reply_for(key: &str) -> Option<OpenReply> {
         .map(|(_, reply)| reply.clone())
 }
 
-/// Finishes a request routed as `routing` at `typed_at`: judges it, records its metrics,
-/// ends its span with `outcome`, `resolved_by` and `pane_id`, and stops keeping it open.
-/// A typed request keeps the pane's prompt for the next turn end there.
-pub(crate) fn finish_phone_request(reply: &OpenReply, routing: &Routing, typed_at: OffsetDateTime) {
+/// Finishes a request routed as `routing`: judges it, records its metrics, ends its span
+/// with `outcome`, `resolved_by` and `pane_id`, and stops keeping it open. A typed
+/// request ends at its own `typed_at`; any other at `handled_at`. A typed request keeps
+/// the pane's prompt for the next turn end there.
+pub(crate) fn finish_phone_request(
+    reply: &OpenReply,
+    routing: &Routing,
+    handled_at: OffsetDateTime,
+) {
+    let typed_at = ended_at(routing, handled_at);
     let verdict = locked(&PHONE_BOOK).judge(reply.channel, reply.reply_at, typed_at, routing);
     record_finished(reply, routing, typed_at, verdict);
+}
+
+/// When a request routed as `routing` and handled at `handled_at` ended.
+fn ended_at(routing: &Routing, handled_at: OffsetDateTime) -> OffsetDateTime {
+    match routing {
+        Routing::Typed { typed_at, .. } => *typed_at,
+        Routing::NotOwned | Routing::Paused | Routing::NoPane => handled_at,
+    }
 }
 
 /// `finish_phone_request`, judged by `book` rather than the process-wide one, so a test's
@@ -535,8 +564,9 @@ pub(crate) fn finish_phone_request_in(
     book: &mut PhoneBook,
     reply: &OpenReply,
     routing: &Routing,
-    typed_at: OffsetDateTime,
+    handled_at: OffsetDateTime,
 ) {
+    let typed_at = ended_at(routing, handled_at);
     let verdict = book.judge(reply.channel, reply.reply_at, typed_at, routing);
     record_finished(reply, routing, typed_at, verdict);
 }
@@ -596,11 +626,20 @@ fn record_finished(
     }
     span.end_with_timestamp(typed_at.into());
 
-    let trace_id = reply.trace_id();
-    locked(&OPEN_REPLIES).retain(|_, (_, open)| open.trace_id() != trace_id);
+    forget_open_reply(reply);
     if let Routing::Typed { pane_id, .. } = routing {
         prompt_typed(pane_id, StartedBy::Phone, Some(reply.cx.clone()), typed_at);
     }
+}
+
+/// Stops keeping `reply` open, under every key it was kept by. A request with no trace
+/// was never kept, and its all-zero trace id must not match another's.
+fn forget_open_reply(reply: &OpenReply) {
+    if !has_trace(reply) {
+        return;
+    }
+    let trace_id = reply.trace_id();
+    locked(&OPEN_REPLIES).retain(|_, (_, open)| open.trace_id() != trace_id);
 }
 
 /// Records that Harold typed a prompt into `pane_id` at `at`, for the next turn end there.

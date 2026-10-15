@@ -1747,6 +1747,7 @@ fn typed_into(pane: &str) -> RouteReport {
             pane_id: pane.to_string(),
             resolved_by: ResolvedBy::LatestNotifier,
             tagged: false,
+            typed_at: time::OffsetDateTime::now_utc(),
         },
     }
 }
