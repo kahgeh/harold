@@ -365,10 +365,12 @@ impl TelemetrySettings {
 fn telemetry_errors(telemetry: &TelemetrySettings) -> Vec<String> {
     let mut errors = Vec::new();
     if let Some(endpoint) = &telemetry.otlp_endpoint {
-        let has_scheme = endpoint.starts_with("http://") || endpoint.starts_with("https://");
+        // Only plain http:// is accepted: no TLS support is built, so an https://
+        // collector could only fail at export.
+        let has_scheme = endpoint.starts_with("http://");
         if !has_scheme || tonic::transport::Endpoint::from_shared(endpoint.clone()).is_err() {
             errors.push(
-                "telemetry.otlp_endpoint must be an http:// or https:// address such as http://localhost:4317"
+                "telemetry.otlp_endpoint must be an http:// address such as http://localhost:4317"
                     .into(),
             );
         }
@@ -1404,17 +1406,23 @@ mod tests {
             (
                 "otlp_endpoint",
                 "localhost:4317",
-                "telemetry.otlp_endpoint must be an http:// or https:// address such as http://localhost:4317",
+                "telemetry.otlp_endpoint must be an http:// address such as http://localhost:4317",
             ),
             (
                 "otlp_endpoint",
                 "",
-                "telemetry.otlp_endpoint must be an http:// or https:// address such as http://localhost:4317",
+                "telemetry.otlp_endpoint must be an http:// address such as http://localhost:4317",
             ),
             (
                 "otlp_endpoint",
                 "http://",
-                "telemetry.otlp_endpoint must be an http:// or https:// address such as http://localhost:4317",
+                "telemetry.otlp_endpoint must be an http:// address such as http://localhost:4317",
+            ),
+            // No TLS support is built, so an https:// collector could only fail at export.
+            (
+                "otlp_endpoint",
+                "https://collector.example:4317",
+                "telemetry.otlp_endpoint must be an http:// address such as http://localhost:4317",
             ),
             (
                 "alert_listen",
@@ -1454,9 +1462,6 @@ mod tests {
         let path = settings.telemetry.pod_registry_path().unwrap();
         assert!(!path.starts_with("~"), "{path:?}");
         assert!(path.ends_with("products.toml"), "{path:?}");
-
-        let https = "[telemetry]\notlp_endpoint = \"https://collector.example:4317\"\n";
-        assert!(telemetry_validate_errors(https).is_empty());
     }
 
     #[test]

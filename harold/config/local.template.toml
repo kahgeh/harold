@@ -62,7 +62,7 @@ command = "say"
 
 # Telemetry: leave a key out to turn that part off. Set pod_registry on one Mac only, or merges are counted twice.
 # [telemetry]
-# otlp_endpoint = "http://localhost:4317"                          # the OpenTelemetry collector's gRPC address; Harold sends its traces, logs and metrics here
+# otlp_endpoint = "http://localhost:4317"                          # the OpenTelemetry collector's gRPC address, http:// only (no TLS); Harold sends its traces, logs and metrics here
 # alert_listen = "127.0.0.1:4320"                                  # the address and port Harold takes alerts on
 # pod_registry = "/Users/you/Dev/p/chief-of-pods/products.toml"    # the chief's products.toml, read every minute for pod facts
 

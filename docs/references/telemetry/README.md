@@ -23,14 +23,14 @@ pod_registry = "~/Dev/p/chief-of-pods/products.toml"
 
 | Key | Turns on | When left out |
 |---|---|---|
-| `otlp_endpoint` | Export of spans, log records and metrics to the collector, over OTLP gRPC | Nothing is exported |
+| `otlp_endpoint` | Export of spans, log records and metrics to the collector, over OTLP gRPC. Plain `http://` only: Harold is built without TLS, so an `https://` address is refused | Nothing is exported |
 | `alert_listen` | The alert address, `POST /alert` on this address and port | No address is opened |
 | `pod_registry` | The pod facts, read from the chief's `products.toml` | No pod folder is read and no `git` command runs |
 
 Each key is off on its own. A malformed value stops Harold at start, and `harold --check-config` fails, with an error naming the key:
 
 ```
-telemetry.otlp_endpoint must be an http:// or https:// address such as http://localhost:4317
+telemetry.otlp_endpoint must be an http:// address such as http://localhost:4317
 telemetry.alert_listen must be an address and port such as 127.0.0.1:4320
 telemetry.pod_registry must be the path of the chief's products.toml
 ```
