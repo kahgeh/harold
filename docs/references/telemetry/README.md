@@ -107,7 +107,7 @@ Each counted request has one outcome:
 | Outcome | When |
 |---|---|
 | `typed` | It was typed into a pane within 10 minutes of its start |
-| `unavailable` | Harold found no pane and dropped it, or typed it more than 10 minutes after its start. A reply read late because the Messages database was blocked counts here when it is typed late |
+| `unavailable` | Harold found no pane and dropped it, gave its delivery up after 10 failed tries, or typed it more than 10 minutes after its start. A reply read late because the Messages database was blocked counts here when it is typed late |
 | `wrong` | It was typed on time, and the next phone reply, within 10 minutes, was tagged for a different pane. It is counted when that tagged reply arrives |
 
 `harold.phone_requests` counts `typed` and `unavailable`. `harold.phone_requests.wrong` counts `wrong` separately, against the earlier request's channel and `resolved_by`. Availability is typed divided by all requests. The right-agent rate is typed minus wrong, divided by all requests.
@@ -142,7 +142,7 @@ These rules decide `wrong`:
 
 **Not counted:** replies another Mac owns, which that Mac counts, and replies routed while messaging is paused. Their span is still exported, with outcome `not_owned` or `paused`. A reply Harold read but did not store carries `ignored`. These three outcomes appear on spans only, never on the metrics.
 
-A request that never finishes, because its payload failed for good or its retry was given up, is dropped after an hour. Its span is then exported with no outcome.
+A reply whose payload failed for good never finishes, and is dropped after an hour; its span is then exported with no outcome. A reply whose delivery was given up after 10 failed tries is one Harold dropped: its request finishes at once as `unavailable`, and `phone-request-unavailable` fires for it.
 
 ## Turns
 
@@ -167,6 +167,8 @@ A request that never finishes, because its payload failed for good or its retry 
 | `harold.turn` | the turn's start – the stop hook reached Harold | `pane_id`, `session.id`, `started_by`, and `session.source`, `turn.start` when they apply |
 | `harold.turn_complete` | the hook's call handled and its event stored | `pane_id` |
 | `harold.delivery`, and `harold.voice_note` inside it | the turn-end update sent or said | `kind`, `channel`, `outcome` |
+
+`harold.delivery`'s `outcome` is `delivered`, `skipped`, `failed` (it will be tried again) or `given_up` (its 10th failure; it is not tried again).
 
 Every log record written inside one of these spans carries its trace id and span id, so HyperDX opens a turn's logs from its trace and finds the trace from any of its lines.
 
@@ -364,7 +366,7 @@ Two limits remain:
 
 | Alert | Fires when | HyperDX definition |
 |---|---|---|
-| `phone-request-unavailable` | Any phone request dropped with no pane, or not typed within 10 minutes | sum of `harold.phone_requests` with `outcome = unavailable` above 0, every 5 minutes |
+| `phone-request-unavailable` | Any phone request dropped with no pane or after 10 failed tries, or not typed within 10 minutes | sum of `harold.phone_requests` with `outcome = unavailable` above 0, every 5 minutes |
 | `phone-request-slow` | The 95th percentile latency is above 60 seconds in an hour with at least 3 requests | 95th percentile of the duration of typed `harold.phone_request` spans above 60 seconds, every hour, on the traces source |
 | `wrong-agent` | A request is counted as wrong | sum of `harold.phone_requests.wrong` above 0, every 5 minutes |
 | `slot-idle` | A slot is free for more than 2 hours in a row between 08:00 and 23:00 local | for each product, the last sample of each 15-minute window has at least 1 slot free, for 8 windows in a row |
@@ -403,6 +405,8 @@ Harold answers:
 
 - `204` for a post naming one of the four alerts with state `firing` or `cleared`. It then types exactly `harold alert: <name> <state>` into the pane of the agent running in the chief's folder, `[notify] away_messages_only_from`.
 - `400` for anything else, including another path or method. It logs `alert ignored (unknown alert)` and types nothing.
+
+Harold types one line of its own the same way: `harold alert: delivery-given-up firing`, when it gives up a delivery after 10 failed tries (see the [notification reference](../notification/README.md#architecture)). It carries no message text. It is typed only when `alert_listen` is set, with the checks and the 10 minutes below, as a posted line is. A post naming `delivery-given-up` is answered `400`.
 
 No log line carries any part of a posted body.
 

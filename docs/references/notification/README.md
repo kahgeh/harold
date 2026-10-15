@@ -8,7 +8,7 @@ AI agents finish turns silently. Without active monitoring you won't know a task
 
 ## Architecture
 
-Harold's event handler stages `TurnCompleted` events in its durable outbox and calls `notify()` in stream-version order. Successful deliveries and intentional skips are marked complete. TTS command, Telegram HTTP/configuration, and iMessage process failures remain pending for retry. Malformed payloads and unknown event types are recorded as terminal failures so one poison event cannot block later work. The notification path is chosen based on runtime checks: whether the completing pane's tmux session has an attached client, whether the completing pane is the one the user is looking at, and whether the screen is locked.
+Harold's event handler stages `TurnCompleted` events in its durable outbox and calls `notify()` in stream-version order. Successful deliveries and intentional skips are marked complete. TTS command, Telegram HTTP/configuration, and iMessage process failures remain pending and are tried again, after 1 second, then 2, 4, 8, 16, 32 and 60 seconds, and 60 seconds after that. Meanwhile no later delivery is tried, so deliveries keep their order. The failures are counted with the delivery in the outbox, so a restart does not start the count again, though the first try after a restart comes at once. At the 10th failure Harold gives the delivery up: it is recorded as a terminal failure with its last error, Harold logs `delivery given up` (`outcome = given_up`, `reason = too_many_tries`, never the message or the error), and moves on to the next delivery at once. With the alert address on, Harold also types `harold alert: delivery-given-up firing` into the chief's pane; see [How an alert reaches the chief](../telemetry/README.md#how-an-alert-reaches-the-chief). Malformed payloads and unknown event types are recorded as terminal failures so one poison event cannot block later work. The notification path is chosen based on runtime checks: whether the completing pane's tmux session has an attached client, whether the completing pane is the one the user is looking at, and whether the screen is locked.
 
 Summarisation uses different backends depending on the path:
 
@@ -216,7 +216,7 @@ It differs from a turn-end notification in these ways:
 | Duplicate checks | The 30-second window, and on iMessage the recent-outgoing check | None: the same text sent twice arrives twice |
 | Messaging pause | Recorded as an intentional skip | The command is refused with `messaging is paused`; a message already stored is skipped and not sent later |
 
-A send that fails stays pending and is retried, as a failed notification is. The `send-message-to-away-device` skill, which the installer links for Claude Code and Codex, teaches an agent the command; see [setup](../../how-tos/setup.md).
+A send that fails stays pending and is tried again, as a failed notification is, up to 10 tries. The `send-message-to-away-device` skill, which the installer links for Claude Code and Codex, teaches an agent the command; see [setup](../../how-tos/setup.md).
 
 ## Lines the chief speaks
 
