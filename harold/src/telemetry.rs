@@ -1339,8 +1339,8 @@ fn allowed_span(mut span: SpanData) -> SpanData {
 /// A new log record with `record`'s body, times, severity and trace, and only its
 /// allowed attributes. The SDK offers no way to remove an attribute, so the record is
 /// rebuilt from a blank one. A record with no record time gets its observed time, or
-/// the current time, since the tracing bridge never sets one and the collector reads
-/// only the record time.
+/// the current time, since the tracing bridge never sets one and the local stack's
+/// ingestor reads only the record time.
 fn allowed_record(record: &SdkLogRecord) -> SdkLogRecord {
     static BLANK: OnceLock<SdkLogger> = OnceLock::new();
     let mut allowed = BLANK
