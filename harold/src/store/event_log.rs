@@ -17,7 +17,7 @@ use super::error::{Result, StoreError};
 
 const KEY: &[u8] = b"harold/main";
 const ACTOR: &str = "system:harold";
-const LOG_DIRECTORY: &str = "log";
+pub(super) const LOG_DIRECTORY: &str = "log";
 /// SlateDB's prefix inside the log directory.
 const LOG_PREFIX: &str = "harold";
 pub(super) const LOG_SETTINGS_FILE: &str = "log-settings.toml";
@@ -239,6 +239,16 @@ impl EventLog {
         std::fs::write(settings, LOG_SETTINGS)?;
         let log = LogDb::open(config).await.map_err(log_error)?;
         Ok(Self { log })
+    }
+
+    /// The highest version the log can hold now: every flushed event's version is at or
+    /// below it. At open it is the version the next append would get, less one, and after
+    /// a reopen it can be well above the newest event, since the log hands out sequences in
+    /// blocks and starts a new block at each open. It only rises while the log is open.
+    pub(super) fn version_bound(&self) -> EventVersion {
+        // `durable_sequence` is the exclusive upper bound of durable sequences, and version
+        // is sequence plus 1.
+        EventVersion(self.log.durable_sequence())
     }
 
     /// Appends `batch` as one write and returns once it is flushed. An empty batch writes

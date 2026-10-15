@@ -136,6 +136,26 @@ fn lock_store(root: &Path) -> Result<StoreLock> {
     }
 }
 
+/// Refuses a store whose `harold-state.db` has read further than its log goes: its `log/`
+/// was deleted, or replaced with an older log or another folder's. Harold would
+/// otherwise wait for versions the log will not reach for a long time, and project and
+/// deliver nothing meanwhile, without saying so.
+async fn refuse_state_ahead_of_log(
+    root: &Path,
+    conn: &turso::Connection,
+    stream: &EventLog,
+) -> Result<()> {
+    let cursor = last_processed_version_from(conn).await?;
+    if cursor <= stream.version_bound() {
+        return Ok(());
+    }
+    Err(StoreError::Data(format!(
+        "{STATE_DATABASE} has read the event log up to version {cursor}, but the log in {} \
+         ends before it; the store folder is inconsistent",
+        root.join(event_log::LOG_DIRECTORY).display()
+    )))
+}
+
 /// The store folder's lock, released when the store is dropped, or as soon as a later step
 /// of opening the store fails. Closing the file alone does not always release it at once: a
 /// child process another thread is starting holds a copy of the file until it runs its
@@ -229,6 +249,7 @@ impl HaroldStore {
         let conn = state.connect()?;
         configure_state_database(&conn).await?;
         initialize_state_schema(&conn).await?;
+        refuse_state_ahead_of_log(root, &conn, &stream).await?;
 
         Ok(Self {
             stream,

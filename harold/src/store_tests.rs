@@ -1147,6 +1147,32 @@ async fn an_existing_store_is_opened_as_it_is() {
 }
 
 #[tokio::test]
+async fn a_state_database_that_has_read_past_the_log_is_refused() {
+    let directory = TestDirectory::new();
+    let cursor = {
+        let store = HaroldStore::open(directory.path()).await.unwrap();
+        append_tts_mute_changed(&store, true).await.unwrap();
+        store.project_unhandled_events(10).await.unwrap();
+        store.last_processed_version().await.unwrap()
+    };
+    assert!(!cursor.is_start());
+    std::fs::remove_dir_all(directory.path().join("log")).unwrap();
+    std::fs::remove_file(directory.path().join(super::event_log::LOG_SETTINGS_FILE)).unwrap();
+
+    let Err(error) = HaroldStore::open(directory.path()).await else {
+        panic!("a state database ahead of its log must be refused");
+    };
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "harold-state.db has read the event log up to version {cursor}, but the log in {} \
+             ends before it; the store folder is inconsistent",
+            directory.path().join("log").display()
+        )
+    );
+}
+
+#[tokio::test]
 async fn tts_mute_is_projected_into_the_snapshot_and_survives_reopen() {
     let directory = TestDirectory::new();
     let store = HaroldStore::open(directory.path()).await.unwrap();
