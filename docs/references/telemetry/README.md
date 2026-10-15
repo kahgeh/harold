@@ -168,7 +168,7 @@ A reply whose payload failed for good never finishes, and is dropped after an ho
 | `harold.turn_complete` | the hook's call handled and its event stored | `pane_id` |
 | `harold.delivery`, and `harold.voice_note` inside it | the turn-end update sent or said | `kind`, `channel`, `outcome` |
 
-`harold.delivery`'s `outcome` is `delivered`, `skipped`, `failed` (it will be tried again) or `given_up` (its 10th failure; it is not tried again).
+`harold.delivery`'s `outcome` is `delivered`, `skipped`, `failed` (a send that failed before its 10th try, which is tried again, or a malformed payload, which is not) or `given_up` (its 10th failure; it is not tried again).
 
 Every log record written inside one of these spans carries its trace id and span id, so HyperDX opens a turn's logs from its trace and finds the trace from any of its lines.
 
