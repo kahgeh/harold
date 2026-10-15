@@ -130,10 +130,6 @@ pub(crate) fn set_local_offset(offset: time::UtcOffset) {
 }
 
 /// The Mac's UTC offset as `main` read it at start, or UTC when it was not read.
-#[allow(
-    dead_code,
-    reason = "the pod facts read the local offset in a later telemetry task"
-)]
 pub(crate) fn local_offset() -> time::UtcOffset {
     LOCAL_OFFSET.get().copied().unwrap_or(time::UtcOffset::UTC)
 }
@@ -186,10 +182,6 @@ pub(crate) struct Instruments {
     /// `pod.merged_lines`, `{line}`.
     pub pod_merged_lines: Counter<u64>,
     /// `pod.spec.lead_time`, seconds.
-    #[allow(
-        dead_code,
-        reason = "the pod facts record spec lead times in a later telemetry task"
-    )]
     pub pod_spec_lead_time: Histogram<f64>,
 }
 

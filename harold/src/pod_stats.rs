@@ -1,6 +1,8 @@
-//! Pod facts: how many of each product's build slots are busy and free, and what merges
-//! to each product's base branch. Every minute Harold reads the chief's `products.toml`
-//! and runs read-only `git` against each product's base checkout. It never writes there.
+//! Pod facts: how many of each product's build slots are busy and free, what merges to
+//! each product's base branch, and each product's specs by state, with their size and
+//! the time from "spec ready" to merged. Every minute Harold reads the chief's
+//! `products.toml`, runs read-only `git` against each product's base checkout and reads
+//! its pod folder. It never writes there.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::future::Future;
@@ -13,10 +15,11 @@ use config::{Config, File, FileFormat};
 use opentelemetry::KeyValue;
 use opentelemetry::metrics::ObservableGauge;
 use serde::Deserialize;
+use time::{Date, Month, OffsetDateTime, Time, UtcOffset};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio::time::MissedTickBehavior;
-use tracing::warn;
+use tracing::{info, warn};
 
 use crate::settings::expand_tilde;
 use crate::telemetry;
@@ -33,6 +36,9 @@ const DEFAULT_SLOTS: u32 = 3;
 /// The file baton writes in a worktree when it starts a worker there. A worktree holding
 /// it is a busy slot.
 const AGENT_PANE: &str = ".superpowers/baton/agent-pane";
+
+/// The pod folder of a base checkout, which holds the product's specs.
+const POD_FOLDER: &str = ".superpowers/pod";
 
 /// Why a product's facts, or the registry, could not be read. Each is fixed text: the
 /// `reason` field is exported.
@@ -165,10 +171,6 @@ pub(crate) struct Slots {
     pub busy: u32,
     pub free: u32,
     /// The busy worktrees as (folder name, path), in `git worktree list` order.
-    #[allow(
-        dead_code,
-        reason = "the spec states read the building specs in a later telemetry task"
-    )]
     pub busy_worktrees: Vec<(String, PathBuf)>,
 }
 
@@ -238,10 +240,6 @@ pub(crate) struct ReflogEntry {
     /// The commit the branch moved to.
     pub hash: String,
     /// The committer time of that commit, in seconds since the epoch (`%ct`).
-    #[allow(
-        dead_code,
-        reason = "the spec states read merge times in a later telemetry task"
-    )]
     pub time: i64,
     /// The reflog subject, such as `merge chief-voice: Fast-forward`.
     pub subject: String,
@@ -406,6 +404,301 @@ fn record_merges(product: &str, merges: &[Merge]) {
 }
 
 // ---------------------------------------------------------------------------
+// Specs
+// ---------------------------------------------------------------------------
+
+/// The state of one spec. A later state wins: a merged spec is merged even though its
+/// approval file remains.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum SpecState {
+    Drafted,
+    Waiting,
+    Approved,
+    Building,
+    Rejected,
+    Merged,
+}
+
+impl SpecState {
+    /// Every state, earliest first.
+    pub(crate) const ALL: [SpecState; 6] = [
+        SpecState::Drafted,
+        SpecState::Waiting,
+        SpecState::Approved,
+        SpecState::Building,
+        SpecState::Rejected,
+        SpecState::Merged,
+    ];
+
+    /// The `state` attribute's value.
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            SpecState::Drafted => "drafted",
+            SpecState::Waiting => "waiting_for_approval",
+            SpecState::Approved => "approved",
+            SpecState::Building => "building",
+            SpecState::Rejected => "rejected",
+            SpecState::Merged => "merged",
+        }
+    }
+}
+
+/// What the pod folder and the base branch say about one spec.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SpecFacts {
+    pub id: String,
+    pub state: SpecState,
+    /// When the spec entered `state`.
+    pub state_at: OffsetDateTime,
+    /// "Spec ready": the creation time of `specs/<id>.url`.
+    pub ready_at: Option<OffsetDateTime>,
+    /// The creation time of `approvals/<id>.md`.
+    pub approved_at: Option<OffsetDateTime>,
+    pub merged_at: Option<OffsetDateTime>,
+    /// The words of `specs/<id>.md`, leaving out drawn lines.
+    pub words: u64,
+    /// The `## Revision <n>` headings of `requests/<id>.md`.
+    pub revisions: u32,
+}
+
+/// The creation time of the file at `path`, or its modification time where the file
+/// system keeps no creation time. None when there is no such file.
+fn file_time(path: &Path, offset: UtcOffset) -> Option<OffsetDateTime> {
+    let metadata = std::fs::metadata(path).ok()?;
+    if !metadata.is_file() {
+        return None;
+    }
+    let time = metadata.created().or_else(|_| metadata.modified()).ok()?;
+    Some(OffsetDateTime::from(time).to_offset(offset))
+}
+
+/// The text of the file at `path`, or None when it cannot be read.
+fn read_text(path: &Path) -> Option<String> {
+    std::fs::read(path)
+        .ok()
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// The specs of the pod folder `pod`, by id. Reads <repo>/.superpowers/pod/ (never
+/// writes). `building` = busy worktree folder names -> the creation time of their
+/// agent-pane file; `merged` = spec id -> time from the reflog (`%ct` of `merge <id>:`)
+/// or from seeing the worktree go. A spec is a `specs/<id>.md` file: an id with no spec
+/// file is not a spec.
+pub(crate) fn read_specs(
+    pod: &Path,
+    building: &HashMap<String, OffsetDateTime>,
+    merged: &HashMap<String, OffsetDateTime>,
+    offset: UtcOffset,
+) -> Vec<SpecFacts> {
+    let Ok(entries) = std::fs::read_dir(pod.join("specs")) else {
+        return Vec::new();
+    };
+    let mut ids: Vec<String> = entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let path = entry.path();
+            if path.extension()? != "md" {
+                return None;
+            }
+            Some(path.file_stem()?.to_str()?.to_owned())
+        })
+        .collect();
+    ids.sort();
+    let rejected = read_text(&pod.join("rejections.md"))
+        .map(|text| rejections(&text, offset))
+        .unwrap_or_default();
+    ids.into_iter()
+        .filter_map(|id| spec_facts(pod, id, building, merged, &rejected, offset))
+        .collect()
+}
+
+fn spec_facts(
+    pod: &Path,
+    id: String,
+    building: &HashMap<String, OffsetDateTime>,
+    merged: &HashMap<String, OffsetDateTime>,
+    rejected: &HashMap<String, OffsetDateTime>,
+    offset: UtcOffset,
+) -> Option<SpecFacts> {
+    let spec = pod.join("specs").join(format!("{id}.md"));
+    let drafted_at = file_time(&spec, offset)?;
+    let ready_at = file_time(&pod.join("specs").join(format!("{id}.url")), offset);
+    let approved_at = file_time(&pod.join("approvals").join(format!("{id}.md")), offset);
+    let time_in =
+        |times: &HashMap<String, OffsetDateTime>| times.get(&id).map(|time| time.to_offset(offset));
+    let merged_at = time_in(merged);
+    let (state, state_at) = [
+        (SpecState::Merged, merged_at),
+        (SpecState::Rejected, time_in(rejected)),
+        (SpecState::Building, time_in(building)),
+        (SpecState::Approved, approved_at),
+        (SpecState::Waiting, ready_at),
+    ]
+    .into_iter()
+    .find_map(|(state, time)| Some((state, time?)))
+    .unwrap_or((SpecState::Drafted, drafted_at));
+    let words = read_text(&spec).map_or(0, |text| spec_words(&text));
+    let revisions = read_text(&pod.join("requests").join(format!("{id}.md")))
+        .map_or(0, |text| revisions(&text));
+    Some(SpecFacts {
+        id,
+        state,
+        state_at,
+        ready_at,
+        approved_at,
+        merged_at,
+        words,
+        revisions,
+    })
+}
+
+/// The words of lines not starting with '<', which hold drawn charts.
+pub(crate) fn spec_words(markdown: &str) -> u64 {
+    let words = markdown
+        .lines()
+        .filter(|line| !line.trim_start().starts_with('<'))
+        .map(|line| line.split_whitespace().count())
+        .sum::<usize>();
+    u64::try_from(words).unwrap_or(u64::MAX)
+}
+
+/// The count of lines starting "## Revision ".
+pub(crate) fn revisions(request: &str) -> u32 {
+    let count = request
+        .lines()
+        .filter(|line| line.starts_with("## Revision "))
+        .count();
+    u32::try_from(count).unwrap_or(u32::MAX)
+}
+
+/// The rejected specs of `rejections.md`: each line `- <id>, <YYYY-MM-DD>, <reason>`
+/// gives `<id>` -> local midnight of that date. A line without a valid date is skipped.
+pub(crate) fn rejections(text: &str, offset: UtcOffset) -> HashMap<String, OffsetDateTime> {
+    text.lines()
+        .filter_map(|line| {
+            let mut fields = line.strip_prefix("- ")?.split(',');
+            let id = fields.next()?.trim();
+            let date = parse_date(fields.next()?.trim())?;
+            (!id.is_empty()).then(|| {
+                (
+                    id.to_owned(),
+                    date.with_time(Time::MIDNIGHT).assume_offset(offset),
+                )
+            })
+        })
+        .collect()
+}
+
+/// The date `YYYY-MM-DD`.
+fn parse_date(text: &str) -> Option<Date> {
+    let mut parts = text.split('-');
+    let year = parts.next()?.parse().ok()?;
+    let month = Month::try_from(parts.next()?.parse::<u8>().ok()?).ok()?;
+    let day = parts.next()?.parse().ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    Date::from_calendar_date(year, month, day).ok()
+}
+
+/// The specs merged by name in the reflog: `<id>` -> the committer time of its newest
+/// `merge <id>:` entry.
+fn reflog_merges(reflog: &[ReflogEntry]) -> HashMap<String, OffsetDateTime> {
+    let mut merged = HashMap::new();
+    for entry in reflog {
+        let (Some(id), Ok(time)) = (
+            spec_id(&entry.subject),
+            OffsetDateTime::from_unix_timestamp(entry.time),
+        ) else {
+            continue;
+        };
+        merged.entry(id).or_insert(time);
+    }
+    merged
+}
+
+/// The last known state of each product's specs.
+#[derive(Default)]
+pub(crate) struct SpecBook {
+    known: HashMap<(String, String), SpecState>,
+    baselined: HashSet<String>,
+}
+
+impl SpecBook {
+    /// The first call per product records states and reports nothing. Later calls log one
+    /// line per change and, on a change to Merged, record pod.spec.lead_time for each
+    /// phase it can compute. Returns the changes as (spec id, new state).
+    pub(crate) fn observe(
+        &mut self,
+        product: &str,
+        specs: &[SpecFacts],
+    ) -> Vec<(String, SpecState)> {
+        let first = self.baselined.insert(product.to_owned());
+        // A spec whose file went is forgotten, so it counts again if it comes back.
+        self.known
+            .retain(|(known, id), _| known != product || specs.iter().any(|spec| &spec.id == id));
+        let mut changes = Vec::new();
+        for spec in specs {
+            let before = self
+                .known
+                .insert((product.to_owned(), spec.id.clone()), spec.state);
+            if first || before == Some(spec.state) {
+                continue;
+            }
+            info!(
+                target: "harold::pod",
+                {
+                    pod.product = %product,
+                    spec.id = %spec.id,
+                    state = spec.state.as_str(),
+                    spec.state_at = %rfc3339(spec.state_at),
+                    spec.words = spec.words,
+                    spec.revisions = spec.revisions,
+                },
+                "spec state changed"
+            );
+            if spec.state == SpecState::Merged {
+                record_lead_time(product, spec);
+            }
+            changes.push((spec.id.clone(), spec.state));
+        }
+        changes
+    }
+}
+
+fn rfc3339(time: OffsetDateTime) -> String {
+    time.format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_default()
+}
+
+/// Records the two phases of a merged spec: waiting for the user (ready to approved) and
+/// the build (approved to merged). A phase missing a time, or with a negative length, is
+/// skipped.
+fn record_lead_time(product: &str, spec: &SpecFacts) {
+    let phases = [
+        ("waiting_for_user", spec.ready_at, spec.approved_at),
+        ("build", spec.approved_at, spec.merged_at),
+    ];
+    for (phase, from, to) in phases {
+        let (Some(from), Some(to)) = (from, to) else {
+            continue;
+        };
+        let seconds = (to - from).as_seconds_f64();
+        if seconds < 0.0 {
+            continue;
+        }
+        telemetry::instruments().pod_spec_lead_time.record(
+            seconds,
+            &[
+                KeyValue::new("pod.product", product.to_owned()),
+                KeyValue::new("phase", phase),
+                KeyValue::new("spec.revisions", i64::from(spec.revisions)),
+            ],
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Polls
 // ---------------------------------------------------------------------------
 
@@ -421,6 +714,8 @@ pub(crate) struct SlotCounts {
 pub(crate) struct PodSnapshot {
     /// Slot counts by product.
     pub slots: BTreeMap<String, SlotCounts>,
+    /// Specs by product.
+    pub specs: BTreeMap<String, Vec<SpecFacts>>,
 }
 
 pub(crate) struct PodStats<G: Git> {
@@ -432,10 +727,22 @@ pub(crate) struct PodStats<G: Git> {
     registry_unreadable: bool,
     /// The products whose failure has been logged since they last worked.
     unavailable: HashSet<String>,
+    specs: SpecBook,
+    /// The busy worktrees' folder names of each product at its last poll.
+    busy_before: HashMap<String, HashSet<String>>,
+    /// The specs of each product seen merged by their worktree going: id -> when.
+    gone_merged: HashMap<String, HashMap<String, OffsetDateTime>>,
+    /// The Mac's UTC offset, for rejection dates and the times logged.
+    offset: UtcOffset,
 }
 
 impl<G: Git> PodStats<G> {
-    pub(crate) fn new(registry: PathBuf, git: G, snapshot: Arc<Mutex<PodSnapshot>>) -> Self {
+    pub(crate) fn new(
+        registry: PathBuf,
+        git: G,
+        snapshot: Arc<Mutex<PodSnapshot>>,
+        offset: UtcOffset,
+    ) -> Self {
         Self {
             registry,
             git,
@@ -443,6 +750,10 @@ impl<G: Git> PodStats<G> {
             snapshot,
             registry_unreadable: false,
             unavailable: HashSet::new(),
+            specs: SpecBook::default(),
+            busy_before: HashMap::new(),
+            gone_merged: HashMap::new(),
+            offset,
         }
     }
 
@@ -466,9 +777,10 @@ impl<G: Git> PodStats<G> {
         let mut snapshot = PodSnapshot::default();
         for product in &products {
             match self.poll_product(product).await {
-                Ok(counts) => {
+                Ok((counts, specs)) => {
                     self.unavailable.remove(&product.name);
                     snapshot.slots.insert(product.name.clone(), counts);
+                    snapshot.specs.insert(product.name.clone(), specs);
                 }
                 Err(reason) => {
                     if self.unavailable.insert(product.name.clone()) {
@@ -480,15 +792,96 @@ impl<G: Git> PodStats<G> {
         *lock(&self.snapshot) = snapshot;
     }
 
-    async fn poll_product(&mut self, product: &Product) -> Result<SlotCounts, &'static str> {
+    async fn poll_product(
+        &mut self,
+        product: &Product,
+    ) -> Result<(SlotCounts, Vec<SpecFacts>), &'static str> {
         let slots = slots(&self.git, product).await?;
         if let TipMove::Merges(merges) = self.tips.observe(&self.git, product).await? {
             record_merges(&product.name, &merges);
         }
-        Ok(SlotCounts {
-            busy: slots.busy,
-            free: slots.free,
-        })
+        let pod = product.repo.join(POD_FOLDER);
+        let reflog = read_reflog(&self.git, product).await?;
+        // Where the base branch keeps no reflog, a spec merges when its worktree goes
+        // after its branch was merged.
+        self.see_worktrees_go(product, &slots, &pod, reflog.is_empty())
+            .await;
+        let mut merged = self
+            .gone_merged
+            .get(&product.name)
+            .cloned()
+            .unwrap_or_default();
+        merged.extend(reflog_merges(&reflog));
+        let building = slots
+            .busy_worktrees
+            .iter()
+            .filter_map(|(name, path)| {
+                Some((
+                    name.clone(),
+                    file_time(&path.join(AGENT_PANE), self.offset)?,
+                ))
+            })
+            .collect();
+        let specs = read_specs(&pod, &building, &merged, self.offset);
+        self.specs.observe(&product.name, &specs);
+        Ok((
+            SlotCounts {
+                busy: slots.busy,
+                free: slots.free,
+            },
+            specs,
+        ))
+    }
+
+    /// Notes the busy worktrees and, when `check` is set, takes each spec whose worktree
+    /// went since the last poll as merged now if its branch is on the base branch. One
+    /// that is not, or that git cannot answer for, is logged and not counted.
+    async fn see_worktrees_go(
+        &mut self,
+        product: &Product,
+        slots: &Slots,
+        pod: &Path,
+        check: bool,
+    ) {
+        let busy: HashSet<String> = slots
+            .busy_worktrees
+            .iter()
+            .map(|(name, _)| name.clone())
+            .collect();
+        let before = self
+            .busy_before
+            .insert(product.name.clone(), busy.clone())
+            .unwrap_or_default();
+        if !check {
+            return;
+        }
+        let base = format!("refs/heads/{}", product.base);
+        for id in before.difference(&busy) {
+            if !is_file(&pod.join("specs").join(format!("{id}.md"))).await {
+                continue;
+            }
+            let branch = format!("refs/heads/{id}");
+            let merged = self
+                .git
+                .run(
+                    &product.repo,
+                    &["merge-base", "--is-ancestor", &branch, &base],
+                )
+                .await
+                .is_some_and(|output| output.success);
+            if merged {
+                self.gone_merged
+                    .entry(product.name.clone())
+                    .or_default()
+                    .insert(id.clone(), OffsetDateTime::now_utc());
+            } else {
+                info!(
+                    pod.product = %product.name,
+                    spec.id = %id,
+                    "worktree removed without its branch on the base branch; spec not counted as merged"
+                );
+            }
+        }
     }
 }
 
@@ -500,12 +893,14 @@ struct Gauges {
     snapshot: Arc<Mutex<PodSnapshot>>,
     _busy: ObservableGauge<u64>,
     _free: ObservableGauge<u64>,
+    _specs: ObservableGauge<u64>,
+    _words: ObservableGauge<u64>,
 }
 
 static GAUGES: OnceLock<Gauges> = OnceLock::new();
 
-/// The snapshot the `pod.slots.busy` and `pod.slots.free` gauges read. The first call
-/// registers the gauges.
+/// The snapshot the `pod.slots.busy`, `pod.slots.free`, `pod.specs` and `pod.spec.words`
+/// gauges read. The first call registers the gauges.
 pub(crate) fn gauge_snapshot() -> Arc<Mutex<PodSnapshot>> {
     let gauges = GAUGES.get_or_init(|| {
         let snapshot = Arc::new(Mutex::new(PodSnapshot::default()));
@@ -525,9 +920,48 @@ pub(crate) fn gauge_snapshot() -> Arc<Mutex<PodSnapshot>> {
                 })
                 .build()
         };
+        let specs = Arc::clone(&snapshot);
+        let words = Arc::clone(&snapshot);
         Gauges {
             _busy: gauge("pod.slots.busy", |counts| counts.busy),
             _free: gauge("pod.slots.free", |counts| counts.free),
+            // Every state of every product, 0 included, so a card can read 0.
+            _specs: meter
+                .u64_observable_gauge("pod.specs")
+                .with_unit("{spec}")
+                .with_callback(move |observer| {
+                    for (product, specs) in &lock(&specs).specs {
+                        for state in SpecState::ALL {
+                            let count = specs.iter().filter(|spec| spec.state == state).count();
+                            observer.observe(
+                                u64::try_from(count).unwrap_or(u64::MAX),
+                                &[
+                                    KeyValue::new("pod.product", product.clone()),
+                                    KeyValue::new("state", state.as_str()),
+                                ],
+                            );
+                        }
+                    }
+                })
+                .build(),
+            _words: meter
+                .u64_observable_gauge("pod.spec.words")
+                .with_unit("{word}")
+                .with_callback(move |observer| {
+                    for (product, specs) in &lock(&words).specs {
+                        for spec in specs {
+                            observer.observe(
+                                spec.words,
+                                &[
+                                    KeyValue::new("pod.product", product.clone()),
+                                    KeyValue::new("spec.id", spec.id.clone()),
+                                    KeyValue::new("state", spec.state.as_str()),
+                                ],
+                            );
+                        }
+                    }
+                })
+                .build(),
             snapshot: Arc::clone(&snapshot),
         }
     });
@@ -555,7 +989,12 @@ async fn run<G: Git>(mut stats: PodStats<G>, mut shutdown: watch::Receiver<()>) 
 
 /// Starts reading the pods of the registry at `registry`.
 pub(crate) fn start(registry: PathBuf, shutdown: watch::Receiver<()>) -> JoinHandle<()> {
-    let stats = PodStats::new(registry, SystemGit, gauge_snapshot());
+    let stats = PodStats::new(
+        registry,
+        SystemGit,
+        gauge_snapshot(),
+        telemetry::local_offset(),
+    );
     tokio::spawn(run(stats, shutdown))
 }
 
