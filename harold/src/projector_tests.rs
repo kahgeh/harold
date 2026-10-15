@@ -3004,3 +3004,37 @@ async fn an_undeliverable_turn_end_is_logged_inside_its_trace() {
         logs.text()
     );
 }
+
+#[tokio::test]
+async fn a_turn_end_failing_ten_times_records_nine_failed_deliveries_then_given_up() {
+    let directory = TestDirectory::new();
+    let store = HaroldStore::open(&directory.0).await.unwrap();
+    let appended = store
+        .stream()
+        .append([NewEvent::new("TurnCompleted", json!({"pane_id": "%4"}))])
+        .await
+        .unwrap();
+    let (_, parent) = keep_a_turn_for(appended.events[0].id);
+    let dispatcher: Arc<dyn DeliveryDispatcher> = Arc::new(FailingDispatcher);
+
+    for _ in 1..=9 {
+        assert!(
+            handle_next_delivery(&store, dispatcher.clone())
+                .await
+                .is_err()
+        );
+    }
+    assert!(
+        handle_next_delivery(&store, dispatcher.clone())
+            .await
+            .unwrap()
+    );
+
+    let outcomes: Vec<String> = deliveries_under(parent)
+        .iter()
+        .map(|span| attr(span, "outcome"))
+        .collect();
+    let mut expected = vec!["failed"; 9];
+    expected.push("given_up");
+    assert_eq!(outcomes, expected);
+}
