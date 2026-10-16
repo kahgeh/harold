@@ -1,14 +1,25 @@
 # Operation
 
-Harold runs as a per-user service on macOS. The installer provides `haroldctl` to start, stop, restart, and check that service. It does not register automatic startup at login.
+Harold runs as a per-user service on macOS. It starts when you log in, and launchd restarts it after a crash, within limits. The installer provides `haroldctl` to start, stop, restart, and check that service; `haroldctl stop` keeps it off, across logins too, until `haroldctl start`.
 
 ## Problem
 
-A listening port alone does not tell you which Harold process owns it or which configuration and database it uses. Starting a second daemon from a hook can also race the first process. Installation and hook startup therefore use one service owner and the same readiness check.
+A listening port alone does not tell you which Harold process owns it or which configuration and database it uses. Starting a second daemon from a hook can also race the first process. Installation, login, crash restarts and hook startup therefore use one service owner, one launchd job, and the same readiness check. That job keeps three properties:
+
+- **Two Harolds never race.** Login, launchd's restarts and `haroldctl` all start the same job, with one label, and the store's `harold.lock` refuses a second process.
+- **A hook never starts a second Harold.** A hook asks `haroldctl ensure`, which starts that job or nothing.
+- **Harold never runs with the wrong configuration or store.** The job carries the managed environment and store path, whichever of them starts it.
 
 ## Architecture
 
-The installed `service.plist` stays inside the Harold bundle. `haroldctl start` loads it into the current user's graphical launchd domain and starts the service on demand. launchd starts the `harold` binary itself, with the environment, working directory and log file the plist names. The service remains in that login session until stopped; the plist is not placed in `~/Library/LaunchAgents`.
+The installer writes one launchd job definition, `service.plist`, and puts it in two places: inside the Harold bundle (`~/bin/harold/service.plist`), for reference and rollback, and in `~/Library/LaunchAgents/<label>.plist`, which launchd loads into the user's graphical domain at every login. The label is `com.harold.agent.` followed by 16 hex digits of the prefix's SHA-256. launchd starts the `harold` binary itself, with the environment, working directory and log file the plist names.
+
+| Plist key | Value | Effect |
+| --- | --- | --- |
+| `RunAtLoad` | true | launchd starts Harold when it loads the job at login |
+| `KeepAlive` | `{ SuccessfulExit = false }` | launchd starts Harold again after an exit other than 0 |
+| `ThrottleInterval` | 30 | launchd waits at least 30 seconds between starts |
+| `EnvironmentVariables` | the managed environment plus `HAROLD_LAUNCHD=1` | tells Harold that launchd started it (below) |
 
 | Component | Responsibility |
 | --- | --- |
@@ -25,7 +36,7 @@ The runtime components share Harold's store and shutdown signal. See [Harold Arc
 
 Harold with the iMessage channel needs two macOS permissions: Full Disk Access, to read `~/Library/Messages/chat.db`, and control of Messages, to send. macOS charges a permission to the program launchd started, which is `harold`. It stores each grant with `harold`'s designated requirement, the rule `codesign -dr -` prints. The installer signs `harold` and `tmx-agent-dash` with the fixed identifiers `harold` and `tmx-agent-dash`, so a build signed with the same certificate keeps both grants; an ad-hoc build does not. [Keep permissions across installs](../../how-tos/setup.md#keep-permissions-across-installs) has the steps.
 
-`haroldctl` stays a Python script and needs neither permission: `start`, `stop`, `restart` and `status` do not read the Messages database or send to Messages.
+`haroldctl` stays a Python script and needs neither permission: `start`, `stop`, `restart`, `status` and `ensure` do not read the Messages database or send to Messages.
 
 ## Installation commands
 
@@ -136,9 +147,17 @@ For the default installation:
 ~/bin/haroldctl stop
 ```
 
-`start` is idempotent. It succeeds only when the launchd service's PID owns the configured listening socket and a read-only gRPC request receives the initial `WatchAgentStates` snapshot. It does not use `TurnComplete` or notification diagnostics as a probe. An unrelated listener is an error, not a process to kill.
+| Command | launchd calls | Result |
+| --- | --- | --- |
+| `start` | `enable`, then `bootstrap` from the LaunchAgents copy and `kickstart` when the job is not running | Turns start at login back on, deletes the crash file (below), and waits for readiness |
+| `stop` | `disable`, then `bootout` | Stops Harold and keeps it off, at the next login too, until `start` |
+| `restart` | `stop`, then `start` | Applies an edited `config/local.toml` |
+| `ensure` | `bootstrap` and `kickstart` only when needed | Starts Harold unless `stop` disabled it or it gave up after a crash loop; then prints why and exits 1 |
+| `status` | `print`, `print-disabled` | Prints JSON with `ready`, `pid`, `grpc_addr` and `autostart`: `on`, `off (stopped with haroldctl stop)` or `off (gave up after a crash loop)` |
 
-Hooks call the same `start` operation before sending a completion. They use the managed endpoint and do not spawn a daemon directly.
+`start` is idempotent. It succeeds only when the launchd service's PID owns the configured listening socket and a read-only gRPC request receives the initial `WatchAgentStates` snapshot. It does not use `TurnComplete` or notification diagnostics as a probe. An unrelated listener is an error, not a process to kill. A start that fails readiness unloads the job and leaves it enabled.
+
+Hooks call `ensure` before sending a completion, so a Harold stopped with `haroldctl stop` stays off and the hook skips its report. They use the managed endpoint and do not spawn a daemon directly.
 
 ```mermaid
 sequenceDiagram
@@ -146,9 +165,12 @@ sequenceDiagram
     participant Control as haroldctl
     participant Launchd as User launchd domain
     participant Harold
-    Caller->>Control: start
+    Caller->>Control: start (user) or ensure (hook)
+    opt ensure, and the job is disabled or gave up after a crash loop
+        Control-->>Caller: off, exit 1
+    end
     opt Service is not running
-        Control->>Launchd: load bundled plist and start job
+        Control->>Launchd: load the LaunchAgents plist and start job
         Launchd->>Harold: start harold with the plist's environment
         Harold->>Harold: validate config, open store, catch up snapshot
     end
@@ -159,9 +181,32 @@ sequenceDiagram
     Control-->>Caller: ready
 ```
 
+## Start at login and after a crash
+
+launchd starts Harold at login and after an exit other than 0. Some starts fail the same way every time, so restarting them would loop for ever. When launchd started it (`HAROLD_LAUNCHD=1`), Harold refuses four kinds of start: it logs `startup refused` with a `reason` and exits 0, which `KeepAlive` does not restart.
+
+| `reason` | Cause |
+| --- | --- |
+| `invalid_config` | The configuration fails to load or validate |
+| `store_in_use` | Another Harold holds the store's `harold.lock` |
+| `store_incompatible` | The store's state database has a schema this Harold does not know |
+| `crash_loop` | This is the third start within 10 minutes after an unclean exit |
+
+The crash count lives in `<bundle>/data/crashes`, beside the store. Its first line is `running` while Harold runs, `clean` after a clean shutdown, or `gave-up`; later lines hold the times of recent starts that followed an unclean exit. A start that finds `running` counts one. At the third within 10 minutes Harold writes `gave-up`, and every later start, at login too, refuses with `crash_loop` until `haroldctl start` deletes the file. A clean shutdown resets the count.
+
+Run any other way, from a terminal or as `--check-config`, Harold exits 1 on these errors. The `startup refused` line carries only fixed text and `reason`. It reaches telemetry only when the exporter has started, which is after the configuration loads; the chief cannot be alerted, because the alert address is not open yet.
+
+The first time the installer writes the LaunchAgents copy, macOS shows a "Background Items Added" notice naming `harold`, and lists Harold in System Settings > General > Login Items & Extensions > Allow in the Background. Three ways turn start at login off:
+
+- `haroldctl stop` keeps Harold off until `haroldctl start`.
+- Switching Harold off under Allow in the Background stops launchd loading it at login; `haroldctl start` still starts it for the current login.
+- Deleting `~/Library/LaunchAgents/<label>.plist` removes start at login until the next install.
+
+To roll back to a bundle built without start at login, delete `~/Library/LaunchAgents/<label>.plist` and run the commands in the bundle's `ROLLBACK.md`, with `launchctl enable gui/$(id -u)/<label>` before its last command, `./haroldctl start`. Its first command, `./haroldctl stop`, disables the label, and the older `haroldctl start` does not enable it.
+
 ## Shutdown
 
-`haroldctl stop` unloads the exact service and waits for its process to stop within a bounded period. Within Harold, SIGINT or SIGTERM closes the shared shutdown signal, ends snapshot streams, drains in-flight RPCs, and joins the event handler and listener. The monitor has a bounded shutdown deadline.
+`haroldctl stop` disables the job, unloads it, and waits for its process to stop within a bounded period. A clean shutdown exits 0 and marks the crash file `clean`. Within Harold, SIGINT or SIGTERM closes the shared shutdown signal, ends snapshot streams, drains in-flight RPCs, and joins the event handler and listener. The monitor has a bounded shutdown deadline.
 
 An RPC that appends after the handler has stopped remains durable and is projected at the next start. Event-stream and state-database writes commit as operations complete; shutdown does not require a separate final checkpoint.
 
@@ -190,7 +235,7 @@ Harold has a kill switch for the away channel. While messaging is paused the dae
 - messages that arrive are discarded, not queued. The listener still moves its cursor past them, so nothing is replayed on resume;
 - `harold send-message-to-away-device` is refused: it prints `messaging is paused` and exits 1. A message the daemon stored before the pause is skipped and is not sent on resume.
 
-Use it when the away channel misbehaves, for example when Harold keeps answering its own messages. `haroldctl stop` does not hold in that case, because the next turn-complete hook starts the service again. The pause is stored as a `MessagingPausedChanged` stream event and projected into the `settings` table of the Turso state database, so it survives a restart and stays on until you resume.
+Use it when the away channel misbehaves, for example when Harold keeps answering its own messages. Pausing keeps the agent monitor, the dashboard stream and at-desk TTS running, which `haroldctl stop` turns off with the rest of Harold. The pause is stored as a `MessagingPausedChanged` stream event and projected into the `settings` table of the Turso state database, so it survives a restart and stays on until you resume.
 
 From `tmx-agent-dash`: press `/`, type `messaging`, and run `Messaging: pause`. The masthead of every connected dash then shows `■ MSG PAUSED`. `Messaging: resume` turns messaging back on.
 

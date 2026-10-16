@@ -2,7 +2,7 @@
 
 Install Harold and its dashboard from the latest macOS release. This is the recommended path: it downloads ready-built programs, checks their checksum, and asks for your channel settings. Rust and a source checkout are unnecessary.
 
-The installer starts Harold once to verify installation. Later, start it when needed with `haroldctl start`; nothing is registered for automatic login startup.
+The installer starts Harold to verify installation, and launchd starts it again at every login; `haroldctl stop` keeps it off until `haroldctl start`. The first install shows a macOS "Background Items Added" notice naming `harold`: that is Harold starting at login.
 
 ## Prerequisites
 
@@ -67,7 +67,7 @@ The default layout is:
 
 `local.toml` holds your channel and optional feature settings. The installed service uses its own `config` directory and its store in `data/store`, regardless of paths copied from another machine or Harold overrides in the invoking shell. It records the PATH and UTF-8 locale needed by its tools. Variables set for all of launchd with `launchctl setenv`, such as `HAROLD__GRPC__PORT`, also reach the service; the six variables the service sets itself (`HAROLD_CONFIG_DIR`, `HAROLD_ENV`, `HAROLD__STORE__PATH`, `PATH`, `LANG` and `LC_ALL`) win on a clash.
 
-Add `~/bin` to your shell's PATH if needed, or use the absolute commands below. The installer prints the service definition and installation paths. The service definition stays inside the installation rather than the auto-loaded LaunchAgents directory. A custom location can be selected with `--prefix /absolute/path/to/bin`.
+Add `~/bin` to your shell's PATH if needed, or use the absolute commands below. The installer prints the service definition and installation paths. The service definition stays in the installation, with a copy in `~/Library/LaunchAgents` that launchd loads at login. A custom location can be selected with `--prefix /absolute/path/to/bin`.
 
 ### Keep permissions across installs
 
@@ -238,7 +238,7 @@ The shared notifier adds the Harold-specific fields:
 | `pane_label`   | `tmux display-message` (e.g. `harold:0.3`)                   |
 | `main_context` | Git branch name, or repo name when on `main`                 |
 
-The shared notifier asks `~/bin/haroldctl start` to ensure the managed service is ready, then sends `TurnComplete` through `grpcurl` to the installed endpoint. It does not launch another daemon.
+The shared notifier asks `~/bin/haroldctl ensure` to start the managed service unless `haroldctl stop` turned it off, then sends `TurnComplete` through `grpcurl` to the installed endpoint. It does not launch another daemon.
 
 Both scripts call the same shared notifier after translating their provider's completion data. They resolve it beside themselves, so a custom install prefix works too. Python 3.9+ is sufficient; uv is not required.
 
