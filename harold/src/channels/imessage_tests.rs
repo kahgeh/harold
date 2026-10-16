@@ -7,7 +7,7 @@ use crate::inbound::ownership::{
     NotifierRecord, Ownership, decide_ownership, delivered_text, error_text, fed_markers,
     notification_text, parse_marker,
 };
-use crate::store::{EventVersion, HaroldStore, TurnCompleted};
+use crate::store::{EventVersion, HaroldStore, TurnCompleted, WriteFault, append_tts_mute_changed};
 use crate::util::sanitise_for_applescript;
 
 use super::{
@@ -863,6 +863,47 @@ async fn running_listener_appends_the_row_and_advances_the_cursor() {
 
     assert_eq!(cursor.load(Ordering::Relaxed), 11);
     assert_eq!(store.project_unhandled_events(10).await.unwrap().applied, 1);
+    let delivery = store.next_pending_delivery().await.unwrap().unwrap();
+    assert_eq!(delivery.event_type, "InboundMessageReceived");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_reply_whose_write_timed_out_is_moved_past() {
+    let directory = TestDirectory::new();
+    let store = HaroldStore::open(&directory.0).await.unwrap();
+    let cursor = AtomicI64::new(10);
+    let recent = Mutex::new(RecentRows::new());
+    store.fault_log_flush_for_test(Some(WriteFault::Hang));
+
+    let reply = row(11, "carry on", Direction::Inbound);
+    let stored = record_row(&store, reply, &cursor, &recent, false, Instant::now()).await;
+
+    assert!(!stored);
+    assert_eq!(cursor.load(Ordering::Relaxed), 11);
+    assert!(store.is_failing());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_reply_whose_write_was_refused_keeps_its_place_and_is_stored_by_a_later_try() {
+    let directory = TestDirectory::new();
+    let store = HaroldStore::open(&directory.0).await.unwrap();
+    let cursor = AtomicI64::new(10);
+    let recent = Mutex::new(RecentRows::new());
+    store.fault_log_flush_for_test(Some(WriteFault::Hang));
+    assert!(append_tts_mute_changed(&store, true).await.is_err());
+    store.fault_log_flush_for_test(None);
+
+    let reply = row(11, "carry on", Direction::Inbound);
+    let stored = record_row(&store, reply, &cursor, &recent, false, Instant::now()).await;
+    assert!(!stored);
+    assert_eq!(cursor.load(Ordering::Relaxed), 10);
+
+    tokio::time::advance(Duration::from_secs(30)).await;
+    let reply = row(11, "carry on", Direction::Inbound);
+    let stored = record_row(&store, reply, &cursor, &recent, false, Instant::now()).await;
+    assert!(stored);
+    assert_eq!(cursor.load(Ordering::Relaxed), 11);
+    store.project_unhandled_events(10).await.unwrap();
     let delivery = store.next_pending_delivery().await.unwrap().unwrap();
     assert_eq!(delivery.event_type, "InboundMessageReceived");
 }

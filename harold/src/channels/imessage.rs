@@ -15,7 +15,9 @@ use crate::inbound::AgentAddress;
 use crate::inbound::ownership::{self, notification_text};
 use crate::outbound::is_messaging_paused;
 use crate::settings::get_settings;
-use crate::store::{HaroldStore, InboundMessage, TurnCompleted, append_inbound_message};
+use crate::store::{
+    FailedWrite, HaroldStore, InboundMessage, StoreError, TurnCompleted, append_inbound_message,
+};
 use crate::telemetry;
 use crate::util::sanitise_for_applescript;
 
@@ -570,7 +572,10 @@ fn trimmed_text(row: &serde_json::Value) -> Option<String> {
 /// Record one fetched row as an inbound event and move `cursor` past it. While messaging
 /// is paused the row is discarded: the cursor still moves, so nothing is replayed on resume.
 /// A row whose text was just recorded from the other direction is skipped the same way.
-/// Returns whether the row was stored.
+/// A row whose store write timed out is moved past too: the write may still land, and
+/// reading the row again could store it twice. A row whose write failed any other way,
+/// or was refused by a failing store, keeps its place and is read again. Returns whether
+/// the row was stored.
 async fn record_row(
     store: &HaroldStore,
     row: FetchedRow,
@@ -606,6 +611,11 @@ async fn record_row(
                 .unwrap()
                 .remember(direction, message.text, now);
             true
+        }
+        Err(StoreError::Failing(FailedWrite::TimedOut)) => {
+            cursor.store(rowid, Ordering::Relaxed);
+            warn!("reply's store write timed out; moving past it");
+            false
         }
         Err(e) => {
             tracing::warn!(error = %e, "failed to append InboundMessageReceived event");
