@@ -1,4 +1,5 @@
-# Vendored OpenSSL (via web-push) is compiled for this target. It matches
+# Vendored OpenSSL (the `openssl` dependency's `vendored` feature; web-push
+# brings OpenSSL in) is compiled for this macOS version. It matches
 # MACOSX_DEPLOYMENT_TARGET in .github/workflows/build.yml, so local builds and
 # the release build compile OpenSSL for the same macOS version, and the binary
 # does not claim an older macOS than its OpenSSL was built for.
