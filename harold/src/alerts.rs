@@ -9,6 +9,7 @@
 //! No log line carries any part of a posted body. A refused post logs a fixed line, and
 //! the alert and state of an accepted one are fields, from the fixed lists below.
 
+use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
 use std::time::Duration;
 
@@ -168,6 +169,124 @@ fn queue_line(queue: &mpsc::Sender<Queued>, line: String) {
 async fn refuse() -> StatusCode {
     warn!("alert ignored (unknown alert)");
     StatusCode::BAD_REQUEST
+}
+
+// ---------------------------------------------------------------------------
+// What the chief was told
+// ---------------------------------------------------------------------------
+
+/// Why a line is not typed.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "deliver uses it in the next commit")
+)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HeldBack {
+    /// The chief was already told this state, or its line already waits.
+    Repeat,
+    /// A `cleared` for a `firing` the chief never heard.
+    NeverFired,
+}
+
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "deliver uses it in the next commit")
+)]
+impl HeldBack {
+    /// The log field's value.
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Repeat => "repeat",
+            Self::NeverFired => "never_fired",
+        }
+    }
+}
+
+/// A line waiting for the chief, and whether a refused try at it was logged.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "deliver uses it in the next commit")
+)]
+struct Waiting {
+    line: String,
+    refused: bool,
+}
+
+/// The state each alert's line last told the chief, and the lines still waiting, oldest
+/// first, at most one for each alert. Kept in memory only, so it starts empty with
+/// Harold.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "deliver uses it in the next commit")
+)]
+#[derive(Default)]
+pub(crate) struct Desk {
+    told: HashMap<String, String>,
+    waiting: VecDeque<Waiting>,
+}
+
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "deliver uses it in the next commit")
+)]
+impl Desk {
+    /// Takes a queued line. `Ok` when it now waits to be typed; otherwise why it is held
+    /// back. A line for an alert whose line already waits replaces it: a repeat changes
+    /// nothing, and the other state cancels both, since the chief never heard the first.
+    /// Every `delivery-given-up` waits, but one waiting takes in the next.
+    pub(crate) fn take(&mut self, line: String) -> Result<(), HeldBack> {
+        let (alert, state) = alert_and_state(&line);
+        let waiting_at = self
+            .waiting
+            .iter()
+            .position(|waiting| alert_and_state(&waiting.line).0 == alert);
+        if let Some(at) = waiting_at {
+            if alert == DELIVERY_GIVEN_UP || alert_and_state(&self.waiting[at].line).1 == state {
+                return Err(HeldBack::Repeat);
+            }
+            self.waiting.remove(at);
+            return Err(if state == "cleared" {
+                HeldBack::NeverFired
+            } else {
+                HeldBack::Repeat
+            });
+        }
+        if alert != DELIVERY_GIVEN_UP {
+            match self.told.get(alert).map(String::as_str) {
+                Some(told) if told == state => return Err(HeldBack::Repeat),
+                None if state == "cleared" => return Err(HeldBack::NeverFired),
+                _ => {}
+            }
+        }
+        self.waiting.push_back(Waiting {
+            line,
+            refused: false,
+        });
+        Ok(())
+    }
+
+    /// The line to try next.
+    pub(crate) fn oldest(&self) -> Option<&str> {
+        self.waiting.front().map(|waiting| waiting.line.as_str())
+    }
+
+    /// Lets go of the oldest line, now in the chief's pane, and remembers its state.
+    pub(crate) fn told_oldest(&mut self) {
+        let Some(waiting) = self.waiting.pop_front() else {
+            return;
+        };
+        let (alert, state) = alert_and_state(&waiting.line);
+        if alert != DELIVERY_GIVEN_UP {
+            self.told.insert(alert.to_string(), state.to_string());
+        }
+    }
+
+    /// `true` only the first time a try at the oldest line is refused.
+    pub(crate) fn first_refusal(&mut self) -> bool {
+        self.waiting
+            .front_mut()
+            .is_some_and(|waiting| !std::mem::replace(&mut waiting.refused, true))
+    }
 }
 
 // ---------------------------------------------------------------------------

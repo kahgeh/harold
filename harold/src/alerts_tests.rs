@@ -644,3 +644,135 @@ fn cleared_queues_the_cleared_line() {
     assert_eq!(line, "harold alert: store-failing cleared");
     assert!(queue_rx.try_recv().is_err());
 }
+
+// --- what the chief was told ---
+
+const SLOT_IDLE_CLEARED: &str = "harold alert: slot-idle cleared";
+const WRONG_AGENT_FIRING: &str = "harold alert: wrong-agent firing";
+
+#[test]
+fn a_repeated_firing_is_held_back() {
+    let mut desk = Desk::default();
+    assert_eq!(desk.take(SLOT_IDLE_FIRING.into()), Ok(()));
+    desk.told_oldest();
+
+    assert_eq!(desk.take(SLOT_IDLE_FIRING.into()), Err(HeldBack::Repeat));
+    assert_eq!(desk.take(SLOT_IDLE_FIRING.into()), Err(HeldBack::Repeat));
+    assert_eq!(desk.oldest(), None);
+}
+
+#[test]
+fn a_repeat_while_the_line_waits_changes_nothing() {
+    let mut desk = Desk::default();
+    assert_eq!(desk.take(SLOT_IDLE_FIRING.into()), Ok(()));
+
+    assert_eq!(desk.take(SLOT_IDLE_FIRING.into()), Err(HeldBack::Repeat));
+    assert_eq!(desk.oldest(), Some(SLOT_IDLE_FIRING));
+}
+
+#[test]
+fn firing_cleared_firing_all_wait_in_turn() {
+    let mut desk = Desk::default();
+    for line in [SLOT_IDLE_FIRING, SLOT_IDLE_CLEARED, SLOT_IDLE_FIRING] {
+        assert_eq!(desk.take(line.into()), Ok(()), "{line}");
+        assert_eq!(desk.oldest(), Some(line));
+        desk.told_oldest();
+    }
+    assert_eq!(desk.oldest(), None);
+}
+
+#[test]
+fn a_cleared_never_fired_is_held_back() {
+    let mut desk = Desk::default();
+    assert_eq!(
+        desk.take(SLOT_IDLE_CLEARED.into()),
+        Err(HeldBack::NeverFired)
+    );
+    assert_eq!(desk.oldest(), None);
+
+    // A cleared overtaking its firing before it was typed cancels both.
+    let mut desk = Desk::default();
+    assert_eq!(desk.take(SLOT_IDLE_FIRING.into()), Ok(()));
+    assert_eq!(
+        desk.take(SLOT_IDLE_CLEARED.into()),
+        Err(HeldBack::NeverFired)
+    );
+    assert_eq!(desk.oldest(), None);
+
+    // A second cleared after a typed one is a repeat.
+    let mut desk = Desk::default();
+    for line in [SLOT_IDLE_FIRING, SLOT_IDLE_CLEARED] {
+        desk.take(line.into()).unwrap();
+        desk.told_oldest();
+    }
+    assert_eq!(desk.take(SLOT_IDLE_CLEARED.into()), Err(HeldBack::Repeat));
+    assert_eq!(desk.oldest(), None);
+}
+
+#[test]
+fn a_firing_overtaking_a_waiting_cleared_cancels_both() {
+    let mut desk = Desk::default();
+    desk.take(SLOT_IDLE_FIRING.into()).unwrap();
+    desk.told_oldest();
+    assert_eq!(desk.take(SLOT_IDLE_CLEARED.into()), Ok(()));
+
+    assert_eq!(desk.take(SLOT_IDLE_FIRING.into()), Err(HeldBack::Repeat));
+    assert_eq!(desk.oldest(), None);
+    // The chief still believes firing.
+    assert_eq!(desk.take(SLOT_IDLE_FIRING.into()), Err(HeldBack::Repeat));
+}
+
+#[test]
+fn delivery_given_up_waits_each_time_and_merges_while_waiting() {
+    let line = "harold alert: delivery-given-up firing";
+    let mut desk = Desk::default();
+    assert_eq!(desk.take(line.into()), Ok(()));
+    assert_eq!(desk.take(line.into()), Err(HeldBack::Repeat));
+    desk.told_oldest();
+    assert_eq!(desk.oldest(), None);
+
+    assert_eq!(desk.take(line.into()), Ok(()));
+    assert_eq!(desk.oldest(), Some(line));
+}
+
+#[test]
+fn store_failing_is_typed_on_each_change() {
+    let mut desk = Desk::default();
+    for line in [
+        "harold alert: store-failing firing",
+        "harold alert: store-failing cleared",
+    ] {
+        assert_eq!(desk.take(line.into()), Ok(()), "{line}");
+        desk.told_oldest();
+    }
+}
+
+#[test]
+fn a_repeat_does_not_move_a_waiting_line_back() {
+    let mut desk = Desk::default();
+    desk.take(SLOT_IDLE_FIRING.into()).unwrap();
+    desk.take(WRONG_AGENT_FIRING.into()).unwrap();
+
+    assert_eq!(desk.take(SLOT_IDLE_FIRING.into()), Err(HeldBack::Repeat));
+    assert_eq!(desk.oldest(), Some(SLOT_IDLE_FIRING));
+    desk.told_oldest();
+    assert_eq!(desk.oldest(), Some(WRONG_AGENT_FIRING));
+}
+
+#[test]
+fn first_refusal_is_true_once_per_line() {
+    let mut desk = Desk::default();
+    desk.take(SLOT_IDLE_FIRING.into()).unwrap();
+    assert!(desk.first_refusal());
+    assert!(!desk.first_refusal());
+    desk.told_oldest();
+
+    desk.take(WRONG_AGENT_FIRING.into()).unwrap();
+    assert!(desk.first_refusal());
+}
+
+#[test]
+fn held_back_reasons_have_the_spec_names() {
+    assert_eq!(HeldBack::Repeat.as_str(), "repeat");
+    assert_eq!(HeldBack::NeverFired.as_str(), "never_fired");
+}
