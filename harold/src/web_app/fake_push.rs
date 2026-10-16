@@ -3,15 +3,17 @@
 
 use std::sync::atomic::{AtomicU16, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use axum::Router;
-use axum::body::Bytes;
+use axum::body::{Body, Bytes};
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use jwt_simple::prelude::{ECDSAP256PublicKeyLike, ES256KeyPair};
 use tokio::task::JoinHandle;
+use tokio_stream::wrappers::ReceiverStream;
 
 use super::push::base64url;
 use crate::store::AppPushSubscribed;
@@ -43,6 +45,8 @@ struct Shared {
     response_body_len: AtomicUsize,
     /// When set, a request is read and never answered.
     silent: bool,
+    /// When set, the body is sent one byte at a time, one every this long, this many bytes.
+    slow_body: Mutex<Option<(Duration, usize)>>,
     requests: Mutex<Vec<FakePushRequest>>,
 }
 
@@ -70,6 +74,7 @@ impl FakePushService {
             status: AtomicU16::new(status),
             response_body_len: AtomicUsize::new(0),
             silent,
+            slow_body: Mutex::new(None),
             requests: Mutex::new(Vec::new()),
         });
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -97,6 +102,12 @@ impl FakePushService {
     /// Sends `len` bytes of body with each answer from now on.
     pub(crate) fn set_response_body_len(&self, len: usize) {
         self.shared.response_body_len.store(len, Ordering::SeqCst);
+    }
+
+    /// Sends each answer's status at once and then its body slowly: `len` bytes, one
+    /// every `interval`.
+    pub(crate) fn set_slow_body(&self, interval: Duration, len: usize) {
+        *self.shared.slow_body.lock().expect("fake push slow body") = Some((interval, len));
     }
 
     /// Every request received so far, oldest first.
@@ -159,6 +170,19 @@ async fn receive(
     }
     let status = StatusCode::from_u16(shared.status.load(Ordering::SeqCst))
         .expect("a valid fake push status");
+    let slow_body = *shared.slow_body.lock().expect("fake push slow body");
+    if let Some((interval, len)) = slow_body {
+        let (sender, receiver) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(1);
+        tokio::spawn(async move {
+            for _ in 0..len {
+                tokio::time::sleep(interval).await;
+                if sender.send(Ok(Bytes::from_static(b"x"))).await.is_err() {
+                    return;
+                }
+            }
+        });
+        return (status, Body::from_stream(ReceiverStream::new(receiver))).into_response();
+    }
     let body = vec![b'x'; shared.response_body_len.load(Ordering::SeqCst)];
     (status, body).into_response()
 }

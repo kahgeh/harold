@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use jwt_simple::prelude::ES256KeyPair;
 use reqwest::blocking::Client;
@@ -26,7 +26,9 @@ use web_push::{
 
 use crate::store::AppPushSubscribed;
 
-/// How long a push may take, from connecting to reading the answer.
+/// How long a push may take to get its answer's status. Reading the body stops once
+/// this much time has passed since the push started; a read already waiting may take
+/// one more timeout, so a push takes at most about twice this.
 const PUSH_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The most of a push service's answer that is read. The address comes from the browser,
@@ -44,10 +46,13 @@ pub(crate) struct VapidKey {
 }
 
 impl VapidKey {
-    /// Reads the key at `path`, or creates it (folder 0700, file 0600) when absent.
+    /// Reads the key at `path`, or creates it (folder 0700, file 0600) when absent. An
+    /// existing key and its folder are set to those modes too, so only the user can
+    /// read the key.
     pub(crate) fn load_or_create(path: &Path) -> Result<Self, String> {
         match std::fs::read(path) {
             Ok(pem) => Self::from_pem(pem)
+                .and_then(|key| make_private(path).map(|()| key))
                 .map_err(|error| format!("read the VAPID key at {}: {error}", path.display())),
             Err(error) if error.kind() == ErrorKind::NotFound => Self::create(path)
                 .map_err(|error| format!("create the VAPID key at {}: {error}", path.display())),
@@ -110,6 +115,20 @@ impl VapidKey {
     pub(crate) fn public_key_base64url(&self) -> String {
         base64url(&self.public_point)
     }
+}
+
+/// Sets the key file to 0600 and its folder to 0700.
+fn make_private(path: &Path) -> Result<(), String> {
+    std::fs::set_permissions(path, Permissions::from_mode(0o600))
+        .map_err(|error| format!("limit the key file: {}", error.kind()))?;
+    if let Some(folder) = path
+        .parent()
+        .filter(|folder| !folder.as_os_str().is_empty())
+    {
+        std::fs::set_permissions(folder, Permissions::from_mode(0o700))
+            .map_err(|error| format!("limit the folder: {}", error.kind()))?;
+    }
+    Ok(())
 }
 
 /// Where the VAPID key lives: `web-push/vapid.pem` in the store's folder (D8).
@@ -192,6 +211,7 @@ impl Pusher {
 
     /// The outcome, and for any outcome but `Accepted` the fixed reason to log.
     fn send(&self, subscription: &AppPushSubscribed, body: &str) -> (PushOutcome, Option<String>) {
+        let deadline = Instant::now() + self.timeout;
         let Some(request) = self.request(subscription, body) else {
             return (PushOutcome::Refused, Some("build".to_owned()));
         };
@@ -203,7 +223,7 @@ impl Pusher {
             Err(error) => return (PushOutcome::Unreachable, Some(send_error_reason(&error))),
         };
         let status = response.status().as_u16();
-        let read = read_capped(&mut response);
+        let read = read_capped(&mut response, deadline);
         self.note_response_read(read);
         match status {
             200..=299 => (PushOutcome::Accepted, None),
@@ -300,18 +320,24 @@ fn send_error_reason(error: &reqwest::Error) -> String {
     reason.to_owned()
 }
 
-/// Reads and drops at most `RESPONSE_READ_LIMIT` bytes of the answer's body, and returns
-/// how many were read. Nothing is sized from the answer's `Content-Length`.
-fn read_capped(body: &mut impl Read) -> usize {
+/// Reads and drops at most `RESPONSE_READ_LIMIT` bytes of the answer's body, starting
+/// no read after `deadline`, and returns how many were read. Nothing is sized from the
+/// answer's `Content-Length`.
+///
+/// The deadline matters because the blocking client gives each read its own fresh
+/// timeout: a service that sends a byte now and then would otherwise hold the thread
+/// for as long as it liked.
+fn read_capped(body: &mut impl Read, deadline: Instant) -> usize {
     let mut limited = body.take(RESPONSE_READ_LIMIT);
     let mut buffer = [0_u8; 8 * 1024];
     let mut read = 0;
-    loop {
+    while Instant::now() < deadline {
         match limited.read(&mut buffer) {
             Ok(0) | Err(_) => return read,
             Ok(count) => read += count,
         }
     }
+    read
 }
 
 /// The first 120 characters of `text`, the most an alert shows.

@@ -173,11 +173,41 @@ async fn a_push_service_that_does_not_answer_counts_as_unreachable() {
     let subscription = service.subscription(1);
     let started = Instant::now();
 
-    let outcome = push(&pusher, &subscription, "hello").await;
+    // `CapturedLogs` sees only its own thread, so it starts on the push's thread.
+    let (outcome, logged) = tokio::task::spawn_blocking(move || {
+        let logs = CapturedLogs::start();
+        let outcome = pusher.push(&subscription, "hello");
+        (outcome, logs.text())
+    })
+    .await
+    .expect("push thread");
 
     assert_eq!(outcome, PushOutcome::Unreachable);
     assert!(started.elapsed() < Duration::from_secs(2));
     assert_eq!(service.requests().len(), 1);
+    assert!(
+        logged.contains(r#"outcome="unreachable" reason="timeout""#),
+        "{logged}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_slow_push_response_body_is_cut_off_at_the_deadline() {
+    let service = FakePushService::start(201).await;
+    service.set_slow_body(Duration::from_millis(50), 200);
+    let (key, _directory) = fresh_key();
+    let pusher = Arc::new(Pusher::new(key, LOGIN).with_timeout(Duration::from_millis(200)));
+    let subscription = service.subscription(1);
+    let started = Instant::now();
+
+    let outcome = push(&pusher, &subscription, "hello").await;
+
+    assert_eq!(outcome, PushOutcome::Accepted);
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "took {:?}",
+        started.elapsed()
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -229,6 +259,34 @@ fn the_key_is_created_once_and_kept_private() {
 
     let second = VapidKey::load_or_create(&path).expect("load the key");
     assert_eq!(second.public_key_base64url(), public_key);
+}
+
+#[test]
+fn an_existing_key_is_made_private_on_load() {
+    let directory = TestDirectory::new();
+    let path = vapid_key_path(&directory.path().join("data").join("harold.db"));
+    let folder = path.parent().expect("key folder").to_path_buf();
+    let created = VapidKey::load_or_create(&path).expect("create the key");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).expect("chmod key");
+    std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o755))
+        .expect("chmod folder");
+
+    let loaded = VapidKey::load_or_create(&path).expect("load the key");
+
+    assert_eq!(
+        loaded.public_key_base64url(),
+        created.public_key_base64url()
+    );
+    let file_mode = std::fs::metadata(&path)
+        .expect("key file")
+        .permissions()
+        .mode();
+    assert_eq!(file_mode & 0o777, 0o600);
+    let folder_mode = std::fs::metadata(&folder)
+        .expect("key folder")
+        .permissions()
+        .mode();
+    assert_eq!(folder_mode & 0o777, 0o700);
 }
 
 #[test]
