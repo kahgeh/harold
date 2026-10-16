@@ -16,8 +16,10 @@ use crate::agent::domain::{
 use crate::agent::snapshot::AgentSnapshotHub;
 use crate::inbound::AgentAddress;
 use crate::inbound::RouteReport;
+use crate::inbound::ownership::agent_message_text;
 use crate::outbound::fake::{CapturedLogs, FakeEnvironment};
-use crate::outbound::{DeliveryOutcome, SystemEnvironment};
+use crate::outbound::notify_tests::{FAKE_MACHINE, FakeApp, FakeAwayText};
+use crate::outbound::{AppDelivery, AppRoute, DeliveryOutcome, SystemEnvironment};
 use crate::store::{
     AwayMessageRequested, EventVersion, HaroldStore, InboundMessage, NewEvent, PendingDelivery,
     SpokenLineRequested, TurnCompleted, WriteFault, append_agent_events,
@@ -190,7 +192,7 @@ async fn idle_handler_stops_when_shutdown_channel_closes() {
     let store = Arc::new(HaroldStore::open(&directory.0).await.unwrap());
     let snapshots = AgentSnapshotHub::new(store.load_agent_snapshot().await.unwrap());
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(());
-    let task = tokio::spawn(run_event_handler(store, snapshots, None, shutdown_rx));
+    let task = tokio::spawn(run_event_handler(store, snapshots, None, None, shutdown_rx));
 
     drop(shutdown_tx);
 
@@ -1420,7 +1422,7 @@ async fn dispatcher_over(
     // Built the way `run_event_handler` builds it, so these tests cover the daemon's wiring
     // of the hub into the dispatcher.
     let dispatcher: Arc<dyn DeliveryDispatcher> =
-        Arc::new(production_dispatcher(environment.clone(), &snapshots));
+        Arc::new(production_dispatcher(environment.clone(), &snapshots, None));
     (store, snapshots, environment, dispatcher)
 }
 
@@ -3247,4 +3249,281 @@ async fn a_failing_store_sends_nothing_until_it_recovers() {
     );
     drop(shutdown_tx);
     task.await.unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// The app route: with a web app set, the chief's messages go to the app
+// ---------------------------------------------------------------------------
+
+/// The daemon's dispatcher with a fake web app and a fake away text send, over a hub
+/// with `events`, the screen locked and the message folder set to /work/chief-of-pods.
+struct WithApp {
+    environment: Arc<FakeEnvironment>,
+    app: Arc<FakeApp>,
+    away: Arc<FakeAwayText>,
+    dispatcher: ProductionDispatcher,
+}
+
+async fn with_app(directory: &TestDirectory, events: Vec<AgentEvent>, app: FakeApp) -> WithApp {
+    let store = HaroldStore::open(&directory.0).await.unwrap();
+    append_agent_events(&store, events).await.unwrap();
+    let snapshots = AgentSnapshotHub::new(store.load_agent_snapshot().await.unwrap());
+    project_and_publish_agent_snapshot(&store, &snapshots, 500)
+        .await
+        .unwrap();
+    let environment = Arc::new(FakeEnvironment::locked(ONLY_FROM_CHIEF));
+    let app = Arc::new(app);
+    let away = Arc::new(FakeAwayText::default());
+    let route: Arc<dyn AppRoute> = app.clone();
+    let dispatcher = production_dispatcher(environment.clone(), &snapshots, Some(route))
+        .with_away_text(away.clone());
+    WithApp {
+        environment,
+        app,
+        away,
+        dispatcher,
+    }
+}
+
+fn inventory_unhealthy() -> AgentEvent {
+    AgentEvent::MonitorHealthChanged(AgentMonitorHealthChanged {
+        component: "inventory".into(),
+        healthy: false,
+        reason_code: "timeout".into(),
+        observed_at_ms: 200,
+    })
+}
+
+#[tokio::test]
+async fn chief_away_message_goes_to_the_app_only() {
+    let directory = TestDirectory::new();
+    let with = with_app(
+        &directory,
+        chief_and_pod(),
+        FakeApp::new(AppDelivery::Pushed),
+    )
+    .await;
+
+    let outcome = with.dispatcher.dispatch(&away_delivery(json!(message_from(
+        "%1",
+        "All pods are green"
+    ))));
+
+    assert!(matches!(outcome, Ok(DeliveryOutcome::Delivered)));
+    assert!(with.environment.away_messages().is_empty());
+    assert!(with.away.sends().is_empty());
+    assert_eq!(
+        with.app.delivered(),
+        [("event-1".to_string(), "All pods are green".to_string())]
+    );
+    // iMessage did not carry it, so replies are not routed to it.
+    assert!(with.environment.reply_targets().is_empty());
+
+    // The pane's mark is still set: its turn-end update for this turn is left out.
+    let update = with.dispatcher.dispatch(&turn_delivery("%1", "report"));
+    assert!(matches!(update, Ok(DeliveryOutcome::Skipped)));
+    assert_eq!(with.app.delivered().len(), 1);
+    assert!(with.environment.delivered().is_empty());
+}
+
+#[tokio::test]
+async fn chief_away_message_not_pushed_goes_to_imessage_once() {
+    let directory = TestDirectory::new();
+    let with = with_app(
+        &directory,
+        chief_and_pod(),
+        FakeApp::new(AppDelivery::NotPushed),
+    )
+    .await;
+
+    let outcome = with.dispatcher.dispatch(&away_delivery(json!(message_from(
+        "%1",
+        "All pods are green"
+    ))));
+
+    assert!(matches!(outcome, Ok(DeliveryOutcome::Delivered)));
+    let sends = with.away.sends();
+    assert_eq!(sends.len(), 1);
+    assert!(sends[0].starts_with("(app unreachable) "), "{sends:?}");
+    assert_eq!(
+        sends[0],
+        format!(
+            "(app unreachable) {}",
+            agent_message_text(FAKE_MACHINE, "work:%1", "All pods are green")
+        )
+    );
+    assert!(with.environment.away_messages().is_empty());
+    assert_eq!(with.app.delivered().len(), 1);
+    assert_eq!(with.environment.reply_targets(), ["%1"]);
+}
+
+#[tokio::test]
+async fn other_panes_messages_are_handled_as_today() {
+    let mut chief_gone = chief_and_pod();
+    chief_gone.push(chief_departed());
+    // While the chief runs, rule B drops %2's message and leaves out its update. Once the
+    // chief has gone, both are sent as today.
+    for (events, expected) in [
+        (chief_and_pod(), DeliveryOutcome::Skipped),
+        (chief_gone, DeliveryOutcome::Delivered),
+    ] {
+        let directory = TestDirectory::new();
+        let with = with_app(
+            &directory,
+            events.clone(),
+            FakeApp::new(AppDelivery::Pushed),
+        )
+        .await;
+        let other_directory = TestDirectory::new();
+        let (store, snapshots, environment, without) =
+            only_from_chief(&other_directory, events).await;
+        project_and_publish_agent_snapshot(&store, &snapshots, 500)
+            .await
+            .unwrap();
+
+        let message = away_delivery(json!(message_from("%2", "Pod 3 is blocked")));
+        let outcomes: Vec<(DeliveryOutcome, DeliveryOutcome)> = [
+            message,
+            turn_delivery("%2", "build it"),
+            turn_delivery("%2", "test it"),
+        ]
+        .iter()
+        .map(|delivery| {
+            (
+                with.dispatcher.dispatch(delivery).unwrap(),
+                without.dispatch(delivery).unwrap(),
+            )
+        })
+        .collect();
+
+        assert_eq!(outcomes[0], (expected, expected));
+        for (routed, as_today) in &outcomes {
+            assert_eq!(routed, as_today);
+        }
+        assert_eq!(
+            with.environment.away_messages(),
+            environment.away_messages()
+        );
+        assert_eq!(with.environment.delivered(), environment.delivered());
+        assert_eq!(
+            with.environment.reply_targets(),
+            environment.reply_targets()
+        );
+        assert!(with.app.delivered().is_empty());
+        assert!(with.away.sends().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn locked_chief_spoken_line_goes_to_the_app_as_text_and_makes_no_voice_note() {
+    let directory = TestDirectory::new();
+    let with = with_app(
+        &directory,
+        chief_and_pod(),
+        FakeApp::new(AppDelivery::Pushed),
+    )
+    .await;
+
+    let outcome = with
+        .dispatcher
+        .dispatch(&spoken_delivery(json!(chief_line("All pods are green."))));
+
+    assert!(matches!(outcome, Ok(DeliveryOutcome::Delivered)));
+    assert!(with.environment.voice_notes().is_empty());
+    assert!(with.environment.spoken_lines().is_empty());
+    assert_eq!(
+        with.app.delivered(),
+        [("event-1".to_string(), "All pods are green.".to_string())]
+    );
+    assert!(with.away.sends().is_empty());
+}
+
+#[tokio::test]
+async fn locked_chief_spoken_line_not_pushed_goes_to_imessage_as_text() {
+    let directory = TestDirectory::new();
+    let with = with_app(
+        &directory,
+        chief_and_pod(),
+        FakeApp::new(AppDelivery::NotPushed),
+    )
+    .await;
+
+    let outcome = with
+        .dispatcher
+        .dispatch(&spoken_delivery(json!(chief_line("All pods are green."))));
+
+    assert!(matches!(outcome, Ok(DeliveryOutcome::Delivered)));
+    assert_eq!(with.away.sends(), ["(app unreachable) All pods are green."]);
+    assert!(with.environment.voice_notes().is_empty());
+    assert!(with.environment.spoken_lines().is_empty());
+}
+
+#[tokio::test]
+async fn unlocked_chief_spoken_line_is_said_at_the_desk_as_today() {
+    let directory = TestDirectory::new();
+    let with = with_app(
+        &directory,
+        chief_and_pod(),
+        FakeApp::new(AppDelivery::Pushed),
+    )
+    .await;
+    with.environment.set_screen_locked(false);
+
+    let outcome =
+        with.dispatcher
+            .dispatch_with_pause(&spoken_delivery(json!(chief_line("hi"))), None, false);
+
+    assert!(matches!(outcome, Ok(DeliveryOutcome::Delivered)));
+    assert_eq!(with.environment.spoken_lines(), ["hi"]);
+    assert!(with.app.delivered().is_empty());
+    assert!(with.away.sends().is_empty());
+}
+
+#[tokio::test]
+async fn chief_message_goes_to_imessage_as_today_while_the_listing_fails() {
+    let directory = TestDirectory::new();
+    let mut events = chief_and_pod();
+    events.push(inventory_unhealthy());
+    let with = with_app(&directory, events, FakeApp::new(AppDelivery::Pushed)).await;
+
+    let message = with.dispatcher.dispatch(&away_delivery(json!(message_from(
+        "%1",
+        "All pods are green"
+    ))));
+    let line = with
+        .dispatcher
+        .dispatch(&spoken_delivery(json!(chief_line("hi"))));
+
+    assert!(matches!(message, Ok(DeliveryOutcome::Delivered)));
+    assert!(matches!(line, Ok(DeliveryOutcome::Delivered)));
+    assert_eq!(with.environment.away_messages(), ["All pods are green"]);
+    assert_eq!(with.environment.voice_notes(), ["hi"]);
+    assert_eq!(with.environment.reply_targets(), ["%1"]);
+    assert!(with.app.delivered().is_empty());
+    assert!(with.away.sends().is_empty());
+}
+
+#[tokio::test]
+async fn a_failed_thread_write_is_retryable_and_sends_nothing() {
+    let directory = TestDirectory::new();
+    let with = with_app(&directory, chief_and_pod(), FakeApp::failing()).await;
+
+    for delivery in [
+        away_delivery(json!(message_from("%1", "All pods are green"))),
+        turn_delivery("%1", "report"),
+        spoken_delivery(json!(chief_line("hi"))),
+    ] {
+        let outcome = with.dispatcher.dispatch(&delivery);
+        assert!(
+            matches!(outcome, Err(DispatchError::Retryable(_))),
+            "{}: {outcome:?}",
+            delivery.event_type
+        );
+    }
+
+    assert!(with.away.sends().is_empty());
+    assert!(with.environment.away_messages().is_empty());
+    assert!(with.environment.delivered().is_empty());
+    assert!(with.environment.voice_notes().is_empty());
+    assert!(with.environment.reply_targets().is_empty());
 }

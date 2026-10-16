@@ -1,9 +1,14 @@
+use std::sync::Mutex;
 use std::time::Duration;
 
 use super::fake::{CapturedLogs, FakeEnvironment, turn};
 use super::left_out::TrackedAgents;
-use super::{DeliveryOutcome, NotifyState, OutboundChannel, notify};
-use crate::store::TurnCompleted;
+use super::{
+    AppDelivery, AppRoute, AwayText, ChiefApp, DeliveryOutcome, NotifyState, OutboundChannel,
+    notify, notify_with_app,
+};
+use crate::inbound::ownership::agent_message_text;
+use crate::store::{AppReplyState, TurnCompleted};
 
 fn notify_turn(
     environment: &FakeEnvironment,
@@ -666,4 +671,177 @@ fn quiet_rule_does_not_change_updates_to_the_phone() {
         environment.delivered(),
         [(OutboundChannel::Away, "%1".to_string())]
     );
+}
+
+// ---------------------------------------------------------------------------
+// The app route for the chief's turn-end updates
+// ---------------------------------------------------------------------------
+
+/// What `FakeAwayText::summarise` returns for every turn.
+pub(crate) const FAKE_SUMMARY: &str = "The pods are green.";
+/// What `FakeAwayText::machine_name` returns.
+pub(crate) const FAKE_MACHINE: &str = "mac";
+
+/// An `AppRoute` that records each `(event_id, text)` it is handed and answers with the
+/// delivery it is set to, or with an error, as a failed thread write does.
+pub(crate) struct FakeApp {
+    answer: Mutex<Result<AppDelivery, String>>,
+    delivered: Mutex<Vec<(String, String)>>,
+}
+
+impl FakeApp {
+    pub(crate) fn new(delivery: AppDelivery) -> Self {
+        Self {
+            answer: Mutex::new(Ok(delivery)),
+            delivered: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Every `deliver` fails, as when the thread cannot be written.
+    pub(crate) fn failing() -> Self {
+        Self {
+            answer: Mutex::new(Err("app thread write failed: store is failing".into())),
+            delivered: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Each `(event_id, text)` delivered, oldest first.
+    pub(crate) fn delivered(&self) -> Vec<(String, String)> {
+        self.delivered.lock().unwrap().clone()
+    }
+}
+
+impl AppRoute for FakeApp {
+    fn deliver(&self, event_id: &str, text: &str) -> Result<AppDelivery, String> {
+        let answer = self.answer.lock().unwrap().clone();
+        if answer.is_ok() {
+            self.delivered
+                .lock()
+                .unwrap()
+                .push((event_id.to_string(), text.to_string()));
+        }
+        answer
+    }
+
+    fn set_reply_state(&self, _event_id: &str, _state: AppReplyState) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+/// An `AwayText` that records each text sent and never reaches a real channel.
+#[derive(Default)]
+pub(crate) struct FakeAwayText {
+    sends: Mutex<Vec<String>>,
+}
+
+impl FakeAwayText {
+    /// Each text sent, oldest first.
+    pub(crate) fn sends(&self) -> Vec<String> {
+        self.sends.lock().unwrap().clone()
+    }
+}
+
+impl AwayText for FakeAwayText {
+    fn machine_name(&self) -> String {
+        FAKE_MACHINE.to_string()
+    }
+
+    fn summarise(&self, _turn: &TurnCompleted) -> String {
+        FAKE_SUMMARY.to_string()
+    }
+
+    fn send(&self, text: &str) -> Result<(), String> {
+        self.sends.lock().unwrap().push(text.to_string());
+        Ok(())
+    }
+}
+
+fn notify_chief_turn(
+    environment: &FakeEnvironment,
+    app: &FakeApp,
+    away: &FakeAwayText,
+    turn: &TurnCompleted,
+) -> Result<DeliveryOutcome, String> {
+    notify_with_app(
+        turn,
+        "event-1",
+        "trace",
+        &NotifyState::default(),
+        &TrackedAgents::default(),
+        environment,
+        Some(&ChiefApp { app, away }),
+    )
+}
+
+#[test]
+fn locked_chief_turn_goes_to_the_app_and_not_the_away_channel() {
+    let environment = FakeEnvironment::locked("");
+    let app = FakeApp::new(AppDelivery::Pushed);
+    let away = FakeAwayText::default();
+
+    let outcome = notify_chief_turn(&environment, &app, &away, &turn("%1", "report"));
+
+    assert_eq!(outcome, Ok(DeliveryOutcome::Delivered));
+    assert!(environment.delivered().is_empty());
+    assert_eq!(
+        app.delivered(),
+        [("event-1".to_string(), FAKE_SUMMARY.to_string())]
+    );
+    assert!(away.sends().is_empty());
+    assert!(environment.reply_targets().is_empty());
+}
+
+#[test]
+fn chief_turn_not_pushed_goes_to_imessage_once_with_the_prefix() {
+    let environment = FakeEnvironment::locked("");
+    let app = FakeApp::new(AppDelivery::NotPushed);
+    let away = FakeAwayText::default();
+
+    let outcome = notify_chief_turn(&environment, &app, &away, &turn("%1", "report"));
+
+    assert_eq!(outcome, Ok(DeliveryOutcome::Delivered));
+    assert!(environment.delivered().is_empty());
+    assert_eq!(app.delivered().len(), 1);
+    let sends = away.sends();
+    assert_eq!(sends.len(), 1);
+    assert!(sends[0].starts_with("(app unreachable) "), "{sends:?}");
+    assert_eq!(
+        sends[0],
+        format!(
+            "(app unreachable) {}",
+            agent_message_text(FAKE_MACHINE, "label-%1", FAKE_SUMMARY)
+        )
+    );
+    assert_eq!(environment.reply_targets(), ["%1"]);
+}
+
+#[test]
+fn unlocked_chief_turn_is_unchanged_by_the_app() {
+    let environment = FakeEnvironment::new("");
+    let app = FakeApp::new(AppDelivery::Pushed);
+    let away = FakeAwayText::default();
+
+    let outcome = notify_chief_turn(&environment, &app, &away, &turn("%1", "report"));
+
+    assert_eq!(outcome, Ok(DeliveryOutcome::Delivered));
+    assert_eq!(
+        environment.delivered(),
+        [(OutboundChannel::Tts, "%1".to_string())]
+    );
+    assert!(app.delivered().is_empty());
+    assert!(away.sends().is_empty());
+}
+
+#[test]
+fn chief_turn_whose_thread_write_fails_is_an_error_and_sends_nothing() {
+    let environment = FakeEnvironment::locked("");
+    let app = FakeApp::failing();
+    let away = FakeAwayText::default();
+
+    let outcome = notify_chief_turn(&environment, &app, &away, &turn("%1", "report"));
+
+    assert!(outcome.is_err());
+    assert!(away.sends().is_empty());
+    assert!(environment.delivered().is_empty());
+    assert!(environment.reply_targets().is_empty());
 }

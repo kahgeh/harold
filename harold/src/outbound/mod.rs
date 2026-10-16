@@ -7,7 +7,7 @@ pub(crate) mod voice_note;
 #[cfg(test)]
 pub(crate) mod fake;
 #[cfg(test)]
-mod notify_tests;
+pub(crate) mod notify_tests;
 
 use std::collections::HashMap;
 use std::process::Command;
@@ -18,9 +18,10 @@ use std::time::Instant;
 use tracing::info;
 
 use crate::channels;
+use crate::inbound::ownership::agent_message_text;
 use crate::inbound::{AgentAddress, set_last_away_notification_source_agent};
 use crate::settings::{NotifySettings, get_settings};
-use crate::store::{AwayMessageRequested, TurnCompleted};
+use crate::store::{AppReplyState, AwayMessageRequested, TurnCompleted};
 use crate::tmux;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -248,6 +249,111 @@ impl NotifyEnvironment for SystemEnvironment {
     }
 }
 
+// ---------------------------------------------------------------------------
+// The app route — the chief's messages go to the web app
+// ---------------------------------------------------------------------------
+
+/// Whether the web app pushed a message to the phone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AppDelivery {
+    /// At least one push service accepted the alert.
+    Pushed,
+    /// No phone is subscribed, or no push service accepted the alert.
+    NotPushed,
+}
+
+/// The web app as the delivery loop sees it. The daemon uses `web_app::route::WebAppRoute`;
+/// tests pass a fake.
+pub(crate) trait AppRoute: Send + Sync {
+    /// Adds the chief's `text` to the thread under `event_id` (once, however often called)
+    /// and pushes its alert body to every subscription. Err only when the thread write fails.
+    fn deliver(&self, event_id: &str, text: &str) -> Result<AppDelivery, String>;
+    fn set_reply_state(&self, event_id: &str, state: AppReplyState) -> Result<(), String>;
+}
+
+/// The away channel's plain-text send and the turn-end summary. `SystemAwayText` uses
+/// `channels::send` and `channels::summarise_for_notification`; tests pass a fake.
+pub(crate) trait AwayText: Send + Sync {
+    fn machine_name(&self) -> String;
+    fn summarise(&self, turn: &TurnCompleted) -> String;
+    fn send(&self, text: &str) -> Result<(), String>;
+}
+
+pub(crate) struct SystemAwayText;
+
+impl AwayText for SystemAwayText {
+    fn machine_name(&self) -> String {
+        get_settings().machine_name.clone()
+    }
+
+    fn summarise(&self, turn: &TurnCompleted) -> String {
+        channels::summarise_for_notification(&turn.assistant_message, &turn.last_user_prompt)
+    }
+
+    fn send(&self, text: &str) -> Result<(), String> {
+        channels::send(text)
+    }
+}
+
+/// What a message the app could not push starts with when it goes to iMessage instead.
+pub(crate) const APP_UNREACHABLE: &str = "(app unreachable)";
+
+/// Which route carried a chief's message to the phone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CarriedBy {
+    App,
+    Away,
+}
+
+/// The app route for one delivery of a chief's message: the web app, and the away
+/// channel's text send for when no push is accepted.
+pub(crate) struct ChiefApp<'a> {
+    pub app: &'a dyn AppRoute,
+    pub away: &'a dyn AwayText,
+}
+
+/// The app route: deliver to the app; when not pushed, send "(app unreachable) <away_text>" once.
+///
+/// An error means nothing reached the phone this try, and the caller retries: a failed
+/// thread write sends nothing, and a failed away send follows a push no service accepted.
+/// The thread keeps one row per `event_id`, so a retry adds no second one.
+pub(crate) fn deliver_from_chief(
+    chief_app: &ChiefApp<'_>,
+    event_id: &str,
+    text: &str,
+    away_text: &str,
+) -> Result<CarriedBy, String> {
+    match chief_app.app.deliver(event_id, text)? {
+        AppDelivery::Pushed => Ok(CarriedBy::App),
+        AppDelivery::NotPushed => {
+            chief_app
+                .away
+                .send(&format!("{APP_UNREACHABLE} {away_text}"))?;
+            Ok(CarriedBy::Away)
+        }
+    }
+}
+
+/// Send a locked-screen turn-end update of a chief's pane by the app route. The update is
+/// the turn's summary; iMessage gets it with the pane's address, as a requested message.
+/// The source agent is returned only when iMessage carried it.
+fn deliver_turn_from_chief(
+    chief_app: &ChiefApp<'_>,
+    turn: &TurnCompleted,
+    event_id: &str,
+) -> Result<(DeliveryOutcome, Option<AgentAddress>), String> {
+    let text = chief_app.away.summarise(turn);
+    let away_text = agent_message_text(&chief_app.away.machine_name(), &turn.pane_label, &text);
+    let source = match deliver_from_chief(chief_app, event_id, &text, &away_text)? {
+        CarriedBy::App => None,
+        CarriedBy::Away => Some(AgentAddress::TmuxPane {
+            pane_id: turn.pane_id.clone(),
+            label: turn.pane_label.clone(),
+        }),
+    };
+    Ok((DeliveryOutcome::Delivered, source))
+}
+
 /// What `notify` remembers between events. Kept in memory: a restart forgets it.
 #[derive(Default)]
 pub(crate) struct NotifyState {
@@ -323,12 +429,31 @@ fn leave_out(
     Ok(DeliveryOutcome::Skipped)
 }
 
+/// The daemon sends through `notify_with_app`; this is its form without the app route.
+#[cfg(test)]
 pub(crate) fn notify(
     turn: &TurnCompleted,
     trace_id: &str,
     state: &NotifyState,
     agents: &left_out::TrackedAgents,
     environment: &dyn NotifyEnvironment,
+) -> Result<DeliveryOutcome, String> {
+    notify_with_app(turn, trace_id, trace_id, state, agents, environment, None)
+}
+
+/// `notify` with the app route for a chief's pane. `notify` calls it with `None`.
+///
+/// `app` is given only for a chief's pane. It changes the send alone: where `notify` would
+/// send the update on `OutboundChannel::Away`, the update goes by `deliver_from_chief`
+/// under `event_id`. Every check before the send is as in `notify`.
+pub(crate) fn notify_with_app(
+    turn: &TurnCompleted,
+    event_id: &str,
+    trace_id: &str,
+    state: &NotifyState,
+    agents: &left_out::TrackedAgents,
+    environment: &dyn NotifyEnvironment,
+    app: Option<&ChiefApp<'_>>,
 ) -> Result<DeliveryOutcome, String> {
     let now = environment.now();
     // Removed before any other check, so a mark affects one turn at most.
@@ -400,7 +525,13 @@ pub(crate) fn notify(
         return leave_out(state, dedup_key, now, &turn.pane_id, &reason);
     }
 
-    let (outcome, source_agent) = match environment.deliver(&channel, turn, trace_id) {
+    let delivered = match (channel, app) {
+        (OutboundChannel::Away, Some(chief_app)) => {
+            deliver_turn_from_chief(chief_app, turn, event_id)
+        }
+        _ => environment.deliver(&channel, turn, trace_id),
+    };
+    let (outcome, source_agent) = match delivered {
         Ok(delivered) => delivered,
         Err(error) => {
             // The event stays pending and this turn comes again: its mark must still be

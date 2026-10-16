@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -8,16 +9,21 @@ use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 
 use crate::agent::snapshot::AgentSnapshotHub;
 use crate::alerts::AlertQueue;
+use crate::inbound::ownership::agent_message_text;
 use crate::inbound::{AgentAddress, RouteReport, route_inbound_message};
 use crate::outbound::left_out::{
     TrackedAgents, message_dropped_reason, spoken_line_dropped_reason,
 };
-use crate::outbound::{DeliveryOutcome, NotifyEnvironment, NotifyState, SystemEnvironment, notify};
+use crate::outbound::{
+    AppRoute, AwayText, CarriedBy, ChiefApp, DeliveryOutcome, NotifyEnvironment, NotifyState,
+    SystemAwayText, SystemEnvironment, deliver_from_chief, notify_with_app,
+};
 use crate::store::{
     AwayMessageRequested, EventVersion, HaroldStore, InboundMessage, PendingDelivery,
     ProjectionBatch, SpokenLineRequested, StoreError, TurnCompleted,
 };
 use crate::telemetry::{self, OpenReply, ResolvedBy, Routing, TRACE_TARGET};
+use crate::web_app::chief::is_chief_pane;
 
 pub(crate) trait DeliveryDispatcher: Send + Sync + 'static {
     fn dispatch(&self, delivery: &PendingDelivery) -> Result<DeliveryOutcome, DispatchError>;
@@ -61,6 +67,10 @@ struct ProductionDispatcher {
     snapshots: Option<AgentSnapshotHub>,
     /// Routes a stored reply: `route_inbound_message`, or a fake in tests.
     router: Router,
+    /// The web app. When set, the chief's messages to the phone go to it first.
+    app: Option<Arc<dyn AppRoute>>,
+    /// The away channel's plain-text send, for a chief's message the app did not push.
+    away_text: Arc<dyn AwayText>,
 }
 
 impl DeliveryDispatcher for ProductionDispatcher {
@@ -88,6 +98,8 @@ impl ProductionDispatcher {
             notify_state: NotifyState::default(),
             snapshots,
             router: Arc::new(route_inbound_message),
+            app: None,
+            away_text: Arc::new(SystemAwayText),
         }
     }
 
@@ -95,6 +107,39 @@ impl ProductionDispatcher {
     #[cfg(test)]
     fn with_router(self, router: Router) -> Self {
         Self { router, ..self }
+    }
+
+    /// The dispatcher with the web app as the chief's route to the phone.
+    fn with_app(self, app: Arc<dyn AppRoute>) -> Self {
+        Self {
+            app: Some(app),
+            ..self
+        }
+    }
+
+    /// The dispatcher with `away` in place of the away channel's text send.
+    #[cfg(test)]
+    fn with_away_text(self, away: Arc<dyn AwayText>) -> Self {
+        Self {
+            away_text: away,
+            ..self
+        }
+    }
+
+    /// The app route for a message from `pane_id`: some only when a web app is set and
+    /// the pane is the chief's in the snapshot the handler published before this delivery.
+    fn chief_app(&self, pane_id: &str) -> Option<ChiefApp<'_>> {
+        let app = self.app.as_deref()?;
+        let snapshots = self.snapshots.as_ref()?;
+        let chief_folder = self
+            .environment
+            .notify_settings()
+            .away_messages_only_from
+            .as_deref();
+        is_chief_pane(&snapshots.current(), chief_folder, pane_id).then(|| ChiefApp {
+            app,
+            away: self.away_text.as_ref(),
+        })
     }
 
     /// The agent panes in the snapshot the handler published before this delivery.
@@ -119,12 +164,14 @@ impl ProductionDispatcher {
                     .map_err(|error| {
                         DispatchError::Permanent(format!("invalid TurnCompleted payload: {error}"))
                     })?;
-                notify(
+                notify_with_app(
                     &turn,
+                    &delivery.event_id,
                     &delivery.trace_id,
                     &self.notify_state,
                     &self.tracked_agents(),
                     self.environment.as_ref(),
+                    self.chief_app(&turn.pane_id).as_ref(),
                 )
                 .map_err(DispatchError::Retryable)
             }
@@ -145,28 +192,52 @@ impl ProductionDispatcher {
                     (self.router)(text, forwarded)
                 })
             }
-            "AwayMessageRequested" => dispatch_away_message(
-                delivery,
-                messaging_paused,
-                |pane_id| {
-                    message_dropped_reason(
-                        self.environment
-                            .notify_settings()
-                            .away_messages_only_from
-                            .as_deref(),
-                        &self.tracked_agents(),
-                        pane_id,
-                    )
-                },
-                |message| self.environment.send_away_message(message),
-                |source| {
-                    // The pane's mark: its turn-end update for this turn is left out.
-                    self.notify_state
-                        .mark_requested_message(source.pane_id(), self.environment.now());
-                    self.environment.record_reply_target(source);
-                },
-            ),
-            "SpokenLineRequested" => dispatch_spoken_line(
+            "AwayMessageRequested" => {
+                // Whether the web app carried the message, in which case no reply target
+                // is recorded: a reply to it comes through the app.
+                let carried_by_app = Cell::new(false);
+                dispatch_away_message(
+                    delivery,
+                    messaging_paused,
+                    |pane_id| {
+                        message_dropped_reason(
+                            self.environment
+                                .notify_settings()
+                                .away_messages_only_from
+                                .as_deref(),
+                            &self.tracked_agents(),
+                            pane_id,
+                        )
+                    },
+                    |message| {
+                        let Some(chief_app) = self.chief_app(&message.pane_id) else {
+                            return self.environment.send_away_message(message);
+                        };
+                        let away_text = agent_message_text(
+                            &chief_app.away.machine_name(),
+                            &message.pane_label,
+                            &message.text,
+                        );
+                        let carried_by = deliver_from_chief(
+                            &chief_app,
+                            &delivery.event_id,
+                            &message.text,
+                            &away_text,
+                        )?;
+                        carried_by_app.set(carried_by == CarriedBy::App);
+                        Ok(())
+                    },
+                    |source| {
+                        // The pane's mark: its turn-end update for this turn is left out.
+                        self.notify_state
+                            .mark_requested_message(source.pane_id(), self.environment.now());
+                        if !carried_by_app.get() {
+                            self.environment.record_reply_target(source);
+                        }
+                    },
+                )
+            }
+            "SpokenLineRequested" => dispatch_spoken_line_with_app(
                 delivery,
                 messaging_paused,
                 crate::outbound::is_tts_muted(),
@@ -181,6 +252,7 @@ impl ProductionDispatcher {
                     )
                 },
                 self.environment.as_ref(),
+                |pane_id| self.chief_app(pane_id),
             ),
             other => Err(DispatchError::Permanent(format!(
                 "unknown event type: {other}"
@@ -320,12 +392,35 @@ fn dispatch_away_message(
 /// is paused; unlocked, it is said unless the voice is muted. Both are asked on every try,
 /// so a line whose send failed while away is said if the user is back for the retry. Log
 /// lines name the pane and never hold the text.
+#[cfg(test)]
 fn dispatch_spoken_line(
     delivery: &PendingDelivery,
     messaging_paused: bool,
     voice_muted: bool,
     drop_reason: impl FnOnce(&str) -> Option<String>,
     environment: &dyn NotifyEnvironment,
+) -> Result<DeliveryOutcome, DispatchError> {
+    dispatch_spoken_line_with_app(
+        delivery,
+        messaging_paused,
+        voice_muted,
+        drop_reason,
+        environment,
+        |_| None,
+    )
+}
+
+/// `dispatch_spoken_line` with the app route. On the locked-screen branch only,
+/// `chief_app` is asked with the line's pane id: when it gives the app route, the line goes
+/// to the app as text, and to iMessage as text when the app does not push it. No voice
+/// note is made for it.
+fn dispatch_spoken_line_with_app<'a>(
+    delivery: &PendingDelivery,
+    messaging_paused: bool,
+    voice_muted: bool,
+    drop_reason: impl FnOnce(&str) -> Option<String>,
+    environment: &dyn NotifyEnvironment,
+    chief_app: impl FnOnce(&str) -> Option<ChiefApp<'a>>,
 ) -> Result<DeliveryOutcome, DispatchError> {
     let line = serde_json::from_value::<SpokenLineRequested>(delivery.payload.clone()).map_err(
         |error| DispatchError::Permanent(format!("invalid SpokenLineRequested payload: {error}")),
@@ -339,6 +434,11 @@ fn dispatch_spoken_line(
         if messaging_paused {
             info!(pane_id = %pane_id, "spoken line dropped (messaging paused)");
             return Ok(DeliveryOutcome::Skipped);
+        }
+        if let Some(chief_app) = chief_app(pane_id) {
+            deliver_from_chief(&chief_app, &delivery.event_id, &line.text, &line.text)
+                .map_err(DispatchError::Retryable)?;
+            return Ok(DeliveryOutcome::Delivered);
         }
         environment
             .send_spoken_line(&line.text)
@@ -359,11 +459,18 @@ fn dispatch_spoken_line(
 
 /// The dispatcher the daemon runs: it reads the tracked agent panes from `snapshots`, the
 /// hub the event handler publishes to before each delivery.
+///
+/// With `app` set, the chief's messages to the phone go to the web app.
 fn production_dispatcher(
     environment: Arc<dyn NotifyEnvironment>,
     snapshots: &AgentSnapshotHub,
+    app: Option<Arc<dyn AppRoute>>,
 ) -> ProductionDispatcher {
-    ProductionDispatcher::new(environment, Some(snapshots.clone()))
+    let dispatcher = ProductionDispatcher::new(environment, Some(snapshots.clone()));
+    match app {
+        Some(app) => dispatcher.with_app(app),
+        None => dispatcher,
+    }
 }
 
 /// A delivery whose send fails this many times is given up.
@@ -657,11 +764,13 @@ pub async fn run_event_handler(
     store: Arc<HaroldStore>,
     snapshots: AgentSnapshotHub,
     alerts: Option<AlertQueue>,
+    app: Option<Arc<dyn AppRoute>>,
     shutdown: watch::Receiver<()>,
 ) {
     let dispatcher: Arc<dyn DeliveryDispatcher> = Arc::new(production_dispatcher(
         Arc::new(SystemEnvironment),
         &snapshots,
+        app,
     ));
     // Voice notes sent before a restart are kept for Messages to read; remove the old ones.
     crate::outbound::voice_note::remove_old_notes(

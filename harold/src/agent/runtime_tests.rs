@@ -1486,6 +1486,7 @@ async fn real_screen_adapter_keeps_unrelated_capture_out_of_every_published_boun
         Arc::clone(&store),
         snapshots,
         None,
+        None,
         handler_shutdown_rx,
     ));
     tokio::time::timeout(Duration::from_secs(1), async {

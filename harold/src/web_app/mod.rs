@@ -6,7 +6,9 @@ pub(crate) const DATASTAR_SHA256: &str =
 #[path = "assets_tests.rs"]
 mod assets_tests;
 
+pub(crate) mod chief;
 pub(crate) mod push;
+pub(crate) mod route;
 
 #[cfg(test)]
 pub(crate) mod fake_push;
