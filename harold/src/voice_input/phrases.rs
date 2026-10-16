@@ -1,0 +1,34 @@
+//! Harold's own phrases in a call, and where each is kept as audio between calls.
+
+use sha2::{Digest, Sha256};
+use std::path::{Path, PathBuf};
+
+pub(crate) const NOTHING_HEARD: &str = "Sorry, I didn't catch that.";
+pub(crate) const CHIEF_BUSY: &str = "The chief is busy. I'll pass it on when it's free.";
+pub(crate) const NO_ANSWER: &str = "No answer yet.";
+pub(crate) const NO_CHIEF: &str = "There's no chief running.";
+pub(crate) const BYE: &str = "Bye.";
+/// Said through the `[tts]` command, never by the worker.
+pub(crate) const VOICE_STOPPED: &str = "The voice stopped. One moment.";
+/// Said through the `[tts]` command, never by the worker.
+pub(crate) const VOICE_FAILED: &str = "The voice failed. Call ended.";
+
+/// The file `phrase` is kept in for `voice`: `<first 16 hex of sha256(voice + "\n" + phrase)>.wav`.
+pub(crate) fn phrase_file(dir: &Path, voice: &str, phrase: &str) -> PathBuf {
+    let digest = Sha256::digest(format!("{voice}\n{phrase}").as_bytes());
+    dir.join(format!("{}.wav", &hex::encode(digest)[..16]))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_phrase_file_is_named_by_its_voice_and_text() {
+        let digest = hex::encode(Sha256::digest(b"af_heart\nBye."));
+        let file = phrase_file(Path::new("/p"), "af_heart", BYE);
+        assert_eq!(file, Path::new("/p").join(format!("{}.wav", &digest[..16])));
+        assert_ne!(file, phrase_file(Path::new("/p"), "bf_emma", BYE));
+        assert_ne!(file, phrase_file(Path::new("/p"), "af_heart", NO_ANSWER));
+    }
+}
