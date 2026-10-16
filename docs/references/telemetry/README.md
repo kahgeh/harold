@@ -406,21 +406,51 @@ Harold answers:
 - `204` for a post naming one of the four alerts with state `firing` or `cleared`. It then types exactly `harold alert: <name> <state>` into the pane of the agent running in the chief's folder, `[notify] away_messages_only_from`.
 - `400` for anything else, including another path or method. It logs `alert ignored (unknown alert)` and types nothing.
 
-Harold also types lines of its own the same way. The first is `harold alert: delivery-given-up firing`, when it gives up a delivery after 10 failed tries (see the [notification reference](../notification/README.md#architecture)). It carries no message text. It is typed only when `alert_listen` is set and the address opened, with the checks and the 10 minutes below, as a posted line is. A post naming `delivery-given-up` is answered `400`.
+Harold also types lines of its own the same way. The first is `harold alert: delivery-given-up firing`, when it gives up a delivery after 10 failed tries (see the [notification reference](../notification/README.md#architecture)). It carries no message text. It is typed only when `alert_listen` is set and the address opened, with the checks below, as a posted line is. A post naming `delivery-given-up` is answered `400`.
 
 The other two are `harold alert: store-failing firing`, when Harold marks its store failing, and `harold alert: store-failing cleared`, when the store recovers (see the [operation reference](../operation/README.md)). The two are typed under the same conditions as the `delivery-given-up` line. `cleared` follows only a `firing` line: a spell that began before the alert address opened is not cleared. Harold also logs the two changes, as `store failing` and `store recovered`, with only the fields `component = "store"` and `reason`. A post naming `store-failing` is answered `400`.
 
 No log line carries any part of a posted body.
 
-Typing follows the timed prompts' checks: the pane must be idle and its input box empty. Harold tries every 5 seconds. A line is dropped, and logged as `alert not delivered (<reason>)`, when:
+### What the chief receives
 
-- no agent runs in the chief's folder (`no_chief`);
-- the chief's pane stays busy for 10 minutes, counted from the post, or for Harold's own line from when it was queued (`agent_busy`), or another check keeps failing that long. Lines are typed one at a time, so a line queued behind one that waited may find its 10 minutes already up;
-- the queue of 32 lines waiting to be typed is full (`queue_full`). The post is still answered 204.
+Harold remembers, for each alert, the state it last typed: `firing`, `cleared`, or nothing yet. A line is typed only when it changes that state:
+
+- a `firing` is typed when the chief was last told `cleared`, or nothing;
+- a `cleared` is typed when the chief was last told `firing`;
+- a repeated `firing`, a second `cleared`, and a `cleared` for a `firing` the chief never heard are held back, and logged at debug level as `alert repeat held back`, with `reason` `repeat` or `never_fired`.
+
+HyperDX posts `firing` again in every alert window while an alert's condition holds, so a spell of an alert reaches the chief as one `firing` line and one `cleared` line.
+
+`slot-idle` is posted per product, but its line does not name the product. One `firing` covers every product's spell: a second product starting to idle while the first still does is held back, until a `cleared` is typed.
+
+`delivery-given-up` is typed every time, since each one is a different lost message and none is cleared. While one waits, a second is merged into it, so the chief gets one line per wait. `store-failing` follows the rule of change, like the posted alerts.
+
+What the chief does with a line is the chief's own instruction.
+
+### Waiting for the chief
+
+Typing follows the timed prompts' checks: the pane must be idle and its input box empty. Harold tries every 5 seconds, and a line waits as long as that takes. It also waits while no agent runs in the chief's folder, so a chief that starts later still hears an alert that is still firing. The first refused try logs `alert waiting (<reason>)` once, with `reason = no_chief` when no agent runs in the folder, and the line is logged again only when it is typed.
+
+While a line waits, Harold keeps reading posts:
+
+- a repeat of the waiting line changes nothing;
+- a `cleared` that arrives while its `firing` waits untyped cancels both, logged as one `alert repeat held back` with `reason = never_fired`;
+- lines waiting for different alerts are typed oldest first.
+
+A line is dropped, and logged as `alert not delivered (<reason>)`, only when:
+
+- the queue of 32 lines not yet read is full (`queue_full`). The post is still answered 204. Repeats are read and held back as they arrive, so they do not fill it;
+- Harold is stopping (`shutting_down`). Lines still waiting are abandoned;
+- the line was typed and Enter failed (`enter_failed`). It is not typed again, and counts as told, since it sits in the chief's input box.
+
+### After a restart
+
+What the chief was last told is kept in memory only, and starts empty when Harold starts. The first post of an alert that is still firing is typed again: for `slot-idle`, one line within 15 minutes of each restart.
+
+### One writer at a time
 
 One writer at a time types into a pane. Alerts, timed prompts and phone replies share a lock per pane around typing and Enter. Alerts and timed prompts also treat a pane as busy for a minute after anyone typed into it, because the agents view can still read idle just after typing.
-
-What the chief does with the line is the chief's own instruction.
 
 ## Creating the definitions
 

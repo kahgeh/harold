@@ -6,6 +6,10 @@
 //! own through `AlertQueue`: `harold alert: delivery-given-up firing`, and
 //! `harold alert: store-failing firing` and `cleared`. The address refuses both names.
 //!
+//! A line is typed only when it changes what the chief was last told about its alert, so
+//! HyperDX's repeated `firing` posts reach the chief once. Every `delivery-given-up` is a
+//! different lost message, and each is typed. A line waits for the chief without limit.
+//!
 //! No log line carries any part of a posted body. A refused post logs a fixed line, and
 //! the alert and state of an accepted one are fields, from the fixed lists below.
 
@@ -23,7 +27,7 @@ use tokio::sync::mpsc::{self, error::TrySendError};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::agent::domain::EffectiveAgentState;
 use crate::timed_prompts::{
@@ -74,15 +78,12 @@ impl AlertQueue {
     }
 }
 
-/// Lines accepted and not yet typed. A post that finds it full is answered 204 and the
-/// alert is dropped.
+/// Lines accepted and not yet read by `deliver`, which reads them while a line waits. A
+/// post that finds it full is answered 204 and the alert is dropped.
 pub(crate) const QUEUE_CAPACITY: usize = 32;
 
-/// A line waiting to be typed, and when it was posted.
+/// A queued line, and when it was queued.
 pub(crate) type Queued = (String, Instant);
-
-/// How long a line waits for the chief to be idle, from its post, before it is dropped.
-const GIVE_UP_AFTER: Duration = Duration::from_secs(10 * 60);
 
 /// The largest body read. A webhook's body is a few dozen bytes.
 const BODY_LIMIT: usize = 16 * 1024;
@@ -176,10 +177,6 @@ async fn refuse() -> StatusCode {
 // ---------------------------------------------------------------------------
 
 /// Why a line is not typed.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "deliver uses it in the next commit")
-)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum HeldBack {
     /// The chief was already told this state, or its line already waits.
@@ -188,10 +185,6 @@ pub(crate) enum HeldBack {
     NeverFired,
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "deliver uses it in the next commit")
-)]
 impl HeldBack {
     /// The log field's value.
     pub(crate) fn as_str(self) -> &'static str {
@@ -203,10 +196,6 @@ impl HeldBack {
 }
 
 /// A line waiting for the chief, and whether a refused try at it was logged.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "deliver uses it in the next commit")
-)]
 struct Waiting {
     line: String,
     refused: bool,
@@ -215,20 +204,12 @@ struct Waiting {
 /// The state each alert's line last told the chief, and the lines still waiting, oldest
 /// first, at most one for each alert. Kept in memory only, so it starts empty with
 /// Harold.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "deliver uses it in the next commit")
-)]
 #[derive(Default)]
 pub(crate) struct Desk {
     told: HashMap<String, String>,
     waiting: VecDeque<Waiting>,
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "deliver uses it in the next commit")
-)]
 impl Desk {
     /// Takes a queued line. `Ok` when it now waits to be typed; otherwise why it is held
     /// back. A line for an alert whose line already waits replaces it: a repeat changes
@@ -326,10 +307,12 @@ fn held_panes(held: &mut Option<HeldPane>, view: &AgentsView) -> Vec<String> {
     held.iter().map(|held| held.pane_id.clone()).collect()
 }
 
-/// Types each queued line into the agent in `chief_folder`, trying every ROUND_INTERVAL
-/// until 10 minutes after its post. Lines are typed one at a time, so a line behind one
-/// that waited may find its 10 minutes already up; it is dropped as `agent_busy`. Shutdown abandons a line still waiting; it is looked at between
-/// tries only, so a try is never stopped between typing and pressing Enter.
+/// Types each queued line that changes what the chief was told into the agent in
+/// `chief_folder`, trying the oldest waiting line every ROUND_INTERVAL until the chief's
+/// pane is idle with an empty input box, however long that takes. Posts are read while a
+/// line waits, so repeats are held back as they arrive and do not fill the queue. Shutdown
+/// abandons the lines still waiting; it is looked at between tries only, so a try is never
+/// stopped between typing and pressing Enter.
 pub(crate) async fn deliver<P: Ports>(
     ports: P,
     chief_folder: Option<String>,
@@ -337,142 +320,137 @@ pub(crate) async fn deliver<P: Ports>(
     mut shutdown: watch::Receiver<()>,
 ) {
     let chief_folder = chief_folder.filter(|folder| !folder.trim().is_empty());
+    let mut desk = Desk::default();
     let mut held = None;
+    let mut open = true;
     loop {
-        let (line, posted_at) = tokio::select! {
+        if let Some(line) = desk.oldest() {
+            let line = line.to_string();
+            try_line(&ports, chief_folder.as_deref(), &line, &mut desk, &mut held).await;
+        }
+        let waiting = desk.oldest().is_some();
+        if !open && !waiting {
+            return;
+        }
+        tokio::select! {
             biased;
             _ = shutdown.changed() => return,
-            queued = queue.recv() => match queued {
-                Some(queued) => queued,
-                None => return,
+            queued = queue.recv(), if open => match queued {
+                Some((line, _)) => {
+                    if let Err(held_back) = desk.take(line.clone()) {
+                        let (alert, state) = alert_and_state(&line);
+                        debug!(
+                            alert,
+                            state,
+                            reason = held_back.as_str(),
+                            "alert repeat held back"
+                        );
+                    }
+                }
+                None => open = false,
             },
-        };
-        let (alert, state) = alert_and_state(&line);
-        let Some(folder) = chief_folder.as_deref() else {
-            log_not_delivered(alert, state, &Reason::NoAgentInFolder);
-            continue;
-        };
-        let give_up_at = posted_at + GIVE_UP_AFTER;
-        if Instant::now() >= give_up_at {
-            // Never tried: it waited its 10 minutes behind an earlier line.
-            log_not_delivered(alert, state, &Reason::AgentBusy);
-            continue;
+            _ = tokio::time::sleep(ROUND_INTERVAL), if waiting => {}
         }
-        loop {
+    }
+}
+
+/// One try at typing `line`, the oldest waiting line. A line that reached the pane is
+/// told, even when Enter failed: it is in the box, and typing it again would put it there
+/// twice. A refused try leaves it waiting, and the first refusal is logged.
+async fn try_line<P: Ports>(
+    ports: &P,
+    chief_folder: Option<&str>,
+    line: &str,
+    desk: &mut Desk,
+    held: &mut Option<HeldPane>,
+) {
+    let (alert, state) = alert_and_state(line);
+    let attempt = match chief_folder {
+        Some(folder) => {
             let view = ports.agents();
-            let typed_into = held_panes(&mut held, &view);
-            match type_when_ready(&ports, Writer::Alert, folder, &line, &view, &typed_into).await {
-                Attempt::Typed { pane } => {
-                    info!(alert, state, pane_id = %pane, outcome = "typed", "alert typed");
-                    held = Some(HeldPane::new(pane));
-                    break;
-                }
-                Attempt::EnterFailed { pane, error } => {
-                    // Not retyped: the line is in the box, and typing it again would put
-                    // it there twice.
-                    warn!(
-                        alert,
-                        state,
-                        pane_id = %pane,
-                        reason = "enter_failed",
-                        error = %error,
-                        "alert not delivered (enter_failed)"
-                    );
-                    held = Some(HeldPane::new(pane));
-                    break;
-                }
-                Attempt::Wait(reason @ Reason::NoAgentInFolder) => {
-                    log_not_delivered(alert, state, &reason);
-                    break;
-                }
-                Attempt::Wait(reason) => {
-                    if Instant::now() >= give_up_at {
-                        log_not_delivered(alert, state, &reason);
-                        break;
-                    }
-                    tokio::select! {
-                        biased;
-                        _ = shutdown.changed() => return,
-                        _ = tokio::time::sleep(ROUND_INTERVAL) => {}
-                    }
-                }
+            let typed_into = held_panes(held, &view);
+            type_when_ready(ports, Writer::Alert, folder, line, &view, &typed_into).await
+        }
+        None => Attempt::Wait(Reason::NoAgentInFolder),
+    };
+    match attempt {
+        Attempt::Typed { pane } => {
+            info!(alert, state, pane_id = %pane, outcome = "typed", "alert typed");
+            *held = Some(HeldPane::new(pane));
+            desk.told_oldest();
+        }
+        Attempt::EnterFailed { pane, error } => {
+            warn!(
+                alert,
+                state,
+                pane_id = %pane,
+                reason = "enter_failed",
+                error = %error,
+                "alert not delivered (enter_failed)"
+            );
+            *held = Some(HeldPane::new(pane));
+            desk.told_oldest();
+        }
+        Attempt::Wait(reason) => {
+            if desk.first_refusal() {
+                log_waiting(alert, state, &reason);
             }
         }
     }
 }
 
-/// Logs a dropped line with a fixed message for each reason. With no agent in the chief's
-/// folder, the reason is `no_chief`.
-fn log_not_delivered(alert: &str, state: &str, reason: &Reason) {
+/// Logs a line's first refused try with a fixed message for each reason. With no agent in
+/// the chief's folder, the reason is `no_chief`.
+fn log_waiting(alert: &str, state: &str, reason: &Reason) {
     let name = reason.as_str();
     match reason {
-        Reason::NoAgentInFolder => warn!(
+        Reason::NoAgentInFolder => info!(
             alert,
             state,
             reason = "no_chief",
-            "alert not delivered (no_chief)"
+            "alert waiting (no_chief)"
         ),
-        Reason::PaneListFailing => warn!(
+        Reason::PaneListFailing => info!(
             alert,
             state,
             reason = name,
-            "alert not delivered (pane_list_failing)"
+            "alert waiting (pane_list_failing)"
         ),
-        Reason::SeveralAgentsInFolder { .. } => warn!(
+        Reason::SeveralAgentsInFolder { .. } => info!(
             alert,
             state,
             reason = name,
-            "alert not delivered (several_agents_in_folder)"
+            "alert waiting (several_agents_in_folder)"
         ),
-        Reason::InputBoxUnreadable => warn!(
+        Reason::InputBoxUnreadable => info!(
             alert,
             state,
             reason = name,
-            "alert not delivered (input_box_unreadable)"
+            "alert waiting (input_box_unreadable)"
         ),
-        Reason::AgentBusy => warn!(
+        Reason::AgentBusy => info!(alert, state, reason = name, "alert waiting (agent_busy)"),
+        Reason::AgentStateUnknown => info!(
             alert,
             state,
             reason = name,
-            "alert not delivered (agent_busy)"
+            "alert waiting (agent_state_unknown)"
         ),
-        Reason::AgentStateUnknown => warn!(
+        Reason::InputBoxNotFound => info!(
             alert,
             state,
             reason = name,
-            "alert not delivered (agent_state_unknown)"
+            "alert waiting (input_box_not_found)"
         ),
-        Reason::InputBoxNotFound => warn!(
+        Reason::InputBoxHoldsText => info!(
             alert,
             state,
             reason = name,
-            "alert not delivered (input_box_not_found)"
+            "alert waiting (input_box_holds_text)"
         ),
-        Reason::InputBoxHoldsText => warn!(
-            alert,
-            state,
-            reason = name,
-            "alert not delivered (input_box_holds_text)"
-        ),
-        Reason::TypingFailed => warn!(
-            alert,
-            state,
-            reason = name,
-            "alert not delivered (typing_failed)"
-        ),
+        Reason::TypingFailed => info!(alert, state, reason = name, "alert waiting (typing_failed)"),
         // Timed prompts only: a try at typing never gives these.
-        Reason::WindowPassed => warn!(
-            alert,
-            state,
-            reason = name,
-            "alert not delivered (window_passed)"
-        ),
-        Reason::NewStore => warn!(
-            alert,
-            state,
-            reason = name,
-            "alert not delivered (new_store)"
-        ),
+        Reason::WindowPassed => info!(alert, state, reason = name, "alert waiting (window_passed)"),
+        Reason::NewStore => info!(alert, state, reason = name, "alert waiting (new_store)"),
     }
 }
 

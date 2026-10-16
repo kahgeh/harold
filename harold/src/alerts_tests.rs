@@ -253,120 +253,312 @@ async fn an_address_already_in_use_is_an_error() {
 
 // --- delivering ---
 
-#[tokio::test]
-async fn with_no_chief_the_alert_is_dropped() {
-    let logs = CapturedLogs::start();
-    // No chief's folder in the settings.
-    let fake = idle_chief();
-    let (queue, _shutdown_tx, _handle) = deliver_to(&fake, None);
-    queue.send(SLOT_IDLE_FIRING.into()).await.unwrap();
-    wait_until("the drop is logged", || {
-        logs.text().contains("alert not delivered (no_chief)")
-    })
-    .await;
+/// Runs `deliver` on its own task, fed by Harold's own queue, which drops a line when full.
+fn deliver_from_queue(fake: &Fake) -> (AlertQueue, watch::Sender<()>, JoinHandle<()>) {
+    let (queue, queue_rx) = AlertQueue::new();
+    let (shutdown_tx, shutdown_rx) = watch::channel(());
+    let handle = tokio::spawn(deliver(
+        fake.clone(),
+        Some(CHIEF.into()),
+        queue_rx,
+        shutdown_rx,
+    ));
+    (queue, shutdown_tx, handle)
+}
 
-    // A folder with no agent in it.
-    let empty = idle_chief();
-    empty.set(|fake| fake.view.panes.clear());
-    let (queue, _shutdown_tx, _handle) = deliver_to(&empty, Some(CHIEF));
-    queue.send(SLOT_IDLE_FIRING.into()).await.unwrap();
-    wait_until("the second drop is logged", || {
-        logs.text()
-            .matches("alert not delivered (no_chief)")
-            .count()
-            == 2
-    })
-    .await;
+/// Shows the chief busy and then idle again, so a pane held after typing is let go.
+async fn busy_then_idle(fake: &Fake) {
+    set_chief_state(fake, EffectiveAgentState::Busy);
+    tokio::time::sleep(Duration::from_secs(6)).await;
+    set_chief_state(fake, EffectiveAgentState::Idle);
+    tokio::time::sleep(Duration::from_secs(6)).await;
+}
 
-    assert!(fake.keys().is_empty());
-    assert!(empty.keys().is_empty());
-    assert!(logs.text().contains("reason=\"no_chief\""));
+fn texts(fake: &Fake) -> Vec<String> {
+    fake.keys()
+        .into_iter()
+        .filter_map(|key| match key {
+            Key::Text(_, text) => Some(text),
+            Key::Enter(_) => None,
+        })
+        .collect()
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_chief_busy_for_ten_minutes_drops_the_alert() {
-    let logs = CapturedLogs::start();
+async fn three_firings_in_a_row_type_one_line() {
     let fake = idle_chief();
-    set_chief_state(&fake, EffectiveAgentState::Busy);
-    let (queue, _shutdown_tx, _handle) = deliver_to(&fake, Some(CHIEF));
-
-    queue.send(SLOT_IDLE_FIRING.into()).await.unwrap();
-    tokio::time::sleep(Duration::from_secs(9 * 60 + 55)).await;
-    assert!(fake.keys().is_empty());
-    assert!(!logs.text().contains("alert not delivered"));
-
-    tokio::time::sleep(Duration::from_secs(10)).await;
-    let text = logs.text();
-    assert!(text.contains("alert not delivered (agent_busy)"), "{text}");
-    assert!(text.contains("reason=\"agent_busy\""), "{text}");
-
-    // The dropped line is not typed once the chief is idle; the next one is.
-    set_chief_state(&fake, EffectiveAgentState::Idle);
-    queue
-        .send("harold alert: wrong-agent cleared".into())
-        .await
-        .unwrap();
-    tokio::time::sleep(Duration::from_secs(1)).await;
-    assert_eq!(fake.keys(), typed("harold alert: wrong-agent cleared"));
-}
-
-fn drops(logs: &CapturedLogs) -> usize {
-    logs.text()
-        .matches("alert not delivered (agent_busy)")
-        .count()
-}
-
-#[tokio::test(start_paused = true)]
-async fn ten_minutes_count_from_the_post_not_from_when_delivery_takes_the_line() {
-    let logs = CapturedLogs::start();
-    let fake = idle_chief();
-    set_chief_state(&fake, EffectiveAgentState::Busy);
-    let (queue, _shutdown_tx, _handle) = deliver_to(&fake, Some(CHIEF));
-
-    // Two posts a minute apart while the chief stays busy for 15 minutes.
-    queue.send(SLOT_IDLE_FIRING.into()).await.unwrap();
-    tokio::time::sleep(Duration::from_secs(60)).await;
-    queue
-        .send("harold alert: wrong-agent firing".into())
-        .await
-        .unwrap();
-
-    tokio::time::sleep(Duration::from_secs(9 * 60 + 5)).await;
-    assert_eq!(drops(&logs), 1, "the first line is dropped at 10 minutes");
-    tokio::time::sleep(Duration::from_secs(60)).await;
-    assert_eq!(
-        drops(&logs),
-        2,
-        "the second is dropped 10 minutes after its post"
-    );
-
-    tokio::time::sleep(Duration::from_secs(4 * 60)).await;
-    assert!(fake.keys().is_empty());
-    assert_eq!(drops(&logs), 2);
-}
-
-#[tokio::test(start_paused = true)]
-async fn a_line_whose_ten_minutes_ran_out_in_the_queue_is_dropped_at_once() {
-    let logs = CapturedLogs::start();
-    let fake = idle_chief();
-    set_chief_state(&fake, EffectiveAgentState::Busy);
     let (queue, _shutdown_tx, _handle) = deliver_to(&fake, Some(CHIEF));
 
     for _ in 0..3 {
         queue.send(SLOT_IDLE_FIRING.into()).await.unwrap();
+        tokio::time::sleep(Duration::from_secs(1)).await;
     }
-    tokio::time::sleep(Duration::from_secs(10 * 60 + 1)).await;
-    // The two lines behind the first waited their 10 minutes in the queue.
-    assert_eq!(drops(&logs), 3);
+    busy_then_idle(&fake).await;
+    tokio::time::sleep(Duration::from_secs(2 * 60)).await;
 
-    // A fresh post is typed as soon as the chief is idle.
+    assert_eq!(fake.keys(), typed(SLOT_IDLE_FIRING));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_chief_busy_for_thirty_minutes_gets_the_alert_once_when_idle() {
+    let logs = CapturedLogs::start();
+    let fake = idle_chief();
+    set_chief_state(&fake, EffectiveAgentState::Busy);
+    let (queue, _shutdown_tx, _handle) = deliver_to(&fake, Some(CHIEF));
+
+    queue.send(SLOT_IDLE_FIRING.into()).await.unwrap();
+    tokio::time::sleep(Duration::from_secs(30 * 60)).await;
+    assert!(fake.keys().is_empty());
+    let text = logs.text();
+    assert!(!text.contains("alert not delivered"), "{text}");
+    assert_eq!(
+        text.matches("alert waiting (agent_busy)").count(),
+        1,
+        "{text}"
+    );
+    assert!(text.contains("reason=\"agent_busy\""), "{text}");
+
     set_chief_state(&fake, EffectiveAgentState::Idle);
-    queue
-        .send("harold alert: wrong-agent cleared".into())
-        .await
-        .unwrap();
+    tokio::time::sleep(Duration::from_secs(6)).await;
+    assert_eq!(fake.keys(), typed(SLOT_IDLE_FIRING));
+    tokio::time::sleep(Duration::from_secs(5 * 60)).await;
+    assert_eq!(fake.keys(), typed(SLOT_IDLE_FIRING));
+    assert!(logs.text().contains("alert typed"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_changed_refusal_reason_logs_waiting_only_once() {
+    let logs = CapturedLogs::start();
+    let fake = idle_chief();
+    set_chief_state(&fake, EffectiveAgentState::Busy);
+    let (queue, _shutdown_tx, _handle) = deliver_to(&fake, Some(CHIEF));
+
+    queue.send(SLOT_IDLE_FIRING.into()).await.unwrap();
+    tokio::time::sleep(Duration::from_secs(10 * 60)).await;
+    set_chief_state(&fake, EffectiveAgentState::Unknown);
+    tokio::time::sleep(Duration::from_secs(10 * 60)).await;
+
+    assert!(fake.keys().is_empty());
+    let text = logs.text();
+    assert_eq!(text.matches("alert waiting (").count(), 1, "{text}");
+}
+
+#[tokio::test(start_paused = true)]
+async fn firing_cleared_firing_type_three_lines() {
+    let fake = idle_chief();
+    let (queue, _shutdown_tx, _handle) = deliver_to(&fake, Some(CHIEF));
+
+    for line in [SLOT_IDLE_FIRING, SLOT_IDLE_CLEARED, SLOT_IDLE_FIRING] {
+        queue.send(line.into()).await.unwrap();
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        busy_then_idle(&fake).await;
+    }
+
+    assert_eq!(
+        texts(&fake),
+        [SLOT_IDLE_FIRING, SLOT_IDLE_CLEARED, SLOT_IDLE_FIRING]
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_cleared_never_fired_types_nothing() {
+    let fake = idle_chief();
+    let (queue, _shutdown_tx, _handle) = deliver_to(&fake, Some(CHIEF));
+    queue.send(SLOT_IDLE_CLEARED.into()).await.unwrap();
+    tokio::time::sleep(Duration::from_secs(60)).await;
+    assert!(fake.keys().is_empty());
+
+    // A firing and its cleared, both while the chief is busy.
+    set_chief_state(&fake, EffectiveAgentState::Busy);
+    queue.send(SLOT_IDLE_FIRING.into()).await.unwrap();
+    tokio::time::sleep(Duration::from_secs(60)).await;
+    queue.send(SLOT_IDLE_CLEARED.into()).await.unwrap();
+    tokio::time::sleep(Duration::from_secs(60)).await;
+    set_chief_state(&fake, EffectiveAgentState::Idle);
+    tokio::time::sleep(Duration::from_secs(60)).await;
+
+    assert!(fake.keys().is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_firing_with_no_chief_is_typed_once_a_chief_starts() {
+    let logs = CapturedLogs::start();
+    let fake = idle_chief();
+    let chief = fake.agents().panes;
+    fake.set(|fake| fake.view.panes.clear());
+    let (queue, _shutdown_tx, _handle) = deliver_to(&fake, Some(CHIEF));
+
+    queue.send(SLOT_IDLE_FIRING.into()).await.unwrap();
+    tokio::time::sleep(Duration::from_secs(20 * 60)).await;
+    assert!(fake.keys().is_empty());
+    let text = logs.text();
+    assert_eq!(
+        text.matches("alert waiting (no_chief)").count(),
+        1,
+        "{text}"
+    );
+    assert!(text.contains("reason=\"no_chief\""), "{text}");
+
+    fake.set(|fake| fake.view.panes = chief);
+    tokio::time::sleep(Duration::from_secs(6)).await;
+    assert_eq!(fake.keys(), typed(SLOT_IDLE_FIRING));
+}
+
+#[tokio::test(start_paused = true)]
+async fn with_no_chief_folder_the_alert_waits() {
+    let logs = CapturedLogs::start();
+    let fake = idle_chief();
+    let (queue, _shutdown_tx, _handle) = deliver_to(&fake, None);
+
+    queue.send(SLOT_IDLE_FIRING.into()).await.unwrap();
+    tokio::time::sleep(Duration::from_secs(20 * 60)).await;
+
+    assert!(fake.keys().is_empty());
+    let text = logs.text();
+    assert_eq!(
+        text.matches("alert waiting (no_chief)").count(),
+        1,
+        "{text}"
+    );
+    assert!(!text.contains("alert not delivered"), "{text}");
+}
+
+#[tokio::test(start_paused = true)]
+async fn delivery_given_up_is_typed_each_time_and_merged_while_busy() {
+    let fake = idle_chief();
+    let (queue, _shutdown_tx, _handle) = deliver_from_queue(&fake);
+    let line = "harold alert: delivery-given-up firing";
+
+    queue.firing(DELIVERY_GIVEN_UP);
     tokio::time::sleep(Duration::from_secs(1)).await;
-    assert_eq!(fake.keys(), typed("harold alert: wrong-agent cleared"));
+    queue.firing(DELIVERY_GIVEN_UP);
+    tokio::time::sleep(Duration::from_secs(70)).await;
+    assert_eq!(texts(&fake), [line, line]);
+
+    set_chief_state(&fake, EffectiveAgentState::Busy);
+    tokio::time::sleep(Duration::from_secs(6)).await;
+    queue.firing(DELIVERY_GIVEN_UP);
+    queue.firing(DELIVERY_GIVEN_UP);
+    tokio::time::sleep(Duration::from_secs(60)).await;
+    set_chief_state(&fake, EffectiveAgentState::Idle);
+    tokio::time::sleep(Duration::from_secs(2 * 60)).await;
+
+    assert_eq!(texts(&fake), [line, line, line]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn store_failing_then_cleared_type_two_lines() {
+    let fake = idle_chief();
+    let (queue, _shutdown_tx, _handle) = deliver_from_queue(&fake);
+
+    queue.firing(STORE_FAILING);
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    queue.cleared(STORE_FAILING);
+    tokio::time::sleep(Duration::from_secs(70)).await;
+
+    assert_eq!(
+        texts(&fake),
+        [
+            "harold alert: store-failing firing",
+            "harold alert: store-failing cleared"
+        ]
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_hundred_repeats_while_busy_do_not_fill_the_queue() {
+    let logs = CapturedLogs::start();
+    let fake = idle_chief();
+    set_chief_state(&fake, EffectiveAgentState::Busy);
+    let (queue, _shutdown_tx, _handle) = deliver_from_queue(&fake);
+
+    for _ in 0..100 {
+        queue.firing("slot-idle");
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    let text = logs.text();
+    assert!(!text.contains("queue_full"), "{text}");
+
+    set_chief_state(&fake, EffectiveAgentState::Idle);
+    tokio::time::sleep(Duration::from_secs(6)).await;
+    assert_eq!(fake.keys(), typed(SLOT_IDLE_FIRING));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_new_deliver_starts_with_nothing_told() {
+    let fake = idle_chief();
+    let (queue, shutdown_tx, handle) = deliver_to(&fake, Some(CHIEF));
+    queue.send(SLOT_IDLE_FIRING.into()).await.unwrap();
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    drop(shutdown_tx);
+    handle.await.unwrap();
+
+    let (queue, _shutdown_tx, _handle) = deliver_to(&fake, Some(CHIEF));
+    queue.send(SLOT_IDLE_FIRING.into()).await.unwrap();
+    tokio::time::sleep(Duration::from_secs(70)).await;
+
+    assert_eq!(texts(&fake), [SLOT_IDLE_FIRING, SLOT_IDLE_FIRING]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn waiting_lines_for_different_alerts_are_typed_oldest_first() {
+    let fake = idle_chief();
+    set_chief_state(&fake, EffectiveAgentState::Busy);
+    let (queue, _shutdown_tx, _handle) = deliver_to(&fake, Some(CHIEF));
+
+    queue.send(SLOT_IDLE_FIRING.into()).await.unwrap();
+    queue.send(WRONG_AGENT_FIRING.into()).await.unwrap();
+    queue.send(SLOT_IDLE_FIRING.into()).await.unwrap();
+    tokio::time::sleep(Duration::from_secs(10)).await;
+    set_chief_state(&fake, EffectiveAgentState::Idle);
+    tokio::time::sleep(Duration::from_secs(6)).await;
+    assert_eq!(fake.keys(), typed(SLOT_IDLE_FIRING));
+    busy_then_idle(&fake).await;
+    // The repeated slot-idle line was held back, not queued behind wrong-agent.
+    busy_then_idle(&fake).await;
+
+    let mut both = typed(SLOT_IDLE_FIRING);
+    both.extend(typed(WRONG_AGENT_FIRING));
+    assert_eq!(fake.keys(), both);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_failed_enter_is_not_typed_again_by_a_repeat() {
+    let fake = idle_chief();
+    fake.set(|fake| fake.fail_enter = true);
+    let (queue, _shutdown_tx, _handle) = deliver_to(&fake, Some(CHIEF));
+
+    queue.send(SLOT_IDLE_FIRING.into()).await.unwrap();
+    tokio::time::sleep(Duration::from_secs(2 * 60)).await;
+    fake.set(|fake| fake.fail_enter = false);
+    queue.send(SLOT_IDLE_FIRING.into()).await.unwrap();
+    tokio::time::sleep(Duration::from_secs(2 * 60)).await;
+
+    assert_eq!(
+        fake.keys(),
+        vec![Key::Text("%2".into(), SLOT_IDLE_FIRING.into())]
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_line_waiting_when_the_queue_closes_is_still_typed() {
+    let fake = idle_chief();
+    set_chief_state(&fake, EffectiveAgentState::Busy);
+    let (queue, _shutdown_tx, handle) = deliver_to(&fake, Some(CHIEF));
+
+    queue.send(SLOT_IDLE_FIRING.into()).await.unwrap();
+    drop(queue);
+    tokio::time::sleep(Duration::from_secs(60)).await;
+    assert!(!handle.is_finished());
+    set_chief_state(&fake, EffectiveAgentState::Idle);
+    tokio::time::sleep(Duration::from_secs(6)).await;
+
+    assert_eq!(fake.keys(), typed(SLOT_IDLE_FIRING));
+    // With nothing left to type and no more lines coming, the delivery ends.
+    tokio::time::timeout(Duration::from_secs(1), handle)
+        .await
+        .expect("the delivery ends")
+        .unwrap();
 }
 
 #[tokio::test(start_paused = true)]
