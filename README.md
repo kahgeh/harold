@@ -37,7 +37,7 @@ Requires Python 3.9+, tmux and grpcurl (`brew install python tmux grpcurl`).
 The bootstrap verifies the release checksum and opens the configuration wizard.
 For a source build, run `./scripts/install.sh` from a checkout.
 
-The installer verifies readiness and provides `haroldctl start` for on-demand startup. It does not register automatic login startup. Use `./scripts/install.sh --reinstall` for fresh storage with retained settings. See [installation and reinstallation](docs/how-tos/setup.md) for another-Mac setup.
+The installer verifies readiness, and launchd starts Harold again at every login; `haroldctl stop` keeps it off until `haroldctl start`. Use `./scripts/install.sh --reinstall` for fresh storage with retained settings. See [installation and reinstallation](docs/how-tos/setup.md) for another-Mac setup.
 
 Then start the dashboard inside the tmux client it should navigate:
 

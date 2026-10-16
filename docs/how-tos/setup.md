@@ -65,7 +65,7 @@ The default layout is:
 ~/bin/tmx-agent-dash
 ```
 
-`local.toml` holds your channel and optional feature settings. The installed service uses its own `config` directory and its store in `data/store`, regardless of paths copied from another machine or Harold overrides in the invoking shell. It records the PATH and UTF-8 locale needed by its tools. Variables set for all of launchd with `launchctl setenv`, such as `HAROLD__GRPC__PORT`, also reach the service; the six variables the service sets itself (`HAROLD_CONFIG_DIR`, `HAROLD_ENV`, `HAROLD__STORE__PATH`, `PATH`, `LANG` and `LC_ALL`) win on a clash.
+`local.toml` holds your channel and optional feature settings. The installed service uses its own `config` directory and its store in `data/store`, regardless of paths copied from another machine or Harold overrides in the invoking shell. It records the PATH and UTF-8 locale needed by its tools. Variables set for all of launchd with `launchctl setenv`, such as `HAROLD__GRPC__PORT`, also reach the service; the seven variables the service sets itself (`HAROLD_CONFIG_DIR`, `HAROLD_ENV`, `HAROLD__STORE__PATH`, `PATH`, `LANG`, `LC_ALL` and `HAROLD_LAUNCHD`) win on a clash.
 
 Add `~/bin` to your shell's PATH if needed, or use the absolute commands below. The installer prints the service definition and installation paths. The service definition stays in the installation, with a copy in `~/Library/LaunchAgents` that launchd loads at login. A custom location can be selected with `--prefix /absolute/path/to/bin`.
 
