@@ -8,7 +8,7 @@ use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use std::process::Stdio;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::io::{AsyncWriteExt, BufReader, Lines};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::time::timeout;
@@ -56,7 +56,8 @@ impl WorkerError {
     }
 }
 
-/// One call's worker. Requests are answered one at a time.
+/// One call's worker. Requests are answered one at a time. Requests are not cancel-safe:
+/// a caller that drops a request future must drop (or close) the worker.
 pub(crate) trait VoiceWorker: Send + 'static {
     fn transcribe(
         &mut self,
@@ -110,6 +111,8 @@ pub(crate) struct ProcessWorker {
     stdin: Option<ChildStdin>,
     lines: Lines<BufReader<ChildStdout>>,
     ready: bool,
+    /// When the worker was started, from which `LOAD_LIMIT` counts.
+    started: Instant,
 }
 
 impl ProcessWorker {
@@ -117,10 +120,14 @@ impl ProcessWorker {
     /// the first request waits for the ready line, up to `LOAD_LIMIT`.
     pub(crate) fn start(command: &WorkerCommand, call_dir: &Path) -> Result<Self, WorkerError> {
         let script = call_dir.join("voice_worker.py");
+        match std::fs::remove_file(&script) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err(WorkerError::FailedToLoad),
+        }
         std::fs::OpenOptions::new()
             .write(true)
-            .create(true)
-            .truncate(true)
+            .create_new(true)
             .mode(0o600)
             .open(&script)
             .and_then(|mut file| file.write_all(VOICE_WORKER_PY.as_bytes()))
@@ -147,6 +154,7 @@ impl ProcessWorker {
             stdin: Some(stdin),
             lines: tokio::io::AsyncBufReadExt::lines(BufReader::new(stdout)),
             ready: false,
+            started: Instant::now(),
         })
     }
 
@@ -155,7 +163,8 @@ impl ProcessWorker {
         if self.ready {
             return Ok(());
         }
-        let line = match timeout(LOAD_LIMIT, self.lines.next_line()).await {
+        let left = LOAD_LIMIT.saturating_sub(self.started.elapsed());
+        let line = match timeout(left, self.lines.next_line()).await {
             Ok(Ok(Some(line))) => line,
             Ok(_) => return Err(WorkerError::FailedToLoad),
             Err(_) => {
@@ -190,7 +199,11 @@ impl ProcessWorker {
                 return Err(WorkerError::TimedOut);
             }
         };
-        let reply: Value = serde_json::from_str(&line).map_err(|_| WorkerError::Failed)?;
+        // A line that is not an answer would put every later answer out of step.
+        let Ok(reply) = serde_json::from_str::<Value>(&line) else {
+            let _ = self.child.start_kill();
+            return Err(WorkerError::Exited);
+        };
         if reply["ok"].as_bool() != Some(true) {
             return Err(WorkerError::Failed);
         }
@@ -224,6 +237,7 @@ impl VoiceWorker for ProcessWorker {
     }
 }
 
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::settings::{TtsSettings, VoiceInputSettings};
@@ -283,6 +297,7 @@ esac"#;
         assert!(lines[0].contains(r#""op":"transcribe""#));
         assert!(lines[1].contains(r#""op":"say""#));
         assert_eq!(lines[2], "closed");
+        std::fs::remove_dir_all(&folder).unwrap();
     }
 
     #[tokio::test]
@@ -293,6 +308,7 @@ esac"#;
         worker.say("Hi", Path::new("/x/say.wav")).await.unwrap();
         worker.close().await;
         assert!(std::fs::read_to_string(&log).unwrap().ends_with("closed\n"));
+        std::fs::remove_dir_all(&folder).unwrap();
     }
 
     #[tokio::test]
@@ -302,6 +318,7 @@ esac"#;
         let mut worker = ProcessWorker::start(&command, &folder.join("call")).unwrap();
         let result = worker.transcribe(Path::new("/x/turn.wav")).await;
         assert_eq!(result.err(), Some(WorkerError::Exited));
+        std::fs::remove_dir_all(&folder).unwrap();
     }
 
     #[tokio::test]
@@ -311,6 +328,7 @@ esac"#;
         let mut worker = ProcessWorker::start(&command, &folder.join("call")).unwrap();
         let result = worker.say("Hi", Path::new("/x/say.wav")).await;
         assert_eq!(result.err(), Some(WorkerError::FailedToLoad));
+        std::fs::remove_dir_all(&folder).unwrap();
     }
 
     #[tokio::test]
@@ -320,6 +338,7 @@ esac"#;
         let mut worker = ProcessWorker::start(&command, &folder.join("call")).unwrap();
         let result = worker.say("Hi", Path::new("/x/say.wav")).await;
         assert_eq!(result.err(), Some(WorkerError::FailedToLoad));
+        std::fs::remove_dir_all(&folder).unwrap();
     }
 
     #[tokio::test]
@@ -336,6 +355,7 @@ esac"#;
         assert_eq!(WorkerError::Failed.exit_reason(), None);
         assert!(worker.say("Hi", Path::new("/x/say.wav")).await.is_ok());
         worker.close().await;
+        std::fs::remove_dir_all(&folder).unwrap();
     }
 
     #[test]
@@ -352,12 +372,35 @@ esac"#;
     async fn the_script_is_written_for_the_user_only() {
         let folder = temp_folder();
         let (command, _) = fake(&folder, READY, ANSWERS);
-        let worker = ProcessWorker::start(&command, &folder.join("call")).unwrap();
         let script = folder.join("call").join("voice_worker.py");
-        let mode = std::fs::metadata(&script).unwrap().permissions().mode();
-        assert_eq!(mode & 0o777, 0o600);
+        // An old file with a wider mode, and a symlink, are never reused.
+        std::fs::write(&script, "old").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o666)).unwrap();
+        for _ in 0..2 {
+            let worker = ProcessWorker::start(&command, &folder.join("call")).unwrap();
+            let mode = std::fs::metadata(&script).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+            assert_eq!(std::fs::read_to_string(&script).unwrap(), VOICE_WORKER_PY);
+            worker.close().await;
+        }
+        std::fs::remove_file(&script).unwrap();
+        let elsewhere = folder.join("elsewhere");
+        std::os::unix::fs::symlink(&elsewhere, &script).unwrap();
+        let worker = ProcessWorker::start(&command, &folder.join("call")).unwrap();
+        assert!(!elsewhere.exists());
         assert_eq!(std::fs::read_to_string(&script).unwrap(), VOICE_WORKER_PY);
         worker.close().await;
+        std::fs::remove_dir_all(&folder).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_line_that_is_not_an_answer_gives_exited() {
+        let folder = temp_folder();
+        let (command, _) = fake(&folder, READY, "echo garbage");
+        let mut worker = ProcessWorker::start(&command, &folder.join("call")).unwrap();
+        let result = worker.say("Hi", Path::new("/x/say.wav")).await;
+        assert_eq!(result.err(), Some(WorkerError::Exited));
+        std::fs::remove_dir_all(&folder).unwrap();
     }
 
     fn tts(args: &[&str]) -> TtsSettings {

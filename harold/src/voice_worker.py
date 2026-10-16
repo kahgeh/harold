@@ -48,6 +48,9 @@ def main():
         tts = tts_utils.load_model(argument("--tts-model"))
         voice = argument("--voice")
         lang_code = argument("--lang-code")
+        # One throwaway line, so a missing voice fails here and not on the first answer.
+        for _ in tts.generate(text="Ready.", voice=voice, speed=1.0, lang_code=lang_code):
+            pass
     except Exception:
         answer({"ready": False})
         return
