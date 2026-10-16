@@ -110,8 +110,10 @@ def get_main_context(cwd: str) -> str:
 def ensure_harold_running() -> str:
     # Only the controller can attribute readiness to the managed process.
     # Keep this wait inside provider hook deadlines; launchd owns slow startup.
+    # `ensure` leaves a Harold stopped with `haroldctl stop`, or one that gave up after a
+    # crash loop, off and exits 1, so the hook skips its report.
     subprocess.run(
-        [str(HAROLD_CONTROL), "start"],
+        [str(HAROLD_CONTROL), "ensure"],
         capture_output=True,
         check=True,
         timeout=8,

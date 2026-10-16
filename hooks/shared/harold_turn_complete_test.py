@@ -133,7 +133,7 @@ class ManagedHookTest(unittest.TestCase):
                 self.hook.notify_harold(self.turn)
 
         start, delivery = run.call_args_list
-        self.assertEqual(start.args[0], [str(self.prefix / "haroldctl"), "start"])
+        self.assertEqual(start.args[0], [str(self.prefix / "haroldctl"), "ensure"])
         self.assertTrue(start.kwargs["check"])
         self.assertLessEqual(start.kwargs["timeout"], 8)
         command = delivery.args[0]
@@ -155,19 +155,31 @@ class ManagedHookTest(unittest.TestCase):
         )
 
     def test_failed_managed_start_never_delivers_to_an_unrelated_listener(self) -> None:
-        error = subprocess.CalledProcessError(1, ["haroldctl", "start"])
+        error = subprocess.CalledProcessError(1, ["haroldctl", "ensure"])
         with patch.object(subprocess, "run", side_effect=error) as run:
             with self.assertRaises(subprocess.CalledProcessError):
                 self.hook.notify_harold(self.turn)
-        self.assertEqual(run.call_args.args[0], [str(self.prefix / "haroldctl"), "start"])
+        self.assertEqual(run.call_args.args[0], [str(self.prefix / "haroldctl"), "ensure"])
         self.assertEqual(run.call_count, 1)
 
+    def test_a_stopped_harold_is_left_off_and_nothing_is_delivered(self) -> None:
+        # haroldctl ensure exits 1 when Harold was stopped with haroldctl stop, or gave up
+        # after a crash loop; the hook then skips its report.
+        commands = []
+        def run(command, **kwargs):
+            commands.append(command)
+            raise subprocess.CalledProcessError(1, command, "", "Harold: stopped with haroldctl stop")
+        with patch.object(subprocess, "run", side_effect=run):
+            with self.assertRaises(subprocess.CalledProcessError):
+                self.hook.notify_harold(self.turn)
+        self.assertEqual(commands, [[str(self.prefix / "haroldctl"), "ensure"]])
+
     def test_start_timeout_prevents_delivery(self) -> None:
-        error = subprocess.TimeoutExpired(["haroldctl", "start"], 8)
+        error = subprocess.TimeoutExpired(["haroldctl", "ensure"], 8)
         with patch.object(subprocess, "run", side_effect=error) as run:
             with self.assertRaises(subprocess.TimeoutExpired):
                 self.hook.notify_harold(self.turn)
-        self.assertEqual(run.call_args.args[0], [str(self.prefix / "haroldctl"), "start"])
+        self.assertEqual(run.call_args.args[0], [str(self.prefix / "haroldctl"), "ensure"])
         self.assertEqual(run.call_count, 1)
 
     def test_missing_or_invalid_managed_endpoint_prevents_delivery(self) -> None:
@@ -191,7 +203,7 @@ class ManagedHookTest(unittest.TestCase):
             if command[0] == str(self.prefix / "haroldctl"):
                 starting.wait(timeout=2)
             else:
-                self.assertEqual(sum(command[-1] == "start" for command in commands), 2)
+                self.assertEqual(sum(command[-1] == "ensure" for command in commands), 2)
             return subprocess.CompletedProcess(command, 0)
 
         with patch.object(subprocess, "run", side_effect=run):
@@ -199,7 +211,7 @@ class ManagedHookTest(unittest.TestCase):
                 futures = [executor.submit(self.hook.notify_harold, self.turn) for _ in range(2)]
                 for future in futures:
                     future.result(timeout=3)
-        self.assertEqual(sum(command[-1] == "start" for command in commands), 2)
+        self.assertEqual(sum(command[-1] == "ensure" for command in commands), 2)
         self.assertEqual(sum(command[0] == "grpcurl" for command in commands), 2)
 
 
