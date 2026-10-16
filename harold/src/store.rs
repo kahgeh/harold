@@ -34,10 +34,16 @@ const NAMESPACE: &str = "harold";
 const PARTITION_KEY: &str = "main";
 const STATE_DATABASE: &str = "harold-state.db";
 const LOCK_FILE: &str = "harold.lock";
-const MIGRATIONS: [(&str, &str); 1] = [(
-    "001_initial",
-    include_str!("store/migrations/001_initial.sql"),
-)];
+const MIGRATIONS: [(&str, &str); 2] = [
+    (
+        "001_initial",
+        include_str!("store/migrations/001_initial.sql"),
+    ),
+    (
+        "002_web_app",
+        include_str!("store/migrations/002_web_app.sql"),
+    ),
+];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TurnCompleted {
@@ -106,6 +112,105 @@ pub(crate) struct TimedPromptHandled {
     pub reason: Option<String>,
     /// The pane typed into; none when skipped.
     pub pane_id: Option<String>,
+}
+
+/// The phone's push subscription, which the web app hands Harold when the user turns alerts on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct AppPushSubscribed {
+    /// The push service's address for this phone; one subscription per endpoint.
+    pub endpoint: String,
+    /// The phone's public key, as the browser gives it.
+    pub p256dh: String,
+    /// The phone's auth secret, as the browser gives it.
+    pub auth: String,
+}
+
+/// The web app turned alerts off for one push subscription.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct AppPushUnsubscribed {
+    pub endpoint: String,
+}
+
+/// An InboundMessageReceived payload as the event handler reads it (D6). It reads the
+/// `to_chief` field that `InboundMessage` does not carry; events without it read as false.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub(crate) struct ReceivedReply {
+    pub text: String,
+    #[serde(default)]
+    pub forwarded: bool,
+    /// True when the user typed the reply in the web app, for the chief.
+    #[serde(default)]
+    pub to_chief: bool,
+}
+
+/// Who wrote a row of the web app's thread.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AppSender {
+    Chief,
+    User,
+}
+
+impl AppSender {
+    fn text(self) -> &'static str {
+        match self {
+            Self::Chief => "chief",
+            Self::User => "user",
+        }
+    }
+
+    fn parse(text: &str) -> Result<Self> {
+        [Self::Chief, Self::User]
+            .into_iter()
+            .find(|sender| sender.text() == text)
+            .ok_or_else(|| StoreError::Data(format!("invalid app message sender: {text}")))
+    }
+}
+
+/// What became of a reply the user sent the chief from the web app.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AppReplyState {
+    Typed,
+    WaitingChiefBusy,
+    NotSentNoChief,
+    NotSentPaused,
+}
+
+impl AppReplyState {
+    const ALL: [Self; 4] = [
+        Self::Typed,
+        Self::WaitingChiefBusy,
+        Self::NotSentNoChief,
+        Self::NotSentPaused,
+    ];
+
+    /// The words the thread shows under the reply, which the store also keeps.
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Typed => "typed",
+            Self::WaitingChiefBusy => "waiting: chief busy",
+            Self::NotSentNoChief => "not sent: no chief",
+            Self::NotSentPaused => "not sent: messaging paused",
+        }
+    }
+
+    fn parse(label: &str) -> Result<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|state| state.label() == label)
+            .ok_or_else(|| StoreError::Data(format!("invalid app reply state: {label}")))
+    }
+}
+
+/// One row of the web app's thread.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AppMessage {
+    /// The id of the event the row came from: a chief message's, or the reply's own.
+    pub event_id: String,
+    pub at_ms: i64,
+    pub sender: AppSender,
+    pub text: String,
+    /// A reply's state; none for a chief message and for a reply not yet handled.
+    pub state: Option<AppReplyState>,
 }
 
 const TIMED_PROMPT_KEY_PREFIX: &str = "timed_prompt.";
@@ -369,6 +474,8 @@ pub struct HaroldStore {
     fail_next_snapshot_load: std::sync::atomic::AtomicBool,
     #[cfg(test)]
     state_write_fault: std::sync::Mutex<Option<WriteFault>>,
+    /// Counts the changes to the web app's thread, so readers can wait for the next.
+    app_thread: tokio::sync::watch::Sender<u64>,
     /// The store folder's lock. Declared last, so the log is dropped before it is released.
     _lock: StoreLock,
 }
@@ -455,6 +562,7 @@ impl HaroldStore {
             fail_next_snapshot_load: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)]
             state_write_fault: std::sync::Mutex::new(None),
+            app_thread: tokio::sync::watch::Sender::new(0),
             _lock: lock,
         })
     }
@@ -518,6 +626,7 @@ impl HaroldStore {
         conn.execute("BEGIN IMMEDIATE", ()).await?;
         let result = async {
             let mut snapshot_changed = false;
+            let mut thread_changed = false;
             for event in &events {
                 match event.r#type.as_str() {
                     "TurnCompleted" => {
@@ -525,9 +634,15 @@ impl HaroldStore {
                         snapshot_changed |=
                             project_turn_completed(&conn, event, self.graces).await?;
                     }
-                    "InboundMessageReceived" | "AwayMessageRequested" | "SpokenLineRequested" => {
+                    "InboundMessageReceived" => {
+                        stage_delivery_event(&conn, event).await?;
+                        thread_changed |= project_app_reply(&conn, event).await?;
+                    }
+                    "AwayMessageRequested" | "SpokenLineRequested" => {
                         stage_delivery_event(&conn, event).await?;
                     }
+                    "AppPushSubscribed" => project_app_push_subscribed(&conn, event).await?,
+                    "AppPushUnsubscribed" => project_app_push_unsubscribed(&conn, event).await?,
                     "AgentPaneObserved"
                     | "AgentPaneDeparted"
                     | "AgentLifecycleObserved"
@@ -612,16 +727,19 @@ impl HaroldStore {
             )
             .await?;
             conn.execute("COMMIT", ()).await?;
-            Ok(snapshot_changed)
+            Ok((snapshot_changed, thread_changed))
         }
         .await;
-        let snapshot_changed = match result {
-            Ok(snapshot_changed) => snapshot_changed,
+        let (snapshot_changed, thread_changed) = match result {
+            Ok(changed) => changed,
             Err(error) => {
                 let _ = conn.execute("ROLLBACK", ()).await;
                 return Err(error);
             }
         };
+        if thread_changed {
+            self.app_thread_changed();
+        }
 
         Ok(ProjectionBatch {
             applied: events.len(),
@@ -825,6 +943,112 @@ impl HaroldStore {
             .await
     }
 
+    /// The web app's thread from `since_ms` on, oldest first; rows with the same time come
+    /// in the order they were added.
+    pub(crate) async fn app_messages_since(&self, since_ms: i64) -> Result<Vec<AppMessage>> {
+        let conn = self.state.connect()?;
+        let mut rows = conn
+            .query(
+                r#"
+                SELECT event_id, at_ms, sender, text, state
+                FROM app_messages
+                WHERE at_ms >= ?1
+                ORDER BY at_ms, rowid
+                "#,
+                (since_ms,),
+            )
+            .await?;
+        let mut messages = Vec::new();
+        while let Some(row) = rows.next().await? {
+            messages.push(AppMessage {
+                event_id: required_text(&row, 0)?,
+                at_ms: required_integer(&row, 1)?,
+                sender: AppSender::parse(&required_text(&row, 2)?)?,
+                text: required_text(&row, 3)?,
+                state: optional_text(&row, 4)?
+                    .map(|label| AppReplyState::parse(&label))
+                    .transpose()?,
+            });
+        }
+        Ok(messages)
+    }
+
+    /// Adds a chief message to the web app's thread. A second call for the same event adds
+    /// nothing.
+    pub(crate) async fn add_chief_app_message(
+        &self,
+        event_id: &str,
+        at_ms: i64,
+        text: &str,
+    ) -> Result<()> {
+        self.app_thread_write(
+            r#"
+            INSERT INTO app_messages (event_id, at_ms, sender, text)
+            VALUES (?1, ?2, ?3, ?4)
+            ON CONFLICT(event_id) DO NOTHING
+            "#,
+            (event_id, at_ms, AppSender::Chief.text(), text),
+        )
+        .await
+    }
+
+    /// Shows what became of the reply that `event_id` stored.
+    pub(crate) async fn set_app_reply_state(
+        &self,
+        event_id: &str,
+        state: AppReplyState,
+    ) -> Result<()> {
+        self.app_thread_write(
+            "UPDATE app_messages SET state = ?1 WHERE event_id = ?2",
+            (state.label(), event_id),
+        )
+        .await
+    }
+
+    /// Deletes the web app's thread rows older than `before_ms`.
+    pub(crate) async fn delete_app_messages_before(&self, before_ms: i64) -> Result<()> {
+        self.app_thread_write("DELETE FROM app_messages WHERE at_ms < ?1", (before_ms,))
+            .await
+    }
+
+    /// The push subscriptions the web app holds, by endpoint.
+    pub(crate) async fn app_push_subscriptions(&self) -> Result<Vec<AppPushSubscribed>> {
+        let conn = self.state.connect()?;
+        let mut rows = conn
+            .query(
+                "SELECT endpoint, p256dh, auth FROM app_push_subscriptions ORDER BY endpoint",
+                (),
+            )
+            .await?;
+        let mut subscriptions = Vec::new();
+        while let Some(row) = rows.next().await? {
+            subscriptions.push(AppPushSubscribed {
+                endpoint: required_text(&row, 0)?,
+                p256dh: required_text(&row, 1)?,
+                auth: required_text(&row, 2)?,
+            });
+        }
+        Ok(subscriptions)
+    }
+
+    /// Changes whenever a thread row is added, relabelled or deleted.
+    pub(crate) fn watch_app_thread(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.app_thread.subscribe()
+    }
+
+    /// A write to the web app's thread, through the store's health check like a delivery
+    /// write; the thread's watchers are told once it succeeds.
+    async fn app_thread_write(&self, sql: &str, params: impl turso::IntoParams) -> Result<()> {
+        self.delivery_write(sql, params).await?;
+        self.app_thread_changed();
+        Ok(())
+    }
+
+    fn app_thread_changed(&self) {
+        self.app_thread
+            .send_modify(|version| *version = version.wrapping_add(1));
+    }
+
     /// Makes every later delivery write to the state database hang or fail, until set to
     /// `None`.
     #[cfg(test)]
@@ -983,6 +1207,92 @@ async fn project_turn_completed(
         }
         ProjectionChange::Remove(_) | ProjectionChange::Ignore => Ok(false),
     }
+}
+
+/// Adds the user's row to the web app's thread for a reply typed there for the chief.
+/// Whether a row was added. A payload it cannot read adds none; its delivery is staged anyway.
+async fn project_app_reply(conn: &turso::Connection, event: &EventEnvelope) -> Result<bool> {
+    let Ok(reply) = serde_json::from_value::<ReceivedReply>(event.payload.clone()) else {
+        return Ok(false);
+    };
+    if !reply.to_chief {
+        return Ok(false);
+    }
+    let at_ms: i64 = (event.created_at.unix_timestamp_nanos() / 1_000_000)
+        .try_into()
+        .map_err(|_| {
+            StoreError::Data("InboundMessageReceived timestamp is outside i64 milliseconds".into())
+        })?;
+    let added = conn
+        .execute(
+            r#"
+            INSERT INTO app_messages (event_id, at_ms, sender, text)
+            VALUES (?1, ?2, ?3, ?4)
+            ON CONFLICT(event_id) DO NOTHING
+            "#,
+            (
+                event.id.to_string(),
+                at_ms,
+                AppSender::User.text(),
+                reply.text,
+            ),
+        )
+        .await?;
+    Ok(added > 0)
+}
+
+/// Keeps the subscription, replacing the keys an endpoint had. Only Harold writes this event,
+/// so a payload it cannot read is passed over rather than block the events after it.
+async fn project_app_push_subscribed(
+    conn: &turso::Connection,
+    event: &EventEnvelope,
+) -> Result<()> {
+    let Ok(subscribed) = serde_json::from_value::<AppPushSubscribed>(event.payload.clone()) else {
+        return Ok(());
+    };
+    let subscribed_at_ms: i64 = (event.created_at.unix_timestamp_nanos() / 1_000_000)
+        .try_into()
+        .map_err(|_| {
+            StoreError::Data("AppPushSubscribed timestamp is outside i64 milliseconds".into())
+        })?;
+    conn.execute(
+        r#"
+        INSERT INTO app_push_subscriptions
+            (endpoint, p256dh, auth, subscribed_at_ms, last_event_version)
+        VALUES (?1, ?2, ?3, ?4, ?5)
+        ON CONFLICT(endpoint) DO UPDATE SET
+            p256dh = excluded.p256dh,
+            auth = excluded.auth,
+            subscribed_at_ms = excluded.subscribed_at_ms,
+            last_event_version = excluded.last_event_version
+        "#,
+        (
+            subscribed.endpoint,
+            subscribed.p256dh,
+            subscribed.auth,
+            subscribed_at_ms,
+            event.version.to_column(),
+        ),
+    )
+    .await?;
+    Ok(())
+}
+
+/// Forgets the endpoint's subscription. A payload it cannot read is passed over, as above.
+async fn project_app_push_unsubscribed(
+    conn: &turso::Connection,
+    event: &EventEnvelope,
+) -> Result<()> {
+    let Ok(unsubscribed) = serde_json::from_value::<AppPushUnsubscribed>(event.payload.clone())
+    else {
+        return Ok(());
+    };
+    conn.execute(
+        "DELETE FROM app_push_subscriptions WHERE endpoint = ?1",
+        (unsubscribed.endpoint,),
+    )
+    .await?;
+    Ok(())
 }
 
 fn agent_event_pane_id(event: &AgentEvent) -> &str {
@@ -1563,6 +1873,37 @@ pub async fn append_messaging_paused_changed(store: &HaroldStore, paused: bool) 
 pub async fn append_inbound_message(store: &HaroldStore, event: &InboundMessage) -> Result<()> {
     store
         .append([NewEvent::new("InboundMessageReceived", json!(event))])
+        .await?;
+    Ok(())
+}
+
+/// Stores a reply the user typed in the web app for the chief.
+pub(crate) async fn append_app_reply(store: &HaroldStore, text: &str) -> Result<()> {
+    store
+        .append([NewEvent::new(
+            "InboundMessageReceived",
+            json!({ "text": text, "forwarded": false, "to_chief": true }),
+        )])
+        .await?;
+    Ok(())
+}
+
+pub(crate) async fn append_app_push_subscribed(
+    store: &HaroldStore,
+    event: &AppPushSubscribed,
+) -> Result<()> {
+    store
+        .append([NewEvent::new("AppPushSubscribed", json!(event))])
+        .await?;
+    Ok(())
+}
+
+pub(crate) async fn append_app_push_unsubscribed(
+    store: &HaroldStore,
+    event: &AppPushUnsubscribed,
+) -> Result<()> {
+    store
+        .append([NewEvent::new("AppPushUnsubscribed", json!(event))])
         .await?;
     Ok(())
 }

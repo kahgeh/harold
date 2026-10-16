@@ -12,12 +12,14 @@ use crate::agent::domain::{
     CompletionSummaryUpdate, EffectiveAgentState, ObservedAgentState, WorkSummaryUpdate,
 };
 
-use super::{FailedWrite, StoreError, WriteFault};
 use super::{
-    HaroldStore, InboundMessage, TimedPromptHandled, TimedPromptOutcome, TurnCompleted,
-    append_agent_events, append_inbound_message, append_messaging_paused_changed,
+    AppMessage, AppPushSubscribed, AppPushUnsubscribed, AppReplyState, AppSender, HaroldStore,
+    InboundMessage, ReceivedReply, TimedPromptHandled, TimedPromptOutcome, TurnCompleted,
+    append_agent_events, append_app_push_subscribed, append_app_push_unsubscribed,
+    append_app_reply, append_inbound_message, append_messaging_paused_changed,
     append_timed_prompt_handled, append_tts_mute_changed, append_turn_completed,
 };
+use super::{FailedWrite, StoreError, WriteFault};
 
 struct TestDirectory(PathBuf);
 
@@ -485,7 +487,7 @@ async fn fresh_schema_has_one_initial_record_across_reopen() {
     while let Some(row) = rows.next().await.unwrap() {
         names.push(row.get_value(0).unwrap().as_text().unwrap().to_string());
     }
-    assert_eq!(names, ["001_initial"]);
+    assert_eq!(names, ["001_initial", "002_web_app"]);
 }
 
 #[tokio::test]
@@ -623,7 +625,7 @@ async fn unknown_schema_record_is_rejected_without_modifying_pending_delivery() 
             .get_value(0)
             .unwrap()
             .as_integer(),
-        Some(&2)
+        Some(&3)
     );
 }
 
@@ -2129,4 +2131,337 @@ async fn an_empty_append_writes_nothing_so_it_is_not_a_try() {
     assert!(store.is_failing());
     write(&store).await.unwrap();
     assert!(!store.is_failing());
+}
+
+/// How many `delivery_outbox` rows there are, delivered or not.
+async fn outbox_row_count(store: &HaroldStore) -> i64 {
+    let conn = store.state.connect().unwrap();
+    let mut rows = conn
+        .query("SELECT COUNT(*) FROM delivery_outbox", ())
+        .await
+        .unwrap();
+    *rows
+        .next()
+        .await
+        .unwrap()
+        .unwrap()
+        .get_value(0)
+        .unwrap()
+        .as_integer()
+        .unwrap()
+}
+
+/// Whether the state database has a table named `name`.
+async fn has_table(conn: &turso::Connection, name: &str) -> bool {
+    let mut rows = conn
+        .query(
+            "SELECT name FROM sqlite_schema WHERE type = 'table' AND name = ?1",
+            (name,),
+        )
+        .await
+        .unwrap();
+    rows.next().await.unwrap().is_some()
+}
+
+fn push_subscription(endpoint: &str, keys: &str) -> AppPushSubscribed {
+    AppPushSubscribed {
+        endpoint: endpoint.into(),
+        p256dh: format!("p256dh-{keys}"),
+        auth: format!("auth-{keys}"),
+    }
+}
+
+fn texts_of(messages: &[AppMessage]) -> Vec<&str> {
+    messages
+        .iter()
+        .map(|message| message.text.as_str())
+        .collect()
+}
+
+#[tokio::test]
+async fn an_app_reply_is_stored_with_to_chief_and_projected_as_a_user_row() {
+    let directory = TestDirectory::new();
+    let store = HaroldStore::open(directory.path()).await.unwrap();
+
+    append_app_reply(&store, "hi").await.unwrap();
+    store.project_unhandled_events(10).await.unwrap();
+
+    let events = store
+        .stream()
+        .load_after_version(EventVersion::start(), 10)
+        .await
+        .unwrap();
+    assert_eq!(events.len(), 1);
+    let event = &events[0];
+    assert_eq!(event.r#type, "InboundMessageReceived");
+    let reply: ReceivedReply = serde_json::from_value(event.payload.clone()).unwrap();
+    assert_eq!(reply.text, "hi");
+    assert!(reply.to_chief);
+    assert!(!reply.forwarded);
+
+    let messages = store.app_messages_since(0).await.unwrap();
+    assert_eq!(
+        messages,
+        [AppMessage {
+            event_id: event.id.to_string(),
+            at_ms: (event.created_at.unix_timestamp_nanos() / 1_000_000) as i64,
+            sender: AppSender::User,
+            text: "hi".into(),
+            state: None,
+        }]
+    );
+
+    let pending = store.next_pending_delivery().await.unwrap().unwrap();
+    assert_eq!(pending.event_type, "InboundMessageReceived");
+    assert_eq!(pending.event_id, event.id.to_string());
+    assert_eq!(outbox_row_count(&store).await, 1);
+}
+
+#[tokio::test]
+async fn an_inbound_message_without_to_chief_reads_as_false_and_adds_no_row() {
+    let directory = TestDirectory::new();
+    let store = HaroldStore::open(directory.path()).await.unwrap();
+
+    append_inbound_message(
+        &store,
+        &InboundMessage {
+            text: "x".into(),
+            forwarded: false,
+        },
+    )
+    .await
+    .unwrap();
+    store.project_unhandled_events(10).await.unwrap();
+
+    let events = store
+        .stream()
+        .load_after_version(EventVersion::start(), 10)
+        .await
+        .unwrap();
+    let reply: ReceivedReply = serde_json::from_value(events[0].payload.clone()).unwrap();
+    assert_eq!(reply.text, "x");
+    assert!(!reply.to_chief);
+    assert!(store.app_messages_since(0).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn push_subscriptions_follow_their_events() {
+    let directory = TestDirectory::new();
+    let store = HaroldStore::open(directory.path()).await.unwrap();
+
+    append_app_push_subscribed(&store, &push_subscription("https://push/a", "a1"))
+        .await
+        .unwrap();
+    append_app_push_subscribed(&store, &push_subscription("https://push/b", "b1"))
+        .await
+        .unwrap();
+    append_app_push_subscribed(&store, &push_subscription("https://push/a", "a2"))
+        .await
+        .unwrap();
+    append_app_push_unsubscribed(
+        &store,
+        &AppPushUnsubscribed {
+            endpoint: "https://push/b".into(),
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(store.project_unhandled_events(10).await.unwrap().applied, 4);
+
+    assert_eq!(
+        store.app_push_subscriptions().await.unwrap(),
+        [push_subscription("https://push/a", "a2")]
+    );
+    assert_eq!(outbox_row_count(&store).await, 0);
+}
+
+#[tokio::test]
+async fn a_chief_message_is_added_once_and_a_reply_state_is_shown() {
+    let directory = TestDirectory::new();
+    let store = HaroldStore::open(directory.path()).await.unwrap();
+
+    store.add_chief_app_message("e1", 10, "m").await.unwrap();
+    store.add_chief_app_message("e1", 10, "m").await.unwrap();
+    assert_eq!(
+        store.app_messages_since(0).await.unwrap(),
+        [AppMessage {
+            event_id: "e1".into(),
+            at_ms: 10,
+            sender: AppSender::Chief,
+            text: "m".into(),
+            state: None,
+        }]
+    );
+
+    append_app_reply(&store, "on it?").await.unwrap();
+    store.project_unhandled_events(10).await.unwrap();
+    let reply_id = store
+        .app_messages_since(0)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|message| message.sender == AppSender::User)
+        .unwrap()
+        .event_id;
+    store
+        .set_app_reply_state(&reply_id, AppReplyState::WaitingChiefBusy)
+        .await
+        .unwrap();
+
+    let reply = store
+        .app_messages_since(0)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|message| message.event_id == reply_id)
+        .unwrap();
+    assert_eq!(reply.state, Some(AppReplyState::WaitingChiefBusy));
+}
+
+#[test]
+fn reply_states_carry_the_labels_the_app_shows() {
+    assert_eq!(AppReplyState::Typed.label(), "typed");
+    assert_eq!(
+        AppReplyState::WaitingChiefBusy.label(),
+        "waiting: chief busy"
+    );
+    assert_eq!(AppReplyState::NotSentNoChief.label(), "not sent: no chief");
+    assert_eq!(
+        AppReplyState::NotSentPaused.label(),
+        "not sent: messaging paused"
+    );
+}
+
+#[tokio::test]
+async fn thread_rows_come_oldest_first_and_old_ones_are_deleted() {
+    let directory = TestDirectory::new();
+    let store = HaroldStore::open(directory.path()).await.unwrap();
+
+    store
+        .add_chief_app_message("e30", 30, "thirty")
+        .await
+        .unwrap();
+    store.add_chief_app_message("e10", 10, "ten").await.unwrap();
+    store
+        .add_chief_app_message("e20", 20, "twenty")
+        .await
+        .unwrap();
+    assert_eq!(
+        texts_of(&store.app_messages_since(0).await.unwrap()),
+        ["ten", "twenty", "thirty"]
+    );
+    assert_eq!(
+        texts_of(&store.app_messages_since(20).await.unwrap()),
+        ["twenty", "thirty"]
+    );
+
+    // Equal times keep insertion order, whatever the ids sort as.
+    store.add_chief_app_message("z", 40, "first").await.unwrap();
+    store
+        .add_chief_app_message("a", 40, "second")
+        .await
+        .unwrap();
+    assert_eq!(
+        texts_of(&store.app_messages_since(40).await.unwrap()),
+        ["first", "second"]
+    );
+
+    store.delete_app_messages_before(25).await.unwrap();
+    assert_eq!(
+        texts_of(&store.app_messages_since(0).await.unwrap()),
+        ["thirty", "first", "second"]
+    );
+}
+
+#[tokio::test]
+async fn the_thread_watch_changes_on_each_change() {
+    let directory = TestDirectory::new();
+    let store = HaroldStore::open(directory.path()).await.unwrap();
+    let mut thread = store.watch_app_thread();
+    let changed = |thread: &mut tokio::sync::watch::Receiver<u64>| {
+        let saw = thread.has_changed().unwrap();
+        thread.borrow_and_update();
+        saw
+    };
+    assert!(!changed(&mut thread));
+
+    append_app_reply(&store, "hi").await.unwrap();
+    store.project_unhandled_events(10).await.unwrap();
+    assert!(changed(&mut thread), "the projection added a user row");
+
+    store.add_chief_app_message("e1", 10, "m").await.unwrap();
+    assert!(changed(&mut thread), "a chief row was added");
+
+    let reply_id = store
+        .app_messages_since(0)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|message| message.sender == AppSender::User)
+        .unwrap()
+        .event_id;
+    store
+        .set_app_reply_state(&reply_id, AppReplyState::Typed)
+        .await
+        .unwrap();
+    assert!(changed(&mut thread), "a reply was relabelled");
+
+    store.delete_app_messages_before(i64::MAX).await.unwrap();
+    assert!(changed(&mut thread), "rows were deleted");
+
+    append_tts_mute_changed(&store, true).await.unwrap();
+    store.project_unhandled_events(10).await.unwrap();
+    assert!(
+        !changed(&mut thread),
+        "a projection that adds no row leaves the thread alone"
+    );
+}
+
+#[tokio::test]
+async fn an_existing_store_gains_002_and_keeps_its_data() {
+    let directory = TestDirectory::new();
+    let store = HaroldStore::open(directory.path()).await.unwrap();
+    append_turn_completed(
+        &store,
+        &TurnCompleted {
+            pane_id: "%1".into(),
+            pane_label: "main:0.0".into(),
+            last_user_prompt: "go".into(),
+            assistant_message: "done".into(),
+            main_context: String::new(),
+            agent_incarnation: None,
+            work_summary: CompletionSummaryUpdate::Unchanged,
+        },
+    )
+    .await
+    .unwrap();
+    store.project_unhandled_events(10).await.unwrap();
+    let turn_id = store
+        .next_pending_delivery()
+        .await
+        .unwrap()
+        .unwrap()
+        .event_id;
+
+    // Take the store back to what the base build left: no 002 record and no new tables.
+    let conn = store.state.connect().unwrap();
+    conn.execute_batch(
+        "DELETE FROM _migrations WHERE name = '002_web_app';
+         DROP TABLE app_messages;
+         DROP TABLE app_push_subscriptions;",
+    )
+    .await
+    .unwrap();
+    assert!(!has_table(&conn, "app_messages").await);
+    drop(conn);
+    drop(store);
+
+    let reopened = HaroldStore::open(directory.path()).await.unwrap();
+    let pending = reopened.next_pending_delivery().await.unwrap().unwrap();
+    assert_eq!(pending.event_id, turn_id);
+    assert_eq!(pending.event_type, "TurnCompleted");
+    let conn = reopened.state.connect().unwrap();
+    assert!(has_table(&conn, "app_messages").await);
+    assert!(has_table(&conn, "app_push_subscriptions").await);
+    assert!(reopened.app_messages_since(0).await.unwrap().is_empty());
 }
