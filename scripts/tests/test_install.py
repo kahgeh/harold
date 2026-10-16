@@ -946,10 +946,10 @@ class ServiceTests(unittest.TestCase):
         with patch.object(self.service, 'launch_pid', return_value=42), \
              patch.object(self.service, 'listener_pids', return_value={42}), \
              patch.object(self.service, 'probe_ready', return_value=False), \
-             patch.object(self.service, 'stop') as stop:
+             patch.object(self.service, 'unload') as unload:
             with self.assertRaisesRegex(RuntimeError, 'readiness'):
-                self.service.start(metadata, timeout=0)
-        stop.assert_called_once_with(metadata)
+                self.service.launch(metadata, timeout=0)
+        unload.assert_called_once_with(metadata)
 
     def test_revalidation_refreshes_edited_endpoint_without_exposing_config_output(self):
         metadata = {'bundle': '/bundle', 'grpc_addr': '127.0.0.1:50060', 'env': {}}

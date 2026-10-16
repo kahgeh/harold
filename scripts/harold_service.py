@@ -88,7 +88,9 @@ def stop_unmanaged(metadata):
         time.sleep(0.1)
 
 
-def stop(metadata):
+def unload(metadata):
+    """Boots the job out of launchd and waits for its process to end. It stays enabled, so
+    launchd loads it again at the next login."""
     pid = launch_pid(metadata)
     loaded = run(['launchctl', 'print', target(metadata)]).returncode == 0
     if loaded:
@@ -100,6 +102,49 @@ def stop(metadata):
         if time.monotonic() >= deadline:
             raise RuntimeError('Service did not stop within 10 seconds')
         time.sleep(0.1)
+
+
+def stop(metadata):
+    """Disables the job, so launchd leaves it off across logins until `start`, then unloads it."""
+    result = run(['launchctl', 'disable', target(metadata)])
+    if result.returncode:
+        raise RuntimeError('Cannot disable service: ' + result.stderr.strip())
+    unload(metadata)
+
+
+def crash_file(metadata):
+    """Harold's record of starts after unclean exits; its first line is `gave-up` after a crash loop."""
+    return Path(metadata['bundle']) / 'data/crashes'
+
+
+def gave_up(metadata):
+    try:
+        with crash_file(metadata).open() as crashes:
+            return crashes.readline().strip() == 'gave-up'
+    except FileNotFoundError:
+        return False
+
+
+def disabled(metadata):
+    """Whether `haroldctl stop` disabled the job. macOS prints `=> disabled` or, before
+    macOS 14, `=> true`."""
+    result = run(['launchctl', 'print-disabled', 'gui/{}'.format(os.getuid())])
+    if result.returncode:
+        raise RuntimeError('Cannot read disabled services: ' + result.stderr.strip())
+    pattern = r'^\s*"{}"\s*=>\s*(disabled|true)\s*$'.format(re.escape(metadata['label']))
+    return re.search(pattern, result.stdout, re.MULTILINE) is not None
+
+
+def autostart(metadata):
+    if disabled(metadata):
+        return 'off (stopped with haroldctl stop)'
+    if gave_up(metadata):
+        return 'off (gave up after a crash loop)'
+    return 'on'
+
+
+class Off(RuntimeError):
+    """`ensure` left Harold off: it was stopped, or gave up after a crash loop."""
 
 
 def probe_ready(metadata):
@@ -125,7 +170,8 @@ def validated_metadata(metadata):
     return dict(metadata, grpc_addr=config['grpc_addr'])
 
 
-def start(metadata, timeout=30):
+def launch(metadata, timeout=30):
+    """Loads the LaunchAgents copy of the job if needed, starts it, and waits until it is ready."""
     pid = launch_pid(metadata)
     listeners = listener_pids(metadata)
     if listeners and listeners != {pid}:
@@ -134,12 +180,12 @@ def start(metadata, timeout=30):
     if not pid:
         loaded = run(['launchctl', 'print', target(metadata)]).returncode == 0
         if not loaded:
-            result = run(['launchctl', 'bootstrap', 'gui/{}'.format(os.getuid()), metadata['plist']])
+            result = run(['launchctl', 'bootstrap', 'gui/{}'.format(os.getuid()), metadata['launch_agent']])
             if result.returncode:
                 raise RuntimeError('Cannot load service: ' + result.stderr.strip())
         result = run(['launchctl', 'kickstart', target(metadata)])
         if result.returncode:
-            stop(metadata)
+            unload(metadata)
             raise RuntimeError('Cannot start service: ' + result.stderr.strip())
     deadline = time.monotonic() + timeout
     try:
@@ -152,8 +198,27 @@ def start(metadata, timeout=30):
             time.sleep(0.2)
         raise RuntimeError('Service failed readiness within {} seconds'.format(timeout))
     except Exception:
-        stop(metadata)
+        # Unload only: a failed start must not leave the job disabled.
+        unload(metadata)
         raise
+
+
+def start(metadata, timeout=30):
+    """Enables the job, forgets any crash loop, and launches it."""
+    result = run(['launchctl', 'enable', target(metadata)])
+    if result.returncode:
+        raise RuntimeError('Cannot enable service: ' + result.stderr.strip())
+    crash_file(metadata).unlink(missing_ok=True)
+    return launch(metadata, timeout)
+
+
+def ensure(metadata, timeout=30):
+    """Launches the job unless `haroldctl stop` disabled it or Harold gave up after a crash loop."""
+    if disabled(metadata):
+        raise Off('stopped with haroldctl stop')
+    if gave_up(metadata):
+        raise Off('gave up after a crash loop; haroldctl start clears it')
+    return launch(metadata, timeout)
 
 
 @contextmanager
@@ -177,7 +242,7 @@ def service_lock(prefix, timeout=40):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command', choices=['start', 'stop', 'restart', 'status'])
+    parser.add_argument('command', choices=['start', 'stop', 'restart', 'status', 'ensure'])
     args = parser.parse_args()
     bundle = Path(__file__).resolve().parent
     try:
@@ -186,7 +251,7 @@ def main():
         os.environ.clear()
         os.environ.update(environment)
         with service_lock(bundle.parent):
-            if args.command in ('start', 'restart'):
+            if args.command in ('start', 'restart', 'ensure'):
                 updated = validated_metadata(metadata)
                 if updated != metadata:
                     import tempfile
@@ -203,10 +268,14 @@ def main():
             if args.command in ('start', 'restart'):
                 pid = start(metadata)
                 print('Harold ready (PID {})'.format(pid))
+            if args.command == 'ensure':
+                pid = ensure(metadata)
+                print('Harold ready (PID {})'.format(pid))
             if args.command == 'status':
                 pid = launch_pid(metadata)
                 ready = bool(pid and listener_pids(metadata) == {pid} and probe_ready(metadata))
-                print(json.dumps({'ready': ready, 'pid': pid, 'grpc_addr': metadata['grpc_addr']}))
+                print(json.dumps({'ready': ready, 'pid': pid, 'grpc_addr': metadata['grpc_addr'],
+                                  'autostart': autostart(metadata)}))
                 return 0 if ready else 1
         return 0
     except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
