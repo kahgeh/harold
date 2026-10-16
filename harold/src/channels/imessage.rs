@@ -719,7 +719,9 @@ async fn start_listener_reading(
 /// One poll of `db`. Marked rows are read before any reply is recorded, and while
 /// messaging is paused too, so the latest notifier is current when a reply is routed. If
 /// they cannot be read, no reply is recorded and no cursor moves, so the next poll reads
-/// the same rows again. `is_paused` is asked after the rows are fetched.
+/// the same rows again. A reply whose write fails and keeps its place ends its direction's
+/// rows for this poll, so no later row moves the cursor past it. `is_paused` is asked after
+/// the rows are fetched.
 async fn poll_chat_db(
     store: &HaroldStore,
     db: ChatDb,
@@ -760,7 +762,7 @@ async fn poll_chat_db(
         let trace_id = uuid::Uuid::new_v4().to_string();
         let span = info_span!("listener_inbound", trace_id = %trace_id, rowid = rowid);
 
-        async {
+        let kept_place = async {
             info!("iMessage received (inbound)");
             let row = FetchedRow {
                 rowid,
@@ -769,9 +771,14 @@ async fn poll_chat_db(
             };
             let stored = record_row(store, row, &cursors.inbound, recent, messaging_paused, now);
             telemetry::store_phone_reply("imessage", reply_time(date), stored).await;
+            cursors.inbound.load(Ordering::Relaxed) < rowid
         }
         .instrument(span)
         .await;
+        // A later row moving the cursor would skip this one, which must be read again.
+        if kept_place {
+            break;
+        }
     }
 
     // A reply typed in Messages on a Mac is a phone request too, on the same channel.
@@ -779,7 +786,7 @@ async fn poll_chat_db(
         let trace_id = uuid::Uuid::new_v4().to_string();
         let span = info_span!("listener_self", trace_id = %trace_id, rowid = rowid);
 
-        async {
+        let kept_place = async {
             info!("iMessage received (self)");
             let row = FetchedRow {
                 rowid,
@@ -795,9 +802,13 @@ async fn poll_chat_db(
                 now,
             );
             telemetry::store_phone_reply("imessage", reply_time(date), stored).await;
+            cursors.self_sent.load(Ordering::Relaxed) < rowid
         }
         .instrument(span)
         .await;
+        if kept_place {
+            break;
+        }
     }
 }
 

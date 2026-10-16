@@ -868,6 +868,39 @@ async fn running_listener_appends_the_row_and_advances_the_cursor() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_poll_stops_at_a_refused_reply_so_a_later_row_cannot_move_past_it() {
+    let store_directory = TestDirectory::new();
+    let store = HaroldStore::open(&store_directory.0).await.unwrap();
+    store.fault_log_flush_for_test(Some(WriteFault::Hang));
+    assert!(append_tts_mute_changed(&store, true).await.is_err());
+    store.fault_log_flush_for_test(None);
+    let directory = TestDirectory::new();
+    let db = chat_db(&directory);
+    let record = Mutex::new(NotifierRecord::for_machines(&[]));
+    let cursors = Cursors::starting_at(0);
+    // Row 2 is the twin of a self-sent row, so it moves the cursor without a write.
+    let recent = Mutex::new(RecentRows::new());
+    recent
+        .lock()
+        .unwrap()
+        .remember(Direction::SelfSent, "ok".into(), Instant::now());
+    insert_dated(&db, &[(HANDLE, 0, "carry on", 100), (HANDLE, 0, "ok", 101)]);
+
+    let feed = |text: &str, date| record.lock().unwrap().record_marker(text, date);
+    poll_chat_db(&store, db.clone(), &cursors, feed, &recent, || false).await;
+    assert_eq!(cursors.inbound.load(Ordering::Relaxed), 0);
+
+    tokio::time::advance(Duration::from_secs(30)).await;
+    let feed = |text: &str, date| record.lock().unwrap().record_marker(text, date);
+    poll_chat_db(&store, db, &cursors, feed, &recent, || false).await;
+    assert_eq!(cursors.inbound.load(Ordering::Relaxed), 2);
+    store.project_unhandled_events(10).await.unwrap();
+    let delivery = store.next_pending_delivery().await.unwrap().unwrap();
+    assert_eq!(delivery.event_type, "InboundMessageReceived");
+    assert_eq!(delivery.payload["text"], "carry on");
+}
+
+#[tokio::test(start_paused = true)]
 async fn a_reply_whose_write_timed_out_is_moved_past() {
     let directory = TestDirectory::new();
     let store = HaroldStore::open(&directory.0).await.unwrap();
