@@ -50,6 +50,11 @@ command = "say"
 # command = "/path/to/python"
 # args = ["-m", "mlx_audio.tts.generate", "--voice", "af_heart", "--play", "--text"]
 
+# Calls with the chief at the desk (tmx-agent-dash: c). Off when absent. The worker loads the Whisper model named by --model, with command as its Python.
+# [voice_input]
+# command = "/Users/you/Dev/xn/mlx-audio/.venv/bin/python"
+# args = ["-m", "mlx_audio.stt.generate", "--model", "mlx-community/whisper-large-v3-turbo"]
+
 # [telegram]
 # bot_token = "123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11"
 # chat_id = 12345678

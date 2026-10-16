@@ -362,6 +362,39 @@ impl TelemetrySettings {
     }
 }
 
+/// The Python and arguments that run the voice worker for calls with the chief.
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct VoiceInputSettings {
+    /// The Python the voice worker runs with.
+    pub command: String,
+    /// The worker's arguments. `--model` names the Whisper model.
+    #[serde(default)]
+    pub args: Vec<String>,
+}
+
+impl VoiceInputSettings {
+    /// The value after `--model` in `args`.
+    #[cfg_attr(not(test), allow(dead_code))] // until the call is wired up (plan Task 9)
+    pub(crate) fn whisper_model(&self) -> Option<&str> {
+        let at = self.args.iter().position(|arg| arg == "--model")?;
+        self.args.get(at + 1).map(String::as_str)
+    }
+}
+
+fn voice_input_errors(voice_input: Option<&VoiceInputSettings>) -> Vec<String> {
+    let Some(voice_input) = voice_input else {
+        return Vec::new();
+    };
+    let mut errors = Vec::new();
+    if voice_input.command.trim().is_empty() {
+        errors.push("voice_input.command must not be empty".into());
+    }
+    if voice_input.whisper_model().is_none() {
+        errors.push("voice_input.args must name the Whisper model with --model".into());
+    }
+    errors
+}
+
 fn telemetry_errors(telemetry: &TelemetrySettings) -> Vec<String> {
     let mut errors = Vec::new();
     if let Some(endpoint) = &telemetry.otlp_endpoint {
@@ -761,6 +794,9 @@ pub struct Settings {
     /// The collector, alert address and pod registry. Off when the section is absent.
     #[serde(default)]
     pub telemetry: TelemetrySettings,
+    /// Calls with the chief at the desk. Off when the section is absent.
+    #[serde(default)]
+    pub(crate) voice_input: Option<VoiceInputSettings>,
 }
 
 impl Settings {
@@ -783,6 +819,7 @@ impl Settings {
         ));
         errors.extend(timed_prompts_errors(&self.timed_prompts));
         errors.extend(telemetry_errors(&self.telemetry));
+        errors.extend(voice_input_errors(self.voice_input.as_ref()));
         match self.notify.away_channel.as_str() {
             "imessage" => {
                 if self.imessage.recipient.is_none() {
@@ -1398,6 +1435,51 @@ mod tests {
         assert_eq!(settings.telemetry.alert_addr(), None);
         assert_eq!(settings.telemetry.pod_registry_path(), None);
         assert!(telemetry_validate_errors("").is_empty());
+    }
+
+    #[test]
+    fn voice_input_is_off_when_absent() {
+        assert!(default_settings_with("").voice_input.is_none());
+    }
+
+    #[test]
+    fn whisper_model_is_the_value_after_dash_dash_model() {
+        let settings = super::VoiceInputSettings {
+            command: "python".into(),
+            args: [
+                "-m",
+                "mlx_audio.stt.generate",
+                "--model",
+                "mlx-community/whisper-large-v3-turbo",
+            ]
+            .map(String::from)
+            .to_vec(),
+        };
+        assert_eq!(
+            settings.whisper_model(),
+            Some("mlx-community/whisper-large-v3-turbo")
+        );
+        let without_value = super::VoiceInputSettings {
+            command: "python".into(),
+            args: vec!["--model".into()],
+        };
+        assert_eq!(without_value.whisper_model(), None);
+    }
+
+    #[test]
+    fn validate_reports_voice_input_without_a_command_or_a_model() {
+        let errors: Vec<String> = default_settings_with("[voice_input]\ncommand = \"\"\n")
+            .validate()
+            .into_iter()
+            .filter(|error| error.starts_with("voice_input."))
+            .collect();
+        assert_eq!(
+            errors,
+            [
+                "voice_input.command must not be empty",
+                "voice_input.args must name the Whisper model with --model",
+            ]
+        );
     }
 
     #[test]
