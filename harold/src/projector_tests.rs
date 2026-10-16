@@ -4,7 +4,7 @@ use std::time::Duration;
 use serde_json::json;
 
 use super::{
-    DeliveryDispatcher, DispatchError, ProductionDispatcher, ReplyOrigin, Router,
+    ChiefTyper, DeliveryDispatcher, DispatchError, ProductionDispatcher, ReplyOrigin, Router,
     dispatch_away_message, dispatch_spoken_line, handle_next_delivery, handle_next_delivery_inner,
     production_dispatcher, project_and_publish_agent_snapshot, route_message, run_event_handler,
     stored_envelope,
@@ -3550,4 +3550,290 @@ async fn a_chief_turn_end_records_the_app_as_its_channel_and_the_fallback_as_tod
         assert_eq!(deliveries.len(), 1, "{channel}");
         assert_eq!(attr(&deliveries[0], "channel"), channel);
     }
+}
+
+// ---------------------------------------------------------------------------
+// A reply typed in the web app goes straight to the chief
+// ---------------------------------------------------------------------------
+
+/// Each `(pane_id, text)` a recording typer was handed, oldest first.
+type TypedKeys = Arc<Mutex<Vec<(String, String)>>>;
+
+/// Each `(text, forwarded)` a recording router was handed, oldest first.
+type RoutedTexts = Arc<Mutex<Vec<(String, bool)>>>;
+
+/// A typer that records each `(pane_id, text)` it is handed and types nothing.
+fn recording_typer() -> (TypedKeys, ChiefTyper) {
+    let typed = TypedKeys::default();
+    let keys = typed.clone();
+    let typer = Arc::new(move |pane_id: &str, text: &str| {
+        keys.lock()
+            .unwrap()
+            .push((pane_id.to_string(), text.to_string()));
+        Ok(())
+    });
+    (typed, typer)
+}
+
+/// A router that records each `(text, forwarded)` it is handed, and reports the reply as
+/// another Mac's so the process-wide phone book is left as it was.
+fn recording_router() -> (RoutedTexts, Router) {
+    let routed = RoutedTexts::default();
+    let calls = routed.clone();
+    let router: Router = Arc::new(move |text: &str, forwarded: bool| {
+        calls.lock().unwrap().push((text.to_string(), forwarded));
+        Ok(not_owned_report())
+    });
+    (routed, router)
+}
+
+/// The chief's agent in pane `chief_pane`, in /work/chief-of-pods, and a pod's in %2.
+fn chief_in(chief_pane: &str) -> Vec<AgentEvent> {
+    vec![
+        agent_observed(chief_pane, 10, "/work/chief-of-pods"),
+        agent_observed("%2", 20, "/work/harold"),
+    ]
+}
+
+/// The daemon's dispatcher with `app`, over a hub with `events`, with a recording typer
+/// and router in place of tmux.
+struct ToChief {
+    app: Arc<FakeApp>,
+    typed: TypedKeys,
+    routed: RoutedTexts,
+    dispatcher: ProductionDispatcher,
+}
+
+async fn to_chief(directory: &TestDirectory, events: Vec<AgentEvent>, app: FakeApp) -> ToChief {
+    let with = with_app(directory, events, app).await;
+    let (typed, typer) = recording_typer();
+    let (routed, router) = recording_router();
+    ToChief {
+        app: with.app,
+        typed,
+        routed,
+        dispatcher: with.dispatcher.with_router(router).with_chief_typer(typer),
+    }
+}
+
+fn inbound_delivery(event_id: &str, payload: serde_json::Value) -> PendingDelivery {
+    PendingDelivery {
+        event_id: event_id.into(),
+        event_version: EventVersion::new(1).unwrap(),
+        event_type: "InboundMessageReceived".into(),
+        payload,
+        trace_id: "trace".into(),
+        attempt_count: 0,
+    }
+}
+
+fn app_reply(text: &str) -> serde_json::Value {
+    json!({ "text": text, "forwarded": false, "to_chief": true })
+}
+
+#[tokio::test]
+async fn a_to_chief_reply_is_typed_into_the_chief_and_nowhere_else() {
+    let directory = TestDirectory::new();
+    let pane = "%app-chief-typed";
+    let with = to_chief(
+        &directory,
+        chief_in(pane),
+        FakeApp::new(AppDelivery::Pushed),
+    )
+    .await;
+    let event_id = unique_event_id();
+
+    let outcome = with.dispatcher.dispatch_with_pause(
+        &inbound_delivery(&event_id, app_reply("[harold] hello")),
+        None,
+        false,
+    );
+
+    assert!(
+        matches!(outcome, Ok(DeliveryOutcome::Delivered)),
+        "{outcome:?}"
+    );
+    assert_eq!(
+        *with.typed.lock().unwrap(),
+        [(pane.to_string(), "📱 [harold] hello".to_string())]
+    );
+    assert!(with.routed.lock().unwrap().is_empty());
+    assert_eq!(
+        with.app.reply_states(),
+        [(event_id, crate::store::AppReplyState::Typed)]
+    );
+    assert!(with.app.delivered().is_empty());
+    let (_, started_by, _) =
+        telemetry::take_prompt(pane, time::OffsetDateTime::now_utc()).expect("a prompt is kept");
+    assert_eq!(started_by, telemetry::StartedBy::Phone);
+}
+
+#[tokio::test]
+async fn a_to_chief_reply_with_no_chief_types_nothing_and_says_so() {
+    let two_chiefs = vec![
+        agent_observed("%app-chief-a", 10, "/work/chief-of-pods"),
+        agent_observed("%app-chief-b", 11, "/work/chief-of-pods"),
+    ];
+    for events in [vec![agent_observed("%2", 20, "/work/harold")], two_chiefs] {
+        let directory = TestDirectory::new();
+        let with = to_chief(&directory, events, FakeApp::new(AppDelivery::Pushed)).await;
+        let event_id = unique_event_id();
+
+        let outcome = with.dispatcher.dispatch_with_pause(
+            &inbound_delivery(&event_id, app_reply("hello")),
+            None,
+            false,
+        );
+
+        assert!(
+            matches!(outcome, Ok(DeliveryOutcome::Skipped)),
+            "{outcome:?}"
+        );
+        assert!(with.typed.lock().unwrap().is_empty());
+        assert!(with.routed.lock().unwrap().is_empty());
+        assert_eq!(
+            with.app.reply_states(),
+            [(event_id, crate::store::AppReplyState::NotSentNoChief)]
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_stored_reply_without_to_chief_routes_as_before() {
+    let directory = TestDirectory::new();
+    let with = to_chief(
+        &directory,
+        chief_in("%app-chief-not-to"),
+        FakeApp::new(AppDelivery::Pushed),
+    )
+    .await;
+
+    let outcome = with.dispatcher.dispatch_with_pause(
+        &inbound_delivery(
+            &unique_event_id(),
+            json!({ "text": "[pane] hi", "forwarded": false }),
+        ),
+        None,
+        false,
+    );
+
+    assert!(
+        matches!(outcome, Ok(DeliveryOutcome::Skipped)),
+        "{outcome:?}"
+    );
+    assert_eq!(
+        *with.routed.lock().unwrap(),
+        [("[pane] hi".to_string(), false)]
+    );
+    assert!(with.typed.lock().unwrap().is_empty());
+    assert!(with.app.reply_states().is_empty());
+}
+
+#[tokio::test]
+async fn a_paused_to_chief_reply_is_not_typed_and_says_so() {
+    let directory = TestDirectory::new();
+    let with = to_chief(
+        &directory,
+        chief_in("%app-chief-paused"),
+        FakeApp::new(AppDelivery::Pushed),
+    )
+    .await;
+    let event_id = unique_event_id();
+
+    let outcome = with.dispatcher.dispatch_with_pause(
+        &inbound_delivery(&event_id, app_reply("hello")),
+        None,
+        true,
+    );
+
+    assert!(
+        matches!(outcome, Ok(DeliveryOutcome::Skipped)),
+        "{outcome:?}"
+    );
+    assert!(with.typed.lock().unwrap().is_empty());
+    assert!(with.routed.lock().unwrap().is_empty());
+    assert_eq!(
+        with.app.reply_states(),
+        [(event_id, crate::store::AppReplyState::NotSentPaused)]
+    );
+}
+
+#[tokio::test]
+async fn a_state_write_failure_after_typing_does_not_retype() {
+    let directory = TestDirectory::new();
+    let pane = "%app-chief-state-fails";
+    let with = to_chief(
+        &directory,
+        chief_in(pane),
+        FakeApp::new(AppDelivery::Pushed).failing_reply_states(),
+    )
+    .await;
+
+    let outcome = with.dispatcher.dispatch_with_pause(
+        &inbound_delivery(&unique_event_id(), app_reply("hello")),
+        None,
+        false,
+    );
+
+    assert!(
+        matches!(outcome, Ok(DeliveryOutcome::Delivered)),
+        "{outcome:?}"
+    );
+    assert_eq!(
+        *with.typed.lock().unwrap(),
+        [(pane.to_string(), "📱 hello".to_string())]
+    );
+    assert_eq!(with.app.reply_states().len(), 1);
+}
+
+#[tokio::test]
+async fn a_to_chief_reply_while_the_listing_fails_is_retried_and_types_nothing() {
+    let directory = TestDirectory::new();
+    let mut events = chief_in("%app-chief-listing");
+    events.push(inventory_unhealthy());
+    let with = to_chief(&directory, events, FakeApp::new(AppDelivery::Pushed)).await;
+
+    let outcome = with.dispatcher.dispatch_with_pause(
+        &inbound_delivery(&unique_event_id(), app_reply("hello")),
+        None,
+        false,
+    );
+
+    assert!(
+        matches!(outcome, Err(DispatchError::Retryable(_))),
+        "{outcome:?}"
+    );
+    assert!(with.typed.lock().unwrap().is_empty());
+    assert!(with.routed.lock().unwrap().is_empty());
+    assert!(with.app.reply_states().is_empty());
+}
+
+#[tokio::test]
+async fn a_to_chief_reply_with_no_app_is_still_typed() {
+    let directory = TestDirectory::new();
+    let pane = "%app-chief-no-app";
+    let store = HaroldStore::open(&directory.0).await.unwrap();
+    append_agent_events(&store, chief_in(pane)).await.unwrap();
+    let snapshots = AgentSnapshotHub::new(store.load_agent_snapshot().await.unwrap());
+    project_and_publish_agent_snapshot(&store, &snapshots, 500)
+        .await
+        .unwrap();
+    let environment = Arc::new(FakeEnvironment::locked(ONLY_FROM_CHIEF));
+    let (typed, typer) = recording_typer();
+    let dispatcher = production_dispatcher(environment, &snapshots, None).with_chief_typer(typer);
+
+    let outcome = dispatcher.dispatch_with_pause(
+        &inbound_delivery(&unique_event_id(), app_reply("hello")),
+        None,
+        false,
+    );
+
+    assert!(
+        matches!(outcome, Ok(DeliveryOutcome::Delivered)),
+        "{outcome:?}"
+    );
+    assert_eq!(
+        *typed.lock().unwrap(),
+        [(pane.to_string(), "📱 hello".to_string())]
+    );
 }

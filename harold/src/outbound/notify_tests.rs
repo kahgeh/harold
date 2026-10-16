@@ -687,27 +687,46 @@ pub(crate) const FAKE_MACHINE: &str = "mac";
 pub(crate) struct FakeApp {
     answer: Mutex<Result<AppDelivery, String>>,
     delivered: Mutex<Vec<(String, String)>>,
+    reply_states: Mutex<Vec<(String, AppReplyState)>>,
+    reply_state_fails: bool,
 }
 
 impl FakeApp {
     pub(crate) fn new(delivery: AppDelivery) -> Self {
-        Self {
-            answer: Mutex::new(Ok(delivery)),
-            delivered: Mutex::new(Vec::new()),
-        }
+        Self::answering(Ok(delivery))
     }
 
     /// Every `deliver` fails, as when the thread cannot be written.
     pub(crate) fn failing() -> Self {
+        Self::answering(Err("app thread write failed: store is failing".into()))
+    }
+
+    fn answering(answer: Result<AppDelivery, String>) -> Self {
         Self {
-            answer: Mutex::new(Err("app thread write failed: store is failing".into())),
+            answer: Mutex::new(answer),
             delivered: Mutex::new(Vec::new()),
+            reply_states: Mutex::new(Vec::new()),
+            reply_state_fails: false,
+        }
+    }
+
+    /// The app, with every `set_reply_state` failing, as when the thread cannot be written.
+    pub(crate) fn failing_reply_states(self) -> Self {
+        Self {
+            reply_state_fails: true,
+            ..self
         }
     }
 
     /// Each `(event_id, text)` delivered, oldest first.
     pub(crate) fn delivered(&self) -> Vec<(String, String)> {
         self.delivered.lock().unwrap().clone()
+    }
+
+    /// Each `(event_id, state)` that `set_reply_state` was asked to set, oldest first,
+    /// including the calls that failed.
+    pub(crate) fn reply_states(&self) -> Vec<(String, AppReplyState)> {
+        self.reply_states.lock().unwrap().clone()
     }
 }
 
@@ -723,7 +742,14 @@ impl AppRoute for FakeApp {
         answer
     }
 
-    fn set_reply_state(&self, _event_id: &str, _state: AppReplyState) -> Result<(), String> {
+    fn set_reply_state(&self, event_id: &str, state: AppReplyState) -> Result<(), String> {
+        self.reply_states
+            .lock()
+            .unwrap()
+            .push((event_id.to_string(), state));
+        if self.reply_state_fails {
+            return Err("app reply state write failed: store is failing".into());
+        }
         Ok(())
     }
 }

@@ -3,12 +3,15 @@ use std::sync::Mutex;
 
 use crate::inbound::ownership::Ownership;
 use crate::inbound::{
-    AgentAddress, RouteReport, RoutingEnv, clear_routing_state, parse_tag, resolve_pane,
-    route_if_owned, route_owned_reply, set_last_away_notification_source_agent,
+    AgentAddress, ChiefRouting, RouteReport, RoutingEnv, clear_routing_state, parse_tag,
+    resolve_pane, route_if_owned, route_owned_reply, route_to_chief,
+    set_last_away_notification_source_agent,
 };
 use crate::outbound::DeliveryOutcome;
+use crate::outbound::fake::CapturedLogs;
 use crate::settings::init_settings_for_test;
-use crate::telemetry::{ResolvedBy, Routing};
+use crate::telemetry::{self, ResolvedBy, Routing, StartedBy};
+use crate::web_app::chief::ChiefPane;
 
 /// Serialises tests that mutate global routing state.
 static ROUTING_TEST_LOCK: Mutex<()> = Mutex::new(());
@@ -377,4 +380,144 @@ fn a_typed_reply_ends_when_enter_is_pressed_not_when_the_user_is_told() {
         test_support::histogram_sum("harold.phone_request.latency", &[("channel", channel)])
             .expect("the latency is recorded");
     assert!(latency < 0.3, "{latency}");
+}
+
+// ---------------------------------------------------------------------------
+// A reply typed in the web app goes straight to the chief
+// ---------------------------------------------------------------------------
+
+/// A typer that records each `(pane_id, text)` it is handed and types nothing.
+#[derive(Default)]
+struct RecordingTyper {
+    typed: Mutex<Vec<(String, String)>>,
+}
+
+impl RecordingTyper {
+    fn type_into(&self, pane_id: &str, text: &str) -> Result<(), String> {
+        self.typed
+            .lock()
+            .unwrap()
+            .push((pane_id.to_string(), text.to_string()));
+        Ok(())
+    }
+
+    fn typed(&self) -> Vec<(String, String)> {
+        self.typed.lock().unwrap().clone()
+    }
+}
+
+fn one_chief(pane_id: &str, busy: bool) -> ChiefPane {
+    ChiefPane::One {
+        pane_id: pane_id.into(),
+        busy,
+    }
+}
+
+#[test]
+fn a_reply_to_the_chief_is_typed_into_its_pane_with_the_phone_mark() {
+    let typer = RecordingTyper::default();
+    let pane = "%app-reply-7";
+    let before = time::OffsetDateTime::now_utc();
+
+    let routing = route_to_chief("hello", &one_chief(pane, false), &|pane_id, text| {
+        typer.type_into(pane_id, text)
+    })
+    .unwrap();
+
+    assert_eq!(typer.typed(), [(pane.to_string(), "📱 hello".to_string())]);
+    let ChiefRouting::Typed {
+        pane_id,
+        busy,
+        typed_at,
+    } = routing
+    else {
+        panic!("the reply was typed: {routing:?}");
+    };
+    assert_eq!(pane_id, pane);
+    assert!(!busy);
+    assert!(typed_at >= before);
+    let (prompt_at, started_by, cx) =
+        telemetry::take_prompt(pane, time::OffsetDateTime::now_utc()).expect("a prompt is kept");
+    assert_eq!(prompt_at, typed_at);
+    assert_eq!(started_by, StartedBy::Phone);
+    assert!(cx.is_none(), "no phone request is opened");
+}
+
+#[test]
+fn a_busy_chief_is_typed_into_and_reported_busy() {
+    let typer = RecordingTyper::default();
+    let pane = "%app-reply-busy";
+
+    let routing = route_to_chief("hello", &one_chief(pane, true), &|pane_id, text| {
+        typer.type_into(pane_id, text)
+    })
+    .unwrap();
+
+    assert_eq!(typer.typed(), [(pane.to_string(), "📱 hello".to_string())]);
+    assert!(
+        matches!(&routing, ChiefRouting::Typed { pane_id, busy: true, .. } if pane_id == pane),
+        "{routing:?}"
+    );
+    let (_, started_by, _) =
+        telemetry::take_prompt(pane, time::OffsetDateTime::now_utc()).expect("a prompt is kept");
+    assert_eq!(started_by, StartedBy::Phone);
+}
+
+#[test]
+fn no_chief_or_several_types_nothing() {
+    for chief in [ChiefPane::NoChief, ChiefPane::Several] {
+        let typer = RecordingTyper::default();
+
+        let routing = route_to_chief("hello", &chief, &|pane_id, text| {
+            typer.type_into(pane_id, text)
+        });
+
+        assert_eq!(routing, Ok(ChiefRouting::NoChief), "{chief:?}");
+        assert!(typer.typed().is_empty(), "{chief:?}");
+    }
+}
+
+#[test]
+fn a_failing_listing_is_an_error_and_types_nothing() {
+    let typer = RecordingTyper::default();
+
+    let routing = route_to_chief("hello", &ChiefPane::ListingFailed, &|pane_id, text| {
+        typer.type_into(pane_id, text)
+    });
+
+    assert!(routing.is_err(), "{routing:?}");
+    assert!(typer.typed().is_empty());
+}
+
+#[test]
+fn a_failed_typing_is_an_error_and_records_no_prompt() {
+    let pane = "%app-reply-fails";
+
+    let routing = route_to_chief("hello", &one_chief(pane, false), &|_, _| {
+        Err("tmux send-keys text failed".to_string())
+    });
+
+    assert_eq!(routing, Err("tmux send-keys text failed".to_string()));
+    assert!(telemetry::take_prompt(pane, time::OffsetDateTime::now_utc()).is_none());
+}
+
+#[test]
+fn a_reply_to_the_chief_is_never_logged() {
+    let logs = CapturedLogs::start();
+    let typer = RecordingTyper::default();
+
+    for chief in [
+        one_chief("%app-reply-log", false),
+        ChiefPane::NoChief,
+        ChiefPane::Several,
+        ChiefPane::ListingFailed,
+    ] {
+        let _ = route_to_chief("APP-CANARY-7731", &chief, &|pane_id, text| {
+            typer.type_into(pane_id, text)
+        });
+    }
+
+    assert_eq!(typer.typed().len(), 1);
+    let text = logs.text();
+    assert!(!text.contains("APP-CANARY-7731"), "{text}");
 }

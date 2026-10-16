@@ -3,7 +3,10 @@ use std::sync::Arc;
 
 use super::WebAppRoute;
 use crate::outbound::{AppDelivery, AppRoute};
-use crate::store::{AppPushSubscribed, AppSender, HaroldStore, append_app_push_subscribed};
+use crate::store::{
+    AppPushSubscribed, AppReplyState, AppSender, HaroldStore, append_app_push_subscribed,
+    append_app_reply,
+};
 use crate::web_app::fake_push::FakePushService;
 use crate::web_app::push::{Pusher, VapidKey, vapid_key_path};
 
@@ -146,4 +149,30 @@ async fn delivering_twice_keeps_one_row() {
     let messages = store.app_messages_since(0).await.unwrap();
     assert_eq!(messages.len(), 1);
     assert_eq!(messages[0].text, "All pods are green");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn set_reply_state_relabels_the_user_row() {
+    let directory = TestDirectory::new();
+    let (store, route) = route_with(&directory, &[]).await;
+    append_app_reply(&store, "on it?").await.unwrap();
+    store.project_unhandled_events(100).await.unwrap();
+    let reply_id = store.app_messages_since(0).await.unwrap()[0]
+        .event_id
+        .clone();
+
+    for state in [AppReplyState::WaitingChiefBusy, AppReplyState::Typed] {
+        let route = route.clone();
+        let event_id = reply_id.clone();
+        tokio::task::spawn_blocking(move || route.set_reply_state(&event_id, state))
+            .await
+            .expect("set_reply_state thread")
+            .expect("state write");
+
+        let messages = store.app_messages_since(0).await.unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].sender, AppSender::User);
+        assert_eq!(messages[0].text, "on it?");
+        assert_eq!(messages[0].state, Some(state));
+    }
 }

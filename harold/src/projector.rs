@@ -10,7 +10,10 @@ use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 use crate::agent::snapshot::AgentSnapshotHub;
 use crate::alerts::AlertQueue;
 use crate::inbound::ownership::agent_message_text;
-use crate::inbound::{AgentAddress, RouteReport, route_inbound_message};
+use crate::inbound::{
+    AgentAddress, ChiefRouting, RouteReport, route_inbound_message, route_to_chief,
+    type_into_pane_quietly,
+};
 use crate::outbound::left_out::{
     TrackedAgents, message_dropped_reason, spoken_line_dropped_reason,
 };
@@ -19,11 +22,12 @@ use crate::outbound::{
     SystemAwayText, SystemEnvironment, deliver_from_chief, notify_with_app,
 };
 use crate::store::{
-    AwayMessageRequested, EventVersion, HaroldStore, InboundMessage, PendingDelivery,
-    ProjectionBatch, SpokenLineRequested, StoreError, TurnCompleted,
+    AppReplyState, AwayMessageRequested, EventVersion, HaroldStore, InboundMessage,
+    PendingDelivery, ProjectionBatch, ReceivedReply, SpokenLineRequested, StoreError,
+    TurnCompleted,
 };
 use crate::telemetry::{self, OpenReply, ResolvedBy, Routing, TRACE_TARGET};
-use crate::web_app::chief::is_chief_pane;
+use crate::web_app::chief::{ChiefPane, find_chief, is_chief_pane};
 
 pub(crate) trait DeliveryDispatcher: Send + Sync + 'static {
     fn dispatch(&self, delivery: &PendingDelivery) -> Result<DeliveryOutcome, DispatchError>;
@@ -50,6 +54,9 @@ pub(crate) struct ReplyOrigin {
 /// Routes a stored reply's text, given whether ownership is already decided.
 pub(crate) type Router = Arc<dyn Fn(&str, bool) -> Result<RouteReport, String> + Send + Sync>;
 
+/// Types a text into a pane, given the pane id and the text, and presses Enter.
+pub(crate) type ChiefTyper = Arc<dyn Fn(&str, &str) -> Result<(), String> + Send + Sync>;
+
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum DispatchError {
     #[error("{0}")]
@@ -71,6 +78,9 @@ struct ProductionDispatcher {
     app: Option<Arc<dyn AppRoute>>,
     /// The away channel's plain-text send, for a chief's message the app did not push.
     away_text: Arc<dyn AwayText>,
+    /// Types a reply from the web app into the chief's pane: `type_into_pane_quietly`, or
+    /// a fake in tests.
+    chief_typer: ChiefTyper,
 }
 
 impl DeliveryDispatcher for ProductionDispatcher {
@@ -100,6 +110,16 @@ impl ProductionDispatcher {
             router: Arc::new(route_inbound_message),
             app: None,
             away_text: Arc::new(SystemAwayText),
+            chief_typer: Arc::new(type_into_pane_quietly),
+        }
+    }
+
+    /// The dispatcher with `typer` in place of typing into the chief's tmux pane.
+    #[cfg(test)]
+    fn with_chief_typer(self, typer: ChiefTyper) -> Self {
+        Self {
+            chief_typer: typer,
+            ..self
         }
     }
 
@@ -142,6 +162,82 @@ impl ProductionDispatcher {
         })
     }
 
+    /// The chief's pane in the snapshot the handler published before this delivery. With
+    /// no hub, no agent is seen.
+    fn chief_pane(&self) -> ChiefPane {
+        let Some(snapshots) = self.snapshots.as_ref() else {
+            return ChiefPane::NoChief;
+        };
+        let chief_folder = self
+            .environment
+            .notify_settings()
+            .away_messages_only_from
+            .as_deref();
+        find_chief(&snapshots.current(), chief_folder)
+    }
+
+    /// Shows `state` on the app's row for the reply `event_id` stored, when a web app is
+    /// set. A failed write is logged and not retried: the reply may have been typed, and a
+    /// retry would type it twice.
+    fn set_reply_state(&self, event_id: &str, state: AppReplyState) {
+        let Some(app) = self.app.as_deref() else {
+            return;
+        };
+        if let Err(error) = app.set_reply_state(event_id, state) {
+            warn!(event_id, error, "app reply state not recorded");
+        }
+    }
+
+    /// A stored reply. One the user typed in the web app (`to_chief`) is typed into the
+    /// chief's pane, and its row in the app shows what became of it; any other reply is
+    /// routed as an iMessage reply is.
+    fn dispatch_inbound(
+        &self,
+        delivery: &PendingDelivery,
+        origin: Option<&ReplyOrigin>,
+        messaging_paused: bool,
+    ) -> Result<DeliveryOutcome, DispatchError> {
+        if messaging_paused {
+            // A backlog queued before the pause drains without being routed or confirmed.
+            // Only a reply for the chief is read, so that its row says it was not sent.
+            let for_chief = serde_json::from_value::<ReceivedReply>(delivery.payload.clone())
+                .is_ok_and(|reply| reply.to_chief);
+            if for_chief {
+                self.set_reply_state(&delivery.event_id, AppReplyState::NotSentPaused);
+            } else {
+                finish_paused_request(origin);
+            }
+            return Ok(DeliveryOutcome::Skipped);
+        }
+        let reply =
+            serde_json::from_value::<ReceivedReply>(delivery.payload.clone()).map_err(|error| {
+                DispatchError::Permanent(format!("invalid InboundMessageReceived payload: {error}"))
+            })?;
+        if !reply.to_chief {
+            let message = InboundMessage {
+                text: reply.text,
+                forwarded: reply.forwarded,
+            };
+            return route_message(&message, &delivery.event_id, origin, |text, forwarded| {
+                (self.router)(text, forwarded)
+            });
+        }
+        // The reply's text is never logged: an error names the listing or tmux only.
+        let routing = route_to_chief(&reply.text, &self.chief_pane(), self.chief_typer.as_ref())
+            .map_err(DispatchError::Retryable)?;
+        let (state, outcome) = match routing {
+            ChiefRouting::Typed { busy: false, .. } => {
+                (AppReplyState::Typed, DeliveryOutcome::Delivered)
+            }
+            ChiefRouting::Typed { busy: true, .. } => {
+                (AppReplyState::WaitingChiefBusy, DeliveryOutcome::Delivered)
+            }
+            ChiefRouting::NoChief => (AppReplyState::NotSentNoChief, DeliveryOutcome::Skipped),
+        };
+        self.set_reply_state(&delivery.event_id, state);
+        Ok(outcome)
+    }
+
     /// The agent panes in the snapshot the handler published before this delivery.
     fn tracked_agents(&self) -> TrackedAgents {
         self.snapshots
@@ -175,23 +271,7 @@ impl ProductionDispatcher {
                 )
                 .map_err(DispatchError::Retryable)
             }
-            "InboundMessageReceived" => {
-                // Checked before the payload is read, so a backlog queued before the
-                // pause drains without being routed or confirmed.
-                if messaging_paused {
-                    finish_paused_request(origin);
-                    return Ok(DeliveryOutcome::Skipped);
-                }
-                let message = serde_json::from_value::<InboundMessage>(delivery.payload.clone())
-                    .map_err(|error| {
-                        DispatchError::Permanent(format!(
-                            "invalid InboundMessageReceived payload: {error}"
-                        ))
-                    })?;
-                route_message(&message, &delivery.event_id, origin, |text, forwarded| {
-                    (self.router)(text, forwarded)
-                })
-            }
+            "InboundMessageReceived" => self.dispatch_inbound(delivery, origin, messaging_paused),
             "AwayMessageRequested" => {
                 // Whether the web app carried the message, in which case no reply target
                 // is recorded: a reply to it comes through the app.

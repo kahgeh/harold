@@ -10,8 +10,10 @@ use tracing::{info, warn};
 
 use crate::outbound::{DeliveryOutcome, send_reply};
 use crate::settings::get_settings;
-use crate::telemetry::{ResolvedBy, Routing};
+use crate::telemetry::{self, ResolvedBy, Routing, StartedBy};
+use crate::timed_prompts::pane_lock;
 use crate::util::ai_cli_env;
+use crate::web_app::chief::ChiefPane;
 
 pub use directory::AgentAddress;
 use directory::AgentDirectory;
@@ -363,6 +365,60 @@ fn route_owned_reply(
             })
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Route a reply typed in the web app — straight to the chief.
+// ---------------------------------------------------------------------------
+
+/// What routing a reply the user typed in the web app did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ChiefRouting {
+    /// Typed into the chief's pane at `typed_at`; `busy` when the chief was busy then.
+    Typed {
+        pane_id: String,
+        busy: bool,
+        typed_at: OffsetDateTime,
+    },
+    /// No agent, or more than one, runs in the chief's folder: nothing was typed.
+    NoChief,
+}
+
+/// Types "📱 <text>" into the chief's pane: no tag, AI or latest-notifier decision. Several
+/// agents or none → NoChief, nothing typed (D2). A failing listing → Err. On typing, records
+/// telemetry::prompt_typed(pane, StartedBy::Phone, None, typed_at) (D7). Logs nothing that holds the text.
+pub(crate) fn route_to_chief(
+    text: &str,
+    chief: &ChiefPane,
+    type_into: &dyn Fn(&str, &str) -> Result<(), String>,
+) -> Result<ChiefRouting, String> {
+    let (pane_id, busy) = match chief {
+        ChiefPane::One { pane_id, busy } => (pane_id, *busy),
+        ChiefPane::NoChief | ChiefPane::Several => return Ok(ChiefRouting::NoChief),
+        ChiefPane::ListingFailed => {
+            return Err(
+                "the tmux pane listing is failing, so the chief's pane is not known".into(),
+            );
+        }
+    };
+    type_into(pane_id, &format!("📱 {text}"))?;
+    let typed_at = OffsetDateTime::now_utc();
+    // No phone request is opened: the turn counts as started by the phone all the same.
+    telemetry::prompt_typed(pane_id, StartedBy::Phone, None, typed_at);
+    Ok(ChiefRouting::Typed {
+        pane_id: pane_id.clone(),
+        busy,
+        typed_at,
+    })
+}
+
+/// relay_holding_lock(pane_lock(pane), type_text_into_tmux_pane + press_enter_in_tmux_pane): the iMessage
+/// reply path's typing, without relay_to_tmux_pane's log line that holds the text.
+pub(crate) fn type_into_pane_quietly(pane_id: &str, text: &str) -> Result<(), String> {
+    tmux::relay_holding_lock(&pane_lock(pane_id), || {
+        tmux::type_text_into_tmux_pane(pane_id, text)?;
+        tmux::press_enter_in_tmux_pane(pane_id)
+    })
 }
 
 // ---------------------------------------------------------------------------
