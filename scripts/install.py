@@ -406,6 +406,23 @@ def write_plist(path, metadata):
     path.write_bytes(plistlib.dumps(value))
 
 
+def write_launch_agent(metadata):
+    """Copies the bundle's service.plist to ~/Library/LaunchAgents, where launchd loads it at
+    login. The copy is written beside it and moved into place, so a symlink there is replaced,
+    not written through."""
+    destination = Path(metadata['launch_agent'])
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(dir=destination.parent, prefix='.harold-', suffix='.plist',
+                                     delete=False) as output:
+        pending = Path(output.name)
+        output.write(Path(metadata['plist']).read_bytes())
+    try:
+        pending.chmod(0o644)
+        os.replace(pending, destination)
+    finally:
+        pending.unlink(missing_ok=True)
+
+
 def recorded(bundle, name):
     """The text of a bundle's VERSION or REVISION file, or None when it has none."""
     try:
@@ -577,7 +594,8 @@ def install(args, repo):
                 for pid in service.listener_pids(current):
                     if not service.executable_matches(pid, bundle / 'harold'):
                         raise RuntimeError('Port {} belongs to unrelated PID {}; leaving it running'.format(current['grpc_addr'], pid))
-            service.stop(old_metadata)
+            # Boot out the old job without disabling it; start enables and loads the new copy.
+            service.unload(old_metadata)
             service.stop_unmanaged(old_metadata)
             backup = replace_bundle(stage, bundle, args.reinstall)
             if backup:
@@ -591,6 +609,7 @@ def install(args, repo):
                 print('Previous installation archived at {}'.format(backup), flush=True)
             os.replace(staging / 'tmx-agent-dash', prefix / 'tmx-agent-dash')
             os.replace(staging / 'haroldctl', prefix / 'haroldctl')
+            write_launch_agent(metadata)
             pid = service.start(metadata)
             print('Harold ready at {} (LaunchAgent PID {}).\nControl: {}\nConfig: {}\nLog: {}'.format(
                 metadata['grpc_addr'], pid, prefix / 'haroldctl', bundle / 'config/local.toml', bundle / 'harold.log'))

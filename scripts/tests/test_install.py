@@ -58,6 +58,10 @@ class InstallTests(unittest.TestCase):
             ('Claude Code', self.claude_skills), ('Codex', self.codex_skills)))
         patcher.start()
         self.addCleanup(patcher.stop)
+        # Never the real ~/Library/LaunchAgents.
+        patcher = patch.dict('os.environ', {'HOME': str(Path(self.temp.name).resolve() / 'home')})
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def test_symlinked_managed_data_rejected_before_mutation(self):
         bundle = self.prefix / 'harold'
@@ -156,10 +160,10 @@ class InstallTests(unittest.TestCase):
                     return subprocess.CompletedProcess(argv, 0, '', '')
                 with patch.object(self.install, 'prerequisites'), \
                      patch.object(subprocess, 'run', side_effect=process), \
-                     patch.object(self.install.service, 'stop') as stop:
+                     patch.object(self.install.service, 'unload') as unload:
                     with self.assertRaises((RuntimeError, subprocess.CalledProcessError)):
                         self.install.install(args, repo)
-                stop.assert_not_called()
+                unload.assert_not_called()
                 self.assertEqual((bundle / 'config/local.toml').read_text(), 'secret = "never print"')
 
     def test_installs_cargo_reported_binaries_from_custom_target_directory(self):
@@ -203,7 +207,7 @@ class InstallTests(unittest.TestCase):
         with patch.object(self.install, 'prerequisites'), \
              patch.object(subprocess, 'run', side_effect=process), \
              patch.object(self.install.service, 'listener_pids', return_value=set()), \
-             patch.object(self.install.service, 'stop'), \
+             patch.object(self.install.service, 'unload'), \
              patch.object(self.install.service, 'stop_unmanaged'), \
              patch.object(self.install.service, 'start', return_value=123):
             with contextlib.redirect_stdout(printed):
@@ -270,7 +274,7 @@ class InstallTests(unittest.TestCase):
              patch.object(self.install, 'build_binaries') as build, \
              patch.object(subprocess, 'run', side_effect=process), \
              patch.object(self.install.service, 'listener_pids', return_value=set()), \
-             patch.object(self.install.service, 'stop'), \
+             patch.object(self.install.service, 'unload'), \
              patch.object(self.install.service, 'stop_unmanaged'), \
              patch.object(self.install.service, 'start', return_value=123):
             self.install.install(args, self.prefix / 'nonexistent source')
@@ -426,6 +430,11 @@ class InstalledServiceTests(unittest.TestCase):
             patcher = patch.object(install, name, value)
             patcher.start()
             self.addCleanup(patcher.stop)
+        # Never the real ~/Library/LaunchAgents.
+        self.home = root / 'home'
+        patcher = patch.dict('os.environ', {'HOME': str(self.home)})
+        patcher.start()
+        self.addCleanup(patcher.stop)
         self.release = root / 'release'
         for name in ('harold', 'tmx-agent-dash', 'harold.proto',
                      'hooks/harold_turn_complete.py', 'hooks/claude_turn_complete.py',
@@ -443,6 +452,14 @@ class InstalledServiceTests(unittest.TestCase):
         self.requirements = {}
         self.sign_error = None
         self.calls = []
+        self.order = []
+
+    def unloaded(self, metadata):
+        self.order.append(('unload', metadata['label']))
+
+    def started(self, metadata):
+        self.order.append(('start', Path(metadata['launch_agent']).is_file()))
+        return 123
 
     def process(self, argv, **kwargs):
         self.calls.append(list(argv))
@@ -496,8 +513,9 @@ class InstalledServiceTests(unittest.TestCase):
              patch.object(subprocess, 'run', side_effect=self.process), \
              patch.object(self.install.service, 'listener_pids', return_value=set()), \
              patch.object(self.install.service, 'stop') as self.stop, \
+             patch.object(self.install.service, 'unload', side_effect=self.unloaded) as self.unload, \
              patch.object(self.install.service, 'stop_unmanaged'), \
-             patch.object(self.install.service, 'start', return_value=123), \
+             patch.object(self.install.service, 'start', side_effect=self.started) as self.start, \
              contextlib.redirect_stdout(self.printed):
             self.install.install(args, self.prefix / 'no source')
         return self.printed.getvalue()
@@ -588,6 +606,46 @@ class InstalledServiceTests(unittest.TestCase):
         self.assertEqual(sorted(metadata['env']), sorted([
             'HAROLD_CONFIG_DIR', 'HAROLD_ENV', 'HAROLD__STORE__PATH', 'PATH', 'LANG', 'LC_ALL']))
 
+    def launch_agent(self):
+        return self.home / 'Library/LaunchAgents' / (self.installed_metadata()['label'] + '.plist')
+
+    def test_an_upgrade_boots_out_the_old_job_writes_both_copies_and_starts_through_haroldctl(self):
+        self.install_existing(saved='-')
+        old = self.install.make_metadata(self.prefix, '127.0.0.1:50123')
+        old_plist = dict(Label=old['label'], ProgramArguments=[str(self.bundle / 'harold')], RunAtLoad=False)
+        (self.bundle / 'service.plist').write_bytes(plistlib.dumps(old_plist))
+        self.run_install()
+        label = self.installed_metadata()['label']
+        # The old job is booted out, never disabled; start then finds the LaunchAgents copy.
+        self.assertEqual(self.order, [('unload', label), ('start', True)])
+        self.stop.assert_not_called()
+        self.assertEqual(self.start.call_args.args[0]['launch_agent'], str(self.launch_agent()))
+        self.assertEqual(self.launch_agent().read_bytes(), (self.bundle / 'service.plist').read_bytes())
+        plist = plistlib.loads(self.launch_agent().read_bytes())
+        self.assertEqual((plist['Label'], plist['RunAtLoad'], plist['KeepAlive'], plist['ThrottleInterval'],
+                          plist['EnvironmentVariables']['HAROLD_LAUNCHD']),
+                         (label, True, {'SuccessfulExit': False}, 30, '1'))
+        if os.environ.get('HAROLD_TEST_EVIDENCE') == '1':
+            print('{}: Label={} RunAtLoad={} KeepAlive={} ThrottleInterval={} HAROLD_LAUNCHD={}'.format(
+                self.launch_agent(), plist['Label'], plist['RunAtLoad'], plist['KeepAlive'],
+                plist['ThrottleInterval'], plist['EnvironmentVariables']['HAROLD_LAUNCHD']))
+
+    def test_an_install_replaces_an_older_launch_agents_copy(self):
+        self.launch_agent_folder = self.home / 'Library/LaunchAgents'
+        self.launch_agent_folder.mkdir(parents=True)
+        label = self.install.make_metadata(self.prefix, '')['label']
+        (self.launch_agent_folder / (label + '.plist')).write_text('stale')
+        self.run_install()
+        self.assertEqual(self.launch_agent().read_bytes(), (self.bundle / 'service.plist').read_bytes())
+        self.assertEqual(sorted(path.name for path in self.launch_agent_folder.iterdir()), [label + '.plist'])
+
+    def test_a_failed_install_leaves_the_launch_agents_folder_alone(self):
+        self.install_existing(saved='Kah Geh Tan')
+        self.sign_error = 'Kah Geh Tan: no identity found'
+        with self.assertRaisesRegex(RuntimeError, 'no identity found'):
+            self.run_install(None)
+        self.assertFalse((self.home / 'Library/LaunchAgents').exists())
+
     def test_the_service_runs_at_normal_priority(self):
         self.run_install()
         plist = plistlib.loads((self.bundle / 'service.plist').read_bytes())
@@ -647,7 +705,7 @@ class InstalledServiceTests(unittest.TestCase):
         self.sign_error = 'Kah Geh Tan: no identity found'
         with self.assertRaisesRegex(RuntimeError, 'Kah Geh Tan: no identity found'):
             self.run_install(None)
-        self.stop.assert_not_called()
+        self.unload.assert_not_called()
         self.assertEqual((self.bundle / 'harold').read_text(), 'old harold')
         # The installed record is untouched: it still names the saved identity.
         self.assertEqual(self.installed_metadata()['signing_identity'], 'Kah Geh Tan')
@@ -656,7 +714,7 @@ class InstalledServiceTests(unittest.TestCase):
         self.install_existing(saved=None)
         with self.assertRaisesRegex(RuntimeError, 'signing_identity must be text'):
             self.run_install(None)
-        self.stop.assert_not_called()
+        self.unload.assert_not_called()
         self.assertEqual((self.bundle / 'harold').read_text(), 'old harold')
         self.assertNotIn(['codesign', '--force'], [argv[:2] for argv in self.calls])
 
@@ -710,7 +768,7 @@ class InstalledServiceTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'ambiguous'):
             self.run_install(None)
         self.assertNotIn('macOS permissions', self.printed.getvalue())
-        self.stop.assert_not_called()
+        self.unload.assert_not_called()
 
     def test_the_backup_keeps_haroldctl_the_dashboard_and_a_rollback_note(self):
         self.install_existing(saved='-')
