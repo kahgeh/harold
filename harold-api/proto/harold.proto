@@ -16,6 +16,8 @@ service Harold {
   rpc SendMessageToAwayDevice (SendMessageToAwayDeviceRequest) returns (SendMessageToAwayDeviceResponse);
   // The chief asks Harold to say a line at the desk or send it as a voice note when away.
   rpc SpeakLine (SpeakLineRequest) returns (SpeakLineResponse);
+  // tmx-agent-dash starts, ends and watches a call with the chief.
+  rpc Call (CallRequest) returns (CallResponse);
 }
 
 message TurnCompleteRequest {
@@ -146,3 +148,44 @@ message SpeakLineRequest {
 }
 
 message SpeakLineResponse {}
+
+enum CallAction {
+  CALL_ACTION_UNSPECIFIED = 0;
+  CALL_ACTION_START = 1;
+  CALL_ACTION_STOP = 2;
+  CALL_ACTION_TALK_NOW = 3;
+  CALL_ACTION_STATUS = 4;
+}
+
+enum CallState {
+  CALL_STATE_UNSPECIFIED = 0;
+  CALL_STATE_OFF = 1;
+  CALL_STATE_LISTENING = 2;
+  CALL_STATE_TRANSCRIBING = 3;
+  CALL_STATE_WAITING = 4;
+  CALL_STATE_SPEAKING = 5;
+  CALL_STATE_NOT_SET_UP = 6;
+}
+
+// UNSPECIFIED: no turn has ended in this call yet.
+enum CallResult {
+  CALL_RESULT_UNSPECIFIED = 0;
+  CALL_RESULT_TYPED = 1;
+  CALL_RESULT_NOTHING_HEARD = 2;
+  CALL_RESULT_NO_CHIEF = 3;
+  CALL_RESULT_CHIEF_BUSY = 4;
+  CALL_RESULT_FAILED = 5;
+  CALL_RESULT_VOICE_MUTED = 6;
+}
+
+message CallRequest {
+  CallAction action = 1;
+}
+
+// chief_pane_id is empty when no chief runs; last_transcript is empty when there is none.
+message CallResponse {
+  CallState state = 1;
+  string chief_pane_id = 2;
+  string last_transcript = 3;
+  CallResult last_result = 4;
+}

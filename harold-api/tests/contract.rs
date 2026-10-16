@@ -1,10 +1,10 @@
 use harold_api::FILE_DESCRIPTOR_SET;
 use harold_api::harold::{
-    AgentPaneState, AgentState, ForwardReplyRequest, ForwardReplyResponse, ReportAgentStateRequest,
-    ReportNotificationRequest, ReportNotificationResponse, SendMessageToAwayDeviceRequest,
-    SendMessageToAwayDeviceResponse, SetMessagingPausedRequest, SetMessagingPausedResponse,
-    SetTtsMutedRequest, SetTtsMutedResponse, SpeakLineRequest, SpeakLineResponse,
-    TurnCompleteRequest,
+    AgentPaneState, AgentState, CallAction, CallRequest, CallResponse, CallResult, CallState,
+    ForwardReplyRequest, ForwardReplyResponse, ReportAgentStateRequest, ReportNotificationRequest,
+    ReportNotificationResponse, SendMessageToAwayDeviceRequest, SendMessageToAwayDeviceResponse,
+    SetMessagingPausedRequest, SetMessagingPausedResponse, SetTtsMutedRequest, SetTtsMutedResponse,
+    SpeakLineRequest, SpeakLineResponse, TurnCompleteRequest,
 };
 use prost::Message;
 
@@ -243,6 +243,7 @@ fn harold_service_exposes_only_the_approved_rpcs() {
             "ForwardReply".to_string(),
             "SendMessageToAwayDevice".to_string(),
             "SpeakLine".to_string(),
+            "Call".to_string(),
         ]
     );
 }
@@ -343,4 +344,57 @@ fn speak_line_carries_the_source_pane_and_the_text() {
     );
     assert!(message_fields("SpeakLineResponse").is_empty());
     let _ = round_trip(&SpeakLineResponse {});
+}
+
+#[test]
+fn call_request_and_response_round_trip() {
+    let request = CallRequest {
+        action: CallAction::TalkNow as i32,
+    };
+    assert_eq!(round_trip(&request), request);
+    assert_eq!(message_fields("CallRequest"), [("action".to_string(), 1)]);
+
+    for result in [
+        CallResult::Unspecified,
+        CallResult::Typed,
+        CallResult::NothingHeard,
+        CallResult::NoChief,
+        CallResult::ChiefBusy,
+        CallResult::Failed,
+        CallResult::VoiceMuted,
+    ] {
+        let response = CallResponse {
+            state: CallState::Speaking as i32,
+            chief_pane_id: "%47".to_string(),
+            last_transcript: "hello chief".to_string(),
+            last_result: result as i32,
+        };
+        assert_eq!(round_trip(&response), response);
+    }
+    assert_eq!(CallResult::VoiceMuted as i32, 6);
+    assert_eq!(CallState::NotSetUp as i32, 6);
+    assert_eq!(CallAction::Status as i32, 4);
+}
+
+#[test]
+fn service_lists_call() {
+    let methods: Vec<String> = harold_file_descriptor()
+        .service
+        .into_iter()
+        .find(|service| service.name.as_deref() == Some("Harold"))
+        .expect("Harold service descriptor")
+        .method
+        .into_iter()
+        .map(|method| method.name.expect("method name"))
+        .collect();
+    assert!(methods.contains(&"Call".to_string()));
+    assert_eq!(
+        message_fields("CallResponse"),
+        [
+            ("state".to_string(), 1),
+            ("chief_pane_id".to_string(), 2),
+            ("last_transcript".to_string(), 3),
+            ("last_result".to_string(), 4),
+        ]
+    );
 }

@@ -32,12 +32,12 @@ pub use harold_api::harold;
 
 use harold::harold_server::{Harold, HaroldServer};
 use harold::{
-    AgentMonitorHealth, AgentPaneState, AgentState, AgentStateSnapshot, ForwardReplyRequest,
-    ForwardReplyResponse, MonitorHealthState, ReportAgentStateRequest, ReportAgentStateResponse,
-    ReportNotificationRequest, ReportNotificationResponse, SendMessageToAwayDeviceRequest,
-    SendMessageToAwayDeviceResponse, SetMessagingPausedRequest, SetMessagingPausedResponse,
-    SetTtsMutedRequest, SetTtsMutedResponse, SpeakLineRequest, SpeakLineResponse,
-    TurnCompleteRequest, TurnCompleteResponse, WatchAgentStatesRequest,
+    AgentMonitorHealth, AgentPaneState, AgentState, AgentStateSnapshot, CallRequest, CallResponse,
+    ForwardReplyRequest, ForwardReplyResponse, MonitorHealthState, ReportAgentStateRequest,
+    ReportAgentStateResponse, ReportNotificationRequest, ReportNotificationResponse,
+    SendMessageToAwayDeviceRequest, SendMessageToAwayDeviceResponse, SetMessagingPausedRequest,
+    SetMessagingPausedResponse, SetTtsMutedRequest, SetTtsMutedResponse, SpeakLineRequest,
+    SpeakLineResponse, TurnCompleteRequest, TurnCompleteResponse, WatchAgentStatesRequest,
 };
 
 struct HaroldService {
@@ -450,6 +450,10 @@ impl Harold for HaroldService {
         // The text is the chief's own words: it is stored, not logged.
         info!(pane_id = %event.pane_id, result = "accepted", "spoken line stored");
         Ok(Response::new(SpeakLineResponse {}))
+    }
+
+    async fn call(&self, _: Request<CallRequest>) -> Result<Response<CallResponse>, Status> {
+        Err(Status::unimplemented("call"))
     }
 }
 
