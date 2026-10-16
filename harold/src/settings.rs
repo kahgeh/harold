@@ -422,6 +422,44 @@ fn telemetry_errors(telemetry: &TelemetrySettings) -> Vec<String> {
     errors
 }
 
+/// The home-screen app Harold serves to the phone through `tailscale serve`.
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct WebAppSettings {
+    /// The loopback address and port Harold listens on, such as `127.0.0.1:4330`.
+    pub listen: String,
+    /// The Tailscale login allowed to use the app.
+    pub allowed_login: String,
+}
+
+impl WebAppSettings {
+    /// The listen address. `Settings::validate` reports one that does not parse.
+    pub(crate) fn listen_addr(&self) -> Option<SocketAddr> {
+        self.listen.parse().ok()
+    }
+}
+
+fn web_app_errors(web_app: Option<&WebAppSettings>, chief_folder: Option<&str>) -> Vec<String> {
+    let Some(web_app) = web_app else {
+        return Vec::new();
+    };
+    let mut errors = Vec::new();
+    if !web_app
+        .listen_addr()
+        .is_some_and(|addr| addr.ip().is_loopback())
+    {
+        errors.push(
+            "web_app.listen must be a loopback address and port such as 127.0.0.1:4330".into(),
+        );
+    }
+    if web_app.allowed_login.trim().is_empty() {
+        errors.push("web_app.allowed_login must be your Tailscale login".into());
+    }
+    if chief_folder.is_none() {
+        errors.push("web_app needs notify.away_messages_only_from, the chief's folder".into());
+    }
+    errors
+}
+
 #[derive(Debug, Deserialize)]
 pub struct StoreSettings {
     pub path: String,
@@ -796,6 +834,9 @@ pub struct Settings {
     /// Calls with the chief at the desk. Off when the section is absent.
     #[serde(default)]
     pub(crate) voice_input: Option<VoiceInputSettings>,
+    /// The home-screen app. Off when the section is absent.
+    #[serde(default)]
+    pub(crate) web_app: Option<WebAppSettings>,
 }
 
 impl Settings {
@@ -819,6 +860,10 @@ impl Settings {
         errors.extend(timed_prompts_errors(&self.timed_prompts));
         errors.extend(telemetry_errors(&self.telemetry));
         errors.extend(voice_input_errors(self.voice_input.as_ref()));
+        errors.extend(web_app_errors(
+            self.web_app.as_ref(),
+            self.notify.away_messages_only_from.as_deref(),
+        ));
         match self.notify.away_channel.as_str() {
             "imessage" => {
                 if self.imessage.recipient.is_none() {
@@ -1931,5 +1976,64 @@ mod tests {
                 "timed_prompts[1].text must be 1 to 2000 characters on one line with no control characters, got 0 characters"
             ]
         );
+    }
+
+    fn web_app_validate_errors(overrides: &str) -> Vec<String> {
+        crate::peers::settings_with(overrides).validate()
+    }
+
+    const WEB_APP_FOLDER: &str = "[notify]\naway_messages_only_from = \"/work/chief-of-pods\"\n";
+
+    #[test]
+    fn web_app_is_off_when_the_section_is_absent() {
+        let settings = crate::peers::settings_with("");
+        assert!(settings.web_app.is_none());
+        assert!(
+            !settings
+                .validate()
+                .iter()
+                .any(|error| error.starts_with("web_app"))
+        );
+    }
+
+    #[test]
+    fn validate_reports_a_listen_address_that_is_not_loopback() {
+        let message = "web_app.listen must be a loopback address and port such as 127.0.0.1:4330";
+        for listen in ["0.0.0.0:4330", "100.64.0.1:4330", "not-an-address"] {
+            let errors = web_app_validate_errors(&format!(
+                "{WEB_APP_FOLDER}[web_app]\nlisten = \"{listen}\"\nallowed_login = \"a@b.c\""
+            ));
+            assert!(errors.iter().any(|e| e == message), "{listen}: {errors:?}");
+        }
+        for listen in ["127.0.0.1:4330", "[::1]:4330"] {
+            let errors = web_app_validate_errors(&format!(
+                "{WEB_APP_FOLDER}[web_app]\nlisten = \"{listen}\"\nallowed_login = \"a@b.c\""
+            ));
+            assert!(!errors.iter().any(|e| e == message), "{listen}: {errors:?}");
+        }
+    }
+
+    #[test]
+    fn validate_reports_an_empty_allowed_login() {
+        let message = "web_app.allowed_login must be your Tailscale login";
+        for login in ["", "  "] {
+            let errors = web_app_validate_errors(&format!(
+                "{WEB_APP_FOLDER}[web_app]\nlisten = \"127.0.0.1:4330\"\nallowed_login = \"{login}\""
+            ));
+            assert!(errors.iter().any(|e| e == message), "{login:?}: {errors:?}");
+        }
+    }
+
+    #[test]
+    fn validate_reports_web_app_without_the_chiefs_folder() {
+        let message = "web_app needs notify.away_messages_only_from, the chief's folder";
+        let without = web_app_validate_errors(
+            "[web_app]\nlisten = \"127.0.0.1:4330\"\nallowed_login = \"a@b.c\"",
+        );
+        assert!(without.iter().any(|e| e == message), "{without:?}");
+        let with = web_app_validate_errors(&format!(
+            "{WEB_APP_FOLDER}[web_app]\nlisten = \"127.0.0.1:4330\"\nallowed_login = \"a@b.c\""
+        ));
+        assert!(!with.iter().any(|e| e == message), "{with:?}");
     }
 }

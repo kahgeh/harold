@@ -104,3 +104,8 @@ command = "say"
 # [peers.hub]
 # url = "http://studio.tailnet:50060"
 # secret = "the same string as in the hub's block for this Mac"
+
+# The home-screen app, served to the phone through `tailscale serve`. Absent: off.
+# [web_app]
+# listen = "127.0.0.1:4330"        # loopback only
+# allowed_login = "you@example.com" # your Tailscale login
