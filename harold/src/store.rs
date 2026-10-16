@@ -1,9 +1,12 @@
 mod error;
 mod event_log;
 
-pub use error::{Result, StoreError};
+pub use error::{FailedWrite, Result, StoreError};
+#[cfg(test)]
+pub(crate) use event_log::WriteFault;
 pub use event_log::{AppendResult, EventEnvelope, EventLog, EventVersion, NewEvent};
 
+use std::future::Future;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -11,6 +14,8 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
+use tokio::time::Instant;
+use tracing::{info, warn};
 use turso::Database;
 
 use crate::agent::domain::{
@@ -170,8 +175,169 @@ impl Drop for StoreLock {
     }
 }
 
+/// How long a store write may wait before the store is marked failing, and how long a
+/// failing store waits between two tries.
+pub(crate) const STORE_WRITE_LIMIT: Duration = Duration::from_secs(30);
+
+/// Which store a write goes to, and so what marks the store failing: an event-log append
+/// only by timing out, a delivery write to the state database by timing out or failing.
+#[derive(Debug, Clone, Copy)]
+enum WriteKind {
+    Log,
+    #[expect(dead_code, reason = "the delivery writes use it in the next task")]
+    State,
+}
+
+impl WriteKind {
+    fn reason(self) -> &'static str {
+        match self {
+            Self::Log => "write_timed_out",
+            Self::State => "state_write_failed",
+        }
+    }
+}
+
+enum Health {
+    Healthy,
+    /// No write is let through until `next_try_at`; then one is, as a try. `trying` while
+    /// that try runs.
+    Failing {
+        next_try_at: Instant,
+        trying: bool,
+    },
+}
+
+/// Whether a write was let through as normal or as a failing store's one try.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Admission {
+    Normal,
+    Try,
+}
+
+/// The store's health, which every gated write passes through. While the store is failing,
+/// writes are refused at once, except one try 30 seconds after the last ended. The try's
+/// result alone decides whether the store recovers.
+struct StoreHealth {
+    health: std::sync::Mutex<Health>,
+}
+
+impl StoreHealth {
+    fn new() -> Self {
+        Self {
+            health: std::sync::Mutex::new(Health::Healthy),
+        }
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, Health> {
+        self.health
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn is_failing(&self) -> bool {
+        matches!(*self.lock(), Health::Failing { .. })
+    }
+
+    fn admit(&self) -> Result<Admission> {
+        let mut health = self.lock();
+        match &mut *health {
+            Health::Healthy => Ok(Admission::Normal),
+            Health::Failing {
+                next_try_at,
+                trying,
+            } if !*trying && Instant::now() >= *next_try_at => {
+                *trying = true;
+                Ok(Admission::Try)
+            }
+            Health::Failing { .. } => Err(StoreError::Failing(FailedWrite::Refused)),
+        }
+    }
+
+    /// Runs `write` if the store lets it through, for at most `STORE_WRITE_LIMIT`.
+    async fn write<T>(&self, kind: WriteKind, write: impl Future<Output = Result<T>>) -> Result<T> {
+        let admission = self.admit()?;
+        let try_in_flight = (admission == Admission::Try).then(|| TryInFlight(Some(self)));
+        let outcome = tokio::time::timeout(STORE_WRITE_LIMIT, write)
+            .await
+            .unwrap_or(Err(StoreError::Failing(FailedWrite::TimedOut)));
+        let failed = match &outcome {
+            Ok(_) => false,
+            Err(StoreError::Failing(FailedWrite::TimedOut)) => true,
+            Err(_) => matches!(kind, WriteKind::State),
+        };
+        match try_in_flight {
+            Some(try_in_flight) => try_in_flight.end(outcome.is_ok()),
+            None if failed => self.mark_failing(kind),
+            None => {}
+        }
+        outcome
+    }
+
+    /// Marks a healthy store failing. A store already failing stays as it is.
+    fn mark_failing(&self, kind: WriteKind) {
+        {
+            let mut health = self.lock();
+            if matches!(*health, Health::Failing { .. }) {
+                return;
+            }
+            *health = Health::Failing {
+                next_try_at: Instant::now() + STORE_WRITE_LIMIT,
+                trying: false,
+            };
+        }
+        warn!(
+            parent: None,
+            component = "store",
+            reason = kind.reason(),
+            "store failing"
+        );
+    }
+
+    /// Ends the running try: the store recovers if it succeeded, or waits for the next.
+    fn end_try(&self, succeeded: bool) {
+        {
+            let mut health = self.lock();
+            if !succeeded {
+                *health = Health::Failing {
+                    next_try_at: Instant::now() + STORE_WRITE_LIMIT,
+                    trying: false,
+                };
+                return;
+            }
+            *health = Health::Healthy;
+        }
+        info!(
+            parent: None,
+            component = "store",
+            reason = "try_succeeded",
+            "store recovered"
+        );
+    }
+}
+
+/// A failing store's try while it runs. Dropped before it ends (its caller went away), it
+/// ends the try as a failed one, so the store waits for the next try and logs nothing.
+struct TryInFlight<'a>(Option<&'a StoreHealth>);
+
+impl TryInFlight<'_> {
+    fn end(mut self, succeeded: bool) {
+        if let Some(health) = self.0.take() {
+            health.end_try(succeeded);
+        }
+    }
+}
+
+impl Drop for TryInFlight<'_> {
+    fn drop(&mut self) {
+        if let Some(health) = self.0.take() {
+            health.end_try(false);
+        }
+    }
+}
+
 pub struct HaroldStore {
     stream: EventLog,
+    health: StoreHealth,
     state: Database,
     graces: GraceWindows,
     is_new: bool,
@@ -255,6 +421,7 @@ impl HaroldStore {
 
         Ok(Self {
             stream,
+            health: StoreHealth::new(),
             state,
             graces,
             is_new,
@@ -277,6 +444,29 @@ impl HaroldStore {
 
     pub(crate) fn stream(&self) -> &EventLog {
         &self.stream
+    }
+
+    /// Whether the store is marked failing: its writes are refused but for one try every
+    /// 30 seconds.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "the delivery loop reads it in the next task")
+    )]
+    pub(crate) fn is_failing(&self) -> bool {
+        self.health.is_failing()
+    }
+
+    /// Appends `batch` to the event log through the store's health check.
+    async fn append(&self, batch: impl IntoIterator<Item = NewEvent>) -> Result<AppendResult> {
+        self.health
+            .write(WriteKind::Log, self.stream.append(batch))
+            .await
+    }
+
+    /// Makes every later event-log flush hang or fail, until set to `None`.
+    #[cfg(test)]
+    pub(crate) fn fault_log_flush_for_test(&self, fault: Option<WriteFault>) {
+        self.stream.fault_flush_for_test(fault);
     }
 
     pub(crate) async fn last_processed_version(&self) -> Result<EventVersion> {
@@ -1301,7 +1491,6 @@ pub async fn open_store(path: impl AsRef<Path>) -> Result<Arc<HaroldStore>> {
 #[cfg(test)]
 pub async fn append_turn_completed(store: &HaroldStore, event: &TurnCompleted) -> Result<()> {
     store
-        .stream
         .append([NewEvent::new("TurnCompleted", json!(event))])
         .await?;
     Ok(())
@@ -1309,7 +1498,6 @@ pub async fn append_turn_completed(store: &HaroldStore, event: &TurnCompleted) -
 
 pub async fn append_tts_mute_changed(store: &HaroldStore, muted: bool) -> Result<()> {
     store
-        .stream
         .append([NewEvent::new("TtsMuteChanged", json!({ "muted": muted }))])
         .await?;
     Ok(())
@@ -1317,7 +1505,6 @@ pub async fn append_tts_mute_changed(store: &HaroldStore, muted: bool) -> Result
 
 pub async fn append_messaging_paused_changed(store: &HaroldStore, paused: bool) -> Result<()> {
     store
-        .stream
         .append([NewEvent::new(
             "MessagingPausedChanged",
             json!({ "paused": paused }),
@@ -1328,7 +1515,6 @@ pub async fn append_messaging_paused_changed(store: &HaroldStore, paused: bool) 
 
 pub async fn append_inbound_message(store: &HaroldStore, event: &InboundMessage) -> Result<()> {
     store
-        .stream
         .append([NewEvent::new("InboundMessageReceived", json!(event))])
         .await?;
     Ok(())
@@ -1339,7 +1525,6 @@ pub async fn append_away_message_requested(
     event: &AwayMessageRequested,
 ) -> Result<()> {
     store
-        .stream
         .append([NewEvent::new("AwayMessageRequested", json!(event))])
         .await?;
     Ok(())
@@ -1350,7 +1535,6 @@ pub async fn append_spoken_line_requested(
     event: &SpokenLineRequested,
 ) -> Result<()> {
     store
-        .stream
         .append([NewEvent::new("SpokenLineRequested", json!(event))])
         .await?;
     Ok(())
@@ -1363,7 +1547,6 @@ pub(crate) async fn append_timed_prompt_handled(
     // The tests' switch for a failing append, shared with the monitor's appends.
     fail_monitor_append_for_test(store)?;
     store
-        .stream
         .append([NewEvent::new("TimedPromptHandled", json!(event))])
         .await?;
     Ok(())
@@ -1383,7 +1566,7 @@ pub(crate) async fn append_agent_events(
         .filter_map(normalize_agent_event)
         .map(agent_new_event)
         .collect::<Result<Vec<_>>>()?;
-    store.stream.append(events).await
+    store.append(events).await
 }
 
 pub(crate) async fn append_monitor_turn_completed(
@@ -1400,7 +1583,7 @@ pub(crate) async fn append_monitor_turn_completed(
         ))?);
     }
     events.push(NewEvent::new("TurnCompleted", json!(turn)));
-    store.stream.append(events).await
+    store.append(events).await
 }
 
 #[cfg(test)]

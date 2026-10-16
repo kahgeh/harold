@@ -183,6 +183,26 @@ struct StoredEnvelope {
 
 pub struct EventLog {
     log: LogDb,
+    #[cfg(test)]
+    flush_fault: std::sync::Mutex<Option<WriteFault>>,
+}
+
+/// A test's fault for a store write: the write never returns, or it fails at once.
+#[cfg(test)]
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum WriteFault {
+    Hang,
+    Fail,
+}
+
+/// Applies `fault`, if any, where a store write would wait on the disk.
+#[cfg(test)]
+pub(crate) async fn apply_fault_for_test(fault: Option<WriteFault>) -> Result<()> {
+    match fault {
+        None => Ok(()),
+        Some(WriteFault::Hang) => std::future::pending().await,
+        Some(WriteFault::Fail) => Err(StoreError::Log("test write failure".into())),
+    }
 }
 
 /// The log's configuration, built here and nowhere else: always the local filesystem at
@@ -238,7 +258,11 @@ impl EventLog {
         };
         std::fs::write(settings, LOG_SETTINGS)?;
         let log = LogDb::open(config).await.map_err(log_error)?;
-        Ok(Self { log })
+        Ok(Self {
+            log,
+            #[cfg(test)]
+            flush_fault: std::sync::Mutex::new(None),
+        })
     }
 
     /// The highest version the log can hold now: every flushed event's version is at or
@@ -285,6 +309,11 @@ impl EventLog {
             .append_timeout(records, APPEND_QUEUE_WAIT)
             .await
             .map_err(|error: AppendError| log_error(error))?;
+        #[cfg(test)]
+        {
+            let fault = *self.flush_fault.lock().expect("flush fault lock");
+            apply_fault_for_test(fault).await?;
+        }
         self.log.flush().await.map_err(log_error)?;
         let events = envelopes
             .into_iter()
@@ -334,6 +363,12 @@ impl EventLog {
             Some(entry) => Ok(Some(decode(entry.sequence, &entry.value)?)),
             None => Ok(None),
         }
+    }
+
+    /// Makes every later flush hang or fail, until set to `None`.
+    #[cfg(test)]
+    pub(crate) fn fault_flush_for_test(&self, fault: Option<WriteFault>) {
+        *self.flush_fault.lock().expect("flush fault lock") = fault;
     }
 
     /// Appends `value` as a record as it is, for tests of records Harold did not write.

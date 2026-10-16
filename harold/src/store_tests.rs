@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use crate::store::{EventVersion, NewEvent};
 use serde_json::json;
+use tokio::time::Instant;
 
 use crate::agent::domain::{
     AgentEvent, AgentIncarnation, AgentLifecycleObserved, AgentMonitorHealthChanged,
@@ -11,6 +12,7 @@ use crate::agent::domain::{
     CompletionSummaryUpdate, EffectiveAgentState, ObservedAgentState, WorkSummaryUpdate,
 };
 
+use super::{FailedWrite, StoreError, WriteFault};
 use super::{
     HaroldStore, InboundMessage, TimedPromptHandled, TimedPromptOutcome, TurnCompleted,
     append_agent_events, append_inbound_message, append_messaging_paused_changed,
@@ -1871,4 +1873,199 @@ fn no_code_outside_tests_pauses_or_advances_tokio_time() {
         }
     }
     assert!(offenders.is_empty(), "{offenders:?}");
+}
+
+// ---------------------------------------------------------------------------
+// A failing store
+// ---------------------------------------------------------------------------
+
+/// A store write: the smallest append there is.
+async fn write(store: &HaroldStore) -> super::Result<()> {
+    append_tts_mute_changed(store, true).await
+}
+
+/// Marks `store` failing with an append whose flush never returns, and leaves the fault on.
+async fn time_out_one_write(store: &HaroldStore) {
+    store.fault_log_flush_for_test(Some(WriteFault::Hang));
+    let result = write(store).await;
+    assert!(
+        matches!(result, Err(StoreError::Failing(FailedWrite::TimedOut))),
+        "{result:?}"
+    );
+}
+
+fn is_refused(result: &super::Result<()>) -> bool {
+    matches!(result, Err(StoreError::Failing(FailedWrite::Refused)))
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_append_whose_flush_never_returns_fails_after_30_seconds_and_marks_the_store_failing() {
+    let directory = TestDirectory::new();
+    let store = HaroldStore::open(directory.path()).await.unwrap();
+    store.fault_log_flush_for_test(Some(WriteFault::Hang));
+    let started = Instant::now();
+
+    let result = write(&store).await;
+
+    assert!(
+        matches!(result, Err(StoreError::Failing(FailedWrite::TimedOut))),
+        "{result:?}"
+    );
+    let waited = started.elapsed();
+    assert!(
+        waited >= Duration::from_secs(30) && waited < Duration::from_secs(31),
+        "{waited:?}"
+    );
+    assert!(store.is_failing());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_failing_store_refuses_writes_at_once_then_lets_one_try_through_after_30_seconds() {
+    let directory = TestDirectory::new();
+    let store = HaroldStore::open(directory.path()).await.unwrap();
+    time_out_one_write(&store).await;
+    store.fault_log_flush_for_test(None);
+
+    let started = Instant::now();
+    let refused = write(&store).await;
+    assert!(is_refused(&refused), "{refused:?}");
+    assert_eq!(started.elapsed(), Duration::ZERO);
+    assert!(store.is_failing());
+
+    tokio::time::advance(Duration::from_secs(29)).await;
+    let refused = write(&store).await;
+    assert!(is_refused(&refused), "{refused:?}");
+
+    tokio::time::advance(Duration::from_secs(1)).await;
+    write(&store).await.unwrap();
+    assert!(!store.is_failing());
+    write(&store).await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_try_that_times_out_keeps_the_store_failing_for_another_30_seconds() {
+    let directory = TestDirectory::new();
+    let store = HaroldStore::open(directory.path()).await.unwrap();
+    time_out_one_write(&store).await;
+
+    tokio::time::advance(Duration::from_secs(30)).await;
+    let started = Instant::now();
+    let tried = write(&store).await;
+    assert!(
+        matches!(tried, Err(StoreError::Failing(FailedWrite::TimedOut))),
+        "{tried:?}"
+    );
+    assert!(started.elapsed() >= Duration::from_secs(30));
+    let refused = write(&store).await;
+    assert!(is_refused(&refused), "{refused:?}");
+    assert!(store.is_failing());
+
+    tokio::time::advance(Duration::from_secs(30)).await;
+    store.fault_log_flush_for_test(None);
+    write(&store).await.unwrap();
+    assert!(!store.is_failing());
+}
+
+/// Lets a spawned task run until it waits.
+async fn let_run() {
+    for _ in 0..100 {
+        tokio::task::yield_now().await;
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_write_while_a_try_is_in_flight_is_refused_at_once() {
+    let directory = TestDirectory::new();
+    let store = Arc::new(HaroldStore::open(directory.path()).await.unwrap());
+    time_out_one_write(&store).await;
+    tokio::time::advance(Duration::from_secs(30)).await;
+
+    let trying = Arc::clone(&store);
+    let attempt = tokio::spawn(async move { write(&trying).await });
+    let_run().await;
+    let started = Instant::now();
+    let refused = write(&store).await;
+    assert!(is_refused(&refused), "{refused:?}");
+    assert_eq!(started.elapsed(), Duration::ZERO);
+
+    // A hang never ends, even once the fault is cleared, so the try times out.
+    let tried = attempt.await.unwrap();
+    assert!(
+        matches!(tried, Err(StoreError::Failing(FailedWrite::TimedOut))),
+        "{tried:?}"
+    );
+    assert!(store.is_failing());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_dropped_try_lets_the_next_write_try_30_seconds_later() {
+    let directory = TestDirectory::new();
+    let store = Arc::new(HaroldStore::open(directory.path()).await.unwrap());
+    time_out_one_write(&store).await;
+    tokio::time::advance(Duration::from_secs(30)).await;
+
+    let trying = Arc::clone(&store);
+    let attempt = tokio::spawn(async move { write(&trying).await });
+    let_run().await;
+    attempt.abort();
+    assert!(attempt.await.unwrap_err().is_cancelled());
+
+    // The dropped try counts as a try: the next one is 30 seconds later.
+    let refused = write(&store).await;
+    assert!(is_refused(&refused), "{refused:?}");
+    tokio::time::advance(Duration::from_secs(30)).await;
+    store.fault_log_flush_for_test(None);
+    write(&store).await.unwrap();
+    assert!(!store.is_failing());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_healthy_append_that_fails_without_timing_out_keeps_the_store_healthy() {
+    let directory = TestDirectory::new();
+    let store = HaroldStore::open(directory.path()).await.unwrap();
+    store.fault_log_flush_for_test(Some(WriteFault::Fail));
+
+    let result = write(&store).await;
+
+    assert!(matches!(result, Err(StoreError::Log(_))), "{result:?}");
+    assert!(!store.is_failing());
+    store.fault_log_flush_for_test(None);
+    write(&store).await.unwrap();
+}
+
+/// The line of `text` that holds `message`.
+fn line_with<'a>(text: &'a str, message: &str) -> &'a str {
+    text.lines()
+        .find(|line| line.contains(message))
+        .unwrap_or_else(|| panic!("no {message:?} line in {text}"))
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_store_failing_and_recovered_lines_carry_only_component_and_reason() {
+    let directory = TestDirectory::new();
+    let store = HaroldStore::open(directory.path()).await.unwrap();
+    let logs = crate::outbound::fake::CapturedLogs::start();
+
+    let span = tracing::info_span!("caller", trace_id = "not-in-the-line");
+    let _entered = span.enter();
+    time_out_one_write(&store).await;
+    store.fault_log_flush_for_test(None);
+    tokio::time::advance(Duration::from_secs(30)).await;
+    write(&store).await.unwrap();
+
+    let text = logs.text();
+    let failing = line_with(&text, "store failing");
+    assert!(failing.contains("WARN"), "{failing}");
+    assert!(failing.contains("component=\"store\""), "{failing}");
+    assert!(failing.contains("reason=\"write_timed_out\""), "{failing}");
+    assert_eq!(failing.matches('=').count(), 2, "{failing}");
+    let recovered = line_with(&text, "store recovered");
+    assert!(recovered.contains("INFO"), "{recovered}");
+    assert!(recovered.contains("component=\"store\""), "{recovered}");
+    assert!(
+        recovered.contains("reason=\"try_succeeded\""),
+        "{recovered}"
+    );
+    assert_eq!(recovered.matches('=').count(), 2, "{recovered}");
+    assert_eq!(text.matches("store failing").count(), 1, "{text}");
 }
