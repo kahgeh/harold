@@ -732,6 +732,9 @@ pub(crate) fn take_prompt(
 pub(crate) enum StartedBy {
     Phone,
     TimedPrompt,
+    // until the call is wired up (plan Task 9)
+    #[cfg_attr(not(test), allow(dead_code))]
+    Voice,
     Desk,
     Unknown,
 }
@@ -741,6 +744,7 @@ impl StartedBy {
         match self {
             Self::Phone => "phone",
             Self::TimedPrompt => "timed_prompt",
+            Self::Voice => "voice",
             Self::Desk => "desk",
             Self::Unknown => "unknown",
         }

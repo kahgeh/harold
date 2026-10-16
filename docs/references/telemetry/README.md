@@ -153,7 +153,7 @@ A reply whose payload failed for good never finishes, and is dropped after an ho
 3. When the agent monitor first saw the pane busy after the previous turn ended.
 4. Otherwise unknown. The span then starts at the turn's end and carries `turn.start = unknown`.
 
-`started_by` is `phone`, `timed_prompt`, `desk` or `unknown`. A prompt Harold typed after the turn's end reached Harold belongs to the next turn, so it does not set `started_by`. A turn started by an alert typed into the chief's pane is not marked as such: `started_by` has no alert value.
+`started_by` is `phone`, `timed_prompt`, `voice`, `desk` or `unknown`. A turn the call typed is `voice`. A prompt Harold typed after the turn's end reached Harold belongs to the next turn, so it does not set `started_by`. A turn started by an alert typed into the chief's pane is not marked as such: `started_by` has no alert value.
 
 **A session** (`session.id`) is the agent's own session id, which the hooks send. Where none is given, the pane id stands in and the span carries `session.source = pane`.
 

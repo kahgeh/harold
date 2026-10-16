@@ -827,6 +827,13 @@ fn the_turn_starts_at_the_first_known_source() {
 }
 
 #[test]
+fn voice_started_by_is_voice() {
+    assert_eq!(StartedBy::Voice.as_str(), "voice");
+    let s = turn_start(None, Some((at(3), StartedBy::Voice)), Some(at(4)), at(30));
+    assert_eq!((s.at, s.started_by), (Some(at(3)), StartedBy::Voice));
+}
+
+#[test]
 fn a_typing_time_after_the_hook_is_ignored_with_what_it_started() {
     let s = turn_start(None, Some((at(31), StartedBy::Phone)), Some(at(4)), at(30));
     assert_eq!((s.at, s.started_by), (Some(at(4)), StartedBy::Desk));

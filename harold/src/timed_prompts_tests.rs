@@ -1595,3 +1595,87 @@ async fn a_new_store_runs_the_marking_at_start() {
     );
     assert_eq!(handled(&store).await.len(), 1);
 }
+
+// ---------------------------------------------------------------------------
+// The voice writer
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn voice_is_not_held_by_another_writers_typing() {
+    let fake = Fake::at(DAY, "09:00:00");
+    let agents = fake.agents();
+
+    let alert = type_when_ready(&fake, Writer::Alert, CHIEF, "alert line", &agents, &[]).await;
+    assert!(matches!(alert, Attempt::Typed { .. }));
+    // The pane still reads idle, so the alert's hold is on.
+    let voice = type_when_ready(&fake, Writer::Voice, CHIEF, "🎙 hi", &agents, &[]).await;
+    assert!(matches!(voice, Attempt::Typed { .. }));
+    // The voice's typing holds the pane against the writers that are held.
+    let timed = type_when_ready(&fake, Writer::TimedPrompt, CHIEF, "prompt", &agents, &[]).await;
+    assert!(matches!(timed, Attempt::Wait(Reason::AgentBusy)));
+    assert_eq!(
+        fake.keys(),
+        vec![
+            Key::Text("%2".into(), "alert line".into()),
+            Key::Enter("%2".into()),
+            Key::Text("%2".into(), "🎙 hi".into()),
+            Key::Enter("%2".into()),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_spoken_prompt_and_an_alert_released_at_once_give_two_whole_lines() {
+    let fake = Fake::at(DAY, "09:00:00");
+    let agents = fake.agents();
+
+    let (voice, alert) = tokio::join!(
+        type_when_ready(&fake, Writer::Voice, CHIEF, "🎙 hi", &agents, &[]),
+        type_when_ready(&fake, Writer::Alert, CHIEF, "alert line", &agents, &[]),
+    );
+    if let Attempt::Wait(_) = alert {
+        // The pane shows busy once, which ends the voice's hold, then idle again.
+        fake.set(|state| {
+            state.view = view(vec![AgentPane {
+                state: EffectiveAgentState::Busy,
+                ..chief("%2")
+            }])
+        });
+        let _ = type_when_ready(
+            &fake,
+            Writer::Alert,
+            CHIEF,
+            "alert line",
+            &fake.agents(),
+            &[],
+        )
+        .await;
+        fake.set(|state| state.view = view(vec![chief("%2")]));
+        let retried = type_when_ready(
+            &fake,
+            Writer::Alert,
+            CHIEF,
+            "alert line",
+            &fake.agents(),
+            &[],
+        )
+        .await;
+        assert!(matches!(retried, Attempt::Typed { .. }));
+    }
+    assert!(matches!(voice, Attempt::Typed { .. }));
+
+    let voice_lines = [
+        Key::Text("%2".into(), "🎙 hi".into()),
+        Key::Enter("%2".into()),
+    ];
+    let alert_lines = [
+        Key::Text("%2".into(), "alert line".into()),
+        Key::Enter("%2".into()),
+    ];
+    let keys = fake.keys();
+    assert!(
+        keys == [voice_lines.clone(), alert_lines.clone()].concat()
+            || keys == [alert_lines, voice_lines].concat(),
+        "keys were interleaved: {keys:?}"
+    );
+}

@@ -319,12 +319,16 @@ pub(crate) fn box_reason(screen: Option<&str>) -> Option<Reason> {
 // ---------------------------------------------------------------------------
 
 /// Who types into a pane: timed prompts and alerts through `type_when_ready`, phone
-/// replies through `inbound::tmux::relay_to_tmux_pane`.
+/// replies through `inbound::tmux::relay_to_tmux_pane`, and a spoken turn of a call
+/// with the chief through `type_when_ready`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Writer {
     TimedPrompt,
     Alert,
     PhoneReply,
+    // until the call is wired up (plan Task 9)
+    #[cfg_attr(not(test), allow(dead_code))]
+    Voice,
 }
 
 /// One pane's lock and what the writers share about the pane.
@@ -339,10 +343,13 @@ pub(crate) struct PaneRecord {
 
 impl PaneRecord {
     /// Whether the pane counts as busy for `writer` because another writer typed into it
-    /// a moment ago. Each writer keeps its own hold on the panes it typed into.
+    /// a moment ago. Each writer keeps its own hold on the panes it typed into. A spoken
+    /// turn is never held back, as a phone reply is not: the caller is waiting on the line.
     fn held_against(&self, writer: Writer, now: Instant) -> bool {
-        self.typed
-            .is_some_and(|(by, until)| by != writer && now < until)
+        writer != Writer::Voice
+            && self
+                .typed
+                .is_some_and(|(by, until)| by != writer && now < until)
     }
 
     /// Records that `writer` has just typed into the pane: for a minute, while the pane
