@@ -1,5 +1,8 @@
 use std::borrow::Cow;
 use std::process::Command;
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use tracing::{info, warn};
 
@@ -88,16 +91,50 @@ pub(crate) fn regex_strip_think(text: &str) -> String {
     result.trim().to_string()
 }
 
-fn build_short_summary(turn: &TurnCompleted) -> String {
+fn build_short_summary(last_user_prompt: &str) -> String {
     let system_prompt = "You are a notification assistant. Given a user's last request, \
          write ONLY a brief 3-8 word summary of what was completed. \
          Do not include any thinking, explanations, or extra text. \
          Output format: Just the summary message.";
     let prompt = format!(
         "User's last request: {}\n\nWrite a 3-8 word summary of what was done:",
-        turn.last_user_prompt.chars().take(500).collect::<String>(),
+        last_user_prompt.chars().take(500).collect::<String>(),
     );
     run_local_model(system_prompt, &prompt, 20).unwrap_or_else(|| "Work complete".into())
+}
+
+/// How long a line being said waits between checks that it has ended or been stopped.
+const STOP_POLL: Duration = Duration::from_millis(50);
+
+/// Stops the line a `[tts]` command is saying. A stopped line counts as said: it is not
+/// passed to the fallback and not retried.
+#[derive(Default)]
+pub(crate) struct LineStopper {
+    generation: AtomicU64,
+}
+
+impl LineStopper {
+    #[cfg_attr(not(test), allow(dead_code))] // until the call is wired up (plan Task 9)
+    pub(crate) fn stop(&self) {
+        self.generation.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn generation(&self) -> u64 {
+        self.generation.load(Ordering::SeqCst)
+    }
+}
+
+/// The daemon's stopper, used by `speak_line` and `notify_at_desk`.
+#[cfg_attr(not(test), allow(dead_code))] // until the call is wired up (plan Task 9)
+pub(crate) fn desk_line_stopper() -> &'static LineStopper {
+    static STOPPER: OnceLock<LineStopper> = OnceLock::new();
+    STOPPER.get_or_init(LineStopper::default)
+}
+
+/// What a finished or stopped `[tts]` command came to.
+enum Said {
+    Ended(bool),
+    Stopped,
 }
 
 fn run_tts_command(
@@ -105,7 +142,9 @@ fn run_tts_command(
     args: Option<&Vec<String>>,
     voice: Option<&String>,
     message: &str,
-) -> std::io::Result<bool> {
+    stopper: &LineStopper,
+    started_at: u64,
+) -> std::io::Result<Said> {
     let mut cmd = Command::new(command);
     if let Some(extra_args) = args {
         cmd.args(extra_args);
@@ -114,17 +153,39 @@ fn run_tts_command(
         cmd.args(["-v", voice]);
     }
 
-    let status = cmd.arg(message).status()?;
-    Ok(status.success())
+    let mut child = cmd.arg(message).spawn()?;
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(Said::Ended(status.success()));
+        }
+        if stopper.generation() != started_at {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Ok(Said::Stopped);
+        }
+        std::thread::sleep(STOP_POLL);
+    }
 }
 
-fn notify_with_fallback(tts: &TtsSettings, message: &str) -> bool {
-    match run_tts_command(&tts.command, tts.args.as_ref(), tts.voice.as_ref(), message) {
-        Ok(true) => {
+fn notify_with_fallback(tts: &TtsSettings, message: &str, stopper: &LineStopper) -> bool {
+    let started_at = stopper.generation();
+    match run_tts_command(
+        &tts.command,
+        tts.args.as_ref(),
+        tts.voice.as_ref(),
+        message,
+        stopper,
+        started_at,
+    ) {
+        Ok(Said::Ended(true)) => {
             info!("TTS notification sent");
             return true;
         }
-        Ok(false) => warn!(command = %tts.command, "TTS command failed"),
+        Ok(Said::Stopped) => {
+            info!("TTS line stopped");
+            return true;
+        }
+        Ok(Said::Ended(false)) => warn!(command = %tts.command, "TTS command failed"),
         Err(e) => warn!(error = %e, command = %tts.command, "TTS command failed to start"),
     }
 
@@ -137,12 +198,18 @@ fn notify_with_fallback(tts: &TtsSettings, message: &str) -> bool {
         tts.fallback_args.as_ref(),
         tts.fallback_voice.as_ref(),
         message,
+        stopper,
+        started_at,
     ) {
-        Ok(true) => {
+        Ok(Said::Ended(true)) => {
             info!("fallback TTS notification sent");
             true
         }
-        Ok(false) => {
+        Ok(Said::Stopped) => {
+            info!("fallback TTS line stopped");
+            true
+        }
+        Ok(Said::Ended(false)) => {
             warn!(command = %fallback_command, "fallback TTS command failed");
             false
         }
@@ -157,14 +224,17 @@ fn notify_with_fallback(tts: &TtsSettings, message: &str) -> bool {
     }
 }
 
+/// The turn-end update the desk says, shared by `notify_at_desk` and a call.
+#[cfg_attr(not(test), allow(dead_code))] // until the call is wired up (plan Task 9)
+pub(crate) fn desk_update_line(last_user_prompt: &str, main_context: &str) -> String {
+    let summary = build_short_summary(last_user_prompt);
+    format!("{summary} on {main_context} and waiting for further instructions")
+}
+
 pub fn notify_at_desk(turn: &TurnCompleted, _trace_id: &str) -> bool {
-    let summary = build_short_summary(turn);
-    let message = format!(
-        "{} on {} and waiting for further instructions",
-        summary, turn.main_context
-    );
+    let message = desk_update_line(&turn.last_user_prompt, &turn.main_context);
     let tts = &get_settings().tts;
-    notify_with_fallback(tts, &message)
+    notify_with_fallback(tts, &message, desk_line_stopper())
 }
 
 /// `line` as it is passed as a program's last argument: a line that starts with `-` gets
@@ -181,11 +251,13 @@ pub(crate) fn as_last_argument(line: &str) -> Cow<'_, str> {
 /// Say `line` with the `[tts]` command, falling back as a turn-end update does. Nothing
 /// heard is added to the line.
 pub(crate) fn speak_line(line: &str) -> bool {
-    speak_line_with(&get_settings().tts, line)
+    speak_line_with(&get_settings().tts, line, desk_line_stopper())
 }
 
-fn speak_line_with(tts: &TtsSettings, line: &str) -> bool {
-    notify_with_fallback(tts, &as_last_argument(line))
+/// Says `line` with `tts`, returning when it has ended or been stopped; true when it was
+/// said or stopped.
+pub(crate) fn speak_line_with(tts: &TtsSettings, line: &str, stopper: &LineStopper) -> bool {
+    notify_with_fallback(tts, &as_last_argument(line), stopper)
 }
 
 #[cfg(test)]
@@ -203,7 +275,11 @@ mod tests {
             fallback_args: None,
         };
 
-        assert!(notify_with_fallback(&tts, "test message"));
+        assert!(notify_with_fallback(
+            &tts,
+            "test message",
+            &LineStopper::default()
+        ));
     }
 
     #[test]
@@ -217,7 +293,11 @@ mod tests {
             fallback_args: None,
         };
 
-        assert!(!notify_with_fallback(&tts, "test message"));
+        assert!(!notify_with_fallback(
+            &tts,
+            "test message",
+            &LineStopper::default()
+        ));
     }
 
     /// A `[tts]` that writes its last argument to `out`.
@@ -248,9 +328,9 @@ mod tests {
         let out = std::env::temp_dir().join(format!("harold-tts-{}", uuid::Uuid::new_v4()));
         let tts = writes_last_argument_to(&out);
 
-        assert!(speak_line_with(&tts, "-o x"));
+        assert!(speak_line_with(&tts, "-o x", &LineStopper::default()));
         assert_eq!(std::fs::read_to_string(&out).unwrap(), " -o x");
-        assert!(speak_line_with(&tts, "All green."));
+        assert!(speak_line_with(&tts, "All green.", &LineStopper::default()));
         assert_eq!(std::fs::read_to_string(&out).unwrap(), "All green.");
         let _ = std::fs::remove_file(out);
     }
@@ -262,12 +342,47 @@ mod tests {
 
         assert!(notify_with_fallback(
             &tts,
-            "Release install is done. Nothing needs you."
+            "Release install is done. Nothing needs you.",
+            &LineStopper::default()
         ));
         assert_eq!(
             std::fs::read_to_string(&out).unwrap(),
             "Release install is done. Nothing needs you."
         );
         let _ = std::fs::remove_file(out);
+    }
+
+    #[test]
+    fn a_stopped_line_counts_as_said_and_skips_the_fallback() {
+        let out = std::env::temp_dir().join(format!("harold-tts-{}", uuid::Uuid::new_v4()));
+        let mut tts = writes_last_argument_to(&out);
+        let fallback = (tts.command, tts.args);
+        tts.command = "/bin/sh".into();
+        tts.args = Some(vec!["-c".into(), "sleep 5".into(), "sh".into()]);
+        tts.fallback_command = Some(fallback.0);
+        tts.fallback_args = fallback.1;
+        let stopper = std::sync::Arc::new(LineStopper::default());
+
+        let started = std::time::Instant::now();
+        let speaking = {
+            let stopper = stopper.clone();
+            std::thread::spawn(move || speak_line_with(&tts, "a long line", &stopper))
+        };
+        std::thread::sleep(Duration::from_millis(200));
+        stopper.stop();
+
+        assert!(speaking.join().unwrap());
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(!out.exists());
+    }
+
+    #[test]
+    fn desk_update_line_reads_like_the_desk() {
+        crate::settings::init_settings_for_test();
+
+        assert_eq!(
+            desk_update_line("x", "chief-of-pods"),
+            "Work complete on chief-of-pods and waiting for further instructions"
+        );
     }
 }
