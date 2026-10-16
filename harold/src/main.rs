@@ -16,6 +16,9 @@ mod telemetry;
 mod timed_prompts;
 mod tmux;
 mod util;
+// until the call is wired up (plan Task 9)
+#[cfg_attr(not(test), allow(dead_code))]
+mod voice_input;
 
 use std::sync::Arc;
 use std::time::Duration;
