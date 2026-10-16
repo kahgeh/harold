@@ -629,7 +629,9 @@ impl<P: CallPorts> Call<P> {
         }
         match self.ports.start_worker(&self.dir) {
             Ok(worker) => self.worker = Some(worker),
-            Err(_) => {
+            Err(error) => {
+                let reason = error.exit_reason().unwrap_or("failed_to_load");
+                warn!(reason, "voice worker exited");
                 self.end(Ended::VoiceFailed, Some(VOICE_FAILED)).await;
                 return;
             }
@@ -1128,6 +1130,12 @@ impl<P: CallPorts> Call<P> {
         }
         self.done = true;
         self.mode = Mode::Ending;
+        // The status reads as the call is while it says its last words and cleans up.
+        lock(&self.status).state = if last_words.is_some() {
+            CallState::Speaking
+        } else {
+            CallState::Off
+        };
         self.drop_held();
         if let Some(playing) = self.playing.take() {
             self.sink.stop();

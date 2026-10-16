@@ -185,6 +185,8 @@ struct PortsState {
     muted: bool,
     fail_awake: bool,
     awake_taken: usize,
+    /// Whether each `[tts]` line goes on until `tts_release` is notified.
+    hold_tts: bool,
 }
 
 struct PortsInner {
@@ -193,6 +195,7 @@ struct PortsInner {
     worker: Arc<Mutex<WorkerLog>>,
     state: Mutex<PortsState>,
     awake_dropped: Arc<AtomicUsize>,
+    tts_release: Notify,
     root: PathBuf,
 }
 
@@ -214,6 +217,7 @@ impl FakePorts {
             worker: Arc::default(),
             state: Mutex::default(),
             awake_dropped: Arc::default(),
+            tts_release: Notify::new(),
             root,
         }))
     }
@@ -258,7 +262,14 @@ impl CallPorts for FakePorts {
     }
 
     async fn speak_with_tts(&self, line: &str) {
-        self.state().tts.push(line.to_string());
+        let hold = {
+            let mut state = self.state();
+            state.tts.push(line.to_string());
+            state.hold_tts
+        };
+        if hold {
+            self.0.tts_release.notified().await;
+        }
     }
 
     fn stop_desk_line(&self) {
@@ -1224,4 +1235,20 @@ async fn shutdown_ends_the_call_with_reason_shutdown() {
     assert_eq!(h.worker().closes, 1);
     assert!(h.call_dirs().is_empty());
     assert!(logs.text().contains("call ended reason=\"shutdown\""));
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn a_call_reads_as_speaking_while_it_says_why_it_ended() {
+    let h = Harness::new();
+    h.script([Heard::FailToLoad]);
+    h.start().await;
+    h.ports.state().hold_tts = true;
+
+    h.speak().await;
+
+    assert_eq!(h.tts(), [VOICE_FAILED]);
+    assert_eq!(h.state(), CallState::Speaking);
+    h.ports.0.tts_release.notify_one();
+    settle().await;
+    assert_eq!(h.state(), CallState::Off);
 }
