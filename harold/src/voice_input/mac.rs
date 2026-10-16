@@ -10,6 +10,12 @@ use tokio::process::{Child, ChildStdout, Command};
 use tokio::sync::oneshot;
 
 pub(crate) const FFMPEG: &str = "ffmpeg";
+pub(crate) const CAFFEINATE: &str = "caffeinate";
+
+/// `-d`: keep the display awake.
+pub(crate) fn caffeinate_args() -> Vec<&'static str> {
+    vec!["-d"]
+}
 
 /// `-nostdin -hide_banner -loglevel error -f avfoundation -i :default -ac 1 -ar 16000 -f s16le -`
 pub(crate) fn ffmpeg_args() -> Vec<&'static str> {
@@ -69,7 +75,9 @@ impl AudioSource for MicSource {
     async fn next_block(&mut self) -> Option<Vec<i16>> {
         let mut buf = [0u8; 8192];
         loop {
-            let start = match self.spare.take() {
+            // The carried byte stays in `spare` until the read completes, so a dropped
+            // future loses nothing.
+            let start = match self.spare {
                 Some(byte) => {
                     buf[0] = byte;
                     1
@@ -77,6 +85,7 @@ impl AudioSource for MicSource {
                 None => 0,
             };
             let read = self.stdout.read(&mut buf[start..]).await.ok()?;
+            self.spare = None;
             if read == 0 {
                 return None;
             }
@@ -132,9 +141,11 @@ impl AudioSink for MacSink {
         let (stop, stopped) = oneshot::channel();
         *self.stopper.lock().unwrap_or_else(|e| e.into_inner()) = Some(stop);
         tokio::select! {
-            status = child.wait() => {
-                status.map(|_| ()).map_err(|error| format!("{} failed: {error}", self.program))
-            }
+            status = child.wait() => match status {
+                Ok(status) if status.success() => Ok(()),
+                Ok(status) => Err(format!("{} exited with {status}", self.program)),
+                Err(error) => Err(format!("{} failed: {error}", self.program)),
+            },
             _ = stopped => {
                 let _ = child.kill().await;
                 Ok(())
@@ -161,7 +172,7 @@ pub(crate) struct KeepAwake {
 
 impl KeepAwake {
     pub(crate) fn start() -> std::io::Result<Self> {
-        Self::start_with("caffeinate", &["-d"])
+        Self::start_with(CAFFEINATE, &caffeinate_args())
     }
 
     pub(crate) fn start_with(program: &str, args: &[&str]) -> std::io::Result<Self> {
@@ -277,9 +288,81 @@ mod tests {
         assert_eq!(FFMPEG, "ffmpeg");
         let sink = MacSink::new();
         assert_eq!((sink.program.as_str(), sink.args.len()), ("afplay", 0));
-        // Never called here: they would start the real programs.
+        assert_eq!(CAFFEINATE, "caffeinate");
+        assert_eq!(caffeinate_args(), ["-d"]);
+        // These keep the not-yet-wired constructors referenced in test builds; never called,
+        // as they would start the real programs.
         let _: fn() -> std::io::Result<MicSource> = MicSource::open;
         let _: fn() -> std::io::Result<KeepAwake> = KeepAwake::start;
+    }
+
+    fn script(dir: &Path, body: &str) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join("fake.sh");
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    #[tokio::test]
+    async fn an_odd_byte_waits_for_the_next_read() {
+        let dir = scratch("odd");
+        let fake = script(&dir, "printf '\\001'; sleep 0.2; printf '\\000\\002\\000'");
+        let mut mic = MicSource::open_with(fake.to_str().unwrap(), &[]).unwrap();
+        let mut heard = Vec::new();
+        while let Some(block) = mic.next_block().await {
+            heard.extend(block);
+        }
+        assert_eq!(heard, [1, 2]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_read_loses_no_byte() {
+        let dir = scratch("cancel");
+        let fake = script(&dir, "printf '\\001'; sleep 0.4; printf '\\000\\002\\000'");
+        let mut mic = MicSource::open_with(fake.to_str().unwrap(), &[]).unwrap();
+        let early = timeout(Duration::from_millis(150), mic.next_block()).await;
+        assert!(early.is_err(), "the rest had not arrived yet");
+        assert_eq!(mic.next_block().await, Some(vec![1, 2]));
+        assert_eq!(mic.next_block().await, None);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn sink_play_reports_a_player_that_failed() {
+        let sink = MacSink::with_program("/usr/bin/false", &[]);
+        let result = sink.play(Path::new("/nowhere.wav")).await;
+        assert!(result.is_err(), "{result:?}");
+    }
+
+    #[tokio::test]
+    async fn sink_stop_kills_the_player() {
+        let dir = scratch("kill");
+        let pid_file = dir.join("pid");
+        let wav = dir.join("endless");
+        std::fs::write(&wav, "x").unwrap();
+        let fake = script(&dir, "echo $$ > \"$1\"\nexec /usr/bin/tail -f \"$2\"");
+        let sink = MacSink::with_program(fake.to_str().unwrap(), &[pid_file.to_str().unwrap()]);
+        let stopping = async {
+            sleep(Duration::from_millis(300)).await;
+            let pid: u32 = std::fs::read_to_string(&pid_file)
+                .unwrap()
+                .trim()
+                .parse()
+                .unwrap();
+            assert!(running(pid));
+            sink.stop();
+            pid
+        };
+        let (played, pid) = tokio::join!(sink.play(&wav), stopping);
+        assert_eq!(played, Ok(()));
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while running(pid) && Instant::now() < deadline {
+            sleep(Duration::from_millis(20)).await;
+        }
+        assert!(!running(pid), "player still running after stop");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     fn running(pid: u32) -> bool {
