@@ -89,6 +89,8 @@ class ServiceControlTests(unittest.TestCase):
                          'grpc_addr': '127.0.0.1:50060', 'plist': str(self.bundle / 'service.plist'),
                          'launch_agent': str(root / 'home/Library/LaunchAgents/com.harold.agent.test.plist'),
                          'env': {}}
+        Path(self.metadata['launch_agent']).parent.mkdir(parents=True)
+        Path(self.metadata['launch_agent']).write_text('plist')
         self.target = 'gui/{}/com.harold.agent.test'.format(os.getuid())
         for name, value in (('pid_alive', lambda pid: False), ('time', FakeTime())):
             patcher = patch.object(service, name, value)
@@ -124,6 +126,19 @@ class ServiceControlTests(unittest.TestCase):
         self.assertLess(launchctl.calls.index(enable), launchctl.calls.index(bootstrap))
         self.assertLess(launchctl.calls.index(bootstrap), launchctl.calls.index(kickstart))
         self.assertFalse(self.crashes.exists())
+
+    def test_without_the_launch_agents_copy_start_loads_the_bundle_plist(self):
+        # Deleting the copy turns off start at login; haroldctl start still works for this login.
+        launchctl = self.fake()
+        Path(self.metadata['launch_agent']).unlink()
+        self.assertEqual(service.start(self.metadata), PID)
+        self.assertIn(['bootstrap', 'gui/{}'.format(os.getuid()), self.metadata['plist']], launchctl.calls)
+
+    def test_a_crash_file_that_is_not_text_does_not_stop_ensure(self):
+        self.fake()
+        self.crashes.write_bytes(b'\xff\xfe\x00')
+        self.assertFalse(service.gave_up(self.metadata))
+        self.assertEqual(service.ensure(self.metadata), PID)
 
     def test_ensure_starts_an_enabled_job(self):
         launchctl = self.fake()

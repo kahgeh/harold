@@ -118,10 +118,11 @@ def crash_file(metadata):
 
 
 def gave_up(metadata):
+    # Read as leniently as Harold does: a file that cannot be read counts as no crash loop.
     try:
-        with crash_file(metadata).open() as crashes:
+        with crash_file(metadata).open(errors='replace') as crashes:
             return crashes.readline().strip() == 'gave-up'
-    except FileNotFoundError:
+    except OSError:
         return False
 
 
@@ -171,7 +172,8 @@ def validated_metadata(metadata):
 
 
 def launch(metadata, timeout=30):
-    """Loads the LaunchAgents copy of the job if needed, starts it, and waits until it is ready."""
+    """Loads the job if needed, starts it, and waits until it is ready. It loads the LaunchAgents
+    copy, or the bundle's plist when that copy was deleted to turn off start at login."""
     pid = launch_pid(metadata)
     listeners = listener_pids(metadata)
     if listeners and listeners != {pid}:
@@ -180,7 +182,8 @@ def launch(metadata, timeout=30):
     if not pid:
         loaded = run(['launchctl', 'print', target(metadata)]).returncode == 0
         if not loaded:
-            result = run(['launchctl', 'bootstrap', 'gui/{}'.format(os.getuid()), metadata['launch_agent']])
+            plist = metadata['launch_agent'] if Path(metadata['launch_agent']).is_file() else metadata['plist']
+            result = run(['launchctl', 'bootstrap', 'gui/{}'.format(os.getuid()), plist])
             if result.returncode:
                 raise RuntimeError('Cannot load service: ' + result.stderr.strip())
         result = run(['launchctl', 'kickstart', target(metadata)])

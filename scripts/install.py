@@ -446,11 +446,22 @@ def plist_python(bundle):
     return None
 
 
-def rollback_note(prefix, backup, copied, reinstall):
+def starts_at_login(bundle):
+    """Whether a bundle's service.plist has launchd start it at login."""
+    try:
+        return plistlib.loads((bundle / 'service.plist').read_bytes()).get('RunAtLoad') is True
+    except Exception:
+        # A missing or damaged plist can raise almost anything; any of it means no.
+        return False
+
+
+def rollback_note(prefix, backup, copied, reinstall, metadata):
     """ROLLBACK.md for `backup`: what it holds and the commands that put it back.
 
     `copied` names the files from `prefix` kept in `backup`. The commands set the new bundle
     aside as harold.replaced-<time> and, unless this was a reinstall, move its data and log back.
+    They put back the LaunchAgents copy of `backup`'s plist, or remove the copy when `backup`
+    does not start at login, and enable the label, which the new `haroldctl stop` disabled.
     """
     aside = 'harold.replaced-' + backup.name[len('harold.backup-'):]
     commands = ['cd ' + shlex.quote(str(prefix)), './haroldctl stop',
@@ -464,7 +475,12 @@ def rollback_note(prefix, backup, copied, reinstall):
         commands += ['mv {}/data harold/data'.format(aside), 'mv {}/harold.log harold/harold.log'.format(aside)]
     if copied:
         commands.append('mv {} .'.format(' '.join('harold/' + name for name in copied)))
-    commands.append('./haroldctl start')
+    launch_agent = shlex.quote(metadata['launch_agent'])
+    if starts_at_login(backup):
+        commands.append('cp harold/service.plist ' + launch_agent)
+    else:
+        commands.append('rm -f ' + launch_agent)
+    commands += ['launchctl enable gui/$(id -u)/' + metadata['label'], './haroldctl start']
     lines = ['# Roll back Harold', '',
              'This folder holds the Harold that was installed in {}.'.format(prefix), '',
              '- Version: {}'.format(recorded(backup, 'VERSION') or 'not recorded'),
@@ -481,7 +497,7 @@ def rollback_note(prefix, backup, copied, reinstall):
     return '\n'.join(lines) + '\n'
 
 
-def keep_rollback_copy(prefix, backup, reinstall):
+def keep_rollback_copy(prefix, backup, reinstall, metadata):
     """Copy haroldctl and tmx-agent-dash into `backup`, which holds the old bundle, and write
     ROLLBACK.md there. Raises OSError when a copy or the note cannot be written."""
     copied = []
@@ -489,7 +505,7 @@ def keep_rollback_copy(prefix, backup, reinstall):
         if (prefix / name).is_file():
             shutil.copy2(prefix / name, backup / name)
             copied.append(name)
-    (backup / 'ROLLBACK.md').write_text(rollback_note(prefix, backup, copied, reinstall))
+    (backup / 'ROLLBACK.md').write_text(rollback_note(prefix, backup, copied, reinstall, metadata))
 
 
 def replace_bundle(stage, bundle, reinstall):
@@ -602,7 +618,7 @@ def install(args, repo):
                 # Before haroldctl and tmx-agent-dash are overwritten below. Harold is stopped and
                 # the old bundle has moved, so a failed copy is reported and the install goes on.
                 try:
-                    keep_rollback_copy(prefix, backup, args.reinstall)
+                    keep_rollback_copy(prefix, backup, args.reinstall, metadata)
                 except Exception as error:
                     print('Rollback copy incomplete ({}); the old bundle is still in the folder below.'.format(
                         getattr(error, 'strerror', None) or error), flush=True)

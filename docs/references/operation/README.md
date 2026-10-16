@@ -200,9 +200,9 @@ The first time the installer writes the LaunchAgents copy, macOS shows a "Backgr
 
 - `haroldctl stop` keeps Harold off until `haroldctl start`.
 - Switching Harold off under Allow in the Background stops launchd loading it at login; `haroldctl start` still starts it for the current login.
-- Deleting `~/Library/LaunchAgents/<label>.plist` removes start at login until the next install.
+- Deleting `~/Library/LaunchAgents/<label>.plist` removes start at login until the next install; `haroldctl start` then loads the bundle's `service.plist` for the current login.
 
-To roll back to a bundle built without start at login, delete `~/Library/LaunchAgents/<label>.plist` and run the commands in the bundle's `ROLLBACK.md`, with `launchctl enable gui/$(id -u)/<label>` before its last command, `./haroldctl start`. Its first command, `./haroldctl stop`, disables the label, and the older `haroldctl start` does not enable it.
+To roll back, run the commands in the archived bundle's `ROLLBACK.md`. Before their last command, `./haroldctl start`, they put back that bundle's LaunchAgents copy, or delete the copy when that bundle does not start at login, and run `launchctl enable gui/$(id -u)/<label>`: their first command, `./haroldctl stop`, disables the label, and an older `haroldctl start` does not enable it. A `ROLLBACK.md` written by an installer without start at login lacks those two steps; run `rm -f ~/Library/LaunchAgents/<label>.plist` and the `launchctl enable` command before its `./haroldctl start`.
 
 ## Shutdown
 

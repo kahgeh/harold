@@ -793,10 +793,16 @@ class InstalledServiceTests(unittest.TestCase):
             '    log.write("new " + " ".join(sys.argv[1:]) + "\\n")\n'.format(str(log)))
         self.run_install('-')
         (self.bundle / 'harold.log').write_text('new log\n')
+        self.assertTrue(self.launch_agent().is_file())
         backup, _, commands = self.rollback()
-        result = subprocess.run(['sh', '-e', '-c', commands], capture_output=True, text=True)
+        result = self.run_rollback(commands, log)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(log.read_text().splitlines(), ['new stop', 'old start'])
+        # The new stop disables the label; the older haroldctl's start cannot load a disabled job.
+        label = self.installed_metadata()['label']
+        self.assertEqual(log.read_text().splitlines(), [
+            'new stop', 'launchctl enable gui/{}/{}'.format(os.getuid(), label), 'old start'])
+        # The older bundle does not start at login, so its LaunchAgents copy is gone.
+        self.assertFalse(self.launch_agent().exists())
         self.assertEqual((self.bundle / 'harold').read_text(), 'old harold')
         self.assertEqual((self.prefix / 'tmx-agent-dash').read_text(), 'old dash')
         self.assertIn('echo "old $*"', (self.prefix / 'haroldctl').read_text())
@@ -806,6 +812,34 @@ class InstalledServiceTests(unittest.TestCase):
         self.assertFalse(backup.exists())
         replaced, = self.prefix.glob('harold.replaced-*')
         self.assertEqual((replaced / 'harold').read_text(), 'release harold')
+
+    def run_rollback(self, commands, log):
+        """Runs the rollback commands with a fake launchctl that writes `launchctl <args>` to `log`."""
+        fake = self.prefix.parent / 'fake-bin'
+        fake.mkdir(exist_ok=True)
+        (fake / 'launchctl').write_text('#!/bin/sh\necho "launchctl $*" >> {}\n'.format(shlex.quote(str(log))))
+        (fake / 'launchctl').chmod(0o755)
+        env = dict(os.environ, PATH='{}:{}'.format(fake, os.environ['PATH']))
+        return subprocess.run(['sh', '-e', '-c', commands], capture_output=True, text=True, env=env)
+
+    def test_rolling_back_to_a_bundle_that_starts_at_login_puts_its_plist_back(self):
+        log = self.prefix.parent / 'haroldctl.log'
+        self.install_existing(saved='-')
+        self.install_existing_programs(log)
+        old = self.install.make_metadata(self.prefix, '127.0.0.1:50123')
+        self.install.write_plist(self.bundle / 'service.plist', old)
+        old_plist = (self.bundle / 'service.plist').read_bytes()
+        (self.release / 'scripts/harold_service.py').write_text(
+            'import sys\nwith open({!r}, "a") as log:\n'
+            '    log.write("new " + " ".join(sys.argv[1:]) + "\\n")\n'.format(str(log)))
+        self.run_install('-')
+        (self.bundle / 'harold.log').write_text('new log\n')
+        self.launch_agent().write_text('the newer copy')
+        _, _, commands = self.rollback()
+        result = self.run_rollback(commands, log)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.launch_agent().read_bytes(), old_plist)
+        self.assertEqual(log.read_text().splitlines()[-1], 'old start')
 
     def test_a_reinstall_rollback_leaves_the_new_data_aside(self):
         self.install_existing(saved='-')

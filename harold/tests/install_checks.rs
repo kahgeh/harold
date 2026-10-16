@@ -789,6 +789,8 @@ impl Fixture {
             .env("HAROLD_CONFIG_DIR", &self.0)
             .env("HAROLD_ENV", "local")
             .env("HAROLD__STORE__PATH", self.store())
+            // Not the real home: a daemon that got past its checks must not read real state.
+            .env("HOME", &self.0)
             .env("NO_COLOR", "1")
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
