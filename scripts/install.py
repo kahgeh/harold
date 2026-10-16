@@ -384,6 +384,7 @@ def make_metadata(prefix, grpc_addr):
     paths.extend([str(Path.home() / '.local/bin'), '/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', '/bin', '/usr/sbin', '/sbin'])
     return {'bundle': str(bundle), 'label': label, 'grpc_addr': grpc_addr,
             'plist': str(bundle / 'service.plist'),
+            'launch_agent': str(Path.home() / 'Library/LaunchAgents' / (label + '.plist')),
             'env': {'HAROLD_CONFIG_DIR': str(bundle / 'config'), 'HAROLD_ENV': 'local',
                     'HAROLD__STORE__PATH': str(bundle / 'data/store'),
                     'PATH': ':'.join(dict.fromkeys(paths)), 'LANG': 'en_US.UTF-8', 'LC_ALL': 'en_US.UTF-8'}}
@@ -393,9 +394,13 @@ def write_plist(path, metadata):
     bundle = Path(metadata['bundle'])
     value = {'Label': metadata['label'],
              'ProgramArguments': [str(bundle / 'harold')],
-             'WorkingDirectory': str(bundle), 'RunAtLoad': False,
+             'WorkingDirectory': str(bundle),
+             # Start at login; after an unclean exit, start again at most every 30 seconds.
+             'RunAtLoad': True, 'KeepAlive': {'SuccessfulExit': False}, 'ThrottleInterval': 30,
              'ExitTimeOut': 10,
-             'EnvironmentVariables': metadata['env'],
+             # Only the job launchd starts carries HAROLD_LAUNCHD, which turns a refused
+             # start into a clean exit; haroldctl's checks run with metadata['env'].
+             'EnvironmentVariables': dict(metadata['env'], HAROLD_LAUNCHD='1'),
              'StandardOutPath': str(bundle / 'harold.log'),
              'StandardErrorPath': str(bundle / 'harold.log')}
     path.write_bytes(plistlib.dumps(value))

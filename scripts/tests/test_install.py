@@ -109,14 +109,22 @@ class InstallTests(unittest.TestCase):
                 self.install.replace_bundle(stage, bundle, False)
         self.assertEqual((bundle / 'data/events/marker').read_text(), 'irreplaceable')
 
-    def test_manual_service_has_no_login_registration(self):
-        metadata = self.install.make_metadata(self.prefix, '127.0.0.1:50060')
+    def test_the_service_starts_at_login_and_restarts_after_a_crash(self):
+        home = Path(self.temp.name).resolve() / 'home'
+        with patch.dict('os.environ', {'HOME': str(home)}):
+            metadata = self.install.make_metadata(self.prefix, '127.0.0.1:50060')
         path = self.prefix / 'service.plist'
         self.install.write_plist(path, metadata)
         plist = plistlib.loads(path.read_bytes())
         self.assertEqual(metadata['plist'], str(self.prefix / 'harold/service.plist'))
-        self.assertFalse(plist.get('RunAtLoad', False))
-        self.assertFalse(plist.get('KeepAlive', False))
+        self.assertEqual(metadata['launch_agent'],
+                         str(home / 'Library/LaunchAgents' / (metadata['label'] + '.plist')))
+        self.assertIs(plist['RunAtLoad'], True)
+        self.assertEqual(plist['KeepAlive'], {'SuccessfulExit': False})
+        self.assertEqual(plist['ThrottleInterval'], 30)
+        self.assertEqual(plist['EnvironmentVariables'], dict(metadata['env'], HAROLD_LAUNCHD='1'))
+        # Only launchd's start says so; haroldctl's checks run with metadata['env'].
+        self.assertNotIn('HAROLD_LAUNCHD', metadata['env'])
 
     def test_signing_and_invalid_config_fail_before_stopping_old_service(self):
         repo = self.prefix / 'repo'
@@ -569,9 +577,11 @@ class InstalledServiceTests(unittest.TestCase):
             'Label': metadata['label'],
             'ProgramArguments': [str(self.bundle / 'harold')],
             'WorkingDirectory': str(self.bundle),
-            'RunAtLoad': False,
+            'RunAtLoad': True,
+            'KeepAlive': {'SuccessfulExit': False},
+            'ThrottleInterval': 30,
             'ExitTimeOut': 10,
-            'EnvironmentVariables': metadata['env'],
+            'EnvironmentVariables': dict(metadata['env'], HAROLD_LAUNCHD='1'),
             'StandardOutPath': str(self.bundle / 'harold.log'),
             'StandardErrorPath': str(self.bundle / 'harold.log'),
         })
