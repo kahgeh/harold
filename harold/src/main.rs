@@ -4,6 +4,7 @@ mod alerts;
 mod away_message;
 mod channels;
 mod cli;
+mod crash_guard;
 mod inbound;
 mod outbound;
 mod peers;
