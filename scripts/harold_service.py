@@ -266,8 +266,11 @@ def main():
                     finally:
                         pending.unlink(missing_ok=True)
                 metadata = updated
-            if args.command in ('stop', 'restart'):
+            if args.command == 'stop':
                 stop(metadata)
+            if args.command == 'restart':
+                # Unload only: if the restart fails here, the job must stay enabled for the next login.
+                unload(metadata)
             if args.command in ('start', 'restart'):
                 pid = start(metadata)
                 print('Harold ready (PID {})'.format(pid))

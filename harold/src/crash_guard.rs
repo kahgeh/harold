@@ -77,8 +77,12 @@ pub(crate) fn begin(file: &Path, now: SystemTime) -> std::io::Result<Start> {
     }))
 }
 
-/// Writes the file whole: to a sibling first, then renamed over it.
+/// Writes the file whole: to a sibling first, then renamed over it. Its folder is created when
+/// missing, as before the store's first start.
 fn write(file: &Path, state: &str, times: &[u64]) -> std::io::Result<()> {
+    if let Some(folder) = file.parent() {
+        std::fs::create_dir_all(folder)?;
+    }
     let mut contents = format!("{state}\n");
     for time in times {
         contents.push_str(&format!("{time}\n"));

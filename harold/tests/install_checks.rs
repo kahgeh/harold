@@ -776,6 +776,13 @@ impl Fixture {
     /// Runs `harold` as the daemon, as launchd starts it when `launchd` is set, and returns
     /// its output once it exits.
     fn daemon(&self, launchd: bool) -> Output {
+        let child = self.daemon_command(launchd).spawn().unwrap();
+        wait_for_exit(child)
+    }
+
+    /// The daemon's command: the fixture's configuration and store, and neither the real home
+    /// nor the user's tmux server.
+    fn daemon_command(&self, launchd: bool) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_harold"));
         for (name, _) in std::env::vars_os() {
             if name.to_string_lossy().starts_with("HAROLD") {
@@ -785,28 +792,33 @@ impl Fixture {
         if launchd {
             command.env("HAROLD_LAUNCHD", "1");
         }
-        let mut child = command
+        command
             .env("HAROLD_CONFIG_DIR", &self.0)
             .env("HAROLD_ENV", "local")
             .env("HAROLD__STORE__PATH", self.store())
-            // Not the real home: a daemon that got past its checks must not read real state.
+            // Not the real home or tmux server: a running daemon must not read real state.
             .env("HOME", &self.0)
+            .env("TMUX_TMPDIR", &self.0)
+            .env_remove("TMUX")
             .env("NO_COLOR", "1")
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
-        let deadline = Instant::now() + Duration::from_secs(8);
-        while child.try_wait().unwrap().is_none() {
-            if Instant::now() >= deadline {
-                child.kill().unwrap();
-                let output = child.wait_with_output().unwrap();
-                panic!("daemon did not exit: {output:?}");
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        child.wait_with_output().unwrap()
+            .stderr(Stdio::piped());
+        command
     }
+}
+
+/// Waits up to 8 seconds for a daemon to exit and returns its output.
+fn wait_for_exit(mut child: std::process::Child) -> Output {
+    let deadline = Instant::now() + Duration::from_secs(8);
+    while child.try_wait().unwrap().is_none() {
+        if Instant::now() >= deadline {
+            child.kill().unwrap();
+            let output = child.wait_with_output().unwrap();
+            panic!("daemon did not exit: {output:?}");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    child.wait_with_output().unwrap()
 }
 
 /// The `startup refused` line in a daemon's output, with its colours taken out.
@@ -921,4 +933,34 @@ fn under_launchd_a_crash_loop_exits_zero_and_says_why() {
     );
     let crashes = std::fs::read_to_string(fixture.crashes()).unwrap();
     assert_eq!(crashes.lines().next(), Some("gave-up"));
+}
+
+#[test]
+fn under_launchd_a_clean_shutdown_marks_the_crash_file_clean() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    let fixture = Fixture::new(&format!("{VALID}\n[grpc]\nport = {port}\n"));
+    let child = fixture.daemon_command(true).spawn().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while std::net::TcpStream::connect(("127.0.0.1", port)).is_err() {
+        assert!(
+            Instant::now() < deadline,
+            "the daemon did not start listening"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let running = std::fs::read_to_string(fixture.crashes()).unwrap();
+    assert_eq!(running.lines().next(), Some("running"));
+    let signalled = Command::new("kill")
+        .args(["-TERM", &child.id().to_string()])
+        .status()
+        .unwrap();
+    assert!(signalled.success());
+    let output = wait_for_exit(child);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert_eq!(
+        std::fs::read_to_string(fixture.crashes()).unwrap(),
+        "clean\n"
+    );
 }

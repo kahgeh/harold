@@ -130,6 +130,32 @@ class InstallTests(unittest.TestCase):
         # Only launchd's start says so; haroldctl's checks run with metadata['env'].
         self.assertNotIn('HAROLD_LAUNCHD', metadata['env'])
 
+    def test_a_failed_launch_agents_write_leaves_no_temporary_file(self):
+        folder = Path(self.temp.name).resolve() / 'home/Library/LaunchAgents'
+        metadata = {'plist': str(self.prefix / 'missing/service.plist'),
+                    'launch_agent': str(folder / 'com.harold.agent.test.plist')}
+        with self.assertRaises(OSError):
+            self.install.write_launch_agent(metadata)
+        self.assertEqual(list(folder.iterdir()), [])
+
+    def test_the_launch_agents_copy_is_written_through_a_file_launchd_does_not_load(self):
+        folder = Path(self.temp.name).resolve() / 'home/Library/LaunchAgents'
+        (self.prefix / 'service.plist').write_text('plist')
+        metadata = {'plist': str(self.prefix / 'service.plist'),
+                    'launch_agent': str(folder / 'com.harold.agent.test.plist')}
+        names = []
+        replace = os.replace
+
+        def record(source, destination):
+            names.append(Path(source).name)
+            return replace(source, destination)
+
+        with patch.object(self.install.os, 'replace', record):
+            self.install.write_launch_agent(metadata)
+        pending, = names
+        self.assertFalse(pending.endswith('.plist'), pending)
+        self.assertEqual([path.name for path in folder.iterdir()], ['com.harold.agent.test.plist'])
+
     def test_signing_and_invalid_config_fail_before_stopping_old_service(self):
         repo = self.prefix / 'repo'
         for name in ('target/release/harold', 'target/release/tmx-agent-dash',

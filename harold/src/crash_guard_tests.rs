@@ -156,3 +156,11 @@ fn an_unwritable_folder_is_an_error_not_a_panic() {
     std::fs::write(&not_a_folder, "a file").expect("write file");
     assert!(begin(&not_a_folder.join("crashes"), at(T)).is_err());
 }
+
+#[test]
+fn a_missing_folder_is_created() {
+    let directory = TestDirectory::new();
+    let file = directory.0.join("data/crashes");
+    runs(&file, T);
+    assert_eq!(std::fs::read_to_string(file).unwrap(), "running\n");
+}

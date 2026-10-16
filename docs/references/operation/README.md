@@ -151,7 +151,7 @@ For the default installation:
 | --- | --- | --- |
 | `start` | `enable`, then `bootstrap` from the LaunchAgents copy and `kickstart` when the job is not running | Turns start at login back on, deletes the crash file (below), and waits for readiness |
 | `stop` | `disable`, then `bootout` | Stops Harold and keeps it off, at the next login too, until `start` |
-| `restart` | `stop`, then `start` | Applies an edited `config/local.toml` |
+| `restart` | `bootout`, then as `start` | Applies an edited `config/local.toml`; a restart that fails leaves start at login on |
 | `ensure` | `bootstrap` and `kickstart` only when needed | Starts Harold unless `stop` disabled it or it gave up after a crash loop; then prints why and exits 1 |
 | `status` | `print`, `print-disabled` | Prints JSON with `ready`, `pid`, `grpc_addr` and `autostart`: `on`, `off (stopped with haroldctl stop)` or `off (gave up after a crash loop)` |
 

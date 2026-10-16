@@ -409,14 +409,16 @@ def write_plist(path, metadata):
 def write_launch_agent(metadata):
     """Copies the bundle's service.plist to ~/Library/LaunchAgents, where launchd loads it at
     login. The copy is written beside it and moved into place, so a symlink there is replaced,
-    not written through."""
+    not written through. The file written beside it does not end in `.plist`, so launchd never
+    loads it, and it is removed if anything fails."""
     destination = Path(metadata['launch_agent'])
     destination.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(dir=destination.parent, prefix='.harold-', suffix='.plist',
-                                     delete=False) as output:
-        pending = Path(output.name)
-        output.write(Path(metadata['plist']).read_bytes())
+    output = tempfile.NamedTemporaryFile(dir=destination.parent, prefix='.harold-', suffix='.plist.tmp',
+                                         delete=False)
+    pending = Path(output.name)
     try:
+        with output:
+            output.write(Path(metadata['plist']).read_bytes())
         pending.chmod(0o644)
         os.replace(pending, destination)
     finally:
