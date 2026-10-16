@@ -2,9 +2,9 @@
 //! `{"alert": "<name>", "state": "firing" | "cleared"}` to `POST /alert`. Harold accepts
 //! only the four alerts below and types `harold alert: <name> <state>` into the pane of
 //! the agent running in the chief's folder, with the same checks and typing as timed
-//! prompts. The chief decides what to do with the line. Harold also queues one line of
-//! its own, `harold alert: delivery-given-up firing`, through `AlertQueue`; the address
-//! refuses that name.
+//! prompts. The chief decides what to do with the line. Harold also queues lines of its
+//! own through `AlertQueue`: `harold alert: delivery-given-up firing`, and
+//! `harold alert: store-failing firing` and `cleared`. The address refuses both names.
 //!
 //! No log line carries any part of a posted body. A refused post logs a fixed line, and
 //! the alert and state of an accepted one are fields, from the fixed lists below.
@@ -46,6 +46,10 @@ const LINE_PREFIX: &str = "harold alert: ";
 /// accept it: it is not in `ALERT_NAMES`.
 pub(crate) const DELIVERY_GIVEN_UP: &str = "delivery-given-up";
 
+/// The alert Harold queues itself when it marks its store failing, and clears when the
+/// store recovers. The address does not accept it: it is not in `ALERT_NAMES`.
+pub(crate) const STORE_FAILING: &str = "store-failing";
+
 /// Where Harold queues its own alert lines, for the same typing as posted ones.
 #[derive(Clone, Debug)]
 pub(crate) struct AlertQueue(mpsc::Sender<Queued>);
@@ -61,6 +65,11 @@ impl AlertQueue {
     /// the same log line as a post's.
     pub(crate) fn firing(&self, alert: &str) {
         queue_line(&self.0, format!("{LINE_PREFIX}{alert} firing"));
+    }
+
+    /// Queues `harold alert: <alert> cleared`, as `firing` does.
+    pub(crate) fn cleared(&self, alert: &str) {
+        queue_line(&self.0, format!("{LINE_PREFIX}{alert} cleared"));
     }
 }
 

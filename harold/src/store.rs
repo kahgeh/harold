@@ -28,6 +28,7 @@ use crate::agent::domain::{
 use crate::agent::reducer::DEFAULT_HOOK_GRACE_MS;
 use crate::agent::reducer::{GraceWindows, reduce_agent_event, reduce_turn_completed};
 use crate::agent::summary::{normalize_work_summary, sanitize_bounded_metadata};
+use crate::alerts::AlertQueue;
 
 const NAMESPACE: &str = "harold";
 const PARTITION_KEY: &str = "main";
@@ -200,10 +201,11 @@ impl WriteKind {
 enum Health {
     Healthy,
     /// No write is let through until `next_try_at`; then one is, as a try. `trying` while
-    /// that try runs.
+    /// that try runs. `alerted` when the chief was told, so the recovery is told too.
     Failing {
         next_try_at: Instant,
         trying: bool,
+        alerted: bool,
     },
 }
 
@@ -219,12 +221,15 @@ enum Admission {
 /// result alone decides whether the store recovers.
 struct StoreHealth {
     health: std::sync::Mutex<Health>,
+    /// Where the chief is told, once `main` has handed the queue over.
+    alerts: std::sync::OnceLock<AlertQueue>,
 }
 
 impl StoreHealth {
     fn new() -> Self {
         Self {
             health: std::sync::Mutex::new(Health::Healthy),
+            alerts: std::sync::OnceLock::new(),
         }
     }
 
@@ -245,6 +250,7 @@ impl StoreHealth {
             Health::Failing {
                 next_try_at,
                 trying,
+                ..
             } if !*trying && Instant::now() >= *next_try_at => {
                 *trying = true;
                 Ok(Admission::Try)
@@ -283,6 +289,7 @@ impl StoreHealth {
             *health = Health::Failing {
                 next_try_at: Instant::now() + STORE_WRITE_LIMIT,
                 trying: false,
+                alerted: self.alerts.get().is_some(),
             };
         }
         warn!(
@@ -291,27 +298,36 @@ impl StoreHealth {
             reason = kind.reason(),
             "store failing"
         );
+        if let Some(alerts) = self.alerts.get() {
+            alerts.firing(crate::alerts::STORE_FAILING);
+        }
     }
 
     /// Ends the running try: the store recovers if it succeeded, or waits for the next.
     fn end_try(&self, succeeded: bool) {
-        {
+        let alerted = {
             let mut health = self.lock();
+            let alerted = matches!(*health, Health::Failing { alerted: true, .. });
             if !succeeded {
                 *health = Health::Failing {
                     next_try_at: Instant::now() + STORE_WRITE_LIMIT,
                     trying: false,
+                    alerted,
                 };
                 return;
             }
             *health = Health::Healthy;
-        }
+            alerted
+        };
         info!(
             parent: None,
             component = "store",
             reason = "try_succeeded",
             "store recovered"
         );
+        if let Some(alerts) = self.alerts.get().filter(|_| alerted) {
+            alerts.cleared(crate::alerts::STORE_FAILING);
+        }
     }
 }
 
@@ -454,6 +470,12 @@ impl HaroldStore {
     )]
     pub(crate) fn is_failing(&self) -> bool {
         self.health.is_failing()
+    }
+
+    /// Where the store tells the chief it is failing and has recovered. Set once, by `main`
+    /// when the alert address is on; a later call is ignored.
+    pub(crate) fn set_alert_queue(&self, queue: AlertQueue) {
+        let _ = self.health.alerts.set(queue);
     }
 
     /// Appends `batch` to the event log through the store's health check.

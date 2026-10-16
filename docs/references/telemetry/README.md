@@ -408,6 +408,8 @@ Harold answers:
 
 Harold types one line of its own the same way: `harold alert: delivery-given-up firing`, when it gives up a delivery after 10 failed tries (see the [notification reference](../notification/README.md#architecture)). It carries no message text. It is typed only when `alert_listen` is set and the address opened, with the checks and the 10 minutes below, as a posted line is. A post naming `delivery-given-up` is answered `400`.
 
+Harold also types `harold alert: store-failing firing` when it marks its store failing, and `harold alert: store-failing cleared` when the store recovers (see the [operation reference](../operation/README.md)). The two are typed under the same conditions as the `delivery-given-up` line. `cleared` follows only a `firing` line: a spell that began before the alert address opened is not cleared. Harold also logs the two changes, as `store failing` and `store recovered`, with only the fields `component = "store"` and `reason`. A post naming `store-failing` is answered `400`.
+
 No log line carries any part of a posted body.
 
 Typing follows the timed prompts' checks: the pane must be idle and its input box empty. Harold tries every 5 seconds. A line is dropped, and logged as `alert not delivered (<reason>)`, when:

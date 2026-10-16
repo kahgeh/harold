@@ -850,6 +850,9 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let telemetry_tasks = start_telemetry_tasks(cfg, &snapshots, &shutdown_rx).await;
+    if let Some(queue) = &telemetry_tasks.alert_queue {
+        store.set_alert_queue(queue.clone());
+    }
     let event_handler_handle = tokio::spawn(projector::run_event_handler(
         Arc::clone(&store),
         snapshots.clone(),

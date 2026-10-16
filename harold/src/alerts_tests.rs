@@ -176,6 +176,14 @@ async fn a_bad_post_gets_400_and_types_nothing() {
             "/alert",
             &br#"{"alert":"delivery-given-up","state":"firing"}"#[..],
         ),
+        (
+            "/alert",
+            &br#"{"alert":"store-failing","state":"firing"}"#[..],
+        ),
+        (
+            "/alert",
+            &br#"{"alert":"store-failing","state":"cleared"}"#[..],
+        ),
     ] {
         assert_eq!(post(addr, path, body).await, 400, "{path} {body:?}");
     }
@@ -191,7 +199,7 @@ async fn a_bad_post_gets_400_and_types_nothing() {
     let text = logs.text();
     assert_eq!(
         text.matches("alert ignored (unknown alert)").count(),
-        7,
+        9,
         "{text}"
     );
     // No part of a refused body reaches the log.
@@ -621,6 +629,18 @@ async fn a_full_queue_drops_harolds_own_line_and_logs_it() {
 }
 
 #[test]
-fn harolds_own_alert_is_not_one_hyperdx_may_post() {
+fn harolds_own_alerts_are_not_ones_hyperdx_may_post() {
     assert!(!ALERT_NAMES.contains(&DELIVERY_GIVEN_UP));
+    assert!(!ALERT_NAMES.contains(&STORE_FAILING));
+}
+
+#[test]
+fn cleared_queues_the_cleared_line() {
+    let (queue, mut queue_rx) = AlertQueue::new();
+
+    queue.cleared(STORE_FAILING);
+
+    let (line, _) = queue_rx.try_recv().unwrap();
+    assert_eq!(line, "harold alert: store-failing cleared");
+    assert!(queue_rx.try_recv().is_err());
 }

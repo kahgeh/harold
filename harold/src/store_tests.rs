@@ -2069,3 +2069,48 @@ async fn the_store_failing_and_recovered_lines_carry_only_component_and_reason()
     assert_eq!(recovered.matches('=').count(), 2, "{recovered}");
     assert_eq!(text.matches("store failing").count(), 1, "{text}");
 }
+
+/// The lines queued so far.
+fn queued(alerts: &mut tokio::sync::mpsc::Receiver<crate::alerts::Queued>) -> Vec<String> {
+    std::iter::from_fn(|| alerts.try_recv().ok().map(|(line, _)| line)).collect()
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_store_failing_queues_firing_once_and_recovering_queues_cleared_once() {
+    let directory = TestDirectory::new();
+    let store = HaroldStore::open(directory.path()).await.unwrap();
+    let (queue, mut alerts) = crate::alerts::AlertQueue::new();
+    store.set_alert_queue(queue);
+    store.fault_log_flush_for_test(Some(WriteFault::Hang));
+
+    let (first, second) = tokio::join!(write(&store), write(&store));
+    for result in [first, second] {
+        assert!(
+            matches!(result, Err(StoreError::Failing(FailedWrite::TimedOut))),
+            "{result:?}"
+        );
+    }
+    let refused = write(&store).await;
+    assert!(is_refused(&refused), "{refused:?}");
+    assert_eq!(queued(&mut alerts), ["harold alert: store-failing firing"]);
+
+    store.fault_log_flush_for_test(None);
+    tokio::time::advance(Duration::from_secs(30)).await;
+    write(&store).await.unwrap();
+    assert_eq!(queued(&mut alerts), ["harold alert: store-failing cleared"]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_failing_spell_before_the_queue_is_set_queues_no_cleared_line() {
+    let directory = TestDirectory::new();
+    let store = HaroldStore::open(directory.path()).await.unwrap();
+    time_out_one_write(&store).await;
+    let (queue, mut alerts) = crate::alerts::AlertQueue::new();
+    store.set_alert_queue(queue);
+
+    store.fault_log_flush_for_test(None);
+    tokio::time::advance(Duration::from_secs(30)).await;
+    write(&store).await.unwrap();
+
+    assert!(queued(&mut alerts).is_empty());
+}
