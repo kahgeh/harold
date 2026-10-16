@@ -494,12 +494,17 @@ fill dashboard.json \
 
 # "Harold trends" has no filters.
 fill trends.json | hdx -X PUT "$HYPERDX_URL/api/v2/dashboards/$(dashboard "Harold trends" | jq -r .id)" --data-binary @-
+```
 
+Then update each alert's webhook and the alert. The loop looks up both ids before it sends either PUT, and stops at the first name whose webhook or alert is missing or is named twice:
+
+```sh
 for name in phone-request-unavailable phone-request-slow wrong-agent slot-idle; do
-  WEBHOOK_ID=$(hdx "$HYPERDX_URL/api/v2/webhooks" | jq -r --arg name "harold-alerts-$name" '.data[] | select(.name == $name) | .id')
+  WEBHOOK_ID=$(webhook_id "harold-alerts-$name") || break
   [ -n "$WEBHOOK_ID" ] || { echo "no webhook harold-alerts-$name: create it first" >&2; break; }
+  id=$(alert_id "$name") || break
+  [ -n "$id" ] || { echo "no alert $name: create it first" >&2; break; }
   fill "webhook-$name.json" | hdx -X PUT "$HYPERDX_URL/api/v2/webhooks/$WEBHOOK_ID" --data-binary @-
-  id=$(hdx "$HYPERDX_URL/api/v2/alerts" | jq -r --arg name "$name" '.data[] | select(.name == $name) | .id')
   fill "alert-$name.json" | hdx -X PUT "$HYPERDX_URL/api/v2/alerts/$id" --data-binary @-
 done
 ```

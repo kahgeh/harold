@@ -2382,3 +2382,112 @@ fn the_create_loop_stops_when_a_lookup_fails() {
         "{calls:?}"
     );
 }
+
+fn update_alerts() -> String {
+    readme_block("Then update each alert's webhook")
+}
+
+/// The PUTs in `calls` to the webhook or alert with one of `ids`.
+fn puts_to(calls: &[String], ids: &[&serde_json::Value]) -> Vec<String> {
+    calls
+        .iter()
+        .filter(|call| {
+            call.starts_with("PUT ")
+                && ids
+                    .iter()
+                    .any(|id| call.ends_with(&format!("/{}", id.as_str().unwrap())))
+        })
+        .cloned()
+        .collect()
+}
+
+#[test]
+fn the_update_loop_stops_at_a_webhook_name_used_twice() {
+    let stand_in = StandIn::new();
+    stand_in.run(&create_alerts());
+    stand_in.run(
+        r#"fill webhook-slot-idle.json | hdx -X POST "$HYPERDX_URL/api/v2/webhooks" --data-binary @- >/dev/null"#,
+    );
+    let alert = stand_in.only("alerts", "slot-idle");
+    let webhooks: Vec<_> = stand_in
+        .objects("webhooks")
+        .into_iter()
+        .filter(|webhook| webhook["name"] == "harold-alerts-slot-idle")
+        .collect();
+    stand_in.forget_calls();
+    let stderr = stand_in.run(&update_alerts());
+    assert!(
+        stderr.contains("2 webhooks are named harold-alerts-slot-idle; delete all but one"),
+        "{stderr}"
+    );
+    let calls = stand_in.calls();
+    let mut ids: Vec<_> = webhooks.iter().map(|webhook| &webhook["id"]).collect();
+    ids.push(&alert["id"]);
+    assert_eq!(puts_to(&calls, &ids), Vec::<String>::new());
+    assert!(
+        !calls.iter().any(|call| call.ends_with(" empty")),
+        "{calls:?}"
+    );
+}
+
+#[test]
+fn the_update_loop_stops_at_a_missing_alert() {
+    let stand_in = StandIn::new();
+    stand_in.run(&create_alerts());
+    let missing = stand_in.only("alerts", "wrong-agent");
+    let file = format!("alerts/{}.json", missing["id"].as_str().unwrap());
+    std::fs::remove_file(stand_in.store.join(file)).unwrap();
+    stand_in.forget_calls();
+    let stderr = stand_in.run(&update_alerts());
+    assert!(
+        stderr.contains("no alert wrong-agent: create it first"),
+        "{stderr}"
+    );
+    let calls = stand_in.calls();
+    assert!(
+        !calls
+            .iter()
+            .any(|call| call == "PUT /api/v2/alerts/" || call.starts_with("PUT /api/v2/alerts/ ")),
+        "a PUT with no id: {calls:?}"
+    );
+    for name in ["phone-request-unavailable", "phone-request-slow"] {
+        let webhook = stand_in.only("webhooks", &format!("harold-alerts-{name}"));
+        let alert = stand_in.only("alerts", name);
+        assert_eq!(
+            puts_to(&calls, &[&webhook["id"], &alert["id"]]).len(),
+            2,
+            "{name}: {calls:?}"
+        );
+    }
+    for name in ["wrong-agent", "slot-idle"] {
+        let webhook = stand_in.only("webhooks", &format!("harold-alerts-{name}"));
+        assert_eq!(
+            puts_to(&calls, &[&webhook["id"]]),
+            Vec::<String>::new(),
+            "{name}"
+        );
+    }
+    let slot_idle = stand_in.only("alerts", "slot-idle");
+    assert_eq!(puts_to(&calls, &[&slot_idle["id"]]), Vec::<String>::new());
+}
+
+#[test]
+fn the_update_loop_stops_at_a_missing_webhook() {
+    let stand_in = StandIn::new();
+    stand_in.run(&create_alerts());
+    let missing = stand_in.only("webhooks", "harold-alerts-phone-request-slow");
+    let file = format!("webhooks/{}.json", missing["id"].as_str().unwrap());
+    std::fs::remove_file(stand_in.store.join(file)).unwrap();
+    stand_in.forget_calls();
+    let stderr = stand_in.run(&update_alerts());
+    assert!(
+        stderr.contains("no webhook harold-alerts-phone-request-slow: create it first"),
+        "{stderr}"
+    );
+    let calls = stand_in.calls();
+    let puts = calls.iter().filter(|call| call.starts_with("PUT")).count();
+    assert_eq!(
+        puts, 2,
+        "only phone-request-unavailable's webhook and alert: {calls:?}"
+    );
+}
