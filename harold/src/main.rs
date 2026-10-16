@@ -17,6 +17,7 @@ mod timed_prompts;
 mod tmux;
 mod util;
 mod voice_input;
+mod web_app;
 
 use std::sync::Arc;
 use std::time::Duration;

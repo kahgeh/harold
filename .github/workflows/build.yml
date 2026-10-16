@@ -45,6 +45,13 @@ jobs:
       - name: Build release binaries
         run: cargo build --locked --release --target aarch64-apple-darwin -p harold -p tmx-agent-dash
 
+      - name: Check no OpenSSL library is linked
+        run: |
+          if otool -L target/aarch64-apple-darwin/release/harold | grep -E 'libssl|libcrypto'; then
+            echo "harold links an OpenSSL library; vendored OpenSSL is required" >&2
+            exit 1
+          fi
+
       - name: Package and smoke test
         shell: bash
         env:

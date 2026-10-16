@@ -31,6 +31,11 @@ opentelemetry-otlp = { version = "=0.31.1", default-features = false, features =
 tracing-opentelemetry = { version = "=0.32.1", default-features = false }
 opentelemetry-appender-tracing = "=0.31.1"
 axum = { version = "0.8.8", default-features = false, features = ["http1", "tokio"] }
+web-push = { version = "=0.11.0", default-features = false }
+jwt-simple = { version = "=0.12.16", default-features = false, features = ["pure-rust"] }
+askama = { version = "=0.14.0", default-features = false, features = ["derive", "std"] }
+datastar = { version = "=0.3.1", default-features = false, features = ["axum"] }
+openssl = { version = "=0.10.75", features = ["vendored"] }
 
 [dev-dependencies]
 tokio = { version = "1.49.0", features = ["test-util"] }
