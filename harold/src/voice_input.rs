@@ -4,6 +4,7 @@
 mod hang_up;
 mod speech;
 mod wav;
+mod worker;
 
 /// The sample rate of the audio the call listens to.
 pub(crate) const SAMPLE_RATE: u32 = 16_000;
