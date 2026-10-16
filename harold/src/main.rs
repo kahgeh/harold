@@ -750,19 +750,24 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
             | cli::Mode::SendMessageToAwayDevice(_)
             | cli::Mode::Speak(_)
     );
-    let settings = settings::Settings::load().map_err(|error| -> Box<dyn std::error::Error> {
-        if is_probe {
-            return "invalid configuration".into();
-        }
-        error.into()
-    })?;
+    let launchd = started_by_launchd(&mode);
+    let settings = match settings::Settings::load() {
+        Ok(settings) => settings,
+        Err(_) if is_probe => return Err("invalid configuration".into()),
+        Err(error) if launchd => refuse_invalid_config(&error.to_string()),
+        Err(error) => return Err(error.into()),
+    };
 
     let errors = settings.validate();
     if !errors.is_empty() {
         if is_probe {
             return Err("invalid configuration".into());
         }
-        return Err(format!("invalid configuration: {}", errors.join("; ")).into());
+        let message = format!("invalid configuration: {}", errors.join("; "));
+        if launchd {
+            refuse_invalid_config(&message);
+        }
+        return Err(message.into());
     }
 
     match mode {
@@ -802,10 +807,28 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let store_path = cfg.store.resolved_path();
+    // Under launchd, count this start if the last run did not exit cleanly, and refuse it
+    // after a crash loop. A crash file that cannot be written leaves the guard off.
+    let mut guard = None;
+    if launchd {
+        let file = crash_guard::crash_file(std::path::Path::new(&store_path));
+        match crash_guard::begin(&file, std::time::SystemTime::now()) {
+            Ok(crash_guard::Start::Run(started)) => guard = Some(started),
+            Ok(crash_guard::Start::Refuse) => refuse_start("crash_loop", telemetry).await,
+            Err(error) => tracing::warn!(error = %error, "crash guard unavailable"),
+        }
+    }
     let store = match store::open_store(&store_path).await {
         Ok(store) => store,
         Err(error) => {
             let line = report_store_open_failure(&store_path, &error);
+            if let (true, Some(reason)) = (launchd, store_refusal_reason(&error)) {
+                // A refused start is not a crash: it must not count toward a crash loop.
+                if let Some(guard) = guard {
+                    mark_clean(guard);
+                }
+                refuse_start(reason, telemetry).await;
+            }
             telemetry.shutdown().await;
             exit_with_line(&line);
         }
@@ -897,9 +920,61 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
     let _ = timed_prompts_handle.await;
     telemetry_tasks.stopped().await;
     stop_agent_monitor(monitor_task, activity_provider, Duration::from_secs(1)).await;
+    if server_result.is_ok()
+        && let Some(guard) = guard
+    {
+        mark_clean(guard);
+    }
     telemetry.shutdown().await;
     server_result?;
     Ok(())
+}
+
+/// Whether launchd started this daemon: its plist sets `HAROLD_LAUNCHD=1`. Then a start that
+/// must not be retried exits 0, so `KeepAlive` does not restart it; any other way, it exits 1.
+fn started_by_launchd(mode: &cli::Mode) -> bool {
+    *mode == cli::Mode::Daemon
+        && std::env::var_os("HAROLD_LAUNCHD").is_some_and(|value| value == "1")
+}
+
+/// The reason a store that cannot be opened refuses a start under launchd, or `None` when
+/// opening it again might work.
+fn store_refusal_reason(error: &store::StoreError) -> Option<&'static str> {
+    match error {
+        store::StoreError::InUse => Some("store_in_use"),
+        store::StoreError::Data(text) if text == "incompatible state schema" => {
+            Some("store_incompatible")
+        }
+        _ => None,
+    }
+}
+
+/// Logs why launchd's start is refused and exits 0. Telemetry is shut down first, so the line
+/// is exported when the exporter is on.
+async fn refuse_start(reason: &'static str, telemetry: telemetry::TelemetryGuard) -> ! {
+    tracing::warn!(reason, "startup refused");
+    telemetry.shutdown().await;
+    std::process::exit(0)
+}
+
+/// Refuses launchd's start of a configuration that does not validate. Logging is not set up
+/// yet, so the error and the refusal go to standard error, which the plist sends to the log.
+fn refuse_invalid_config(message: &str) -> ! {
+    eprintln!("Error: {message}");
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .with_ansi(false)
+        .finish();
+    tracing::subscriber::with_default(subscriber, || {
+        tracing::warn!(reason = "invalid_config", "startup refused");
+    });
+    std::process::exit(0)
+}
+
+fn mark_clean(guard: crash_guard::CrashGuard) {
+    if let Err(error) = guard.mark_clean() {
+        tracing::warn!(error = %error, "crash guard could not record a clean exit");
+    }
 }
 
 /// The pod facts and the alert address, each started only when its `[telemetry]` key is

@@ -756,3 +756,167 @@ fn help_lists_the_away_message_command() {
         "{help}"
     );
 }
+
+/// A valid configuration whose gRPC port Harold cannot bind, so a daemon that got past its
+/// start-up checks by mistake exits instead of serving beside the installed Harold.
+const DAEMON: &str =
+    "[imessage]\nrecipient = 'secret-recipient'\nhandle_ids = [999]\n[grpc]\nport = 1\n";
+
+impl Fixture {
+    /// The store a daemon run uses: `data/store` in the fixture folder, as in a bundle.
+    fn store(&self) -> PathBuf {
+        self.0.join("data/store")
+    }
+
+    /// The crash guard's file beside the store.
+    fn crashes(&self) -> PathBuf {
+        self.0.join("data/crashes")
+    }
+
+    /// Runs `harold` as the daemon, as launchd starts it when `launchd` is set, and returns
+    /// its output once it exits.
+    fn daemon(&self, launchd: bool) -> Output {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_harold"));
+        for (name, _) in std::env::vars_os() {
+            if name.to_string_lossy().starts_with("HAROLD") {
+                command.env_remove(name);
+            }
+        }
+        if launchd {
+            command.env("HAROLD_LAUNCHD", "1");
+        }
+        let mut child = command
+            .env("HAROLD_CONFIG_DIR", &self.0)
+            .env("HAROLD_ENV", "local")
+            .env("HAROLD__STORE__PATH", self.store())
+            .env("NO_COLOR", "1")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(8);
+        while child.try_wait().unwrap().is_none() {
+            if Instant::now() >= deadline {
+                child.kill().unwrap();
+                let output = child.wait_with_output().unwrap();
+                panic!("daemon did not exit: {output:?}");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        child.wait_with_output().unwrap()
+    }
+}
+
+/// The `startup refused` line in a daemon's output, with its colours taken out.
+fn refusal(output: &Output) -> Option<String> {
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let mut plain = String::new();
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            chars.by_ref().find(|c| c.is_ascii_alphabetic());
+        } else {
+            plain.push(c);
+        }
+    }
+    plain
+        .lines()
+        .find(|line| line.contains("startup refused"))
+        .map(str::to_owned)
+}
+
+/// Asserts the daemon exited 0 and logged `startup refused` with `reason`, and prints the line.
+fn assert_refused(output: &Output, reason: &str) {
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    let line = refusal(output).unwrap_or_else(|| panic!("no startup refused line: {output:?}"));
+    assert!(line.contains(&format!("reason=\"{reason}\"")), "{line}");
+    eprintln!("{line}");
+}
+
+/// Asserts the daemon, started other than by launchd, exited 1 as before, without a refusal.
+fn assert_failed(output: &Output) {
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert_eq!(refusal(output), None);
+}
+
+fn locked_store(fixture: &Fixture) -> std::fs::File {
+    std::fs::create_dir_all(fixture.store()).unwrap();
+    let lock = std::fs::File::create(fixture.store().join("harold.lock")).unwrap();
+    lock.try_lock().unwrap();
+    lock
+}
+
+async fn incompatible_store(fixture: &Fixture) {
+    std::fs::create_dir_all(fixture.store()).unwrap();
+    let path = fixture.store().join("harold-state.db");
+    let database = turso::Builder::new_local(path.to_str().unwrap())
+        .build()
+        .await
+        .unwrap();
+    let conn = database.connect().unwrap();
+    conn.execute(
+        "CREATE TABLE _migrations (id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE, \
+         checksum TEXT NOT NULL, applied_at_ms INTEGER NOT NULL)",
+        (),
+    )
+    .await
+    .unwrap();
+    conn.execute(
+        "INSERT INTO _migrations (name, checksum, applied_at_ms) VALUES ('unknown_schema', 'unknown', 0)",
+        (),
+    )
+    .await
+    .unwrap();
+}
+
+#[test]
+fn under_launchd_an_invalid_config_exits_zero_and_says_why() {
+    let fixture = Fixture::new("");
+    assert_refused(&fixture.daemon(true), "invalid_config");
+    assert_failed(&fixture.daemon(false));
+}
+
+#[test]
+fn under_launchd_a_store_in_use_exits_zero_and_says_why() {
+    let fixture = Fixture::new(DAEMON);
+    let _lock = locked_store(&fixture);
+    assert_refused(&fixture.daemon(true), "store_in_use");
+    // A refused start is not a crash: the guard's mark is clean again.
+    let crashes = std::fs::read_to_string(fixture.crashes()).unwrap();
+    assert_eq!(crashes.lines().next(), Some("clean"));
+    assert_failed(&fixture.daemon(false));
+}
+
+#[tokio::test]
+async fn under_launchd_an_incompatible_store_exits_zero_and_says_why() {
+    let fixture = Fixture::new(DAEMON);
+    incompatible_store(&fixture).await;
+    assert_refused(&fixture.daemon(true), "store_incompatible");
+    assert_failed(&fixture.daemon(false));
+}
+
+#[test]
+fn under_launchd_a_crash_loop_exits_zero_and_says_why() {
+    let fixture = Fixture::new(DAEMON);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    std::fs::create_dir_all(fixture.crashes().parent().unwrap()).unwrap();
+    std::fs::write(
+        fixture.crashes(),
+        format!("running\n{}\n{}\n", now - 60, now - 30),
+    )
+    .unwrap();
+    assert_refused(&fixture.daemon(true), "crash_loop");
+    assert!(
+        !fixture.store().exists(),
+        "a refused start opened the store"
+    );
+    let crashes = std::fs::read_to_string(fixture.crashes()).unwrap();
+    assert_eq!(crashes.lines().next(), Some("gave-up"));
+}
