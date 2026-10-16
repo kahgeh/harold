@@ -192,7 +192,7 @@ async fn idle_handler_stops_when_shutdown_channel_closes() {
     let store = Arc::new(HaroldStore::open(&directory.0).await.unwrap());
     let snapshots = AgentSnapshotHub::new(store.load_agent_snapshot().await.unwrap());
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(());
-    let task = tokio::spawn(run_event_handler(store, snapshots, None, None, shutdown_rx));
+    let task = tokio::spawn(run_event_handler(store, snapshots, None, shutdown_rx));
 
     drop(shutdown_tx);
 
@@ -3526,4 +3526,28 @@ async fn a_failed_thread_write_is_retryable_and_sends_nothing() {
     assert!(with.environment.delivered().is_empty());
     assert!(with.environment.voice_notes().is_empty());
     assert!(with.environment.reply_targets().is_empty());
+}
+
+#[tokio::test]
+async fn a_chief_turn_end_records_the_app_as_its_channel_and_the_fallback_as_today() {
+    for (delivery, channel) in [
+        (AppDelivery::Pushed, "app"),
+        (AppDelivery::NotPushed, "imessage"),
+    ] {
+        let directory = TestDirectory::new();
+        let with = with_app(&directory, chief_and_pod(), FakeApp::new(delivery)).await;
+        let event_id = uuid::Uuid::new_v4();
+        let (_, parent) = keep_a_turn_for(event_id);
+
+        let outcome = dispatch_turn_end(&Unpaused(with.dispatcher), &event_id.to_string(), "%1");
+
+        assert!(
+            matches!(outcome, Ok(DeliveryOutcome::Delivered)),
+            "{channel}"
+        );
+        assert_eq!(with.app.delivered().len(), 1, "{channel}");
+        let deliveries = deliveries_under(parent);
+        assert_eq!(deliveries.len(), 1, "{channel}");
+        assert_eq!(attr(&deliveries[0], "channel"), channel);
+    }
 }

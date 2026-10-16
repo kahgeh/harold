@@ -334,6 +334,9 @@ pub(crate) fn deliver_from_chief(
     }
 }
 
+/// The `channel` attribute of a turn-end update the web app carried.
+const APP_CHANNEL: &str = "app";
+
 /// Send a locked-screen turn-end update of a chief's pane by the app route. The update is
 /// the turn's summary; iMessage gets it with the pane's address, as a requested message.
 /// The source agent is returned only when iMessage carried it.
@@ -341,17 +344,18 @@ fn deliver_turn_from_chief(
     chief_app: &ChiefApp<'_>,
     turn: &TurnCompleted,
     event_id: &str,
-) -> Result<(DeliveryOutcome, Option<AgentAddress>), String> {
+) -> Result<(CarriedBy, Option<AgentAddress>), String> {
     let text = chief_app.away.summarise(turn);
     let away_text = agent_message_text(&chief_app.away.machine_name(), &turn.pane_label, &text);
-    let source = match deliver_from_chief(chief_app, event_id, &text, &away_text)? {
+    let carried_by = deliver_from_chief(chief_app, event_id, &text, &away_text)?;
+    let source = match carried_by {
         CarriedBy::App => None,
         CarriedBy::Away => Some(AgentAddress::TmuxPane {
             pane_id: turn.pane_id.clone(),
             label: turn.pane_label.clone(),
         }),
     };
-    Ok((DeliveryOutcome::Delivered, source))
+    Ok((carried_by, source))
 }
 
 /// What `notify` remembers between events. Kept in memory: a restart forgets it.
@@ -446,6 +450,10 @@ pub(crate) fn notify(
 /// `app` is given only for a chief's pane. It changes the send alone: where `notify` would
 /// send the update on `OutboundChannel::Away`, the update goes by `deliver_from_chief`
 /// under `event_id`. Every check before the send is as in `notify`.
+///
+/// The current span's `channel` is `app` when the app carried the update, and the away
+/// channel's name otherwise. A span keeps every value recorded for a field, so on the app
+/// route the channel is recorded once, on return, when it is known.
 pub(crate) fn notify_with_app(
     turn: &TurnCompleted,
     event_id: &str,
@@ -454,6 +462,36 @@ pub(crate) fn notify_with_app(
     agents: &left_out::TrackedAgents,
     environment: &dyn NotifyEnvironment,
     app: Option<&ChiefApp<'_>>,
+) -> Result<DeliveryOutcome, String> {
+    let mut app_route_channel = None;
+    let notified = notify_routed(
+        turn,
+        event_id,
+        trace_id,
+        state,
+        agents,
+        environment,
+        app,
+        &mut app_route_channel,
+    );
+    if let Some(channel) = app_route_channel {
+        tracing::Span::current().record("channel", channel);
+    }
+    notified
+}
+
+/// The body of `notify_with_app`. On the app route it leaves the `channel` to record in
+/// `app_route_channel` instead of recording it.
+#[allow(clippy::too_many_arguments)]
+fn notify_routed(
+    turn: &TurnCompleted,
+    event_id: &str,
+    trace_id: &str,
+    state: &NotifyState,
+    agents: &left_out::TrackedAgents,
+    environment: &dyn NotifyEnvironment,
+    app: Option<&ChiefApp<'_>>,
+    app_route_channel: &mut Option<&'static str>,
 ) -> Result<DeliveryOutcome, String> {
     let now = environment.now();
     // Removed before any other check, so a mark affects one turn at most.
@@ -494,8 +532,19 @@ pub(crate) fn notify_with_app(
     } else {
         OutboundChannel::Tts
     };
-    // Recorded on `harold.delivery` when the update is delivered inside it.
-    tracing::Span::current().record("channel", channel_name(channel, &cfg.away_channel));
+    // Recorded on `harold.delivery` when the update is delivered inside it. The app route
+    // records it on return, once the route that carried the update is known.
+    let app_route = match (channel, app) {
+        (OutboundChannel::Away, Some(chief_app)) => Some(chief_app),
+        _ => None,
+    };
+    let name = channel_name(channel, &cfg.away_channel);
+    match app_route {
+        Some(_) => *app_route_channel = Some(name),
+        None => {
+            tracing::Span::current().record("channel", name);
+        }
+    }
 
     // The voice mute and the messaging pause skip as they always have, before any rule
     // below is looked at: a paused update would not go to the phone.
@@ -525,11 +574,16 @@ pub(crate) fn notify_with_app(
         return leave_out(state, dedup_key, now, &turn.pane_id, &reason);
     }
 
-    let delivered = match (channel, app) {
-        (OutboundChannel::Away, Some(chief_app)) => {
-            deliver_turn_from_chief(chief_app, turn, event_id)
+    let delivered = match app_route {
+        Some(chief_app) => {
+            deliver_turn_from_chief(chief_app, turn, event_id).map(|(carried_by, source)| {
+                if carried_by == CarriedBy::App {
+                    *app_route_channel = Some(APP_CHANNEL);
+                }
+                (DeliveryOutcome::Delivered, source)
+            })
         }
-        _ => environment.deliver(&channel, turn, trace_id),
+        None => environment.deliver(&channel, turn, trace_id),
     };
     let (outcome, source_agent) = match delivered {
         Ok(delivered) => delivered,

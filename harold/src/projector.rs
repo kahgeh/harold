@@ -764,6 +764,17 @@ pub async fn run_event_handler(
     store: Arc<HaroldStore>,
     snapshots: AgentSnapshotHub,
     alerts: Option<AlertQueue>,
+    shutdown: watch::Receiver<()>,
+) {
+    run_event_handler_with_app(store, snapshots, alerts, None, shutdown).await;
+}
+
+/// `run_event_handler` with `app`: when it is set, the chief's messages to the phone go to
+/// the web app.
+pub async fn run_event_handler_with_app(
+    store: Arc<HaroldStore>,
+    snapshots: AgentSnapshotHub,
+    alerts: Option<AlertQueue>,
     app: Option<Arc<dyn AppRoute>>,
     shutdown: watch::Receiver<()>,
 ) {

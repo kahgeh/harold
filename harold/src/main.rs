@@ -934,7 +934,6 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
         Arc::clone(&store),
         snapshots.clone(),
         telemetry_tasks.alert_queue.clone(),
-        None,
         shutdown_rx.clone(),
     ));
     let listener_handle = tokio::spawn(channels::listen_for_inbound_messages(
