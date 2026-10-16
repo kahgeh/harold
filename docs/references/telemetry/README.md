@@ -509,10 +509,12 @@ for name in phone-request-unavailable phone-request-slow wrong-agent slot-idle; 
 done
 ```
 
-A HyperDX set up from the earlier single-webhook files has one webhook named `harold-alerts` and none of the four. Create the four with this loop, then run the update loop above:
+A HyperDX set up from the earlier single-webhook files has one webhook named `harold-alerts` and none of the four. Create the four with this loop, which skips any that already exist, then run the update loop above:
 
 ```sh
 for name in phone-request-unavailable phone-request-slow wrong-agent slot-idle; do
+  WEBHOOK_ID=$(webhook_id "harold-alerts-$name") || break
+  [ -z "$WEBHOOK_ID" ] || continue
   fill "webhook-$name.json" | hdx -X POST "$HYPERDX_URL/api/v2/webhooks" --data-binary @- | jq -r '.data.id // .id'
 done
 ```

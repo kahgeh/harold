@@ -2491,3 +2491,29 @@ fn the_update_loop_stops_at_a_missing_webhook() {
         "only phone-request-unavailable's webhook and alert: {calls:?}"
     );
 }
+
+#[test]
+fn the_old_setup_loop_creates_only_the_missing_webhooks() {
+    let stand_in = StandIn::new();
+    stand_in.run(
+        r#"echo '{"name": "harold-alerts"}' | hdx -X POST "$HYPERDX_URL/api/v2/webhooks" --data-binary @- >/dev/null
+for name in phone-request-slow slot-idle; do
+  fill "webhook-$name.json" | hdx -X POST "$HYPERDX_URL/api/v2/webhooks" --data-binary @- >/dev/null
+done"#,
+    );
+    let kept = ["phone-request-slow", "slot-idle"]
+        .map(|name| stand_in.only("webhooks", &format!("harold-alerts-{name}"))["id"].clone());
+    stand_in.forget_calls();
+    let stderr = stand_in.run(&readme_block("A HyperDX set up from the earlier"));
+    assert_eq!(stand_in.objects("webhooks").len(), 5, "{stderr}");
+    for name in crate::alerts::ALERT_NAMES {
+        stand_in.only("webhooks", &format!("harold-alerts-{name}"));
+    }
+    for (name, id) in ["phone-request-slow", "slot-idle"].iter().zip(&kept) {
+        let webhook = stand_in.only("webhooks", &format!("harold-alerts-{name}"));
+        assert_eq!(&webhook["id"], id, "{name}");
+    }
+    let calls = stand_in.calls();
+    let posts = calls.iter().filter(|call| call.starts_with("POST")).count();
+    assert_eq!(posts, 2, "{calls:?}");
+}
