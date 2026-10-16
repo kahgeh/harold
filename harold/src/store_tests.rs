@@ -2114,3 +2114,19 @@ async fn a_failing_spell_before_the_queue_is_set_queues_no_cleared_line() {
 
     assert!(queued(&mut alerts).is_empty());
 }
+
+#[tokio::test(start_paused = true)]
+async fn an_empty_append_writes_nothing_so_it_is_not_a_try() {
+    let directory = TestDirectory::new();
+    let store = HaroldStore::open(directory.path()).await.unwrap();
+    time_out_one_write(&store).await;
+    store.fault_log_flush_for_test(None);
+    tokio::time::advance(Duration::from_secs(30)).await;
+
+    let appended = append_agent_events(&store, Vec::new()).await.unwrap();
+
+    assert!(appended.events.is_empty());
+    assert!(store.is_failing());
+    write(&store).await.unwrap();
+    assert!(!store.is_failing());
+}

@@ -280,6 +280,9 @@ impl StoreHealth {
 
     /// Marks a healthy store failing. A store already failing stays as it is.
     fn mark_failing(&self, kind: WriteKind) {
+        // Read once, so the line queued and `alerted` agree if `main` hands the queue over
+        // meanwhile.
+        let alerts = self.alerts.get();
         {
             let mut health = self.lock();
             if matches!(*health, Health::Failing { .. }) {
@@ -288,7 +291,7 @@ impl StoreHealth {
             *health = Health::Failing {
                 next_try_at: Instant::now() + STORE_WRITE_LIMIT,
                 trying: false,
-                alerted: self.alerts.get().is_some(),
+                alerted: alerts.is_some(),
             };
         }
         warn!(
@@ -297,7 +300,7 @@ impl StoreHealth {
             reason = kind.reason(),
             "store failing"
         );
-        if let Some(alerts) = self.alerts.get() {
+        if let Some(alerts) = alerts {
             alerts.firing(crate::alerts::STORE_FAILING);
         }
     }
@@ -477,8 +480,13 @@ impl HaroldStore {
         let _ = self.health.alerts.set(queue);
     }
 
-    /// Appends `batch` to the event log through the store's health check.
+    /// Appends `batch` to the event log through the store's health check. An empty batch
+    /// writes nothing, so it skips the check: it is neither refused nor a try.
     async fn append(&self, batch: impl IntoIterator<Item = NewEvent>) -> Result<AppendResult> {
+        let batch: Vec<NewEvent> = batch.into_iter().collect();
+        if batch.is_empty() {
+            return self.stream.append(batch).await;
+        }
         self.health
             .write(WriteKind::Log, self.stream.append(batch))
             .await
