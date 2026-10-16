@@ -436,13 +436,14 @@ While a line waits, Harold keeps reading posts:
 
 - a repeat of the waiting line changes nothing;
 - a `cleared` that arrives while its `firing` waits untyped cancels both, logged as one `alert repeat held back` with `reason = never_fired`;
+- a `firing` that arrives while a `cleared` waits, the chief having been told `firing`, cancels both, logged as one `alert repeat held back` with `reason = repeat`;
 - lines waiting for different alerts are typed oldest first.
 
-A line is dropped, and logged as `alert not delivered (<reason>)`, only when:
+A line is dropped only when:
 
-- the queue of 32 lines not yet read is full (`queue_full`). The post is still answered 204. Repeats are read and held back as they arrive, so they do not fill it;
-- Harold is stopping (`shutting_down`). Lines still waiting are abandoned;
-- the line was typed and Enter failed (`enter_failed`). It is not typed again, and counts as told, since it sits in the chief's input box.
+- the queue of 32 lines not yet read is full, logged as `alert not delivered (queue_full)`. The post is still answered 204. Repeats are read and held back as they arrive, so they do not fill it;
+- Harold is stopping. A line queued after delivery stopped is logged as `alert not delivered (shutting_down)`; lines still waiting are abandoned without a log line;
+- the line was typed and Enter failed, logged as `alert not delivered (enter_failed)`. It is not typed again, and counts as told, since it sits in the chief's input box.
 
 ### After a restart
 
