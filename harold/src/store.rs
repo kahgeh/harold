@@ -185,7 +185,6 @@ pub(crate) const STORE_WRITE_LIMIT: Duration = Duration::from_secs(30);
 #[derive(Debug, Clone, Copy)]
 enum WriteKind {
     Log,
-    #[expect(dead_code, reason = "the delivery writes use it in the next task")]
     State,
 }
 
@@ -365,6 +364,8 @@ pub struct HaroldStore {
     fail_next_monitor_append: std::sync::atomic::AtomicBool,
     #[cfg(test)]
     fail_next_snapshot_load: std::sync::atomic::AtomicBool,
+    #[cfg(test)]
+    state_write_fault: std::sync::Mutex<Option<WriteFault>>,
     /// The store folder's lock. Declared last, so the log is dropped before it is released.
     _lock: StoreLock,
 }
@@ -449,6 +450,8 @@ impl HaroldStore {
             fail_next_monitor_append: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)]
             fail_next_snapshot_load: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            state_write_fault: std::sync::Mutex::new(None),
             _lock: lock,
         })
     }
@@ -464,10 +467,6 @@ impl HaroldStore {
 
     /// Whether the store is marked failing: its writes are refused but for one try every
     /// 30 seconds.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the delivery loop reads it in the next task")
-    )]
     pub(crate) fn is_failing(&self) -> bool {
         self.health.is_failing()
     }
@@ -762,9 +761,8 @@ impl HaroldStore {
     }
 
     pub async fn mark_delivered(&self, event_id: &str) -> Result<()> {
-        let conn = self.state.connect()?;
         let now_ms = (time::OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000) as i64;
-        conn.execute(
+        self.delivery_write(
             r#"
             UPDATE delivery_outbox
             SET delivered_at_ms = ?1, last_error = NULL
@@ -772,13 +770,11 @@ impl HaroldStore {
             "#,
             (now_ms, event_id),
         )
-        .await?;
-        Ok(())
+        .await
     }
 
     pub async fn record_delivery_failure(&self, event_id: &str, error: &str) -> Result<()> {
-        let conn = self.state.connect()?;
-        conn.execute(
+        self.delivery_write(
             r#"
             UPDATE delivery_outbox
             SET attempt_count = attempt_count + 1, last_error = ?1
@@ -786,14 +782,12 @@ impl HaroldStore {
             "#,
             (error, event_id),
         )
-        .await?;
-        Ok(())
+        .await
     }
 
     pub async fn mark_undeliverable(&self, event_id: &str, error: &str) -> Result<()> {
-        let conn = self.state.connect()?;
         let now_ms = (time::OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000) as i64;
-        conn.execute(
+        self.delivery_write(
             r#"
             UPDATE delivery_outbox
             SET attempt_count = attempt_count + 1,
@@ -803,8 +797,31 @@ impl HaroldStore {
             "#,
             (error, now_ms, event_id),
         )
-        .await?;
-        Ok(())
+        .await
+    }
+
+    /// One of the delivery loop's writes to the state database, through the store's health
+    /// check: one that fails or takes over 30 seconds marks the store failing.
+    async fn delivery_write(&self, sql: &str, params: impl turso::IntoParams) -> Result<()> {
+        self.health
+            .write(WriteKind::State, async {
+                let conn = self.state.connect()?;
+                #[cfg(test)]
+                {
+                    let fault = *self.state_write_fault.lock().expect("state fault lock");
+                    event_log::apply_fault_for_test(fault).await?;
+                }
+                conn.execute(sql, params).await?;
+                Ok(())
+            })
+            .await
+    }
+
+    /// Makes every later delivery write to the state database hang or fail, until set to
+    /// `None`.
+    #[cfg(test)]
+    pub(crate) fn fault_state_writes_for_test(&self, fault: Option<WriteFault>) {
+        *self.state_write_fault.lock().expect("state fault lock") = fault;
     }
 }
 

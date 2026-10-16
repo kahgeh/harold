@@ -390,6 +390,11 @@ pub(crate) enum HandlerError {
 
     #[error("delivery failed: {error}")]
     Delivery { error: String, retry_in: Duration },
+
+    /// The row was sent, but the outbox could not store that, so the store is failing. The
+    /// row must be marked delivered later, not sent again.
+    #[error("delivery sent but not marked delivered: {error}")]
+    NotMarkedDelivered { event_id: String, error: StoreError },
 }
 
 #[cfg(test)]
@@ -453,7 +458,9 @@ async fn handle_next_delivery_inner(
 
     match result {
         Ok(outcome) => {
-            store.mark_delivered(&event_id).await?;
+            if let Err(error) = store.mark_delivered(&event_id).await {
+                return Err(HandlerError::NotMarkedDelivered { event_id, error });
+            }
             if outcome == DeliveryOutcome::Skipped {
                 in_delivery(delivering.as_ref(), || {
                     info!(
@@ -670,6 +677,10 @@ pub async fn run_event_handler(
 /// send, the same row is tried again once its wait is up, and no later row is tried
 /// meanwhile. Events are still projected during the wait, every POLL_INTERVAL, so the
 /// agent snapshots stay current.
+///
+/// While the store is failing, nothing is projected or sent: the loop only waits
+/// POLL_INTERVAL between checks. A row that was sent but could not be marked delivered is
+/// marked later, before anything else, and never sent again.
 async fn run_deliveries(
     store: Arc<HaroldStore>,
     dispatcher: Arc<dyn DeliveryDispatcher>,
@@ -678,9 +689,26 @@ async fn run_deliveries(
     mut shutdown: watch::Receiver<()>,
 ) {
     let mut retry_at: Option<tokio::time::Instant> = None;
+    let mut unmarked: Option<String> = None;
     loop {
         if shutdown.has_changed().unwrap_or(true) {
             break;
+        }
+        if let Some(event_id) = &unmarked {
+            if store.mark_delivered(event_id).await.is_ok() {
+                unmarked = None;
+                continue;
+            }
+            if wait_or_shutdown(&mut shutdown, POLL_INTERVAL).await {
+                break;
+            }
+            continue;
+        }
+        if store.is_failing() {
+            if wait_or_shutdown(&mut shutdown, POLL_INTERVAL).await {
+                break;
+            }
+            continue;
         }
         if let Some(at) = retry_at {
             let now = tokio::time::Instant::now();
@@ -712,6 +740,11 @@ async fn run_deliveries(
             Err(HandlerError::Delivery { error, retry_in }) => {
                 warn!(error = %error, "event handler cycle failed");
                 retry_at = Some(tokio::time::Instant::now() + retry_in);
+                continue;
+            }
+            Err(HandlerError::NotMarkedDelivered { event_id, error }) => {
+                warn!(error = %error, "event handler cycle failed");
+                unmarked = Some(event_id);
                 continue;
             }
             Err(error) => {

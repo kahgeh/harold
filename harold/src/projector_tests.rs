@@ -20,9 +20,9 @@ use crate::outbound::fake::{CapturedLogs, FakeEnvironment};
 use crate::outbound::{DeliveryOutcome, SystemEnvironment};
 use crate::store::{
     AwayMessageRequested, EventVersion, HaroldStore, InboundMessage, NewEvent, PendingDelivery,
-    SpokenLineRequested, TurnCompleted, append_agent_events, append_away_message_requested,
-    append_inbound_message, append_messaging_paused_changed, append_spoken_line_requested,
-    append_turn_completed,
+    SpokenLineRequested, TurnCompleted, WriteFault, append_agent_events,
+    append_away_message_requested, append_inbound_message, append_messaging_paused_changed,
+    append_spoken_line_requested, append_turn_completed,
 };
 use crate::telemetry::{self, ResolvedBy, Routing};
 
@@ -3037,4 +3037,214 @@ async fn a_turn_end_failing_ten_times_records_nine_failed_deliveries_then_given_
     let mut expected = vec!["failed"; 9];
     expected.push("given_up");
     assert_eq!(outcomes, expected);
+}
+
+// ---------------------------------------------------------------------------
+// A failing store
+// ---------------------------------------------------------------------------
+
+struct PermanentDispatcher;
+
+impl DeliveryDispatcher for PermanentDispatcher {
+    fn dispatch(&self, _delivery: &PendingDelivery) -> Result<DeliveryOutcome, DispatchError> {
+        Err(DispatchError::Permanent("bad payload".into()))
+    }
+}
+
+/// Stores one reply and returns its outbox row's event id.
+async fn one_reply(store: &HaroldStore) -> String {
+    append_inbound_message(
+        store,
+        &InboundMessage {
+            text: "carry on".into(),
+            forwarded: false,
+        },
+    )
+    .await
+    .unwrap();
+    store.project_unhandled_events(10).await.unwrap();
+    store
+        .next_pending_delivery()
+        .await
+        .unwrap()
+        .expect("the reply is pending")
+        .event_id
+}
+
+async fn outbox_row(store: &HaroldStore, event_id: &str) -> crate::store::OutboxRow {
+    store
+        .outbox_row_for_test(event_id)
+        .await
+        .unwrap()
+        .expect("the outbox row")
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_sent_row_whose_mark_delivered_fails_is_sent_once_and_marked_after_recovery() {
+    let directory = TestDirectory::new();
+    let store = Arc::new(HaroldStore::open(&directory.0).await.unwrap());
+    let event_id = one_reply(&store).await;
+    store.fault_state_writes_for_test(Some(WriteFault::Fail));
+    let dispatcher = Arc::new(RecordingDispatcher::default());
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(());
+    let task = tokio::spawn(super::run_deliveries(
+        Arc::clone(&store),
+        dispatcher.clone(),
+        None,
+        None,
+        shutdown_rx,
+    ));
+
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert_eq!(dispatcher.event_types.lock().unwrap().len(), 1);
+    assert!(store.is_failing());
+    assert_eq!(outbox_row(&store, &event_id).await.delivered_at_ms, None);
+
+    tokio::time::sleep(Duration::from_secs(28)).await;
+    assert_eq!(dispatcher.event_types.lock().unwrap().len(), 1);
+    store.fault_state_writes_for_test(None);
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    assert!(
+        outbox_row(&store, &event_id)
+            .await
+            .delivered_at_ms
+            .is_some()
+    );
+    assert_eq!(dispatcher.event_types.lock().unwrap().len(), 1);
+    assert!(!store.is_failing());
+    drop(shutdown_tx);
+    task.await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_mark_delivered_that_never_returns_fails_after_30_seconds() {
+    let directory = TestDirectory::new();
+    let store = HaroldStore::open(&directory.0).await.unwrap();
+    one_reply(&store).await;
+    store.fault_state_writes_for_test(Some(WriteFault::Hang));
+    let started = tokio::time::Instant::now();
+
+    let error = handle_next_delivery(&store, Arc::new(RecordingDispatcher::default()))
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(error, super::HandlerError::NotMarkedDelivered { .. }),
+        "{error}"
+    );
+    assert!(started.elapsed() >= Duration::from_secs(30));
+    assert!(store.is_failing());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_failing_record_delivery_failure_marks_the_store_failing_and_keeps_the_try_count() {
+    let directory = TestDirectory::new();
+    let store = HaroldStore::open(&directory.0).await.unwrap();
+    let event_id = one_reply(&store).await;
+    store.fault_state_writes_for_test(Some(WriteFault::Fail));
+
+    let error = handle_next_delivery(&store, Arc::new(FailingDispatcher))
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, super::HandlerError::Store(_)), "{error}");
+    assert!(store.is_failing());
+    let row = outbox_row(&store, &event_id).await;
+    assert_eq!(row.attempt_count, 0);
+    assert_eq!(row.delivered_at_ms, None);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_failing_mark_undeliverable_marks_the_store_failing_and_keeps_the_try_count() {
+    let directory = TestDirectory::new();
+    let store = HaroldStore::open(&directory.0).await.unwrap();
+    let event_id = one_reply(&store).await;
+    store.fault_state_writes_for_test(Some(WriteFault::Fail));
+
+    let error = handle_next_delivery(&store, Arc::new(PermanentDispatcher))
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, super::HandlerError::Store(_)), "{error}");
+    assert!(store.is_failing());
+    let row = outbox_row(&store, &event_id).await;
+    assert_eq!(row.attempt_count, 0);
+    assert_eq!(row.delivered_at_ms, None);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_give_up_whose_mark_undeliverable_fails_says_nothing_until_it_is_stored() {
+    let logs = CapturedLogs::start();
+    let directory = TestDirectory::new();
+    let store = HaroldStore::open(&directory.0).await.unwrap();
+    let event_id = one_reply(&store).await;
+    let (alerts, mut alert_rx) = crate::alerts::AlertQueue::new();
+    for _ in 0..9 {
+        assert!(
+            super::handle_next_delivery_alerting(&store, Arc::new(FailingDispatcher), &alerts)
+                .await
+                .is_err()
+        );
+    }
+    store.fault_state_writes_for_test(Some(WriteFault::Fail));
+
+    let error = super::handle_next_delivery_alerting(&store, Arc::new(FailingDispatcher), &alerts)
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, super::HandlerError::Store(_)), "{error}");
+    assert!(!logs.text().contains("delivery given up"));
+    assert!(alert_rx.try_recv().is_err());
+    assert_eq!(outbox_row(&store, &event_id).await.attempt_count, 9);
+
+    store.fault_state_writes_for_test(None);
+    tokio::time::advance(Duration::from_secs(30)).await;
+    assert!(
+        super::handle_next_delivery_alerting(&store, Arc::new(FailingDispatcher), &alerts)
+            .await
+            .unwrap()
+    );
+    assert_eq!(logs.text().matches("delivery given up").count(), 1);
+    let (line, _) = alert_rx.try_recv().unwrap();
+    assert_eq!(line, "harold alert: delivery-given-up firing");
+    assert!(!store.is_failing());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_failing_store_sends_nothing_until_it_recovers() {
+    let directory = TestDirectory::new();
+    let store = Arc::new(HaroldStore::open(&directory.0).await.unwrap());
+    one_reply(&store).await;
+    store.fault_log_flush_for_test(Some(WriteFault::Hang));
+    assert!(
+        append_messaging_paused_changed(&store, false)
+            .await
+            .is_err()
+    );
+    store.fault_log_flush_for_test(None);
+    let dispatcher = Arc::new(RecordingDispatcher::default());
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(());
+    let task = tokio::spawn(super::run_deliveries(
+        Arc::clone(&store),
+        dispatcher.clone(),
+        None,
+        None,
+        shutdown_rx,
+    ));
+
+    tokio::time::sleep(Duration::from_secs(10)).await;
+    assert!(dispatcher.event_types.lock().unwrap().is_empty());
+    tokio::time::sleep(Duration::from_secs(20)).await;
+    append_messaging_paused_changed(&store, false)
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    assert_eq!(
+        *dispatcher.event_types.lock().unwrap(),
+        ["InboundMessageReceived"]
+    );
+    drop(shutdown_tx);
+    task.await.unwrap();
 }
