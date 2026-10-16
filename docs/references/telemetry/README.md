@@ -444,11 +444,13 @@ fill() {
       -e "s/@WEBHOOK_ID@/$WEBHOOK_ID/g" "docs/references/telemetry/hyperdx/$1"
 }
 
-# The id of the one webhook or alert named $1. Nothing if none has the name; a failure if more than one does.
+# The id of the one webhook or alert named $1. Nothing if none has the name; a failure if more than one does,
+# or if HyperDX cannot be reached or does not answer with a list.
 webhook_id() { named webhooks "$1"; }
 alert_id() { named alerts "$1"; }
 named() {
-  _ids=$(hdx "$HYPERDX_URL/api/v2/$1" | jq -r --arg name "$2" '.data[] | select(.name == $name) | .id') || return
+  _list=$(hdx "$HYPERDX_URL/api/v2/$1") || return
+  _ids=$(printf '%s' "$_list" | jq -n -r --arg name "$2" 'input | .data[] | select(.name == $name) | .id') || return
   _count=$(printf '%s' "$_ids" | grep -c .)
   [ "$_count" -le 1 ] || { echo "$_count $1 are named $2; delete all but one" >&2; return 1; }
   printf '%s' "$_ids"

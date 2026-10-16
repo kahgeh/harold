@@ -2194,7 +2194,9 @@ fn readme_block(after: &str) -> String {
 /// A stand-in for the README's `hdx`: webhooks, alerts and dashboards are files under
 /// `$STORE/<kind>/`, and every call is logged to `$STORE/calls` as `<method> <path>`, with
 /// ` empty` after a POST or PUT that sent no body. With `HDX_DOWN` set it answers every call
-/// the way HyperDX answers a bad key.
+/// the way HyperDX answers a bad key; with `HDX_UNREACHABLE` set it fails every call the way
+/// curl does when it cannot connect, with exit status 7 and no output; with `HDX_EMPTY` set it
+/// answers every call with nothing and exit status 0, as curl does for an error page with no body.
 const STAND_IN_HDX: &str = r#"
 hdx() {
   _method=GET _url=
@@ -2214,6 +2216,8 @@ hdx() {
   else
     echo "$_method $_path" >> "$STORE/calls"
   fi
+  [ -z "$HDX_UNREACHABLE" ] || return 7
+  [ -z "$HDX_EMPTY" ] || return 0
   [ -z "$HDX_DOWN" ] || { echo '{"message":"Unauthorized"}'; return; }
   _rest=${_path#/api/v2/}
   _kind=${_rest%%/*}
@@ -2259,6 +2263,8 @@ impl StandIn {
             .env("STORE", &self.store)
             .env("HYPERDX_URL", "http://hyperdx.test")
             .env_remove("HDX_DOWN")
+            .env_remove("HDX_UNREACHABLE")
+            .env_remove("HDX_EMPTY")
             .output()
             .unwrap();
         String::from_utf8(output.stderr).unwrap()
@@ -2420,6 +2426,7 @@ fn the_update_loop_stops_at_a_webhook_name_used_twice() {
         stderr.contains("2 webhooks are named harold-alerts-slot-idle; delete all but one"),
         "{stderr}"
     );
+    assert!(!stderr.contains("create it first"), "one message: {stderr}");
     let calls = stand_in.calls();
     let mut ids: Vec<_> = webhooks.iter().map(|webhook| &webhook["id"]).collect();
     ids.push(&alert["id"]);
@@ -2516,4 +2523,105 @@ done"#,
     let calls = stand_in.calls();
     let posts = calls.iter().filter(|call| call.starts_with("POST")).count();
     assert_eq!(posts, 2, "{calls:?}");
+}
+
+#[test]
+fn the_create_loop_stops_when_hyperdx_cannot_be_reached() {
+    let stand_in = StandIn::new();
+    stand_in.run(&format!("HDX_UNREACHABLE=1\n{}", create_alerts()));
+    let calls = stand_in.calls();
+    assert!(
+        !calls.iter().any(|call| call.starts_with("POST")),
+        "{calls:?}"
+    );
+}
+
+#[test]
+fn the_create_loop_stops_when_hyperdx_answers_with_nothing() {
+    let stand_in = StandIn::new();
+    stand_in.run(&format!("HDX_EMPTY=1\n{}", create_alerts()));
+    let calls = stand_in.calls();
+    assert!(
+        !calls.iter().any(|call| call.starts_with("POST")),
+        "{calls:?}"
+    );
+}
+
+#[test]
+fn the_update_loop_stops_when_hyperdx_cannot_be_reached() {
+    let stand_in = StandIn::new();
+    stand_in.run(&create_alerts());
+    stand_in.forget_calls();
+    let stderr = stand_in.run(&format!("HDX_UNREACHABLE=1\n{}", update_alerts()));
+    assert!(!stderr.contains("create it first"), "{stderr}");
+    let calls = stand_in.calls();
+    assert!(
+        !calls.iter().any(|call| call.starts_with("PUT")),
+        "{calls:?}"
+    );
+}
+
+#[test]
+fn the_update_loop_stops_at_an_alert_name_used_twice() {
+    let stand_in = StandIn::new();
+    stand_in.run(&create_alerts());
+    stand_in.run(
+        r#"fill alert-phone-request-slow.json | hdx -X POST "$HYPERDX_URL/api/v2/alerts" --data-binary @- >/dev/null"#,
+    );
+    stand_in.forget_calls();
+    let stderr = stand_in.run(&update_alerts());
+    assert!(
+        stderr.contains("2 alerts are named phone-request-slow; delete all but one"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("create it first"), "one message: {stderr}");
+    let calls = stand_in.calls();
+    let puts = calls.iter().filter(|call| call.starts_with("PUT")).count();
+    assert_eq!(
+        puts, 2,
+        "only phone-request-unavailable's webhook and alert: {calls:?}"
+    );
+}
+
+#[test]
+fn the_old_setup_loop_stops_at_a_webhook_name_used_twice() {
+    let stand_in = StandIn::new();
+    stand_in.run(
+        r#"for i in 1 2; do
+  fill webhook-wrong-agent.json | hdx -X POST "$HYPERDX_URL/api/v2/webhooks" --data-binary @- >/dev/null
+done"#,
+    );
+    stand_in.forget_calls();
+    let stderr = stand_in.run(&readme_block("A HyperDX set up from the earlier"));
+    assert!(
+        stderr.contains("2 webhooks are named harold-alerts-wrong-agent; delete all but one"),
+        "{stderr}"
+    );
+    let calls = stand_in.calls();
+    let posts: Vec<_> = calls
+        .iter()
+        .filter(|call| call.starts_with("POST"))
+        .collect();
+    assert_eq!(posts.len(), 2, "only the two names before it: {calls:?}");
+    let webhooks = stand_in.objects("webhooks");
+    assert!(
+        !webhooks
+            .iter()
+            .any(|webhook| webhook["name"] == "harold-alerts-slot-idle"),
+        "the loop stops before slot-idle"
+    );
+}
+
+#[test]
+fn the_old_setup_loop_stops_when_hyperdx_cannot_be_reached() {
+    let stand_in = StandIn::new();
+    stand_in.run(&format!(
+        "HDX_UNREACHABLE=1\n{}",
+        readme_block("A HyperDX set up from the earlier")
+    ));
+    let calls = stand_in.calls();
+    assert!(
+        !calls.iter().any(|call| call.starts_with("POST")),
+        "{calls:?}"
+    );
 }
