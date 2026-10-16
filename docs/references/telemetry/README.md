@@ -443,21 +443,40 @@ fill() {
       -e "s/@TRACES_SOURCE_ID@/$TRACES_SOURCE_ID/g" \
       -e "s/@WEBHOOK_ID@/$WEBHOOK_ID/g" "docs/references/telemetry/hyperdx/$1"
 }
+
+# The id of the one webhook or alert named $1. Nothing if none has the name; a failure if more than one does.
+webhook_id() { named webhooks "$1"; }
+alert_id() { named alerts "$1"; }
+named() {
+  _ids=$(hdx "$HYPERDX_URL/api/v2/$1" | jq -r --arg name "$2" '.data[] | select(.name == $name) | .id') || return
+  _count=$(printf '%s' "$_ids" | grep -c .)
+  [ "$_count" -le 1 ] || { echo "$_count $1 are named $2; delete all but one" >&2; return 1; }
+  printf '%s' "$_ids"
+}
 ```
 
 Run them from the repository root.
 
-**Create** the dashboards, then each alert's webhook and the alert pointing at it:
+**Create** the dashboards:
 
 ```sh
 for file in dashboard.json trends.json; do
   fill "$file" | hdx -X POST "$HYPERDX_URL/api/v2/dashboards/validate" --data-binary @-   # HyperDX's own check
   fill "$file" | hdx -X POST "$HYPERDX_URL/api/v2/dashboards" --data-binary @- | jq -r '.data.id // .id'
 done
+```
 
+Then create each alert's webhook and the alert pointing at it. A webhook that already exists is reused. An alert that already exists is left for the update commands, so a second run creates nothing:
+
+```sh
 for name in phone-request-unavailable phone-request-slow wrong-agent slot-idle; do
-  WEBHOOK_ID=$(fill "webhook-$name.json" | hdx -X POST "$HYPERDX_URL/api/v2/webhooks" --data-binary @- | jq -r '.data.id // .id')
-  [ -n "$WEBHOOK_ID" ] && [ "$WEBHOOK_ID" != null ] || { echo "webhook harold-alerts-$name not created" >&2; break; }
+  WEBHOOK_ID=$(webhook_id "harold-alerts-$name") || break
+  if [ -z "$WEBHOOK_ID" ]; then
+    WEBHOOK_ID=$(fill "webhook-$name.json" | hdx -X POST "$HYPERDX_URL/api/v2/webhooks" --data-binary @- | jq -r '.data.id // .id')
+    [ -n "$WEBHOOK_ID" ] && [ "$WEBHOOK_ID" != null ] || { echo "webhook harold-alerts-$name not created" >&2; break; }
+  fi
+  id=$(alert_id "$name") || break
+  [ -z "$id" ] || { echo "alert $name already exists; use the update commands" >&2; continue; }
   fill "alert-$name.json" | hdx -X POST "$HYPERDX_URL/api/v2/alerts" --data-binary @- | jq -r '.data.id // .id'
 done
 ```

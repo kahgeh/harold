@@ -2168,3 +2168,217 @@ fn every_phone_counter_set_the_alerts_read_is_exported_from_zero() {
         }
     }
 }
+
+/// The first `sh` block after the paragraph starting `after` in the README's "Creating the
+/// definitions" section.
+fn readme_block(after: &str) -> String {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../docs/references/telemetry/README.md");
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|error| panic!("{path:?}: {error}"));
+    let section = text
+        .split("\n## Creating the definitions\n")
+        .nth(1)
+        .expect("the Creating the definitions section")
+        .split("\n## ")
+        .next()
+        .unwrap();
+    let start = section
+        .find(&format!("\n{after}"))
+        .unwrap_or_else(|| panic!("no paragraph starting {after:?}"));
+    let block = section[start..]
+        .split("```sh\n")
+        .nth(1)
+        .expect("an sh block after it");
+    block.split("\n```").next().unwrap().to_owned()
+}
+
+/// A stand-in for the README's `hdx`: webhooks, alerts and dashboards are files under
+/// `$STORE/<kind>/`, and every call is logged to `$STORE/calls` as `<method> <path>`, with
+/// ` empty` after a POST or PUT that sent no body. With `HDX_DOWN` set it answers every call
+/// the way HyperDX answers a bad key.
+const STAND_IN_HDX: &str = r#"
+hdx() {
+  _method=GET _url=
+  while [ $# -gt 0 ]; do
+    case $1 in
+      -X) _method=$2; shift 2 ;;
+      --data-binary|-H) shift 2 ;;
+      -*) shift ;;
+      *) _url=$1; shift ;;
+    esac
+  done
+  _path=${_url#"$HYPERDX_URL"}
+  _body=
+  [ "$_method" = GET ] || _body=$(cat)
+  if [ "$_method" != GET ] && [ -z "$_body" ]; then
+    echo "$_method $_path empty" >> "$STORE/calls"
+  else
+    echo "$_method $_path" >> "$STORE/calls"
+  fi
+  [ -z "$HDX_DOWN" ] || { echo '{"message":"Unauthorized"}'; return; }
+  _rest=${_path#/api/v2/}
+  _kind=${_rest%%/*}
+  case $_method/$_rest in
+    GET/*) cat "$STORE/$_kind"/*.json 2>/dev/null | jq -s '{data: .}' ;;
+    POST/dashboards/validate) echo '{}' ;;
+    POST/*)
+      _n=$(( $(cat "$STORE/next" 2>/dev/null || echo 0) + 1 ))
+      echo "$_n" > "$STORE/next"
+      mkdir -p "$STORE/$_kind"
+      printf '%s' "$_body" | jq --arg id "$_kind-$_n" '. + {id: $id}' > "$STORE/$_kind/$_kind-$_n.json" \
+        && jq '{data: .}' "$STORE/$_kind/$_kind-$_n.json" ;;
+    PUT/*)
+      _id=${_rest#*/}
+      if [ -n "$_id" ] && [ -f "$STORE/$_kind/$_id.json" ]; then
+        printf '%s' "$_body" | jq --arg id "$_id" '. + {id: $id}' > "$STORE/$_kind/$_id.new" \
+          && mv "$STORE/$_kind/$_id.new" "$STORE/$_kind/$_id.json"
+      fi
+      echo '{}' ;;
+  esac
+}
+"#;
+
+struct StandIn {
+    store: PathBuf,
+}
+
+impl StandIn {
+    fn new() -> Self {
+        let store = std::env::temp_dir().join(format!("harold-hdx-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&store).unwrap();
+        Self { store }
+    }
+
+    /// Runs `script` under `/bin/sh` from the repository root, after the stand-in and the
+    /// README's lookup block. Returns what it wrote to stderr.
+    fn run(&self, script: &str) -> String {
+        let lookups = readme_block("The files name HyperDX objects");
+        let output = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(format!("{STAND_IN_HDX}\n{lookups}\n{script}\n"))
+            .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join(".."))
+            .env("STORE", &self.store)
+            .env("HYPERDX_URL", "http://hyperdx.test")
+            .env_remove("HDX_DOWN")
+            .output()
+            .unwrap();
+        String::from_utf8(output.stderr).unwrap()
+    }
+
+    fn objects(&self, kind: &str) -> Vec<serde_json::Value> {
+        let Ok(entries) = std::fs::read_dir(self.store.join(kind)) else {
+            return Vec::new();
+        };
+        entries
+            .map(|entry| {
+                let text = std::fs::read_to_string(entry.unwrap().path()).unwrap();
+                serde_json::from_str(&text).unwrap()
+            })
+            .collect()
+    }
+
+    /// The one object of `kind` named `name`.
+    fn only(&self, kind: &str, name: &str) -> serde_json::Value {
+        let mut named: Vec<_> = self
+            .objects(kind)
+            .into_iter()
+            .filter(|object| object["name"] == name)
+            .collect();
+        assert_eq!(named.len(), 1, "{kind} named {name}");
+        named.remove(0)
+    }
+
+    fn calls(&self) -> Vec<String> {
+        std::fs::read_to_string(self.store.join("calls"))
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    }
+
+    fn forget_calls(&self) {
+        let _ = std::fs::remove_file(self.store.join("calls"));
+    }
+}
+
+impl Drop for StandIn {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.store);
+    }
+}
+
+fn create_alerts() -> String {
+    readme_block("Then create each alert's webhook")
+}
+
+#[test]
+fn the_create_loop_makes_each_alert_with_its_own_webhook() {
+    let stand_in = StandIn::new();
+    let stderr = stand_in.run(&create_alerts());
+    assert_eq!(stand_in.objects("webhooks").len(), 4, "{stderr}");
+    assert_eq!(stand_in.objects("alerts").len(), 4, "{stderr}");
+    for name in crate::alerts::ALERT_NAMES {
+        let webhook = stand_in.only("webhooks", &format!("harold-alerts-{name}"));
+        let alert = stand_in.only("alerts", name);
+        assert_eq!(alert["channel"]["webhookId"], webhook["id"], "{name}");
+    }
+}
+
+#[test]
+fn the_create_loop_run_twice_makes_nothing_new() {
+    let stand_in = StandIn::new();
+    stand_in.run(&create_alerts());
+    stand_in.forget_calls();
+    let stderr = stand_in.run(&create_alerts());
+    assert_eq!(stand_in.objects("webhooks").len(), 4, "{stderr}");
+    assert_eq!(stand_in.objects("alerts").len(), 4, "{stderr}");
+    for name in crate::alerts::ALERT_NAMES {
+        assert!(
+            stderr.contains(&format!(
+                "alert {name} already exists; use the update commands"
+            )),
+            "{stderr}"
+        );
+    }
+    let calls = stand_in.calls();
+    assert!(
+        !calls.iter().any(|call| call.starts_with("POST")),
+        "{calls:?}"
+    );
+}
+
+#[test]
+fn the_create_loop_stops_at_an_alert_name_used_twice() {
+    let stand_in = StandIn::new();
+    stand_in.run(&create_alerts());
+    stand_in.run(
+        r#"fill alert-wrong-agent.json | hdx -X POST "$HYPERDX_URL/api/v2/alerts" --data-binary @- >/dev/null"#,
+    );
+    stand_in.forget_calls();
+    let stderr = stand_in.run(&create_alerts());
+    assert!(
+        stderr.contains("2 alerts are named wrong-agent; delete all but one"),
+        "{stderr}"
+    );
+    assert!(
+        !stderr.contains("alert slot-idle already exists"),
+        "the loop stops: {stderr}"
+    );
+    let calls = stand_in.calls();
+    assert!(
+        !calls.iter().any(|call| call.starts_with("POST")),
+        "{calls:?}"
+    );
+}
+
+#[test]
+fn the_create_loop_stops_when_a_lookup_fails() {
+    let stand_in = StandIn::new();
+    stand_in.run(&format!("HDX_DOWN=1\n{}", create_alerts()));
+    assert!(stand_in.objects("webhooks").is_empty());
+    assert!(stand_in.objects("alerts").is_empty());
+    let calls = stand_in.calls();
+    assert!(
+        !calls.iter().any(|call| call.starts_with("POST")),
+        "{calls:?}"
+    );
+}
