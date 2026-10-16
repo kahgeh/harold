@@ -125,7 +125,6 @@ impl LineStopper {
 }
 
 /// The daemon's stopper, used by `speak_line` and `notify_at_desk`.
-#[cfg_attr(not(test), allow(dead_code))] // until the call is wired up (plan Task 9)
 pub(crate) fn desk_line_stopper() -> &'static LineStopper {
     static STOPPER: OnceLock<LineStopper> = OnceLock::new();
     STOPPER.get_or_init(LineStopper::default)
@@ -145,6 +144,9 @@ fn run_tts_command(
     stopper: &LineStopper,
     started_at: u64,
 ) -> std::io::Result<Said> {
+    if stopper.generation() != started_at {
+        return Ok(Said::Stopped);
+    }
     let mut cmd = Command::new(command);
     if let Some(extra_args) = args {
         cmd.args(extra_args);
@@ -168,7 +170,17 @@ fn run_tts_command(
 }
 
 fn notify_with_fallback(tts: &TtsSettings, message: &str, stopper: &LineStopper) -> bool {
-    let started_at = stopper.generation();
+    notify_with_fallback_from(tts, message, stopper, stopper.generation())
+}
+
+/// `notify_with_fallback` for a line that started at generation `started_at`: a stop since
+/// then ends it before the next command is spawned.
+fn notify_with_fallback_from(
+    tts: &TtsSettings,
+    message: &str,
+    stopper: &LineStopper,
+    started_at: u64,
+) -> bool {
     match run_tts_command(
         &tts.command,
         tts.args.as_ref(),
@@ -225,7 +237,6 @@ fn notify_with_fallback(tts: &TtsSettings, message: &str, stopper: &LineStopper)
 }
 
 /// The turn-end update the desk says, shared by `notify_at_desk` and a call.
-#[cfg_attr(not(test), allow(dead_code))] // until the call is wired up (plan Task 9)
 pub(crate) fn desk_update_line(last_user_prompt: &str, main_context: &str) -> String {
     let summary = build_short_summary(last_user_prompt);
     format!("{summary} on {main_context} and waiting for further instructions")
@@ -354,13 +365,19 @@ mod tests {
 
     #[test]
     fn a_stopped_line_counts_as_said_and_skips_the_fallback() {
-        let out = std::env::temp_dir().join(format!("harold-tts-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir();
+        let out = dir.join(format!("harold-tts-{}", uuid::Uuid::new_v4()));
+        let marker = dir.join(format!("harold-tts-{}", uuid::Uuid::new_v4()));
         let mut tts = writes_last_argument_to(&out);
-        let fallback = (tts.command, tts.args);
+        tts.fallback_command = Some(tts.command.clone());
+        tts.fallback_args = tts.args.take();
         tts.command = "/bin/sh".into();
-        tts.args = Some(vec!["-c".into(), "sleep 5".into(), "sh".into()]);
-        tts.fallback_command = Some(fallback.0);
-        tts.fallback_args = fallback.1;
+        tts.args = Some(vec![
+            "-c".into(),
+            "touch \"$1\"; sleep 5".into(),
+            "sh".into(),
+            marker.display().to_string(),
+        ]);
         let stopper = std::sync::Arc::new(LineStopper::default());
 
         let started = std::time::Instant::now();
@@ -368,12 +385,36 @@ mod tests {
             let stopper = stopper.clone();
             std::thread::spawn(move || speak_line_with(&tts, "a long line", &stopper))
         };
-        std::thread::sleep(Duration::from_millis(200));
+        while !marker.exists() && started.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(marker.exists(), "the primary command never started");
         stopper.stop();
 
         assert!(speaking.join().unwrap());
-        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(started.elapsed() < Duration::from_secs(4));
         assert!(!out.exists());
+        let _ = std::fs::remove_file(marker);
+    }
+
+    #[test]
+    fn a_stop_before_a_command_is_spawned_spawns_nothing() {
+        let primary_out = std::env::temp_dir().join(format!("harold-tts-{}", uuid::Uuid::new_v4()));
+        let fallback_out =
+            std::env::temp_dir().join(format!("harold-tts-{}", uuid::Uuid::new_v4()));
+        let mut tts = writes_last_argument_to(&primary_out);
+        let fallback = writes_last_argument_to(&fallback_out);
+        tts.fallback_command = Some(fallback.command);
+        tts.fallback_args = fallback.args;
+        let stopper = LineStopper::default();
+        let started_at = stopper.generation();
+        stopper.stop();
+
+        assert!(notify_with_fallback_from(
+            &tts, "line", &stopper, started_at
+        ));
+        assert!(!primary_out.exists());
+        assert!(!fallback_out.exists());
     }
 
     #[test]
