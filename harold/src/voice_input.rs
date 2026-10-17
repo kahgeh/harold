@@ -4,9 +4,6 @@
 mod call;
 mod hang_up;
 mod mac;
-// The phone's calls and the web app's call routes use the phone's ports; until they
-// exist only the tests do.
-#[cfg_attr(not(test), allow(dead_code))]
 mod phone;
 mod phrases;
 mod speech;
@@ -18,7 +15,7 @@ pub(crate) use mac::MacPorts;
 #[cfg_attr(not(test), allow(unused_imports))]
 pub(crate) use phone::{
     ANSWER_KEEP, AudioRefused, PHONE_SILENT_LIMIT, PIECE_LIMIT_BYTES, PIECES_QUEUED, PLAY_GRACE,
-    PhoneLine, PhoneSound, PhoneSpeech, PhoneView, SPEECH_BASE, SPEECH_PER_CHAR,
+    PhoneCalls, PhoneLine, PhoneSound, PhoneSpeech, PhoneView, SPEECH_BASE, SPEECH_PER_CHAR,
 };
 use std::future::Future;
 use std::path::{Path, PathBuf};

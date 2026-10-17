@@ -5,7 +5,7 @@
 use super::call::lock;
 use super::phrases::NO_ANSWER_IN_THREAD;
 use super::worker::WorkerError;
-use super::{AudioSink, AudioSource, CallPorts, CallState, Said};
+use super::{AudioSink, AudioSource, CallControl, CallPorts, CallState, CallStatus, Said, Speaker};
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
@@ -14,7 +14,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{mpsc, oneshot, watch};
-use tokio::time::{Instant, sleep_until, timeout};
+use tokio::task::JoinHandle;
+use tokio::time::{Instant, sleep, sleep_until, timeout};
 use tracing::info;
 use uuid::Uuid;
 
@@ -33,6 +34,8 @@ pub(crate) const ANSWER_KEEP: Duration = Duration::from_secs(120);
 /// each of its characters, with no report from the phone.
 pub(crate) const SPEECH_BASE: Duration = Duration::from_secs(2);
 pub(crate) const SPEECH_PER_CHAR: Duration = Duration::from_millis(80);
+/// How often the view takes the open call's state and transcript.
+pub(super) const STATUS_EVERY: Duration = Duration::from_millis(100);
 
 /// What the phone shows and plays now.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -197,6 +200,12 @@ impl PhoneLine {
     /// What the phone shows and plays, now and as it changes.
     pub(crate) fn view(&self) -> watch::Receiver<PhoneView> {
         self.view.subscribe()
+    }
+
+    /// When the open call's source opened, the time its pieces are stamped from.
+    #[cfg(test)]
+    fn source_base(&self) -> Option<Instant> {
+        lock(&self.inner).source.as_ref().map(|pieces| pieces.base)
     }
 
     /// A source for a new call. An older source ends once it has read what was posted to it.
@@ -529,5 +538,169 @@ impl<B: CallPorts> CallPorts for PhonePorts<B> {
 
     fn no_answer_phrase(&self) -> &'static str {
         NO_ANSWER_IN_THREAD
+    }
+}
+
+/// The phone's calls, as the web app holds them: each runs on the shared core through the
+/// phone's ports, and while it is open the view follows its state and transcript.
+// The web app's call routes hold these; until they exist only the tests do.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) struct PhoneCalls<B: CallPorts> {
+    calls: Arc<CallControl<PhonePorts<B>>>,
+    line: Arc<PhoneLine>,
+    set_up: bool,
+    /// The task that copies the open call's status into the view: one for each call.
+    follower: Mutex<Option<JoinHandle<()>>>,
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+impl<B: CallPorts> PhoneCalls<B> {
+    pub(crate) fn new(base: B, set_up: bool) -> Self {
+        let line = PhoneLine::new(set_up);
+        let ports = PhonePorts::new(base, Arc::clone(&line));
+        Self {
+            calls: Arc::new(CallControl::new(ports, set_up)),
+            line,
+            set_up,
+            follower: Mutex::default(),
+        }
+    }
+
+    /// Starts a call as `CallControl::start` does, and once it listens has the view follow
+    /// it. With a call already open, answers its status and starts nothing new.
+    pub(crate) async fn start(&self) -> CallStatus {
+        if self.set_up {
+            self.forget_ended_call();
+        }
+        let status = self.calls.start().await;
+        if matches!(status.state, CallState::Off | CallState::NotSetUp) {
+            return status;
+        }
+        let mut follower = lock(&self.follower);
+        if follower.as_ref().is_some_and(|task| !task.is_finished()) {
+            return status;
+        }
+        info!("app call started");
+        let calls = Arc::clone(&self.calls);
+        let line = Arc::clone(&self.line);
+        *follower = Some(tokio::spawn(follow(calls, line)));
+        status
+    }
+
+    /// Unless a call is open, lets go of the last call's follower and clears why it ended
+    /// from the view, so the next call's status shows.
+    fn forget_ended_call(&self) {
+        let mut follower = lock(&self.follower);
+        let following = follower.as_ref().is_some_and(|task| !task.is_finished());
+        if following && self.line.view.borrow().ended.is_none() {
+            return;
+        }
+        if let Some(task) = follower.take() {
+            task.abort();
+        }
+        self.line
+            .view
+            .send_if_modified(|view| view.ended.take().is_some());
+    }
+
+    pub(crate) async fn stop(&self) -> CallStatus {
+        self.calls.stop().await
+    }
+
+    pub(crate) fn talk_now(&self) -> CallStatus {
+        self.calls.talk_now()
+    }
+
+    pub(crate) fn status(&self) -> CallStatus {
+        self.calls.status()
+    }
+
+    /// Ends an open call with reason `shutdown`, and its follower with it.
+    pub(crate) async fn shutdown(&self) {
+        self.calls.shutdown().await;
+        if let Some(task) = lock(&self.follower).take() {
+            task.abort();
+        }
+    }
+
+    /// Plays the chief's `line` on the phone, from a blocking thread, as
+    /// `CallControl::say_blocking` does. `None` for another agent's line: those are still
+    /// said at the desk.
+    pub(crate) fn say_blocking(&self, line: &str, by: Speaker) -> Option<bool> {
+        if by == Speaker::OtherAgent {
+            return None;
+        }
+        self.calls.say_blocking(line, by)
+    }
+
+    /// The same from async code, as `CallControl::say` does.
+    #[cfg(test)]
+    pub(crate) async fn say(&self, line: &str, by: Speaker) -> Option<bool> {
+        if by == Speaker::OtherAgent {
+            return None;
+        }
+        self.calls.say(line, by).await
+    }
+
+    pub(crate) fn audio(&self, at_ms: u64, bytes: &[u8]) -> Result<(), AudioRefused> {
+        self.line.audio(at_ms, bytes)
+    }
+
+    pub(crate) fn played(&self, id: &str) {
+        self.line.played(id);
+    }
+
+    pub(crate) fn answer(&self, id: &str) -> Option<Vec<u8>> {
+        self.line.answer(id)
+    }
+
+    pub(crate) fn view(&self) -> watch::Receiver<PhoneView> {
+        self.line.view()
+    }
+
+    pub(crate) fn set_up(&self) -> bool {
+        self.set_up
+    }
+
+    /// When the open call's source opened, so a test can stamp the pieces it posts.
+    #[cfg(test)]
+    pub(crate) fn source_base(&self) -> Option<Instant> {
+        self.line.source_base()
+    }
+
+    /// Whether a follower still copies a call's status into the view.
+    #[cfg(test)]
+    pub(crate) fn is_following(&self) -> bool {
+        lock(&self.follower)
+            .as_ref()
+            .is_some_and(|task| !task.is_finished())
+    }
+}
+
+/// Copies the call's state and transcript into the view every `STATUS_EVERY` until the call
+/// ends. The core reports the end through `call_ended` before its status reads off, so once
+/// the view shows the end nothing more is copied: a status read just before would otherwise
+/// put the ended call back on the screen.
+async fn follow<B: CallPorts>(calls: Arc<CallControl<PhonePorts<B>>>, line: Arc<PhoneLine>) {
+    loop {
+        let status = calls.status();
+        if status.state == CallState::Off {
+            return;
+        }
+        let mut ended = false;
+        line.view.send_if_modified(|view| {
+            if view.ended.is_some() {
+                ended = true;
+                return false;
+            }
+            let changed = view.state != status.state || view.transcript != status.last_transcript;
+            view.state = status.state;
+            view.transcript = status.last_transcript;
+            changed
+        });
+        if ended {
+            return;
+        }
+        sleep(STATUS_EVERY).await;
     }
 }
