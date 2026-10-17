@@ -21,8 +21,8 @@ use super::AppState;
 use super::route::now_ms;
 use crate::store::HaroldStore;
 use crate::voice_input::{
-    AudioRefused, CallPorts, CallState, CallStatus, LineTaker, NO_CHIEF, PhoneCalls, PhoneView,
-    Speaker, TurnResult, VOICE_FAILED,
+    AudioRefused, CallPorts, CallState, CallStatus, LineTaker, NO_CHIEF, PhoneCalls, PhoneStarted,
+    PhoneView, Speaker, TurnResult, VOICE_FAILED,
 };
 
 pub(crate) type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -31,12 +31,13 @@ pub(crate) type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 pub(crate) trait PhoneCallApi: Send + Sync {
     /// Whether `[voice_input]` is set, so a call can start.
     fn set_up(&self) -> bool;
-    /// Starts a call, or answers the open one's status.
-    fn start(&self) -> BoxFuture<'_, CallStatus>;
+    /// Starts a call, or takes the open one over, and answers its status and its new id.
+    fn start(&self) -> BoxFuture<'_, PhoneStarted>;
     /// Ends the call, and answers once it has ended and cleaned up.
     fn stop(&self) -> BoxFuture<'_, CallStatus>;
     fn talk_now(&self);
-    fn audio(&self, at_ms: u64, bytes: &[u8]) -> Result<(), AudioRefused>;
+    /// A piece for the call `call`; one for any other call is refused as `NoCall`.
+    fn audio(&self, call: &str, at_ms: u64, bytes: &[u8]) -> Result<(), AudioRefused>;
     fn played(&self, id: &str);
     fn answer(&self, id: &str) -> Option<Vec<u8>>;
     /// What the phone shows and plays, now and as it changes.
@@ -84,7 +85,7 @@ impl<B: CallPorts> PhoneCallApi for AppCalls<B> {
         self.phone.set_up()
     }
 
-    fn start(&self) -> BoxFuture<'_, CallStatus> {
+    fn start(&self) -> BoxFuture<'_, PhoneStarted> {
         // Taken before the desk call ends: the phone stamps its pieces from just before it
         // sent `POST /call`, so the call's clock starts as the request arrives.
         let asked = Instant::now();
@@ -102,8 +103,8 @@ impl<B: CallPorts> PhoneCallApi for AppCalls<B> {
         self.phone.talk_now();
     }
 
-    fn audio(&self, at_ms: u64, bytes: &[u8]) -> Result<(), AudioRefused> {
-        self.phone.audio(at_ms, bytes)
+    fn audio(&self, call: &str, at_ms: u64, bytes: &[u8]) -> Result<(), AudioRefused> {
+        self.phone.audio(call, at_ms, bytes)
     }
 
     fn played(&self, id: &str) {
@@ -141,9 +142,11 @@ impl<B: CallPorts> LineTaker for AppCalls<B> {
     }
 }
 
-/// `?at=<ms>` on a posted piece: when it was recorded, in milliseconds from the call's start.
+/// `?call=<id>&at=<ms>` on a posted piece: the call it is for, as `POST /call` answered,
+/// and when it was recorded, in milliseconds from the call's start.
 #[derive(Deserialize)]
 pub(crate) struct AudioAt {
+    call: Option<String>,
     at: u64,
 }
 
@@ -153,24 +156,31 @@ pub(crate) struct PlayedId {
     id: Option<String>,
 }
 
-/// `POST /call`: `204` once the call listens. Otherwise `409` with a `text/plain` line
-/// saying why no call started.
+/// `POST /call`: `200` once the call listens, with a `text/plain` body holding the call's
+/// id, which each piece of its audio carries. A call already open is taken over: it goes on
+/// with a new id, and pieces carrying the older one are refused. Otherwise `409` with a
+/// `text/plain` line saying why no call started.
 pub(crate) async fn post_call(State(state): State<AppState>) -> Response {
     let Some(calls) = state.calls.as_ref().filter(|calls| calls.set_up()) else {
         return (StatusCode::CONFLICT, NOT_SET_UP).into_response();
     };
-    let status = calls.start().await;
+    let PhoneStarted { status, call } = calls.start().await;
     let why = match (status.state, status.last_result) {
         (CallState::NotSetUp, _) => NOT_SET_UP,
         (CallState::Off, Some(TurnResult::NoChief)) => NO_CHIEF,
         (CallState::Off, _) => VOICE_FAILED,
-        _ => return StatusCode::NO_CONTENT.into_response(),
+        // A call that listens always has an id; without one the phone could post nothing.
+        _ => match call {
+            Some(call) => return (StatusCode::OK, call).into_response(),
+            None => VOICE_FAILED,
+        },
     };
     (StatusCode::CONFLICT, why).into_response()
 }
 
-/// `POST /call/audio?at=<ms>`: a piece of little-endian `i16` audio for the open call.
-/// `204` once taken; `400` without a numeric `at`; else the refusal's status.
+/// `POST /call/audio?call=<id>&at=<ms>`: a piece of little-endian `i16` audio for the call
+/// `id`. `204` once taken; `400` without a numeric `at`; `409` without the open call's id;
+/// else the refusal's status.
 pub(crate) async fn post_audio(
     State(state): State<AppState>,
     at: Result<Query<AudioAt>, QueryRejection>,
@@ -179,10 +189,13 @@ pub(crate) async fn post_audio(
     let Some(calls) = &state.calls else {
         return StatusCode::CONFLICT.into_response();
     };
-    let Ok(Query(AudioAt { at })) = at else {
+    let Ok(Query(AudioAt { call, at })) = at else {
         return StatusCode::BAD_REQUEST.into_response();
     };
-    match calls.audio(at, &body) {
+    let Some(call) = call else {
+        return refusal_status(AudioRefused::NoCall).into_response();
+    };
+    match calls.audio(&call, at, &body) {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(refused) => refusal_status(refused).into_response(),
     }

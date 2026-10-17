@@ -15,7 +15,8 @@ pub(crate) use mac::MacPorts;
 #[cfg_attr(not(test), allow(unused_imports))]
 pub(crate) use phone::{
     ANSWER_KEEP, AudioRefused, PHONE_SILENT_LIMIT, PIECE_LIMIT_BYTES, PIECES_QUEUED, PLAY_GRACE,
-    PhoneCalls, PhoneLine, PhoneSound, PhoneSpeech, PhoneView, SPEECH_BASE, SPEECH_PER_CHAR,
+    PhoneCalls, PhoneLine, PhoneSound, PhoneSpeech, PhoneStarted, PhoneView, SPEECH_BASE,
+    SPEECH_PER_CHAR,
 };
 /// The web app's `POST /call` says these when no phone call starts.
 pub(crate) use phrases::{NO_CHIEF, VOICE_FAILED};
@@ -312,6 +313,13 @@ impl<P: CallPorts> CallControl<P> {
         let (reply, said) = oneshot::channel();
         let line = line.to_string();
         self.send(Event::Say { line, by, reply }).then_some(said)
+    }
+
+    /// Has the open call forget the turn being spoken, if any, as if it had not been heard.
+    /// A phone's call uses it when a newer screen takes the call over. Does nothing when no
+    /// call is open.
+    pub(crate) fn forget_turn(&self) {
+        self.send(Event::ForgetTurn);
     }
 
     /// Ends an open call with reason `shutdown`.

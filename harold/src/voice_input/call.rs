@@ -96,6 +96,8 @@ pub(super) enum Event<W> {
     SourceEnded,
     Stop(Ended),
     TalkNow,
+    /// Forget the turn being spoken: a newer phone screen has taken the call over.
+    ForgetTurn,
     Say {
         line: String,
         by: Speaker,
@@ -562,6 +564,7 @@ impl<P: CallPorts> Call<P> {
             }
             Event::Stop(why) => self.end(why, None).await,
             Event::TalkNow => self.talk_now(),
+            Event::ForgetTurn => self.forget_turn(),
             Event::Say { line, by, reply } => self.line(line, by, Some(reply)),
             Event::Transcribed {
                 generation,
@@ -598,6 +601,16 @@ impl<P: CallPorts> Call<P> {
             return;
         };
         self.turn_ended(&turn);
+    }
+
+    /// Forgets the speech of a turn not yet ended, keeping the background level. A newer
+    /// phone screen that takes the call over means the user is starting again: joining the
+    /// older screen's half of a sentence to the newer's could type a garbled line, with Enter,
+    /// into the chief's pane. Only a turn being spoken while listening has anything to forget.
+    fn forget_turn(&mut self) {
+        if self.mode == Mode::Listening {
+            self.detector.reset();
+        }
     }
 
     /// Writes the turn to `<call dir>/turn-<uuid>/turn.wav` for the worker to transcribe.

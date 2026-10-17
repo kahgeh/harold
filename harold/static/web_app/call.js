@@ -63,6 +63,8 @@
       wakeLock: null,
       // The context's time just before the call is asked for, which pieces are stamped from.
       start: 0,
+      // The id Harold answered POST /call with, which each piece carries.
+      id: "",
       // Whether Harold answered that the call listens, and whether #call has shown it.
       open: false,
       live: false,
@@ -107,6 +109,8 @@
       recorder.connect(ctx.destination);
       current.start = ctx.currentTime;
       const response = await send("POST", "/call");
+      // A 200 holds the call's id; a 409 the line saying why no call started.
+      const text = response.ok || response.status === 409 ? await response.text() : "";
       if (call !== current) {
         // Hung up while it opened: a DELETE sent then may have come first, so end it again.
         if (response.ok && !call) {
@@ -115,13 +119,14 @@
         return;
       }
       if (response.status === 409) {
-        refuse(current, await response.text());
+        refuse(current, text);
         return;
       }
-      if (!response.ok) {
+      if (!response.ok || !text) {
         end(current);
         return;
       }
+      current.id = text;
       current.open = true;
       sync();
     } catch {
@@ -175,8 +180,8 @@
     }
   }
 
-  // 3. Each piece goes to Harold stamped with when it was recorded, in milliseconds from
-  // the call's start. Pieces recorded while something plays, or in the echo's tail after,
+  // 3. Each piece goes to Harold with the call's id and stamped with when it was recorded,
+  // in milliseconds from the call's start. Pieces recorded while something plays, or in the echo's tail after,
   // are dropped, so the chief never hears itself. The pieces are posted one after another,
   // since Harold hears them in the order they arrive; those still queued when the call
   // ends are dropped, and one that fails does not hold up the rest.
@@ -192,13 +197,15 @@
       if (call !== current) {
         return;
       }
-      const answer = await fetch("/call/audio?at=" + at, {
+      const path = "/call/audio?call=" + encodeURIComponent(current.id) + "&at=" + at;
+      const answer = await fetch(path, {
         method: "POST",
         headers: { "Content-Type": "application/octet-stream" },
         body: piece.samples,
       });
-      // No call open on the Mac: it ended, and the stream that says so did not reach the
-      // phone. Only this call's own pieces end it, so a late one cannot end a newer call.
+      // No call open on the Mac for this id: it ended, and the stream that says so did not
+      // reach the phone, or a newer screen's Call took it over. Only this call's own pieces
+      // end it, so a late one cannot end a newer call.
       if (answer.status === 409 && call === current && current.open) {
         end(current);
       }

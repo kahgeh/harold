@@ -10,7 +10,10 @@ fn embedded_datastar_script_is_the_audited_one() {
 fn the_call_script_keeps_its_contract() {
     let script = include_str!("../../static/web_app/call.js");
     for wanted in [
-        "/call/audio?at=",
+        // Each piece carries the id POST /call answered.
+        "/call/audio?call=",
+        "&at=",
+        "current.id = text",
         "application/octet-stream",
         "echoCancellation: true",
         "wakeLock",

@@ -15,6 +15,7 @@ use super::{
 use crate::agent::domain::EffectiveAgentState;
 use crate::outbound::fake::CapturedLogs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::task::JoinHandle;
@@ -71,39 +72,44 @@ async fn a_piece_is_read_as_samples_stamped_by_when_it_was_recorded() {
     let line = PhoneLine::new(true);
     let opened = Instant::now();
     let mut source = line.open_source();
+    let call = line.call_id().unwrap();
     sleep(Duration::from_secs(1)).await;
 
-    line.audio(250, &[0x01, 0x00, 0xff, 0x7f]).unwrap();
+    line.audio(&call, 250, &[0x01, 0x00, 0xff, 0x7f]).unwrap();
 
     assert_eq!(
         source.next_stamped().await,
         Some((vec![1, i16::MAX], opened + Duration::from_millis(250)))
     );
-    line.audio(500, &[0x02, 0x00]).unwrap();
+    line.audio(&call, 500, &[0x02, 0x00]).unwrap();
     assert_eq!(source.next_block().await, Some(vec![2]));
 }
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn pieces_are_refused_with_no_call_odd_too_large_or_past_64_queued() {
     let line = PhoneLine::new(true);
-    assert_eq!(line.audio(0, &[0; 8_000]), Err(AudioRefused::NoCall));
+    assert_eq!(
+        line.audio("no-call", 0, &[0; 8_000]),
+        Err(AudioRefused::NoCall)
+    );
 
     let source = line.open_source();
-    assert_eq!(line.audio(0, &[0; 3]), Err(AudioRefused::Malformed));
+    let call = line.call_id().unwrap();
+    assert_eq!(line.audio(&call, 0, &[0; 3]), Err(AudioRefused::Malformed));
     assert_eq!(
-        line.audio(0, &vec![0; PIECE_LIMIT_BYTES + 2]),
+        line.audio(&call, 0, &vec![0; PIECE_LIMIT_BYTES + 2]),
         Err(AudioRefused::TooLarge)
     );
-    assert_eq!(line.audio(0, &vec![0; PIECE_LIMIT_BYTES]), Ok(()));
-    assert_eq!(line.audio(0, &[]), Ok(()));
+    assert_eq!(line.audio(&call, 0, &vec![0; PIECE_LIMIT_BYTES]), Ok(()));
+    assert_eq!(line.audio(&call, 0, &[]), Ok(()));
     for _ in 2..PIECES_QUEUED {
-        assert_eq!(line.audio(0, &[0; 8_000]), Ok(()));
+        assert_eq!(line.audio(&call, 0, &[0; 8_000]), Ok(()));
     }
-    assert_eq!(line.audio(0, &[0; 8_000]), Err(AudioRefused::Full));
+    assert_eq!(line.audio(&call, 0, &[0; 8_000]), Err(AudioRefused::Full));
 
     // The call's source is gone: what arrives late is not kept for the next call.
     drop(source);
-    assert_eq!(line.audio(0, &[0; 8_000]), Err(AudioRefused::NoCall));
+    assert_eq!(line.audio(&call, 0, &[0; 8_000]), Err(AudioRefused::NoCall));
 }
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
@@ -111,8 +117,9 @@ async fn a_new_source_ends_the_old_one() {
     let line = PhoneLine::new(true);
     let mut old = line.open_source();
     let mut new = line.open_source();
+    let call = line.call_id().unwrap();
 
-    line.audio(0, &[0x05, 0x00]).unwrap();
+    line.audio(&call, 0, &[0x05, 0x00]).unwrap();
 
     assert_eq!(old.next_stamped().await, None);
     assert_eq!(new.next_block().await, Some(vec![5]));
@@ -122,8 +129,9 @@ async fn a_new_source_ends_the_old_one() {
 async fn the_source_ends_15_s_after_the_last_piece_while_nothing_plays() {
     let line = PhoneLine::new(true);
     let mut source = line.open_source();
+    let call = line.call_id().unwrap();
     sleep(Duration::from_secs(5)).await;
-    line.audio(5_000, &[0, 0]).unwrap();
+    line.audio(&call, 5_000, &[0, 0]).unwrap();
     let piece_at = Instant::now();
 
     assert!(source.next_stamped().await.is_some());
@@ -137,7 +145,10 @@ async fn the_source_ends_15_s_after_the_last_piece_while_nothing_plays() {
     assert_eq!(Instant::now(), piece_at + PHONE_SILENT_LIMIT);
 
     assert_eq!(source.next_stamped().await, None);
-    assert_eq!(line.audio(20_000, &[0, 0]), Err(AudioRefused::NoCall));
+    assert_eq!(
+        line.audio(&call, 20_000, &[0, 0]),
+        Err(AudioRefused::NoCall)
+    );
 }
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
@@ -148,7 +159,8 @@ async fn the_source_ends_15_s_after_the_last_piece_while_offered_sounds_go_unfet
     let sink = Arc::new(PhoneSink::new(Arc::clone(&line)));
     let start = Instant::now();
     let mut source = line.open_source();
-    line.audio(0, &[0, 0]).unwrap();
+    let call = line.call_id().unwrap();
+    line.audio(&call, 0, &[0, 0]).unwrap();
     assert!(source.next_stamped().await.is_some());
 
     // The chief is thinking, so a tick is offered every 3 s; the phone is gone and fetches none.
@@ -173,6 +185,7 @@ async fn the_source_waits_through_a_30_s_answer_with_no_pieces() {
     let sink = Arc::new(PhoneSink::new(Arc::clone(&line)));
     let start = Instant::now();
     let mut source = line.open_source();
+    let call = line.call_id().unwrap();
     let reading = tokio::spawn(async move { source.next_stamped().await });
 
     let said = Said::Line {
@@ -189,7 +202,7 @@ async fn the_source_waits_through_a_30_s_answer_with_no_pieces() {
 
     sleep_until(start + Duration::from_secs(40)).await;
     assert!(!reading.is_finished(), "the source ended during the answer");
-    line.audio(40_000, &[0x02, 0x00]).unwrap();
+    line.audio(&call, 40_000, &[0x02, 0x00]).unwrap();
     assert_eq!(
         reading.await.unwrap(),
         Some((vec![2], start + Duration::from_secs(40)))
@@ -514,6 +527,7 @@ impl Phone {
     /// of the open call's source.
     fn post(&self, at: Instant, samples: Vec<i16>) {
         let base = self.calls.source_base().expect("a call is open");
+        let call = self.calls.call_id().expect("a call is open");
         let from = at.duration_since(base);
         for (n, piece) in samples.chunks(PIECE_SAMPLES).enumerate() {
             let at = from + PIECE_LENGTH * u32::try_from(n).unwrap();
@@ -523,7 +537,7 @@ impl Phone {
                 .flat_map(|sample| sample.to_le_bytes())
                 .collect();
             self.calls
-                .audio(at_ms, &bytes)
+                .audio(&call, at_ms, &bytes)
                 .expect("the call takes the piece");
         }
     }
@@ -1098,14 +1112,16 @@ async fn a_calls_pieces_are_stamped_from_when_it_was_asked_for() {
     let asked = Instant::now();
     sleep(Duration::from_secs(3)).await;
 
-    phone.calls.start_at(asked).await;
+    let started = phone.calls.start_at(asked).await;
     assert_eq!(phone.calls.source_base(), Some(asked));
+    assert_eq!(started.call, phone.calls.call_id());
 
-    // A second start joins the open call and leaves its clock where it was.
+    // A second start takes the open call over: its clock starts again from that start.
     sleep(Duration::from_secs(1)).await;
-    let joined = phone.calls.start_at(Instant::now()).await;
-    assert_eq!(joined.state, CallState::Listening);
-    assert_eq!(phone.calls.source_base(), Some(asked));
+    let taken_over = Instant::now();
+    let joined = phone.calls.start_at(taken_over).await;
+    assert_eq!(joined.status.state, CallState::Listening);
+    assert_eq!(phone.calls.source_base(), Some(taken_over));
 
     // The next call, started with no time, is stamped from when its source opens.
     phone.calls.stop().await;
@@ -1113,6 +1129,208 @@ async fn a_calls_pieces_are_stamped_from_when_it_was_asked_for() {
     let restarted = Instant::now();
     phone.calls.start().await;
     assert_eq!(phone.calls.source_base(), Some(restarted));
+}
+
+// --- The call's id, and a newer screen taking the call over ---
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn a_piece_with_another_calls_id_or_none_is_refused_and_queues_nothing() {
+    let line = PhoneLine::new(true);
+    let mut source = line.open_source();
+    let call = line.call_id().expect("an open call has an id");
+    assert_eq!(call.len(), 32);
+    assert!(call.chars().all(|c| c.is_ascii_hexdigit()), "{call}");
+
+    for other in ["0123456789abcdef0123456789abcdef", ""] {
+        assert_eq!(
+            line.audio(other, 0, &[0x01, 0x00]),
+            Err(AudioRefused::NoCall)
+        );
+    }
+    line.audio(&call, 0, &[0x02, 0x00]).unwrap();
+
+    assert_eq!(source.next_block().await, Some(vec![2]));
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn each_call_has_its_own_id() {
+    let line = PhoneLine::new(true);
+    let _last = line.open_source();
+    let last = line.call_id().unwrap();
+    let mut next = line.open_source();
+    let call = line.call_id().unwrap();
+
+    assert_ne!(last, call);
+    assert_eq!(
+        line.audio(&last, 0, &[0x01, 0x00]),
+        Err(AudioRefused::NoCall)
+    );
+    line.audio(&call, 0, &[0x02, 0x00]).unwrap();
+    assert_eq!(next.next_block().await, Some(vec![2]));
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn after_a_takeover_the_source_skips_the_older_screens_pieces_and_forgets_first() {
+    let line = PhoneLine::new(true);
+    let forgets = Arc::new(AtomicUsize::new(0));
+    line.set_forget_turn({
+        let forgets = Arc::clone(&forgets);
+        move || {
+            forgets.fetch_add(1, Ordering::SeqCst);
+        }
+    });
+    let mut source = line.open_source();
+    let older = line.call_id().unwrap();
+    line.audio(&older, 0, &[0x01, 0x00]).unwrap();
+    assert_eq!(source.next_block().await, Some(vec![1]));
+    // Posted under the older id, and still waiting to be read at the takeover.
+    line.audio(&older, 250, &[0x02, 0x00]).unwrap();
+
+    let taken_over = Instant::now();
+    let newer = line.take_over(taken_over).expect("a source is open");
+    assert_ne!(older, newer);
+    assert_eq!(
+        line.audio(&older, 500, &[0x03, 0x00]),
+        Err(AudioRefused::NoCall)
+    );
+    line.audio(&newer, 0, &[0x04, 0x00]).unwrap();
+    line.audio(&newer, 250, &[0x05, 0x00]).unwrap();
+    assert_eq!(forgets.load(Ordering::SeqCst), 0);
+
+    assert_eq!(source.next_stamped().await, Some((vec![4], taken_over)));
+    assert_eq!(forgets.load(Ordering::SeqCst), 1);
+    assert_eq!(source.next_block().await, Some(vec![5]));
+    assert_eq!(forgets.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn a_second_start_takes_the_call_over_with_a_new_id() {
+    let phone = Phone::new();
+    phone.script([text("from the new screen")]);
+    phone.auto_play(Duration::from_secs(1));
+    phone.start().await;
+    let first = phone.calls.call_id().unwrap();
+    sleep(Duration::from_secs(1)).await;
+
+    let taken_over = Instant::now();
+    let status = phone.calls.start().await;
+
+    assert_eq!(status.state, CallState::Listening);
+    let second = phone.calls.call_id().unwrap();
+    assert_ne!(first, second);
+    assert_eq!(phone.calls.source_base(), Some(taken_over));
+    assert_eq!(phone.base.worker_log().starts, 1);
+    assert!(phone.calls.is_following());
+    assert_eq!(
+        phone.calls.audio(&first, 1_000, &[0; 8_000]),
+        Err(AudioRefused::NoCall)
+    );
+    phone.post(Instant::now(), quiet(500));
+    phone.speak().await;
+    assert_eq!(
+        phone.base.fake_panes().keys(),
+        typed("%2", "from the new screen")
+    );
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn a_piece_from_the_last_call_never_reaches_the_next() {
+    let phone = Phone::new();
+    phone.start().await;
+    let last = phone.calls.call_id().unwrap();
+    phone.calls.stop().await;
+    phone.start().await;
+
+    let mut speech = loud(1000);
+    speech.extend(quiet(1500));
+    let bytes: Vec<u8> = speech.iter().flat_map(|s| s.to_le_bytes()).collect();
+    for piece in bytes.chunks(PIECE_SAMPLES * 2) {
+        assert_eq!(
+            phone.calls.audio(&last, 1_000, piece),
+            Err(AudioRefused::NoCall)
+        );
+    }
+    phone.post(Instant::now(), quiet(1500));
+    settle().await;
+    sleep(Duration::from_secs(2)).await;
+
+    assert_eq!(phone.transcribed(), 0);
+    assert!(phone.base.fake_panes().keys().is_empty());
+}
+
+/// What a call transcribes for one `speak` and nothing else: the samples in one turn of
+/// new speech.
+async fn one_turn_of_new_speech() -> usize {
+    let phone = Phone::new();
+    phone.start().await;
+    phone.speak().await;
+    let transcribed = phone.base.worker_log().transcribed.clone();
+    assert_eq!(transcribed.len(), 1);
+    transcribed[0]
+}
+
+/// The older screen is in the middle of a sentence, its speech not yet ended by silence,
+/// when a newer screen's Call takes the call over.
+async fn taken_over_mid_sentence(phone: &Phone) {
+    phone.start().await;
+    phone.post(Instant::now(), loud(1000));
+    settle().await;
+    sleep(Duration::from_secs(1)).await;
+    assert_eq!(phone.calls.start().await.state, CallState::Listening);
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn a_takeover_drops_what_the_older_screen_was_saying() {
+    let phone = Phone::new();
+    taken_over_mid_sentence(&phone).await;
+
+    phone.post(Instant::now(), quiet(1500));
+    settle().await;
+    sleep(Duration::from_secs(2)).await;
+
+    assert_eq!(phone.transcribed(), 0);
+    assert!(phone.base.fake_panes().keys().is_empty());
+    assert_eq!(phone.calls.status().state, CallState::Listening);
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn after_a_takeover_only_the_newer_screens_sentence_is_typed() {
+    let new_speech_only = one_turn_of_new_speech().await;
+    let phone = Phone::new();
+    phone.script([text("from the new screen")]);
+    taken_over_mid_sentence(&phone).await;
+
+    phone.post(Instant::now(), quiet(500));
+    settle().await;
+    phone.speak().await;
+
+    assert_eq!(phone.base.worker_log().transcribed, [new_speech_only]);
+    assert_eq!(
+        phone.base.fake_panes().keys(),
+        typed("%2", "from the new screen")
+    );
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn an_older_screens_piece_still_queued_at_a_takeover_is_not_heard() {
+    let new_speech_only = one_turn_of_new_speech().await;
+    let phone = Phone::new();
+    phone.script([text("from the new screen")]);
+    phone.start().await;
+    sleep(Duration::from_secs(1)).await;
+    // Taken under the older id just before the takeover, and not yet read by the call.
+    phone.post(Instant::now(), loud(1000));
+
+    assert_eq!(phone.calls.start().await.state, CallState::Listening);
+    phone.post(Instant::now(), quiet(500));
+    settle().await;
+    phone.speak().await;
+
+    assert_eq!(phone.base.worker_log().transcribed, [new_speech_only]);
+    assert_eq!(
+        phone.base.fake_panes().keys(),
+        typed("%2", "from the new screen")
+    );
 }
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]

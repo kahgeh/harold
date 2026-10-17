@@ -139,9 +139,25 @@ impl TestServer {
         .await
     }
 
-    async fn post_audio(&self, at_ms: u64, bytes: Vec<u8>) -> StatusCode {
-        let path = format!("/call/audio?at={at_ms}");
+    /// Posts a piece for the call `call`, or with no call id when `None`.
+    async fn post_audio(&self, call: Option<&str>, at_ms: u64, bytes: Vec<u8>) -> StatusCode {
+        let path = match call {
+            Some(call) => format!("/call/audio?call={call}&at={at_ms}"),
+            None => format!("/call/audio?at={at_ms}"),
+        };
         self.send(Method::POST, &path, bytes).await.status()
+    }
+
+    /// `POST /call`, which must answer `200` with the new call's id as plain text.
+    async fn post_call(&self) -> String {
+        let response = self.send(Method::POST, "/call", Vec::new()).await;
+        assert_eq!(response.status(), 200);
+        let content_type = response.headers()["content-type"].to_str().unwrap();
+        assert!(content_type.starts_with("text/plain"), "{content_type}");
+        let call = response.text().await.unwrap();
+        assert_eq!(call.len(), 32, "{call}");
+        assert!(call.chars().all(|c| c.is_ascii_hexdigit()), "{call}");
+        call
     }
 
     /// Opens `GET /updates`.
@@ -231,6 +247,8 @@ struct Phone {
     /// When the last `POST /call` was sent, which pieces are stamped from, and where the
     /// audio posted so far ends, in milliseconds from then.
     clock: Mutex<(Instant, u64)>,
+    /// The id the last `POST /call` answered, which each piece carries.
+    call: Mutex<Option<String>>,
 }
 
 impl Phone {
@@ -265,18 +283,26 @@ impl Phone {
             desk_ends,
             server,
             clock: Mutex::new((Instant::now(), 0)),
+            call: Mutex::default(),
         }
     }
 
-    /// `POST /call`, which must start the call, and half a second of background.
-    async fn start(&self) {
+    /// `POST /call`, which must start the call or take it over, and half a second of
+    /// background. Answers the call's id.
+    async fn start(&self) -> String {
         let sent = Instant::now();
-        let response = self.server.send(Method::POST, "/call", Vec::new()).await;
-        assert_eq!(response.status(), 204);
+        let call = self.server.post_call().await;
         // The call's clock starts as the request arrives, after `sent`, so a piece stamped
         // with the time since `sent` was recorded after the call opened, and is heard.
         *self.clock.lock().unwrap() = (sent, 0);
+        *self.call.lock().unwrap() = Some(call.clone());
         self.post(quiet(500)).await;
+        call
+    }
+
+    /// The id the last `POST /call` answered.
+    fn call(&self) -> Option<String> {
+        self.call.lock().unwrap().clone()
     }
 
     /// Milliseconds since `POST /call` was sent, as the page stamps a piece, rounded up: the
@@ -300,9 +326,14 @@ impl Phone {
             clock.1 = from + PIECE_MS * pieces;
             from
         };
+        let call = self.call();
         for (n, piece) in samples.chunks(PIECE_SAMPLES).enumerate() {
             let at = from + PIECE_MS * u64::try_from(n).unwrap();
-            assert_eq!(self.server.post_audio(at, bytes(piece)).await, 204);
+            let status = self
+                .server
+                .post_audio(call.as_deref(), at, bytes(piece))
+                .await;
+            assert_eq!(status, 204);
         }
     }
 
@@ -524,18 +555,21 @@ async fn audio_with_no_call_open_is_refused_and_queues_nothing() {
     let mut speech = quiet(500);
     speech.extend(loud(1000));
     speech.extend(quiet(1500));
-    let post_refused = || async {
+    let server = &phone.server;
+    let speech = &speech;
+    let post_refused = |call: Option<String>| async move {
         for (n, piece) in speech.chunks(PIECE_SAMPLES).enumerate() {
             let at = 1000 + PIECE_MS * u64::try_from(n).unwrap();
-            assert_eq!(phone.server.post_audio(at, bytes(piece)).await, 409);
+            let status = server.post_audio(call.as_deref(), at, bytes(piece)).await;
+            assert_eq!(status, 409);
         }
     };
-    post_refused().await;
+    post_refused(None).await;
     // Pieces still in flight after End.
-    phone.start().await;
+    let ended = phone.start().await;
     let response = phone.server.send(Method::DELETE, "/call", Vec::new()).await;
     assert_eq!(response.status(), 204);
-    post_refused().await;
+    post_refused(Some(ended)).await;
 
     phone.start().await;
     phone.post(quiet(1500)).await;
@@ -553,20 +587,24 @@ async fn audio_with_no_call_open_is_refused_and_queues_nothing() {
 async fn malformed_audio_is_refused_and_the_call_goes_on() {
     let phone = Phone::new(true).await;
     phone.base.worker_log().script.push_back(text("still here"));
-    phone.start().await;
+    let call = phone.start().await;
     let at = phone.now_ms();
 
-    assert_eq!(phone.server.post_audio(at, vec![0; 3]).await, 400);
+    let odd = phone.server.post_audio(Some(&call), at, vec![0; 3]).await;
+    assert_eq!(odd, 400);
     let too_large = vec![0; PIECE_LIMIT_BYTES + 2];
     assert_eq!(too_large.len(), 32_002);
-    assert_eq!(phone.server.post_audio(at, too_large).await, 413);
+    let too_large = phone.server.post_audio(Some(&call), at, too_large).await;
+    assert_eq!(too_large, 413);
     for path in [
-        "/call/audio",
-        "/call/audio?at=",
-        "/call/audio?at=soon",
-        "/call/audio?at=-5",
+        "/call/audio".to_owned(),
+        "/call/audio?at=".to_owned(),
+        "/call/audio?at=soon".to_owned(),
+        "/call/audio?at=-5".to_owned(),
+        format!("/call/audio?call={call}"),
+        format!("/call/audio?call={call}&at=soon"),
     ] {
-        let response = phone.server.send(Method::POST, path, vec![0; 8_000]).await;
+        let response = phone.server.send(Method::POST, &path, vec![0; 8_000]).await;
         assert_eq!(response.status(), 400, "{path}");
     }
 
@@ -594,22 +632,102 @@ async fn a_phone_calls_pieces_are_stamped_from_when_post_call_arrived() {
     let calls = AppCalls::new(PhoneCalls::new(FakePorts::new(), true), store, end_desk);
 
     let arrived = Instant::now();
-    assert_eq!(calls.start().await.state, CallState::Listening);
+    assert_eq!(calls.start().await.status.state, CallState::Listening);
 
     assert!(arrived.elapsed() >= Duration::from_secs(3));
     assert_eq!(calls.phone.source_base(), Some(arrived));
     calls.shutdown().await;
 }
 
+/// A newer screen's Call takes the open call over: the same call goes on, with a new id,
+/// and the older screen's pieces are refused, which ends the call on that screen.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_second_post_call_answers_the_open_call() {
+async fn a_second_post_call_takes_over_the_open_call_with_a_new_id() {
     let phone = Phone::new(true).await;
+    phone
+        .base
+        .worker_log()
+        .script
+        .push_back(text("from the new screen"));
 
-    phone.start().await;
-    phone.start().await;
+    let first = phone.start().await;
+    let second = phone.start().await;
 
+    assert_ne!(first, second);
     assert_eq!(phone.base.worker_log().starts, 1);
     assert_eq!(phone.calls.view().borrow().state, CallState::Listening);
+    let mut speech = loud(1000);
+    speech.extend(quiet(1500));
+    for (n, piece) in speech.chunks(PIECE_SAMPLES).enumerate() {
+        let at = phone.now_ms() + PIECE_MS * u64::try_from(n).unwrap();
+        let status = phone
+            .server
+            .post_audio(Some(&first), at, bytes(piece))
+            .await;
+        assert_eq!(status, 409);
+    }
+    phone.speak().await;
+    phone.wait_for_typed("from the new screen").await;
+    assert_eq!(phone.base.worker_log().transcribed.len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn audio_without_the_calls_id_or_with_another_is_refused_and_queues_nothing() {
+    let phone = Phone::new(true).await;
+    phone
+        .base
+        .worker_log()
+        .script
+        .push_back(text("with the id"));
+    phone.start().await;
+    let mut speech = loud(1000);
+    speech.extend(quiet(1500));
+
+    for call in [None, Some("0123456789abcdef0123456789abcdef"), Some("")] {
+        for (n, piece) in speech.chunks(PIECE_SAMPLES).enumerate() {
+            let at = phone.now_ms() + PIECE_MS * u64::try_from(n).unwrap();
+            let status = phone.server.post_audio(call, at, bytes(piece)).await;
+            assert_eq!(status, 409, "{call:?}");
+        }
+    }
+    phone.post(quiet(1500)).await;
+    sleep(Duration::from_millis(500)).await;
+    assert!(phone.base.worker_log().transcribed.is_empty());
+    assert!(phone.base.fake_panes().keys().is_empty());
+
+    phone.speak().await;
+    phone.wait_for_typed("with the id").await;
+    assert_eq!(phone.base.worker_log().transcribed.len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_piece_from_the_last_call_never_reaches_the_next() {
+    let phone = Phone::new(true).await;
+    phone
+        .base
+        .worker_log()
+        .script
+        .push_back(text("the next call"));
+    let last = phone.start().await;
+    let response = phone.server.send(Method::DELETE, "/call", Vec::new()).await;
+    assert_eq!(response.status(), 204);
+
+    let next = phone.start().await;
+    assert_ne!(last, next);
+    let mut speech = loud(1000);
+    speech.extend(quiet(1500));
+    for (n, piece) in speech.chunks(PIECE_SAMPLES).enumerate() {
+        let at = phone.now_ms() + PIECE_MS * u64::try_from(n).unwrap();
+        let status = phone.server.post_audio(Some(&last), at, bytes(piece)).await;
+        assert_eq!(status, 409);
+    }
+    phone.post(quiet(1500)).await;
+    sleep(Duration::from_millis(500)).await;
+    assert!(phone.base.worker_log().transcribed.is_empty());
+
+    phone.speak().await;
+    phone.wait_for_typed("the next call").await;
+    assert_eq!(phone.base.worker_log().transcribed.len(), 1);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -746,10 +864,11 @@ async fn an_audio_post_from_the_page_passes_the_origin_check() {
             .await;
         assert_eq!(response.status(), 409, "no call is open: {headers:?}");
     }
-    phone.start().await;
+    let call = phone.start().await;
+    let path = format!("/call/audio?call={call}&at=600");
     for headers in page_posts {
         let response = server
-            .send_with(Method::POST, "/call/audio?at=600", headers, vec![0; 8_000])
+            .send_with(Method::POST, &path, headers, vec![0; 8_000])
             .await;
         assert_eq!(response.status(), 204, "{headers:?}");
     }
@@ -803,7 +922,7 @@ async fn shutdown_ends_an_open_phone_call() {
     .await
     .expect("the app starts");
     let started = calls.start().await;
-    assert_eq!(started.state, CallState::Listening);
+    assert_eq!(started.status.state, CallState::Listening);
 
     drop(shutdown);
 

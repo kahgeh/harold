@@ -142,14 +142,16 @@ You tap **📞 Call**, and talk with the chief as in a phone call. Harold hears 
 
 Starting a call on the phone ends a call open at the desk first, so the chief does not get turns from the desk's microphone too. Nothing stops the dashboard from starting a desk call while the phone's call is open.
 
+Tapping **Call** on a newer screen, such as the app opened again, takes over the phone's call: the same call goes on with the newer screen, and the older screen's call ends there when Harold refuses its next piece of audio. Whatever the older screen was saying when the call was taken over is dropped, not typed.
+
 ### The routes
 
 Every call route passes the login check and the checks on posts ([What the app refuses](#what-the-app-refuses)). The page's script uses them; nothing else needs to.
 
 | Route | Does |
 |---|---|
-| `POST /call` | Starts the call. `204` once it listens; otherwise `409` with a line saying why. |
-| `POST /call/audio?at=<ms>` | A quarter-second piece of audio: 16 kHz mono, little-endian `i16`, 4,000 samples (8,000 bytes), recorded `at` milliseconds from the call's start: on the phone, just before it sent `POST /call`; on the Mac, when that request arrived. `204` once taken. `409` when no call is open, `400` for an odd number of bytes or a missing `at`, `413` for more than one second of audio, `503` when too many pieces wait. A refused piece does not end the call. The app posts the pieces one after another, in the order they were recorded, since Harold hears them in the order they arrive. A `409` for a piece of the open call means the call ended on the Mac without the phone hearing of it, so the app ends the call on the phone too. |
+| `POST /call` | Starts the call, or takes over the open one. `200` once it listens, with a `text/plain` body holding the call's id; a takeover answers a new id, and the older id is refused from then on. Otherwise `409` with a line saying why. |
+| `POST /call/audio?call=<id>&at=<ms>` | A quarter-second piece of audio for the call `id`, as `POST /call` answered it: 16 kHz mono, little-endian `i16`, 4,000 samples (8,000 bytes), recorded `at` milliseconds from the call's start: on the phone, just before it sent `POST /call`; on the Mac, when that request arrived. `204` once taken. `409` when no call is open, or the piece carries no id or another call's id; `400` for an odd number of bytes or a missing `at`, `413` for more than one second of audio, `503` when too many pieces wait. A refused piece does not end the call. The app posts the pieces one after another, in the order they were recorded, since Harold hears them in the order they arrive. A `409` for a piece of the open call means the call ended on the Mac without the phone hearing of it, or a newer screen took it over, so the app ends the call on the phone too. |
 | `POST /call/talk-now` | Stops what plays and listens at once. |
 | `DELETE /call` | Ends the call, and answers `204` once it has ended and cleaned up. |
 | `GET /call/answer/<id>` | The WAV of an answer or phrase Harold offers. `404` once it is no longer offered. |

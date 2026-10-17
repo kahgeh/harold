@@ -13,7 +13,7 @@ use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{mpsc, oneshot, watch};
@@ -83,6 +83,8 @@ pub(crate) struct PhoneLine {
     inner: Mutex<Inner>,
     view: watch::Sender<PhoneView>,
     quiet: watch::Sender<Quiet>,
+    /// Has the open call forget the turn being spoken; set once by the phone's calls.
+    forget_turn: OnceLock<Box<dyn Fn() + Send + Sync>>,
 }
 
 #[derive(Default)]
@@ -95,13 +97,22 @@ struct Inner {
     /// When the phone asked for the call being started, which the phone stamps its pieces
     /// from; the next source's base, and cleared once that start has answered.
     asked: Option<Instant>,
+    /// The id the open call's pieces carry: a new one for each call, and for each START
+    /// that takes the open call over.
+    call: Option<String>,
+    /// Counts the screens that have had the call: one more for each source opened and for
+    /// each takeover.
+    screen: u64,
 }
 
 /// A piece of samples and when it was recorded.
 type Piece = (Vec<i16>, Instant);
 
+/// A piece as it waits to be read, with the screen that posted it.
+type Queued = (Vec<i16>, Instant, u64);
+
 struct Pieces {
-    sender: mpsc::Sender<Piece>,
+    sender: mpsc::Sender<Queued>,
     /// When the phone asked for the call, or else when the source opened: the phone
     /// stamps each piece in milliseconds from then.
     base: Instant,
@@ -153,13 +164,29 @@ impl PhoneLine {
                 waiting: false,
             })
             .0,
+            forget_turn: OnceLock::new(),
         })
     }
 
-    /// Takes a piece the phone posted: little-endian `i16` samples recorded `at_ms`
-    /// milliseconds after the source's base: when the phone asked for the call.
-    pub(crate) fn audio(&self, at_ms: u64, bytes: &[u8]) -> Result<(), AudioRefused> {
+    /// Sets what has the open call forget the turn being spoken. Only the first call counts.
+    pub(super) fn set_forget_turn(&self, forget: impl Fn() + Send + Sync + 'static) {
+        let _ = self.forget_turn.set(Box::new(forget));
+    }
+
+    fn forget_turn(&self) {
+        if let Some(forget) = self.forget_turn.get() {
+            forget();
+        }
+    }
+
+    /// Takes a piece the phone posted for the call `call`: little-endian `i16` samples
+    /// recorded `at_ms` milliseconds after the source's base: when the phone asked for the
+    /// call. A piece carrying any id but the open call's is refused as if no call were open.
+    pub(crate) fn audio(&self, call: &str, at_ms: u64, bytes: &[u8]) -> Result<(), AudioRefused> {
         let mut inner = lock(&self.inner);
+        if inner.call.as_deref() != Some(call) {
+            return Err(AudioRefused::NoCall);
+        }
         let pieces = inner.source.as_ref().ok_or(AudioRefused::NoCall)?;
         if bytes.len() % 2 == 1 {
             return Err(AudioRefused::Malformed);
@@ -175,7 +202,7 @@ impl PhoneLine {
             .chunks_exact(2)
             .map(|pair| i16::from_le_bytes([pair[0], pair[1]]))
             .collect();
-        match pieces.sender.try_send((samples, at)) {
+        match pieces.sender.try_send((samples, at, inner.screen)) {
             Ok(()) => {}
             Err(TrySendError::Full(_)) => return Err(AudioRefused::Full),
             Err(TrySendError::Closed(_)) => {
@@ -215,18 +242,43 @@ impl PhoneLine {
         lock(&self.inner).source.as_ref().map(|pieces| pieces.base)
     }
 
+    /// The id the open call's pieces carry; the last call's once it has ended.
+    #[cfg(test)]
+    pub(super) fn call_id(&self) -> Option<String> {
+        lock(&self.inner).call.clone()
+    }
+
+    /// Hands the open call to a newer screen: a new id, which the call's pieces carry from
+    /// now on, and a new base, `base`, which they are stamped from. Pieces carrying the
+    /// older id are refused, which ends the call on the older screen, and those the older
+    /// screen posted that still wait are not read. `None` when no source is open.
+    pub(super) fn take_over(&self, base: Instant) -> Option<String> {
+        let mut inner = lock(&self.inner);
+        let pieces = inner.source.as_mut()?;
+        pieces.base = base;
+        inner.screen += 1;
+        let call = new_id();
+        inner.call = Some(call.clone());
+        Some(call)
+    }
+
     /// A source for a new call, its pieces stamped from when the phone asked for the call.
-    /// An older source ends once it has read what was posted to it.
-    pub(super) fn open_source(&self) -> PhoneSource {
+    /// An older source ends, and reads nothing more.
+    pub(super) fn open_source(self: &Arc<Self>) -> PhoneSource {
         let (sender, pieces) = mpsc::channel(PIECES_QUEUED);
         let opened = Instant::now();
         let mut inner = lock(&self.inner);
         let base = inner.asked.take().unwrap_or(opened);
         inner.source = Some(Pieces { sender, base });
+        inner.screen += 1;
+        inner.call = Some(new_id());
+        let screen = inner.screen;
         drop(inner);
         self.quiet.send_modify(|quiet| quiet.since = opened);
         PhoneSource {
+            line: Arc::clone(self),
             pieces,
+            screen,
             quiet: self.quiet.subscribe(),
             ended: false,
         }
@@ -382,9 +434,29 @@ fn read_length(wav: &Path) -> std::io::Result<Duration> {
 
 /// The call's audio, as the phone posts it.
 pub(crate) struct PhoneSource {
-    pieces: mpsc::Receiver<Piece>,
+    line: Arc<PhoneLine>,
+    pieces: mpsc::Receiver<Queued>,
+    /// The screen whose pieces this source reads now.
+    screen: u64,
     quiet: watch::Receiver<Quiet>,
     ended: bool,
+}
+
+impl PhoneSource {
+    /// The queued piece, unless a newer screen has taken the call over since it was posted.
+    /// Before the newer screen's first piece, the call forgets the turn being spoken: the
+    /// pieces the call read before are then the last of the older screen's, so the forget
+    /// reaches the call after them and before anything of the newer screen's.
+    fn take(&mut self, (samples, at, screen): Queued) -> Option<Piece> {
+        if screen < lock(&self.line.inner).screen {
+            return None;
+        }
+        if screen > self.screen {
+            self.screen = screen;
+            self.line.forget_turn();
+        }
+        Some((samples, at))
+    }
 }
 
 impl AudioSource for PhoneSource {
@@ -394,14 +466,19 @@ impl AudioSource for PhoneSource {
     }
 
     /// Ends `PHONE_SILENT_LIMIT` after the last piece, counting no time a sound the phone
-    /// fetched, or a line, waited for it; or when a newer source replaced this one.
+    /// fetched, or a line, waited for it; or when a newer source replaced this one. Skips
+    /// the pieces an older screen posted before a newer one took the call over.
     async fn next_stamped(&mut self) -> Option<Piece> {
         while !self.ended {
             let quiet = *self.quiet.borrow_and_update();
             tokio::select! {
                 biased;
                 piece = self.pieces.recv() => match piece {
-                    Some(piece) => return Some(piece),
+                    Some(queued) => {
+                        if let Some(piece) = self.take(queued) {
+                            return Some(piece);
+                        }
+                    }
                     None => self.ended = true,
                 },
                 changed = self.quiet.changed() => self.ended = changed.is_err(),
@@ -586,6 +663,14 @@ impl<B: CallPorts> CallPorts for PhonePorts<B> {
     }
 }
 
+/// What a START answers: the call's status and, while the call listens, the id the
+/// phone's pieces for it carry.
+#[derive(Debug, Clone)]
+pub(crate) struct PhoneStarted {
+    pub status: CallStatus,
+    pub call: Option<String>,
+}
+
 /// The phone's calls, as the web app holds them: each runs on the shared core through the
 /// phone's ports, and while it is open the view follows its state and transcript.
 pub(crate) struct PhoneCalls<B: CallPorts> {
@@ -606,8 +691,15 @@ impl<B: CallPorts> PhoneCalls<B> {
     pub(crate) fn new(base: B, set_up: bool) -> Self {
         let line = PhoneLine::new(set_up);
         let ports = PhonePorts::new(base, Arc::clone(&line));
+        let calls = Arc::new(CallControl::new(ports, set_up));
+        let forgets = Arc::downgrade(&calls);
+        line.set_forget_turn(move || {
+            if let Some(calls) = forgets.upgrade() {
+                calls.forget_turn();
+            }
+        });
         Self {
-            calls: Arc::new(CallControl::new(ports, set_up)),
+            calls,
             line,
             set_up,
             follower: Mutex::default(),
@@ -615,39 +707,59 @@ impl<B: CallPorts> PhoneCalls<B> {
     }
 
     /// Starts a call as `CallControl::start` does, and once it listens has the view follow
-    /// it. The phone stamps its pieces from `asked`, when it asked for the call: before a
-    /// desk call ended, so the Mac's clock is not behind the phone's. With a call already
-    /// open, answers its status and starts nothing new, its clock left as it was.
-    pub(crate) async fn start_at(&self, asked: Instant) -> CallStatus {
+    /// it, answering the id its pieces carry. The phone stamps its pieces from `asked`, when
+    /// it asked for the call: before a desk call ended, so the Mac's clock is not behind the
+    /// phone's. With a call already open, a newer screen takes it over: the same call goes
+    /// on with a new id, its pieces stamped from `asked`.
+    pub(crate) async fn start_at(&self, asked: Instant) -> PhoneStarted {
         self.start_with(Some(asked)).await
     }
 
-    /// The same with the pieces stamped from when the source opens.
+    /// The same with the pieces stamped from when the source opens, or, for a takeover,
+    /// from now.
     #[cfg(test)]
     pub(crate) async fn start(&self) -> CallStatus {
-        self.start_with(None).await
+        self.start_with(None).await.status
     }
 
-    async fn start_with(&self, asked: Option<Instant>) -> CallStatus {
+    async fn start_with(&self, asked: Option<Instant>) -> PhoneStarted {
         if self.set_up {
             self.forget_ended_call();
         }
-        lock(&self.line.inner).asked = asked;
+        let screen = {
+            let mut inner = lock(&self.line.inner);
+            inner.asked = asked;
+            inner.screen
+        };
         let status = self.calls.start().await;
-        // A call already open, or one that never opened its source, leaves it unread.
-        lock(&self.line.inner).asked = None;
+        let (unread, opened) = {
+            let mut inner = lock(&self.line.inner);
+            // A call already open, or one that never opened its source, leaves it unread.
+            (inner.asked.take(), inner.screen != screen)
+        };
         if matches!(status.state, CallState::Off | CallState::NotSetUp) {
-            return status;
+            return PhoneStarted { status, call: None };
         }
+        let call = if opened {
+            lock(&self.line.inner).call.clone()
+        } else {
+            // A takeover means the user starts again: what the older screen was saying is
+            // dropped. The source forgets it again before the newer screen's first piece, in
+            // case a piece of the older screen's reaches the call after this.
+            let call = self.line.take_over(unread.unwrap_or_else(Instant::now));
+            self.calls.forget_turn();
+            call
+        };
+        let started = PhoneStarted { status, call };
         let mut follower = lock(&self.follower);
         if follower.as_ref().is_some_and(|task| !task.is_finished()) {
-            return status;
+            return started;
         }
         info!("app call started");
         let calls = Arc::clone(&self.calls);
         let line = Arc::clone(&self.line);
         *follower = Some(tokio::spawn(follow(calls, line)));
-        status
+        started
     }
 
     /// Unless a call is open, lets go of the last call's follower and clears why it ended
@@ -706,8 +818,8 @@ impl<B: CallPorts> PhoneCalls<B> {
         self.calls.say(line, by).await
     }
 
-    pub(crate) fn audio(&self, at_ms: u64, bytes: &[u8]) -> Result<(), AudioRefused> {
-        self.line.audio(at_ms, bytes)
+    pub(crate) fn audio(&self, call: &str, at_ms: u64, bytes: &[u8]) -> Result<(), AudioRefused> {
+        self.line.audio(call, at_ms, bytes)
     }
 
     pub(crate) fn played(&self, id: &str) {
@@ -730,6 +842,12 @@ impl<B: CallPorts> PhoneCalls<B> {
     #[cfg(test)]
     pub(crate) fn source_base(&self) -> Option<Instant> {
         self.line.source_base()
+    }
+
+    /// The id the open call's pieces carry, so a test can post them.
+    #[cfg(test)]
+    pub(crate) fn call_id(&self) -> Option<String> {
+        self.line.call_id()
     }
 
     /// Whether a follower still copies a call's status into the view.
