@@ -6,9 +6,7 @@ use std::path::{Path, PathBuf};
 pub(crate) const NOTHING_HEARD: &str = "Sorry, I didn't catch that.";
 pub(crate) const CHIEF_BUSY: &str = "The chief is busy. I'll pass it on when it's free.";
 pub(crate) const NO_ANSWER: &str = "No answer yet.";
-/// The phone's version, which knows the answer will be in the thread. The phone's ports
-/// use it; until they exist only the tests do.
-#[cfg_attr(not(test), allow(dead_code))]
+/// The phone's version, which knows the answer will be in the thread.
 pub(crate) const NO_ANSWER_IN_THREAD: &str = "No answer yet. It will be in the thread.";
 pub(crate) const NO_CHIEF: &str = "There's no chief running.";
 pub(crate) const BYE: &str = "Bye.";

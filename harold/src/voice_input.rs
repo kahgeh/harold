@@ -4,6 +4,10 @@
 mod call;
 mod hang_up;
 mod mac;
+// PhoneCalls (Task 3) and the app's call routes (Task 5) use the phone's ports; until then
+// only the tests do.
+#[cfg_attr(not(test), allow(dead_code))]
+mod phone;
 mod phrases;
 mod speech;
 mod wav;
@@ -11,6 +15,11 @@ mod worker;
 
 use call::{Ended, Event, chief_pane, lock, run_call, sweep_call_folders};
 pub(crate) use mac::MacPorts;
+#[cfg_attr(not(test), allow(unused_imports))]
+pub(crate) use phone::{
+    ANSWER_KEEP, AudioRefused, PHONE_SILENT_LIMIT, PIECE_LIMIT_BYTES, PIECES_QUEUED, PLAY_GRACE,
+    PhoneLine, PhoneSound, PhoneSpeech, PhoneView, SPEECH_BASE, SPEECH_PER_CHAR,
+};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -362,3 +371,7 @@ pub(crate) fn say_in_open_call(line: &str, by: Speaker) -> Option<bool> {
 #[cfg(test)]
 #[path = "voice_input_tests.rs"]
 pub(crate) mod tests;
+
+#[cfg(test)]
+#[path = "voice_input_phone_tests.rs"]
+mod phone_tests;
