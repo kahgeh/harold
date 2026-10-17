@@ -261,13 +261,13 @@ The pane message does not expose adapter IDs, classifier IDs, evidence provenanc
 
 Optional Claude dashboard generation is configured separately under `[activity_summary]`; see the [complete settings reference](activity-summaries.md#configuration).
 
-Default monitor configuration:
+Default monitor configuration, from `harold/config/default.toml`:
 
 ```toml
 [agent_monitor]
-inventory_interval_ms = 1000
+inventory_interval_ms = 2000
 inventory_timeout_ms = 3000
-screen_interval_ms = 500
+screen_interval_ms = 2000
 hook_grace_ms = 2000
 report_grace_ms = 30000
 
@@ -284,9 +284,9 @@ screen_history_lines = 2000
 
 | Key | Constraint and behavior |
 | --- | --- |
-| `agent_monitor.inventory_interval_ms` | Positive integer; scheduled inventory period |
-| `agent_monitor.inventory_timeout_ms` | Positive integer; inventory scan/resolve deadline in milliseconds, default 3000 |
-| `agent_monitor.screen_interval_ms` | Positive integer; scheduled visible-screen period |
+| `agent_monitor.inventory_interval_ms` | Positive integer; scheduled inventory period, default 2000 |
+| `agent_monitor.inventory_timeout_ms` | Positive integer; inventory scan/resolve deadline in milliseconds, default 3000; a retried scan gets twice this |
+| `agent_monitor.screen_interval_ms` | Positive integer; scheduled visible-screen period, default 2000 |
 | `agent_monitor.hook_grace_ms` | Non-negative; how long a turn-complete's idle state wins over the screen for a pane with no lifecycle adapter |
 | `agent_monitor.report_grace_ms` | Non-negative, default 30000; how old a lifecycle adapter's `Busy` report can be before the screen decides, and how long the screen must read `Busy` without a break to replace an `Idle` report |
 | `agents[].id` | Unique bounded identifier; `unknown` is reserved |
@@ -297,6 +297,8 @@ screen_history_lines = 2000
 | `agents[].summary_line_prefixes` | Optional exact, case-sensitive safe submitted-input prefixes for `generic-v1`; `codex-v1` recognizes its own styled `>` and `›` blocks |
 | `agents[].screen_adapter` | `generic-v1` when omitted; accepts `generic-v1`, `codex-v1`, or `claude-v1`; unknown names fail startup |
 | `agents[].screen_history_lines` | Integer from 1 through 10,000; defaults to 2,000 history rows before the visible grid |
+
+The defaults above are the ones in `harold/config/default.toml`, and that file decides them. Harold will not start without it, and it sets every `[agent_monitor]` key, so the fallback values built into `AgentMonitorSettings` in `harold/src/settings.rs` (1,000 ms inventory and 500 ms screen intervals) apply only to a key the file leaves out.
 
 Tmux pane inventory uses tab-separated fields and explicitly requests UTF-8 output (`tmux -u`), so output framing does not depend on the daemon’s locale. Rows must contain exactly seven fields; embedded tabs are rejected as malformed rather than guessing their meaning.
 
@@ -333,11 +335,15 @@ The public snapshot reports `inventory` and `screen` health after a component fi
 | `capture_unavailable` | Screen-capture command is absent |
 | `capture_failed` | Screen capture exits unsuccessfully |
 | `pane_departed` | Pane disappears during capture |
-| `timeout` | Acquisition exceeded its deadline (inventory: configured timeout; screen: 500 ms) |
+| `timeout` | Acquisition exceeded its deadline (inventory: configured timeout, twice that on a retry; screen: 500 ms, 2,000 ms on a retry) |
 | `task_failed` | The bounded acquisition worker could not start or return |
 | `ok` | Recovery to healthy |
 
-A still-running worker causes later attempts to return internal `busy` without starting another worker or changing public health. A deadline miss remains `timeout` until a later acquisition succeeds. Degradation and recovery are logged on health transitions with component and reason code; process commands and screen content are excluded.
+By default the monitor scans the inventory and reads each pane's screen every 2 seconds (`inventory_interval_ms`, `screen_interval_ms`). A failed inventory scan or screen read is retried once, at once, with a longer deadline: twice `inventory_timeout_ms` for the scan, 2,000 ms for a pane's screen read (the capture command's own limit). These retry deadlines are fixed in the code. A first try still running is asked to stop, which kills its child command, and the retry waits within its own deadline for that worker to finish, so the two never run together. A first try that returns `busy` is not retried. Revalidating a departed pane, resolving a pane, and prompt recovery are not retried.
+
+A retry that works logs one info line, `agent monitor read retried`, with `component` (`inventory` or `screen`), `pane_id` for a screen read, and `elapsed_ms` from the first try's start to the retry's success. It changes no health: there is no warning, and the monitor is not marked degraded. When the retry fails too, the component degrades with the retry's reason code, and `agent monitor degraded` is logged at warning level; the next scheduled read, with its own retry, tries again, and `agent monitor recovered` is logged when one works.
+
+A worker that does not stop causes later attempts to return internal `busy` without starting another worker or changing public health. A deadline miss remains `timeout` until a later acquisition succeeds. Degradation and recovery are logged on health transitions with component and reason code; process commands and screen content are excluded.
 
 An inventory failure preserves current panes and never infers mass departure. A screen failure preserves lifecycle state and the prior fallback. Projector failures leave the checkpoint and projection unchanged and are retried by the event-handler loop. A schema initialization, startup catch-up, or snapshot-load error prevents the server from becoming ready.
 

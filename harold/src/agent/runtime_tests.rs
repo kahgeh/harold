@@ -1,12 +1,13 @@
 use std::collections::VecDeque;
 use std::io::Write;
 use std::path::Path;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use prost::Message;
-use tokio::sync::watch;
+use tokio::sync::{Semaphore, watch};
 
 use super::domain::{
     AgentEvent, AgentIncarnation, AgentLifecycleObserved, AgentPaneObservation, AgentPaneObserved,
@@ -16,13 +17,13 @@ use super::domain::{
 use super::inventory::{AgentInventoryPort, InventoryError};
 use super::reducer::GraceWindows;
 use super::runtime::{
-    AgentMonitorHandle, AgentMonitorSeed, MonitorCommandError, coalesced_tick_channel_for_test,
-    spawn_agent_monitor_for_test, spawn_agent_monitor_seeded_for_test,
-    spawn_agent_monitor_with_graces_for_test,
+    AgentMonitorHandle, AgentMonitorSeed, MonitorCommandError, SCREEN_RETRY_TIMEOUT,
+    coalesced_tick_channel_for_test, read_with_retry_for_test, spawn_agent_monitor_for_test,
+    spawn_agent_monitor_seeded_for_test, spawn_agent_monitor_with_graces_for_test,
 };
 use super::screen::{
-    CommandOutput, CommandRunner, PromptBlock, PromptScan, ScreenError, TmuxVisibleScreen,
-    VisibleScreenPort,
+    CommandOutput, CommandRunner, PromptBlock, PromptScan, ScreenError, StopSignal,
+    TmuxVisibleScreen, VisibleScreenPort,
 };
 use super::snapshot::AgentSnapshotHub;
 use crate::harold::harold_server::Harold;
@@ -4592,4 +4593,215 @@ async fn timed_out_first_try_is_stopped_before_its_retry() {
     assert!(!logs.contains("agent monitor degraded"), "{logs}");
     drop(shutdown);
     task.await.unwrap();
+}
+
+#[test]
+fn shipped_defaults_poll_every_two_seconds() {
+    let shipped = include_str!("../../config/default.toml");
+    assert!(shipped.contains("inventory_interval_ms = 2000"));
+    assert!(shipped.contains("screen_interval_ms = 2000"));
+}
+
+/// One recorded call of a scripted read: its deadline, when it started, and its stop signal.
+struct Attempt {
+    deadline: Duration,
+    started: tokio::time::Instant,
+    stop: StopSignal,
+}
+
+type AttemptFuture = Pin<Box<dyn Future<Output = Result<u8, &'static str>> + Send>>;
+
+/// Each scripted read takes its time in paused tokio time, then gives its result.
+fn scripted(
+    script: Vec<(Duration, Result<u8, &'static str>)>,
+) -> (
+    Arc<Mutex<Vec<Attempt>>>,
+    impl FnMut(Duration, StopSignal) -> AttemptFuture,
+) {
+    let attempts = Arc::new(Mutex::new(Vec::new()));
+    let recorded = Arc::clone(&attempts);
+    let mut script = VecDeque::from(script);
+    let attempt = move |deadline: Duration, stop: StopSignal| -> AttemptFuture {
+        recorded.lock().unwrap().push(Attempt {
+            deadline,
+            started: tokio::time::Instant::now(),
+            stop,
+        });
+        let (takes, result) = script.pop_front().expect("an unscripted read");
+        Box::pin(async move {
+            tokio::time::sleep(takes).await;
+            result
+        })
+    };
+    (attempts, attempt)
+}
+
+#[tokio::test(start_paused = true)]
+async fn retry_gets_the_longer_deadline_after_a_failure() {
+    let (captured, _guard) = capture_logs();
+    let gate = Arc::new(Semaphore::new(1));
+    let (attempts, attempt) = scripted(vec![
+        (Duration::from_millis(500), Err("timeout")),
+        (Duration::ZERO, Ok(7)),
+    ]);
+    let result = read_with_retry_for_test(
+        "screen",
+        Some("%8"),
+        &gate,
+        Duration::from_millis(500),
+        SCREEN_RETRY_TIMEOUT,
+        attempt,
+    )
+    .await;
+    assert_eq!(result.ok(), Some(7));
+    let deadlines: Vec<_> = attempts
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|a| a.deadline)
+        .collect();
+    assert_eq!(
+        deadlines,
+        [Duration::from_millis(500), Duration::from_millis(2_000)]
+    );
+    let logs = logged(&captured);
+    assert_eq!(logs.matches("agent monitor read retried").count(), 1);
+    assert!(logs.contains("component=\"screen\""), "{logs}");
+    assert!(logs.contains("pane_id=\"%8\""), "{logs}");
+    assert!(logs.contains("elapsed_ms=500"), "{logs}");
+    assert!(!logs.contains("agent monitor degraded"), "{logs}");
+}
+
+#[tokio::test(start_paused = true)]
+async fn inventory_retry_has_no_pane() {
+    let (captured, _guard) = capture_logs();
+    let gate = Arc::new(Semaphore::new(1));
+    let (attempts, attempt) = scripted(vec![
+        (Duration::from_millis(3_000), Err("timeout")),
+        (Duration::from_millis(40), Ok(1)),
+    ]);
+    let result = read_with_retry_for_test(
+        "inventory",
+        None,
+        &gate,
+        Duration::from_millis(3_000),
+        Duration::from_millis(3_000) * 2,
+        attempt,
+    )
+    .await;
+    assert_eq!(result.ok(), Some(1));
+    let deadlines: Vec<_> = attempts
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|a| a.deadline)
+        .collect();
+    assert_eq!(
+        deadlines,
+        [Duration::from_millis(3_000), Duration::from_millis(6_000)]
+    );
+    let logs = logged(&captured);
+    assert_eq!(logs.matches("agent monitor read retried").count(), 1);
+    assert!(logs.contains("component=\"inventory\""), "{logs}");
+    assert!(logs.contains("elapsed_ms=3040"), "{logs}");
+    assert!(!logs.contains("pane_id"), "{logs}");
+}
+
+#[tokio::test(start_paused = true)]
+async fn retry_failure_returns_the_retrys_reason() {
+    let (captured, _guard) = capture_logs();
+    let gate = Arc::new(Semaphore::new(1));
+    let (attempts, attempt) = scripted(vec![
+        (Duration::from_millis(500), Err("timeout")),
+        (Duration::ZERO, Err("capture_failed")),
+    ]);
+    let failure = read_with_retry_for_test(
+        "screen",
+        Some("%8"),
+        &gate,
+        Duration::from_millis(500),
+        SCREEN_RETRY_TIMEOUT,
+        attempt,
+    )
+    .await
+    .expect_err("both tries failed");
+    assert_eq!(failure, "capture_failed");
+    assert_eq!(attempts.lock().unwrap().len(), 2);
+    assert!(!logged(&captured).contains("agent monitor read retried"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn busy_first_try_is_not_retried() {
+    let gate = Arc::new(Semaphore::new(1));
+    let (attempts, attempt) = scripted(vec![(Duration::ZERO, Err("busy"))]);
+    let failure = read_with_retry_for_test(
+        "inventory",
+        None,
+        &gate,
+        Duration::from_millis(3_000),
+        Duration::from_millis(6_000),
+        attempt,
+    )
+    .await
+    .expect_err("a busy gate is not retried");
+    assert_eq!(failure, "busy");
+    assert_eq!(attempts.lock().unwrap().len(), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn retry_waits_for_the_stopped_first_try_to_release_the_gate() {
+    let gate = Arc::new(Semaphore::new(1));
+    // The test plays the timed-out first try's worker, which still holds the gate.
+    let held = Arc::clone(&gate).try_acquire_owned().unwrap();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(800)).await;
+        drop(held);
+    });
+    let (attempts, attempt) = scripted(vec![
+        (Duration::from_millis(500), Err("timeout")),
+        (Duration::ZERO, Ok(3)),
+    ]);
+    let began = tokio::time::Instant::now();
+    let result = read_with_retry_for_test(
+        "screen",
+        Some("%8"),
+        &gate,
+        Duration::from_millis(500),
+        SCREEN_RETRY_TIMEOUT,
+        attempt,
+    )
+    .await;
+    assert_eq!(result.ok(), Some(3));
+    let attempts = attempts.lock().unwrap();
+    assert!(
+        attempts[0].stop.requested(),
+        "the first try must be asked to stop"
+    );
+    assert!(!attempts[1].stop.requested());
+    assert_eq!(
+        attempts[1].started.duration_since(began),
+        Duration::from_millis(800)
+    );
+    assert_eq!(attempts[1].deadline, Duration::from_millis(1_700));
+}
+
+#[tokio::test(start_paused = true)]
+async fn retry_never_starts_while_the_gate_stays_held() {
+    let gate = Arc::new(Semaphore::new(1));
+    let _held = Arc::clone(&gate).try_acquire_owned().unwrap();
+    let (attempts, attempt) = scripted(vec![(Duration::from_millis(500), Err("timeout"))]);
+    let began = tokio::time::Instant::now();
+    let failure = read_with_retry_for_test(
+        "screen",
+        Some("%8"),
+        &gate,
+        Duration::from_millis(500),
+        SCREEN_RETRY_TIMEOUT,
+        attempt,
+    )
+    .await
+    .expect_err("the gate never came free");
+    assert_eq!(failure, "timeout");
+    assert_eq!(attempts.lock().unwrap().len(), 1);
+    assert_eq!(began.elapsed(), Duration::from_millis(2_500));
 }
