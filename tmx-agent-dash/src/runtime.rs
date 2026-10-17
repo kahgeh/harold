@@ -343,7 +343,10 @@ where
 {
     let result = async {
         // The call's state is asked for as the stream opens, so the button finds the
-        // chief's pane before any call, and then on every tick of the poll.
+        // chief's pane before any call, and then on every tick of the poll. Each poll
+        // is awaited inline, like the mute and pause requests: Harold answers Status
+        // synchronously from the call's last state, so the loop waits only one round
+        // trip, and at most VOICE_REQUEST_TIMEOUT when Harold hangs.
         let polled = stream.call(CallAction::Status).await;
         if core.call_polled(polled) {
             draw(terminal, &core.app, clock)?;

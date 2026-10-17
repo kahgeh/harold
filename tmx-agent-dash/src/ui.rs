@@ -1,7 +1,7 @@
 use std::borrow::Cow;
 
 use ratatui::Frame;
-use ratatui::layout::{Alignment, Constraint, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint, Flex, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, TableState, Wrap};
@@ -27,6 +27,9 @@ const COMPACT_WIDTH: u16 = 84;
 /// The speaking bars' heights, one step apart; the five bars read it two steps apart.
 const LEVELS: [char; 12] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '▆', '▅', '▄', '▃', '▂'];
 const BAR_STEP_MS: i64 = 150;
+const COLUMN_SPACING: u16 = 1;
+/// The work summary's place among the list's columns, in both forms.
+const WORK_COLUMN: usize = 4;
 
 pub fn render(frame: &mut Frame<'_>, app: &App, now_ms: i64) {
     let area = frame.area();
@@ -333,7 +336,7 @@ fn render_live_workspace(frame: &mut Frame<'_>, area: Rect, app: &App, now_ms: i
     let [inventory, detail] =
         Layout::horizontal([Constraint::Percentage(68), Constraint::Percentage(32)]).areas(area);
     let detail_lines = app.selected_row().map(|agent| detail_lines(agent, now_ms));
-    if !detail_fits(detail, detail_lines.as_deref()) || !inventory_fits(inventory, app, now_ms) {
+    if !detail_fits(detail, detail_lines.as_deref()) {
         render_inventory(frame, area, app, now_ms);
         return;
     }
@@ -449,92 +452,12 @@ fn render_state_message(
     );
 }
 
-/// The chief's buttons, when Harold has named a chief that is on the list.
-fn chief_buttons(app: &App, now_ms: i64) -> Option<Vec<Span<'static>>> {
-    app.chief_row()?;
-    let view = app.call.as_ref()?;
-    if view.state == CallState::Off && app.voice() == VoiceState::Muted {
-        return Some(vec![button(
-            "[c] 📞 call: voice muted",
-            Style::default().fg(MUTED),
-        )]);
-    }
-    Some(call_buttons(view, now_ms))
-}
-
-fn spans_width(spans: &[Span<'_>]) -> u16 {
-    u16::try_from(spans.iter().map(Span::width).sum::<usize>()).unwrap_or(u16::MAX)
-}
-
-/// The narrowest work summary column the list keeps when it can.
-const fn summary_min(wide: bool) -> u16 {
-    if wide { 12 } else { 8 }
-}
-
-/// The column widths, with a last column for the chief's buttons when they show.
-/// The work summary gives way first when the buttons need the room.
-fn inventory_widths(wide: bool, buttons_width: Option<u16>) -> Vec<Constraint> {
-    let where_width = if wide { 26 } else { 20 };
-    let summary_min = if buttons_width.is_some() {
-        0
-    } else {
-        summary_min(wide)
-    };
-    let mut widths = vec![
-        Constraint::Length(if wide { 13 } else { 11 }),
-        Constraint::Length(where_width),
-        Constraint::Length(1),
-        Constraint::Length(2),
-        Constraint::Min(summary_min),
-    ];
-    if wide {
-        widths.push(Constraint::Length(7));
-    }
-    widths.extend(buttons_width.map(Constraint::Length));
-    widths
-}
-
-/// Whether `area` holds every fixed column, the chief's buttons among them, and
-/// still leaves the work summary its usual room.
-fn inventory_fits(area: Rect, app: &App, now_ms: i64) -> bool {
-    let Some(buttons) = chief_buttons(app, now_ms) else {
-        return true;
-    };
-    let wide = area.width >= COMPACT_WIDTH;
-    let widths = inventory_widths(wide, Some(spans_width(&buttons)));
-    let fixed: u16 = widths
-        .iter()
-        .map(|width| match width {
-            Constraint::Length(length) | Constraint::Min(length) => *length,
-            _ => 0,
-        })
-        .sum();
-    let spacing = u16::try_from(widths.len().saturating_sub(1)).unwrap_or(u16::MAX);
-    fixed
-        .saturating_add(summary_min(wide))
-        .saturating_add(spacing)
-        .saturating_add(2)
-        <= area.width
-}
-
-/// The chief's work cell during a call: what the chief was sent, or else what
-/// became of the last turn.
-fn call_work(view: &CallView) -> Option<String> {
-    if !view.state.in_call() {
-        return None;
-    }
-    if !view.last_transcript.is_empty() {
-        return Some(format!("🎙 {}", view.last_transcript));
-    }
-    view.last_result.map(str::to_owned)
-}
-
 fn render_inventory(frame: &mut Frame<'_>, area: Rect, app: &App, now_ms: i64) {
     let wide = area.width >= COMPACT_WIDTH;
     let where_width: u16 = if wide { 26 } else { 20 };
+    let widths = inventory_widths(wide);
+    let work_width = work_cell_width(area, &widths);
     let chief = app.chief_row().map(|row| &row.incarnation);
-    let buttons = chief_buttons(app, now_ms);
-    let buttons_width = buttons.as_deref().map(spans_width);
     let mut rows = Vec::new();
     let mut selected_index = None;
     for (group, agents) in app.visible_groups() {
@@ -589,19 +512,22 @@ fn render_inventory(frame: &mut Frame<'_>, area: Rect, app: &App, now_ms: i64) {
                     Style::default().fg(MUTED),
                 )),
             ];
-            let is_chief = chief == Some(&agent.incarnation);
-            let work = is_chief
-                .then(|| app.call.as_ref().and_then(call_work))
-                .flatten();
-            cells.push(match work {
-                Some(work) => Cell::from(work),
-                None => Cell::from(display_work_summary(agent.work_summary.as_deref())),
+            let summary = display_work_summary(agent.work_summary.as_deref());
+            cells.push(match app.call.as_ref() {
+                Some(view) if chief == Some(&agent.incarnation) => {
+                    let work = call_work(view);
+                    Cell::from(chief_work_line(
+                        work.as_deref().unwrap_or(summary),
+                        view,
+                        app.voice() == VoiceState::Muted,
+                        now_ms,
+                        work_width,
+                    ))
+                }
+                _ => Cell::from(summary),
             });
             if wide {
                 cells.push(Cell::from(age(now_ms, agent.last_transition_at_ms)));
-            }
-            if let Some(buttons) = buttons.as_ref().filter(|_| is_chief) {
-                cells.push(Cell::from(Line::from(buttons.clone())));
             }
             rows.push(Row::new(cells).style(style));
         }
@@ -611,7 +537,6 @@ fn render_inventory(frame: &mut Frame<'_>, area: Rect, app: &App, now_ms: i64) {
     } else {
         Row::new(["STATE", "WHERE", "", "", "WORK SUMMARY"])
     };
-    let widths = inventory_widths(wide, buttons_width);
     const LIST_TITLE: &str = " AGENT BLOCK OCCUPANCY ";
     let title_room = usize::from(area.width)
         .saturating_sub(2)
@@ -622,15 +547,82 @@ fn render_inventory(frame: &mut Frame<'_>, area: Rect, app: &App, now_ms: i64) {
         .borders(Borders::ALL);
     let table = Table::new(rows, widths)
         .header(header.style(Style::default().fg(MUTED).add_modifier(Modifier::BOLD)))
-        .column_spacing(1)
+        .column_spacing(COLUMN_SPACING)
         .block(block);
     let mut state = TableState::default().with_selected(selected_index);
     frame.render_stateful_widget(table, area, &mut state);
 }
 
-/// One button: its text inside a space of padding, on its face.
-fn button(text: impl std::fmt::Display, style: Style) -> Span<'static> {
-    Span::styled(format!(" {text} "), style)
+/// The column widths. A call never changes them: the chief's buttons share its
+/// work cell.
+fn inventory_widths(wide: bool) -> Vec<Constraint> {
+    if wide {
+        vec![
+            Constraint::Length(13),
+            Constraint::Length(26),
+            Constraint::Length(1),
+            Constraint::Length(2),
+            Constraint::Min(12),
+            Constraint::Length(7),
+        ]
+    } else {
+        vec![
+            Constraint::Length(11),
+            Constraint::Length(20),
+            Constraint::Length(1),
+            Constraint::Length(2),
+            Constraint::Min(8),
+        ]
+    }
+}
+
+/// The work column's width inside `area`, laid out as the table lays it out.
+fn work_cell_width(area: Rect, widths: &[Constraint]) -> usize {
+    let inner = Rect::new(0, 0, area.width.saturating_sub(2), 1);
+    let columns = Layout::horizontal(widths.iter().copied())
+        .flex(Flex::Start)
+        .spacing(COLUMN_SPACING)
+        .split(inner);
+    columns
+        .get(WORK_COLUMN)
+        .map_or(0, |column| usize::from(column.width))
+}
+
+/// The chief's work cell during a call: what the chief was sent, or else what
+/// became of the last turn.
+fn call_work(view: &CallView) -> Option<String> {
+    if !view.state.in_call() {
+        return None;
+    }
+    if !view.last_transcript.is_empty() {
+        return Some(format!("🎙 {}", view.last_transcript));
+    }
+    view.last_result.map(str::to_owned)
+}
+
+/// The chief's work cell: its summary, truncated first, then the buttons at the
+/// right edge.
+fn chief_work_line(
+    summary: &str,
+    view: &CallView,
+    voice_muted: bool,
+    now_ms: i64,
+    width: usize,
+) -> Line<'static> {
+    let buttons = call_buttons(view, voice_muted, now_ms, width);
+    let buttons_width: usize = buttons.iter().map(Span::width).sum();
+    let room = width.saturating_sub(buttons_width + 1);
+    let summary = if room == 0 {
+        String::new()
+    } else {
+        fit(summary, room).into_owned()
+    };
+    let gap = width
+        .saturating_sub(buttons_width)
+        .saturating_sub(Line::raw(summary.as_str()).width());
+    let mut spans = vec![Span::raw(summary), Span::raw(" ".repeat(gap))];
+    spans.extend(buttons);
+    Line::from(spans)
 }
 
 /// The five bars for `now_ms`: they step once every 150 ms.
@@ -644,32 +636,76 @@ fn speaking_bars(now_ms: i64) -> String {
         .collect()
 }
 
-/// The button (and talk-now button) spans for `view`, with the spec's texts and colours.
-fn call_buttons(view: &CallView, now_ms: i64) -> Vec<Span<'static>> {
+/// The call button's texts for `view`, longest first, and its colours.
+fn call_button_texts(view: &CallView, voice_muted: bool, now_ms: i64) -> (Vec<String>, Style) {
     let key_cap = Style::default().fg(INK).bg(KEY_CAP);
+    let muted = Style::default().fg(MUTED);
     let lit = |colour| {
         Style::default()
             .fg(BOARD)
             .bg(colour)
             .add_modifier(Modifier::BOLD)
     };
+    let texts = |texts: &[&str]| texts.iter().map(|text| (*text).to_owned()).collect();
     match view.state {
-        CallState::Off => vec![button("[c] 📞 call", key_cap)],
-        CallState::Listening => vec![button("[c] ● listening · end call", lit(GREEN))],
-        CallState::Thinking => vec![button("[c] … chief thinking · end call", lit(AMBER))],
-        CallState::Speaking => vec![
-            button(
-                format!("[c] 📞 {} chief speaking · end call", speaking_bars(now_ms)),
+        CallState::Off if voice_muted => (
+            texts(&["[c] 📞 call: voice muted", "[c] 📞 voice muted"]),
+            muted,
+        ),
+        CallState::Off => (texts(&["[c] 📞 call"]), key_cap),
+        CallState::Listening => (
+            texts(&["[c] ● listening · end call", "[c] ● end call"]),
+            lit(GREEN),
+        ),
+        CallState::Thinking => (
+            texts(&["[c] … chief thinking · end call", "[c] … end call"]),
+            lit(AMBER),
+        ),
+        CallState::Speaking => {
+            let bars = speaking_bars(now_ms);
+            (
+                vec![
+                    format!("[c] 📞 {bars} chief speaking · end call"),
+                    format!("[c] 📞 {bars} end call"),
+                    "[c] 📞 end call".to_owned(),
+                ],
                 lit(AMBER),
-            ),
-            Span::raw(" "),
-            button("[t] talk now", key_cap),
-        ],
-        CallState::NotSetUp => vec![button(
-            "[c] 📞 call: not set up",
-            Style::default().fg(MUTED),
-        )],
+            )
+        }
+        CallState::NotSetUp => (
+            texts(&["[c] 📞 call: not set up", "[c] 📞 not set up"]),
+            muted,
+        ),
     }
+}
+
+/// The button (and talk-now button) spans for `view` in `width` columns: the
+/// first of the call button's texts that fits, then talk now in what is left.
+fn call_buttons(
+    view: &CallView,
+    voice_muted: bool,
+    now_ms: i64,
+    width: usize,
+) -> Vec<Span<'static>> {
+    let (texts, style) = call_button_texts(view, voice_muted, now_ms);
+    let fits = |text: &str, room: usize| Line::raw(text).width() <= room;
+    let shortest = texts.len() - 1;
+    let call = texts
+        .iter()
+        .position(|text| fits(text, width))
+        .unwrap_or(shortest);
+    let mut spans = vec![Span::styled(texts[call].clone(), style)];
+    if view.state == CallState::Speaking {
+        let room = width.saturating_sub(spans[0].width() + 1);
+        if let Some(talk) = ["[t] talk now", "[t] talk"]
+            .into_iter()
+            .find(|text| fits(text, room))
+        {
+            spans.push(Span::raw(" "));
+            spans.push(Span::styled(talk, Style::default().fg(INK).bg(KEY_CAP)));
+        }
+    }
+    spans
 }
 
 fn waiting_entry(app: &App, row: &crate::app::AgentRow) -> String {
@@ -2536,19 +2572,50 @@ mod tests {
             .unwrap_or_else(|| panic!("{needle:?} is not on screen"))
     }
 
+    const CALL_WIDTHS: [u16; 6] = [60, 70, 84, 100, 125, 140];
+    const IN_CALL_AND_OFF: [CallState; 4] = [
+        CallState::Off,
+        CallState::Listening,
+        CallState::Thinking,
+        CallState::Speaking,
+    ];
+
+    /// The chief's buttons on its row: from `[c]` to the end of the work cell,
+    /// which is the list's border or, in the wide form, the AGE cell after it.
+    fn chief_buttons_text(lines: &[String]) -> String {
+        let line = chief_line(lines);
+        let start = line.find("[c]").expect("the call button");
+        let tail = &line[start..];
+        let cell = tail[..tail.find('│').unwrap_or(tail.len())].trim_end();
+        cell.strip_suffix("<1m")
+            .unwrap_or(cell)
+            .trim_end()
+            .to_owned()
+    }
+
     #[test]
     fn the_button_is_only_on_the_chief_row() {
-        let app = call_layout(chief_call(CallState::Off));
-        for (width, height) in [(140, 38), (100, 30)] {
+        for (state, width, height) in [
+            (CallState::Off, 140, 38),
+            (CallState::Off, 100, 30),
+            (CallState::Speaking, 60, 30),
+            (CallState::Listening, 70, 30),
+        ] {
+            let app = call_layout(chief_call(state));
             let lines = text_lines(&app, width, height, 100_000);
+            let expected = if state == CallState::Off {
+                "[c] 📞 call"
+            } else {
+                "end call"
+            };
             assert!(
-                chief_line(&lines).contains("[c] 📞 call"),
-                "{width}: {lines:#?}"
+                chief_line(&lines).contains(expected),
+                "{state:?} {width}: {lines:#?}"
             );
             assert_eq!(
                 lines.iter().filter(|line| line.contains("[c]")).count(),
                 1,
-                "{width}"
+                "{state:?} {width}"
             );
         }
 
@@ -2583,54 +2650,205 @@ mod tests {
             "[c] 📞 {} chief speaking · end call",
             super::speaking_bars(now_ms)
         );
-        for (state, text, fg, bg) in [
-            (CallState::Off, "[c] 📞 call", ink, Some(key_cap)),
+        for (state, voice_muted, text, fg, bg) in [
+            (CallState::Off, false, "[c] 📞 call", ink, Some(key_cap)),
             (
                 CallState::Listening,
+                false,
                 "[c] ● listening · end call",
                 board,
                 Some(green),
             ),
             (
                 CallState::Thinking,
+                false,
                 "[c] … chief thinking · end call",
                 board,
                 Some(amber),
             ),
-            (CallState::Speaking, speaking.as_str(), board, Some(amber)),
-            (CallState::NotSetUp, "[c] 📞 call: not set up", muted, None),
+            (
+                CallState::Speaking,
+                false,
+                speaking.as_str(),
+                board,
+                Some(amber),
+            ),
+            (
+                CallState::NotSetUp,
+                false,
+                "[c] 📞 call: not set up",
+                muted,
+                None,
+            ),
+            (
+                CallState::Off,
+                true,
+                "[c] 📞 call: voice muted",
+                muted,
+                None,
+            ),
         ] {
-            let app = call_layout(chief_call(state));
-            let lines = text_lines(&app, 140, 38, now_ms);
-            assert!(chief_line(&lines).contains(text), "{state:?}: {lines:#?}");
-            let style = style_at(&rendered_buffer(&app, 140, 38, now_ms), "[c]");
-            assert_eq!(style.fg, Some(fg), "{state:?}");
-            if let Some(bg) = bg {
-                assert_eq!(style.bg, Some(bg), "{state:?}");
-            }
+            // The full texts, with room to spare.
+            let spans = super::call_buttons(&chief_call(state), voice_muted, now_ms, 200);
+            assert_eq!(spans[0].content, text, "{state:?}");
+            assert_eq!(spans[0].style.fg, Some(fg), "{state:?}");
+            assert_eq!(spans[0].style.bg, bg, "{state:?}");
             let lit = matches!(
                 state,
                 CallState::Listening | CallState::Thinking | CallState::Speaking
             );
             assert_eq!(
-                style.add_modifier.contains(ratatui::style::Modifier::BOLD),
+                spans[0]
+                    .style
+                    .add_modifier
+                    .contains(ratatui::style::Modifier::BOLD),
                 lit,
                 "{state:?}"
             );
-            let talk_now = chief_line(&lines).contains("[t] talk now");
-            assert_eq!(talk_now, state == CallState::Speaking, "{state:?}");
+            if state == CallState::Speaking {
+                assert_eq!(spans.len(), 3);
+                assert_eq!(spans[2].content, "[t] talk now");
+                assert_eq!(
+                    (spans[2].style.fg, spans[2].style.bg),
+                    (Some(ink), Some(key_cap))
+                );
+            } else {
+                assert_eq!(spans.len(), 1, "{state:?}");
+            }
+
+            // On screen at 140 columns, beside the detail panel.
+            let mut app = call_layout(chief_call(state));
+            app.snapshot.tts_muted = voice_muted;
+            let lines = text_lines(&app, 140, 38, now_ms);
+            assert_eq!(chief_buttons_text(&lines), text, "{state:?}: {lines:#?}");
+            let style = style_at(&rendered_buffer(&app, 140, 38, now_ms), "[c]");
+            assert_eq!(style.fg, Some(fg), "{state:?}");
+            if let Some(bg) = bg {
+                assert_eq!(style.bg, Some(bg), "{state:?}");
+            }
         }
+    }
 
-        let speaking = call_layout(chief_call(CallState::Speaking));
-        let style = style_at(&rendered_buffer(&speaking, 140, 38, now_ms), "[t]");
-        assert_eq!((style.fg, style.bg), (Some(ink), Some(key_cap)));
+    #[test]
+    fn call_buttons_shorten_in_the_spec_order() {
+        let now_ms = 100_000;
+        let bars = super::speaking_bars(now_ms);
+        let texts = |state, voice_muted, width| {
+            super::call_buttons(&chief_call(state), voice_muted, now_ms, width)
+                .iter()
+                .map(|span| span.content.clone().into_owned())
+                .collect::<String>()
+        };
+        for (state, voice_muted, short) in [
+            (CallState::Listening, false, "[c] ● end call"),
+            (CallState::Thinking, false, "[c] … end call"),
+            (CallState::NotSetUp, false, "[c] 📞 not set up"),
+            (CallState::Off, true, "[c] 📞 voice muted"),
+        ] {
+            let full = super::call_buttons(&chief_call(state), voice_muted, now_ms, 200)[0].width();
+            assert_eq!(texts(state, voice_muted, full - 1), short, "{state:?}");
+        }
+        // Off has one text.
+        assert_eq!(texts(CallState::Off, false, 4), "[c] 📞 call");
 
-        let mut muted_voice = call_layout(chief_call(CallState::Off));
-        muted_voice.snapshot.tts_muted = true;
-        let lines = text_lines(&muted_voice, 140, 38, now_ms);
-        assert!(chief_line(&lines).contains("[c] 📞 call: voice muted"));
-        let style = style_at(&rendered_buffer(&muted_voice, 140, 38, now_ms), "[c]");
-        assert_eq!(style.fg, Some(muted));
+        // Speaking: the call button's first text that fits, then talk now in what is left.
+        let full = format!("[c] 📞 {bars} chief speaking · end call");
+        let middle = format!("[c] 📞 {bars} end call");
+        for (width, expected) in [
+            (51, format!("{full} [t] talk now")),
+            (50, format!("{full} [t] talk")),
+            (46, full.clone()),
+            (38, full.clone()),
+            (37, format!("{middle} [t] talk now")),
+            (34, format!("{middle} [t] talk now")),
+            (33, format!("{middle} [t] talk")),
+            (30, format!("{middle} [t] talk")),
+            (29, middle.clone()),
+            (21, middle.clone()),
+            (20, "[c] 📞 end call".to_owned()),
+            (5, "[c] 📞 end call".to_owned()),
+        ] {
+            assert_eq!(
+                texts(CallState::Speaking, false, width),
+                expected,
+                "{width}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_chief_row_keeps_end_call_at_every_width() {
+        let now_ms = 100_000;
+        let bars = super::speaking_bars(now_ms);
+        for width in CALL_WIDTHS {
+            for state in IN_CALL_AND_OFF {
+                let lines = text_lines(&call_layout(chief_call(state)), width, 38, now_ms);
+                let expected = if state == CallState::Off {
+                    "[c] 📞 call"
+                } else {
+                    "end call"
+                };
+                assert!(
+                    chief_buttons_text(&lines).contains(expected),
+                    "{state:?} at {width}: {lines:#?}"
+                );
+            }
+        }
+        // The exact texts the order gives where the cell is tight.
+        for (width, state, expected) in [
+            (60, CallState::Thinking, "[c] … end call".to_owned()),
+            (60, CallState::Speaking, "[c] 📞 end call".to_owned()),
+            (125, CallState::Thinking, "[c] … end call".to_owned()),
+            (125, CallState::Speaking, format!("[c] 📞 {bars} end call")),
+            (
+                70,
+                CallState::Speaking,
+                format!("[c] 📞 {bars} end call [t] talk"),
+            ),
+        ] {
+            let lines = text_lines(&call_layout(chief_call(state)), width, 38, now_ms);
+            assert_eq!(chief_buttons_text(&lines), expected, "{state:?} at {width}");
+        }
+    }
+
+    #[test]
+    fn a_call_changes_only_the_chief_row() {
+        let now_ms = 100_000;
+        let quiet = {
+            let mut app = user_layout();
+            app.observe_call(None);
+            app
+        };
+        for width in CALL_WIDTHS {
+            let before = rendered_buffer(&quiet, width, 38, now_ms);
+            let before_lines = text_lines(&quiet, width, 38, now_ms);
+            let chief_index = before_lines
+                .iter()
+                .position(|line| line.contains("sre") && line.contains("IDLE"))
+                .unwrap();
+            let main = before_lines
+                .iter()
+                .find(|line| line.contains("main") && line.contains("BUSY"))
+                .unwrap();
+            assert!(
+                main.contains("cc") && main.contains("fixing handler"),
+                "{width}"
+            );
+            for state in IN_CALL_AND_OFF {
+                let during = rendered_buffer(&call_layout(chief_call(state)), width, 38, now_ms);
+                let row_width = usize::from(width);
+                for (index, (old, new)) in before
+                    .content()
+                    .chunks(row_width)
+                    .zip(during.content().chunks(row_width))
+                    .enumerate()
+                {
+                    if index != chief_index {
+                        assert_eq!(old, new, "{state:?} at {width}, row {index}");
+                    }
+                }
+            }
+        }
     }
 
     #[test]
@@ -2699,17 +2917,22 @@ mod tests {
             last_result: Some("typed"),
             ..chief_call(CallState::Listening)
         };
-        let lines = text_lines(&call_layout(heard.clone()), 140, 38, 100_000);
+        let lines = text_lines(&call_layout(heard.clone()), 100, 30, 100_000);
         assert!(chief_line(&lines).contains("🎙 approve q19"), "{lines:#?}");
         assert!(!chief_line(&lines).contains("waiting"));
 
         let dropped = CallView {
             last_transcript: String::new(),
             last_result: Some("nothing heard"),
-            ..chief_call(CallState::Thinking)
+            ..chief_call(CallState::Listening)
         };
-        let lines = text_lines(&call_layout(dropped), 140, 38, 100_000);
+        let lines = text_lines(&call_layout(dropped), 100, 30, 100_000);
         assert!(chief_line(&lines).contains("nothing heard"));
+
+        // Where the cell is tight the transcript is cut first; the button stays whole.
+        let lines = text_lines(&call_layout(heard.clone()), 60, 30, 100_000);
+        assert!(chief_line(&lines).contains("🎙 ap…"), "{lines:#?}");
+        assert!(chief_line(&lines).contains("[c] ● end call"));
 
         // Before any turn the summary stays.
         let lines = text_lines(
