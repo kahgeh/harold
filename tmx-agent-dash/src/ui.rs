@@ -6,7 +6,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, TableState, Wrap};
 
-use crate::app::{AgentState, App, RuntimeStatus};
+use crate::app::{AgentState, App, CallState, CallView, RuntimeStatus, VoiceState};
 use crate::text::display_work_summary;
 
 const BOARD: Color = Color::Rgb(20, 20, 16);
@@ -16,12 +16,17 @@ const MUTED: Color = Color::Rgb(143, 138, 127);
 const AMBER: Color = Color::Rgb(224, 174, 85);
 const GREEN: Color = Color::Rgb(125, 200, 139);
 const CORAL: Color = Color::Rgb(224, 114, 98);
+/// The face of a key-cap button: the call button with no call, and talk now.
+const KEY_CAP: Color = Color::Rgb(58, 58, 48);
 const MIN_WIDTH: u16 = 60;
 const MIN_HEIGHT: u16 = 18;
 const WIDE_WIDTH: u16 = 120;
 /// Narrowest terminal that fits the long-form footer with every hint visible.
-const WIDE_FOOTER_WIDTH: u16 = 100;
+const WIDE_FOOTER_WIDTH: u16 = 117;
 const COMPACT_WIDTH: u16 = 84;
+/// The speaking bars' heights, one step apart; the five bars read it two steps apart.
+const LEVELS: [char; 12] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '▆', '▅', '▄', '▃', '▂'];
+const BAR_STEP_MS: i64 = 150;
 
 pub fn render(frame: &mut Frame<'_>, app: &App, now_ms: i64) {
     let area = frame.area();
@@ -208,6 +213,7 @@ fn render_monitor(frame: &mut Frame<'_>, area: Rect, app: &App, now_ms: i64) {
             }
             RuntimeStatus::VoiceFailed(detail) => format!("VOICE ERROR: {detail}"),
             RuntimeStatus::MessagingFailed(detail) => format!("MESSAGING ERROR: {detail}"),
+            RuntimeStatus::CallFailed(detail) => format!("CALL ERROR: {detail}"),
             RuntimeStatus::SourceError(detail) => format!("SOURCE ERROR: {detail}"),
         };
         text.push_span(Span::styled(
@@ -327,7 +333,7 @@ fn render_live_workspace(frame: &mut Frame<'_>, area: Rect, app: &App, now_ms: i
     let [inventory, detail] =
         Layout::horizontal([Constraint::Percentage(68), Constraint::Percentage(32)]).areas(area);
     let detail_lines = app.selected_row().map(|agent| detail_lines(agent, now_ms));
-    if !detail_fits(detail, detail_lines.as_deref()) {
+    if !detail_fits(detail, detail_lines.as_deref()) || !inventory_fits(inventory, app, now_ms) {
         render_inventory(frame, area, app, now_ms);
         return;
     }
@@ -443,9 +449,92 @@ fn render_state_message(
     );
 }
 
+/// The chief's buttons, when Harold has named a chief that is on the list.
+fn chief_buttons(app: &App, now_ms: i64) -> Option<Vec<Span<'static>>> {
+    app.chief_row()?;
+    let view = app.call.as_ref()?;
+    if view.state == CallState::Off && app.voice() == VoiceState::Muted {
+        return Some(vec![button(
+            "[c] 📞 call: voice muted",
+            Style::default().fg(MUTED),
+        )]);
+    }
+    Some(call_buttons(view, now_ms))
+}
+
+fn spans_width(spans: &[Span<'_>]) -> u16 {
+    u16::try_from(spans.iter().map(Span::width).sum::<usize>()).unwrap_or(u16::MAX)
+}
+
+/// The narrowest work summary column the list keeps when it can.
+const fn summary_min(wide: bool) -> u16 {
+    if wide { 12 } else { 8 }
+}
+
+/// The column widths, with a last column for the chief's buttons when they show.
+/// The work summary gives way first when the buttons need the room.
+fn inventory_widths(wide: bool, buttons_width: Option<u16>) -> Vec<Constraint> {
+    let where_width = if wide { 26 } else { 20 };
+    let summary_min = if buttons_width.is_some() {
+        0
+    } else {
+        summary_min(wide)
+    };
+    let mut widths = vec![
+        Constraint::Length(if wide { 13 } else { 11 }),
+        Constraint::Length(where_width),
+        Constraint::Length(1),
+        Constraint::Length(2),
+        Constraint::Min(summary_min),
+    ];
+    if wide {
+        widths.push(Constraint::Length(7));
+    }
+    widths.extend(buttons_width.map(Constraint::Length));
+    widths
+}
+
+/// Whether `area` holds every fixed column, the chief's buttons among them, and
+/// still leaves the work summary its usual room.
+fn inventory_fits(area: Rect, app: &App, now_ms: i64) -> bool {
+    let Some(buttons) = chief_buttons(app, now_ms) else {
+        return true;
+    };
+    let wide = area.width >= COMPACT_WIDTH;
+    let widths = inventory_widths(wide, Some(spans_width(&buttons)));
+    let fixed: u16 = widths
+        .iter()
+        .map(|width| match width {
+            Constraint::Length(length) | Constraint::Min(length) => *length,
+            _ => 0,
+        })
+        .sum();
+    let spacing = u16::try_from(widths.len().saturating_sub(1)).unwrap_or(u16::MAX);
+    fixed
+        .saturating_add(summary_min(wide))
+        .saturating_add(spacing)
+        .saturating_add(2)
+        <= area.width
+}
+
+/// The chief's work cell during a call: what the chief was sent, or else what
+/// became of the last turn.
+fn call_work(view: &CallView) -> Option<String> {
+    if !view.state.in_call() {
+        return None;
+    }
+    if !view.last_transcript.is_empty() {
+        return Some(format!("🎙 {}", view.last_transcript));
+    }
+    view.last_result.map(str::to_owned)
+}
+
 fn render_inventory(frame: &mut Frame<'_>, area: Rect, app: &App, now_ms: i64) {
     let wide = area.width >= COMPACT_WIDTH;
     let where_width: u16 = if wide { 26 } else { 20 };
+    let chief = app.chief_row().map(|row| &row.incarnation);
+    let buttons = chief_buttons(app, now_ms);
+    let buttons_width = buttons.as_deref().map(spans_width);
     let mut rows = Vec::new();
     let mut selected_index = None;
     for (group, agents) in app.visible_groups() {
@@ -499,38 +588,30 @@ fn render_inventory(frame: &mut Frame<'_>, area: Rect, app: &App, now_ms: i64) {
                     agent.provider_tag(),
                     Style::default().fg(MUTED),
                 )),
-                Cell::from(display_work_summary(agent.work_summary.as_deref())),
             ];
+            let is_chief = chief == Some(&agent.incarnation);
+            let work = is_chief
+                .then(|| app.call.as_ref().and_then(call_work))
+                .flatten();
+            cells.push(match work {
+                Some(work) => Cell::from(work),
+                None => Cell::from(display_work_summary(agent.work_summary.as_deref())),
+            });
             if wide {
                 cells.push(Cell::from(age(now_ms, agent.last_transition_at_ms)));
+            }
+            if let Some(buttons) = buttons.as_ref().filter(|_| is_chief) {
+                cells.push(Cell::from(Line::from(buttons.clone())));
             }
             rows.push(Row::new(cells).style(style));
         }
     }
-    let (header, widths) = if wide {
-        (
-            Row::new(["STATE", "WHERE", "", "", "WORK SUMMARY", "AGE"]),
-            vec![
-                Constraint::Length(13),
-                Constraint::Length(where_width),
-                Constraint::Length(1),
-                Constraint::Length(2),
-                Constraint::Min(12),
-                Constraint::Length(7),
-            ],
-        )
+    let header = if wide {
+        Row::new(["STATE", "WHERE", "", "", "WORK SUMMARY", "AGE"])
     } else {
-        (
-            Row::new(["STATE", "WHERE", "", "", "WORK SUMMARY"]),
-            vec![
-                Constraint::Length(11),
-                Constraint::Length(where_width),
-                Constraint::Length(1),
-                Constraint::Length(2),
-                Constraint::Min(8),
-            ],
-        )
+        Row::new(["STATE", "WHERE", "", "", "WORK SUMMARY"])
     };
+    let widths = inventory_widths(wide, buttons_width);
     const LIST_TITLE: &str = " AGENT BLOCK OCCUPANCY ";
     let title_room = usize::from(area.width)
         .saturating_sub(2)
@@ -545,6 +626,50 @@ fn render_inventory(frame: &mut Frame<'_>, area: Rect, app: &App, now_ms: i64) {
         .block(block);
     let mut state = TableState::default().with_selected(selected_index);
     frame.render_stateful_widget(table, area, &mut state);
+}
+
+/// One button: its text inside a space of padding, on its face.
+fn button(text: impl std::fmt::Display, style: Style) -> Span<'static> {
+    Span::styled(format!(" {text} "), style)
+}
+
+/// The five bars for `now_ms`: they step once every 150 ms.
+fn speaking_bars(now_ms: i64) -> String {
+    let step = now_ms.div_euclid(BAR_STEP_MS);
+    (0..5)
+        .map(|bar| {
+            let level = (step + 2 * bar).rem_euclid(12);
+            LEVELS[usize::try_from(level).unwrap_or(0)]
+        })
+        .collect()
+}
+
+/// The button (and talk-now button) spans for `view`, with the spec's texts and colours.
+fn call_buttons(view: &CallView, now_ms: i64) -> Vec<Span<'static>> {
+    let key_cap = Style::default().fg(INK).bg(KEY_CAP);
+    let lit = |colour| {
+        Style::default()
+            .fg(BOARD)
+            .bg(colour)
+            .add_modifier(Modifier::BOLD)
+    };
+    match view.state {
+        CallState::Off => vec![button("[c] 📞 call", key_cap)],
+        CallState::Listening => vec![button("[c] ● listening · end call", lit(GREEN))],
+        CallState::Thinking => vec![button("[c] … chief thinking · end call", lit(AMBER))],
+        CallState::Speaking => vec![
+            button(
+                format!("[c] 📞 {} chief speaking · end call", speaking_bars(now_ms)),
+                lit(AMBER),
+            ),
+            Span::raw(" "),
+            button("[t] talk now", key_cap),
+        ],
+        CallState::NotSetUp => vec![button(
+            "[c] 📞 call: not set up",
+            Style::default().fg(MUTED),
+        )],
+    }
 }
 
 fn waiting_entry(app: &App, row: &crate::app::AgentRow) -> String {
@@ -713,43 +838,74 @@ fn detail_lines<'a>(agent: &'a crate::app::AgentRow, now_ms: i64) -> Vec<Line<'a
     ]
 }
 
-fn render_footer(frame: &mut Frame<'_>, area: Rect, compact: bool) {
-    let spans = if compact {
+/// The footer's hints, short or long. The call keys come last before `q`; the
+/// short form breaks there when one line cannot hold it.
+fn footer_hints(compact: bool) -> Vec<Span<'static>> {
+    let key = |text| Span::styled(text, Style::default().fg(INK));
+    if compact {
         vec![
-            Span::styled(" j/k", Style::default().fg(INK)),
+            key(" j/k"),
             Span::raw(" move "),
-            Span::styled("h/l", Style::default().fg(INK)),
+            key("h/l"),
             Span::raw(" wait "),
-            Span::styled("f", Style::default().fg(INK)),
+            key("f"),
             Span::raw(" search "),
-            Span::styled("/", Style::default().fg(INK)),
+            key("/"),
             Span::raw(" commands "),
-            Span::styled("Enter", Style::default().fg(INK)),
+            key("Enter"),
             Span::raw(" go "),
-            Span::styled("q", Style::default().fg(INK)),
+            key("c"),
+            Span::raw(" call "),
+            key("t"),
+            Span::raw(" talk now "),
+            key("q"),
             Span::raw(" quit "),
         ]
     } else {
         vec![
             Span::styled(" DISPATCH  ", Style::default().fg(MUTED)),
-            Span::styled("j/k", Style::default().fg(INK)),
+            key("j/k"),
             Span::raw(" select  "),
-            Span::styled("h/l", Style::default().fg(INK)),
+            key("h/l"),
             Span::raw(" waiting  "),
-            Span::styled("f", Style::default().fg(INK)),
+            key("f"),
             Span::raw(" search  "),
-            Span::styled("/", Style::default().fg(INK)),
+            key("/"),
             Span::raw(" commands  "),
-            Span::styled("Enter", Style::default().fg(INK)),
+            key("Enter"),
             Span::raw(" switch pane  "),
-            Span::styled("Esc", Style::default().fg(INK)),
+            key("c"),
+            Span::raw(" call  "),
+            key("t"),
+            Span::raw(" talk now  "),
+            key("Esc"),
             Span::raw(" clear  "),
-            Span::styled("q", Style::default().fg(INK)),
+            key("q"),
             Span::raw(" quit "),
         ]
-    };
+    }
+}
+
+fn render_footer(frame: &mut Frame<'_>, area: Rect, compact: bool) {
+    let mut hints = footer_hints(compact);
+    if Line::from(hints.clone()).width() + 2 <= usize::from(area.width) {
+        frame.render_widget(
+            Paragraph::new(Line::from(hints)).block(board_block().borders(Borders::ALL)),
+            area,
+        );
+        return;
+    }
+    // Too narrow for one line: the call keys and quit go on a second line, in the
+    // row the top border would take.
+    let call_keys = hints
+        .iter()
+        .position(|span| span.content == "c")
+        .unwrap_or(hints.len());
+    let mut second = hints.split_off(call_keys);
+    second.insert(0, Span::raw(" "));
     frame.render_widget(
-        Paragraph::new(Line::from(spans)).block(board_block().borders(Borders::ALL)),
+        Paragraph::new(vec![Line::from(hints), Line::from(second)])
+            .block(board_block().borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)),
         area,
     );
 }
@@ -898,8 +1054,8 @@ mod tests {
 
     use super::{fit, render};
     use crate::app::{
-        AgentIncarnation, AgentRow, AgentState, App, ConnectionState, MonitorHealth,
-        MonitorHealthState, SearchState, Snapshot,
+        AgentIncarnation, AgentRow, AgentState, App, CallState, CallView, ConnectionState,
+        MonitorHealth, MonitorHealthState, SearchState, Snapshot,
     };
 
     #[test]
@@ -2319,6 +2475,270 @@ mod tests {
             }
         }
     }
+    fn call_layout(view: CallView) -> App {
+        let mut app = user_layout();
+        app.observe_call(Some(view));
+        app
+    }
+
+    fn chief_call(state: CallState) -> CallView {
+        CallView {
+            state,
+            chief_pane_id: "%3".into(),
+            last_transcript: String::new(),
+            last_result: None,
+        }
+    }
+
+    /// The screen's text, one string per terminal row, without the cells a wide
+    /// character covers, so `📞 call` reads as written.
+    fn text_lines(app: &App, width: u16, height: u16, now_ms: i64) -> Vec<String> {
+        let buffer = rendered_buffer(app, width, height, now_ms);
+        buffer
+            .content()
+            .chunks(usize::from(buffer.area.width))
+            .map(|cells| {
+                let mut line = String::new();
+                let mut hidden = 0;
+                for cell in cells {
+                    if hidden > 0 {
+                        hidden -= 1;
+                        continue;
+                    }
+                    line.push_str(cell.symbol());
+                    hidden = Line::raw(cell.symbol()).width().saturating_sub(1);
+                }
+                line
+            })
+            .collect()
+    }
+
+    fn chief_line(lines: &[String]) -> &str {
+        lines
+            .iter()
+            .find(|line| line.contains("sre") && line.contains("IDLE"))
+            .expect("the chief's row")
+    }
+
+    /// The style of the first cell of the first `needle` on screen.
+    fn style_at(buffer: &Buffer, needle: &str) -> ratatui::style::Style {
+        let symbols: Vec<String> = needle.chars().map(String::from).collect();
+        buffer
+            .content()
+            .windows(symbols.len())
+            .find(|cells| {
+                cells
+                    .iter()
+                    .zip(&symbols)
+                    .all(|(cell, symbol)| cell.symbol() == symbol)
+            })
+            .map(|cells| cells[0].style())
+            .unwrap_or_else(|| panic!("{needle:?} is not on screen"))
+    }
+
+    #[test]
+    fn the_button_is_only_on_the_chief_row() {
+        let app = call_layout(chief_call(CallState::Off));
+        for (width, height) in [(140, 38), (100, 30)] {
+            let lines = text_lines(&app, width, height, 100_000);
+            assert!(
+                chief_line(&lines).contains("[c] 📞 call"),
+                "{width}: {lines:#?}"
+            );
+            assert_eq!(
+                lines.iter().filter(|line| line.contains("[c]")).count(),
+                1,
+                "{width}"
+            );
+        }
+
+        let mut moved = call_layout(chief_call(CallState::Off));
+        moved.observe_call(Some(CallView {
+            chief_pane_id: "%1".into(),
+            ..chief_call(CallState::Off)
+        }));
+        let lines = text_lines(&moved, 140, 38, 100_000);
+        let main = lines
+            .iter()
+            .find(|line| line.contains("main") && line.contains("BUSY"))
+            .unwrap();
+        assert!(main.contains("[c] 📞 call"));
+        assert!(!chief_line(&lines).contains("[c]"));
+
+        let mut unknown = call_layout(chief_call(CallState::Off));
+        unknown.observe_call(None);
+        assert!(!rendered(&unknown, 140, 38, 100_000).contains("[c]"));
+    }
+
+    #[test]
+    fn each_state_shows_the_specs_text() {
+        let now_ms = 100_000;
+        let key_cap = Color::Rgb(58, 58, 48);
+        let ink = Color::Rgb(237, 231, 216);
+        let board = Color::Rgb(20, 20, 16);
+        let green = Color::Rgb(125, 200, 139);
+        let amber = Color::Rgb(224, 174, 85);
+        let muted = Color::Rgb(143, 138, 127);
+        let speaking = format!(
+            "[c] 📞 {} chief speaking · end call",
+            super::speaking_bars(now_ms)
+        );
+        for (state, text, fg, bg) in [
+            (CallState::Off, "[c] 📞 call", ink, Some(key_cap)),
+            (
+                CallState::Listening,
+                "[c] ● listening · end call",
+                board,
+                Some(green),
+            ),
+            (
+                CallState::Thinking,
+                "[c] … chief thinking · end call",
+                board,
+                Some(amber),
+            ),
+            (CallState::Speaking, speaking.as_str(), board, Some(amber)),
+            (CallState::NotSetUp, "[c] 📞 call: not set up", muted, None),
+        ] {
+            let app = call_layout(chief_call(state));
+            let lines = text_lines(&app, 140, 38, now_ms);
+            assert!(chief_line(&lines).contains(text), "{state:?}: {lines:#?}");
+            let style = style_at(&rendered_buffer(&app, 140, 38, now_ms), "[c]");
+            assert_eq!(style.fg, Some(fg), "{state:?}");
+            if let Some(bg) = bg {
+                assert_eq!(style.bg, Some(bg), "{state:?}");
+            }
+            let lit = matches!(
+                state,
+                CallState::Listening | CallState::Thinking | CallState::Speaking
+            );
+            assert_eq!(
+                style.add_modifier.contains(ratatui::style::Modifier::BOLD),
+                lit,
+                "{state:?}"
+            );
+            let talk_now = chief_line(&lines).contains("[t] talk now");
+            assert_eq!(talk_now, state == CallState::Speaking, "{state:?}");
+        }
+
+        let speaking = call_layout(chief_call(CallState::Speaking));
+        let style = style_at(&rendered_buffer(&speaking, 140, 38, now_ms), "[t]");
+        assert_eq!((style.fg, style.bg), (Some(ink), Some(key_cap)));
+
+        let mut muted_voice = call_layout(chief_call(CallState::Off));
+        muted_voice.snapshot.tts_muted = true;
+        let lines = text_lines(&muted_voice, 140, 38, now_ms);
+        assert!(chief_line(&lines).contains("[c] 📞 call: voice muted"));
+        let style = style_at(&rendered_buffer(&muted_voice, 140, 38, now_ms), "[c]");
+        assert_eq!(style.fg, Some(muted));
+    }
+
+    #[test]
+    fn bars_change_every_150_ms_and_only_while_speaking() {
+        use super::speaking_bars;
+        assert_eq!(speaking_bars(0), speaking_bars(149));
+        assert_ne!(speaking_bars(0), speaking_bars(150));
+        assert_eq!(speaking_bars(150), speaking_bars(299));
+        assert_eq!(speaking_bars(0).chars().count(), 5);
+        assert!(speaking_bars(0).chars().all(|bar| "▁▂▃▄▅▆▇".contains(bar)));
+        // The pattern repeats after twelve steps.
+        assert_eq!(speaking_bars(0), speaking_bars(12 * 150));
+
+        let speaking = call_layout(chief_call(CallState::Speaking));
+        assert_ne!(
+            rendered(&speaking, 140, 38, 100_000),
+            rendered(&speaking, 140, 38, 100_150)
+        );
+        for state in [
+            CallState::Off,
+            CallState::Listening,
+            CallState::Thinking,
+            CallState::NotSetUp,
+        ] {
+            let content = rendered(&call_layout(chief_call(state)), 140, 38, 100_000);
+            assert!(!content.chars().any(|c| "▁▂▃▄▅▆▇".contains(c)), "{state:?}");
+        }
+    }
+
+    #[test]
+    fn footer_lists_call_and_talk_now() {
+        for (width, height) in [
+            (140, 38),
+            (super::WIDE_FOOTER_WIDTH, 38),
+            (super::WIDE_FOOTER_WIDTH - 1, 38),
+            (100, 30),
+            (84, 30),
+            (70, 30),
+            (60, 18),
+        ] {
+            let content = rendered(&user_layout(), width, height, 100_000);
+            for hint in [
+                "j/k",
+                "h/l",
+                "f search",
+                "/ commands",
+                "Enter",
+                "c call",
+                "t talk now",
+                "q quit",
+            ] {
+                assert!(content.contains(hint), "{hint} missing at {width}x{height}");
+            }
+        }
+        // The long form fits exactly at its threshold, inside the footer's borders.
+        assert_eq!(
+            Line::from(super::footer_hints(false)).width() + 2,
+            usize::from(super::WIDE_FOOTER_WIDTH)
+        );
+    }
+
+    #[test]
+    fn the_transcript_shows_on_the_chief_row_during_a_call() {
+        let heard = CallView {
+            last_transcript: "approve q19".into(),
+            last_result: Some("typed"),
+            ..chief_call(CallState::Listening)
+        };
+        let lines = text_lines(&call_layout(heard.clone()), 140, 38, 100_000);
+        assert!(chief_line(&lines).contains("🎙 approve q19"), "{lines:#?}");
+        assert!(!chief_line(&lines).contains("waiting"));
+
+        let dropped = CallView {
+            last_transcript: String::new(),
+            last_result: Some("nothing heard"),
+            ..chief_call(CallState::Thinking)
+        };
+        let lines = text_lines(&call_layout(dropped), 140, 38, 100_000);
+        assert!(chief_line(&lines).contains("nothing heard"));
+
+        // Before any turn the summary stays.
+        let lines = text_lines(
+            &call_layout(chief_call(CallState::Listening)),
+            140,
+            38,
+            100_000,
+        );
+        assert!(chief_line(&lines).contains("waiting"));
+
+        // Once the call ends the work summary comes back.
+        let ended = CallView {
+            state: CallState::Off,
+            ..heard
+        };
+        let lines = text_lines(&call_layout(ended), 140, 38, 100_000);
+        assert!(chief_line(&lines).contains("waiting"));
+        assert!(!chief_line(&lines).contains("🎙"));
+    }
+
+    #[test]
+    fn a_failed_call_is_reported_in_the_monitor_line() {
+        let mut app = live_app(Vec::new(), None);
+        app.set_runtime_status(crate::app::RuntimeStatus::CallFailed(
+            "start refused".into(),
+        ));
+        assert!(rendered(&app, 140, 38, 100_000).contains("CALL ERROR: start refused"));
+    }
+
     #[test]
     fn age_shows_one_unit_rounded_down() {
         const SECOND: i64 = 1_000;

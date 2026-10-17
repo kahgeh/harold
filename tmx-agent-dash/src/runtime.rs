@@ -14,7 +14,8 @@ use tokio::time::sleep;
 
 use crate::api::{AgentStateSource, SourceError, SourceStream};
 use crate::app::{
-    App, ConnectionState, Effect, FocusReading, RuntimeStatus, SearchState, Snapshot, SnapshotError,
+    App, CallAction, CallView, ConnectionState, Effect, FocusReading, RuntimeStatus, SearchState,
+    Snapshot, SnapshotError,
 };
 use crate::cli::Options;
 use crate::navigation::{NavigationError, PaneNavigator, TmuxNavigator};
@@ -27,6 +28,8 @@ const INPUT_CHANNEL_CAPACITY: usize = 32;
 const INPUT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const FOCUS_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const REDRAW_INTERVAL: Duration = Duration::from_millis(100);
+const CALL_POLL_DURING_CALL: Duration = Duration::from_millis(500);
+const CALL_POLL_OTHERWISE: Duration = Duration::from_secs(5);
 type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 #[derive(Debug)]
@@ -152,7 +155,8 @@ async fn run_async(
                 Control::Retry
                 | Control::Continue
                 | Control::SetTtsMuted(_)
-                | Control::SetMessagingPaused(_) => {}
+                | Control::SetMessagingPaused(_)
+                | Control::Call(_) => {}
             }
         }
         retry_immediately = false;
@@ -193,7 +197,12 @@ async fn run_async(
             Ok(Control::Retry) => {
                 retry_immediately = true;
             }
-            Ok(Control::Continue | Control::SetTtsMuted(_) | Control::SetMessagingPaused(_)) => {
+            Ok(
+                Control::Continue
+                | Control::SetTtsMuted(_)
+                | Control::SetMessagingPaused(_)
+                | Control::Call(_),
+            ) => {
                 let detail = core
                     .app
                     .runtime_status()
@@ -229,6 +238,9 @@ trait StreamPort: Sized {
     fn set_messaging_paused(&mut self, _paused: bool) -> BoxFuture<'_, Result<(), SourceError>> {
         Box::pin(async { Ok(()) })
     }
+    fn call(&mut self, _action: CallAction) -> BoxFuture<'_, Result<CallView, SourceError>> {
+        Box::pin(async { Err(SourceError::Transport("call control unavailable".into())) })
+    }
 }
 
 impl SourcePort for AgentStateSource {
@@ -254,6 +266,10 @@ impl StreamPort for SourceStream {
 
     fn set_messaging_paused(&mut self, paused: bool) -> BoxFuture<'_, Result<(), SourceError>> {
         Box::pin(self.request_messaging_paused(paused))
+    }
+
+    fn call(&mut self, action: CallAction) -> BoxFuture<'_, Result<CallView, SourceError>> {
+        Box::pin(self.request_call(action))
     }
 }
 
@@ -300,7 +316,10 @@ where
                 match handle_input(item, core, navigator)? {
                     Control::Quit => return Ok(OpenOutcome::Quit),
                     Control::Retry => return Ok(OpenOutcome::RetryNow),
-                    Control::Continue | Control::SetTtsMuted(_) | Control::SetMessagingPaused(_) => draw(terminal, &core.app, clock)?,
+                    Control::Continue
+                    | Control::SetTtsMuted(_)
+                    | Control::SetMessagingPaused(_)
+                    | Control::Call(_) => draw(terminal, &core.app, clock)?,
                 }
             }
             () = shutdown.recv_shutdown() => return Ok(OpenOutcome::Quit),
@@ -323,8 +342,23 @@ where
     T: ScreenPort,
 {
     let result = async {
+        // The call's state is asked for as the stream opens, so the button finds the
+        // chief's pane before any call, and then on every tick of the poll.
+        let polled = stream.call(CallAction::Status).await;
+        if core.call_polled(polled) {
+            draw(terminal, &core.app, clock)?;
+        }
+        let poll = sleep(call_poll_interval(core.app.call.as_ref()));
+        tokio::pin!(poll);
         loop {
             tokio::select! {
+            () = &mut poll => {
+                let polled = stream.call(CallAction::Status).await;
+                if core.call_polled(polled) {
+                    draw(terminal, &core.app, clock)?;
+                }
+                poll.as_mut().reset(next_call_poll(&core.app));
+            }
             item = stream.receive() => {
                 match item {
                     Some(Ok(snapshot)) => {
@@ -361,6 +395,13 @@ where
                     draw(terminal, &core.app, clock)?;
                     continue;
                 }
+                if let Control::Call(action) = control {
+                    let result = stream.call(action).await;
+                    core.call_result(action, result);
+                    draw(terminal, &core.app, clock)?;
+                    poll.as_mut().reset(next_call_poll(&core.app));
+                    continue;
+                }
                 draw(terminal, &core.app, clock)?;
                 if control != Control::Continue {
                     break Ok(control);
@@ -395,13 +436,33 @@ async fn wait_for_retry(
             item = input.recv() => {
                 let control = handle_input(item, core, navigator)?;
                 draw(terminal, &core.app, clock)?;
-                if !matches!(control, Control::Continue | Control::SetTtsMuted(_) | Control::SetMessagingPaused(_)) {
+                if !matches!(
+                    control,
+                    Control::Continue
+                        | Control::SetTtsMuted(_)
+                        | Control::SetMessagingPaused(_)
+                        | Control::Call(_)
+                ) {
                     return Ok(control);
                 }
             }
             () = shutdown.recv_shutdown() => return Ok(RuntimeCore::shutdown()),
         }
     }
+}
+
+/// How long until the call's state is asked for again: half a second while a call
+/// is on, so the button keeps up with it, and five seconds otherwise.
+fn call_poll_interval(call: Option<&CallView>) -> Duration {
+    if call.is_some_and(|call| call.state.in_call()) {
+        CALL_POLL_DURING_CALL
+    } else {
+        CALL_POLL_OTHERWISE
+    }
+}
+
+fn next_call_poll(app: &App) -> tokio::time::Instant {
+    tokio::time::Instant::now() + call_poll_interval(app.call.as_ref())
 }
 
 fn handle_input(
@@ -472,6 +533,7 @@ fn runtime_status_detail(status: &RuntimeStatus) -> String {
         | RuntimeStatus::NavigationFailed(detail)
         | RuntimeStatus::VoiceFailed(detail)
         | RuntimeStatus::MessagingFailed(detail)
+        | RuntimeStatus::CallFailed(detail)
         | RuntimeStatus::SourceError(detail) => detail.clone(),
         RuntimeStatus::NavigationUnavailable => "navigation unavailable".into(),
     }
@@ -791,6 +853,7 @@ enum Control {
     Quit,
     SetTtsMuted(bool),
     SetMessagingPaused(bool),
+    Call(CallAction),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -849,6 +912,27 @@ impl RuntimeCore {
 
     fn messaging_result(&mut self, result: Result<(), SourceError>) {
         self.request_result(result, RuntimeStatus::MessagingFailed);
+    }
+
+    /// Takes a poll's answer, and reports whether the call's view changed. A failed
+    /// poll hides the button and sets no status, so an older Harold without the RPC
+    /// shows nothing.
+    fn call_polled(&mut self, result: Result<CallView, SourceError>) -> bool {
+        let view = result.ok();
+        let changed = self.app.call != view;
+        self.app.observe_call(view);
+        changed
+    }
+
+    /// Takes the answer to a `c` or `t` press. Talk now answers with the state from
+    /// before the call handled it, so its answer is not shown; the next poll is.
+    fn call_result(&mut self, action: CallAction, result: Result<CallView, SourceError>) {
+        let result = result.map(|view| {
+            if action != CallAction::TalkNow {
+                self.app.observe_call(Some(view));
+            }
+        });
+        self.request_result(result, RuntimeStatus::CallFailed);
     }
 
     fn request_result(
@@ -951,6 +1035,7 @@ impl RuntimeCore {
             Effect::Quit => Control::Quit,
             Effect::SetTtsMuted(muted) => Control::SetTtsMuted(muted),
             Effect::SetMessagingPaused(paused) => Control::SetMessagingPaused(paused),
+            Effect::Call(action) => Control::Call(action),
             Effect::Navigate { pane_id } => {
                 let Some(client) = self.client.as_deref() else {
                     self.app
@@ -990,13 +1075,13 @@ mod tests {
     use super::{
         Backoff, BoxFuture, ClockPort, Control, FocusProbe, InputMessage, InputPump, OpenOutcome,
         RedrawCadence, RuntimeCore, RuntimeInput, ScreenPort, ShutdownPort, SourcePort,
-        StreamControl, StreamPort, TerminalInput, consume_stream, handle_input, merge_exit,
-        open_stream, resolve_client, spawn_focus_worker, wait_for_retry,
+        StreamControl, StreamPort, TerminalInput, call_poll_interval, consume_stream, handle_input,
+        merge_exit, open_stream, resolve_client, spawn_focus_worker, wait_for_retry,
     };
     use crate::api::SourceError;
     use crate::app::{
-        AgentIncarnation, AgentRow, AgentState, ConnectionState, FocusReading, MonitorHealth,
-        MonitorHealthState, RuntimeStatus, Snapshot,
+        AgentIncarnation, AgentRow, AgentState, CallAction, CallState, CallView, ConnectionState,
+        FocusReading, MonitorHealth, MonitorHealthState, RuntimeStatus, Snapshot,
     };
     use crate::navigation::{NavigationError, PaneNavigator};
 
@@ -1624,6 +1709,137 @@ mod tests {
         );
     }
 
+    fn chief_view(state: CallState) -> CallView {
+        CallView {
+            state,
+            chief_pane_id: "%7".into(),
+            last_transcript: String::new(),
+            last_result: None,
+        }
+    }
+
+    /// Runs `consume_stream` over `keys` then `q`, with a stream whose `call`
+    /// answers the status with `view` and fails every press when `fail_presses`.
+    async fn run_call_stream(
+        core: &mut RuntimeCore,
+        view: Option<CallView>,
+        fail_presses: bool,
+        keys: &str,
+    ) -> Vec<CallAction> {
+        let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut stream = FakeStream::pending(Arc::new(AtomicBool::new(false)));
+        stream.call = Some(CallProbe {
+            calls: Arc::clone(&calls),
+            view,
+            fail_presses,
+        });
+        let (input_sender, mut input) = InputPump::channel();
+        for key in keys.chars().chain(['q']).map(KeyCode::Char) {
+            input_sender.try_send(InputMessage::Key(key)).unwrap();
+        }
+        let (_shutdown_sender, mut shutdown) = FakeShutdown::channel();
+        let outcome = consume_stream(
+            stream,
+            core,
+            &mut input,
+            &mut shutdown,
+            &mut FakeScreen::default(),
+            &FakeNavigator::successful(),
+            &FakeClock::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome, Control::Quit);
+        calls.lock().unwrap().clone()
+    }
+
+    fn connected_core() -> RuntimeCore {
+        let mut core = RuntimeCore::new(Some("client-7".into()));
+        core.begin_stream();
+        core.accept_snapshot(snapshot(1, MonitorHealthState::Healthy), 1_000);
+        core
+    }
+
+    #[test]
+    fn call_poll_interval_is_half_a_second_during_a_call() {
+        assert_eq!(call_poll_interval(None), Duration::from_secs(5));
+        for (state, interval) in [
+            (CallState::NotSetUp, Duration::from_secs(5)),
+            (CallState::Off, Duration::from_secs(5)),
+            (CallState::Listening, Duration::from_millis(500)),
+            (CallState::Thinking, Duration::from_millis(500)),
+            (CallState::Speaking, Duration::from_millis(500)),
+        ] {
+            assert_eq!(
+                call_poll_interval(Some(&chief_view(state))),
+                interval,
+                "{state:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn consume_stream_asks_for_the_call_state_when_the_stream_opens() {
+        let mut core = connected_core();
+        let calls = run_call_stream(&mut core, Some(chief_view(CallState::Off)), false, "").await;
+        assert_eq!(calls.first(), Some(&CallAction::Status));
+        assert_eq!(core.app.call, Some(chief_view(CallState::Off)));
+        assert_eq!(core.app.chief_row().unwrap().incarnation.pane_id, "%7");
+    }
+
+    #[tokio::test]
+    async fn a_failed_poll_hides_the_button_without_a_status() {
+        let mut core = connected_core();
+        core.app
+            .observe_call(Some(chief_view(CallState::Listening)));
+        let calls = run_call_stream(&mut core, None, false, "").await;
+        assert_eq!(calls.first(), Some(&CallAction::Status));
+        assert_eq!(core.app.call, None);
+        assert_eq!(core.app.runtime_status(), None);
+    }
+
+    #[tokio::test]
+    async fn a_failed_call_press_shows_call_failed() {
+        let mut core = connected_core();
+        let calls = run_call_stream(&mut core, Some(chief_view(CallState::Off)), true, "c").await;
+        assert_eq!(calls, [CallAction::Status, CallAction::Start]);
+        assert!(matches!(
+            core.app.runtime_status(),
+            Some(RuntimeStatus::CallFailed(detail)) if detail.contains("call refused")
+        ));
+        // The last known state stays until the next poll.
+        assert_eq!(core.app.call, Some(chief_view(CallState::Off)));
+    }
+
+    #[tokio::test]
+    async fn a_call_press_shows_harolds_answer_except_for_talk_now() {
+        let mut core = connected_core();
+        let calls = run_call_stream(&mut core, Some(chief_view(CallState::Off)), false, "c").await;
+        assert_eq!(calls, [CallAction::Status, CallAction::Start]);
+        assert_eq!(core.app.call, Some(chief_view(CallState::Listening)));
+        assert_eq!(core.app.runtime_status(), None);
+
+        // Talk now answers with the state from before the call handled it.
+        let mut core = connected_core();
+        let calls =
+            run_call_stream(&mut core, Some(chief_view(CallState::Speaking)), false, "t").await;
+        assert_eq!(calls, [CallAction::Status, CallAction::TalkNow]);
+        assert_eq!(core.app.call, Some(chief_view(CallState::Speaking)));
+    }
+
+    #[test]
+    fn no_mouse_capture_is_enabled() {
+        for (name, source) in [
+            ("terminal.rs", include_str!("terminal.rs")),
+            (
+                "terminal/fault_harness.rs",
+                include_str!("terminal/fault_harness.rs"),
+            ),
+        ] {
+            assert!(!source.contains("EnableMouseCapture"), "{name}");
+        }
+    }
+
     struct FakeNavigator {
         calls: Rc<RefCell<Vec<(String, String)>>>,
         fail: bool,
@@ -1772,6 +1988,14 @@ mod tests {
         receive: FakeReceive,
         mute: Option<MuteProbe>,
         pause: Option<MuteProbe>,
+        call: Option<CallProbe>,
+    }
+
+    struct CallProbe {
+        calls: Arc<std::sync::Mutex<Vec<CallAction>>>,
+        /// The status answer; `None` fails every poll.
+        view: Option<CallView>,
+        fail_presses: bool,
     }
 
     struct MuteProbe {
@@ -1791,6 +2015,7 @@ mod tests {
                 receive: FakeReceive::Pending,
                 mute: None,
                 pause: None,
+                call: None,
             }
         }
 
@@ -1800,6 +2025,7 @@ mod tests {
                 receive: FakeReceive::Item(Some(Ok(snapshot))),
                 mute: None,
                 pause: None,
+                call: None,
             }
         }
     }
@@ -1840,6 +2066,27 @@ mod tests {
                     Ok(())
                 }
             })
+        }
+
+        fn call(&mut self, action: CallAction) -> BoxFuture<'_, Result<CallView, SourceError>> {
+            let Some(probe) = &self.call else {
+                return Box::pin(async { Err(SourceError::Transport("no call RPC".into())) });
+            };
+            probe.calls.lock().unwrap().push(action);
+            let answer = match (action, &probe.view) {
+                (_, None) => Err(SourceError::Transport("no call RPC".into())),
+                (CallAction::Status, Some(view)) => Ok(view.clone()),
+                _ if probe.fail_presses => Err(SourceError::Transport("call refused".into())),
+                (CallAction::Stop, Some(view)) => Ok(CallView {
+                    state: CallState::Off,
+                    ..view.clone()
+                }),
+                (_, Some(view)) => Ok(CallView {
+                    state: CallState::Listening,
+                    ..view.clone()
+                }),
+            };
+            Box::pin(async move { answer })
         }
 
         fn close_stream(self) -> BoxFuture<'static, ()> {

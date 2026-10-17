@@ -6,15 +6,18 @@ use std::time::Duration;
 
 use harold_api::harold::{
     AgentMonitorHealth, AgentPaneState, AgentState as ProtoAgentState, AgentStateSnapshot,
-    MonitorHealthState as ProtoMonitorHealthState, SetMessagingPausedRequest, SetTtsMutedRequest,
-    WatchAgentStatesRequest, harold_client::HaroldClient,
+    CallAction as ProtoCallAction, CallRequest, CallResponse, CallResult as ProtoCallResult,
+    CallState as ProtoCallState, MonitorHealthState as ProtoMonitorHealthState,
+    SetMessagingPausedRequest, SetTtsMutedRequest, WatchAgentStatesRequest,
+    harold_client::HaroldClient,
 };
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tonic::transport::{Channel, Endpoint};
 
 use crate::app::{
-    AgentIncarnation, AgentRow, AgentState, MonitorHealth, MonitorHealthState, Snapshot,
+    AgentIncarnation, AgentRow, AgentState, CallAction, CallState, CallView, MonitorHealth,
+    MonitorHealthState, Snapshot,
 };
 use crate::text::sanitize_display;
 
@@ -23,6 +26,7 @@ const PANE_FIELD_LIMIT: usize = 256;
 const DIRECTORY_LIMIT: usize = 1_024;
 const SUMMARY_LIMIT: usize = 160;
 const MONITOR_FIELD_LIMIT: usize = 64;
+const TRANSCRIPT_LIMIT: usize = 1_024;
 const ERROR_LIMIT: usize = 512;
 const SOURCE_CHANNEL_CAPACITY: usize = 16;
 
@@ -187,6 +191,28 @@ impl SourceStream {
         .map_err(|error| SourceError::transport(error.to_string()))
     }
 
+    pub async fn request_call(&self, action: CallAction) -> Result<CallView, SourceError> {
+        let Some(mut client) = self.voice.clone() else {
+            return Err(SourceError::transport("call control unavailable"));
+        };
+        let action = match action {
+            CallAction::Start => ProtoCallAction::Start,
+            CallAction::Stop => ProtoCallAction::Stop,
+            CallAction::TalkNow => ProtoCallAction::TalkNow,
+            CallAction::Status => ProtoCallAction::Status,
+        };
+        tokio::time::timeout(
+            VOICE_REQUEST_TIMEOUT,
+            client.call(CallRequest {
+                action: action.into(),
+            }),
+        )
+        .await
+        .map_err(|_| SourceError::transport("call request timed out"))?
+        .map(|response| map_call(response.into_inner()))
+        .map_err(|error| SourceError::transport(error.to_string()))
+    }
+
     pub async fn close(mut self) {
         if let Some(reader) = self.reader.take() {
             reader.abort();
@@ -260,6 +286,33 @@ pub fn map_snapshot(snapshot: AgentStateSnapshot) -> Result<Snapshot, ProtocolEr
     })
 }
 
+/// Harold's call answer as the dashboard shows it. A state the dashboard does not
+/// know counts as not set up, so the button never offers a call it cannot follow.
+pub fn map_call(response: CallResponse) -> CallView {
+    let state = match ProtoCallState::try_from(response.state) {
+        Ok(ProtoCallState::Off) => CallState::Off,
+        Ok(ProtoCallState::Listening) => CallState::Listening,
+        Ok(ProtoCallState::Transcribing | ProtoCallState::Waiting) => CallState::Thinking,
+        Ok(ProtoCallState::Speaking) => CallState::Speaking,
+        Ok(ProtoCallState::NotSetUp | ProtoCallState::Unspecified) | Err(_) => CallState::NotSetUp,
+    };
+    let last_result = match ProtoCallResult::try_from(response.last_result) {
+        Ok(ProtoCallResult::Typed) => Some("typed"),
+        Ok(ProtoCallResult::NothingHeard) => Some("nothing heard"),
+        Ok(ProtoCallResult::NoChief) => Some("no chief"),
+        Ok(ProtoCallResult::ChiefBusy) => Some("chief busy"),
+        Ok(ProtoCallResult::Failed) => Some("failed"),
+        Ok(ProtoCallResult::VoiceMuted) => Some("voice muted"),
+        Ok(ProtoCallResult::Unspecified) | Err(_) => None,
+    };
+    CallView {
+        state,
+        chief_pane_id: sanitize_display(&response.chief_pane_id, PANE_FIELD_LIMIT),
+        last_transcript: sanitize_display(&response.last_transcript, TRANSCRIPT_LIMIT),
+        last_result,
+    }
+}
+
 fn map_pane(pane: AgentPaneState) -> Result<AgentRow, ProtocolError> {
     if pane.pane_pid == 0 {
         return Err(ProtocolError::ZeroPanePid);
@@ -331,13 +384,14 @@ mod tests {
 
     use harold_api::harold::{
         AgentMonitorHealth, AgentPaneState, AgentState as ProtoAgentState, AgentStateSnapshot,
+        CallResponse, CallResult as ProtoCallResult, CallState as ProtoCallState,
         MonitorHealthState as ProtoMonitorHealthState,
     };
     use tokio::sync::oneshot;
 
-    use crate::app::{AgentState, MonitorHealthState};
+    use crate::app::{AgentState, CallAction, CallState, CallView, MonitorHealthState};
 
-    use super::{ProtocolError, SnapshotReader, SourceError, map_snapshot, spawn_reader};
+    use super::{ProtocolError, SnapshotReader, SourceError, map_call, map_snapshot, spawn_reader};
 
     #[test]
     fn maps_tts_muted_from_the_snapshot() {
@@ -759,6 +813,65 @@ mod tests {
         let stream = spawn_reader(FakeReader::new([]));
         let error = stream.request_messaging_paused(true).await.unwrap_err();
         assert!(error.detail().contains("messaging control unavailable"));
+    }
+
+    #[test]
+    fn maps_every_call_state_and_result() {
+        for (state, expected) in [
+            (ProtoCallState::Unspecified as i32, CallState::NotSetUp),
+            (ProtoCallState::Off as i32, CallState::Off),
+            (ProtoCallState::Listening as i32, CallState::Listening),
+            (ProtoCallState::Transcribing as i32, CallState::Thinking),
+            (ProtoCallState::Waiting as i32, CallState::Thinking),
+            (ProtoCallState::Speaking as i32, CallState::Speaking),
+            (ProtoCallState::NotSetUp as i32, CallState::NotSetUp),
+            (99, CallState::NotSetUp),
+        ] {
+            let view = map_call(CallResponse {
+                state,
+                ..Default::default()
+            });
+            assert_eq!(view.state, expected, "{state}");
+        }
+        for (result, expected) in [
+            (ProtoCallResult::Unspecified as i32, None),
+            (ProtoCallResult::Typed as i32, Some("typed")),
+            (ProtoCallResult::NothingHeard as i32, Some("nothing heard")),
+            (ProtoCallResult::NoChief as i32, Some("no chief")),
+            (ProtoCallResult::ChiefBusy as i32, Some("chief busy")),
+            (ProtoCallResult::Failed as i32, Some("failed")),
+            (ProtoCallResult::VoiceMuted as i32, Some("voice muted")),
+            (99, None),
+        ] {
+            let view = map_call(CallResponse {
+                last_result: result,
+                ..Default::default()
+            });
+            assert_eq!(view.last_result, expected, "{result}");
+        }
+
+        let view = map_call(CallResponse {
+            state: ProtoCallState::Listening.into(),
+            chief_pane_id: "%3\x1b[31m".into(),
+            last_transcript: "approve\x1b]0;x\x07 q19".into(),
+            last_result: ProtoCallResult::Typed.into(),
+        });
+        assert_eq!(
+            view,
+            CallView {
+                state: CallState::Listening,
+                chief_pane_id: "%3".into(),
+                last_transcript: "approve q19".into(),
+                last_result: Some("typed"),
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn request_call_without_a_client_reports_unavailable() {
+        let stream = spawn_reader(FakeReader::new([]));
+        let error = stream.request_call(CallAction::Status).await.unwrap_err();
+        assert!(error.detail().contains("call control unavailable"));
     }
 
     struct FakeReader {

@@ -127,6 +127,43 @@ impl VoiceState {
     }
 }
 
+/// The call with the chief, as Harold last reported it. Harold's transcribing
+/// and waiting both show as `Thinking`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CallState {
+    NotSetUp,
+    Off,
+    Listening,
+    Thinking,
+    Speaking,
+}
+
+impl CallState {
+    /// Whether a call is open: listening, thinking or speaking.
+    pub const fn in_call(self) -> bool {
+        matches!(self, Self::Listening | Self::Thinking | Self::Speaking)
+    }
+}
+
+/// What the dashboard asks of Harold's call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CallAction {
+    Start,
+    Stop,
+    TalkNow,
+    Status,
+}
+
+/// Harold's last answer about the call. `chief_pane_id` is empty when no chief
+/// runs, and `last_transcript` is empty until a turn is typed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CallView {
+    pub state: CallState,
+    pub chief_pane_id: String,
+    pub last_transcript: String,
+    pub last_result: Option<&'static str>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConnectionState {
     Connecting,
@@ -163,6 +200,7 @@ pub(crate) enum RuntimeStatus {
     NavigationFailed(String),
     VoiceFailed(String),
     MessagingFailed(String),
+    CallFailed(String),
     SourceError(String),
 }
 
@@ -180,6 +218,8 @@ pub struct App {
     pub search: SearchState,
     pub palette: Option<PaletteState>,
     pub selected: Option<AgentIncarnation>,
+    /// The call, unknown until Harold answers and again after a failed poll or a disconnect.
+    pub call: Option<CallView>,
     last_snapshot_received_at_ms: Option<i64>,
     runtime_status: Option<RuntimeStatus>,
     has_snapshot: bool,
@@ -204,6 +244,7 @@ pub enum Effect {
     Quit,
     SetTtsMuted(bool),
     SetMessagingPaused(bool),
+    Call(CallAction),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -258,6 +299,7 @@ impl App {
             search,
             palette: None,
             selected,
+            call: None,
             last_snapshot_received_at_ms: None,
             runtime_status: None,
             has_snapshot: matches!(connection, ConnectionState::Live | ConnectionState::Stale),
@@ -404,6 +446,40 @@ impl App {
         }
     }
 
+    pub fn observe_call(&mut self, view: Option<CallView>) {
+        self.call = view;
+    }
+
+    /// The row whose pane Harold named as the chief's in its last call answer.
+    pub fn chief_row(&self) -> Option<&AgentRow> {
+        let pane_id = self
+            .call
+            .as_ref()
+            .map(|call| call.chief_pane_id.as_str())
+            .filter(|pane_id| !pane_id.is_empty())?;
+        self.snapshot
+            .rows
+            .iter()
+            .find(|row| row.incarnation.pane_id == pane_id)
+    }
+
+    fn chief_row_selected(&self) -> bool {
+        match (self.selected_row(), self.chief_row()) {
+            (Some(selected), Some(chief)) => selected.incarnation == chief.incarnation,
+            _ => false,
+        }
+    }
+
+    /// What the call button does now: start a call when none is on and the voice
+    /// is not muted, end one during a call, and nothing otherwise.
+    fn call_press(&self) -> Option<CallAction> {
+        match self.call.as_ref()?.state {
+            CallState::Off if self.voice() != VoiceState::Muted => Some(CallAction::Start),
+            state if state.in_call() => Some(CallAction::Stop),
+            _ => None,
+        }
+    }
+
     pub fn begin_connection(&mut self) {
         self.connection = ConnectionState::Connecting;
     }
@@ -433,6 +509,7 @@ impl App {
     }
 
     pub fn mark_disconnected(&mut self) {
+        self.call = None;
         self.connection = if self.has_snapshot {
             ConnectionState::Stale
         } else {
@@ -539,6 +616,17 @@ impl App {
                 }
             });
         }
+        match self.call_press() {
+            Some(CallAction::Start) => all.push(PaletteEntry {
+                label: "Call: start",
+                effect: Effect::Call(CallAction::Start),
+            }),
+            Some(CallAction::Stop) => all.push(PaletteEntry {
+                label: "Call: end",
+                effect: Effect::Call(CallAction::Stop),
+            }),
+            Some(CallAction::TalkNow | CallAction::Status) | None => {}
+        }
         all.into_iter()
             .filter(|entry| normalize_search(entry.label).contains(&query))
             .collect()
@@ -601,6 +689,20 @@ impl App {
             KeyCode::Char('k') | KeyCode::Up => self.select_relative(-1),
             KeyCode::Char('g') => self.select_boundary(false),
             KeyCode::Char('G') => self.select_boundary(true),
+            KeyCode::Char('c') if self.chief_row_selected() => {
+                if let Some(action) = self.call_press() {
+                    return Effect::Call(action);
+                }
+            }
+            KeyCode::Char('t')
+                if self.chief_row_selected()
+                    && self
+                        .call
+                        .as_ref()
+                        .is_some_and(|call| call.state == CallState::Speaking) =>
+            {
+                return Effect::Call(CallAction::TalkNow);
+            }
             KeyCode::Char('l') | KeyCode::Right => self.select_waiting(true),
             KeyCode::Char('h') | KeyCode::Left => self.select_waiting(false),
             KeyCode::Enter => {
@@ -2132,6 +2234,182 @@ mod tests {
         assert!(app.search.query.is_empty());
         assert_eq!(app.selected.as_ref().unwrap().pane_id, "%3");
         assert_eq!(app.visible_rows().len(), 3);
+    }
+
+    fn call_view(state: CallState, chief_pane_id: &str) -> CallView {
+        CallView {
+            state,
+            chief_pane_id: chief_pane_id.into(),
+            last_transcript: String::new(),
+            last_result: None,
+        }
+    }
+
+    /// The fleet with the call known and the chief (%3) selected.
+    fn call_app(state: CallState) -> App {
+        let mut app = empty_app();
+        app.apply_first_snapshot(fleet([Idle, Idle, Idle], 1))
+            .unwrap();
+        app.observe_call(Some(call_view(state, "%3")));
+        app.selected = Some(app.chief_row().unwrap().incarnation.clone());
+        app
+    }
+
+    fn select_pane(app: &mut App, pane_id: &str) {
+        app.selected = app
+            .snapshot
+            .rows
+            .iter()
+            .find(|row| row.incarnation.pane_id == pane_id)
+            .map(|row| row.incarnation.clone());
+    }
+
+    fn palette_labels(app: &mut App, query: &str) -> Vec<&'static str> {
+        app.handle_key(KeyCode::Char('/'));
+        type_text(app, query);
+        app.palette_entries().iter().map(|e| e.label).collect()
+    }
+
+    #[test]
+    fn c_on_the_chief_row_starts_and_ends_a_call() {
+        let mut app = call_app(CallState::Off);
+        assert_eq!(
+            app.handle_key(KeyCode::Char('c')),
+            Effect::Call(CallAction::Start)
+        );
+        for state in [
+            CallState::Listening,
+            CallState::Thinking,
+            CallState::Speaking,
+        ] {
+            let mut app = call_app(state);
+            assert_eq!(
+                app.handle_key(KeyCode::Char('c')),
+                Effect::Call(CallAction::Stop),
+                "{state:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn c_and_t_do_nothing_on_other_rows() {
+        for state in [
+            CallState::Off,
+            CallState::Listening,
+            CallState::Thinking,
+            CallState::Speaking,
+        ] {
+            for pane in ["%1", "%2"] {
+                let mut app = call_app(state);
+                select_pane(&mut app, pane);
+                assert_eq!(app.handle_key(KeyCode::Char('c')), Effect::None);
+                assert_eq!(app.handle_key(KeyCode::Char('t')), Effect::None);
+            }
+        }
+    }
+
+    #[test]
+    fn t_talks_now_only_while_the_chief_speaks() {
+        let mut app = call_app(CallState::Speaking);
+        assert_eq!(
+            app.handle_key(KeyCode::Char('t')),
+            Effect::Call(CallAction::TalkNow)
+        );
+        for state in [
+            CallState::NotSetUp,
+            CallState::Off,
+            CallState::Listening,
+            CallState::Thinking,
+        ] {
+            let mut app = call_app(state);
+            assert_eq!(
+                app.handle_key(KeyCode::Char('t')),
+                Effect::None,
+                "{state:?}"
+            );
+        }
+        let mut unknown = call_app(CallState::Speaking);
+        unknown.observe_call(None);
+        assert_eq!(unknown.handle_key(KeyCode::Char('t')), Effect::None);
+    }
+
+    #[test]
+    fn c_does_nothing_when_not_set_up() {
+        let mut app = call_app(CallState::NotSetUp);
+        assert_eq!(app.handle_key(KeyCode::Char('c')), Effect::None);
+        assert!(palette_labels(&mut app, "call").is_empty());
+
+        let mut unknown = call_app(CallState::Off);
+        unknown.observe_call(None);
+        assert_eq!(unknown.handle_key(KeyCode::Char('c')), Effect::None);
+        assert!(palette_labels(&mut unknown, "call").is_empty());
+    }
+
+    #[test]
+    fn c_does_nothing_while_the_voice_is_muted_and_works_once_unmuted() {
+        let mut app = call_app(CallState::Off);
+        app.apply_later_snapshot(Snapshot {
+            tts_muted: true,
+            ..fleet([Idle, Idle, Idle], 2)
+        })
+        .unwrap();
+        assert_eq!(app.voice(), VoiceState::Muted);
+        assert_eq!(app.handle_key(KeyCode::Char('c')), Effect::None);
+        assert!(!palette_labels(&mut app, "").contains(&"Call: start"));
+        app.handle_key(KeyCode::Esc);
+
+        app.apply_later_snapshot(fleet([Idle, Idle, Idle], 3))
+            .unwrap();
+        assert_eq!(
+            app.handle_key(KeyCode::Char('c')),
+            Effect::Call(CallAction::Start)
+        );
+    }
+
+    #[test]
+    fn palette_call_runs_the_same_action_from_any_row() {
+        for (state, label, action) in [
+            (CallState::Off, "Call: start", CallAction::Start),
+            (CallState::Listening, "Call: end", CallAction::Stop),
+            (CallState::Thinking, "Call: end", CallAction::Stop),
+            (CallState::Speaking, "Call: end", CallAction::Stop),
+        ] {
+            for pane in ["%1", "%3"] {
+                let mut app = call_app(state);
+                select_pane(&mut app, pane);
+                assert_eq!(palette_labels(&mut app, "call"), [label], "{state:?}");
+                assert_eq!(app.handle_key(KeyCode::Enter), Effect::Call(action));
+                assert!(app.palette.is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn the_chief_row_follows_chief_pane_id() {
+        let mut app = call_app(CallState::Off);
+        assert_eq!(app.chief_row().unwrap().incarnation.pane_id, "%3");
+
+        app.observe_call(Some(call_view(CallState::Off, "%1")));
+        assert_eq!(app.chief_row().unwrap().incarnation.pane_id, "%1");
+        select_pane(&mut app, "%1");
+        assert_eq!(
+            app.handle_key(KeyCode::Char('c')),
+            Effect::Call(CallAction::Start)
+        );
+        select_pane(&mut app, "%3");
+        assert_eq!(app.handle_key(KeyCode::Char('c')), Effect::None);
+
+        for missing in ["", "%9"] {
+            app.observe_call(Some(call_view(CallState::Off, missing)));
+            assert!(app.chief_row().is_none(), "{missing:?}");
+        }
+        app.observe_call(None);
+        assert!(app.chief_row().is_none());
+
+        // A disconnect forgets the call until the next answer.
+        app.observe_call(Some(call_view(CallState::Off, "%3")));
+        app.mark_disconnected();
+        assert_eq!(app.call, None);
     }
 
     #[test]
