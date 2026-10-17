@@ -346,7 +346,10 @@ where
         // chief's pane before any call, and then on every tick of the poll. Each poll
         // is awaited inline, like the mute and pause requests: Harold answers Status
         // synchronously from the call's last state, so the loop waits only one round
-        // trip, and at most VOICE_REQUEST_TIMEOUT when Harold hangs.
+        // trip, and at most VOICE_REQUEST_TIMEOUT (2 s) when Harold hangs. A `c` or `t`
+        // press is awaited inline too, for up to CALL_REQUEST_TIMEOUT (8 s), because a
+        // STOP answers only once the call has cleaned up, and closing the worker alone
+        // may take 5 s.
         let polled = stream.call(CallAction::Status).await;
         if core.call_polled(polled) {
             draw(terminal, &core.app, clock)?;

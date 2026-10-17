@@ -22,6 +22,9 @@ use crate::app::{
 use crate::text::sanitize_display;
 
 const VOICE_REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
+/// A press of `c` or `t` waits longer than Harold's 5 s limit for closing the voice worker,
+/// so a STOP that waits for the call's cleanup is not reported as timed out.
+const CALL_REQUEST_TIMEOUT: Duration = Duration::from_secs(8);
 const PANE_FIELD_LIMIT: usize = 256;
 const DIRECTORY_LIMIT: usize = 1_024;
 const SUMMARY_LIMIT: usize = 160;
@@ -195,16 +198,16 @@ impl SourceStream {
         let Some(mut client) = self.voice.clone() else {
             return Err(SourceError::transport("call control unavailable"));
         };
-        let action = match action {
+        let proto_action = match action {
             CallAction::Start => ProtoCallAction::Start,
             CallAction::Stop => ProtoCallAction::Stop,
             CallAction::TalkNow => ProtoCallAction::TalkNow,
             CallAction::Status => ProtoCallAction::Status,
         };
         tokio::time::timeout(
-            VOICE_REQUEST_TIMEOUT,
+            call_request_timeout(action),
             client.call(CallRequest {
-                action: action.into(),
+                action: proto_action.into(),
             }),
         )
         .await
@@ -284,6 +287,16 @@ pub fn map_snapshot(snapshot: AgentStateSnapshot) -> Result<Snapshot, ProtocolEr
         tts_muted: snapshot.tts_muted,
         messaging_paused: snapshot.messaging_paused,
     })
+}
+
+/// How long the dashboard waits for Harold's answer to `action`. A Status poll is awaited
+/// inline every 500 ms during a call and Harold answers it at once, so it keeps the short
+/// voice timeout; a press waits `CALL_REQUEST_TIMEOUT`.
+pub(crate) fn call_request_timeout(action: CallAction) -> Duration {
+    match action {
+        CallAction::Status => VOICE_REQUEST_TIMEOUT,
+        CallAction::Start | CallAction::Stop | CallAction::TalkNow => CALL_REQUEST_TIMEOUT,
+    }
 }
 
 /// Harold's call answer as the dashboard shows it. A state the dashboard does not
@@ -381,6 +394,7 @@ mod tests {
     use std::pin::Pin;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
 
     use harold_api::harold::{
         AgentMonitorHealth, AgentPaneState, AgentState as ProtoAgentState, AgentStateSnapshot,
@@ -391,7 +405,10 @@ mod tests {
 
     use crate::app::{AgentState, CallAction, CallState, CallView, MonitorHealthState};
 
-    use super::{ProtocolError, SnapshotReader, SourceError, map_call, map_snapshot, spawn_reader};
+    use super::{
+        ProtocolError, SnapshotReader, SourceError, call_request_timeout, map_call, map_snapshot,
+        spawn_reader,
+    };
 
     #[test]
     fn maps_tts_muted_from_the_snapshot() {
@@ -864,6 +881,20 @@ mod tests {
                 last_transcript: "approve q19".into(),
                 last_result: Some("typed"),
             }
+        );
+    }
+
+    #[test]
+    fn a_call_press_outwaits_the_workers_close_and_a_status_poll_stays_short() {
+        // Harold closes the voice worker within 5 s when a call ends.
+        let close_limit = Duration::from_secs(5);
+        for action in [CallAction::Start, CallAction::Stop, CallAction::TalkNow] {
+            assert_eq!(call_request_timeout(action), Duration::from_secs(8));
+            assert!(call_request_timeout(action) > close_limit);
+        }
+        assert_eq!(
+            call_request_timeout(CallAction::Status),
+            Duration::from_secs(2)
         );
     }
 
