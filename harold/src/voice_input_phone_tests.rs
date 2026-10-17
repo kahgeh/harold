@@ -138,6 +138,31 @@ async fn the_source_ends_15_s_after_the_last_piece_while_nothing_plays() {
 }
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn the_source_ends_15_s_after_the_last_piece_while_offered_sounds_go_unfetched() {
+    let scratch = Scratch::new();
+    let tick = scratch.wav("tick", 0);
+    let line = PhoneLine::new(true);
+    let sink = Arc::new(PhoneSink::new(Arc::clone(&line)));
+    let start = Instant::now();
+    let mut source = line.open_source();
+    line.audio(0, &[0, 0]).unwrap();
+    assert!(source.next_stamped().await.is_some());
+
+    // The chief is thinking, so a tick is offered every 3 s; the phone is gone and fetches none.
+    let ticking = tokio::spawn(async move {
+        loop {
+            let _ = sink.play_said(&tick, &Said::Tick).await;
+            sleep(Duration::from_secs(3)).await;
+        }
+    });
+
+    let ended = timeout(Duration::from_secs(60), source.next_stamped()).await;
+    assert_eq!(ended, Ok(None), "the source did not end within 60 s");
+    assert_eq!(Instant::now(), start + PHONE_SILENT_LIMIT);
+    ticking.abort();
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn the_source_waits_through_a_30_s_answer_with_no_pieces() {
     let scratch = Scratch::new();
     let wav = scratch.wav("answer", 30);
@@ -273,6 +298,30 @@ async fn a_sound_never_fetched_fails_after_its_length_and_10_s() {
     assert_eq!(played, Err("not fetched by the phone".to_string()));
     assert_eq!(Instant::now(), start + Duration::from_secs(12));
     assert_eq!(line.view().borrow().sound, None);
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn a_sounds_length_is_read_past_the_chunks_before_its_data() {
+    let scratch = Scratch::new();
+    // A `LIST` chunk of 3 bytes, padded to 4, between `fmt ` and a 2 s `data` chunk.
+    let mut bytes = wav_bytes(&[], 16_000);
+    let data = bytes.split_off(36);
+    bytes.extend_from_slice(b"LIST");
+    bytes.extend_from_slice(&3u32.to_le_bytes());
+    bytes.extend_from_slice(b"abc\0");
+    bytes.extend_from_slice(&data[..4]);
+    bytes.extend_from_slice(&64_000u32.to_le_bytes());
+    let wav = scratch.0.join("listed.wav");
+    std::fs::write(&wav, bytes).unwrap();
+    let line = PhoneLine::new(true);
+    let sink = Arc::new(PhoneSink::new(Arc::clone(&line)));
+    let start = Instant::now();
+    let playing = play(&sink, &wav, Said::Tick);
+    settle().await;
+    assert!(line.answer(&offered(&line).id).is_some());
+
+    assert_eq!(playing.await.unwrap(), Ok(()));
+    assert_eq!(Instant::now(), start + Duration::from_secs(2) + PLAY_GRACE);
 }
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]

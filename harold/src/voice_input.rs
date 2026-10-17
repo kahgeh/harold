@@ -4,8 +4,8 @@
 mod call;
 mod hang_up;
 mod mac;
-// PhoneCalls (Task 3) and the app's call routes (Task 5) use the phone's ports; until then
-// only the tests do.
+// The phone's calls and the web app's call routes use the phone's ports; until they
+// exist only the tests do.
 #[cfg_attr(not(test), allow(dead_code))]
 mod phone;
 mod phrases;

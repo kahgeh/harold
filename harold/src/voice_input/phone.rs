@@ -7,6 +7,8 @@ use super::phrases::NO_ANSWER_IN_THREAD;
 use super::worker::WorkerError;
 use super::{AudioSink, AudioSource, CallPorts, CallState, Said};
 use std::collections::HashMap;
+use std::fs::File;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -112,9 +114,10 @@ struct Speech {
 /// The silence clock the open source ends by.
 #[derive(Debug, Clone, Copy)]
 struct Quiet {
-    /// When the last piece arrived, or the last sound or line stopped waiting.
+    /// When the last piece arrived, or the last fetched sound or line stopped waiting.
     since: Instant,
-    /// Whether a sound or a line waits for the phone; the clock does not run meanwhile.
+    /// Whether a sound the phone fetched, or a line, waits for the phone; the clock does
+    /// not run meanwhile.
     waiting: bool,
 }
 
@@ -182,10 +185,12 @@ impl PhoneLine {
     /// The offered sound `id`'s file, which the phone has now fetched. `None` once it is no
     /// longer offered.
     pub(crate) fn answer(&self, id: &str) -> Option<Vec<u8>> {
+        // Read without the lock, so posted pieces do not wait behind the file.
+        let wav = lock(&self.inner).sounds.get(id)?.wav.clone();
+        let bytes = std::fs::read(&wav).ok()?;
         let mut inner = lock(&self.inner);
-        let offer = inner.sounds.get_mut(id)?;
-        let bytes = std::fs::read(&offer.wav).ok()?;
-        offer.fetched = true;
+        inner.sounds.get_mut(id)?.fetched = true;
+        self.note_waiting(&inner);
         Some(bytes)
     }
 
@@ -247,19 +252,14 @@ impl PhoneLine {
         (Waiting { line: self, id }, taken_back)
     }
 
-    /// Takes back the sound or the line `id` if it still waits, and answers whether the
-    /// phone had fetched it.
-    fn take_back(&self, id: &str) -> bool {
+    /// Takes back the sound or the line `id` if it still waits. For a sound still offered,
+    /// answers whether the phone had fetched it; `None` when it was already taken back.
+    fn take_back(&self, id: &str) -> Option<bool> {
         let mut inner = lock(&self.inner);
-        let fetched = match inner.sounds.remove(id) {
-            Some(offer) => offer.fetched,
-            None => {
-                if inner.speech.as_ref().is_some_and(|speech| speech.id == id) {
-                    inner.speech = None;
-                }
-                false
-            }
-        };
+        let fetched = inner.sounds.remove(id).map(|offer| offer.fetched);
+        if fetched.is_none() && inner.speech.as_ref().is_some_and(|speech| speech.id == id) {
+            inner.speech = None;
+        }
         self.view.send_if_modified(|view| {
             let sound = view.sound.take_if(|sound| sound.id == id).is_some();
             let speech = view.speech.take_if(|speech| speech.id == id).is_some();
@@ -288,9 +288,10 @@ impl PhoneLine {
         }
     }
 
-    /// Restarts the silence clock when the last sound or line stops waiting.
+    /// Restarts the silence clock when the last fetched sound or line stops waiting. A sound
+    /// the phone has not fetched does not stop the clock: a phone that is gone fetches none.
     fn note_waiting(&self, inner: &Inner) {
-        let waiting = !inner.sounds.is_empty() || inner.speech.is_some();
+        let waiting = inner.speech.is_some() || inner.sounds.values().any(|offer| offer.fetched);
         self.quiet.send_if_modified(|quiet| {
             if quiet.waiting == waiting {
                 return false;
@@ -312,8 +313,8 @@ struct Waiting<'a> {
 }
 
 impl Waiting<'_> {
-    /// Takes it back now, and answers whether the phone had fetched it.
-    fn take_back(&self) -> bool {
+    /// Takes it back now, as `PhoneLine::take_back` does.
+    fn take_back(&self) -> Option<bool> {
         self.line.take_back(&self.id)
     }
 }
@@ -331,25 +332,32 @@ fn new_id() -> String {
 /// How long the WAV at `wav` lasts: its `data` chunk's size over the byte rate in its
 /// header. A file that cannot be read lasts no time.
 fn sound_length(wav: &Path) -> Duration {
-    let Ok(bytes) = std::fs::read(wav) else {
-        return Duration::ZERO;
-    };
-    let u32_at = |at: usize| {
-        let field = bytes.get(at..at + 4)?;
-        Some(u32::from_le_bytes([field[0], field[1], field[2], field[3]]))
-    };
-    let Some(byte_rate) = u32_at(28).filter(|rate| *rate > 0) else {
-        return Duration::ZERO;
-    };
+    read_length(wav).unwrap_or(Duration::ZERO)
+}
+
+/// Reads the header and the chunk headers only, not the samples.
+fn read_length(wav: &Path) -> std::io::Result<Duration> {
+    let mut file = File::open(wav)?;
+    let mut header = [0; 32];
+    file.read_exact(&mut header)?;
+    let byte_rate = u32::from_le_bytes([header[28], header[29], header[30], header[31]]);
+    if byte_rate == 0 {
+        return Ok(Duration::ZERO);
+    }
     // The chunks follow `RIFF <size> WAVE`, each an id and a size, padded to an even length.
     let mut at = 12;
-    while let Some(size) = u32_at(at + 4) {
-        if &bytes[at..at + 4] == b"data" {
-            return Duration::from_secs_f64(f64::from(size) / f64::from(byte_rate));
+    loop {
+        file.seek(SeekFrom::Start(at))?;
+        let mut chunk = [0; 8];
+        file.read_exact(&mut chunk)?;
+        let size = u32::from_le_bytes([chunk[4], chunk[5], chunk[6], chunk[7]]);
+        if &chunk[..4] == b"data" {
+            return Ok(Duration::from_secs_f64(
+                f64::from(size) / f64::from(byte_rate),
+            ));
         }
-        at += 8 + size as usize + size as usize % 2;
+        at += 8 + u64::from(size) + u64::from(size % 2);
     }
-    Duration::ZERO
 }
 
 /// The call's audio, as the phone posts it.
@@ -365,8 +373,8 @@ impl AudioSource for PhoneSource {
         Some(samples)
     }
 
-    /// Ends `PHONE_SILENT_LIMIT` after the last piece, counting no time a sound or a line
-    /// waited for the phone, or when a newer source replaced this one.
+    /// Ends `PHONE_SILENT_LIMIT` after the last piece, counting no time a sound the phone
+    /// fetched, or a line, waited for it; or when a newer source replaced this one.
     async fn next_stamped(&mut self) -> Option<Piece> {
         while !self.ended {
             let quiet = *self.quiet.borrow_and_update();
@@ -411,12 +419,12 @@ impl AudioSink for PhoneSink {
     async fn play_said(&self, wav: &Path, said: &Said) -> Result<(), String> {
         let limit = (sound_length(wav) + PLAY_GRACE).min(ANSWER_KEEP);
         let (offered, taken_back) = self.line.offer(wav, said);
-        let ended_early = timeout(limit, taken_back).await.is_ok();
-        let fetched = offered.take_back();
-        if ended_early || fetched {
-            Ok(())
-        } else {
-            Err("not fetched by the phone".to_string())
+        let _ = timeout(limit, taken_back).await;
+        // At the limit, a sound still offered fails unless the phone fetched it. One already
+        // taken back was reported played or ended by `stop`, perhaps just as the limit passed.
+        match offered.take_back() {
+            Some(false) => Err("not fetched by the phone".to_string()),
+            Some(true) | None => Ok(()),
         }
     }
 
