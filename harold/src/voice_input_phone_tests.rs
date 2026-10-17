@@ -488,6 +488,8 @@ struct Phone {
     base: FakePorts,
     calls: Arc<PhoneCalls<FakePorts>>,
     said: Arc<Mutex<Vec<Said>>>,
+    /// Sounds offered that the phone could not fetch.
+    unfetched: Arc<Mutex<Vec<Said>>>,
     spoken: Arc<Mutex<Vec<String>>>,
 }
 
@@ -499,6 +501,7 @@ impl Phone {
             base,
             calls,
             said: Arc::default(),
+            unfetched: Arc::default(),
             spoken: Arc::default(),
         }
     }
@@ -526,6 +529,7 @@ impl Phone {
     fn auto_play(&self, length: Duration) {
         let calls = Arc::clone(&self.calls);
         let said = Arc::clone(&self.said);
+        let unfetched = Arc::clone(&self.unfetched);
         let spoken = Arc::clone(&self.spoken);
         let mut view = calls.view();
         tokio::spawn(async move {
@@ -539,8 +543,11 @@ impl Phone {
                     .filter(|sound| last_sound.as_ref() != Some(&sound.id))
                 {
                     last_sound = Some(sound.id.clone());
+                    if calls.answer(&sound.id).is_none() {
+                        unfetched.lock().unwrap().push(sound.said);
+                        continue;
+                    }
                     said.lock().unwrap().push(sound.said);
-                    assert!(calls.answer(&sound.id).is_some(), "the sound is offered");
                     sleep(length).await;
                     calls.played(&sound.id);
                     continue;
@@ -562,8 +569,14 @@ impl Phone {
         });
     }
 
-    /// What each sound the phone played said.
+    /// What each sound the phone fetched and played said. Fails the test when a sound was
+    /// offered that the phone could not fetch.
     fn said(&self) -> Vec<Said> {
+        let unfetched = self.unfetched.lock().unwrap().clone();
+        assert!(
+            unfetched.is_empty(),
+            "offered but not fetched: {unfetched:?}"
+        );
         self.said.lock().unwrap().clone()
     }
 
@@ -629,7 +642,15 @@ async fn after_an_answer(phone: &Phone) -> Instant {
     );
     settle().await;
     assert_eq!(phone.calls.status().state, CallState::Listening);
+    assert_eq!(phone.said(), [answer_line()]);
     Instant::now()
+}
+
+fn answer_line() -> Said {
+    Said::Line {
+        text: "answer".into(),
+        by: Speaker::Chief,
+    }
 }
 
 /// Past the view's next copy of the call's status.
@@ -661,6 +682,7 @@ async fn audio_posted_while_an_answer_plays_is_not_heard() {
     assert_eq!(phone.transcribed(), 1);
     assert_eq!(phone.base.fake_panes().keys(), typed("%2", "first"));
     assert_eq!(phone.calls.status().state, CallState::Listening);
+    assert_eq!(phone.said(), [answer_line()]);
 }
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
@@ -687,9 +709,9 @@ async fn audio_recorded_within_0_3_s_of_the_answers_end_is_not_heard() {
     phone.script([text("first"), text("second")]);
     let ended = after_an_answer(&phone).await;
 
-    // A quarter of a second of speech from 50 ms after the end, and silence enough to end
-    // it: a turn, were it heard.
-    sleep(Duration::from_millis(50)).await;
+    // A quarter of a second of speech recorded from 50 ms after the end, and silence enough
+    // to end it: a turn, were it heard. It arrives a second later, well past the 0.3 s.
+    sleep(Duration::from_secs(1)).await;
     let mut samples = loud(250);
     samples.extend(quiet(1500));
     phone.post(ended + Duration::from_millis(50), samples);
