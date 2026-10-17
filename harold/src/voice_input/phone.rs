@@ -91,6 +91,9 @@ struct Inner {
     /// The offered sounds, by id.
     sounds: HashMap<String, Offer>,
     speech: Option<Speech>,
+    /// When the phone asked for the call being started, which the phone stamps its pieces
+    /// from; the next source's base, and cleared once that start has answered.
+    asked: Option<Instant>,
 }
 
 /// A piece of samples and when it was recorded.
@@ -98,7 +101,8 @@ type Piece = (Vec<i16>, Instant);
 
 struct Pieces {
     sender: mpsc::Sender<Piece>,
-    /// When the source opened: the phone stamps each piece in milliseconds from then.
+    /// When the phone asked for the call, or else when the source opened: the phone
+    /// stamps each piece in milliseconds from then.
     base: Instant,
 }
 
@@ -152,7 +156,7 @@ impl PhoneLine {
     }
 
     /// Takes a piece the phone posted: little-endian `i16` samples recorded `at_ms`
-    /// milliseconds after the call's source opened.
+    /// milliseconds after the source's base: when the phone asked for the call.
     pub(crate) fn audio(&self, at_ms: u64, bytes: &[u8]) -> Result<(), AudioRefused> {
         let mut inner = lock(&self.inner);
         let pieces = inner.source.as_ref().ok_or(AudioRefused::NoCall)?;
@@ -204,18 +208,22 @@ impl PhoneLine {
         self.view.subscribe()
     }
 
-    /// When the open call's source opened, the time its pieces are stamped from.
+    /// The open call's source's base, the time its pieces are stamped from.
     #[cfg(test)]
     fn source_base(&self) -> Option<Instant> {
         lock(&self.inner).source.as_ref().map(|pieces| pieces.base)
     }
 
-    /// A source for a new call. An older source ends once it has read what was posted to it.
+    /// A source for a new call, its pieces stamped from when the phone asked for the call.
+    /// An older source ends once it has read what was posted to it.
     pub(super) fn open_source(&self) -> PhoneSource {
         let (sender, pieces) = mpsc::channel(PIECES_QUEUED);
-        let base = Instant::now();
-        lock(&self.inner).source = Some(Pieces { sender, base });
-        self.quiet.send_modify(|quiet| quiet.since = base);
+        let opened = Instant::now();
+        let mut inner = lock(&self.inner);
+        let base = inner.asked.take().unwrap_or(opened);
+        inner.source = Some(Pieces { sender, base });
+        drop(inner);
+        self.quiet.send_modify(|quiet| quiet.since = opened);
         PhoneSource {
             pieces,
             quiet: self.quiet.subscribe(),
@@ -572,12 +580,27 @@ impl<B: CallPorts> PhoneCalls<B> {
     }
 
     /// Starts a call as `CallControl::start` does, and once it listens has the view follow
-    /// it. With a call already open, answers its status and starts nothing new.
+    /// it. The phone stamps its pieces from `asked`, when it asked for the call: before a
+    /// desk call ended, so the Mac's clock is not behind the phone's. With a call already
+    /// open, answers its status and starts nothing new, its clock left as it was.
+    pub(crate) async fn start_at(&self, asked: Instant) -> CallStatus {
+        self.start_with(Some(asked)).await
+    }
+
+    /// The same with the pieces stamped from when the source opens.
+    #[cfg(test)]
     pub(crate) async fn start(&self) -> CallStatus {
+        self.start_with(None).await
+    }
+
+    async fn start_with(&self, asked: Option<Instant>) -> CallStatus {
         if self.set_up {
             self.forget_ended_call();
         }
+        lock(&self.line.inner).asked = asked;
         let status = self.calls.start().await;
+        // A call already open, or one that never opened its source, leaves it unread.
+        lock(&self.line.inner).asked = None;
         if matches!(status.state, CallState::Off | CallState::NotSetUp) {
             return status;
         }
@@ -668,7 +691,7 @@ impl<B: CallPorts> PhoneCalls<B> {
         self.set_up
     }
 
-    /// When the open call's source opened, so a test can stamp the pieces it posts.
+    /// The open call's source's base, so a test can stamp the pieces it posts.
     #[cfg(test)]
     pub(crate) fn source_base(&self) -> Option<Instant> {
         self.line.source_base()

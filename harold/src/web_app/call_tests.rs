@@ -273,15 +273,18 @@ impl Phone {
         let sent = Instant::now();
         let response = self.server.send(Method::POST, "/call", Vec::new()).await;
         assert_eq!(response.status(), 204);
-        // The call opened after `sent`, so a piece stamped with the time since `sent` was
-        // recorded after it opened, and is heard.
+        // The call's clock starts as the request arrives, after `sent`, so a piece stamped
+        // with the time since `sent` was recorded after the call opened, and is heard.
         *self.clock.lock().unwrap() = (sent, 0);
         self.post(quiet(500)).await;
     }
 
-    /// Milliseconds since `POST /call` was sent, as the page stamps a piece.
+    /// Milliseconds since `POST /call` was sent, as the page stamps a piece, rounded up: the
+    /// call's clock starts as the request arrives, so a stamp rounded down could fall just
+    /// before the call opened, and be muted.
     fn now_ms(&self) -> u64 {
-        u64::try_from(self.clock.lock().unwrap().0.elapsed().as_millis()).unwrap()
+        let elapsed = self.clock.lock().unwrap().0.elapsed();
+        u64::try_from(elapsed.as_micros().div_ceil(1000)).unwrap()
     }
 
     /// Posts `samples` in quarter-second pieces with rising `at`, each of which the call
@@ -579,6 +582,23 @@ async fn starting_a_phone_call_ends_the_desk_call_first() {
 
     assert_eq!(*phone.desk_ends.lock().unwrap(), [0]);
     assert_eq!(phone.base.worker_log().starts, 1);
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn a_phone_calls_pieces_are_stamped_from_when_post_call_arrived() {
+    let directory = TestDirectory::new();
+    let store = Arc::new(HaroldStore::open(directory.store_path()).await.unwrap());
+    // Ending the desk call takes three seconds; the phone stamped its pieces from before
+    // it asked, so the call's clock starts when the request arrives, not when it opens.
+    let end_desk: EndDeskCall = Arc::new(|| Box::pin(sleep(Duration::from_secs(3))));
+    let calls = AppCalls::new(PhoneCalls::new(FakePorts::new(), true), store, end_desk);
+
+    let arrived = Instant::now();
+    assert_eq!(calls.start().await.state, CallState::Listening);
+
+    assert!(arrived.elapsed() >= Duration::from_secs(3));
+    assert_eq!(calls.phone.source_base(), Some(arrived));
+    calls.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread")]

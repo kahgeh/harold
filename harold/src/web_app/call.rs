@@ -13,6 +13,7 @@ use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 use tokio::sync::watch;
+use tokio::time::Instant;
 use tracing::warn;
 use uuid::Uuid;
 
@@ -50,8 +51,8 @@ pub(crate) type EndDeskCall = Arc<dyn Fn() -> BoxFuture<'static, ()> + Send + Sy
 /// `POST /call`'s answer when no call can start at all.
 const NOT_SET_UP: &str = "Voice is not set up on the Mac";
 
-/// The phone's calls, as the web app holds them. A phone call starts only once a call
-/// open at the desk has ended, so the chief never gets turns from two microphones; and a
+/// The phone's calls, as the web app holds them. Starting a phone call ends a call open at
+/// the desk first, so the chief does not get turns from the desk's microphone too; and a
 /// chief's line played on the phone is added to the thread, with no push.
 pub(crate) struct AppCalls<B: CallPorts> {
     phone: PhoneCalls<B>,
@@ -84,9 +85,12 @@ impl<B: CallPorts> PhoneCallApi for AppCalls<B> {
     }
 
     fn start(&self) -> BoxFuture<'_, CallStatus> {
+        // Taken before the desk call ends: the phone stamps its pieces from just before it
+        // sent `POST /call`, so the call's clock starts as the request arrives.
+        let asked = Instant::now();
         Box::pin(async move {
             (self.end_desk_call)().await;
-            self.phone.start().await
+            self.phone.start_at(asked).await
         })
     }
 

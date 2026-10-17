@@ -61,13 +61,15 @@
       ctx,
       stream: null,
       wakeLock: null,
-      // The context's time when the call opened, which pieces are stamped from.
+      // The context's time just before the call is asked for, which pieces are stamped from.
       start: 0,
       // Whether Harold answered that the call listens, and whether #call has shown it.
       open: false,
       live: false,
       // Pieces recorded before this context time are dropped.
       mutedUntil: 0,
+      // The audio posts, chained so each is sent once the one before has answered.
+      posts: Promise.resolve(),
       shownAt: performance.now(),
       timerId: 0,
     };
@@ -175,7 +177,9 @@
 
   // 3. Each piece goes to Harold stamped with when it was recorded, in milliseconds from
   // the call's start. Pieces recorded while something plays, or in the echo's tail after,
-  // are dropped, so the chief never hears itself.
+  // are dropped, so the chief never hears itself. The pieces are posted one after another,
+  // since Harold hears them in the order they arrive; those still queued when the call
+  // ends are dropped, and one that fails does not hold up the rest.
   function post(current, piece) {
     if (call !== current || !current.open || playback) {
       return;
@@ -184,10 +188,20 @@
       return;
     }
     const at = Math.round((piece.at - current.start) * 1000);
-    fetch("/call/audio?at=" + at, {
-      method: "POST",
-      headers: { "Content-Type": "application/octet-stream" },
-      body: piece.samples,
+    current.posts = current.posts.then(async () => {
+      if (call !== current) {
+        return;
+      }
+      const answer = await fetch("/call/audio?at=" + at, {
+        method: "POST",
+        headers: { "Content-Type": "application/octet-stream" },
+        body: piece.samples,
+      });
+      // No call open on the Mac: it ended, and the stream that says so did not reach the
+      // phone. Only this call's own pieces end it, so a late one cannot end a newer call.
+      if (answer.status === 409 && call === current && current.open) {
+        end(current);
+      }
     }).catch(() => {});
   }
 

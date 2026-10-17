@@ -1037,6 +1037,29 @@ async fn shutdown_ends_the_phone_call_and_its_follower() {
 }
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn a_calls_pieces_are_stamped_from_when_it_was_asked_for() {
+    let phone = Phone::new();
+    let asked = Instant::now();
+    sleep(Duration::from_secs(3)).await;
+
+    phone.calls.start_at(asked).await;
+    assert_eq!(phone.calls.source_base(), Some(asked));
+
+    // A second start joins the open call and leaves its clock where it was.
+    sleep(Duration::from_secs(1)).await;
+    let joined = phone.calls.start_at(Instant::now()).await;
+    assert_eq!(joined.state, CallState::Listening);
+    assert_eq!(phone.calls.source_base(), Some(asked));
+
+    // The next call, started with no time, is stamped from when its source opens.
+    phone.calls.stop().await;
+    sleep(Duration::from_secs(1)).await;
+    let restarted = Instant::now();
+    phone.calls.start().await;
+    assert_eq!(phone.calls.source_base(), Some(restarted));
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn a_phone_with_no_voice_set_up_starts_nothing() {
     let base = FakePorts::new();
     let calls = PhoneCalls::new(base.clone(), false);

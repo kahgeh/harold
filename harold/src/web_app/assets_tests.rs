@@ -20,6 +20,10 @@ fn the_call_script_keeps_its_contract() {
         "Call ended: the app was closed or the phone locked",
         "prefers-reduced-motion",
         r#"audioWorklet.addModule("/static/call-worklet.js")"#,
+        // A piece Harold refuses with no call open ends the call on the phone too.
+        "answer.status === 409",
+        // Pieces are posted one after another, in the order they were recorded.
+        "current.posts = current.posts.then(",
     ] {
         assert!(script.contains(wanted), "call.js lacks {wanted}");
     }
