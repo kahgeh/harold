@@ -1067,6 +1067,9 @@ impl AgentMonitorRuntime {
             .collect();
         let mut attempted = false;
         let mut failure_reason = None;
+        // After one pane's retry fails, the rest of the tick reads each pane once, so a stuck
+        // tmux does not hold queued hook calls for a retry per pane.
+        let mut retry_failed = false;
         for pane in panes {
             let Some(provider) = self.providers.get(&pane.incarnation.provider_id).cloned() else {
                 continue;
@@ -1076,27 +1079,34 @@ impl AgentMonitorRuntime {
             self.baseline_pane(&pane.incarnation.pane_id).await?;
             let screen = &self.screen;
             let gate = &self.screen_gate;
-            let observation = match read_with_retry(
-                "screen",
-                Some(&pane.incarnation.pane_id),
-                gate,
-                self.acquisition_timeout,
-                SCREEN_RETRY_TIMEOUT,
-                |timeout, stop| {
-                    observe_screen(
-                        Arc::clone(screen),
-                        pane.clone(),
-                        provider.clone(),
-                        timeout,
-                        Arc::clone(gate),
-                        stop,
-                    )
-                },
-            )
-            .await
-            {
+            let mut read = |timeout, stop| {
+                observe_screen(
+                    Arc::clone(screen),
+                    pane.clone(),
+                    provider.clone(),
+                    timeout,
+                    Arc::clone(gate),
+                    stop,
+                )
+            };
+            let result = if retry_failed {
+                read(self.acquisition_timeout, StopSignal::default()).await
+            } else {
+                read_with_retry(
+                    "screen",
+                    Some(&pane.incarnation.pane_id),
+                    gate,
+                    self.acquisition_timeout,
+                    SCREEN_RETRY_TIMEOUT,
+                    &mut read,
+                )
+                .await
+            };
+            let observation = match result {
                 Ok(observation) => observation,
                 Err(failure) => {
+                    // A busy gate means no read ran, so there was no retry to fail.
+                    retry_failed |= failure.reason_code != "busy";
                     failure_reason.get_or_insert(failure.reason_code);
                     continue;
                 }

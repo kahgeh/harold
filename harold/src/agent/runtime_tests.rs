@@ -4448,6 +4448,7 @@ async fn retried_read_after_degraded_logs_recovered() {
 struct PaneScriptedScreen {
     observations: Mutex<std::collections::HashMap<String, VecDeque<ScreenObservation>>>,
     failures: Mutex<std::collections::HashMap<String, usize>>,
+    observe_calls: AtomicUsize,
 }
 
 impl VisibleScreenPort for PaneScriptedScreen {
@@ -4456,6 +4457,7 @@ impl VisibleScreenPort for PaneScriptedScreen {
         pane: &AgentPaneObservation,
         _provider: &AgentProviderSettings,
     ) -> Result<ScreenObservation, ScreenError> {
+        self.observe_calls.fetch_add(1, Ordering::SeqCst);
         let pane_id = &pane.incarnation.pane_id;
         if let Some(failures) = self.failures.lock().unwrap().get_mut(pane_id)
             && *failures > 0
@@ -4851,6 +4853,39 @@ async fn inventory_retry_gets_twice_the_inventory_timeout() {
         )
         .is_empty()
     );
+    drop(shutdown);
+    task.await.unwrap();
+}
+
+#[tokio::test]
+async fn screen_tick_stops_retrying_once_a_retry_fails() {
+    let directory = TestDirectory::new();
+    let store = Arc::new(HaroldStore::open(&directory.0).await.unwrap());
+    let panes = [
+        pane("%7", 70, 700, 1_000, 100),
+        pane("%8", 80, 800, 1_000, 100),
+        pane("%9", 90, 900, 1_000, 100),
+    ];
+    // No scripted observations: every read of every pane fails.
+    let screen = Arc::new(PaneScriptedScreen::default());
+    let (shutdown, shutdown_rx) = watch::channel(());
+    let (handle, task) = spawn_agent_monitor_for_test(
+        Arc::clone(&store),
+        Arc::new(FakeInventory::scans(vec![Ok(panes.to_vec())])),
+        Arc::clone(&screen),
+        vec![provider()],
+        2_000,
+        shutdown_rx,
+    );
+    handle.inventory_tick().await.unwrap();
+    let (captured, _guard) = capture_logs();
+
+    handle.screen_tick().await.unwrap();
+
+    // The first pane read gets its retry; the two after it get one try each.
+    assert_eq!(screen.observe_calls.load(Ordering::SeqCst), 4);
+    let logs = logged(&captured);
+    assert_eq!(logs.matches("agent monitor degraded").count(), 1, "{logs}");
     drop(shutdown);
     task.await.unwrap();
 }
