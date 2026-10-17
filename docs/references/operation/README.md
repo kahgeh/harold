@@ -265,6 +265,7 @@ inventory_timeout_ms = 5000
 ```
 
 Restart with `~/bin/haroldctl restart` after changing it. This controls process
-inventory scanning and identity resolution, and a retried scan gets twice it; a
-screen capture has a fixed 500 ms deadline, and 2,000 ms when it is retried. A worker still finishing after a timeout is not launched again; the
-previous health state and panes remain until another acquisition completes.
+inventory scanning and identity resolution, and a retried scan gets twice that; a
+screen capture has a fixed 500 ms deadline, and 2,000 ms when it is retried. A
+worker still finishing after a timeout is not launched again; the previous health
+state and panes remain until another acquisition completes.
