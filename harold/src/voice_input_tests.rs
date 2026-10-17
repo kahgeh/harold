@@ -1572,6 +1572,33 @@ fn a_line_goes_to_the_first_open_call() {
     assert_eq!(open.taken(), 0);
 }
 
+/// The projector asks only the phone's calls for the chief's line: an open desk call is
+/// never asked, so the line then goes by the screen lock's rules, as before the phone's calls.
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn the_chiefs_line_for_the_phone_never_reaches_an_open_desk_call() {
+    let desk = Harness::new();
+    desk.start().await;
+    assert_eq!(desk.state(), CallState::Listening);
+    let no_phone_call = FakeLineTaker::new(None);
+
+    assert_eq!(say_in_phone_call_over(None, "hi", Speaker::Chief), None);
+    assert_eq!(
+        say_in_phone_call_over(Some(&no_phone_call), "hi", Speaker::Chief),
+        None
+    );
+    settle().await;
+
+    assert_eq!(no_phone_call.taken(), 1);
+    assert!(desk.played().is_empty());
+    assert_eq!(desk.state(), CallState::Listening);
+    let phone_call = FakeLineTaker::new(Some(true));
+    assert_eq!(
+        say_in_phone_call_over(Some(&phone_call), "hi", Speaker::Chief),
+        Some(true)
+    );
+    assert_eq!(phone_call.taken(), 1);
+}
+
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn a_line_said_into_a_call_that_ends_first_is_not_played() {
     let h = Harness::new();

@@ -334,7 +334,7 @@ impl ProductionDispatcher {
                 },
                 self.environment.as_ref(),
                 |pane_id| self.chief_app(pane_id),
-                |text| crate::voice_input::say_in_open_call(text, Speaker::Chief),
+                |text| crate::voice_input::say_in_phone_call(text, Speaker::Chief),
             ),
             other => Err(DispatchError::Permanent(format!(
                 "unknown event type: {other}"

@@ -390,6 +390,23 @@ pub(crate) fn init_phone_calls(calls: Arc<dyn LineTaker>) {
     );
 }
 
+/// Says `line` in the phone's open call, from a blocking thread, and returns once it has
+/// ended. `None` when Harold has no phone calls or no phone call is open: then it neither
+/// blocks nor needs a runtime. The projector asks this before the screen lock decides, so a
+/// desk call is not asked here: at the desk the line still goes by the lock's rules.
+pub(crate) fn say_in_phone_call(line: &str, by: Speaker) -> Option<bool> {
+    say_in_phone_call_over(PHONE_CALLS.get().map(|calls| calls.as_ref()), line, by)
+}
+
+/// `say_in_phone_call` over `phone`, the phone's calls if Harold has them.
+pub(crate) fn say_in_phone_call_over(
+    phone: Option<&dyn LineTaker>,
+    line: &str,
+    by: Speaker,
+) -> Option<bool> {
+    phone?.say_blocking(line, by)
+}
+
 /// Says `line` in the open call, the desk's or else the phone's, from a blocking thread, and
 /// returns once it has ended. `None` when Harold has no calls or no call is open: then it
 /// neither blocks nor needs a runtime.

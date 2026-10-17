@@ -28,6 +28,7 @@ use crate::store::{
     append_spoken_line_requested, append_turn_completed,
 };
 use crate::telemetry::{self, ResolvedBy, Routing};
+use crate::voice_input::{Speaker, say_in_phone_call_over};
 
 struct TestDirectory(std::path::PathBuf);
 
@@ -2181,6 +2182,43 @@ fn a_spoken_line_with_no_call_open_goes_by_the_app_route() {
     assert!(matches!(outcome, Ok(DeliveryOutcome::Delivered)));
     assert_eq!(asked, 1);
     assert_eq!(app.delivered(), [("event-1".to_string(), "hi".to_string())]);
+}
+
+/// The daemon asks only the phone's calls (`say_in_phone_call`), never the desk's: with no
+/// phone call open the line goes by the screen lock's rules, as before the phone's calls,
+/// even while a desk call is open.
+#[test]
+fn a_spoken_line_with_no_phone_call_open_goes_by_the_lock_rules() {
+    for (messaging_paused, delivered) in [(false, true), (true, false)] {
+        let environment = FakeEnvironment::locked("");
+        let app = FakeApp::new(AppDelivery::Pushed);
+        let away = FakeAwayText::default();
+
+        let outcome = dispatch_spoken_line_with_app(
+            &spoken_delivery(json!(chief_line("hi"))),
+            messaging_paused,
+            false,
+            |_| None,
+            &environment,
+            |_| {
+                Some(ChiefApp {
+                    app: &app,
+                    away: &away,
+                })
+            },
+            |text| say_in_phone_call_over(None, text, Speaker::Chief),
+        );
+
+        if delivered {
+            assert!(matches!(outcome, Ok(DeliveryOutcome::Delivered)));
+            assert_eq!(app.delivered(), [("event-1".to_string(), "hi".to_string())]);
+        } else {
+            assert!(matches!(outcome, Ok(DeliveryOutcome::Skipped)));
+            assert!(app.delivered().is_empty());
+        }
+        assert!(away.sends().is_empty());
+        assert!(environment.spoken_lines().is_empty());
+    }
 }
 
 // ---------------------------------------------------------------------------
