@@ -326,8 +326,6 @@ pub(crate) enum Writer {
     TimedPrompt,
     Alert,
     PhoneReply,
-    // until the call is wired up (plan Task 9)
-    #[cfg_attr(not(test), allow(dead_code))]
     Voice,
 }
 

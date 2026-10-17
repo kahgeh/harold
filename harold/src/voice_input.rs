@@ -10,9 +10,10 @@ mod wav;
 mod worker;
 
 use call::{Ended, Event, chief_pane, lock, run_call};
+pub(crate) use mac::MacPorts;
 use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use tokio::sync::{mpsc, oneshot, watch};
 use tracing::info;
 use worker::{VoiceWorker, WorkerError};
@@ -41,8 +42,8 @@ pub(crate) trait AudioSink: Send + Sync + 'static {
     fn stop(&self);
 }
 
-/// What a call reads and does outside the core. The daemon's are `MacPorts` (Task 9); the
-/// phone's come with away-web-app.
+/// What a call reads and does outside the core. The daemon's are `MacPorts`; the phone's
+/// come with away-web-app.
 pub(crate) trait CallPorts: Send + Sync + 'static {
     type Source: AudioSource;
     type Sink: AudioSink;
@@ -242,23 +243,24 @@ impl<P: CallPorts> CallControl<P> {
 
     /// Plays `line` in the open call and resolves once it has ended. `None` when no call is open.
     /// `Some(false)` when the call ended before playing it, so the delivery retries outside the call.
+    /// Test-only until away-web-app's phone call says its lines from async code.
+    #[cfg(test)]
     pub(crate) async fn say(&self, line: &str, by: Speaker) -> Option<bool> {
-        let (reply, said) = oneshot::channel();
-        let line = line.to_string();
-        if !self.send(Event::Say { line, by, reply }) {
-            return None;
-        }
-        Some(said.await.unwrap_or(false))
+        Some(self.send_line(line, by)?.await.unwrap_or(false))
     }
 
-    /// The same from a blocking thread (the projector's `spawn_blocking`); never call it from async code.
+    /// The same from a blocking thread (the projector's `spawn_blocking`); never call it from
+    /// async code. With no call open it returns `None` at once.
     pub(crate) fn say_blocking(&self, line: &str, by: Speaker) -> Option<bool> {
+        Some(self.send_line(line, by)?.blocking_recv().unwrap_or(false))
+    }
+
+    /// Hands `line` to the open call; the answer resolves once it has ended. `None` when no
+    /// call is open.
+    fn send_line(&self, line: &str, by: Speaker) -> Option<oneshot::Receiver<bool>> {
         let (reply, said) = oneshot::channel();
         let line = line.to_string();
-        if !self.send(Event::Say { line, by, reply }) {
-            return None;
-        }
-        Some(said.blocking_recv().unwrap_or(false))
+        self.send(Event::Say { line, by, reply }).then_some(said)
     }
 
     /// Ends an open call with reason `shutdown`.
@@ -286,6 +288,31 @@ impl<P: CallPorts> CallControl<P> {
         };
         let _ = ended.wait_for(|ended| *ended).await;
     }
+}
+
+/// The daemon's calls with the chief at the desk.
+pub(crate) type DaemonCalls = CallControl<MacPorts>;
+
+static DAEMON_CALLS: OnceLock<DaemonCalls> = OnceLock::new();
+
+/// Sets the daemon's calls, once, at start-up.
+pub(crate) fn init_daemon_calls(calls: DaemonCalls) {
+    assert!(
+        DAEMON_CALLS.set(calls).is_ok(),
+        "init_daemon_calls called more than once"
+    );
+}
+
+/// The daemon's calls; `None` before start-up sets them, and in `--diagnostics` and tests.
+pub(crate) fn daemon_calls() -> Option<&'static DaemonCalls> {
+    DAEMON_CALLS.get()
+}
+
+/// Says `line` in the daemon's open call, from a blocking thread, and returns once it has
+/// ended. `None` when Harold has no calls or no call is open: then it neither blocks nor
+/// needs a runtime.
+pub(crate) fn say_in_open_call(line: &str, by: Speaker) -> Option<bool> {
+    daemon_calls()?.say_blocking(line, by)
 }
 
 #[cfg(test)]

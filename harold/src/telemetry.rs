@@ -732,8 +732,6 @@ pub(crate) fn take_prompt(
 pub(crate) enum StartedBy {
     Phone,
     TimedPrompt,
-    // until the call is wired up (plan Task 9)
-    #[cfg_attr(not(test), allow(dead_code))]
     Voice,
     Desk,
     Unknown,

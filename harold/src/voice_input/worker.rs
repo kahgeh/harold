@@ -25,7 +25,7 @@ pub(crate) const LOAD_LIMIT: Duration = Duration::from_secs(120);
 const CLOSE_LIMIT: Duration = Duration::from_secs(5);
 
 const DEFAULT_TTS_MODEL: &str = "mlx-community/Kokoro-82M-bf16";
-const DEFAULT_VOICE: &str = "af_heart";
+pub(super) const DEFAULT_VOICE: &str = "af_heart";
 const DEFAULT_LANG_CODE: &str = "a";
 
 /// What Whisper heard in one turn.

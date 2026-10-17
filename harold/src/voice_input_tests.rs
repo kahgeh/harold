@@ -1338,6 +1338,74 @@ async fn a_call_reads_as_speaking_while_it_says_why_it_ended() {
     assert_eq!(h.state(), CallState::Off);
 }
 
+// ---------------------------------------------------------------------------
+// The daemon's control
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn a_control_that_is_not_set_up_starts_nothing() {
+    let ports = FakePorts::new();
+    let calls = CallControl::new(ports.clone(), false);
+
+    let status = calls.start().await;
+    settle().await;
+
+    assert_eq!(status.state, CallState::NotSetUp);
+    assert_eq!(calls.status().state, CallState::NotSetUp);
+    assert_eq!(ports.state().sources, 0);
+    assert_eq!(ports.0.worker.lock().unwrap().starts, 0);
+    assert_eq!(ports.state().awake_taken, 0);
+    assert!(!ports.calls_dir().exists());
+    assert_eq!(calls.say("hello", Speaker::Chief).await, None);
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn start_during_a_call_starts_nothing_new() {
+    let h = Harness::new();
+    assert_eq!(h.start().await.state, CallState::Listening);
+
+    assert_eq!(h.calls.start().await.state, CallState::Listening);
+    settle().await;
+
+    assert_eq!(h.ports.state().sources, 1);
+    assert_eq!(h.worker().starts, 1);
+    assert_eq!(h.call_dirs().len(), 1);
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn stop_with_no_call_answers_off() {
+    let h = Harness::new();
+
+    assert_eq!(h.calls.stop().await.state, CallState::Off);
+    assert_eq!(h.ports.state().sources, 0);
+    assert_eq!(h.worker().starts, 0);
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn shutdown_ends_the_call_and_cleans_up() {
+    let logs = CapturedLogs::start();
+    let h = Harness::new();
+    h.start().await;
+    assert_eq!(h.call_dirs().len(), 1);
+
+    h.calls.shutdown().await;
+    settle().await;
+
+    assert_eq!(h.state(), CallState::Off);
+    assert_eq!(h.worker().closes, 1);
+    let mic = h
+        .ports
+        .state()
+        .mic
+        .clone()
+        .expect("the test's end of the microphone");
+    assert!(mic.is_closed(), "the source was dropped");
+    assert_eq!(h.awake_held(), 0);
+    assert!(h.call_dirs().is_empty());
+    assert!(logs.text().contains("call ended reason=\"shutdown\""));
+    assert_eq!(h.calls.say("later", Speaker::Chief).await, None);
+}
+
 // The worker's health, sounds that cannot play, the turn before a bye, and a second START.
 #[path = "voice_input_call_tests.rs"]
 mod call_tests;

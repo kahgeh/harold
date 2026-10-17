@@ -374,7 +374,6 @@ pub(crate) struct VoiceInputSettings {
 
 impl VoiceInputSettings {
     /// The value after `--model` in `args`.
-    #[cfg_attr(not(test), allow(dead_code))] // until the call is wired up (plan Task 9)
     pub(crate) fn whisper_model(&self) -> Option<&str> {
         let at = self.args.iter().position(|arg| arg == "--model")?;
         self.args.get(at + 1).map(String::as_str)

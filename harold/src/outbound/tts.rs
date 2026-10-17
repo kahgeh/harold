@@ -8,6 +8,7 @@ use tracing::{info, warn};
 
 use crate::settings::{TtsSettings, get_settings};
 use crate::store::TurnCompleted;
+use crate::voice_input::{Speaker, say_in_open_call};
 
 fn run_local_model(system_prompt: &str, prompt: &str, max_tokens: u32) -> Option<String> {
     let cfg = get_settings();
@@ -114,7 +115,6 @@ pub(crate) struct LineStopper {
 }
 
 impl LineStopper {
-    #[cfg_attr(not(test), allow(dead_code))] // until the call is wired up (plan Task 9)
     pub(crate) fn stop(&self) {
         self.generation.fetch_add(1, Ordering::SeqCst);
     }
@@ -242,8 +242,13 @@ pub(crate) fn desk_update_line(last_user_prompt: &str, main_context: &str) -> St
     format!("{summary} on {main_context} and waiting for further instructions")
 }
 
+/// Says another agent's turn-end update in the open call, or with the `[tts]` command
+/// when no call is open.
 pub fn notify_at_desk(turn: &TurnCompleted, _trace_id: &str) -> bool {
     let message = desk_update_line(&turn.last_user_prompt, &turn.main_context);
+    if let Some(said) = say_in_open_call(&message, Speaker::OtherAgent) {
+        return said;
+    }
     let tts = &get_settings().tts;
     notify_with_fallback(tts, &message, desk_line_stopper())
 }
@@ -259,10 +264,18 @@ pub(crate) fn as_last_argument(line: &str) -> Cow<'_, str> {
     }
 }
 
-/// Say `line` with the `[tts]` command, falling back as a turn-end update does. Nothing
-/// heard is added to the line.
+/// Say `line` in the open call, or with the `[tts]` command, falling back as a turn-end
+/// update does, when no call is open. Nothing heard is added to the line.
 pub(crate) fn speak_line(line: &str) -> bool {
-    speak_line_with(&get_settings().tts, line, desk_line_stopper())
+    speak_line_through(&get_settings().tts, line)
+}
+
+/// `speak_line` with `tts` as the `[tts]` command.
+fn speak_line_through(tts: &TtsSettings, line: &str) -> bool {
+    if let Some(said) = say_in_open_call(line, Speaker::Chief) {
+        return said;
+    }
+    speak_line_with(tts, line, desk_line_stopper())
 }
 
 /// Says `line` with `tts`, returning when it has ended or been stopped; true when it was
@@ -342,6 +355,17 @@ mod tests {
         assert!(speak_line_with(&tts, "-o x", &LineStopper::default()));
         assert_eq!(std::fs::read_to_string(&out).unwrap(), " -o x");
         assert!(speak_line_with(&tts, "All green.", &LineStopper::default()));
+        assert_eq!(std::fs::read_to_string(&out).unwrap(), "All green.");
+        let _ = std::fs::remove_file(out);
+    }
+
+    #[test]
+    fn speak_line_goes_to_tts_when_no_call_is_open() {
+        let out = std::env::temp_dir().join(format!("harold-tts-{}", uuid::Uuid::new_v4()));
+        let tts = writes_last_argument_to(&out);
+
+        assert_eq!(say_in_open_call("All green.", Speaker::Chief), None);
+        assert!(speak_line_through(&tts, "All green."));
         assert_eq!(std::fs::read_to_string(&out).unwrap(), "All green.");
         let _ = std::fs::remove_file(out);
     }

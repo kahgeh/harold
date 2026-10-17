@@ -2359,3 +2359,104 @@ async fn a_store_in_use_stops_harold_with_the_error_text_not_its_debug_form() {
     drop(first);
     let _ = std::fs::remove_dir_all(&directory);
 }
+
+// ---------------------------------------------------------------------------
+// Calls with the chief
+// ---------------------------------------------------------------------------
+
+fn call_request(action: super::harold::CallAction) -> Request<super::harold::CallRequest> {
+    Request::new(super::harold::CallRequest {
+        action: action as i32,
+    })
+}
+
+#[tokio::test]
+async fn call_answers_not_set_up_without_daemon_calls() {
+    use super::harold::{CallAction, CallResult, CallState};
+    let directory = TestDirectory::new();
+    let store = Arc::new(store::HaroldStore::open(&directory.0).await.unwrap());
+    let (service, _shutdown, task) = test_service(store, empty_snapshot());
+
+    for action in [
+        CallAction::Start,
+        CallAction::Stop,
+        CallAction::TalkNow,
+        CallAction::Status,
+    ] {
+        let answer = service
+            .call(call_request(action))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(answer.state, CallState::NotSetUp as i32, "{action:?}");
+        assert_eq!(answer.last_result, CallResult::Unspecified as i32);
+        assert_eq!(answer.chief_pane_id, "");
+        assert_eq!(answer.last_transcript, "");
+    }
+    task.abort();
+}
+
+#[tokio::test]
+async fn call_without_an_action_is_invalid() {
+    let directory = TestDirectory::new();
+    let store = Arc::new(store::HaroldStore::open(&directory.0).await.unwrap());
+    let (service, _shutdown, task) = test_service(store, empty_snapshot());
+
+    for action in [super::harold::CallAction::Unspecified as i32, 99] {
+        let status = service
+            .call(Request::new(super::harold::CallRequest { action }))
+            .await
+            .unwrap_err();
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+        assert_eq!(status.message(), "call action is required");
+    }
+    task.abort();
+}
+
+#[test]
+fn call_response_maps_every_state_and_result() {
+    use super::harold::{CallResult, CallState};
+    use super::voice_input::{self, CallStatus, TurnResult};
+    let states = [
+        (voice_input::CallState::NotSetUp, CallState::NotSetUp),
+        (voice_input::CallState::Off, CallState::Off),
+        (voice_input::CallState::Listening, CallState::Listening),
+        (
+            voice_input::CallState::Transcribing,
+            CallState::Transcribing,
+        ),
+        (voice_input::CallState::Waiting, CallState::Waiting),
+        (voice_input::CallState::Speaking, CallState::Speaking),
+    ];
+    let results = [
+        (None, CallResult::Unspecified),
+        (Some(TurnResult::Typed), CallResult::Typed),
+        (Some(TurnResult::NothingHeard), CallResult::NothingHeard),
+        (Some(TurnResult::NoChief), CallResult::NoChief),
+        (Some(TurnResult::ChiefBusy), CallResult::ChiefBusy),
+        (Some(TurnResult::Failed), CallResult::Failed),
+        (Some(TurnResult::VoiceMuted), CallResult::VoiceMuted),
+    ];
+    for (state, wire_state) in states {
+        for (result, wire_result) in results {
+            let answer = super::call_response(&CallStatus {
+                state,
+                chief_pane_id: Some("%3".into()),
+                last_transcript: Some("check the build".into()),
+                last_result: result,
+            });
+            assert_eq!(answer.state, wire_state as i32);
+            assert_eq!(answer.last_result, wire_result as i32);
+            assert_eq!(answer.chief_pane_id, "%3");
+            assert_eq!(answer.last_transcript, "check the build");
+        }
+    }
+    let empty = super::call_response(&CallStatus {
+        state: voice_input::CallState::Off,
+        chief_pane_id: None,
+        last_transcript: None,
+        last_result: None,
+    });
+    assert_eq!(empty.chief_pane_id, "");
+    assert_eq!(empty.last_transcript, "");
+}

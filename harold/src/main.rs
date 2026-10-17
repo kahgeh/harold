@@ -16,8 +16,6 @@ mod telemetry;
 mod timed_prompts;
 mod tmux;
 mod util;
-// until the call is wired up (plan Task 9)
-#[cfg_attr(not(test), allow(dead_code))]
 mod voice_input;
 
 use std::sync::Arc;
@@ -455,8 +453,55 @@ impl Harold for HaroldService {
         Ok(Response::new(SpeakLineResponse {}))
     }
 
-    async fn call(&self, _: Request<CallRequest>) -> Result<Response<CallResponse>, Status> {
-        Err(Status::unimplemented("call"))
+    async fn call(&self, request: Request<CallRequest>) -> Result<Response<CallResponse>, Status> {
+        let action = harold::CallAction::try_from(request.into_inner().action)
+            .unwrap_or(harold::CallAction::Unspecified);
+        if action == harold::CallAction::Unspecified {
+            return Err(Status::invalid_argument("call action is required"));
+        }
+        let Some(calls) = voice_input::daemon_calls() else {
+            return Ok(Response::new(call_response(&voice_input::CallStatus {
+                state: voice_input::CallState::NotSetUp,
+                chief_pane_id: None,
+                last_transcript: None,
+                last_result: None,
+            })));
+        };
+        let status = match action {
+            harold::CallAction::Start => calls.start().await,
+            harold::CallAction::Stop => calls.stop().await,
+            harold::CallAction::TalkNow => calls.talk_now(),
+            harold::CallAction::Status | harold::CallAction::Unspecified => calls.status(),
+        };
+        Ok(Response::new(call_response(&status)))
+    }
+}
+
+/// A call's status as the `Call` RPC answers it.
+fn call_response(status: &voice_input::CallStatus) -> CallResponse {
+    use voice_input::{CallState, TurnResult};
+    let state = match status.state {
+        CallState::NotSetUp => harold::CallState::NotSetUp,
+        CallState::Off => harold::CallState::Off,
+        CallState::Listening => harold::CallState::Listening,
+        CallState::Transcribing => harold::CallState::Transcribing,
+        CallState::Waiting => harold::CallState::Waiting,
+        CallState::Speaking => harold::CallState::Speaking,
+    };
+    let last_result = match status.last_result {
+        None => harold::CallResult::Unspecified,
+        Some(TurnResult::Typed) => harold::CallResult::Typed,
+        Some(TurnResult::NothingHeard) => harold::CallResult::NothingHeard,
+        Some(TurnResult::NoChief) => harold::CallResult::NoChief,
+        Some(TurnResult::ChiefBusy) => harold::CallResult::ChiefBusy,
+        Some(TurnResult::Failed) => harold::CallResult::Failed,
+        Some(TurnResult::VoiceMuted) => harold::CallResult::VoiceMuted,
+    };
+    CallResponse {
+        state: state as i32,
+        chief_pane_id: status.chief_pane_id.clone().unwrap_or_default(),
+        last_transcript: status.last_transcript.clone().unwrap_or_default(),
+        last_result: last_result as i32,
     }
 }
 
@@ -902,6 +947,10 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
     )
     .await?;
 
+    let call_ports = voice_input::MacPorts::from_settings(cfg, snapshots.clone());
+    let set_up = call_ports.set_up();
+    voice_input::init_daemon_calls(voice_input::CallControl::new(call_ports, set_up));
+
     info!(address = %addr, "Harold listening");
     let service = harold_service(
         cfg,
@@ -919,6 +968,11 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
             drop(shutdown_tx);
         })
         .await;
+
+    // An open call ends with reason `shutdown`, and its folder and child programs go.
+    if let Some(calls) = voice_input::daemon_calls() {
+        calls.shutdown().await;
+    }
 
     // Wait for the handler, the listener, the timed-prompt task, the pod facts and the
     // alert address to stop before returning.

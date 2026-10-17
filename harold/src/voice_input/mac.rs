@@ -1,13 +1,19 @@
 //! The Mac's side of a call: the microphone through `ffmpeg`, the speakers through `afplay`,
 //! and `caffeinate` to keep the display awake while the call lasts.
 
-use super::{AudioSink, AudioSource};
-use std::path::Path;
+use super::worker::{DEFAULT_VOICE, ProcessWorker, WorkerCommand, WorkerError};
+use super::{AudioSink, AudioSource, CallPorts};
+use crate::agent::snapshot::AgentSnapshotHub;
+use crate::outbound::tts;
+use crate::settings::{Settings, TtsSettings};
+use crate::timed_prompts::TmuxPorts;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use tokio::io::AsyncReadExt;
 use tokio::process::{Child, ChildStdout, Command};
 use tokio::sync::oneshot;
+use tracing::warn;
 
 pub(crate) const FFMPEG: &str = "ffmpeg";
 pub(crate) const CAFFEINATE: &str = "caffeinate";
@@ -167,7 +173,7 @@ impl AudioSink for MacSink {
 
 /// `caffeinate -d`, held for a call (Decision 16); dropping it kills the child.
 pub(crate) struct KeepAwake {
-    child: Child,
+    _child: Child,
 }
 
 impl KeepAwake {
@@ -183,12 +189,136 @@ impl KeepAwake {
             .stderr(Stdio::null())
             .kill_on_drop(true)
             .spawn()?;
-        Ok(Self { child })
+        Ok(Self { _child: child })
     }
 
     #[cfg(test)]
     fn pid(&self) -> u32 {
-        self.child.id().expect("child is running")
+        self._child.id().expect("child is running")
+    }
+}
+
+/// The daemon's call ports: the Mac's microphone, speakers and display, the voice worker
+/// `[voice_input]` names, the chief's tmux pane and the `[tts]` command.
+pub(crate) struct MacPorts {
+    panes: TmuxPorts,
+    /// `None` without `[voice_input]` or its Whisper model; no call starts then.
+    worker: Option<WorkerCommand>,
+    chief_folder: Option<String>,
+    tts: Arc<TtsSettings>,
+    sink: Arc<MacSink>,
+}
+
+impl MacPorts {
+    pub(crate) fn from_settings(settings: &Settings, snapshots: AgentSnapshotHub) -> Self {
+        let tts = &settings.tts;
+        Self {
+            panes: TmuxPorts::new(snapshots, settings.agents.0.clone()),
+            worker: settings
+                .voice_input
+                .as_ref()
+                .and_then(|voice_input| WorkerCommand::from_settings(voice_input, tts)),
+            chief_folder: settings.notify.away_messages_only_from.clone(),
+            tts: Arc::new(TtsSettings {
+                command: tts.command.clone(),
+                voice: tts.voice.clone(),
+                args: tts.args.clone(),
+                fallback_command: tts.fallback_command.clone(),
+                fallback_voice: tts.fallback_voice.clone(),
+                fallback_args: tts.fallback_args.clone(),
+            }),
+            sink: Arc::new(MacSink::new()),
+        }
+    }
+
+    /// Whether a call can start: `[voice_input]` is there and names its Whisper model.
+    pub(crate) fn set_up(&self) -> bool {
+        self.worker.is_some()
+    }
+}
+
+/// The last component of `folder`, as a turn-end update names its agent.
+fn last_component(folder: &str) -> String {
+    Path::new(folder).file_name().map_or_else(
+        || folder.to_string(),
+        |name| name.to_string_lossy().into_owned(),
+    )
+}
+
+impl CallPorts for MacPorts {
+    type Source = MicSource;
+    type Sink = MacSink;
+    type Worker = ProcessWorker;
+    type Panes = TmuxPorts;
+    type Awake = KeepAwake;
+
+    fn open_source(&self) -> Result<MicSource, String> {
+        MicSource::open().map_err(|error| error.to_string())
+    }
+
+    fn sink(&self) -> Arc<MacSink> {
+        Arc::clone(&self.sink)
+    }
+
+    fn start_worker(&self, call_dir: &Path) -> Result<ProcessWorker, WorkerError> {
+        let command = self.worker.as_ref().ok_or(WorkerError::FailedToLoad)?;
+        ProcessWorker::start(command, call_dir)
+    }
+
+    fn panes(&self) -> &TmuxPorts {
+        &self.panes
+    }
+
+    fn chief_folder(&self) -> Option<String> {
+        self.chief_folder.clone()
+    }
+
+    async fn speak_with_tts(&self, line: &str) {
+        let tts = Arc::clone(&self.tts);
+        let line = line.to_string();
+        // A failed command is logged where it runs.
+        let _ = tokio::task::spawn_blocking(move || {
+            tts::speak_line_with(&tts, &line, tts::desk_line_stopper())
+        })
+        .await;
+    }
+
+    fn stop_desk_line(&self) {
+        tts::desk_line_stopper().stop();
+    }
+
+    async fn turn_end_update(&self, prompt: &str) -> String {
+        let prompt = prompt.to_string();
+        let context = last_component(self.chief_folder.as_deref().unwrap_or_default());
+        let update =
+            tokio::task::spawn_blocking(move || tts::desk_update_line(&prompt, &context)).await;
+        update.unwrap_or_else(|_| {
+            warn!("turn-end update not made");
+            "Work complete".to_string()
+        })
+    }
+
+    fn calls_dir(&self) -> PathBuf {
+        std::env::temp_dir().join("harold-voice-input")
+    }
+
+    fn phrases_dir(&self) -> PathBuf {
+        std::env::temp_dir().join("harold-voice-phrases")
+    }
+
+    fn voice_name(&self) -> String {
+        self.worker
+            .as_ref()
+            .map_or(DEFAULT_VOICE, |command| command.voice.as_str())
+            .to_string()
+    }
+
+    fn voice_muted(&self) -> bool {
+        crate::outbound::is_tts_muted()
+    }
+
+    fn keep_awake(&self) -> Result<KeepAwake, String> {
+        KeepAwake::start().map_err(|error| error.to_string())
     }
 }
 
@@ -284,16 +414,46 @@ mod tests {
     }
 
     #[test]
+    fn mac_ports_without_voice_input_are_not_set_up() {
+        crate::settings::init_settings_for_test();
+        let settings = crate::settings::get_settings();
+        assert!(settings.voice_input.is_none());
+        let snapshots = AgentSnapshotHub::new(crate::agent::domain::AgentSnapshot {
+            tts_muted: false,
+            messaging_paused: false,
+            through_event_version: crate::store::EventVersion::start(),
+            server_time_ms: 1_000,
+            monitor_health: Vec::new(),
+            panes: Vec::new(),
+        });
+
+        let ports = MacPorts::from_settings(settings, snapshots);
+
+        assert!(!ports.set_up());
+        assert_eq!(ports.voice_name(), DEFAULT_VOICE);
+        let temp = std::env::temp_dir();
+        assert_eq!(ports.calls_dir(), temp.join("harold-voice-input"));
+        assert_eq!(ports.phrases_dir(), temp.join("harold-voice-phrases"));
+        assert_eq!(
+            ports.start_worker(&temp).err(),
+            Some(WorkerError::FailedToLoad)
+        );
+    }
+
+    #[test]
+    fn a_turn_end_update_names_the_chief_by_its_folders_last_component() {
+        assert_eq!(last_component("/Users/me/chief-of-pods"), "chief-of-pods");
+        assert_eq!(last_component("/Users/me/chief-of-pods/"), "chief-of-pods");
+        assert_eq!(last_component(""), "");
+    }
+
+    #[test]
     fn the_real_programs_are_ffmpeg_afplay_and_caffeinate() {
         assert_eq!(FFMPEG, "ffmpeg");
         let sink = MacSink::new();
         assert_eq!((sink.program.as_str(), sink.args.len()), ("afplay", 0));
         assert_eq!(CAFFEINATE, "caffeinate");
         assert_eq!(caffeinate_args(), ["-d"]);
-        // These keep the not-yet-wired constructors referenced in test builds; never called,
-        // as they would start the real programs.
-        let _: fn() -> std::io::Result<MicSource> = MicSource::open;
-        let _: fn() -> std::io::Result<KeepAwake> = KeepAwake::start;
     }
 
     fn script(dir: &Path, body: &str) -> std::path::PathBuf {
@@ -345,12 +505,16 @@ mod tests {
         let fake = script(&dir, "echo $$ > \"$1\"\nexec /usr/bin/tail -f \"$2\"");
         let sink = MacSink::with_program(fake.to_str().unwrap(), &[pid_file.to_str().unwrap()]);
         let stopping = async {
-            sleep(Duration::from_millis(300)).await;
-            let pid: u32 = std::fs::read_to_string(&pid_file)
-                .unwrap()
-                .trim()
-                .parse()
-                .unwrap();
+            // The pid is there once the script has written a whole line.
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let pid: u32 = loop {
+                let written = std::fs::read_to_string(&pid_file).unwrap_or_default();
+                if let Some(pid) = written.strip_suffix('\n').and_then(|pid| pid.parse().ok()) {
+                    break pid;
+                }
+                assert!(Instant::now() < deadline, "the player never wrote its pid");
+                sleep(Duration::from_millis(20)).await;
+            };
             assert!(running(pid));
             sink.stop();
             pid
