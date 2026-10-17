@@ -1,0 +1,161 @@
+/* Harold's web app. The colours are app-theme's Light and Dark sets, with the Open Props
+   values they use, switched by the phone's dark-mode setting. */
+
+:root {
+  color-scheme: light;
+  --brand: #fd7e14;
+  --on-brand: #fff;
+  --text-1: #343a40;
+  --text-2: #495057;
+  --surface-1: #f8f9fa;
+  --surface-2: #f1f3f5;
+  --surface-3: #e9ecef;
+  --surface-4: #dee2e6;
+  --border: #adb5bd;
+  --muted: #868e96;
+  --target: 48px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+    --brand: #ffc078;
+    --on-brand: #030507;
+    --text-1: #dee2e6;
+    --text-2: #adb5bd;
+    --surface-1: #030507;
+    --surface-2: #0d0f12;
+    --surface-3: #16191d;
+    --surface-4: #212529;
+    --border: #495057;
+    --muted: #868e96;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  display: flex;
+  flex-direction: column;
+  background: var(--surface-1);
+  color: var(--text-1);
+  font-family: -apple-system, system-ui, sans-serif;
+  font-size: 17px;
+  line-height: 1.4;
+  -webkit-text-size-adjust: 100%;
+}
+
+button,
+input {
+  font: inherit;
+  color: inherit;
+}
+
+button {
+  min-height: var(--target);
+  padding: 0 16px;
+  border: 0;
+  border-radius: 24px;
+  background: var(--brand);
+  color: var(--on-brand);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+button[hidden] {
+  display: none;
+}
+
+/* The header and the reply bar. */
+
+.bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--surface-1);
+}
+
+.top {
+  justify-content: space-between;
+  padding: max(8px, env(safe-area-inset-top)) 12px 8px 16px;
+  border-bottom: 1px solid var(--surface-4);
+}
+
+.top h1 {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 600;
+}
+
+.bottom {
+  padding: 8px 10px max(8px, env(safe-area-inset-bottom));
+  border-top: 1px solid var(--surface-4);
+}
+
+.bottom input {
+  flex: 1;
+  min-width: 0;
+  min-height: var(--target);
+  padding: 0 16px;
+  border: 1px solid var(--border);
+  border-radius: 24px;
+  background: var(--surface-1);
+}
+
+.bottom input::placeholder {
+  color: var(--muted);
+}
+
+/* The thread, oldest at the top. */
+
+main {
+  flex: 1;
+  overflow-y: auto;
+}
+
+#messages {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+}
+
+.message {
+  max-width: 85%;
+  padding: 10px 12px;
+  border-radius: 14px;
+}
+
+.message p {
+  margin: 0;
+}
+
+.message .text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.chief {
+  align-self: flex-start;
+  background: var(--surface-3);
+}
+
+.user {
+  align-self: flex-end;
+  background: var(--brand);
+  color: var(--on-brand);
+}
+
+.state {
+  font-size: 12px;
+  opacity: 0.85;
+  text-align: right;
+}

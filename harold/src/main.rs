@@ -930,10 +930,18 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(queue) = &telemetry_tasks.alert_queue {
         store.set_alert_queue(queue.clone());
     }
-    let event_handler_handle = tokio::spawn(projector::run_event_handler(
+    let web_app = web_app::start_if_set(
+        cfg.web_app.as_ref(),
+        Arc::clone(&store),
+        std::path::Path::new(&store_path),
+        shutdown_rx.clone(),
+    )
+    .await;
+    let event_handler_handle = tokio::spawn(projector::run_event_handler_with_app(
         Arc::clone(&store),
         snapshots.clone(),
         telemetry_tasks.alert_queue.clone(),
+        web_app.as_ref().map(|running| Arc::clone(&running.route)),
         shutdown_rx.clone(),
     ));
     let listener_handle = tokio::spawn(channels::listen_for_inbound_messages(
@@ -975,11 +983,14 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
         calls.shutdown().await;
     }
 
-    // Wait for the handler, the listener, the timed-prompt task, the pod facts and the
-    // alert address to stop before returning.
+    // Wait for the handler, the listener, the timed-prompt task, the web app, the pod facts
+    // and the alert address to stop before returning.
     let _ = event_handler_handle.await;
     let _ = listener_handle.await;
     let _ = timed_prompts_handle.await;
+    if let Some(running) = web_app {
+        let _ = running.handle.await;
+    }
     telemetry_tasks.stopped().await;
     stop_agent_monitor(monitor_task, activity_provider, Duration::from_secs(1)).await;
     if server_result.is_ok()

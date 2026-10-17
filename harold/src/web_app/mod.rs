@@ -1,14 +1,187 @@
+//! The home-screen web app Harold serves to the phone through `tailscale serve`: one
+//! thread with the chief, on a loopback address, behind the Tailscale login check.
+
+use std::path::Path;
+use std::sync::Arc;
+use std::time::Duration;
+
+use axum::Router;
+use axum::middleware::{from_fn, from_fn_with_state};
+use axum::routing::get;
+use tokio::net::TcpListener;
+use tokio::sync::watch;
+use tokio::task::JoinHandle;
+use tracing::{error, warn};
+
+use crate::outbound::AppRoute;
+use crate::settings::WebAppSettings;
+use crate::store::HaroldStore;
+use push::{Pusher, VapidKey, vapid_key_path};
+use route::{WebAppRoute, now_ms};
+
 pub(crate) const DATASTAR_JS: &[u8] = include_bytes!("../../static/web_app/datastar-1.0.2.js");
+/// The released Datastar 1.0.2 bundle's sha256; the tests check the embedded copy against it.
+#[cfg(test)]
 pub(crate) const DATASTAR_SHA256: &str =
     "2837d87acf6ee0ba8e4e63765926c25a98d63883b02f88be194a86b81d3fd24a";
+
+/// How many days of messages the thread keeps.
+pub(crate) const THREAD_DAYS: i64 = 30;
+
+const DAY_MS: i64 = 24 * 60 * 60 * 1000;
+/// How often the thread is cut back to `THREAD_DAYS`, after the cut at start.
+const PRUNE_EVERY: Duration = Duration::from_secs(60 * 60);
+/// How long the server gets to stop after shutdown. A client that holds its connection
+/// open is not waited for.
+const SERVER_STOP_LIMIT: Duration = Duration::from_secs(1);
 
 #[cfg(test)]
 #[path = "assets_tests.rs"]
 mod assets_tests;
 
 pub(crate) mod chief;
+pub(crate) mod login;
+pub(crate) mod pages;
 pub(crate) mod push;
 pub(crate) mod route;
 
 #[cfg(test)]
 pub(crate) mod fake_push;
+
+/// What every route can reach.
+#[derive(Clone)]
+pub(crate) struct AppState {
+    pub store: Arc<HaroldStore>,
+    /// The one Tailscale login the app answers.
+    pub allowed_login: Arc<str>,
+    /// Harold's VAPID public key, base64url.
+    pub public_key: Arc<str>,
+    /// Changes, or closes, when Harold shuts down.
+    pub shutdown: watch::Receiver<()>,
+}
+
+/// The app's routes, every one of them, the 404 fallback included, behind
+/// `login::require_login`, and every response carrying the content security policy.
+pub(crate) fn router(state: AppState) -> Router {
+    Router::new()
+        .route("/", get(pages::get_thread))
+        .route("/static/{name}", get(pages::get_static))
+        .fallback(pages::not_found)
+        .layer(from_fn_with_state(state.clone(), login::require_login))
+        .layer(from_fn(pages::add_policy))
+        .with_state(state)
+}
+
+/// The running app.
+pub(crate) struct Running {
+    /// The delivery loop's way into the thread and the pushes.
+    pub route: Arc<dyn AppRoute>,
+    /// Ends when the server and the pruning have stopped, after shutdown.
+    pub handle: JoinHandle<()>,
+    /// The address the app listens on, which tests read for the port.
+    #[cfg(test)]
+    pub local_addr: std::net::SocketAddr,
+}
+
+/// Binds `settings.listen_addr()`, makes or reads the key, serves until shutdown, and prunes
+/// the thread to 30 days at start and every hour. Err when it cannot (D12); the error names
+/// the address or the key's path, never the login or the key.
+pub(crate) async fn start(
+    settings: &WebAppSettings,
+    store: Arc<HaroldStore>,
+    store_path: &Path,
+    shutdown: watch::Receiver<()>,
+) -> Result<Running, String> {
+    let addr = settings
+        .listen_addr()
+        .ok_or_else(|| "web_app.listen is not an address and port".to_owned())?;
+    let listener = TcpListener::bind(addr)
+        .await
+        .map_err(|error| format!("listen on {addr}: {error}"))?;
+    #[cfg(test)]
+    let local_addr = listener
+        .local_addr()
+        .map_err(|error| format!("listen on {addr}: {error}"))?;
+    let key = VapidKey::load_or_create(&vapid_key_path(store_path))?;
+
+    prune(&store).await;
+    let state = AppState {
+        store: Arc::clone(&store),
+        allowed_login: Arc::from(settings.allowed_login.as_str()),
+        public_key: Arc::from(key.public_key_base64url()),
+        shutdown: shutdown.clone(),
+    };
+    let pusher = Arc::new(Pusher::new(key, &settings.allowed_login));
+    let route: Arc<dyn AppRoute> = Arc::new(WebAppRoute::new(Arc::clone(&store), pusher));
+
+    let pruning = tokio::spawn(prune_every_hour(store, shutdown.clone()));
+    let mut server_shutdown = shutdown;
+    let server = axum::serve(listener, router(state)).with_graceful_shutdown(async move {
+        let _ = server_shutdown.changed().await;
+    });
+    let mut server = tokio::spawn(async move { server.await });
+    let handle = tokio::spawn(async move {
+        // The pruning stops at shutdown, when the server stops taking connections too.
+        let _ = pruning.await;
+        match tokio::time::timeout(SERVER_STOP_LIMIT, &mut server).await {
+            Ok(Ok(Err(error))) => error!(error = %error, "web app stopped"),
+            Ok(_) => {}
+            Err(_) => server.abort(),
+        }
+    });
+    Ok(Running {
+        route,
+        handle,
+        #[cfg(test)]
+        local_addr,
+    })
+}
+
+/// None without binding anything when the section is absent; `start`, with an Err logged as
+/// `warn!(error, "web app unavailable")` and turned into None, when it is set. main.rs calls
+/// only this.
+pub(crate) async fn start_if_set(
+    settings: Option<&WebAppSettings>,
+    store: Arc<HaroldStore>,
+    store_path: &Path,
+    shutdown: watch::Receiver<()>,
+) -> Option<Running> {
+    let settings = settings?;
+    start(settings, store, store_path, shutdown)
+        .await
+        .inspect_err(|error| warn!(error = %error, "web app unavailable"))
+        .ok()
+}
+
+/// When the thread starts: `THREAD_DAYS` days ago, in milliseconds since the Unix epoch.
+pub(crate) fn thread_start_ms() -> i64 {
+    now_ms().saturating_sub(THREAD_DAYS * DAY_MS)
+}
+
+/// Deletes the thread's rows older than `THREAD_DAYS`. A failure logs a line without
+/// the store's words, and the next hour tries again.
+async fn prune(store: &HaroldStore) {
+    if store
+        .delete_app_messages_before(thread_start_ms())
+        .await
+        .is_err()
+    {
+        warn!("web app thread not pruned");
+    }
+}
+
+/// Prunes the thread every `PRUNE_EVERY` until shutdown.
+async fn prune_every_hour(store: Arc<HaroldStore>, mut shutdown: watch::Receiver<()>) {
+    let mut ticks =
+        tokio::time::interval_at(tokio::time::Instant::now() + PRUNE_EVERY, PRUNE_EVERY);
+    loop {
+        tokio::select! {
+            _ = shutdown.changed() => break,
+            _ = ticks.tick() => prune(&store).await,
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "server_tests.rs"]
+mod server_tests;

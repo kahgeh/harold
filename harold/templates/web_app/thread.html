@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Chief">
+<meta name="harold-vapid-key" content="{{ public_key }}">
+<title>Chief</title>
+<link rel="manifest" href="/static/manifest.webmanifest">
+<link rel="stylesheet" href="/static/app.css">
+<script type="module" src="/static/datastar-1.0.2.js"></script>
+<script src="/static/alerts.js" defer></script>
+</head>
+<body>
+<header class="bar top">
+<h1>Chief</h1>
+<button type="button" id="alerts">Turn on alerts</button>
+</header>
+<main>
+<section id="messages">
+{% for message in messages %}{{ message|safe }}
+{% endfor %}</section>
+</main>
+<form id="reply" class="bar bottom" method="post" action="/replies">
+<input type="text" name="reply" maxlength="1000" placeholder="Reply to the chief" aria-label="Reply to the chief" autocomplete="off">
+<button type="submit">Send</button>
+</form>
+</body>
+</html>

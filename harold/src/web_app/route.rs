@@ -29,7 +29,7 @@ impl WebAppRoute {
 }
 
 /// The current time in milliseconds since the Unix epoch.
-fn now_ms() -> i64 {
+pub(super) fn now_ms() -> i64 {
     i64::try_from(OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000).unwrap_or(i64::MAX)
 }
 

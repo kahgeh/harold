@@ -1,0 +1,9 @@
+{
+  "name": "Chief",
+  "short_name": "Chief",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#f8f9fa",
+  "theme_color": "#f8f9fa"
+}
