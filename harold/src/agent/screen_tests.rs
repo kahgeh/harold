@@ -1,12 +1,14 @@
 use std::io;
+use std::process::Command;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use crate::settings::AgentProviderSettings;
 
 use super::domain::{AgentIncarnation, AgentPaneObservation, ObservedAgentState};
 use super::screen::{
-    CommandOutput, CommandRunner, ScreenError, TmuxVisibleScreen, VisibleScreenPort,
-    observe_visible_text,
+    CommandOutput, CommandRunner, ScreenError, StopSignal, SystemCommandRunner, TmuxVisibleScreen,
+    VisibleScreenPort, observe_visible_text, run_stoppable, stoppable_output,
 };
 
 fn pane(pane_id: &str) -> AgentPaneObservation {
@@ -632,4 +634,54 @@ fn claude_keeps_configured_busy_markers_and_prompt_prefixes() {
         scan.blocks[0].candidate.as_deref(),
         Some("Review the reducer")
     );
+}
+
+fn request_stop_after(signal: &StopSignal, delay: Duration) {
+    let signal = signal.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(delay);
+        signal.request();
+    });
+}
+
+#[test]
+fn stoppable_output_kills_a_stopped_child() {
+    let signal = StopSignal::default();
+    request_stop_after(&signal, Duration::from_millis(50));
+    let started = Instant::now();
+    let error = run_stoppable(signal, || {
+        stoppable_output(Command::new("/bin/sleep").arg("5"))
+    })
+    .expect_err("a stopped child gives no output");
+    assert_eq!(error.kind(), io::ErrorKind::Interrupted);
+    assert!(started.elapsed() < Duration::from_secs(1));
+}
+
+#[test]
+fn stoppable_output_returns_a_finished_childs_stdout() {
+    let output = stoppable_output(Command::new("/bin/sh").args(["-c", "printf safe"])).unwrap();
+    assert!(output.status.success());
+    assert_eq!(output.stdout, b"safe");
+}
+
+#[test]
+fn stoppable_output_drains_more_than_a_pipe_buffer() {
+    let output = run_stoppable(StopSignal::default(), || {
+        stoppable_output(Command::new("/bin/sh").args(["-c", "head -c 200000 /dev/zero"]))
+    })
+    .unwrap();
+    assert!(output.status.success());
+    assert_eq!(output.stdout.len(), 200_000);
+}
+
+#[test]
+fn bounded_output_stops_on_request() {
+    let signal = StopSignal::default();
+    request_stop_after(&signal, Duration::from_millis(50));
+    let started = Instant::now();
+    let error = run_stoppable(signal, || SystemCommandRunner.output("/bin/sleep", &["5"]))
+        .err()
+        .expect("a stopped capture gives no output");
+    assert_eq!(error.kind(), io::ErrorKind::Interrupted);
+    assert!(started.elapsed() < Duration::from_secs(1));
 }

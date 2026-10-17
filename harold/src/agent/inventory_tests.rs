@@ -2,9 +2,10 @@ use crate::settings::{AgentProviderSettings, AgentSettings};
 
 use super::domain::{AgentIncarnation, UNKNOWN_PROVIDER_ID};
 use super::inventory::{
-    InventoryError, ProcessInfo, ProviderResolution, TmuxPaneInfo, observe_pane,
+    InventoryError, ProcessInfo, ProviderResolution, TmuxPaneInfo, command_stdout, observe_pane,
     parse_process_table, parse_tmux_panes, resolve_provider,
 };
+use super::screen::{StopSignal, run_stoppable};
 
 fn provider(id: &str, command_contains: &[&str]) -> AgentProviderSettings {
     AgentProviderSettings {
@@ -315,4 +316,22 @@ fn live_tmux_inventory_roundtrip_without_locale() {
         );
         assert!(panes[0].pane_pid > 0);
     }
+}
+
+#[test]
+fn inventory_command_returns_its_stdout() {
+    let stdout = command_stdout(std::process::Command::new("/bin/sh").args(["-c", "printf panes"]));
+    assert_eq!(stdout, Ok("panes".to_string()));
+}
+
+#[test]
+fn stopped_inventory_command_is_killed_and_fails() {
+    let signal = StopSignal::default();
+    signal.request();
+    let started = std::time::Instant::now();
+    let stdout = run_stoppable(signal, || {
+        command_stdout(std::process::Command::new("/bin/sleep").arg("5"))
+    });
+    assert_eq!(stdout, Err(InventoryError::CommandFailed));
+    assert!(started.elapsed() < std::time::Duration::from_secs(1));
 }

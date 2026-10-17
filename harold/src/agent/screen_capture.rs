@@ -4,7 +4,7 @@ use std::os::unix::net::UnixStream;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use super::{CommandOutput, CommandRunner, ScreenError};
+use super::{CommandOutput, CommandRunner, ScreenError, stop_requested};
 
 pub(super) const MAX_CAPTURE_BYTES: usize = 4 * 1024 * 1024;
 
@@ -92,6 +92,9 @@ pub(super) fn bounded_output(
     let result = loop {
         if started.elapsed() >= timeout {
             break Err(io::Error::from(io::ErrorKind::TimedOut));
+        }
+        if stop_requested() {
+            break Err(io::Error::from(io::ErrorKind::Interrupted));
         }
         match reader.read(&mut buffer) {
             Ok(0) => match child.try_wait() {

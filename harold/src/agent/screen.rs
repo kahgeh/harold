@@ -4,10 +4,11 @@
 )]
 
 use std::cell::RefCell;
-use std::io;
+use std::io::{self, Read};
+use std::process::{Command, Output, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::settings::{AgentProviderSettings, ScreenAdapter};
 use sha2::{Digest, Sha256};
@@ -99,6 +100,46 @@ pub(crate) fn stop_requested() -> bool {
     CURRENT_STOP.with(|current| current.borrow().as_ref().is_some_and(StopSignal::requested))
 }
 
+/// Runs `command` like `Command::output`, without stderr, but kills and reaps the child once
+/// this thread's stop signal is requested.
+pub(crate) fn stoppable_output(command: &mut Command) -> io::Result<Output> {
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()?;
+    let mut stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| io::Error::other("child stdout is not piped"))?;
+    // Drained on its own thread, so a child writing more than a pipe buffer can still exit.
+    let reader = std::thread::spawn(move || {
+        let mut buffer = Vec::new();
+        stdout.read_to_end(&mut buffer).map(|_| buffer)
+    });
+    loop {
+        let waited = child.try_wait();
+        if let Ok(Some(status)) = waited {
+            let stdout = reader
+                .join()
+                .map_err(|_| io::Error::other("child stdout reader panicked"))??;
+            return Ok(Output {
+                status,
+                stdout,
+                stderr: Vec::new(),
+            });
+        }
+        if waited.is_err() || stop_requested() {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(waited
+                .err()
+                .unwrap_or_else(|| io::ErrorKind::Interrupted.into()));
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
 pub(crate) struct SystemCommandRunner;
 
 impl CommandRunner for SystemCommandRunner {
@@ -106,7 +147,7 @@ impl CommandRunner for SystemCommandRunner {
         capture::bounded_output(
             program,
             args,
-            std::time::Duration::from_secs(2),
+            Duration::from_secs(2),
             capture::MAX_CAPTURE_BYTES,
         )
     }

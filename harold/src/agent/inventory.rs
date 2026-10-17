@@ -11,6 +11,7 @@ use crate::settings::{AgentProviderSettings, AgentSettings};
 use super::domain::{
     AgentIncarnation, AgentPaneObservation, UNKNOWN_PROVIDER_DISPLAY_NAME, UNKNOWN_PROVIDER_ID,
 };
+use super::screen::stoppable_output;
 
 #[derive(Clone, PartialEq, Eq)]
 pub(super) struct ProcessInfo {
@@ -327,16 +328,12 @@ fn parse_start_time(month: &str, day: &str, time: &str, year: &str) -> Option<i6
 }
 
 fn read_process_table() -> Result<Vec<ProcessInfo>, InventoryError> {
-    let output = Command::new("ps")
-        .env("LC_ALL", "C")
-        .env("TZ", "UTC")
-        .args(["-axo", "pid=,ppid=,pgid=,tpgid=,tty=,lstart=,command="])
-        .output()
-        .map_err(command_error)?;
-    if !output.status.success() {
-        return Err(InventoryError::CommandFailed);
-    }
-    let stdout = String::from_utf8(output.stdout).map_err(|_| InventoryError::MalformedOutput)?;
+    let stdout = command_stdout(
+        Command::new("ps")
+            .env("LC_ALL", "C")
+            .env("TZ", "UTC")
+            .args(["-axo", "pid=,ppid=,pgid=,tpgid=,tty=,lstart=,command="]),
+    )?;
     parse_process_table(&stdout)
 }
 
@@ -354,12 +351,17 @@ pub(super) fn tmux_panes_command() -> Command {
 }
 
 fn read_tmux_panes() -> Result<Vec<TmuxPaneInfo>, InventoryError> {
-    let output = tmux_panes_command().output().map_err(command_error)?;
+    let stdout = command_stdout(&mut tmux_panes_command())?;
+    parse_tmux_panes(&stdout)
+}
+
+/// A stopped command (a timed-out scan about to be retried) is killed and fails.
+pub(super) fn command_stdout(command: &mut Command) -> Result<String, InventoryError> {
+    let output = stoppable_output(command).map_err(command_error)?;
     if !output.status.success() {
         return Err(InventoryError::CommandFailed);
     }
-    let stdout = String::from_utf8(output.stdout).map_err(|_| InventoryError::MalformedOutput)?;
-    parse_tmux_panes(&stdout)
+    String::from_utf8(output.stdout).map_err(|_| InventoryError::MalformedOutput)
 }
 
 fn command_error(error: io::Error) -> InventoryError {
