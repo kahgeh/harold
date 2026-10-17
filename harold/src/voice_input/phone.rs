@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::mpsc::error::TrySendError;
@@ -418,11 +419,33 @@ impl AudioSource for PhoneSource {
 /// The phone's speaker: each sound is offered for the phone to fetch, play and report.
 pub(crate) struct PhoneSink {
     line: Arc<PhoneLine>,
+    /// Whether the call has opened. Until it has, nothing is offered: a call that ends before
+    /// it opens answers START with `409` and the line saying why, and the phone, which has
+    /// then ended the call and shows the line, would never fetch an offer. The offer would
+    /// only hold up the call's end, and the next Call tap, until its limit.
+    opened: AtomicBool,
 }
 
 impl PhoneSink {
+    /// A sink that offers every sound, as one in an open call does.
+    #[cfg(test)]
     pub(super) fn new(line: Arc<PhoneLine>) -> Self {
-        Self { line }
+        Self {
+            line,
+            opened: AtomicBool::new(true),
+        }
+    }
+
+    /// A sink for a call's ports, which offers nothing until the call opens.
+    fn unopened(line: Arc<PhoneLine>) -> Self {
+        Self {
+            line,
+            opened: AtomicBool::new(false),
+        }
+    }
+
+    fn opened(&self) -> bool {
+        self.opened.load(Ordering::SeqCst)
     }
 }
 
@@ -435,7 +458,11 @@ impl AudioSink for PhoneSink {
     /// Resolves when the phone reports the sound played or `stop` takes it back. With
     /// neither, at the sound's length and `PLAY_GRACE`, but never past `ANSWER_KEEP`: a
     /// sound the phone fetched then counts as played, one it never fetched as failed.
+    /// Before the call opens, offers nothing and resolves at once: the phone shows the line.
     async fn play_said(&self, wav: &Path, said: &Said) -> Result<(), String> {
+        if !self.opened() {
+            return Ok(());
+        }
         let limit = (sound_length(wav) + PLAY_GRACE).min(ANSWER_KEEP);
         let (offered, taken_back) = self.line.offer(wav, said);
         let _ = timeout(limit, taken_back).await;
@@ -462,7 +489,7 @@ pub(crate) struct PhonePorts<B: CallPorts> {
 
 impl<B: CallPorts> PhonePorts<B> {
     pub(super) fn new(base: B, line: Arc<PhoneLine>) -> Self {
-        let sink = Arc::new(PhoneSink::new(Arc::clone(&line)));
+        let sink = Arc::new(PhoneSink::unopened(Arc::clone(&line)));
         Self { base, line, sink }
     }
 }
@@ -482,8 +509,11 @@ impl<B: CallPorts> CallPorts for PhonePorts<B> {
         Arc::clone(&self.sink)
     }
 
+    /// The call opens once its worker has started; from then on sounds and lines are offered.
     fn start_worker(&self, call_dir: &Path) -> Result<B::Worker, WorkerError> {
-        self.base.start_worker(call_dir)
+        let worker = self.base.start_worker(call_dir)?;
+        self.sink.opened.store(true, Ordering::SeqCst);
+        Ok(worker)
     }
 
     fn panes(&self) -> &B::Panes {
@@ -495,8 +525,12 @@ impl<B: CallPorts> CallPorts for PhonePorts<B> {
     }
 
     /// Says `line` in the phone's own voice: resolves when the phone reports it said, or
-    /// after `SPEECH_BASE` and `SPEECH_PER_CHAR` for each character.
+    /// after `SPEECH_BASE` and `SPEECH_PER_CHAR` for each character. Before the call opens,
+    /// offers nothing and resolves at once, as the sink does.
     async fn speak_with_tts(&self, line: &str) {
+        if !self.sink.opened() {
+            return;
+        }
         let chars = u32::try_from(line.chars().count()).unwrap_or(u32::MAX);
         let limit = SPEECH_BASE + SPEECH_PER_CHAR.saturating_mul(chars);
         let (_waiting, taken_back) = self.line.offer_speech(line);
@@ -534,6 +568,7 @@ impl<B: CallPorts> CallPorts for PhonePorts<B> {
     }
 
     fn call_ended(&self, reason: &'static str) {
+        self.sink.opened.store(false, Ordering::SeqCst);
         info!(reason, "app call ended");
         self.line.view.send_modify(|view| {
             *view = PhoneView {

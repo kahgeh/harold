@@ -200,6 +200,8 @@ async fn the_source_waits_through_a_30_s_answer_with_no_pieces() {
 async fn the_source_waits_through_a_line_for_the_phones_voice() {
     let line = PhoneLine::new(true);
     let ports = Arc::new(PhonePorts::new(FakePorts::new(), Arc::clone(&line)));
+    // The call has opened: its worker has started.
+    let _worker = ports.start_worker(Path::new("call")).unwrap();
     let start = Instant::now();
     let mut source = ports.open_source().unwrap();
     let reading = tokio::spawn(async move { source.next_stamped().await });
@@ -384,6 +386,8 @@ async fn a_line_for_the_phones_voice_waits_for_its_report_or_its_limit() {
     let base = FakePorts::new();
     let line = PhoneLine::new(true);
     let ports = Arc::new(PhonePorts::new(base.clone(), Arc::clone(&line)));
+    // The call has opened: its worker has started.
+    let _worker = ports.start_worker(Path::new("call")).unwrap();
     let start = Instant::now();
 
     let speaking = tokio::spawn({
@@ -825,8 +829,38 @@ async fn nothing_heard_plays_sorry_on_the_phone() {
     assert!(phone.tts().is_empty());
 }
 
+/// Every sound and line offered to the phone from now on.
+fn record_offers(calls: &PhoneCalls<FakePorts>) -> Arc<Mutex<Vec<String>>> {
+    let offers: Arc<Mutex<Vec<String>>> = Arc::default();
+    let recorded = Arc::clone(&offers);
+    let mut view = calls.view();
+    tokio::spawn(async move {
+        loop {
+            let now = view.borrow_and_update().clone();
+            if let Some(sound) = now.sound {
+                recorded
+                    .lock()
+                    .unwrap()
+                    .push(format!("sound {:?}", sound.said));
+            }
+            if let Some(speech) = now.speech {
+                recorded
+                    .lock()
+                    .unwrap()
+                    .push(format!("speech {}", speech.text));
+            }
+            if view.changed().await.is_err() {
+                return;
+            }
+        }
+    });
+    offers
+}
+
+/// The phone has already ended the call on START's `409`, and shows its line: so nothing is
+/// offered to the phone, and the call has ended by the time START answers.
 #[tokio::test(flavor = "current_thread", start_paused = true)]
-async fn no_chief_at_start_plays_the_phrase_on_the_phone_and_starts_nothing() {
+async fn no_chief_at_start_offers_nothing_to_the_phone_and_ends_at_once() {
     let phone = Phone::new();
     let kept = phrase_file(
         &phone.base.phrases_dir(),
@@ -836,20 +870,42 @@ async fn no_chief_at_start_plays_the_phrase_on_the_phone_and_starts_nothing() {
     std::fs::create_dir_all(phone.base.phrases_dir()).unwrap();
     std::fs::write(&kept, NO_CHIEF).unwrap();
     phone.base.fake_panes().set(|s| s.view.panes.clear());
-    phone.auto_play(Duration::from_secs(1));
+    let offers = record_offers(&phone.calls);
+    let asked = Instant::now();
 
     let status = phone.calls.start().await;
     settle().await;
-    sleep(Duration::from_secs(2)).await;
 
+    assert_eq!(Instant::now(), asked, "the call waited on the paused clock");
     assert_eq!(status.state, CallState::Off);
     assert_eq!(status.last_result, Some(TurnResult::NoChief));
-    assert_eq!(phone.said(), [Said::Phrase(NO_CHIEF.into())]);
+    assert!(offers.lock().unwrap().is_empty(), "{offers:?}");
     assert!(phone.tts().is_empty());
     assert_eq!(phone.calls.source_base(), None);
     assert_eq!(phone.base.worker_log().starts, 0);
     assert_eq!(phone.view().state, CallState::Off);
     assert_eq!(phone.view().ended, Some("no_chief"));
+    assert!(!phone.calls.is_following());
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn the_voice_failing_before_the_call_opens_offers_nothing_and_ends_at_once() {
+    let phone = Phone::new();
+    // The call's folder cannot be made: the voice fails before the call opens.
+    let calls_dir = phone.base.calls_dir();
+    std::fs::create_dir_all(calls_dir.parent().unwrap()).unwrap();
+    std::fs::write(&calls_dir, "not a folder").unwrap();
+    let offers = record_offers(&phone.calls);
+    let asked = Instant::now();
+
+    let status = phone.calls.start().await;
+    settle().await;
+
+    assert_eq!(Instant::now(), asked, "the call waited on the paused clock");
+    assert_eq!(status.state, CallState::Off);
+    assert!(offers.lock().unwrap().is_empty(), "{offers:?}");
+    assert!(phone.tts().is_empty());
+    assert_eq!(phone.view().ended, Some("voice_failed"));
     assert!(!phone.calls.is_following());
 }
 

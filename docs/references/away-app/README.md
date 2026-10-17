@@ -186,10 +186,10 @@ Nothing records or plays while the phone is locked or the app is in the backgrou
 | The chief takes longer than 3 seconds | A soft tick every 3 seconds, from 3 seconds after your turn is typed. At 90 seconds, `No answer yet. It will be in the thread.` |
 | The chief's turn ends without `harold speak` | The chief's turn-end update, made into audio. |
 | Nothing was heard, or the transcript is empty | `Sorry, I didn't catch that.` Harold listens again. |
-| No chief is running | `There's no chief running.` The call ends. |
+| No chief is running when you tap **Call** | Nothing. The screen shows `There's no chief running.` for a moment, then the thread; the line is shown, not heard. No call starts. |
 | You say `bye`, `bye bye`, `goodbye` or `bye chief` at the end of a turn | `Bye.` The call ends. Anything before those words is typed to the chief; a turn of only those words types nothing. |
 
-Harold's own phrases are made into audio on the Mac. A line that has no audio, such as one only the `[tts]` command could say, is said by the phone's own voice.
+Harold's own phrases are made into audio on the Mac. A line that has no audio, such as one only the `[tts]` command could say, is said by the phone's own voice. When no call starts, Harold plays and says nothing on the phone: `POST /call` answers `409` at once with the line, and the screen shows it.
 
 ### Privacy in a call
 
