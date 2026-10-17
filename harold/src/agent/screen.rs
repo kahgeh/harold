@@ -3,7 +3,10 @@
     reason = "the visible-screen adapter is consumed by the monitor runtime slice"
 )]
 
+use std::cell::RefCell;
 use std::io;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::settings::{AgentProviderSettings, ScreenAdapter};
@@ -63,6 +66,37 @@ pub(super) struct CommandOutput {
 
 pub(super) trait CommandRunner: Send + Sync {
     fn output(&self, program: &str, args: &[&str]) -> io::Result<CommandOutput>;
+}
+
+/// Asks a timed-out read's worker thread to stop, so its retry never runs beside it.
+#[derive(Clone, Default)]
+pub(crate) struct StopSignal(Arc<AtomicBool>);
+
+impl StopSignal {
+    pub(crate) fn request(&self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+
+    pub(crate) fn requested(&self) -> bool {
+        self.0.load(Ordering::SeqCst)
+    }
+}
+
+thread_local! {
+    static CURRENT_STOP: RefCell<Option<StopSignal>> = const { RefCell::new(None) };
+}
+
+/// Runs `operation` with `signal` as this thread's stop signal, which the child commands it
+/// starts check through `stop_requested`.
+pub(crate) fn run_stoppable<T>(signal: StopSignal, operation: impl FnOnce() -> T) -> T {
+    let previous = CURRENT_STOP.with(|current| current.replace(Some(signal)));
+    let result = operation();
+    CURRENT_STOP.with(|current| current.replace(previous));
+    result
+}
+
+pub(crate) fn stop_requested() -> bool {
+    CURRENT_STOP.with(|current| current.borrow().as_ref().is_some_and(StopSignal::requested))
 }
 
 pub(crate) struct SystemCommandRunner;

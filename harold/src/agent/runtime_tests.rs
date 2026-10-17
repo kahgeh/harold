@@ -979,6 +979,7 @@ async fn departure_requires_two_successful_absences_and_exact_incarnation_revali
         Ok(vec![original.clone()]),
         Ok(Vec::new()),
         Err(InventoryError::CommandFailed),
+        Err(InventoryError::CommandFailed),
         Ok(Vec::new()),
     ]);
     inventory.push_current(Ok(false));
@@ -1398,6 +1399,10 @@ async fn real_screen_adapter_keeps_unrelated_capture_out_of_every_published_boun
                     },
                     CommandOutput {
                         success: true,
+                        stdout: raw_capture.as_bytes().to_vec(),
+                    },
+                    CommandOutput {
+                        success: false,
                         stdout: raw_capture.as_bytes().to_vec(),
                     },
                     CommandOutput {
@@ -2344,16 +2349,18 @@ async fn slow_inventory_uses_its_own_budget_while_screen_keeps_the_short_deadlin
     assert_eq!(snapshot.panes.len(), 1);
     assert_eq!(snapshot.monitor_health.len(), 1);
     assert_eq!(snapshot.monitor_health[0].component, "screen");
-    assert_eq!(snapshot.monitor_health[0].reason_code, "timeout");
+    // The first try missed its short deadline; the health row carries the retry's reason.
+    assert_eq!(snapshot.monitor_health[0].reason_code, "capture_failed");
     drop(shutdown);
     task.await.unwrap();
 }
 
 #[tokio::test]
 async fn restored_inventory_failure_deduplicates_until_recovery() {
-    let fixture = Fixture::new(FakeInventory::scans(vec![Err(
-        InventoryError::CommandFailed,
-    )]))
+    let fixture = Fixture::new(FakeInventory::scans(vec![
+        Err(InventoryError::CommandFailed),
+        Err(InventoryError::CommandFailed),
+    ]))
     .await;
     assert!(fixture.handle.inventory_tick().await.is_err());
     fixture.store.project_unhandled_events(100).await.unwrap();
@@ -2362,6 +2369,8 @@ async fn restored_inventory_failure_deduplicates_until_recovery() {
     let (handle, task) = spawn_agent_monitor_seeded_for_test(
         fixture.store.clone(),
         Arc::new(FakeInventory::scans(vec![
+            Err(InventoryError::CommandFailed),
+            Err(InventoryError::CommandFailed),
             Err(InventoryError::CommandFailed),
             Err(InventoryError::CommandFailed),
             Ok(Vec::new()),
@@ -2391,6 +2400,8 @@ async fn inventory_health_degrades_recovers_and_deduplicates_without_losing_pane
     let observed = pane("%8", 80, 800, 1_000, 100);
     let fixture = Fixture::new(FakeInventory::scans(vec![
         Ok(vec![observed]),
+        Err(InventoryError::CommandFailed),
+        Err(InventoryError::CommandFailed),
         Err(InventoryError::CommandFailed),
         Err(InventoryError::CommandFailed),
         Ok(Vec::new()),
@@ -2426,6 +2437,8 @@ async fn failed_health_append_is_retried_without_advancing_health_dedupe() {
     let fixture = Fixture::new(FakeInventory::scans(vec![
         Err(InventoryError::MalformedOutput),
         Err(InventoryError::MalformedOutput),
+        Err(InventoryError::MalformedOutput),
+        Err(InventoryError::MalformedOutput),
     ]))
     .await;
     fixture.store.fail_next_monitor_append_for_test();
@@ -2451,8 +2464,9 @@ async fn screen_health_degrades_recovers_and_deduplicates_without_raw_errors() {
     let observed = pane("%8", 80, 800, 1_000, 100);
     let fixture = Fixture::new(FakeInventory::scans(vec![Ok(vec![observed.clone()])])).await;
     fixture.handle.inventory_tick().await.unwrap();
-    fixture.screen.push(Err(ScreenError::CaptureFailed));
-    fixture.screen.push(Err(ScreenError::CaptureFailed));
+    for _ in 0..4 {
+        fixture.screen.push(Err(ScreenError::CaptureFailed));
+    }
     fixture.screen.push(Ok(screen(
         &observed,
         Some(ObservedAgentState::Busy),
@@ -4287,4 +4301,295 @@ async fn a_busy_report_from_the_hook_reports_the_pane_busy() {
     }
 
     assert_eq!(crate::telemetry::take_busy_since(&pane_id), Some(ms(2_000)));
+}
+
+fn capture_logs() -> (Arc<Mutex<Vec<u8>>>, tracing::subscriber::DefaultGuard) {
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let writer = Arc::clone(&captured);
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_writer(move || CapturedLogWriter(Arc::clone(&writer)))
+        .finish();
+    (captured, tracing::subscriber::set_default(subscriber))
+}
+
+fn logged(captured: &Arc<Mutex<Vec<u8>>>) -> String {
+    String::from_utf8(captured.lock().unwrap().clone()).unwrap()
+}
+
+fn health_events(events: &[EventEnvelope]) -> Vec<super::domain::AgentMonitorHealthChanged> {
+    events
+        .iter()
+        .filter(|event| event.r#type == "AgentMonitorHealthChanged")
+        .map(|event| serde_json::from_value(event.payload.clone()).unwrap())
+        .collect()
+}
+
+#[tokio::test]
+async fn screen_read_that_fails_once_logs_retried_and_stays_healthy() {
+    let observed = pane("%8", 80, 800, 1_000, 100);
+    let fixture = Fixture::new(FakeInventory::scans(vec![Ok(vec![observed.clone()])])).await;
+    fixture.handle.inventory_tick().await.unwrap();
+    fixture.screen.push(Err(ScreenError::CaptureFailed));
+    fixture.screen.push(Ok(screen(
+        &observed,
+        Some(ObservedAgentState::Busy),
+        None,
+        200,
+    )));
+    let (captured, _guard) = capture_logs();
+
+    fixture.handle.screen_tick().await.unwrap();
+
+    let logs = logged(&captured);
+    println!("{}", logs.trim_end());
+    assert_eq!(logs.matches("agent monitor read retried").count(), 1);
+    assert!(logs.contains("component=\"screen\""), "{logs}");
+    assert!(logs.contains("pane_id=\"%8\""), "{logs}");
+    assert!(logs.contains("elapsed_ms="), "{logs}");
+    assert!(!logs.contains("agent monitor degraded"), "{logs}");
+    let events = fixture.events().await;
+    assert!(health_events(&events).is_empty());
+    let observed_screen: super::domain::AgentScreenObserved =
+        serde_json::from_value(events.last().unwrap().payload.clone()).unwrap();
+    assert_eq!(observed_screen.state, Some(ObservedAgentState::Busy));
+}
+
+#[tokio::test]
+async fn inventory_scan_that_fails_once_logs_retried_and_stays_healthy() {
+    let observed = pane("%8", 80, 800, 1_000, 100);
+    let fixture = Fixture::new(FakeInventory::scans(vec![
+        Err(InventoryError::CommandFailed),
+        Ok(vec![observed]),
+    ]))
+    .await;
+    let (captured, _guard) = capture_logs();
+
+    fixture.handle.inventory_tick().await.unwrap();
+
+    let logs = logged(&captured);
+    println!("{}", logs.trim_end());
+    assert_eq!(logs.matches("agent monitor read retried").count(), 1);
+    assert!(logs.contains("component=\"inventory\""), "{logs}");
+    assert!(logs.contains("elapsed_ms="), "{logs}");
+    assert!(!logs.contains("pane_id"), "{logs}");
+    assert!(!logs.contains("agent monitor degraded"), "{logs}");
+    let events = fixture.events().await;
+    assert_eq!(event_types(&events), ["AgentPaneObserved"]);
+}
+
+#[tokio::test]
+async fn read_that_fails_twice_logs_degraded_once_then_recovered() {
+    let fixture = Fixture::new(FakeInventory::scans(vec![
+        Err(InventoryError::CommandFailed),
+        Err(InventoryError::CommandFailed),
+        Ok(Vec::new()),
+    ]))
+    .await;
+    let (captured, _guard) = capture_logs();
+
+    assert!(matches!(
+        fixture.handle.inventory_tick().await,
+        Err(MonitorCommandError::InventoryUnavailable)
+    ));
+    let logs = logged(&captured);
+    assert_eq!(logs.matches("agent monitor degraded").count(), 1, "{logs}");
+    let health = health_events(&fixture.events().await);
+    assert_eq!(health.len(), 1);
+    assert!(!health[0].healthy);
+    assert_eq!(health[0].reason_code, "command_failed");
+
+    fixture.handle.inventory_tick().await.unwrap();
+    let logs = logged(&captured);
+    println!("{}", logs.trim_end());
+    assert_eq!(logs.matches("agent monitor degraded").count(), 1, "{logs}");
+    assert_eq!(logs.matches("agent monitor recovered").count(), 1, "{logs}");
+    assert!(!logs.contains("agent monitor read retried"), "{logs}");
+}
+
+#[tokio::test]
+async fn retried_read_after_degraded_logs_recovered() {
+    let fixture = Fixture::new(FakeInventory::scans(vec![
+        Err(InventoryError::CommandFailed),
+        Err(InventoryError::CommandFailed),
+        Err(InventoryError::CommandFailed),
+        Ok(Vec::new()),
+    ]))
+    .await;
+    let (captured, _guard) = capture_logs();
+
+    assert!(fixture.handle.inventory_tick().await.is_err());
+    fixture.handle.inventory_tick().await.unwrap();
+
+    let logs = logged(&captured);
+    assert_eq!(logs.matches("agent monitor degraded").count(), 1, "{logs}");
+    assert_eq!(
+        logs.matches("agent monitor read retried").count(),
+        1,
+        "{logs}"
+    );
+    assert_eq!(logs.matches("agent monitor recovered").count(), 1, "{logs}");
+    let health = health_events(&fixture.events().await);
+    assert_eq!(health.len(), 2);
+    assert!(health[1].healthy);
+}
+
+/// Scripted observations per pane, since a screen tick visits panes in no fixed order.
+#[derive(Default)]
+struct PaneScriptedScreen {
+    observations: Mutex<std::collections::HashMap<String, VecDeque<ScreenObservation>>>,
+    failures: Mutex<std::collections::HashMap<String, usize>>,
+}
+
+impl VisibleScreenPort for PaneScriptedScreen {
+    fn observe(
+        &self,
+        pane: &AgentPaneObservation,
+        _provider: &AgentProviderSettings,
+    ) -> Result<ScreenObservation, ScreenError> {
+        let pane_id = &pane.incarnation.pane_id;
+        if let Some(failures) = self.failures.lock().unwrap().get_mut(pane_id)
+            && *failures > 0
+        {
+            *failures -= 1;
+            return Err(ScreenError::CaptureFailed);
+        }
+        self.observations
+            .lock()
+            .unwrap()
+            .get_mut(pane_id)
+            .and_then(VecDeque::pop_front)
+            .ok_or(ScreenError::CaptureFailed)
+    }
+}
+
+#[tokio::test]
+async fn screen_retry_names_only_the_retried_pane() {
+    let directory = TestDirectory::new();
+    let store = Arc::new(HaroldStore::open(&directory.0).await.unwrap());
+    let first = pane("%8", 80, 800, 1_000, 100);
+    let second = pane("%9", 90, 900, 1_000, 100);
+    let screen = Arc::new(PaneScriptedScreen::default());
+    for observed in [&first, &second] {
+        screen.observations.lock().unwrap().insert(
+            observed.incarnation.pane_id.clone(),
+            [screen_observation(observed)].into(),
+        );
+    }
+    screen.failures.lock().unwrap().insert("%9".into(), 1);
+    let (shutdown, shutdown_rx) = watch::channel(());
+    let (handle, task) = spawn_agent_monitor_for_test(
+        Arc::clone(&store),
+        Arc::new(FakeInventory::scans(vec![Ok(vec![
+            first.clone(),
+            second.clone(),
+        ])])),
+        screen,
+        vec![provider()],
+        2_000,
+        shutdown_rx,
+    );
+    handle.inventory_tick().await.unwrap();
+    let (captured, _guard) = capture_logs();
+
+    handle.screen_tick().await.unwrap();
+
+    let logs = logged(&captured);
+    println!("{}", logs.trim_end());
+    assert_eq!(
+        logs.matches("agent monitor read retried").count(),
+        1,
+        "{logs}"
+    );
+    assert!(logs.contains("pane_id=\"%9\""), "{logs}");
+    assert!(!logs.contains("pane_id=\"%8\""), "{logs}");
+    let events = store
+        .stream()
+        .load_after_version(EventVersion::start(), 100)
+        .await
+        .unwrap();
+    assert_eq!(
+        event_types(&events)
+            .into_iter()
+            .filter(|event_type| *event_type == "AgentScreenObserved")
+            .count(),
+        2
+    );
+    assert!(health_events(&events).is_empty());
+    drop(shutdown);
+    task.await.unwrap();
+}
+
+fn screen_observation(observed: &AgentPaneObservation) -> ScreenObservation {
+    screen(observed, Some(ObservedAgentState::Busy), None, 200)
+}
+
+/// Its first scan runs until the monitor asks it to stop; the retry checks that it did.
+#[derive(Default)]
+struct StopAwareInventory {
+    scan_calls: AtomicUsize,
+    first_exited: std::sync::atomic::AtomicBool,
+    retry_saw_first_running: std::sync::atomic::AtomicBool,
+}
+
+impl AgentInventoryPort for StopAwareInventory {
+    fn scan(&self) -> Result<Vec<AgentPaneObservation>, InventoryError> {
+        if self.scan_calls.fetch_add(1, Ordering::SeqCst) > 0 {
+            if !self.first_exited.load(Ordering::SeqCst) {
+                self.retry_saw_first_running.store(true, Ordering::SeqCst);
+            }
+            return Ok(Vec::new());
+        }
+        while !super::screen::stop_requested() {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        self.first_exited.store(true, Ordering::SeqCst);
+        Err(InventoryError::CommandFailed)
+    }
+
+    fn resolve(&self, _pane_id: &str) -> Result<Option<AgentPaneObservation>, InventoryError> {
+        Ok(None)
+    }
+
+    fn is_current(&self, _incarnation: &AgentIncarnation) -> Result<bool, InventoryError> {
+        Ok(false)
+    }
+}
+
+#[tokio::test]
+async fn timed_out_first_try_is_stopped_before_its_retry() {
+    let directory = TestDirectory::new();
+    let store = Arc::new(HaroldStore::open(&directory.0).await.unwrap());
+    let inventory = Arc::new(StopAwareInventory::default());
+    let (shutdown, shutdown_rx) = watch::channel(());
+    let (handle, task) = spawn_agent_monitor_seeded_for_test(
+        Arc::clone(&store),
+        Arc::clone(&inventory),
+        Arc::new(FakeScreen::default()),
+        vec![provider()],
+        AgentMonitorSeed {
+            snapshot: empty_snapshot(),
+            hook_grace_ms: 2_000,
+            acquisition_timeout: Duration::from_millis(200),
+        },
+        shutdown_rx,
+    );
+    let (captured, _guard) = capture_logs();
+
+    handle.inventory_tick().await.unwrap();
+
+    assert_eq!(inventory.scan_calls.load(Ordering::SeqCst), 2);
+    assert!(inventory.first_exited.load(Ordering::SeqCst));
+    assert!(!inventory.retry_saw_first_running.load(Ordering::SeqCst));
+    let logs = logged(&captured);
+    println!("{}", logs.trim_end());
+    assert_eq!(
+        logs.matches("agent monitor read retried").count(),
+        1,
+        "{logs}"
+    );
+    assert!(!logs.contains("agent monitor degraded"), "{logs}");
+    drop(shutdown);
+    task.await.unwrap();
 }
