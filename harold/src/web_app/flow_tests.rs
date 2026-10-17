@@ -60,6 +60,7 @@ impl TestServer {
             public_key: Arc::from("BPublicKeyForTheTestPage"),
             loopback_hosts: Arc::from(loopback_hosts("127.0.0.1:0", addr)),
             shutdown: shutdown_rx,
+            calls: None,
         };
         let handle = tokio::spawn(async move {
             let _ = axum::serve(listener, router(state)).await;

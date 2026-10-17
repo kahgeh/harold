@@ -935,6 +935,7 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
         Arc::clone(&store),
         std::path::Path::new(&store_path),
         shutdown_rx.clone(),
+        None,
     )
     .await;
     let event_handler_handle = tokio::spawn(projector::run_event_handler_with_app(

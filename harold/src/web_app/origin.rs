@@ -97,20 +97,21 @@ fn is_same_origin(headers: &HeaderMap, host: &str) -> bool {
     })
 }
 
-/// True for `Datastar-Request: true`, which Datastar's `@post` sends, or a JSON
-/// `Content-Type`, which `alerts.js` sends. A page on another site cannot send either
-/// without a preflight.
+/// True for `Datastar-Request: true`, which Datastar's `@post` sends, or a `Content-Type`
+/// of JSON, which `alerts.js` sends, or of `application/octet-stream`, which the call's
+/// audio posts carry. A page on another site cannot send any of them without a preflight.
 fn has_non_simple_header(headers: &HeaderMap) -> bool {
     let datastar = headers
         .get("datastar-request")
         .is_some_and(|value| value.as_bytes() == b"true");
-    let json = header_text(headers, header::CONTENT_TYPE).is_some_and(|content_type| {
-        content_type
-            .split(';')
-            .next()
-            .is_some_and(|media_type| media_type.trim().eq_ignore_ascii_case("application/json"))
+    let non_simple_type = header_text(headers, header::CONTENT_TYPE).is_some_and(|content_type| {
+        content_type.split(';').next().is_some_and(|media_type| {
+            let media_type = media_type.trim();
+            media_type.eq_ignore_ascii_case("application/json")
+                || media_type.eq_ignore_ascii_case("application/octet-stream")
+        })
     });
-    datastar || json
+    datastar || non_simple_type
 }
 
 fn header_text(headers: &HeaderMap, name: header::HeaderName) -> Option<&str> {

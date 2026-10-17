@@ -16,6 +16,7 @@ use tracing::{error, warn};
 use crate::outbound::AppRoute;
 use crate::settings::WebAppSettings;
 use crate::store::HaroldStore;
+use call::PhoneCallApi;
 use push::{Pusher, VapidKey, vapid_key_path};
 use route::{WebAppRoute, now_ms};
 
@@ -39,6 +40,7 @@ const SERVER_STOP_LIMIT: Duration = Duration::from_secs(1);
 #[path = "assets_tests.rs"]
 mod assets_tests;
 
+pub(crate) mod call;
 pub(crate) mod chief;
 pub(crate) mod login;
 pub(crate) mod origin;
@@ -68,6 +70,8 @@ pub(crate) struct AppState {
     pub loopback_hosts: Arc<[String]>,
     /// Changes, or closes, when Harold shuts down.
     pub shutdown: watch::Receiver<()>,
+    /// The phone's calls; `None` when Harold has none, and every call route answers `409`.
+    pub calls: Option<Arc<dyn PhoneCallApi>>,
 }
 
 /// The app's routes, every one of them, the 404 fallback included, behind
@@ -80,6 +84,11 @@ pub(crate) fn router(state: AppState) -> Router {
         .route("/replies", post(replies::post_reply))
         .route("/push/subscription", post(replies::post_subscription))
         .route("/updates", get(updates::get_updates))
+        .route("/call", post(call::post_call).delete(call::delete_call))
+        .route("/call/audio", post(call::post_audio))
+        .route("/call/played", post(call::post_played))
+        .route("/call/talk-now", post(call::post_talk_now))
+        .route("/call/answer/{id}", get(call::get_answer))
         .fallback(pages::not_found)
         // The last layer added runs first: the login check, then the origin check.
         .layer(from_fn_with_state(
@@ -105,12 +114,14 @@ pub(crate) struct Running {
 /// Binds `settings.listen_addr()`, makes or reads the key, serves until shutdown, and prunes
 /// the thread to 30 days at start and every hour. Err when it cannot, and Harold then runs
 /// without the app, every message reaching the phone through iMessage; the error names the
-/// address or the key's path, never the login or the key.
+/// address or the key's path, never the login or the key. At shutdown an open phone call
+/// ends, with reason `shutdown`, before the handle does.
 pub(crate) async fn start(
     settings: &WebAppSettings,
     store: Arc<HaroldStore>,
     store_path: &Path,
     shutdown: watch::Receiver<()>,
+    calls: Option<Arc<dyn PhoneCallApi>>,
 ) -> Result<Running, String> {
     let addr = settings
         .listen_addr()
@@ -130,6 +141,7 @@ pub(crate) async fn start(
         public_key: Arc::from(key.public_key_base64url()),
         loopback_hosts: Arc::from(origin::loopback_hosts(&settings.listen, local_addr)),
         shutdown: shutdown.clone(),
+        calls: calls.clone(),
     };
     let pusher = Arc::new(Pusher::new(key, &settings.allowed_login));
     let route: Arc<dyn AppRoute> = Arc::new(WebAppRoute::new(Arc::clone(&store), pusher));
@@ -143,6 +155,9 @@ pub(crate) async fn start(
     let handle = tokio::spawn(async move {
         // The pruning stops at shutdown, when the server stops taking connections too.
         let _ = pruning.await;
+        if let Some(calls) = &calls {
+            calls.shutdown().await;
+        }
         match tokio::time::timeout(SERVER_STOP_LIMIT, &mut server).await {
             Ok(Ok(Err(error))) => error!(error = %error, "web app stopped"),
             Ok(_) => {}
@@ -165,9 +180,10 @@ pub(crate) async fn start_if_set(
     store: Arc<HaroldStore>,
     store_path: &Path,
     shutdown: watch::Receiver<()>,
+    calls: Option<Arc<dyn PhoneCallApi>>,
 ) -> Option<Running> {
     let settings = settings?;
-    start(settings, store, store_path, shutdown)
+    start(settings, store, store_path, shutdown, calls)
         .await
         .inspect_err(|error| warn!(error = %error, "web app unavailable"))
         .ok()

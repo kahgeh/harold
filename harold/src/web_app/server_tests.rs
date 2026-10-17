@@ -68,6 +68,7 @@ impl TestServer {
             public_key: Arc::from(PUBLIC_KEY),
             loopback_hosts: Arc::from(loopback_hosts("127.0.0.1:0", addr)),
             shutdown: shutdown_rx,
+            calls: None,
         };
         let handle = tokio::spawn(async move {
             let _ = axum::serve(listener, router(state)).await;
@@ -288,7 +289,7 @@ async fn no_section_starts_nothing() {
     let store = directory.store().await;
     let (_shutdown, shutdown_rx) = watch::channel(());
 
-    let running = start_if_set(None, store, &directory.store_path(), shutdown_rx).await;
+    let running = start_if_set(None, store, &directory.store_path(), shutdown_rx, None).await;
 
     assert!(running.is_none());
     assert!(!vapid_key_path(&directory.store_path()).exists());
@@ -305,6 +306,7 @@ async fn start_serves_until_shutdown() {
         store,
         &directory.store_path(),
         shutdown_rx,
+        None,
     )
     .await
     .expect("the app starts");
@@ -333,6 +335,7 @@ async fn an_address_in_use_runs_without_the_app() {
         store,
         &directory.store_path(),
         shutdown_rx,
+        None,
     )
     .await;
 
@@ -359,6 +362,7 @@ async fn old_thread_rows_are_pruned_at_start() {
         store.clone(),
         &directory.store_path(),
         shutdown_rx,
+        None,
     )
     .await
     .expect("the app starts");

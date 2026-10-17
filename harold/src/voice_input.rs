@@ -17,6 +17,8 @@ pub(crate) use phone::{
     ANSWER_KEEP, AudioRefused, PHONE_SILENT_LIMIT, PIECE_LIMIT_BYTES, PIECES_QUEUED, PLAY_GRACE,
     PhoneCalls, PhoneLine, PhoneSound, PhoneSpeech, PhoneView, SPEECH_BASE, SPEECH_PER_CHAR,
 };
+/// The web app's `POST /call` says these when no phone call starts.
+pub(crate) use phrases::{NO_CHIEF, VOICE_FAILED};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
