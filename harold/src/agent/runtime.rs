@@ -1067,9 +1067,9 @@ impl AgentMonitorRuntime {
             .collect();
         let mut attempted = false;
         let mut failure_reason = None;
-        // After one pane's retry fails, the rest of the tick reads each pane once, so a stuck
-        // tmux does not hold queued hook calls for a retry per pane.
-        let mut retry_failed = false;
+        // One retry per pass, whether it works or not: the rest of the pass reads each pane
+        // once, so a slow tmux does not hold queued hook calls for a retry per pane.
+        let mut retried = false;
         for pane in panes {
             let Some(provider) = self.providers.get(&pane.incarnation.provider_id).cloned() else {
                 continue;
@@ -1079,7 +1079,9 @@ impl AgentMonitorRuntime {
             self.baseline_pane(&pane.incarnation.pane_id).await?;
             let screen = &self.screen;
             let gate = &self.screen_gate;
+            let mut reads = 0_u32;
             let mut read = |timeout, stop| {
+                reads += 1;
                 observe_screen(
                     Arc::clone(screen),
                     pane.clone(),
@@ -1089,7 +1091,7 @@ impl AgentMonitorRuntime {
                     stop,
                 )
             };
-            let result = if retry_failed {
+            let result = if retried {
                 read(self.acquisition_timeout, StopSignal::default()).await
             } else {
                 read_with_retry(
@@ -1102,11 +1104,15 @@ impl AgentMonitorRuntime {
                 )
                 .await
             };
+            // A first try that failed spent the retry, even when the wait for the gate gave out
+            // before the retry ran. A busy gate means no read ran at all.
+            retried |= reads > 1
+                || result
+                    .as_ref()
+                    .is_err_and(|failure| failure.reason_code != "busy");
             let observation = match result {
                 Ok(observation) => observation,
                 Err(failure) => {
-                    // A busy gate means no read ran, so there was no retry to fail.
-                    retry_failed |= failure.reason_code != "busy";
                     failure_reason.get_or_insert(failure.reason_code);
                     continue;
                 }
@@ -1564,7 +1570,13 @@ where
     };
     drop(permit);
     let remaining = retry.saturating_sub(retry_started.elapsed());
-    let value = attempt(remaining, StopSignal::default()).await?;
+    let retry_try = StopSignal::default();
+    let result = attempt(remaining, retry_try.clone()).await;
+    if result.is_err() {
+        // A retry that timed out may still be running: stop it, so its child is reaped too.
+        retry_try.request();
+    }
+    let value = result?;
     let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
     match pane_id {
         Some(pane_id) => {

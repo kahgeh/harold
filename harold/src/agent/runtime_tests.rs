@@ -4858,7 +4858,7 @@ async fn inventory_retry_gets_twice_the_inventory_timeout() {
 }
 
 #[tokio::test]
-async fn screen_tick_stops_retrying_once_a_retry_fails() {
+async fn screen_pass_stops_retrying_after_a_retry_that_fails() {
     let directory = TestDirectory::new();
     let store = Arc::new(HaroldStore::open(&directory.0).await.unwrap());
     let panes = [
@@ -4888,4 +4888,76 @@ async fn screen_tick_stops_retrying_once_a_retry_fails() {
     assert_eq!(logs.matches("agent monitor degraded").count(), 1, "{logs}");
     drop(shutdown);
     task.await.unwrap();
+}
+
+#[tokio::test]
+async fn screen_pass_stops_retrying_after_a_retry_that_works() {
+    let directory = TestDirectory::new();
+    let store = Arc::new(HaroldStore::open(&directory.0).await.unwrap());
+    let panes = [
+        pane("%7", 70, 700, 1_000, 100),
+        pane("%8", 80, 800, 1_000, 100),
+        pane("%9", 90, 900, 1_000, 100),
+    ];
+    // Each pane's first read fails and its next one works.
+    let screen = Arc::new(PaneScriptedScreen::default());
+    for observed in &panes {
+        let pane_id = observed.incarnation.pane_id.clone();
+        screen
+            .observations
+            .lock()
+            .unwrap()
+            .insert(pane_id.clone(), [screen_observation(observed)].into());
+        screen.failures.lock().unwrap().insert(pane_id, 1);
+    }
+    let (shutdown, shutdown_rx) = watch::channel(());
+    let (handle, task) = spawn_agent_monitor_for_test(
+        Arc::clone(&store),
+        Arc::new(FakeInventory::scans(vec![Ok(panes.to_vec())])),
+        Arc::clone(&screen),
+        vec![provider()],
+        2_000,
+        shutdown_rx,
+    );
+    handle.inventory_tick().await.unwrap();
+    let (captured, _guard) = capture_logs();
+
+    handle.screen_tick().await.unwrap();
+
+    // The first pane read gets its retry; the two after it get one try each.
+    assert_eq!(screen.observe_calls.load(Ordering::SeqCst), 4);
+    let logs = logged(&captured);
+    assert_eq!(
+        logs.matches("agent monitor read retried").count(),
+        1,
+        "{logs}"
+    );
+    drop(shutdown);
+    task.await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn retry_that_fails_is_asked_to_stop() {
+    let gate = Arc::new(Semaphore::new(1));
+    let (attempts, attempt) = scripted(vec![
+        (Duration::from_millis(500), Err("timeout")),
+        (Duration::from_millis(2_000), Err("timeout")),
+    ]);
+    let failure = read_with_retry_for_test(
+        "screen",
+        Some("%8"),
+        &gate,
+        Duration::from_millis(500),
+        SCREEN_RETRY_TIMEOUT,
+        attempt,
+    )
+    .await
+    .expect_err("both tries timed out");
+    assert_eq!(failure, "timeout");
+    let attempts = attempts.lock().unwrap();
+    assert!(attempts[0].stop.requested());
+    assert!(
+        attempts[1].stop.requested(),
+        "a timed-out retry must be stopped too"
+    );
 }
