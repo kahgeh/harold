@@ -2,7 +2,8 @@
 //! test, a fake sink that records what it plays, a fake voice worker and a fake chief pane.
 
 use super::phrases::{
-    BYE, CHIEF_BUSY, NO_ANSWER, NO_CHIEF, NOTHING_HEARD, VOICE_FAILED, VOICE_STOPPED,
+    BYE, CHIEF_BUSY, NO_ANSWER, NO_ANSWER_IN_THREAD, NO_CHIEF, NOTHING_HEARD, VOICE_FAILED,
+    VOICE_STOPPED,
 };
 use super::wav::tick_wav;
 use super::worker::{
@@ -27,13 +28,13 @@ use tokio::time::{Instant, sleep};
 // Samples
 // ---------------------------------------------------------------------------
 
-fn loud(ms: usize) -> Vec<i16> {
+pub(crate) fn loud(ms: usize) -> Vec<i16> {
     (0..ms * 16)
         .map(|i| (8000.0 * (i as f64 * 0.3).sin()) as i16)
         .collect()
 }
 
-fn quiet(ms: usize) -> Vec<i16> {
+pub(crate) fn quiet(ms: usize) -> Vec<i16> {
     vec![0; ms * 16]
 }
 
@@ -42,7 +43,7 @@ fn quiet(ms: usize) -> Vec<i16> {
 // ---------------------------------------------------------------------------
 
 /// What the fake worker answers to one transcribe request.
-enum Heard {
+pub(crate) enum Heard {
     Text(String),
     /// Whisper's no-speech probability is 0.7.
     Unlikely(String),
@@ -57,29 +58,29 @@ enum Heard {
     FailToLoad,
 }
 
-fn text(heard: &str) -> Heard {
+pub(crate) fn text(heard: &str) -> Heard {
     Heard::Text(heard.to_string())
 }
 
 #[derive(Default)]
-struct WorkerLog {
-    script: VecDeque<Heard>,
-    starts: usize,
+pub(crate) struct WorkerLog {
+    pub(crate) script: VecDeque<Heard>,
+    pub(crate) starts: usize,
     /// The samples in each turn sent to be transcribed.
-    transcribed: Vec<usize>,
+    pub(crate) transcribed: Vec<usize>,
     /// The text of each say request.
-    said: Vec<String>,
+    pub(crate) said: Vec<String>,
     /// What each say request answers in turn, with the health left as it is; once used
     /// up, each say request writes its file.
-    say_script: VecDeque<WorkerError>,
-    closes: usize,
+    pub(crate) say_script: VecDeque<WorkerError>,
+    pub(crate) closes: usize,
     /// Whether each worker starts `Loading` rather than `Ready`.
-    starts_loading: bool,
+    pub(crate) starts_loading: bool,
     /// The health of the worker started last.
-    health: Option<Arc<watch::Sender<Health>>>,
+    pub(crate) health: Option<Arc<watch::Sender<Health>>>,
 }
 
-struct FakeWorker(Arc<Mutex<WorkerLog>>, Arc<watch::Sender<Health>>);
+pub(crate) struct FakeWorker(Arc<Mutex<WorkerLog>>, Arc<watch::Sender<Health>>);
 
 impl VoiceWorker for FakeWorker {
     fn health(&self) -> watch::Receiver<Health> {
@@ -148,19 +149,21 @@ impl VoiceWorker for FakeWorker {
 
 /// Records what each played file holds: the text the fake worker wrote, or `tick`.
 #[derive(Default)]
-struct FakeSink {
-    played: Mutex<Vec<(Instant, String)>>,
+pub(crate) struct FakeSink {
+    pub(crate) played: Mutex<Vec<(Instant, String)>>,
     /// Whether each play stays open until `release` or `stop`.
-    hold: AtomicBool,
-    playing: AtomicBool,
-    release: Notify,
-    stops: AtomicUsize,
+    pub(crate) hold: AtomicBool,
+    pub(crate) playing: AtomicBool,
+    pub(crate) release: Notify,
+    pub(crate) stops: AtomicUsize,
     /// Whether each play fails.
-    fails: AtomicBool,
+    pub(crate) fails: AtomicBool,
+    /// What each played sound said, as the core told the sink.
+    pub(crate) said: Mutex<Vec<Said>>,
 }
 
 impl FakeSink {
-    fn release(&self) {
+    pub(crate) fn release(&self) {
         if self.playing.swap(false, Ordering::SeqCst) {
             self.release.notify_one();
         }
@@ -186,22 +189,35 @@ impl AudioSink for FakeSink {
         Ok(())
     }
 
+    async fn play_said(&self, wav: &Path, said: &Said) -> Result<(), String> {
+        self.said.lock().unwrap().push(said.clone());
+        self.play(wav).await
+    }
+
     fn stop(&self) {
         self.stops.fetch_add(1, Ordering::SeqCst);
         self.release();
     }
 }
 
-struct FakeSource(mpsc::UnboundedReceiver<Vec<i16>>);
+/// A block of samples and when it was recorded; `None` is stamped when it is read.
+type MicBlock = (Vec<i16>, Option<Instant>);
+
+pub(crate) struct FakeSource(mpsc::UnboundedReceiver<MicBlock>);
 
 impl AudioSource for FakeSource {
     async fn next_block(&mut self) -> Option<Vec<i16>> {
-        self.0.recv().await
+        self.0.recv().await.map(|(samples, _)| samples)
+    }
+
+    async fn next_stamped(&mut self) -> Option<(Vec<i16>, Instant)> {
+        let (samples, at) = self.0.recv().await?;
+        Some((samples, at.unwrap_or_else(Instant::now)))
     }
 }
 
 /// Counts its drop in `dropped`.
-struct FakeAwake(Arc<AtomicUsize>);
+pub(crate) struct FakeAwake(Arc<AtomicUsize>);
 
 impl Drop for FakeAwake {
     fn drop(&mut self) {
@@ -213,22 +229,27 @@ impl Drop for FakeAwake {
 // The fake ports
 // ---------------------------------------------------------------------------
 
-const UPDATE: &str = "Work complete on chief-of-pods and waiting for further instructions";
+pub(crate) const UPDATE: &str =
+    "Work complete on chief-of-pods and waiting for further instructions";
 
 #[derive(Default)]
-struct PortsState {
-    mic: Option<mpsc::UnboundedSender<Vec<i16>>>,
-    sources: usize,
+pub(crate) struct PortsState {
+    mic: Option<mpsc::UnboundedSender<MicBlock>>,
+    pub(crate) sources: usize,
     /// The next source ends at once.
-    source_ends: bool,
-    tts: Vec<String>,
-    desk_stops: usize,
-    update_prompts: Vec<String>,
-    muted: bool,
-    fail_awake: bool,
-    awake_taken: usize,
+    pub(crate) source_ends: bool,
+    pub(crate) tts: Vec<String>,
+    pub(crate) desk_stops: usize,
+    pub(crate) update_prompts: Vec<String>,
+    pub(crate) muted: bool,
+    pub(crate) fail_awake: bool,
+    pub(crate) awake_taken: usize,
     /// Whether each `[tts]` line goes on until `tts_release` is notified.
-    hold_tts: bool,
+    pub(crate) hold_tts: bool,
+    /// The reason of each `call_ended`.
+    pub(crate) ended: Vec<&'static str>,
+    /// What `no_answer_phrase` returns, when set.
+    pub(crate) no_answer: Option<&'static str>,
 }
 
 struct PortsInner {
@@ -248,10 +269,10 @@ impl Drop for PortsInner {
 }
 
 #[derive(Clone)]
-struct FakePorts(Arc<PortsInner>);
+pub(crate) struct FakePorts(Arc<PortsInner>);
 
 impl FakePorts {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let root = std::env::temp_dir().join(format!("harold-call-{}", uuid::Uuid::new_v4()));
         Self(Arc::new(PortsInner {
             panes: Fake::at("2026-10-14", "09:00:00"),
@@ -264,8 +285,18 @@ impl FakePorts {
         }))
     }
 
-    fn state(&self) -> MutexGuard<'_, PortsState> {
+    pub(crate) fn state(&self) -> MutexGuard<'_, PortsState> {
         self.0.state.lock().unwrap()
+    }
+
+    /// The log of the fake workers' requests.
+    pub(crate) fn worker_log(&self) -> MutexGuard<'_, WorkerLog> {
+        self.0.worker.lock().unwrap()
+    }
+
+    /// The fake chief panes, and the keys typed into them.
+    pub(crate) fn fake_panes(&self) -> &Fake {
+        &self.0.panes
     }
 }
 
@@ -347,6 +378,14 @@ impl CallPorts for FakePorts {
         self.state().muted
     }
 
+    fn call_ended(&self, reason: &'static str) {
+        self.state().ended.push(reason);
+    }
+
+    fn no_answer_phrase(&self) -> &'static str {
+        self.state().no_answer.unwrap_or(NO_ANSWER)
+    }
+
     fn keep_awake(&self) -> Result<FakeAwake, String> {
         let mut state = self.state();
         if state.fail_awake {
@@ -362,18 +401,18 @@ impl CallPorts for FakePorts {
 // ---------------------------------------------------------------------------
 
 /// Lets every task that can run, run, without moving the paused clock.
-async fn settle() {
+pub(crate) async fn settle() {
     for _ in 0..200 {
         tokio::task::yield_now().await;
     }
 }
 
 /// Past the 0.3 s after a sound in which the microphone is not heard.
-async fn past_the_tail() {
+pub(crate) async fn past_the_tail() {
     sleep(Duration::from_millis(400)).await;
 }
 
-fn typed(pane: &str, transcript: &str) -> Vec<Key> {
+pub(crate) fn typed(pane: &str, transcript: &str) -> Vec<Key> {
     vec![
         Key::Text(pane.to_string(), format!("🎙 {transcript}")),
         Key::Enter(pane.to_string()),
@@ -419,7 +458,20 @@ impl Harness {
             return;
         };
         for block in samples.chunks(1600) {
-            let _ = mic.send(block.to_vec());
+            let _ = mic.send((block.to_vec(), None));
+        }
+    }
+
+    /// Feeds `samples` as recorded from `at`: each block of 1,600 samples is stamped `at`
+    /// plus its offset in the feed at 16 kHz.
+    fn feed_captured(&self, samples: Vec<i16>, at: Instant) {
+        let mic = self.ports.state().mic.clone();
+        let Some(mic) = mic else {
+            return;
+        };
+        for (n, block) in samples.chunks(1600).enumerate() {
+            let offset = Duration::from_millis(n as u64 * 100);
+            let _ = mic.send((block.to_vec(), Some(at + offset)));
         }
     }
 
@@ -449,7 +501,7 @@ impl Harness {
     }
 
     fn keys(&self) -> Vec<Key> {
-        self.ports.0.panes.keys()
+        self.ports.fake_panes().keys()
     }
 
     fn set_chief(&self, state: EffectiveAgentState) {
@@ -474,7 +526,7 @@ impl Harness {
     }
 
     fn worker(&self) -> MutexGuard<'_, WorkerLog> {
-        self.ports.0.worker.lock().unwrap()
+        self.ports.worker_log()
     }
 
     fn call_dirs(&self) -> Vec<PathBuf> {
@@ -626,6 +678,108 @@ async fn speech_while_the_sink_plays_or_0_3_s_after_starts_no_turn() {
     past_the_tail().await;
     h.speak().await;
     assert_eq!(h.worker().transcribed.len(), 2);
+}
+
+/// A typed turn, then the chief's answer held in the sink and released: the instant the
+/// answer ended, with the call listening again.
+async fn after_an_answer(h: &Harness) -> Instant {
+    h.start().await;
+    h.speak().await;
+    h.sink().hold.store(true, Ordering::SeqCst);
+    let said = h.say("answer", Speaker::Chief);
+    settle().await;
+    h.sink().release();
+    said.await.unwrap();
+    settle().await;
+    Instant::now()
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn speech_captured_during_a_sound_but_read_after_it_starts_no_turn() {
+    let h = Harness::new();
+    h.script([text("first"), text("second")]);
+    let ended = after_an_answer(&h).await;
+
+    sleep(Duration::from_secs(1)).await;
+    // The speech was recorded from 0.5 s before the answer ended to 0.2 s after, all inside
+    // the muted time; only the silence after it was recorded in the clear.
+    let mut samples = loud(700);
+    samples.extend(quiet(1200));
+    h.feed_captured(samples, ended - Duration::from_millis(500));
+    settle().await;
+
+    assert_eq!(h.worker().transcribed.len(), 1);
+    assert_eq!(h.keys(), typed("%2", "first"));
+    assert_eq!(h.state(), CallState::Listening);
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn speech_captured_after_the_tail_but_read_late_is_a_turn() {
+    let h = Harness::new();
+    h.script([text("first"), text("second")]);
+    let ended = after_an_answer(&h).await;
+
+    sleep(Duration::from_secs(2)).await;
+    let mut samples = loud(1000);
+    samples.extend(quiet(1200));
+    h.feed_captured(samples, ended + Duration::from_millis(400));
+    settle().await;
+
+    let mut want = typed("%2", "first");
+    want.extend(typed("%2", "second"));
+    assert_eq!(h.keys(), want);
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn the_sink_is_told_what_each_sound_says() {
+    let h = Harness::new();
+    h.script([text("hello there"), text("")]);
+    h.start().await;
+    h.speak().await;
+
+    sleep(Duration::from_secs(3)).await;
+    settle().await;
+    h.answer("All green.").await;
+    h.speak().await;
+
+    let said = h.sink().said.lock().unwrap().clone();
+    assert_eq!(
+        said,
+        [
+            Said::Tick,
+            Said::Line {
+                text: "All green.".into(),
+                by: Speaker::Chief
+            },
+            Said::Phrase(NOTHING_HEARD.into()),
+        ]
+    );
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn the_ports_hear_why_each_call_ended() {
+    let h = Harness::new();
+    h.script([text("Bye.")]);
+    h.start().await;
+    h.speak().await;
+    h.ports.fake_panes().set(|s| s.view.panes.clear());
+
+    h.calls.start().await;
+    settle().await;
+
+    assert_eq!(h.ports.state().ended, ["bye", "no_chief"]);
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn the_ports_choose_the_no_answer_phrase() {
+    let h = Harness::new();
+    h.ports.state().no_answer = Some(NO_ANSWER_IN_THREAD);
+    h.start().await;
+    h.speak().await;
+
+    sleep(Duration::from_secs(95)).await;
+
+    assert_eq!(h.played().last().unwrap(), NO_ANSWER_IN_THREAD);
 }
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]

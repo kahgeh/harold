@@ -6,13 +6,14 @@
 
 use super::hang_up::{Spoken, hang_up};
 use super::phrases::{
-    BYE, CHIEF_BUSY, NO_ANSWER, NO_CHIEF, NOTHING_HEARD, VOICE_FAILED, VOICE_STOPPED, phrase_file,
+    BYE, CHIEF_BUSY, NO_CHIEF, NOTHING_HEARD, VOICE_FAILED, VOICE_STOPPED, phrase_file,
 };
 use super::speech::SpeechDetector;
 use super::wav::{tick_wav, wav_bytes};
 use super::worker::{Health, Transcript, VoiceWorker, WorkerError};
 use super::{
-    AudioSink, AudioSource, CallPorts, CallState, CallStatus, SAMPLE_RATE, Speaker, TurnResult,
+    AudioSink, AudioSource, CallPorts, CallState, CallStatus, SAMPLE_RATE, Said, Speaker,
+    TurnResult,
 };
 use crate::agent::domain::EffectiveAgentState;
 use crate::away_message::one_line;
@@ -87,7 +88,11 @@ impl Ended {
 
 /// What a call's task hears about.
 pub(super) enum Event<W> {
-    Block(Vec<i16>),
+    /// Samples, and when they were recorded.
+    Block {
+        samples: Vec<i16>,
+        captured_at: Instant,
+    },
     SourceEnded,
     Stop(Ended),
     TalkNow,
@@ -315,6 +320,17 @@ impl Sound {
         }
     }
 
+    /// What it says, as the sink is told.
+    fn said(&self) -> Said {
+        match self.by {
+            Some(by) => Said::Line {
+                text: self.text.clone(),
+                by,
+            },
+            None => Said::Phrase(self.text.clone()),
+        }
+    }
+
     /// Removes its file when it was made for this call, answers its sender and gives back
     /// what happens next.
     fn finish(self, said: bool) -> After {
@@ -466,8 +482,12 @@ impl<P: CallPorts> Call<P> {
         };
         let blocks = events.clone();
         let reader = tokio::spawn(async move {
-            while let Some(block) = source.next_block().await {
-                if blocks.send(Event::Block(block)).is_err() {
+            while let Some((samples, captured_at)) = source.next_stamped().await {
+                let block = Event::Block {
+                    samples,
+                    captured_at,
+                };
+                if blocks.send(block).is_err() {
                     return;
                 }
             }
@@ -532,8 +552,11 @@ impl<P: CallPorts> Call<P> {
 
     async fn on_event(&mut self, event: Event<P::Worker>) {
         match event {
-            Event::Block(_) if self.ports.voice_muted() => self.voice_muted().await,
-            Event::Block(block) => self.heard_block(&block),
+            Event::Block { .. } if self.ports.voice_muted() => self.voice_muted().await,
+            Event::Block {
+                samples,
+                captured_at,
+            } => self.heard_block(&samples, captured_at),
             Event::SourceEnded => {
                 self.end(Ended::MicrophoneFailed, Some(VOICE_FAILED)).await;
             }
@@ -563,12 +586,14 @@ impl<P: CallPorts> Call<P> {
 
     // --- the samples ---
 
-    fn heard_block(&mut self, block: &[i16]) {
+    /// A block recorded while a sound played, or within the tail after, is not heard, even
+    /// when it is read later.
+    fn heard_block(&mut self, block: &[i16], captured_at: Instant) {
         if self.mode != Mode::Listening {
             self.detector.reset();
             return;
         }
-        let muted = self.playing.is_some() || Instant::now() < self.unmuted_at;
+        let muted = self.playing.is_some() || captured_at < self.unmuted_at;
         let Some(turn) = self.detector.push(block, muted).into_iter().next() else {
             return;
         };
@@ -1055,7 +1080,8 @@ impl<P: CallPorts> Call<P> {
         if now >= awaiting.gives_up_at {
             self.awaiting = None;
             self.mode = Mode::Listening;
-            self.phrase(NO_ANSWER, After::Nothing);
+            let phrase = self.ports.no_answer_phrase();
+            self.phrase(phrase, After::Nothing);
             return;
         }
         let tick = now >= awaiting.next_tick;
@@ -1229,7 +1255,7 @@ impl<P: CallPorts> Call<P> {
         }
         let by_tts = matches!(sound.audio, Audio::Tts);
         let task = match &sound.audio {
-            Audio::Wav { path, .. } => self.spawn_play(sound.id, path.clone()),
+            Audio::Wav { path, .. } => self.spawn_play(sound.id, path.clone(), sound.said()),
             Audio::Tts => self.spawn_tts(sound.id, sound.text.clone()),
         };
         self.playing = Some(Playing {
@@ -1246,7 +1272,7 @@ impl<P: CallPorts> Call<P> {
             return;
         }
         let id = self.new_id();
-        let task = self.spawn_play(id, self.dir.join(TICK_WAV));
+        let task = self.spawn_play(id, self.dir.join(TICK_WAV), Said::Tick);
         self.playing = Some(Playing {
             id,
             task,
@@ -1256,11 +1282,11 @@ impl<P: CallPorts> Call<P> {
         });
     }
 
-    fn spawn_play(&self, id: u64, wav: PathBuf) -> JoinHandle<()> {
+    fn spawn_play(&self, id: u64, wav: PathBuf, said: Said) -> JoinHandle<()> {
         let sink = Arc::clone(&self.sink);
         let events = self.events.clone();
         tokio::spawn(async move {
-            let played = match sink.play(&wav).await {
+            let played = match sink.play_said(&wav, &said).await {
                 Ok(()) => true,
                 Err(error) => {
                     warn!(error = %error, "call sound not played");
@@ -1423,6 +1449,7 @@ impl<P: CallPorts> Call<P> {
         }
         self.awake = None;
         info!(reason = why.as_str(), "call ended");
+        self.ports.call_ended(why.as_str());
         let mut status = lock(&self.status);
         status.state = CallState::Off;
         // The transcript is shown only while the call lasts.
@@ -1464,7 +1491,8 @@ impl<P: CallPorts> NotOpened<'_, P> {
                 &self.ports.voice_name(),
                 NO_CHIEF,
             );
-            if !kept.is_file() || self.ports.sink().play(&kept).await.is_err() {
+            let said = Said::Phrase(NO_CHIEF.into());
+            if !kept.is_file() || self.ports.sink().play_said(&kept, &said).await.is_err() {
                 self.ports.speak_with_tts(NO_CHIEF).await;
             }
         } else {
@@ -1472,5 +1500,6 @@ impl<P: CallPorts> NotOpened<'_, P> {
         }
         let _ = std::fs::remove_dir_all(self.dir);
         info!(reason = why.as_str(), "call ended");
+        self.ports.call_ended(why.as_str());
     }
 }

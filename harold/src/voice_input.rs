@@ -29,6 +29,31 @@ pub(crate) trait AudioSource: Send + 'static {
     ///
     /// Cancel-safe: dropping the future before it resolves loses no samples and shifts none.
     fn next_block(&mut self) -> impl Future<Output = Option<Vec<i16>>> + Send;
+
+    /// The next block with the time it was recorded, so the core can tell speech recorded
+    /// while a sound played from speech read while it played. The default stamps the block
+    /// when it is read, which is when it was recorded for a source that reads as it records.
+    ///
+    /// Cancel-safe as `next_block` is.
+    fn next_stamped(
+        &mut self,
+    ) -> impl Future<Output = Option<(Vec<i16>, tokio::time::Instant)>> + Send {
+        async move {
+            let block = self.next_block().await?;
+            Some((block, tokio::time::Instant::now()))
+        }
+    }
+}
+
+/// What a sound says, for a sink that shows or relays it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Said {
+    /// The tick that plays while an answer is awaited.
+    Tick,
+    /// One of Harold's own phrases.
+    Phrase(String),
+    /// A line said into the call.
+    Line { text: String, by: Speaker },
 }
 
 /// Where a call's sound goes. The core plays one file at a time and knows when each ends.
@@ -37,6 +62,15 @@ pub(crate) trait AudioSink: Send + Sync + 'static {
     /// Resolves `Ok` when the sound has ended or `stop` ended it, and `Err` when it could not
     /// be played.
     fn play(&self, wav: &Path) -> impl Future<Output = Result<(), String>> + Send;
+    /// `play`, told what the sound says. The default ignores that.
+    fn play_said(
+        &self,
+        wav: &Path,
+        said: &Said,
+    ) -> impl Future<Output = Result<(), String>> + Send {
+        let _ = said;
+        self.play(wav)
+    }
     /// Stops what `play` is playing now, and returns at once; the sound stops promptly. Does
     /// nothing when nothing plays, and does not affect a later `play`.
     fn stop(&self);
@@ -74,6 +108,14 @@ pub(crate) trait CallPorts: Send + Sync + 'static {
     /// Whether Harold's voice is muted now (`outbound::is_tts_muted` in the daemon). Decision 17.
     fn voice_muted(&self) -> bool;
     fn keep_awake(&self) -> Result<Self::Awake, String>;
+    /// A call ended, for `reason` (the `reason` of its `call ended` line). Does nothing by default.
+    fn call_ended(&self, reason: &'static str) {
+        let _ = reason;
+    }
+    /// What Harold says when the chief has not answered in 90 seconds.
+    fn no_answer_phrase(&self) -> &'static str {
+        phrases::NO_ANSWER
+    }
 }
 
 /// What a call is doing, as the dashboard's button shows it.
@@ -319,4 +361,4 @@ pub(crate) fn say_in_open_call(line: &str, by: Speaker) -> Option<bool> {
 
 #[cfg(test)]
 #[path = "voice_input_tests.rs"]
-mod tests;
+pub(crate) mod tests;
