@@ -1524,6 +1524,54 @@ async fn a_line_with_no_call_open_is_not_taken() {
     assert_eq!(blocking.await.unwrap(), None);
 }
 
+/// A call that answers a fixed result, or `None` for no call open, and counts the lines it got.
+struct FakeLineTaker {
+    answer: Option<bool>,
+    taken: AtomicUsize,
+}
+
+impl FakeLineTaker {
+    fn new(answer: Option<bool>) -> Self {
+        Self {
+            answer,
+            taken: AtomicUsize::new(0),
+        }
+    }
+
+    fn taken(&self) -> usize {
+        self.taken.load(Ordering::SeqCst)
+    }
+}
+
+impl LineTaker for FakeLineTaker {
+    fn say_blocking(&self, _line: &str, _by: Speaker) -> Option<bool> {
+        self.taken.fetch_add(1, Ordering::SeqCst);
+        self.answer
+    }
+}
+
+#[test]
+fn a_line_goes_to_the_first_open_call() {
+    let closed = FakeLineTaker::new(None);
+    let open = FakeLineTaker::new(Some(true));
+    let ended_first = FakeLineTaker::new(Some(false));
+
+    assert_eq!(say_in_first_open(&[], "hi", Speaker::Chief), None);
+
+    assert_eq!(
+        say_in_first_open(&[&closed, &open], "hi", Speaker::Chief),
+        Some(true)
+    );
+    assert_eq!((closed.taken(), open.taken()), (1, 1));
+
+    let open = FakeLineTaker::new(Some(true));
+    assert_eq!(
+        say_in_first_open(&[&ended_first, &open], "hi", Speaker::Chief),
+        Some(false)
+    );
+    assert_eq!(open.taken(), 0);
+}
+
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn a_line_said_into_a_call_that_ends_first_is_not_played() {
     let h = Harness::new();

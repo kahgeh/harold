@@ -358,11 +358,45 @@ pub(crate) fn daemon_calls() -> Option<&'static DaemonCalls> {
     DAEMON_CALLS.get()
 }
 
-/// Says `line` in the daemon's open call, from a blocking thread, and returns once it has
-/// ended. `None` when Harold has no calls or no call is open: then it neither blocks nor
-/// needs a runtime.
+/// Somewhere the chief's spoken lines can be said: a set of calls, of which one may be open.
+pub(crate) trait LineTaker: Send + Sync {
+    /// Says `line` in the open call, from a blocking thread, and returns once it has ended.
+    /// `None` when no call is open (or the line is not one these calls say).
+    fn say_blocking(&self, line: &str, by: Speaker) -> Option<bool>;
+}
+
+impl<P: CallPorts> LineTaker for CallControl<P> {
+    fn say_blocking(&self, line: &str, by: Speaker) -> Option<bool> {
+        CallControl::say_blocking(self, line, by)
+    }
+}
+
+/// The result of the first of `calls` that takes `line`: `None` when none has a call open.
+/// A call that takes it ends the search, whether or not it played the line.
+fn say_in_first_open(calls: &[&dyn LineTaker], line: &str, by: Speaker) -> Option<bool> {
+    calls.iter().find_map(|calls| calls.say_blocking(line, by))
+}
+
+static PHONE_CALLS: OnceLock<Arc<dyn LineTaker>> = OnceLock::new();
+
+/// Sets the phone's calls, once, at start-up.
+// main.rs registers the phone's calls; until it does, no phone's calls are registered.
+#[allow(dead_code)]
+pub(crate) fn init_phone_calls(calls: Arc<dyn LineTaker>) {
+    assert!(
+        PHONE_CALLS.set(calls).is_ok(),
+        "init_phone_calls called more than once"
+    );
+}
+
+/// Says `line` in the open call, the desk's or else the phone's, from a blocking thread, and
+/// returns once it has ended. `None` when Harold has no calls or no call is open: then it
+/// neither blocks nor needs a runtime.
 pub(crate) fn say_in_open_call(line: &str, by: Speaker) -> Option<bool> {
-    daemon_calls()?.say_blocking(line, by)
+    let desk = daemon_calls().map(|calls| calls as &dyn LineTaker);
+    let phone = PHONE_CALLS.get().map(|calls| calls.as_ref());
+    let calls: Vec<&dyn LineTaker> = desk.into_iter().chain(phone).collect();
+    say_in_first_open(&calls, line, by)
 }
 
 #[cfg(test)]

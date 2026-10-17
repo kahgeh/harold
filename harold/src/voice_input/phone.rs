@@ -5,7 +5,9 @@
 use super::call::lock;
 use super::phrases::NO_ANSWER_IN_THREAD;
 use super::worker::WorkerError;
-use super::{AudioSink, AudioSource, CallControl, CallPorts, CallState, CallStatus, Said, Speaker};
+use super::{
+    AudioSink, AudioSource, CallControl, CallPorts, CallState, CallStatus, LineTaker, Said, Speaker,
+};
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
@@ -551,6 +553,12 @@ pub(crate) struct PhoneCalls<B: CallPorts> {
     set_up: bool,
     /// The task that copies the open call's status into the view: one for each call.
     follower: Mutex<Option<JoinHandle<()>>>,
+}
+
+impl<B: CallPorts> LineTaker for PhoneCalls<B> {
+    fn say_blocking(&self, line: &str, by: Speaker) -> Option<bool> {
+        PhoneCalls::say_blocking(self, line, by)
+    }
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
