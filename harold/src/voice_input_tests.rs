@@ -1223,19 +1223,87 @@ async fn a_second_turn_while_the_first_waits_is_joined() {
 }
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
-async fn stop_drops_a_turn_not_yet_typed() {
+async fn stop_passes_on_a_turn_held_for_a_busy_chief() {
+    let logs = CapturedLogs::start();
+    let h = Harness::new();
+    h.script([text("approve q19")]);
+    h.start().await;
+    h.set_chief(EffectiveAgentState::Busy);
+    h.speak().await;
+    assert_eq!(h.played(), [CHIEF_BUSY]);
+
+    assert_eq!(h.calls.stop().await.state, CallState::Off);
+    assert!(h.call_dirs().is_empty());
+    sleep(Duration::from_secs(60)).await;
+    assert!(h.keys().is_empty());
+    h.set_chief(EffectiveAgentState::Idle);
+    sleep(Duration::from_secs(10)).await;
+
+    assert_eq!(h.keys(), typed("%2", "approve q19"));
+    let text = logs.text();
+    assert!(
+        text.contains("spoken prompt typed pane_id=%2 words=2"),
+        "{text}"
+    );
+    assert!(!text.contains("spoken prompt dropped"), "{text}");
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn a_bye_passes_on_a_turn_held_for_a_busy_chief() {
+    let h = Harness::new();
+    h.script([text("approve q19"), text("Bye.")]);
+    h.start().await;
+    h.set_chief(EffectiveAgentState::Busy);
+    h.speak().await;
+    past_the_tail().await;
+
+    h.speak().await;
+
+    assert_eq!(h.played(), [CHIEF_BUSY, BYE]);
+    assert_eq!(h.state(), CallState::Off);
+    assert!(h.keys().is_empty());
+    h.set_chief(EffectiveAgentState::Idle);
+    sleep(Duration::from_secs(10)).await;
+    assert_eq!(h.keys(), typed("%2", "approve q19"));
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn a_held_turn_passed_on_is_dropped_2_minutes_after_it_was_first_held() {
+    let logs = CapturedLogs::start();
+    let h = Harness::new();
+    h.start().await;
+    h.set_chief(EffectiveAgentState::Busy);
+    h.speak().await;
+    sleep(Duration::from_secs(60)).await;
+    h.calls.stop().await;
+
+    // Two minutes from the hold, not from the stop.
+    sleep(Duration::from_secs(65)).await;
+    h.set_chief(EffectiveAgentState::Idle);
+    sleep(Duration::from_secs(10)).await;
+
+    assert!(h.keys().is_empty());
+    let text = logs.text();
+    assert_eq!(text.matches("spoken prompt dropped").count(), 1, "{text}");
+    assert!(
+        text.contains("spoken prompt dropped reason=\"chief_busy\""),
+        "{text}"
+    );
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn shutdown_drops_a_turn_held_for_a_busy_chief() {
     let logs = CapturedLogs::start();
     let h = Harness::new();
     h.start().await;
     h.set_chief(EffectiveAgentState::Busy);
     h.speak().await;
 
-    assert_eq!(h.calls.stop().await.state, CallState::Off);
+    h.calls.shutdown().await;
     h.set_chief(EffectiveAgentState::Idle);
     sleep(Duration::from_secs(10)).await;
 
     assert!(h.keys().is_empty());
-    assert!(h.call_dirs().is_empty());
     assert_eq!(h.status().last_result, Some(TurnResult::ChiefBusy));
     let text = logs.text();
     assert!(

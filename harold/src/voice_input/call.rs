@@ -176,18 +176,26 @@ fn log_dropped(result: TurnResult) {
     info!(reason = result.reason(), "spoken prompt dropped");
 }
 
-/// Types a turn into a busy chief's pane once it is free: tried every second for up to two
-/// minutes, as during a call (Decision 9).
-async fn pass_on_when_free<P: CallPorts>(ports: Arc<P>, text: String) {
-    let gives_up_at = Instant::now() + BUSY_LIMIT;
+/// Types a turn into a busy chief's pane once it is free, after the call has ended: tried
+/// first at `next_try` and then every second until `gives_up_at`, as during a call
+/// (Decision 9).
+async fn pass_on_when_free<P: CallPorts>(
+    ports: Arc<P>,
+    text: String,
+    mut next_try: Instant,
+    gives_up_at: Instant,
+) {
     loop {
-        tokio::time::sleep(BUSY_RETRY).await;
+        sleep_until(next_try).await;
         let result = match try_type(&*ports, &text).await {
             Typing::Typed(pane) => {
                 log_typed(&pane, &text);
                 return;
             }
-            Typing::Busy if Instant::now() < gives_up_at => continue,
+            Typing::Busy if Instant::now() < gives_up_at => {
+                next_try = Instant::now() + BUSY_RETRY;
+                continue;
+            }
             Typing::Busy => TurnResult::ChiefBusy,
             Typing::NoChief => TurnResult::NoChief,
             Typing::Failed => TurnResult::Failed,
@@ -813,11 +821,11 @@ impl<P: CallPorts> Call<P> {
         match hang_up(&text) {
             Spoken::Turn(turn) => self.turn(turn.to_string()).await,
             Spoken::TurnThenBye(turn) => {
-                let turn = match self.held.take() {
-                    Some(held) => format!("{} {turn}", held.text),
-                    None => turn.to_string(),
+                let (turn, gives_up_at) = match self.held.take() {
+                    Some(held) => (format!("{} {turn}", held.text), held.gives_up_at),
+                    None => (turn.to_string(), Instant::now() + BUSY_LIMIT),
                 };
-                self.last_turn(turn).await;
+                self.last_turn(turn, gives_up_at).await;
             }
             Spoken::ByeOnly => self.say_bye(),
         }
@@ -848,13 +856,20 @@ impl<P: CallPorts> Call<P> {
     }
 
     /// The turn said before a bye, and then the call ends. A busy chief gets the turn as
-    /// it would during the call, from a task that outlives the call and holds no audio.
-    async fn last_turn(&mut self, text: String) {
+    /// it would during the call, until `gives_up_at`, from a task that outlives the call and
+    /// holds no audio.
+    async fn last_turn(&mut self, text: String, gives_up_at: Instant) {
         match try_type(&*self.ports, &text).await {
             Typing::Typed(pane) => self.typed(pane, text),
             Typing::NoChief => self.dropped(TurnResult::NoChief),
             Typing::Busy => {
-                tokio::spawn(pass_on_when_free(Arc::clone(&self.ports), text));
+                let next_try = Instant::now() + BUSY_RETRY;
+                tokio::spawn(pass_on_when_free(
+                    Arc::clone(&self.ports),
+                    text,
+                    next_try,
+                    gives_up_at,
+                ));
             }
             Typing::Failed => self.dropped(TurnResult::Failed),
         }
@@ -898,8 +913,21 @@ impl<P: CallPorts> Call<P> {
         }
     }
 
+    /// Hands a turn still waiting for a busy chief to a task that outlives the call: Harold
+    /// promised to pass it on, so it keeps its retry and its two minutes from when it was
+    /// first held.
+    fn pass_on_held(&mut self) {
+        if let Some(held) = self.held.take() {
+            tokio::spawn(pass_on_when_free(
+                Arc::clone(&self.ports),
+                held.text,
+                held.next_try,
+                held.gives_up_at,
+            ));
+        }
+    }
+
     fn say_bye(&mut self) {
-        self.drop_held();
         self.ending_phrase(BYE, Ended::Bye);
     }
 
@@ -1332,8 +1360,8 @@ impl<P: CallPorts> Call<P> {
         lock(&self.status).state = state;
     }
 
-    /// Ends the call: a turn not yet typed is dropped, lines not yet played go back to
-    /// their senders, `last_words` are said through the `[tts]` command, the source, the
+    /// Ends the call: a turn waiting for a busy chief is passed on once the chief is free,
+    /// or dropped when Harold shuts down, lines not yet played go back to their senders, `last_words` are said through the `[tts]` command, the source, the
     /// worker, the call's folder and the display's wake are let go, and the transcript is
     /// forgotten.
     async fn end(&mut self, why: Ended, last_words: Option<&'static str>) {
@@ -1353,7 +1381,11 @@ impl<P: CallPorts> Call<P> {
                 status.last_transcript = None;
             }
         }
-        self.drop_held();
+        if why == Ended::Shutdown {
+            self.drop_held();
+        } else {
+            self.pass_on_held();
+        }
         if let Some(playing) = self.playing.take() {
             self.sink.stop();
             if playing.by_tts {

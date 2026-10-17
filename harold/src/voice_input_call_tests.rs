@@ -191,6 +191,31 @@ async fn a_turn_before_bye_for_a_chief_busy_past_2_minutes_is_dropped() {
 }
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn a_held_turn_joined_to_a_turn_before_bye_keeps_its_first_2_minutes() {
+    let logs = CapturedLogs::start();
+    let h = Harness::new();
+    h.script([text("approve q19"), text("and q20, bye")]);
+    h.start().await;
+    h.set_chief(EffectiveAgentState::Busy);
+    h.speak().await;
+    sleep(Duration::from_secs(60)).await;
+    h.speak().await;
+    assert_eq!(h.played(), [CHIEF_BUSY, BYE]);
+    assert_eq!(h.state(), CallState::Off);
+
+    sleep(Duration::from_secs(65)).await;
+    h.set_chief(EffectiveAgentState::Idle);
+    sleep(Duration::from_secs(10)).await;
+
+    assert!(h.keys().is_empty());
+    let text = logs.text();
+    assert!(
+        text.contains("spoken prompt dropped reason=\"chief_busy\""),
+        "{text}"
+    );
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn a_second_start_while_the_first_opens_answers_the_call_it_opens() {
     let h = Harness::new();
 
