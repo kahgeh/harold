@@ -145,6 +145,8 @@ pub(crate) struct CallControl<P: CallPorts> {
 /// The call started last.
 struct Running<W> {
     events: mpsc::UnboundedSender<Event<W>>,
+    /// Turns true once the call listens, or has ended before it did.
+    opened: watch::Receiver<bool>,
     /// Turns true once the call has ended and cleaned up.
     ended: watch::Receiver<bool>,
 }
@@ -183,41 +185,45 @@ impl<P: CallPorts> CallControl<P> {
     }
 
     /// Starts a call, and answers once it listens or has ended. With a call already on,
-    /// answers its status and starts nothing new.
+    /// or still opening, answers its status once it has opened, and starts nothing new.
     pub(crate) async fn start(&self) -> CallStatus {
         if !self.set_up {
             return self.status();
         }
-        let started = {
+        let mut opened = {
             let mut call = lock(&self.call);
-            if call.as_ref().is_some_and(Running::is_open) {
-                drop(call);
-                return self.status();
-            }
-            if self.ports.voice_muted() {
-                drop(call);
-                {
-                    let mut status = lock(&self.status);
-                    status.state = CallState::Off;
-                    status.last_result = Some(TurnResult::VoiceMuted);
+            if let Some(running) = call.as_ref().filter(|running| running.is_open()) {
+                running.opened.clone()
+            } else {
+                if self.ports.voice_muted() {
+                    drop(call);
+                    {
+                        let mut status = lock(&self.status);
+                        status.state = CallState::Off;
+                        status.last_result = Some(TurnResult::VoiceMuted);
+                    }
+                    info!(reason = TurnResult::VoiceMuted.reason(), "call not started");
+                    return self.status();
                 }
-                info!(reason = TurnResult::VoiceMuted.reason(), "call not started");
-                return self.status();
+                let (events, inbox) = mpsc::unbounded_channel();
+                let (opened_tx, opened) = watch::channel(false);
+                let (ended_tx, ended) = watch::channel(false);
+                let ports = Arc::clone(&self.ports);
+                let status = Arc::clone(&self.status);
+                let own_events = events.clone();
+                tokio::spawn(async move {
+                    run_call(ports, status, own_events, inbox, opened_tx).await;
+                    let _ = ended_tx.send(true);
+                });
+                *call = Some(Running {
+                    events,
+                    opened: opened.clone(),
+                    ended,
+                });
+                opened
             }
-            let (events, inbox) = mpsc::unbounded_channel();
-            let (started_tx, started) = oneshot::channel();
-            let (ended_tx, ended) = watch::channel(false);
-            let ports = Arc::clone(&self.ports);
-            let status = Arc::clone(&self.status);
-            let own_events = events.clone();
-            tokio::spawn(async move {
-                run_call(ports, status, own_events, inbox, started_tx).await;
-                let _ = ended_tx.send(true);
-            });
-            *call = Some(Running { events, ended });
-            started
         };
-        let _ = started.await;
+        let _ = opened.wait_for(|opened| *opened).await;
         self.status()
     }
 
@@ -230,13 +236,7 @@ impl<P: CallPorts> CallControl<P> {
     /// Stops what plays now and listens at once. The chief's lines are then not played
     /// until the next turn is typed (Decision 12).
     pub(crate) fn talk_now(&self) -> CallStatus {
-        if self.send(Event::TalkNow) {
-            self.ports.sink().stop();
-            let mut status = lock(&self.status);
-            if matches!(status.state, CallState::Speaking | CallState::Waiting) {
-                status.state = CallState::Listening;
-            }
-        }
+        self.send(Event::TalkNow);
         self.status()
     }
 

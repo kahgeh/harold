@@ -8,9 +8,11 @@ use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use std::process::Stdio;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokio::io::{AsyncWriteExt, BufReader, Lines};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
+use tokio::sync::{mpsc, oneshot, watch};
+use tokio::task::JoinHandle;
 use tokio::time::timeout;
 
 /// The worker's program, written into the call's folder when the call starts.
@@ -56,9 +58,21 @@ impl WorkerError {
     }
 }
 
+/// Whether a worker has loaded, and whether it is still there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Health {
+    Loading,
+    Ready,
+    /// The worker has gone: it could not load, exited, or was killed for not answering.
+    Gone(WorkerError),
+}
+
 /// One call's worker. Requests are answered one at a time. Requests are not cancel-safe:
 /// a caller that drops a request future must drop (or close) the worker.
 pub(crate) trait VoiceWorker: Send + 'static {
+    /// The worker's health as it changes, between requests as well as during them.
+    /// Waiting for a change is cancel-safe.
+    fn health(&self) -> watch::Receiver<Health>;
     fn transcribe(
         &mut self,
         wav: &Path,
@@ -105,19 +119,21 @@ impl WorkerCommand {
     }
 }
 
-/// The worker as a child process, spoken to over JSON lines.
+/// The worker as a child process, spoken to over JSON lines. A reader task owns the child
+/// and its output: it waits for the ready line, passes each later line on as an answer, and
+/// reports the worker's health as it changes.
 pub(crate) struct ProcessWorker {
-    child: Child,
     stdin: Option<ChildStdin>,
-    lines: Lines<BufReader<ChildStdout>>,
-    ready: bool,
-    /// When the worker was started, from which `LOAD_LIMIT` counts.
-    started: Instant,
+    answers: mpsc::UnboundedReceiver<String>,
+    health: watch::Receiver<Health>,
+    /// Tells the reader to kill the child, and why; dropping it kills the child too.
+    kill: Option<oneshot::Sender<WorkerError>>,
+    reader: JoinHandle<()>,
 }
 
 impl ProcessWorker {
-    /// Writes the script into `call_dir` (mode 0600) and starts it. Loading goes on in the background:
-    /// the first request waits for the ready line, up to `LOAD_LIMIT`.
+    /// Writes the script into `call_dir` (mode 0600) and starts it. Loading goes on in the
+    /// background, and must end with the ready line within `LOAD_LIMIT`.
     pub(crate) fn start(command: &WorkerCommand, call_dir: &Path) -> Result<Self, WorkerError> {
         let script = call_dir.join("voice_worker.py");
         match std::fs::remove_file(&script) {
@@ -149,59 +165,68 @@ impl ProcessWorker {
             .map_err(|_| WorkerError::FailedToLoad)?;
         let stdin = child.stdin.take().ok_or(WorkerError::FailedToLoad)?;
         let stdout = child.stdout.take().ok_or(WorkerError::FailedToLoad)?;
+        let lines = tokio::io::AsyncBufReadExt::lines(BufReader::new(stdout));
+        let (health_tx, health) = watch::channel(Health::Loading);
+        let (answers_tx, answers) = mpsc::unbounded_channel();
+        let (kill, killed) = oneshot::channel();
+        let reader = tokio::spawn(read_output(child, lines, health_tx, answers_tx, killed));
         Ok(Self {
-            child,
             stdin: Some(stdin),
-            lines: tokio::io::AsyncBufReadExt::lines(BufReader::new(stdout)),
-            ready: false,
-            started: Instant::now(),
+            answers,
+            health,
+            kill: Some(kill),
+            reader,
         })
     }
 
+    fn kill(&mut self, why: WorkerError) {
+        if let Some(kill) = self.kill.take() {
+            let _ = kill.send(why);
+        }
+    }
+
+    /// Why the worker has gone, once its output has ended.
+    fn gone_reason(&self) -> WorkerError {
+        match *self.health.borrow() {
+            Health::Gone(error) => error,
+            Health::Loading | Health::Ready => WorkerError::Exited,
+        }
+    }
+
     /// Waits for the worker's ready line.
-    async fn wait_until_ready(&mut self) -> Result<(), WorkerError> {
-        if self.ready {
-            return Ok(());
+    async fn wait_until_ready(&self) -> Result<(), WorkerError> {
+        let mut health = self.health.clone();
+        let health = health
+            .wait_for(|health| *health != Health::Loading)
+            .await
+            .map(|health| *health);
+        match health {
+            Ok(Health::Ready) => Ok(()),
+            Ok(Health::Gone(error)) => Err(error),
+            Ok(Health::Loading) | Err(_) => Err(WorkerError::FailedToLoad),
         }
-        let left = LOAD_LIMIT.saturating_sub(self.started.elapsed());
-        let line = match timeout(left, self.lines.next_line()).await {
-            Ok(Ok(Some(line))) => line,
-            Ok(_) => return Err(WorkerError::FailedToLoad),
-            Err(_) => {
-                let _ = self.child.start_kill();
-                return Err(WorkerError::FailedToLoad);
-            }
-        };
-        let ready = serde_json::from_str::<Value>(&line)
-            .ok()
-            .and_then(|reply| reply["ready"].as_bool());
-        if ready != Some(true) {
-            return Err(WorkerError::FailedToLoad);
-        }
-        self.ready = true;
-        Ok(())
     }
 
     /// Sends one request and returns the worker's answer, which has `"ok": true`.
     async fn request(&mut self, request: Value) -> Result<Value, WorkerError> {
         self.wait_until_ready().await?;
-        let stdin = self.stdin.as_mut().ok_or(WorkerError::Exited)?;
         let mut line = request.to_string();
         line.push('\n');
+        let stdin = self.stdin.as_mut().ok_or(WorkerError::Exited)?;
         if stdin.write_all(line.as_bytes()).await.is_err() || stdin.flush().await.is_err() {
-            return Err(WorkerError::Exited);
+            return Err(self.gone_reason());
         }
-        let line = match timeout(REQUEST_LIMIT, self.lines.next_line()).await {
-            Ok(Ok(Some(line))) => line,
-            Ok(_) => return Err(WorkerError::Exited),
+        let line = match timeout(REQUEST_LIMIT, self.answers.recv()).await {
+            Ok(Some(line)) => line,
+            Ok(None) => return Err(self.gone_reason()),
             Err(_) => {
-                let _ = self.child.start_kill();
+                self.kill(WorkerError::TimedOut);
                 return Err(WorkerError::TimedOut);
             }
         };
         // A line that is not an answer would put every later answer out of step.
         let Ok(reply) = serde_json::from_str::<Value>(&line) else {
-            let _ = self.child.start_kill();
+            self.kill(WorkerError::Exited);
             return Err(WorkerError::Exited);
         };
         if reply["ok"].as_bool() != Some(true) {
@@ -211,7 +236,75 @@ impl ProcessWorker {
     }
 }
 
+/// The reader task: the ready line within `LOAD_LIMIT`, then each answer line, until the
+/// output ends or the worker is killed. The health it last reports is why the worker went.
+async fn read_output(
+    mut child: Child,
+    mut lines: Lines<BufReader<ChildStdout>>,
+    health: watch::Sender<Health>,
+    answers: mpsc::UnboundedSender<String>,
+    mut killed: oneshot::Receiver<WorkerError>,
+) {
+    let mut kill_asked = false;
+    let loaded = tokio::select! {
+        line = timeout(LOAD_LIMIT, lines.next_line()) => match line {
+            Ok(Ok(Some(line))) if is_ready(&line) => None,
+            // A first line that is not the ready line, an output that ended or failed,
+            // or no line in time.
+            _ => Some(WorkerError::FailedToLoad),
+        },
+        why = &mut killed => {
+            kill_asked = true;
+            Some(why.unwrap_or(WorkerError::Exited))
+        }
+    };
+    let gone = match loaded {
+        Some(error) => error,
+        None => {
+            health.send_replace(Health::Ready);
+            loop {
+                tokio::select! {
+                    line = lines.next_line() => match line {
+                        Ok(Some(line)) => {
+                            let _ = answers.send(line);
+                        }
+                        Ok(None) | Err(_) => break WorkerError::Exited,
+                    },
+                    why = &mut killed => {
+                        kill_asked = true;
+                        break why.unwrap_or(WorkerError::Exited);
+                    }
+                }
+            }
+        }
+    };
+    health.send_replace(Health::Gone(gone));
+    drop(answers);
+    if gone == WorkerError::FailedToLoad || kill_asked {
+        let _ = child.kill().await;
+        return;
+    }
+    // The output ended: the worker is exiting. A kill asked for meanwhile ends the wait.
+    tokio::select! {
+        _ = child.wait() => {}
+        _ = &mut killed => {
+            let _ = child.kill().await;
+        }
+    }
+}
+
+fn is_ready(line: &str) -> bool {
+    serde_json::from_str::<Value>(line)
+        .ok()
+        .and_then(|reply| reply["ready"].as_bool())
+        == Some(true)
+}
+
 impl VoiceWorker for ProcessWorker {
+    fn health(&self) -> watch::Receiver<Health> {
+        self.health.clone()
+    }
+
     async fn transcribe(&mut self, wav: &Path) -> Result<Transcript, WorkerError> {
         let reply = self
             .request(json!({"op": "transcribe", "wav": wav.to_string_lossy()}))
@@ -231,8 +324,9 @@ impl VoiceWorker for ProcessWorker {
 
     async fn close(mut self) {
         drop(self.stdin.take());
-        if timeout(CLOSE_LIMIT, self.child.wait()).await.is_err() {
-            let _ = self.child.kill().await;
+        if timeout(CLOSE_LIMIT, &mut self.reader).await.is_err() {
+            self.kill(WorkerError::Exited);
+            let _ = (&mut self.reader).await;
         }
     }
 }
@@ -308,6 +402,55 @@ esac"#;
         worker.say("Hi", Path::new("/x/say.wav")).await.unwrap();
         worker.close().await;
         assert!(std::fs::read_to_string(&log).unwrap().ends_with("closed\n"));
+        std::fs::remove_dir_all(&folder).unwrap();
+    }
+
+    /// The first health after `Loading`, or after `Ready` when `past_ready`.
+    async fn health_after(worker: &ProcessWorker, past_ready: bool) -> Health {
+        let mut health = worker.health();
+        let seen = timeout(
+            Duration::from_secs(5),
+            health.wait_for(|health| {
+                *health != Health::Loading && !(past_ready && *health == Health::Ready)
+            }),
+        )
+        .await
+        .expect("the health changes in time")
+        .expect("the reader reports before it goes");
+        *seen
+    }
+
+    #[tokio::test]
+    async fn health_turns_ready_after_the_ready_line() {
+        let folder = temp_folder();
+        let (command, _) = fake(&folder, READY, ANSWERS);
+        let worker = ProcessWorker::start(&command, &folder.join("call")).unwrap();
+        assert_eq!(health_after(&worker, false).await, Health::Ready);
+        worker.close().await;
+        std::fs::remove_dir_all(&folder).unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_exit_before_ready_is_seen_with_no_request() {
+        let folder = temp_folder();
+        let (command, _) = fake(&folder, "exit 1", ANSWERS);
+        let worker = ProcessWorker::start(&command, &folder.join("call")).unwrap();
+        assert_eq!(
+            health_after(&worker, false).await,
+            Health::Gone(WorkerError::FailedToLoad)
+        );
+        std::fs::remove_dir_all(&folder).unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_exit_after_ready_is_seen_with_no_request() {
+        let folder = temp_folder();
+        let (command, _) = fake(&folder, &format!("{READY}\nexit 0"), ANSWERS);
+        let worker = ProcessWorker::start(&command, &folder.join("call")).unwrap();
+        assert_eq!(
+            health_after(&worker, true).await,
+            Health::Gone(WorkerError::Exited)
+        );
         std::fs::remove_dir_all(&folder).unwrap();
     }
 

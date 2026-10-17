@@ -5,7 +5,9 @@ use super::phrases::{
     BYE, CHIEF_BUSY, NO_ANSWER, NO_CHIEF, NOTHING_HEARD, VOICE_FAILED, VOICE_STOPPED,
 };
 use super::wav::tick_wav;
-use super::worker::{REQUEST_LIMIT, Transcript, VoiceWorker, WorkerError};
+use super::worker::{
+    Health, ProcessWorker, REQUEST_LIMIT, Transcript, VoiceWorker, WorkerCommand, WorkerError,
+};
 use super::*;
 use crate::agent::domain::EffectiveAgentState;
 use crate::outbound::fake::CapturedLogs;
@@ -17,7 +19,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
-use tokio::sync::{Notify, mpsc};
+use tokio::sync::{Notify, mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, sleep};
 
@@ -46,7 +48,10 @@ enum Heard {
     Unlikely(String),
     Fail,
     TimeOut,
+    /// The worker exits: its health says so, and the request answers `Exited`.
     Exit,
+    /// The same, with the request answering a second after the health.
+    ExitLater,
     FailToLoad,
 }
 
@@ -63,11 +68,19 @@ struct WorkerLog {
     /// The text of each say request.
     said: Vec<String>,
     closes: usize,
+    /// Whether each worker starts `Loading` rather than `Ready`.
+    starts_loading: bool,
+    /// The health of the worker started last.
+    health: Option<Arc<watch::Sender<Health>>>,
 }
 
-struct FakeWorker(Arc<Mutex<WorkerLog>>);
+struct FakeWorker(Arc<Mutex<WorkerLog>>, Arc<watch::Sender<Health>>);
 
 impl VoiceWorker for FakeWorker {
+    fn health(&self) -> watch::Receiver<Health> {
+        self.1.subscribe()
+    }
+
     async fn transcribe(&mut self, wav: &Path) -> Result<Transcript, WorkerError> {
         let heard = {
             let mut log = self.0.lock().unwrap();
@@ -82,7 +95,15 @@ impl VoiceWorker for FakeWorker {
             Heard::Text(text) => (text, 0.1),
             Heard::Unlikely(text) => (text, 0.7),
             Heard::Fail => return Err(WorkerError::Failed),
-            Heard::Exit => return Err(WorkerError::Exited),
+            Heard::Exit => {
+                self.1.send_replace(Health::Gone(WorkerError::Exited));
+                return Err(WorkerError::Exited);
+            }
+            Heard::ExitLater => {
+                self.1.send_replace(Health::Gone(WorkerError::Exited));
+                sleep(Duration::from_secs(1)).await;
+                return Err(WorkerError::Exited);
+            }
             Heard::FailToLoad => return Err(WorkerError::FailedToLoad),
             Heard::TimeOut => {
                 sleep(REQUEST_LIMIT).await;
@@ -118,6 +139,8 @@ struct FakeSink {
     playing: AtomicBool,
     release: Notify,
     stops: AtomicUsize,
+    /// Whether each play fails.
+    fails: AtomicBool,
 }
 
 impl FakeSink {
@@ -130,6 +153,9 @@ impl FakeSink {
 
 impl AudioSink for FakeSink {
     async fn play(&self, wav: &Path) -> Result<(), String> {
+        if self.fails.load(Ordering::SeqCst) {
+            return Err("afplay exited with 1".to_string());
+        }
         let bytes = std::fs::read(wav).map_err(|error| error.to_string())?;
         let what = if bytes == tick_wav() {
             "tick".to_string()
@@ -249,8 +275,16 @@ impl CallPorts for FakePorts {
     }
 
     fn start_worker(&self, _call_dir: &Path) -> Result<FakeWorker, WorkerError> {
-        self.0.worker.lock().unwrap().starts += 1;
-        Ok(FakeWorker(Arc::clone(&self.0.worker)))
+        let mut log = self.0.worker.lock().unwrap();
+        log.starts += 1;
+        let first = if log.starts_loading {
+            Health::Loading
+        } else {
+            Health::Ready
+        };
+        let health = Arc::new(watch::channel(first).0);
+        log.health = Some(Arc::clone(&health));
+        Ok(FakeWorker(Arc::clone(&self.0.worker), health))
     }
 
     fn panes(&self) -> &Fake {
@@ -448,6 +482,12 @@ impl Harness {
             .collect()
     }
 
+    /// Sets the health of the worker started last.
+    fn set_health(&self, health: Health) {
+        let sender = self.worker().health.clone().expect("a worker was started");
+        sender.send_replace(health);
+    }
+
     fn awake_held(&self) -> usize {
         self.ports.state().awake_taken - self.ports.0.awake_dropped.load(Ordering::SeqCst)
     }
@@ -582,14 +622,28 @@ async fn talk_now_stops_the_sink_and_listens_at_once() {
     settle().await;
     assert_eq!(h.state(), CallState::Speaking);
 
-    assert_eq!(h.calls.talk_now().state, CallState::Listening);
-
-    assert_eq!(said.await.unwrap(), Some(true));
-    assert!(h.sink().stops.load(Ordering::SeqCst) >= 1);
+    // Another agent's update waits behind the answer.
+    let update = h.say("update", Speaker::OtherAgent);
     settle().await;
+
+    h.calls.talk_now();
+    settle().await;
+
     assert_eq!(h.state(), CallState::Listening);
-    past_the_tail().await;
-    h.speak().await;
+    assert_eq!(said.await.unwrap(), Some(true));
+    assert_eq!(h.sink().stops.load(Ordering::SeqCst), 1);
+    // The update waits until the user's next turn is cut.
+    h.sink().hold.store(false, Ordering::SeqCst);
+    sleep(Duration::from_secs(5)).await;
+    assert_eq!(h.played(), ["a long answer"]);
+    assert!(!update.is_finished());
+    h.feed(loud(1000));
+    settle().await;
+    assert_eq!(h.played(), ["a long answer"]);
+    h.feed(quiet(1200));
+    settle().await;
+    assert_eq!(update.await.unwrap(), Some(true));
+    assert_eq!(h.played(), ["a long answer", "update"]);
     assert_eq!(h.worker().transcribed.len(), 2);
 }
 
@@ -943,9 +997,11 @@ async fn a_worker_that_exits_is_started_once_more() {
     assert_eq!(h.tts(), [VOICE_STOPPED]);
     assert_eq!(h.status().last_result, Some(TurnResult::Failed));
     assert_eq!(h.state(), CallState::Listening);
-    assert!(
+    assert_eq!(
         logs.text()
-            .contains("voice worker exited reason=\"exited\"")
+            .matches("voice worker exited reason=\"exited\"")
+            .count(),
+        1
     );
     past_the_tail().await;
     h.speak().await;
@@ -954,6 +1010,7 @@ async fn a_worker_that_exits_is_started_once_more() {
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn a_second_exit_ends_the_call() {
+    let logs = CapturedLogs::start();
     let h = Harness::new();
     h.script([Heard::Exit, Heard::Exit]);
     h.start().await;
@@ -966,20 +1023,35 @@ async fn a_second_exit_ends_the_call() {
     assert_eq!(h.tts(), [VOICE_STOPPED, VOICE_FAILED]);
     assert_eq!(h.state(), CallState::Off);
     assert!(h.call_dirs().is_empty());
+    let text = logs.text();
+    assert_eq!(
+        text.matches("voice worker exited reason=\"exited\"")
+            .count(),
+        2,
+        "{text}"
+    );
+    assert!(
+        text.contains("call ended reason=\"voice_failed\""),
+        "{text}"
+    );
+    assert_eq!(h.awake_held(), 0);
 }
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn a_worker_that_fails_to_load_ends_the_call_at_once() {
     let logs = CapturedLogs::start();
     let h = Harness::new();
-    h.script([Heard::FailToLoad]);
+    h.worker().starts_loading = true;
     h.start().await;
 
-    h.speak().await;
+    h.set_health(Health::Gone(WorkerError::FailedToLoad));
+    settle().await;
 
     assert_eq!(h.worker().starts, 1);
     assert_eq!(h.tts(), [VOICE_FAILED]);
     assert_eq!(h.state(), CallState::Off);
+    assert_eq!(h.awake_held(), 0);
+    assert!(h.call_dirs().is_empty());
     let text = logs.text();
     assert!(
         text.contains("voice worker exited reason=\"failed_to_load\""),
@@ -1136,6 +1208,7 @@ async fn a_second_turn_while_the_first_waits_is_joined() {
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn stop_drops_a_turn_not_yet_typed() {
+    let logs = CapturedLogs::start();
     let h = Harness::new();
     h.start().await;
     h.set_chief(EffectiveAgentState::Busy);
@@ -1147,6 +1220,12 @@ async fn stop_drops_a_turn_not_yet_typed() {
 
     assert!(h.keys().is_empty());
     assert!(h.call_dirs().is_empty());
+    assert_eq!(h.status().last_result, Some(TurnResult::ChiefBusy));
+    let text = logs.text();
+    assert!(
+        text.contains("spoken prompt dropped reason=\"chief_busy\""),
+        "{text}"
+    );
 }
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
@@ -1252,3 +1331,7 @@ async fn a_call_reads_as_speaking_while_it_says_why_it_ended() {
     settle().await;
     assert_eq!(h.state(), CallState::Off);
 }
+
+// The worker's health, sounds that cannot play, the turn before a bye, and a second START.
+#[path = "voice_input_call_tests.rs"]
+mod call_tests;

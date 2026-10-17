@@ -10,7 +10,7 @@ use super::phrases::{
 };
 use super::speech::SpeechDetector;
 use super::wav::{tick_wav, wav_bytes};
-use super::worker::{Transcript, VoiceWorker, WorkerError};
+use super::worker::{Health, Transcript, VoiceWorker, WorkerError};
 use super::{
     AudioSink, AudioSource, CallPorts, CallState, CallStatus, SAMPLE_RATE, Speaker, TurnResult,
 };
@@ -24,7 +24,7 @@ use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, sleep_until};
 use tracing::{info, warn};
@@ -86,21 +86,25 @@ pub(super) enum Event<W> {
         by: Speaker,
         reply: oneshot::Sender<bool>,
     },
-    /// A transcribe request ended; the worker comes back with its answer.
+    /// A transcribe request ended; the worker of `generation` comes back with its answer.
     Transcribed {
+        generation: u64,
         dir: PathBuf,
         result: Result<Transcript, WorkerError>,
         worker: W,
     },
     /// A say request for the sound `id` ended.
     Made {
+        generation: u64,
         id: u64,
         wav: PathBuf,
         result: Result<(), WorkerError>,
         worker: W,
     },
+    /// The sound `id` ended; `played` is false when the sink could not play it.
     Played {
         id: u64,
+        played: bool,
     },
     TurnEndUpdate(String),
 }
@@ -147,6 +151,42 @@ async fn try_type<P: CallPorts>(ports: &P, text: &str) -> Typing {
     }
 }
 
+fn log_typed(pane: &str, text: &str) {
+    let words = text.split_whitespace().count();
+    info!(pane_id = %pane, words, "spoken prompt typed");
+    telemetry::prompt_typed(
+        pane,
+        StartedBy::Voice,
+        None,
+        time::OffsetDateTime::now_utc(),
+    );
+}
+
+fn log_dropped(result: TurnResult) {
+    info!(reason = result.reason(), "spoken prompt dropped");
+}
+
+/// Types a turn into a busy chief's pane once it is free: tried every second for up to two
+/// minutes, as during a call (Decision 9).
+async fn pass_on_when_free<P: CallPorts>(ports: Arc<P>, text: String) {
+    let gives_up_at = Instant::now() + BUSY_LIMIT;
+    loop {
+        tokio::time::sleep(BUSY_RETRY).await;
+        let result = match try_type(&*ports, &text).await {
+            Typing::Typed(pane) => {
+                log_typed(&pane, &text);
+                return;
+            }
+            Typing::Busy if Instant::now() < gives_up_at => continue,
+            Typing::Busy => TurnResult::ChiefBusy,
+            Typing::NoChief => TurnResult::NoChief,
+            Typing::Failed => TurnResult::Failed,
+        };
+        log_dropped(result);
+        return;
+    }
+}
+
 fn private_dir(dir: &Path) -> std::io::Result<()> {
     std::fs::DirBuilder::new().mode(0o700).create(dir)
 }
@@ -170,9 +210,9 @@ pub(super) async fn run_call<P: CallPorts>(
     status: Arc<Mutex<CallStatus>>,
     events: mpsc::UnboundedSender<Event<P::Worker>>,
     mut inbox: mpsc::UnboundedReceiver<Event<P::Worker>>,
-    started: oneshot::Sender<()>,
+    opened: watch::Sender<bool>,
 ) {
-    let Some(mut call) = Call::open(ports, status, events, started).await else {
+    let Some(mut call) = Call::open(ports, status, events, opened).await else {
         return;
     };
     call.run(&mut inbox).await;
@@ -258,6 +298,8 @@ struct Playing {
     id: u64,
     task: JoinHandle<()>,
     by_tts: bool,
+    /// Talk now stopped it: the call listens while it winds down.
+    stopped: bool,
     sound: Option<Sound>,
 }
 
@@ -300,6 +342,11 @@ struct Call<P: CallPorts> {
     mode: Mode,
     /// The worker while it answers nothing; a request's task owns it until it reports back.
     worker: Option<P::Worker>,
+    /// Counts the workers started; a request's answer carries the count of its worker.
+    generation: u64,
+    /// The health of the call's worker, while it is followed.
+    health: Option<watch::Receiver<Health>>,
+    worker_ready: bool,
     request: Option<JoinHandle<()>>,
     jobs: VecDeque<Job>,
     worker_exits: u32,
@@ -311,6 +358,8 @@ struct Call<P: CallPorts> {
     held: Option<HeldTurn>,
     /// Set by talk now: the chief's lines are taken as said until the next turn is typed.
     skip_chief_lines: bool,
+    /// Set by talk now: sounds other than an ending phrase wait until the next turn is cut.
+    hold_others: bool,
     done: bool,
     reader: Option<JoinHandle<()>>,
     updates: Vec<JoinHandle<()>>,
@@ -324,7 +373,7 @@ impl<P: CallPorts> Call<P> {
         ports: Arc<P>,
         status: Arc<Mutex<CallStatus>>,
         events: mpsc::UnboundedSender<Event<P::Worker>>,
-        started: oneshot::Sender<()>,
+        started: watch::Sender<bool>,
     ) -> Option<Self> {
         {
             let mut status = lock(&status);
@@ -384,7 +433,7 @@ impl<P: CallPorts> Call<P> {
             let _ = blocks.send(Event::SourceEnded);
         });
         info!("call started");
-        let call = Self {
+        let mut call = Self {
             sink: ports.sink(),
             ports,
             status,
@@ -392,7 +441,10 @@ impl<P: CallPorts> Call<P> {
             dir,
             detector: SpeechDetector::new(),
             mode: Mode::Listening,
-            worker: Some(worker),
+            worker: None,
+            generation: 0,
+            health: None,
+            worker_ready: false,
             request: None,
             jobs: VecDeque::new(),
             worker_exits: 0,
@@ -402,14 +454,17 @@ impl<P: CallPorts> Call<P> {
             awaiting: None,
             held: None,
             skip_chief_lines: false,
+            hold_others: false,
             done: false,
             reader: Some(reader),
             updates: Vec::new(),
             awake,
             next_id: 0,
         };
+        call.watch_worker(&worker);
+        call.worker = Some(worker);
         call.publish();
-        let _ = started.send(());
+        started.send_replace(true);
         Some(call)
     }
 
@@ -426,6 +481,9 @@ impl<P: CallPorts> Call<P> {
                     None => self.end(Ended::Stopped, None).await,
                 },
                 () = sleep_until(wake.unwrap_or(far)), if wake.is_some() => self.on_timer().await,
+                health = health_change(&mut self.health), if self.health.is_some() => {
+                    self.health_changed(health).await;
+                }
             }
         }
     }
@@ -440,20 +498,22 @@ impl<P: CallPorts> Call<P> {
             Event::TalkNow => self.talk_now(),
             Event::Say { line, by, reply } => self.line(line, by, Some(reply)),
             Event::Transcribed {
+                generation,
                 dir,
                 result,
                 worker,
             } => {
                 let _ = std::fs::remove_dir_all(&dir);
-                self.transcribed(result, worker).await;
+                self.transcribed(generation, result, worker).await;
             }
             Event::Made {
+                generation,
                 id,
                 wav,
                 result,
                 worker,
-            } => self.made(id, wav, result, worker).await,
-            Event::Played { id } => self.played(id).await,
+            } => self.made(generation, id, wav, result, worker).await,
+            Event::Played { id, played } => self.played(id, played).await,
             Event::TurnEndUpdate(line) => self.turn_end_update(line),
         }
     }
@@ -476,6 +536,7 @@ impl<P: CallPorts> Call<P> {
     fn turn_ended(&mut self, samples: &[i16]) {
         self.mode = Mode::Transcribing;
         self.detector.reset();
+        self.hold_others = false;
         let dir = self.dir.join(format!("turn-{}", Uuid::new_v4()));
         let written = private_dir(&dir)
             .and_then(|()| std::fs::write(dir.join(TURN_WAV), wav_bytes(samples, SAMPLE_RATE)));
@@ -505,11 +566,13 @@ impl<P: CallPorts> Call<P> {
             return;
         };
         let events = self.events.clone();
+        let generation = self.generation;
         self.request = Some(tokio::spawn(async move {
             let event = match job {
                 Job::Transcribe { dir } => {
                     let result = worker.transcribe(&dir.join(TURN_WAV)).await;
                     Event::Transcribed {
+                        generation,
                         dir,
                         result,
                         worker,
@@ -518,6 +581,7 @@ impl<P: CallPorts> Call<P> {
                 Job::Make { id, text, wav } => {
                     let result = worker.say(&text, &wav).await;
                     Event::Made {
+                        generation,
                         id,
                         wav,
                         result,
@@ -529,23 +593,34 @@ impl<P: CallPorts> Call<P> {
         }));
     }
 
-    async fn transcribed(&mut self, result: Result<Transcript, WorkerError>, worker: P::Worker) {
+    async fn transcribed(
+        &mut self,
+        generation: u64,
+        result: Result<Transcript, WorkerError>,
+        worker: P::Worker,
+    ) {
         self.request = None;
-        match result {
+        let error = match result {
             Ok(transcript) => {
-                self.worker = Some(worker);
+                self.worker_back(generation, worker).await;
                 self.heard(transcript).await;
+                return;
             }
-            Err(error) => {
-                self.dropped(TurnResult::Failed);
-                self.mode = Mode::Listening;
-                self.worker_failed(error, worker, None).await;
-            }
+            Err(error) => error,
+        };
+        self.dropped(TurnResult::Failed);
+        self.mode = Mode::Listening;
+        if error.exit_reason().is_some() {
+            worker.close().await;
+            self.worker_died(generation, error).await;
+        } else {
+            self.worker_back(generation, worker).await;
         }
     }
 
     async fn made(
         &mut self,
+        generation: u64,
         id: u64,
         wav: PathBuf,
         result: Result<(), WorkerError>,
@@ -555,7 +630,7 @@ impl<P: CallPorts> Call<P> {
         let at = self.sounds.iter().position(|sound| sound.id == id);
         match result {
             Ok(()) => {
-                self.worker = Some(worker);
+                self.worker_back(generation, worker).await;
                 match at {
                     Some(at) => self.keep_made(at),
                     None => {
@@ -565,20 +640,30 @@ impl<P: CallPorts> Call<P> {
             }
             // The worker could not make it: the `[tts]` command says it instead.
             Err(WorkerError::Failed) => {
-                self.worker = Some(worker);
+                self.worker_back(generation, worker).await;
                 let _ = std::fs::remove_file(&wav);
                 if let Some(at) = at {
                     self.sounds[at].audio = Audio::Tts;
                 }
             }
+            // The worker went: the line is made again by the next one.
             Err(error) => {
-                let retry = at.map(|at| Job::Make {
-                    id,
-                    text: self.sounds[at].text.clone(),
-                    wav,
-                });
-                self.worker_failed(error, worker, retry).await;
+                worker.close().await;
+                self.worker_died(generation, error).await;
+                if let (false, Some(at)) = (self.done, at) {
+                    let text = self.sounds[at].text.clone();
+                    self.jobs.push_front(Job::Make { id, text, wav });
+                }
             }
+        }
+    }
+
+    /// Takes back the worker a request owned. One whose death was already handled is closed.
+    async fn worker_back(&mut self, generation: u64, worker: P::Worker) {
+        if generation == self.generation {
+            self.worker = Some(worker);
+        } else {
+            worker.close().await;
         }
     }
 
@@ -612,33 +697,59 @@ impl<P: CallPorts> Call<P> {
         }
     }
 
-    /// After a request failed: a worker that is still running goes on. One that exited is
-    /// started once more, and `retry` is sent again; a second exit, or a worker that could
-    /// not load, ends the call.
-    async fn worker_failed(&mut self, error: WorkerError, worker: P::Worker, retry: Option<Job>) {
-        let Some(reason) = error.exit_reason() else {
-            self.worker = Some(worker);
+    /// Follows the health of `worker`, the call's worker from now on.
+    fn watch_worker(&mut self, worker: &P::Worker) {
+        let health = worker.health();
+        self.worker_ready = *health.borrow() == Health::Ready;
+        self.health = Some(health);
+    }
+
+    async fn health_changed(&mut self, health: Health) {
+        match health {
+            Health::Loading => {}
+            Health::Ready => self.worker_ready = true,
+            Health::Gone(error) => self.worker_died(self.generation, error).await,
+        }
+    }
+
+    /// The worker of `generation` has gone, seen through its health or a request; each
+    /// death counts once. A worker that never loaded, a second death, or a restart that
+    /// fails ends the call. Otherwise the worker is started once more, and requests go to
+    /// it from now on.
+    async fn worker_died(&mut self, generation: u64, error: WorkerError) {
+        if self.done || generation != self.generation {
             return;
-        };
+        }
+        let reason = error.exit_reason().unwrap_or("exited");
         warn!(reason, "voice worker exited");
-        worker.close().await;
+        self.generation += 1;
+        self.health = None;
+        if let Some(worker) = self.worker.take() {
+            worker.close().await;
+        }
         self.worker_exits += 1;
-        if error == WorkerError::FailedToLoad || self.worker_exits > 1 {
+        let restarted =
+            if error == WorkerError::FailedToLoad || !self.worker_ready || self.worker_exits > 1 {
+                None
+            } else {
+                match self.ports.start_worker(&self.dir) {
+                    Ok(worker) => Some(worker),
+                    Err(error) => {
+                        let reason = error.exit_reason().unwrap_or("failed_to_load");
+                        warn!(reason, "voice worker exited");
+                        None
+                    }
+                }
+            };
+        let Some(worker) = restarted else {
+            if self.mode == Mode::Transcribing {
+                self.dropped(TurnResult::Failed);
+            }
             self.end(Ended::VoiceFailed, Some(VOICE_FAILED)).await;
             return;
-        }
-        match self.ports.start_worker(&self.dir) {
-            Ok(worker) => self.worker = Some(worker),
-            Err(error) => {
-                let reason = error.exit_reason().unwrap_or("failed_to_load");
-                warn!(reason, "voice worker exited");
-                self.end(Ended::VoiceFailed, Some(VOICE_FAILED)).await;
-                return;
-            }
-        }
-        if let Some(job) = retry {
-            self.jobs.push_front(job);
-        }
+        };
+        self.watch_worker(&worker);
+        self.worker = Some(worker);
         let id = self.new_id();
         self.sounds.push_front(Sound {
             id,
@@ -698,26 +809,22 @@ impl<P: CallPorts> Call<P> {
         }
     }
 
-    /// The turn said before a bye: typed once if the chief takes it, then the call ends.
+    /// The turn said before a bye, and then the call ends. A busy chief gets the turn as
+    /// it would during the call, from a task that outlives the call and holds no audio.
     async fn last_turn(&mut self, text: String) {
         match try_type(&*self.ports, &text).await {
             Typing::Typed(pane) => self.typed(pane, text),
             Typing::NoChief => self.dropped(TurnResult::NoChief),
-            Typing::Busy => self.dropped(TurnResult::ChiefBusy),
+            Typing::Busy => {
+                tokio::spawn(pass_on_when_free(Arc::clone(&self.ports), text));
+            }
             Typing::Failed => self.dropped(TurnResult::Failed),
         }
         self.say_bye();
     }
 
     fn typed(&mut self, pane: String, text: String) {
-        let words = text.split_whitespace().count();
-        info!(pane_id = %pane, words, "spoken prompt typed");
-        telemetry::prompt_typed(
-            &pane,
-            StartedBy::Voice,
-            None,
-            time::OffsetDateTime::now_utc(),
-        );
+        log_typed(&pane, &text);
         let prompt = format!("{MARK} {text}");
         {
             let mut status = lock(&self.status);
@@ -741,7 +848,7 @@ impl<P: CallPorts> Call<P> {
     }
 
     fn dropped(&self, result: TurnResult) {
-        info!(reason = result.reason(), "spoken prompt dropped");
+        log_dropped(result);
         lock(&self.status).last_result = Some(result);
     }
 
@@ -1011,6 +1118,9 @@ impl<P: CallPorts> Call<P> {
         if !first.ready() || (self.mode == Mode::Listening && self.detector.in_turn()) {
             return;
         }
+        if self.hold_others && first.after == After::Nothing {
+            return;
+        }
         let Some(sound) = self.sounds.pop_front() else {
             return;
         };
@@ -1026,6 +1136,7 @@ impl<P: CallPorts> Call<P> {
             id: sound.id,
             task,
             by_tts,
+            stopped: false,
             sound: Some(sound),
         });
     }
@@ -1040,6 +1151,7 @@ impl<P: CallPorts> Call<P> {
             id,
             task,
             by_tts: false,
+            stopped: false,
             sound: None,
         });
     }
@@ -1048,10 +1160,14 @@ impl<P: CallPorts> Call<P> {
         let sink = Arc::clone(&self.sink);
         let events = self.events.clone();
         tokio::spawn(async move {
-            if let Err(error) = sink.play(&wav).await {
-                warn!(error = %error, "call sound not played");
-            }
-            let _ = events.send(Event::Played { id });
+            let played = match sink.play(&wav).await {
+                Ok(()) => true,
+                Err(error) => {
+                    warn!(error = %error, "call sound not played");
+                    false
+                }
+            };
+            let _ = events.send(Event::Played { id, played });
         })
     }
 
@@ -1060,11 +1176,13 @@ impl<P: CallPorts> Call<P> {
         let events = self.events.clone();
         tokio::spawn(async move {
             ports.speak_with_tts(&text).await;
-            let _ = events.send(Event::Played { id });
+            let _ = events.send(Event::Played { id, played: true });
         })
     }
 
-    async fn played(&mut self, id: u64) {
+    /// A sound ended. One the sink could not play is said through the `[tts]` command
+    /// next, and only then counts as said.
+    async fn played(&mut self, id: u64, played: bool) {
         if self.playing.as_ref().is_none_or(|playing| playing.id != id) {
             return;
         }
@@ -1072,19 +1190,38 @@ impl<P: CallPorts> Call<P> {
             return;
         };
         self.unmuted_at = Instant::now() + MUTE_TAIL;
-        if let Some(After::End(why)) = playing.sound.map(|sound| sound.finish(true)) {
+        let Some(mut sound) = playing.sound else {
+            return;
+        };
+        if !played && !playing.stopped && matches!(sound.audio, Audio::Wav { .. }) {
+            if let Audio::Wav {
+                path, remove: true, ..
+            } = &sound.audio
+            {
+                let _ = std::fs::remove_file(path);
+            }
+            sound.audio = Audio::Tts;
+            self.sounds.push_front(sound);
+            return;
+        }
+        if let After::End(why) = sound.finish(true) {
             self.end(why, None).await;
         }
     }
 
-    /// Stops what plays, listens at once, and takes the chief's lines as said until the
-    /// next turn is typed (Decision 12).
+    /// Stops what plays and listens at once. The chief's lines count as said until the next
+    /// turn is typed (Decision 12), and other sounds, but for an ending phrase, wait until
+    /// the next turn is cut.
     fn talk_now(&mut self) {
-        self.sink.stop();
-        if self.playing.as_ref().is_some_and(|playing| playing.by_tts) {
-            self.ports.stop_desk_line();
+        if let Some(playing) = self.playing.as_mut() {
+            self.sink.stop();
+            if playing.by_tts {
+                self.ports.stop_desk_line();
+            }
+            playing.stopped = true;
         }
         self.skip_chief_lines = true;
+        self.hold_others = true;
         let (chief, others): (VecDeque<Sound>, VecDeque<Sound>) = std::mem::take(&mut self.sounds)
             .into_iter()
             .partition(|sound| sound.by == Some(Speaker::Chief));
@@ -1110,7 +1247,7 @@ impl<P: CallPorts> Call<P> {
         let speaking = self
             .playing
             .as_ref()
-            .is_some_and(|playing| playing.sound.is_some());
+            .is_some_and(|playing| playing.sound.is_some() && !playing.stopped);
         let state = match self.mode {
             _ if speaking => CallState::Speaking,
             Mode::Listening => CallState::Listening,
@@ -1178,6 +1315,20 @@ impl<P: CallPorts> Call<P> {
     }
 }
 
+/// The next health `health` reports. Once its worker is gone for good, `health` is set to
+/// `None` and is no longer followed. Cancel-safe.
+async fn health_change(health: &mut Option<watch::Receiver<Health>>) -> Health {
+    let Some(receiver) = health.as_mut() else {
+        return std::future::pending().await;
+    };
+    let changed = receiver.changed().await;
+    let now = *receiver.borrow_and_update();
+    if changed.is_err() {
+        *health = None;
+    }
+    now
+}
+
 /// A call that ended before it listened.
 struct NotOpened<'a, P> {
     ports: &'a P,
@@ -1187,9 +1338,9 @@ struct NotOpened<'a, P> {
 
 impl<P: CallPorts> NotOpened<'_, P> {
     /// Answers START, says why the call ended, and removes its folder.
-    async fn close(&self, started: oneshot::Sender<()>, why: Ended) {
+    async fn close(&self, started: watch::Sender<bool>, why: Ended) {
         lock(self.status).state = CallState::Off;
-        let _ = started.send(());
+        started.send_replace(true);
         if why == Ended::NoChief {
             // No worker runs yet: the phrase plays from the phrase folder, or else
             // through the `[tts]` command (Decision 8).
