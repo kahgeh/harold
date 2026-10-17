@@ -1,5 +1,5 @@
 use crate::text::normalize_search;
-use crossterm::event::KeyCode;
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::collections::HashSet;
 use std::fmt;
 
@@ -663,15 +663,21 @@ impl App {
         Effect::None
     }
 
-    pub fn handle_key(&mut self, key: KeyCode) -> Effect {
+    /// Handles one key press. The call keys `c` and `t` act only without Control
+    /// or Alt, so Ctrl+C (pressed to leave a terminal app) never starts a call.
+    pub fn handle_key(&mut self, key: impl Into<KeyEvent>) -> Effect {
+        let key = key.into();
         if self.search.editing {
-            return self.handle_search_key(key);
+            return self.handle_search_key(key.code);
         }
         if self.palette.is_some() {
-            return self.handle_palette_key(key);
+            return self.handle_palette_key(key.code);
         }
+        let plain = !key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
 
-        match key {
+        match key.code {
             KeyCode::Char('f') => self.search.editing = true,
             KeyCode::Char('/') => {
                 self.palette = Some(PaletteState {
@@ -689,13 +695,14 @@ impl App {
             KeyCode::Char('k') | KeyCode::Up => self.select_relative(-1),
             KeyCode::Char('g') => self.select_boundary(false),
             KeyCode::Char('G') => self.select_boundary(true),
-            KeyCode::Char('c') if self.chief_row_selected() => {
+            KeyCode::Char('c') if plain && self.chief_row_selected() => {
                 if let Some(action) = self.call_press() {
                     return Effect::Call(action);
                 }
             }
             KeyCode::Char('t')
-                if self.chief_row_selected()
+                if plain
+                    && self.chief_row_selected()
                     && self
                         .call
                         .as_ref()
@@ -938,7 +945,7 @@ fn build_labels(rows: &[AgentRow]) -> Vec<RowLabel> {
 
 #[cfg(test)]
 mod tests {
-    use crossterm::event::KeyCode;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     use super::*;
     use AgentState::{Busy, Idle, Unknown};
@@ -2289,6 +2296,66 @@ mod tests {
                 "{state:?}"
             );
         }
+    }
+
+    #[test]
+    fn control_or_alt_c_on_the_chief_row_starts_and_ends_nothing() {
+        for state in [
+            CallState::Off,
+            CallState::Listening,
+            CallState::Thinking,
+            CallState::Speaking,
+        ] {
+            for modifiers in [KeyModifiers::CONTROL, KeyModifiers::ALT] {
+                let mut app = call_app(state);
+                assert_eq!(
+                    app.handle_key(KeyEvent::new(KeyCode::Char('c'), modifiers)),
+                    Effect::None,
+                    "{state:?} {modifiers:?}"
+                );
+            }
+        }
+        let mut app = call_app(CallState::Off);
+        assert_eq!(
+            app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE)),
+            Effect::Call(CallAction::Start)
+        );
+        let mut app = call_app(CallState::Listening);
+        assert_eq!(
+            app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE)),
+            Effect::Call(CallAction::Stop)
+        );
+    }
+
+    #[test]
+    fn control_or_alt_t_does_not_talk_now() {
+        for modifiers in [KeyModifiers::CONTROL, KeyModifiers::ALT] {
+            let mut app = call_app(CallState::Speaking);
+            assert_eq!(
+                app.handle_key(KeyEvent::new(KeyCode::Char('t'), modifiers)),
+                Effect::None,
+                "{modifiers:?}"
+            );
+        }
+        let mut app = call_app(CallState::Speaking);
+        assert_eq!(
+            app.handle_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE)),
+            Effect::Call(CallAction::TalkNow)
+        );
+    }
+
+    #[test]
+    fn control_keys_keep_their_behaviour_off_the_call_keys() {
+        let mut app = call_app(CallState::Off);
+        select_pane(&mut app, "%1");
+        assert_eq!(
+            app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            Effect::None
+        );
+        assert_eq!(
+            app.handle_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL)),
+            Effect::Quit
+        );
     }
 
     #[test]

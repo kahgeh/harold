@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
 use tokio::runtime::Builder;
 use tokio::sync::{mpsc, watch};
 use tokio::time::sleep;
@@ -555,14 +555,14 @@ fn panic_detail(payload: Box<dyn std::any::Any + Send>) -> String {
 }
 
 enum InputMessage {
-    Key(KeyCode),
+    Key(KeyEvent),
     Redraw,
     Error(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum RuntimeInput {
-    Key(KeyCode),
+    Key(KeyEvent),
     Redraw,
     Focus(FocusReading),
 }
@@ -691,7 +691,7 @@ impl InputPump {
                         Ok(Event::Key(key))
                             if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) =>
                         {
-                            if sender.try_send(InputMessage::Key(key.code)).is_err()
+                            if sender.try_send(InputMessage::Key(key)).is_err()
                                 && sender.is_closed()
                             {
                                 break;
@@ -1034,7 +1034,7 @@ impl RuntimeCore {
         delay
     }
 
-    fn handle_key(&mut self, key: KeyCode, navigator: &impl PaneNavigator) -> Control {
+    fn handle_key(&mut self, key: impl Into<KeyEvent>, navigator: &impl PaneNavigator) -> Control {
         match self.app.handle_key(key) {
             Effect::None => Control::Continue,
             Effect::Retry => Control::Retry,
@@ -1120,6 +1120,20 @@ mod tests {
         });
 
         assert_eq!(pump.recv().await, Some(Ok(RuntimeInput::Redraw)));
+    }
+
+    #[tokio::test]
+    async fn a_key_reaches_the_app_with_its_modifiers() {
+        let control_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        let mut pump = InputPump::start_with(SequenceInput {
+            events: vec![Event::Key(control_c)].into(),
+        });
+
+        let Some(Ok(RuntimeInput::Key(key))) = pump.recv().await else {
+            panic!("expected a key");
+        };
+        assert_eq!(key.code, KeyCode::Char('c'));
+        assert_eq!(key.modifiers, KeyModifiers::CONTROL);
     }
 
     #[test]
@@ -1362,7 +1376,7 @@ mod tests {
         let source = FakeSource::pending(Arc::clone(&open_dropped));
         let (input_sender, mut input) = InputPump::channel();
         input_sender
-            .try_send(InputMessage::Key(KeyCode::Char('r')))
+            .try_send(InputMessage::Key(KeyCode::Char('r').into()))
             .unwrap();
         let (_shutdown_sender, mut shutdown) = FakeShutdown::channel();
         let navigator = FakeNavigator::successful();
@@ -1388,7 +1402,7 @@ mod tests {
         core.retry_after("again");
         let (delay_sender, mut delay_input) = InputPump::channel();
         delay_sender
-            .try_send(InputMessage::Key(KeyCode::Char('r')))
+            .try_send(InputMessage::Key(KeyCode::Char('r').into()))
             .unwrap();
         assert_eq!(
             wait_for_retry(
@@ -1407,7 +1421,7 @@ mod tests {
         let closed = Arc::new(AtomicBool::new(false));
         let (stream_sender, mut stream_input) = InputPump::channel();
         stream_sender
-            .try_send(InputMessage::Key(KeyCode::Char('r')))
+            .try_send(InputMessage::Key(KeyCode::Char('r').into()))
             .unwrap();
         assert_eq!(
             consume_stream(
@@ -1489,7 +1503,7 @@ mod tests {
         let (input_sender, mut input) = InputPump::channel();
         input_sender.try_send(InputMessage::Redraw).unwrap();
         input_sender
-            .try_send(InputMessage::Key(KeyCode::Char('r')))
+            .try_send(InputMessage::Key(KeyCode::Char('r').into()))
             .unwrap();
         let (_shutdown_sender, mut shutdown) = FakeShutdown::channel();
         let mut core = RuntimeCore::new(Some("client-7".into()));
@@ -1544,7 +1558,9 @@ mod tests {
             .map(KeyCode::Char)
             .chain([KeyCode::Enter, KeyCode::Char('q')])
         {
-            input_sender.try_send(InputMessage::Key(key)).unwrap();
+            input_sender
+                .try_send(InputMessage::Key(key.into()))
+                .unwrap();
         }
         let (_shutdown_sender, mut shutdown) = FakeShutdown::channel();
         let mut core = live_core(false);
@@ -1577,7 +1593,9 @@ mod tests {
             .map(KeyCode::Char)
             .chain([KeyCode::Enter, KeyCode::Char('q')])
         {
-            input_sender.try_send(InputMessage::Key(key)).unwrap();
+            input_sender
+                .try_send(InputMessage::Key(key.into()))
+                .unwrap();
         }
         let (_shutdown_sender, mut shutdown) = FakeShutdown::channel();
         let mut core = live_core(false);
@@ -1741,7 +1759,9 @@ mod tests {
         });
         let (input_sender, mut input) = InputPump::channel();
         for key in keys.chars().chain(['q']).map(KeyCode::Char) {
-            input_sender.try_send(InputMessage::Key(key)).unwrap();
+            input_sender
+                .try_send(InputMessage::Key(key.into()))
+                .unwrap();
         }
         let (_shutdown_sender, mut shutdown) = FakeShutdown::channel();
         let outcome = consume_stream(
