@@ -321,7 +321,7 @@ The dashboard shows `TRANSCRIBING` and `WAITING` both as `chief thinking`. It wa
 
 ## The shared core and away-web-app
 
-The conversation core is one design with two places for audio. It does four things: it finds the end of speech, takes turns, turns speech into text, and types the text into the chief's pane marked `🎙`. This page's call is the desk's: the microphone through `ffmpeg` and the speakers through `afplay`. away-web-app's call mode (its stage 1b) adds only the phone's side, recording and playing audio in the app and carrying it to and from the Mac, by supplying its own source and sink. It starts after this work has merged.
+The conversation core is one design with two places for audio. It does four things: it finds the end of speech, takes turns, turns speech into text, and types the text into the chief's pane marked `🎙`. This page's call is the desk's: the microphone through `ffmpeg` and the speakers through `afplay`. away-web-app's call mode (its stage 1b) adds only the phone's side, recording and playing audio in the app and carrying it to and from the Mac, by supplying its own source and sink. The phone's side is built; [The phone's side](#the-phones-side) describes it.
 
 The core, in `harold/src/voice_input.rs`, is internal Rust, not an API. A call is built from three traits.
 
@@ -336,7 +336,7 @@ The core, in `harold/src/voice_input.rs`, is internal Rust, not an API. A call i
 - `play(&self, wav)` plays the 16-bit PCM WAV at `wav`, at any sample rate. Only one `play` runs at a time. It resolves `Ok` when the sound has ended or `stop` ended it, and `Err` when it could not be played. The core then says the line through `[tts]` instead.
 - `stop(&self)` stops what `play` is playing now and returns at once; the sound stops promptly. It does nothing when nothing plays, and does not affect a later `play`.
 
-**`CallPorts`** bundles everything a call reads and does outside the core. The daemon's is `MacPorts`; the phone's comes with away-web-app. It names a `Source`, a `Sink`, a `Worker`, the chief's `Panes`, and an `Awake` value held for the call (`caffeinate` at the desk; dropping it lets the display sleep). Its methods are:
+**`CallPorts`** bundles everything a call reads and does outside the core. The daemon's is `MacPorts`; the phone's is `PhonePorts`, built on the desk's `MacPorts`. It names a `Source`, a `Sink`, a `Worker`, the chief's `Panes`, and an `Awake` value held for the call (`caffeinate` at the desk; dropping it lets the display sleep). Its methods are:
 
 | Method | Does |
 |---|---|
@@ -352,3 +352,20 @@ The core, in `harold/src/voice_input.rs`, is internal Rust, not an API. A call i
 `CallControl` runs at most one call. `start`, `stop`, `talk_now` and `status` are what the `Call` RPC calls. `say_blocking` plays a line in the open call from a blocking thread, which is how `harold speak` and other agents' turn-end updates reach it. `CallControl::say`, its async twin, is compiled only in tests today (`#[cfg(test)]`). Stage 1b re-enables it, because the phone call says its lines from async code.
 
 Tests use a fake source, sink, worker and pane; nothing in them touches the microphone, the speakers or a model.
+
+## The phone's side
+
+away-web-app's call mode (its stage 1b) runs on this core. [The away app reference](../away-app/README.md#calls-stage-1b) describes what you see and hear; this section is what the phone supplies in place of the desk's parts. The phone's calls are built only when `[web_app]` is set, on the same `MacPorts`, so the transcription worker, the chief's pane and the voice name are the desk's.
+
+**The source and the sink.**
+
+- **The source** is `PhoneSource`. The app posts quarter-second pieces of 16 kHz mono audio (`POST /call/audio`), and the source hands each to the core with the time the app recorded it. A piece with an odd number of bytes, more than one second of audio, or no time is refused and the call goes on; one that arrives with no call open is refused with `409`. The source ends, and the call with it, when the phone posts nothing for 15 seconds while nothing plays.
+- **The sink** is `PhoneSink`. `play` does not play anything on the Mac. It offers the WAV under a new id; the app fetches it (`GET /call/answer/<id>`), plays it and reports it (`POST /call/played`). `play` resolves when the phone reports, or `stop` (Talk now) takes the sound back. A sound the phone fetched and never reported counts as played after its length plus 10 seconds. One it never fetched fails, so the core says the line through `[tts]`, which on the phone is its own voice. Nothing is offered for more than 2 minutes.
+
+**Muting by capture time.** The core ignores a block recorded while a sound played or within 0.3 seconds after. At the desk a block's capture time is when it was read. On the phone a piece may be delayed by the network, so the source stamps each with when the app recorded it (the call's start plus the piece's `at`), and the core compares that with the sound's end. The app also stops sending during that time, so the core's rule is the second guard.
+
+**The phone's own voice.** What Harold says only through `[tts]` at the desk, such as the last words `Bye.`, and any sound the phone never fetched, goes to the phone as a line, not a sound. The app says it with the phone's `speechSynthesis`, and reports it said. The core waits for that report, or for 2 seconds plus 80 milliseconds for each character, whichever comes first. Harold's voice mute silences the Mac's speakers, not the phone, so it does not end or refuse a phone's call.
+
+**`say_in_open_call`.** `harold speak` and other agents' turn-end updates reach an open call through `say_in_open_call`. It asks the desk's call first, then the phone's, and the first with a call open takes the line. A line the chief says in the phone's call plays on the phone and is added to the thread as text, with no push and no iMessage. A call open at the desk and one on the phone are never open together: the phone's start ends the desk's first.
+
+**Logs.** A phone's call writes `app call started` and `app call ended` with `reason`, and its turns write the lines above. No transcript, audio or line text is in any of them.

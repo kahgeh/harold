@@ -53,8 +53,6 @@ const NOT_SET_UP: &str = "Voice is not set up on the Mac";
 /// The phone's calls, as the web app holds them. A phone call starts only once a call
 /// open at the desk has ended, so the chief never gets turns from two microphones; and a
 /// chief's line played on the phone is added to the thread, with no push.
-// main.rs builds these; until it does only the tests do.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) struct AppCalls<B: CallPorts> {
     phone: PhoneCalls<B>,
     store: Arc<HaroldStore>,
@@ -64,7 +62,6 @@ pub(crate) struct AppCalls<B: CallPorts> {
     runtime: tokio::runtime::Handle,
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 impl<B: CallPorts> AppCalls<B> {
     /// Call inside the daemon's runtime: the calls keep a handle to it.
     pub(crate) fn new(

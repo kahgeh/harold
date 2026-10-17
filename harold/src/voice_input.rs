@@ -382,8 +382,6 @@ fn say_in_first_open(calls: &[&dyn LineTaker], line: &str, by: Speaker) -> Optio
 static PHONE_CALLS: OnceLock<Arc<dyn LineTaker>> = OnceLock::new();
 
 /// Sets the phone's calls, once, at start-up.
-// main.rs registers the phone's calls; until it does, no phone's calls are registered.
-#[allow(dead_code)]
 pub(crate) fn init_phone_calls(calls: Arc<dyn LineTaker>) {
     assert!(
         PHONE_CALLS.set(calls).is_ok(),

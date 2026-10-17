@@ -545,8 +545,6 @@ impl<B: CallPorts> CallPorts for PhonePorts<B> {
 
 /// The phone's calls, as the web app holds them: each runs on the shared core through the
 /// phone's ports, and while it is open the view follows its state and transcript.
-// The web app's call routes hold these; until they exist only the tests do.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) struct PhoneCalls<B: CallPorts> {
     calls: Arc<CallControl<PhonePorts<B>>>,
     line: Arc<PhoneLine>,
@@ -561,7 +559,6 @@ impl<B: CallPorts> LineTaker for PhoneCalls<B> {
     }
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 impl<B: CallPorts> PhoneCalls<B> {
     pub(crate) fn new(base: B, set_up: bool) -> Self {
         let line = PhoneLine::new(set_up);
@@ -619,6 +616,7 @@ impl<B: CallPorts> PhoneCalls<B> {
         self.calls.talk_now()
     }
 
+    #[cfg(test)]
     pub(crate) fn status(&self) -> CallStatus {
         self.calls.status()
     }

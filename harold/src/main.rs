@@ -930,12 +930,39 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(queue) = &telemetry_tasks.alert_queue {
         store.set_alert_queue(queue.clone());
     }
+    // The desk's calls come first: they sweep leftover `call-*` folders before either
+    // control can start a call.
+    let call_ports = voice_input::MacPorts::from_settings(cfg, snapshots.clone());
+    let set_up = call_ports.set_up();
+    voice_input::init_daemon_calls(voice_input::CallControl::new(call_ports, set_up));
+
+    // The phone's calls exist only with the web app. One value serves the web app's call
+    // routes and the chief's spoken lines.
+    let phone_calls = cfg.web_app.as_ref().map(|_| {
+        let ports = voice_input::MacPorts::from_settings(cfg, snapshots.clone());
+        let set_up = ports.set_up();
+        let end_desk: web_app::call::EndDeskCall = Arc::new(|| {
+            Box::pin(async {
+                if let Some(calls) = voice_input::daemon_calls() {
+                    calls.stop().await;
+                }
+            })
+        });
+        Arc::new(web_app::call::AppCalls::new(
+            voice_input::PhoneCalls::new(ports, set_up),
+            Arc::clone(&store),
+            end_desk,
+        ))
+    });
+    if let Some(calls) = &phone_calls {
+        voice_input::init_phone_calls(Arc::clone(calls) as Arc<dyn voice_input::LineTaker>);
+    }
     let web_app = web_app::start_if_set(
         cfg.web_app.as_ref(),
         Arc::clone(&store),
         std::path::Path::new(&store_path),
         shutdown_rx.clone(),
-        None,
+        phone_calls.map(|calls| calls as Arc<dyn web_app::call::PhoneCallApi>),
     )
     .await;
     let event_handler_handle = tokio::spawn(projector::run_event_handler_with_app(
@@ -956,10 +983,6 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
         shutdown_rx.clone(),
     )
     .await?;
-
-    let call_ports = voice_input::MacPorts::from_settings(cfg, snapshots.clone());
-    let set_up = call_ports.set_up();
-    voice_input::init_daemon_calls(voice_input::CallControl::new(call_ports, set_up));
 
     info!(address = %addr, "Harold listening");
     let service = harold_service(

@@ -23,9 +23,9 @@ The moved folder keeps everything recorded until then. Moved back, it opens in t
 The app is built in two stages:
 
 - **Stage 1a, built:** the thread, alerts and typed replies, described below.
-- **Stage 1b, not built yet:** calls with the chief ([Calls](#calls-stage-1b)).
+- **Stage 1b, built:** calls with the chief ([Calls](#calls-stage-1b)).
 
-Stage 1a is built; stage 1b is not. Both are tested on the Mac before the phone: publishing the app to the phone waits until stage 0, a throwaway test on a real iPhone, has passed and you have said so.
+Both stages are built. Both are tested on the Mac before the phone: publishing the app to the phone waits until stage 0, a throwaway test on a real iPhone, has passed and you have said so.
 
 ## Setting it up
 
@@ -126,7 +126,7 @@ With `[web_app]` set, the chief's messages always go into the app's thread. Once
 | Message | Route |
 |---|---|
 | From the chief's pane (turn-end updates, `send-message-to-away-device`, spoken lines), with alerts turned on and no call open | **The app only, as text.** Harold puts the message in the thread and sends a push. A spoken line arrives as its text. No voice note is made. |
-| A spoken line from the chief while a call is open | **The call.** It plays on the phone at once, and its text is added to the thread. (Stage 1b, not built yet.) |
+| A spoken line from the chief while the phone's call is open | **The phone's call.** It plays on the phone at once, and its text is added to the thread, with no push and no iMessage. |
 | From the chief, when no phone has turned alerts on, or the push service refuses the push or cannot be reached | **iMessage only, once.** It is sent as today, starting `(app unreachable)`. A push address the service reports gone (`404` or `410`) is deleted. |
 | From any other pane | **iMessage as today.** The chief-only rule still decides what is left out. |
 | The user's iMessage replies | **As today**, routed by tag or the latest notifier. Nothing in iMessage changes. |
@@ -138,7 +138,35 @@ The route applies only to messages that would reach the phone today. At the desk
 
 ## Calls (stage 1b)
 
-Calls are not built yet. When they are, you tap **📞 Call the chief** and talk with the chief as in a phone call: Harold hears when you stop talking, types what you said into the chief's pane, plays the chief's spoken answer, and listens again. The desk's calls work the same way; the [voice input reference](../voice-input/README.md) describes them.
+You tap **📞 Call**, and talk with the chief as in a phone call. Harold hears when you stop talking, types what you said into the chief's pane, marked `🎙`, plays the chief's spoken answer on the phone, and listens again. The desk's calls work the same way; the [voice input reference](../voice-input/README.md) describes them. Call mode uses the `[voice_input]` section for transcription. Without it, the button's screen says `Voice is not set up on the Mac`.
+
+A call starts only when no call is open at the desk. If one is, Harold ends it first, so the chief never gets turns from two microphones.
+
+### The routes
+
+Every call route passes the login check and the checks on posts ([What the app refuses](#what-the-app-refuses)). The page's script uses them; nothing else needs to.
+
+| Route | Does |
+|---|---|
+| `POST /call` | Starts the call. `204` once it listens; otherwise `409` with a line saying why. |
+| `POST /call/audio?at=<ms>` | A quarter-second piece of audio: 16 kHz mono, little-endian `i16`, 4,000 samples (8,000 bytes), recorded `at` milliseconds from the call's start. `204` once taken. `409` when no call is open, `400` for an odd number of bytes or a missing `at`, `413` for more than one second of audio, `503` when too many pieces wait. A refused piece does not end the call. |
+| `POST /call/talk-now` | Stops what plays and listens at once. |
+| `DELETE /call` | Ends the call, and answers `204` once it has ended and cleaned up. |
+| `GET /call/answer/<id>` | The WAV of an answer or phrase Harold offers. `404` once it is no longer offered. |
+| `POST /call/played?id=<id>` | The phone reports that it has played the sound, or said the line, `id`. |
+
+`POST /call/played` is not in the spec's route list. It is added because Harold has to know when a sound has ended before it listens again, and the phone is the only one that knows. A late or unknown report changes nothing and answers `204`.
+
+### Not hearing the chief
+
+While an answer, a phrase or the tick plays, and for 0.3 seconds after, the phone sends no audio. Two guards keep the chief's voice out of the next turn:
+
+- **The app:** it stops sending from the moment a sound is offered, and starts again 0.3 seconds after the sound ends. The browser's echo cancellation helps too.
+- **The core on the Mac:** it ignores any piece recorded, by the time the app stamped it, while a sound played or within 0.3 seconds after. A piece delayed on the network is judged by when it was recorded, not when it arrived.
+
+The phone does no detection of its own. The core's rule ends a turn after 1.2 seconds of silence. To cut an answer short, tap **Talk now**.
+
+### What iOS limits
 
 iOS limits what a home-screen web app can do during a call. Stage 0 checks each of these on a real iPhone:
 
@@ -148,7 +176,28 @@ iOS limits what a home-screen web app can do during a call. Stage 0 checks each 
 | The microphone stops when the phone locks or the app leaves the front. | The app ends the call, and on return shows `Call ended: the app was closed or the phone locked`. |
 | Sound pauses while the app is in the background. | The call ends the same way. The chief's answer still reaches the thread as text, with an alert. |
 
-Nothing records or plays while the phone is locked or the app is in the background.
+Nothing records or plays while the phone is locked or the app is in the background. If the phone vanishes without ending the call, Harold ends it 15 seconds after the last piece of audio, while nothing plays.
+
+### When something gets in the way
+
+| Case | What you hear |
+|---|---|
+| The chief's pane is busy | `The chief is busy. I'll pass it on when it's free.` Harold types the turn when the pane is free, up to 2 minutes, and listens again meanwhile. |
+| The chief takes longer than 3 seconds | A soft tick every 3 seconds, from 3 seconds after your turn is typed. At 90 seconds, `No answer yet. It will be in the thread.` |
+| The chief's turn ends without `harold speak` | The chief's turn-end update, made into audio. |
+| Nothing was heard, or the transcript is empty | `Sorry, I didn't catch that.` Harold listens again. |
+| No chief is running | `There's no chief running.` The call ends. |
+| You say `bye`, `bye bye`, `goodbye` or `bye chief` at the end of a turn | `Bye.` The call ends. Anything before those words is typed to the chief; a turn of only those words types nothing. |
+
+Harold's own phrases are made into audio on the Mac. A line that has no audio, such as one only the `[tts]` command could say, is said by the phone's own voice.
+
+### Privacy in a call
+
+- **Transcripts** are not stored as events or in the thread, and no log line holds one. The screen shows the last one while the call lasts.
+- **Audio** of your turns is held on the Mac only until the turn is transcribed.
+- **Answer audio** is deleted once the phone has played it, or after 2 minutes. A sound the phone fetched counts as played after its length plus 10 seconds, if no report comes.
+- **Logs:** a call writes `app call started` and `app call ended` with a `reason`, and the turns write the desk's lines. No line holds a transcript, audio or the text of a line.
+- **The chief's lines:** a spoken line played in a call is added to the thread as text, so you can read it after. It sends no push and no iMessage.
 
 ## Logs and privacy
 
@@ -161,6 +210,8 @@ Harold logs no message text, no reply, no push address and no key. The app adds 
 | `app push sent` | `outcome` (`accepted`) |
 | `app push refused` | `outcome` (`gone`, `refused` or `unreachable`) and `reason` (`status_<code>`, `timeout`, `connect`, `send`, `build` or `client`) |
 | `app reply stored` | `chars`, the reply's length in characters |
+| `app call started` | none |
+| `app call ended` | `reason`, one of the desk's `call ended` reasons ([Log lines](../voice-input/README.md#log-lines)); `microphone_failed` when the phone stopped posting audio |
 
 Four other lines report failures, and none carries content:
 
