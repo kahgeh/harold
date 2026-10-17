@@ -679,8 +679,21 @@ fn call_button_texts(view: &CallView, voice_muted: bool, now_ms: i64) -> (Vec<St
     }
 }
 
+/// While the chief speaks, the call button's text (by its place in
+/// `call_button_texts`) and talk now's, in the order they are tried. Talk now is
+/// the only way to cut the chief short, so it outlasts the state words.
+const SPEAKING_PAIRS: [(usize, Option<&str>); 6] = [
+    (0, Some("[t] talk now")),
+    (1, Some("[t] talk now")),
+    (2, Some("[t] talk now")),
+    (1, Some("[t] talk")),
+    (2, Some("[t] talk")),
+    (2, None),
+];
+
 /// The button (and talk-now button) spans for `view` in `width` columns: the
-/// first of the call button's texts that fits, then talk now in what is left.
+/// first of the call button's texts that fits or, while the chief speaks, the
+/// first of `SPEAKING_PAIRS` that fits. The shortest is used when none does.
 fn call_buttons(
     view: &CallView,
     voice_muted: bool,
@@ -688,22 +701,26 @@ fn call_buttons(
     width: usize,
 ) -> Vec<Span<'static>> {
     let (texts, style) = call_button_texts(view, voice_muted, now_ms);
-    let fits = |text: &str, room: usize| Line::raw(text).width() <= room;
-    let shortest = texts.len() - 1;
-    let call = texts
-        .iter()
-        .position(|text| fits(text, width))
-        .unwrap_or(shortest);
-    let mut spans = vec![Span::styled(texts[call].clone(), style)];
-    if view.state == CallState::Speaking {
-        let room = width.saturating_sub(spans[0].width() + 1);
-        if let Some(talk) = ["[t] talk now", "[t] talk"]
+    let text_width = |text: &str| Line::raw(text).width();
+    let (call, talk) = if view.state == CallState::Speaking {
+        let pair_width = |(call, talk): &(usize, Option<&str>)| {
+            text_width(&texts[*call]) + talk.map_or(0, |talk| 1 + text_width(talk))
+        };
+        SPEAKING_PAIRS
             .into_iter()
-            .find(|text| fits(text, room))
-        {
-            spans.push(Span::raw(" "));
-            spans.push(Span::styled(talk, Style::default().fg(INK).bg(KEY_CAP)));
-        }
+            .find(|pair| pair_width(pair) <= width)
+            .unwrap_or(SPEAKING_PAIRS[SPEAKING_PAIRS.len() - 1])
+    } else {
+        let call = texts
+            .iter()
+            .position(|text| text_width(text) <= width)
+            .unwrap_or(texts.len() - 1);
+        (call, None)
+    };
+    let mut spans = vec![Span::styled(texts[call].clone(), style)];
+    if let Some(talk) = talk {
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled(talk, Style::default().fg(INK).bg(KEY_CAP)));
     }
     spans
 }
@@ -2716,17 +2733,48 @@ mod tests {
                 assert_eq!(spans.len(), 1, "{state:?}");
             }
 
-            // On screen at 140 columns, beside the detail panel.
+            // On screen at 140 columns, beside the detail panel. Its 39-column cell
+            // holds every full text but the chief speaking with talk now.
             let mut app = call_layout(chief_call(state));
             app.snapshot.tts_muted = voice_muted;
             let lines = text_lines(&app, 140, 38, now_ms);
-            assert_eq!(chief_buttons_text(&lines), text, "{state:?}: {lines:#?}");
+            let on_screen = if state == CallState::Speaking {
+                format!(
+                    "[c] 📞 {} end call [t] talk now",
+                    super::speaking_bars(now_ms)
+                )
+            } else {
+                text.to_owned()
+            };
+            assert_eq!(
+                chief_buttons_text(&lines),
+                on_screen,
+                "{state:?}: {lines:#?}"
+            );
             let style = style_at(&rendered_buffer(&app, 140, 38, now_ms), "[c]");
             assert_eq!(style.fg, Some(fg), "{state:?}");
             if let Some(bg) = bg {
                 assert_eq!(style.bg, Some(bg), "{state:?}");
             }
         }
+
+        // The spec's full speaking row, wherever the cell is 51 columns or more: at
+        // 110 columns there is no detail panel and the cell is 54.
+        let speaking = call_layout(chief_call(CallState::Speaking));
+        let lines = text_lines(&speaking, 110, 38, now_ms);
+        assert_eq!(
+            chief_buttons_text(&lines),
+            format!("{} [t] talk now", speaking_full(now_ms))
+        );
+        let style = style_at(&rendered_buffer(&speaking, 110, 38, now_ms), "[t]");
+        assert_eq!((style.fg, style.bg), (Some(ink), Some(key_cap)));
+    }
+
+    fn speaking_full(now_ms: i64) -> String {
+        format!(
+            "[c] 📞 {} chief speaking · end call",
+            super::speaking_bars(now_ms)
+        )
     }
 
     #[test]
@@ -2751,21 +2799,21 @@ mod tests {
         // Off has one text.
         assert_eq!(texts(CallState::Off, false, 4), "[c] 📞 call");
 
-        // Speaking: the call button's first text that fits, then talk now in what is left.
-        let full = format!("[c] 📞 {bars} chief speaking · end call");
-        let middle = format!("[c] 📞 {bars} end call");
+        // Speaking: the first pair that fits, talk now outlasting the state words.
+        let full = format!("[c] 📞 {bars} chief speaking · end call [t] talk now");
+        let middle = format!("[c] 📞 {bars} end call [t] talk now");
+        let short = "[c] 📞 end call [t] talk now".to_owned();
         for (width, expected) in [
-            (51, format!("{full} [t] talk now")),
-            (50, format!("{full} [t] talk")),
-            (46, full.clone()),
-            (38, full.clone()),
-            (37, format!("{middle} [t] talk now")),
-            (34, format!("{middle} [t] talk now")),
-            (33, format!("{middle} [t] talk")),
-            (30, format!("{middle} [t] talk")),
-            (29, middle.clone()),
-            (21, middle.clone()),
-            (20, "[c] 📞 end call".to_owned()),
+            (200, full.clone()),
+            (51, full.clone()),
+            (50, middle.clone()),
+            (34, middle.clone()),
+            (33, short.clone()),
+            (28, short.clone()),
+            (27, "[c] 📞 end call [t] talk".to_owned()),
+            (24, "[c] 📞 end call [t] talk".to_owned()),
+            (23, "[c] 📞 end call".to_owned()),
+            (15, "[c] 📞 end call".to_owned()),
             (5, "[c] 📞 end call".to_owned()),
         ] {
             assert_eq!(
@@ -2794,17 +2842,25 @@ mod tests {
                 );
             }
         }
-        // The exact texts the order gives where the cell is tight.
+        // The exact texts the order gives. Talk now shows from 70 columns, where the
+        // cell (28 columns or more) has room for it.
+        let thinking = "[c] … chief thinking · end call".to_owned();
+        let short_thinking = "[c] … end call".to_owned();
+        let middle = format!("[c] 📞 {bars} end call [t] talk now");
+        let short = "[c] 📞 end call [t] talk now".to_owned();
         for (width, state, expected) in [
-            (60, CallState::Thinking, "[c] … end call".to_owned()),
+            (60, CallState::Thinking, short_thinking.clone()),
+            (70, CallState::Thinking, short_thinking.clone()),
+            (84, CallState::Thinking, short_thinking.clone()),
+            (100, CallState::Thinking, thinking.clone()),
+            (125, CallState::Thinking, short_thinking.clone()),
+            (140, CallState::Thinking, thinking.clone()),
             (60, CallState::Speaking, "[c] 📞 end call".to_owned()),
-            (125, CallState::Thinking, "[c] … end call".to_owned()),
-            (125, CallState::Speaking, format!("[c] 📞 {bars} end call")),
-            (
-                70,
-                CallState::Speaking,
-                format!("[c] 📞 {bars} end call [t] talk"),
-            ),
+            (70, CallState::Speaking, short.clone()),
+            (84, CallState::Speaking, short.clone()),
+            (100, CallState::Speaking, middle.clone()),
+            (125, CallState::Speaking, short.clone()),
+            (140, CallState::Speaking, middle.clone()),
         ] {
             let lines = text_lines(&call_layout(chief_call(state)), width, 38, now_ms);
             assert_eq!(chief_buttons_text(&lines), expected, "{state:?} at {width}");
