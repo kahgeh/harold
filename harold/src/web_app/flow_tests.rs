@@ -7,6 +7,7 @@ use tokio::net::TcpListener;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
+use super::origin::loopback_hosts;
 use super::pages::CONTENT_SECURITY_POLICY;
 use super::replies::REPLY_MAX_CHARS;
 use super::{AppState, router};
@@ -51,14 +52,15 @@ struct TestServer {
 impl TestServer {
     async fn serve(store: Arc<HaroldStore>) -> Self {
         let (shutdown, shutdown_rx) = watch::channel(());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
         let state = AppState {
             store,
             allowed_login: Arc::from(LOGIN),
             public_key: Arc::from("BPublicKeyForTheTestPage"),
+            loopback_hosts: Arc::from(loopback_hosts("127.0.0.1:0", addr)),
             shutdown: shutdown_rx,
         };
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
         let handle = tokio::spawn(async move {
             let _ = axum::serve(listener, router(state)).await;
         });
@@ -73,15 +75,36 @@ impl TestServer {
         format!("http://{}{path}", self.addr)
     }
 
+    /// Posts `body` with the headers the app's own page sends: Datastar's `@post` to
+    /// `/replies`, and `alerts.js`'s fetch to `/push/subscription`.
     async fn post(&self, path: &str, body: impl Into<reqwest::Body>) -> reqwest::Response {
-        reqwest::Client::new()
+        let mut request = reqwest::Client::new()
             .post(self.url(path))
             .header("Tailscale-User-Login", LOGIN)
-            .header("content-type", "application/json")
-            .body(body)
-            .send()
-            .await
-            .unwrap()
+            .header("sec-fetch-site", "same-origin")
+            .header("origin", format!("http://{}", self.addr))
+            .header("content-type", "application/json");
+        if path == "/replies" {
+            request = request.header("datastar-request", "true");
+        }
+        request.body(body).send().await.unwrap()
+    }
+
+    /// Sends `method` to `path` with the login, only the given headers, and `body`.
+    async fn send_with(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        headers: &[(&str, &str)],
+        body: String,
+    ) -> reqwest::Response {
+        let mut request = reqwest::Client::new()
+            .request(method, self.url(path))
+            .header("Tailscale-User-Login", LOGIN);
+        for (name, value) in headers {
+            request = request.header(*name, *value);
+        }
+        request.body(body).send().await.unwrap()
     }
 
     async fn get(&self, path: &str) -> reqwest::Response {
@@ -405,7 +428,9 @@ async fn markup_in_a_reply_is_escaped_in_the_page_and_the_stream() {
     assert!(!page.contains("@post('/x')"), "{page}");
     // The page's own Datastar expressions are fixed template text.
     assert!(
-        page.contains(r#"<form id="reply" class="bar bottom" data-on:submit="@post('/replies')">"#),
+        page.contains(
+            r#"<form id="reply" class="bar bottom" data-indicator:sending data-on:submit="@post('/replies')">"#
+        ),
         "{page}"
     );
     assert!(page.contains("data-bind:reply"), "{page}");
@@ -449,4 +474,247 @@ async fn the_stream_ends_at_shutdown() {
         .await
         .expect("the stream ends within 2 s");
     assert_eq!(ended, None);
+}
+
+/// A valid subscription body.
+fn a_subscription() -> String {
+    subscription_body(
+        "https://web.push.apple.com/QGuQyavXutnMH",
+        "BNcRdreALRFXTkOOUHK1EtK2wtaz5Ry4YfYCA_0QTpQtUbVlUls0VJXg7A8u-Ts1XbjhazAkj7I99e8QcYP7DkM",
+        "tBHItJI5svbpez7KI4CCXg==",
+    )
+}
+
+/// Fails when the store holds any event, thread row or push subscription.
+async fn assert_nothing_stored(store: &HaroldStore) {
+    assert!(events(store).await.is_empty(), "a refusal stores no event");
+    store.project_unhandled_events(100).await.unwrap();
+    assert!(store.app_messages_since(0).await.unwrap().is_empty());
+    assert!(store.app_push_subscriptions().await.unwrap().is_empty());
+}
+
+/// Current-thread runtime: the server's middleware runs on this thread, so `CapturedLogs`
+/// sees its lines, and the exported records catch any line from any thread.
+#[tokio::test(flavor = "current_thread")]
+async fn a_cross_site_post_is_refused_and_stores_nothing() {
+    crate::telemetry::test_support::install();
+    let logs = CapturedLogs::start();
+    let directory = TestDirectory::new();
+    let store = directory.store().await;
+    let server = TestServer::serve(store.clone()).await;
+    let page_headers = [
+        ("content-type", "application/json"),
+        ("datastar-request", "true"),
+    ];
+    let sites: [&[(&str, &str)]; 5] = [
+        &[("sec-fetch-site", "cross-site")],
+        &[("sec-fetch-site", "same-site")],
+        &[("sec-fetch-site", "none")],
+        &[("origin", "https://evil.example")],
+        &[],
+    ];
+
+    for (path, body) in [
+        ("/replies", reply_body(CANARY)),
+        ("/push/subscription", a_subscription()),
+    ] {
+        for site in sites {
+            let headers: Vec<_> = site.iter().chain(&page_headers).copied().collect();
+            let response = server
+                .send_with(reqwest::Method::POST, path, &headers, body.clone())
+                .await;
+            assert_eq!(response.status(), 403, "{path} with {site:?}");
+            assert!(response.bytes().await.unwrap().is_empty(), "{path}");
+        }
+    }
+
+    assert_nothing_stored(&store).await;
+    let captured = logs.text();
+    for named in [CANARY, "/replies", "/push/subscription", "evil.example"] {
+        assert!(!captured.contains(named), "a log line names {named}");
+    }
+    // Other tests export records at the same time; neither string appears anywhere else.
+    let exported = format!("{:?}", crate::telemetry::test_support::logs());
+    for named in [CANARY, "evil.example"] {
+        assert!(
+            !exported.contains(named),
+            "an exported record names {named}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_simple_post_without_the_datastar_or_json_header_is_refused() {
+    let directory = TestDirectory::new();
+    let store = directory.store().await;
+    let server = TestServer::serve(store.clone()).await;
+    let origin = format!("http://{}", server.addr);
+    let sites: [&[(&str, &str)]; 2] =
+        [&[("sec-fetch-site", "same-origin")], &[("origin", &origin)]];
+    let simple_types: [&[(&str, &str)]; 4] = [
+        &[("content-type", "text/plain")],
+        &[("content-type", "application/x-www-form-urlencoded")],
+        &[
+            ("content-type", "text/plain"),
+            ("datastar-request", "false"),
+        ],
+        &[],
+    ];
+
+    for (path, body) in [
+        ("/replies", reply_body(CANARY)),
+        ("/push/subscription", a_subscription()),
+    ] {
+        for site in sites {
+            for simple in simple_types {
+                let headers: Vec<_> = site.iter().chain(simple).copied().collect();
+                let response = server
+                    .send_with(reqwest::Method::POST, path, &headers, body.clone())
+                    .await;
+                assert_eq!(response.status(), 403, "{path} with {headers:?}");
+                assert!(response.bytes().await.unwrap().is_empty(), "{path}");
+            }
+        }
+    }
+
+    assert_nothing_stored(&store).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_same_origin_datastar_post_is_accepted() {
+    let directory = TestDirectory::new();
+    let store = directory.store().await;
+    let server = TestServer::serve(store.clone()).await;
+    let origin = format!("http://{}", server.addr);
+    // Datastar sends every signal, the in-flight `sending` one too.
+    let signals = serde_json::json!({ "reply": "from the page", "sending": true }).to_string();
+
+    let reply = server
+        .send_with(
+            reqwest::Method::POST,
+            "/replies",
+            &[
+                ("sec-fetch-site", "same-origin"),
+                ("datastar-request", "true"),
+            ],
+            signals,
+        )
+        .await;
+    assert_eq!(reply.status(), 200);
+
+    for headers in [
+        [
+            ("sec-fetch-site", "same-origin"),
+            ("content-type", "application/json"),
+        ],
+        [
+            ("origin", origin.as_str()),
+            ("content-type", "Application/JSON; charset=utf-8"),
+        ],
+    ] {
+        let subscription = server
+            .send_with(
+                reqwest::Method::POST,
+                "/push/subscription",
+                &headers,
+                a_subscription(),
+            )
+            .await;
+        assert_eq!(subscription.status(), 204, "{headers:?}");
+    }
+
+    let stored = events(&store).await;
+    assert_eq!(stored.len(), 3, "{stored:?}");
+    assert_eq!(stored[0].0, "InboundMessageReceived");
+    assert_eq!(stored[0].1["text"], "from the page");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_request_with_a_foreign_host_is_refused() {
+    let directory = TestDirectory::new();
+    let store = directory.store().await;
+    let server = TestServer::serve(store.clone()).await;
+    let port = server.addr.port();
+    let localhost = format!("localhost:{port}");
+    let wrong_port = format!("localhost:{}", port.wrapping_add(1));
+
+    for host in [
+        "evil.example",
+        "EVIL.example:80",
+        "ts.net.evil.example",
+        "evil-ts.net",
+        "pasm4mbp.tail1234.ts.net.evil.example",
+        wrong_port.as_str(),
+    ] {
+        let page = server
+            .send_with(reqwest::Method::GET, "/", &[("host", host)], String::new())
+            .await;
+        assert_eq!(page.status(), 403, "GET / with Host {host}");
+        assert!(page.bytes().await.unwrap().is_empty(), "{host}");
+
+        // A rebinding page is same-origin with its own name, and sends the page's headers.
+        let origin = format!("http://{host}");
+        let reply = server
+            .send_with(
+                reqwest::Method::POST,
+                "/replies",
+                &[
+                    ("host", host),
+                    ("origin", &origin),
+                    ("sec-fetch-site", "same-origin"),
+                    ("datastar-request", "true"),
+                    ("content-type", "application/json"),
+                ],
+                reply_body(CANARY),
+            )
+            .await;
+        assert_eq!(reply.status(), 403, "POST /replies with Host {host}");
+    }
+    assert_nothing_stored(&store).await;
+
+    for host in [
+        "pasm4mbp.tail1234.ts.net",
+        "PASM4MBP.Tail1234.TS.NET:443",
+        localhost.as_str(),
+    ] {
+        let page = server
+            .send_with(reqwest::Method::GET, "/", &[("host", host)], String::new())
+            .await;
+        assert_eq!(page.status(), 200, "GET / with Host {host}");
+    }
+
+    // The phone's post through `tailscale serve`, with only an Origin to go by.
+    let reply = server
+        .send_with(
+            reqwest::Method::POST,
+            "/replies",
+            &[
+                ("host", "pasm4mbp.tail1234.ts.net"),
+                ("origin", "https://pasm4mbp.tail1234.ts.net"),
+                ("datastar-request", "true"),
+                ("content-type", "application/json"),
+            ],
+            reply_body("through serve"),
+        )
+        .await;
+    assert_eq!(reply.status(), 200);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_send_button_is_disabled_while_a_reply_is_posting() {
+    let directory = TestDirectory::new();
+    let server = TestServer::serve(directory.store().await).await;
+
+    let page = server.get("/").await.text().await.unwrap();
+
+    assert!(
+        page.contains(
+            r#"<form id="reply" class="bar bottom" data-indicator:sending data-on:submit="@post('/replies')">"#
+        ),
+        "{page}"
+    );
+    assert!(
+        page.contains(r#"<button type="submit" data-attr:disabled="$sending">Send</button>"#),
+        "{page}"
+    );
 }

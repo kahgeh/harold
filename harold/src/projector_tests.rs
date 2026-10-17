@@ -3924,6 +3924,7 @@ fn the_canary_reaches_no_log_line_and_no_export() {
 async fn run_the_app_path_with_a_canary() -> Vec<String> {
     use crate::store::{AppReplyState, AppSender, append_app_push_subscribed};
     use crate::web_app::fake_push::FakePushService;
+    use crate::web_app::origin::loopback_hosts;
     use crate::web_app::push::{Pusher, VapidKey, vapid_key_path};
     use crate::web_app::route::WebAppRoute;
     use crate::web_app::{AppState, router};
@@ -3951,14 +3952,15 @@ async fn run_the_app_path_with_a_canary() -> Vec<String> {
 
     // The app's real router, behind its login check, on a free local port.
     let (_shutdown, shutdown_rx) = tokio::sync::watch::channel(());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
     let state = AppState {
         store: Arc::clone(&store),
         allowed_login: Arc::from(APP_LOGIN),
         public_key: Arc::from(public_key.as_str()),
+        loopback_hosts: Arc::from(loopback_hosts("127.0.0.1:0", addr)),
         shutdown: shutdown_rx,
     };
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
     let server = tokio::spawn(async move {
         let _ = axum::serve(listener, router(state)).await;
     });
@@ -3974,10 +3976,14 @@ async fn run_the_app_path_with_a_canary() -> Vec<String> {
             .with_away_text(away.clone()),
     ));
 
-    // The reply, typed in the app and handed to the chief.
+    // The reply, typed in the app and handed to the chief, with the headers Datastar's
+    // `@post` sends from the app's own page.
     let response = reqwest::Client::new()
         .post(format!("http://{addr}/replies"))
         .header("Tailscale-User-Login", APP_LOGIN)
+        .header("sec-fetch-site", "same-origin")
+        .header("origin", format!("http://{addr}"))
+        .header("datastar-request", "true")
         .header("content-type", "application/json")
         .body(json!({ "reply": APP_CANARY }).to_string())
         .send()

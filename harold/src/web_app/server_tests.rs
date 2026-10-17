@@ -8,6 +8,7 @@ use tokio::net::TcpListener;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
+use super::origin::loopback_hosts;
 use super::pages::CONTENT_SECURITY_POLICY;
 use super::push::vapid_key_path;
 use super::{AppState, DATASTAR_SHA256, THREAD_DAYS, router, start, start_if_set};
@@ -59,14 +60,15 @@ struct TestServer {
 impl TestServer {
     async fn serve(store: Arc<HaroldStore>) -> Self {
         let (shutdown, shutdown_rx) = watch::channel(());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
         let state = AppState {
             store,
             allowed_login: Arc::from(LOGIN),
             public_key: Arc::from(PUBLIC_KEY),
+            loopback_hosts: Arc::from(loopback_hosts("127.0.0.1:0", addr)),
             shutdown: shutdown_rx,
         };
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
         let handle = tokio::spawn(async move {
             let _ = axum::serve(listener, router(state)).await;
         });

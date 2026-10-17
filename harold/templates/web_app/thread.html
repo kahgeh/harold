@@ -20,9 +20,9 @@
 <main>
 {% include "web_app/messages.html" %}
 </main>
-<form id="reply" class="bar bottom" data-on:submit="@post('/replies')">
+<form id="reply" class="bar bottom" data-indicator:sending data-on:submit="@post('/replies')">
 <input type="text" data-bind:reply maxlength="1000" placeholder="Reply to the chief" aria-label="Reply to the chief" autocomplete="off">
-<button type="submit">Send</button>
+<button type="submit" data-attr:disabled="$sending">Send</button>
 </form>
 </body>
 </html>

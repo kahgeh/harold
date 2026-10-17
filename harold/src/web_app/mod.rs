@@ -41,6 +41,7 @@ mod assets_tests;
 
 pub(crate) mod chief;
 pub(crate) mod login;
+pub(crate) mod origin;
 pub(crate) mod pages;
 pub(crate) mod push;
 pub(crate) mod replies;
@@ -62,12 +63,16 @@ pub(crate) struct AppState {
     pub allowed_login: Arc<str>,
     /// Harold's VAPID public key, base64url.
     pub public_key: Arc<str>,
+    /// The loopback Hosts the app answers to, besides the tailnet's `.ts.net` names:
+    /// `origin::loopback_hosts`.
+    pub loopback_hosts: Arc<[String]>,
     /// Changes, or closes, when Harold shuts down.
     pub shutdown: watch::Receiver<()>,
 }
 
 /// The app's routes, every one of them, the 404 fallback included, behind
-/// `login::require_login`, and every response carrying the content security policy.
+/// `login::require_login` and then `origin::require_same_origin`, and every response
+/// carrying the content security policy.
 pub(crate) fn router(state: AppState) -> Router {
     Router::new()
         .route("/", get(pages::get_thread))
@@ -76,6 +81,11 @@ pub(crate) fn router(state: AppState) -> Router {
         .route("/push/subscription", post(replies::post_subscription))
         .route("/updates", get(updates::get_updates))
         .fallback(pages::not_found)
+        // The last layer added runs first: the login check, then the origin check.
+        .layer(from_fn_with_state(
+            state.clone(),
+            origin::require_same_origin,
+        ))
         .layer(from_fn_with_state(state.clone(), login::require_login))
         .layer(from_fn(pages::add_policy))
         .with_state(state)
@@ -93,8 +103,9 @@ pub(crate) struct Running {
 }
 
 /// Binds `settings.listen_addr()`, makes or reads the key, serves until shutdown, and prunes
-/// the thread to 30 days at start and every hour. Err when it cannot (D12); the error names
-/// the address or the key's path, never the login or the key.
+/// the thread to 30 days at start and every hour. Err when it cannot, and Harold then runs
+/// without the app, every message reaching the phone through iMessage; the error names the
+/// address or the key's path, never the login or the key.
 pub(crate) async fn start(
     settings: &WebAppSettings,
     store: Arc<HaroldStore>,
@@ -107,7 +118,6 @@ pub(crate) async fn start(
     let listener = TcpListener::bind(addr)
         .await
         .map_err(|error| format!("listen on {addr}: {error}"))?;
-    #[cfg(test)]
     let local_addr = listener
         .local_addr()
         .map_err(|error| format!("listen on {addr}: {error}"))?;
@@ -118,6 +128,7 @@ pub(crate) async fn start(
         store: Arc::clone(&store),
         allowed_login: Arc::from(settings.allowed_login.as_str()),
         public_key: Arc::from(key.public_key_base64url()),
+        loopback_hosts: Arc::from(origin::loopback_hosts(&settings.listen, local_addr)),
         shutdown: shutdown.clone(),
     };
     let pusher = Arc::new(Pusher::new(key, &settings.allowed_login));
