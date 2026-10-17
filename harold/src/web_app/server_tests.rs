@@ -114,8 +114,11 @@ async fn event_count(store: &HaroldStore) -> usize {
         .len()
 }
 
-#[tokio::test(flavor = "multi_thread")]
+/// Current-thread runtime: the server's middleware runs on this thread, so `CapturedLogs`
+/// sees its lines, and the exported records catch any line from any thread.
+#[tokio::test(flavor = "current_thread")]
 async fn every_route_refuses_a_missing_or_wrong_login() {
+    crate::telemetry::test_support::install();
     let logs = CapturedLogs::start();
     let directory = TestDirectory::new();
     let store = directory.store().await;
@@ -154,20 +157,18 @@ async fn every_route_refuses_a_missing_or_wrong_login() {
 
     assert_eq!(event_count(&store).await, 0, "a refusal stores no event");
     assert!(store.app_messages_since(0).await.unwrap().is_empty());
-    let exported = crate::telemetry::test_support::exported_text();
-    for text in [logs.text(), exported] {
-        for named in [
-            CANARY,
-            "someone@else",
-            "/updates",
-            "/replies",
-            "/push/subscription",
-        ] {
-            assert!(!text.contains(named), "a log line names {named}");
-        }
-        for (_, path) in routes.iter().filter(|(_, path)| *path != "/") {
-            assert!(!text.contains(path), "a log line names {path}");
-        }
+    // Other tests export records at the same time; neither string appears anywhere else.
+    let exported = format!("{:?}", crate::telemetry::test_support::logs());
+    let captured = logs.text();
+    for named in [CANARY, "someone@else"] {
+        assert!(
+            !exported.contains(named),
+            "an exported record names {named}"
+        );
+        assert!(!captured.contains(named), "a log line names {named}");
+    }
+    for (_, path) in routes.iter().filter(|(_, path)| *path != "/") {
+        assert!(!captured.contains(path), "a log line names {path}");
     }
 }
 

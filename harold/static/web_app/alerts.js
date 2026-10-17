@@ -37,6 +37,7 @@
     try {
       const permission = await Notification.requestPermission();
       if (permission !== "granted") {
+        // The button stays, for another tap.
         return;
       }
       const registration = await navigator.serviceWorker.register("/static/sw.js", {
@@ -49,20 +50,34 @@
         userVisibleOnly: true,
         applicationServerKey,
       });
-      const response = await fetch("/push/subscription", {
-        method: "POST",
-        credentials: "same-origin",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          endpoint: subscription.endpoint,
-          keys: {
-            p256dh: encodeBase64url(subscription.getKey("p256dh")),
-            auth: encodeBase64url(subscription.getKey("auth")),
-          },
-        }),
-      });
-      if (response.ok) {
+      let stored = false;
+      try {
+        const response = await fetch("/push/subscription", {
+          method: "POST",
+          credentials: "same-origin",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            endpoint: subscription.endpoint,
+            keys: {
+              p256dh: encodeBase64url(subscription.getKey("p256dh")),
+              auth: encodeBase64url(subscription.getKey("auth")),
+            },
+          }),
+        });
+        stored = response.ok;
+      } catch {
+        // Harold could not be reached: the subscription is not stored.
+      }
+      if (stored) {
         hide();
+        return;
+      }
+      // Harold did not store it: drop the browser's copy, so the next load does not
+      // take it for a working sign-up, and leave the button for another tap.
+      try {
+        await subscription.unsubscribe();
+      } catch {
+        // Nothing more to do; the button stays.
       }
     } finally {
       button.disabled = false;
