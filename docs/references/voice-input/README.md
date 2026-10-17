@@ -55,7 +55,7 @@ The chief treats `🎙` lines as possibly misheard, and confirms anything conseq
 
 | Case | What happens |
 |---|---|
-| The chief's pane is busy | Harold says `The chief is busy. I'll pass it on when it's free.` It tries to type the turn every second, for up to 2 minutes, and listens meanwhile. A second turn spoken meanwhile is joined to the waiting one with a space, so the chief gets one `🎙` line. After 2 minutes the turn is dropped, with no phrase. |
+| The chief's pane is busy | Harold says `The chief is busy. I'll pass it on when it's free.` It tries to type the turn every second, for up to 2 minutes, and listens meanwhile. A second turn spoken meanwhile is joined to the waiting one with a space, so the chief gets one `🎙` line. After 2 minutes the turn is dropped, with no phrase. When the call ends before the turn is typed, the turn keeps waiting ([A turn waiting for a busy chief](#a-turn-waiting-for-a-busy-chief)). |
 | The chief takes longer than 3 seconds | The tick, every 3 seconds. At 90 seconds Harold says `No answer yet.` and listens again. |
 | The chief's turn ends without `harold speak` | Harold reads the chief's pane every 500 ms. When it sees the pane busy and then idle, and no line arrives within 2 seconds, it says the desk's turn-end update for that prompt, so every turn gets an answer. |
 | Nothing was heard, or the transcript is empty | `Sorry, I didn't catch that.`, and listening again. |
@@ -79,7 +79,7 @@ The call ends in one of these ways. Each is the `reason` of the `call ended` log
 | `idle` | For 10 minutes no turn was cut and no sound played. Harold says `Bye.` and ends the call ([Where this differs from the spec](#where-this-differs-from-the-spec)). |
 | `voice_muted` | Harold's voice was muted during the call ([No call while Harold's voice is muted](#no-call-while-harolds-voice-is-muted)). |
 
-When the voice or the microphone fails, Harold says `The voice failed. Call ended.` through the `[tts]` command. Ending the call stops `ffmpeg`, the voice worker and `caffeinate`, drops any turn not yet typed, deletes the call's folder, and clears the transcript the dashboard shows.
+When the voice or the microphone fails, Harold says `The voice failed. Call ended.` through the `[tts]` command. Ending the call stops `ffmpeg`, the voice worker and `caffeinate`, deletes the call's folder, and clears the transcript the dashboard shows. A turn still waiting for a busy chief is not dropped: it keeps its retry after the call ends ([A turn waiting for a busy chief](#a-turn-waiting-for-a-busy-chief)).
 
 The 10-minute clock starts again on every turn cut and every sound played, the tick included. When it runs out while something is going on (you are speaking, a sound plays or waits, a turn waits for a busy chief, or Harold is transcribing or waiting for the chief), the clock starts again instead.
 
@@ -96,6 +96,10 @@ Harold checks each transcript before typing it. It takes the transcript's last w
 The chief's answer to a last turn arrives as it would with no call open: said aloud at the desk.
 
 A turn said before `bye` while the chief is busy keeps its ordinary 2-minute retry after the call has ended. Harold hands it to a background task that tries every second, holds no audio, and gives up after 2 minutes.
+
+### A turn waiting for a busy chief
+
+When Harold has said `The chief is busy. I'll pass it on when it's free.`, the turn reaches the chief even if the call ends first. You press `c`, say `bye`, or the call ends by itself (idle, a muted voice, or a failed voice), and Harold hands the waiting turn to the same background task a turn said before `bye` uses. The task tries every second, holds no audio, and logs `spoken prompt typed` once the chief is free. It gives up 2 minutes after the turn was first held, not 2 minutes after the call ended, and then logs `spoken prompt dropped` with `reason = chief_busy`. A turn said before `bye` that joins a waiting turn keeps that turn's 2 minutes too. When Harold itself stops, the waiting turn is dropped and nothing more runs.
 
 ### The button
 
@@ -143,11 +147,16 @@ Muting the voice during a call ends the call at once, with no last words. The ca
 
 ### Where this differs from the spec
 
-These behaviours were added after the spec, at the final review:
+Harold differs from the spec in these behaviours, each for the reason given:
 
+- **The button shortens in a narrow terminal.** The spec gives only the full button texts. Harold drops the state words first, then the bars, and keeps `[t] talk now` ahead of the state words ([Narrow terminals](#the-button)). The reason: the button sits inside the chief's work cell so a call never changes the list's column widths, and in a narrow terminal the full text would cut off `end call`, the words that say how to end the call.
+- **A turn said before `bye` keeps its 2-minute retry after the call ends.** The spec drops any turn not yet typed when the call ends. Harold passes the turn on once the chief is free ([Hanging up by voice](#hanging-up-by-voice)). The reason: you said the turn for the chief, and hanging up in the same breath should not lose it. The retry needs no microphone or speaker.
+- **`caffeinate` keeps the display awake for the call.** The spec does not cover the screen. Harold holds `caffeinate -d -w <Harold's pid>` while a call is open ([The display and the lock screen](#the-display-and-the-lock-screen)). The reason: when the screen locks from being idle, Harold sends the chief's line to the phone instead of saying it into the call. The known limit: a lock you make by hand still sends the line to the phone.
+- **START refuses while Harold's voice is muted.** The spec does not cover Harold's mute. Harold starts no call, and the button shows `[c] 📞 call: voice muted` ([No call while Harold's voice is muted](#no-call-while-harolds-voice-is-muted)). The reason: a call plays its sound through Harold's voice, so a call with the voice muted could hear you but never answer.
 - **A forgotten call ends by itself.** A call with no turn cut and no sound played for 10 minutes says `Bye.` and ends with `reason = idle`. The spec has no such limit. The reason: `caffeinate` keeps the Mac awake and unlocked for as long as a call is open, so a call left open must end by itself.
-- **Muting the voice ends an open call.** The spec only says no call starts while the voice is muted. In the same spirit, muting the voice during a call ends it at once, with `reason = voice_muted`.
+- **Muting the voice ends an open call.** The spec does not cover Harold's mute. In the same spirit as START refusing while the voice is muted, muting the voice during a call ends it at once, with `reason = voice_muted`.
 - **Held lines wait at most 10 seconds after talk now.** The spec holds other agents' updates until your next turn. Harold plays them 10 seconds after talk now when you start no turn, because another agent's update is delivered from a thread that waits until its line has been said, and a held line would stall that delivery.
+- **A turn Harold promised to pass on is not dropped when the call ends.** The spec drops any turn not yet typed when the call ends. Harold keeps trying to type it until 2 minutes after it was first held ([A turn waiting for a busy chief](#a-turn-waiting-for-a-busy-chief)). The reason: Harold has said `I'll pass it on when it's free.`, and ending the call must not break that promise. Only Harold stopping drops it.
 
 ## The end-of-speech rule
 
