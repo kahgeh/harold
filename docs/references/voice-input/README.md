@@ -33,7 +33,7 @@ When a call starts, Harold:
 
 1. stops any line it is saying at the desk;
 2. checks that an agent runs in the chief's folder (if none does, it says `There's no chief running.` and the call ends);
-3. starts `caffeinate -d`, which keeps the display awake for the length of the call;
+3. starts `caffeinate -d -w <Harold's pid>`, which keeps the display awake for the length of the call, and exits by itself when Harold does;
 4. starts `ffmpeg` with avfoundation on the default microphone, reading 16 kHz mono samples;
 5. starts the voice worker, which loads while you say the first turn ([The voice worker](#the-voice-worker)).
 
@@ -76,8 +76,12 @@ The call ends in one of these ways. Each is the `reason` of the `call ended` log
 | `voice_failed` | The voice worker failed to load or died twice ([If the worker dies](#if-the-worker-dies)), or the call's folder could not be made. |
 | `microphone_failed` | `ffmpeg` could not start, or ended during the call. |
 | `shutdown` | Harold stopped while the call was open. |
+| `idle` | For 10 minutes no turn was cut and no sound played. Harold says `Bye.` and ends the call ([Where this differs from the spec](#where-this-differs-from-the-spec)). |
+| `voice_muted` | Harold's voice was muted during the call ([No call while Harold's voice is muted](#no-call-while-harolds-voice-is-muted)). |
 
-When the voice or the microphone fails, Harold says `The voice failed. Call ended.` through the `[tts]` command. Ending the call stops `ffmpeg`, the voice worker and `caffeinate`, drops any turn not yet typed, and deletes the call's folder.
+When the voice or the microphone fails, Harold says `The voice failed. Call ended.` through the `[tts]` command. Ending the call stops `ffmpeg`, the voice worker and `caffeinate`, drops any turn not yet typed, deletes the call's folder, and clears the transcript the dashboard shows.
+
+The 10-minute clock starts again on every turn cut and every sound played, the tick included. When it runs out while something is going on (you are speaking, a sound plays or waits, a turn waits for a busy chief, or Harold is transcribing or waiting for the chief), the clock starts again instead.
 
 ### Hanging up by voice
 
@@ -123,17 +127,27 @@ The other states shorten like this: off is always `[c] 📞 call`; not set up an
 
 You cannot talk over the chief: speech during an answer is not heard. To cut an answer short, press `t` on the chief's row while the chief speaks. Harold stops the sound and listens at once.
 
-After talk now, lines the chief sends until your next turn is typed are reported as said and not played. Other agents' updates and the restart phrase (`The voice stopped. One moment.`) wait until your next turn is cut, then play. The chief's answer to a turn and Harold's own replies to a turn (such as `Sorry, I didn't catch that.`) keep playing.
+After talk now, lines the chief sends until your next turn is typed are reported as said and not played. Other agents' updates and the restart phrase (`The voice stopped. One moment.`) wait until your next turn is cut, then play. If you start no turn within 10 seconds of talk now, they play then, so a delivery waiting on them is never held for long. The chief's answer to a turn and Harold's own replies to a turn (such as `Sorry, I didn't catch that.`) keep playing.
 
 ### The display and the lock screen
 
-During a call Harold holds `caffeinate -d` as a child program, so the display does not sleep and the screen does not lock from being idle. It is stopped when the call ends, whatever the reason. If it cannot start, the call goes on and `harold.log` gets `display not kept awake`.
+During a call Harold holds `caffeinate -d -w <Harold's pid>` as a child program, so the display does not sleep and the screen does not lock from being idle. It is stopped when the call ends, whatever the reason. With `-w`, `caffeinate` also exits when Harold does, even when Harold is killed without stopping it. If it cannot start, the call goes on and `harold.log` gets `display not kept awake`.
 
 A known limit: a lock you make by hand still sends the chief's line to the phone, because Harold sees the screen as locked.
 
 ### No call while Harold's voice is muted
 
 A call plays its sound through Harold's voice, so Harold starts no call while the voice is muted. The state stays off, the last result is `voice muted`, and the log gets `call not started` with `reason = voice_muted`. The button shows `[c] 📞 call: voice muted`, and `c` does nothing until you unmute the voice.
+
+Muting the voice during a call ends the call at once, with no last words. The call checks the mute as each block of samples arrives. The state turns off, the last result is `voice muted`, and the log gets `call ended` with `reason = voice_muted`.
+
+### Where this differs from the spec
+
+These behaviours were added after the spec, at the final review:
+
+- **A forgotten call ends by itself.** A call with no turn cut and no sound played for 10 minutes says `Bye.` and ends with `reason = idle`. The spec has no such limit. The reason: `caffeinate` keeps the Mac awake and unlocked for as long as a call is open, so a call left open must end by itself.
+- **Muting the voice ends an open call.** The spec only says no call starts while the voice is muted. In the same spirit, muting the voice during a call ends it at once, with `reason = voice_muted`.
+- **Held lines wait at most 10 seconds after talk now.** The spec holds other agents' updates until your next turn. Harold plays them 10 seconds after talk now when you start no turn, because another agent's update is delivered from a thread that waits until its line has been said, and a held line would stall that delivery.
 
 ## The end-of-speech rule
 
@@ -175,7 +189,7 @@ The worker takes Kokoro's model, voice and language from `[tts] args`: `--model`
 
 With no `[voice_input]` section, the button shows `[c] 📞 call: not set up`, and nothing runs. Harold reads the configuration only at startup.
 
-The fixed limits are not settings: the 1.2-second silence, the 60-second turn, the 3-second tick, the 90-second wait, the 2-minute retry and the 30-second worker answer.
+The fixed limits are not settings: the 1.2-second silence, the 60-second turn, the 3-second tick, the 90-second wait, the 2-minute retry, the 30-second worker answer, the 10-second hold after talk now and the 10-minute idle end.
 
 ### The microphone permission
 
@@ -219,12 +233,28 @@ Harold notices when the worker's output ends, when it does not answer a request 
 
 For example, if Whisper is not downloaded, the worker fails to load, and the call ends at once with `The voice failed. Call ended.`
 
+Before the ready line, the worker's output may hold a line that is not JSON, such as a library's stray print. Harold skips such lines. The first JSON line must be `{"ready": true}`, or the load fails. After the ready line, a line that is not JSON ends the worker.
+
+### Why did the voice fail to load?
+
+Harold discards the worker's standard error, so `harold.log` shows only `voice worker exited` with `reason = failed_to_load`. To see the error, run the worker by hand the way Harold runs it. Harold writes the script into the call's folder, runs it from there with `HF_HUB_OFFLINE=1`, and passes the values from `[voice_input]` and `[tts] args`:
+
+```sh
+cd "$(mktemp -d)"
+cp <harold repo>/harold/src/voice_worker.py .
+HF_HUB_OFFLINE=1 <[voice_input] command> -I voice_worker.py \
+  --stt-model <Whisper model> --tts-model <Kokoro model> \
+  --voice <voice> --lang-code <lang code> < /dev/null
+```
+
+`<Whisper model>` is the word after `--model` in `[voice_input] args`. The Kokoro model, voice and language come from `[tts] args`, with the defaults in [Settings](#settings). The worker prints `{"ready": true}` when it loads, or `{"ready": false}` when it does not, and then exits, because its input is empty. An import error, such as a Python without `mlx_audio`, prints its traceback to standard error. A model that fails to load prints only `{"ready": false}`, plus whatever the library printed to standard error on the way.
+
 ## Privacy
 
 - **On the Mac.** Audio and transcripts stay on the Mac. The models and commands are local, and no cloud service is used.
-- **Audio.** Each turn's audio lives only until its transcript returns, and is deleted even on failure. Samples between turns are kept only in memory. The voice worker keeps no audio or text after answering. The audio of the lines it made for a call is deleted after it plays, and the worker's script and the call's folder are deleted when the call ends. If Harold is killed during a call, the folder stays in `$TMPDIR` until macOS clears it, because nothing sweeps old call folders at start-up.
+- **Audio.** Each turn's audio lives only until its transcript returns, and is deleted even on failure. Samples between turns are kept only in memory. The voice worker keeps no audio or text after answering. The audio of the lines it made for a call is deleted after it plays, and the worker's script and the call's folder are deleted when the call ends. If Harold is killed during a call, its folder stays in `$TMPDIR/harold-voice-input/` until Harold next starts: at start-up Harold removes every `call-*` folder left there, and nothing else in that folder.
 - **Phrases kept.** The phrase folder holds only Harold's own fixed phrases, never your words.
-- **Transcripts.** Harold does not store the transcript as an event, and never writes it to `harold.log`. It is shown in tmx-agent-dash while the call lasts, through the `Call` answer's `last_transcript`.
+- **Transcripts.** Harold does not store the transcript as an event, and never writes it to `harold.log`. It is shown in tmx-agent-dash while the call lasts, through the `Call` answer's `last_transcript`, and cleared when the call ends.
 - **Telemetry.** harold-telemetry never exports text. The typed line becomes a turn's prompt like any typed prompt.
 - **The chief's session.** The prompt typed into the chief's pane is in the chief's own session. That is how the chief hears it.
 
@@ -235,7 +265,7 @@ Messages are fixed text, with values in fields, as harold-telemetry's test `ever
 | Level | Message | Fields |
 |---|---|---|
 | info | `call started` | none |
-| info | `call ended` | `reason`: `stopped`, `bye`, `no_chief`, `voice_failed`, `microphone_failed` or `shutdown` |
+| info | `call ended` | `reason`: `stopped`, `bye`, `no_chief`, `voice_failed`, `microphone_failed`, `shutdown`, `idle` or `voice_muted` |
 | info | `call not started` | `reason`: `voice_muted` |
 | info | `spoken prompt typed` | `pane_id`, `words` (a count) |
 | info | `spoken prompt dropped` | `reason`: `nothing_heard`, `no_chief`, `chief_busy` or `failed` |
@@ -243,7 +273,7 @@ Messages are fixed text, with values in fields, as harold-telemetry's test `ever
 | warn | `display not kept awake` | `error` |
 | warn | `microphone not opened` | `error` |
 | warn | `call folder not made` | `error` |
-| warn | `call folder not removed` | `error` |
+| warn | `call folder not removed` | `error`; at the end of a call, or for a leftover folder at start-up |
 | warn | `turn not written` | `error` |
 | warn | `phrase not kept` | `error` |
 | warn | `call sound not played` | `error` |
@@ -278,7 +308,7 @@ tmx-agent-dash controls the call over one gRPC call in `harold-api/proto/harold.
 | `state` | `OFF`, `LISTENING`, `TRANSCRIBING`, `WAITING`, `SPEAKING`, `NOT_SET_UP` |
 | `last_result` | `TYPED`, `NOTHING_HEARD`, `NO_CHIEF`, `CHIEF_BUSY`, `FAILED`, `VOICE_MUTED`; unspecified before any turn has ended in the call |
 
-The dashboard shows `TRANSCRIBING` and `WAITING` both as `chief thinking`. `chief_pane_id` is empty when no chief runs. `START` answers once the call listens or has ended. A state the dashboard does not know counts as not set up.
+The dashboard shows `TRANSCRIBING` and `WAITING` both as `chief thinking`. It waits up to 8 seconds for the answer to `START`, `STOP` or `TALK_NOW`, longer than the 5 seconds Harold may take to close the voice worker when a call ends, and up to 2 seconds for a `STATUS` poll, which Harold answers at once. `chief_pane_id` is empty when no chief runs. `START` answers once the call listens or has ended. A state the dashboard does not know counts as not set up.
 
 ## The shared core and away-web-app
 

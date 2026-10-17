@@ -69,6 +69,9 @@ struct WorkerLog {
     transcribed: Vec<usize>,
     /// The text of each say request.
     said: Vec<String>,
+    /// What each say request answers in turn, with the health left as it is; once used
+    /// up, each say request writes its file.
+    say_script: VecDeque<WorkerError>,
     closes: usize,
     /// Whether each worker starts `Loading` rather than `Ready`.
     starts_loading: bool,
@@ -123,7 +126,14 @@ impl VoiceWorker for FakeWorker {
     }
 
     async fn say(&mut self, text: &str, wav: &Path) -> Result<(), WorkerError> {
-        self.0.lock().unwrap().said.push(text.to_string());
+        let scripted = {
+            let mut log = self.0.lock().unwrap();
+            log.said.push(text.to_string());
+            log.say_script.pop_front()
+        };
+        if let Some(error) = scripted {
+            return Err(error);
+        }
         std::fs::write(wav, text).map_err(|_| WorkerError::Failed)
     }
 

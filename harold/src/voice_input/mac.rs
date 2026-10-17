@@ -7,9 +7,10 @@ use crate::agent::snapshot::AgentSnapshotHub;
 use crate::outbound::tts;
 use crate::settings::{Settings, TtsSettings};
 use crate::timed_prompts::TmuxPorts;
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use tokio::io::AsyncReadExt;
 use tokio::process::{Child, ChildStdout, Command};
 use tokio::sync::oneshot;
@@ -18,9 +19,10 @@ use tracing::warn;
 pub(crate) const FFMPEG: &str = "ffmpeg";
 pub(crate) const CAFFEINATE: &str = "caffeinate";
 
-/// `-d`: keep the display awake.
-pub(crate) fn caffeinate_args() -> Vec<&'static str> {
-    vec!["-d"]
+/// `-d -w <pid>`: keep the display awake, and exit when the process `pid` (Harold) does,
+/// even when Harold is killed without dropping its child.
+pub(crate) fn caffeinate_args(pid: u32) -> Vec<String> {
+    vec!["-d".to_string(), "-w".to_string(), pid.to_string()]
 }
 
 /// `-nostdin -hide_banner -loglevel error -f avfoundation -i :default -ac 1 -ar 16000 -f s16le -`
@@ -115,7 +117,15 @@ pub(crate) struct MacSink {
     program: String,
     args: Vec<String>,
     /// How the running `play`, if any, is told to stop.
-    stopper: Mutex<Option<oneshot::Sender<()>>>,
+    stopper: Mutex<Stopper>,
+}
+
+/// The stop of the `play` started last, while it runs.
+#[derive(Default)]
+struct Stopper {
+    /// Counts the plays started, so a play that ends clears only its own stop.
+    generation: u64,
+    stop: Option<oneshot::Sender<()>>,
 }
 
 impl MacSink {
@@ -128,13 +138,16 @@ impl MacSink {
         Self {
             program: program.to_string(),
             args: args.iter().map(|arg| arg.to_string()).collect(),
-            stopper: Mutex::new(None),
+            stopper: Mutex::default(),
         }
     }
-}
 
-impl AudioSink for MacSink {
-    async fn play(&self, wav: &Path) -> Result<(), String> {
+    fn stopper(&self) -> MutexGuard<'_, Stopper> {
+        self.stopper.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Runs the player on `wav` until it ends or `stopped` fires.
+    async fn run(&self, wav: &Path, stopped: oneshot::Receiver<()>) -> Result<(), String> {
         let mut child = Command::new(&self.program)
             .args(&self.args)
             .arg(wav)
@@ -144,8 +157,6 @@ impl AudioSink for MacSink {
             .kill_on_drop(true)
             .spawn()
             .map_err(|error| format!("could not start {}: {error}", self.program))?;
-        let (stop, stopped) = oneshot::channel();
-        *self.stopper.lock().unwrap_or_else(|e| e.into_inner()) = Some(stop);
         tokio::select! {
             status = child.wait() => match status {
                 Ok(status) if status.success() => Ok(()),
@@ -158,30 +169,47 @@ impl AudioSink for MacSink {
             }
         }
     }
+}
+
+impl AudioSink for MacSink {
+    /// The stop is in place before the player starts, so a `stop` as it starts is not lost,
+    /// and is cleared when the play ends.
+    async fn play(&self, wav: &Path) -> Result<(), String> {
+        let (stop, stopped) = oneshot::channel();
+        let generation = {
+            let mut stopper = self.stopper();
+            stopper.generation += 1;
+            stopper.stop = Some(stop);
+            stopper.generation
+        };
+        let played = self.run(wav, stopped).await;
+        let mut stopper = self.stopper();
+        if stopper.generation == generation {
+            stopper.stop = None;
+        }
+        played
+    }
 
     fn stop(&self) {
-        let stop = self
-            .stopper
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .take();
+        let stop = self.stopper().stop.take();
         if let Some(stop) = stop {
             let _ = stop.send(());
         }
     }
 }
 
-/// `caffeinate -d`, held for a call (Decision 16); dropping it kills the child.
+/// `caffeinate -d -w <Harold's pid>`, held for a call (Decision 16); dropping it kills the
+/// child, and the child exits by itself when Harold does.
 pub(crate) struct KeepAwake {
     _child: Child,
 }
 
 impl KeepAwake {
     pub(crate) fn start() -> std::io::Result<Self> {
-        Self::start_with(CAFFEINATE, &caffeinate_args())
+        Self::start_with(CAFFEINATE, &caffeinate_args(std::process::id()))
     }
 
-    pub(crate) fn start_with(program: &str, args: &[&str]) -> std::io::Result<Self> {
+    pub(crate) fn start_with<S: AsRef<OsStr>>(program: &str, args: &[S]) -> std::io::Result<Self> {
         let child = Command::new(program)
             .args(args)
             .stdin(Stdio::null())
@@ -388,17 +416,36 @@ mod tests {
     #[tokio::test]
     async fn sink_stop_ends_play_at_once() {
         let dir = scratch("stop");
-        let file = dir.join("endless");
-        std::fs::write(&file, "x").unwrap();
-        let sink = MacSink::with_program("/usr/bin/tail", &["-f"]);
-        let stopping = async {
-            sleep(Duration::from_millis(100)).await;
-            sink.stop();
-        };
-        let (played, ()) =
-            tokio::join!(timeout(Duration::from_secs(1), sink.play(&file)), stopping);
-        assert_eq!(played.expect("play ended after stop"), Ok(()));
+        let pid_file = dir.join("pid");
+        let wav = dir.join("endless");
+        std::fs::write(&wav, "x").unwrap();
+        let fake = script(&dir, "echo $$ > \"$1\"\nexec /usr/bin/tail -f \"$2\"");
+        let sink = Arc::new(MacSink::with_program(
+            fake.to_str().unwrap(),
+            &[pid_file.to_str().unwrap()],
+        ));
+        let playing = tokio::spawn({
+            let sink = Arc::clone(&sink);
+            async move { sink.play(&wav).await }
+        });
+        wait_for_pid(&pid_file).await;
+
+        sink.stop();
+
+        let played = timeout(Duration::from_secs(1), playing).await;
+        assert_eq!(played.expect("play ended after stop").unwrap(), Ok(()));
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_play_that_ends_leaves_no_stopper_behind() {
+        let sink = MacSink::with_program("/usr/bin/true", &[]);
+        assert_eq!(sink.play(Path::new("/nowhere.wav")).await, Ok(()));
+        assert!(sink.stopper().stop.is_none());
+
+        let missing = MacSink::with_program("/nowhere/player", &[]);
+        assert!(missing.play(Path::new("/nowhere.wav")).await.is_err());
+        assert!(missing.stopper().stop.is_none());
     }
 
     #[tokio::test]
@@ -453,7 +500,7 @@ mod tests {
         let sink = MacSink::new();
         assert_eq!((sink.program.as_str(), sink.args.len()), ("afplay", 0));
         assert_eq!(CAFFEINATE, "caffeinate");
-        assert_eq!(caffeinate_args(), ["-d"]);
+        assert_eq!(caffeinate_args(4321), ["-d", "-w", "4321"]);
     }
 
     fn script(dir: &Path, body: &str) -> std::path::PathBuf {
@@ -505,16 +552,7 @@ mod tests {
         let fake = script(&dir, "echo $$ > \"$1\"\nexec /usr/bin/tail -f \"$2\"");
         let sink = MacSink::with_program(fake.to_str().unwrap(), &[pid_file.to_str().unwrap()]);
         let stopping = async {
-            // The pid is there once the script has written a whole line.
-            let deadline = Instant::now() + Duration::from_secs(5);
-            let pid: u32 = loop {
-                let written = std::fs::read_to_string(&pid_file).unwrap_or_default();
-                if let Some(pid) = written.strip_suffix('\n').and_then(|pid| pid.parse().ok()) {
-                    break pid;
-                }
-                assert!(Instant::now() < deadline, "the player never wrote its pid");
-                sleep(Duration::from_millis(20)).await;
-            };
+            let pid = wait_for_pid(&pid_file).await;
             assert!(running(pid));
             sink.stop();
             pid
@@ -527,6 +565,19 @@ mod tests {
         }
         assert!(!running(pid), "player still running after stop");
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The player's pid, once the script has written a whole line: the player is running.
+    async fn wait_for_pid(pid_file: &Path) -> u32 {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let written = std::fs::read_to_string(pid_file).unwrap_or_default();
+            if let Some(pid) = written.strip_suffix('\n').and_then(|pid| pid.parse().ok()) {
+                return pid;
+            }
+            assert!(Instant::now() < deadline, "the player never wrote its pid");
+            sleep(Duration::from_millis(20)).await;
+        }
     }
 
     fn running(pid: u32) -> bool {

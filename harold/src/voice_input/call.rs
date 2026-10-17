@@ -44,6 +44,10 @@ const BUSY_LIMIT: Duration = Duration::from_secs(120);
 const PANE_READ_EVERY: Duration = Duration::from_millis(500);
 /// How long after the chief's turn ends its line may still arrive.
 const LINE_GRACE: Duration = Duration::from_secs(2);
+/// How long a call goes with no turn cut and no sound played before it ends by itself.
+const IDLE_LIMIT: Duration = Duration::from_secs(10 * 60);
+/// How long, after talk now, other agents' lines and the restart phrase wait for a turn.
+const HOLD_LIMIT: Duration = Duration::from_secs(10);
 /// Whisper's no-speech probability above which a turn counts as nothing heard.
 const NO_SPEECH_LIMIT: f32 = 0.6;
 /// The mark in front of each turn typed into the chief's pane.
@@ -60,6 +64,10 @@ pub(super) enum Ended {
     VoiceFailed,
     MicrophoneFailed,
     Shutdown,
+    /// No turn was cut and no sound played for `IDLE_LIMIT`.
+    Idle,
+    /// Harold's voice was muted during the call.
+    VoiceMuted,
 }
 
 impl Ended {
@@ -71,6 +79,8 @@ impl Ended {
             Self::VoiceFailed => "voice_failed",
             Self::MicrophoneFailed => "microphone_failed",
             Self::Shutdown => "shutdown",
+            Self::Idle => "idle",
+            Self::VoiceMuted => "voice_muted",
         }
     }
 }
@@ -199,6 +209,23 @@ fn make_call_dir(calls: &Path, dir: &Path) -> std::io::Result<()> {
         .create(calls)?;
     private_dir(dir)?;
     std::fs::write(dir.join(TICK_WAV), tick_wav())
+}
+
+/// Removes the `call-*` folders under `calls` that a Harold which did not end its calls
+/// left behind. Nothing else in `calls` is touched.
+pub(super) fn sweep_call_folders(calls: &Path) {
+    let Ok(entries) = std::fs::read_dir(calls) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let is_dir = entry.file_type().is_ok_and(|kind| kind.is_dir());
+        if !is_dir || !entry.file_name().to_string_lossy().starts_with("call-") {
+            continue;
+        }
+        if let Err(error) = std::fs::remove_dir_all(entry.path()) {
+            warn!(error = %error, "call folder not removed");
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -362,8 +389,10 @@ struct Call<P: CallPorts> {
     /// Set by talk now: the chief's lines are taken as said until the next turn is typed.
     skip_chief_lines: bool,
     /// Set by talk now: sounds that wait after talk now do so until the next turn is cut
-    /// or typed.
-    hold_others: bool,
+    /// or typed, or until this time, when no turn has started by then.
+    hold_others_until: Option<Instant>,
+    /// When the last turn was cut or the last sound played; the call ends `IDLE_LIMIT` after.
+    active_at: Instant,
     done: bool,
     reader: Option<JoinHandle<()>>,
     updates: Vec<JoinHandle<()>>,
@@ -458,7 +487,8 @@ impl<P: CallPorts> Call<P> {
             awaiting: None,
             held: None,
             skip_chief_lines: false,
-            hold_others: false,
+            hold_others_until: None,
+            active_at: Instant::now(),
             done: false,
             reader: Some(reader),
             updates: Vec::new(),
@@ -494,6 +524,7 @@ impl<P: CallPorts> Call<P> {
 
     async fn on_event(&mut self, event: Event<P::Worker>) {
         match event {
+            Event::Block(_) if self.ports.voice_muted() => self.voice_muted().await,
             Event::Block(block) => self.heard_block(&block),
             Event::SourceEnded => {
                 self.end(Ended::MicrophoneFailed, Some(VOICE_FAILED)).await;
@@ -540,7 +571,8 @@ impl<P: CallPorts> Call<P> {
     fn turn_ended(&mut self, samples: &[i16]) {
         self.mode = Mode::Transcribing;
         self.detector.reset();
-        self.hold_others = false;
+        self.hold_others_until = None;
+        self.active_at = Instant::now();
         let dir = self.dir.join(format!("turn-{}", Uuid::new_v4()));
         let written = private_dir(&dir)
             .and_then(|()| std::fs::write(dir.join(TURN_WAV), wav_bytes(samples, SAMPLE_RATE)));
@@ -650,12 +682,13 @@ impl<P: CallPorts> Call<P> {
                     self.sounds[at].audio = Audio::Tts;
                 }
             }
-            // The worker went: the line is made again by the next one.
+            // The worker went: the line is made again by the next one. Its text is taken
+            // first, because a restart puts the restart phrase in front of it.
             Err(error) => {
+                let text = at.map(|at| self.sounds[at].text.clone());
                 worker.close().await;
                 self.worker_died(generation, error).await;
-                if let (false, Some(at)) = (self.done, at) {
-                    let text = self.sounds[at].text.clone();
+                if let (false, Some(text)) = (self.done, text) {
                     self.jobs.push_front(Job::Make { id, text, wav });
                 }
             }
@@ -830,7 +863,7 @@ impl<P: CallPorts> Call<P> {
 
     fn typed(&mut self, pane: String, text: String) {
         log_typed(&pane, &text);
-        self.hold_others = false;
+        self.hold_others_until = None;
         let prompt = format!("{MARK} {text}");
         {
             let mut status = lock(&self.status);
@@ -904,7 +937,11 @@ impl<P: CallPorts> Call<P> {
                 }
                 times
             });
-        held.chain(awaiting).min()
+        let idle = std::iter::once(self.active_at + IDLE_LIMIT);
+        held.chain(awaiting)
+            .chain(self.hold_others_until)
+            .chain(idle)
+            .min()
     }
 
     async fn on_timer(&mut self) {
@@ -918,6 +955,33 @@ impl<P: CallPorts> Call<P> {
             }
         }
         self.await_answer(now);
+        if self.hold_others_until.is_some_and(|until| now >= until) {
+            self.hold_others_until = None;
+        }
+        if now >= self.active_at + IDLE_LIMIT {
+            self.idle(now);
+        }
+    }
+
+    /// Ends a call that nothing happened in for `IDLE_LIMIT`, so a call left open does not
+    /// keep the display awake for good. A call doing something then starts its clock again.
+    fn idle(&mut self, now: Instant) {
+        let quiet = self.mode == Mode::Listening
+            && !self.detector.in_turn()
+            && self.playing.is_none()
+            && self.sounds.is_empty()
+            && self.held.is_none();
+        if !quiet {
+            self.active_at = now;
+            return;
+        }
+        self.ending_phrase(BYE, Ended::Idle);
+    }
+
+    /// Harold's voice was muted during the call: it ends at once, with no last words.
+    async fn voice_muted(&mut self) {
+        self.end(Ended::VoiceMuted, None).await;
+        lock(&self.status).last_result = Some(TurnResult::VoiceMuted);
     }
 
     /// Tries the turn waiting for a busy chief again, unless the user is speaking or a
@@ -1126,7 +1190,7 @@ impl<P: CallPorts> Call<P> {
         if !first.ready() || (self.mode == Mode::Listening && self.detector.in_turn()) {
             return;
         }
-        if self.hold_others && first.waits_after_talk_now {
+        if self.hold_others_until.is_some() && first.waits_after_talk_now {
             return;
         }
         let Some(sound) = self.sounds.pop_front() else {
@@ -1198,6 +1262,7 @@ impl<P: CallPorts> Call<P> {
             return;
         };
         self.unmuted_at = Instant::now() + MUTE_TAIL;
+        self.active_at = Instant::now();
         let Some(mut sound) = playing.sound else {
             return;
         };
@@ -1219,7 +1284,8 @@ impl<P: CallPorts> Call<P> {
 
     /// Stops what plays and listens at once. The chief's lines count as said until the next
     /// turn is typed (Decision 12), and other agents' lines and the restart phrase wait until
-    /// the next turn is cut or typed.
+    /// the next turn is cut or typed, or for `HOLD_LIMIT` when no turn starts, so a delivery
+    /// waiting on them is never held for long.
     fn talk_now(&mut self) {
         if let Some(playing) = self.playing.as_mut() {
             self.sink.stop();
@@ -1229,7 +1295,7 @@ impl<P: CallPorts> Call<P> {
             playing.stopped = true;
         }
         self.skip_chief_lines = true;
-        self.hold_others = true;
+        self.hold_others_until = Some(Instant::now() + HOLD_LIMIT);
         let (chief, others): (VecDeque<Sound>, VecDeque<Sound>) = std::mem::take(&mut self.sounds)
             .into_iter()
             .partition(|sound| sound.by == Some(Speaker::Chief));
@@ -1267,8 +1333,9 @@ impl<P: CallPorts> Call<P> {
     }
 
     /// Ends the call: a turn not yet typed is dropped, lines not yet played go back to
-    /// their senders, `last_words` are said through the `[tts]` command, and the source,
-    /// the worker, the call's folder and the display's wake are let go.
+    /// their senders, `last_words` are said through the `[tts]` command, the source, the
+    /// worker, the call's folder and the display's wake are let go, and the transcript is
+    /// forgotten.
     async fn end(&mut self, why: Ended, last_words: Option<&'static str>) {
         if self.done {
             return;
@@ -1319,7 +1386,10 @@ impl<P: CallPorts> Call<P> {
         }
         self.awake = None;
         info!(reason = why.as_str(), "call ended");
-        lock(&self.status).state = CallState::Off;
+        let mut status = lock(&self.status);
+        status.state = CallState::Off;
+        // The transcript is shown only while the call lasts.
+        status.last_transcript = None;
     }
 }
 

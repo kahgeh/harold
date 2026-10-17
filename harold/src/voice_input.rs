@@ -9,7 +9,7 @@ mod speech;
 mod wav;
 mod worker;
 
-use call::{Ended, Event, chief_pane, lock, run_call};
+use call::{Ended, Event, chief_pane, lock, run_call, sweep_call_folders};
 pub(crate) use mac::MacPorts;
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -295,8 +295,10 @@ pub(crate) type DaemonCalls = CallControl<MacPorts>;
 
 static DAEMON_CALLS: OnceLock<DaemonCalls> = OnceLock::new();
 
-/// Sets the daemon's calls, once, at start-up.
+/// Sets the daemon's calls, once, at start-up, and removes the call folders a Harold that
+/// crashed or was killed during a call left behind.
 pub(crate) fn init_daemon_calls(calls: DaemonCalls) {
+    sweep_call_folders(&calls.ports.calls_dir());
     assert!(
         DAEMON_CALLS.set(calls).is_ok(),
         "init_daemon_calls called more than once"

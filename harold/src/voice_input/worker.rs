@@ -238,6 +238,7 @@ impl ProcessWorker {
 
 /// The reader task: the ready line within `LOAD_LIMIT`, then each answer line, until the
 /// output ends or the worker is killed. The health it last reports is why the worker went.
+/// Before the ready line, a line that is not JSON is a library's stray print and is skipped.
 async fn read_output(
     mut child: Child,
     mut lines: Lines<BufReader<ChildStdout>>,
@@ -247,11 +248,11 @@ async fn read_output(
 ) {
     let mut kill_asked = false;
     let loaded = tokio::select! {
-        line = timeout(LOAD_LIMIT, lines.next_line()) => match line {
-            Ok(Ok(Some(line))) if is_ready(&line) => None,
-            // A first line that is not the ready line, an output that ended or failed,
-            // or no line in time.
-            _ => Some(WorkerError::FailedToLoad),
+        ready = timeout(LOAD_LIMIT, wait_for_ready(&mut lines)) => match ready {
+            Ok(true) => None,
+            // A JSON line that is not the ready line, an output that ended or failed, or no
+            // ready line in time.
+            Ok(false) | Err(_) => Some(WorkerError::FailedToLoad),
         },
         why = &mut killed => {
             kill_asked = true;
@@ -293,11 +294,15 @@ async fn read_output(
     }
 }
 
-fn is_ready(line: &str) -> bool {
-    serde_json::from_str::<Value>(line)
-        .ok()
-        .and_then(|reply| reply["ready"].as_bool())
-        == Some(true)
+/// Reads up to the first JSON line, and reports whether it is the ready line. A cancelled
+/// wait (a kill, or the load limit) fails the load, so it need not be cancel-safe.
+async fn wait_for_ready(lines: &mut Lines<BufReader<ChildStdout>>) -> bool {
+    while let Ok(Some(line)) = lines.next_line().await {
+        if let Ok(reply) = serde_json::from_str::<Value>(&line) {
+            return reply["ready"].as_bool() == Some(true);
+        }
+    }
+    false
 }
 
 impl VoiceWorker for ProcessWorker {
@@ -468,6 +473,28 @@ esac"#;
     async fn ready_false_gives_failed_to_load() {
         let folder = temp_folder();
         let (command, _) = fake(&folder, r#"echo '{"ready":false}'; exit 0"#, ANSWERS);
+        let mut worker = ProcessWorker::start(&command, &folder.join("call")).unwrap();
+        let result = worker.say("Hi", Path::new("/x/say.wav")).await;
+        assert_eq!(result.err(), Some(WorkerError::FailedToLoad));
+        std::fs::remove_dir_all(&folder).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_stray_print_before_ready_is_skipped() {
+        let folder = temp_folder();
+        let (command, _) = fake(&folder, &format!("echo hello\necho\n{READY}"), ANSWERS);
+        let mut worker = ProcessWorker::start(&command, &folder.join("call")).unwrap();
+        let heard = worker.transcribe(Path::new("/x/turn.wav")).await.unwrap();
+        assert_eq!(heard.text, "hello");
+        worker.close().await;
+        std::fs::remove_dir_all(&folder).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_json_line_before_ready_that_is_not_ready_fails_the_load() {
+        let folder = temp_folder();
+        let ready = format!("echo hello\necho '{{\"progress\":1}}'\n{READY}");
+        let (command, _) = fake(&folder, &ready, ANSWERS);
         let mut worker = ProcessWorker::start(&command, &folder.join("call")).unwrap();
         let result = worker.say("Hi", Path::new("/x/say.wav")).await;
         assert_eq!(result.err(), Some(WorkerError::FailedToLoad));

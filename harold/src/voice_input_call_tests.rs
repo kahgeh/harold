@@ -1,7 +1,9 @@
 //! More of a call on the fakes of `voice_input_tests.rs`: the worker's health as it changes,
-//! a sound the sink cannot play, a turn said before a bye, and a second START.
+//! a sound the sink cannot play, a turn said before a bye, a second START, and the fixes of
+//! the final review: the idle end, the mid-call mute end and the talk-now hold's limit.
 
 use super::*;
+use tokio::time::sleep_until;
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn a_worker_that_fails_to_load_mid_turn_ends_the_call_at_once() {
@@ -255,4 +257,154 @@ async fn talk_now_while_transcribing_nothing_heard_still_says_sorry_at_once() {
     assert_eq!(h.played(), [NOTHING_HEARD]);
     assert_eq!(h.status().last_result, Some(TurnResult::NothingHeard));
     assert_eq!(h.state(), CallState::Listening);
+}
+
+// ---------------------------------------------------------------------------
+// The final review's fixes
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn a_worker_that_exits_while_making_the_answer_still_plays_the_answer() {
+    let h = Harness::new();
+    h.worker().say_script.push_back(WorkerError::Exited);
+    h.start().await;
+    h.speak().await;
+
+    let said = h.say("the answer", Speaker::Chief);
+    assert_eq!(said.await.unwrap(), Some(true));
+    settle().await;
+
+    assert_eq!(h.worker().starts, 2);
+    assert_eq!(h.worker().said, ["the answer", "the answer"]);
+    assert_eq!(h.played(), ["the answer"]);
+    assert_eq!(h.tts(), [VOICE_STOPPED]);
+    assert_eq!(h.state(), CallState::Listening);
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn muting_the_voice_mid_call_ends_the_call_at_once() {
+    let logs = CapturedLogs::start();
+    let h = Harness::new();
+    h.start().await;
+    h.speak().await;
+    assert_eq!(h.state(), CallState::Waiting);
+
+    h.ports.state().muted = true;
+    h.feed(quiet(100));
+    settle().await;
+
+    let status = h.status();
+    assert_eq!(status.state, CallState::Off);
+    assert_eq!(status.last_result, Some(TurnResult::VoiceMuted));
+    // No tick at 3 s, and no last words.
+    sleep(Duration::from_secs(5)).await;
+    assert!(h.played().is_empty());
+    assert!(h.tts().is_empty());
+    assert_eq!(h.awake_held(), 0);
+    assert!(h.call_dirs().is_empty());
+    let text = logs.text();
+    assert!(text.contains("call ended reason=\"voice_muted\""), "{text}");
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn a_call_with_nothing_said_for_10_minutes_ends_with_bye() {
+    let logs = CapturedLogs::start();
+    let h = Harness::new();
+    h.start().await;
+
+    sleep(Duration::from_secs(10 * 60 - 1)).await;
+    assert_eq!(h.state(), CallState::Listening);
+    sleep(Duration::from_secs(2)).await;
+
+    assert_eq!(h.played(), [BYE]);
+    assert_eq!(h.state(), CallState::Off);
+    assert_eq!(h.awake_held(), 0);
+    assert!(h.call_dirs().is_empty());
+    let text = logs.text();
+    assert!(text.contains("call ended reason=\"idle\""), "{text}");
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn a_turn_at_9_minutes_pushes_the_idle_end_to_19_minutes() {
+    let h = Harness::new();
+    h.start().await;
+    let started = Instant::now();
+
+    sleep(Duration::from_secs(9 * 60)).await;
+    h.speak().await;
+    h.answer("answer").await;
+
+    sleep_until(started + Duration::from_secs(19 * 60 - 1)).await;
+    assert_eq!(h.state(), CallState::Listening);
+    assert_eq!(h.played(), ["answer"]);
+    sleep_until(started + Duration::from_secs(19 * 60 + 1)).await;
+    assert_eq!(h.played(), ["answer", BYE]);
+    assert_eq!(h.state(), CallState::Off);
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn the_transcript_is_not_kept_after_the_call_ends() {
+    let h = Harness::new();
+    h.start().await;
+    h.speak().await;
+    assert_eq!(h.status().last_transcript.as_deref(), Some("hello there"));
+
+    h.calls.stop().await;
+
+    let status = h.status();
+    assert_eq!(status.last_transcript, None);
+    assert_eq!(status.last_result, Some(TurnResult::Typed));
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn a_line_held_after_talk_now_plays_10_s_later_with_no_turn() {
+    let h = Harness::new();
+    h.start().await;
+    h.speak().await;
+    h.sink().hold.store(true, Ordering::SeqCst);
+    let said = h.say("a long answer", Speaker::Chief);
+    settle().await;
+    let update = h.say("update", Speaker::OtherAgent);
+    settle().await;
+
+    h.calls.talk_now();
+    let held_at = Instant::now();
+    assert_eq!(said.await.unwrap(), Some(true));
+    h.sink().hold.store(false, Ordering::SeqCst);
+
+    sleep_until(held_at + Duration::from_millis(9_900)).await;
+    assert!(!update.is_finished());
+    assert_eq!(h.played(), ["a long answer"]);
+    sleep_until(held_at + Duration::from_millis(10_100)).await;
+    assert!(update.is_finished(), "the held line still waits");
+    assert_eq!(update.await.unwrap(), Some(true));
+    let played = h.played_at();
+    assert_eq!(played.len(), 2);
+    assert_eq!(played[1].1, "update");
+    assert_eq!(played[1].0 - held_at, Duration::from_secs(10));
+}
+
+#[test]
+fn the_sweep_removes_only_call_folders() {
+    let calls = std::env::temp_dir().join(format!("harold-sweep-{}", uuid::Uuid::new_v4()));
+    for dir in ["call-1", "call-2/turn-1", "keep"] {
+        std::fs::create_dir_all(calls.join(dir)).unwrap();
+    }
+    std::fs::write(calls.join("call-2/turn-1/turn.wav"), "x").unwrap();
+    std::fs::write(calls.join("call-file"), "x").unwrap();
+    std::fs::write(calls.join("notes.txt"), "x").unwrap();
+
+    crate::voice_input::call::sweep_call_folders(&calls);
+
+    let mut left: Vec<String> = std::fs::read_dir(&calls)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    left.sort();
+    assert_eq!(left, ["call-file", "keep", "notes.txt"]);
+    std::fs::remove_dir_all(&calls).unwrap();
+
+    // A base folder that is not there is left alone.
+    crate::voice_input::call::sweep_call_folders(&calls);
+    assert!(!calls.exists());
 }
