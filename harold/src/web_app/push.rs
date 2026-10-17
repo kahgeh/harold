@@ -131,7 +131,8 @@ fn make_private(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Where the VAPID key lives: `web-push/vapid.pem` in the store's folder (D8).
+/// Where the VAPID key lives: `web-push/vapid.pem` beside the store's folder, in its
+/// parent, which is the installed service's `data` folder.
 pub(crate) fn vapid_key_path(store_path: &Path) -> PathBuf {
     store_path
         .parent()

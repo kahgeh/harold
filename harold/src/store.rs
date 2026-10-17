@@ -131,8 +131,9 @@ pub(crate) struct AppPushUnsubscribed {
     pub endpoint: String,
 }
 
-/// An InboundMessageReceived payload as the event handler reads it (D6). It reads the
-/// `to_chief` field that `InboundMessage` does not carry; events without it read as false.
+/// An InboundMessageReceived payload as the event handler reads it. It reads the
+/// `to_chief` field that `InboundMessage` does not carry, so the channels' writers keep
+/// their struct as it is; events without it read as false.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub(crate) struct ReceivedReply {
     pub text: String,

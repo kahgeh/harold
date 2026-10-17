@@ -385,8 +385,12 @@ pub(crate) enum ChiefRouting {
 }
 
 /// Types "📱 <text>" into the chief's pane: no tag, AI or latest-notifier decision. Several
-/// agents or none → NoChief, nothing typed (D2). A failing listing → Err. On typing, records
-/// telemetry::prompt_typed(pane, StartedBy::Phone, None, typed_at) (D7). Logs nothing that holds the text.
+/// agents or none → NoChief, nothing typed, since guessing which one is the chief could type
+/// the reply into the wrong pane, as the timed prompts' rule also refuses to guess. A failing
+/// listing → Err. On typing, records telemetry::prompt_typed(pane, StartedBy::Phone, None,
+/// typed_at), so the chief's turn counts as started from the phone; a typed app reply opens
+/// no phone request, because the phone-request counters keep a fixed channel list. Logs
+/// nothing that holds the text.
 pub(crate) fn route_to_chief(
     text: &str,
     chief: &ChiefPane,
