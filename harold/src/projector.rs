@@ -27,6 +27,7 @@ use crate::store::{
     TurnCompleted,
 };
 use crate::telemetry::{self, OpenReply, ResolvedBy, Routing, TRACE_TARGET};
+use crate::voice_input::Speaker;
 use crate::web_app::chief::{ChiefPane, find_chief, is_chief_pane};
 
 pub(crate) trait DeliveryDispatcher: Send + Sync + 'static {
@@ -333,6 +334,7 @@ impl ProductionDispatcher {
                 },
                 self.environment.as_ref(),
                 |pane_id| self.chief_app(pane_id),
+                |text| crate::voice_input::say_in_open_call(text, Speaker::Chief),
             ),
             other => Err(DispatchError::Permanent(format!(
                 "unknown event type: {other}"
@@ -487,6 +489,7 @@ fn dispatch_spoken_line(
         drop_reason,
         environment,
         |_| None,
+        |_| None,
     )
 }
 
@@ -501,6 +504,7 @@ fn dispatch_spoken_line_with_app<'a>(
     drop_reason: impl FnOnce(&str) -> Option<String>,
     environment: &dyn NotifyEnvironment,
     chief_app: impl FnOnce(&str) -> Option<ChiefApp<'a>>,
+    in_call: impl FnOnce(&str) -> Option<bool>,
 ) -> Result<DeliveryOutcome, DispatchError> {
     let line = serde_json::from_value::<SpokenLineRequested>(delivery.payload.clone()).map_err(
         |error| DispatchError::Permanent(format!("invalid SpokenLineRequested payload: {error}")),
@@ -509,6 +513,10 @@ fn dispatch_spoken_line_with_app<'a>(
     if let Some(reason) = drop_reason(pane_id) {
         info!(pane_id = %pane_id, "{reason}");
         return Ok(DeliveryOutcome::Skipped);
+    }
+    if in_call(&line.text) == Some(true) {
+        info!(pane_id = %pane_id, "spoken line said in the open call");
+        return Ok(DeliveryOutcome::Delivered);
     }
     if environment.screen_locked() {
         if messaging_paused {

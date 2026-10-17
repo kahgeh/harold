@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -5,9 +6,9 @@ use serde_json::json;
 
 use super::{
     ChiefTyper, DeliveryDispatcher, DispatchError, ProductionDispatcher, ReplyOrigin, Router,
-    dispatch_away_message, dispatch_spoken_line, handle_next_delivery, handle_next_delivery_inner,
-    production_dispatcher, project_and_publish_agent_snapshot, route_message, run_event_handler,
-    stored_envelope,
+    dispatch_away_message, dispatch_spoken_line, dispatch_spoken_line_with_app,
+    handle_next_delivery, handle_next_delivery_inner, production_dispatcher,
+    project_and_publish_agent_snapshot, route_message, run_event_handler, stored_envelope,
 };
 use crate::agent::domain::{
     AgentEvent, AgentIncarnation, AgentMonitorHealthChanged, AgentPaneDeparted,
@@ -19,7 +20,7 @@ use crate::inbound::RouteReport;
 use crate::inbound::ownership::agent_message_text;
 use crate::outbound::fake::{CapturedLogs, FakeEnvironment};
 use crate::outbound::notify_tests::{FAKE_MACHINE, FakeApp, FakeAwayText};
-use crate::outbound::{AppDelivery, AppRoute, DeliveryOutcome, SystemEnvironment};
+use crate::outbound::{AppDelivery, AppRoute, ChiefApp, DeliveryOutcome, SystemEnvironment};
 use crate::store::{
     AwayMessageRequested, EventVersion, HaroldStore, InboundMessage, NewEvent, PendingDelivery,
     SpokenLineRequested, TurnCompleted, WriteFault, append_agent_events,
@@ -2113,6 +2114,73 @@ fn dropped_spoken_line_logs_the_reason_and_the_pane_only() {
             .contains("spoken line dropped (lines come from /work/chief-of-pods only) pane_id=%2")
     );
     assert!(!logs.text().contains("secret words"));
+}
+
+/// A chief's line on a locked screen with the chief app answering, and `in_call` as the open
+/// call's answer; `in_call_asked` is how many times the call was asked.
+fn dispatch_line_with_call(
+    environment: &FakeEnvironment,
+    app: &FakeApp,
+    away: &FakeAwayText,
+    in_call: Option<bool>,
+) -> (Result<DeliveryOutcome, DispatchError>, usize) {
+    let asked = Cell::new(0);
+    let outcome = dispatch_spoken_line_with_app(
+        &spoken_delivery(json!(chief_line("hi"))),
+        false,
+        false,
+        |_| None,
+        environment,
+        |_| Some(ChiefApp { app, away }),
+        |text| {
+            assert_eq!(text, "hi");
+            asked.set(asked.get() + 1);
+            in_call
+        },
+    );
+    (outcome, asked.get())
+}
+
+#[test]
+fn a_spoken_line_an_open_call_played_is_not_pushed_or_sent() {
+    let environment = FakeEnvironment::locked("");
+    let app = FakeApp::new(AppDelivery::Pushed);
+    let away = FakeAwayText::default();
+
+    let (outcome, asked) = dispatch_line_with_call(&environment, &app, &away, Some(true));
+
+    assert!(matches!(outcome, Ok(DeliveryOutcome::Delivered)));
+    assert_eq!(asked, 1);
+    assert!(app.delivered().is_empty());
+    assert!(away.sends().is_empty());
+    assert!(environment.spoken_lines().is_empty());
+    assert!(environment.voice_notes().is_empty());
+}
+
+#[test]
+fn a_spoken_line_the_call_did_not_play_goes_by_the_app_route() {
+    let environment = FakeEnvironment::locked("");
+    let app = FakeApp::new(AppDelivery::Pushed);
+    let away = FakeAwayText::default();
+
+    let (outcome, asked) = dispatch_line_with_call(&environment, &app, &away, Some(false));
+
+    assert!(matches!(outcome, Ok(DeliveryOutcome::Delivered)));
+    assert_eq!(asked, 1);
+    assert_eq!(app.delivered(), [("event-1".to_string(), "hi".to_string())]);
+}
+
+#[test]
+fn a_spoken_line_with_no_call_open_goes_by_the_app_route() {
+    let environment = FakeEnvironment::locked("");
+    let app = FakeApp::new(AppDelivery::Pushed);
+    let away = FakeAwayText::default();
+
+    let (outcome, asked) = dispatch_line_with_call(&environment, &app, &away, None);
+
+    assert!(matches!(outcome, Ok(DeliveryOutcome::Delivered)));
+    assert_eq!(asked, 1);
+    assert_eq!(app.delivered(), [("event-1".to_string(), "hi".to_string())]);
 }
 
 // ---------------------------------------------------------------------------
