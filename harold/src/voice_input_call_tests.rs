@@ -98,7 +98,7 @@ async fn a_worker_that_never_says_ready_fails_its_load_after_120_s() {
     let folder = std::env::temp_dir().join(format!("harold-call-load-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&folder).unwrap();
     let script = folder.join("silent-worker");
-    std::fs::write(&script, "#!/bin/sh\nsleep 600\n").unwrap();
+    std::fs::write(&script, "#!/bin/sh\nexec sleep 600\n").unwrap();
     std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
     let command = WorkerCommand {
         python: script.display().to_string(),
@@ -198,4 +198,61 @@ async fn a_second_start_while_the_first_opens_answers_the_call_it_opens() {
     assert_eq!(second.state, CallState::Listening);
     assert_eq!(h.ports.state().sources, 1);
     assert_eq!(h.worker().starts, 1);
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn talk_now_while_transcribing_still_plays_the_answer_to_the_typed_turn() {
+    let h = Harness::new();
+    h.script([Heard::Slow("hello there".to_string())]);
+    h.start().await;
+    h.speak().await;
+    assert_eq!(h.state(), CallState::Transcribing);
+
+    h.calls.talk_now();
+    sleep(Duration::from_millis(1100)).await;
+    assert_eq!(h.keys(), typed("%2", "hello there"));
+    assert_eq!(h.state(), CallState::Waiting);
+
+    let said = h.say("answer", Speaker::Chief);
+    assert_eq!(said.await.unwrap(), Some(true));
+    settle().await;
+    assert_eq!(h.played(), ["answer"]);
+    assert_eq!(h.state(), CallState::Listening);
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn talk_now_while_a_turn_waits_for_a_busy_chief_still_plays_the_answer() {
+    let h = Harness::new();
+    h.start().await;
+    h.set_chief(EffectiveAgentState::Busy);
+    h.speak().await;
+    assert_eq!(h.played(), [CHIEF_BUSY]);
+
+    h.calls.talk_now();
+    settle().await;
+    h.set_chief(EffectiveAgentState::Idle);
+    sleep(Duration::from_millis(1100)).await;
+    assert_eq!(h.keys(), typed("%2", "hello there"));
+    assert_eq!(h.state(), CallState::Waiting);
+
+    let said = h.say("answer", Speaker::Chief);
+    assert_eq!(said.await.unwrap(), Some(true));
+    settle().await;
+    assert_eq!(h.played(), [CHIEF_BUSY, "answer"]);
+    assert_eq!(h.state(), CallState::Listening);
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn talk_now_while_transcribing_nothing_heard_still_says_sorry_at_once() {
+    let h = Harness::new();
+    h.script([Heard::Slow(String::new())]);
+    h.start().await;
+    h.speak().await;
+
+    h.calls.talk_now();
+    sleep(Duration::from_millis(1100)).await;
+
+    assert_eq!(h.played(), [NOTHING_HEARD]);
+    assert_eq!(h.status().last_result, Some(TurnResult::NothingHeard));
+    assert_eq!(h.state(), CallState::Listening);
 }

@@ -265,6 +265,9 @@ struct Sound {
     by: Option<Speaker>,
     /// Whether this is the chief's answer to the turn typed last.
     answers: bool,
+    /// Whether it waits, after talk now, until the next turn is cut: another agent's line
+    /// or the restart phrase, but not the chief's lines or Harold's reply to a turn.
+    waits_after_talk_now: bool,
     after: After,
     reply: Option<oneshot::Sender<bool>>,
 }
@@ -358,7 +361,8 @@ struct Call<P: CallPorts> {
     held: Option<HeldTurn>,
     /// Set by talk now: the chief's lines are taken as said until the next turn is typed.
     skip_chief_lines: bool,
-    /// Set by talk now: sounds other than an ending phrase wait until the next turn is cut.
+    /// Set by talk now: sounds that wait after talk now do so until the next turn is cut
+    /// or typed.
     hold_others: bool,
     done: bool,
     reader: Option<JoinHandle<()>>,
@@ -757,6 +761,7 @@ impl<P: CallPorts> Call<P> {
             audio: Audio::Tts,
             by: None,
             answers: false,
+            waits_after_talk_now: true,
             after: After::Nothing,
             reply: None,
         });
@@ -825,6 +830,7 @@ impl<P: CallPorts> Call<P> {
 
     fn typed(&mut self, pane: String, text: String) {
         log_typed(&pane, &text);
+        self.hold_others = false;
         let prompt = format!("{MARK} {text}");
         {
             let mut status = lock(&self.status);
@@ -1046,6 +1052,7 @@ impl<P: CallPorts> Call<P> {
             },
             by: Some(by),
             answers,
+            waits_after_talk_now: by == Speaker::OtherAgent,
             after: After::Nothing,
             reply,
         });
@@ -1099,6 +1106,7 @@ impl<P: CallPorts> Call<P> {
             audio,
             by: None,
             answers: false,
+            waits_after_talk_now: false,
             after,
             reply: None,
         });
@@ -1118,7 +1126,7 @@ impl<P: CallPorts> Call<P> {
         if !first.ready() || (self.mode == Mode::Listening && self.detector.in_turn()) {
             return;
         }
-        if self.hold_others && first.after == After::Nothing {
+        if self.hold_others && first.waits_after_talk_now {
             return;
         }
         let Some(sound) = self.sounds.pop_front() else {
@@ -1210,8 +1218,8 @@ impl<P: CallPorts> Call<P> {
     }
 
     /// Stops what plays and listens at once. The chief's lines count as said until the next
-    /// turn is typed (Decision 12), and other sounds, but for an ending phrase, wait until
-    /// the next turn is cut.
+    /// turn is typed (Decision 12), and other agents' lines and the restart phrase wait until
+    /// the next turn is cut or typed.
     fn talk_now(&mut self) {
         if let Some(playing) = self.playing.as_mut() {
             self.sink.stop();

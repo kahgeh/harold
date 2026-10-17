@@ -52,6 +52,8 @@ enum Heard {
     Exit,
     /// The same, with the request answering a second after the health.
     ExitLater,
+    /// `Text`, answered a second after the request.
+    Slow(String),
     FailToLoad,
 }
 
@@ -94,6 +96,10 @@ impl VoiceWorker for FakeWorker {
         let (text, no_speech_prob) = match heard {
             Heard::Text(text) => (text, 0.1),
             Heard::Unlikely(text) => (text, 0.7),
+            Heard::Slow(text) => {
+                sleep(Duration::from_secs(1)).await;
+                (text, 0.1)
+            }
             Heard::Fail => return Err(WorkerError::Failed),
             Heard::Exit => {
                 self.1.send_replace(Health::Gone(WorkerError::Exited));
