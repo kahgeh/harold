@@ -1413,8 +1413,11 @@ async fn task_with_no_prompts_ends_without_reading_the_clock() {
 
 #[test]
 fn startup_wait_covers_two_pane_listings_and_a_screen_pass() {
-    let shipped = AgentMonitorSettings::default();
-    assert_eq!(startup_wait(&shipped), Duration::from_millis(10_500));
+    let settings_default = AgentMonitorSettings::default();
+    assert_eq!(
+        startup_wait(&settings_default),
+        Duration::from_millis(10_500)
+    );
 
     // Each listing may take its interval and its timeout, and there are two.
     let slower_interval = AgentMonitorSettings {
