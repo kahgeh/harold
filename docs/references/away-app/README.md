@@ -138,7 +138,7 @@ The route applies only to messages that would reach the phone today. At the desk
 
 ## Calls (stage 1b)
 
-You tap **📞 Call**, and talk with the chief as in a phone call. Harold hears when you stop talking, types what you said into the chief's pane, marked `🎙`, plays the chief's spoken answer on the phone, and listens again. The desk's calls work the same way; the [voice input reference](../voice-input/README.md) describes them. Call mode uses the `[voice_input]` section for transcription. Without it, the button's screen says `Voice is not set up on the Mac`.
+You tap **📞 Call**, and talk with the chief as in a phone call. Harold hears when you stop talking, types what you said into the chief's pane, marked `🎙`, plays the chief's spoken answer on the phone, and listens again. The desk's calls work the same way; the [voice input reference](../voice-input/README.md) describes them. Call mode uses the `[voice_input]` section for transcription. Without it, the **Call** button is disabled and reads `Voice is not set up on the Mac`, and `POST /call` answers `409` with the same line.
 
 A call starts only when no call is open at the desk. If one is, Harold ends it first, so the chief never gets turns from two microphones.
 

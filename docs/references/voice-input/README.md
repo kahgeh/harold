@@ -349,7 +349,7 @@ The core, in `harold/src/voice_input.rs`, is internal Rust, not an API. A call i
 | `voice_muted` | Whether Harold's voice is muted now. |
 | `keep_awake` | Hold the display awake for the call. |
 
-`CallControl` runs at most one call. `start`, `stop`, `talk_now` and `status` are what the `Call` RPC calls. `say_blocking` plays a line in the open call from a blocking thread, which is how `harold speak` and other agents' turn-end updates reach it. `CallControl::say`, its async twin, is compiled only in tests today (`#[cfg(test)]`). Stage 1b re-enables it, because the phone call says its lines from async code.
+`CallControl` runs at most one call. `start`, `stop`, `talk_now` and `status` are what the `Call` RPC calls. `say_blocking` plays a line in the open call from a blocking thread, which is how `harold speak` and other agents' turn-end updates reach it. `CallControl::say`, its async twin, is compiled only in tests (`#[cfg(test)]`). The phone's call does not need it: every line it says arrives on a blocking thread (the projector's `spawn_blocking`) and goes through `say_blocking`, as at the desk.
 
 Tests use a fake source, sink, worker and pane; nothing in them touches the microphone, the speakers or a model.
 

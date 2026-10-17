@@ -293,7 +293,8 @@ impl<P: CallPorts> CallControl<P> {
 
     /// Plays `line` in the open call and resolves once it has ended. `None` when no call is open.
     /// `Some(false)` when the call ended before playing it, so the delivery retries outside the call.
-    /// Test-only until away-web-app's phone call says its lines from async code.
+    /// Test-only: every line Harold says in a call, the desk's or the phone's, arrives on a
+    /// blocking thread and goes through `say_blocking`.
     #[cfg(test)]
     pub(crate) async fn say(&self, line: &str, by: Speaker) -> Option<bool> {
         Some(self.send_line(line, by)?.await.unwrap_or(false))
