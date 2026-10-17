@@ -3837,3 +3837,197 @@ async fn a_to_chief_reply_with_no_app_is_still_typed() {
         [(pane.to_string(), "📱 hello".to_string())]
     );
 }
+
+// ---------------------------------------------------------------------------
+// End to end: no app content reaches a log line or an export
+// ---------------------------------------------------------------------------
+
+const APP_CANARY: &str = "APP-CANARY-7731";
+const APP_LOGIN: &str = "chief@example.com";
+
+/// The whole app path with a canary: the reply is posted to the app's real router and
+/// typed into the chief, and the chief's answer goes through the real `WebAppRoute` and
+/// is pushed to a fake push service. Then no `harold.log` line written on the runtime's
+/// threads, and no exported log record or span, holds the canary, the push address, the
+/// phone's keys or Harold's public key.
+///
+/// The exporter is process-wide, so the search of the exports covers every test's. Other
+/// tests send the same canary and must not leak it either: a failure here is a real
+/// leak, wherever it came from. The `harold.log` lines are this test's own: each thread of
+/// its runtime, and the test's thread, captures what it writes.
+#[test]
+fn the_canary_reaches_no_log_line_and_no_export() {
+    thread_local! {
+        static CAPTURE: std::cell::RefCell<Option<CapturedLogs>> =
+            const { std::cell::RefCell::new(None) };
+    }
+    telemetry::test_support::install();
+    let harold_log = Arc::new(Mutex::new(String::new()));
+    let kept = Arc::clone(&harold_log);
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .on_thread_start(|| {
+            CAPTURE.with(|capture| *capture.borrow_mut() = Some(CapturedLogs::start()));
+        })
+        .on_thread_stop(move || {
+            CAPTURE.with(|capture| {
+                if let Some(lines) = capture.borrow_mut().take() {
+                    kept.lock().unwrap().push_str(&lines.text());
+                }
+            });
+        })
+        .build()
+        .unwrap();
+    let on_test_thread = CapturedLogs::start();
+
+    let secrets = runtime.block_on(run_the_app_path_with_a_canary());
+    // Every thread has stopped, and handed in its lines, once the runtime has.
+    drop(runtime);
+    let harold_log = format!("{}{}", harold_log.lock().unwrap(), on_test_thread.text());
+
+    let logs: Vec<String> = telemetry::test_support::logs()
+        .iter()
+        .map(|log| format!("{log:?}"))
+        .collect();
+    let spans: Vec<String> = telemetry::test_support::spans()
+        .iter()
+        .map(|span| format!("{span:?}"))
+        .collect();
+    // The path wrote and exported its lines, so the searches below read them.
+    for line in ["app reply stored", "app push sent"] {
+        assert!(harold_log.contains(line), "{line}: {harold_log}");
+        assert!(logs.iter().any(|log| log.contains(line)), "{line}");
+    }
+    for secret in &secrets {
+        assert!(
+            !harold_log.contains(secret.as_str()),
+            "harold.log holds {secret}: {harold_log}"
+        );
+        for log in &logs {
+            assert!(
+                !log.contains(secret.as_str()),
+                "a log record holds {secret}: {log}"
+            );
+        }
+        for span in &spans {
+            assert!(
+                !span.contains(secret.as_str()),
+                "a span holds {secret}: {span}"
+            );
+        }
+    }
+}
+
+/// Posts the canary to the app, types it into an idle chief, and pushes the chief's
+/// answer that holds it, checking each step. Returns what no log may hold: the canary,
+/// the push address, the phone's keys and Harold's public key.
+async fn run_the_app_path_with_a_canary() -> Vec<String> {
+    use crate::store::{AppReplyState, AppSender, append_app_push_subscribed};
+    use crate::web_app::fake_push::FakePushService;
+    use crate::web_app::push::{Pusher, VapidKey, vapid_key_path};
+    use crate::web_app::route::WebAppRoute;
+    use crate::web_app::{AppState, router};
+
+    let directory = TestDirectory::new();
+    let pane = "%app-canary-chief";
+    let store = Arc::new(HaroldStore::open(&directory.0).await.unwrap());
+    append_agent_events(&store, chief_in(pane)).await.unwrap();
+    let snapshots = AgentSnapshotHub::new(store.load_agent_snapshot().await.unwrap());
+    project_and_publish_agent_snapshot(&store, &snapshots, 500)
+        .await
+        .unwrap();
+
+    // A phone that turned alerts on, at a push service that takes every push.
+    let service = FakePushService::start(201).await;
+    let subscription = service.subscription(1);
+    append_app_push_subscribed(&store, &subscription)
+        .await
+        .unwrap();
+    let key = VapidKey::load_or_create(&vapid_key_path(&directory.0.join("harold.db")))
+        .expect("create the VAPID key");
+    let public_key = key.public_key_base64url();
+    let pusher = Arc::new(Pusher::new(key, APP_LOGIN));
+    let route: Arc<dyn AppRoute> = Arc::new(WebAppRoute::new(Arc::clone(&store), pusher));
+
+    // The app's real router, behind its login check, on a free local port.
+    let (_shutdown, shutdown_rx) = tokio::sync::watch::channel(());
+    let state = AppState {
+        store: Arc::clone(&store),
+        allowed_login: Arc::from(APP_LOGIN),
+        public_key: Arc::from(public_key.as_str()),
+        shutdown: shutdown_rx,
+    };
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let _ = axum::serve(listener, router(state)).await;
+    });
+
+    let (typed, typer) = recording_typer();
+    let (routed, chat_router) = recording_router();
+    let away = Arc::new(FakeAwayText::default());
+    let environment = Arc::new(FakeEnvironment::locked(ONLY_FROM_CHIEF));
+    let dispatcher: Arc<dyn DeliveryDispatcher> = Arc::new(Unpaused(
+        production_dispatcher(environment.clone(), &snapshots, Some(route))
+            .with_router(chat_router)
+            .with_chief_typer(typer)
+            .with_away_text(away.clone()),
+    ));
+
+    // The reply, typed in the app and handed to the chief.
+    let response = reqwest::Client::new()
+        .post(format!("http://{addr}/replies"))
+        .header("Tailscale-User-Login", APP_LOGIN)
+        .header("content-type", "application/json")
+        .body(json!({ "reply": APP_CANARY }).to_string())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    response.text().await.unwrap();
+    while handle_next_delivery(&store, Arc::clone(&dispatcher))
+        .await
+        .unwrap()
+    {}
+
+    // The chief's answer, pushed to the phone.
+    let answer = format!("{APP_CANARY} from the chief");
+    request_message(&store, pane, &answer).await;
+    while handle_next_delivery(&store, Arc::clone(&dispatcher))
+        .await
+        .unwrap()
+    {}
+    server.abort();
+
+    assert_eq!(
+        *typed.lock().unwrap(),
+        [(pane.to_string(), format!("📱 {APP_CANARY}"))]
+    );
+    assert!(routed.lock().unwrap().is_empty());
+    assert_eq!(service.requests().len(), 1, "the push was sent");
+    assert!(
+        away.sends().is_empty(),
+        "pushed, so iMessage carries nothing"
+    );
+    assert!(environment.away_messages().is_empty());
+    let rows = store.app_messages_since(0).await.unwrap();
+    let rows: Vec<_> = rows
+        .iter()
+        .map(|row| (row.sender, row.text.as_str(), row.state))
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            (AppSender::User, APP_CANARY, Some(AppReplyState::Typed)),
+            (AppSender::Chief, answer.as_str(), None),
+        ]
+    );
+
+    vec![
+        APP_CANARY.to_owned(),
+        subscription.endpoint,
+        subscription.p256dh,
+        subscription.auth,
+        public_key,
+    ]
+}
