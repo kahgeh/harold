@@ -25,7 +25,7 @@ The app is built in two stages:
 - **Stage 1a, built:** the thread, alerts and typed replies, described below.
 - **Stage 1b, not built yet:** calls with the chief ([Calls](#calls-stage-1b)).
 
-Both are built and tested on the Mac only. Publishing the app to the phone waits until stage 0, a throwaway test on a real iPhone, has passed and you have said so.
+Stage 1a is built; stage 1b is not. Both are tested on the Mac before the phone: publishing the app to the phone waits until stage 0, a throwaway test on a real iPhone, has passed and you have said so.
 
 ## Setting it up
 
@@ -34,6 +34,13 @@ Setting up takes five steps: Tailscale on both devices, `tailscale serve`, the `
 ### Tailscale on the Mac and the iPhone
 
 Install Tailscale on this Mac (PasM4MBP) and on the iPhone, and sign both in to the same tailnet, the private network Tailscale makes from the devices signed in to your account. Only devices in that tailnet can reach the app.
+
+Before `tailscale serve` will serve HTTPS, the tailnet needs two settings turned on in the Tailscale admin console:
+
+- **MagicDNS**, which gives the Mac its name in the tailnet, `pasm4mbp.<tailnet>.ts.net`;
+- **HTTPS certificates**, which let Tailscale obtain a certificate for that name.
+
+The first run of `tailscale serve` offers a link to turn on whichever is off. The `tailscale` command must also be on the `PATH`: the Mac app can install its command-line tool from its settings.
 
 ### Publishing the app with `tailscale serve`
 
@@ -46,6 +53,17 @@ tailscale serve --bg http://127.0.0.1:4330
 `tailscale serve status` shows what is published. Never use `tailscale funnel` for the app: Funnel opens a service to the whole internet.
 
 For each request it passes on, Tailscale Serve adds a `Tailscale-User-Login` header naming the person signed in on the device that sent it. Harold answers `403` to every request whose header is missing or differs from `allowed_login`, on every route, and stores and logs nothing for it.
+
+Harold also accepts only a Host ending in `.ts.net`, such as the Mac's tailnet name, or the loopback address it listens on. Stage 0 must confirm that `tailscale serve` passes the `.ts.net` Host through to Harold. If it passes some other name instead, Harold answers `403` to every request, and the app is blocked entirely.
+
+### What the app refuses
+
+The login header comes from the device, not from the page, so every page open in the phone's browser carries it, as it would a cookie. Two more checks keep other pages out, and each refusal is a `403` with nothing stored or logged:
+
+- **Posts from another page:** a reply or an alert sign-up must come from the app's own page. The browser must say the request is from the same site (`Sec-Fetch-Site: same-origin`, or else an `Origin` that matches the Host), and the request must carry a header another site's page cannot send without asking first: `Datastar-Request: true`, which the page's reply form sends, or `Content-Type: application/json`, which the alert sign-up sends. Harold never grants that asking, so another site's page cannot post at all.
+- **Another Host:** a page can point its own name at `127.0.0.1` and reach Harold's listener. Harold refuses every request whose Host is not the tailnet name or the loopback address, so such a page gets nothing.
+
+These checks protect against web pages and other devices, not against software on the Mac. Any program on the Mac can still reach `127.0.0.1:4330` and send a correct Host, Origin and login. The Mac's own processes are trusted, as they already are with tmux, where any of them can type into the chief's pane.
 
 ### The `[web_app]` section
 
@@ -65,7 +83,7 @@ allowed_login = "<your Tailscale login>"
 The section also needs `[notify] away_messages_only_from` set, because that folder decides which agent is the chief.
 
 - **Absent:** Harold serves nothing, listens on no port, and every message reaches the phone as before.
-- **Invalid:** a `listen` that is not a loopback address and port, an empty `allowed_login`, or no `away_messages_only_from` stops Harold at start, and fails `--check-config`, with an error naming the key.
+- **Invalid:** a `listen` that is not a loopback address and port, an empty `allowed_login`, or no `away_messages_only_from` stops Harold at start with an error naming the key. `--check-config` fails too, but prints only `invalid configuration`; start Harold to see which key is wrong.
 - **Cannot start:** when Harold cannot listen on the address or read its key, it logs `web app unavailable` with the address or the key's path, and runs without the app. Messages then reach the phone through iMessage.
 
 ### Adding the app to the home screen
@@ -82,13 +100,15 @@ The thread page shows **Turn on alerts** at the top until this phone has turned 
 
 If you refuse permission, or Harold cannot store the address, the button stays, and you can tap it again.
 
+Each time the app opens, it sends the phone's address to Harold again, and hides the button only when Harold stores it. If Harold cannot store it, the button stays, and a tap signs the phone up afresh. A sign-up made with another key, such as one from before Harold's key was replaced, is dropped, and the button shows.
+
 Harold creates its own key pair the first time it starts with `[web_app]` set ([The key](#the-key)). The app subscribes with that key's public half, and Harold signs each push with the private half, so the push service knows the push comes from the same server the phone subscribed to.
 
 ## The thread
 
 The thread is one page, with the oldest message at the top. It holds the last 30 days of messages; Harold deletes older ones at start and every hour. While the page is open, each new message appears as soon as Harold stores it.
 
-A reply you type goes to the chief. It can be up to 1,000 characters; Harold refuses a blank one. Harold stores the reply first, then types `📱 <reply>` and Enter into the chief's pane. Under each reply, the thread shows what became of it:
+A reply you type goes to the chief. It can be up to 1,000 characters; Harold refuses a blank one. **Send** is disabled while a reply is on its way, so a double tap sends it once. Harold stores the reply first, then types `📱 <reply>` and Enter into the chief's pane. Under each reply, the thread shows what became of it:
 
 | Under the reply | What happened |
 |---|---|
@@ -101,7 +121,7 @@ While Harold cannot list the tmux panes, it does not know which pane is the chie
 
 ## What reaches the phone, and by which route
 
-Once a phone has turned on alerts, the chief's messages go to the app instead of iMessage. Every other agent's messages, and your iMessage replies, work as before:
+With `[web_app]` set, the chief's messages always go into the app's thread. Once a phone has turned on alerts, they reach the phone as a push instead of through iMessage; until then, each also goes to iMessage, starting `(app unreachable)`. Every other agent's messages, and your iMessage replies, work as before:
 
 | Message | Route |
 |---|---|
@@ -149,7 +169,7 @@ Four other lines report failures, and none carries content:
 - `web app thread not pruned` carries no field;
 - `app reply state not recorded` carries the reply's event id and the store's error.
 
-A request refused by the login check writes no line at all.
+A request refused by the login check, or by the checks on posts and the Host, writes no line at all.
 
 The same lines reach Harold's exported telemetry. A turn started by a reply typed in the app counts as `started_by = phone`, as a phone reply through iMessage does.
 
