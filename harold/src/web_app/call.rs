@@ -38,8 +38,7 @@ pub(crate) trait PhoneCallApi: Send + Sync {
     fn audio(&self, at_ms: u64, bytes: &[u8]) -> Result<(), AudioRefused>;
     fn played(&self, id: &str);
     fn answer(&self, id: &str) -> Option<Vec<u8>>;
-    // The event stream reads the view once it shows the call; until then only tests do.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// What the phone shows and plays, now and as it changes.
     fn view(&self) -> watch::Receiver<PhoneView>;
     /// Ends an open call with reason `shutdown`.
     fn shutdown(&self) -> BoxFuture<'_, ()>;

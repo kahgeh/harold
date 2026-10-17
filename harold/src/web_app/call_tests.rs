@@ -12,6 +12,8 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, sleep, timeout};
 
+use askama::Template;
+
 use super::{AppCalls, EndDeskCall, PhoneCallApi, refusal_status};
 use crate::outbound::fake::CapturedLogs;
 use crate::outbound::{AppDelivery, AppRoute};
@@ -20,10 +22,12 @@ use crate::store::{AppSender, EventVersion, HaroldStore, append_app_push_subscri
 use crate::telemetry::test_support;
 use crate::voice_input::tests::{FakePorts, loud, quiet, text, typed};
 use crate::voice_input::{
-    AudioRefused, CallPorts, CallState, LineTaker, PIECE_LIMIT_BYTES, PhoneCalls, Said, Speaker,
+    AudioRefused, CallPorts, CallState, LineTaker, PIECE_LIMIT_BYTES, PhoneCalls, PhoneSound,
+    PhoneSpeech, PhoneView, Said, Speaker,
 };
 use crate::web_app::fake_push::FakePushService;
 use crate::web_app::origin::loopback_hosts;
+use crate::web_app::pages::{CONTENT_SECURITY_POLICY, CallSection};
 use crate::web_app::push::{Pusher, VapidKey, vapid_key_path};
 use crate::web_app::route::WebAppRoute;
 use crate::web_app::{AppState, router, start};
@@ -36,6 +40,9 @@ const LIMIT: Duration = Duration::from_secs(5);
 /// Samples in one posted piece: a quarter of a second at 16 kHz.
 const PIECE_SAMPLES: usize = 4_000;
 const PIECE_MS: u64 = 250;
+const MARKUP: &str = "<script>alert(1)</script> {{x}} $reply @post('/x')";
+/// `MARKUP` as askama escapes it: `<` and `>` become `&#60;` and `&#62;`.
+const ESCAPED: &str = "&#60;script&#62;alert(1)&#60;/script&#62;";
 
 struct TestDirectory(PathBuf);
 
@@ -135,6 +142,55 @@ impl TestServer {
     async fn post_audio(&self, at_ms: u64, bytes: Vec<u8>) -> StatusCode {
         let path = format!("/call/audio?at={at_ms}");
         self.send(Method::POST, &path, bytes).await.status()
+    }
+
+    /// Opens `GET /updates`.
+    async fn updates(&self) -> EventReader {
+        let response = self.get("/updates").await;
+        assert_eq!(response.status(), 200);
+        assert_eq!(response.headers()["content-type"], "text/event-stream");
+        EventReader {
+            response,
+            buffer: String::new(),
+        }
+    }
+}
+
+/// Reads one SSE response event by event.
+struct EventReader {
+    response: reqwest::Response,
+    buffer: String,
+}
+
+impl EventReader {
+    /// The next event, its lines without the blank line that ends it; None when the
+    /// response has ended. Keep-alive comments are skipped.
+    async fn next(&mut self) -> Option<String> {
+        loop {
+            if let Some(end) = self.buffer.find("\n\n") {
+                let event = self.buffer[..end].to_owned();
+                self.buffer.drain(..end + 2);
+                if event.lines().all(|line| line.starts_with(':')) {
+                    continue;
+                }
+                return Some(event);
+            }
+            let chunk = timeout(LIMIT, self.response.chunk())
+                .await
+                .expect("an event within the limit")
+                .expect("the stream reads");
+            self.buffer.push_str(std::str::from_utf8(&chunk?).unwrap());
+        }
+    }
+
+    /// The first event from now that holds `wanted`.
+    async fn until(&mut self, wanted: &str) -> String {
+        loop {
+            let event = self.next().await.expect("the stream goes on");
+            if event.contains(wanted) {
+                return event;
+            }
+        }
     }
 }
 
@@ -338,6 +394,7 @@ async fn a_phone_turn_is_typed_and_the_chiefs_line_is_offered_and_not_pushed() {
         .worker_log()
         .script
         .push_back(text("status of the pod"));
+    let mut updates = phone.server.updates().await;
 
     phone.start().await;
     phone.speak().await;
@@ -345,6 +402,10 @@ async fn a_phone_turn_is_typed_and_the_chiefs_line_is_offered_and_not_pushed() {
 
     let said = phone.say("Two specs wait.");
     let id = phone.offered_line("Two specs wait.").await;
+    // The line is announced on the event stream, for the phone to fetch.
+    let announced = updates.until(&format!(r#"data-harold-sound="{id}""#)).await;
+    assert!(announced.contains(r#"id="call""#), "{announced}");
+    assert!(announced.contains("Two specs wait."), "{announced}");
     let answer = phone.server.get(&format!("/call/answer/{id}")).await;
     assert_eq!(answer.status(), 200);
     assert_eq!(answer.headers()["content-type"], "audio/wav");
@@ -738,4 +799,248 @@ fn each_audio_refusal_has_its_status() {
     assert_eq!(refusal_status(AudioRefused::Malformed), 400);
     assert_eq!(refusal_status(AudioRefused::TooLarge), 413);
     assert_eq!(refusal_status(AudioRefused::Full), 503);
+}
+
+// ---------------------------------------------------------------------------
+// The call screen
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_thread_page_offers_a_call_or_says_voice_is_not_set_up() {
+    let offered = r#"<button type="button" id="call-start">📞 Call</button>"#;
+    let refused =
+        r#"<button type="button" id="call-start" disabled>Voice is not set up on the Mac</button>"#;
+
+    let set_up = Phone::new(true).await;
+    let page = set_up.server.get("/").await.text().await.unwrap();
+    assert!(page.contains(offered), "{page}");
+    assert!(!page.contains(NOT_SET_UP), "{page}");
+    assert!(
+        page.contains(r#"<script src="/static/call.js" defer></script>"#),
+        "{page}"
+    );
+    assert!(page.contains(r#"id="call""#), "{page}");
+    assert!(page.contains("Call with the chief · 0:00"), "{page}");
+
+    let not_set_up = Phone::new(false).await;
+    let page = not_set_up.server.get("/").await.text().await.unwrap();
+    assert!(page.contains(refused), "{page}");
+    assert!(!page.contains("📞 Call"), "{page}");
+
+    let directory = TestDirectory::new();
+    let store = Arc::new(HaroldStore::open(directory.store_path()).await.unwrap());
+    let no_calls = TestServer::serve(store, None).await;
+    let page = no_calls.get("/").await.text().await.unwrap();
+    assert!(page.contains(refused), "{page}");
+    assert!(page.contains(r#"id="call""#), "{page}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_call_scripts_are_served_as_javascript_under_the_policy() {
+    let directory = TestDirectory::new();
+    let store = Arc::new(HaroldStore::open(directory.store_path()).await.unwrap());
+    let server = TestServer::serve(store, None).await;
+
+    for (name, file) in [
+        (
+            "call.js",
+            include_bytes!("../../static/web_app/call.js").as_slice(),
+        ),
+        (
+            "call-worklet.js",
+            include_bytes!("../../static/web_app/call-worklet.js").as_slice(),
+        ),
+    ] {
+        let response = server.get(&format!("/static/{name}")).await;
+        assert_eq!(response.status(), 200, "{name}");
+        let headers = response.headers().clone();
+        assert_eq!(headers["content-type"], "text/javascript", "{name}");
+        assert_eq!(
+            headers["content-security-policy"], CONTENT_SECURITY_POLICY,
+            "{name}"
+        );
+        assert_eq!(response.bytes().await.unwrap(), file, "{name}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_call_view_change_reaches_the_stream_as_a_patch_of_call() {
+    let phone = Phone::new(true).await;
+    let mut updates = phone.server.updates().await;
+    let thread = updates.next().await.expect("the whole thread");
+    assert!(thread.contains(r#"id="messages""#), "{thread}");
+    let first = updates.next().await.expect("the call section");
+    assert!(first.contains(r#"id="call""#), "{first}");
+    assert!(first.contains(r#"data-harold-state="off""#), "{first}");
+
+    phone.start().await;
+    let listening = updates.until(r#"data-harold-state="listening""#).await;
+    assert!(
+        listening.starts_with("event: datastar-patch-elements\n"),
+        "{listening}"
+    );
+    assert!(listening.contains(r#"id="call""#), "{listening}");
+    assert!(
+        !listening.contains("data: selector"),
+        "morphed by id: {listening}"
+    );
+    assert!(
+        !listening.contains("data: mode"),
+        "morphed by id: {listening}"
+    );
+    assert!(listening.contains("Listening"), "{listening}");
+
+    phone.speak().await;
+    phone.wait_for_typed("hello there").await;
+    let said = phone.say(MARKUP);
+    let id = phone.offered_line(MARKUP).await;
+
+    let offered = updates.until(&format!(r#"data-harold-sound="{id}""#)).await;
+    assert!(offered.contains(r#"id="call""#), "{offered}");
+    assert!(offered.contains(ESCAPED), "{offered}");
+    assert!(!offered.contains("<script>alert"), "{offered}");
+    assert!(!offered.contains("@post('/x')"), "{offered}");
+
+    let played = format!("/call/played?id={id}");
+    let response = phone.server.send(Method::POST, &played, Vec::new()).await;
+    assert_eq!(response.status(), 204);
+    assert_eq!(finished(said).await, Some(true));
+}
+
+fn view(state: CallState) -> PhoneView {
+    PhoneView {
+        state,
+        transcript: None,
+        sound: None,
+        speech: None,
+        ended: None,
+    }
+}
+
+fn sound(id: &str, said: Said) -> Option<PhoneSound> {
+    Some(PhoneSound {
+        id: id.to_owned(),
+        said,
+    })
+}
+
+fn render(view: &PhoneView) -> String {
+    CallSection::from(view).render().unwrap()
+}
+
+#[test]
+fn the_call_section_shows_each_state_in_the_specs_words() {
+    let hint = r#"<p class="call-hint">Say "bye" or tap End to hang up</p>"#;
+    let end = r#"<button type="button" id="call-end" class="call-end">End</button>"#;
+    let talk_now =
+        r#"<button type="button" id="call-talk-now" class="call-talk-now">Talk now</button>"#;
+
+    for state in [CallState::Off, CallState::NotSetUp] {
+        let html = render(&view(state));
+        assert!(
+            html.starts_with(r#"<section id="call" class="call""#),
+            "{html}"
+        );
+        assert!(html.contains(r#"data-harold-state="off""#), "{html}");
+        assert!(html.contains(r#"data-harold-sound="""#), "{html}");
+        assert!(html.contains(r#"data-harold-speech="""#), "{html}");
+        assert!(!html.contains("call-title"), "{html}");
+        assert!(!html.contains(talk_now), "{html}");
+    }
+
+    for state in [CallState::Listening, CallState::Transcribing] {
+        let mut listening = view(state);
+        listening.transcript = Some("what is left on the pod".into());
+        let html = render(&listening);
+        assert!(html.contains(r#"data-harold-state="listening""#), "{html}");
+        assert!(
+            html.contains(r#"<h2 class="call-title">Listening</h2>"#),
+            "{html}"
+        );
+        assert!(html.contains(hint), "{html}");
+        assert!(html.contains("You said:"), "{html}");
+        assert!(html.contains(r#""🎙 what is left on the pod""#), "{html}");
+        assert!(html.contains(end), "{html}");
+        assert!(!html.contains(talk_now), "{html}");
+        assert!(!html.contains(r#"class="bars""#), "{html}");
+    }
+
+    // A tick plays while the chief thinks, and leaves the title as it was.
+    let mut thinking = view(CallState::Waiting);
+    thinking.sound = sound("t1", Said::Tick);
+    let html = render(&thinking);
+    assert!(html.contains(r#"data-harold-state="thinking""#), "{html}");
+    assert!(html.contains(r#"data-harold-sound="t1""#), "{html}");
+    assert!(
+        html.contains(r#"<h2 class="call-title">Chief is thinking</h2>"#),
+        "{html}"
+    );
+    assert!(html.contains(hint), "{html}");
+    assert!(!html.contains("call-line"), "{html}");
+    assert!(!html.contains(talk_now), "{html}");
+
+    let mut chief = view(CallState::Speaking);
+    chief.sound = sound(
+        "s1",
+        Said::Line {
+            text: "Two specs wait.".into(),
+            by: Speaker::Chief,
+        },
+    );
+    let html = render(&chief);
+    assert!(html.contains(r#"data-harold-state="speaking""#), "{html}");
+    assert!(html.contains(r#"data-harold-sound="s1""#), "{html}");
+    assert!(
+        html.contains(r#"<h2 class="call-title">Chief speaking</h2>"#),
+        "{html}"
+    );
+    assert!(
+        html.contains(r#"<p class="call-line">"Two specs wait."</p>"#),
+        "{html}"
+    );
+    assert!(html.contains("📞"), "{html}");
+    assert_eq!(html.matches("<i></i>").count(), 5, "five bars: {html}");
+    assert!(html.contains(talk_now), "{html}");
+    assert!(html.contains(end), "{html}");
+    assert!(!html.contains(hint), "{html}");
+
+    let mut phrase = view(CallState::Speaking);
+    phrase.sound = sound("s2", Said::Phrase("Sorry, I didn't catch that.".into()));
+    let html = render(&phrase);
+    assert!(
+        html.contains(r#"<h2 class="call-title">Harold speaking</h2>"#),
+        "{html}"
+    );
+    assert!(html.contains("Sorry, I didn&#39;t catch that."), "{html}");
+
+    let mut speech = view(CallState::Speaking);
+    speech.speech = Some(PhoneSpeech {
+        id: "p1".into(),
+        text: "Bye.".into(),
+    });
+    let html = render(&speech);
+    assert!(html.contains(r#"data-harold-speech="p1""#), "{html}");
+    assert!(html.contains(r#"data-harold-speech-text="Bye.""#), "{html}");
+    assert!(html.contains(r#"data-harold-sound="""#), "{html}");
+    assert!(
+        html.contains(r#"<h2 class="call-title">Harold speaking</h2>"#),
+        "{html}"
+    );
+
+    // Every text value is escaped, in the attributes and in the screen's words.
+    let mut markup = view(CallState::Speaking);
+    markup.speech = Some(PhoneSpeech {
+        id: "p2".into(),
+        text: MARKUP.into(),
+    });
+    markup.transcript = Some(MARKUP.into());
+    let html = render(&markup);
+    assert!(html.contains(ESCAPED), "{html}");
+    assert!(!html.contains("<script>alert"), "{html}");
+    assert!(!html.contains("@post('/x')"), "{html}");
+    let mut heard = view(CallState::Listening);
+    heard.transcript = Some(MARKUP.into());
+    let html = render(&heard);
+    assert!(html.contains(ESCAPED), "{html}");
+    assert!(!html.contains("<script>alert"), "{html}");
 }

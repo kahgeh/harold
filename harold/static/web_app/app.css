@@ -13,6 +13,8 @@
   --surface-4: #dee2e6;
   --border: #adb5bd;
   --muted: #868e96;
+  --end: #e03131;
+  --on-end: #fff;
   --target: 48px;
 }
 
@@ -70,6 +72,12 @@ button {
   cursor: pointer;
 }
 
+button:disabled {
+  background: var(--surface-3);
+  color: var(--text-2);
+  cursor: default;
+}
+
 button[hidden] {
   display: none;
 }
@@ -90,6 +98,7 @@ button[hidden] {
 }
 
 .top h1 {
+  flex: 1;
   margin: 0;
   font-size: 17px;
   font-weight: 600;
@@ -158,4 +167,133 @@ main {
   font-size: 12px;
   opacity: 0.85;
   text-align: right;
+}
+
+/* The call: the screen replaces the thread while a call lasts. */
+
+.call-notice {
+  margin: 0;
+  padding: 10px 16px;
+  background: var(--surface-3);
+  text-align: center;
+}
+
+.call-screen {
+  display: none;
+}
+
+body.in-call > .top,
+body.in-call > main,
+body.in-call > #reply {
+  display: none;
+}
+
+body.in-call > .call-screen {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  align-items: center;
+  padding: max(28px, env(safe-area-inset-top)) 16px max(26px, env(safe-area-inset-bottom));
+  text-align: center;
+}
+
+.call-timer {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text-2);
+}
+
+.call {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  justify-content: space-between;
+  align-items: center;
+  width: 100%;
+}
+
+.call p,
+.call h2 {
+  margin: 0;
+}
+
+.call .call-icon {
+  margin-top: 18px;
+  font-size: 30px;
+  color: var(--brand);
+}
+
+.call .call-title {
+  margin-top: 18px;
+  font-size: 24px;
+  font-weight: 600;
+}
+
+.call .call-hint {
+  margin-top: 14px;
+  font-size: 13px;
+  color: var(--text-2);
+}
+
+.call .call-heard {
+  margin-top: 18px;
+  font-size: 14px;
+  color: var(--text-2);
+}
+
+.call-heard span {
+  color: var(--text-1);
+}
+
+.call .call-line {
+  margin-top: 18px;
+  font-size: 16px;
+  line-height: 1.45;
+}
+
+.call-heard,
+.call-line {
+  overflow-wrap: anywhere;
+}
+
+/* The five bars beside the 📞: call.js sets their height from the playing sound. */
+.bars {
+  display: inline-flex;
+  gap: 3px;
+  align-items: center;
+  height: 26px;
+  vertical-align: middle;
+}
+
+.bars i {
+  width: 4px;
+  height: 26px;
+  border-radius: 2px;
+  background: currentColor;
+  transform: scaleY(0.35);
+}
+
+.call-buttons {
+  display: flex;
+  gap: 16px;
+}
+
+.call-buttons button {
+  width: 96px;
+  height: 96px;
+  padding: 0;
+  border-radius: 50%;
+}
+
+.call-end {
+  background: var(--end);
+  color: var(--on-end);
+  font-size: 18px;
+}
+
+.call-talk-now {
+  border: 1px solid var(--border);
+  background: var(--surface-3);
+  color: var(--text-1);
+  font-size: 15px;
 }

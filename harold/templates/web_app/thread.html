@@ -11,12 +11,15 @@
 <link rel="stylesheet" href="/static/app.css">
 <script type="module" src="/static/datastar-1.0.2.js"></script>
 <script src="/static/alerts.js" defer></script>
+<script src="/static/call.js" defer></script>
 </head>
 <body>
 <header class="bar top">
 <h1>Chief</h1>
 <button type="button" id="alerts">Turn on alerts</button>
+{% if call_set_up %}<button type="button" id="call-start">📞 Call</button>{% else %}<button type="button" id="call-start" disabled>Voice is not set up on the Mac</button>{% endif %}
 </header>
+<p id="call-notice" class="call-notice" role="status" hidden></p>
 <main>
 {% include "web_app/messages.html" %}
 </main>
@@ -24,5 +27,9 @@
 <input type="text" data-bind:reply maxlength="1000" placeholder="Reply to the chief" aria-label="Reply to the chief" autocomplete="off">
 <button type="submit" data-attr:disabled="$sending">Send</button>
 </form>
+<div id="call-screen" class="call-screen">
+<p id="call-timer" class="call-timer">Call with the chief · 0:00</p>
+{{ call|safe }}
+</div>
 </body>
 </html>
