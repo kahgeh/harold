@@ -3,6 +3,7 @@
 # length of one call and answers one JSON line per request on the real stdout.
 import json
 import sys
+import traceback
 
 answers = sys.stdout
 sys.stdout = sys.stderr
@@ -52,6 +53,8 @@ def main():
         for _ in tts.generate(text="Ready.", voice=voice, speed=1.0, lang_code=lang_code):
             pass
     except Exception:
+        # Harold discards stderr; the traceback is there for someone who runs this by hand.
+        traceback.print_exc()
         answer({"ready": False})
         return
     answer({"ready": True})

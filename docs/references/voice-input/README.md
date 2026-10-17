@@ -247,7 +247,7 @@ HF_HUB_OFFLINE=1 <[voice_input] command> -I voice_worker.py \
   --voice <voice> --lang-code <lang code> < /dev/null
 ```
 
-`<Whisper model>` is the word after `--model` in `[voice_input] args`. The Kokoro model, voice and language come from `[tts] args`, with the defaults in [Settings](#settings). The worker prints `{"ready": true}` when it loads, or `{"ready": false}` when it does not, and then exits, because its input is empty. An import error, such as a Python without `mlx_audio`, prints its traceback to standard error. A model that fails to load prints only `{"ready": false}`, plus whatever the library printed to standard error on the way.
+`<Whisper model>` is the word after `--model` in `[voice_input] args`. The Kokoro model, voice and language come from `[tts] args`, with the defaults in [Settings](#settings). The worker prints `{"ready": true}` when it loads, or `{"ready": false}` when it does not, and then exits, because its input is empty. Either way of failing prints its traceback to standard error, where you see it: an import error, such as a Python without `mlx_audio`, and a model or voice that fails to load. Harold still discards standard error, so no traceback reaches `harold.log`.
 
 ## Privacy
 

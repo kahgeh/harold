@@ -384,6 +384,20 @@ async fn a_line_held_after_talk_now_plays_10_s_later_with_no_turn() {
     assert_eq!(played[1].0 - held_at, Duration::from_secs(10));
 }
 
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn a_call_logs_its_start_and_its_end() {
+    let logs = CapturedLogs::start();
+    let h = Harness::new();
+
+    h.start().await;
+    assert!(logs.text().contains("call started"), "{}", logs.text());
+    assert!(!logs.text().contains("call ended"), "{}", logs.text());
+
+    h.calls.stop().await;
+    let text = logs.text();
+    assert!(text.contains("call ended reason=\"stopped\""), "{text}");
+}
+
 #[test]
 fn the_sweep_removes_only_call_folders() {
     let calls = std::env::temp_dir().join(format!("harold-sweep-{}", uuid::Uuid::new_v4()));

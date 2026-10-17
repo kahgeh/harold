@@ -623,6 +623,7 @@ esac"#;
         let allowed = [
             "json",
             "sys",
+            "traceback",
             "numpy",
             "soundfile",
             "mlx_audio.stt.utils",

@@ -1342,12 +1342,17 @@ impl<P: CallPorts> Call<P> {
         }
         self.done = true;
         self.mode = Mode::Ending;
-        // The status reads as the call is while it says its last words and cleans up.
-        lock(&self.status).state = if last_words.is_some() {
-            CallState::Speaking
-        } else {
-            CallState::Off
-        };
+        // The status reads as the call is while it says its last words and cleans up. The
+        // transcript goes the moment the status reads off.
+        {
+            let mut status = lock(&self.status);
+            if last_words.is_some() {
+                status.state = CallState::Speaking;
+            } else {
+                status.state = CallState::Off;
+                status.last_transcript = None;
+            }
+        }
         self.drop_held();
         if let Some(playing) = self.playing.take() {
             self.sink.stop();
