@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use axum::Router;
 use axum::middleware::{from_fn, from_fn_with_state};
-use axum::routing::get;
+use axum::routing::{get, post};
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
@@ -43,7 +43,13 @@ pub(crate) mod chief;
 pub(crate) mod login;
 pub(crate) mod pages;
 pub(crate) mod push;
+pub(crate) mod replies;
 pub(crate) mod route;
+pub(crate) mod updates;
+
+#[cfg(test)]
+#[path = "flow_tests.rs"]
+mod flow_tests;
 
 #[cfg(test)]
 pub(crate) mod fake_push;
@@ -66,6 +72,9 @@ pub(crate) fn router(state: AppState) -> Router {
     Router::new()
         .route("/", get(pages::get_thread))
         .route("/static/{name}", get(pages::get_static))
+        .route("/replies", post(replies::post_reply))
+        .route("/push/subscription", post(replies::post_subscription))
+        .route("/updates", get(updates::get_updates))
         .fallback(pages::not_found)
         .layer(from_fn_with_state(state.clone(), login::require_login))
         .layer(from_fn(pages::add_policy))

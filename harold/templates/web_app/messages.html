@@ -1,0 +1,3 @@
+<section id="messages" data-init="@get('/updates')">
+{% for message in messages %}{{ message|safe }}
+{% endfor %}</section>

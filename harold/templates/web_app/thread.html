@@ -18,12 +18,10 @@
 <button type="button" id="alerts">Turn on alerts</button>
 </header>
 <main>
-<section id="messages">
-{% for message in messages %}{{ message|safe }}
-{% endfor %}</section>
+{% include "web_app/messages.html" %}
 </main>
-<form id="reply" class="bar bottom" method="post" action="/replies">
-<input type="text" name="reply" maxlength="1000" placeholder="Reply to the chief" aria-label="Reply to the chief" autocomplete="off">
+<form id="reply" class="bar bottom" data-on:submit="@post('/replies')">
+<input type="text" data-bind:reply maxlength="1000" placeholder="Reply to the chief" aria-label="Reply to the chief" autocomplete="off">
 <button type="submit">Send</button>
 </form>
 </body>

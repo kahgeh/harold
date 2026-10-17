@@ -840,6 +840,8 @@ const POLL_INTERVAL: Duration = Duration::from_millis(100);
 /// The pause after a cycle that failed for any reason but a delivery's send.
 const ERROR_PAUSE: Duration = Duration::from_secs(1);
 
+/// `run_event_handler_with_app` without the web app. Only tests call it now.
+#[cfg(test)]
 pub async fn run_event_handler(
     store: Arc<HaroldStore>,
     snapshots: AgentSnapshotHub,
