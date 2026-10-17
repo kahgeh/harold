@@ -2311,11 +2311,11 @@ impl VisibleScreenPort for SlowScreen {
 
     fn observe(
         &self,
-        _pane: &AgentPaneObservation,
+        pane: &AgentPaneObservation,
         _provider: &AgentProviderSettings,
     ) -> Result<ScreenObservation, ScreenError> {
         std::thread::sleep(Duration::from_millis(80));
-        Err(ScreenError::CaptureFailed)
+        Ok(screen(pane, Some(ObservedAgentState::Busy), None, 200))
     }
 }
 
@@ -2343,15 +2343,22 @@ async fn slow_inventory_uses_its_own_budget_while_screen_keeps_the_short_deadlin
         },
         shutdown_rx,
     );
+    let (captured, _guard) = capture_logs();
     handle.inventory_tick().await.unwrap();
     handle.screen_tick().await.unwrap();
     store.project_unhandled_events(100).await.unwrap();
     let snapshot = store.load_agent_snapshot().await.unwrap();
     assert_eq!(snapshot.panes.len(), 1);
-    assert_eq!(snapshot.monitor_health.len(), 1);
-    assert_eq!(snapshot.monitor_health[0].component, "screen");
-    // The first try missed its short deadline; the health row carries the retry's reason.
-    assert_eq!(snapshot.monitor_health[0].reason_code, "capture_failed");
+    assert!(snapshot.monitor_health.is_empty());
+    // The 80 ms read misses the 20 ms first deadline and fits the retry's 2,000 ms;
+    // the 80 ms scan fits its one-second budget at the first try.
+    let logs = logged(&captured);
+    assert_eq!(
+        logs.matches("agent monitor read retried").count(),
+        1,
+        "{logs}"
+    );
+    assert!(logs.contains("component=\"screen\""), "{logs}");
     drop(shutdown);
     task.await.unwrap();
 }
@@ -4532,6 +4539,7 @@ struct StopAwareInventory {
     scan_calls: AtomicUsize,
     first_exited: std::sync::atomic::AtomicBool,
     retry_saw_first_running: std::sync::atomic::AtomicBool,
+    retry_takes: Duration,
 }
 
 impl AgentInventoryPort for StopAwareInventory {
@@ -4540,6 +4548,7 @@ impl AgentInventoryPort for StopAwareInventory {
             if !self.first_exited.load(Ordering::SeqCst) {
                 self.retry_saw_first_running.store(true, Ordering::SeqCst);
             }
+            std::thread::sleep(self.retry_takes);
             return Ok(Vec::new());
         }
         while !super::screen::stop_requested() {
@@ -4804,4 +4813,44 @@ async fn retry_never_starts_while_the_gate_stays_held() {
     assert_eq!(failure, "timeout");
     assert_eq!(attempts.lock().unwrap().len(), 1);
     assert_eq!(began.elapsed(), Duration::from_millis(2_500));
+}
+
+#[tokio::test]
+async fn inventory_retry_gets_twice_the_inventory_timeout() {
+    let directory = TestDirectory::new();
+    let store = Arc::new(HaroldStore::open(&directory.0).await.unwrap());
+    // The retry takes 1.5 times the 500 ms timeout: it fits only twice that deadline.
+    let inventory = Arc::new(StopAwareInventory {
+        retry_takes: Duration::from_millis(750),
+        ..StopAwareInventory::default()
+    });
+    let (shutdown, shutdown_rx) = watch::channel(());
+    let (handle, task) = spawn_agent_monitor_seeded_for_test(
+        Arc::clone(&store),
+        Arc::clone(&inventory),
+        Arc::new(FakeScreen::default()),
+        vec![provider()],
+        AgentMonitorSeed {
+            snapshot: empty_snapshot(),
+            hook_grace_ms: 2_000,
+            acquisition_timeout: Duration::from_millis(500),
+        },
+        shutdown_rx,
+    );
+
+    handle.inventory_tick().await.unwrap();
+
+    assert_eq!(inventory.scan_calls.load(Ordering::SeqCst), 2);
+    assert!(
+        health_events(
+            &store
+                .stream()
+                .load_after_version(EventVersion::start(), 100)
+                .await
+                .unwrap()
+        )
+        .is_empty()
+    );
+    drop(shutdown);
+    task.await.unwrap();
 }
