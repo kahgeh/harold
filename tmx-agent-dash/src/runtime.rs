@@ -1444,7 +1444,10 @@ mod tests {
         assert!(!core.app.search.editing);
         assert_eq!(core.handle_key(KeyCode::Esc, &navigator), Control::Continue);
         assert_eq!(
-            core.handle_key(KeyCode::Char('r'), &navigator),
+            core.handle_key(
+                KeyEvent::new(KeyCode::Char('l'), KeyModifiers::CONTROL),
+                &navigator
+            ),
             Control::Retry
         );
         assert_eq!(
@@ -1557,7 +1560,10 @@ mod tests {
         let source = FakeSource::pending(Arc::clone(&open_dropped));
         let (input_sender, mut input) = InputPump::channel();
         input_sender
-            .try_send(InputMessage::Key(KeyCode::Char('r').into()))
+            .try_send(InputMessage::Key(KeyEvent::new(
+                KeyCode::Char('l'),
+                KeyModifiers::CONTROL,
+            )))
             .unwrap();
         let (_shutdown_sender, mut shutdown) = FakeShutdown::channel();
         let navigator = FakeNavigator::successful();
@@ -1583,7 +1589,10 @@ mod tests {
         core.retry_after("again");
         let (delay_sender, mut delay_input) = InputPump::channel();
         delay_sender
-            .try_send(InputMessage::Key(KeyCode::Char('r').into()))
+            .try_send(InputMessage::Key(KeyEvent::new(
+                KeyCode::Char('l'),
+                KeyModifiers::CONTROL,
+            )))
             .unwrap();
         assert_eq!(
             wait_for_retry(
@@ -1602,7 +1611,10 @@ mod tests {
         let closed = Arc::new(AtomicBool::new(false));
         let (stream_sender, mut stream_input) = InputPump::channel();
         stream_sender
-            .try_send(InputMessage::Key(KeyCode::Char('r').into()))
+            .try_send(InputMessage::Key(KeyEvent::new(
+                KeyCode::Char('l'),
+                KeyModifiers::CONTROL,
+            )))
             .unwrap();
         assert_eq!(
             consume_stream(
@@ -1684,7 +1696,10 @@ mod tests {
         let (input_sender, mut input) = InputPump::channel();
         input_sender.try_send(InputMessage::Redraw).unwrap();
         input_sender
-            .try_send(InputMessage::Key(KeyCode::Char('r').into()))
+            .try_send(InputMessage::Key(KeyEvent::new(
+                KeyCode::Char('l'),
+                KeyModifiers::CONTROL,
+            )))
             .unwrap();
         let (_shutdown_sender, mut shutdown) = FakeShutdown::channel();
         let mut core = RuntimeCore::new(Some("client-7".into()));

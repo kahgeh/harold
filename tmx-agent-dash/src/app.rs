@@ -14,6 +14,13 @@ const fn version_or_source(value: Option<&'static str>) -> &'static str {
     }
 }
 
+/// Whether `key` acts the same in every mode, before any other routing: Ctrl+Q and
+/// Ctrl+C quit and Ctrl+L retries. Shift held as well still counts.
+pub fn is_global_key(key: &KeyEvent) -> bool {
+    key.modifiers.contains(KeyModifiers::CONTROL)
+        && matches!(key.code, KeyCode::Char('q' | 'c' | 'l'))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct AgentIncarnation {
     pub pane_id: String,
@@ -577,8 +584,10 @@ impl App {
     }
 
     /// Whether `key` should meet a fresh queue: it goes to the block, or it is `Tab`.
+    /// A global key never does: it acts the same whatever the queue holds.
     pub fn wants_fresh_questions(&self, key: &KeyEvent) -> bool {
-        !self.swallowing_keys
+        !is_global_key(key)
+            && !self.swallowing_keys
             && !self.search.editing
             && self.palette.is_none()
             && (self.focus == Focus::Block || key.code == KeyCode::Tab)
@@ -795,16 +804,28 @@ impl App {
         Effect::None
     }
 
-    /// Handles one key press. The call keys `c` and `t` act only without Control
-    /// or Alt, so Ctrl+C (pressed to leave a terminal app) never starts a call.
+    /// Selects the first visible row, or nothing when no row shows.
+    pub fn select_first_row(&mut self) {
+        self.select_boundary(false);
+    }
+
+    /// Handles one key press. Ctrl+Q and Ctrl+C quit and Ctrl+L retries from every
+    /// mode, changing nothing else. Any other Control or Alt chord does nothing: it is
+    /// never typed and never taken as the bare letter.
     pub fn handle_key(&mut self, key: impl Into<KeyEvent>) -> Effect {
         let key = key.into();
-        // Ctrl+Q always leaves, even while the question block holds or swallows keys.
-        if key.code == KeyCode::Char('q')
-            && key.modifiers.contains(KeyModifiers::CONTROL)
-            && (self.swallowing_keys || self.focus == Focus::Block)
+        // The global keys act first, even while the question block holds or swallows keys.
+        if is_global_key(&key) {
+            return match key.code {
+                KeyCode::Char('l') => Effect::Retry,
+                _ => Effect::Quit,
+            };
+        }
+        if key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
         {
-            return Effect::Quit;
+            return Effect::None;
         }
         if self.swallowing_keys {
             // Tab or Esc returns the keys to the list, which already has the focus.
@@ -845,14 +866,7 @@ impl App {
             };
             return Effect::None;
         }
-        let plain = !key
-            .modifiers
-            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
         if self.focus == Focus::Block {
-            // A Control or Alt chord is never typed into a note or taken as a block key.
-            if !plain {
-                return Effect::None;
-            }
             return self.handle_block_key(key.code);
         }
 
@@ -869,19 +883,17 @@ impl App {
                 self.search.query.clear();
                 self.search_changed();
             }
-            KeyCode::Char('r') => return Effect::Retry,
             KeyCode::Char('j') | KeyCode::Down => self.select_relative(1),
             KeyCode::Char('k') | KeyCode::Up => self.select_relative(-1),
             KeyCode::Char('g') => self.select_boundary(false),
             KeyCode::Char('G') => self.select_boundary(true),
-            KeyCode::Char('c') if plain && self.chief_row_selected() => {
+            KeyCode::Char('c') if self.chief_row_selected() => {
                 if let Some(action) = self.call_press() {
                     return Effect::Call(action);
                 }
             }
             KeyCode::Char('t')
-                if plain
-                    && self.chief_row_selected()
+                if self.chief_row_selected()
                     && self
                         .call
                         .as_ref()
@@ -889,8 +901,8 @@ impl App {
             {
                 return Effect::Call(CallAction::TalkNow);
             }
-            KeyCode::Char('l') | KeyCode::Right => self.select_waiting(true),
-            KeyCode::Char('h') | KeyCode::Left => self.select_waiting(false),
+            KeyCode::Char('n') => self.select_waiting(true),
+            KeyCode::Char('N') => self.select_waiting(false),
             KeyCode::Enter => {
                 let Some(incarnation) = self.selected_row().map(|row| row.incarnation.clone())
                 else {
@@ -1509,7 +1521,7 @@ mod tests {
                 pane_id: "%4".into()
             }
         );
-        assert_eq!(app.handle_key(KeyCode::Char('r')), Effect::Retry);
+        assert_eq!(app.handle_key(ctrl('l')), Effect::Retry);
         assert_eq!(app.handle_key(KeyCode::Char('q')), Effect::Quit);
         assert_eq!(app.handle_key(KeyCode::Esc), Effect::None);
 
@@ -2414,7 +2426,7 @@ mod tests {
     }
 
     #[test]
-    fn h_and_l_cycle_waiting_agents_and_wrap() {
+    fn n_and_shift_n_cycle_waiting_agents_and_wrap() {
         let mut app = empty_app();
         app.apply_first_snapshot(fleet([Busy, Busy, Busy], 1))
             .unwrap();
@@ -2426,39 +2438,29 @@ mod tests {
         let selected = |app: &App| app.selected.as_ref().map(|s| s.pane_id.clone());
 
         app.selected = Some(app.snapshot.rows[1].incarnation.clone()); // %2, not waiting
-        assert_eq!(app.handle_key(KeyCode::Char('l')), Effect::None);
+        assert_eq!(app.handle_key(KeyCode::Char('n')), Effect::None);
         assert_eq!(selected(&app).as_deref(), Some("%3"));
-        app.handle_key(KeyCode::Right);
+        app.handle_key(KeyCode::Char('n'));
         assert_eq!(selected(&app).as_deref(), Some("%1"));
-        app.handle_key(KeyCode::Char('l'));
+        app.handle_key(KeyCode::Char('n'));
         assert_eq!(selected(&app).as_deref(), Some("%3"));
-        app.handle_key(KeyCode::Char('h'));
+        assert_eq!(app.handle_key(shift_n()), Effect::None);
         assert_eq!(selected(&app).as_deref(), Some("%1"));
 
         app.selected = Some(app.snapshot.rows[1].incarnation.clone());
-        app.handle_key(KeyCode::Left);
+        app.handle_key(shift_n());
         assert_eq!(selected(&app).as_deref(), Some("%1"));
     }
 
     #[test]
-    fn h_and_l_do_nothing_when_nothing_waits_and_type_text_while_editing() {
+    fn n_and_shift_n_do_nothing_when_nothing_waits() {
         let mut app = empty_app();
         app.apply_first_snapshot(fleet([Busy, Busy, Busy], 1))
             .unwrap();
         let before = app.selected.clone();
-        app.handle_key(KeyCode::Char('l'));
-        app.handle_key(KeyCode::Char('h'));
+        assert_eq!(app.handle_key(KeyCode::Char('n')), Effect::None);
+        assert_eq!(app.handle_key(shift_n()), Effect::None);
         assert_eq!(app.selected, before);
-
-        app.handle_key(KeyCode::Char('f'));
-        app.handle_key(KeyCode::Char('h'));
-        app.handle_key(KeyCode::Char('l'));
-        assert_eq!(app.search.query, "hl");
-        app.handle_key(KeyCode::Esc);
-
-        app.handle_key(KeyCode::Char('/'));
-        app.handle_key(KeyCode::Char('l'));
-        assert_eq!(app.palette.as_ref().unwrap().query, "l");
     }
 
     #[test]
@@ -2475,7 +2477,7 @@ mod tests {
         app.handle_key(KeyCode::Enter);
         assert_eq!(app.visible_rows().len(), 1);
 
-        app.handle_key(KeyCode::Char('l'));
+        app.handle_key(KeyCode::Char('n'));
         assert!(app.search.query.is_empty());
         assert_eq!(app.selected.as_ref().unwrap().pane_id, "%3");
         assert_eq!(app.visible_rows().len(), 3);
@@ -2537,21 +2539,20 @@ mod tests {
     }
 
     #[test]
-    fn control_or_alt_c_on_the_chief_row_starts_and_ends_nothing() {
+    fn ctrl_c_on_the_chief_row_quits_and_alt_c_does_nothing() {
         for state in [
             CallState::Off,
             CallState::Listening,
             CallState::Thinking,
             CallState::Speaking,
         ] {
-            for modifiers in [KeyModifiers::CONTROL, KeyModifiers::ALT] {
-                let mut app = call_app(state);
-                assert_eq!(
-                    app.handle_key(KeyEvent::new(KeyCode::Char('c'), modifiers)),
-                    Effect::None,
-                    "{state:?} {modifiers:?}"
-                );
-            }
+            let mut app = call_app(state);
+            assert_eq!(app.handle_key(ctrl('c')), Effect::Quit, "{state:?}");
+            assert_eq!(
+                app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::ALT)),
+                Effect::None,
+                "{state:?}"
+            );
         }
         let mut app = call_app(CallState::Off);
         assert_eq!(
@@ -2583,17 +2584,11 @@ mod tests {
     }
 
     #[test]
-    fn control_keys_keep_their_behaviour_off_the_call_keys() {
+    fn ctrl_c_and_ctrl_q_quit_off_the_chief_row() {
         let mut app = call_app(CallState::Off);
         select_pane(&mut app, "%1");
-        assert_eq!(
-            app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
-            Effect::None
-        );
-        assert_eq!(
-            app.handle_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL)),
-            Effect::Quit
-        );
+        assert_eq!(app.handle_key(ctrl('c')), Effect::Quit);
+        assert_eq!(app.handle_key(ctrl('q')), Effect::Quit);
     }
 
     #[test]
@@ -2724,7 +2719,7 @@ mod tests {
             .unwrap();
         app.apply_later_snapshot(fleet([Idle, Busy, Busy], 2))
             .unwrap();
-        app.handle_key(KeyCode::Char('l'));
+        app.handle_key(KeyCode::Char('n'));
         assert_eq!(
             app.handle_key(KeyCode::Enter),
             Effect::Navigate {
@@ -2736,7 +2731,7 @@ mod tests {
         app.observe_focus(FocusReading::Active("%9".into()));
         app.apply_later_snapshot(fleet([Idle, Idle, Busy], 3))
             .unwrap();
-        app.handle_key(KeyCode::Char('l'));
+        app.handle_key(KeyCode::Char('n'));
         app.handle_key(KeyCode::Enter);
         assert_eq!(
             waiting_panes(&app),
@@ -2826,11 +2821,11 @@ mod tests {
     }
 
     #[test]
-    fn r_l_and_c_keep_their_dash_meanings_in_the_list() {
+    fn r_and_l_do_nothing_and_c_calls_in_the_list() {
         let mut app = call_app(CallState::Off);
         app.observe_questions(question_queue(&["Q1"]));
         assert_eq!(app.focus, Focus::List);
-        assert_eq!(app.handle_key(KeyCode::Char('r')), Effect::Retry);
+        assert_eq!(app.handle_key(KeyCode::Char('r')), Effect::None);
         assert_eq!(
             app.handle_key(KeyCode::Char('c')),
             Effect::Call(CallAction::Start)
@@ -3065,24 +3060,275 @@ mod tests {
         assert!(!app.holding_block_keys());
     }
 
-    #[test]
-    fn ctrl_q_quits_with_the_block_focused_and_while_holding() {
-        let ctrl_q = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL);
-        let mut app = call_app(CallState::Off);
-        app.observe_questions(question_queue(&["Q1"]));
-        app.handle_key(KeyCode::Tab);
-        assert_eq!(app.focus, Focus::Block);
-        assert_eq!(app.handle_key(ctrl_q), Effect::Quit);
+    fn ctrl(character: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(character), KeyModifiers::CONTROL)
+    }
 
-        open_revise_note(&mut app);
-        let mut changed = question_queue(&["Q1"]);
+    /// `N` as the terminal sends it: the capital letter with Shift held.
+    fn shift_n() -> KeyEvent {
+        KeyEvent::new(KeyCode::Char('N'), KeyModifiers::SHIFT)
+    }
+
+    /// Everything a key could change: the focus, the selection, search, the palette,
+    /// the swallow and hold flags, and the block.
+    type KeyState = (
+        Focus,
+        Option<AgentIncarnation>,
+        SearchState,
+        Option<PaletteState>,
+        bool,
+        bool,
+        Option<crate::questions::BlockView>,
+    );
+
+    fn key_state(app: &App) -> KeyState {
+        (
+            app.focus,
+            app.selected.clone(),
+            app.search.clone(),
+            app.palette.clone(),
+            app.swallowing_keys,
+            app.holding_block_keys,
+            app.questions.view(),
+        )
+    }
+
+    /// The fleet with %3 and %1 waiting, the call off and %2 selected.
+    fn waiting_app() -> App {
+        let mut app = empty_app();
+        app.apply_first_snapshot(fleet([Busy, Busy, Busy], 1))
+            .unwrap();
+        app.apply_later_snapshot(fleet([Busy, Busy, Idle], 2))
+            .unwrap();
+        app.apply_later_snapshot(fleet([Idle, Busy, Idle], 3))
+            .unwrap();
+        app.observe_call(Some(call_view(CallState::Off, "%3")));
+        select_pane(&mut app, "%2");
+        app
+    }
+
+    /// One app in each mode a key can meet, with two questions listed and text typed
+    /// where the mode takes text.
+    fn apps_in_every_mode() -> Vec<(&'static str, App)> {
+        let list = || {
+            let mut app = waiting_app();
+            app.observe_questions(question_queue(&["Q1", "Q2"]));
+            app
+        };
+        let mut block = list();
+        block.handle_key(KeyCode::Tab);
+        let mut summary = block.clone();
+        summary.handle_key(KeyCode::Enter);
+        summary.handle_key(KeyCode::Enter);
+        assert_eq!(summary.questions.view().unwrap().mode, Mode::Summary);
+        let mut note = block.clone();
+        open_revise_note(&mut note);
+        type_text(&mut note, "ab");
+        let mut search = list();
+        type_text(&mut search, "fma");
+        let mut palette = list();
+        type_text(&mut palette, "/ca");
+        let mut holding = note.clone();
+        let mut changed = question_queue(&["Q1", "Q2"]);
         changed.questions[0].version = 2;
-        app.observe_questions(changed);
-        assert!(app.holding_block_keys());
-        assert_eq!(app.handle_key(ctrl_q), Effect::Quit);
+        holding.observe_questions(changed);
+        assert!(holding.holding_block_keys());
+        let mut swallowing = note.clone();
+        swallowing.hide_questions();
+        assert!(swallowing.swallowing_keys());
+        vec![
+            ("list", list()),
+            ("block", block),
+            ("summary", summary),
+            ("note", note),
+            ("search", search),
+            ("palette", palette),
+            ("holding", holding),
+            ("swallowing", swallowing),
+        ]
+    }
 
-        app.hide_questions();
-        assert!(app.swallowing_keys());
-        assert_eq!(app.handle_key(ctrl_q), Effect::Quit);
+    #[test]
+    fn quit_keys_quit_from_every_mode() {
+        for character in ['q', 'c'] {
+            for modifiers in [
+                KeyModifiers::CONTROL,
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            ] {
+                for (mode, mut app) in apps_in_every_mode() {
+                    let before = key_state(&app);
+                    assert_eq!(
+                        app.handle_key(KeyEvent::new(KeyCode::Char(character), modifiers)),
+                        Effect::Quit,
+                        "{mode} {character} {modifiers:?}"
+                    );
+                    assert_eq!(key_state(&app), before, "{mode} {character}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn ctrl_l_retries_from_every_mode_and_types_nothing() {
+        for (mode, mut app) in apps_in_every_mode() {
+            let before = key_state(&app);
+            assert_eq!(app.handle_key(ctrl('l')), Effect::Retry, "{mode}");
+            assert_eq!(key_state(&app), before, "{mode}");
+        }
+    }
+
+    #[test]
+    fn chords_do_nothing_in_any_mode() {
+        let alt = |character| KeyEvent::new(KeyCode::Char(character), KeyModifiers::ALT);
+        for (mode, app) in apps_in_every_mode() {
+            for chord in [
+                ctrl('r'),
+                alt('q'),
+                ctrl('j'),
+                ctrl('g'),
+                alt('f'),
+                alt('a'),
+            ] {
+                let mut app = app.clone();
+                let before = key_state(&app);
+                assert_eq!(app.handle_key(chord), Effect::None, "{mode} {chord:?}");
+                assert_eq!(key_state(&app), before, "{mode} {chord:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn r_h_l_and_x_do_nothing_in_the_list() {
+        let mut app = waiting_app();
+        assert_eq!(waiting_panes(&app), ["%3", "%1"]);
+        let before = key_state(&app);
+        for code in [
+            KeyCode::Char('r'),
+            KeyCode::Char('h'),
+            KeyCode::Char('l'),
+            KeyCode::Char('x'),
+            KeyCode::Left,
+            KeyCode::Right,
+            KeyCode::Char('o'),
+        ] {
+            assert_eq!(app.handle_key(code), Effect::None, "{code:?}");
+            assert_eq!(key_state(&app), before, "{code:?}");
+        }
+    }
+
+    #[test]
+    fn letters_type_in_search_and_the_palette() {
+        let letters = "hjklnNrxoq";
+        let typed = |app: &mut App| {
+            for character in letters.chars() {
+                let modifiers = if character.is_uppercase() {
+                    KeyModifiers::SHIFT
+                } else {
+                    KeyModifiers::NONE
+                };
+                assert_eq!(
+                    app.handle_key(KeyEvent::new(KeyCode::Char(character), modifiers)),
+                    Effect::None,
+                    "{character}"
+                );
+            }
+        };
+        let mut app = waiting_app();
+        app.handle_key(KeyCode::Char('f'));
+        typed(&mut app);
+        assert_eq!(app.search.query, letters);
+
+        let mut app = waiting_app();
+        app.handle_key(KeyCode::Char('/'));
+        typed(&mut app);
+        assert_eq!(app.palette.as_ref().unwrap().query, letters);
+    }
+
+    #[test]
+    fn n_in_the_block_moves_questions_not_agents() {
+        let mut app = waiting_app();
+        app.observe_questions(question_queue(&["Q1", "Q2"]));
+        app.handle_key(KeyCode::Tab);
+        let selected = app.selected.clone();
+        assert_eq!(app.questions.view().unwrap().id, "Q1");
+        assert_eq!(app.handle_key(KeyCode::Char('n')), Effect::None);
+        assert_eq!(app.questions.view().unwrap().id, "Q2");
+        assert_eq!(app.selected, selected);
+        assert_eq!(app.handle_key(shift_n()), Effect::None);
+        assert_eq!(app.questions.view().unwrap().id, "Q1");
+        assert_eq!(app.selected, selected);
+        assert_eq!(app.focus, Focus::Block);
+    }
+
+    #[test]
+    fn list_keys_do_nothing_in_the_block() {
+        for (mode, app) in apps_in_every_mode() {
+            if !matches!(mode, "block" | "summary") {
+                continue;
+            }
+            for character in ['f', '/', 'g', 'G', 'c', 't', 'q'] {
+                let mut app = app.clone();
+                app.observe_call(Some(call_view(CallState::Speaking, "%3")));
+                select_pane(&mut app, "%3");
+                let before = key_state(&app);
+                assert_eq!(
+                    app.handle_key(KeyCode::Char(character)),
+                    Effect::None,
+                    "{mode} {character}"
+                );
+                assert_eq!(key_state(&app), before, "{mode} {character}");
+            }
+        }
+    }
+
+    #[test]
+    fn tab_does_nothing_in_search_and_the_palette() {
+        for (mode, app) in apps_in_every_mode() {
+            if !matches!(mode, "search" | "palette") {
+                continue;
+            }
+            let mut app = app.clone();
+            let before = key_state(&app);
+            assert_eq!(app.handle_key(KeyCode::Tab), Effect::None, "{mode}");
+            assert_eq!(key_state(&app), before, "{mode}");
+        }
+    }
+
+    #[test]
+    fn global_keys_are_the_quit_keys_and_ctrl_l() {
+        for character in ['q', 'c', 'l'] {
+            assert!(is_global_key(&ctrl(character)), "{character}");
+            assert!(is_global_key(&KeyEvent::new(
+                KeyCode::Char(character),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT
+            )));
+            assert!(!is_global_key(&KeyEvent::from(KeyCode::Char(character))));
+            assert!(!is_global_key(&KeyEvent::new(
+                KeyCode::Char(character),
+                KeyModifiers::ALT
+            )));
+        }
+        assert!(!is_global_key(&ctrl('r')));
+    }
+
+    #[test]
+    fn global_keys_never_want_fresh_questions() {
+        for (mode, app) in apps_in_every_mode() {
+            for character in ['q', 'c', 'l'] {
+                assert!(!app.wants_fresh_questions(&ctrl(character)), "{mode}");
+            }
+        }
+    }
+
+    #[test]
+    fn select_first_row_selects_the_first_visible_row() {
+        let mut app = waiting_app();
+        app.select_first_row();
+        assert_eq!(app.selected.as_ref().unwrap().pane_id, "%1");
+        type_text(&mut app, "fvoice");
+        app.handle_key(KeyCode::Enter);
+        app.selected = None;
+        app.select_first_row();
+        assert_eq!(app.selected.as_ref().unwrap().pane_id, "%2");
     }
 }
