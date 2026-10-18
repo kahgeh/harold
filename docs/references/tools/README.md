@@ -1,6 +1,6 @@
 # Tools
 
-A tool is a small service inside the Harold daemon that does one job for the chief of pods and keeps its own storage. The first tool is the [question queue](questions.md). This page is for a developer adding the next one.
+A tool is a small service inside the Harold daemon that does one job for the agents and keeps its own storage. There are two: the [question queue](questions.md) and the [backlog and queue](backlog.md). This page is for a developer adding another.
 
 ## The contract
 
@@ -10,18 +10,20 @@ A tool is a module under `harold/src/tools/<name>/`. Its public surface is a `NA
 pub(crate) async fn start(ctx: ToolContext) -> Result<ToolHandle, ToolError>
 ```
 
-The host (`harold/src/tools.rs`) builds the `ToolContext` and calls `start`. The context holds four things:
+The host (`harold/src/tools.rs`) builds the `ToolContext` and calls `start`. The context holds six things:
 
 | Field | What it is |
 | --- | --- |
 | `data_folder` | The tool's own folder, `<parent of the store path>/tools/<name>/`. The tool opens its own database there. |
-| `typing` | A `PaneTyping`: makes one try at typing one line into a pane, which must be idle with an empty input box. It never waits for a busy pane; the tool tries again on a later round. |
+| `typing` | An `Option<Arc<dyn PaneTyping>>`. A `PaneTyping` makes one try at typing one line into a pane, which must be idle with an empty input box. It never waits for a busy pane; the tool tries again on a later round. A tool that doesn't type gets `None`; the question tool refuses to start with `None`, with the reason `no_typing`. |
 | `chief_pane` | A `ChiefPane`: the pane id of the chief, if one is running. |
+| `pane_folder` | A `PaneFolder`: `folder_of(pane_id)` gives the folder of the agent in that pane, from the agent snapshot, or `None` when the pane is not an agent's. |
+| `products` | A `Products`: `products()` gives the products of the pod registry (`[telemetry] pod_registry`, the vault's `products.toml`), each as its name and its `repo` folder. It reads the registry on each call, so an edit shows at once. With no `pod_registry` set the list is empty; a registry that is set but can't be read gives `Err("registry_unreadable")`. |
 | `shutdown` | A `watch::Receiver<()>` that fires when Harold stops. |
 
 `start` gives back a `ToolHandle`: the gRPC `routes` the host adds to its server, and the `task` the host joins on shutdown. The task must end when `shutdown` fires.
 
-`PaneTyping::type_line` returns a `Typing` at once: `Typed`, `EnterFailed` (the text is in the input box but Enter failed, so typing it again would repeat it), `PaneBusy` (the pane is busy or its input box holds text; nothing was typed) or `NoPane`. It holds the pane against Harold's other writers as `Writer::Tool(name)`. Today the host builds one `TmuxTyping` with `Writer::Tool(questions::NAME)` and gives it to the one tool it starts, so the writer is the question tool's. Two tools with different names would hold the pane against each other like any two writers, but only if the host gives each its own writer. It logs nothing; the tool logs its own lines.
+`PaneTyping::type_line` returns a `Typing` at once: `Typed`, `EnterFailed` (the text is in the input box but Enter failed, so typing it again would repeat it), `PaneBusy` (the pane is busy or its input box holds text; nothing was typed) or `NoPane`. It holds the pane against Harold's other writers as `Writer::Tool(name)`. The host builds one `TmuxTyping` with `Writer::Tool(questions::NAME)` and gives it to the question tool only; the backlog tool types nothing and gets `None`. Two tools with different names would hold the pane against each other like any two writers, but only if the host gives each its own writer. It logs nothing; the tool logs its own lines.
 
 `ChiefPane` finds the one agent pane whose folder is `[notify] away_messages_only_from`. With no folder set, no such pane, or more than one, there is no chief and the tool should wait.
 
@@ -43,7 +45,7 @@ A tool that cannot start is logged and left out; Harold runs on without its serv
 tool failed to start    tool=questions reason=store_open_failed
 ```
 
-`reason` is a fixed word, never error text or a path. `ToolError` carries only a `&'static str` for this reason. Callers of the missing service get `Unimplemented`, and the CLI prints `the Harold daemon does not serve questions`.
+`reason` is a fixed word, never error text or a path. `ToolError` carries only a `&'static str` for this reason. Callers of the missing service get `Unimplemented`, and the CLI prints `the Harold daemon does not serve questions`, or `the Harold daemon does not serve the backlog`.
 
 There is no setting that turns a tool off. To stop one, remove its `start_tool` line from the host.
 
@@ -52,15 +54,12 @@ There is no setting that turns a tool off. To stop one, remove its `start_tool` 
 1. Write the module under `harold/src/tools/<name>/` with `NAME` and `start`. Open storage in `ctx.data_folder`.
 2. Add a proto under `harold-api/proto/tools/<name>.proto`, and build it in `harold-api/build.rs`.
 3. Add `pub(crate) mod <name>;` and one `start_tool` call in the host's `start_with`, with `data_folder(store_path, <name>::NAME)`.
-4. Give the tool its own writer. The host does not do this for you: build a `TmuxTyping { writer: Writer::Tool(<name>::NAME), .. }` for the new tool, and its own `ChiefPane` if it needs a different lookup, and put them in its `ToolContext`. Reusing the question tool's `typing` would type as `Tool("questions")`.
+4. Give a writer only to a tool that types. A tool that types needs its own, and the host does not make one for you: build a `TmuxTyping { writer: Writer::Tool(<name>::NAME), .. }` for the new tool and put it in its `ToolContext` as `Some`, with its own `ChiefPane` if it needs a different lookup. Reusing the question tool's `typing` would type as `Tool("questions")`. A tool that types nothing gets `typing: None`.
 5. Add a CLI subcommand under `harold tool <name>`.
 6. Log with fixed lines and the fields `tool`, `question_id` or another id, `version` and `reason`. Never log user text.
 7. Write a page here, as `docs/references/tools/<name>.md`.
 
-## The next tool
-
-The next tool is each product's backlog, plus the chief's own queue. Its scope is the user's: what each product still has to do, and what the chief itself has queued. It is not designed yet.
-
 ## Tools
 
-- [Question queue](questions.md)
+- [Question queue](questions.md): the chief's questions for the user, answered from the dash and typed back into the chief's pane.
+- [Backlog and queue](backlog.md): each product's ranked backlog, kept by its product manager, and the chief's own queue.
