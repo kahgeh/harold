@@ -2049,17 +2049,25 @@ mod tests {
         assert!(!with.iter().any(|e| e == message), "{with:?}");
     }
 
-    /// Removes the env vars and the temp dir when dropped, even if an assertion fails.
-    struct LoadTestGuard(std::path::PathBuf);
+    /// Removes the temp dir when dropped, even if an assertion fails.
+    struct TempDirGuard(std::path::PathBuf);
 
-    impl Drop for LoadTestGuard {
+    impl Drop for TempDirGuard {
         fn drop(&mut self) {
-            // SAFETY: only this test touches these vars.
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// Clears the config env vars when dropped, even if an assertion fails.
+    struct EnvGuard;
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            // SAFETY: only load_defaults_ignores_local_toml_but_load_reads_it touches these vars.
             unsafe {
                 std::env::remove_var("HAROLD_CONFIG_DIR");
                 std::env::remove_var("HAROLD_ENV");
             }
-            let _ = std::fs::remove_dir_all(&self.0);
         }
     }
 
@@ -2073,7 +2081,8 @@ mod tests {
     #[test]
     fn load_defaults_ignores_local_toml_but_load_reads_it() {
         let dir = unique_temp_dir("load-defaults");
-        let _guard = LoadTestGuard(dir.clone());
+        let _dir_guard = TempDirGuard(dir.clone());
+        let _env_guard = EnvGuard;
         let manifest_dir = env!("CARGO_MANIFEST_DIR");
         std::fs::copy(
             format!("{manifest_dir}/config/default.toml"),
@@ -2102,7 +2111,7 @@ mod tests {
     #[test]
     fn load_defaults_errors_when_default_toml_missing() {
         let dir = unique_temp_dir("load-defaults-missing");
-        let _guard = LoadTestGuard(dir.clone());
+        let _guard = TempDirGuard(dir.clone());
         let dir_str = dir.to_str().expect("utf-8 temp dir");
         assert!(Settings::load_defaults(dir_str).is_err());
     }
