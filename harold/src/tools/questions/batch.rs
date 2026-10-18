@@ -217,6 +217,10 @@ impl<S: QuestionStore> Sender<S> {
             return self.not_typed(batch.id, inherited, "no_chief").await;
         };
         // One try: a busy pane is not waited for here, but on the next round.
+        // `Typed` and `EnterFailed` mean the line may be in the pane, so the batch
+        // is never released after either. A stop between typing and the mark is
+        // typed again once at the next start; a failed mark is retried without
+        // typing again.
         match self.typing.type_line(&pane, &batch.text).await {
             how @ (Typing::Typed | Typing::EnterFailed) => {
                 // The line reached the pane, so this spell of waiting is over.
