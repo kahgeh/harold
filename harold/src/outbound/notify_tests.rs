@@ -632,7 +632,7 @@ fn while_the_chief_runs_only_the_sessions_the_user_drives_are_spoken() {
 }
 
 #[test]
-fn with_no_agent_in_the_chiefs_folder_every_pane_is_spoken() {
+fn with_no_agent_in_the_chiefs_folder_only_pod_and_worker_panes_stay_quiet() {
     let directory = TestDirectory::new();
     let (chief, agents) = pod(&directory);
     let environment = FakeEnvironment::new(&format!(
@@ -649,7 +649,16 @@ fn with_no_agent_in_the_chiefs_folder_every_pane_is_spoken() {
         .unwrap();
     }
 
-    assert_eq!(environment.delivered().len(), 5);
+    // The chief %1 and the sessions the user drives (%4, %5) are spoken; the build worker
+    // %2 and the pod session %3 are named by files and stay quiet.
+    assert_eq!(
+        environment.delivered(),
+        [
+            (OutboundChannel::Tts, "%1".to_string()),
+            (OutboundChannel::Tts, "%4".to_string()),
+            (OutboundChannel::Tts, "%5".to_string()),
+        ]
+    );
 }
 
 #[test]
@@ -671,6 +680,148 @@ fn quiet_rule_does_not_change_updates_to_the_phone() {
         environment.delivered(),
         [(OutboundChannel::Away, "%1".to_string())]
     );
+}
+
+// -- Pod and build-worker panes are left out whether or not the chief runs -------------
+
+fn pod_files_for(
+    directory: &TestDirectory,
+    started: std::time::SystemTime,
+) -> (String, String, super::left_out::PodFiles) {
+    let base = directory.folder("harold");
+    let outside = directory.folder("elsewhere/place");
+    write(&base, ".superpowers/pod/agent-panes", "%2\n%5\n");
+    write(&outside, ".superpowers/pod/agent-panes", "%4\n");
+    let files = super::left_out::PodFiles::new(vec![base.clone().into()], Some(started));
+    (base, outside, files)
+}
+
+fn hour_ago() -> std::time::SystemTime {
+    std::time::SystemTime::now() - Duration::from_secs(3600)
+}
+
+#[test]
+fn chief_absent_pod_pane_update_is_spoken_never_and_logged_as_pod_session() {
+    let directory = TestDirectory::new();
+    let (base, _, files) = pod_files_for(&directory, hour_ago());
+    let agents = TrackedAgents::in_folders(&[("%2", base.as_str()), ("%7", "/work/harold")])
+        .with_pod_files(files);
+    let environment = FakeEnvironment::new(ONLY_FROM_CHIEF);
+    let logs = CapturedLogs::start();
+
+    for pane in ["%2", "%5", "%7"] {
+        notify_turn_among(
+            &environment,
+            &NotifyState::default(),
+            &agents,
+            &turn(pane, "x"),
+        )
+        .unwrap();
+    }
+
+    // %2 tracked and %5 untracked are both named by agent-panes; only %7 is spoken.
+    assert_eq!(
+        environment.delivered(),
+        [(OutboundChannel::Tts, "%7".to_string())]
+    );
+    assert!(
+        logs.text()
+            .contains("spoken update left out (pod session) pane_id=%2")
+    );
+}
+
+#[test]
+fn chief_absent_pod_pane_update_is_skipped_on_the_phone_and_unnamed_pane_is_sent() {
+    let directory = TestDirectory::new();
+    let (base, _, files) = pod_files_for(&directory, hour_ago());
+    let agents = TrackedAgents::in_folders(&[("%2", base.as_str()), ("%7", "/work/harold")])
+        .with_pod_files(files);
+    let environment = FakeEnvironment::locked(ONLY_FROM_CHIEF);
+
+    let named = notify_turn_among(
+        &environment,
+        &NotifyState::default(),
+        &agents,
+        &turn("%2", "x"),
+    );
+    let unnamed = notify_turn_among(
+        &environment,
+        &NotifyState::default(),
+        &agents,
+        &turn("%7", "x"),
+    );
+
+    assert_eq!(named, Ok(DeliveryOutcome::Skipped));
+    assert_eq!(unnamed, Ok(DeliveryOutcome::Delivered));
+    assert_eq!(
+        environment.delivered(),
+        [(OutboundChannel::Away, "%7".to_string())]
+    );
+}
+
+#[test]
+fn stale_entries_are_spoken_and_the_reason_is_logged() {
+    let directory = TestDirectory::new();
+    let (base, outside, files) = pod_files_for(&directory, hour_ago());
+    let agents = TrackedAgents::in_folders(&[("%2", base.as_str()), ("%4", outside.as_str())])
+        .with_pod_files(files);
+    let environment = FakeEnvironment::new(ONLY_FROM_CHIEF);
+    let logs = CapturedLogs::start();
+
+    for pane in ["%4", "%2"] {
+        notify_turn_among(
+            &environment,
+            &NotifyState::default(),
+            &agents,
+            &turn(pane, "x"),
+        )
+        .unwrap();
+    }
+
+    // The tracked pane outside every product folder is spoken; the same kind of file still
+    // makes the pane in the base checkout quiet.
+    assert_eq!(
+        environment.delivered(),
+        [(OutboundChannel::Tts, "%4".to_string())]
+    );
+    assert!(
+        logs.text().contains("outside_pod_folders"),
+        "{}",
+        logs.text()
+    );
+
+    // An untracked pane named in a file older than the tmux server, or with no start time.
+    let (_, _, older) = pod_files_for(
+        &directory,
+        std::time::SystemTime::now() + Duration::from_secs(3600),
+    );
+    let environment = FakeEnvironment::new(ONLY_FROM_CHIEF);
+    let logs = CapturedLogs::start();
+    let agents = TrackedAgents::default().with_pod_files(older);
+    notify_turn_among(
+        &environment,
+        &NotifyState::default(),
+        &agents,
+        &turn("%5", "x"),
+    )
+    .unwrap();
+    assert_eq!(environment.delivered().len(), 1);
+    assert!(logs.text().contains("older_than_tmux_server"));
+
+    let (base, _, _) = pod_files_for(&directory, hour_ago());
+    let unknown = super::left_out::PodFiles::new(vec![base.into()], None);
+    let environment = FakeEnvironment::new(ONLY_FROM_CHIEF);
+    let logs = CapturedLogs::start();
+    let agents = TrackedAgents::default().with_pod_files(unknown);
+    notify_turn_among(
+        &environment,
+        &NotifyState::default(),
+        &agents,
+        &turn("%5", "x"),
+    )
+    .unwrap();
+    assert_eq!(environment.delivered().len(), 1);
+    assert!(logs.text().contains("no_tmux_start_time"));
 }
 
 // ---------------------------------------------------------------------------
