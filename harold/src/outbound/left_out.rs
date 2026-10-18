@@ -1,10 +1,12 @@
 //! The decisions behind the two rules that keep a message off the away device. Rule A: the
 //! pane sent a message with `harold send-message-to-away-device` this turn, so its
-//! turn-end update is left out. Rule B: `[notify] away_messages_only_from` names a folder
-//! with an agent running in it, and the pane is outside that folder, so its turn-end
-//! update is left out and its requested message is dropped. The quiet rule: while an
-//! agent runs in that folder, the turn-end updates of the chief's panes, build workers and
-//! pod sessions are not spoken at the desk.
+//! turn-end update is left out. Rule B: `[notify] away_messages_only_from` names a folder,
+//! and the pane is outside it, so its turn-end update is left out and its requested
+//! message is dropped. Rule B acts for an ordinary pane only while an agent runs in that
+//! folder; a pane that a pod `agent-panes` file or a baton `agent-pane` file names counts
+//! as outside it whether or not the chief runs. The quiet rule: the turn-end update of such
+//! a named pane (a pod session or build worker) is not spoken at the desk, whether or not
+//! the chief runs, and neither is the chief's own pane while it is tracked.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
