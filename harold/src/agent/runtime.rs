@@ -33,6 +33,9 @@ use super::summary::completion_summary_update;
 const COMMAND_CAPACITY: usize = 64;
 /// A screen read's retry gets the capture command's own limit (`screen.rs`'s `SystemCommandRunner`).
 pub(super) const SCREEN_RETRY_TIMEOUT: Duration = Duration::from_millis(2_000);
+/// The part of an inventory tick kept for a timed-out scan's worker to stop and let go of the
+/// gate, so the calls queued behind the tick find it free. At most a tenth of the timeout.
+const INVENTORY_STOP_GRACE: Duration = Duration::from_millis(50);
 
 pub(crate) enum AgentMonitorCommand {
     #[allow(
@@ -230,6 +233,9 @@ struct AgentMonitorRuntime {
     health: HashMap<String, HealthState>,
     logged_health: HashMap<String, HealthState>,
     summaries: Option<ActivityScheduler>,
+    /// When a failed inventory scan started, and why it failed: the next tick's scan is its
+    /// retry.
+    held_inventory_failure: Option<(tokio::time::Instant, &'static str)>,
 }
 
 pub(crate) struct AgentMonitorRuntimeConfig {
@@ -478,6 +484,7 @@ fn spawn_runtime(
             logged_health: HashMap::new(),
             summaries: activity_summary
                 .map(|(provider, settings)| ActivityScheduler::new(provider, settings)),
+            held_inventory_failure: None,
         };
         let seeded_panes: Vec<_> = runtime.panes.keys().cloned().collect();
         for pane_id in seeded_panes {
@@ -867,23 +874,44 @@ impl AgentMonitorRuntime {
         Ok(result)
     }
 
+    /// A failed scan is retried by the next tick's scan, not at once: hook calls queue behind a
+    /// tick, and some of their clients give up after 3 seconds, so one tick holds the monitor
+    /// for at most `inventory_timeout`, retry or not.
     async fn inventory_tick(&mut self) -> Result<(), MonitorCommandError> {
-        let inventory = &self.inventory;
-        let gate = &self.inventory_gate;
-        let observed = match read_with_retry(
-            "inventory",
-            None,
-            gate,
-            self.inventory_timeout,
-            self.inventory_timeout * 2,
-            |timeout, stop| scan(Arc::clone(inventory), timeout, Arc::clone(gate), stop),
+        let held = self.held_inventory_failure.take();
+        let started = tokio::time::Instant::now();
+        let stop = StopSignal::default();
+        let grace = INVENTORY_STOP_GRACE.min(self.inventory_timeout / 10);
+        let result = scan(
+            Arc::clone(&self.inventory),
+            self.inventory_timeout - grace,
+            Arc::clone(&self.inventory_gate),
+            stop.clone(),
         )
-        .await
-        {
-            Ok(observed) => observed,
+        .await;
+        let observed = match result {
+            Ok(observed) => {
+                if let Some((first_started, _)) = held {
+                    log_read_retried("inventory", None, first_started);
+                }
+                observed
+            }
             Err(failure) => {
-                self.set_health("inventory", false, failure.reason_code)
-                    .await?;
+                if failure.reason_code == "timeout" {
+                    stop.request();
+                    let _ = tokio::time::timeout(grace, self.inventory_gate.acquire()).await;
+                }
+                match (failure.reason_code, held) {
+                    // No scan ran, because an earlier one still holds the gate. That is today's
+                    // no-op, unless it was the retry: then the retry has failed.
+                    ("busy", None) => {}
+                    ("busy", Some((_, reason_code))) | (reason_code, Some(_)) => {
+                        self.set_health("inventory", false, reason_code).await?;
+                    }
+                    (reason_code, None) => {
+                        self.held_inventory_failure = Some((started, reason_code));
+                    }
+                }
                 return Err(MonitorCommandError::InventoryUnavailable);
             }
         };
@@ -1095,8 +1123,7 @@ impl AgentMonitorRuntime {
                 read(self.acquisition_timeout, StopSignal::default()).await
             } else {
                 read_with_retry(
-                    "screen",
-                    Some(&pane.incarnation.pane_id),
+                    &pane.incarnation.pane_id,
                     gate,
                     self.acquisition_timeout,
                     SCREEN_RETRY_TIMEOUT,
@@ -1539,12 +1566,11 @@ where
         })
 }
 
-/// Tries a failed read once more, at once, with the longer `retry` deadline. The first try,
-/// if still running, is asked to stop, and the retry waits within its own deadline for it to
-/// let go of the gate, so the two never run together.
+/// Tries a failed screen read once more, at once, with the longer `retry` deadline. The first
+/// try, if still running, is asked to stop, and the retry waits within its own deadline for it
+/// to let go of the gate, so the two never run together.
 async fn read_with_retry<T, F, Fut>(
-    component: &'static str,
-    pane_id: Option<&str>,
+    pane_id: &str,
     gate: &Arc<Semaphore>,
     first: Duration,
     retry: Duration,
@@ -1577,6 +1603,12 @@ where
         retry_try.request();
     }
     let value = result?;
+    log_read_retried("screen", Some(pane_id), started);
+    Ok(value)
+}
+
+/// A retried read that worked, `started` being when its first try began.
+fn log_read_retried(component: &'static str, pane_id: Option<&str>, started: tokio::time::Instant) {
     let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
     match pane_id {
         Some(pane_id) => {
@@ -1584,14 +1616,12 @@ where
         }
         None => tracing::info!(component, elapsed_ms, "agent monitor read retried"),
     }
-    Ok(value)
 }
 
 /// `read_with_retry` with bare reason codes, for tests outside this module.
 #[cfg(test)]
 pub(crate) async fn read_with_retry_for_test<T, F, Fut>(
-    component: &'static str,
-    pane_id: Option<&str>,
+    pane_id: &str,
     gate: &Arc<Semaphore>,
     first: Duration,
     retry: Duration,
@@ -1601,7 +1631,7 @@ where
     F: FnMut(Duration, StopSignal) -> Fut,
     Fut: Future<Output = Result<T, &'static str>>,
 {
-    read_with_retry(component, pane_id, gate, first, retry, |timeout, stop| {
+    read_with_retry(pane_id, gate, first, retry, |timeout, stop| {
         let read = attempt(timeout, stop);
         async move {
             read.await

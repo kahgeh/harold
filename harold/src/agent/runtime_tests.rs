@@ -988,10 +988,13 @@ async fn departure_requires_two_successful_absences_and_exact_incarnation_revali
 
     fixture.handle.inventory_tick().await.unwrap();
     fixture.handle.inventory_tick().await.unwrap();
-    assert!(matches!(
-        fixture.handle.inventory_tick().await,
-        Err(MonitorCommandError::InventoryUnavailable)
-    ));
+    // The first failure is held for a tick; its retry on the next tick fails too.
+    for _ in 0..2 {
+        assert!(matches!(
+            fixture.handle.inventory_tick().await,
+            Err(MonitorCommandError::InventoryUnavailable)
+        ));
+    }
     assert_eq!(
         event_types(&fixture.events().await),
         ["AgentPaneObserved", "AgentMonitorHealthChanged"]
@@ -2371,14 +2374,13 @@ async fn restored_inventory_failure_deduplicates_until_recovery() {
     ]))
     .await;
     assert!(fixture.handle.inventory_tick().await.is_err());
+    assert!(fixture.handle.inventory_tick().await.is_err());
     fixture.store.project_unhandled_events(100).await.unwrap();
     let snapshot = fixture.store.load_agent_snapshot().await.unwrap();
     let (shutdown, shutdown_rx) = watch::channel(());
     let (handle, task) = spawn_agent_monitor_seeded_for_test(
         fixture.store.clone(),
         Arc::new(FakeInventory::scans(vec![
-            Err(InventoryError::CommandFailed),
-            Err(InventoryError::CommandFailed),
             Err(InventoryError::CommandFailed),
             Err(InventoryError::CommandFailed),
             Ok(Vec::new()),
@@ -2408,8 +2410,6 @@ async fn inventory_health_degrades_recovers_and_deduplicates_without_losing_pane
     let observed = pane("%8", 80, 800, 1_000, 100);
     let fixture = Fixture::new(FakeInventory::scans(vec![
         Ok(vec![observed]),
-        Err(InventoryError::CommandFailed),
-        Err(InventoryError::CommandFailed),
         Err(InventoryError::CommandFailed),
         Err(InventoryError::CommandFailed),
         Ok(Vec::new()),
@@ -2450,14 +2450,21 @@ async fn failed_health_append_is_retried_without_advancing_health_dedupe() {
     ]))
     .await;
     fixture.store.fail_next_monitor_append_for_test();
-    assert!(matches!(
-        fixture.handle.inventory_tick().await,
-        Err(MonitorCommandError::EventAppend(_))
-    ));
+    // Each failure is held for a tick, so the health append comes on every second tick.
     assert!(matches!(
         fixture.handle.inventory_tick().await,
         Err(MonitorCommandError::InventoryUnavailable)
     ));
+    assert!(matches!(
+        fixture.handle.inventory_tick().await,
+        Err(MonitorCommandError::EventAppend(_))
+    ));
+    for _ in 0..2 {
+        assert!(matches!(
+            fixture.handle.inventory_tick().await,
+            Err(MonitorCommandError::InventoryUnavailable)
+        ));
+    }
     let events = fixture.events().await;
     assert_eq!(event_types(&events), ["AgentMonitorHealthChanged"]);
     let health: super::domain::AgentMonitorHealthChanged =
@@ -4365,7 +4372,7 @@ async fn screen_read_that_fails_once_logs_retried_and_stays_healthy() {
 }
 
 #[tokio::test]
-async fn inventory_scan_that_fails_once_logs_retried_and_stays_healthy() {
+async fn inventory_scan_that_fails_once_is_retried_on_the_next_tick() {
     let observed = pane("%8", 80, 800, 1_000, 100);
     let fixture = Fixture::new(FakeInventory::scans(vec![
         Err(InventoryError::CommandFailed),
@@ -4374,6 +4381,13 @@ async fn inventory_scan_that_fails_once_logs_retried_and_stays_healthy() {
     .await;
     let (captured, _guard) = capture_logs();
 
+    // The failure is held for one tick: no health changes and nothing is logged.
+    assert!(matches!(
+        fixture.handle.inventory_tick().await,
+        Err(MonitorCommandError::InventoryUnavailable)
+    ));
+    assert!(fixture.events().await.is_empty());
+    assert!(logged(&captured).is_empty());
     fixture.handle.inventory_tick().await.unwrap();
 
     let logs = logged(&captured);
@@ -4382,7 +4396,7 @@ async fn inventory_scan_that_fails_once_logs_retried_and_stays_healthy() {
     assert!(logs.contains("component=\"inventory\""), "{logs}");
     assert!(logs.contains("elapsed_ms="), "{logs}");
     assert!(!logs.contains("pane_id"), "{logs}");
-    assert!(!logs.contains("agent monitor degraded"), "{logs}");
+    assert!(!logs.contains("WARN"), "{logs}");
     let events = fixture.events().await;
     assert_eq!(event_types(&events), ["AgentPaneObserved"]);
 }
@@ -4397,6 +4411,7 @@ async fn read_that_fails_twice_logs_degraded_once_then_recovered() {
     .await;
     let (captured, _guard) = capture_logs();
 
+    assert!(fixture.handle.inventory_tick().await.is_err());
     assert!(matches!(
         fixture.handle.inventory_tick().await,
         Err(MonitorCommandError::InventoryUnavailable)
@@ -4427,6 +4442,8 @@ async fn retried_read_after_degraded_logs_recovered() {
     .await;
     let (captured, _guard) = capture_logs();
 
+    assert!(fixture.handle.inventory_tick().await.is_err());
+    assert!(fixture.handle.inventory_tick().await.is_err());
     assert!(fixture.handle.inventory_tick().await.is_err());
     fixture.handle.inventory_tick().await.unwrap();
 
@@ -4542,6 +4559,7 @@ struct StopAwareInventory {
     first_exited: std::sync::atomic::AtomicBool,
     retry_saw_first_running: std::sync::atomic::AtomicBool,
     retry_takes: Duration,
+    resolves_to: Option<AgentPaneObservation>,
 }
 
 impl AgentInventoryPort for StopAwareInventory {
@@ -4550,7 +4568,13 @@ impl AgentInventoryPort for StopAwareInventory {
             if !self.first_exited.load(Ordering::SeqCst) {
                 self.retry_saw_first_running.store(true, Ordering::SeqCst);
             }
-            std::thread::sleep(self.retry_takes);
+            let started = std::time::Instant::now();
+            while started.elapsed() < self.retry_takes {
+                if super::screen::stop_requested() {
+                    return Err(InventoryError::CommandFailed);
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
             return Ok(Vec::new());
         }
         while !super::screen::stop_requested() {
@@ -4561,7 +4585,7 @@ impl AgentInventoryPort for StopAwareInventory {
     }
 
     fn resolve(&self, _pane_id: &str) -> Result<Option<AgentPaneObservation>, InventoryError> {
-        Ok(None)
+        Ok(self.resolves_to.clone())
     }
 
     fn is_current(&self, _incarnation: &AgentIncarnation) -> Result<bool, InventoryError> {
@@ -4589,6 +4613,7 @@ async fn timed_out_first_try_is_stopped_before_its_retry() {
     );
     let (captured, _guard) = capture_logs();
 
+    assert!(handle.inventory_tick().await.is_err());
     handle.inventory_tick().await.unwrap();
 
     assert_eq!(inventory.scan_calls.load(Ordering::SeqCst), 2);
@@ -4656,8 +4681,7 @@ async fn retry_gets_the_longer_deadline_after_a_failure() {
         (Duration::ZERO, Ok(7)),
     ]);
     let result = read_with_retry_for_test(
-        "screen",
-        Some("%8"),
+        "%8",
         &gate,
         Duration::from_millis(500),
         SCREEN_RETRY_TIMEOUT,
@@ -4684,41 +4708,6 @@ async fn retry_gets_the_longer_deadline_after_a_failure() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn inventory_retry_has_no_pane() {
-    let (captured, _guard) = capture_logs();
-    let gate = Arc::new(Semaphore::new(1));
-    let (attempts, attempt) = scripted(vec![
-        (Duration::from_millis(3_000), Err("timeout")),
-        (Duration::from_millis(40), Ok(1)),
-    ]);
-    let result = read_with_retry_for_test(
-        "inventory",
-        None,
-        &gate,
-        Duration::from_millis(3_000),
-        Duration::from_millis(3_000) * 2,
-        attempt,
-    )
-    .await;
-    assert_eq!(result.ok(), Some(1));
-    let deadlines: Vec<_> = attempts
-        .lock()
-        .unwrap()
-        .iter()
-        .map(|a| a.deadline)
-        .collect();
-    assert_eq!(
-        deadlines,
-        [Duration::from_millis(3_000), Duration::from_millis(6_000)]
-    );
-    let logs = logged(&captured);
-    assert_eq!(logs.matches("agent monitor read retried").count(), 1);
-    assert!(logs.contains("component=\"inventory\""), "{logs}");
-    assert!(logs.contains("elapsed_ms=3040"), "{logs}");
-    assert!(!logs.contains("pane_id"), "{logs}");
-}
-
-#[tokio::test(start_paused = true)]
 async fn retry_failure_returns_the_retrys_reason() {
     let (captured, _guard) = capture_logs();
     let gate = Arc::new(Semaphore::new(1));
@@ -4727,8 +4716,7 @@ async fn retry_failure_returns_the_retrys_reason() {
         (Duration::ZERO, Err("capture_failed")),
     ]);
     let failure = read_with_retry_for_test(
-        "screen",
-        Some("%8"),
+        "%8",
         &gate,
         Duration::from_millis(500),
         SCREEN_RETRY_TIMEOUT,
@@ -4746,8 +4734,7 @@ async fn busy_first_try_is_not_retried() {
     let gate = Arc::new(Semaphore::new(1));
     let (attempts, attempt) = scripted(vec![(Duration::ZERO, Err("busy"))]);
     let failure = read_with_retry_for_test(
-        "inventory",
-        None,
+        "%8",
         &gate,
         Duration::from_millis(3_000),
         Duration::from_millis(6_000),
@@ -4774,8 +4761,7 @@ async fn retry_waits_for_the_stopped_first_try_to_release_the_gate() {
     ]);
     let began = tokio::time::Instant::now();
     let result = read_with_retry_for_test(
-        "screen",
-        Some("%8"),
+        "%8",
         &gate,
         Duration::from_millis(500),
         SCREEN_RETRY_TIMEOUT,
@@ -4803,8 +4789,7 @@ async fn retry_never_starts_while_the_gate_stays_held() {
     let (attempts, attempt) = scripted(vec![(Duration::from_millis(500), Err("timeout"))]);
     let began = tokio::time::Instant::now();
     let failure = read_with_retry_for_test(
-        "screen",
-        Some("%8"),
+        "%8",
         &gate,
         Duration::from_millis(500),
         SCREEN_RETRY_TIMEOUT,
@@ -4818,12 +4803,12 @@ async fn retry_never_starts_while_the_gate_stays_held() {
 }
 
 #[tokio::test]
-async fn inventory_retry_gets_twice_the_inventory_timeout() {
+async fn a_slow_scan_never_holds_the_monitor_past_inventory_timeout() {
     let directory = TestDirectory::new();
     let store = Arc::new(HaroldStore::open(&directory.0).await.unwrap());
-    // The retry takes 1.5 times the 500 ms timeout: it fits only twice that deadline.
+    // Both tries outlast the 300 ms timeout; the retry runs until it is stopped.
     let inventory = Arc::new(StopAwareInventory {
-        retry_takes: Duration::from_millis(750),
+        retry_takes: Duration::from_secs(5),
         ..StopAwareInventory::default()
     });
     let (shutdown, shutdown_rx) = watch::channel(());
@@ -4835,24 +4820,28 @@ async fn inventory_retry_gets_twice_the_inventory_timeout() {
         AgentMonitorSeed {
             snapshot: empty_snapshot(),
             hook_grace_ms: 2_000,
-            acquisition_timeout: Duration::from_millis(500),
+            acquisition_timeout: Duration::from_millis(300),
         },
         shutdown_rx,
     );
+    let (captured, _guard) = capture_logs();
 
-    handle.inventory_tick().await.unwrap();
+    for _ in 0..2 {
+        let started = std::time::Instant::now();
+        assert!(handle.inventory_tick().await.is_err());
+        let held = started.elapsed();
+        println!(
+            "inventory tick held the monitor for {} ms",
+            held.as_millis()
+        );
+        // 300 ms is the timeout; the rest is scheduling slack on a loaded Mac.
+        assert!(held < Duration::from_millis(400), "held for {held:?}");
+    }
 
     assert_eq!(inventory.scan_calls.load(Ordering::SeqCst), 2);
-    assert!(
-        health_events(
-            &store
-                .stream()
-                .load_after_version(EventVersion::start(), 100)
-                .await
-                .unwrap()
-        )
-        .is_empty()
-    );
+    let logs = logged(&captured);
+    assert_eq!(logs.matches("agent monitor degraded").count(), 1, "{logs}");
+    assert!(logs.contains("reason_code=timeout"), "{logs}");
     drop(shutdown);
     task.await.unwrap();
 }
@@ -4944,8 +4933,7 @@ async fn retry_that_fails_is_asked_to_stop() {
         (Duration::from_millis(2_000), Err("timeout")),
     ]);
     let failure = read_with_retry_for_test(
-        "screen",
-        Some("%8"),
+        "%8",
         &gate,
         Duration::from_millis(500),
         SCREEN_RETRY_TIMEOUT,
@@ -4960,4 +4948,69 @@ async fn retry_that_fails_is_asked_to_stop() {
         attempts[1].stop.requested(),
         "a timed-out retry must be stopped too"
     );
+}
+
+#[tokio::test]
+async fn away_message_and_spoken_line_during_a_slow_scan_are_answered_within_three_seconds() {
+    let directory = TestDirectory::new();
+    let store = Arc::new(HaroldStore::open(&directory.0).await.unwrap());
+    // Both tries outlast the 1.5 s timeout; the retry runs until it is stopped.
+    let inventory = Arc::new(StopAwareInventory {
+        retry_takes: Duration::from_secs(10),
+        resolves_to: Some(pane("%8", 80, 800, 1_000, 100)),
+        ..StopAwareInventory::default()
+    });
+    let (shutdown, shutdown_rx) = watch::channel(());
+    let (handle, task) = spawn_agent_monitor_seeded_for_test(
+        Arc::clone(&store),
+        Arc::clone(&inventory),
+        Arc::new(FakeScreen::default()),
+        vec![provider()],
+        AgentMonitorSeed {
+            snapshot: empty_snapshot(),
+            hook_grace_ms: 2_000,
+            acquisition_timeout: Duration::from_millis(1_500),
+        },
+        shutdown_rx.clone(),
+    );
+    let service = HaroldService {
+        messaging_switch: tokio::sync::Mutex::new(None),
+        tts_switch: tokio::sync::Mutex::new(None),
+        monitor: handle.clone(),
+        store: Arc::clone(&store),
+        snapshots: AgentSnapshotHub::new(empty_snapshot()),
+        shutdown: shutdown_rx,
+        peers: crate::peers::PeerEndpoint::Off,
+    };
+
+    // The first scan runs until its 1.5 s deadline stops it; both calls queue behind it.
+    let tick = tokio::spawn({
+        let handle = handle.clone();
+        async move { handle.inventory_tick().await }
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let started = std::time::Instant::now();
+    let (away, spoken) = tokio::join!(
+        service.send_message_to_away_device(Request::new(
+            crate::harold::SendMessageToAwayDeviceRequest {
+                src_id: "%8".into(),
+                text: "Build finished".into(),
+            }
+        )),
+        service.speak_line(Request::new(crate::harold::SpeakLineRequest {
+            src_id: "%8".into(),
+            text: "Build finished".into(),
+        })),
+    );
+    let answered = started.elapsed();
+    println!("answered in {} ms", answered.as_millis());
+    assert!(away.unwrap().into_inner().accepted);
+    spoken.unwrap();
+    assert!(
+        answered < Duration::from_secs(3),
+        "answered in {answered:?}"
+    );
+    assert!(tick.await.unwrap().is_err());
+    drop(shutdown);
+    task.await.unwrap();
 }
