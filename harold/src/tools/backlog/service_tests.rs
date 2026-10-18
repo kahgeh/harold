@@ -529,6 +529,33 @@ fn queue_counts(text: &str) -> Vec<String> {
 }
 
 #[tokio::test]
+async fn empty_queue_text_is_refused_and_stores_nothing() {
+    let setup = Setup::new().await;
+    let service = setup.service();
+    for text in ["", "  \n"] {
+        assert_eq!(
+            refusal(add_queue(&service, text, false, 0).await),
+            (Code::InvalidArgument, "invalid text".into())
+        );
+    }
+    assert!(list_queue(&service, 0).await.parked.is_empty());
+
+    add_queue(&service, "keep", false, 0).await.unwrap();
+    let updated = service
+        .update_queue_item(Request::new(pb::UpdateQueueItemRequest {
+            id: "N1".into(),
+            text: "".into(),
+            caller_pane: CHIEF.into(),
+        }))
+        .await;
+    assert_eq!(
+        refusal(updated),
+        (Code::InvalidArgument, "invalid text".into())
+    );
+    assert_eq!(list_queue(&service, 0).await.parked[0].text, "keep");
+}
+
+#[tokio::test]
 async fn every_queue_write_logs_the_parked_count() {
     let setup = Setup::new().await;
     let service = setup.service();

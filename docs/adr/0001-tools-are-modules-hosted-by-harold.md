@@ -5,7 +5,7 @@ Status: Accepted (dash-question-queue, merged at 8ab08a3)
 
 ## Context
 
-The question queue is Harold's first tool, and more are expected (the next is each product's backlog plus the chief's queue). Each is likely to want a different database. The core store and the Harold gRPC service must stay unchanged by them.
+The question queue is Harold's first tool, and more are expected (the second, the backlog and queue tool, now exists: each product's backlog plus the chief's queue). Each is likely to want a different database. The core store and the Harold gRPC service must stay unchanged by them.
 
 ## Decision
 

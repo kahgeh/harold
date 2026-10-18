@@ -184,7 +184,7 @@ The CLI takes any word starting with `--` as a flag, so an item id that starts w
 | `FailedPrecondition` | `not_empty` | An import into a product or queue that already holds something. |
 | `FailedPrecondition` | `not_parked` | `queue order` names an id that is Now or done. |
 | `FailedPrecondition` | `already_done` | `queue now` or `queue done` on a done item. |
-| `InvalidArgument` | `invalid <field>` | A rule is broken, such as `invalid risk`, `invalid evidence`, `invalid kind`, `invalid at`, `invalid text`, or `invalid ids` (an empty or repeated id list). Nothing is stored. |
+| `InvalidArgument` | `invalid <field>` | A rule is broken, such as `invalid risk`, `invalid evidence`, `invalid kind`, `invalid at`, `invalid text` (too long, or empty on `queue add` and `queue update`), or `invalid ids` (an empty or repeated id list). Nothing is stored. |
 | `InvalidArgument` | `unparsed line <n>` | An import line has no place; `n` counts from 1. Nothing is stored. |
 | `Unavailable` | `registry_unreadable` | The registry is set but can't be read. Writes, the product list (`ListProducts`) and a backlog dry-run import are refused; reading items, notes, the queue and an export still answer. |
 | `Unavailable` | `the backlog database is unavailable` | A database call failed. |

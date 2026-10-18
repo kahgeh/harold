@@ -2752,6 +2752,13 @@ mod tests {
         assert_eq!(dry, Err("unknown_product".into()));
     }
 
+    #[tokio::test]
+    async fn queue_add_with_empty_stdin_is_refused() {
+        let server = backlog_server().await;
+        let empty = server.run("%2", &["queue", "add"], "").await;
+        assert_eq!(empty, Err("invalid text".into()));
+    }
+
     /// The lines an export must keep: not blank, not a heading.
     fn content_lines(markdown: &str) -> Vec<String> {
         markdown

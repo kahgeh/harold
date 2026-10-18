@@ -67,6 +67,14 @@ fn queue_changed(count: u32) {
     info!(tool = NAME, count, "queue changed");
 }
 
+/// Refuses empty or whitespace-only queue text, which would store a blank item.
+fn refuse_blank(text: &str) -> Result<(), Status> {
+    match text.trim().is_empty() {
+        true => Err(invalid("text")),
+        false => Ok(()),
+    }
+}
+
 fn invalid(field: &str) -> Status {
     Status::invalid_argument(format!("invalid {field}"))
 }
@@ -410,6 +418,7 @@ impl<S: BacklogStore> BacklogService for BacklogToolService<S> {
         } = request.into_inner();
         self.may_write_queue(&caller_pane)?;
         schema::validate_queue_text(&text).map_err(|field| invalid(&field))?;
+        refuse_blank(&text)?;
         let place = match (now, at) {
             (false, 0) => Place::End,
             (true, 0) => Place::Now,
@@ -473,6 +482,7 @@ impl<S: BacklogStore> BacklogService for BacklogToolService<S> {
         } = request.into_inner();
         self.may_write_queue(&caller_pane)?;
         schema::validate_queue_text(&text).map_err(|field| invalid(&field))?;
+        refuse_blank(&text)?;
         let parked = self
             .store
             .update_queue_item(&id, &text, now_ms())
