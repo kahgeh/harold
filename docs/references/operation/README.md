@@ -125,6 +125,8 @@ Not carried over from ~/bin/harold/data/events: messages still waiting to be del
 
 To go back to a build that uses `data/events/`, install that build again with a normal install. It opens `data/events/`, which holds no event recorded only in `data/store/`. After a `--reinstall`, `data/events/` is in the `harold.backup-*` folder, not in the bundle.
 
+When the Harold you go back to was built before 36a7c94, also run `rm -f ~/bin/harold/data/pod/tips`. An older Harold counts merges without moving that file, so the next upgrade would count them again from the old tip. Deleting it is safe: the next Harold counts from the current tip.
+
 ## Accepted dependency exceptions
 
 The dependency audit of Harold's `Cargo.lock` accepts five advisories:

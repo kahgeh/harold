@@ -69,6 +69,7 @@ The `git` commands are read-only: they run with `GIT_OPTIONAL_LOCKS=0`, at most 
 - When a write fails, Harold records nothing for that product until a write succeeds. It logs `pod merges and specs unavailable` once, with `reason="tip file unwritable"`.
 - The first poll after a start counts the merges since the saved tip, so merges made while Harold was stopped are counted.
 - A missing file, a line that does not parse, or a saved tip that the reflog does not hold before the current tip counts nothing. Harold starts from the current tip.
+- After a rollback to a Harold built before 36a7c94, delete the file; see [Rollback](../operation/README.md#rollback).
 
 ### Spec states
 
