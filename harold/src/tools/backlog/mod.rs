@@ -8,6 +8,7 @@ use tonic::service::Routes;
 
 use crate::tools::{ToolContext, ToolError, ToolHandle};
 
+mod guard;
 mod schema;
 mod store;
 #[cfg(test)]
