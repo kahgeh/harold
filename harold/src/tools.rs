@@ -201,10 +201,13 @@ impl<P: Ports> PaneTyping for TmuxTyping<P> {
                 Ok(LineOutcome::Failed) => Typing::EnterFailed,
                 // A panic in the typing task (`Err(_)`) is reported as `PaneBusy`,
                 // which is safe only because `TmuxPorts`' `typing_step` in
-                // timed_prompts.rs catches a panic in the typing or Enter step
-                // (`spawn_blocking` turns it into `Err`, so `EnterFailed`) before it
-                // can end the task. Any `Ports` used by a tool must not panic after
-                // `type_text`, or a typed batch would be released and sent twice.
+                // timed_prompts.rs catches a panic in a typing step before it can end
+                // the task (`spawn_blocking` turns it into `Err`). An Enter-step panic
+                // then becomes `EnterFailed`, which is marked typed and never released.
+                // A `type_text` panic becomes `PaneBusy`, which is released, and that is
+                // safe because nothing was typed. Any `Ports` used by a tool must not
+                // panic after `type_text`, or a typed batch would be released and sent
+                // twice.
                 Ok(LineOutcome::PaneBusy) | Err(_) => Typing::PaneBusy,
                 Ok(LineOutcome::NoPane) => Typing::NoPane,
             }
