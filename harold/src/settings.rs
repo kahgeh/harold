@@ -967,8 +967,8 @@ mod tests {
     use serde::Deserialize;
 
     use super::{
-        AgentMonitorSettings, AgentProviderSettings, AgentSettings, Settings, is_valid_machine_name,
-        machine_name_error, machine_name_from_hostname,
+        AgentMonitorSettings, AgentProviderSettings, AgentSettings, Settings,
+        is_valid_machine_name, machine_name_error, machine_name_from_hostname,
     };
 
     #[derive(Debug, Deserialize)]
