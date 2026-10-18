@@ -284,6 +284,22 @@ pub(crate) async fn check_ready(settings: &Settings) -> Result<(), Box<dyn std::
     Ok(())
 }
 
+pub(crate) const CALL_DEADLINE: Duration = Duration::from_secs(3);
+
+/// `deadline` is what the timeout line names, `wait` is how long it really waits; a command passes the same value for both.
+pub(crate) async fn call_within<T, E: From<String>>(
+    deadline: Duration,
+    wait: Duration,
+    call: impl std::future::Future<Output = Result<T, E>>,
+) -> Result<T, E> {
+    tokio::time::timeout(wait, call).await.map_err(|_| {
+        E::from(format!(
+            "the Harold daemon did not answer within {} seconds",
+            deadline.as_secs()
+        ))
+    })?
+}
+
 pub(crate) async fn accept(
     settings: &Settings,
     args: &AcceptArgs,
@@ -531,6 +547,37 @@ mod tests {
 
     fn parse(args: &[&str]) -> Result<Mode, String> {
         Mode::parse(&args.iter().map(|a| a.to_string()).collect::<Vec<_>>())
+    }
+
+    #[test]
+    fn the_call_deadline_is_three_seconds() {
+        assert_eq!(CALL_DEADLINE, Duration::from_secs(3));
+    }
+
+    #[tokio::test]
+    async fn the_timeout_line_names_the_deadline_not_the_wait() {
+        let never = std::future::pending::<Result<(), String>>();
+        let line = call_within(CALL_DEADLINE, Duration::from_millis(100), never).await;
+        assert_eq!(
+            line,
+            Err("the Harold daemon did not answer within 3 seconds".into())
+        );
+
+        let never = std::future::pending::<Result<(), String>>();
+        let line = call_within(Duration::from_secs(30), Duration::from_millis(100), never).await;
+        assert_eq!(
+            line,
+            Err("the Harold daemon did not answer within 30 seconds".into())
+        );
+    }
+
+    #[tokio::test]
+    async fn call_within_returns_the_calls_own_result() {
+        let line = call_within(CALL_DEADLINE, CALL_DEADLINE, async {
+            Err::<(), String>("refused".into())
+        })
+        .await;
+        assert_eq!(line, Err("refused".into()));
     }
 
     fn accept(event: AcceptEvent) -> Mode {
