@@ -15,6 +15,7 @@ mod store;
 mod telemetry;
 mod timed_prompts;
 mod tmux;
+mod tools;
 mod util;
 mod voice_input;
 mod web_app;
