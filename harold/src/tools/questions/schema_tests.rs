@@ -152,27 +152,38 @@ fn picks_must_fit_the_question() {
         "picks"
     );
 
-    // free_text: the last pick is the free one, with text
+    // free_text: one pick per decision, at least one free, each free pick with text
     let q2 = from_proto(pb::Question {
         decisions: vec![
-            decision("First?", vec![option("a")]),
+            decision("First?", vec![option("a"), free_option("y")]),
             decision("Second?", vec![option("a"), free_option("z")]),
         ],
         ..proto()
     })
     .unwrap();
-    let ok = resolve_picks(
+    let last = resolve_picks(
         &q2,
         Kind::FreeText,
         &[pick(0, "a", ""), pick(1, "z", "my words")],
         "",
     )
     .unwrap();
-    assert_eq!(ok.picks[1].label, "my words");
-    assert!(ok.picks[1].free);
+    assert_eq!(last.picks[1].label, "my words");
+    assert!(last.picks[1].free);
+    let early = resolve_picks(
+        &q2,
+        Kind::FreeText,
+        &[pick(0, "y", "early words"), pick(1, "a", "")],
+        "",
+    )
+    .unwrap();
+    assert_eq!(early.picks[0].label, "early words");
+    assert!(early.picks[0].free);
+    assert!(!early.picks[1].free);
     for bad in [
         vec![pick(0, "a", ""), pick(1, "z", "  ")],
         vec![pick(0, "a", ""), pick(1, "a", "")],
+        vec![pick(0, "y", "early words")],
     ] {
         assert_eq!(
             resolve_picks(&q2, Kind::FreeText, &bad, "").unwrap_err(),

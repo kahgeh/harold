@@ -222,13 +222,7 @@ pub(super) fn resolve_picks(
             }
         }
         Kind::FreeText => {
-            let last = picked.len().saturating_sub(1);
-            if picked.is_empty()
-                || picked
-                    .iter()
-                    .enumerate()
-                    .any(|(i, p)| p.free != (i == last))
-            {
+            if !picked.iter().any(|p| p.free) {
                 return Err("picks".into());
             }
         }

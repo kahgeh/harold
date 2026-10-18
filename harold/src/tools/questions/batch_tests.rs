@@ -222,6 +222,48 @@ async fn a_re_put_between_ready_and_start_types_nothing_until_answered_again() {
 }
 
 #[test]
+fn a_free_pick_on_an_early_decision_renders_in_place() {
+    let question = schema::from_proto(pb::Question {
+        id: "Q9".into(),
+        product: "p".into(),
+        spec: "s9".into(),
+        sha: "abc".into(),
+        link: "https://x".into(),
+        intro: "i".into(),
+        decisions: ["First?", "Second?"]
+            .map(|ask| pb::Decision {
+                ask: ask.into(),
+                options: vec![pb::DecisionOption {
+                    key: "a".into(),
+                    label: "A".into(),
+                    impact: "i".into(),
+                    suggested: false,
+                    free: false,
+                }],
+            })
+            .to_vec(),
+    })
+    .unwrap();
+    let picked = |ask: &str, label: &str, free| schema::Picked {
+        ask: ask.into(),
+        label: label.into(),
+        free,
+    };
+    let answer = schema::Answer {
+        kind: Kind::FreeText,
+        picks: vec![
+            picked("First?", "my\nwords", true),
+            picked("Second?", "A", false),
+        ],
+        note: String::new(),
+    };
+    assert_eq!(
+        answer_part("Q9", &question, &answer),
+        "Q9 s9 sha abc: First? \"my words\"; Second? A"
+    );
+}
+
+#[test]
 fn clean_strips_escape_sequences_tabs_and_returns() {
     assert_eq!(clean("a\x1b[2Jb\tc\rd\ne"), "abcd e");
     assert_eq!(clean("one\r\ntwo\nthree"), "one two three");
