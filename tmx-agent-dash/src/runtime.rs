@@ -407,14 +407,16 @@ where
         // QUESTION_POLL_INTERVAL, before each key that goes to the block (and before
         // Tab), and after each answer or deferral. Each read is awaited inline and
         // bounded by VOICE_REQUEST_TIMEOUT. The chief's Now item is read beside the
-        // queue as the stream opens and on each QUESTION_POLL_INTERVAL, the same way.
+        // queue as the stream opens and on each QUESTION_POLL_INTERVAL, the same way,
+        // except when that queue read failed (see `read_now`).
         let polled = stream.call(CallAction::Status).await;
         if core.call_polled(polled) {
             draw(terminal, &core.app, clock)?;
         }
         let listed = stream.list_questions().await;
+        let questions_failed = listed.is_err();
         let changed = core.questions_listed(listed).changed;
-        let now = stream.list_queue_now().await;
+        let now = read_now(&mut stream, questions_failed).await;
         let now_changed = core.now_listed(now);
         if changed || now_changed {
             draw(terminal, &core.app, clock)?;
@@ -434,8 +436,9 @@ where
             }
             () = &mut question_poll => {
                 let listed = stream.list_questions().await;
+                let questions_failed = listed.is_err();
                 let changed = core.questions_refreshed(listed);
-                let now = stream.list_queue_now().await;
+                let now = read_now(&mut stream, questions_failed).await;
                 let now_changed = core.now_listed(now);
                 if changed || now_changed {
                     draw(terminal, &core.app, clock)?;
@@ -549,6 +552,21 @@ where
     .await;
     stream.close_stream().await;
     result
+}
+
+/// The Now read that follows a question read. When the question read failed or timed
+/// out, Harold is not answering, so the Now read is skipped and the line hides, as a
+/// failed read would hide it: a hung Harold holds the keys for one timeout, not two.
+async fn read_now<S: StreamPort>(
+    stream: &mut S,
+    questions_failed: bool,
+) -> Result<Option<String>, SourceError> {
+    if questions_failed {
+        return Err(SourceError::Transport(
+            "skipped after a failed question read".into(),
+        ));
+    }
+    stream.list_queue_now().await
 }
 
 async fn wait_for_retry(
@@ -2189,10 +2207,12 @@ mod tests {
         assert!(core.app.questions.is_visible());
     }
 
-    /// Runs `consume_stream` for `run_for` with the question poll every 20 ms and the
-    /// backlog tool answering `answers` in order, and returns how often it was read.
+    /// Runs `consume_stream` for `run_for` with the question poll every 20 ms, the
+    /// question tool answering `queue` (`None` fails every read) and the backlog tool
+    /// answering `answers` in order, and returns how often the backlog tool was read.
     async fn run_now_stream(
         core: &mut RuntimeCore,
+        queue: Option<Queue>,
         answers: Vec<Result<Option<String>, SourceError>>,
         run_for: Duration,
     ) -> usize {
@@ -2202,6 +2222,7 @@ mod tests {
             reads: 0,
         }));
         let mut stream = FakeStream::pending(Arc::new(AtomicBool::new(false)));
+        stream.questions = Some(question_probe(queue));
         stream.now = Some(Arc::clone(&probe));
         let (_input_sender, mut input) = InputPump::channel();
         let (shutdown_sender, mut shutdown) = FakeShutdown::channel();
@@ -2229,6 +2250,7 @@ mod tests {
         let mut core = connected_core();
         let reads = run_now_stream(
             &mut core,
+            Some(Queue::default()),
             vec![Ok(Some("a".into())), Ok(Some("b".into()))],
             Duration::from_millis(100),
         )
@@ -2242,6 +2264,7 @@ mod tests {
         let mut core = connected_core();
         let reads = run_now_stream(
             &mut core,
+            Some(Queue::default()),
             vec![
                 Ok(Some("a".into())),
                 Err(SourceError::Transport("status: Unimplemented".into())),
@@ -2259,6 +2282,35 @@ mod tests {
         assert!(core.now_listed(Err(SourceError::Transport("status: Unimplemented".into()))));
         assert_eq!(core.app.now_line, None);
         assert!(!core.now_listed(Ok(None)), "no Now item keeps it hidden");
+    }
+
+    #[tokio::test]
+    async fn a_failed_question_read_skips_the_now_read_and_hides_the_line() {
+        let mut core = connected_core();
+        core.app.observe_now(Some("a".into()));
+        let reads = run_now_stream(
+            &mut core,
+            None,
+            vec![Ok(Some("a".into()))],
+            Duration::from_millis(100),
+        )
+        .await;
+        assert_eq!(reads, 0, "no Now read follows a failed question read");
+        assert_eq!(core.app.now_line, None);
+    }
+
+    #[tokio::test]
+    async fn a_successful_question_read_is_followed_by_the_now_read() {
+        let mut core = connected_core();
+        let reads = run_now_stream(
+            &mut core,
+            Some(Queue::default()),
+            vec![Ok(Some("a".into()))],
+            Duration::from_millis(100),
+        )
+        .await;
+        assert!(reads >= 2, "read {reads} times");
+        assert_eq!(core.app.now_line.as_deref(), Some("a"));
     }
 
     #[tokio::test]

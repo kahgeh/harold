@@ -259,14 +259,11 @@ impl SourceStream {
         let Some(mut client) = self.backlog.clone() else {
             return Err(SourceError::transport("backlog tool unavailable"));
         };
-        tokio::time::timeout(
-            VOICE_REQUEST_TIMEOUT,
-            client.list_queue(ListQueueRequest { done_since_ms: 0 }),
-        )
-        .await
-        .map_err(|_| SourceError::transport("backlog request timed out"))?
-        .map(|response| map_now(response.into_inner()))
-        .map_err(|error| SourceError::transport(error.to_string()))
+        tokio::time::timeout(VOICE_REQUEST_TIMEOUT, client.list_queue(now_request()))
+            .await
+            .map_err(|_| SourceError::transport("backlog request timed out"))?
+            .map(|response| map_now(response.into_inner()))
+            .map_err(|error| SourceError::transport(error.to_string()))
     }
 
     pub async fn answer_question(&self, out: &Outgoing) -> SendResult {
@@ -481,6 +478,14 @@ fn map_option(option: DecisionOption) -> OptionView {
     }
 }
 
+/// The dash's queue read. `done_since_ms` 0 would return every done item, a history
+/// that only grows, so the read asks for done items from the end of time: none.
+pub(crate) fn now_request() -> ListQueueRequest {
+    ListQueueRequest {
+        done_since_ms: i64::MAX,
+    }
+}
+
 /// The Now item's first line, cleaned and cut, or `None` when there is no Now item or
 /// its first line is blank.
 pub fn map_now(response: ListQueueResponse) -> Option<String> {
@@ -612,7 +617,7 @@ mod tests {
 
     use super::{
         ProtocolError, SnapshotReader, SourceError, call_request_timeout, map_call, map_now,
-        map_snapshot, spawn_reader,
+        map_snapshot, now_request, spawn_reader,
     };
 
     #[test]
@@ -1058,6 +1063,11 @@ mod tests {
         let stream = spawn_reader(FakeReader::new([]));
         let error = stream.list_queue_now().await.unwrap_err();
         assert!(error.detail().contains("backlog tool unavailable"));
+    }
+
+    #[test]
+    fn the_now_read_asks_for_no_done_items() {
+        assert_eq!(now_request().done_since_ms, i64::MAX);
     }
 
     #[test]

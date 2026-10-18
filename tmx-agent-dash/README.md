@@ -128,7 +128,7 @@ for what the switch does.
 
 ## Now line
 
-When the chief of pods has a Now item in its queue, the dash shows it on one dim line under the masthead: `NOW  ` and the item's first line, cut to the terminal's width. The dash reads it from Harold's backlog tool with the question queue, every 2 seconds. The line is hidden while the queue has no Now item, when Harold does not serve the backlog tool or the read fails, and at the smallest height (18 rows), where the agent list keeps its six rows. It is never focused and takes no keys; the question block sits below it with the same focus and keys. See the [backlog reference](../docs/references/tools/backlog.md) for how the queue is kept.
+When the chief of pods has a Now item in its queue, the dash shows it on one dim line under the masthead: `NOW  ` and the item's first line, cut to the terminal's width. The dash reads it from Harold's backlog tool with the question queue, every 2 seconds. The line is hidden while the queue has no Now item, when Harold does not serve the backlog tool, the read fails or the stream to Harold is lost, and at the smallest height (18 rows), where the agent list keeps its six rows. It is never focused and takes no keys; the question block sits below it with the same focus and keys. See the [backlog reference](../docs/references/tools/backlog.md) for how the queue is kept.
 
 ## Question block
 

@@ -656,6 +656,7 @@ impl App {
 
     pub fn mark_disconnected(&mut self) {
         self.call = None;
+        self.now_line = None;
         self.snapshot.harold_version = None;
         self.connection = if self.has_snapshot {
             ConnectionState::Stale
@@ -2877,6 +2878,14 @@ mod tests {
                 .all(|focus| *focus == Focus::List),
             "with no question, Tab finds nothing to focus"
         );
+    }
+
+    #[test]
+    fn a_disconnect_hides_the_now_line() {
+        let mut app = call_app(CallState::Off);
+        app.observe_now(Some("Ship the backlog tool".into()));
+        app.mark_disconnected();
+        assert_eq!(app.now_line, None);
     }
 
     #[test]
