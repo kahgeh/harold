@@ -218,8 +218,19 @@ impl QuestionBlock {
         if !self.is_visible() {
             return None;
         }
+        self.kept()
+    }
+
+    /// Like [`QuestionBlock::shown`], but also while suspended: what the block will show
+    /// again if the next listing keeps it.
+    pub fn kept(&self) -> Option<(String, u32, Mode)> {
         let q = self.question()?;
         Some((q.id.clone(), self.version, self.mode.clone()))
+    }
+
+    /// Clears the notice, as any key in the block does.
+    pub fn clear_notice(&mut self) {
+        self.notice = None;
     }
 
     /// Sets a notice, for the runtime's own messages.

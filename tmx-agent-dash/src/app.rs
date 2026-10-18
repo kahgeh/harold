@@ -1,4 +1,4 @@
-use crate::questions::{BlockEffect, Outgoing, QuestionBlock, Queue, SendResult};
+use crate::questions::{BlockEffect, Mode, Outgoing, QuestionBlock, Queue, SendResult};
 use crate::text::normalize_search;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::collections::HashSet;
@@ -244,6 +244,10 @@ pub struct App {
     /// The block hid while it had the focus: keys are swallowed until Tab or Esc, so a
     /// note being typed never turns into list commands.
     swallowing_keys: bool,
+    /// The question under the focus changed while a note or the summary was in view, or
+    /// came back changed: block keys are dropped until Esc (stay in the block) or Tab
+    /// (go to the list), so letters typed for the old question never act on the new one.
+    holding_block_keys: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -330,6 +334,7 @@ impl App {
             active_pane: None,
             focus_tracking: false,
             swallowing_keys: false,
+            holding_block_keys: false,
         }
     }
 
@@ -503,9 +508,34 @@ impl App {
 
     /// Takes the latest question queue. A new question never takes the focus; the
     /// focus returns to the list when the block hides.
+    ///
+    /// When the block has the focus and the question in view changes while a note or the
+    /// summary was showing, block keys are held until Esc or Tab. A block that hid under
+    /// the focus and comes back takes the focus back: as it was, typing resumes; changed,
+    /// its keys are held.
     pub fn observe_questions(&mut self, queue: Queue) {
+        let before = self.questions.shown();
+        let kept = self.questions.kept();
         self.questions.reconcile(queue);
+        let after = self.questions.shown();
+        if self.swallowing_keys && self.questions.is_visible() {
+            self.swallowing_keys = false;
+            self.focus = Focus::Block;
+            self.holding_block_keys = after != kept;
+        } else if self.focus == Focus::Block
+            && after != before
+            && before
+                .as_ref()
+                .is_some_and(|(_, _, mode)| !matches!(mode, Mode::Choosing))
+        {
+            self.holding_block_keys = true;
+        }
         self.settle_focus();
+    }
+
+    /// Whether block keys are held after the question in view changed under them.
+    pub fn holding_block_keys(&self) -> bool {
+        self.holding_block_keys
     }
 
     /// Hides the block without a notice, for when the queue cannot be read or the stream
@@ -516,6 +546,7 @@ impl App {
         if self.focus == Focus::Block {
             self.swallowing_keys = true;
         }
+        self.holding_block_keys = false;
         self.settle_focus();
     }
 
@@ -546,6 +577,7 @@ impl App {
     fn settle_focus(&mut self) {
         if !self.questions.is_visible() {
             self.focus = Focus::List;
+            self.holding_block_keys = false;
         }
     }
 
@@ -763,6 +795,20 @@ impl App {
         }
         if self.palette.is_some() {
             return self.handle_palette_key(key.code);
+        }
+        if self.holding_block_keys && self.focus == Focus::Block {
+            match key.code {
+                // Esc reads the change: the notice goes and the shown question is chosen
+                // from, from its first decision.
+                KeyCode::Esc => {
+                    self.holding_block_keys = false;
+                    self.questions.clear_notice();
+                    self.settle_focus();
+                    return Effect::None;
+                }
+                KeyCode::Tab => self.holding_block_keys = false,
+                _ => return Effect::None,
+            }
         }
         if key.code == KeyCode::Tab && self.questions.is_visible() {
             self.focus = match self.focus {
@@ -2805,5 +2851,91 @@ mod tests {
         app.hide_questions();
         assert!(!app.swallowing_keys());
         assert_eq!(app.handle_key(KeyCode::Char('q')), Effect::Quit);
+    }
+
+    #[test]
+    fn a_returning_block_takes_the_focus_back_and_typing_resumes() {
+        let mut app = call_app(CallState::Off);
+        app.observe_questions(question_queue(&["Q1"]));
+        app.handle_key(KeyCode::Tab);
+        app.handle_key(KeyCode::Char('r'));
+        app.handle_key(KeyCode::Char('a'));
+        app.hide_questions();
+        assert!(app.swallowing_keys());
+        app.observe_questions(question_queue(&["Q1"]));
+        assert_eq!(app.focus, Focus::Block);
+        assert!(!app.swallowing_keys());
+        assert!(!app.holding_block_keys());
+        app.handle_key(KeyCode::Char('b'));
+        assert_eq!(
+            app.questions.view().unwrap().mode,
+            Mode::Note {
+                kind: crate::questions::NoteKind::Revise,
+                text: "ab".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn a_returning_block_that_changed_swallows_until_esc() {
+        let mut app = call_app(CallState::Off);
+        app.observe_questions(question_queue(&["Q1"]));
+        app.handle_key(KeyCode::Tab);
+        app.handle_key(KeyCode::Char('r'));
+        app.handle_key(KeyCode::Char('a'));
+        app.hide_questions();
+        let mut changed = question_queue(&["Q1"]);
+        changed.questions[0].version = 2;
+        app.observe_questions(changed);
+        assert_eq!(app.focus, Focus::Block);
+        assert!(!app.swallowing_keys());
+        assert!(app.holding_block_keys());
+        for code in [
+            KeyCode::Char('l'),
+            KeyCode::Char('o'),
+            KeyCode::Char('r'),
+            KeyCode::Enter,
+            KeyCode::Char('q'),
+        ] {
+            assert_eq!(app.handle_key(code), Effect::None, "{code:?}");
+        }
+        let view = app.questions.view().unwrap();
+        assert_eq!(view.mode, Mode::Choosing);
+        assert!(view.picks.is_empty());
+        assert_eq!(
+            view.notice.as_deref(),
+            Some("Q1 changed, your picks were cleared")
+        );
+        // Esc reads the change: the notice goes, and the question is chosen from.
+        assert_eq!(app.handle_key(KeyCode::Esc), Effect::None);
+        assert!(!app.holding_block_keys());
+        assert_eq!(app.focus, Focus::Block);
+        assert_eq!(app.questions.view().unwrap().notice, None);
+        assert_eq!(
+            app.handle_key(KeyCode::Char('l')),
+            Effect::Defer("Q1".into())
+        );
+
+        // Tab also ends the hold, moving to the list as usual.
+        let mut app = call_app(CallState::Off);
+        app.observe_questions(question_queue(&["Q1"]));
+        app.handle_key(KeyCode::Tab);
+        app.handle_key(KeyCode::Char('r'));
+        let mut changed = question_queue(&["Q1"]);
+        changed.questions[0].version = 2;
+        app.observe_questions(changed);
+        assert!(app.holding_block_keys(), "a change under a note holds too");
+        assert_eq!(app.handle_key(KeyCode::Tab), Effect::None);
+        assert_eq!(app.focus, Focus::List);
+        assert!(!app.holding_block_keys());
+
+        // A change while choosing does not hold.
+        let mut app = call_app(CallState::Off);
+        app.observe_questions(question_queue(&["Q1"]));
+        app.handle_key(KeyCode::Tab);
+        let mut changed = question_queue(&["Q1"]);
+        changed.questions[0].version = 2;
+        app.observe_questions(changed);
+        assert!(!app.holding_block_keys());
     }
 }

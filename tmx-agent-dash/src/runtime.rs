@@ -2332,6 +2332,53 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn a_note_knocked_out_by_a_poll_swallows_until_esc() {
+        let mut core = connected_core();
+        core.question_poll_interval = Duration::from_millis(10);
+        let probe = question_probe(Some(question("Q1", 1, 2)));
+        let mut stream = FakeStream::pending(Arc::new(AtomicBool::new(false)));
+        stream.questions = Some(Arc::clone(&probe));
+        let (input_sender, mut input) = InputPump::channel();
+        let key = |code: KeyCode| InputMessage::Key(code.into());
+        input_sender.try_send(key(KeyCode::Tab)).unwrap();
+        input_sender.try_send(key(KeyCode::Char('r'))).unwrap();
+        let tool = Arc::clone(&probe);
+        tokio::spawn(async move {
+            // A poll finds version 2 while the user is typing the note "later".
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            tool.lock().unwrap().queue = Some(question("Q1", 2, 2));
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            let typed = "later".chars().map(KeyCode::Char).chain([KeyCode::Enter]);
+            for code in typed.chain([KeyCode::Tab, KeyCode::Char('q')]) {
+                input_sender.send(key(code)).await.unwrap();
+            }
+        });
+        let (_shutdown_sender, mut shutdown) = FakeShutdown::channel();
+        let outcome = consume_stream(
+            stream,
+            &mut core,
+            &mut input,
+            &mut shutdown,
+            &mut FakeScreen::default(),
+            &FakeNavigator::successful(),
+            &FakeClock::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome, Control::Quit);
+        let log = probe.lock().unwrap().log.clone();
+        assert!(!log.iter().any(|call| call.starts_with("defer")), "{log:?}");
+        let view = core.app.questions.view().unwrap();
+        assert_eq!(view.mode, crate::questions::Mode::Choosing);
+        assert!(view.picks.is_empty(), "Enter picked nothing");
+        assert_eq!(
+            view.notice.as_deref(),
+            Some("Q1 changed, your picks were cleared")
+        );
+        assert!(!core.app.holding_block_keys(), "Tab ended the hold");
+    }
+
     #[test]
     fn a_second_version_bump_is_flagged() {
         let mut core = connected_core();

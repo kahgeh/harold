@@ -92,6 +92,8 @@ pub fn render(frame: &mut Frame<'_>, app: &App, now_ms: i64) {
     render_workspace(frame, workspace, app, now_ms);
     if app.swallowing_keys() {
         render_swallow_footer(frame, footer);
+    } else if app.holding_block_keys() {
+        render_hold_footer(frame, footer);
     } else {
         render_footer(
             frame,
@@ -1147,6 +1149,19 @@ fn render_swallow_footer(frame: &mut Frame<'_>, area: Rect) {
             Style::default().fg(Color::Yellow),
         ),
     ]);
+    frame.render_widget(
+        Paragraph::new(line).block(board_block().borders(Borders::ALL)),
+        area,
+    );
+}
+
+/// While block keys are held after the question changed under them, the footer says
+/// how to go on.
+fn render_hold_footer(frame: &mut Frame<'_>, area: Rect) {
+    let line = Line::from(Span::styled(
+        " esc to continue",
+        Style::default().fg(Color::Yellow),
+    ));
     frame.render_widget(
         Paragraph::new(line).block(board_block().borders(Borders::ALL)),
         area,
@@ -3478,5 +3493,17 @@ mod tests {
         app.handle_key(KeyCode::Esc);
         let lines = rendered_lines(&app, 140, 38, 100_000);
         row_with(&lines, "q quit");
+    }
+
+    #[test]
+    fn the_footer_says_esc_to_continue_while_block_keys_are_held() {
+        let mut app = question_app(true);
+        app.handle_key(KeyCode::Char('r'));
+        // The question is withdrawn while its note is being typed.
+        app.observe_questions(crate::questions::Queue::default());
+        assert!(app.holding_block_keys());
+        let lines = rendered_lines(&app, 140, 38, 100_000);
+        row_with(&lines, "esc to continue");
+        row_with(&lines, "Q25 dismissed: withdrawn");
     }
 }
