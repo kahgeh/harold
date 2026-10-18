@@ -3,10 +3,12 @@
 //! When no question is waiting and some answers are unsent, the sender
 //! records a batch as started, with its text, and makes one try at typing it
 //! into the chief's pane. Typed, it is marked typed. Not typed (the pane busy
-//! or gone, or no chief), it is released, so the next round, 5 s later, builds
-//! it again from what is there then and a question put meanwhile holds it. A
-//! started batch never marked typed, from before a restart, was being typed
-//! when Harold stopped; it is typed again first, once.
+//! or gone, or no chief), a batch built in this run is released, so the next
+//! round, 5 s later, builds it again from what is there then and a question
+//! put meanwhile holds it. A started batch never marked typed, found when the
+//! sender starts, was being typed when Harold stopped and may have reached the
+//! pane. It is kept, never released: it waits for the pane like any batch and
+//! is typed again once, before any new batch, even if a question waits.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -114,7 +116,11 @@ enum Next {
 
 /// What the sender found to type.
 enum Found {
+    /// A batch built in this run: released if the try types nothing.
     Batch(StartedBatch),
+    /// The started batch found when the sender started, left from before a
+    /// restart: it may have reached the pane, so it is kept and typed once.
+    Inherited(StartedBatch),
     Nothing,
     /// The answers changed between `ready` and `start_batch`; nothing was started.
     Changed,
@@ -128,9 +134,14 @@ struct Sender<S> {
     typed: Option<(i64, Typing)>,
     /// A batch not typed whose release failed; it is released before anything else.
     unreleased: Option<i64>,
-    /// Whether this spell of waiting was logged. A spell ends when a batch is
-    /// typed or nothing is left to send.
-    waiting_logged: bool,
+    /// Whether the store was asked, since the sender started, for a started
+    /// batch left from before.
+    looked_for_leftover: bool,
+    /// The started batch left from before, until it is typed.
+    inherited: Option<StartedBatch>,
+    /// The reason last logged in this spell of waiting. A spell ends when a
+    /// batch is typed or nothing is left to send.
+    waiting_logged: Option<&'static str>,
 }
 
 /// Sends batches until shutdown, which also cancels a line being typed.
@@ -147,7 +158,9 @@ pub(super) async fn run<S: QuestionStore>(
         chief,
         typed: None,
         unreleased: None,
-        waiting_logged: false,
+        looked_for_leftover: false,
+        inherited: None,
+        waiting_logged: None,
     };
     loop {
         let next = tokio::select! {
@@ -185,10 +198,11 @@ impl<S: QuestionStore> Sender<S> {
             }
             self.unreleased = None;
         }
-        let batch = match self.next_batch().await {
-            Ok(Found::Batch(batch)) => batch,
+        let (batch, inherited) = match self.next_batch().await {
+            Ok(Found::Batch(batch)) => (batch, false),
+            Ok(Found::Inherited(batch)) => (batch, true),
             Ok(Found::Nothing) => {
-                self.waiting_logged = false;
+                self.waiting_logged = None;
                 return Next::Idle;
             }
             // A write landed after `ready`: build the batch again from what is there now.
@@ -200,25 +214,39 @@ impl<S: QuestionStore> Sender<S> {
         };
         // The chief is looked up every round, and the line goes to the pane found now.
         let Some(pane) = self.chief.chief_pane() else {
-            return self.release(batch.id, "no_chief").await;
+            return self.not_typed(batch.id, inherited, "no_chief").await;
         };
         // One try: a busy pane is not waited for here, but on the next round.
         match self.typing.type_line(&pane, &batch.text).await {
             how @ (Typing::Typed | Typing::EnterFailed) => {
                 // The line reached the pane, so this spell of waiting is over.
-                self.waiting_logged = false;
+                self.waiting_logged = None;
+                self.inherited = None;
                 self.typed = Some((batch.id, how));
                 self.mark_typed(batch.id, how).await
             }
-            how @ (Typing::PaneBusy | Typing::NoPane) => self.release(batch.id, how.reason()).await,
+            how @ (Typing::PaneBusy | Typing::NoPane) => {
+                self.not_typed(batch.id, inherited, how.reason()).await
+            }
         }
     }
 
-    /// The started batch from before, else a new one when answers are ready.
-    async fn next_batch(&self) -> Result<Found, StoreError> {
-        if let Some(batch) = self.store.started_batch().await? {
-            return Ok(Found::Batch(batch));
+    /// The started batch left from before, else a started batch, else a new
+    /// one when answers are ready.
+    async fn next_batch(&mut self) -> Result<Found, StoreError> {
+        if let Some(batch) = &self.inherited {
+            return Ok(Found::Inherited(batch.clone()));
         }
+        if let Some(batch) = self.store.started_batch().await? {
+            if self.looked_for_leftover {
+                return Ok(Found::Batch(batch));
+            }
+            // Found at the first look since the sender started: from before a restart.
+            self.looked_for_leftover = true;
+            self.inherited = Some(batch.clone());
+            return Ok(Found::Inherited(batch));
+        }
+        self.looked_for_leftover = true;
         let Some(ready) = self.store.ready().await? else {
             return Ok(Found::Nothing);
         };
@@ -234,11 +262,17 @@ impl<S: QuestionStore> Sender<S> {
         Ok(started.map_or(Found::Changed, Found::Batch))
     }
 
-    /// Nothing was typed, so the batch is released: the next round builds it
-    /// again, and a question put meanwhile holds it.
-    async fn release(&mut self, batch_id: i64, reason: &'static str) -> Next {
+    /// Nothing was typed. A batch built in this run is released: the next
+    /// round builds it again, and a question put meanwhile holds it. The
+    /// batch left from before a restart may have reached the pane, so it is
+    /// kept and tried again.
+    async fn not_typed(&mut self, batch_id: i64, inherited: bool, reason: &'static str) -> Next {
         self.log_waiting(reason);
+        if inherited {
+            return Next::Retry;
+        }
         if self.store.release_batch(batch_id, now_ms()).await.is_err() {
+            self.log_waiting("store_failed");
             self.unreleased = Some(batch_id);
         }
         Next::Retry
@@ -250,7 +284,7 @@ impl<S: QuestionStore> Sender<S> {
             return Next::Retry;
         }
         self.typed = None;
-        self.waiting_logged = false;
+        self.waiting_logged = None;
         match how {
             Typing::EnterFailed => {
                 warn!(tool = NAME, reason = how.reason(), "answers batch typed")
@@ -260,12 +294,13 @@ impl<S: QuestionStore> Sender<S> {
         Next::Again
     }
 
-    /// Logs the first reason of a spell of waiting only.
-    fn log_waiting(&mut self, reason: &str) {
-        if self.waiting_logged {
+    /// Logs a reason when it differs from the one last logged in this spell
+    /// of waiting, so a spell gives one line per change of reason.
+    fn log_waiting(&mut self, reason: &'static str) {
+        if self.waiting_logged == Some(reason) {
             return;
         }
-        self.waiting_logged = true;
+        self.waiting_logged = Some(reason);
         if reason == "store_failed" {
             warn!(tool = NAME, reason, "answers batch waiting");
         } else {

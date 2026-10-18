@@ -132,9 +132,9 @@ A `|` in a field is not changed, so a note that holds `|` reads like a separator
 
 ### Timing and restart
 
-Each round, the sender looks up the chief's pane and makes one try at typing the batch: the pane must be idle with an empty input box. It does not wait for a busy pane inside the try. If there is no chief, the pane is busy or gone, or the database fails, it tries again 5 seconds later, without limit. It logs `answers batch waiting` once for each spell of waiting, with the first `reason`; the spell ends when a batch is typed or nothing is left to send.
+Each round, the sender looks up the chief's pane and makes one try at typing the batch: the pane must be idle with an empty input box. It does not wait for a busy pane inside the try. If there is no chief, the pane is busy or gone, or the database fails, it tries again 5 seconds later, without limit. It logs `answers batch waiting` when a spell of waiting starts, with its `reason`, and again each time the `reason` changes, for example `store_failed` when a release fails after `pane_busy`. The spell ends when a batch is typed or nothing is left to send.
 
-The batch is stored with its text before the try. If nothing was typed (no chief, a busy pane, no pane), the batch is released: its row is deleted and its answers are unsent again, in one transaction. The next round builds it again from what is there then, so a question put while a batch waits holds it until that question is answered or deferred, and the chief gets one line, not two. If the release fails, it is tried again before anything else.
+The batch is stored with its text before the try. If nothing was typed (no chief, a busy pane, no pane), a batch built since Harold started is released: its row is deleted and its answers are unsent again, in one transaction. The next round builds it again from what is there then, so a question put while a batch waits holds it until that question is answered or deferred, and the chief gets one line, not two. If the release fails, it is tried again before anything else. A panic in the typing task counts as a busy pane, so its batch is released too.
 
 While nothing is to be sent, the sender wakes on each write, and also looks again every 30 seconds, in case a write was stored by a call that was cancelled before it woke the sender.
 
@@ -145,7 +145,7 @@ Once a batch is typed, it is marked typed:
 
 If Enter fails after the text went in, the batch counts as typed and is never typed again, since the text is already in the box.
 
-If Harold stops while a batch is being typed, or between typing and marking, the batch may have reached the pane, so it is still open at the next start and is typed again, once, before any new batch. Such a line is the only case that can repeat. A batch whose try typed nothing was released, so it is never typed twice.
+If Harold stops while a batch is being typed, or between typing and marking, the batch may have reached the pane, so it is still open at the next start. That leftover batch is kept: it waits for the chief and an idle pane like any batch, but it is never released, and it is typed again once, before any new batch, even if a question waits. Such a line is the only case that can repeat. A batch whose try typed nothing was released, so it is never typed twice. If Harold crashes during a release, the batch is still open at the next start, so it is typed as a leftover batch, even if a question waits.
 
 ## Log lines
 

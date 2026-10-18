@@ -976,6 +976,95 @@ async fn a_batch_in_flight_at_shutdown_is_typed_again_once_after_a_restart() {
     );
 }
 
+/// The reviewer's restart scenario: B1 may have reached the chief's pane when
+/// Harold stopped. After the restart the pane is busy and Q2 is put; B1 must be
+/// kept, not released (or Q1 would come again inside `ANSWERS 2`), and typed
+/// once when the pane is idle, with Q2 still waiting.
+#[tokio::test(start_paused = true)]
+async fn a_restart_with_a_busy_pane_keeps_the_leftover_batch_and_types_it_once() {
+    let (logs, _guard) = capture_logs();
+    let folder = TempFolder::new();
+    let store = open_store(&folder).await;
+    put(&*store, question("Q1", "s1", "abc")).await;
+    answer_a(&*store, "Q1").await;
+    let first = spawn_sender(&store, FakeTyping::new(vec![Step::Hang], Typing::Typed));
+    until("the first sender is typing", || {
+        first.typing.calls().len() == 1
+    })
+    .await;
+    // Harold dies while B1 is being typed: started, never marked typed.
+    first.task.abort();
+    let _ = first.task.await;
+    let b1 = store.started_batch().await.unwrap().expect("B1 started");
+    drop(store);
+
+    // The restart: the chief is busy reading B1, and puts Q2 meanwhile.
+    let store: Arc<TursoQuestionStore> = open_store(&folder).await;
+    let second = spawn_sender(&store, FakeTyping::new(vec![], Typing::PaneBusy));
+    until("the restarted sender tries B1", || {
+        !second.typing.calls().is_empty()
+    })
+    .await;
+    put(&*store, question("Q2", "s2", "abc")).await;
+    second.wake.notify_one();
+    pass(30).await;
+    let tries = second.typing.calls().len();
+    assert!(tries >= 2, "tried again while busy: {tries}");
+    assert_eq!(
+        store.started_batch().await.unwrap(),
+        Some(b1.clone()),
+        "B1 is kept, not released"
+    );
+    assert!(
+        second.typing.texts().iter().all(|t| t == &b1.text),
+        "{:?}",
+        second.typing.texts()
+    );
+    assert!(
+        logs.lines().iter().all(|l| !l.contains("ANSWERS 2")),
+        "{:#?}",
+        logs.lines()
+    );
+
+    // The pane goes idle: B1 is typed once, though Q2 waits.
+    second.typing.set_fallback(Typing::Typed);
+    until("B1 is typed", || second.typing.calls().len() == tries + 1).await;
+    until_no_started_batch(&*store).await;
+    second.wake.notify_one();
+    pass(30).await;
+    let texts = second.typing.texts();
+    assert_eq!(texts.len(), tries + 1, "one line, once: {texts:?}");
+    assert!(texts.iter().all(|t| t == &b1.text), "{texts:?}");
+    assert!(
+        texts.iter().all(|t| !t.starts_with("ANSWERS 2")),
+        "{texts:?}"
+    );
+    assert_eq!(logs.with("answers batch typed").len(), 1);
+    let waiting = logs.with("answers batch waiting");
+    assert_eq!(waiting.len(), 1, "{:#?}", logs.lines());
+    assert!(
+        waiting[0].contains("reason=\"pane_busy\""),
+        "{}",
+        waiting[0]
+    );
+    let listing = store.list(0).await.unwrap();
+    let q2 = listing
+        .questions
+        .iter()
+        .find(|l| l.question.id == "Q2")
+        .expect("Q2 listed");
+    assert!(!q2.deferred, "Q2 still waiting");
+    assert_eq!(
+        store.ready().await.unwrap(),
+        None,
+        "Q2 holds the next batch"
+    );
+    println!(
+        "evidence: after a restart B1 ({}) was kept through {tries} busy tries while Q2 waited, never released; then typed once: {}; Q2 still waiting",
+        b1.id, texts[tries]
+    );
+}
+
 #[tokio::test(start_paused = true)]
 async fn a_failed_release_is_retried_before_the_batch_is_built_again() {
     let (logs, _guard) = capture_logs();
@@ -988,7 +1077,15 @@ async fn a_failed_release_is_retried_before_the_batch_is_built_again() {
     failing.releases.store(true, Ordering::SeqCst);
     let sender = spawn_sender(&failing, FakeTyping::new(vec![], Typing::PaneBusy));
     until("the first try", || sender.typing.calls().len() == 1).await;
-    pass(30).await;
+    // The failed release is logged in the same round, after its `pane_busy`.
+    pass(1).await;
+    assert_eq!(
+        logs.with("reason=\"store_failed\"").len(),
+        1,
+        "{:#?}",
+        logs.lines()
+    );
+    pass(29).await;
     // The unreleased batch is neither typed again nor left for a question to skip.
     assert_eq!(sender.typing.calls().len(), 1);
     assert!(inner.started_batch().await.unwrap().is_some());
@@ -1000,11 +1097,31 @@ async fn a_failed_release_is_retried_before_the_batch_is_built_again() {
         logs.with("answers batch typed").len() == 1
     })
     .await;
+    // One line per change of reason: the busy pane, then the failed release.
     let waiting = logs.with("answers batch waiting");
-    assert_eq!(waiting.len(), 1, "{:#?}", logs.lines());
-    println!(
-        "evidence: the release failed for 30 s with no retyping; once it succeeded the batch was built again and typed; log: {}",
+    assert!(waiting.len() >= 2, "{:#?}", logs.lines());
+    assert!(
+        waiting[0].contains("reason=\"pane_busy\""),
+        "{}",
         waiting[0]
+    );
+    assert!(
+        waiting[1].contains("reason=\"store_failed\""),
+        "{}",
+        waiting[1]
+    );
+    assert!(
+        logs.with("reason=\"store_failed\"").len() == 1,
+        "store_failed logged once for 30 s of failed releases: {:#?}",
+        logs.lines()
+    );
+    assert!(
+        waiting.windows(2).all(|w| w[0] != w[1]),
+        "no reason logged twice in a row: {waiting:#?}"
+    );
+    println!(
+        "evidence: the release failed for 30 s with no retyping; once it succeeded the batch was built again and typed; logs: {}; {}",
+        waiting[0], waiting[1]
     );
 }
 
