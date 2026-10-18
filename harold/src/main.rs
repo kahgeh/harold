@@ -43,6 +43,16 @@ use harold::{
     SpeakLineResponse, TurnCompleteRequest, TurnCompleteResponse, WatchAgentStatesRequest,
 };
 
+/// Release tag compiled in by the release workflow; "source" for any other build.
+const HAROLD_VERSION: &str = version_or_source(option_env!("HAROLD_RELEASE_VERSION"));
+
+const fn version_or_source(value: Option<&'static str>) -> &'static str {
+    match value {
+        Some(version) if !version.is_empty() => version,
+        _ => "source",
+    }
+}
+
 struct HaroldService {
     monitor: agent::runtime::AgentMonitorHandle,
     store: Arc<store::HaroldStore>,
@@ -555,6 +565,7 @@ fn map_agent_snapshot(snapshot: agent::domain::AgentSnapshot) -> AgentStateSnaps
     AgentStateSnapshot {
         tts_muted: snapshot.tts_muted,
         messaging_paused: snapshot.messaging_paused,
+        harold_version: HAROLD_VERSION.to_owned(),
         through_event_version: snapshot.through_event_version.get(),
         server_time_ms: snapshot.server_time_ms,
         monitor_health: snapshot

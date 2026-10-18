@@ -24,8 +24,9 @@ use super::inbound::ownership::recorded_notifications;
 use super::peers::PeerEndpoint;
 use super::settings::{PeerHub, PeerMember};
 use super::{
-    HaroldService, Request, TurnCompleteRequest, apply_setting, load_startup_agent_snapshot,
-    map_agent_snapshot, pane_id_for_log, restore_startup_state, store,
+    HAROLD_VERSION, HaroldService, Request, TurnCompleteRequest, apply_setting,
+    load_startup_agent_snapshot, map_agent_snapshot, pane_id_for_log, restore_startup_state, store,
+    version_or_source,
 };
 
 struct EmptyInventory;
@@ -1149,6 +1150,23 @@ async fn overlapping_mute_requests_wait_for_the_one_in_progress() {
     drop(shutdown);
     let _ = task.await;
     let _ = std::fs::remove_dir_all(&directory);
+}
+
+#[test]
+fn snapshot_mapping_carries_the_harold_version() {
+    assert_eq!(
+        map_agent_snapshot(empty_snapshot()).harold_version,
+        HAROLD_VERSION
+    );
+    // Tests build without HAROLD_RELEASE_VERSION.
+    assert_eq!(HAROLD_VERSION, "source");
+}
+
+#[test]
+fn an_unset_or_empty_release_version_is_source() {
+    assert_eq!(version_or_source(None), "source");
+    assert_eq!(version_or_source(Some("")), "source");
+    assert_eq!(version_or_source(Some("v0.9.0")), "v0.9.0");
 }
 
 #[test]

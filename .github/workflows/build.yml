@@ -43,6 +43,8 @@ jobs:
           python3 -m unittest hooks.providers.test_turn_complete
 
       - name: Build release binaries
+        env:
+          HAROLD_RELEASE_VERSION: ${{ github.event.release.tag_name }}
         run: cargo build --locked --release --target aarch64-apple-darwin -p harold -p tmx-agent-dash
 
       - name: Check no OpenSSL library is linked

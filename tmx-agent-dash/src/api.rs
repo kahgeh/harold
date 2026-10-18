@@ -629,6 +629,7 @@ mod tests {
         .collect();
 
         let mapped = map_snapshot(AgentStateSnapshot {
+            harold_version: String::new(),
             tts_muted: false,
             messaging_paused: false,
             through_event_version: 42,
@@ -674,6 +675,7 @@ mod tests {
     #[test]
     fn maps_every_monitor_health_state_and_unknown_enum_values_to_unknown() {
         let mapped = map_snapshot(AgentStateSnapshot {
+            harold_version: String::new(),
             tts_muted: false,
             messaging_paused: false,
             through_event_version: 1,
@@ -746,6 +748,7 @@ mod tests {
             .collect();
 
         let mapped = map_snapshot(AgentStateSnapshot {
+            harold_version: String::new(),
             tts_muted: false,
             messaging_paused: false,
             through_event_version: 1,
@@ -803,6 +806,7 @@ mod tests {
         };
 
         let mapped = map_snapshot(AgentStateSnapshot {
+            harold_version: String::new(),
             tts_muted: false,
             messaging_paused: false,
             through_event_version: 1,
@@ -892,6 +896,7 @@ mod tests {
     #[tokio::test]
     async fn reader_maps_generated_snapshot_before_delivery_then_closes_at_eof() {
         let generated = AgentStateSnapshot {
+            harold_version: String::new(),
             tts_muted: false,
             messaging_paused: false,
             through_event_version: 7,
@@ -917,6 +922,7 @@ mod tests {
         let mut invalid = proto_pane("%1");
         invalid.pane_pid = 0;
         let mut stream = spawn_reader(FakeReader::new([Ok(Some(AgentStateSnapshot {
+            harold_version: String::new(),
             tts_muted: false,
             messaging_paused: false,
             through_event_version: 1,
@@ -1158,6 +1164,7 @@ mod tests {
 
     fn mapping_error(panes: Vec<AgentPaneState>) -> ProtocolError {
         map_snapshot(AgentStateSnapshot {
+            harold_version: String::new(),
             tts_muted: false,
             messaging_paused: false,
             through_event_version: 1,

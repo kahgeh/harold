@@ -1,10 +1,11 @@
 use harold_api::FILE_DESCRIPTOR_SET;
 use harold_api::harold::{
-    AgentPaneState, AgentState, CallAction, CallRequest, CallResponse, CallResult, CallState,
-    ForwardReplyRequest, ForwardReplyResponse, ReportAgentStateRequest, ReportNotificationRequest,
-    ReportNotificationResponse, SendMessageToAwayDeviceRequest, SendMessageToAwayDeviceResponse,
-    SetMessagingPausedRequest, SetMessagingPausedResponse, SetTtsMutedRequest, SetTtsMutedResponse,
-    SpeakLineRequest, SpeakLineResponse, TurnCompleteRequest,
+    AgentPaneState, AgentState, AgentStateSnapshot, CallAction, CallRequest, CallResponse,
+    CallResult, CallState, ForwardReplyRequest, ForwardReplyResponse, ReportAgentStateRequest,
+    ReportNotificationRequest, ReportNotificationResponse, SendMessageToAwayDeviceRequest,
+    SendMessageToAwayDeviceResponse, SetMessagingPausedRequest, SetMessagingPausedResponse,
+    SetTtsMutedRequest, SetTtsMutedResponse, SpeakLineRequest, SpeakLineResponse,
+    TurnCompleteRequest,
 };
 use prost::Message;
 
@@ -259,7 +260,7 @@ fn set_tts_muted_contract_is_additive() {
     );
     let snapshot_fields = message_fields("AgentStateSnapshot");
     assert!(snapshot_fields.contains(&("tts_muted".to_string(), 5)));
-    assert_eq!(snapshot_fields.len(), 6);
+    assert_eq!(snapshot_fields.len(), 7);
 }
 
 #[test]
@@ -277,7 +278,7 @@ fn set_messaging_paused_contract_is_additive() {
     );
     let snapshot_fields = message_fields("AgentStateSnapshot");
     assert!(snapshot_fields.contains(&("messaging_paused".to_string(), 6)));
-    assert_eq!(snapshot_fields.len(), 6);
+    assert_eq!(snapshot_fields.len(), 7);
 }
 
 #[test]
@@ -397,4 +398,29 @@ fn service_lists_call() {
             ("last_result".to_string(), 4),
         ]
     );
+}
+
+#[test]
+fn agent_state_snapshot_carries_harold_version_in_field_seven() {
+    let snapshot = AgentStateSnapshot {
+        harold_version: "v0.9.0".into(),
+        ..Default::default()
+    };
+    assert_eq!(round_trip(&snapshot).harold_version, "v0.9.0");
+    let fields = message_fields("AgentStateSnapshot");
+    for expected in [
+        ("through_event_version", 1),
+        ("server_time_ms", 2),
+        ("monitor_health", 3),
+        ("panes", 4),
+        ("tts_muted", 5),
+        ("messaging_paused", 6),
+        ("harold_version", 7),
+    ] {
+        assert!(
+            fields.contains(&(expected.0.to_string(), expected.1)),
+            "{expected:?}"
+        );
+    }
+    assert_eq!(fields.len(), 7);
 }
