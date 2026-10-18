@@ -1984,3 +1984,20 @@ async fn a_garbled_tip_file_counts_nothing_for_that_product() {
     assert_eq!(merges_of(&pod, "spec-a"), None);
     assert_eq!(tip_file_text(&pod), tip_line(&pod, &repo));
 }
+
+#[tokio::test]
+async fn a_saved_tip_that_is_an_ancestor_but_not_in_the_reflog_counts_nothing() {
+    let pod = Pod::new();
+    let repo = repo_without_a_reflog(&pod);
+    write(&tips_path(&pod), &tip_line(&pod, &repo));
+    merge_branch(&repo, "spec-x", "1\n2\n3\n4\n5\n6\n");
+    let (mut stats, _) = stats(one_product(&pod, &repo));
+
+    stats.poll().await;
+
+    assert_eq!(
+        test_support::counter_value("pod.merges", &[("pod.product", pod.name.as_str())]),
+        Some(0)
+    );
+    assert_eq!(tip_file_text(&pod), tip_line(&pod, &repo));
+}
