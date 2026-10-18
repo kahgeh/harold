@@ -9,6 +9,8 @@ use crate::harold::{
     WatchAgentStatesRequest, harold_client::HaroldClient,
 };
 use crate::settings::Settings;
+use harold_api::tools::questions::v1 as questions;
+use harold_api::tools::questions::v1::question_service_client::QuestionServiceClient;
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Mode {
@@ -20,6 +22,7 @@ pub(crate) enum Mode {
     Accept(AcceptArgs),
     SendMessageToAwayDevice(AwayMessageArgs),
     Speak(AwayMessageArgs),
+    Tool(ToolCommand),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -105,6 +108,9 @@ const MESSAGE_LENGTH_LINE: &str = "the message must be 1 to 1,000 characters";
 const NOT_STORED_LINE: &str = "the Harold daemon could not store the message";
 
 pub(crate) const SPEAK_COMMAND: &str = "speak";
+pub(crate) const TOOL_COMMAND: &str = "tool";
+const TOOL_USAGE_LINE: &str =
+    "invalid argument: usage is harold tool questions put|dismiss|order|list";
 const SPEAK_ARGUMENTS: &str = "invalid argument: usage is speak --src-id ID TEXT";
 const SPOKEN_LENGTH_LINE: &str = "the spoken line must be 1 to 300 characters";
 const SPOKEN_NOT_STORED_LINE: &str = "the Harold daemon could not store the spoken line";
@@ -183,6 +189,32 @@ fn speak_refusal_line(code: tonic::Code, message: &str, src_id: &str) -> String 
     }
 }
 
+/// A `harold tool questions` command. `put` reads the question as JSON from stdin.
+// The variant names are the planned interface; the group will gain other tools.
+#[allow(clippy::enum_variant_names)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ToolCommand {
+    QuestionsPut,
+    QuestionsDismiss { id: String, reason: String },
+    QuestionsOrder { ids: Vec<String> },
+    QuestionsList,
+}
+
+fn parse_tool(args: &[&str]) -> Result<ToolCommand, String> {
+    match args {
+        ["questions", "put"] => Ok(ToolCommand::QuestionsPut),
+        ["questions", "list"] => Ok(ToolCommand::QuestionsList),
+        ["questions", "dismiss", id, "--reason", reason] => Ok(ToolCommand::QuestionsDismiss {
+            id: (*id).into(),
+            reason: (*reason).into(),
+        }),
+        ["questions", "order", ids @ ..] if !ids.is_empty() => Ok(ToolCommand::QuestionsOrder {
+            ids: ids.iter().map(|id| (*id).into()).collect(),
+        }),
+        _ => Err(TOOL_USAGE_LINE.into()),
+    }
+}
+
 impl Mode {
     pub(crate) fn parse(args: &[String]) -> Result<Self, String> {
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
@@ -198,6 +230,7 @@ impl Mode {
             [SPEAK_COMMAND, rest @ ..] => {
                 parse_source_and_text(rest, SPEAK_ARGUMENTS, SPOKEN_LENGTH_LINE).map(Self::Speak)
             }
+            [TOOL_COMMAND, rest @ ..] => parse_tool(rest).map(Self::Tool),
             ["--diagnostic" | "--diagnostics"] => Ok(Self::Diagnostics { delay_seconds: 0 }),
             ["--diagnostic" | "--diagnostics", "--delay"] => {
                 Ok(Self::Diagnostics { delay_seconds: 10 })
@@ -331,6 +364,165 @@ pub(crate) async fn speak(settings: &Settings, args: &AwayMessageArgs) -> Result
     .await
     .map_err(|_| "the Harold daemon did not answer within 3 seconds".to_string())??;
     Ok(())
+}
+
+fn json_error(what: impl std::fmt::Display) -> String {
+    format!("invalid JSON: {what}")
+}
+
+fn json_text(object: &serde_json::Value, field: &str) -> Result<String, String> {
+    match object.get(field) {
+        Some(serde_json::Value::String(text)) => Ok(text.clone()),
+        Some(_) => Err(json_error(format!("{field} must be a string"))),
+        None => Err(json_error(format!("{field} is missing"))),
+    }
+}
+
+fn json_flag(object: &serde_json::Value, field: &str) -> Result<bool, String> {
+    match object.get(field) {
+        None => Ok(false),
+        Some(serde_json::Value::Bool(flag)) => Ok(*flag),
+        Some(_) => Err(json_error(format!("{field} must be true or false"))),
+    }
+}
+
+fn json_list<'a>(
+    object: &'a serde_json::Value,
+    field: &str,
+) -> Result<&'a [serde_json::Value], String> {
+    match object.get(field) {
+        Some(serde_json::Value::Array(items)) => Ok(items),
+        Some(_) => Err(json_error(format!("{field} must be a list"))),
+        None => Err(json_error(format!("{field} is missing"))),
+    }
+}
+
+fn option_from_json(option: &serde_json::Value) -> Result<questions::DecisionOption, String> {
+    if !option.is_object() {
+        return Err(json_error("option must be an object"));
+    }
+    Ok(questions::DecisionOption {
+        key: json_text(option, "key")?,
+        label: json_text(option, "label")?,
+        impact: json_text(option, "impact")?,
+        suggested: json_flag(option, "suggested")?,
+        free: json_flag(option, "free")?,
+    })
+}
+
+fn decision_from_json(decision: &serde_json::Value) -> Result<questions::Decision, String> {
+    if !decision.is_object() {
+        return Err(json_error("decision must be an object"));
+    }
+    Ok(questions::Decision {
+        ask: json_text(decision, "ask")?,
+        options: json_list(decision, "options")?
+            .iter()
+            .map(option_from_json)
+            .collect::<Result<_, _>>()?,
+    })
+}
+
+/// Turns the spec's JSON into a question. It only translates; the daemon checks the rules.
+fn question_from_json(text: &str) -> Result<questions::Question, String> {
+    let value: serde_json::Value = serde_json::from_str(text).map_err(json_error)?;
+    if !value.is_object() {
+        return Err(json_error("question must be an object"));
+    }
+    Ok(questions::Question {
+        id: json_text(&value, "id")?,
+        product: json_text(&value, "product")?,
+        spec: json_text(&value, "spec")?,
+        sha: json_text(&value, "sha")?,
+        link: json_text(&value, "link")?,
+        intro: json_text(&value, "intro")?,
+        decisions: json_list(&value, "decisions")?
+            .iter()
+            .map(decision_from_json)
+            .collect::<Result<_, _>>()?,
+    })
+}
+
+/// The line printed for a refusal from the question service: its status message.
+fn tool_refusal_line(status: &tonic::Status) -> String {
+    match status.code() {
+        tonic::Code::Unimplemented => "the Harold daemon does not serve questions".into(),
+        _ if status.message().is_empty() => "the Harold daemon refused the call".into(),
+        _ => status.message().to_string(),
+    }
+}
+
+/// Run a `harold tool questions` command against the daemon at `address`. `Ok` is the line
+/// to print; `Err` is the one line to print for a refusal.
+pub(crate) async fn tool(
+    address: &str,
+    command: &ToolCommand,
+    mut stdin: impl std::io::Read,
+) -> Result<String, String> {
+    let question = match command {
+        ToolCommand::QuestionsPut => {
+            let mut text = String::new();
+            stdin.read_to_string(&mut text).map_err(json_error)?;
+            Some(question_from_json(&text)?)
+        }
+        _ => None,
+    };
+    tokio::time::timeout(Duration::from_secs(3), async {
+        let mut client = QuestionServiceClient::connect(format!("http://{address}"))
+            .await
+            .map_err(|_| "the Harold daemon is not reachable".to_string())?;
+        let refused = |status: tonic::Status| tool_refusal_line(&status);
+        match command {
+            ToolCommand::QuestionsPut => {
+                let stored = client
+                    .put_question(questions::PutQuestionRequest { question })
+                    .await
+                    .map_err(refused)?
+                    .into_inner();
+                Ok(format!("stored {} v{}", stored.id, stored.version))
+            }
+            ToolCommand::QuestionsDismiss { id, reason } => {
+                client
+                    .dismiss_question(questions::DismissQuestionRequest {
+                        id: id.clone(),
+                        reason: reason.clone(),
+                    })
+                    .await
+                    .map_err(refused)?;
+                Ok(format!("dismissed {id}"))
+            }
+            ToolCommand::QuestionsOrder { ids } => {
+                client
+                    .reorder_questions(questions::ReorderQuestionsRequest { ids: ids.clone() })
+                    .await
+                    .map_err(refused)?;
+                Ok(format!("ordered {}", ids.len()))
+            }
+            ToolCommand::QuestionsList => {
+                let listed = client
+                    .list_questions(questions::ListQuestionsRequest {})
+                    .await
+                    .map_err(refused)?
+                    .into_inner();
+                let mut lines: Vec<String> = listed
+                    .questions
+                    .iter()
+                    .map(|listed| {
+                        let question = listed.question.clone().unwrap_or_default();
+                        let deferred = if listed.deferred { " (deferred)" } else { "" };
+                        format!(
+                            "{} v{} {} {}{deferred}",
+                            question.id, listed.version, question.product, question.spec
+                        )
+                    })
+                    .collect();
+                lines.push(format!("{} waiting", listed.waiting));
+                Ok(lines.join("\n"))
+            }
+        }
+    })
+    .await
+    .map_err(|_| "the Harold daemon did not answer within 3 seconds".to_string())?
 }
 
 #[cfg(test)]
@@ -657,5 +849,245 @@ mod tests {
             speak_refusal_line(tonic::Code::Unimplemented, "", "%47"),
             "the Harold daemon could not store the spoken line"
         );
+    }
+
+    #[test]
+    fn tool_questions_commands_parse() {
+        assert_eq!(
+            parse(&["tool", "questions", "put"]),
+            Ok(Mode::Tool(ToolCommand::QuestionsPut))
+        );
+        assert_eq!(
+            parse(&["tool", "questions", "list"]),
+            Ok(Mode::Tool(ToolCommand::QuestionsList))
+        );
+        assert_eq!(
+            parse(&[
+                "tool",
+                "questions",
+                "dismiss",
+                "q-1",
+                "--reason",
+                "no longer needed"
+            ]),
+            Ok(Mode::Tool(ToolCommand::QuestionsDismiss {
+                id: "q-1".into(),
+                reason: "no longer needed".into()
+            }))
+        );
+        assert_eq!(
+            parse(&["tool", "questions", "order", "b", "a"]),
+            Ok(Mode::Tool(ToolCommand::QuestionsOrder {
+                ids: vec!["b".into(), "a".into()]
+            }))
+        );
+    }
+
+    #[test]
+    fn an_unknown_tool_command_is_refused_with_usage() {
+        let usage = "invalid argument: usage is harold tool questions put|dismiss|order|list";
+        for words in [
+            vec!["tool"],
+            vec!["tool", "questions"],
+            vec!["tool", "other", "list"],
+            vec!["tool", "questions", "order"],
+            vec!["tool", "questions", "dismiss", "q-1"],
+            vec!["tool", "questions", "dismiss", "--reason", "x"],
+            vec!["tool", "questions", "list", "extra"],
+            vec!["tool", "questions", "put", "extra"],
+        ] {
+            assert_eq!(parse(&words), Err(usage.to_string()), "{words:?}");
+        }
+    }
+
+    #[test]
+    fn there_is_no_answer_command() {
+        let result = parse(&["tool", "questions", "answer", "q-1"]);
+        assert_eq!(
+            result,
+            Err("invalid argument: usage is harold tool questions put|dismiss|order|list".into())
+        );
+    }
+
+    const SPEC_JSON: &str = r#"{
+        "id": "q-1", "product": "harold", "spec": "dash", "sha": "abc123",
+        "link": "https://example.com/spec", "intro": "Two things",
+        "decisions": [
+            {"ask": "Which store?", "options": [
+                {"key": "a", "label": "Turso", "impact": "fast", "suggested": true},
+                {"key": "b", "label": "Other", "impact": "", "free": true}
+            ]}
+        ]
+    }"#;
+
+    #[test]
+    fn put_turns_the_spec_json_into_a_question() {
+        let question = question_from_json(SPEC_JSON).unwrap();
+        assert_eq!(question.id, "q-1");
+        assert_eq!(question.product, "harold");
+        assert_eq!(question.spec, "dash");
+        assert_eq!(question.sha, "abc123");
+        assert_eq!(question.link, "https://example.com/spec");
+        assert_eq!(question.intro, "Two things");
+        assert_eq!(question.decisions.len(), 1);
+        let decision = &question.decisions[0];
+        assert_eq!(decision.ask, "Which store?");
+        assert_eq!(decision.options.len(), 2);
+        let (first, second) = (&decision.options[0], &decision.options[1]);
+        assert_eq!(
+            (&*first.key, &*first.label, &*first.impact),
+            ("a", "Turso", "fast")
+        );
+        assert!(first.suggested && !first.free);
+        assert!(!second.suggested && second.free);
+    }
+
+    #[test]
+    fn bad_json_is_refused() {
+        let error = question_from_json("{not json").unwrap_err();
+        assert!(error.starts_with("invalid JSON: "), "{error}");
+        for (text, what) in [
+            (r#"{"id": 5}"#, "id"),
+            (r#"[]"#, "question"),
+            (
+                r#"{"id":"a","product":"p","spec":"s","sha":"h","link":"l","intro":"i","decisions":[{"ask":"x","options":[{"key":"k","label":"l","impact":"i","free":"yes"}]}]}"#,
+                "free",
+            ),
+            (
+                r#"{"id":"a","product":"p","spec":"s","sha":"h","link":"l","intro":"i"}"#,
+                "decisions",
+            ),
+        ] {
+            let error = question_from_json(text).unwrap_err();
+            assert!(
+                error.starts_with("invalid JSON: ") && error.contains(what),
+                "{text}: {error}"
+            );
+        }
+    }
+
+    struct Typist;
+    impl crate::tools::PaneTyping for Typist {
+        fn type_line<'a>(
+            &'a self,
+            _pane_id: &'a str,
+            _text: &'a str,
+        ) -> crate::tools::BoxFuture<'a, crate::tools::Typing> {
+            Box::pin(async { crate::tools::Typing::Typed })
+        }
+    }
+    struct NoChief;
+    impl crate::tools::ChiefPane for NoChief {
+        fn chief_pane(&self) -> Option<String> {
+            None
+        }
+    }
+
+    #[tokio::test]
+    async fn the_chief_puts_lists_orders_and_dismisses_through_the_tool() {
+        let folder = std::env::temp_dir().join(format!("harold-cli-tool-{}", uuid::Uuid::new_v4()));
+        let (stop, shutdown) = tokio::sync::watch::channel(());
+        let handle = crate::tools::questions::start(crate::tools::ToolContext {
+            data_folder: folder.clone(),
+            typing: std::sync::Arc::new(Typist),
+            chief_pane: std::sync::Arc::new(NoChief),
+            shutdown,
+        })
+        .await
+        .unwrap_or_else(|e| panic!("start failed: {}", e.reason));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap().to_string();
+        let (incoming, connections) = tokio::sync::mpsc::channel(1);
+        let accept = tokio::spawn(async move {
+            while let Ok((socket, _)) = listener.accept().await {
+                if incoming
+                    .send(Ok::<_, std::io::Error>(socket))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+        let server = tokio::spawn(
+            tonic::transport::Server::builder()
+                .add_routes(handle.routes)
+                .serve_with_incoming(tokio_stream::wrappers::ReceiverStream::new(connections)),
+        );
+
+        let second = SPEC_JSON.replace("q-1", "q-2").replace("dash", "other");
+        let mut lines = Vec::new();
+        for (command, input) in [
+            (ToolCommand::QuestionsPut, SPEC_JSON.to_string()),
+            (ToolCommand::QuestionsPut, SPEC_JSON.to_string()),
+            (ToolCommand::QuestionsPut, second),
+            (ToolCommand::QuestionsList, String::new()),
+            (
+                ToolCommand::QuestionsOrder {
+                    ids: vec!["q-2".into(), "q-1".into()],
+                },
+                String::new(),
+            ),
+            (ToolCommand::QuestionsList, String::new()),
+            (
+                ToolCommand::QuestionsDismiss {
+                    id: "q-1".into(),
+                    reason: "done".into(),
+                },
+                String::new(),
+            ),
+            (ToolCommand::QuestionsList, String::new()),
+        ] {
+            lines.push(tool(&address, &command, input.as_bytes()).await.unwrap());
+        }
+        let refused = tool(
+            &address,
+            &ToolCommand::QuestionsPut,
+            SPEC_JSON.replace("https://", "ftp://").as_bytes(),
+        )
+        .await
+        .unwrap_err();
+        let missing = tool(
+            &address,
+            &ToolCommand::QuestionsDismiss {
+                id: "q-9".into(),
+                reason: "x".into(),
+            },
+            &b""[..],
+        )
+        .await
+        .unwrap_err();
+
+        server.abort();
+        accept.abort();
+        drop(stop);
+        let _ = handle.task.await;
+        println!("{lines:#?}\nrefused: {refused}\nmissing: {missing}");
+
+        assert_eq!(lines[0], "stored q-1 v1");
+        assert_eq!(lines[1], "stored q-1 v2");
+        assert_eq!(lines[2], "stored q-2 v1");
+        assert_eq!(
+            lines[3],
+            "q-1 v2 harold dash\nq-2 v1 harold other\n2 waiting"
+        );
+        assert_eq!(lines[4], "ordered 2");
+        assert_eq!(
+            lines[5],
+            "q-2 v1 harold other\nq-1 v2 harold dash\n2 waiting"
+        );
+        assert_eq!(lines[6], "dismissed q-1");
+        assert_eq!(lines[7], "q-2 v1 harold other\n1 waiting");
+        assert_eq!(refused, "invalid link");
+        assert_eq!(missing, "not_waiting");
+    }
+
+    #[tokio::test]
+    async fn an_unreachable_daemon_is_named() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap().to_string();
+        drop(listener);
+        let line = tool(&address, &ToolCommand::QuestionsList, &b""[..]).await;
+        assert_eq!(line, Err("the Harold daemon is not reachable".into()));
     }
 }

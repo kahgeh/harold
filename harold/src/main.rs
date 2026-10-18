@@ -756,6 +756,14 @@ fn print_help() {
     println!("  harold speak --src-id ID TEXT");
     println!("                          Say TEXT from tmux pane ID, or send it as a voice note;");
     println!("                          exit 0 once the daemon has stored it; 3s timeout");
+    println!("  harold tool questions put");
+    println!(
+        "                          Add a question from JSON on stdin; prints its id and version"
+    );
+    println!("  harold tool questions dismiss ID --reason TEXT");
+    println!("                          Withdraw a question, with a reason the dash shows");
+    println!("  harold tool questions order ID...   Put the listed questions first, in order");
+    println!("  harold tool questions list          List the waiting questions");
     println!("  harold --diagnostics [--delay [N]]  Test screen lock, TTS, and iMessage config");
     println!("                                      --delay defaults to 10s if no value given");
     println!("  harold --help           Show this help\n");
@@ -772,7 +780,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Err(line)
             if matches!(
                 args.first().map(String::as_str),
-                Some(cli::AWAY_MESSAGE_COMMAND | cli::SPEAK_COMMAND)
+                Some(cli::AWAY_MESSAGE_COMMAND | cli::SPEAK_COMMAND | cli::TOOL_COMMAND)
             ) =>
         {
             exit_with_line(&line)
@@ -803,6 +811,7 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
             | cli::Mode::Accept(_)
             | cli::Mode::SendMessageToAwayDevice(_)
             | cli::Mode::Speak(_)
+            | cli::Mode::Tool(_)
     );
     let launchd = started_by_launchd(&mode);
     let settings = match settings::Settings::load() {
@@ -837,6 +846,14 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
         cli::Mode::Speak(ref args) => {
             if let Err(line) = cli::speak(&settings, args).await {
                 exit_with_line(&line);
+            }
+            return Ok(());
+        }
+        cli::Mode::Tool(ref command) => {
+            let address = settings.grpc.addr()?.to_string();
+            match cli::tool(&address, command, std::io::stdin()).await {
+                Ok(line) => println!("{line}"),
+                Err(line) => exit_with_line(&line),
             }
             return Ok(());
         }
