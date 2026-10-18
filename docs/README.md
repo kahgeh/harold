@@ -16,6 +16,7 @@
 - [Notification](references/notification/README.md)
 - [Inbound Message Routing](references/inbound-message-routing/README.md)
 - [Operation](references/operation/README.md)
+- [Tools](references/tools/README.md)
 
 ## Explanations
 
