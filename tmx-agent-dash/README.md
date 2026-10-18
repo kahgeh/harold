@@ -61,21 +61,44 @@ outside this MVP; use a trusted deployment boundary for remote connections.
 
 ## Keys
 
-| Key | Action |
-| --- | --- |
-| `j` / Down | Select the next visible row |
-| `k` / Up | Select the previous visible row |
-| `g` / `G` | Select the first / last visible row |
-| `l` / Right | Select the next waiting agent (wraps) |
-| `h` / Left | Select the previous waiting agent (wraps) |
-| `f` | Enter search editing |
-| `/` | Open the command palette (type to filter, Up/Down choose, Enter run, Esc close; e.g. `Voice: mute` / `Voice: unmute`, `Messaging: pause` / `Messaging: resume`) |
-| Printable text | Extend the query while editing |
-| Backspace | Remove the last Unicode scalar value while editing |
-| `Enter` | Accept the query while editing; otherwise switch the invoking tmux client to the selected pane |
-| `Esc` | While editing, clear the query and leave editing; otherwise clear an accepted filter, or do nothing when no filter exists |
-| `r` | Retry the Harold connection immediately |
-| `q` | Quit outside search editing or the palette; enter `q` into the query while editing |
+The dash has three sections: the [question block](#question-block), its summary,
+and the agent list. Search, the command palette and the block's notes are text
+modes. One table gives every key. Where a cell is "—", the key does nothing in that
+section, so a key never means two things.
+
+| Key | Question block (choosing) | Summary | Agent list | Search, palette, note |
+| --- | --- | --- | --- | --- |
+| `j` / ↓ | Next row: the real options, then the answer actions | — | Next visible row | ↓ moves in the palette; `j` types |
+| `k` / ↑ | Previous row | — | Previous visible row | ↑ moves in the palette; `k` types |
+| `l` / → | Pick the highlighted option and go to the next decision; nothing on an answer action | — | — | Types `l` |
+| `h` / ← | Previous decision, picks kept | Back to the last decision | — | Types `h` |
+| `n` / `N` | Next or previous waiting question (wraps) | Same | Next or previous waiting agent (wraps) | Types |
+| Enter | Pick the highlighted row: an option moves on, an answer action acts | Record the answer | Switch the invoking tmux client to the selected pane | Search: keep the query · palette: run · note: done |
+| Esc | Leave the block, picks kept | Back to the last decision | Clear an accepted filter, or nothing | Search: clear the query and leave · palette: close · note: discard and leave |
+| Tab | Focus to the list | Focus to the list | Focus to the block, while it shows | Search and palette: nothing · note: focus to the list, note kept |
+| `o` | Open the question's link | Open the question's link | — | Types |
+| Ctrl+L | Clear the screen, redraw, and retry the Harold connection now | Same | Same | Same: the note's text and the query are kept, and nothing is typed |
+| `f` / `/` | — | — | Search editing / command palette | Types |
+| `g` / `G` | — | — | First / last visible row | Types |
+| `c` / `t` | — | — | Call / talk now, on the chief's row | Types |
+| `q` | — | — | Quit | Types |
+| Ctrl+Q, Ctrl+C | Quit | Quit | Quit | Quit |
+
+- **Quit keys:** Ctrl+Q and Ctrl+C quit from every mode, including a note and the
+  held or swallowed keys described under [Reconnects](#reconnects). `q` quits only
+  from the agent list; anywhere else it does nothing or types itself.
+- **Chords:** Ctrl+Q, Ctrl+C and Ctrl+L are the only Control or Alt chords that act.
+  Every other chord, such as Ctrl+R or Alt+Q, does nothing in any mode, and is never
+  typed or taken as the bare letter.
+- **Text modes:** in search, the palette query and a note, every printable key,
+  `h`, `j`, `k`, `l`, `n`, `N`, `r`, `x`, `o` and `q` included, types itself, and
+  `Backspace` removes the last Unicode scalar value. Outside the text modes, a key
+  not in the table, such as `r` or `x`, does nothing.
+- **`c` and `t`** act only while the chief's row is selected. `c` starts a call when
+  none is on and the voice is not muted, and ends one during a call. `t` asks to talk
+  now while the call is speaking.
+- **The palette** filters its commands as you type; ↑/↓ choose and Enter runs one,
+  such as `Voice: mute` / `Voice: unmute` or `Messaging: pause` / `Messaging: resume`.
 
 Search is a local, case-insensitive filter over provider, work summary, tmux
 target, and working directory. It never sends a search request to Harold and it
@@ -111,23 +134,32 @@ The block shows the product and spec, the intro, the current decision with its o
 
 ### Focus and keys
 
-`Tab` moves the focus between the agent list and the block while the block shows. The block has a bright border with the focus and a dim one without. Footer hints show `tab question` while the block shows. Control and Alt chords never reach the block.
+`Tab` moves the focus between the agent list and the block while the block shows. The block has a bright border with the focus and a dim one without. Footer hints show `tab question` while the block shows, and the footer gives the keys of whichever section has the focus. Control and Alt chords never reach the block. The [Keys](#keys) table gives every key in the block and its summary.
 
-With the focus on the block, in the decision view:
+Each decision lists the question's own options, then a thin rule and three dim answer actions, which have no option key:
 
-| Key | Action |
-| --- | --- |
-| Up / Down | Move the highlight |
-| `Enter` | Pick the highlighted option and go to the next decision. After the last decision, show the summary. A free option opens a text field first |
-| `r` | Revise: type a note saying what to change, then `Enter` records it |
-| `x` | Reject: type a note saying why, then `Enter` records it |
-| `o` | Open the question's link (only `http://` and `https://` links) |
-| `l` | Later: set the question aside and go on to the next one |
-| `Esc` | Step back one decision, dropping its pick. At the first decision, give the focus back to the list |
+```text
+  a  libSQL's Hrana — Existing libSQL clients work unchanged.  (suggested)
+  b  Postgres wire — …
+  z  Something else — Type your answer.
+  ─────────────
+     later
+     revise…
+     reject…
+```
 
-In the summary, which lists each decision with its pick, `Enter` records the answer and `Esc` steps back. In a text field, type the text, `Backspace` removes the last character, `Enter` accepts it (blank text is not accepted) and `Esc` leaves the field. Text stops at 1,999 characters, since Harold refuses 2,000.
+- `j`/`k` move the highlight over the options and then the actions. The highlight starts on the suggested option, never on an action, and each decision keeps its own highlight.
+- `Enter` on an option picks it and goes to the next decision; after the last decision the summary shows. A free option opens a text field first; when it is already the decision's pick, the field holds the text typed before.
+- `l` picks the highlighted option and moves on as `Enter` does. On a free option that is already the pick, it moves on and keeps the text; on a free option that is not the pick, it opens the text field. On an answer action it does nothing.
+- `h` goes back a decision. Every pick is kept, and `Enter` or `l` on a different option replaces that decision's pick.
+- **later** sets the question aside and shows the next waiting one. **revise…** opens a note saying what to change, and **reject…** a note saying why. `Enter` on a note records it as a revise or reject answer with the picks made so far; a blank note is not recorded.
+- `Esc` gives the focus back to the list from any decision, and the picks stay.
+
+The summary lists each decision with its pick: `Enter` records the answer, and `h` or `Esc` goes back to the last decision. In a text field, type the text, `Backspace` removes the last character, `Enter` accepts it (blank text is not accepted) and `Esc` discards it and leaves the field. Text stops at 1,999 characters, since Harold refuses 2,000.
 
 A free option does not end the walk. The text you type becomes that decision's pick, and you go on to the next decision. The answer is recorded as free text when any pick is free.
+
+`n` and `N` move to the next or previous waiting question, wrapping over the listed order, set-aside questions included. With one question listed they do nothing. The picks, decision and highlights of the question you leave are kept while the dash runs, and come back when you return to it, as do the picks of a question set aside with **later**. Kept picks belong to the version of the question they were made on: when Harold lists a higher version, or refuses an answer because the version changed, they are dropped, and the question starts at its first decision. Kept picks of a question that is answered or dismissed are gone.
 
 When Harold has everything it needs, it types one line of answers into the chief's pane. Deferred questions come back to the queue after that line is typed.
 
@@ -139,13 +171,15 @@ A notice shows under the block until the next key:
 - `<id> dismissed: <reason>`: the chief withdrew the question, with its reason (`withdrawn` when none is known). The block moves to the next question.
 - `Harold can't save answers right now`: Harold could not store the answer or the deferral. Your picks stay; try again.
 
-When no question is left, a notice stands alone in the block. It goes at the next key, wherever the focus is, and otherwise after the next read that still finds no question, a few seconds on. Then the block hides. With the focus on the list, that key also does what it does on the list. With the focus on the block, the key only clears the notice, and the focus returns to the list. If the read hides the block while it has the focus, the focus returns to the list and the next key is dropped, so a key meant for the block does not act on the list.
+When no question is left, a notice stands alone in the block. It goes at the next key, wherever the focus is, and otherwise after the next read that still finds no question, a few seconds on. Then the block hides. With the focus on the list, that key also does what it does on the list. With the focus on the block, the key only clears the notice, and the focus returns to the list. If the read hides the block while it has the focus, the focus returns to the list, and the next key acts on the list. A key that would still reach a block whose question just changed is dropped, since it was typed for what was there before.
 
 ### Reconnects
 
-If the queue cannot be read, or the stream to Harold is lost, the block hides but keeps your picks and any half-typed note. They come back when the next read succeeds and the question is unchanged. If the block had the focus, keys are ignored until `Tab` or `Esc` returns them to the list.
+If the queue cannot be read, or the stream to Harold is lost, the block hides but keeps your picks and any half-typed note. They come back when the next read succeeds and the question is unchanged. If the block had the focus, keys are ignored until `Tab` or `Esc` returns them to the list. The footer says so.
 
 If the question changes under a half-typed note or the summary, the block keeps showing the new question and holds its keys until you press `Esc` (or `Tab`). The footer says `esc to continue`. This stops letters typed for the old question from acting on the new one. `Esc` clears the notice and starts the shown question from its first decision.
+
+While keys are ignored or held, the quit keys still quit and Ctrl+L still retries. Ctrl+L leaves a half-typed note as it was, and the keys stay ignored or held.
 
 ## Reading status
 
@@ -182,22 +216,20 @@ footer hints (below 100 columns the footer switches to a shorter set). Selection
 incarnation when possible. A restarted agent in the same pane is a new
 incarnation and does not inherit the old selection.
 
-### Waiting line
+### Waiting agents
 
-The top border of the agent list carries a waiting line: `WAITING n` followed by
-the waiting agents, oldest first, with `+N more` when they do not all fit. Rows
-of waiting agents are marked with `◆`.
+Rows of waiting agents are marked with `◆`. `n` and `N` move the selection to the
+next or previous waiting agent, oldest first, and wrap around. If a search filter
+hides that agent, the filter is cleared.
 
-- An agent joins when it goes from Busy to Idle while its pane is not the pane
-  you are looking at.
-- It leaves when you visit its pane, when it goes Busy again, when it exits, or
+- An agent starts waiting when it goes from Busy to Idle while its pane is not the
+  pane you are looking at.
+- It stops when you visit its pane, when it goes Busy again, when it exits, or
   when you press `Enter` on it. With focus tracking on, `Enter` does not clear
-  it directly: it leaves once the jump makes its pane active, on the next poll.
+  it directly: it stops once the jump makes its pane active, on the next poll.
   With tracking off, `Enter` clears it.
 - Waiting state is per dash and kept in memory only. Agents that are already
-  Idle when the dash starts do not join, and a second dash keeps its own list.
-- `h`/`l` (or Left/Right) step the selection through the waiting agents and
-  wrap around.
+  Idle when the dash starts do not wait, and a second dash keeps its own list.
 
 ### Focus tracking
 
@@ -205,10 +237,10 @@ Once a second the dash runs `tmux list-clients` and decides which pane you can
 see. Suspended clients are ignored; a focused client is preferred, otherwise the
 most recently active client is used, and that client's active pane counts as
 seen. Focus is sampled once a second, so leaving a pane less than about a second
-before its agent finishes can keep that agent off the line. The waiting line shows
-`(focus tracking off)` when the query fails, when no client is eligible, and for
-the first second after start; while it is off, an agent leaves the list only on
-`Enter` or when it goes Busy.
+before its agent finishes can keep that agent from waiting. The top border of the
+agent list shows `(focus tracking off)` when the query fails, when no client is
+eligible, and for the first second after start; while it is off, an agent stops
+waiting only on `Enter` or when it goes Busy.
 
 An absent or empty work summary is displayed exactly as:
 
@@ -225,7 +257,7 @@ in the dashboard.
 ### Harold is unavailable
 
 The dashboard keeps retrying with a capped backoff and shows the selected
-endpoint plus a sanitized error. Press `r` to retry immediately. Before the
+endpoint plus a sanitized error. Press Ctrl+L to retry immediately; the message reads `Press Ctrl+L to retry now`. Before the
 first snapshot, no rows are shown; after a disconnect, the last accepted rows
 remain visible as stale.
 
@@ -251,9 +283,10 @@ clipping.
 
 ### Terminal shutdown
 
-Use `q` outside search editing or the palette. `Esc` never quits: while editing it always clears
-the query and leaves editing, and outside editing it clears an accepted filter or
-does nothing when no filter exists. `SIGINT` and `SIGTERM` also initiate shutdown.
+Ctrl+Q and Ctrl+C quit from every mode. `q` quits from the agent list; in search,
+the palette and a note it types itself, and in the question block it does nothing.
+`Esc` never quits: while editing it always clears the query and leaves editing, and
+outside editing it clears an accepted filter or does nothing when no filter exists. `SIGINT` and `SIGTERM` also initiate shutdown.
 The runtime restores raw mode, the primary screen, and
 cursor visibility before returning; a restoration failure is reported on
 standard error.

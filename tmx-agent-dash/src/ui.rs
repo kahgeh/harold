@@ -3754,4 +3754,48 @@ mod tests {
         );
         assert!(!lines.contains("WAITING"), "{lines}");
     }
+
+    /// The README's `## Keys` table gives one row per key of the scheme, in its order,
+    /// and the old waiting line, `r` retry and `l` later are gone from the README.
+    #[test]
+    fn readme_key_table_matches_the_scheme() {
+        let readme = include_str!("../README.md");
+        let keys_section = readme
+            .split("\n## Keys\n")
+            .nth(1)
+            .expect("README has a ## Keys section")
+            .split("\n## ")
+            .next()
+            .unwrap_or_default();
+        let table: Vec<&str> = keys_section
+            .lines()
+            .skip_while(|line| !line.starts_with('|'))
+            .take_while(|line| line.starts_with('|'))
+            .skip(2)
+            .map(|line| line.split('|').nth(1).unwrap_or_default().trim())
+            .collect();
+        assert_eq!(
+            table,
+            [
+                "`j` / ↓",
+                "`k` / ↑",
+                "`l` / →",
+                "`h` / ←",
+                "`n` / `N`",
+                "Enter",
+                "Esc",
+                "Tab",
+                "`o`",
+                "Ctrl+L",
+                "`f` / `/`",
+                "`g` / `G`",
+                "`c` / `t`",
+                "`q`",
+                "Ctrl+Q, Ctrl+C",
+            ]
+        );
+        for gone in ["WAITING n", "`r` | Retry", "`l` | Later", "Press `r`"] {
+            assert!(!readme.contains(gone), "README still holds {gone}");
+        }
+    }
 }
