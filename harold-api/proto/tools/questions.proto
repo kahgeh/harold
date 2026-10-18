@@ -1,0 +1,131 @@
+// The question queue: Harold's first tool.
+//
+// The chief of pods calls:
+//   PutQuestion      adds a question, or replaces one with the same id (the
+//                    version rises and the question is waiting again).
+//   DismissQuestion  withdraws a question, with a reason the dash shows.
+//   ReorderQuestions puts the listed waiting or deferred ids first, in order.
+//
+// The dash calls:
+//   ListQuestions    the waiting and deferred questions, the count waiting,
+//                    and recently dismissed ids with their reasons.
+//   AnswerQuestion   answers a question at the version the dash saw.
+//   DeferQuestion    sets a question aside; it stays waiting for a later batch.
+//
+// Refusals:
+//   InvalidArgument      message "invalid <field>" for a broken rule; nothing
+//                        is stored.
+//   FailedPrecondition   message "version_changed" (the question changed since
+//                        the dash read it) or "not_waiting" (it is no longer
+//                        waiting for an answer).
+//   Unavailable          the database write failed.
+//
+// The server trusts local callers: there is no token.
+syntax = "proto3";
+
+package harold.tools.questions.v1;
+
+service QuestionService {
+  rpc PutQuestion(PutQuestionRequest) returns (PutQuestionResponse);
+  rpc DismissQuestion(DismissQuestionRequest) returns (DismissQuestionResponse);
+  rpc ReorderQuestions(ReorderQuestionsRequest) returns (ReorderQuestionsResponse);
+  rpc ListQuestions(ListQuestionsRequest) returns (ListQuestionsResponse);
+  rpc AnswerQuestion(AnswerQuestionRequest) returns (AnswerQuestionResponse);
+  rpc DeferQuestion(DeferQuestionRequest) returns (DeferQuestionResponse);
+}
+
+message DecisionOption {
+  string key = 1;
+  string label = 2;
+  string impact = 3;
+  bool suggested = 4;
+  bool free = 5;
+}
+
+message Decision {
+  string ask = 1;
+  repeated DecisionOption options = 2;
+}
+
+message Question {
+  string id = 1;
+  string product = 2;
+  string spec = 3;
+  string sha = 4;
+  string link = 5;
+  string intro = 6;
+  repeated Decision decisions = 7;
+}
+
+message PutQuestionRequest {
+  Question question = 1;
+}
+
+message PutQuestionResponse {
+  string id = 1;
+  uint32 version = 2;
+}
+
+message DismissQuestionRequest {
+  string id = 1;
+  string reason = 2;
+}
+
+message DismissQuestionResponse {}
+
+message ReorderQuestionsRequest {
+  repeated string ids = 1;
+}
+
+message ReorderQuestionsResponse {}
+
+message ListQuestionsRequest {}
+
+message ListedQuestion {
+  Question question = 1;
+  uint32 version = 2;
+  bool deferred = 3;
+}
+
+message Dismissed {
+  string id = 1;
+  string reason = 2;
+}
+
+message ListQuestionsResponse {
+  repeated ListedQuestion questions = 1;
+  uint32 waiting = 2;
+  repeated Dismissed dismissed = 3;
+}
+
+enum AnswerKind {
+  ANSWER_KIND_UNSPECIFIED = 0;
+  ANSWER_KIND_ANSWER = 1;
+  ANSWER_KIND_REVISE = 2;
+  ANSWER_KIND_REJECT = 3;
+  ANSWER_KIND_FREE_TEXT = 4;
+}
+
+// One choice for one decision. `decision` counts from 0; `text` is set only
+// when the chosen option is a free one.
+message Pick {
+  uint32 decision = 1;
+  string key = 2;
+  string text = 3;
+}
+
+message AnswerQuestionRequest {
+  string id = 1;
+  uint32 version = 2;
+  AnswerKind kind = 3;
+  repeated Pick picks = 4;
+  string note = 5;
+}
+
+message AnswerQuestionResponse {}
+
+message DeferQuestionRequest {
+  string id = 1;
+}
+
+message DeferQuestionResponse {}
