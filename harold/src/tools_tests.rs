@@ -553,6 +553,165 @@ async fn the_canary_reaches_no_log_or_export() {
     );
 }
 
+const BACKLOG_CANARY: &str = "BACKLOG-CANARY-3141";
+
+/// A `ChiefPane` that is always this pane.
+struct FixedChief(&'static str);
+
+impl ChiefPane for FixedChief {
+    fn chief_pane(&self) -> Option<String> {
+        Some(self.0.into())
+    }
+}
+
+#[tokio::test]
+async fn the_backlog_canary_reaches_no_log_or_export() {
+    test_support::install();
+    let logs = CapturedLogs::start();
+    let folder = TempFolder::new();
+    let (typing, _, folders, _) = host_ports(&Fake::at(DAY, "09:00:00"));
+    let products = FixedProducts(Ok(vec![("harold".into(), folder.0.join("harold"))]));
+    let (shutdown, shutdown_rx) = watch::channel(());
+    let tools = start_with(
+        &folder.store_path(),
+        typing,
+        Arc::new(FixedChief("%2")),
+        folders,
+        Arc::new(products),
+        shutdown_rx,
+    )
+    .await;
+    assert_eq!(tools.tasks.len(), 2);
+    // An item id no other test uses, so this test's lines can be told apart.
+    let id = unique_id();
+
+    let _: bp::PutItemResponse = call(
+        &tools.routes,
+        BACKLOG,
+        "PutItem",
+        bp::PutItemRequest {
+            product: "harold".into(),
+            item: Some(bp::Item {
+                id: id.clone(),
+                title: "A canary item".into(),
+                risk: format!("the risk is {BACKLOG_CANARY}"),
+                evidence: vec!["harold.log:1".into()],
+                ..Default::default()
+            }),
+            caller_pane: "%2".into(),
+        },
+    )
+    .await
+    .unwrap();
+    let note: bp::AddNoteResponse = call(
+        &tools.routes,
+        BACKLOG,
+        "AddNote",
+        bp::AddNoteRequest {
+            product: "harold".into(),
+            kind: "rule".into(),
+            title: "A canary note".into(),
+            body: format!("the body is {BACKLOG_CANARY}"),
+            caller_pane: "%2".into(),
+        },
+    )
+    .await
+    .unwrap();
+    let _: bp::AddQueueItemResponse = call(
+        &tools.routes,
+        BACKLOG,
+        "AddQueueItem",
+        bp::AddQueueItemRequest {
+            text: format!("the queue item is {BACKLOG_CANARY}"),
+            caller_pane: "%2".into(),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    // Each text is stored, canary and all.
+    let items: bp::ListItemsResponse = call(
+        &tools.routes,
+        BACKLOG,
+        "ListItems",
+        bp::ListItemsRequest {
+            product: "harold".into(),
+        },
+    )
+    .await
+    .unwrap();
+    assert!(items.items[0].risk.contains(BACKLOG_CANARY));
+    let notes: bp::ListNotesResponse = call(
+        &tools.routes,
+        BACKLOG,
+        "ListNotes",
+        bp::ListNotesRequest {
+            product: "harold".into(),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert!(notes.notes[0].body.contains(BACKLOG_CANARY));
+    let queue: bp::ListQueueResponse = call(
+        &tools.routes,
+        BACKLOG,
+        "ListQueue",
+        bp::ListQueueRequest { done_since_ms: 0 },
+    )
+    .await
+    .unwrap();
+    assert!(queue.parked[0].text.contains(BACKLOG_CANARY));
+    drop(shutdown);
+    tokio::time::timeout(Duration::from_secs(5), tools.stopped())
+        .await
+        .expect("the tools stop on shutdown");
+
+    // The captured `harold.log` lines name the item and the note, and hold no canary.
+    let text = logs.text();
+    let note_id = format!("note_id={}", note.id);
+    assert!(
+        text.lines()
+            .any(|line| line.contains("backlog item stored") && line.contains(&id)),
+        "{text}"
+    );
+    assert!(
+        text.lines()
+            .any(|line| line.contains("backlog note added") && line.contains(&note_id)),
+        "{text}"
+    );
+    assert!(text.contains("queue changed"), "{text}");
+    assert!(!text.contains(BACKLOG_CANARY), "{text}");
+
+    // No exported record or span from any test holds the canary.
+    let records: Vec<String> = test_support::logs()
+        .iter()
+        .map(|log| format!("{:?}", log.record))
+        .collect();
+    let holding: Vec<&String> = records
+        .iter()
+        .filter(|record| record.contains(BACKLOG_CANARY))
+        .collect();
+    assert!(holding.is_empty(), "{holding:#?}");
+    let spans = format!("{:?}", test_support::spans());
+    assert!(!spans.contains(BACKLOG_CANARY));
+    let exported = ["backlog item stored", "backlog note added", "queue changed"]
+        .iter()
+        .filter(|line| records.iter().any(|record| record.contains(*line)))
+        .count();
+    assert_eq!(exported, 3, "the backlog lines are exported");
+    println!(
+        "evidence: {} captured log lines ({} backlog), {} exported records ({exported} of the 3 \
+         backlog lines among them), none holds {BACKLOG_CANARY}",
+        text.lines().count(),
+        text.lines()
+            .filter(|line| line.contains("tool=\"backlog\"") || line.contains("tool=backlog"))
+            .count(),
+        records.len()
+    );
+}
+
 /// The core service, as far as routing goes: every call reaches it and is refused with
 /// `NotFound`, which the empty router's `Unimplemented` fallback never gives.
 struct CoreStub;
