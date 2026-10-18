@@ -876,6 +876,48 @@ class InstalledServiceTests(unittest.TestCase):
         self.assertNotIn('/data harold/data', commands)
         self.assertNotIn('harold.log', commands)
 
+    TIPS_STEP = 'rm -f harold/data/pod/tips'
+    TIPS_SENTENCE = ('The commands delete `harold/data/pod/tips`, the counted-tip file. A Harold built before '
+                     '36a7c94 counts merges without moving it, so a later upgrade would count them again. '
+                     'Deleting it is safe.')
+
+    def test_the_rollback_note_deletes_the_counted_tip_file(self):
+        self.install_existing(saved='-')
+        self.install_existing_programs(self.prefix.parent / 'haroldctl.log')
+        self.run_install('-')
+        _, note, commands = self.rollback()
+        lines = commands.splitlines()
+        data_back, = [i for i, line in enumerate(lines)
+                      if line.startswith('mv harold.replaced-') and line.endswith('/data harold/data')]
+        self.assertGreater(lines.index(self.TIPS_STEP), data_back)
+        self.assertLess(lines.index(self.TIPS_STEP), lines.index('./haroldctl start'))
+        self.assertIn(self.TIPS_SENTENCE, note)
+
+    def test_a_reinstall_rollback_note_deletes_the_counted_tip_file(self):
+        self.install_existing(saved='-')
+        self.install_existing_programs(self.prefix.parent / 'haroldctl.log')
+        self.run_install('-', reinstall=True)
+        backup, note, commands = self.rollback()
+        lines = commands.splitlines()
+        self.assertGreater(lines.index(self.TIPS_STEP), lines.index('mv {} harold'.format(backup.name)))
+        self.assertLess(lines.index(self.TIPS_STEP), lines.index('./haroldctl start'))
+        self.assertIn(self.TIPS_SENTENCE, note)
+
+    def test_the_rollback_commands_remove_the_counted_tip_file(self):
+        log = self.prefix.parent / 'haroldctl.log'
+        self.install_existing(saved='-')
+        self.install_existing_programs(log)
+        (self.release / 'scripts/harold_service.py').write_text('')
+        self.run_install('-')
+        # The new install's data moves back into the restored bundle, tips file and all.
+        (self.bundle / 'harold.log').write_text('new log\n')
+        (self.bundle / 'data/pod').mkdir(parents=True)
+        (self.bundle / 'data/pod/tips').write_text('abc123\n')
+        _, _, commands = self.rollback()
+        result = self.run_rollback(commands, log)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse((self.bundle / 'data/pod/tips').exists())
+
     def test_a_first_install_creates_no_backup_folder(self):
         output = self.run_install('-')
         self.assertEqual(list(self.prefix.glob('harold.backup-*')), [])

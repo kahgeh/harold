@@ -464,6 +464,7 @@ def rollback_note(prefix, backup, copied, reinstall, metadata):
     aside as harold.replaced-<time> and, unless this was a reinstall, move its data and log back.
     They put back the LaunchAgents copy of `backup`'s plist, or remove the copy when `backup`
     does not start at login, and enable the label, which the new `haroldctl stop` disabled.
+    They also delete the counted-tip file, which an older Harold would leave stale.
     """
     aside = 'harold.replaced-' + backup.name[len('harold.backup-'):]
     commands = ['cd ' + shlex.quote(str(prefix)), './haroldctl stop',
@@ -477,6 +478,8 @@ def rollback_note(prefix, backup, copied, reinstall, metadata):
         commands += ['mv {}/data harold/data'.format(aside), 'mv {}/harold.log harold/harold.log'.format(aside)]
     if copied:
         commands.append('mv {} .'.format(' '.join('harold/' + name for name in copied)))
+    # An older Harold counts merges without moving the tips file, so a later upgrade would count them again.
+    commands.append('rm -f harold/data/pod/tips')
     launch_agent = shlex.quote(metadata['launch_agent'])
     if starts_at_login(backup):
         commands.append('cp harold/service.plist ' + launch_agent)
@@ -491,7 +494,9 @@ def rollback_note(prefix, backup, copied, reinstall, metadata):
              holds, '',
              'To roll back, run these commands. They stop the new Harold, set it aside as {}, '
              'put this one back and start it.'.format(aside), '',
-             '```sh'] + commands + ['```']
+             '```sh'] + commands + ['```', '',
+             'The commands delete `harold/data/pod/tips`, the counted-tip file. A Harold built before 36a7c94 '
+             'counts merges without moving it, so a later upgrade would count them again. Deleting it is safe.']
     python = plist_python(backup)
     if python:
         lines += ['', 'This Harold starts through Python. After rolling back, Full Disk Access and Messages '
