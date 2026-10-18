@@ -450,8 +450,13 @@ where
                     // dropped: the user has not seen what it would act on. The change
                     // is found by this key's own read, or was flagged by an earlier one.
                     // A key for a block that this read hid (a notice it cleared) is
-                    // dropped too, rather than handed to the list.
+                    // dropped too, rather than handed to the list, and so is the first
+                    // key after an earlier read hid the block under the focus.
                     let flagged = std::mem::take(&mut core.drop_next_block_key);
+                    if flagged && core.app.focus == Focus::List && !core.app.swallowing_keys() {
+                        draw(terminal, &core.app, clock)?;
+                        continue;
+                    }
                     if core.app.wants_fresh_questions(key) {
                         let reaches_block = core.app.key_reaches_block(key);
                         let listed = stream.list_questions().await;
@@ -469,6 +474,11 @@ where
                     core.app.question_sent(&out.id, result);
                     let listed = stream.list_questions().await;
                     core.questions_refreshed(listed);
+                    // A full interval before the next poll, so a notice this read
+                    // kept stays a few seconds.
+                    question_poll
+                        .as_mut()
+                        .reset(tokio::time::Instant::now() + core.question_poll_interval);
                     draw(terminal, &core.app, clock)?;
                     continue;
                 }
@@ -478,6 +488,9 @@ where
                     }
                     let listed = stream.list_questions().await;
                     core.questions_refreshed(listed);
+                    question_poll
+                        .as_mut()
+                        .reset(tokio::time::Instant::now() + core.question_poll_interval);
                     draw(terminal, &core.app, clock)?;
                     continue;
                 }
@@ -988,7 +1001,8 @@ struct RuntimeCore {
     /// How often the question queue is read; QUESTION_POLL_INTERVAL, shorter in tests.
     question_poll_interval: Duration,
     /// A read no key asked for changed the question under the focus: the next key, if
-    /// it goes to the block, is dropped. Any key clears it.
+    /// it goes to the block, is dropped. Or it hid the block under the focus: the next
+    /// key, now on the list, is dropped. Any key clears it.
     drop_next_block_key: bool,
 }
 
@@ -1064,11 +1078,15 @@ impl RuntimeCore {
 
     /// Takes a read no key asked for: the poll, or the read after an answer or a
     /// deferral. If it changes the question in view while the block has the focus, the
-    /// next block key is dropped, as it was typed for what was there before. Reports
-    /// whether the block changed at all.
+    /// next block key is dropped, as it was typed for what was there before. If it hides
+    /// the block that had the focus (a failed read swallows keys instead), the next key
+    /// is dropped too, rather than acting on the list. Reports whether the block changed
+    /// at all.
     fn questions_refreshed(&mut self, result: Result<Queue, SourceError>) -> bool {
+        let focused = self.app.focus == Focus::Block;
         let listed = self.questions_listed(result);
-        if listed.question_changed && self.app.focus == Focus::Block {
+        let hid = focused && !self.app.questions.is_visible() && !self.app.swallowing_keys();
+        if (listed.question_changed && self.app.focus == Focus::Block) || hid {
             self.drop_next_block_key = true;
         }
         listed.changed
@@ -2504,6 +2522,116 @@ mod tests {
         assert_eq!(log, lists(2));
         assert!(!core.app.questions.is_visible());
         assert_eq!(core.app.focus, Focus::List);
+    }
+
+    #[tokio::test]
+    async fn a_poll_that_hides_a_focused_block_drops_the_next_key() {
+        let mut core = connected_core();
+        core.question_poll_interval = Duration::from_millis(10);
+        let navigator = FakeNavigator::successful();
+        core.app.observe_questions(question("Q1", 1, 1));
+        core.handle_key(KeyCode::Tab, &navigator);
+        core.app.question_sent("Q1", SendResult::NotWaiting);
+        assert!(core.app.questions.shows_notice_only());
+        assert_eq!(core.app.focus, Focus::Block);
+        let probe = question_probe(Some(Queue::default()));
+        let mut stream = FakeStream::pending(Arc::new(AtomicBool::new(false)));
+        stream.questions = Some(Arc::clone(&probe));
+        let (input_sender, mut input) = InputPump::channel();
+        // Kept open, so the input does not close before the shutdown.
+        let _input_open = input_sender.clone();
+        let (shutdown_sender, mut shutdown) = FakeShutdown::channel();
+        let shut = Arc::new(AtomicBool::new(false));
+        let shut_by_test = Arc::clone(&shut);
+        tokio::spawn(async move {
+            // The read as the stream opens keeps the notice; the next poll, 10 ms on,
+            // clears it and hides the block under the focus. Then the user presses
+            // `q`, meant for the block: on the list it would quit.
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            input_sender
+                .send(InputMessage::Key(KeyCode::Char('q').into()))
+                .await
+                .unwrap();
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            shut_by_test.store(true, Ordering::SeqCst);
+            let _ = shutdown_sender.send(()).await;
+        });
+        let outcome = consume_stream(
+            stream,
+            &mut core,
+            &mut input,
+            &mut shutdown,
+            &mut FakeScreen::default(),
+            &FakeNavigator::successful(),
+            &FakeClock::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome, Control::Quit);
+        assert!(
+            shut.load(Ordering::SeqCst),
+            "q reached the list and quit before the shutdown"
+        );
+        assert!(!core.app.questions.is_visible());
+        assert_eq!(core.app.focus, Focus::List);
+        assert!(
+            !core.drop_next_block_key,
+            "the dropped key cleared the flag"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_answer_puts_off_the_poll_so_a_dismissal_notice_stays() {
+        let mut core = connected_core();
+        core.question_poll_interval = Duration::from_millis(1_000);
+        let probe = question_probe(Some(question("Q1", 1, 1)));
+        probe
+            .lock()
+            .unwrap()
+            .answers
+            .push_back((SendResult::NotWaiting, Some(Queue::default())));
+        let mut stream = FakeStream::pending(Arc::new(AtomicBool::new(false)));
+        stream.questions = Some(Arc::clone(&probe));
+        let (input_sender, mut input) = InputPump::channel();
+        // Kept open, so the input does not close before the shutdown.
+        let _input_open = input_sender.clone();
+        let (shutdown_sender, mut shutdown) = FakeShutdown::channel();
+        tokio::spawn(async move {
+            // The answer goes just before the first poll is due, at 1 s. Its read keeps
+            // the notice; a poll right after it would clear it at once.
+            tokio::time::sleep(Duration::from_millis(900)).await;
+            for code in [KeyCode::Tab, KeyCode::Enter, KeyCode::Enter] {
+                input_sender
+                    .send(InputMessage::Key(code.into()))
+                    .await
+                    .unwrap();
+            }
+            tokio::time::sleep(Duration::from_millis(400)).await;
+            let _ = shutdown_sender.send(()).await;
+        });
+        consume_stream(
+            stream,
+            &mut core,
+            &mut input,
+            &mut shutdown,
+            &mut FakeScreen::default(),
+            &FakeNavigator::successful(),
+            &FakeClock::default(),
+        )
+        .await
+        .unwrap();
+        let log = probe.lock().unwrap().log.clone();
+        let answered = log
+            .iter()
+            .position(|call| call == "answer Q1 v1")
+            .unwrap_or_else(|| panic!("{log:?}"));
+        assert_eq!(
+            log[answered + 1..],
+            lists(1),
+            "only the read after the answer, no poll: {log:?}"
+        );
+        assert!(core.app.questions.shows_notice_only(), "the notice stays");
+        assert!(core.app.questions.view().unwrap().notice.is_some());
     }
 
     #[tokio::test]
