@@ -1,0 +1,660 @@
+use std::sync::Arc;
+use std::sync::atomic::Ordering;
+use std::time::Duration;
+
+use harold_api::tools::questions::v1 as pb;
+use tokio::sync::{Notify, watch};
+use tokio::task::JoinHandle;
+
+use super::*;
+use crate::tools::questions::schema::{self, Kind};
+use crate::tools::questions::store::{QuestionStore, TursoQuestionStore};
+use crate::tools::questions::test_support::*;
+use crate::tools::{Typing, questions};
+
+/// One running sender over `store`, with its fakes.
+struct Running {
+    typing: Arc<FakeTyping>,
+    chief: Arc<FakeChief>,
+    wake: Arc<Notify>,
+    shutdown: watch::Sender<()>,
+    task: JoinHandle<()>,
+}
+
+fn spawn_sender<S: QuestionStore>(store: &Arc<S>, typing: Arc<FakeTyping>) -> Running {
+    spawn_with_chief(store, typing, FakeChief::at(Some(CHIEF_PANE)))
+}
+
+fn spawn_with_chief<S: QuestionStore>(
+    store: &Arc<S>,
+    typing: Arc<FakeTyping>,
+    chief: Arc<FakeChief>,
+) -> Running {
+    let wake = Arc::new(Notify::new());
+    let (shutdown, shutdown_rx) = watch::channel(());
+    let task = tokio::spawn(run(
+        Arc::clone(store),
+        typing.clone() as Arc<dyn crate::tools::PaneTyping>,
+        chief.clone() as Arc<dyn crate::tools::ChiefPane>,
+        Arc::clone(&wake),
+        shutdown_rx,
+    ));
+    Running {
+        typing,
+        chief,
+        wake,
+        shutdown,
+        task,
+    }
+}
+
+async fn put(store: &impl QuestionStore, question: pb::Question) {
+    store
+        .put(schema::from_proto(question).unwrap(), 0)
+        .await
+        .unwrap();
+}
+
+async fn answer(
+    store: &impl QuestionStore,
+    id: &str,
+    version: u32,
+    kind: Kind,
+    picks: Vec<pb::Pick>,
+    note: &str,
+) {
+    let note = note.to_string();
+    let result = store
+        .answer(
+            id,
+            version,
+            move |q| schema::resolve_picks(q, kind, &picks, &note),
+            0,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result, Ok(Ok(())), "answer {id}");
+}
+
+async fn answer_a(store: &impl QuestionStore, id: &str) {
+    answer(store, id, 1, Kind::Answer, vec![pick(0, "a")], "").await;
+}
+
+async fn defer(store: &impl QuestionStore, id: &str) {
+    store.defer(id, 0).await.unwrap().unwrap();
+}
+
+/// Lets the sender run for `seconds` of (paused) time.
+async fn pass(seconds: u64) {
+    tokio::time::sleep(Duration::from_secs(seconds)).await;
+}
+
+async fn until_no_started_batch(store: &impl QuestionStore) {
+    for _ in 0..2_000 {
+        if store.started_batch().await.unwrap().is_none() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("the batch was never marked typed");
+}
+
+fn ready_with(answers: Vec<(&str, pb::Question, schema::Answer)>, later: &[&str]) -> Ready {
+    Ready {
+        answers: answers
+            .into_iter()
+            .map(|(id, q, a)| (id.to_string(), 1, schema::from_proto(q).unwrap(), a))
+            .collect(),
+        later: later.iter().map(|id| id.to_string()).collect(),
+    }
+}
+
+#[test]
+fn clean_strips_escape_sequences_tabs_and_returns() {
+    assert_eq!(clean("a\x1b[2Jb\tc\rd\ne"), "abcd e");
+    assert_eq!(clean("one\r\ntwo\nthree"), "one two three");
+    assert_eq!(clean("x\x1b[1;31mred\x1b[0m\x07\u{7f}\u{85}y"), "xredy");
+    assert_eq!(clean("lone \x1b escape"), "lone  escape");
+    assert_eq!(clean("cut \x1b[12"), "cut ");
+    assert_eq!(clean("a | b \"q\""), "a | b \"q\"");
+    println!(
+        "evidence: clean(\"a\\x1b[2Jb\\tc\\rd\\ne\") = {:?}",
+        clean("a\x1b[2Jb\tc\rd\ne")
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn three_answers_type_one_line_with_ids_specs_shas_and_picks() {
+    let folder = TempFolder::new();
+    let store = open_store(&folder).await;
+    put(
+        &*store,
+        question_with(
+            "Q25",
+            "durable-server",
+            "d84bf386a2a5",
+            vec![
+                decision(
+                    "protocol",
+                    vec![option("a", "libSQL's Hrana"), option("b", "Postgres wire")],
+                ),
+                decision("build", vec![option("y", "yes"), option("n", "no")]),
+            ],
+        ),
+    )
+    .await;
+    put(
+        &*store,
+        question_with(
+            "Q26",
+            "voice-x",
+            "1111aaaa",
+            vec![decision(
+                "size",
+                vec![option("s", "small"), option("l", "large")],
+            )],
+        ),
+    )
+    .await;
+    put(
+        &*store,
+        question_with(
+            "Q27",
+            "old-y",
+            "2222bbbb",
+            vec![decision(
+                "keep",
+                vec![option("k", "keep"), option("d", "drop")],
+            )],
+        ),
+    )
+    .await;
+    let sender = spawn_sender(&store, FakeTyping::typed_ok());
+
+    answer(
+        &*store,
+        "Q25",
+        1,
+        Kind::Answer,
+        vec![pick(0, "a"), pick(1, "y")],
+        "",
+    )
+    .await;
+    sender.wake.notify_one();
+    answer(&*store, "Q26", 1, Kind::Answer, vec![pick(0, "l")], "").await;
+    sender.wake.notify_one();
+    pass(10).await;
+    assert!(sender.typing.calls().is_empty(), "Q27 still waits");
+
+    answer(&*store, "Q27", 1, Kind::Answer, vec![pick(0, "d")], "").await;
+    sender.wake.notify_one();
+    until("the batch is typed", || sender.typing.calls().len() == 1).await;
+    until_no_started_batch(&*store).await;
+
+    let expected = "ANSWERS 3 | Q25 durable-server sha d84bf386a2a5: protocol libSQL's Hrana; build yes | Q26 voice-x sha 1111aaaa: size large | Q27 old-y sha 2222bbbb: keep drop";
+    assert_eq!(
+        sender.typing.calls(),
+        vec![(CHIEF_PANE.to_string(), expected.to_string())]
+    );
+    assert!(store.list(0).await.unwrap().questions.is_empty());
+    pass(30).await;
+    assert_eq!(sender.typing.calls().len(), 1);
+    println!("evidence: typed into {CHIEF_PANE}: {expected}");
+}
+
+#[tokio::test(start_paused = true)]
+async fn revise_reject_and_free_text_share_the_line_with_newlines_as_spaces() {
+    let folder = TempFolder::new();
+    let store = open_store(&folder).await;
+    put(&*store, question("Q26", "voice-x", "1111")).await;
+    put(&*store, question("Q27", "old-y", "2222")).await;
+    put(&*store, question("Q28", "net-z", "3333")).await;
+    answer(
+        &*store,
+        "Q26",
+        1,
+        Kind::Revise,
+        vec![],
+        "make the button\nbigger",
+    )
+    .await;
+    answer(
+        &*store,
+        "Q27",
+        1,
+        Kind::Reject,
+        vec![],
+        "not\r\nneeded\x1b[2J\t!",
+    )
+    .await;
+    answer(
+        &*store,
+        "Q28",
+        1,
+        Kind::FreeText,
+        vec![free_pick(0, "z", "use\nHTTP/3\r")],
+        "",
+    )
+    .await;
+    let sender = spawn_sender(&store, FakeTyping::typed_ok());
+    until("the batch is typed", || sender.typing.calls().len() == 1).await;
+
+    let expected = "ANSWERS 3 | Q26 voice-x: revise \"make the button bigger\" | Q27 old-y: reject \"not needed!\" | Q28 net-z sha 3333: Which? \"use HTTP/3\"";
+    assert_eq!(sender.typing.texts(), vec![expected.to_string()]);
+    println!("evidence: {expected}");
+}
+
+#[test]
+fn a_note_with_a_pipe_or_quote_is_typed_as_is() {
+    let note = "a | b \"quoted\"";
+    let revise = schema::Answer {
+        kind: Kind::Revise,
+        picks: vec![],
+        note: note.into(),
+    };
+    let plain = schema::Answer {
+        kind: Kind::Answer,
+        picks: vec![schema::Picked {
+            ask: "Which?".into(),
+            label: "A".into(),
+            free: false,
+        }],
+        note: String::new(),
+    };
+    let ready = ready_with(
+        vec![
+            ("Q1", question("Q1", "spec-1", "abc"), revise),
+            ("Q2", question("Q2", "spec-2", "def"), plain),
+        ],
+        &[],
+    );
+    let line = batch_line(&ready);
+    assert_eq!(
+        line,
+        "ANSWERS 2 | Q1 spec-1: revise \"a | b \"quoted\"\" | Q2 spec-2 sha def: Which? A"
+    );
+    println!("evidence: {line}");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_deferred_question_is_listed_under_later_and_returns_to_waiting() {
+    let folder = TempFolder::new();
+    let store = open_store(&folder).await;
+    put(&*store, question("Q1", "s1", "abc")).await;
+    put(&*store, question("Q2", "s2", "abc")).await;
+    put(&*store, question("Q3", "s3", "abc")).await;
+    defer(&*store, "Q2").await;
+    answer_a(&*store, "Q1").await;
+    defer(&*store, "Q3").await;
+    let sender = spawn_sender(&store, FakeTyping::typed_ok());
+    until("the batch is typed", || sender.typing.calls().len() == 1).await;
+    until_no_started_batch(&*store).await;
+
+    let expected = "ANSWERS 1 | Q1 s1 sha abc: Which? A | later: Q2, Q3";
+    assert_eq!(sender.typing.texts(), vec![expected.to_string()]);
+    let waiting: Vec<(String, bool)> = store
+        .list(0)
+        .await
+        .unwrap()
+        .questions
+        .into_iter()
+        .map(|l| (l.question.id, l.deferred))
+        .collect();
+    assert_eq!(
+        waiting,
+        vec![("Q2".to_string(), false), ("Q3".to_string(), false)]
+    );
+    println!("evidence: {expected}; afterwards waiting: {waiting:?}");
+}
+
+#[tokio::test(start_paused = true)]
+async fn one_waiting_question_holds_the_batch_until_answered_or_deferred() {
+    let folder = TempFolder::new();
+    let store = open_store(&folder).await;
+    put(&*store, question("Q1", "s1", "abc")).await;
+    put(&*store, question("Q2", "s2", "abc")).await;
+    answer_a(&*store, "Q1").await;
+    let sender = spawn_sender(&store, FakeTyping::typed_ok());
+    pass(30).await;
+    assert!(sender.typing.calls().is_empty(), "Q2 is still waiting");
+
+    defer(&*store, "Q2").await;
+    sender.wake.notify_one();
+    until("the batch is typed", || sender.typing.calls().len() == 1).await;
+    until_no_started_batch(&*store).await;
+
+    // Q2 waits again; answering it sends the next batch.
+    pass(30).await;
+    assert_eq!(sender.typing.calls().len(), 1);
+    answer_a(&*store, "Q2").await;
+    sender.wake.notify_one();
+    until("the second batch is typed", || {
+        sender.typing.calls().len() == 2
+    })
+    .await;
+    let texts = sender.typing.texts();
+    assert_eq!(
+        texts,
+        vec![
+            "ANSWERS 1 | Q1 s1 sha abc: Which? A | later: Q2".to_string(),
+            "ANSWERS 1 | Q2 s2 sha abc: Which? A".to_string(),
+        ]
+    );
+    println!("evidence: nothing typed for 30 s while Q2 waited; then {texts:?}");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_question_added_after_two_answers_holds_the_batch() {
+    let folder = TempFolder::new();
+    let store = open_store(&folder).await;
+    put(&*store, question("Q1", "s1", "abc")).await;
+    put(&*store, question("Q2", "s2", "abc")).await;
+    answer_a(&*store, "Q1").await;
+    answer_a(&*store, "Q2").await;
+    put(&*store, question("Q3", "s3", "abc")).await;
+    let sender = spawn_sender(&store, FakeTyping::typed_ok());
+    pass(30).await;
+    assert!(sender.typing.calls().is_empty(), "Q3 holds the batch");
+
+    answer_a(&*store, "Q3").await;
+    sender.wake.notify_one();
+    until("the batch is typed", || sender.typing.calls().len() == 1).await;
+    let expected =
+        "ANSWERS 3 | Q1 s1 sha abc: Which? A | Q2 s2 sha abc: Which? A | Q3 s3 sha abc: Which? A";
+    assert_eq!(sender.typing.texts(), vec![expected.to_string()]);
+    println!("evidence: held 30 s by Q3, then {expected}");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_busy_pane_waits_logs_once_and_types_when_idle() {
+    let (logs, _guard) = capture_logs();
+    let folder = TempFolder::new();
+    let store = open_store(&folder).await;
+    put(&*store, question("Q1", "s1", "abc")).await;
+    answer_a(&*store, "Q1").await;
+    let busy = Step::Answer(Typing::PaneBusy);
+    let started = tokio::time::Instant::now();
+    let sender = spawn_sender(&store, FakeTyping::new(vec![busy; 3], Typing::Typed));
+    until("the batch is typed", || sender.typing.calls().len() == 4).await;
+    until_no_started_batch(&*store).await;
+    let elapsed = started.elapsed();
+
+    let texts = sender.typing.texts();
+    assert!(texts.iter().all(|t| t == &texts[0]), "{texts:?}");
+    assert!(
+        elapsed >= RETRY * 3 && elapsed < RETRY * 4,
+        "three retries 5 s apart, took {elapsed:?}"
+    );
+    let waiting = logs.with("answers batch waiting");
+    assert_eq!(waiting.len(), 1, "{:#?}", logs.lines());
+    assert_eq!(
+        field_names(&waiting[0], "answers batch waiting"),
+        ["tool", "reason"]
+    );
+    assert!(
+        waiting[0].contains("reason=\"pane_busy\""),
+        "{}",
+        waiting[0]
+    );
+    let typed = logs.with("answers batch typed");
+    assert_eq!(typed.len(), 1);
+    assert!(typed[0].contains("reason=\"typed\""), "{}", typed[0]);
+    println!(
+        "evidence: 3 busy tries then typed after {elapsed:?}; log: {}; log: {}",
+        waiting[0], typed[0]
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn no_chief_waits() {
+    let (logs, _guard) = capture_logs();
+    let folder = TempFolder::new();
+    let store = open_store(&folder).await;
+    put(&*store, question("Q1", "s1", "abc")).await;
+    answer_a(&*store, "Q1").await;
+    let sender = spawn_with_chief(&store, FakeTyping::typed_ok(), FakeChief::at(None));
+    pass(30).await;
+    assert!(sender.typing.calls().is_empty());
+    let waiting = logs.with("answers batch waiting");
+    assert_eq!(waiting.len(), 1, "{:#?}", logs.lines());
+    assert!(waiting[0].contains("reason=\"no_chief\""), "{}", waiting[0]);
+
+    sender.chief.set(Some(CHIEF_PANE));
+    let before = tokio::time::Instant::now();
+    until("the batch is typed", || sender.typing.calls().len() == 1).await;
+    assert!(before.elapsed() < RETRY + Duration::from_secs(1));
+    assert_eq!(sender.typing.calls()[0].0, CHIEF_PANE);
+    println!(
+        "evidence: no chief for 30 s, nothing typed, log: {}; typed once the chief ran",
+        waiting[0]
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_started_batch_is_typed_once_after_a_restart() {
+    let folder = TempFolder::new();
+    let store = open_store(&folder).await;
+    put(&*store, question("Q1", "s1", "abc")).await;
+    answer_a(&*store, "Q1").await;
+    let first = spawn_sender(&store, FakeTyping::new(vec![Step::Hang], Typing::Typed));
+    until("the first sender is typing", || {
+        first.typing.calls().len() == 1
+    })
+    .await;
+    // Harold dies while the line is being typed: the batch was started, never marked typed.
+    first.task.abort();
+    let _ = first.task.await;
+    let started = store.started_batch().await.unwrap().expect("batch started");
+    drop(store);
+
+    let store: Arc<TursoQuestionStore> = open_store(&folder).await;
+    let second = spawn_sender(&store, FakeTyping::typed_ok());
+    until("the restarted sender types", || {
+        second.typing.calls().len() == 1
+    })
+    .await;
+    until_no_started_batch(&*store).await;
+    second.wake.notify_one();
+    pass(30).await;
+    assert_eq!(second.typing.texts(), vec![started.text.clone()]);
+    println!(
+        "evidence: started batch {} typed once after the restart: {}",
+        started.id, started.text
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_typed_batch_is_never_typed_again() {
+    let folder = TempFolder::new();
+    let store = open_store(&folder).await;
+    put(&*store, question("Q1", "s1", "abc")).await;
+    answer_a(&*store, "Q1").await;
+    let first = spawn_sender(&store, FakeTyping::typed_ok());
+    until("the batch is typed", || first.typing.calls().len() == 1).await;
+    until_no_started_batch(&*store).await;
+    for _ in 0..3 {
+        first.wake.notify_one();
+        pass(10).await;
+    }
+    assert_eq!(first.typing.calls().len(), 1);
+    first.shutdown.send(()).unwrap();
+    first.task.await.unwrap();
+    drop(store);
+
+    let store: Arc<TursoQuestionStore> = open_store(&folder).await;
+    let second = spawn_sender(&store, FakeTyping::typed_ok());
+    second.wake.notify_one();
+    pass(30).await;
+    assert!(second.typing.calls().is_empty());
+    println!("evidence: one line typed; 30 s of wakes and a restart typed nothing more");
+}
+
+#[tokio::test(start_paused = true)]
+async fn enter_failed_counts_as_typed_and_logs_its_reason() {
+    let (logs, _guard) = capture_logs();
+    let folder = TempFolder::new();
+    let store = open_store(&folder).await;
+    put(&*store, question("Q1", "s1", "abc")).await;
+    answer_a(&*store, "Q1").await;
+    let sender = spawn_sender(
+        &store,
+        FakeTyping::new(vec![Step::Answer(Typing::EnterFailed)], Typing::Typed),
+    );
+    until("the batch is typed", || sender.typing.calls().len() == 1).await;
+    until_no_started_batch(&*store).await;
+    pass(30).await;
+    assert_eq!(sender.typing.calls().len(), 1);
+    let typed = logs.with("answers batch typed");
+    assert_eq!(typed.len(), 1, "{:#?}", logs.lines());
+    assert_eq!(
+        field_names(&typed[0], "answers batch typed"),
+        ["tool", "reason"]
+    );
+    assert!(typed[0].contains("reason=\"enter_failed\""), "{}", typed[0]);
+    assert!(logs.with("answers batch waiting").is_empty());
+    println!(
+        "evidence: one line typed, batch marked typed, log: {}",
+        typed[0]
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn shutdown_stops_a_waiting_batch() {
+    let folder = TempFolder::new();
+    let store = open_store(&folder).await;
+    put(&*store, question("Q1", "s1", "abc")).await;
+    answer_a(&*store, "Q1").await;
+
+    // Waiting for a busy pane between tries.
+    let busy = spawn_sender(&store, FakeTyping::new(vec![], Typing::PaneBusy));
+    until("the first try", || busy.typing.calls().len() == 1).await;
+    busy.shutdown.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(1), busy.task)
+        .await
+        .expect("the sender stops at once")
+        .unwrap();
+    let started = store.started_batch().await.unwrap().expect("batch kept");
+    assert_eq!(busy.typing.texts(), vec![started.text.clone()]);
+
+    // Inside a `type_line` that has not returned.
+    let typing = spawn_sender(&store, FakeTyping::new(vec![Step::Hang], Typing::Typed));
+    until("typing", || typing.typing.calls().len() == 1).await;
+    typing.shutdown.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(1), typing.task)
+        .await
+        .expect("the sender stops inside type_line")
+        .unwrap();
+    assert_eq!(
+        store.started_batch().await.unwrap(),
+        Some(started.clone()),
+        "the batch stays started for the restart"
+    );
+    println!(
+        "evidence: shutdown stopped the sender within 1 s while waiting and while typing; batch {} still started",
+        started.id
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_failing_store_waits_with_store_failed_and_retries() {
+    let (logs, _guard) = capture_logs();
+    let folder = TempFolder::new();
+    let inner = open_store(&folder).await;
+    put(&*inner, question("Q1", "s1", "abc")).await;
+    answer_a(&*inner, "Q1").await;
+    let failing = FailingStore::new(Arc::clone(&inner));
+    let sender = spawn_sender(&failing, FakeTyping::typed_ok());
+    pass(30).await;
+    assert!(sender.typing.calls().is_empty());
+    let waiting = logs.with("answers batch waiting");
+    assert_eq!(waiting.len(), 1, "{:#?}", logs.lines());
+    assert!(
+        waiting[0].contains("reason=\"store_failed\""),
+        "{}",
+        waiting[0]
+    );
+
+    failing.writes.store(false, Ordering::SeqCst);
+    until("the batch is typed", || sender.typing.calls().len() == 1).await;
+    println!(
+        "evidence: no batch could start for 30 s, log: {}; typed once the database recovered",
+        waiting[0]
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_failed_mark_is_retried_without_typing_again() {
+    let (logs, _guard) = capture_logs();
+    let folder = TempFolder::new();
+    let inner = open_store(&folder).await;
+    put(&*inner, question("Q1", "s1", "abc")).await;
+    answer_a(&*inner, "Q1").await;
+    let failing = FailingStore::new(Arc::clone(&inner));
+    failing.writes.store(false, Ordering::SeqCst);
+    failing.marks.store(true, Ordering::SeqCst);
+    let sender = spawn_sender(&failing, FakeTyping::typed_ok());
+    until("the batch is typed", || sender.typing.calls().len() == 1).await;
+    pass(30).await;
+    assert!(inner.started_batch().await.unwrap().is_some());
+
+    failing.marks.store(false, Ordering::SeqCst);
+    until_no_started_batch(&*inner).await;
+    pass(30).await;
+    assert_eq!(sender.typing.calls().len(), 1);
+    let waiting = logs.with("answers batch waiting");
+    assert_eq!(waiting.len(), 1, "{:#?}", logs.lines());
+    assert!(waiting[0].contains("reason=\"store_failed\""));
+    assert_eq!(logs.with("answers batch typed").len(), 1);
+    println!("evidence: the mark failed for 30 s; it was retried and the line was typed once");
+}
+
+#[tokio::test]
+async fn start_creates_questions_db_and_serves() {
+    use prost::Message;
+    use tonic::codegen::Service;
+
+    let folder = TempFolder::new();
+    let data_folder = folder.0.join("tools").join(questions::NAME);
+    let (shutdown, shutdown_rx) = watch::channel(());
+    let handle = questions::start(crate::tools::ToolContext {
+        data_folder: data_folder.clone(),
+        typing: FakeTyping::typed_ok(),
+        chief_pane: FakeChief::at(Some(CHIEF_PANE)),
+        shutdown: shutdown_rx,
+    })
+    .await
+    .unwrap_or_else(|e| panic!("start failed: {}", e.reason));
+    assert!(data_folder.join("questions.db").is_file());
+
+    // One ListQuestions call through the routes the host adds to its server.
+    let mut router = handle.routes.into_axum_router();
+    let message = pb::ListQuestionsRequest {}.encode_to_vec();
+    let mut framed = vec![0u8];
+    framed.extend_from_slice(&(message.len() as u32).to_be_bytes());
+    framed.extend_from_slice(&message);
+    let request = tonic::codegen::http::Request::builder()
+        .method("POST")
+        .uri("/harold.tools.questions.v1.QuestionService/ListQuestions")
+        .header("content-type", "application/grpc")
+        .header("te", "trailers")
+        .body(axum::body::Body::from(framed))
+        .unwrap();
+    let response = router.call(request).await.unwrap();
+    assert_eq!(response.status(), 200);
+    let body = axum::body::to_bytes(response.into_body(), 1 << 20)
+        .await
+        .unwrap();
+    let listing = pb::ListQuestionsResponse::decode(&body[5..]).unwrap();
+    assert_eq!(listing.waiting, 0);
+
+    shutdown.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), handle.task)
+        .await
+        .expect("the sender stops on shutdown")
+        .unwrap();
+    println!(
+        "evidence: start created {} and served ListQuestions (waiting = {})",
+        data_folder.join("questions.db").display(),
+        listing.waiting
+    );
+}
