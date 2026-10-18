@@ -82,7 +82,7 @@ fn bad_link_id_duplicate_key_and_second_suggested_name_their_field() {
 }
 
 #[test]
-fn an_id_over_32_or_a_field_over_2000_is_refused() {
+fn an_id_over_32_or_a_field_of_2000_is_refused() {
     let mut p = proto();
     p.id = "a".repeat(33);
     assert_eq!(from_proto(p).unwrap_err(), "id");
@@ -91,15 +91,18 @@ fn an_id_over_32_or_a_field_over_2000_is_refused() {
     assert!(from_proto(p).is_ok());
 
     let mut p = proto();
-    p.intro = "x".repeat(2001);
+    p.intro = "x".repeat(2000);
     assert_eq!(from_proto(p).unwrap_err(), "intro");
+    let mut p = proto();
+    p.intro = "x".repeat(1999);
+    assert!(from_proto(p).is_ok());
 
     let mut p = proto();
-    p.decisions[1].options[0].impact = "x".repeat(2001);
+    p.decisions[1].options[0].impact = "x".repeat(2000);
     assert_eq!(from_proto(p).unwrap_err(), "decisions.2.options.1.impact");
 
     let mut p = proto();
-    p.decisions[0].ask = "x".repeat(2001);
+    p.decisions[0].ask = "x".repeat(2000);
     assert_eq!(from_proto(p).unwrap_err(), "decisions.1.ask");
 
     let mut p = proto();

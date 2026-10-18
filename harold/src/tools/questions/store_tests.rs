@@ -336,3 +336,20 @@ async fn a_started_batch_survives_reopening() {
     store.batch_typed(first.id, 11).await.unwrap();
     assert!(store.started_batch().await.unwrap().is_none());
 }
+
+#[tokio::test]
+async fn a_write_dropped_inside_its_transaction_does_not_block_the_next() {
+    let temp = TempFolder::new();
+    let store = TursoQuestionStore::open(&temp.0).await.unwrap();
+    // A cancelled call leaves the connection inside BEGIN IMMEDIATE with the
+    // mutex released. Reproduced by hand, since the drop cannot be timed
+    // reliably between two awaits.
+    {
+        let conn = store.conn.lock().await;
+        begin(&conn).await.unwrap();
+        assert!(!conn.is_autocommit().unwrap());
+    }
+    assert_eq!(store.put(question("Q1"), 1).await.unwrap(), 1);
+    assert_eq!(store.put(question("Q2"), 2).await.unwrap(), 1);
+    assert_eq!(listed_ids(&store).await.len(), 2);
+}

@@ -4,6 +4,7 @@ use harold_api::tools::questions::v1 as pb;
 use serde::{Deserialize, Serialize};
 
 const MAX_ID: usize = 32;
+/// Text fields must be shorter than this.
 const MAX_TEXT: usize = 2000;
 const MAX_OPTIONS: usize = 9;
 
@@ -56,7 +57,7 @@ pub(super) struct Answer {
 }
 
 fn too_long(text: &str) -> bool {
-    text.chars().count() > MAX_TEXT
+    text.chars().count() >= MAX_TEXT
 }
 
 /// Checks the rules and converts; the error is the name of the first field that breaks one.

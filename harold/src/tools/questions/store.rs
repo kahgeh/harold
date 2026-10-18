@@ -143,7 +143,12 @@ async fn initialize_schema(conn: &Connection) -> Result<()> {
     finish(conn, apply_migrations(conn).await).await
 }
 
+/// Starts a write. A caller dropped between `begin` and `finish` leaves the
+/// connection inside its transaction, so that one is rolled back first.
 async fn begin(conn: &Connection) -> Result<()> {
+    if !conn.is_autocommit()? {
+        conn.execute("ROLLBACK", ()).await?;
+    }
     conn.execute("BEGIN IMMEDIATE", ()).await?;
     Ok(())
 }
