@@ -16,11 +16,11 @@ The question queue is Harold's first tool, and more are expected (the next is ea
 - Each tool has its own proto package, `harold.tools.<name>.v1`, and its CLI under `harold tool <name> ...`.
 - Typing into a pane goes through `PaneTyping` as the single `Writer::Tool(name)`. A tool that needs it gets its own writer; the host does not share one between tools.
 - A tool that cannot start is logged (`tool failed to start`, with `tool` and `reason`) and left out; Harold runs on.
-- There is no plugin loader or registry. The host is plain code that gains a `start` call and a `start_tool` line per tool.
+- There is no plugin loader or registry. The host is plain code that gains, per tool, a `mod` line, a typing with the tool's own writer, a `start` call and a `start_tool` line.
 
 ## Consequences
 
-- A new tool changes `tools.rs` and touches no other core code.
+- A new tool adds its module, its proto in `harold-api`, its `harold tool <name>` commands in `cli.rs` and its start in `tools.rs`; it changes neither the core store nor the Harold gRPC service.
 - A rollback to an older Harold ignores `tools/<name>/`; deleting the folder empties that tool.
 - Each tool's database is separate from the core store, so the core's disk-fault handling does not cover it.
 - The data standard is still undecided; one database per tool is the current practice, not a standard.
