@@ -770,3 +770,23 @@ async fn start_creates_questions_db_and_serves() {
         listing.waiting
     );
 }
+
+#[tokio::test]
+async fn start_on_a_folder_it_cannot_open_fails_with_store_open_failed() {
+    let folder = TempFolder::new();
+    // `tools` is a file, so `<folder>/tools/questions` cannot be made.
+    std::fs::create_dir_all(&folder.0).unwrap();
+    std::fs::write(folder.0.join("tools"), "not a folder").unwrap();
+    let (_shutdown, shutdown_rx) = watch::channel(());
+    let started = questions::start(crate::tools::ToolContext {
+        data_folder: folder.0.join("tools").join(questions::NAME),
+        typing: FakeTyping::typed_ok(),
+        chief_pane: FakeChief::at(Some(CHIEF_PANE)),
+        shutdown: shutdown_rx,
+    })
+    .await;
+    let Err(error) = started else {
+        panic!("start succeeded under a file");
+    };
+    assert_eq!(error.reason, "store_open_failed");
+}

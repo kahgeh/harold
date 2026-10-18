@@ -80,10 +80,11 @@ pub(crate) struct ToolHandle {
     pub(crate) task: tokio::task::JoinHandle<()>,
 }
 
-/// Why a tool could not start.
+/// Why a tool could not start: a fixed word, such as `store_open_failed`, never error
+/// text, since `reason` is exported with the log line.
 #[derive(Debug)]
 pub(crate) struct ToolError {
-    pub(crate) reason: String,
+    pub(crate) reason: &'static str,
 }
 
 // ---------------------------------------------------------------------------
@@ -155,7 +156,7 @@ fn start_tool(name: &'static str, started: Result<ToolHandle, ToolError>, tools:
     let handle = match started {
         Ok(handle) => handle,
         Err(error) => {
-            warn!(tool = name, reason = %error.reason, "tool failed to start");
+            warn!(tool = name, reason = error.reason, "tool failed to start");
             return;
         }
     };

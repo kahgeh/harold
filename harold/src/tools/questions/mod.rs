@@ -18,13 +18,17 @@ mod test_support;
 
 pub(crate) const NAME: &str = "questions";
 
+/// The reason `start` gives when `questions.db` cannot be opened or migrated. The
+/// error's own text names the data folder's path, so it is not passed on.
+const STORE_OPEN_FAILED: &str = "store_open_failed";
+
 /// Opens `questions.db` in the tool's data folder, then serves the queue and
 /// sends its answers to the chief until shutdown.
 pub(crate) async fn start(ctx: ToolContext) -> Result<ToolHandle, ToolError> {
     let store = store::TursoQuestionStore::open(&ctx.data_folder)
         .await
-        .map_err(|error| ToolError {
-            reason: error.to_string(),
+        .map_err(|_| ToolError {
+            reason: STORE_OPEN_FAILED,
         })?;
     let store = Arc::new(store);
     let wake = Arc::new(Notify::new());

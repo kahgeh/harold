@@ -170,9 +170,19 @@ async fn a_tool_that_fails_to_start_is_logged_and_harold_runs_on() {
         .filter(|line| line.contains("tool failed to start"))
         .collect();
     assert_eq!(failed.len(), 1, "{text}");
-    assert!(failed[0].starts_with(" WARN "), "{}", failed[0]);
-    assert!(failed[0].contains("tool=\"questions\""), "{}", failed[0]);
-    assert!(failed[0].contains(" reason="), "{}", failed[0]);
+    // Only `tool` and a fixed `reason`: no error text, so no path.
+    assert_eq!(
+        failed[0],
+        " WARN harold::tools: tool failed to start tool=\"questions\" reason=\"store_open_failed\""
+    );
+    let folder_name = folder.0.file_name().unwrap().to_str().unwrap();
+    assert!(!text.contains(folder_name), "{text}");
+    assert!(
+        !test_support::logs()
+            .iter()
+            .any(|log| format!("{:?}", log.record).contains(folder_name)),
+        "an exported record names the data folder"
+    );
     // Harold runs on: the routes answer, as unimplemented, and the host stops at once.
     let listed: Result<pb::ListQuestionsResponse, String> =
         call(&tools.routes, "ListQuestions", pb::ListQuestionsRequest {}).await;
