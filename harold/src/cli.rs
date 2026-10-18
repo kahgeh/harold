@@ -304,9 +304,17 @@ pub(crate) async fn accept(
     settings: &Settings,
     args: &AcceptArgs,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    accept_within(settings, args, CALL_DEADLINE).await
+}
+
+pub(crate) async fn accept_within(
+    settings: &Settings,
+    args: &AcceptArgs,
+    wait: Duration,
+) -> Result<(), Box<dyn std::error::Error>> {
     let address = settings.grpc.addr()?;
     let state = args.event.state();
-    let response = tokio::time::timeout(Duration::from_secs(3), async {
+    let response = call_within(CALL_DEADLINE, wait, async {
         let mut client = HaroldClient::connect(format!("http://{address}"))
             .await
             .map_err(|_| "the Harold daemon is not reachable")?;
@@ -318,10 +326,9 @@ pub(crate) async fn accept(
                 work_summary: None,
             })
             .await
-            .map_err(|_| "the Harold daemon refused the call")
+            .map_err(|_| Box::<dyn std::error::Error>::from("the Harold daemon refused the call"))
     })
-    .await
-    .map_err(|_| "the Harold daemon did not answer within 3 seconds")??;
+    .await?;
     if !response.into_inner().accepted {
         return Err("the Harold daemon did not accept the report".into());
     }
@@ -334,11 +341,19 @@ pub(crate) async fn send_message_to_away_device(
     settings: &Settings,
     args: &AwayMessageArgs,
 ) -> Result<(), String> {
+    send_message_to_away_device_within(settings, args, CALL_DEADLINE).await
+}
+
+pub(crate) async fn send_message_to_away_device_within(
+    settings: &Settings,
+    args: &AwayMessageArgs,
+    wait: Duration,
+) -> Result<(), String> {
     let address = settings
         .grpc
         .addr()
         .map_err(|_| "invalid configuration".to_string())?;
-    let response = tokio::time::timeout(Duration::from_secs(3), async {
+    let response = call_within(CALL_DEADLINE, wait, async {
         let mut client = HaroldClient::connect(format!("http://{address}"))
             .await
             .map_err(|_| "the Harold daemon is not reachable".to_string())?;
@@ -350,8 +365,7 @@ pub(crate) async fn send_message_to_away_device(
             .await
             .map_err(|status| refusal_line(status.code(), status.message(), &args.src_id))
     })
-    .await
-    .map_err(|_| "the Harold daemon did not answer within 3 seconds".to_string())??;
+    .await?;
     if !response.into_inner().accepted {
         return Err(NOT_STORED_LINE.into());
     }
@@ -361,11 +375,19 @@ pub(crate) async fn send_message_to_away_device(
 /// Ask the daemon to say `args.text` or send it as a voice note. `Ok` means the daemon
 /// stored the line, not that it was heard. `Err` is the one line to print.
 pub(crate) async fn speak(settings: &Settings, args: &AwayMessageArgs) -> Result<(), String> {
+    speak_within(settings, args, CALL_DEADLINE).await
+}
+
+pub(crate) async fn speak_within(
+    settings: &Settings,
+    args: &AwayMessageArgs,
+    wait: Duration,
+) -> Result<(), String> {
     let address = settings
         .grpc
         .addr()
         .map_err(|_| "invalid configuration".to_string())?;
-    tokio::time::timeout(Duration::from_secs(3), async {
+    call_within(CALL_DEADLINE, wait, async {
         let mut client = HaroldClient::connect(format!("http://{address}"))
             .await
             .map_err(|_| "the Harold daemon is not reachable".to_string())?;
@@ -377,8 +399,7 @@ pub(crate) async fn speak(settings: &Settings, args: &AwayMessageArgs) -> Result
             .await
             .map_err(|status| speak_refusal_line(status.code(), status.message(), &args.src_id))
     })
-    .await
-    .map_err(|_| "the Harold daemon did not answer within 3 seconds".to_string())??;
+    .await?;
     Ok(())
 }
 
@@ -473,7 +494,16 @@ fn tool_refusal_line(status: &tonic::Status) -> String {
 pub(crate) async fn tool(
     address: &str,
     command: &ToolCommand,
+    stdin: impl std::io::Read,
+) -> Result<String, String> {
+    tool_within(address, command, stdin, CALL_DEADLINE).await
+}
+
+pub(crate) async fn tool_within(
+    address: &str,
+    command: &ToolCommand,
     mut stdin: impl std::io::Read,
+    wait: Duration,
 ) -> Result<String, String> {
     let question = match command {
         ToolCommand::QuestionsPut => {
@@ -483,7 +513,7 @@ pub(crate) async fn tool(
         }
         _ => None,
     };
-    tokio::time::timeout(Duration::from_secs(3), async {
+    call_within(CALL_DEADLINE, wait, async {
         let mut client = QuestionServiceClient::connect(format!("http://{address}"))
             .await
             .map_err(|_| "the Harold daemon is not reachable".to_string())?;
@@ -538,7 +568,6 @@ pub(crate) async fn tool(
         }
     })
     .await
-    .map_err(|_| "the Harold daemon did not answer within 3 seconds".to_string())?
 }
 
 #[cfg(test)]
@@ -1131,10 +1160,150 @@ mod tests {
 
     #[tokio::test]
     async fn an_unreachable_daemon_is_named() {
+        let line = tool(CLOSED, &ToolCommand::QuestionsList, &b""[..]).await;
+        assert_eq!(line, Err("the Harold daemon is not reachable".into()));
+    }
+
+    /// Nothing can listen on port 0, so a connect is refused at once and no other process can take it.
+    const CLOSED: &str = "127.0.0.1:0";
+    const GUARD: Duration = Duration::from_secs(30);
+    const NOT_ANSWERING: &str = "the Harold daemon did not answer within 3 seconds";
+    const NOT_REACHABLE: &str = "the Harold daemon is not reachable";
+
+    /// A daemon stand-in that takes connections and never reads or writes.
+    async fn never_answers() -> (String, tokio::task::JoinHandle<()>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap().to_string();
-        drop(listener);
-        let line = tool(&address, &ToolCommand::QuestionsList, &b""[..]).await;
-        assert_eq!(line, Err("the Harold daemon is not reachable".into()));
+        let handle = tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((socket, _)) = listener.accept().await {
+                held.push(socket);
+            }
+        });
+        (address, handle)
+    }
+
+    fn settings_for(address: &str) -> Settings {
+        let (host, port) = address.rsplit_once(':').unwrap();
+        crate::peers::settings_with(&format!("[grpc]\nhost = \"{host}\"\nport = {port}"))
+    }
+
+    fn accept_args() -> AcceptArgs {
+        AcceptArgs {
+            event: AcceptEvent::TurnCompleted,
+            pane: "%47".into(),
+            adapter: "claude.lifecycle".into(),
+        }
+    }
+
+    fn message_args() -> AwayMessageArgs {
+        AwayMessageArgs {
+            src_id: "%47".into(),
+            text: "hello".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn accept_gives_up_on_a_daemon_that_never_answers() {
+        let (hung, stand_in) = never_answers().await;
+        let wait = Duration::from_millis(100);
+        let result = tokio::time::timeout(
+            GUARD,
+            accept_within(&settings_for(&hung), &accept_args(), wait),
+        )
+        .await
+        .expect("accept waited past its deadline");
+        stand_in.abort();
+        assert_eq!(result.unwrap_err().to_string(), NOT_ANSWERING);
+    }
+
+    #[tokio::test]
+    async fn accept_names_a_daemon_that_is_down() {
+        let wait = Duration::from_secs(3600);
+        let result = tokio::time::timeout(
+            GUARD,
+            accept_within(&settings_for(CLOSED), &accept_args(), wait),
+        )
+        .await
+        .expect("accept waited past its deadline");
+        assert_eq!(result.unwrap_err().to_string(), NOT_REACHABLE);
+    }
+
+    #[tokio::test]
+    async fn away_message_gives_up_on_a_daemon_that_never_answers() {
+        let (hung, stand_in) = never_answers().await;
+        let wait = Duration::from_millis(100);
+        let result = tokio::time::timeout(
+            GUARD,
+            send_message_to_away_device_within(&settings_for(&hung), &message_args(), wait),
+        )
+        .await
+        .expect("away message waited past its deadline");
+        stand_in.abort();
+        assert_eq!(result, Err(NOT_ANSWERING.into()));
+    }
+
+    #[tokio::test]
+    async fn away_message_names_a_daemon_that_is_down() {
+        let wait = Duration::from_secs(3600);
+        let result = tokio::time::timeout(
+            GUARD,
+            send_message_to_away_device_within(&settings_for(CLOSED), &message_args(), wait),
+        )
+        .await
+        .expect("away message waited past its deadline");
+        assert_eq!(result, Err(NOT_REACHABLE.into()));
+    }
+
+    #[tokio::test]
+    async fn speak_gives_up_on_a_daemon_that_never_answers() {
+        let (hung, stand_in) = never_answers().await;
+        let wait = Duration::from_millis(100);
+        let result = tokio::time::timeout(
+            GUARD,
+            speak_within(&settings_for(&hung), &message_args(), wait),
+        )
+        .await
+        .expect("speak waited past its deadline");
+        stand_in.abort();
+        assert_eq!(result, Err(NOT_ANSWERING.into()));
+    }
+
+    #[tokio::test]
+    async fn speak_names_a_daemon_that_is_down() {
+        let wait = Duration::from_secs(3600);
+        let result = tokio::time::timeout(
+            GUARD,
+            speak_within(&settings_for(CLOSED), &message_args(), wait),
+        )
+        .await
+        .expect("speak waited past its deadline");
+        assert_eq!(result, Err(NOT_REACHABLE.into()));
+    }
+
+    #[tokio::test]
+    async fn tool_gives_up_on_a_daemon_that_never_answers() {
+        let (hung, stand_in) = never_answers().await;
+        let wait = Duration::from_millis(100);
+        let result = tokio::time::timeout(
+            GUARD,
+            tool_within(&hung, &ToolCommand::QuestionsList, &b""[..], wait),
+        )
+        .await
+        .expect("tool waited past its deadline");
+        stand_in.abort();
+        assert_eq!(result, Err(NOT_ANSWERING.into()));
+    }
+
+    #[tokio::test]
+    async fn tool_names_a_daemon_that_is_down() {
+        let wait = Duration::from_secs(3600);
+        let result = tokio::time::timeout(
+            GUARD,
+            tool_within(CLOSED, &ToolCommand::QuestionsList, &b""[..], wait),
+        )
+        .await
+        .expect("tool waited past its deadline");
+        assert_eq!(result, Err(NOT_REACHABLE.into()));
     }
 }
