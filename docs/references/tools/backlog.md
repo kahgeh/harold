@@ -33,7 +33,7 @@ A product manager writes an item as JSON and passes it to `harold tool backlog p
 }
 ```
 
-`id` and `title` are required strings, and `evidence` must be there with at least one pointer. Every other field may be left out, which stores it empty. The rules, counted in characters, not bytes:
+`id` and `title` are required strings. `evidence` needs at least one pointer: an item without it is sent with an empty list and refused with `invalid evidence`. Every other field may be left out, which stores it empty. The rules, counted in characters, not bytes:
 
 | Field | Rule |
 | --- | --- |
@@ -165,6 +165,8 @@ Moving the files in and out is under [Import and export](#import-and-export).
 | `the Harold daemon did not answer within 30 seconds` | An import or export, after 30 seconds. |
 | `invalid JSON: <what>` | `put`, `note add` or `note update` got empty or broken JSON, such as `invalid JSON: id is missing`. Nothing is sent. |
 | `cannot read <file>: <error>` | An import file can't be read. Nothing is sent. |
+| `cannot read stdin: <error>` | `queue add`, `queue update` or `queue note` can't read stdin. Nothing is sent. For `put` and the note commands the same failure prints `invalid JSON: cannot read stdin: <error>`. |
+| `the Harold daemon refused the call` | A refusal that carries no message. |
 | `invalid argument: usage is harold tool backlog put\|rank\|remove\|list\|note\|notes\|queue\|import\|export` | Any other use: a missing or unknown argument, a flag given twice, `--now` with `--at`, `--at 0`, a note id that isn't a number, or a date that isn't `YYYY-MM-DD`. |
 | the refusal's message | Any other refusal, such as `backlog_full` or `invalid evidence`. |
 
@@ -184,7 +186,7 @@ The CLI takes any word starting with `--` as a flag, so an item id that starts w
 | `FailedPrecondition` | `already_done` | `queue now` or `queue done` on a done item. |
 | `InvalidArgument` | `invalid <field>` | A rule is broken, such as `invalid risk`, `invalid evidence`, `invalid kind`, `invalid at`, `invalid text`, or `invalid ids` (an empty or repeated id list). Nothing is stored. |
 | `InvalidArgument` | `unparsed line <n>` | An import line has no place; `n` counts from 1. Nothing is stored. |
-| `Unavailable` | `registry_unreadable` | The registry is set but can't be read. Writes are refused; reads still answer. |
+| `Unavailable` | `registry_unreadable` | The registry is set but can't be read. Writes, the product list (`ListProducts`) and a backlog dry-run import are refused; reading items, notes, the queue and an export still answer. |
 | `Unavailable` | `the backlog database is unavailable` | A database call failed. |
 
 ## Import and export
@@ -236,13 +238,13 @@ In the held and left-out sections, a block starts at each column-0 `- ` bullet, 
 
 The export writes `# Backlog: <product>`, then the rule notes' bodies, the items by rank (each field with a value, as `- <field>: <value>`, with the evidence joined by `; `), the history notes as `## <title>` and body, then `## In flight with another session (not ranked)` and the held notes, and `## Looked at and left out` and the left-out notes, each kind only when it has notes. Notes go by id, with one blank line between blocks.
 
-Every line of the source that isn't blank and isn't a heading appears in the export, in the same order within its section. A note added through `note add` comes back the same way only if it keeps the file's shape: a `history` note's title needs a date, and a `rule` note's body needs to be one paragraph, since a blank line would split it into two rules on the next import.
+Every line of the source that isn't blank and isn't a heading appears in the export, in the same order within its section. A note added through `note add` comes back the same way only if it keeps the file's shape: a `history` note's title needs a date, and a `rule` note's body needs to be one paragraph, since a blank line would split it into two rules on the next import. The export writes only the body of a `rule`, `held` or `left_out` note, not its title. On the next import the title is the body's first line, cut to 80 characters (without its `- ` for held and left-out notes), so a title set by hand is lost unless it matches that.
 
 ### The `queue.md` layout
 
 | Part of the file | Becomes |
 | --- | --- |
-| The `# Queue` title, as the first line that isn't blank | Nothing; it is skipped. A `# ` line anywhere else is `unparsed line <n>`. |
+| A first `# ` title, such as `# Queue`, as the first line that isn't blank; its text isn't checked | Nothing; it is skipped. A `# ` line anywhere else is `unparsed line <n>`. |
 | The lines between it and the first `## ` heading | The queue's note, as written, without the blank lines at its start and end. |
 | `## Now` | One `- ` bullet and the indented lines after it: the Now item. Its text is the first line without `- `, then the indented lines as written. |
 | `## Parked` | `<n>. ` lines and the indented lines after each: the parked items, in order. The text drops the `<n>. `. |
