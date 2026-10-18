@@ -1081,7 +1081,7 @@ fn start_up_reports_no_change() {
 }
 
 #[test]
-fn a_spec_that_merges_records_both_phases() {
+fn a_spec_that_merges_is_logged_without_a_lead_time() {
     test_support::install();
     let product = format!("pod-test-{}", uuid::Uuid::new_v4());
     let mut book = SpecBook::default();
@@ -1096,20 +1096,9 @@ fn a_spec_that_merges_records_both_phases() {
     let changes = book.observe(&product, &[merged]);
 
     assert_eq!(changes, vec![("g".to_owned(), SpecState::Merged)]);
-    let wanted = |phase| {
-        [
-            ("pod.product", product.as_str()),
-            ("phase", phase),
-            ("spec.revisions", "1"),
-        ]
-    };
     assert_eq!(
-        test_support::histogram_sum("pod.spec.lead_time", &wanted("waiting_for_user")),
-        Some(1860.0)
-    );
-    assert_eq!(
-        test_support::histogram_sum("pod.spec.lead_time", &wanted("build")),
-        Some(3780.0)
+        test_support::histogram_sum("pod.spec.lead_time", &[("pod.product", product.as_str())]),
+        None
     );
     let text = logs.text();
     assert!(
@@ -1133,16 +1122,22 @@ fn a_spec_that_merges_records_both_phases() {
 fn a_phase_with_a_missing_time_or_a_negative_length_is_not_recorded() {
     test_support::install();
     let product = format!("pod-test-{}", uuid::Uuid::new_v4());
-    let mut book = SpecBook::default();
-    book.observe(&product, &[]);
-    let mut merged = spec("g", SpecState::Merged, "2026-10-14T09:00:00Z");
-    merged.ready_at = None;
-    // Merged before it was approved: the build phase would be negative.
-    merged.merged_at = Some(at("2026-10-14T09:00:00Z"));
+    let mut facts = spec("g", SpecState::Merged, "2026-10-14T09:00:00Z");
+    facts.ready_at = None;
+    let spec_ref = SpecRef {
+        id: "g".into(),
+        stage: None,
+    };
 
-    let changes = book.observe(&product, &[merged]);
+    // No ready time, and merged before it was approved: the build phase would be negative.
+    record_lead_time(
+        &product,
+        &spec_ref,
+        &facts,
+        at("2026-10-14T09:00:00Z"),
+        true,
+    );
 
-    assert_eq!(changes, vec![("g".to_owned(), SpecState::Merged)]);
     assert_eq!(
         test_support::histogram_sum("pod.spec.lead_time", &[("pod.product", product.as_str())]),
         None
@@ -1409,29 +1404,210 @@ async fn an_unreadable_specs_folder_waits_for_the_next_poll() {
     assert_eq!(text.matches("spec state changed").count(), 0, "{text}");
 }
 
-#[test]
-fn a_merged_spec_seen_again_records_its_lead_time_once() {
-    test_support::install();
-    let product = format!("pod-test-{}", uuid::Uuid::new_v4());
-    let mut book = SpecBook::default();
-    book.observe(
-        &product,
-        &[spec("g", SpecState::Approved, "2026-10-14T10:31:00Z")],
+/// Every `pod.spec.lead_time` data point of `product` with `phase` in the latest export,
+/// as its attributes (as text) and its count.
+fn lead_time_series(product: &str, phase: &str) -> Vec<(BTreeMap<String, String>, u64)> {
+    test_support::metrics()
+        .iter()
+        .rev()
+        .find_map(|resource| {
+            resource
+                .scope_metrics()
+                .flat_map(|scope| scope.metrics())
+                .find(|metric| metric.name() == "pod.spec.lead_time")
+        })
+        .and_then(|metric| {
+            let AggregatedMetrics::F64(MetricData::Histogram(histogram)) = metric.data() else {
+                return None;
+            };
+            Some(
+                histogram
+                    .data_points()
+                    .map(|point| {
+                        let attributes: BTreeMap<String, String> = point
+                            .attributes()
+                            .map(|kv| (kv.key.to_string(), kv.value.as_str().into_owned()))
+                            .collect();
+                        (attributes, point.count())
+                    })
+                    .filter(|(attributes, _)| {
+                        attributes.get("pod.product").map(String::as_str) == Some(product)
+                            && attributes.get("phase").map(String::as_str) == Some(phase)
+                    })
+                    .collect(),
+            )
+        })
+        .unwrap_or_default()
+}
+
+/// The time of the newest reflog entry of `main` in `repo`.
+fn newest_merge_time(repo: &Path) -> OffsetDateTime {
+    let entry = git(
+        repo,
+        &[
+            "reflog",
+            "show",
+            "--date=unix",
+            "--format=%gd",
+            "-1",
+            "refs/heads/main",
+        ],
     );
-    let mut merged = spec("g", SpecState::Merged, "2026-10-14T11:34:00Z");
-    merged.merged_at = Some(at("2026-10-14T11:34:00Z"));
-    book.observe(&product, std::slice::from_ref(&merged));
+    OffsetDateTime::from_unix_timestamp(reflog_time(&entry).unwrap()).unwrap()
+}
 
-    book.observe(&product, &[]);
-    let changes = book.observe(&product, &[merged]);
+/// Writes the files of a spec `id` that is ready and approved: the spec, its link and its
+/// approval, then waits out the second, so the whole-second merge time that follows is
+/// after the approval's creation time.
+async fn approved_spec(repo: &Path, id: &str) {
+    let pod = repo.join(".superpowers/pod");
+    write(&pod.join(format!("specs/{id}.md")), "# Spec\n");
+    write(
+        &pod.join(format!("specs/{id}.url")),
+        "https://example.com\n",
+    );
+    write(&pod.join(format!("approvals/{id}.md")), "approved\n");
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+}
 
-    assert_eq!(changes, vec![("g".to_owned(), SpecState::Merged)]);
+fn keys(attributes: &BTreeMap<String, String>) -> BTreeSet<&str> {
+    attributes.keys().map(String::as_str).collect()
+}
+
+#[tokio::test]
+async fn a_merge_records_both_phases_with_its_spec() {
+    let pod = Pod::new();
+    let repo = pod.repo("main");
+    approved_spec(&repo, "g").await;
+    let (mut stats, _) = stats(one_product(&pod, &repo));
+    stats.poll().await;
+
+    merge_branch(&repo, "g", "x\n");
+    stats.poll().await;
+
+    let files = repo.join(".superpowers/pod");
+    let ready = created(&files.join("specs/g.url"));
+    let approved = created(&files.join("approvals/g.md"));
+    let merged = newest_merge_time(&repo);
+    let seconds = |from: OffsetDateTime, to: OffsetDateTime| (to - from).as_seconds_f64();
     assert_eq!(
         test_support::histogram_sum(
             "pod.spec.lead_time",
-            &[("pod.product", product.as_str()), ("phase", "build")]
+            &[
+                ("pod.product", pod.name.as_str()),
+                ("phase", "waiting_for_user"),
+                ("spec.id", "g"),
+                ("spec.revisions", "0"),
+            ]
         ),
-        Some(3780.0)
+        Some(seconds(ready, approved))
+    );
+    assert_eq!(
+        test_support::histogram_sum(
+            "pod.spec.lead_time",
+            &[
+                ("pod.product", pod.name.as_str()),
+                ("phase", "build"),
+                ("spec.id", "g"),
+            ]
+        ),
+        Some(seconds(approved, merged))
+    );
+}
+
+#[tokio::test]
+async fn a_stage_records_build_but_not_waiting_again() {
+    let pod = Pod::new();
+    let repo = pod.repo("main");
+    approved_spec(&repo, "away-web-app").await;
+    let (mut stats, _) = stats(one_product(&pod, &repo));
+    stats.poll().await;
+
+    merge_branch(&repo, "away-web-app", "x\n");
+    stats.poll().await;
+    merge_branch(&repo, "away-web-app-1b", "y\n");
+    stats.poll().await;
+
+    let waiting = lead_time_series(&pod.name, "waiting_for_user");
+    assert_eq!(waiting.len(), 1, "{waiting:?}");
+    assert_eq!(waiting[0].1, 1);
+    assert_eq!(
+        keys(&waiting[0].0),
+        BTreeSet::from(["pod.product", "phase", "spec.revisions", "spec.id"])
+    );
+    let mut build = lead_time_series(&pod.name, "build");
+    build.sort_by_key(|(attributes, _)| attributes.get("spec.stage").cloned());
+    assert_eq!(build.len(), 2, "{build:?}");
+    assert_eq!(build[0].0.get("spec.stage"), None);
+    assert_eq!(build[1].0.get("spec.stage").map(String::as_str), Some("1b"));
+    let base = ["pod.product", "phase", "spec.revisions", "spec.id"];
+    let staged = [base.as_slice(), &["spec.stage"]].concat();
+    assert_eq!(keys(&build[0].0), base.into_iter().collect());
+    assert_eq!(keys(&build[1].0), staged.into_iter().collect());
+    assert_eq!((build[0].1, build[1].1), (1, 1));
+}
+
+#[tokio::test]
+async fn waiting_is_recorded_on_the_specs_oldest_merge() {
+    let pod = Pod::new();
+    let repo = pod.repo("main");
+    approved_spec(&repo, "s").await;
+    approved_spec(&repo, "t").await;
+    let (mut stats, _) = stats(one_product(&pod, &repo));
+    stats.poll().await;
+
+    merge_branch(&repo, "s-1", "a\n");
+    stats.poll().await;
+    merge_branch(&repo, "s", "b\n");
+    stats.poll().await;
+    merge_branch(&repo, "t", "c\n");
+    stats.poll().await;
+    git(&repo, &["branch", "-q", "-D", "t"]);
+    merge_branch(&repo, "t", "d\n");
+    stats.poll().await;
+
+    let of = |id: &str, phase: &str| -> Vec<_> {
+        lead_time_series(&pod.name, phase)
+            .into_iter()
+            .filter(|(attributes, _)| attributes["spec.id"] == id)
+            .collect()
+    };
+    let waiting = of("s", "waiting_for_user");
+    assert_eq!(waiting.len(), 1, "{waiting:?}");
+    assert_eq!(waiting[0].1, 1);
+    assert_eq!(
+        waiting[0].0.get("spec.stage").map(String::as_str),
+        Some("1")
+    );
+    let waiting = of("t", "waiting_for_user");
+    assert_eq!(waiting.iter().map(|(_, count)| count).sum::<u64>(), 1);
+    let build = of("t", "build");
+    assert_eq!(build.iter().map(|(_, count)| count).sum::<u64>(), 2);
+}
+
+#[tokio::test]
+async fn a_merge_without_an_approval_records_no_lead_time() {
+    let pod = Pod::new();
+    let repo = pod.repo("main");
+    let specs = repo.join(".superpowers/pod/specs");
+    write(&specs.join("h.md"), "# Spec\n");
+    write(&specs.join("h.url"), "https://example.com\n");
+    let (mut stats, _) = stats(one_product(&pod, &repo));
+    stats.poll().await;
+
+    merge_branch(&repo, "h", "x\n");
+    stats.poll().await;
+
+    assert_eq!(
+        test_support::histogram_sum("pod.spec.lead_time", &[("pod.product", pod.name.as_str())]),
+        None
+    );
+    assert_eq!(
+        test_support::counter_value(
+            "pod.merges",
+            &[("pod.product", pod.name.as_str()), ("spec.id", "h")]
+        ),
+        Some(1)
     );
 }
 

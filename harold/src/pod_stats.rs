@@ -746,10 +746,7 @@ pub(crate) struct SpecBook {
 
 impl SpecBook {
     /// The first call per product records states and reports nothing. Later calls log one
-    /// line per change and, on a change from a known state to Merged, record
-    /// pod.spec.lead_time for each phase it can compute. A spec first seen merged records
-    /// none, so a spec seen again records its lead time once. Returns the changes as
-    /// (spec id, new state).
+    /// line per change. Returns the changes as (spec id, new state).
     pub(crate) fn observe(
         &mut self,
         product: &str,
@@ -779,9 +776,6 @@ impl SpecBook {
                 },
                 "spec state changed"
             );
-            if spec.state == SpecState::Merged && before.is_some() {
-                record_lead_time(product, spec);
-            }
             changes.push((spec.id.clone(), spec.state));
         }
         changes
@@ -793,30 +787,54 @@ fn rfc3339(time: OffsetDateTime) -> String {
         .unwrap_or_default()
 }
 
-/// Records the two phases of a merged spec: waiting for the user (ready to approved) and
-/// the build (approved to merged). A phase missing a time, or with a negative length, is
-/// skipped.
-fn record_lead_time(product: &str, spec: &SpecFacts) {
+/// Whether the merge at `reflog[entry]` is the oldest in the reflog for spec `id`: no
+/// older entry (a higher index) names a merge that counts under `id`.
+fn first_merge(
+    reflog: &[ReflogEntry],
+    entry: usize,
+    id: &str,
+    is_spec: impl Fn(&str) -> bool,
+) -> bool {
+    !reflog[entry + 1..].iter().any(|older| {
+        merge_name(&older.subject).is_some_and(|name| spec_ref(&name, &is_spec).id == id)
+    })
+}
+
+/// Records the phases of one counted merge of `spec`, merged at `merged_at`: waiting for
+/// the user (ready to approved), only when `first` is set, as a spec waits once however
+/// many merges it takes, and the build (approved to merged). A phase missing a time, or
+/// with a negative length, is skipped.
+fn record_lead_time(
+    product: &str,
+    spec: &SpecRef,
+    facts: &SpecFacts,
+    merged_at: OffsetDateTime,
+    first: bool,
+) {
     let phases = [
-        ("waiting_for_user", spec.ready_at, spec.approved_at),
-        ("build", spec.approved_at, spec.merged_at),
+        ("waiting_for_user", first, facts.ready_at, facts.approved_at),
+        ("build", true, facts.approved_at, Some(merged_at)),
     ];
-    for (phase, from, to) in phases {
-        let (Some(from), Some(to)) = (from, to) else {
+    for (phase, wanted, from, to) in phases {
+        let (true, Some(from), Some(to)) = (wanted, from, to) else {
             continue;
         };
         let seconds = (to - from).as_seconds_f64();
         if seconds < 0.0 {
             continue;
         }
-        telemetry::instruments().pod_spec_lead_time.record(
-            seconds,
-            &[
-                KeyValue::new("pod.product", product.to_owned()),
-                KeyValue::new("phase", phase),
-                KeyValue::new("spec.revisions", i64::from(spec.revisions)),
-            ],
-        );
+        let mut attributes = vec![
+            KeyValue::new("pod.product", product.to_owned()),
+            KeyValue::new("phase", phase),
+            KeyValue::new("spec.revisions", i64::from(facts.revisions)),
+            KeyValue::new("spec.id", spec.id.clone()),
+        ];
+        if let Some(stage) = &spec.stage {
+            attributes.push(KeyValue::new("spec.stage", stage.clone()));
+        }
+        telemetry::instruments()
+            .pod_spec_lead_time
+            .record(seconds, &attributes);
     }
 }
 
@@ -960,9 +978,9 @@ impl<G: Git> PodStats<G> {
     }
 
     /// Reads the product's specs and records its merges, each under the spec it names
-    /// (and its stage), from one read of the base branch's tip and reflog. Specs are read
-    /// first, so a pod folder that cannot be read leaves the tip where it was and the
-    /// merges are counted by a later poll.
+    /// (and its stage) and with that merge's lead times, from one read of the base
+    /// branch's tip and reflog. Specs are read first, so a pod folder that cannot be read
+    /// leaves the tip where it was and the merges are counted by a later poll.
     async fn poll_history(
         &mut self,
         product: &Product,
@@ -1000,6 +1018,21 @@ impl<G: Git> PodStats<G> {
             for merge in &merges {
                 let spec = merge.name.as_deref().map(|name| spec_ref(name, is_spec));
                 record_merge(&product.name, merge, spec.as_ref());
+                let (Some(spec), Some(entry)) = (spec, merge.entry) else {
+                    continue;
+                };
+                let Some(facts) = specs
+                    .iter()
+                    .find(|facts| facts.id == spec.id && facts.approved_at.is_some())
+                else {
+                    continue;
+                };
+                let Ok(merged_at) = OffsetDateTime::from_unix_timestamp(history.reflog[entry].time)
+                else {
+                    continue;
+                };
+                let first = first_merge(&history.reflog, entry, &spec.id, is_spec);
+                record_lead_time(&product.name, &spec, facts, merged_at, first);
             }
         }
         self.specs.observe(&product.name, &specs);
