@@ -26,6 +26,7 @@ use crate::pod_stats;
 use crate::settings::Settings;
 use crate::timed_prompts::{self, LineOutcome, Ports, TmuxPorts, Writer};
 
+pub(crate) mod backlog;
 pub(crate) mod questions;
 
 pub(crate) type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
