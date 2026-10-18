@@ -180,12 +180,12 @@ impl QuestionStore for FailingStore {
 
     async fn start_batch(
         &self,
-        ids: &[String],
+        answers: &[(String, u32)],
         text: &str,
         now_ms: i64,
-    ) -> Result<StartedBatch, StoreError> {
+    ) -> Result<Option<StartedBatch>, StoreError> {
         self.check()?;
-        self.inner.start_batch(ids, text, now_ms).await
+        self.inner.start_batch(answers, text, now_ms).await
     }
 
     async fn started_batch(&self) -> Result<Option<StartedBatch>, StoreError> {

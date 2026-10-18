@@ -8,7 +8,9 @@ use tokio::task::JoinHandle;
 
 use super::*;
 use crate::tools::questions::schema::{self, Kind};
-use crate::tools::questions::store::{QuestionStore, TursoQuestionStore};
+use crate::tools::questions::store::{
+    Listing, QuestionStore, Refusal, StartedBatch, StoreError, TursoQuestionStore,
+};
 use crate::tools::questions::test_support::*;
 use crate::tools::{Typing, questions};
 
@@ -107,6 +109,116 @@ fn ready_with(answers: Vec<(&str, pb::Question, schema::Answer)>, later: &[&str]
             .collect(),
         later: later.iter().map(|id| id.to_string()).collect(),
     }
+}
+
+/// Forwards to a real store, but puts `race` just before the first
+/// `start_batch`, as a write landing between `ready` and `start_batch`.
+struct RacingStore {
+    inner: Arc<TursoQuestionStore>,
+    race: std::sync::Mutex<Option<pb::Question>>,
+}
+
+impl QuestionStore for RacingStore {
+    async fn put(&self, question: schema::Question, now_ms: i64) -> Result<u32, StoreError> {
+        self.inner.put(question, now_ms).await
+    }
+
+    async fn dismiss(
+        &self,
+        id: &str,
+        reason: &str,
+        now_ms: i64,
+    ) -> Result<Result<u32, Refusal>, StoreError> {
+        self.inner.dismiss(id, reason, now_ms).await
+    }
+
+    async fn reorder(&self, ids: &[String], now_ms: i64) -> Result<(), StoreError> {
+        self.inner.reorder(ids, now_ms).await
+    }
+
+    async fn list(&self, now_ms: i64) -> Result<Listing, StoreError> {
+        self.inner.list(now_ms).await
+    }
+
+    async fn answer(
+        &self,
+        id: &str,
+        version: u32,
+        answer: impl FnOnce(&schema::Question) -> Result<schema::Answer, String> + Send,
+        now_ms: i64,
+    ) -> Result<Result<Result<(), String>, Refusal>, StoreError> {
+        self.inner.answer(id, version, answer, now_ms).await
+    }
+
+    async fn defer(&self, id: &str, now_ms: i64) -> Result<Result<u32, Refusal>, StoreError> {
+        self.inner.defer(id, now_ms).await
+    }
+
+    async fn ready(&self) -> Result<Option<Ready>, StoreError> {
+        self.inner.ready().await
+    }
+
+    async fn start_batch(
+        &self,
+        answers: &[(String, u32)],
+        text: &str,
+        now_ms: i64,
+    ) -> Result<Option<StartedBatch>, StoreError> {
+        let race = self.race.lock().unwrap().take();
+        if let Some(question) = race {
+            put(&*self.inner, question).await;
+        }
+        self.inner.start_batch(answers, text, now_ms).await
+    }
+
+    async fn started_batch(&self) -> Result<Option<StartedBatch>, StoreError> {
+        self.inner.started_batch().await
+    }
+
+    async fn batch_typed(&self, batch_id: i64, now_ms: i64) -> Result<(), StoreError> {
+        self.inner.batch_typed(batch_id, now_ms).await
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_re_put_between_ready_and_start_types_nothing_until_answered_again() {
+    let folder = TempFolder::new();
+    let inner = open_store(&folder).await;
+    put(&*inner, question("Q1", "s1", "abc")).await;
+    put(&*inner, question("Q2", "s2", "abc")).await;
+    answer_a(&*inner, "Q1").await;
+    answer_a(&*inner, "Q2").await;
+    let racing = Arc::new(RacingStore {
+        inner: Arc::clone(&inner),
+        race: std::sync::Mutex::new(Some(question("Q1", "s1", "new"))),
+    });
+    let sender = spawn_sender(&racing, FakeTyping::typed_ok());
+    pass(30).await;
+    assert!(
+        sender.typing.calls().is_empty(),
+        "the stale v1 line was typed: {:?}",
+        sender.typing.texts()
+    );
+    assert!(racing.race.lock().unwrap().is_none(), "the race ran");
+    assert_eq!(inner.started_batch().await.unwrap(), None);
+
+    answer(
+        &*inner,
+        "Q1",
+        2,
+        Kind::FreeText,
+        vec![free_pick(0, "z", "second")],
+        "",
+    )
+    .await;
+    sender.wake.notify_one();
+    until("the batch is typed", || sender.typing.calls().len() == 1).await;
+    pass(30).await;
+    let expected = "ANSWERS 2 | Q2 s2 sha abc: Which? A | Q1 s1 sha new: Which? \"second\"";
+    assert_eq!(sender.typing.texts(), vec![expected.to_string()]);
+    println!(
+        "evidence: re-put of Q1 between ready and start_batch: nothing typed for 30 s; after Q1 v2 was answered: {expected}"
+    );
 }
 
 #[test]

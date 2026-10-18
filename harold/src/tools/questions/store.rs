@@ -94,12 +94,15 @@ pub(super) trait QuestionStore: Send + Sync + 'static {
         now_ms: i64,
     ) -> impl Future<Output = Result<std::result::Result<u32, Refusal>>> + Send;
     fn ready(&self) -> impl Future<Output = Result<Option<Ready>>> + Send;
+    /// Records a batch of the answers `ready` returned, as `(id, version)`.
+    /// Stores nothing and returns `None` when, by now, a question is waiting
+    /// or a listed answer is no longer answered and unsent at that version.
     fn start_batch(
         &self,
-        ids: &[String],
+        answers: &[(String, u32)],
         text: &str,
         now_ms: i64,
-    ) -> impl Future<Output = Result<StartedBatch>> + Send;
+    ) -> impl Future<Output = Result<Option<StartedBatch>>> + Send;
     fn started_batch(&self) -> impl Future<Output = Result<Option<StartedBatch>>> + Send;
     fn batch_typed(&self, batch_id: i64, now_ms: i64) -> impl Future<Output = Result<()>> + Send;
 }
@@ -524,12 +527,34 @@ async fn ready_in(conn: &Connection) -> Result<Option<Ready>> {
     }))
 }
 
+/// Whether the question is still answered, unsent, at this version.
+async fn unsent_at(conn: &Connection, id: &str, version: u32) -> Result<bool> {
+    let mut rows = conn
+        .query(
+            "SELECT 1 FROM questions WHERE id = ?1 AND version = ?2 \
+             AND state = 'answered' AND batch_id IS NULL",
+            (id, i64::from(version)),
+        )
+        .await?;
+    Ok(rows.next().await?.is_some())
+}
+
 async fn start_batch_in(
     conn: &Connection,
-    ids: &[String],
+    answers: &[(String, u32)],
     text_of_batch: &str,
     now_ms: i64,
-) -> Result<StartedBatch> {
+) -> Result<Option<StartedBatch>> {
+    // `ready` and this call take the lock apart, so a write may land between
+    // them: a new question to wait for, or an answer replaced.
+    if answers.is_empty() || !ids_in_state(conn, "waiting").await?.is_empty() {
+        return Ok(None);
+    }
+    for (id, version) in answers {
+        if !unsent_at(conn, id, *version).await? {
+            return Ok(None);
+        }
+    }
     conn.execute(
         "INSERT INTO batches (text, started_at_ms) VALUES (?1, ?2)",
         (text_of_batch, now_ms),
@@ -541,7 +566,7 @@ async fn start_batch_in(
         None => return Err(StoreError::Data("batch was not stored".into())),
     };
     drop(rows);
-    for question in ids {
+    for (question, _) in answers {
         conn.execute(
             "UPDATE questions SET batch_id = ?2, updated_at_ms = ?3 \
              WHERE id = ?1 AND state = 'answered' AND batch_id IS NULL",
@@ -549,10 +574,10 @@ async fn start_batch_in(
         )
         .await?;
     }
-    Ok(StartedBatch {
+    Ok(Some(StartedBatch {
         id,
         text: text_of_batch.to_string(),
-    })
+    }))
 }
 
 async fn started_batch_in(conn: &Connection) -> Result<Option<StartedBatch>> {
@@ -648,10 +673,15 @@ impl QuestionStore for TursoQuestionStore {
         ready_in(&conn).await
     }
 
-    async fn start_batch(&self, ids: &[String], text: &str, now_ms: i64) -> Result<StartedBatch> {
+    async fn start_batch(
+        &self,
+        answers: &[(String, u32)],
+        text: &str,
+        now_ms: i64,
+    ) -> Result<Option<StartedBatch>> {
         let conn = self.conn.lock().await;
         begin(&conn).await?;
-        finish(&conn, start_batch_in(&conn, ids, text, now_ms).await).await
+        finish(&conn, start_batch_in(&conn, answers, text, now_ms).await).await
     }
 
     async fn started_batch(&self) -> Result<Option<StartedBatch>> {

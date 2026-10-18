@@ -100,8 +100,17 @@ enum Next {
     Idle,
     /// A batch is pending: try again after `RETRY`, or sooner on a write.
     Retry,
-    /// A batch was just typed: look again at once.
+    /// A batch was just typed, or could not start because the answers changed:
+    /// look again at once.
     Again,
+}
+
+/// What the sender found to type.
+enum Found {
+    Batch(StartedBatch),
+    Nothing,
+    /// The answers changed between `ready` and `start_batch`; nothing was started.
+    Changed,
 }
 
 struct Sender<S> {
@@ -158,11 +167,13 @@ impl<S: QuestionStore> Sender<S> {
             return self.mark_typed(batch_id, how).await;
         }
         let batch = match self.next_batch().await {
-            Ok(Some(batch)) => batch,
-            Ok(None) => {
+            Ok(Found::Batch(batch)) => batch,
+            Ok(Found::Nothing) => {
                 self.waiting_logged = None;
                 return Next::Idle;
             }
+            // A write landed after `ready`: build the batch again from what is there now.
+            Ok(Found::Changed) => return Next::Again,
             Err(_) => {
                 self.log_waiting(None, "store_failed");
                 return Next::Retry;
@@ -185,19 +196,23 @@ impl<S: QuestionStore> Sender<S> {
     }
 
     /// The started batch from before, else a new one when answers are ready.
-    async fn next_batch(&self) -> Result<Option<StartedBatch>, StoreError> {
+    async fn next_batch(&self) -> Result<Found, StoreError> {
         if let Some(batch) = self.store.started_batch().await? {
-            return Ok(Some(batch));
+            return Ok(Found::Batch(batch));
         }
         let Some(ready) = self.store.ready().await? else {
-            return Ok(None);
+            return Ok(Found::Nothing);
         };
-        let ids: Vec<String> = ready.answers.iter().map(|(id, ..)| id.clone()).collect();
-        let batch = self
+        let answers: Vec<(String, u32)> = ready
+            .answers
+            .iter()
+            .map(|(id, version, ..)| (id.clone(), *version))
+            .collect();
+        let started = self
             .store
-            .start_batch(&ids, &batch_line(&ready), now_ms())
+            .start_batch(&answers, &batch_line(&ready), now_ms())
             .await?;
-        Ok(Some(batch))
+        Ok(started.map_or(Found::Changed, Found::Batch))
     }
 
     async fn mark_typed(&mut self, batch_id: i64, how: Typing) -> Next {

@@ -54,6 +54,19 @@ fn ids(items: &[&str]) -> Vec<String> {
     items.iter().map(|s| s.to_string()).collect()
 }
 
+fn at_v1(items: &[&str]) -> Vec<(String, u32)> {
+    items.iter().map(|s| (s.to_string(), 1)).collect()
+}
+
+/// The `(id, version)` of each answer `ready` returns.
+fn ready_answers(ready: &Ready) -> Vec<(String, u32)> {
+    ready
+        .answers
+        .iter()
+        .map(|(id, version, ..)| (id.clone(), *version))
+        .collect()
+}
+
 async fn listed_ids(store: &TursoQuestionStore) -> Vec<(String, bool)> {
     store
         .list(0)
@@ -298,9 +311,10 @@ async fn a_batch_typed_marks_answers_sent_and_deferred_waiting() {
     store.defer("Q2", 2).await.unwrap().unwrap();
 
     let batch = store
-        .start_batch(&ids(&["Q1", "Q3"]), "ANSWERS 2", 10)
+        .start_batch(&at_v1(&["Q1", "Q3"]), "ANSWERS 2", 10)
         .await
-        .unwrap();
+        .unwrap()
+        .expect("batch started");
     assert_eq!(batch.text, "ANSWERS 2");
     // started answers are no longer unsent
     assert!(store.ready().await.unwrap().is_none());
@@ -325,9 +339,10 @@ async fn a_started_batch_survives_reopening() {
     store.put(question("Q1"), 1).await.unwrap();
     answer_ok(&store, "Q1", 1).await;
     let first = store
-        .start_batch(&ids(&["Q1"]), "ANSWERS 1", 10)
+        .start_batch(&at_v1(&["Q1"]), "ANSWERS 1", 10)
         .await
-        .unwrap();
+        .unwrap()
+        .expect("batch started");
     drop(store);
 
     let store = TursoQuestionStore::open(&temp.0).await.unwrap();
@@ -335,6 +350,75 @@ async fn a_started_batch_survives_reopening() {
     assert!(store.ready().await.unwrap().is_none());
     store.batch_typed(first.id, 11).await.unwrap();
     assert!(store.started_batch().await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn start_batch_refuses_when_a_question_waits() {
+    let temp = TempFolder::new();
+    let store = TursoQuestionStore::open(&temp.0).await.unwrap();
+    store.put(question("Q1"), 1).await.unwrap();
+    answer_ok(&store, "Q1", 1).await;
+    let ready = store.ready().await.unwrap().expect("Q1 is ready");
+
+    // Q2 lands between `ready` and `start_batch`.
+    store.put(question("Q2"), 2).await.unwrap();
+    let started = store
+        .start_batch(&ready_answers(&ready), "ANSWERS 1", 10)
+        .await
+        .unwrap();
+    assert_eq!(started, None);
+    assert_eq!(store.started_batch().await.unwrap(), None);
+
+    // Q1 was not claimed: once Q2 is answered, both are ready together.
+    answer_ok(&store, "Q2", 1).await;
+    let ready = store.ready().await.unwrap().unwrap();
+    assert_eq!(ready_answers(&ready), at_v1(&["Q1", "Q2"]));
+    println!(
+        "evidence: start_batch with Q2 waiting -> None, no batch stored; later ready = Q1, Q2"
+    );
+}
+
+#[tokio::test]
+async fn start_batch_refuses_when_a_listed_answer_changed() {
+    let temp = TempFolder::new();
+    let store = TursoQuestionStore::open(&temp.0).await.unwrap();
+    store.put(question("Q1"), 1).await.unwrap();
+    store.put(question("Q2"), 1).await.unwrap();
+    answer_ok(&store, "Q1", 1).await;
+    answer_ok(&store, "Q2", 1).await;
+    let ready = store.ready().await.unwrap().expect("Q1 and Q2 are ready");
+
+    // The chief re-puts the answered Q1 between `ready` and `start_batch`.
+    assert_eq!(store.put(question("Q1"), 2).await.unwrap(), 2);
+    let started = store
+        .start_batch(&ready_answers(&ready), "ANSWERS 2 (stale)", 10)
+        .await
+        .unwrap();
+    assert_eq!(started, None);
+    assert_eq!(store.started_batch().await.unwrap(), None);
+
+    // Even answered again, Q1 v2 is not the v1 answer `ready` listed.
+    answer_ok(&store, "Q1", 2).await;
+    let started = store
+        .start_batch(&ready_answers(&ready), "ANSWERS 2 (stale)", 11)
+        .await
+        .unwrap();
+    assert_eq!(started, None);
+
+    let ready = store.ready().await.unwrap().unwrap();
+    assert_eq!(
+        ready_answers(&ready),
+        vec![("Q2".to_string(), 1), ("Q1".to_string(), 2)]
+    );
+    let batch = store
+        .start_batch(&ready_answers(&ready), "ANSWERS 2", 12)
+        .await
+        .unwrap()
+        .expect("the fresh answers start a batch");
+    assert_eq!(store.started_batch().await.unwrap(), Some(batch));
+    println!(
+        "evidence: start_batch after a re-put of Q1 -> None, and again after Q1 v2 was answered; the fresh ready (Q2 v1, Q1 v2) starts it"
+    );
 }
 
 #[tokio::test]
