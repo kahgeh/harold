@@ -9,6 +9,7 @@ use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 use turso::Connection;
 
+use super::markdown::{BacklogImport, QueueImport};
 use super::schema::{Item, MAX_ITEMS, Note, NoteKind, Place, QueueItem, QueueListing, QueueState};
 
 const DATABASE: &str = "backlog.db";
@@ -163,6 +164,23 @@ pub(super) trait BacklogStore: Send + Sync + 'static {
     fn list_queue(&self, done_since_ms: i64) -> impl Future<Output = Result<QueueListing>> + Send;
     /// Whether the queue has no item and no note.
     fn queue_is_empty(&self) -> impl Future<Output = Result<bool>> + Send;
+    /// Stores a parsed backlog in one transaction: the items ranked in order,
+    /// then the notes in order. A product with any item or note is `NotEmpty`.
+    fn import_backlog(
+        &self,
+        product: &str,
+        import: BacklogImport,
+        now_ms: i64,
+    ) -> impl Future<Output = Result<std::result::Result<(), Refusal>>> + Send;
+    /// Stores a parsed queue in one transaction, with ids `N1` up in the order
+    /// Now, parked, done; the done items are dated `done_at_ms`. A queue with
+    /// any item or a note is `NotEmpty`.
+    fn import_queue(
+        &self,
+        import: QueueImport,
+        done_at_ms: i64,
+        now_ms: i64,
+    ) -> impl Future<Output = Result<std::result::Result<(), Refusal>>> + Send;
 }
 
 pub(super) struct TursoBacklogStore {
@@ -912,6 +930,68 @@ async fn queue_is_empty_in(conn: &Connection) -> Result<bool> {
     Ok(rows.next().await?.is_none())
 }
 
+async fn import_backlog_in(
+    conn: &Connection,
+    product: &str,
+    import: &BacklogImport,
+    now_ms: i64,
+) -> Result<std::result::Result<(), Refusal>> {
+    if !product_is_empty_in(conn, product).await? {
+        return Ok(Err(Refusal::NotEmpty));
+    }
+    for item in &import.items {
+        if let Err(refusal) = put_item_in(conn, product, item, now_ms).await? {
+            return Ok(Err(refusal));
+        }
+    }
+    for (kind, title, body) in &import.notes {
+        insert_note(conn, product, *kind, title, body, now_ms).await?;
+    }
+    Ok(Ok(()))
+}
+
+async fn import_queue_in(
+    conn: &Connection,
+    import: &QueueImport,
+    done_at_ms: i64,
+    now_ms: i64,
+) -> Result<std::result::Result<(), Refusal>> {
+    if !queue_is_empty_in(conn).await? {
+        return Ok(Err(Refusal::NotEmpty));
+    }
+    if !import.note.is_empty() {
+        set_queue_note_in(conn, &import.note).await?;
+    }
+    let now = import
+        .now
+        .iter()
+        .map(|text| (QueueState::Now, 0, text, None));
+    let parked = (1..)
+        .zip(&import.parked)
+        .map(|(position, text)| (QueueState::Parked, position, text, None));
+    let done = import
+        .done
+        .iter()
+        .map(|text| (QueueState::Done, 0, text, Some(done_at_ms)));
+    // The queue is empty, so the ids start at N1.
+    for (k, (state, position, text, done_at)) in (1..).zip(now.chain(parked).chain(done)) {
+        conn.execute(
+            "INSERT INTO queue_items (id, state, position, text, done_at_ms, updated_at_ms) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            (
+                format!("N{k}"),
+                state.as_str(),
+                position,
+                text.as_str(),
+                done_at,
+                now_ms,
+            ),
+        )
+        .await?;
+    }
+    Ok(Ok(()))
+}
+
 impl BacklogStore for TursoBacklogStore {
     async fn put_item(
         &self,
@@ -1092,6 +1172,36 @@ impl BacklogStore for TursoBacklogStore {
         let conn = self.conn.lock().await;
         roll_back_abandoned(&conn).await?;
         queue_is_empty_in(&conn).await
+    }
+
+    async fn import_backlog(
+        &self,
+        product: &str,
+        import: BacklogImport,
+        now_ms: i64,
+    ) -> Result<std::result::Result<(), Refusal>> {
+        let conn = self.conn.lock().await;
+        begin(&conn).await?;
+        finish_refusable(
+            &conn,
+            import_backlog_in(&conn, product, &import, now_ms).await,
+        )
+        .await
+    }
+
+    async fn import_queue(
+        &self,
+        import: QueueImport,
+        done_at_ms: i64,
+        now_ms: i64,
+    ) -> Result<std::result::Result<(), Refusal>> {
+        let conn = self.conn.lock().await;
+        begin(&conn).await?;
+        finish_refusable(
+            &conn,
+            import_queue_in(&conn, &import, done_at_ms, now_ms).await,
+        )
+        .await
     }
 }
 

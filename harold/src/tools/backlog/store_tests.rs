@@ -1,4 +1,5 @@
 use super::*;
+use crate::tools::backlog::markdown::{self, BacklogImport, QueueImport};
 use crate::tools::backlog::test_support::{TempFolder, item};
 
 const P: &str = "harold";
@@ -626,4 +627,118 @@ async fn a_queue_with_only_an_item_is_not_empty() {
     let store = open_store(&folder).await;
     add(&store, "a", Place::End).await;
     assert!(!store.queue_is_empty().await.unwrap());
+}
+
+const BACKLOG: &str = include_str!("fixtures/backlog.md");
+const QUEUE: &str = include_str!("fixtures/queue.md");
+
+fn backlog_import() -> BacklogImport {
+    markdown::parse_backlog(BACKLOG).unwrap()
+}
+
+fn queue_import() -> QueueImport {
+    markdown::parse_queue(QUEUE).unwrap()
+}
+
+#[tokio::test]
+async fn importing_twice_is_not_empty_and_stores_nothing_the_second_time() {
+    let folder = TempFolder::new();
+    let store = open_store(&folder).await;
+    assert_eq!(
+        store.import_backlog(P, backlog_import(), 1).await.unwrap(),
+        Ok(())
+    );
+    assert_eq!(
+        store.import_backlog(P, backlog_import(), 2).await.unwrap(),
+        Err(Refusal::NotEmpty)
+    );
+    assert_eq!(store.list_items(P).await.unwrap().len(), 5);
+    let notes = store.list_notes(P, None, None).await.unwrap();
+    assert_eq!(notes.len(), 12);
+    assert!(notes.iter().all(|note| note.created_at_ms == 1));
+
+    assert_eq!(
+        store.import_queue(queue_import(), 5, 1).await.unwrap(),
+        Ok(())
+    );
+    assert_eq!(
+        store.import_queue(queue_import(), 6, 2).await.unwrap(),
+        Err(Refusal::NotEmpty)
+    );
+    let listing = store.list_queue(0).await.unwrap();
+    assert_eq!(listing.parked.len(), 4);
+    assert_eq!(listing.done.len(), 2);
+    assert!(listing.done.iter().all(|item| item.done_at_ms == 5));
+}
+
+#[tokio::test]
+async fn a_product_with_a_note_refuses_an_import_and_keeps_only_that_note() {
+    let folder = TempFolder::new();
+    let store = open_store(&folder).await;
+    store
+        .add_note(P, NoteKind::Rule, "r", "r", 1)
+        .await
+        .unwrap();
+    assert_eq!(
+        store.import_backlog(P, backlog_import(), 2).await.unwrap(),
+        Err(Refusal::NotEmpty)
+    );
+    assert!(store.list_items(P).await.unwrap().is_empty());
+    assert_eq!(store.list_notes(P, None, None).await.unwrap().len(), 1);
+    // Another product is still empty and takes the import.
+    assert_eq!(
+        store
+            .import_backlog("other", backlog_import(), 3)
+            .await
+            .unwrap(),
+        Ok(())
+    );
+
+    store.set_queue_note("kept").await.unwrap();
+    assert_eq!(
+        store.import_queue(queue_import(), 4, 4).await.unwrap(),
+        Err(Refusal::NotEmpty)
+    );
+    let listing = store.list_queue(0).await.unwrap();
+    assert_eq!((listing.now, listing.parked.len()), (None, 0));
+    assert_eq!(listing.note, "kept");
+}
+
+#[tokio::test]
+async fn an_import_round_trips_through_the_store() {
+    let folder = TempFolder::new();
+    let store = open_store(&folder).await;
+    store
+        .import_backlog(P, backlog_import(), 1)
+        .await
+        .unwrap()
+        .unwrap();
+    let items = store.list_items(P).await.unwrap();
+    let notes = store.list_notes(P, None, None).await.unwrap();
+    let ranks: Vec<u32> = items.iter().map(|item| item.rank).collect();
+    assert_eq!(ranks, [1, 2, 3, 4, 5]);
+    let export = markdown::export_backlog(P, &items, &notes);
+    assert_eq!(
+        markdown::content_lines(&export),
+        markdown::content_lines(BACKLOG)
+    );
+
+    store
+        .import_queue(queue_import(), 9, 1)
+        .await
+        .unwrap()
+        .unwrap();
+    let listing = store.list_queue(0).await.unwrap();
+    let now = listing.now.as_ref().unwrap();
+    assert_eq!((now.id.as_str(), now.state), ("N1", QueueState::Now));
+    let positions: Vec<u32> = listing.parked.iter().map(|item| item.position).collect();
+    assert_eq!(positions, [1, 2, 3, 4]);
+    let export = markdown::export_queue(&listing);
+    assert_eq!(
+        markdown::content_lines(&export),
+        markdown::content_lines(QUEUE)
+    );
+    // The next item added gets the next id.
+    let added = store.add_queue_item("later", Place::End, 2).await.unwrap();
+    assert_eq!(added.unwrap().id, "N8");
 }
