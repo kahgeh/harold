@@ -99,6 +99,48 @@ visible. A failed request is reported as `MESSAGING ERROR: …`. See Harold's
 [operation reference](../docs/references/operation/README.md#pausing-messaging)
 for what the switch does.
 
+## Question block
+
+When the chief of pods has questions for you, the dash shows a yellow block above the agent list. It reads the queue from Harold's question tool every 2 seconds, and before each key that goes to the block. The block is hidden while no question waits. A new question never takes the focus from the agent list. See the [question queue reference](../docs/references/tools/questions.md) for how questions get in and what Harold does with the answers.
+
+The block shows the product and spec, the intro, the current decision with its options, and a key hint. Its title reads `<id> · n of m waiting`. The option the chief suggests is marked `(suggested)` and the highlight starts on it.
+
+### Focus and keys
+
+`Tab` moves the focus between the agent list and the block while the block shows. The block has a bright border with the focus and a dim one without. Footer hints show `tab question` while the block shows. Control and Alt chords never reach the block.
+
+With the focus on the block, in the decision view:
+
+| Key | Action |
+| --- | --- |
+| Up / Down | Move the highlight |
+| `Enter` | Pick the highlighted option and go to the next decision. After the last decision, show the summary. A free option opens a text field first |
+| `r` | Revise: type a note saying what to change, then `Enter` records it |
+| `x` | Reject: type a note saying why, then `Enter` records it |
+| `o` | Open the question's link |
+| `l` | Later: set the question aside and go on to the next one |
+| `Esc` | Step back one decision, dropping its pick. At the first decision, give the focus back to the list |
+
+In the summary, which lists each decision with its pick, `Enter` records the answer and `Esc` steps back. In a text field, type the text, `Backspace` removes the last character, `Enter` accepts it (blank text is not accepted) and `Esc` leaves the field. Text stops at 1,999 characters, since Harold refuses 2,000.
+
+A free option does not end the walk. The text you type becomes that decision's pick, and you go on to the next decision. The answer is recorded as free text when any pick is free.
+
+When Harold has everything it needs, it types one line of answers into the chief's pane. Deferred questions come back to the queue after that line is typed.
+
+### Notices
+
+A notice shows under the block until the next key:
+
+- `<id> changed, your picks were cleared`: the chief put the question again. Your picks are dropped and you start at its first decision.
+- `<id> dismissed: <reason>`: the chief withdrew the question, with its reason (`withdrawn` when none is known). The block moves to the next question.
+- `Harold can't save answers right now`: Harold could not store the answer or the deferral. Your picks stay; try again.
+
+### Reconnects
+
+If the queue cannot be read, or the stream to Harold is lost, the block hides but keeps your picks and any half-typed note. They come back when the next read succeeds and the question is unchanged. If the block had the focus, keys are ignored until `Tab` or `Esc` returns them to the list.
+
+If the question changes under a half-typed note or the summary, the block keeps showing the new question and holds its keys until you press `Esc` (or `Tab`). The footer says `esc to continue`. This stops letters typed for the old question from acting on the new one. `Esc` clears the notice and starts the shown question from its first decision.
+
 ## Reading status
 
 Each row has Harold's latest classified agent state:
