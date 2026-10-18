@@ -90,12 +90,16 @@ pub fn render(frame: &mut Frame<'_>, app: &App, now_ms: i64) {
         render_questions(frame, questions, view, lines, app.focus == Focus::Block);
     }
     render_workspace(frame, workspace, app, now_ms);
-    render_footer(
-        frame,
-        footer,
-        compact || area.width < WIDE_FOOTER_WIDTH,
-        question.is_some(),
-    );
+    if app.swallowing_keys() {
+        render_swallow_footer(frame, footer);
+    } else {
+        render_footer(
+            frame,
+            footer,
+            compact || area.width < WIDE_FOOTER_WIDTH,
+            question.is_some(),
+        );
+    }
     render_palette(frame, area, app);
 }
 
@@ -1131,6 +1135,22 @@ fn footer_hints(compact: bool) -> Vec<Span<'static>> {
             Span::raw(" quit "),
         ]
     }
+}
+
+/// While keys are swallowed after the question block hid under the focus, the footer
+/// says the one way out.
+fn render_swallow_footer(frame: &mut Frame<'_>, area: Rect) {
+    let line = Line::from(vec![
+        Span::styled(" Esc", Style::default().fg(INK)),
+        Span::styled(
+            " back to the list (the question block is away)",
+            Style::default().fg(Color::Yellow),
+        ),
+    ]);
+    frame.render_widget(
+        Paragraph::new(line).block(board_block().borders(Borders::ALL)),
+        area,
+    );
 }
 
 fn render_footer(frame: &mut Frame<'_>, area: Rect, compact: bool, questions: bool) {
@@ -3446,5 +3466,17 @@ mod tests {
             }
             row_with(&lines, "AGENT BLOCK OCCUPANCY");
         }
+    }
+
+    #[test]
+    fn the_footer_names_esc_while_keys_are_swallowed() {
+        let mut app = question_app(true);
+        app.hide_questions();
+        let lines = rendered_lines(&app, 140, 38, 100_000);
+        row_with(&lines, "Esc back to the list");
+        assert!(!lines.contains("Q25"), "the block is hidden");
+        app.handle_key(KeyCode::Esc);
+        let lines = rendered_lines(&app, 140, 38, 100_000);
+        row_with(&lines, "q quit");
     }
 }

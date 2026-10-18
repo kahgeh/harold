@@ -147,6 +147,9 @@ pub struct QuestionBlock {
     highlighted: usize,
     mode: Mode,
     notice: Option<String>,
+    /// Hidden after a failed read or a lost stream, with the picks, mode and note kept
+    /// for the next listing.
+    suspended: bool,
 }
 
 /// The notice when Harold could not save an answer or a deferral.
@@ -170,7 +173,10 @@ fn is_web_link(link: &str) -> bool {
 impl QuestionBlock {
     /// Takes the latest listing. The current question stays while it is listed at the same
     /// version; a higher version restarts it; a missing one is replaced with a notice.
+    /// A suspended block shows again, and keeps its state when its question is listed at
+    /// the same version.
     pub fn reconcile(&mut self, queue: Queue) {
+        self.suspended = false;
         self.queue = queue;
         let Some(id) = self.current.clone() else {
             self.select_first();
@@ -190,9 +196,30 @@ impl QuestionBlock {
         }
     }
 
-    /// Whether the block has anything to draw: a question or a notice.
+    /// Whether the block has anything to draw: a question or a notice, while not
+    /// suspended.
     pub fn is_visible(&self) -> bool {
-        !self.queue.questions.is_empty() || self.notice.is_some()
+        !self.suspended && (!self.queue.questions.is_empty() || self.notice.is_some())
+    }
+
+    /// Hides the block and keeps everything, until the next [`QuestionBlock::reconcile`].
+    /// It adds no notice.
+    pub fn suspend(&mut self) {
+        // An empty block has nothing to keep, and stays equal to a fresh one.
+        if self.is_visible() {
+            self.suspended = true;
+        }
+    }
+
+    /// The question in view, as (id, version, mode); `None` while hidden or showing
+    /// only a notice. A change here means keys typed before it were meant for something
+    /// else.
+    pub fn shown(&self) -> Option<(String, u32, Mode)> {
+        if !self.is_visible() {
+            return None;
+        }
+        let q = self.question()?;
+        Some((q.id.clone(), self.version, self.mode.clone()))
     }
 
     /// Sets a notice, for the runtime's own messages.
@@ -281,6 +308,9 @@ impl QuestionBlock {
 
     /// Handles one key and says what the runtime should do.
     pub fn handle_key(&mut self, code: KeyCode) -> BlockEffect {
+        if self.suspended {
+            return BlockEffect::None;
+        }
         if self.question().is_none() {
             if code == KeyCode::Esc {
                 self.notice = None;

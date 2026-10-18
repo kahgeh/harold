@@ -241,6 +241,9 @@ pub struct App {
     waiting: Vec<AgentIncarnation>,
     active_pane: Option<String>,
     focus_tracking: bool,
+    /// The block hid while it had the focus: keys are swallowed until Tab or Esc, so a
+    /// note being typed never turns into list commands.
+    swallowing_keys: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -326,6 +329,7 @@ impl App {
             waiting: Vec::new(),
             active_pane: None,
             focus_tracking: false,
+            swallowing_keys: false,
         }
     }
 
@@ -504,10 +508,20 @@ impl App {
         self.settle_focus();
     }
 
-    /// Hides the block without a notice, for when the queue cannot be read.
+    /// Hides the block without a notice, for when the queue cannot be read or the stream
+    /// is lost. The block keeps its picks, mode and note for the next listing. If it had
+    /// the focus, keys are swallowed until Tab or Esc.
     pub fn hide_questions(&mut self) {
-        self.questions = QuestionBlock::default();
+        self.questions.suspend();
+        if self.focus == Focus::Block {
+            self.swallowing_keys = true;
+        }
         self.settle_focus();
+    }
+
+    /// Whether keys are being swallowed after the block hid under the focus.
+    pub fn swallowing_keys(&self) -> bool {
+        self.swallowing_keys
     }
 
     /// Applies Harold's answer to a send.
@@ -518,9 +532,15 @@ impl App {
 
     /// Whether `key` should meet a fresh queue: it goes to the block, or it is `Tab`.
     pub fn wants_fresh_questions(&self, key: &KeyEvent) -> bool {
-        !self.search.editing
+        !self.swallowing_keys
+            && !self.search.editing
             && self.palette.is_none()
             && (self.focus == Focus::Block || key.code == KeyCode::Tab)
+    }
+
+    /// Whether `key` goes to the question block.
+    pub fn key_reaches_block(&self, key: &KeyEvent) -> bool {
+        self.wants_fresh_questions(key) && self.focus == Focus::Block && key.code != KeyCode::Tab
     }
 
     fn settle_focus(&mut self) {
@@ -731,6 +751,13 @@ impl App {
     /// or Alt, so Ctrl+C (pressed to leave a terminal app) never starts a call.
     pub fn handle_key(&mut self, key: impl Into<KeyEvent>) -> Effect {
         let key = key.into();
+        if self.swallowing_keys {
+            // Tab or Esc returns the keys to the list, which already has the focus.
+            if matches!(key.code, KeyCode::Tab | KeyCode::Esc) {
+                self.swallowing_keys = false;
+            }
+            return Effect::None;
+        }
         if self.search.editing {
             return self.handle_search_key(key.code);
         }
@@ -2732,5 +2759,51 @@ mod tests {
         app.hide_questions();
         assert!(!app.questions.is_visible());
         assert_eq!(app.focus, Focus::List);
+    }
+
+    #[test]
+    fn keys_after_the_block_hides_under_focus_do_not_reach_the_list() {
+        let mut app = call_app(CallState::Off);
+        app.observe_questions(question_queue(&["Q1"]));
+        app.handle_key(KeyCode::Tab);
+        app.handle_key(KeyCode::Char('r'));
+        app.handle_key(KeyCode::Char('a'));
+        // The list fails, or the stream ends, while a note is being typed.
+        app.hide_questions();
+        assert_eq!(app.focus, Focus::List);
+        assert!(app.swallowing_keys());
+        for code in [
+            KeyCode::Char('q'),
+            KeyCode::Enter,
+            KeyCode::Char('c'),
+            KeyCode::Char('r'),
+            KeyCode::Char('f'),
+            KeyCode::Char('/'),
+        ] {
+            assert_eq!(app.handle_key(code), Effect::None, "{code:?}");
+        }
+        assert!(!app.search.editing && app.palette.is_none());
+        assert_eq!(app.handle_key(KeyCode::Esc), Effect::None);
+        assert!(!app.swallowing_keys());
+        assert_eq!(
+            app.handle_key(KeyCode::Char('c')),
+            Effect::Call(CallAction::Start)
+        );
+
+        // Tab ends it too, and the list keeps the focus.
+        app.observe_questions(question_queue(&["Q1"]));
+        app.handle_key(KeyCode::Tab);
+        app.hide_questions();
+        assert_eq!(app.handle_key(KeyCode::Char('q')), Effect::None);
+        assert_eq!(app.handle_key(KeyCode::Tab), Effect::None);
+        assert_eq!(app.focus, Focus::List);
+        assert_eq!(app.handle_key(KeyCode::Char('q')), Effect::Quit);
+
+        // Without the focus, a hidden block swallows nothing.
+        let mut app = call_app(CallState::Off);
+        app.observe_questions(question_queue(&["Q1"]));
+        app.hide_questions();
+        assert!(!app.swallowing_keys());
+        assert_eq!(app.handle_key(KeyCode::Char('q')), Effect::Quit);
     }
 }

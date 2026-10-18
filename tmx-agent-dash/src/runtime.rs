@@ -415,7 +415,7 @@ where
             }
             () = &mut question_poll => {
                 let listed = stream.list_questions().await;
-                if core.questions_listed(listed).changed {
+                if core.questions_refreshed(listed) {
                     draw(terminal, &core.app, clock)?;
                 }
                 question_poll
@@ -445,16 +445,19 @@ where
                 }
             }
             item = input.recv() => {
-                if let Some(Ok(RuntimeInput::Key(key))) = &item
-                    && core.app.wants_fresh_questions(key)
-                {
-                    let in_block = core.app.focus == Focus::Block;
-                    let listed = stream.list_questions().await;
+                if let Some(Ok(RuntimeInput::Key(key))) = &item {
                     // A key meant for a question that just changed, went or hid is
-                    // dropped: the user has not seen what it would act on.
-                    if core.questions_listed(listed).interrupted && in_block {
-                        draw(terminal, &core.app, clock)?;
-                        continue;
+                    // dropped: the user has not seen what it would act on. The change
+                    // is found by this key's own read, or was flagged by an earlier one.
+                    let flagged = std::mem::take(&mut core.drop_next_block_key);
+                    if core.app.wants_fresh_questions(key) {
+                        let reaches_block = core.app.key_reaches_block(key);
+                        let listed = stream.list_questions().await;
+                        let changed = core.questions_listed(listed).question_changed;
+                        if reaches_block && (flagged || changed) {
+                            draw(terminal, &core.app, clock)?;
+                            continue;
+                        }
                     }
                 }
                 let control = handle_input(item, core, navigator)?;
@@ -462,7 +465,7 @@ where
                     let result = stream.answer_question(out).await;
                     core.app.question_sent(&out.id, result);
                     let listed = stream.list_questions().await;
-                    core.questions_listed(listed);
+                    core.questions_refreshed(listed);
                     draw(terminal, &core.app, clock)?;
                     continue;
                 }
@@ -471,7 +474,7 @@ where
                         core.app.questions.set_notice(UNAVAILABLE_NOTICE.into());
                     }
                     let listed = stream.list_questions().await;
-                    core.questions_listed(listed);
+                    core.questions_refreshed(listed);
                     draw(terminal, &core.app, clock)?;
                     continue;
                 }
@@ -962,8 +965,8 @@ enum Control {
 /// What a read of the question queue did to the block.
 struct QuestionsListed {
     changed: bool,
-    /// It hid the block, or brought a new notice: a changed or dismissed question.
-    interrupted: bool,
+    /// The question in view changed: its id, version or mode, or it hid or appeared.
+    question_changed: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -981,6 +984,9 @@ struct RuntimeCore {
     endpoint_display: String,
     /// How often the question queue is read; QUESTION_POLL_INTERVAL, shorter in tests.
     question_poll_interval: Duration,
+    /// A read no key asked for changed the question under the focus: the next key, if
+    /// it goes to the block, is dropped. Any key clears it.
+    drop_next_block_key: bool,
 }
 
 impl RuntimeCore {
@@ -1016,6 +1022,7 @@ impl RuntimeCore {
             navigation_issue,
             endpoint_display: sanitize_display(endpoint, ERROR_LIMIT),
             question_poll_interval: QUESTION_POLL_INTERVAL,
+            drop_next_block_key: false,
         }
     }
 
@@ -1042,17 +1049,26 @@ impl RuntimeCore {
     /// tool shows nothing.
     fn questions_listed(&mut self, result: Result<Queue, SourceError>) -> QuestionsListed {
         let before = self.app.questions.clone();
-        let notice = before.view().and_then(|view| view.notice);
         match result {
             Ok(queue) => self.app.observe_questions(queue),
             Err(_) => self.app.hide_questions(),
         }
-        let new_notice = self.app.questions.view().and_then(|view| view.notice);
         QuestionsListed {
             changed: self.app.questions != before,
-            interrupted: (before.is_visible() && !self.app.questions.is_visible())
-                || (new_notice.is_some() && new_notice != notice),
+            question_changed: self.app.questions.shown() != before.shown(),
         }
+    }
+
+    /// Takes a read no key asked for: the poll, or the read after an answer or a
+    /// deferral. If it changes the question in view while the block has the focus, the
+    /// next block key is dropped, as it was typed for what was there before. Reports
+    /// whether the block changed at all.
+    fn questions_refreshed(&mut self, result: Result<Queue, SourceError>) -> bool {
+        let listed = self.questions_listed(result);
+        if listed.question_changed && self.app.focus == Focus::Block {
+            self.drop_next_block_key = true;
+        }
+        listed.changed
     }
 
     fn open_link(&mut self, link: &str, navigator: &impl PaneNavigator) {
@@ -2271,6 +2287,152 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_poll_found_change_drops_the_next_block_key() {
+        let mut core = connected_core();
+        core.question_poll_interval = Duration::from_millis(10);
+        let probe = question_probe(Some(question("Q1", 1, 2)));
+        let mut stream = FakeStream::pending(Arc::new(AtomicBool::new(false)));
+        stream.questions = Some(Arc::clone(&probe));
+        let (input_sender, mut input) = InputPump::channel();
+        let key = |code: KeyCode| InputMessage::Key(code.into());
+        input_sender.try_send(key(KeyCode::Tab)).unwrap();
+        input_sender.try_send(key(KeyCode::Char('r'))).unwrap();
+        let tool = Arc::clone(&probe);
+        tokio::spawn(async move {
+            // The question changes; well after a poll has found version 2, the user,
+            // still typing the note, presses `l`: as a block key it would defer.
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            tool.lock().unwrap().queue = Some(question("Q1", 2, 2));
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            for code in [KeyCode::Char('l'), KeyCode::Tab, KeyCode::Char('q')] {
+                input_sender.send(key(code)).await.unwrap();
+            }
+        });
+        let (_shutdown_sender, mut shutdown) = FakeShutdown::channel();
+        let outcome = consume_stream(
+            stream,
+            &mut core,
+            &mut input,
+            &mut shutdown,
+            &mut FakeScreen::default(),
+            &FakeNavigator::successful(),
+            &FakeClock::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome, Control::Quit);
+        let log = probe.lock().unwrap().log.clone();
+        assert!(!log.iter().any(|call| call.starts_with("defer")), "{log:?}");
+        let view = core.app.questions.view().unwrap();
+        assert_eq!(view.mode, crate::questions::Mode::Choosing);
+        assert_eq!(
+            view.notice.as_deref(),
+            Some("Q1 changed, your picks were cleared"),
+            "the dropped key did not clear the notice"
+        );
+    }
+
+    #[test]
+    fn a_second_version_bump_is_flagged() {
+        let mut core = connected_core();
+        let navigator = FakeNavigator::successful();
+        core.app.observe_questions(question("Q1", 1, 2));
+        core.handle_key(KeyCode::Tab, &navigator);
+        assert!(core.questions_refreshed(Ok(question("Q1", 2, 2))));
+        assert!(core.drop_next_block_key);
+        core.drop_next_block_key = false;
+        // The notice reads the same after a second bump, but the version differs.
+        assert!(core.questions_refreshed(Ok(question("Q1", 3, 2))));
+        assert!(core.drop_next_block_key, "the second bump is flagged too");
+        core.drop_next_block_key = false;
+        assert!(!core.questions_refreshed(Ok(question("Q1", 3, 2))));
+        assert!(!core.drop_next_block_key, "an unchanged read flags nothing");
+        // Without the focus there is nothing to drop.
+        core.handle_key(KeyCode::Tab, &navigator);
+        assert!(core.questions_refreshed(Ok(question("Q1", 4, 2))));
+        assert!(!core.drop_next_block_key);
+    }
+
+    #[test]
+    fn a_failed_list_keeps_the_picks_for_the_next_list() {
+        let mut core = connected_core();
+        let navigator = FakeNavigator::successful();
+        core.app.observe_questions(question("Q1", 1, 2));
+        core.handle_key(KeyCode::Tab, &navigator);
+        core.handle_key(KeyCode::Enter, &navigator);
+        core.questions_listed(Err(SourceError::Transport("unavailable".into())));
+        assert!(!core.app.questions.is_visible());
+        assert_eq!(core.app.runtime_status(), None);
+        core.questions_listed(Ok(question("Q1", 1, 2)));
+        let view = core.app.questions.view().unwrap();
+        assert_eq!(view.ask.as_deref(), Some("Ask 2?"));
+        assert_eq!(view.picks, vec!["label b".to_string()]);
+        assert_eq!(view.notice, None, "a failed list leaves no notice");
+    }
+
+    #[test]
+    fn a_failed_list_then_a_new_version_clears_the_picks() {
+        let mut core = connected_core();
+        let navigator = FakeNavigator::successful();
+        core.app.observe_questions(question("Q1", 1, 2));
+        core.handle_key(KeyCode::Tab, &navigator);
+        core.handle_key(KeyCode::Enter, &navigator);
+        core.questions_listed(Err(SourceError::Transport("unavailable".into())));
+        core.questions_listed(Ok(question("Q1", 2, 2)));
+        let view = core.app.questions.view().unwrap();
+        assert_eq!(view.ask.as_deref(), Some("Ask 1?"));
+        assert!(view.picks.is_empty());
+        assert_eq!(
+            view.notice.as_deref(),
+            Some("Q1 changed, your picks were cleared")
+        );
+
+        // A question gone by then shows its dismissal.
+        core.questions_listed(Err(SourceError::Transport("unavailable".into())));
+        let gone = Queue {
+            dismissed: vec![("Q1".into(), "no longer needed".into())],
+            ..Queue::default()
+        };
+        core.questions_listed(Ok(gone));
+        assert_eq!(
+            core.app.questions.view().unwrap().notice.as_deref(),
+            Some("Q1 dismissed: no longer needed")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_half_typed_note_survives_a_reconnect() {
+        let mut core = connected_core();
+        let probe = question_probe(Some(question("Q1", 1, 2)));
+        let keys = [
+            KeyCode::Tab,
+            KeyCode::Char('r'),
+            KeyCode::Char('a'),
+            KeyCode::Char('b'),
+            KeyCode::Char('c'),
+            KeyCode::Tab,
+        ];
+        run_question_stream(&mut core, &probe, &keys).await;
+        // The stream ends: run_async hides the block.
+        core.app.hide_questions();
+        assert!(!core.app.questions.is_visible());
+        let log = run_question_stream(
+            &mut core,
+            &probe,
+            &[KeyCode::Tab, KeyCode::Char('d'), KeyCode::Tab],
+        )
+        .await;
+        assert_eq!(log, lists(7 + 4), "every key went to the block or was Tab");
+        assert_eq!(
+            core.app.questions.view().unwrap().mode,
+            crate::questions::Mode::Note {
+                kind: crate::questions::NoteKind::Revise,
+                text: "abcd".into(),
+            }
+        );
+    }
+
+    #[tokio::test]
     async fn unimplemented_hides_the_block() {
         let mut core = connected_core();
         let navigator = FakeNavigator::successful();
@@ -2279,7 +2441,8 @@ mod tests {
         assert_eq!(core.app.focus, Focus::Block);
         // An older Harold answers Unimplemented; Harold down fails the same way.
         let probe = question_probe(None);
-        let log = run_question_stream(&mut core, &probe, &[KeyCode::Char('j')]).await;
+        // The keys are swallowed until Esc, so `j` (and `q`, before Esc) do nothing.
+        let log = run_question_stream(&mut core, &probe, &[KeyCode::Char('j'), KeyCode::Esc]).await;
         assert_eq!(log, lists(1));
         assert!(
             !core.app.questions.is_visible(),
