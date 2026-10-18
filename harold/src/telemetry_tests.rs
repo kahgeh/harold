@@ -1509,7 +1509,7 @@ const CARDS: [(&str, &str, &[&str], &[&str]); 16] = [
     ),
     (
         "Pods",
-        "Merges to main",
+        "Merges to main, last 24 h",
         &["pod.merges"],
         &["SELECT sum(rise)"],
     ),
@@ -1808,11 +1808,13 @@ fn the_cards_dashboard_shows_each_card_beside_its_earlier_number_and_nothing_els
         .iter()
         .flat_map(|(_, card, ..)| {
             let earlier = if *card == LAST_HOUR_CARD {
-                "previous hour"
+                format!("{card}, previous hour")
+            } else if *card == "Merges to main, last 24 h" {
+                "Merges to main, the 24 h before".to_string()
             } else {
-                "previous 24 h"
+                format!("{card}, previous 24 h")
             };
-            [card.to_string(), format!("{card}, {earlier}")]
+            [card.to_string(), earlier]
         })
         .collect();
     assert_eq!(tile_names(&dashboard), names);

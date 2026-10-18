@@ -134,7 +134,7 @@
     },
     {
       "id": "merges-to-main",
-      "name": "Merges to main",
+      "name": "Merges to main, last 24 h",
       "x": 12,
       "y": 0,
       "w": 3,
@@ -150,7 +150,7 @@
     },
     {
       "id": "merges-to-main-previous",
-      "name": "Merges to main, previous 24 h",
+      "name": "Merges to main, the 24 h before",
       "x": 15,
       "y": 0,
       "w": 3,

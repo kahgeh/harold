@@ -61,8 +61,14 @@ The `git` commands are read-only: they run with `GIT_OPTIONAL_LOCKS=0`, at most 
 
 - Its lines are the added and removed lines of `git diff --shortstat <old> <new>`.
 - A step to a commit that does not contain the old tip, such as a rewrite, is not counted. It logs `base branch rewritten; not counted`. A rewrite between two merges in one minute leaves both merges counted.
-- When Harold starts, it takes the current tips as known, so merges made while it was stopped are not counted.
-- `spec.id` is set when the reflog entry reads `merge <id>`.
+- `spec.id` and `spec.stage` come from the reflog entry `merge <name>: …`. When `specs/<name>.md` exists, `<name>` is the `spec.id` and there is no stage. Otherwise, when `<name>` reads `<id>-<stage>`, `specs/<id>.md` exists, and the stage is digits optionally followed by one lower-case letter (`1b`, `2`, `3a`), the merge is a stage of `<id>`: `spec.id` is `<id>` and `spec.stage` is the stage. Any other name is the whole `spec.id`, with no stage.
+
+**The counted-tip file** holds, for each product, the base branch's tip that Harold has counted up to. It is `<store path>/../pod/tips`, which is `~/bin/harold/data/pod/tips` for the installed Harold. It has one `<product> <hash>` line per product and mode 0600. Harold writes it to `tips.tmp` and renames it.
+
+- Harold writes the file first and records the counts and lead times after, so a crash can lose a poll's counts but never count them twice.
+- When a write fails, Harold records nothing for that product until a write succeeds. It logs `pod merges and specs unavailable` once, with `reason="tip file unwritable"`.
+- The first poll after a start counts the merges since the saved tip, so merges made while Harold was stopped are counted.
+- A missing file, a line that does not parse, or a saved tip that the reflog does not hold before the current tip counts nothing. Harold starts from the current tip.
 
 ### Spec states
 
@@ -89,10 +95,12 @@ A later state wins: a merged spec is merged even though its approval file remain
 
 **Spec size** is the word count of `specs/<id>.md`, leaving out lines that start with `<`, which hold drawn charts.
 
-**Start to completion** (`pod.spec.lead_time`) is recorded once, when this Harold run sees a spec merge, in two phases (`phase`):
+**Start to completion** (`pod.spec.lead_time`) is recorded when Harold counts a merge, so once per merge, restarts included. It has two phases (`phase`):
 
-- `waiting_for_user`: from "spec ready" to approval;
-- `build`: from approval to merge, including any wait for a free slot.
+- `waiting_for_user`: from "spec ready" to approval, recorded on the spec's first merge only (the oldest in the reflog);
+- `build`: from approval to merge, including any wait for a free slot, recorded on each merge, stages included.
+
+A merge whose spec has no approval file records no lead time, and neither does a merge on a base branch with no reflog, which has no spec.
 
 ## Phone requests
 
@@ -187,7 +195,7 @@ Metrics are sent every 30 seconds. Every metric also carries `harold.machine`.
 | Metric | Type, unit | Attributes |
 |---|---|---|
 | `pod.slots.busy`, `pod.slots.free` | gauge, `{slot}` | `pod.product` |
-| `pod.merges` | counter, `{merge}` | `pod.product`, `spec.id` when the reflog names one |
+| `pod.merges` | counter, `{merge}` | `pod.product`, `spec.id` when the reflog names one, `spec.stage` when the merge is a stage |
 | `pod.merged_lines` | counter, `{line}` | `pod.product`, `change` (`added`, `removed`) |
 | `harold.phone_requests` | counter, `{request}` | `channel`, `outcome` (`typed`, `unavailable`), `resolved_by` |
 | `harold.phone_requests.wrong` | counter, `{request}` | `channel`, `resolved_by` |
@@ -196,7 +204,7 @@ Metrics are sent every 30 seconds. Every metric also carries `harold.machine`.
 | `harold.turn.duration` | histogram, `s`, buckets 10, 30, 60, 120, 300, 600, 1800, 3600 | `started_by` |
 | `pod.specs` | gauge, `{spec}` | `pod.product`, `state` |
 | `pod.spec.words` | gauge, `{word}` | `pod.product`, `spec.id`, `state` |
-| `pod.spec.lead_time` | histogram, `s`, buckets 600, 1800, 3600, 7200, 14400, 43200, 86400, 172800 | `pod.product`, `phase` (`waiting_for_user`, `build`), `spec.revisions` |
+| `pod.spec.lead_time` | histogram, `s`, buckets 600, 1800, 3600, 7200, 14400, 43200, 86400, 172800 | `pod.product`, `phase` (`waiting_for_user`, `build`), `spec.revisions`, `spec.id`, `spec.stage` when the merge is a stage |
 
 `pod.specs` reports every state of every product, 0 included, so a card can read 0.
 
@@ -238,7 +246,7 @@ The definition files are in [`hyperdx/`](hyperdx/), in the shape HyperDX 2.40's 
 
 ### Harold: the cards
 
-`dashboard.json` is the "Harold" dashboard. It holds the cards in four groups, and a product filter. Each card is two number tiles side by side: the card's number over the last 24 hours, and beside it the same number over the 24 hours before, named "<card>, previous 24 h". "Lines merged, last hour" reads the last hour, and its "previous hour" tile reads the hour before.
+`dashboard.json` is the "Harold" dashboard. It holds the cards in four groups, and a product filter. Each card is two number tiles side by side: the card's number over the last 24 hours, and beside it the same number over the 24 hours before, named "<card>, previous 24 h". The exception is "Merges to main, last 24 h", whose earlier tile is named "Merges to main, the 24 h before". "Lines merged, last hour" reads the last hour, and its "previous hour" tile reads the hour before.
 
 Each tile's window is written into its query: `TimeUnix >= now() - INTERVAL 24 HOUR` for a current tile, and `TimeUnix >= now() - INTERVAL 48 HOUR AND TimeUnix < now() - INTERVAL 24 HOUR` for an earlier one. Open the dashboard with a time range of at least the last 48 hours. A shorter range cuts the tiles down to it.
 
@@ -246,7 +254,7 @@ Each tile's window is written into its query: `TimeUnix >= now() - INTERVAL 24 H
 |---|---|---|---|
 | Pods | Free slots, average | `pod.slots.free` averaged over the period | builder: average |
 | Pods | Busy slots, p95 | the 95th percentile of `pod.slots.busy` over the period | builder: 95th percentile |
-| Pods | Merges to main | `pod.merges` in the period | SQL: the counter rule |
+| Pods | Merges to main, last 24 h | `pod.merges` in the period | SQL: the counter rule |
 | Pods | Lines merged | `pod.merged_lines` in the period | SQL: the counter rule |
 | Pods | Lines merged, last hour | `pod.merged_lines` in the last hour | SQL: the counter rule over the last hour |
 | Phone requests | Requests | `harold.phone_requests` in the period | SQL: the counter rule |
