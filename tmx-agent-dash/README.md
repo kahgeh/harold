@@ -76,7 +76,7 @@ section, so a key never means two things.
 | Enter | Pick the highlighted row: an option moves on, an answer action acts | Record the answer | Switch the invoking tmux client to the selected pane | Search: keep the query · palette: run · note: done |
 | Esc | Leave the block, picks kept | Back to the last decision | Clear an accepted filter, or nothing | Search: clear the query and leave · palette: close · note: discard and leave |
 | Tab | Focus to the list | Focus to the list | Focus to the block, while it shows | Search and palette: nothing · note: focus to the list, note kept |
-| `o` | Open the question's link | Open the question's link | — | Types |
+| `o` | Open the question's link, if it is `http://` or `https://` | Same | — | Types |
 | Ctrl+L | Clear the screen, redraw, and retry the Harold connection now | Same | Same | Same: the note's text and the query are kept, and nothing is typed |
 | `f` / `/` | — | — | Search editing / command palette | Types |
 | `g` / `G` | — | — | First / last visible row | Types |
@@ -179,7 +179,7 @@ If the queue cannot be read, or the stream to Harold is lost, the block hides bu
 
 If the question changes under a half-typed note or the summary, the block keeps showing the new question and holds its keys until you press `Esc` (or `Tab`). The footer says `esc to continue`. This stops letters typed for the old question from acting on the new one. `Esc` clears the notice and starts the shown question from its first decision.
 
-While keys are ignored or held, the quit keys still quit and Ctrl+L still retries. Ctrl+L leaves a half-typed note as it was, and the keys stay ignored or held.
+While keys are ignored or held, the quit keys still quit and Ctrl+L still retries. Ctrl+L leaves a half-typed note as it was. Ignored keys stay ignored until the block comes back. A hold ends with the reconnect: the block hides and its keys are ignored until the next read shows it again. Then keys act on the question shown, and if that question changed meanwhile, the block shows its notice and holds its keys again until `Esc` or `Tab`.
 
 ## Reading status
 
@@ -212,7 +212,7 @@ sessions in one group are told apart by the session's second word, or the full
 tmux target), and a provider tag: `cc` for Claude Code, `cx` for Codex, otherwise the
 first two letters of the provider name. The selected agent's detail panel still
 shows the full tmux target and working directory. Narrower terminals drop some
-footer hints (below 100 columns the footer switches to a shorter set). Selection follows a stable agent
+footer hints (the long footer needs 127 columns and 24 rows; below that it switches to a shorter set, on two lines when one cannot hold it). Selection follows a stable agent
 incarnation when possible. A restarted agent in the same pane is a new
 incarnation and does not inherit the old selection.
 
@@ -286,7 +286,7 @@ clipping.
 Ctrl+Q and Ctrl+C quit from every mode. `q` quits from the agent list; in search,
 the palette and a note it types itself, and in the question block it does nothing.
 `Esc` never quits: while editing it always clears the query and leaves editing, and
-outside editing it clears an accepted filter or does nothing when no filter exists. `SIGINT` and `SIGTERM` also initiate shutdown.
+in the agent list it clears an accepted filter or does nothing when no filter exists. `SIGINT` and `SIGTERM` also initiate shutdown.
 The runtime restores raw mode, the primary screen, and
 cursor visibility before returning; a restoration failure is reported on
 standard error.

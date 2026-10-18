@@ -110,52 +110,146 @@ pub fn render(frame: &mut Frame<'_>, app: &App, now_ms: i64) {
 /// The rule between a decision's options and its answer actions.
 const ACTIONS_RULE: &str = "─────────────";
 
+/// What a line of the question block is, so a short block knows what to leave out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Part {
+    /// The product, spec and intro.
+    Header,
+    Ask,
+    /// An option or answer action that is not highlighted.
+    Row,
+    /// The highlighted option or answer action.
+    Highlighted,
+    Rule,
+    Picks,
+    Hint,
+    /// The summary, the note being typed and the notice.
+    Body,
+}
+
 /// The block's lines and height, borders included, within `room` rows and
-/// QUESTION_BLOCK_MAX. When not everything fits, the product, spec and intro go first,
-/// so the ask and its options stay in view.
+/// QUESTION_BLOCK_MAX. When not everything fits, the header goes first, then the
+/// picks, the hint and the rule. If the block is still too tall, only the rows
+/// around the highlighted one show, so the highlight is always in view with the ask
+/// above it.
 fn fit_question_lines(view: &BlockView, width: u16, room: u16) -> (Vec<Line<'static>>, u16) {
-    let (mut lines, header) = question_lines(view);
+    let mut parts = question_lines(view);
     let inner_width = width.saturating_sub(2);
     let limit = usize::from(room.min(QUESTION_BLOCK_MAX).saturating_sub(2));
-    if measured_wrapped_height(&lines, inner_width) > limit {
-        lines.drain(..header);
+    let height = |parts: &[(Part, Line<'static>)]| {
+        parts
+            .iter()
+            .map(|(_, line)| measured_wrapped_height(std::slice::from_ref(line), inner_width))
+            .sum::<usize>()
+    };
+    for drop in [Part::Header, Part::Picks, Part::Hint, Part::Rule] {
+        if height(&parts) <= limit {
+            break;
+        }
+        parts.retain(|(part, _)| *part != drop);
     }
+    if height(&parts) > limit {
+        window_rows(&mut parts, limit, height);
+    }
+    let lines: Vec<Line<'static>> = parts.into_iter().map(|(_, line)| line).collect();
     let content = measured_wrapped_height(&lines, inner_width).min(limit);
     (lines, u16::try_from(content + 2).unwrap_or(u16::MAX))
 }
 
-/// The question block's lines: where the question comes from and its intro (the
-/// header, whose length is returned too), its ask, the options then a rule and the
-/// dim answer actions, or the summary or the note being typed, a key hint, then the
-/// notice.
-fn question_lines(view: &BlockView) -> (Vec<Line<'static>>, usize) {
+/// Keeps as many option and action rows around the highlighted one as fit in
+/// `limit` beside the other lines, measured by `height`. When not even the
+/// highlighted row fits beside them, the ask goes too.
+fn window_rows(
+    parts: &mut Vec<(Part, Line<'static>)>,
+    limit: usize,
+    height: impl Fn(&[(Part, Line<'static>)]) -> usize,
+) {
+    let is_row = |part: Part| matches!(part, Part::Row | Part::Highlighted);
+    let Some(highlighted) = parts
+        .iter()
+        .position(|(part, _)| *part == Part::Highlighted)
+    else {
+        return;
+    };
+    let others: Vec<_> = parts
+        .iter()
+        .filter(|(part, _)| !is_row(*part))
+        .cloned()
+        .collect();
+    let budget = limit.saturating_sub(height(&others));
+    let row_height = |at: usize| height(&parts[at..=at]);
+    let fits = |at: usize, used: usize| is_row(parts[at].0) && used + row_height(at) <= budget;
+    let (mut first, mut last) = (highlighted, highlighted);
+    let mut used = row_height(highlighted);
+    loop {
+        let mut grew = false;
+        if last + 1 < parts.len() && fits(last + 1, used) {
+            last += 1;
+            used += row_height(last);
+            grew = true;
+        }
+        if first > 0 && fits(first - 1, used) {
+            first -= 1;
+            used += row_height(first);
+            grew = true;
+        }
+        if !grew {
+            break;
+        }
+    }
+    let mut index = 0;
+    parts.retain(|(part, _)| {
+        let keep = !is_row(*part) || (first..=last).contains(&index);
+        index += 1;
+        keep
+    });
+    if used > budget {
+        parts.retain(|(part, _)| *part != Part::Ask);
+    }
+}
+
+/// The question block's lines, each with its [`Part`]: where the question comes from
+/// and its intro, its ask, the options then a rule and the dim answer actions, or the
+/// summary or the note being typed, a key hint, then the notice.
+fn question_lines(view: &BlockView) -> Vec<(Part, Line<'static>)> {
     let muted = Style::default().fg(MUTED);
     let ink = Style::default().fg(INK);
     let mut lines = Vec::new();
     if !view.id.is_empty() {
-        lines.push(Line::styled(
-            format!("{} · {}", view.product, view.spec),
-            muted,
+        lines.push((
+            Part::Header,
+            Line::styled(format!("{} · {}", view.product, view.spec), muted),
         ));
         if !view.intro.is_empty() {
-            lines.push(Line::styled(view.intro.clone(), ink));
+            lines.push((Part::Header, Line::styled(view.intro.clone(), ink)));
         }
     }
-    let header = lines.len();
     match &view.mode {
         _ if view.id.is_empty() => {}
         Mode::Choosing => {
             if let Some(ask) = &view.ask {
-                lines.push(Line::styled(ask.clone(), ink.add_modifier(Modifier::BOLD)));
+                lines.push((
+                    Part::Ask,
+                    Line::styled(ask.clone(), ink.add_modifier(Modifier::BOLD)),
+                ));
             }
             let bright = Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD);
             let marker = |highlighted: bool| if highlighted { "▸ " } else { "  " };
+            let row = |highlighted: bool, text: String, style: Style| {
+                let part = if highlighted {
+                    Part::Highlighted
+                } else {
+                    Part::Row
+                };
+                (part, Line::styled(text, style))
+            };
             for (index, option) in view.options.iter().enumerate() {
                 let highlighted = index == view.highlighted;
                 let suggested = if option.suggested { " (suggested)" } else { "" };
-                lines.push(Line::styled(
+                lines.push(row(
+                    highlighted,
                     format!(
                         "{}{}  {} — {}{suggested}",
                         marker(highlighted),
@@ -166,11 +260,12 @@ fn question_lines(view: &BlockView) -> (Vec<Line<'static>>, usize) {
                     if highlighted { bright } else { ink },
                 ));
             }
-            lines.push(Line::styled(format!("  {ACTIONS_RULE}"), muted));
+            lines.push((Part::Rule, Line::styled(format!("  {ACTIONS_RULE}"), muted)));
             // No option key, so the label lines up with the options' labels.
             for (index, action) in ANSWER_ACTIONS.iter().enumerate() {
                 let highlighted = view.options.len() + index == view.highlighted;
-                lines.push(Line::styled(
+                lines.push(row(
+                    highlighted,
                     format!("{}   {action}", marker(highlighted)),
                     if highlighted {
                         bright
@@ -180,21 +275,24 @@ fn question_lines(view: &BlockView) -> (Vec<Line<'static>>, usize) {
                 ));
             }
             if !view.picks.is_empty() {
-                lines.push(Line::styled(
-                    format!("picked: {}", view.picks.join(" · ")),
-                    muted,
+                lines.push((
+                    Part::Picks,
+                    Line::styled(format!("picked: {}", view.picks.join(" · ")), muted),
                 ));
             }
-            lines.push(Line::styled(
-                "j/k choose · l next · h back · enter pick · o open · n/N next · esc back",
-                muted,
+            lines.push((
+                Part::Hint,
+                Line::styled(
+                    "j/k choose · l next · h back · enter pick · o open · n/N next · esc back",
+                    muted,
+                ),
             ));
         }
         Mode::Summary => {
             for line in &view.summary {
-                lines.push(Line::styled(line.clone(), ink));
+                lines.push((Part::Body, Line::styled(line.clone(), ink)));
             }
-            lines.push(Line::styled("enter record · esc back", muted));
+            lines.push((Part::Hint, Line::styled("enter record · esc back", muted)));
         }
         Mode::Note { kind, text } => {
             let label = match kind {
@@ -202,26 +300,35 @@ fn question_lines(view: &BlockView) -> (Vec<Line<'static>>, usize) {
                 NoteKind::Reject => "reject:",
                 NoteKind::FreeText => {
                     if let Some(ask) = &view.ask {
-                        lines.push(Line::styled(ask.clone(), ink.add_modifier(Modifier::BOLD)));
+                        lines.push((
+                            Part::Ask,
+                            Line::styled(ask.clone(), ink.add_modifier(Modifier::BOLD)),
+                        ));
                     }
                     "answer:"
                 }
             };
-            lines.push(Line::from(vec![
-                Span::styled(format!("{label} "), Style::default().fg(Color::Yellow)),
-                Span::styled(text.clone(), ink.add_modifier(Modifier::BOLD)),
-                Span::styled("█", Style::default().fg(Color::Yellow)),
-            ]));
-            lines.push(Line::styled("enter done · esc back", muted));
+            lines.push((
+                Part::Body,
+                Line::from(vec![
+                    Span::styled(format!("{label} "), Style::default().fg(Color::Yellow)),
+                    Span::styled(text.clone(), ink.add_modifier(Modifier::BOLD)),
+                    Span::styled("█", Style::default().fg(Color::Yellow)),
+                ]),
+            ));
+            lines.push((Part::Hint, Line::styled("enter done · esc back", muted)));
         }
     }
     if let Some(notice) = &view.notice {
-        lines.push(Line::styled(
-            notice.clone(),
-            Style::default().fg(CORAL).add_modifier(Modifier::BOLD),
+        lines.push((
+            Part::Body,
+            Line::styled(
+                notice.clone(),
+                Style::default().fg(CORAL).add_modifier(Modifier::BOLD),
+            ),
         ));
     }
-    (lines, header)
+    lines
 }
 
 /// The question block, in yellow: bright with the focus, dim without, never a bell.
@@ -3409,7 +3516,31 @@ mod tests {
     }
 
     fn question_app(focused: bool) -> App {
-        use crate::questions::{DecisionView, OptionView, QuestionView, Queue};
+        let option =
+            |key: &str, label: &str, impact: &str, suggested: bool| crate::questions::OptionView {
+                key: key.into(),
+                label: label.into(),
+                impact: impact.into(),
+                suggested,
+                free: false,
+            };
+        question_app_with(
+            focused,
+            vec![
+                option(
+                    "h",
+                    "libSQL's Hrana",
+                    "one client for local and remote",
+                    true,
+                ),
+                option("g", "gRPC", "a second schema to keep", false),
+            ],
+        )
+    }
+
+    /// One question, Q25, whose one decision asks "Which protocol?" with `options`.
+    fn question_app_with(focused: bool, options: Vec<crate::questions::OptionView>) -> App {
+        use crate::questions::{DecisionView, QuestionView, Queue};
         let selected = incarnation("%17", 91700, 91844, "codex");
         let mut app = live_app(
             vec![row(
@@ -3422,13 +3553,6 @@ mod tests {
             )],
             Some(selected),
         );
-        let option = |key: &str, label: &str, impact: &str, suggested: bool| OptionView {
-            key: key.into(),
-            label: label.into(),
-            impact: impact.into(),
-            suggested,
-            free: false,
-        };
         app.observe_questions(Queue {
             questions: vec![QuestionView {
                 id: "Q25".into(),
@@ -3441,15 +3565,7 @@ mod tests {
                 deferred: false,
                 decisions: vec![DecisionView {
                     ask: "Which protocol?".into(),
-                    options: vec![
-                        option(
-                            "h",
-                            "libSQL's Hrana",
-                            "one client for local and remote",
-                            true,
-                        ),
-                        option("g", "gRPC", "a second schema to keep", false),
-                    ],
+                    options,
                 }],
             }],
             waiting: 2,
@@ -3576,7 +3692,8 @@ mod tests {
             row_with(&lines, "Q25 · 1 of 2 waiting");
             row_with(&lines, "TRANSPORT LIVE");
             if height < 24 {
-                row_with(&lines, "Which protocol?");
+                // One line is left: it shows the highlighted row, which j/k move.
+                row_with(&lines, "▸ h  libSQL's Hrana");
             }
             row_with(&lines, "AGENT BLOCK OCCUPANCY");
         }
@@ -3606,11 +3723,18 @@ mod tests {
         row_with(&lines, "Q25 dismissed: withdrawn");
     }
 
+    /// The block's lines, without their parts.
+    fn lines_of(view: &crate::questions::BlockView) -> Vec<Line<'static>> {
+        super::question_lines(view)
+            .into_iter()
+            .map(|(_, line)| line)
+            .collect()
+    }
+
     /// The text of each of the block's lines.
     fn block_texts(app: &App) -> Vec<String> {
         let view = app.questions.view().expect("a question is in view");
-        super::question_lines(&view)
-            .0
+        lines_of(&view)
             .iter()
             .map(|line| {
                 line.spans
@@ -3641,7 +3765,7 @@ mod tests {
     fn action_rows_follow_a_rule_dimmed_with_no_key() {
         let mut app = question_app(true);
         let view = app.questions.view().unwrap();
-        let lines = super::question_lines(&view).0;
+        let lines = lines_of(&view);
         let texts = block_texts(&app);
         let first = texts
             .iter()
@@ -3667,7 +3791,7 @@ mod tests {
         }
         let view = app.questions.view().unwrap();
         assert_eq!(view.highlighted, view.options.len() + 1);
-        let lines = super::question_lines(&view).0;
+        let lines = lines_of(&view);
         let texts = block_texts(&app);
         assert_eq!(texts[first + 2], "▸    revise…");
         let revise = &lines[first + 2];
@@ -3796,6 +3920,70 @@ mod tests {
         );
         for gone in ["WAITING n", "`r` | Retry", "`l` | Later", "Press `r`"] {
             assert!(!readme.contains(gone), "README still holds {gone}");
+        }
+    }
+
+    /// A question with three options, the middle one long enough to wrap at 84 columns.
+    fn three_option_app() -> App {
+        let option =
+            |key: &str, label: &str, impact: &str, suggested: bool| crate::questions::OptionView {
+                key: key.into(),
+                label: label.into(),
+                impact: impact.into(),
+                suggested,
+                free: false,
+            };
+        question_app_with(
+            true,
+            vec![
+                option("h", "libSQL's Hrana", "one client", true),
+                option(
+                    "g",
+                    "gRPC",
+                    "a second schema to keep, a second code generator to run, and a \
+                     second set of clients to test on every release",
+                    false,
+                ),
+                option("p", "Postgres wire", "a server to run", false),
+            ],
+        )
+    }
+
+    #[test]
+    fn a_short_block_keeps_the_highlighted_row_and_the_ask_in_view() {
+        // 30 rows leave the block 7 inner lines; 26 rows leave it 3.
+        let rows = ["libSQL's Hrana", "later", "revise…", "reject…"];
+        for (width, height) in [(84, 30), (140, 30), (84, 26), (140, 26)] {
+            for (presses, label) in [0, 3, 4, 5].into_iter().zip(rows) {
+                let mut app = three_option_app();
+                for _ in 0..presses {
+                    app.handle_key(KeyCode::Char('j'));
+                }
+                let lines = rendered_lines(&app, width, height, 100_000);
+                let marked = lines
+                    .lines()
+                    .find(|line| line.contains("▸ "))
+                    .unwrap_or_else(|| panic!("no highlight at {width}x{height}:\n{lines}"));
+                assert!(
+                    marked.contains(label),
+                    "{label} not highlighted at {width}x{height}:\n{lines}"
+                );
+                row_with(&lines, "Which protocol?");
+                row_with(&lines, "AGENT BLOCK OCCUPANCY");
+            }
+        }
+    }
+
+    #[test]
+    fn a_block_with_room_keeps_every_row_and_the_hint() {
+        let lines = rendered_lines(&three_option_app(), 140, 40, 100_000);
+        for expected in [
+            "Postgres wire",
+            "─────────────",
+            "reject…",
+            "j/k choose · l next",
+        ] {
+            row_with(&lines, expected);
         }
     }
 }

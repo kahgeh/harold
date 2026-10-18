@@ -2720,9 +2720,8 @@ mod tests {
         //
         // After Q25 is recorded, the probe's queue drops it. The block then shows Q26,
         // and `n` with one question listed does nothing, so the block stays on Q26.
-        // (The read after the answer changed the question in view, so `n` is dropped
-        // anyway.) Q26's revise row is two below its suggested option: j, j, then
-        // Enter opens the note, the note is typed, and Enter sends it.
+        // Q26's revise row is two below its suggested option: j, j, then Enter opens
+        // the note, the note is typed, and Enter sends it.
         let mut keys = vec![
             KeyCode::Tab,
             KeyCode::Char('j'),

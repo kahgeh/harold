@@ -360,11 +360,6 @@ impl App {
         }
     }
 
-    pub fn label<'a>(&'a self, row: &'a AgentRow) -> &'a str {
-        self.row_label(row)
-            .map_or_else(|| row.name(), |label| label.full.as_str())
-    }
-
     /// The row label split into its name and the disambiguating suffix (empty
     /// unless the name collides). Renderers truncate the name, never the suffix.
     pub fn label_parts<'a>(&'a self, row: &'a AgentRow) -> (&'a str, &'a str) {
@@ -2257,7 +2252,10 @@ mod tests {
             .snapshot
             .rows
             .iter()
-            .map(|row| app.label(row).to_owned())
+            .map(|row| {
+                let (name, suffix) = app.label_parts(row);
+                format!("{name}{suffix}")
+            })
             .collect();
         assert_eq!(labels, ["skills :0.3", "skills :0.4", "sre", "skills"]);
     }
@@ -2283,7 +2281,10 @@ mod tests {
             .snapshot
             .rows
             .iter()
-            .map(|row| app.label(row).to_owned())
+            .map(|row| {
+                let (name, suffix) = app.label_parts(row);
+                format!("{name}{suffix}")
+            })
             .collect();
         labels.sort();
         labels.dedup();
@@ -2818,6 +2819,28 @@ mod tests {
         assert_eq!(app.focus, Focus::Block);
         assert_eq!(app.handle_key(KeyCode::Esc), Effect::None);
         assert_eq!(app.focus, Focus::List);
+    }
+
+    #[test]
+    fn tab_in_the_summary_moves_the_focus_to_the_list() {
+        let mut app = call_app(CallState::Off);
+        app.observe_questions(question_queue(&["Q1"]));
+        app.handle_key(KeyCode::Tab);
+        // Enter picks each decision's suggested option, and the summary shows.
+        app.handle_key(KeyCode::Enter);
+        app.handle_key(KeyCode::Enter);
+        assert_eq!(
+            app.questions.view().unwrap().mode,
+            crate::questions::Mode::Summary
+        );
+
+        assert_eq!(app.handle_key(KeyCode::Tab), Effect::None);
+        assert_eq!(app.focus, Focus::List);
+        assert_eq!(
+            app.questions.view().unwrap().mode,
+            crate::questions::Mode::Summary,
+            "the summary is kept"
+        );
     }
 
     #[test]
