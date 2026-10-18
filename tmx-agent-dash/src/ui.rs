@@ -6,9 +6,10 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, TableState, Wrap};
 
+use crate::api::HAROLD_VERSION_LIMIT;
 use crate::app::{AgentState, App, CallState, CallView, Focus, RuntimeStatus, VoiceState};
 use crate::questions::{BlockView, Mode, NoteKind};
-use crate::text::display_work_summary;
+use crate::text::{display_work_summary, sanitize_display};
 
 const BOARD: Color = Color::Rgb(20, 20, 16);
 const PANEL: Color = Color::Rgb(25, 25, 21);
@@ -295,7 +296,10 @@ fn render_masthead(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let amber = Style::default().fg(AMBER);
     let version_style = Style::default().fg(INK).add_modifier(Modifier::BOLD);
     let harold_version = app.snapshot.harold_version.as_deref();
-    let differs = harold_version.filter(|version| *version != app.dash_version);
+    // Harold's version arrives cut to the limit, so the dash's own is cut the same way
+    // before the two are compared.
+    let dash_version = sanitize_display(&app.dash_version, HAROLD_VERSION_LIMIT);
+    let differs = harold_version.filter(|version| *version != dash_version);
     let version_span = |text: String| Span::styled(text, version_style);
     let compact = area.width < COMPACT_WIDTH;
     let mut candidates: Vec<(Vec<Span<'static>>, bool)> = Vec::new();
@@ -304,7 +308,7 @@ fn render_masthead(frame: &mut Frame<'_>, area: Rect, app: &App) {
             candidates.push((
                 vec![
                     Span::styled(" HAROLD / TMUX  ", amber),
-                    version_span(format!("{version} (DASH {})", app.dash_version)),
+                    version_span(format!("{version} (DASH {dash_version})")),
                     Span::raw("  ·  "),
                 ],
                 true,
@@ -349,8 +353,8 @@ fn render_masthead(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let available = usize::from(area.width.saturating_sub(2));
     // The header shapes are tried in this order and the first that fits wins: Harold's
     // version with `(DASH …)`, the version alone, `TMX DASH` and the version, the
-    // version alone without the title, then without `REV`, then nothing but the
-    // transport. Transport, voice and the paused marker always remain.
+    // version alone without the title, then without `REV`, then no version at all. Transport,
+    // voice and the paused marker always remain.
     let mut lines = candidates
         .into_iter()
         .map(|(lead, with_revision)| line(lead, with_revision))
@@ -1362,6 +1366,7 @@ fn seconds_ago(now_ms: i64, then_ms: i64) -> String {
 mod tests {
     use std::borrow::Cow;
 
+    use crate::api::HAROLD_VERSION_LIMIT;
     use crossterm::event::KeyCode;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
@@ -2133,7 +2138,9 @@ mod tests {
 
         // The DASH part goes first, then HAROLD / TMUX becomes TMX DASH.
         let medium = rendered(&app, 84, 38, 100_000);
-        assert!(medium.contains("TMX DASH v0.8.0 · TRANSPORT LIVE  ·  REV #00043"));
+        assert!(medium.contains(
+            "TMX DASH v0.8.0 · TRANSPORT LIVE  ·  REV #00043  ·  ● VOICE ON  ·  ■ MSG PAUSED"
+        ));
         assert!(!medium.contains("DASH v0.9.0"));
 
         // Then TMX DASH and REV; the version, transport, voice and the paused marker remain.
@@ -2141,6 +2148,25 @@ mod tests {
         assert!(minimum.contains("v0.8.0  ·  TRANSPORT LIVE  ·  ● VOICE ON  ·  ■ MSG PAUSED"));
         assert!(!minimum.contains("TMX DASH"));
         assert!(!minimum.contains("REV #"));
+    }
+
+    #[test]
+    fn masthead_keeps_the_version_without_the_title_at_the_minimum_width() {
+        let app = versioned_app(Some("source"), "source", false);
+        let minimum = rendered(&app, 60, 18, 100_000);
+        assert!(minimum.contains(" source  ·  TRANSPORT LIVE  ·  REV #"));
+        assert!(!minimum.contains("TMX DASH"));
+    }
+
+    #[test]
+    fn masthead_shows_no_dash_part_when_a_long_tag_is_cut_on_the_harold_side() {
+        let tag = "v1.2.3-a-very-long-release-tag-012345678";
+        assert_eq!(tag.chars().count(), 40);
+        let cut: String = tag.chars().take(HAROLD_VERSION_LIMIT).collect();
+        let app = versioned_app(Some(&cut), tag, false);
+        let content = rendered(&app, 140, 38, 100_000);
+        assert!(content.contains(&format!("HAROLD / TMUX  {cut}  ·  TRANSPORT LIVE")));
+        assert!(!content.contains("(DASH"));
     }
 
     #[test]

@@ -37,7 +37,7 @@ const PANE_FIELD_LIMIT: usize = 256;
 const DIRECTORY_LIMIT: usize = 1_024;
 const SUMMARY_LIMIT: usize = 160;
 const MONITOR_FIELD_LIMIT: usize = 64;
-const HAROLD_VERSION_LIMIT: usize = 32;
+pub const HAROLD_VERSION_LIMIT: usize = 32;
 const TRANSCRIPT_LIMIT: usize = 1_024;
 const ERROR_LIMIT: usize = 512;
 /// Harold refuses a question field of 2,000 characters or more.
