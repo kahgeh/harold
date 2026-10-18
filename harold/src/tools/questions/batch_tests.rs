@@ -772,6 +772,20 @@ async fn a_failed_mark_is_retried_without_typing_again() {
     println!("evidence: the mark failed for 30 s; it was retried and the line was typed once");
 }
 
+struct NoFolder;
+impl crate::tools::PaneFolder for NoFolder {
+    fn folder_of(&self, _pane_id: &str) -> Option<std::path::PathBuf> {
+        None
+    }
+}
+
+struct NoProducts;
+impl crate::tools::Products for NoProducts {
+    fn products(&self) -> Result<Vec<(String, std::path::PathBuf)>, &'static str> {
+        Ok(Vec::new())
+    }
+}
+
 #[tokio::test]
 async fn start_creates_questions_db_and_serves() {
     use prost::Message;
@@ -782,8 +796,10 @@ async fn start_creates_questions_db_and_serves() {
     let (shutdown, shutdown_rx) = watch::channel(());
     let handle = questions::start(crate::tools::ToolContext {
         data_folder: data_folder.clone(),
-        typing: FakeTyping::typed_ok(),
+        typing: Some(FakeTyping::typed_ok()),
         chief_pane: FakeChief::at(Some(CHIEF_PANE)),
+        pane_folder: Arc::new(NoFolder),
+        products: Arc::new(NoProducts),
         shutdown: shutdown_rx,
     })
     .await
@@ -832,8 +848,10 @@ async fn start_on_a_folder_it_cannot_open_fails_with_store_open_failed() {
     let (_shutdown, shutdown_rx) = watch::channel(());
     let started = questions::start(crate::tools::ToolContext {
         data_folder: folder.0.join("tools").join(questions::NAME),
-        typing: FakeTyping::typed_ok(),
+        typing: Some(FakeTyping::typed_ok()),
         chief_pane: FakeChief::at(Some(CHIEF_PANE)),
+        pane_folder: Arc::new(NoFolder),
+        products: Arc::new(NoProducts),
         shutdown: shutdown_rx,
     })
     .await;

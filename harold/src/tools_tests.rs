@@ -61,8 +61,37 @@ fn panes(panes: Vec<AgentPane>) -> AgentsView {
     }
 }
 
-/// The host's typing and chief lookup over the fake ports, as `start` builds them over tmux.
-fn host_ports(fake: &Fake) -> (Arc<dyn PaneTyping>, Arc<dyn ChiefPane>) {
+/// A `PaneFolder` that knows these panes.
+struct FixedFolders(Vec<(String, PathBuf)>);
+
+impl PaneFolder for FixedFolders {
+    fn folder_of(&self, pane_id: &str) -> Option<PathBuf> {
+        self.0
+            .iter()
+            .find(|(id, _)| id == pane_id)
+            .map(|(_, folder)| folder.clone())
+    }
+}
+
+/// A `Products` that answers with a fixed result.
+struct FixedProducts(Result<Vec<(String, PathBuf)>, &'static str>);
+
+impl Products for FixedProducts {
+    fn products(&self) -> Result<Vec<(String, PathBuf)>, &'static str> {
+        self.0.clone()
+    }
+}
+
+type HostPorts = (
+    Arc<dyn PaneTyping>,
+    Arc<dyn ChiefPane>,
+    Arc<dyn PaneFolder>,
+    Arc<dyn Products>,
+);
+
+/// The host's ports over the fake ports, as `start` builds them over tmux. The
+/// pane folder and products answer nothing.
+fn host_ports(fake: &Fake) -> HostPorts {
     let ports = Arc::new(fake.clone());
     let typing = TmuxTyping {
         ports: Arc::clone(&ports),
@@ -72,7 +101,12 @@ fn host_ports(fake: &Fake) -> (Arc<dyn PaneTyping>, Arc<dyn ChiefPane>) {
         ports,
         folder: Some(CHIEF.to_string()),
     };
-    (Arc::new(typing), Arc::new(chief))
+    (
+        Arc::new(typing),
+        Arc::new(chief),
+        Arc::new(FixedFolders(Vec::new())),
+        Arc::new(FixedProducts(Ok(Vec::new()))),
+    )
 }
 
 /// One unary call to the question service through `routes`, framed as a gRPC client
@@ -158,10 +192,18 @@ async fn a_tool_that_fails_to_start_is_logged_and_harold_runs_on() {
     let folder = TempFolder::new();
     // `tools` is a file, so the tool's data folder `<folder>/tools/questions` cannot be made.
     std::fs::write(folder.0.join("tools"), "not a folder").unwrap();
-    let (typing, chief) = host_ports(&Fake::at(DAY, "09:00:00"));
+    let (typing, chief, folders, products) = host_ports(&Fake::at(DAY, "09:00:00"));
     let (_shutdown, shutdown_rx) = watch::channel(());
 
-    let tools = start_with(&folder.store_path(), typing, chief, shutdown_rx).await;
+    let tools = start_with(
+        &folder.store_path(),
+        typing,
+        chief,
+        folders,
+        products,
+        shutdown_rx,
+    )
+    .await;
 
     assert!(tools.tasks.is_empty());
     let text = logs.text();
@@ -309,9 +351,17 @@ async fn the_canary_reaches_no_log_or_export() {
     let logs = CapturedLogs::start();
     let folder = TempFolder::new();
     let fake = Fake::at(DAY, "09:00:00");
-    let (typing, chief) = host_ports(&fake);
+    let (typing, chief, folders, products) = host_ports(&fake);
     let (shutdown, shutdown_rx) = watch::channel(());
-    let tools = start_with(&folder.store_path(), typing, chief, shutdown_rx).await;
+    let tools = start_with(
+        &folder.store_path(),
+        typing,
+        chief,
+        folders,
+        products,
+        shutdown_rx,
+    )
+    .await;
     assert_eq!(tools.tasks.len(), 1);
     let id = unique_id();
 
@@ -477,9 +527,17 @@ impl hp::harold_server::Harold for CoreStub {
 #[tokio::test]
 async fn the_core_service_and_the_tool_share_one_server() {
     let folder = TempFolder::new();
-    let (typing, chief) = host_ports(&Fake::at(DAY, "09:00:00"));
+    let (typing, chief, folders, products) = host_ports(&Fake::at(DAY, "09:00:00"));
     let (shutdown, shutdown_rx) = watch::channel(());
-    let tools = start_with(&folder.store_path(), typing, chief, shutdown_rx).await;
+    let tools = start_with(
+        &folder.store_path(),
+        typing,
+        chief,
+        folders,
+        products,
+        shutdown_rx,
+    )
+    .await;
 
     // The server as `main` builds it, on a local port.
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -542,4 +600,68 @@ async fn the_core_service_and_the_tool_share_one_server() {
         refused.code(),
         listing.waiting
     );
+}
+
+#[tokio::test]
+async fn the_question_tool_refuses_to_start_without_typing() {
+    let folder = TempFolder::new();
+    let (_typing, chief, pane_folder, products) = host_ports(&Fake::at(DAY, "09:00:00"));
+    let (_shutdown, shutdown_rx) = watch::channel(());
+
+    let started = questions::start(ToolContext {
+        data_folder: folder.0.join("tools").join(questions::NAME),
+        typing: None,
+        chief_pane: chief,
+        pane_folder,
+        products,
+        shutdown: shutdown_rx,
+    })
+    .await;
+
+    let Err(error) = started else {
+        panic!("started without typing")
+    };
+    assert_eq!(error.reason, "no_typing");
+}
+
+#[test]
+fn registry_products_reads_each_product_with_its_repo() {
+    let tmp = TempFolder::new();
+    let file = tmp.0.join("products.toml");
+    std::fs::write(
+        &file,
+        format!(
+            "[products.harold]\nrepo = \"{0}/harold\"\nbase = \"main\"\n[products.turso]\nrepo = \"{0}/turso\"\nbase = \"main\"\n",
+            tmp.0.display()
+        ),
+    )
+    .unwrap();
+
+    assert_eq!(
+        RegistryProducts { path: Some(file) }.products(),
+        Ok(vec![
+            ("harold".into(), tmp.0.join("harold")),
+            ("turso".into(), tmp.0.join("turso")),
+        ])
+    );
+    assert_eq!(RegistryProducts { path: None }.products(), Ok(vec![]));
+    assert_eq!(
+        RegistryProducts {
+            path: Some(tmp.0.join("missing.toml"))
+        }
+        .products(),
+        Err("registry_unreadable")
+    );
+}
+
+#[test]
+fn the_pane_folder_is_the_agents_folder_in_the_snapshot() {
+    let fake = Fake::at(DAY, "09:00:00");
+    fake.set(|state| state.view = panes(vec![pane("%40", "/work/harold"), pane("%2", CHIEF)]));
+    let folder = SnapshotPaneFolder {
+        ports: Arc::new(fake),
+    };
+
+    assert_eq!(folder.folder_of("%40"), Some(PathBuf::from("/work/harold")));
+    assert_eq!(folder.folder_of("%99"), None);
 }

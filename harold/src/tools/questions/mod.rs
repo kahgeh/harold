@@ -22,9 +22,13 @@ pub(crate) const NAME: &str = "questions";
 /// error's own text names the data folder's path, so it is not passed on.
 const STORE_OPEN_FAILED: &str = "store_open_failed";
 
+/// The reason `start` gives when the host has no way to type into a pane.
+const NO_TYPING: &str = "no_typing";
+
 /// Opens `questions.db` in the tool's data folder, then serves the queue and
 /// sends its answers to the chief until shutdown.
 pub(crate) async fn start(ctx: ToolContext) -> Result<ToolHandle, ToolError> {
+    let typing = ctx.typing.ok_or(ToolError { reason: NO_TYPING })?;
     let store = store::TursoQuestionStore::open(&ctx.data_folder)
         .await
         .map_err(|_| ToolError {
@@ -35,7 +39,7 @@ pub(crate) async fn start(ctx: ToolContext) -> Result<ToolHandle, ToolError> {
     let service = service::QuestionToolService::new(Arc::clone(&store), Arc::clone(&wake));
     let task = tokio::spawn(batch::run(
         store,
-        ctx.typing,
+        typing,
         ctx.chief_pane,
         wake,
         ctx.shutdown,

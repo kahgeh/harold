@@ -22,12 +22,18 @@ use tracing::warn;
 
 use crate::agent::snapshot::AgentSnapshotHub;
 use crate::outbound::left_out::same_folder;
+use crate::pod_stats;
 use crate::settings::Settings;
 use crate::timed_prompts::{self, LineOutcome, Ports, TmuxPorts, Writer};
 
 pub(crate) mod questions;
 
 pub(crate) type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+/// The reason `Products` gives when the registry is set but cannot be read. The error's
+/// own text names the registry's path, so it is not passed on.
+#[allow(dead_code)] // Read by the backlog tool.
+const REGISTRY_UNREADABLE: &str = "registry_unreadable";
 
 /// How typing one line into a pane went.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,12 +71,29 @@ pub(crate) trait ChiefPane: Send + Sync {
     fn chief_pane(&self) -> Option<String>;
 }
 
+/// Finds the folder an agent pane is in, if the pane is an agent's.
+#[allow(dead_code)] // Read by the backlog tool.
+pub(crate) trait PaneFolder: Send + Sync {
+    fn folder_of(&self, pane_id: &str) -> Option<PathBuf>;
+}
+
+/// Lists the registry's products as `(name, repo)`. The word in `Err` says why the
+/// registry could not be read.
+#[allow(dead_code)] // Read by the backlog tool.
+pub(crate) trait Products: Send + Sync {
+    fn products(&self) -> Result<Vec<(String, PathBuf)>, &'static str>;
+}
+
 /// What the host gives a tool when it starts.
+#[allow(dead_code)] // Read by the backlog tool.
 pub(crate) struct ToolContext {
     /// The tool's own folder, `<store folder>/tools/<name>/`.
     pub(crate) data_folder: PathBuf,
-    pub(crate) typing: Arc<dyn PaneTyping>,
+    /// `None` for a tool that types nothing; the question tool refuses to start without it.
+    pub(crate) typing: Option<Arc<dyn PaneTyping>>,
     pub(crate) chief_pane: Arc<dyn ChiefPane>,
+    pub(crate) pane_folder: Arc<dyn PaneFolder>,
+    pub(crate) products: Arc<dyn Products>,
     pub(crate) shutdown: watch::Receiver<()>,
 }
 
@@ -123,17 +146,31 @@ pub(crate) async fn start(
         writer: Writer::Tool(questions::NAME),
     };
     let chief_pane = SnapshotChiefPane {
-        ports,
+        ports: Arc::clone(&ports),
         folder: cfg.notify.away_messages_only_from.clone(),
     };
-    start_with(store_path, Arc::new(typing), Arc::new(chief_pane), shutdown).await
+    let pane_folder = SnapshotPaneFolder { ports };
+    let products = RegistryProducts {
+        path: cfg.telemetry.pod_registry_path(),
+    };
+    start_with(
+        store_path,
+        Arc::new(typing),
+        Arc::new(chief_pane),
+        Arc::new(pane_folder),
+        Arc::new(products),
+        shutdown,
+    )
+    .await
 }
 
-/// Starts the tools with the given typing and chief lookup.
+/// Starts the tools with the given ports.
 async fn start_with(
     store_path: &str,
     typing: Arc<dyn PaneTyping>,
     chief_pane: Arc<dyn ChiefPane>,
+    pane_folder: Arc<dyn PaneFolder>,
+    products: Arc<dyn Products>,
     shutdown: watch::Receiver<()>,
 ) -> Tools {
     let mut tools = Tools {
@@ -142,8 +179,10 @@ async fn start_with(
     };
     let started = questions::start(ToolContext {
         data_folder: data_folder(store_path, questions::NAME),
-        typing,
+        typing: Some(typing),
         chief_pane,
+        pane_folder,
+        products,
         shutdown,
     })
     .await;
@@ -234,6 +273,44 @@ impl<P: Ports> ChiefPane for SnapshotChiefPane<P> {
             .filter(|pane| same_folder(&pane.folder, folder));
         let chief = in_folder.next()?;
         in_folder.next().is_none().then_some(chief.pane_id)
+    }
+}
+
+/// Finds an agent pane's folder in the agent snapshot.
+#[allow(dead_code)] // Read by the backlog tool.
+struct SnapshotPaneFolder<P = TmuxPorts> {
+    ports: Arc<P>,
+}
+
+impl<P: Ports> PaneFolder for SnapshotPaneFolder<P> {
+    fn folder_of(&self, pane_id: &str) -> Option<PathBuf> {
+        let pane = self
+            .ports
+            .agents()
+            .panes
+            .into_iter()
+            .find(|pane| pane.pane_id == pane_id)?;
+        Some(PathBuf::from(pane.folder))
+    }
+}
+
+/// Reads the pod registry on every call, so an edit to it shows at once. With no
+/// registry set there are no products.
+#[allow(dead_code)] // Read by the backlog tool.
+struct RegistryProducts {
+    path: Option<PathBuf>,
+}
+
+impl Products for RegistryProducts {
+    fn products(&self) -> Result<Vec<(String, PathBuf)>, &'static str> {
+        let Some(path) = &self.path else {
+            return Ok(Vec::new());
+        };
+        let products = pod_stats::read_registry(path).map_err(|_| REGISTRY_UNREADABLE)?;
+        Ok(products
+            .into_iter()
+            .map(|product| (product.name, product.repo))
+            .collect())
     }
 }
 

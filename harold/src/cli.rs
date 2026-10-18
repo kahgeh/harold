@@ -1059,14 +1059,29 @@ mod tests {
         }
     }
 
+    struct NoFolder;
+    impl crate::tools::PaneFolder for NoFolder {
+        fn folder_of(&self, _pane_id: &str) -> Option<std::path::PathBuf> {
+            None
+        }
+    }
+    struct NoProducts;
+    impl crate::tools::Products for NoProducts {
+        fn products(&self) -> Result<Vec<(String, std::path::PathBuf)>, &'static str> {
+            Ok(Vec::new())
+        }
+    }
+
     #[tokio::test]
     async fn the_chief_puts_lists_orders_and_dismisses_through_the_tool() {
         let folder = std::env::temp_dir().join(format!("harold-cli-tool-{}", uuid::Uuid::new_v4()));
         let (stop, shutdown) = tokio::sync::watch::channel(());
         let handle = crate::tools::questions::start(crate::tools::ToolContext {
             data_folder: folder.clone(),
-            typing: std::sync::Arc::new(Typist),
+            typing: Some(std::sync::Arc::new(Typist)),
             chief_pane: std::sync::Arc::new(NoChief),
+            pane_folder: std::sync::Arc::new(NoFolder),
+            products: std::sync::Arc::new(NoProducts),
             shutdown,
         })
         .await
