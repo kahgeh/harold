@@ -428,12 +428,43 @@ async fn a_write_dropped_inside_its_transaction_does_not_block_the_next() {
     // A cancelled call leaves the connection inside BEGIN IMMEDIATE with the
     // mutex released. Reproduced by hand, since the drop cannot be timed
     // reliably between two awaits.
+    store.put(question("Q1"), 1).await.unwrap();
+    {
+        let conn = store.conn.lock().await;
+        begin(&conn).await.unwrap();
+        let applied = answer_in(&conn, "Q1", 1, |_| Ok(an_answer()), 2)
+            .await
+            .unwrap();
+        assert_eq!(applied, Ok(Ok(())));
+        assert!(!conn.is_autocommit().unwrap());
+    }
+    // The reads roll the half-applied answer back instead of showing it.
+    assert_eq!(listed_ids(&store).await, vec![("Q1".to_string(), false)]);
+    {
+        let conn = store.conn.lock().await;
+        begin(&conn).await.unwrap();
+        answer_in(&conn, "Q1", 1, |_| Ok(an_answer()), 2)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
+    assert!(store.ready().await.unwrap().is_none());
+    {
+        let conn = store.conn.lock().await;
+        begin(&conn).await.unwrap();
+        answer_in(&conn, "Q1", 1, |_| Ok(an_answer()), 2)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
+    assert!(store.started_batch().await.unwrap().is_none());
     {
         let conn = store.conn.lock().await;
         begin(&conn).await.unwrap();
         assert!(!conn.is_autocommit().unwrap());
     }
-    assert_eq!(store.put(question("Q1"), 1).await.unwrap(), 1);
-    assert_eq!(store.put(question("Q2"), 2).await.unwrap(), 1);
+    assert_eq!(store.put(question("Q2"), 3).await.unwrap(), 1);
     assert_eq!(listed_ids(&store).await.len(), 2);
 }

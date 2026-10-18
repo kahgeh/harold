@@ -149,10 +149,17 @@ async fn initialize_schema(conn: &Connection) -> Result<()> {
 /// Starts a write. A caller dropped between `begin` and `finish` leaves the
 /// connection inside its transaction, so that one is rolled back first.
 async fn begin(conn: &Connection) -> Result<()> {
+    roll_back_abandoned(conn).await?;
+    conn.execute("BEGIN IMMEDIATE", ()).await?;
+    Ok(())
+}
+
+/// Rolls back a transaction a cancelled write left open, so the next call,
+/// read or write, starts from committed data.
+async fn roll_back_abandoned(conn: &Connection) -> Result<()> {
     if !conn.is_autocommit()? {
         conn.execute("ROLLBACK", ()).await?;
     }
-    conn.execute("BEGIN IMMEDIATE", ()).await?;
     Ok(())
 }
 
@@ -647,6 +654,7 @@ impl QuestionStore for TursoQuestionStore {
 
     async fn list(&self, now_ms: i64) -> Result<Listing> {
         let conn = self.conn.lock().await;
+        roll_back_abandoned(&conn).await?;
         list_in(&conn, now_ms).await
     }
 
@@ -670,6 +678,7 @@ impl QuestionStore for TursoQuestionStore {
 
     async fn ready(&self) -> Result<Option<Ready>> {
         let conn = self.conn.lock().await;
+        roll_back_abandoned(&conn).await?;
         ready_in(&conn).await
     }
 
@@ -686,6 +695,7 @@ impl QuestionStore for TursoQuestionStore {
 
     async fn started_batch(&self) -> Result<Option<StartedBatch>> {
         let conn = self.conn.lock().await;
+        roll_back_abandoned(&conn).await?;
         started_batch_in(&conn).await
     }
 
