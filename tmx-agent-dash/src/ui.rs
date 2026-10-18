@@ -8,7 +8,7 @@ use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, Table
 
 use crate::api::HAROLD_VERSION_LIMIT;
 use crate::app::{AgentState, App, CallState, CallView, Focus, RuntimeStatus, VoiceState};
-use crate::questions::{BlockView, Mode, NoteKind};
+use crate::questions::{ANSWER_ACTIONS, BlockView, Mode, NoteKind};
 use crate::text::{display_work_summary, sanitize_display};
 
 const BOARD: Color = Color::Rgb(20, 20, 16);
@@ -23,8 +23,8 @@ const KEY_CAP: Color = Color::Rgb(58, 58, 48);
 const MIN_WIDTH: u16 = 60;
 const MIN_HEIGHT: u16 = 18;
 const WIDE_WIDTH: u16 = 120;
-/// Narrowest terminal that fits the long-form footer with every hint visible.
-const WIDE_FOOTER_WIDTH: u16 = 117;
+/// Narrowest terminal that fits the list's long-form footer with every hint visible.
+const WIDE_FOOTER_WIDTH: u16 = 127;
 const COMPACT_WIDTH: u16 = 84;
 /// The speaking bars' heights, one step apart; the five bars read it two steps apart.
 const LEVELS: [char; 12] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '▆', '▅', '▄', '▃', '▂'];
@@ -100,11 +100,15 @@ pub fn render(frame: &mut Frame<'_>, app: &App, now_ms: i64) {
             frame,
             footer,
             compact || area.width < WIDE_FOOTER_WIDTH,
+            app.focus,
             question.is_some(),
         );
     }
     render_palette(frame, area, app);
 }
+
+/// The rule between a decision's options and its answer actions.
+const ACTIONS_RULE: &str = "─────────────";
 
 /// The block's lines and height, borders included, within `room` rows and
 /// QUESTION_BLOCK_MAX. When not everything fits, the product, spec and intro go first,
@@ -121,8 +125,9 @@ fn fit_question_lines(view: &BlockView, width: u16, room: u16) -> (Vec<Line<'sta
 }
 
 /// The question block's lines: where the question comes from and its intro (the
-/// header, whose length is returned too), its ask, the options or the summary or the
-/// note being typed, a key hint, then the notice.
+/// header, whose length is returned too), its ask, the options then a rule and the
+/// dim answer actions, or the summary or the note being typed, a key hint, then the
+/// notice.
 fn question_lines(view: &BlockView) -> (Vec<Line<'static>>, usize) {
     let muted = Style::default().fg(MUTED);
     let ink = Style::default().fg(INK);
@@ -143,23 +148,35 @@ fn question_lines(view: &BlockView) -> (Vec<Line<'static>>, usize) {
             if let Some(ask) = &view.ask {
                 lines.push(Line::styled(ask.clone(), ink.add_modifier(Modifier::BOLD)));
             }
+            let bright = Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD);
+            let marker = |highlighted: bool| if highlighted { "▸ " } else { "  " };
             for (index, option) in view.options.iter().enumerate() {
                 let highlighted = index == view.highlighted;
-                let marker = if highlighted { "▸ " } else { "  " };
                 let suggested = if option.suggested { " (suggested)" } else { "" };
-                let style = if highlighted {
-                    Style::default()
-                        .fg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    ink
-                };
                 lines.push(Line::styled(
                     format!(
-                        "{marker}{}  {} — {}{suggested}",
-                        option.key, option.label, option.impact
+                        "{}{}  {} — {}{suggested}",
+                        marker(highlighted),
+                        option.key,
+                        option.label,
+                        option.impact
                     ),
-                    style,
+                    if highlighted { bright } else { ink },
+                ));
+            }
+            lines.push(Line::styled(format!("  {ACTIONS_RULE}"), muted));
+            // No option key, so the label lines up with the options' labels.
+            for (index, action) in ANSWER_ACTIONS.iter().enumerate() {
+                let highlighted = view.options.len() + index == view.highlighted;
+                lines.push(Line::styled(
+                    format!("{}   {action}", marker(highlighted)),
+                    if highlighted {
+                        bright
+                    } else {
+                        ink.add_modifier(Modifier::DIM)
+                    },
                 ));
             }
             if !view.picks.is_empty() {
@@ -169,7 +186,7 @@ fn question_lines(view: &BlockView) -> (Vec<Line<'static>>, usize) {
                 ));
             }
             lines.push(Line::styled(
-                "↑/↓ choose · enter pick · r revise · x reject · o open · l later · esc back",
+                "j/k choose · l next · h back · enter pick · o open · n/N next · esc back",
                 muted,
             ));
         }
@@ -527,9 +544,12 @@ fn render_workspace(frame: &mut Frame<'_>, area: Rect, app: &App, now_ms: i64) {
                 "Connecting…",
             );
         }
-        crate::app::ConnectionState::Unavailable => {
-            render_state_message(frame, area, "Harold is unavailable", "Press r to retry now")
-        }
+        crate::app::ConnectionState::Unavailable => render_state_message(
+            frame,
+            area,
+            "Harold is unavailable",
+            "Press Ctrl+L to retry now",
+        ),
         crate::app::ConnectionState::Live | crate::app::ConnectionState::Stale => {
             render_live_workspace(frame, area, app, now_ms);
         }
@@ -760,13 +780,9 @@ fn render_inventory(frame: &mut Frame<'_>, area: Rect, app: &App, now_ms: i64) {
     } else {
         Row::new(["STATE", "WHERE", "", "", "WORK SUMMARY"])
     };
-    const LIST_TITLE: &str = " AGENT BLOCK OCCUPANCY ";
-    let title_room = usize::from(area.width)
-        .saturating_sub(2)
-        .saturating_sub(LIST_TITLE.chars().count() + 1);
     let block = board_block()
-        .title(LIST_TITLE)
-        .title_top(waiting_title(app, title_room).right_aligned())
+        .title(" AGENT BLOCK OCCUPANCY ")
+        .title_top(focus_tracking_title(app).right_aligned())
         .borders(Borders::ALL);
     let table = Table::new(rows, widths)
         .header(header.style(Style::default().fg(MUTED).add_modifier(Modifier::BOLD)))
@@ -948,14 +964,6 @@ fn call_buttons(
     spans
 }
 
-fn waiting_entry(app: &App, row: &crate::app::AgentRow) -> String {
-    if row.group() == row.name() {
-        app.label(row).to_owned()
-    } else {
-        format!("{}/{}", row.group(), app.label(row))
-    }
-}
-
 /// `prefix` + name truncated with an ellipsis so the pane-address suffix that
 /// tells colliding agents apart always stays visible.
 fn fit_with_suffix(prefix: &str, (name, suffix): (&str, &str), width: usize) -> String {
@@ -967,93 +975,13 @@ fn fit_with_suffix(prefix: &str, (name, suffix): (&str, &str), width: usize) -> 
     format!("{}{suffix}", fit(&head, width - suffix_width))
 }
 
-/// The waiting line: count, focus-tracking state, then as many entries as fit.
-/// Never exceeds `max_width`; when not even the oldest entry fits whole it is
-/// truncated so something useful still renders.
-fn waiting_title(app: &App, max_width: usize) -> Line<'static> {
-    const OPEN: &str = "◀ h  ";
-    const CLOSE: &str = "  l ▶ ";
-    let waiting = app.waiting_rows();
-    let mut spans = vec![Span::styled(
-        format!(" WAITING {} ", waiting.len()),
-        Style::default()
-            .fg(if waiting.is_empty() { MUTED } else { AMBER })
-            .add_modifier(Modifier::BOLD),
-    )];
-    if !app.focus_tracking() {
-        spans.push(Span::styled(
-            "(focus tracking off) ",
-            Style::default().fg(MUTED),
-        ));
+/// The list's right-hand title: `(focus tracking off)` while the focus probe sees no
+/// usable pane, and nothing otherwise. Waiting agents show by their ◆ marks instead.
+fn focus_tracking_title(app: &App) -> Line<'static> {
+    if app.focus_tracking() {
+        return Line::default();
     }
-    let used = Line::from(spans.clone()).width();
-    let budget =
-        max_width.saturating_sub(used + Line::raw(OPEN).width() + Line::raw(CLOSE).width());
-    let more = |hidden: usize| format!(" +{hidden} more");
-    let mut entries: Vec<Span<'static>> = Vec::new();
-    let mut entries_width = 0;
-    let mut shown = 0;
-    for (index, row) in waiting.iter().enumerate() {
-        let text = format!(
-            "{}{}",
-            if index == 0 { "" } else { " · " },
-            waiting_entry(app, row)
-        );
-        let hidden_after = waiting.len() - index - 1;
-        let reserve = if hidden_after == 0 {
-            0
-        } else {
-            Line::raw(more(hidden_after)).width()
-        };
-        let width = Line::raw(text.as_str()).width();
-        if entries_width + width + reserve > budget {
-            break;
-        }
-        let selected = app.selected.as_ref() == Some(&row.incarnation);
-        entries.push(Span::styled(
-            text,
-            if selected {
-                Style::default()
-                    .fg(INK)
-                    .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
-            } else {
-                Style::default().fg(INK)
-            },
-        ));
-        entries_width += width;
-        shown += 1;
-    }
-    let mut trailing = None;
-    if shown == 0 {
-        let Some(oldest) = waiting.first() else {
-            return Line::from(spans);
-        };
-        if budget == 0 {
-            return Line::from(spans);
-        }
-        let prefix = if oldest.group() == oldest.name() {
-            String::new()
-        } else {
-            format!("{}/", oldest.group())
-        };
-        let text = fit_with_suffix(&prefix, app.label_parts(oldest), budget);
-        let width = Line::raw(text.as_str()).width();
-        entries.push(Span::styled(text, Style::default().fg(INK)));
-        let hidden = more(waiting.len() - 1);
-        // The count is dropped rather than overflowing the border.
-        if waiting.len() > 1 && width + Line::raw(hidden.as_str()).width() <= budget {
-            trailing = Some(hidden);
-        }
-    } else if shown < waiting.len() {
-        trailing = Some(more(waiting.len() - shown));
-    }
-    spans.push(Span::styled(OPEN, Style::default().fg(MUTED)));
-    spans.extend(entries);
-    if let Some(hidden) = trailing {
-        spans.push(Span::styled(hidden, Style::default().fg(MUTED)));
-    }
-    spans.push(Span::styled(CLOSE, Style::default().fg(MUTED)));
-    Line::from(spans)
+    Line::styled(" (focus tracking off) ", Style::default().fg(MUTED))
 }
 
 fn render_detail<'a>(frame: &mut Frame<'_>, area: Rect, lines: Option<Vec<Line<'a>>>) {
@@ -1114,79 +1042,126 @@ fn detail_lines<'a>(agent: &'a crate::app::AgentRow, now_ms: i64) -> Vec<Line<'a
     ]
 }
 
-/// The footer's hints, with `tab question` while the question block shows.
-fn footer_hints_with_questions(compact: bool, questions: bool) -> Vec<Span<'static>> {
+/// The footer's hints for the focused section, short or long. The list's hints name
+/// `tab question` while the question block shows. Each form names a break key: the
+/// list's call keys or the block's `^L`, where a narrow footer goes on to a second line.
+fn footer_hints(compact: bool, focus: Focus, questions: bool) -> Vec<Span<'static>> {
     let key = |text| Span::styled(text, Style::default().fg(INK));
-    let mut hints = footer_hints(compact);
-    if questions {
-        // Before the call keys, so a narrow footer still wraps at `c`.
-        let at = hints
-            .iter()
-            .position(|span| span.content == "c")
-            .unwrap_or(hints.len());
-        let label = if compact { " question " } else { " question  " };
-        hints.splice(at..at, [key("tab"), Span::raw(label)]);
-    }
-    hints
-}
-
-/// The footer's hints, short or long. The call keys come last before `q`; the
-/// short form breaks there when one line cannot hold it.
-fn footer_hints(compact: bool) -> Vec<Span<'static>> {
-    let key = |text| Span::styled(text, Style::default().fg(INK));
-    if compact {
-        vec![
+    let label = |text| Span::styled(text, Style::default().fg(MUTED));
+    match (focus, compact) {
+        (Focus::Block, true) => vec![
             key(" j/k"),
-            Span::raw(" move "),
+            Span::raw(" choose "),
             key("h/l"),
-            Span::raw(" wait "),
-            key("f"),
-            Span::raw(" search "),
-            key("/"),
-            Span::raw(" commands "),
+            Span::raw(" decision "),
+            key("n/N"),
+            Span::raw(" next "),
             key("Enter"),
-            Span::raw(" go "),
-            key("c"),
-            Span::raw(" call "),
-            key("t"),
-            Span::raw(" talk now "),
-            key("q"),
-            Span::raw(" quit "),
-        ]
-    } else {
-        vec![
-            Span::styled(" DISPATCH  ", Style::default().fg(MUTED)),
-            key("j/k"),
-            Span::raw(" select  "),
-            key("h/l"),
-            Span::raw(" waiting  "),
-            key("f"),
-            Span::raw(" search  "),
-            key("/"),
-            Span::raw(" commands  "),
-            key("Enter"),
-            Span::raw(" switch pane  "),
-            key("c"),
-            Span::raw(" call  "),
-            key("t"),
-            Span::raw(" talk now  "),
+            Span::raw(" pick "),
+            key("o"),
+            Span::raw(" open "),
             key("Esc"),
-            Span::raw(" clear  "),
-            key("q"),
+            Span::raw(" back "),
+            key("tab"),
+            Span::raw(" list "),
+            key("^L"),
+            Span::raw(" retry "),
+            key("^Q"),
             Span::raw(" quit "),
-        ]
+        ],
+        (Focus::Block, false) => vec![
+            label(" QUESTION  "),
+            key("j/k"),
+            Span::raw(" choose  "),
+            key("h/l"),
+            Span::raw(" decision  "),
+            key("n/N"),
+            Span::raw(" question  "),
+            key("Enter"),
+            Span::raw(" pick  "),
+            key("o"),
+            Span::raw(" open  "),
+            key("Esc"),
+            Span::raw(" back  "),
+            key("tab"),
+            Span::raw(" list  "),
+            key("^L"),
+            Span::raw(" retry  "),
+            key("^Q"),
+            Span::raw(" quit "),
+        ],
+        (Focus::List, true) => {
+            let mut hints = vec![
+                key(" j/k"),
+                Span::raw(" move "),
+                key("n/N"),
+                Span::raw(" wait "),
+                key("f"),
+                Span::raw(" search "),
+                key("/"),
+                Span::raw(" commands "),
+                key("Enter"),
+                Span::raw(" go "),
+            ];
+            if questions {
+                hints.extend([key("tab"), Span::raw(" question ")]);
+            }
+            hints.extend([
+                key("c"),
+                Span::raw(" call "),
+                key("t"),
+                Span::raw(" talk now "),
+                key("^L"),
+                Span::raw(" retry "),
+                key("q"),
+                Span::raw(" quit "),
+            ]);
+            hints
+        }
+        (Focus::List, false) => {
+            let mut hints = vec![
+                label(" DISPATCH  "),
+                key("j/k"),
+                Span::raw(" select  "),
+                key("n/N"),
+                Span::raw(" waiting  "),
+                key("f"),
+                Span::raw(" search  "),
+                key("/"),
+                Span::raw(" commands  "),
+                key("Enter"),
+                Span::raw(" switch pane  "),
+            ];
+            if questions {
+                hints.extend([key("tab"), Span::raw(" question  ")]);
+            }
+            hints.extend([
+                key("c"),
+                Span::raw(" call  "),
+                key("t"),
+                Span::raw(" talk now  "),
+                key("Esc"),
+                Span::raw(" clear  "),
+                key("^L"),
+                Span::raw(" retry  "),
+                key("q"),
+                Span::raw(" quit "),
+            ]);
+            hints
+        }
     }
 }
 
 /// While keys are swallowed after the question block hid under the focus, the footer
-/// says the one way out.
+/// says the ways out.
 fn render_swallow_footer(frame: &mut Frame<'_>, area: Rect) {
+    let key = Style::default().fg(INK);
+    let words = Style::default().fg(Color::Yellow);
     let line = Line::from(vec![
-        Span::styled(" Esc", Style::default().fg(INK)),
-        Span::styled(
-            " back to the list (the question block is away)",
-            Style::default().fg(Color::Yellow),
-        ),
+        Span::styled(" Esc", key),
+        Span::styled(" / ", words),
+        Span::styled("Tab", key),
+        Span::styled(" back to the list (the question block is away)", words),
     ]);
     frame.render_widget(
         Paragraph::new(line).block(board_block().borders(Borders::ALL)),
@@ -1195,10 +1170,10 @@ fn render_swallow_footer(frame: &mut Frame<'_>, area: Rect) {
 }
 
 /// While block keys are held after the question changed under them, the footer says
-/// how to go on.
+/// how to go on, or how to leave for the list.
 fn render_hold_footer(frame: &mut Frame<'_>, area: Rect) {
     let line = Line::from(Span::styled(
-        " esc to continue",
+        " esc to continue · tab to the list",
         Style::default().fg(Color::Yellow),
     ));
     frame.render_widget(
@@ -1207,22 +1182,39 @@ fn render_hold_footer(frame: &mut Frame<'_>, area: Rect) {
     );
 }
 
-fn render_footer(frame: &mut Frame<'_>, area: Rect, compact: bool, questions: bool) {
-    let mut hints = footer_hints_with_questions(compact, questions);
-    if Line::from(hints.clone()).width() + 2 <= usize::from(area.width) {
+/// The footer for the focused section, on one line when it fits. Otherwise it goes on
+/// to a second line at its break key (the list's `c`, the block's `^L`), or at the last
+/// key before that when the first line still would not fit.
+fn render_footer(frame: &mut Frame<'_>, area: Rect, compact: bool, focus: Focus, questions: bool) {
+    let mut hints = footer_hints(compact, focus, questions);
+    let room = usize::from(area.width).saturating_sub(2);
+    if Line::from(hints.clone()).width() <= room {
         frame.render_widget(
             Paragraph::new(Line::from(hints)).block(board_block().borders(Borders::ALL)),
             area,
         );
         return;
     }
-    // Too narrow for one line: the call keys and quit go on a second line, in the
-    // row the top border would take.
-    let call_keys = hints
+    // Too narrow for one line: the rest goes on a second line, in the row the top
+    // border would take.
+    let break_key = match focus {
+        Focus::List => "c",
+        Focus::Block => "^L",
+    };
+    let named = hints
         .iter()
-        .position(|span| span.content == "c")
+        .position(|span| span.content == break_key)
         .unwrap_or(hints.len());
-    let mut second = hints.split_off(call_keys);
+    let fits = |at: usize| Line::from(hints[..at].to_vec()).width() <= room;
+    let at = if fits(named) {
+        named
+    } else {
+        (1..named)
+            .rev()
+            .find(|&at| hints[at].style.fg == Some(INK) && fits(at))
+            .unwrap_or(named)
+    };
+    let mut second = hints.split_off(at);
     second.insert(0, Span::raw(" "));
     frame.render_widget(
         Paragraph::new(vec![Line::from(hints), Line::from(second)])
@@ -1722,7 +1714,7 @@ mod tests {
 
         assert!(content.contains("TRANSPORT UNAVAILABLE"));
         assert!(content.contains("Harold is unavailable"));
-        assert!(content.contains("Press r to retry now"));
+        assert!(content.contains("Press Ctrl+L to retry now"));
         assert!(!content.contains("No configured agent panes found"));
     }
 
@@ -2792,33 +2784,6 @@ mod tests {
     }
 
     #[test]
-    fn waiting_line_shows_count_entries_oldest_first_and_keys() {
-        let content = rendered(&waiting_app(), 140, 38, 100_000);
-        assert!(content.contains("WAITING 2"));
-        assert!(content.contains("◀ h"));
-        assert!(content.contains("l ▶"));
-        let sre = content.find("home/sre").expect("oldest entry");
-        let palette = content
-            .find("harold/voice-mute-palette")
-            .expect("newest entry");
-        assert!(sre < palette);
-        assert!(content.contains("AGENT BLOCK OCCUPANCY"));
-        assert!(!content.contains("focus tracking off"));
-    }
-
-    #[test]
-    fn waiting_line_is_quiet_when_empty_and_flags_missing_focus_tracking() {
-        let mut app = user_layout();
-        let content = rendered(&app, 140, 38, 100_000);
-        assert!(content.contains("WAITING 0"));
-        assert!(!content.contains("◀ h"));
-        assert!(content.contains("(focus tracking off)"));
-
-        app.observe_focus(crate::app::FocusReading::Active("%99".into()));
-        assert!(!rendered(&app, 140, 38, 100_000).contains("focus tracking off"));
-    }
-
-    #[test]
     fn waiting_rows_carry_a_marker_and_others_do_not() {
         let content = rendered_lines(&waiting_app(), 140, 38, 100_000);
         let line_with = |needle: &str| {
@@ -2836,47 +2801,48 @@ mod tests {
     }
 
     #[test]
-    fn waiting_line_overflow_reports_how_many_are_hidden_and_never_wraps() {
-        let content = rendered_lines(&waiting_app(), 60, 18, 100_000);
-        assert!(content.contains("WAITING 2"));
-        assert!(content.contains("more") || content.contains("home/sre"));
-        assert_eq!(content.lines().count(), 18);
-    }
-
-    #[test]
-    fn group_equal_to_name_is_not_repeated_in_a_waiting_entry() {
-        use AgentState::{Busy, Idle};
-        let single = |state, revision| crate::app::Snapshot {
-            through_event_version: revision,
-            ..snapshot(
-                vec![health(MonitorHealthState::Healthy, "ok")],
-                vec![located(
-                    "%1",
-                    state,
-                    "Codex",
-                    "kahgeh-com",
-                    "/p/kahgeh-com",
-                    "a",
-                )],
-            )
-        };
-        let mut app = live_app(Vec::new(), None);
-        app.apply_later_snapshot(single(Busy, 43)).unwrap();
-        app.apply_later_snapshot(single(Idle, 44)).unwrap();
-        let content = rendered(&app, 140, 38, 100_000);
-        assert!(content.contains("WAITING 1"));
-        assert!(!content.contains("kahgeh-com/kahgeh-com"));
-    }
-
-    #[test]
     fn footer_lists_every_hint_untruncated_at_all_widths() {
+        let list = [
+            "j/k",
+            "n/N",
+            "f search",
+            "/ commands",
+            "Enter",
+            "^L retry",
+            "q quit",
+        ];
+        let block = [
+            "j/k choose",
+            "h/l decision",
+            "n/N",
+            "Enter pick",
+            "o open",
+            "Esc back",
+            "tab list",
+            "^L retry",
+            "^Q quit",
+        ];
         for (width, height) in [(140, 38), (84, 30), (70, 30), (60, 18)] {
-            let content = rendered(&user_layout(), width, height, 100_000);
-            for hint in ["j/k", "h/l", "f search", "/ commands", "Enter", "q quit"] {
-                assert!(content.contains(hint), "{hint} missing at {width}x{height}");
+            for (app, hints) in [
+                (user_layout(), &list[..]),
+                (
+                    question_app(false),
+                    &[&list[..], &["tab question"]].concat()[..],
+                ),
+                (question_app(true), &block[..]),
+            ] {
+                let content = rendered(&app, width, height, 100_000);
+                for hint in hints {
+                    assert!(
+                        content.contains(hint),
+                        "{hint} missing at {width}x{height} with {:?} focus",
+                        app.focus
+                    );
+                }
             }
         }
     }
+
     fn call_layout(view: CallView) -> App {
         let mut app = user_layout();
         app.observe_call(Some(view));
@@ -3297,7 +3263,7 @@ mod tests {
             let content = rendered(&user_layout(), width, height, 100_000);
             for hint in [
                 "j/k",
-                "h/l",
+                "n/N",
                 "f search",
                 "/ commands",
                 "Enter",
@@ -3310,7 +3276,7 @@ mod tests {
         }
         // The long form fits exactly at its threshold, inside the footer's borders.
         assert_eq!(
-            Line::from(super::footer_hints(false)).width() + 2,
+            Line::from(super::footer_hints(false, crate::app::Focus::List, false)).width() + 2,
             usize::from(super::WIDE_FOOTER_WIDTH)
         );
     }
@@ -3532,7 +3498,7 @@ mod tests {
             "Which protocol?",
             "h  libSQL's Hrana — one client for local and remote (suggested)",
             "g  gRPC — a second schema to keep",
-            "tab question",
+            "tab list",
         ] {
             row_with(&lines, expected);
         }
@@ -3621,7 +3587,7 @@ mod tests {
         let mut app = question_app(true);
         app.hide_questions();
         let lines = rendered_lines(&app, 140, 38, 100_000);
-        row_with(&lines, "Esc back to the list");
+        row_with(&lines, "Esc / Tab back to the list");
         assert!(!lines.contains("Q25"), "the block is hidden");
         app.handle_key(KeyCode::Esc);
         let lines = rendered_lines(&app, 140, 38, 100_000);
@@ -3638,5 +3604,154 @@ mod tests {
         let lines = rendered_lines(&app, 140, 38, 100_000);
         row_with(&lines, "esc to continue");
         row_with(&lines, "Q25 dismissed: withdrawn");
+    }
+
+    /// The text of each of the block's lines.
+    fn block_texts(app: &App) -> Vec<String> {
+        let view = app.questions.view().expect("a question is in view");
+        super::question_lines(&view)
+            .0
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn choosing_hint_is_the_new_string() {
+        let texts = block_texts(&question_app(true));
+        assert!(
+            texts.iter().any(|text| text
+                == "j/k choose · l next · h back · enter pick · o open · n/N next · esc back"),
+            "{texts:#?}"
+        );
+        for gone in ["r revise", "x reject", "l later"] {
+            assert!(
+                texts.iter().all(|text| !text.contains(gone)),
+                "{gone} is still hinted: {texts:#?}"
+            );
+        }
+    }
+
+    #[test]
+    fn action_rows_follow_a_rule_dimmed_with_no_key() {
+        let mut app = question_app(true);
+        let view = app.questions.view().unwrap();
+        let lines = super::question_lines(&view).0;
+        let texts = block_texts(&app);
+        let first = texts
+            .iter()
+            .position(|text| text.contains("gRPC"))
+            .expect("the last option")
+            + 1;
+        assert_eq!(
+            texts[first..first + 4],
+            [
+                "  ─────────────",
+                "     later",
+                "     revise…",
+                "     reject…"
+            ],
+            "{texts:#?}"
+        );
+        for line in &lines[first + 1..first + 4] {
+            assert!(line.style.add_modifier.contains(Modifier::DIM), "{line:?}");
+        }
+
+        for _ in 0..3 {
+            app.handle_key(KeyCode::Char('j'));
+        }
+        let view = app.questions.view().unwrap();
+        assert_eq!(view.highlighted, view.options.len() + 1);
+        let lines = super::question_lines(&view).0;
+        let texts = block_texts(&app);
+        assert_eq!(texts[first + 2], "▸    revise…");
+        let revise = &lines[first + 2];
+        assert_eq!(revise.style.fg, Some(Color::Yellow));
+        assert!(revise.style.add_modifier.contains(Modifier::BOLD));
+        assert!(!revise.style.add_modifier.contains(Modifier::DIM));
+        for line in [&lines[first + 1], &lines[first + 3]] {
+            assert!(line.style.add_modifier.contains(Modifier::DIM), "{line:?}");
+        }
+    }
+
+    /// The footer's rows: the last three of the screen.
+    fn footer_rows(lines: &str) -> String {
+        let rows: Vec<&str> = lines.lines().collect();
+        rows[rows.len() - 3..].join("\n")
+    }
+
+    #[test]
+    fn footer_differs_by_focus_and_both_name_ctrl_l() {
+        let list = footer_rows(&rendered_lines(&question_app(false), 120, 40, 100_000));
+        let block = footer_rows(&rendered_lines(&question_app(true), 120, 40, 100_000));
+        assert_ne!(list, block);
+        assert!(list.contains("^L retry"), "{list}");
+        assert!(block.contains("^L retry"), "{block}");
+        assert!(list.contains("n/N"), "{list}");
+        assert!(!list.contains("h/l"), "{list}");
+        assert!(block.contains("h/l decision"), "{block}");
+    }
+
+    #[test]
+    fn hold_and_swallow_footers_name_tab() {
+        let mut swallowing = question_app(true);
+        swallowing.hide_questions();
+        let lines = footer_rows(&rendered_lines(&swallowing, 140, 38, 100_000));
+        assert!(
+            lines.contains("Esc / Tab back to the list (the question block is away)"),
+            "{lines}"
+        );
+
+        let mut holding = question_app(true);
+        open_revise_note(&mut holding);
+        holding.observe_questions(crate::questions::Queue::default());
+        let lines = footer_rows(&rendered_lines(&holding, 140, 38, 100_000));
+        assert!(
+            lines.contains("esc to continue · tab to the list"),
+            "{lines}"
+        );
+    }
+
+    #[test]
+    fn unavailable_workspace_says_ctrl_l() {
+        let app = App::new(
+            ConnectionState::Unavailable,
+            snapshot(Vec::new(), Vec::new()),
+            empty_search(),
+            None,
+        );
+        let content = rendered(&app, 104, 28, 100_000);
+        assert!(content.contains("Press Ctrl+L to retry now"));
+        assert!(!content.contains("Press r"));
+    }
+
+    #[test]
+    fn the_list_border_has_no_waiting_text() {
+        for width in [100, 160] {
+            let lines = rendered_lines(&waiting_app(), width, 38, 100_000);
+            for gone in ["WAITING", "+1 more", "◀ h", "l ▶", "focus tracking off"] {
+                assert!(!lines.contains(gone), "{gone} at {width}:\n{lines}");
+            }
+            for name in ["sre", "voice-mute-palette"] {
+                let row = lines
+                    .lines()
+                    .find(|line| line.contains(name) && line.contains("IDLE"))
+                    .unwrap_or_else(|| panic!("no {name} row at {width}:\n{lines}"));
+                assert!(row.contains('◆'), "{row}");
+            }
+        }
+
+        let lines = rendered_lines(&user_layout(), 140, 38, 100_000);
+        let border = lines.lines().nth(row_with(&lines, "AGENT BLOCK OCCUPANCY"));
+        assert!(
+            border.unwrap().contains("(focus tracking off)"),
+            "{border:?}"
+        );
+        assert!(!lines.contains("WAITING"), "{lines}");
     }
 }
