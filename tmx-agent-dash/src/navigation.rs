@@ -46,6 +46,10 @@ impl ProcessContext for ProcessEnvironment {
 pub enum NavigationError {
     EmptyClient,
     EmptyPane,
+    /// Only an `https://` or `http://` link is opened.
+    NotWebLink,
+    /// This navigator cannot open links.
+    LinksUnavailable,
     CommandIo {
         operation: &'static str,
         detail: String,
@@ -61,6 +65,8 @@ impl fmt::Display for NavigationError {
         match self {
             Self::EmptyClient => formatter.write_str("tmux client must not be empty"),
             Self::EmptyPane => formatter.write_str("tmux pane ID must not be empty"),
+            Self::NotWebLink => formatter.write_str("only an http(s) link can be opened"),
+            Self::LinksUnavailable => formatter.write_str("links cannot be opened here"),
             Self::CommandIo { operation, detail } => {
                 write!(formatter, "could not {operation}: {detail}")
             }
@@ -75,6 +81,11 @@ impl std::error::Error for NavigationError {}
 
 pub trait PaneNavigator {
     fn jump_to(&self, client: &str, pane_id: &str) -> Result<(), NavigationError>;
+
+    /// Opens a question's link in the user's browser.
+    fn open_link(&self, _link: &str) -> Result<(), NavigationError> {
+        Err(NavigationError::LinksUnavailable)
+    }
 }
 
 pub struct TmuxNavigator {
@@ -165,18 +176,27 @@ impl TmuxNavigator {
         operation: &'static str,
         args: &[&str],
     ) -> Result<CommandOutput, NavigationError> {
-        let output = self
-            .runner
-            .run("tmux", args)
-            .map_err(|error| NavigationError::CommandIo {
-                operation,
-                detail: sanitize_detail(&error.to_string()),
-            })?;
+        self.run_command("tmux", operation, args)
+    }
+
+    fn run_command(
+        &self,
+        program: &str,
+        operation: &'static str,
+        args: &[&str],
+    ) -> Result<CommandOutput, NavigationError> {
+        let output =
+            self.runner
+                .run(program, args)
+                .map_err(|error| NavigationError::CommandIo {
+                    operation,
+                    detail: sanitize_detail(&error.to_string()),
+                })?;
 
         if !output.success {
             return Err(NavigationError::CommandFailed {
                 operation,
-                detail: command_failure_detail(&output.stderr),
+                detail: command_failure_detail(program, &output.stderr),
             });
         }
 
@@ -205,12 +225,22 @@ impl PaneNavigator for TmuxNavigator {
         self.run_tmux("switch tmux client", &["switch-client", "-t", pane_id])?;
         Ok(())
     }
+
+    /// Runs `open <link>`. The scheme check means the link can never be read as a flag
+    /// or name a local file or app.
+    fn open_link(&self, link: &str) -> Result<(), NavigationError> {
+        if !(link.starts_with("https://") || link.starts_with("http://")) {
+            return Err(NavigationError::NotWebLink);
+        }
+        self.run_command("open", "open link", &[link])?;
+        Ok(())
+    }
 }
 
-fn command_failure_detail(stderr: &[u8]) -> String {
+fn command_failure_detail(program: &str, stderr: &[u8]) -> String {
     let detail = sanitize_detail(&String::from_utf8_lossy(stderr));
     if detail.is_empty() {
-        return "tmux exited unsuccessfully".into();
+        return format!("{program} exited unsuccessfully");
     }
     detail
 }
@@ -409,6 +439,36 @@ mod tests {
                 vec!["switch-client".into(), "-t".into(), "%27".into()]
             )]
         );
+    }
+
+    #[test]
+    fn open_link_runs_open_with_the_link() {
+        let runner = FakeRunner::successful("");
+        let (navigator, observed_runner) = navigator_with(runner, FakeContext::valid());
+
+        navigator.open_link("https://example.com/spec").unwrap();
+
+        assert_eq!(
+            observed_runner.calls(),
+            vec![("open".into(), vec!["https://example.com/spec".into()])]
+        );
+
+        // Anything but an http(s) link is refused without running a command.
+        let runner = FakeRunner::with_outputs(Vec::new());
+        let (navigator, observed_runner) = navigator_with(runner, FakeContext::valid());
+        for link in ["-a Calculator", "file:///etc/passwd", ""] {
+            assert_eq!(navigator.open_link(link), Err(NavigationError::NotWebLink));
+        }
+        assert!(observed_runner.calls().is_empty());
+
+        let (navigator, _) = navigator_with(FakeRunner::failed("no app"), FakeContext::valid());
+        assert!(matches!(
+            navigator.open_link("http://example.com"),
+            Err(NavigationError::CommandFailed {
+                operation: "open link",
+                ..
+            })
+        ));
     }
 
     #[test]

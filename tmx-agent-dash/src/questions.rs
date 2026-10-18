@@ -137,7 +137,7 @@ pub struct BlockView {
 }
 
 /// The block's state.
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct QuestionBlock {
     queue: Queue,
     current: Option<String>,
@@ -148,6 +148,12 @@ pub struct QuestionBlock {
     mode: Mode,
     notice: Option<String>,
 }
+
+/// The notice when Harold could not save an answer or a deferral.
+pub const UNAVAILABLE_NOTICE: &str = "Harold can't save answers right now";
+
+/// The longest note the block takes; Harold refuses a field of 2,000 characters.
+const NOTE_LIMIT: usize = 1_999;
 
 fn changed_notice(id: &str) -> String {
     format!("{id} changed, your picks were cleared")
@@ -216,7 +222,7 @@ impl QuestionBlock {
                 self.select_first();
             }
             SendResult::Unavailable => {
-                self.notice = Some("Harold can't save answers right now".into());
+                self.notice = Some(UNAVAILABLE_NOTICE.into());
             }
         }
     }
@@ -369,7 +375,11 @@ impl QuestionBlock {
             return BlockEffect::None;
         };
         match code {
-            KeyCode::Char(c) if !c.is_control() => text.push(c),
+            KeyCode::Char(c) if !c.is_control() => {
+                if text.chars().count() < NOTE_LIMIT {
+                    text.push(c);
+                }
+            }
             KeyCode::Backspace => {
                 text.pop();
             }
@@ -781,6 +791,30 @@ mod tests {
                 note: "mine".into(),
             })
         );
+    }
+
+    #[test]
+    fn a_note_stops_at_1999_characters() {
+        let mut b = block(vec![question("Q1", 1, 1)]);
+        press(&mut b, KeyCode::Char('r'));
+        type_text(&mut b, &"a".repeat(1_999));
+        type_text(&mut b, "bcd");
+        match b.view().unwrap().mode {
+            Mode::Note { text, .. } => {
+                assert_eq!(text.chars().count(), 1_999);
+                assert!(text.chars().all(|c| c == 'a'));
+            }
+            other => panic!("{other:?}"),
+        }
+        press(&mut b, KeyCode::Backspace);
+        press(&mut b, KeyCode::Char('z'));
+        match press(&mut b, KeyCode::Enter) {
+            BlockEffect::Send(out) => {
+                assert_eq!(out.note.chars().count(), 1_999);
+                assert!(out.note.ends_with('z'));
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

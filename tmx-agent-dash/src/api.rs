@@ -11,6 +11,11 @@ use harold_api::harold::{
     SetMessagingPausedRequest, SetTtsMutedRequest, WatchAgentStatesRequest,
     harold_client::HaroldClient,
 };
+use harold_api::tools::questions::v1::{
+    AnswerKind as ProtoAnswerKind, AnswerQuestionRequest, Decision, DecisionOption,
+    DeferQuestionRequest, ListQuestionsRequest, ListQuestionsResponse, ListedQuestion, Pick,
+    question_service_client::QuestionServiceClient,
+};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tonic::transport::{Channel, Endpoint};
@@ -18,6 +23,9 @@ use tonic::transport::{Channel, Endpoint};
 use crate::app::{
     AgentIncarnation, AgentRow, AgentState, CallAction, CallState, CallView, MonitorHealth,
     MonitorHealthState, Snapshot,
+};
+use crate::questions::{
+    AnswerKind, DecisionView, OptionView, Outgoing, QuestionView, Queue, SendResult,
 };
 use crate::text::sanitize_display;
 
@@ -31,6 +39,8 @@ const SUMMARY_LIMIT: usize = 160;
 const MONITOR_FIELD_LIMIT: usize = 64;
 const TRANSCRIPT_LIMIT: usize = 1_024;
 const ERROR_LIMIT: usize = 512;
+/// Harold refuses a question field of 2,000 characters or more.
+const QUESTION_FIELD_LIMIT: usize = 2_000;
 const SOURCE_CHANNEL_CAPACITY: usize = 16;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -118,6 +128,7 @@ pub struct SourceStream {
     receiver: mpsc::Receiver<Result<Snapshot, SourceError>>,
     reader: Option<JoinHandle<()>>,
     voice: Option<HaroldClient<Channel>>,
+    questions: Option<QuestionServiceClient<Channel>>,
 }
 
 trait SnapshotReader: Send + 'static {
@@ -158,6 +169,7 @@ where
         receiver,
         reader: Some(reader),
         voice: None,
+        questions: None,
     }
 }
 
@@ -216,6 +228,61 @@ impl SourceStream {
         .map_err(|error| SourceError::transport(error.to_string()))
     }
 
+    /// The question queue, or an error when the tool cannot be reached: an older Harold
+    /// answers `Unimplemented`.
+    pub async fn list_questions(&self) -> Result<Queue, SourceError> {
+        let Some(mut client) = self.questions.clone() else {
+            return Err(SourceError::transport("question tool unavailable"));
+        };
+        tokio::time::timeout(
+            VOICE_REQUEST_TIMEOUT,
+            client.list_questions(ListQuestionsRequest {}),
+        )
+        .await
+        .map_err(|_| SourceError::transport("question request timed out"))?
+        .map(|response| map_queue(response.into_inner()))
+        .map_err(|error| SourceError::transport(error.to_string()))
+    }
+
+    pub async fn answer_question(&self, out: &Outgoing) -> SendResult {
+        let Some(mut client) = self.questions.clone() else {
+            return SendResult::Unavailable;
+        };
+        let request = AnswerQuestionRequest {
+            id: out.id.clone(),
+            version: out.version,
+            kind: proto_answer_kind(out.kind) as i32,
+            picks: out
+                .picks
+                .iter()
+                .map(|pick| Pick {
+                    decision: pick.decision,
+                    key: pick.key.clone(),
+                    text: pick.text.clone(),
+                })
+                .collect(),
+            note: out.note.clone(),
+        };
+        match tokio::time::timeout(VOICE_REQUEST_TIMEOUT, client.answer_question(request)).await {
+            Ok(result) => answer_send_result(result.map(|_| ())),
+            Err(_) => SendResult::Unavailable,
+        }
+    }
+
+    pub async fn defer_question(&self, id: &str) -> Result<(), SourceError> {
+        let Some(mut client) = self.questions.clone() else {
+            return Err(SourceError::transport("question tool unavailable"));
+        };
+        tokio::time::timeout(
+            VOICE_REQUEST_TIMEOUT,
+            client.defer_question(DeferQuestionRequest { id: id.to_owned() }),
+        )
+        .await
+        .map_err(|_| SourceError::transport("question request timed out"))?
+        .map(|_| ())
+        .map_err(|error| SourceError::transport(error.to_string()))
+    }
+
     pub async fn close(mut self) {
         if let Some(reader) = self.reader.take() {
             reader.abort();
@@ -246,9 +313,12 @@ impl AgentStateSource {
         &self,
     ) -> Pin<Box<dyn Future<Output = Result<SourceStream, SourceError>> + Send + '_>> {
         Box::pin(async move {
-            let mut client = HaroldClient::connect(self.endpoint.clone())
+            let channel = self
+                .endpoint
+                .connect()
                 .await
                 .map_err(|error| SourceError::transport(error.to_string()))?;
+            let mut client = HaroldClient::new(channel.clone());
             let stream = client
                 .watch_agent_states(WatchAgentStatesRequest {})
                 .await
@@ -257,6 +327,7 @@ impl AgentStateSource {
 
             let mut source = spawn_reader(stream);
             source.voice = Some(client);
+            source.questions = Some(QuestionServiceClient::new(channel));
             Ok(source)
         })
     }
@@ -287,6 +358,100 @@ pub fn map_snapshot(snapshot: AgentStateSnapshot) -> Result<Snapshot, ProtocolEr
         tts_muted: snapshot.tts_muted,
         messaging_paused: snapshot.messaging_paused,
     })
+}
+
+/// What `AnswerQuestion`'s answer means for the block. Only the two refusals the tool
+/// names are told apart; anything else, an older Harold or a failed write included,
+/// means the answer was not saved.
+pub(crate) fn answer_send_result(result: Result<(), tonic::Status>) -> SendResult {
+    let Err(status) = result else {
+        return SendResult::Recorded;
+    };
+    match (status.code(), status.message()) {
+        (tonic::Code::FailedPrecondition, "version_changed") => SendResult::VersionChanged,
+        (tonic::Code::FailedPrecondition, "not_waiting") => SendResult::NotWaiting,
+        _ => SendResult::Unavailable,
+    }
+}
+
+fn proto_answer_kind(kind: AnswerKind) -> ProtoAnswerKind {
+    match kind {
+        AnswerKind::Answer => ProtoAnswerKind::Answer,
+        AnswerKind::Revise => ProtoAnswerKind::Revise,
+        AnswerKind::Reject => ProtoAnswerKind::Reject,
+        AnswerKind::FreeText => ProtoAnswerKind::FreeText,
+    }
+}
+
+/// The question queue as the block shows it. Every text is cleaned for display. A
+/// question with no decisions, or with a decision that has no options, is left out, so
+/// the block never indexes into empty data; it is not counted as waiting either.
+pub fn map_queue(response: ListQuestionsResponse) -> Queue {
+    let listed = response.questions.len();
+    let questions: Vec<QuestionView> = response
+        .questions
+        .into_iter()
+        .filter_map(map_listed_question)
+        .collect();
+    let dropped = u32::try_from(listed - questions.len()).unwrap_or(u32::MAX);
+    Queue {
+        waiting: response.waiting.saturating_sub(dropped),
+        questions,
+        dismissed: response
+            .dismissed
+            .into_iter()
+            .map(|dismissed| {
+                (
+                    question_text(&dismissed.id),
+                    question_text(&dismissed.reason),
+                )
+            })
+            .collect(),
+    }
+}
+
+fn map_listed_question(listed: ListedQuestion) -> Option<QuestionView> {
+    let question = listed.question?;
+    if question.decisions.is_empty()
+        || question
+            .decisions
+            .iter()
+            .any(|decision| decision.options.is_empty())
+    {
+        return None;
+    }
+    Some(QuestionView {
+        id: question_text(&question.id),
+        product: question_text(&question.product),
+        spec: question_text(&question.spec),
+        sha: question_text(&question.sha),
+        link: question_text(&question.link),
+        intro: question_text(&question.intro),
+        version: listed.version,
+        deferred: listed.deferred,
+        decisions: question.decisions.into_iter().map(map_decision).collect(),
+    })
+}
+
+fn map_decision(decision: Decision) -> DecisionView {
+    DecisionView {
+        ask: question_text(&decision.ask),
+        options: decision.options.into_iter().map(map_option).collect(),
+    }
+}
+
+fn map_option(option: DecisionOption) -> OptionView {
+    OptionView {
+        key: question_text(&option.key),
+        label: question_text(&option.label),
+        impact: question_text(&option.impact),
+        suggested: option.suggested,
+        free: option.free,
+    }
+}
+
+fn question_text(text: &str) -> String {
+    sanitize_display(text, QUESTION_FIELD_LIMIT)
 }
 
 /// How long the dashboard waits for Harold's answer to `action`. A Status poll is awaited
@@ -1001,5 +1166,167 @@ mod tests {
             panes,
         })
         .unwrap_err()
+    }
+}
+
+#[cfg(test)]
+mod question_tests {
+    use harold_api::tools::questions::v1::{
+        Decision, DecisionOption, Dismissed, ListQuestionsResponse, ListedQuestion, Question,
+    };
+
+    use super::{answer_send_result, map_queue};
+    use crate::questions::SendResult;
+
+    fn option(key: &str, suggested: bool, free: bool) -> DecisionOption {
+        DecisionOption {
+            key: key.into(),
+            label: format!("label {key}"),
+            impact: format!("impact {key}"),
+            suggested,
+            free,
+        }
+    }
+
+    fn listed(id: &str, version: u32, deferred: bool, decisions: Vec<Decision>) -> ListedQuestion {
+        ListedQuestion {
+            question: Some(Question {
+                id: id.into(),
+                product: "harold".into(),
+                spec: "dash-question-queue".into(),
+                sha: "d84bf386a2a5".into(),
+                link: "https://example.com/spec".into(),
+                intro: "We need a choice.".into(),
+                decisions,
+            }),
+            version,
+            deferred,
+        }
+    }
+
+    fn decision(ask: &str, options: Vec<DecisionOption>) -> Decision {
+        Decision {
+            ask: ask.into(),
+            options,
+        }
+    }
+
+    #[test]
+    fn map_queue_keeps_order_versions_and_dismissals() {
+        let mut hostile = listed(
+            "Q3",
+            1,
+            false,
+            vec![decision("\x1b[2Jwipe?", vec![option("a", false, false)])],
+        );
+        let question = hostile.question.as_mut().unwrap();
+        question.intro = "line one\nline two\x1b]0;title\x07".into();
+        question.product = "\x1b[31mred".into();
+        let mut free_label = option("z", false, true);
+        free_label.label = "other\r".into();
+
+        let queue = map_queue(ListQuestionsResponse {
+            questions: vec![
+                listed(
+                    "Q2",
+                    4,
+                    false,
+                    vec![
+                        decision(
+                            "Protocol?",
+                            vec![option("a", false, false), option("b", true, false)],
+                        ),
+                        decision("Build?", vec![option("y", true, false), free_label]),
+                    ],
+                ),
+                listed(
+                    "Q1",
+                    1,
+                    true,
+                    vec![decision("Later?", vec![option("a", true, false)])],
+                ),
+                // No decisions, or a decision with no options: never shown.
+                listed("Q8", 1, false, vec![]),
+                listed("Q9", 1, false, vec![decision("Empty?", vec![])]),
+                ListedQuestion {
+                    question: None,
+                    version: 1,
+                    deferred: false,
+                },
+                hostile,
+            ],
+            waiting: 6,
+            dismissed: vec![Dismissed {
+                id: "Q7".into(),
+                reason: "no longer \x1b[1mneeded".into(),
+            }],
+        });
+
+        let ids: Vec<&str> = queue.questions.iter().map(|q| q.id.as_str()).collect();
+        assert_eq!(ids, ["Q2", "Q1", "Q3"]);
+        assert_eq!(queue.waiting, 3, "the dropped questions are not counted");
+        let q2 = &queue.questions[0];
+        assert_eq!((q2.version, q2.deferred), (4, false));
+        assert_eq!(
+            (queue.questions[1].version, queue.questions[1].deferred),
+            (1, true)
+        );
+        assert_eq!(q2.product, "harold");
+        assert_eq!(q2.spec, "dash-question-queue");
+        assert_eq!(q2.sha, "d84bf386a2a5");
+        assert_eq!(q2.link, "https://example.com/spec");
+        assert_eq!(q2.decisions.len(), 2);
+        assert_eq!(q2.decisions[0].ask, "Protocol?");
+        let b = &q2.decisions[0].options[1];
+        assert_eq!(
+            (
+                b.key.as_str(),
+                b.label.as_str(),
+                b.impact.as_str(),
+                b.suggested,
+                b.free
+            ),
+            ("b", "label b", "impact b", true, false)
+        );
+        let z = &q2.decisions[1].options[1];
+        assert!(z.free);
+        assert_eq!(z.label, "other");
+
+        let q3 = &queue.questions[2];
+        assert_eq!(q3.product, "red");
+        assert_eq!(q3.intro, "line oneline two");
+        assert_eq!(q3.decisions[0].ask, "wipe?");
+
+        assert_eq!(
+            queue.dismissed,
+            vec![("Q7".to_string(), "no longer needed".to_string())]
+        );
+    }
+
+    #[test]
+    fn answer_refusals_map_to_send_results() {
+        assert_eq!(answer_send_result(Ok(())), SendResult::Recorded);
+        assert_eq!(
+            answer_send_result(Err(tonic::Status::failed_precondition("version_changed"))),
+            SendResult::VersionChanged
+        );
+        assert_eq!(
+            answer_send_result(Err(tonic::Status::failed_precondition("not_waiting"))),
+            SendResult::NotWaiting
+        );
+        for status in [
+            tonic::Status::failed_precondition("something_else"),
+            tonic::Status::unavailable("write failed"),
+            tonic::Status::unimplemented("no such service"),
+            tonic::Status::invalid_argument("invalid picks"),
+            tonic::Status::unknown("transport error"),
+            tonic::Status::deadline_exceeded("timed out"),
+        ] {
+            assert_eq!(
+                answer_send_result(Err(status.clone())),
+                SendResult::Unavailable,
+                "{status:?}"
+            );
+        }
     }
 }

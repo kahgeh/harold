@@ -6,7 +6,8 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, TableState, Wrap};
 
-use crate::app::{AgentState, App, CallState, CallView, RuntimeStatus, VoiceState};
+use crate::app::{AgentState, App, CallState, CallView, Focus, RuntimeStatus, VoiceState};
+use crate::questions::{BlockView, Mode, NoteKind};
 use crate::text::display_work_summary;
 
 const BOARD: Color = Color::Rgb(20, 20, 16);
@@ -30,6 +31,10 @@ const BAR_STEP_MS: i64 = 150;
 const COLUMN_SPACING: u16 = 1;
 /// The work summary's place among the list's columns, in both forms.
 const WORK_COLUMN: usize = 4;
+/// The question block's tallest height, borders included.
+const QUESTION_BLOCK_MAX: u16 = 16;
+/// The rows the agent list keeps while the question block is hidden.
+const WORKSPACE_MIN: u16 = 6;
 
 pub fn render(frame: &mut Frame<'_>, app: &App, now_ms: i64) {
     let area = frame.area();
@@ -42,12 +47,37 @@ pub fn render(frame: &mut Frame<'_>, app: &App, now_ms: i64) {
 
     let compact = area.width < COMPACT_WIDTH || area.height < 24;
     let chrome_height = if compact { 2 } else { 3 };
-    let [masthead, monitor, summary, search, workspace, footer] = Layout::vertical([
+    let question = app.questions.view();
+    // The block takes what the list can spare above its six rows, but never less than
+    // its borders and one line: on a short terminal the list gives way to it.
+    let room = area
+        .height
+        .saturating_sub(3 + 3 * chrome_height + WORKSPACE_MIN + 3)
+        .max(3);
+    let question_block = question
+        .as_ref()
+        .map(|view| fit_question_lines(view, area.width, room));
+    let question_height = question_block.as_ref().map_or(0, |(_, height)| *height);
+    let workspace_min = if question_height == 0 {
+        WORKSPACE_MIN
+    } else {
+        0
+    };
+    let [
+        masthead,
+        monitor,
+        summary,
+        search,
+        questions,
+        workspace,
+        footer,
+    ] = Layout::vertical([
         Constraint::Length(3),
         Constraint::Length(chrome_height),
         Constraint::Length(chrome_height),
         Constraint::Length(chrome_height),
-        Constraint::Min(6),
+        Constraint::Length(question_height),
+        Constraint::Min(workspace_min),
         Constraint::Length(3),
     ])
     .areas(area);
@@ -56,9 +86,157 @@ pub fn render(frame: &mut Frame<'_>, app: &App, now_ms: i64) {
     render_monitor(frame, monitor, app, now_ms);
     render_summary(frame, summary, app);
     render_search(frame, search, app);
+    if let (Some(view), Some((lines, _))) = (question.as_ref(), question_block) {
+        render_questions(frame, questions, view, lines, app.focus == Focus::Block);
+    }
     render_workspace(frame, workspace, app, now_ms);
-    render_footer(frame, footer, compact || area.width < WIDE_FOOTER_WIDTH);
+    render_footer(
+        frame,
+        footer,
+        compact || area.width < WIDE_FOOTER_WIDTH,
+        question.is_some(),
+    );
     render_palette(frame, area, app);
+}
+
+/// The block's lines and height, borders included, within `room` rows and
+/// QUESTION_BLOCK_MAX. When not everything fits, the product, spec and intro go first,
+/// so the ask and its options stay in view.
+fn fit_question_lines(view: &BlockView, width: u16, room: u16) -> (Vec<Line<'static>>, u16) {
+    let (mut lines, header) = question_lines(view);
+    let inner_width = width.saturating_sub(2);
+    let limit = usize::from(room.min(QUESTION_BLOCK_MAX).saturating_sub(2));
+    if measured_wrapped_height(&lines, inner_width) > limit {
+        lines.drain(..header);
+    }
+    let content = measured_wrapped_height(&lines, inner_width).min(limit);
+    (lines, u16::try_from(content + 2).unwrap_or(u16::MAX))
+}
+
+/// The question block's lines: where the question comes from and its intro (the
+/// header, whose length is returned too), its ask, the options or the summary or the
+/// note being typed, a key hint, then the notice.
+fn question_lines(view: &BlockView) -> (Vec<Line<'static>>, usize) {
+    let muted = Style::default().fg(MUTED);
+    let ink = Style::default().fg(INK);
+    let mut lines = Vec::new();
+    if !view.id.is_empty() {
+        lines.push(Line::styled(
+            format!("{} · {}", view.product, view.spec),
+            muted,
+        ));
+        if !view.intro.is_empty() {
+            lines.push(Line::styled(view.intro.clone(), ink));
+        }
+    }
+    let header = lines.len();
+    match &view.mode {
+        _ if view.id.is_empty() => {}
+        Mode::Choosing => {
+            if let Some(ask) = &view.ask {
+                lines.push(Line::styled(ask.clone(), ink.add_modifier(Modifier::BOLD)));
+            }
+            for (index, option) in view.options.iter().enumerate() {
+                let highlighted = index == view.highlighted;
+                let marker = if highlighted { "▸ " } else { "  " };
+                let suggested = if option.suggested { " (suggested)" } else { "" };
+                let style = if highlighted {
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    ink
+                };
+                lines.push(Line::styled(
+                    format!(
+                        "{marker}{}  {} — {}{suggested}",
+                        option.key, option.label, option.impact
+                    ),
+                    style,
+                ));
+            }
+            if !view.picks.is_empty() {
+                lines.push(Line::styled(
+                    format!("picked: {}", view.picks.join(" · ")),
+                    muted,
+                ));
+            }
+            lines.push(Line::styled(
+                "↑/↓ choose · enter pick · r revise · x reject · o open · l later · esc back",
+                muted,
+            ));
+        }
+        Mode::Summary => {
+            for line in &view.summary {
+                lines.push(Line::styled(line.clone(), ink));
+            }
+            lines.push(Line::styled("enter record · esc back", muted));
+        }
+        Mode::Note { kind, text } => {
+            let label = match kind {
+                NoteKind::Revise => "revise:",
+                NoteKind::Reject => "reject:",
+                NoteKind::FreeText => {
+                    if let Some(ask) = &view.ask {
+                        lines.push(Line::styled(ask.clone(), ink.add_modifier(Modifier::BOLD)));
+                    }
+                    "answer:"
+                }
+            };
+            lines.push(Line::from(vec![
+                Span::styled(format!("{label} "), Style::default().fg(Color::Yellow)),
+                Span::styled(text.clone(), ink.add_modifier(Modifier::BOLD)),
+                Span::styled("█", Style::default().fg(Color::Yellow)),
+            ]));
+            lines.push(Line::styled("enter done · esc back", muted));
+        }
+    }
+    if let Some(notice) = &view.notice {
+        lines.push(Line::styled(
+            notice.clone(),
+            Style::default().fg(CORAL).add_modifier(Modifier::BOLD),
+        ));
+    }
+    (lines, header)
+}
+
+/// The question block, in yellow: bright with the focus, dim without, never a bell.
+fn render_questions(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    view: &BlockView,
+    lines: Vec<Line<'static>>,
+    focused: bool,
+) {
+    let border = if focused {
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::DIM)
+    };
+    let mut block = Block::default()
+        .style(Style::default().bg(PANEL).fg(INK))
+        .borders(Borders::ALL)
+        .border_style(border);
+    if !view.id.is_empty() {
+        block = block.title(Span::styled(
+            format!(
+                " {} · {} of {} waiting ",
+                view.id, view.position, view.waiting
+            ),
+            border,
+        ));
+    }
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .block(block),
+        area,
+    );
 }
 
 fn render_resize_instruction(frame: &mut Frame<'_>, area: Rect) {
@@ -891,6 +1069,22 @@ fn detail_lines<'a>(agent: &'a crate::app::AgentRow, now_ms: i64) -> Vec<Line<'a
     ]
 }
 
+/// The footer's hints, with `tab question` while the question block shows.
+fn footer_hints_with_questions(compact: bool, questions: bool) -> Vec<Span<'static>> {
+    let key = |text| Span::styled(text, Style::default().fg(INK));
+    let mut hints = footer_hints(compact);
+    if questions {
+        // Before the call keys, so a narrow footer still wraps at `c`.
+        let at = hints
+            .iter()
+            .position(|span| span.content == "c")
+            .unwrap_or(hints.len());
+        let label = if compact { " question " } else { " question  " };
+        hints.splice(at..at, [key("tab"), Span::raw(label)]);
+    }
+    hints
+}
+
 /// The footer's hints, short or long. The call keys come last before `q`; the
 /// short form breaks there when one line cannot hold it.
 fn footer_hints(compact: bool) -> Vec<Span<'static>> {
@@ -939,8 +1133,8 @@ fn footer_hints(compact: bool) -> Vec<Span<'static>> {
     }
 }
 
-fn render_footer(frame: &mut Frame<'_>, area: Rect, compact: bool) {
-    let mut hints = footer_hints(compact);
+fn render_footer(frame: &mut Frame<'_>, area: Rect, compact: bool, questions: bool) {
+    let mut hints = footer_hints_with_questions(compact, questions);
     if Line::from(hints.clone()).width() + 2 <= usize::from(area.width) {
         frame.render_widget(
             Paragraph::new(Line::from(hints)).block(board_block().borders(Borders::ALL)),
@@ -1102,7 +1296,7 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::buffer::Buffer;
-    use ratatui::style::Color;
+    use ratatui::style::{Color, Modifier};
     use ratatui::text::Line;
 
     use super::{fit, render};
@@ -3090,5 +3284,167 @@ mod tests {
             })
         });
         assert!(!has_seconds_age, "an age in seconds is shown:\n{lines}");
+    }
+
+    fn question_app(focused: bool) -> App {
+        use crate::questions::{DecisionView, OptionView, QuestionView, Queue};
+        let selected = incarnation("%17", 91700, 91844, "codex");
+        let mut app = live_app(
+            vec![row(
+                selected.clone(),
+                AgentState::Busy,
+                "Codex",
+                "tmx-agent-dash:0.1",
+                "Build the question block",
+                90_000,
+            )],
+            Some(selected),
+        );
+        let option = |key: &str, label: &str, impact: &str, suggested: bool| OptionView {
+            key: key.into(),
+            label: label.into(),
+            impact: impact.into(),
+            suggested,
+            free: false,
+        };
+        app.observe_questions(Queue {
+            questions: vec![QuestionView {
+                id: "Q25".into(),
+                product: "harold".into(),
+                spec: "durable-server".into(),
+                sha: "d84bf386a2a5".into(),
+                link: "https://example.com/spec".into(),
+                intro: "The server needs a wire protocol.".into(),
+                version: 1,
+                deferred: false,
+                decisions: vec![DecisionView {
+                    ask: "Which protocol?".into(),
+                    options: vec![
+                        option(
+                            "h",
+                            "libSQL's Hrana",
+                            "one client for local and remote",
+                            true,
+                        ),
+                        option("g", "gRPC", "a second schema to keep", false),
+                    ],
+                }],
+            }],
+            waiting: 2,
+            dismissed: Vec::new(),
+        });
+        if focused {
+            app.handle_key(KeyCode::Tab);
+            assert_eq!(app.focus, crate::app::Focus::Block);
+        }
+        app
+    }
+
+    /// The row holding `needle`, and its index.
+    fn row_with(lines: &str, needle: &str) -> usize {
+        lines
+            .lines()
+            .position(|line| line.contains(needle))
+            .unwrap_or_else(|| panic!("missing {needle:?}:\n{lines}"))
+    }
+
+    #[test]
+    fn the_block_shows_above_the_list_with_a_bright_border_when_focused() {
+        let app = question_app(true);
+        let lines = rendered_lines(&app, 140, 38, 100_000);
+        let title = row_with(&lines, "Q25 · 1 of 2 waiting");
+        assert!(title > row_with(&lines, "FILTER"), "below the search line");
+        assert!(
+            title < row_with(&lines, "Build the question block"),
+            "above the list"
+        );
+        for expected in [
+            "harold · durable-server",
+            "The server needs a wire protocol.",
+            "Which protocol?",
+            "h  libSQL's Hrana — one client for local and remote (suggested)",
+            "g  gRPC — a second schema to keep",
+            "tab question",
+        ] {
+            row_with(&lines, expected);
+        }
+        let highlighted = lines
+            .lines()
+            .nth(row_with(&lines, "libSQL's Hrana"))
+            .unwrap();
+        assert!(highlighted.contains("▸ h"), "{highlighted}");
+
+        let buffer = rendered_buffer(&app, 140, 38, 100_000);
+        let corner = &buffer[(0, u16::try_from(title).unwrap())];
+        assert_eq!(corner.symbol(), "┌");
+        assert_eq!(corner.fg, Color::Yellow);
+        assert!(corner.modifier.contains(Modifier::BOLD));
+        assert!(!corner.modifier.contains(Modifier::DIM));
+    }
+
+    #[test]
+    fn the_block_border_is_dim_without_focus() {
+        let app = question_app(false);
+        let lines = rendered_lines(&app, 140, 38, 100_000);
+        let title = row_with(&lines, "Q25 · 1 of 2 waiting");
+        let buffer = rendered_buffer(&app, 140, 38, 100_000);
+        let corner = &buffer[(0, u16::try_from(title).unwrap())];
+        assert_eq!(corner.fg, Color::Yellow);
+        assert!(corner.modifier.contains(Modifier::DIM));
+        assert!(!corner.modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn the_block_is_hidden_when_nothing_waits() {
+        let selected = incarnation("%17", 91700, 91844, "codex");
+        let app = live_app(
+            vec![row(
+                selected.clone(),
+                AgentState::Busy,
+                "Codex",
+                "tmx-agent-dash:0.1",
+                "Build the question block",
+                90_000,
+            )],
+            Some(selected),
+        );
+        let lines = rendered_lines(&app, 140, 38, 100_000);
+        assert!(!lines.contains("tab question"), "{lines}");
+        let buffer = rendered_buffer(&app, 140, 38, 100_000);
+        assert!(
+            buffer.content().iter().all(|cell| cell.fg != Color::Yellow),
+            "no yellow border"
+        );
+    }
+
+    #[test]
+    fn the_summary_and_note_show_their_lines() {
+        let mut app = question_app(true);
+        app.handle_key(KeyCode::Enter);
+        let lines = rendered_lines(&app, 140, 38, 100_000);
+        row_with(&lines, "Which protocol? — libSQL's Hrana");
+        row_with(&lines, "enter record · esc back");
+
+        app.handle_key(KeyCode::Esc);
+        app.handle_key(KeyCode::Char('r'));
+        for character in "bigger".chars() {
+            app.handle_key(KeyCode::Char(character));
+        }
+        let lines = rendered_lines(&app, 140, 38, 100_000);
+        row_with(&lines, "revise: bigger");
+    }
+
+    #[test]
+    fn the_block_gives_way_to_the_list_on_a_short_terminal() {
+        let app = question_app(false);
+        for (width, height) in [(80, 24), (60, 18), (140, 30)] {
+            let lines = rendered_lines(&app, width, height, 100_000);
+            row_with(&lines, "Q25 · 1 of 2 waiting");
+            row_with(&lines, "TRANSPORT LIVE");
+            if height < 24 {
+                row_with(&lines, "Which protocol?");
+            }
+            row_with(&lines, "AGENT BLOCK OCCUPANCY");
+        }
     }
 }

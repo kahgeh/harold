@@ -14,11 +14,12 @@ use tokio::time::sleep;
 
 use crate::api::{AgentStateSource, SourceError, SourceStream};
 use crate::app::{
-    App, CallAction, CallView, ConnectionState, Effect, FocusReading, RuntimeStatus, SearchState,
-    Snapshot, SnapshotError,
+    App, CallAction, CallView, ConnectionState, Effect, Focus, FocusReading, RuntimeStatus,
+    SearchState, Snapshot, SnapshotError,
 };
 use crate::cli::Options;
 use crate::navigation::{NavigationError, PaneNavigator, TmuxNavigator};
+use crate::questions::{Outgoing, Queue, SendResult, UNAVAILABLE_NOTICE};
 use crate::terminal::{TerminalError, TerminalGuard};
 use crate::text::sanitize_display;
 
@@ -30,6 +31,7 @@ const FOCUS_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const REDRAW_INTERVAL: Duration = Duration::from_millis(100);
 const CALL_POLL_DURING_CALL: Duration = Duration::from_millis(500);
 const CALL_POLL_OTHERWISE: Duration = Duration::from_secs(5);
+const QUESTION_POLL_INTERVAL: Duration = Duration::from_secs(2);
 type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 #[derive(Debug)]
@@ -156,7 +158,10 @@ async fn run_async(
                 | Control::Continue
                 | Control::SetTtsMuted(_)
                 | Control::SetMessagingPaused(_)
-                | Control::Call(_) => {}
+                | Control::Call(_)
+                | Control::Answer(_)
+                | Control::Defer(_)
+                | Control::OpenLink(_) => {}
             }
         }
         retry_immediately = false;
@@ -182,7 +187,7 @@ async fn run_async(
         };
         core.begin_stream();
 
-        match consume_stream(
+        let outcome = consume_stream(
             stream,
             &mut core,
             &mut input,
@@ -191,8 +196,11 @@ async fn run_async(
             navigator,
             &clock,
         )
-        .await
-        {
+        .await;
+        // The block lives only while a stream does: without Harold nothing can be
+        // answered, so it hides until a stream opens and the queue is read again.
+        core.app.hide_questions();
+        match outcome {
             Ok(Control::Quit) => return Ok(()),
             Ok(Control::Retry) => {
                 retry_immediately = true;
@@ -201,7 +209,10 @@ async fn run_async(
                 Control::Continue
                 | Control::SetTtsMuted(_)
                 | Control::SetMessagingPaused(_)
-                | Control::Call(_),
+                | Control::Call(_)
+                | Control::Answer(_)
+                | Control::Defer(_)
+                | Control::OpenLink(_),
             ) => {
                 let detail = core
                     .app
@@ -241,6 +252,15 @@ trait StreamPort: Sized {
     fn call(&mut self, _action: CallAction) -> BoxFuture<'_, Result<CallView, SourceError>> {
         Box::pin(async { Err(SourceError::Transport("call control unavailable".into())) })
     }
+    fn list_questions(&mut self) -> BoxFuture<'_, Result<Queue, SourceError>> {
+        Box::pin(async { Err(SourceError::Transport("question tool unavailable".into())) })
+    }
+    fn answer_question<'a>(&'a mut self, _out: &'a Outgoing) -> BoxFuture<'a, SendResult> {
+        Box::pin(async { SendResult::Unavailable })
+    }
+    fn defer_question<'a>(&'a mut self, _id: &'a str) -> BoxFuture<'a, Result<(), SourceError>> {
+        Box::pin(async { Err(SourceError::Transport("question tool unavailable".into())) })
+    }
 }
 
 impl SourcePort for AgentStateSource {
@@ -270,6 +290,20 @@ impl StreamPort for SourceStream {
 
     fn call(&mut self, action: CallAction) -> BoxFuture<'_, Result<CallView, SourceError>> {
         Box::pin(self.request_call(action))
+    }
+
+    // The inherent methods share these names, so they are called by path: a method
+    // call here would pick the trait's `&mut self` method and recurse.
+    fn list_questions(&mut self) -> BoxFuture<'_, Result<Queue, SourceError>> {
+        Box::pin(SourceStream::list_questions(self))
+    }
+
+    fn answer_question<'a>(&'a mut self, out: &'a Outgoing) -> BoxFuture<'a, SendResult> {
+        Box::pin(SourceStream::answer_question(self, out))
+    }
+
+    fn defer_question<'a>(&'a mut self, id: &'a str) -> BoxFuture<'a, Result<(), SourceError>> {
+        Box::pin(SourceStream::defer_question(self, id))
     }
 }
 
@@ -319,7 +353,10 @@ where
                     Control::Continue
                     | Control::SetTtsMuted(_)
                     | Control::SetMessagingPaused(_)
-                    | Control::Call(_) => draw(terminal, &core.app, clock)?,
+                    | Control::Call(_)
+                    | Control::Answer(_)
+                    | Control::Defer(_)
+                    | Control::OpenLink(_) => draw(terminal, &core.app, clock)?,
                 }
             }
             () = shutdown.recv_shutdown() => return Ok(OpenOutcome::Quit),
@@ -350,12 +387,23 @@ where
         // press is awaited inline too, for up to CALL_REQUEST_TIMEOUT (8 s), because a
         // STOP answers only once the call has cleaned up, and closing the worker alone
         // may take 5 s.
+        //
+        // The question queue is read the same way: as the stream opens, every
+        // QUESTION_POLL_INTERVAL, before each key that goes to the block (and before
+        // Tab), and after each answer or deferral. Each read is awaited inline and
+        // bounded by VOICE_REQUEST_TIMEOUT.
         let polled = stream.call(CallAction::Status).await;
         if core.call_polled(polled) {
             draw(terminal, &core.app, clock)?;
         }
+        let listed = stream.list_questions().await;
+        if core.questions_listed(listed).changed {
+            draw(terminal, &core.app, clock)?;
+        }
         let poll = sleep(call_poll_interval(core.app.call.as_ref()));
         tokio::pin!(poll);
+        let question_poll = sleep(core.question_poll_interval);
+        tokio::pin!(question_poll);
         loop {
             tokio::select! {
             () = &mut poll => {
@@ -364,6 +412,15 @@ where
                     draw(terminal, &core.app, clock)?;
                 }
                 poll.as_mut().reset(next_call_poll(&core.app));
+            }
+            () = &mut question_poll => {
+                let listed = stream.list_questions().await;
+                if core.questions_listed(listed).changed {
+                    draw(terminal, &core.app, clock)?;
+                }
+                question_poll
+                    .as_mut()
+                    .reset(tokio::time::Instant::now() + core.question_poll_interval);
             }
             item = stream.receive() => {
                 match item {
@@ -388,7 +445,41 @@ where
                 }
             }
             item = input.recv() => {
+                if let Some(Ok(RuntimeInput::Key(key))) = &item
+                    && core.app.wants_fresh_questions(key)
+                {
+                    let in_block = core.app.focus == Focus::Block;
+                    let listed = stream.list_questions().await;
+                    // A key meant for a question that just changed, went or hid is
+                    // dropped: the user has not seen what it would act on.
+                    if core.questions_listed(listed).interrupted && in_block {
+                        draw(terminal, &core.app, clock)?;
+                        continue;
+                    }
+                }
                 let control = handle_input(item, core, navigator)?;
+                if let Control::Answer(out) = &control {
+                    let result = stream.answer_question(out).await;
+                    core.app.question_sent(&out.id, result);
+                    let listed = stream.list_questions().await;
+                    core.questions_listed(listed);
+                    draw(terminal, &core.app, clock)?;
+                    continue;
+                }
+                if let Control::Defer(id) = &control {
+                    if stream.defer_question(id).await.is_err() {
+                        core.app.questions.set_notice(UNAVAILABLE_NOTICE.into());
+                    }
+                    let listed = stream.list_questions().await;
+                    core.questions_listed(listed);
+                    draw(terminal, &core.app, clock)?;
+                    continue;
+                }
+                if let Control::OpenLink(link) = &control {
+                    core.open_link(link, navigator);
+                    draw(terminal, &core.app, clock)?;
+                    continue;
+                }
                 if let Control::SetTtsMuted(muted) = control {
                     let result = stream.set_tts_muted(muted).await;
                     core.voice_result(result);
@@ -448,6 +539,9 @@ async fn wait_for_retry(
                         | Control::SetTtsMuted(_)
                         | Control::SetMessagingPaused(_)
                         | Control::Call(_)
+                        | Control::Answer(_)
+                        | Control::Defer(_)
+                        | Control::OpenLink(_)
                 ) {
                     return Ok(control);
                 }
@@ -852,7 +946,7 @@ impl Backoff {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum Control {
     Continue,
     Retry,
@@ -860,6 +954,16 @@ enum Control {
     SetTtsMuted(bool),
     SetMessagingPaused(bool),
     Call(CallAction),
+    Answer(Outgoing),
+    Defer(String),
+    OpenLink(String),
+}
+
+/// What a read of the question queue did to the block.
+struct QuestionsListed {
+    changed: bool,
+    /// It hid the block, or brought a new notice: a changed or dismissed question.
+    interrupted: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -875,6 +979,8 @@ struct RuntimeCore {
     backoff: Backoff,
     navigation_issue: Option<RuntimeStatus>,
     endpoint_display: String,
+    /// How often the question queue is read; QUESTION_POLL_INTERVAL, shorter in tests.
+    question_poll_interval: Duration,
 }
 
 impl RuntimeCore {
@@ -909,6 +1015,7 @@ impl RuntimeCore {
             backoff: Backoff::default(),
             navigation_issue,
             endpoint_display: sanitize_display(endpoint, ERROR_LIMIT),
+            question_poll_interval: QUESTION_POLL_INTERVAL,
         }
     }
 
@@ -928,6 +1035,34 @@ impl RuntimeCore {
         let changed = self.app.call != view;
         self.app.observe_call(view);
         changed
+    }
+
+    /// Takes a read of the question queue. A failed read hides the block with no notice
+    /// and sets no status, as a failed call poll does, so an older Harold without the
+    /// tool shows nothing.
+    fn questions_listed(&mut self, result: Result<Queue, SourceError>) -> QuestionsListed {
+        let before = self.app.questions.clone();
+        let notice = before.view().and_then(|view| view.notice);
+        match result {
+            Ok(queue) => self.app.observe_questions(queue),
+            Err(_) => self.app.hide_questions(),
+        }
+        let new_notice = self.app.questions.view().and_then(|view| view.notice);
+        QuestionsListed {
+            changed: self.app.questions != before,
+            interrupted: (before.is_visible() && !self.app.questions.is_visible())
+                || (new_notice.is_some() && new_notice != notice),
+        }
+    }
+
+    fn open_link(&mut self, link: &str, navigator: &impl PaneNavigator) {
+        if let Err(error) = navigator.open_link(link) {
+            self.app
+                .set_runtime_status(RuntimeStatus::NavigationFailed(sanitize_display(
+                    &error.to_string(),
+                    ERROR_LIMIT,
+                )));
+        }
     }
 
     /// Takes the answer to a `c` or `t` press. Talk now answers with the state from
@@ -1042,6 +1177,9 @@ impl RuntimeCore {
             Effect::SetTtsMuted(muted) => Control::SetTtsMuted(muted),
             Effect::SetMessagingPaused(paused) => Control::SetMessagingPaused(paused),
             Effect::Call(action) => Control::Call(action),
+            Effect::Answer(out) => Control::Answer(out),
+            Effect::Defer(id) => Control::Defer(id),
+            Effect::OpenLink(link) => Control::OpenLink(link),
             Effect::Navigate { pane_id } => {
                 let Some(client) = self.client.as_deref() else {
                     self.app
@@ -1080,16 +1218,21 @@ mod tests {
 
     use super::{
         Backoff, BoxFuture, ClockPort, Control, FocusProbe, InputMessage, InputPump, OpenOutcome,
-        RedrawCadence, RuntimeCore, RuntimeInput, ScreenPort, ShutdownPort, SourcePort,
-        StreamControl, StreamPort, TerminalInput, call_poll_interval, consume_stream, handle_input,
-        merge_exit, open_stream, resolve_client, spawn_focus_worker, wait_for_retry,
+        QUESTION_POLL_INTERVAL, RedrawCadence, RuntimeCore, RuntimeInput, ScreenPort, ShutdownPort,
+        SourcePort, StreamControl, StreamPort, TerminalInput, call_poll_interval, consume_stream,
+        handle_input, merge_exit, open_stream, resolve_client, spawn_focus_worker, wait_for_retry,
     };
     use crate::api::SourceError;
+    use crate::app::Focus;
     use crate::app::{
         AgentIncarnation, AgentRow, AgentState, CallAction, CallState, CallView, ConnectionState,
         FocusReading, MonitorHealth, MonitorHealthState, RuntimeStatus, Snapshot,
     };
     use crate::navigation::{NavigationError, PaneNavigator};
+    use crate::questions::{
+        AnswerKind, DecisionView, OptionView, Outgoing, PickView, QuestionView, Queue, SendResult,
+    };
+    use std::collections::VecDeque;
 
     #[test]
     fn retry_backoff_is_capped_and_resets_only_when_requested() {
@@ -1853,6 +1996,342 @@ mod tests {
         assert_eq!(core.app.call, Some(chief_view(CallState::Speaking)));
     }
 
+    fn question(id: &str, version: u32, decisions: usize) -> Queue {
+        Queue {
+            questions: vec![question_view(id, version, decisions)],
+            waiting: 1,
+            dismissed: Vec::new(),
+        }
+    }
+
+    fn question_view(id: &str, version: u32, decisions: usize) -> QuestionView {
+        let option = |key: &str, suggested: bool| OptionView {
+            key: key.into(),
+            label: format!("label {key}"),
+            impact: format!("impact {key}"),
+            suggested,
+            free: false,
+        };
+        QuestionView {
+            id: id.into(),
+            product: "harold".into(),
+            spec: "spec".into(),
+            sha: "abc".into(),
+            link: "https://example.com/spec".into(),
+            intro: "intro".into(),
+            version,
+            deferred: false,
+            decisions: (1..=decisions)
+                .map(|n| DecisionView {
+                    ask: format!("Ask {n}?"),
+                    options: vec![option("a", false), option("b", true)],
+                })
+                .collect(),
+        }
+    }
+
+    fn question_probe(queue: Option<Queue>) -> QuestionProbe {
+        Arc::new(std::sync::Mutex::new(QuestionState {
+            queue,
+            ..QuestionState::default()
+        }))
+    }
+
+    /// Runs `consume_stream` over `keys` then `q`, with `probe` as the question tool,
+    /// and returns the tool's call log.
+    async fn run_question_stream(
+        core: &mut RuntimeCore,
+        probe: &QuestionProbe,
+        keys: &[KeyCode],
+    ) -> Vec<String> {
+        let mut stream = FakeStream::pending(Arc::new(AtomicBool::new(false)));
+        stream.questions = Some(Arc::clone(probe));
+        let (input_sender, mut input) = InputPump::channel();
+        for key in keys.iter().copied().chain([KeyCode::Char('q')]) {
+            input_sender
+                .try_send(InputMessage::Key(key.into()))
+                .unwrap();
+        }
+        let (_shutdown_sender, mut shutdown) = FakeShutdown::channel();
+        let outcome = consume_stream(
+            stream,
+            core,
+            &mut input,
+            &mut shutdown,
+            &mut FakeScreen::default(),
+            &FakeNavigator::successful(),
+            &FakeClock::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome, Control::Quit);
+        probe.lock().unwrap().log.clone()
+    }
+
+    fn lists(n: usize) -> Vec<String> {
+        vec!["list".to_string(); n]
+    }
+
+    #[tokio::test]
+    async fn the_queue_is_polled_every_two_seconds() {
+        assert_eq!(QUESTION_POLL_INTERVAL, Duration::from_secs(2));
+        let mut core = connected_core();
+        assert_eq!(core.question_poll_interval, QUESTION_POLL_INTERVAL);
+        core.question_poll_interval = Duration::from_millis(20);
+        let probe = question_probe(Some(question("Q1", 1, 1)));
+        let mut stream = FakeStream::pending(Arc::new(AtomicBool::new(false)));
+        stream.questions = Some(Arc::clone(&probe));
+        let (_input_sender, mut input) = InputPump::channel();
+        let (shutdown_sender, mut shutdown) = FakeShutdown::channel();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            let _ = shutdown_sender.send(()).await;
+        });
+        let outcome = consume_stream(
+            stream,
+            &mut core,
+            &mut input,
+            &mut shutdown,
+            &mut FakeScreen::default(),
+            &FakeNavigator::successful(),
+            &FakeClock::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome, Control::Quit);
+        let listed = probe.lock().unwrap().log.len();
+        assert!(listed >= 4, "listed {listed} times");
+        assert!(core.app.questions.is_visible());
+    }
+
+    #[tokio::test]
+    async fn a_block_key_lists_first() {
+        let mut core = connected_core();
+        let probe = question_probe(Some(question("Q1", 1, 2)));
+        let log = run_question_stream(
+            &mut core,
+            &probe,
+            &[KeyCode::Char('j'), KeyCode::Tab, KeyCode::Up, KeyCode::Tab],
+        )
+        .await;
+        // Once as the stream opens, then before Tab, Up and Tab; not before j or q.
+        assert_eq!(log, lists(4));
+        assert_eq!(core.app.questions.view().unwrap().highlighted, 0);
+        assert_eq!(core.app.focus, Focus::List);
+    }
+
+    #[tokio::test]
+    async fn a_key_that_meets_a_changed_question_is_dropped() {
+        let mut core = connected_core();
+        let probe = question_probe(Some(question("Q1", 1, 2)));
+        probe.lock().unwrap().on_list = VecDeque::from([
+            Some(question("Q1", 1, 2)),
+            Some(question("Q1", 1, 2)),
+            Some(question("Q1", 1, 2)),
+            Some(question("Q1", 2, 2)),
+        ]);
+        run_question_stream(
+            &mut core,
+            &probe,
+            &[KeyCode::Tab, KeyCode::Enter, KeyCode::Enter, KeyCode::Tab],
+        )
+        .await;
+        let view = core.app.questions.view().unwrap();
+        assert_eq!(view.ask.as_deref(), Some("Ask 1?"));
+        assert!(view.picks.is_empty(), "the second Enter was not applied");
+        assert_eq!(
+            view.notice.as_deref(),
+            Some("Q1 changed, your picks were cleared")
+        );
+    }
+
+    #[tokio::test]
+    async fn enter_on_the_summary_calls_answer_question() {
+        let mut core = connected_core();
+        let probe = question_probe(Some(question("Q1", 3, 1)));
+        probe
+            .lock()
+            .unwrap()
+            .answers
+            .push_back((SendResult::Recorded, Some(Queue::default())));
+        let log = run_question_stream(
+            &mut core,
+            &probe,
+            &[KeyCode::Tab, KeyCode::Enter, KeyCode::Enter],
+        )
+        .await;
+        let mut expected = lists(4);
+        expected.extend(["answer Q1 v3".to_string(), "list".to_string()]);
+        assert_eq!(log, expected);
+        let sent = probe.lock().unwrap().sent.clone();
+        assert_eq!(
+            sent,
+            vec![Outgoing {
+                id: "Q1".into(),
+                version: 3,
+                kind: AnswerKind::Answer,
+                picks: vec![PickView {
+                    decision: 0,
+                    key: "b".into(),
+                    text: String::new(),
+                }],
+                note: String::new(),
+            }]
+        );
+        assert!(!core.app.questions.is_visible());
+        assert_eq!(core.app.focus, Focus::List);
+    }
+
+    #[tokio::test]
+    async fn l_calls_defer_question() {
+        let mut core = connected_core();
+        let mut queue = question("Q1", 1, 1);
+        queue.questions.push(question_view("Q2", 1, 1));
+        queue.waiting = 2;
+        let probe = question_probe(Some(queue));
+        let log = run_question_stream(
+            &mut core,
+            &probe,
+            &[KeyCode::Tab, KeyCode::Char('l'), KeyCode::Tab],
+        )
+        .await;
+        let mut expected = lists(3);
+        expected.extend([
+            "defer Q1".to_string(),
+            "list".to_string(),
+            "list".to_string(),
+        ]);
+        assert_eq!(log, expected);
+        let view = core.app.questions.view().unwrap();
+        assert_eq!((view.id.as_str(), view.position), ("Q2", 1));
+    }
+
+    #[tokio::test]
+    async fn a_version_changed_answer_shows_the_new_version() {
+        let mut core = connected_core();
+        let probe = question_probe(Some(question("Q1", 1, 2)));
+        let mut changed = question("Q1", 2, 2);
+        changed.questions[0].decisions[0].ask = "Changed?".into();
+        probe
+            .lock()
+            .unwrap()
+            .answers
+            .push_back((SendResult::VersionChanged, Some(changed)));
+        let enter3 = [KeyCode::Enter, KeyCode::Enter, KeyCode::Enter];
+        let keys: Vec<KeyCode> = [KeyCode::Tab]
+            .into_iter()
+            .chain(enter3)
+            .chain([KeyCode::Tab])
+            .collect();
+        let log = run_question_stream(&mut core, &probe, &keys).await;
+        assert!(log.contains(&"answer Q1 v1".to_string()));
+        let view = core.app.questions.view().unwrap();
+        assert_eq!(view.ask.as_deref(), Some("Changed?"));
+        assert!(view.picks.is_empty());
+        assert_eq!(view.mode, crate::questions::Mode::Choosing);
+        assert_eq!(
+            view.notice.as_deref(),
+            Some("Q1 changed, your picks were cleared")
+        );
+
+        // The next answer carries the new version.
+        probe
+            .lock()
+            .unwrap()
+            .answers
+            .push_back((SendResult::Recorded, Some(Queue::default())));
+        let keys: Vec<KeyCode> = [KeyCode::Tab].into_iter().chain(enter3).collect();
+        let log = run_question_stream(&mut core, &probe, &keys).await;
+        assert!(log.contains(&"answer Q1 v2".to_string()), "{log:?}");
+    }
+
+    #[tokio::test]
+    async fn an_unavailable_answer_keeps_the_picks() {
+        let mut core = connected_core();
+        let probe = question_probe(Some(question("Q1", 1, 1)));
+        probe
+            .lock()
+            .unwrap()
+            .answers
+            .push_back((SendResult::Unavailable, None));
+        let log = run_question_stream(
+            &mut core,
+            &probe,
+            &[KeyCode::Tab, KeyCode::Enter, KeyCode::Enter, KeyCode::Tab],
+        )
+        .await;
+        assert!(log.contains(&"answer Q1 v1".to_string()));
+        let view = core.app.questions.view().unwrap();
+        assert_eq!(view.mode, crate::questions::Mode::Summary);
+        assert_eq!(view.picks.len(), 1);
+        assert_eq!(
+            view.notice.as_deref(),
+            Some("Harold can't save answers right now")
+        );
+    }
+
+    #[tokio::test]
+    async fn unimplemented_hides_the_block() {
+        let mut core = connected_core();
+        let navigator = FakeNavigator::successful();
+        core.app.observe_questions(question("Q1", 1, 1));
+        core.handle_key(KeyCode::Tab, &navigator);
+        assert_eq!(core.app.focus, Focus::Block);
+        // An older Harold answers Unimplemented; Harold down fails the same way.
+        let probe = question_probe(None);
+        let log = run_question_stream(&mut core, &probe, &[KeyCode::Char('j')]).await;
+        assert_eq!(log, lists(1));
+        assert!(
+            !core.app.questions.is_visible(),
+            "no withdrawn notice either"
+        );
+        assert_eq!(core.app.focus, Focus::List);
+        assert_eq!(core.app.runtime_status(), None);
+    }
+
+    #[tokio::test]
+    async fn o_opens_the_link_through_the_navigator() {
+        struct LinkNavigator(RefCell<Vec<String>>);
+        impl PaneNavigator for LinkNavigator {
+            fn jump_to(&self, _client: &str, _pane_id: &str) -> Result<(), NavigationError> {
+                Ok(())
+            }
+            fn open_link(&self, link: &str) -> Result<(), NavigationError> {
+                self.0.borrow_mut().push(link.into());
+                Ok(())
+            }
+        }
+        let mut core = connected_core();
+        let probe = question_probe(Some(question("Q1", 1, 1)));
+        let mut stream = FakeStream::pending(Arc::new(AtomicBool::new(false)));
+        stream.questions = Some(Arc::clone(&probe));
+        let (input_sender, mut input) = InputPump::channel();
+        for key in [
+            KeyCode::Tab,
+            KeyCode::Char('o'),
+            KeyCode::Tab,
+            KeyCode::Char('q'),
+        ] {
+            input_sender
+                .try_send(InputMessage::Key(key.into()))
+                .unwrap();
+        }
+        let (_shutdown_sender, mut shutdown) = FakeShutdown::channel();
+        let navigator = LinkNavigator(RefCell::new(Vec::new()));
+        consume_stream(
+            stream,
+            &mut core,
+            &mut input,
+            &mut shutdown,
+            &mut FakeScreen::default(),
+            &navigator,
+            &FakeClock::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(*navigator.0.borrow(), ["https://example.com/spec"]);
+    }
+
     #[test]
     fn no_mouse_capture_is_enabled() {
         for (name, source) in [
@@ -2015,7 +2494,23 @@ mod tests {
         mute: Option<MuteProbe>,
         pause: Option<MuteProbe>,
         call: Option<CallProbe>,
+        questions: Option<QuestionProbe>,
     }
+
+    /// The question tool as a test sees it; every call is logged.
+    #[derive(Default)]
+    struct QuestionState {
+        log: Vec<String>,
+        /// What a list answers; `None` fails it, as an older Harold without the tool does.
+        queue: Option<Queue>,
+        /// Answers for the next lists, in order; each one also becomes `queue`.
+        on_list: VecDeque<Option<Queue>>,
+        /// Each answer takes the next result, and the queue lists show after it.
+        answers: VecDeque<(SendResult, Option<Queue>)>,
+        sent: Vec<Outgoing>,
+    }
+
+    type QuestionProbe = Arc<std::sync::Mutex<QuestionState>>;
 
     struct CallProbe {
         calls: Arc<std::sync::Mutex<Vec<CallAction>>>,
@@ -2042,6 +2537,7 @@ mod tests {
                 mute: None,
                 pause: None,
                 call: None,
+                questions: None,
             }
         }
 
@@ -2052,6 +2548,7 @@ mod tests {
                 mute: None,
                 pause: None,
                 call: None,
+                questions: None,
             }
         }
     }
@@ -2113,6 +2610,57 @@ mod tests {
                 }),
             };
             Box::pin(async move { answer })
+        }
+
+        fn list_questions(&mut self) -> BoxFuture<'_, Result<Queue, SourceError>> {
+            let Some(probe) = &self.questions else {
+                return Box::pin(async { Err(SourceError::Transport("no question tool".into())) });
+            };
+            let mut state = probe.lock().unwrap();
+            state.log.push("list".into());
+            if let Some(next) = state.on_list.pop_front() {
+                state.queue = next;
+            }
+            let answer = state
+                .queue
+                .clone()
+                .ok_or_else(|| SourceError::Transport("status: Unimplemented".into()));
+            Box::pin(async move { answer })
+        }
+
+        fn answer_question<'a>(&'a mut self, out: &'a Outgoing) -> BoxFuture<'a, SendResult> {
+            let Some(probe) = &self.questions else {
+                return Box::pin(async { SendResult::Unavailable });
+            };
+            let mut state = probe.lock().unwrap();
+            state
+                .log
+                .push(format!("answer {} v{}", out.id, out.version));
+            state.sent.push(out.clone());
+            let (result, next) = state
+                .answers
+                .pop_front()
+                .unwrap_or((SendResult::Unavailable, None));
+            if let Some(next) = next {
+                state.queue = Some(next);
+            }
+            Box::pin(async move { result })
+        }
+
+        fn defer_question<'a>(&'a mut self, id: &'a str) -> BoxFuture<'a, Result<(), SourceError>> {
+            let Some(probe) = &self.questions else {
+                return Box::pin(async { Err(SourceError::Transport("no question tool".into())) });
+            };
+            let mut state = probe.lock().unwrap();
+            state.log.push(format!("defer {id}"));
+            if let Some(queue) = state.queue.as_mut()
+                && let Some(index) = queue.questions.iter().position(|q| q.id == id)
+            {
+                let mut question = queue.questions.remove(index);
+                question.deferred = true;
+                queue.questions.push(question);
+            }
+            Box::pin(async { Ok(()) })
         }
 
         fn close_stream(self) -> BoxFuture<'static, ()> {

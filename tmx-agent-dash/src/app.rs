@@ -1,3 +1,4 @@
+use crate::questions::{BlockEffect, Outgoing, QuestionBlock, Queue, SendResult};
 use crate::text::normalize_search;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::collections::HashSet;
@@ -204,6 +205,14 @@ pub(crate) enum RuntimeStatus {
     SourceError(String),
 }
 
+/// Where the keys go: the agent list, or the question block above it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Focus {
+    #[default]
+    List,
+    Block,
+}
+
 /// What the tmux focus probe saw: the user's active pane, or nothing usable.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FocusReading {
@@ -220,6 +229,9 @@ pub struct App {
     pub selected: Option<AgentIncarnation>,
     /// The call, unknown until Harold answers and again after a failed poll or a disconnect.
     pub call: Option<CallView>,
+    /// The chief's questions, hidden while none waits.
+    pub questions: QuestionBlock,
+    pub focus: Focus,
     last_snapshot_received_at_ms: Option<i64>,
     runtime_status: Option<RuntimeStatus>,
     has_snapshot: bool,
@@ -245,6 +257,9 @@ pub enum Effect {
     SetTtsMuted(bool),
     SetMessagingPaused(bool),
     Call(CallAction),
+    Answer(Outgoing),
+    Defer(String),
+    OpenLink(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -300,6 +315,8 @@ impl App {
             palette: None,
             selected,
             call: None,
+            questions: QuestionBlock::default(),
+            focus: Focus::List,
             last_snapshot_received_at_ms: None,
             runtime_status: None,
             has_snapshot: matches!(connection, ConnectionState::Live | ConnectionState::Stale),
@@ -478,6 +495,53 @@ impl App {
             state if state.in_call() => Some(CallAction::Stop),
             _ => None,
         }
+    }
+
+    /// Takes the latest question queue. A new question never takes the focus; the
+    /// focus returns to the list when the block hides.
+    pub fn observe_questions(&mut self, queue: Queue) {
+        self.questions.reconcile(queue);
+        self.settle_focus();
+    }
+
+    /// Hides the block without a notice, for when the queue cannot be read.
+    pub fn hide_questions(&mut self) {
+        self.questions = QuestionBlock::default();
+        self.settle_focus();
+    }
+
+    /// Applies Harold's answer to a send.
+    pub fn question_sent(&mut self, id: &str, result: SendResult) {
+        self.questions.sent(id, result);
+        self.settle_focus();
+    }
+
+    /// Whether `key` should meet a fresh queue: it goes to the block, or it is `Tab`.
+    pub fn wants_fresh_questions(&self, key: &KeyEvent) -> bool {
+        !self.search.editing
+            && self.palette.is_none()
+            && (self.focus == Focus::Block || key.code == KeyCode::Tab)
+    }
+
+    fn settle_focus(&mut self) {
+        if !self.questions.is_visible() {
+            self.focus = Focus::List;
+        }
+    }
+
+    fn handle_block_key(&mut self, code: KeyCode) -> Effect {
+        let effect = match self.questions.handle_key(code) {
+            BlockEffect::None => Effect::None,
+            BlockEffect::Leave => {
+                self.focus = Focus::List;
+                Effect::None
+            }
+            BlockEffect::OpenLink(link) => Effect::OpenLink(link),
+            BlockEffect::Defer(id) => Effect::Defer(id),
+            BlockEffect::Send(out) => Effect::Answer(out),
+        };
+        self.settle_focus();
+        effect
     }
 
     pub fn begin_connection(&mut self) {
@@ -673,9 +737,23 @@ impl App {
         if self.palette.is_some() {
             return self.handle_palette_key(key.code);
         }
+        if key.code == KeyCode::Tab && self.questions.is_visible() {
+            self.focus = match self.focus {
+                Focus::List => Focus::Block,
+                Focus::Block => Focus::List,
+            };
+            return Effect::None;
+        }
         let plain = !key
             .modifiers
             .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
+        if self.focus == Focus::Block {
+            // A Control or Alt chord is never typed into a note or taken as a block key.
+            if !plain {
+                return Effect::None;
+            }
+            return self.handle_block_key(key.code);
+        }
 
         match key.code {
             KeyCode::Char('f') => self.search.editing = true,
@@ -948,6 +1026,7 @@ mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     use super::*;
+    use crate::questions::{AnswerKind, Mode};
     use AgentState::{Busy, Idle, Unknown};
 
     #[test]
@@ -2505,5 +2584,153 @@ mod tests {
             ["%2"],
             "tracking on: only a real visit clears it"
         );
+    }
+
+    fn question_view(id: &str, version: u32) -> crate::questions::QuestionView {
+        use crate::questions::{DecisionView, OptionView, QuestionView};
+        let option = |key: &str, suggested: bool| OptionView {
+            key: key.into(),
+            label: format!("label {key}"),
+            impact: format!("impact {key}"),
+            suggested,
+            free: false,
+        };
+        QuestionView {
+            id: id.into(),
+            product: "harold".into(),
+            spec: "spec".into(),
+            sha: "abc".into(),
+            link: "https://example.com/spec".into(),
+            intro: "intro".into(),
+            version,
+            deferred: false,
+            decisions: vec![
+                DecisionView {
+                    ask: "Ask 1?".into(),
+                    options: vec![option("a", true), option("b", false)],
+                },
+                DecisionView {
+                    ask: "Ask 2?".into(),
+                    options: vec![option("a", true), option("b", false)],
+                },
+            ],
+        }
+    }
+
+    fn question_queue(ids: &[&str]) -> crate::questions::Queue {
+        crate::questions::Queue {
+            questions: ids.iter().map(|id| question_view(id, 1)).collect(),
+            waiting: ids.len() as u32,
+            dismissed: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn tab_moves_the_focus() {
+        let mut app = call_app(CallState::Off);
+        assert_eq!(app.handle_key(KeyCode::Tab), Effect::None);
+        assert_eq!(app.focus, Focus::List, "no block, no focus to move");
+
+        app.observe_questions(question_queue(&["Q1"]));
+        assert_eq!(app.handle_key(KeyCode::Tab), Effect::None);
+        assert_eq!(app.focus, Focus::Block);
+        assert_eq!(app.handle_key(KeyCode::Tab), Effect::None);
+        assert_eq!(app.focus, Focus::List);
+
+        // Search and palette editing keep their keys.
+        app.handle_key(KeyCode::Char('f'));
+        app.handle_key(KeyCode::Tab);
+        assert_eq!(app.focus, Focus::List);
+        app.handle_key(KeyCode::Enter);
+        app.handle_key(KeyCode::Char('/'));
+        app.handle_key(KeyCode::Tab);
+        assert_eq!(app.focus, Focus::List);
+        app.handle_key(KeyCode::Esc);
+
+        // Esc on the first decision gives the focus back.
+        app.handle_key(KeyCode::Tab);
+        assert_eq!(app.focus, Focus::Block);
+        assert_eq!(app.handle_key(KeyCode::Esc), Effect::None);
+        assert_eq!(app.focus, Focus::List);
+    }
+
+    #[test]
+    fn r_l_and_c_keep_their_dash_meanings_in_the_list() {
+        let mut app = call_app(CallState::Off);
+        app.observe_questions(question_queue(&["Q1"]));
+        assert_eq!(app.focus, Focus::List);
+        assert_eq!(app.handle_key(KeyCode::Char('r')), Effect::Retry);
+        assert_eq!(
+            app.handle_key(KeyCode::Char('c')),
+            Effect::Call(CallAction::Start)
+        );
+        let before = app.selected.clone();
+        assert_eq!(app.handle_key(KeyCode::Char('l')), Effect::None);
+        assert_eq!(app.selected, before, "nothing waits, so l stays put");
+        assert_eq!(app.questions.view().unwrap().mode, Mode::Choosing);
+        assert!(app.questions.view().unwrap().picks.is_empty());
+    }
+
+    #[test]
+    fn block_keys_apply_only_with_focus() {
+        let mut app = call_app(CallState::Off);
+        app.observe_questions(question_queue(&["Q1", "Q2"]));
+        app.handle_key(KeyCode::Enter);
+        assert!(app.questions.view().unwrap().picks.is_empty());
+
+        app.handle_key(KeyCode::Tab);
+        assert_eq!(app.handle_key(KeyCode::Char('c')), Effect::None);
+        assert_eq!(app.handle_key(KeyCode::Char('r')), Effect::None);
+        assert!(matches!(
+            app.questions.view().unwrap().mode,
+            Mode::Note { .. }
+        ));
+        app.handle_key(KeyCode::Esc);
+        assert_eq!(app.handle_key(KeyCode::Enter), Effect::None);
+        assert_eq!(app.questions.view().unwrap().picks.len(), 1);
+        app.handle_key(KeyCode::Enter);
+        match app.handle_key(KeyCode::Enter) {
+            Effect::Answer(out) => {
+                assert_eq!((out.id.as_str(), out.version), ("Q1", 1));
+                assert_eq!(out.kind, AnswerKind::Answer);
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(
+            app.handle_key(KeyCode::Char('l')),
+            Effect::None,
+            "the summary ignores l"
+        );
+        app.handle_key(KeyCode::Esc);
+        app.handle_key(KeyCode::Esc);
+        assert_eq!(
+            app.handle_key(KeyCode::Char('l')),
+            Effect::Defer("Q1".into())
+        );
+        assert_eq!(
+            app.handle_key(KeyCode::Char('o')),
+            Effect::OpenLink("https://example.com/spec".into())
+        );
+        assert_eq!(
+            app.handle_key(KeyCode::Char('q')),
+            Effect::None,
+            "q is not quit in the block"
+        );
+    }
+
+    #[test]
+    fn a_new_question_does_not_take_the_focus() {
+        let mut app = call_app(CallState::Off);
+        app.observe_questions(question_queue(&["Q1"]));
+        assert_eq!(app.focus, Focus::List);
+        app.observe_questions(question_queue(&["Q1", "Q2"]));
+        assert_eq!(app.focus, Focus::List);
+
+        // When the block hides, the focus returns to the list.
+        app.handle_key(KeyCode::Tab);
+        assert_eq!(app.focus, Focus::Block);
+        app.hide_questions();
+        assert!(!app.questions.is_visible());
+        assert_eq!(app.focus, Focus::List);
     }
 }
