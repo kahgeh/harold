@@ -4,7 +4,7 @@ use harold_api::harold::{
     ForwardReplyRequest, ForwardReplyResponse, ReportAgentStateRequest, ReportNotificationRequest,
     ReportNotificationResponse, SendMessageToAwayDeviceRequest, SendMessageToAwayDeviceResponse,
     SetMessagingPausedRequest, SetMessagingPausedResponse, SetTtsMutedRequest, SetTtsMutedResponse,
-    SpeakLineRequest, SpeakLineResponse, TurnCompleteRequest,
+    SpeakLineRequest, SpeakLineResponse, TurnCompleteRequest, TypeLineRequest, TypeLineResponse,
 };
 use prost::Message;
 
@@ -244,6 +244,7 @@ fn harold_service_exposes_only_the_approved_rpcs() {
             "SendMessageToAwayDevice".to_string(),
             "SpeakLine".to_string(),
             "Call".to_string(),
+            "TypeLine".to_string(),
         ]
     );
 }
@@ -397,4 +398,30 @@ fn service_lists_call() {
             ("last_result".to_string(), 4),
         ]
     );
+}
+
+#[test]
+fn type_line_request_and_response_carry_pane_text_typed_and_reason() {
+    assert_eq!(
+        message_fields("TypeLineRequest"),
+        [("pane_id".to_string(), 1), ("text".to_string(), 2)]
+    );
+    assert_eq!(
+        message_fields("TypeLineResponse"),
+        [("typed".to_string(), 1), ("reason".to_string(), 2)]
+    );
+    let request = round_trip(&TypeLineRequest {
+        pane_id: "%2".into(),
+        text: "Q25 revise: no".into(),
+    });
+    assert_eq!(
+        (request.pane_id.as_str(), request.text.as_str()),
+        ("%2", "Q25 revise: no")
+    );
+    let response = round_trip(&TypeLineResponse {
+        typed: true,
+        reason: "typed".into(),
+    });
+    assert!(response.typed);
+    assert_eq!(response.reason, "typed");
 }

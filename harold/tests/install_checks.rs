@@ -12,7 +12,8 @@ use harold_api::harold::{
     ReportNotificationRequest, ReportNotificationResponse, SendMessageToAwayDeviceRequest,
     SendMessageToAwayDeviceResponse, SetMessagingPausedRequest, SetMessagingPausedResponse,
     SetTtsMutedRequest, SetTtsMutedResponse, SpeakLineRequest, SpeakLineResponse,
-    TurnCompleteRequest, TurnCompleteResponse, WatchAgentStatesRequest,
+    TurnCompleteRequest, TurnCompleteResponse, TypeLineRequest, TypeLineResponse,
+    WatchAgentStatesRequest,
     harold_server::{Harold, HaroldServer},
 };
 use tokio::sync::mpsc;
@@ -222,6 +223,13 @@ impl Harold for ProbeServer {
 
     async fn call(&self, _: Request<CallRequest>) -> Result<Response<CallResponse>, Status> {
         Err(Status::unimplemented("call"))
+    }
+
+    async fn type_line(
+        &self,
+        _: Request<TypeLineRequest>,
+    ) -> Result<Response<TypeLineResponse>, Status> {
+        Err(Status::unimplemented("type_line"))
     }
 
     async fn watch_agent_states(
@@ -437,6 +445,13 @@ impl Harold for RecordingServer {
 
     async fn call(&self, _: Request<CallRequest>) -> Result<Response<CallResponse>, Status> {
         Err(Status::unimplemented("call"))
+    }
+
+    async fn type_line(
+        &self,
+        _: Request<TypeLineRequest>,
+    ) -> Result<Response<TypeLineResponse>, Status> {
+        Err(Status::unimplemented("type_line"))
     }
 
     async fn watch_agent_states(

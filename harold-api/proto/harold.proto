@@ -18,6 +18,22 @@ service Harold {
   rpc SpeakLine (SpeakLineRequest) returns (SpeakLineResponse);
   // tmx-agent-dash starts, ends and watches a call with the chief.
   rpc Call (CallRequest) returns (CallResponse);
+  // tmx-agent-dash asks Harold to type one line into an agent pane and press Enter once the
+  // pane is idle. Harold waits up to two minutes for the pane.
+  rpc TypeLine (TypeLineRequest) returns (TypeLineResponse);
+}
+
+message TypeLineRequest {
+  string pane_id = 1;
+  string text = 2;
+}
+
+message TypeLineResponse {
+  bool typed = 1;
+  // Why the line was or was not typed: "typed", "pane_busy" (the pane stayed busy for two
+  // minutes), "no_pane" (no agent pane has that id) or "failed" (the text went into the
+  // box but Enter failed).
+  string reason = 2;
 }
 
 message TurnCompleteRequest {

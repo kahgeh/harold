@@ -1682,3 +1682,219 @@ async fn a_spoken_prompt_and_an_alert_released_at_once_give_two_whole_lines() {
         "keys were interleaved: {keys:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// The dash writer
+// ---------------------------------------------------------------------------
+
+fn busy_chief(pane_id: &str) -> AgentPane {
+    AgentPane {
+        state: EffectiveAgentState::Busy,
+        ..chief(pane_id)
+    }
+}
+
+#[tokio::test]
+async fn type_line_types_into_an_idle_pane() {
+    let fake = Fake::at(DAY, "09:00:00");
+
+    let outcome = type_line(&fake, "%2", "Q25 revise: no").await;
+
+    assert_eq!(outcome, LineOutcome::Typed);
+    assert_eq!(
+        fake.keys(),
+        vec![
+            Key::Text("%2".into(), "Q25 revise: no".into()),
+            Key::Enter("%2".into()),
+        ]
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn type_line_waits_for_a_busy_pane_to_go_idle() {
+    let fake = Fake::at(DAY, "09:00:00");
+    fake.set(|state| state.view = view(vec![busy_chief("%2")]));
+
+    let task = tokio::spawn({
+        let fake = fake.clone();
+        async move { type_line(&fake, "%2", "dash line").await }
+    });
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    assert!(fake.keys().is_empty());
+    fake.set(|state| state.view = view(vec![chief("%2")]));
+
+    assert_eq!(task.await.unwrap(), LineOutcome::Typed);
+    assert_eq!(
+        fake.keys(),
+        vec![
+            Key::Text("%2".into(), "dash line".into()),
+            Key::Enter("%2".into()),
+        ]
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn type_line_gives_up_with_pane_busy_after_two_minutes() {
+    let fake = Fake::at(DAY, "09:00:00");
+    fake.set(|state| state.view = view(vec![busy_chief("%2")]));
+    let started = Instant::now();
+
+    let outcome = type_line(&fake, "%2", "dash line").await;
+
+    assert_eq!(outcome, LineOutcome::PaneBusy);
+    assert!(started.elapsed() >= DASH_LINE_WAIT);
+    assert!(fake.keys().is_empty());
+}
+
+#[tokio::test]
+async fn type_line_without_the_pane_is_no_pane() {
+    let fake = Fake::at(DAY, "09:00:00");
+
+    let outcome = type_line(&fake, "%9", "dash line").await;
+
+    assert_eq!(outcome, LineOutcome::NoPane);
+    assert!(fake.keys().is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn type_line_whose_enter_fails_is_failed() {
+    let fake = Fake::at(DAY, "09:00:00");
+    fake.set(|state| state.fail_enter = true);
+
+    assert_eq!(
+        type_line(&fake, "%2", "dash line").await,
+        LineOutcome::Failed
+    );
+    assert_eq!(
+        fake.keys(),
+        vec![Key::Text("%2".into(), "dash line".into())]
+    );
+}
+
+#[test]
+fn line_outcomes_have_the_four_reasons() {
+    assert_eq!(LineOutcome::Typed.reason(), "typed");
+    assert_eq!(LineOutcome::PaneBusy.reason(), "pane_busy");
+    assert_eq!(LineOutcome::NoPane.reason(), "no_pane");
+    assert_eq!(LineOutcome::Failed.reason(), "failed");
+}
+
+#[tokio::test(start_paused = true)]
+async fn type_line_and_a_voice_and_an_alert_give_whole_lines() {
+    let fake = Fake::at(DAY, "09:00:00");
+    let agents = fake.agents();
+
+    let (dash, voice, alert) = tokio::join!(
+        type_line(&fake, "%2", "dash line"),
+        type_when_ready(&fake, Writer::Voice, CHIEF, "🎙 hi", &agents, &[]),
+        type_when_ready(&fake, Writer::Alert, CHIEF, "alert line", &agents, &[]),
+    );
+    if let Attempt::Wait(_) = alert {
+        // The pane shows busy once, which ends the other writers' holds, then idle again.
+        fake.set(|state| state.view = view(vec![busy_chief("%2")]));
+        let _ = type_when_ready(
+            &fake,
+            Writer::Alert,
+            CHIEF,
+            "alert line",
+            &fake.agents(),
+            &[],
+        )
+        .await;
+        fake.set(|state| state.view = view(vec![chief("%2")]));
+        let retried = type_when_ready(
+            &fake,
+            Writer::Alert,
+            CHIEF,
+            "alert line",
+            &fake.agents(),
+            &[],
+        )
+        .await;
+        assert!(matches!(retried, Attempt::Typed { .. }));
+    }
+    assert_eq!(dash, LineOutcome::Typed);
+    assert!(matches!(voice, Attempt::Typed { .. }));
+
+    let keys = fake.keys();
+    let mut texts = 0;
+    for (index, key) in keys.iter().enumerate() {
+        if let Key::Text(pane, _) = key {
+            texts += 1;
+            assert_eq!(
+                keys.get(index + 1),
+                Some(&Key::Enter(pane.clone())),
+                "keys were interleaved: {keys:?}"
+            );
+        }
+    }
+    assert_eq!(texts, 3, "{keys:?}");
+    let dash_lines = keys
+        .iter()
+        .filter(|key| **key == Key::Text("%2".into(), "dash line".into()))
+        .count();
+    assert_eq!(dash_lines, 1, "{keys:?}");
+}
+
+#[tokio::test]
+async fn dash_is_held_by_another_writers_typing() {
+    let fake = Fake::at(DAY, "09:00:00");
+    let agents = fake.agents();
+
+    let alert = type_when_ready(&fake, Writer::Alert, CHIEF, "alert line", &agents, &[]).await;
+    assert!(matches!(alert, Attempt::Typed { .. }));
+    // The pane still reads idle, so the alert's hold is on.
+    let dash = type_when_ready(&fake, Writer::Dash, CHIEF, "dash line", &agents, &[]).await;
+
+    assert!(matches!(dash, Attempt::Wait(Reason::AgentBusy)));
+}
+
+/// A `MakeWriter` that appends to a shared buffer.
+#[derive(Clone, Default)]
+struct LogBuffer(Arc<Mutex<Vec<u8>>>);
+
+impl std::io::Write for LogBuffer {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn type_line_logs_pane_and_reason_without_text() {
+    let buffer = LogBuffer::default();
+    let writer = buffer.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .with_writer(move || writer.clone())
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
+    let fake = Fake::at(DAY, "09:00:00");
+
+    assert_eq!(
+        type_line(&fake, "%2", "secret words").await,
+        LineOutcome::Typed
+    );
+    assert_eq!(
+        type_line(&fake, "%9", "secret words").await,
+        LineOutcome::NoPane
+    );
+
+    let logged = String::from_utf8(buffer.0.lock().unwrap().clone()).unwrap();
+    for line in logged.lines() {
+        println!("evidence: {line}");
+    }
+    let lines: Vec<&str> = logged.lines().collect();
+    assert_eq!(lines.len(), 2, "{logged}");
+    assert!(lines[0].contains("dash line typed"), "{logged}");
+    assert!(lines[0].contains("pane_id"), "{logged}");
+    assert!(lines[0].contains("reason=\"typed\""), "{logged}");
+    assert!(lines[1].contains("dash line not typed"), "{logged}");
+    assert!(lines[1].contains("pane_id"), "{logged}");
+    assert!(lines[1].contains("reason=\"no_pane\""), "{logged}");
+    assert!(!logged.contains("secret words"), "{logged}");
+}

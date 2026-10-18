@@ -79,6 +79,7 @@ where
 {
     let (shutdown, shutdown_rx) = watch::channel(());
     let service_store = Arc::clone(&store);
+    let snapshots = AgentSnapshotHub::new(snapshot);
     let (monitor, task) = spawn_agent_monitor_for_test(
         store,
         inventory,
@@ -91,11 +92,12 @@ where
         HaroldService {
             monitor,
             store: service_store,
-            snapshots: AgentSnapshotHub::new(snapshot),
+            snapshots: snapshots.clone(),
             messaging_switch: tokio::sync::Mutex::new(None),
             tts_switch: tokio::sync::Mutex::new(None),
             shutdown: shutdown_rx,
             peers: super::peers::PeerEndpoint::Off,
+            typing: super::timed_prompts::TmuxPorts::new(snapshots, Vec::new()),
         },
         shutdown,
         task,
