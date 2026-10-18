@@ -1022,3 +1022,90 @@ fn chief_turn_whose_thread_write_fails_is_an_error_and_sends_nothing() {
     assert!(environment.delivered().is_empty());
     assert!(environment.reply_targets().is_empty());
 }
+
+// -- The environment hands the pod files to the quiet rule --------------------------------
+
+/// A fake environment whose `pod_files` are fixed; everything else is `FakeEnvironment`'s.
+struct EnvironmentWithPodFiles {
+    inner: FakeEnvironment,
+    files: super::left_out::PodFiles,
+}
+
+impl super::NotifyEnvironment for EnvironmentWithPodFiles {
+    fn now(&self) -> std::time::Instant {
+        self.inner.now()
+    }
+    fn notify_settings(&self) -> &crate::settings::NotifySettings {
+        self.inner.notify_settings()
+    }
+    fn screen_locked(&self) -> bool {
+        self.inner.screen_locked()
+    }
+    fn session_attached(&self, pane_id: &str) -> bool {
+        self.inner.session_attached(pane_id)
+    }
+    fn active_pane(&self, pane_id: &str) -> Option<String> {
+        self.inner.active_pane(pane_id)
+    }
+    fn deliver(
+        &self,
+        channel: &OutboundChannel,
+        turn: &TurnCompleted,
+        trace_id: &str,
+    ) -> Result<(DeliveryOutcome, Option<crate::inbound::AgentAddress>), String> {
+        self.inner.deliver(channel, turn, trace_id)
+    }
+    fn send_away_message(
+        &self,
+        message: &crate::store::AwayMessageRequested,
+    ) -> Result<(), String> {
+        self.inner.send_away_message(message)
+    }
+    fn speak_line(&self, line: &str) -> Result<(), String> {
+        self.inner.speak_line(line)
+    }
+    fn send_spoken_line(&self, line: &str) -> Result<(), String> {
+        self.inner.send_spoken_line(line)
+    }
+    fn record_reply_target(&self, agent: crate::inbound::AgentAddress) {
+        self.inner.record_reply_target(agent)
+    }
+    fn pod_files(&self) -> super::left_out::PodFiles {
+        self.files.clone()
+    }
+}
+
+#[test]
+fn pod_pane_is_quiet_with_the_chief_absent_when_the_environment_supplies_the_pod_files() {
+    use super::NotifyEnvironment;
+    let directory = TestDirectory::new();
+    let (base, _, files) = pod_files_for(&directory, hour_ago());
+    let environment = EnvironmentWithPodFiles {
+        inner: FakeEnvironment::new(ONLY_FROM_CHIEF),
+        files,
+    };
+    let agents = TrackedAgents::in_folders(&[("%2", base.as_str()), ("%7", "/work/harold")])
+        .with_pod_files(environment.pod_files());
+
+    let pod_pane = notify(
+        &turn("%2", "x"),
+        "trace",
+        &NotifyState::default(),
+        &agents,
+        &environment,
+    );
+    let other = notify(
+        &turn("%7", "x"),
+        "trace",
+        &NotifyState::default(),
+        &agents,
+        &environment,
+    );
+
+    assert_eq!(pod_pane, Ok(DeliveryOutcome::Skipped));
+    assert_eq!(other, Ok(DeliveryOutcome::Delivered));
+    assert_eq!(
+        environment.inner.delivered(),
+        [(OutboundChannel::Tts, "%7".to_string())]
+    );
+}

@@ -243,7 +243,10 @@ impl ProductionDispatcher {
     fn tracked_agents(&self) -> TrackedAgents {
         self.snapshots
             .as_ref()
-            .map(|snapshots| TrackedAgents::from_snapshot(&snapshots.current()))
+            .map(|snapshots| {
+                TrackedAgents::from_snapshot(&snapshots.current())
+                    .with_pod_files(self.environment.pod_files())
+            })
             .unwrap_or_default()
     }
 

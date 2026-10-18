@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use std::process::Command;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use tracing::info;
 
@@ -23,6 +23,7 @@ use crate::inbound::{AgentAddress, set_last_away_notification_source_agent};
 use crate::settings::{NotifySettings, get_settings};
 use crate::store::{AppReplyState, AwayMessageRequested, TurnCompleted};
 use crate::tmux;
+use left_out::PodFiles;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DeliveryOutcome {
@@ -194,7 +195,57 @@ pub(crate) trait NotifyEnvironment: Send + Sync {
     fn send_spoken_line(&self, line: &str) -> Result<(), String>;
     /// Make `agent` the one an untagged reply goes to.
     fn record_reply_target(&self, agent: AgentAddress);
+    /// Where pod files can be, and when the tmux server started. None known by default.
+    fn pod_files(&self) -> PodFiles {
+        PodFiles::default()
+    }
 }
+
+/// How long a read of the tmux server's start time is kept.
+const TMUX_START_KEPT: Duration = Duration::from_secs(60);
+
+/// The tmux server's start time, read through `reader` at most once in `TMUX_START_KEPT`.
+struct TmuxStartCache {
+    reader: fn() -> Option<SystemTime>,
+    last: Mutex<Option<(Instant, Option<SystemTime>)>>,
+}
+
+impl TmuxStartCache {
+    const fn new(reader: fn() -> Option<SystemTime>) -> Self {
+        Self {
+            reader,
+            last: Mutex::new(None),
+        }
+    }
+
+    /// The kept reading, or a fresh one when none is kept or it is a minute old at `now`.
+    fn get(&self, now: Instant) -> Option<SystemTime> {
+        let mut last = self.last.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((read_at, value)) = *last
+            && now.saturating_duration_since(read_at) < TMUX_START_KEPT
+        {
+            return value;
+        }
+        let value = (self.reader)();
+        *last = Some((now, value));
+        value
+    }
+}
+
+fn parse_tmux_start(text: &str) -> Option<SystemTime> {
+    let seconds: u64 = text.trim().parse().ok()?;
+    Some(UNIX_EPOCH + Duration::from_secs(seconds))
+}
+
+fn read_tmux_start() -> Option<SystemTime> {
+    let out = Command::new("tmux")
+        .args(["display-message", "-p", "#{start_time}"])
+        .output()
+        .ok()?;
+    parse_tmux_start(&String::from_utf8_lossy(&out.stdout))
+}
+
+static TMUX_START: TmuxStartCache = TmuxStartCache::new(read_tmux_start);
 
 pub(crate) struct SystemEnvironment;
 
@@ -217,6 +268,16 @@ impl NotifyEnvironment for SystemEnvironment {
 
     fn active_pane(&self, pane_id: &str) -> Option<String> {
         tmux::active_pane_in_session(pane_id)
+    }
+
+    fn pod_files(&self) -> PodFiles {
+        let bases = get_settings()
+            .telemetry
+            .pod_registry_path()
+            .and_then(|path| crate::pod_stats::read_registry(&path).ok())
+            .map(|products| products.into_iter().map(|product| product.repo).collect())
+            .unwrap_or_default();
+        PodFiles::new(bases, TMUX_START.get(Instant::now()))
     }
 
     fn deliver(
@@ -618,6 +679,37 @@ pub fn send_reply(msg: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tmux_start_is_read_once_within_a_minute_and_again_after() {
+        use std::sync::atomic::AtomicUsize;
+        use std::time::{Duration, SystemTime};
+        static READS: AtomicUsize = AtomicUsize::new(0);
+        fn reader() -> Option<SystemTime> {
+            READS.fetch_add(1, Ordering::SeqCst);
+            Some(SystemTime::UNIX_EPOCH + Duration::from_secs(100))
+        }
+        let cache = TmuxStartCache::new(reader);
+        let t0 = Instant::now();
+
+        let first = cache.get(t0);
+        let second = cache.get(t0 + Duration::from_secs(59));
+        assert_eq!(READS.load(Ordering::SeqCst), 1);
+        assert_eq!(first, second);
+
+        cache.get(t0 + Duration::from_secs(60));
+        assert_eq!(READS.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn tmux_start_time_parses_epoch_seconds() {
+        assert_eq!(
+            parse_tmux_start("1760000000\n"),
+            Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1_760_000_000))
+        );
+        assert_eq!(parse_tmux_start(""), None);
+        assert_eq!(parse_tmux_start("nope"), None);
+    }
 
     fn turn() -> TurnCompleted {
         TurnCompleted {

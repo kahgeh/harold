@@ -76,7 +76,6 @@ impl TrackedAgents {
     }
 
     /// These agents with the places pod and baton files are looked for.
-    #[allow(dead_code)] // Used by the environment plumbing in the next task.
     pub(crate) fn with_pod_files(self, pod_files: PodFiles) -> Self {
         Self { pod_files, ..self }
     }
@@ -209,7 +208,6 @@ pub(crate) struct PodFiles {
 }
 
 impl PodFiles {
-    #[allow(dead_code)] // Used by the environment plumbing in the next task.
     pub(crate) fn new(bases: Vec<PathBuf>, tmux_started: Option<SystemTime>) -> Self {
         Self {
             bases,
