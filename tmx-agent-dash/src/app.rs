@@ -783,6 +783,13 @@ impl App {
     /// or Alt, so Ctrl+C (pressed to leave a terminal app) never starts a call.
     pub fn handle_key(&mut self, key: impl Into<KeyEvent>) -> Effect {
         let key = key.into();
+        // Ctrl+Q always leaves, even while the question block holds or swallows keys.
+        if key.code == KeyCode::Char('q')
+            && key.modifiers.contains(KeyModifiers::CONTROL)
+            && (self.swallowing_keys || self.focus == Focus::Block)
+        {
+            return Effect::Quit;
+        }
         if self.swallowing_keys {
             // Tab or Esc returns the keys to the list, which already has the focus.
             if matches!(key.code, KeyCode::Tab | KeyCode::Esc) {
@@ -2937,5 +2944,26 @@ mod tests {
         changed.questions[0].version = 2;
         app.observe_questions(changed);
         assert!(!app.holding_block_keys());
+    }
+
+    #[test]
+    fn ctrl_q_quits_with_the_block_focused_and_while_holding() {
+        let ctrl_q = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL);
+        let mut app = call_app(CallState::Off);
+        app.observe_questions(question_queue(&["Q1"]));
+        app.handle_key(KeyCode::Tab);
+        assert_eq!(app.focus, Focus::Block);
+        assert_eq!(app.handle_key(ctrl_q), Effect::Quit);
+
+        app.handle_key(KeyCode::Char('r'));
+        let mut changed = question_queue(&["Q1"]);
+        changed.questions[0].version = 2;
+        app.observe_questions(changed);
+        assert!(app.holding_block_keys());
+        assert_eq!(app.handle_key(ctrl_q), Effect::Quit);
+
+        app.hide_questions();
+        assert!(app.swallowing_keys());
+        assert_eq!(app.handle_key(ctrl_q), Effect::Quit);
     }
 }

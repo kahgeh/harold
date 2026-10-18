@@ -58,12 +58,14 @@ The `waiting` count in `ListQuestions` is the number of questions listed, deferr
 
 | Kind | Picks | Note |
 | --- | --- | --- |
-| `ANSWER` | One per decision, in order, none of them free. | Optional. |
-| `FREE_TEXT` | One per decision, in order, at least one of them free. A free pick must have `text`. | Optional. |
+| `ANSWER` | One per decision, in order, none of them free. | Optional; not sent. |
+| `FREE_TEXT` | One per decision, in order, at least one of them free. A free pick must have `text`. | Optional; not sent. |
 | `REVISE` | Any picks made so far, in order. | Required: what to change. |
 | `REJECT` | Any picks made so far, in order. | Required: why. |
 
 `UNSPECIFIED` is refused. A free option does not end the walk through the decisions: its typed text becomes that decision's pick, and the dash goes on to the next decision. The answer is `FREE_TEXT` when any pick is free.
+
+The note is sent only with `REVISE` and `REJECT`. For `ANSWER` and `FREE_TEXT` it is not sent; the typed text of a free pick travels as that pick.
 
 ### Refusals
 
