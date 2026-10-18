@@ -2164,7 +2164,7 @@ mod tests {
         assert_eq!(tag.chars().count(), 40);
         let cut: String = tag.chars().take(HAROLD_VERSION_LIMIT).collect();
         let app = versioned_app(Some(&cut), tag, false);
-        let content = rendered(&app, 140, 38, 100_000);
+        let content = rendered(&app, 200, 38, 100_000);
         assert!(content.contains(&format!("HAROLD / TMUX  {cut}  ·  TRANSPORT LIVE")));
         assert!(!content.contains("(DASH"));
     }
