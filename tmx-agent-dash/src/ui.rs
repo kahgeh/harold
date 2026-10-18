@@ -292,21 +292,51 @@ fn render_masthead(frame: &mut Frame<'_>, area: Rect, app: &App) {
             Style::default().fg(CORAL).add_modifier(Modifier::BOLD),
         ));
     }
-    let heading = if area.width < COMPACT_WIDTH {
-        vec![
-            Span::styled(" TMX DASH ", Style::default().fg(AMBER)),
-            Span::raw("· "),
-        ]
+    let amber = Style::default().fg(AMBER);
+    let version_style = Style::default().fg(INK).add_modifier(Modifier::BOLD);
+    let harold_version = app.snapshot.harold_version.as_deref();
+    let differs = harold_version.filter(|version| *version != app.dash_version);
+    let version_span = |text: String| Span::styled(text, version_style);
+    let compact = area.width < COMPACT_WIDTH;
+    let mut candidates: Vec<(Vec<Span<'static>>, bool)> = Vec::new();
+    if !compact {
+        if let Some(version) = differs {
+            candidates.push((
+                vec![
+                    Span::styled(" HAROLD / TMUX  ", amber),
+                    version_span(format!("{version} (DASH {})", app.dash_version)),
+                    Span::raw("  ·  "),
+                ],
+                true,
+            ));
+        }
+        let mut lead = vec![Span::styled(" HAROLD / TMUX  ", amber)];
+        if let Some(version) = harold_version {
+            lead.push(version_span(version.to_owned()));
+            lead.push(Span::raw("  ·  "));
+        } else {
+            lead.push(Span::raw("·  "));
+        }
+        candidates.push((lead, true));
+    }
+    let mut lead = vec![Span::styled(" TMX DASH ", amber)];
+    if let Some(version) = harold_version {
+        lead.push(version_span(version.to_owned()));
+        lead.push(Span::raw(" · "));
     } else {
-        vec![
-            Span::styled(" HAROLD / TMUX  ", Style::default().fg(AMBER)),
-            Span::styled(
-                "AGENT SIGNAL BOARD",
-                Style::default().fg(INK).add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("  ·  "),
-        ]
-    };
+        lead.push(Span::raw("· "));
+    }
+    candidates.push((lead, true));
+    let mut lead = vec![Span::raw(" ")];
+    if let Some(version) = harold_version {
+        lead.push(version_span(version.to_owned()));
+        lead.push(Span::raw("  ·  "));
+    }
+    candidates.push((lead.clone(), true));
+    if harold_version.is_some() {
+        candidates.push((lead, false));
+    }
+    candidates.push((vec![Span::raw(" ")], false));
     let line = |lead: Vec<Span<'static>>, with_revision: bool| {
         Line::from(
             lead.into_iter()
@@ -317,15 +347,20 @@ fn render_masthead(frame: &mut Frame<'_>, area: Rect, app: &App) {
         )
     };
     let available = usize::from(area.width.saturating_sub(2));
-    let mut title = line(heading, true);
-    // When the masthead is tight the title goes first, then the revision. Transport,
-    // voice and the paused marker always remain.
-    if title.width() > available {
-        title = line(vec![Span::raw(" ")], true);
-    }
-    if title.width() > available {
-        title = line(vec![Span::raw(" ")], false);
-    }
+    // The header shapes are tried in this order and the first that fits wins: Harold's
+    // version with `(DASH …)`, the version alone, `TMX DASH` and the version, the
+    // version alone without the title, then without `REV`, then nothing but the
+    // transport. Transport, voice and the paused marker always remain.
+    let mut lines = candidates
+        .into_iter()
+        .map(|(lead, with_revision)| line(lead, with_revision))
+        .collect::<Vec<_>>();
+    let last = lines.len() - 1;
+    let chosen = lines
+        .iter()
+        .position(|candidate| candidate.width() <= available)
+        .unwrap_or(last);
+    let title = lines.swap_remove(chosen);
     frame.render_widget(
         Paragraph::new(title).block(board_block().borders(Borders::ALL)),
         area,
@@ -2038,24 +2073,74 @@ mod tests {
         app
     }
 
+    fn versioned_app(harold: Option<&str>, dash: &str, paused: bool) -> App {
+        let mut app = if paused {
+            paused_app()
+        } else {
+            let mut app = live_app(Vec::new(), None);
+            app.apply_later_snapshot(crate::app::Snapshot {
+                through_event_version: 43,
+                ..app.snapshot.clone()
+            })
+            .unwrap();
+            app
+        };
+        app.snapshot.harold_version = harold.map(str::to_owned);
+        app.dash_version = dash.to_owned();
+        app
+    }
+
+    #[test]
+    fn masthead_shows_harolds_version_in_place_of_the_board_title() {
+        let same = rendered(
+            &versioned_app(Some("v0.9.0"), "v0.9.0", false),
+            140,
+            38,
+            100_000,
+        );
+        assert!(same.contains("HAROLD / TMUX  v0.9.0  ·  TRANSPORT LIVE  ·  REV #00043"));
+        assert!(!same.contains("AGENT SIGNAL BOARD"));
+        assert!(!same.contains("DASH"));
+
+        let differs = rendered(
+            &versioned_app(Some("v0.8.0"), "v0.9.0", false),
+            140,
+            38,
+            100_000,
+        );
+        assert!(differs.contains("HAROLD / TMUX  v0.8.0 (DASH v0.9.0)  ·  TRANSPORT LIVE"));
+
+        // Both built from source, so no DASH part.
+        let source = rendered(
+            &versioned_app(Some("source"), "source", false),
+            140,
+            38,
+            100_000,
+        );
+        assert!(source.contains("HAROLD / TMUX  source  ·"));
+
+        let none = rendered(&versioned_app(None, "v0.9.0", false), 140, 38, 100_000);
+        assert!(none.contains("HAROLD / TMUX  ·  TRANSPORT LIVE"));
+        assert!(!none.contains("DASH v0.9.0"));
+    }
+
     #[test]
     fn masthead_marks_paused_messaging_at_every_supported_width() {
-        let app = paused_app();
+        let app = versioned_app(Some("v0.8.0"), "v0.9.0", true);
 
         let wide = rendered(&app, 140, 38, 100_000);
-        assert!(wide.contains("AGENT SIGNAL BOARD"));
-        assert!(wide.contains("REV #00043  ·  ● VOICE ON  ·  ■ MSG PAUSED"));
+        assert!(wide.contains("HAROLD / TMUX  v0.8.0 (DASH v0.9.0)  ·  TRANSPORT LIVE  ·  REV #00043  ·  ● VOICE ON  ·  ■ MSG PAUSED"));
 
-        // The title goes first when the line is tight.
+        // The DASH part goes first, then HAROLD / TMUX becomes TMX DASH.
         let medium = rendered(&app, 84, 38, 100_000);
-        assert!(!medium.contains("AGENT SIGNAL BOARD"));
-        assert!(medium.contains("TRANSPORT LIVE  ·  REV #00043  ·  ● VOICE ON  ·  ■ MSG PAUSED"));
+        assert!(medium.contains("TMX DASH v0.8.0 · TRANSPORT LIVE  ·  REV #00043"));
+        assert!(!medium.contains("DASH v0.9.0"));
 
-        // Then the revision: transport, voice and the paused marker always remain.
+        // Then TMX DASH and REV; the version, transport, voice and the paused marker remain.
         let minimum = rendered(&app, 60, 18, 100_000);
+        assert!(minimum.contains("v0.8.0  ·  TRANSPORT LIVE  ·  ● VOICE ON  ·  ■ MSG PAUSED"));
         assert!(!minimum.contains("TMX DASH"));
         assert!(!minimum.contains("REV #"));
-        assert!(minimum.contains("TRANSPORT LIVE  ·  ● VOICE ON  ·  ■ MSG PAUSED"));
     }
 
     #[test]
