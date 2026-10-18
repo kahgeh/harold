@@ -247,8 +247,11 @@ async fn is_file(path: &Path) -> bool {
 /// One move of the base branch's tip that contains the old tip.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Merge {
-    /// `<id>` when the reflog subject is `merge <id>: ...`.
-    pub spec_id: Option<String>,
+    /// `<name>` when the reflog subject is `merge <name>: ...`.
+    pub name: Option<String>,
+    /// The index in `History::reflog` of the merge's entry. None for the one merge, with
+    /// no name, counted when the reflog does not hold both tips.
+    pub entry: Option<usize>,
     pub added: u64,
     pub removed: u64,
 }
@@ -334,11 +337,47 @@ pub(crate) async fn read_history(
     Ok(History { tip, reflog })
 }
 
-/// `<id>` when `subject` is `merge <id>: ...`.
-pub(crate) fn spec_id(subject: &str) -> Option<String> {
+/// `<name>` when `subject` is `merge <name>: ...`.
+pub(crate) fn merge_name(subject: &str) -> Option<String> {
     let (id, _) = subject.strip_prefix("merge ")?.split_once(':')?;
     let id = id.trim();
     (!id.is_empty()).then(|| id.to_owned())
+}
+
+/// The spec a merge counts under, and the stage of that spec it merged, if any.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SpecRef {
+    pub id: String,
+    /// The `1b` of a merge named `<id>-1b`.
+    pub stage: Option<String>,
+}
+
+/// Whether `text` is a stage: digits and then at most one lowercase letter, such as `2`
+/// or `1b`.
+fn is_stage(text: &str) -> bool {
+    let digits = text.trim_end_matches(|c: char| c.is_ascii_lowercase());
+    let letters = text.len() - digits.len();
+    letters <= 1 && !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// The spec a merge named `name` counts under. A name that is a spec's id is that spec; a
+/// name `<id>-<stage>` where `<id>` is a spec is that spec's stage; any other name
+/// stands for itself.
+pub(crate) fn spec_ref(name: &str, is_spec: impl Fn(&str) -> bool) -> SpecRef {
+    if !is_spec(name)
+        && let Some((id, stage)) = name.rsplit_once('-')
+        && is_stage(stage)
+        && is_spec(id)
+    {
+        return SpecRef {
+            id: id.to_owned(),
+            stage: Some(stage.to_owned()),
+        };
+    }
+    SpecRef {
+        id: name.to_owned(),
+        stage: None,
+    }
 }
 
 /// The numbers before `insertion` and `deletion` in `git diff --shortstat` output, each
@@ -394,7 +433,8 @@ impl Tips {
 }
 
 /// The merges from `old` to `new`: one for each reflog entry from just after `old` up to
-/// `new`, or one from `old` to `new` with no spec when the reflog does not hold both.
+/// `new`, each with its name and entry, or one from `old` to `new` with neither when the
+/// reflog does not hold both.
 /// Each step counts only when its new commit contains its old one; a step that does not,
 /// such as a rewrite, is logged and skipped. Also says whether any step was skipped.
 async fn merges(
@@ -411,18 +451,25 @@ async fn merges(
             .position(|entry| entry.hash == old)?;
         Some(newest + after)
     });
-    let steps: Vec<(&str, Option<String>)> = match (newest, oldest) {
+    let steps: Vec<(&str, Option<String>, Option<usize>)> = match (newest, oldest) {
         (Some(newest), Some(oldest)) if newest < oldest => reflog[newest..oldest]
             .iter()
+            .enumerate()
             .rev()
-            .map(|entry| (entry.hash.as_str(), spec_id(&entry.subject)))
+            .map(|(offset, entry)| {
+                (
+                    entry.hash.as_str(),
+                    merge_name(&entry.subject),
+                    Some(newest + offset),
+                )
+            })
             .collect(),
-        _ => vec![(new, None)],
+        _ => vec![(new, None, None)],
     };
     let mut merges = Vec::new();
     let mut rewritten = false;
     let mut from = old;
-    for (to, spec_id) in steps {
+    for (to, name, entry) in steps {
         if to == from {
             continue;
         }
@@ -440,7 +487,8 @@ async fn merges(
         let shortstat = git_stdout(git, &product.repo, &["diff", "--shortstat", from, to]).await?;
         let (added, removed) = shortstat_lines(&shortstat);
         merges.push(Merge {
-            spec_id,
+            name,
+            entry,
             added,
             removed,
         });
@@ -449,23 +497,25 @@ async fn merges(
     Ok((merges, rewritten))
 }
 
-fn record_merges(product: &str, merges: &[Merge]) {
+/// Counts one merge, under its spec and stage when it has them.
+fn record_merge(product: &str, merge: &Merge, spec: Option<&SpecRef>) {
     let instruments = telemetry::instruments();
-    for merge in merges {
-        let mut attributes = vec![KeyValue::new("pod.product", product.to_owned())];
-        if let Some(spec_id) = &merge.spec_id {
-            attributes.push(KeyValue::new("spec.id", spec_id.clone()));
+    let mut attributes = vec![KeyValue::new("pod.product", product.to_owned())];
+    if let Some(spec) = spec {
+        attributes.push(KeyValue::new("spec.id", spec.id.clone()));
+        if let Some(stage) = &spec.stage {
+            attributes.push(KeyValue::new("spec.stage", stage.clone()));
         }
-        instruments.pod_merges.add(1, &attributes);
-        for (change, lines) in [("added", merge.added), ("removed", merge.removed)] {
-            instruments.pod_merged_lines.add(
-                lines,
-                &[
-                    KeyValue::new("pod.product", product.to_owned()),
-                    KeyValue::new("change", change),
-                ],
-            );
-        }
+    }
+    instruments.pod_merges.add(1, &attributes);
+    for (change, lines) in [("added", merge.added), ("removed", merge.removed)] {
+        instruments.pod_merged_lines.add(
+            lines,
+            &[
+                KeyValue::new("pod.product", product.to_owned()),
+                KeyValue::new("change", change),
+            ],
+        );
     }
 }
 
@@ -677,7 +727,7 @@ fn reflog_merges(reflog: &[ReflogEntry]) -> HashMap<String, OffsetDateTime> {
     let mut merged = HashMap::new();
     for entry in reflog {
         let (Some(id), Ok(time)) = (
-            spec_id(&entry.subject),
+            merge_name(&entry.subject),
             OffsetDateTime::from_unix_timestamp(entry.time),
         ) else {
             continue;
@@ -909,17 +959,16 @@ impl<G: Git> PodStats<G> {
         *lock(&self.snapshot) = snapshot;
     }
 
-    /// Records the product's merges and reads its specs, from one read of the base
-    /// branch's tip and reflog.
+    /// Reads the product's specs and records its merges, each under the spec it names
+    /// (and its stage), from one read of the base branch's tip and reflog. Specs are read
+    /// first, so a pod folder that cannot be read leaves the tip where it was and the
+    /// merges are counted by a later poll.
     async fn poll_history(
         &mut self,
         product: &Product,
         slots: &Slots,
     ) -> Result<Vec<SpecFacts>, &'static str> {
         let history = read_history(&self.git, product).await?;
-        if let TipMove::Merges(merges) = self.tips.observe(&self.git, product, &history).await? {
-            record_merges(&product.name, &merges);
-        }
         let pod = product.repo.join(POD_FOLDER);
         // Where the base branch keeps no reflog, a spec merges when its worktree goes
         // after its commit was merged.
@@ -946,6 +995,13 @@ impl<G: Git> PodStats<G> {
             })
             .collect();
         let specs = read_specs(&pod, &building, &merged, self.offset)?;
+        if let TipMove::Merges(merges) = self.tips.observe(&self.git, product, &history).await? {
+            let is_spec = |id: &str| specs.iter().any(|spec| spec.id == id);
+            for merge in &merges {
+                let spec = merge.name.as_deref().map(|name| spec_ref(name, is_spec));
+                record_merge(&product.name, merge, spec.as_ref());
+            }
+        }
         self.specs.observe(&product.name, &specs);
         Ok(specs)
     }

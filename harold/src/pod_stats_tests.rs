@@ -1,9 +1,10 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use opentelemetry_sdk::metrics::data::{AggregatedMetrics, MetricData};
 use time::{OffsetDateTime, UtcOffset};
 use tokio::sync::watch;
 
@@ -271,7 +272,8 @@ async fn a_fast_forward_counts_one_merge_with_its_lines() {
     assert_eq!(
         observe(&mut tips, &product).await,
         Ok(TipMove::Merges(vec![Merge {
-            spec_id: Some("spec-x".into()),
+            name: Some("spec-x".into()),
+            entry: Some(0),
             added: 3,
             removed: 1,
         }]))
@@ -293,12 +295,14 @@ async fn two_merges_between_polls_count_as_two() {
         observe(&mut tips, &product).await,
         Ok(TipMove::Merges(vec![
             Merge {
-                spec_id: Some("spec-x".into()),
+                name: Some("spec-x".into()),
+                entry: Some(1),
                 added: 1,
                 removed: 0,
             },
             Merge {
-                spec_id: Some("spec-y".into()),
+                name: Some("spec-y".into()),
+                entry: Some(0),
                 added: 0,
                 removed: 1,
             },
@@ -322,7 +326,8 @@ async fn a_move_without_a_reflog_counts_one_merge_without_a_spec() {
     assert_eq!(
         observe(&mut tips, &product).await,
         Ok(TipMove::Merges(vec![Merge {
-            spec_id: None,
+            name: None,
+            entry: None,
             added: 2,
             removed: 0,
         }]))
@@ -380,13 +385,17 @@ async fn a_rewrite_between_two_merges_in_one_poll_counts_the_two_merges_and_is_l
     assert_eq!(
         moved,
         Ok(TipMove::Merges(vec![
+            // Newest first: spec-y, the rewrite, spec-x. `git reset --hard` writes no entry
+            // for the branch.
             Merge {
-                spec_id: Some("spec-x".into()),
+                name: Some("spec-x".into()),
+                entry: Some(2),
                 added: 1,
                 removed: 0,
             },
             Merge {
-                spec_id: Some("spec-y".into()),
+                name: Some("spec-y".into()),
+                entry: Some(0),
                 added: 1,
                 removed: 0,
             },
@@ -401,18 +410,46 @@ async fn a_rewrite_between_two_merges_in_one_poll_counts_the_two_merges_and_is_l
 }
 
 #[test]
-fn a_spec_id_comes_from_a_merge_subject() {
+fn a_merge_name_comes_from_a_merge_subject() {
     assert_eq!(
-        spec_id("merge chief-voice: Fast-forward"),
+        merge_name("merge chief-voice: Fast-forward"),
         Some("chief-voice".into())
     );
     assert_eq!(
-        spec_id("merge reply-ownership: Merge made by the 'ort' strategy."),
+        merge_name("merge reply-ownership: Merge made by the 'ort' strategy."),
         Some("reply-ownership".into())
     );
-    assert_eq!(spec_id("commit: fix the build"), None);
-    assert_eq!(spec_id("merge : Fast-forward"), None);
-    assert_eq!(spec_id("merge spec-x"), None);
+    assert_eq!(merge_name("commit: fix the build"), None);
+    assert_eq!(merge_name("merge : Fast-forward"), None);
+    assert_eq!(merge_name("merge spec-x"), None);
+}
+
+#[test]
+fn a_merge_names_its_spec_and_stage() {
+    let specs = ["away-web-app", "foo", "foo-1b"];
+    let is_spec = |id: &str| specs.contains(&id);
+    let named = |id: &str, stage: Option<&str>| SpecRef {
+        id: id.into(),
+        stage: stage.map(Into::into),
+    };
+    assert_eq!(
+        spec_ref("away-web-app-1b", is_spec),
+        named("away-web-app", Some("1b"))
+    );
+    assert_eq!(
+        spec_ref("away-web-app", is_spec),
+        named("away-web-app", None)
+    );
+    // A spec literally named foo-1b keeps its whole name.
+    assert_eq!(spec_ref("foo-1b", is_spec), named("foo-1b", None));
+    assert_eq!(spec_ref("foo-2", is_spec), named("foo", Some("2")));
+    assert_eq!(spec_ref("foo-3a", is_spec), named("foo", Some("3a")));
+    // Not a stage, or no spec of that id: the whole name, as today.
+    for name in [
+        "foo-1bb", "foo-b1", "foo-1B", "foo-", "foo-v2", "bar-1b", "bar",
+    ] {
+        assert_eq!(spec_ref(name, is_spec), named(name, None), "{name}");
+    }
 }
 
 #[test]
@@ -463,6 +500,215 @@ async fn a_poll_records_slots_and_merges() {
     assert_eq!(
         test_support::counter_value("pod.merged_lines", &[product, ("change", "removed")]),
         Some(1)
+    );
+}
+
+#[tokio::test]
+async fn a_poll_counts_a_stage_under_its_spec() {
+    let pod = Pod::new();
+    let repo = pod.repo("main");
+    write(
+        &repo.join(".superpowers/pod/specs/away-web-app.md"),
+        "# Spec\n",
+    );
+    let (mut stats, _) = stats(one_product(&pod, &repo));
+    stats.poll().await;
+
+    merge_branch(&repo, "away-web-app", "1\n2\n3\n4\n5\n6\n");
+    merge_branch(&repo, "away-web-app-1b", "1\n2\n3\n4\n5\n6\n7\n");
+    stats.poll().await;
+
+    let product = ("pod.product", pod.name.as_str());
+    assert_eq!(
+        test_support::exact_counter_value("pod.merges", &[product, ("spec.id", "away-web-app")]),
+        Some(1)
+    );
+    assert_eq!(
+        test_support::exact_counter_value(
+            "pod.merges",
+            &[product, ("spec.id", "away-web-app"), ("spec.stage", "1b")]
+        ),
+        Some(1)
+    );
+    assert_eq!(
+        test_support::exact_counter_value("pod.merges", &[product, ("spec.id", "away-web-app-1b")]),
+        None
+    );
+}
+
+#[tokio::test]
+async fn an_unreadable_pod_folder_counts_its_merges_once_when_readable() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let pod = Pod::new();
+    let repo = pod.repo("main");
+    let specs = repo.join(".superpowers/pod/specs");
+    write(&specs.join("spec-u.md"), "# Spec\n");
+    let (mut stats, _) = stats(one_product(&pod, &repo));
+    stats.poll().await;
+
+    std::fs::set_permissions(&specs, std::fs::Permissions::from_mode(0o000)).unwrap();
+    merge_branch(&repo, "spec-u", "1\n2\n3\n4\n5\n6\n");
+    stats.poll().await;
+    let product = ("pod.product", pod.name.as_str());
+    let spec = ("spec.id", "spec-u");
+    assert_eq!(
+        test_support::counter_value("pod.merges", &[product, spec]),
+        None
+    );
+
+    std::fs::set_permissions(&specs, std::fs::Permissions::from_mode(0o755)).unwrap();
+    stats.poll().await;
+    stats.poll().await;
+
+    assert_eq!(
+        test_support::counter_value("pod.merges", &[product, spec]),
+        Some(1)
+    );
+}
+
+/// The counter rule the dashboards' SQL applies, in Rust: the rise of one series in a
+/// window starting at `start`, from its points in time order from the lookback on. A copy
+/// of `rise_in_window` in telemetry_tests.rs, which is private to that module; the two
+/// must stay the same.
+fn rise_in_window(points: &[(i64, f64)], start: i64) -> f64 {
+    let mut before = 0.0;
+    let mut total = 0.0;
+    for &(time, value) in points {
+        // `if(Value >= before, Value - before, Value)`, with `before` 0 for a first point.
+        let rise = if value >= before {
+            value - before
+        } else {
+            value
+        };
+        if time >= start {
+            total += rise;
+        }
+        before = value;
+    }
+    total
+}
+
+/// Every `pod.merges` data point of `product` in the latest export, as its attributes
+/// (as text) and its value.
+fn merge_series(product: &str) -> Vec<(BTreeMap<String, String>, u64)> {
+    test_support::metrics()
+        .iter()
+        .rev()
+        .find_map(|resource| {
+            resource
+                .scope_metrics()
+                .flat_map(|scope| scope.metrics())
+                .find(|metric| metric.name() == "pod.merges")
+        })
+        .and_then(|metric| {
+            let AggregatedMetrics::U64(MetricData::Sum(sum)) = metric.data() else {
+                return None;
+            };
+            Some(
+                sum.data_points()
+                    .map(|point| {
+                        let attributes: BTreeMap<String, String> = point
+                            .attributes()
+                            .map(|kv| (kv.key.to_string(), kv.value.as_str().into_owned()))
+                            .collect();
+                        (attributes, point.value())
+                    })
+                    .filter(|(attributes, _)| {
+                        attributes.get("pod.product").map(String::as_str) == Some(product)
+                    })
+                    .collect(),
+            )
+        })
+        .unwrap_or_default()
+}
+
+#[tokio::test]
+async fn eight_merges_count_eight_each_with_its_spec_and_the_counter_rule_agrees() {
+    let pod = Pod::new();
+    let repo = pod.repo("main");
+    let ids = [
+        "webhook-loop-guards",
+        "store-disk-fault",
+        "alert-repeats",
+        "harold-autostart",
+        "voice-conversation",
+        "away-web-app",
+        "monitor-timeouts",
+    ];
+    for id in ids {
+        write(
+            &repo.join(format!(".superpowers/pod/specs/{id}.md")),
+            "# Spec\n",
+        );
+    }
+    let (mut stats, _) = stats(one_product(&pod, &repo));
+    stats.poll().await;
+
+    let merged = [
+        "webhook-loop-guards",
+        "store-disk-fault",
+        "alert-repeats",
+        "harold-autostart",
+        "voice-conversation",
+        "away-web-app",
+        "away-web-app-1b",
+        "monitor-timeouts",
+    ];
+    for (n, branch) in merged.iter().enumerate() {
+        merge_branch(&repo, branch, &format!("{}\n", "x\n".repeat(n + 1)));
+    }
+    stats.poll().await;
+
+    let product = ("pod.product", pod.name.as_str());
+    assert_eq!(
+        test_support::counter_value("pod.merges", &[product]),
+        Some(8)
+    );
+    let series: Vec<_> = merge_series(&pod.name)
+        .into_iter()
+        .filter(|(attributes, _)| attributes.len() > 1)
+        .collect();
+    let rise: f64 = series
+        .iter()
+        .map(|(_, value)| rise_in_window(&[(10, *value as f64)], 5))
+        .sum();
+    assert_eq!(rise, 8.0);
+    let mut named: Vec<(String, Option<String>)> = series
+        .iter()
+        .map(|(attributes, _)| {
+            (
+                attributes["spec.id"].clone(),
+                attributes.get("spec.stage").cloned(),
+            )
+        })
+        .collect();
+    named.sort();
+    let mut expected: Vec<(String, Option<String>)> =
+        ids.iter().map(|id| ((*id).to_owned(), None)).collect();
+    expected.push(("away-web-app".into(), Some("1b".into())));
+    expected.sort();
+    assert_eq!(named, expected);
+    let keys = |stage: bool| -> BTreeSet<&str> {
+        let wanted = if stage {
+            ["pod.product", "spec.id", "spec.stage"].to_vec()
+        } else {
+            ["pod.product", "spec.id"].to_vec()
+        };
+        wanted.into_iter().collect()
+    };
+    for (attributes, _) in &series {
+        let found: BTreeSet<&str> = attributes.keys().map(String::as_str).collect();
+        assert_eq!(
+            found,
+            keys(attributes.contains_key("spec.stage")),
+            "{attributes:?}"
+        );
+    }
+    assert!(
+        series
+            .iter()
+            .any(|(attributes, _)| attributes.contains_key("spec.stage"))
     );
 }
 
