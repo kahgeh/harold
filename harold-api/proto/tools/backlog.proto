@@ -1,0 +1,280 @@
+// The backlog tool: each product's ranked items and notes, and the chief's queue.
+//
+// The chief of pods calls:
+//   PutItem, RankItems, RemoveItem          change a product's ranked items.
+//   AddNote, UpdateNote, RemoveNote         change a product's notes.
+//   AddQueueItem, SetNow, OrderQueue,
+//   UpdateQueueItem, DoneQueueItem,
+//   SetQueueNote                            change the chief's queue.
+//   Import                                  loads a backlog.md or queue.md into
+//                                           an empty product or queue (apply
+//                                           false is a dry run: nothing stored).
+// A product's own pane may also call the product writes for its product.
+//
+// Anyone calls:
+//   ListProducts, ListItems, ListNotes, ListQueue, Export.
+//
+// Refusals (gRPC code, message):
+//   PermissionDenied     "wrong_product", "not_chief", "no_pane".
+//   NotFound             "unknown_product" (a write for a product not in the
+//                        registry), "not_found" (an item, note or queue id that
+//                        is not there).
+//   FailedPrecondition   "backlog_full", "not_empty", "append_only" (update or
+//                        remove of a history note), "not_parked" (an id in an
+//                        order that is not parked), "already_done" (now on a
+//                        done item).
+//   InvalidArgument      "invalid <field>" (for example "invalid evidence"),
+//                        "unparsed line <n>" (1-based source line).
+//   Unavailable          "registry_unreadable" (registry set but unreadable),
+//                        "the backlog database is unavailable" (store error).
+//
+// Guard order for a product write: empty caller_pane is no_pane; a product not
+// in the registry is unknown_product; the chief is allowed; a pane whose folder
+// is unknown is wrong_product; a pane inside the product's repo is allowed;
+// anything else is wrong_product. A queue write: no_pane, then chief or
+// not_chief. An applied import is a write; a dry run is a read.
+//
+// The server trusts local callers: there is no token.
+syntax = "proto3";
+
+package harold.tools.backlog.v1;
+
+service BacklogService {
+  rpc ListProducts(ListProductsRequest) returns (ListProductsResponse);
+  rpc PutItem(PutItemRequest) returns (PutItemResponse);
+  rpc RankItems(RankItemsRequest) returns (RankItemsResponse);
+  rpc RemoveItem(RemoveItemRequest) returns (RemoveItemResponse);
+  rpc ListItems(ListItemsRequest) returns (ListItemsResponse);
+  rpc AddNote(AddNoteRequest) returns (AddNoteResponse);
+  rpc UpdateNote(UpdateNoteRequest) returns (UpdateNoteResponse);
+  rpc RemoveNote(RemoveNoteRequest) returns (RemoveNoteResponse);
+  rpc ListNotes(ListNotesRequest) returns (ListNotesResponse);
+  rpc AddQueueItem(AddQueueItemRequest) returns (AddQueueItemResponse);
+  rpc SetNow(SetNowRequest) returns (SetNowResponse);
+  rpc OrderQueue(OrderQueueRequest) returns (OrderQueueResponse);
+  rpc UpdateQueueItem(UpdateQueueItemRequest) returns (UpdateQueueItemResponse);
+  rpc DoneQueueItem(DoneQueueItemRequest) returns (DoneQueueItemResponse);
+  rpc SetQueueNote(SetQueueNoteRequest) returns (SetQueueNoteResponse);
+  rpc ListQueue(ListQueueRequest) returns (ListQueueResponse);
+  rpc Import(ImportRequest) returns (ImportResponse);
+  rpc Export(ExportRequest) returns (ExportResponse);
+}
+
+message Item {
+  string id = 1;
+  string title = 2;
+  string value = 3;
+  string size = 4;
+  string risk = 5;
+  string reason = 6;
+  string paths = 7;
+  string after = 8;
+  repeated string evidence = 9;
+  uint32 rank = 10;
+  int64 updated_at_ms = 11;
+}
+
+message Note {
+  int64 id = 1;
+  string kind = 2;
+  string title = 3;
+  string body = 4;
+  int64 created_at_ms = 5;
+  int64 updated_at_ms = 6;
+}
+
+message QueueItem {
+  string id = 1;
+  string state = 2;
+  uint32 position = 3;
+  string text = 4;
+  int64 done_at_ms = 5;
+  int64 updated_at_ms = 6;
+}
+
+message Product {
+  string name = 1;
+  string repo = 2;
+  uint32 item_count = 3;
+}
+
+message ImportCounts {
+  uint32 items = 1;
+  uint32 rule = 2;
+  uint32 history = 3;
+  uint32 held = 4;
+  uint32 left_out = 5;
+  uint32 now = 6;
+  uint32 parked = 7;
+  uint32 done = 8;
+}
+
+message ListProductsRequest {}
+
+message ListProductsResponse {
+  repeated Product products = 1;
+}
+
+message PutItemRequest {
+  string product = 1;
+  Item item = 2;
+  string caller_pane = 3;
+}
+
+message PutItemResponse {
+  string id = 1;
+  uint32 rank = 2;
+}
+
+message RankItemsRequest {
+  string product = 1;
+  repeated string ids = 2;
+  string caller_pane = 3;
+}
+
+message RankItemsResponse {
+  uint32 count = 1;
+}
+
+message RemoveItemRequest {
+  string product = 1;
+  string id = 2;
+  string reason = 3;
+  string caller_pane = 4;
+}
+
+message RemoveItemResponse {}
+
+message ListItemsRequest {
+  string product = 1;
+}
+
+message ListItemsResponse {
+  repeated Item items = 1;
+}
+
+message AddNoteRequest {
+  string product = 1;
+  string kind = 2;
+  string title = 3;
+  string body = 4;
+  string caller_pane = 5;
+}
+
+message AddNoteResponse {
+  int64 id = 1;
+}
+
+message UpdateNoteRequest {
+  string product = 1;
+  int64 id = 2;
+  string title = 3;
+  string body = 4;
+  string caller_pane = 5;
+}
+
+message UpdateNoteResponse {}
+
+message RemoveNoteRequest {
+  string product = 1;
+  int64 id = 2;
+  string caller_pane = 3;
+}
+
+message RemoveNoteResponse {}
+
+message ListNotesRequest { // kind "" = every kind; last 0 = all
+  string product = 1;
+  string kind = 2;
+  uint32 last = 3;
+}
+
+message ListNotesResponse {
+  repeated Note notes = 1;
+}
+
+message AddQueueItemRequest { // at 0 = end
+  string text = 1;
+  bool now = 2;
+  uint32 at = 3;
+  string caller_pane = 4;
+}
+
+message AddQueueItemResponse {
+  QueueItem item = 1;
+}
+
+message SetNowRequest {
+  string id = 1;
+  string caller_pane = 2;
+}
+
+message SetNowResponse {
+  string now = 1;
+  uint32 parked = 2;
+}
+
+message OrderQueueRequest {
+  repeated string ids = 1;
+  string caller_pane = 2;
+}
+
+message OrderQueueResponse {
+  uint32 count = 1;
+}
+
+message UpdateQueueItemRequest {
+  string id = 1;
+  string text = 2;
+  string caller_pane = 3;
+}
+
+message UpdateQueueItemResponse {}
+
+message DoneQueueItemRequest {
+  string id = 1;
+  string caller_pane = 2;
+}
+
+message DoneQueueItemResponse {}
+
+message SetQueueNoteRequest {
+  string text = 1;
+  string caller_pane = 2;
+}
+
+message SetQueueNoteResponse {}
+
+message ListQueueRequest { // 0 = every done item
+  int64 done_since_ms = 1;
+}
+
+message ListQueueResponse {
+  QueueItem now = 1;
+  repeated QueueItem parked = 2;
+  repeated QueueItem done = 3;
+  string note = 4;
+}
+
+message ImportRequest {
+  string product = 1;
+  bool queue = 2;
+  string markdown = 3;
+  bool apply = 4;
+  string caller_pane = 5;
+  int32 utc_offset_seconds = 6;
+}
+
+message ImportResponse {
+  ImportCounts counts = 1;
+  bool applied = 2;
+}
+
+message ExportRequest {
+  string product = 1;
+  bool queue = 2;
+}
+
+message ExportResponse {
+  string markdown = 1;
+}
