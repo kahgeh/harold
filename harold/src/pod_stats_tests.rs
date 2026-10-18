@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -135,10 +136,22 @@ fn registry(pod: &Pod, text: &str) -> PathBuf {
 
 fn stats(registry: PathBuf) -> (PodStats<SystemGit>, Arc<Mutex<PodSnapshot>>) {
     let snapshot = Arc::new(Mutex::new(PodSnapshot::default()));
+    let tips = tips_file(&registry.parent().unwrap().join("data/store"));
     (
-        PodStats::new(registry, SystemGit, Arc::clone(&snapshot), UtcOffset::UTC),
+        PodStats::new(
+            registry,
+            tips,
+            SystemGit,
+            Arc::clone(&snapshot),
+            UtcOffset::UTC,
+        ),
         snapshot,
     )
+}
+
+/// The tip file the `stats` of `pod`'s registry use.
+fn tips_path(pod: &Pod) -> PathBuf {
+    tips_file(&pod.root.join("data/store"))
 }
 
 // --- the registry ---
@@ -222,10 +235,12 @@ async fn free_slots_never_go_below_zero() {
 
 // --- merges ---
 
-/// Reads the product's history and observes it, as a poll does.
+/// Reads the product's history, then reads the move and saves the tip, as a poll does.
 async fn observe(tips: &mut Tips, product: &Product) -> Result<TipMove, &'static str> {
     let history = read_history(&SystemGit, product).await?;
-    tips.observe(&SystemGit, product, &history).await
+    let moved = tips.moved(&SystemGit, product, &history).await?;
+    tips.save(&product.name, &history.tip).unwrap();
+    Ok(moved)
 }
 
 #[test]
@@ -237,10 +252,10 @@ fn a_reflog_time_comes_from_its_selector() {
 }
 
 #[tokio::test]
-async fn start_up_counts_no_merge() {
+async fn a_first_sight_with_no_file_counts_no_merge() {
     let pod = Pod::new();
     let repo = pod.repo("main");
-    let mut tips = Tips::default();
+    let mut tips = Tips::load(tips_path(&pod));
 
     let moved = observe(&mut tips, &pod.product(&repo, 3)).await;
 
@@ -252,7 +267,7 @@ async fn an_unmoved_tip_counts_no_merge() {
     let pod = Pod::new();
     let repo = pod.repo("main");
     let product = pod.product(&repo, 3);
-    let mut tips = Tips::default();
+    let mut tips = Tips::load(tips_path(&pod));
     observe(&mut tips, &product).await.unwrap();
 
     assert_eq!(observe(&mut tips, &product).await, Ok(TipMove::Unchanged));
@@ -263,7 +278,7 @@ async fn a_fast_forward_counts_one_merge_with_its_lines() {
     let pod = Pod::new();
     let repo = pod.repo("main");
     let product = pod.product(&repo, 3);
-    let mut tips = Tips::default();
+    let mut tips = Tips::load(tips_path(&pod));
     observe(&mut tips, &product).await.unwrap();
 
     // Lines 1, 2, 4 and 5 kept, 3 removed, three added.
@@ -285,7 +300,7 @@ async fn two_merges_between_polls_count_as_two() {
     let pod = Pod::new();
     let repo = pod.repo("main");
     let product = pod.product(&repo, 3);
-    let mut tips = Tips::default();
+    let mut tips = Tips::load(tips_path(&pod));
     observe(&mut tips, &product).await.unwrap();
 
     merge_branch(&repo, "spec-x", "1\n2\n3\n4\n5\n6\n");
@@ -317,7 +332,7 @@ async fn a_move_without_a_reflog_counts_one_merge_without_a_spec() {
     let product = pod.product(&repo, 3);
     git(&repo, &["config", "core.logAllRefUpdates", "false"]);
     std::fs::remove_file(repo.join(".git/logs/refs/heads/main")).unwrap();
-    let mut tips = Tips::default();
+    let mut tips = Tips::load(tips_path(&pod));
     observe(&mut tips, &product).await.unwrap();
 
     merge_branch(&repo, "spec-x", "1\n2\n3\n4\n5\n6\n");
@@ -339,7 +354,7 @@ async fn a_rewrite_counts_nothing_and_is_logged() {
     let pod = Pod::new();
     let repo = pod.repo("main");
     let product = pod.product(&repo, 3);
-    let mut tips = Tips::default();
+    let mut tips = Tips::load(tips_path(&pod));
     observe(&mut tips, &product).await.unwrap();
     let tree = git(&repo, &["rev-parse", "HEAD^{tree}"]);
     let unrelated = git(&repo, &["commit-tree", &tree, "-m", "unrelated"]);
@@ -366,7 +381,7 @@ async fn a_rewrite_between_two_merges_in_one_poll_counts_the_two_merges_and_is_l
     let pod = Pod::new();
     let repo = pod.repo("main");
     let product = pod.product(&repo, 3);
-    let mut tips = Tips::default();
+    let mut tips = Tips::load(tips_path(&pod));
     observe(&mut tips, &product).await.unwrap();
 
     merge_branch(&repo, "spec-x", "1\n2\n3\n4\n5\n6\n");
@@ -843,7 +858,7 @@ async fn the_task_polls_at_start_reports_the_gauges_and_stops_at_shutdown() {
     );
     let (shutdown_tx, shutdown_rx) = watch::channel(());
 
-    let handle = start(path, shutdown_rx);
+    let handle = start(path, tips_path(&pod), shutdown_rx);
 
     let snapshot = gauge_snapshot();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
@@ -1635,6 +1650,7 @@ async fn a_reflog_that_cannot_be_read_keeps_the_slots() {
     let snapshot = Arc::new(Mutex::new(PodSnapshot::default()));
     let mut stats = PodStats::new(
         one_product(&pod, &repo),
+        tips_path(&pod),
         NoReflog,
         Arc::clone(&snapshot),
         UtcOffset::UTC,
@@ -1669,7 +1685,7 @@ async fn the_spec_gauges_report_every_state_and_each_specs_words() {
     let path = one_product(&pod, &repo);
     let (shutdown_tx, shutdown_rx) = watch::channel(());
 
-    let handle = start(path, shutdown_rx);
+    let handle = start(path, tips_path(&pod), shutdown_rx);
 
     let snapshot = gauge_snapshot();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
@@ -1713,4 +1729,258 @@ async fn the_spec_gauges_report_every_state_and_each_specs_words() {
         .await
         .expect("the task stops at shutdown")
         .unwrap();
+}
+
+// --- the counted-tip file ---
+
+fn merges_of(pod: &Pod, spec: &str) -> Option<u64> {
+    test_support::counter_value(
+        "pod.merges",
+        &[("pod.product", pod.name.as_str()), ("spec.id", spec)],
+    )
+}
+
+fn tip_file_text(pod: &Pod) -> String {
+    std::fs::read_to_string(tips_path(pod)).unwrap()
+}
+
+/// What the tip file holds when `main` of `repo` is the pod's counted tip.
+fn tip_line(pod: &Pod, repo: &Path) -> String {
+    format!("{} {}\n", pod.name, git(repo, &["rev-parse", "main"]))
+}
+
+#[tokio::test]
+async fn the_first_poll_after_a_start_counts_the_merges_since_the_saved_tip() {
+    let pod = Pod::new();
+    let repo = pod.repo("main");
+    let path = one_product(&pod, &repo);
+    let (mut first, _) = stats(path.clone());
+    first.poll().await;
+    drop(first);
+
+    merge_branch(&repo, "spec-a", "1\n2\n3\n4\n5\n6\n");
+    merge_branch(&repo, "spec-b", "1\n2\n3\n4\n5\n6\n7\n");
+    let (mut second, _) = stats(path);
+    second.poll().await;
+
+    assert_eq!(merges_of(&pod, "spec-a"), Some(1));
+    assert_eq!(merges_of(&pod, "spec-b"), Some(1));
+    assert_eq!(
+        test_support::counter_value("pod.merges", &[("pod.product", pod.name.as_str())]),
+        Some(2)
+    );
+    assert_eq!(tip_file_text(&pod), tip_line(&pod, &repo));
+}
+
+#[tokio::test]
+async fn a_saved_tip_equal_to_the_current_tip_counts_nothing() {
+    let pod = Pod::new();
+    let repo = pod.repo("main");
+    let path = one_product(&pod, &repo);
+    let (mut first, _) = stats(path.clone());
+    first.poll().await;
+    drop(first);
+
+    let (mut second, _) = stats(path);
+    second.poll().await;
+
+    assert_eq!(
+        test_support::counter_value("pod.merges", &[("pod.product", pod.name.as_str())]),
+        Some(0)
+    );
+}
+
+#[tokio::test]
+async fn a_missing_file_counts_nothing_and_writes_the_current_tip() {
+    let pod = Pod::new();
+    let repo = pod.repo("main");
+    merge_branch(&repo, "spec-a", "1\n2\n3\n4\n5\n6\n");
+    let (mut stats, _) = stats(one_product(&pod, &repo));
+
+    stats.poll().await;
+
+    assert_eq!(merges_of(&pod, "spec-a"), None);
+    assert_eq!(tip_file_text(&pod), tip_line(&pod, &repo));
+}
+
+#[tokio::test]
+async fn a_saved_tip_not_in_the_reflog_counts_nothing_and_writes_the_current_tip() {
+    let pod = Pod::new();
+    let repo = pod.repo("main");
+    let tree = git(&repo, &["rev-parse", "HEAD^{tree}"]);
+    let unrelated = git(&repo, &["commit-tree", &tree, "-m", "unrelated"]);
+    write(&tips_path(&pod), &format!("{} {unrelated}\n", pod.name));
+    merge_branch(&repo, "spec-a", "1\n2\n3\n4\n5\n6\n");
+    let (mut stats, _) = stats(one_product(&pod, &repo));
+
+    stats.poll().await;
+
+    assert_eq!(merges_of(&pod, "spec-a"), None);
+    assert_eq!(tip_file_text(&pod), tip_line(&pod, &repo));
+}
+
+/// The `git` on the PATH, but `merge-base` gets no answer while the flag is set.
+struct SilentMergeBase(Arc<AtomicBool>);
+
+impl Git for SilentMergeBase {
+    async fn run(&self, repo: &Path, args: &[&str]) -> Option<GitOutput> {
+        if args.first() == Some(&"merge-base") && self.0.load(Ordering::SeqCst) {
+            return None;
+        }
+        SystemGit.run(repo, args).await
+    }
+}
+
+#[tokio::test]
+async fn a_git_with_no_answer_records_nothing_and_leaves_the_file() {
+    let pod = Pod::new();
+    let repo = pod.repo("main");
+    let silent = Arc::new(AtomicBool::new(false));
+    let mut stats = PodStats::new(
+        one_product(&pod, &repo),
+        tips_path(&pod),
+        SilentMergeBase(Arc::clone(&silent)),
+        Arc::new(Mutex::new(PodSnapshot::default())),
+        UtcOffset::UTC,
+    );
+    stats.poll().await;
+    let old = tip_file_text(&pod);
+    merge_branch(&repo, "spec-a", "1\n2\n3\n4\n5\n6\n");
+    merge_branch(&repo, "spec-b", "1\n2\n3\n4\n5\n6\n7\n");
+
+    silent.store(true, Ordering::SeqCst);
+    stats.poll().await;
+
+    assert_eq!(merges_of(&pod, "spec-a"), None);
+    assert_eq!(tip_file_text(&pod), old);
+
+    silent.store(false, Ordering::SeqCst);
+    stats.poll().await;
+    stats.poll().await;
+
+    assert_eq!(merges_of(&pod, "spec-a"), Some(1));
+    assert_eq!(merges_of(&pod, "spec-b"), Some(1));
+}
+
+#[tokio::test]
+async fn a_crash_after_the_tip_file_is_written_loses_that_polls_counts_and_never_doubles_them() {
+    let pod = Pod::new();
+    let repo = pod.repo("main");
+    let path = one_product(&pod, &repo);
+    let (mut first, _) = stats(path.clone());
+    first.poll().await;
+    drop(first);
+    merge_branch(&repo, "spec-a", "1\n2\n3\n4\n5\n6\n");
+    merge_branch(&repo, "spec-b", "1\n2\n3\n4\n5\n6\n7\n");
+    // What `save` wrote before a crash stopped the recording.
+    write(&tips_path(&pod), &tip_line(&pod, &repo));
+
+    let (mut second, _) = stats(path);
+    second.poll().await;
+    second.poll().await;
+
+    assert_eq!(merges_of(&pod, "spec-a"), None);
+    assert_eq!(merges_of(&pod, "spec-b"), None);
+    assert_eq!(tip_file_text(&pod), tip_line(&pod, &repo));
+}
+
+#[tokio::test]
+async fn a_restart_after_a_counted_poll_counts_nothing_again() {
+    let pod = Pod::new();
+    let repo = pod.repo("main");
+    let path = one_product(&pod, &repo);
+    let (mut first, _) = stats(path.clone());
+    first.poll().await;
+    merge_branch(&repo, "spec-a", "1\n2\n3\n4\n5\n6\n");
+    merge_branch(&repo, "spec-b", "1\n2\n3\n4\n5\n6\n7\n");
+    first.poll().await;
+    assert_eq!(merges_of(&pod, "spec-a"), Some(1));
+    assert_eq!(merges_of(&pod, "spec-b"), Some(1));
+    drop(first);
+
+    let (mut second, _) = stats(path);
+    second.poll().await;
+    second.poll().await;
+
+    assert_eq!(merges_of(&pod, "spec-a"), Some(1));
+    assert_eq!(merges_of(&pod, "spec-b"), Some(1));
+}
+
+#[tokio::test]
+async fn the_tip_file_is_readable_by_the_user_only_and_keeps_a_name_with_a_space() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let pod = Pod::new();
+    let repo = pod.repo("main");
+    let name = format!("{} x", pod.name);
+    let path = registry(
+        &pod,
+        &format!(
+            "[products.\"{name}\"]\nrepo = \"{}\"\nbase = \"main\"\nslots = 3\n",
+            repo.display()
+        ),
+    );
+    let (mut stats, _) = stats(path);
+
+    stats.poll().await;
+
+    let mode = std::fs::metadata(tips_path(&pod))
+        .unwrap()
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o777, 0o600);
+    let tips = Tips::load(tips_path(&pod));
+    assert_eq!(
+        tips.counted.get(&name),
+        Some(&git(&repo, &["rev-parse", "main"]))
+    );
+}
+
+#[tokio::test]
+async fn an_unwritable_tip_file_counts_nothing_until_it_can_be_written() {
+    let pod = Pod::new();
+    let repo = pod.repo("main");
+    let blocker = pod.root.join("blocker");
+    let mut stats = PodStats::new(
+        one_product(&pod, &repo),
+        blocker.join("tips"),
+        SystemGit,
+        Arc::new(Mutex::new(PodSnapshot::default())),
+        UtcOffset::UTC,
+    );
+    // A tip is known, then its folder is replaced by a regular file.
+    stats.poll().await;
+    std::fs::remove_dir_all(&blocker).unwrap();
+    write(&blocker, "in the way");
+    merge_branch(&repo, "spec-a", "1\n2\n3\n4\n5\n6\n");
+    let logs = CapturedLogs::start();
+
+    stats.poll().await;
+    stats.poll().await;
+
+    assert_eq!(merges_of(&pod, "spec-a"), None);
+    let text = logs.text();
+    let line = format!(
+        "pod merges and specs unavailable pod.product={} reason=\"tip file unwritable\"",
+        pod.name
+    );
+    assert_eq!(text.matches(&line).count(), 1, "{text}");
+
+    std::fs::remove_file(&blocker).unwrap();
+    stats.poll().await;
+
+    assert_eq!(merges_of(&pod, "spec-a"), Some(1));
+}
+
+#[tokio::test]
+async fn a_garbled_tip_file_counts_nothing_for_that_product() {
+    let pod = Pod::new();
+    let repo = pod.repo("main");
+    write(&tips_path(&pod), "garbage\n");
+    merge_branch(&repo, "spec-a", "1\n2\n3\n4\n5\n6\n");
+    let (mut stats, _) = stats(one_product(&pod, &repo));
+
+    stats.poll().await;
+
+    assert_eq!(merges_of(&pod, "spec-a"), None);
+    assert_eq!(tip_file_text(&pod), tip_line(&pod, &repo));
 }

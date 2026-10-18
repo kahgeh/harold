@@ -1103,10 +1103,13 @@ async fn start_telemetry_tasks(
     shutdown_rx: &watch::Receiver<()>,
 ) -> TelemetryTasks {
     // The pod facts are read only when the chief's registry is named.
-    let pod_stats = cfg
-        .telemetry
-        .pod_registry_path()
-        .map(|registry| pod_stats::start(registry, shutdown_rx.clone()));
+    let pod_stats = cfg.telemetry.pod_registry_path().map(|registry| {
+        pod_stats::start(
+            registry,
+            pod_stats::tips_file(std::path::Path::new(&cfg.store.resolved_path())),
+            shutdown_rx.clone(),
+        )
+    });
     // The alert address is opened only when `alert_listen` is set.
     let (alerts, alert_queue) = match cfg.telemetry.alert_addr() {
         Some(alert_addr) => alerts::start(

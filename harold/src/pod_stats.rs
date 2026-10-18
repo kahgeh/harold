@@ -2,10 +2,13 @@
 //! each product's base branch, and each product's specs by state, with their size and
 //! the time from "spec ready" to merged. Every minute Harold reads the chief's
 //! `products.toml`, runs read-only `git` against each product's base checkout and reads
-//! its pod folder. It never writes there.
+//! its pod folder. It writes one file, the counted tips beside Harold's store, and never
+//! writes in the pod folder.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::future::Future;
+use std::io::Write as _;
+use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
@@ -46,6 +49,7 @@ const NO_ANSWER: &str = "git gave no answer";
 const GIT_FAILED: &str = "git failed";
 const REGISTRY_UNREADABLE: &str = "registry unreadable";
 const POD_UNREADABLE: &str = "pod folder unreadable";
+const TIPS_UNWRITABLE: &str = "tip file unwritable";
 
 /// How long Harold keeps asking whether a spec worktree that went had its commit merged
 /// to the base branch, when git cannot yet say so.
@@ -400,36 +404,115 @@ pub(crate) fn shortstat_lines(text: &str) -> (u64, u64) {
     (added, removed)
 }
 
-/// The last known tip of each product's base branch.
-#[derive(Default)]
-pub(crate) struct Tips(HashMap<String, String>);
+/// The tip file beside the store at `store_path`: `<bundle>/data/pod/tips`.
+pub(crate) fn tips_file(store_path: &Path) -> PathBuf {
+    store_path
+        .parent()
+        .unwrap_or(Path::new("."))
+        .join("pod")
+        .join("tips")
+}
+
+/// The tip of each product's base branch at its last counted poll, kept in the tip file
+/// as one `<product> <hash>` line each so a start can count the merges made while Harold
+/// was stopped.
+pub(crate) struct Tips {
+    file: PathBuf,
+    counted: BTreeMap<String, String>,
+    /// The products whose tip is as the file had it at the start and has not been saved
+    /// since.
+    from_file: HashSet<String>,
+}
 
 impl Tips {
-    /// First call for a product records its tip and reports Unchanged (start-up counts nothing).
-    /// When reading fails, the known tip stays, so the next poll counts the whole move.
-    pub(crate) async fn observe(
-        &mut self,
+    /// The tips saved in `file`. A line that does not read as `<product> <hash>` is
+    /// skipped, and a file that is missing or unreadable gives no tips.
+    pub(crate) fn load(file: PathBuf) -> Self {
+        let text = std::fs::read_to_string(&file).unwrap_or_default();
+        let counted: BTreeMap<String, String> = text
+            .lines()
+            .filter_map(|line| line.rsplit_once(' '))
+            .filter(|(product, tip)| !product.is_empty() && !tip.is_empty())
+            .map(|(product, tip)| (product.to_owned(), tip.to_owned()))
+            .collect();
+        let from_file = counted.keys().cloned().collect();
+        Self {
+            file,
+            counted,
+            from_file,
+        }
+    }
+
+    /// What the move from the counted tip to the current one holds, changing nothing: a
+    /// product with no counted tip has none to count from. A tip from the file that the
+    /// reflog does not hold before the current tip is not counted from, as the branch was
+    /// rewritten or its reflog lost while Harold was stopped. When reading fails, the
+    /// counted tip stays, so the next poll counts the whole move.
+    pub(crate) async fn moved(
+        &self,
         git: &impl Git,
         product: &Product,
         history: &History,
     ) -> Result<TipMove, &'static str> {
-        let tip = history.tip.clone();
-        let Some(old) = self.0.get(&product.name).cloned() else {
-            self.0.insert(product.name.clone(), tip);
+        let Some(old) = self.counted.get(&product.name) else {
             return Ok(TipMove::Unchanged);
         };
+        let tip = &history.tip;
         if old == tip {
             return Ok(TipMove::Unchanged);
         }
-        let (merges, rewritten) = merges(git, product, &old, &tip, &history.reflog).await?;
-        let moved = if merges.is_empty() && rewritten {
+        if self.from_file.contains(&product.name) {
+            let reflog = &history.reflog;
+            let held = reflog
+                .iter()
+                .position(|entry| entry.hash == *tip)
+                .is_some_and(|newest| reflog[newest..].iter().any(|entry| entry.hash == *old));
+            if !held {
+                return Ok(TipMove::Unchanged);
+            }
+        }
+        let (merges, rewritten) = merges(git, product, old, tip, &history.reflog).await?;
+        Ok(if merges.is_empty() && rewritten {
             TipMove::Rewritten
         } else {
             TipMove::Merges(merges)
-        };
-        self.0.insert(product.name.clone(), tip);
-        Ok(moved)
+        })
     }
+
+    /// Counts `tip` as the product's, writing the whole tip file first when it differs
+    /// from the one stored. A failed write changes nothing.
+    pub(crate) fn save(&mut self, product: &str, tip: &str) -> Result<(), &'static str> {
+        if self.counted.get(product).map(String::as_str) != Some(tip) {
+            let mut counted = self.counted.clone();
+            counted.insert(product.to_owned(), tip.to_owned());
+            write_tips(&self.file, &counted).map_err(|_| TIPS_UNWRITABLE)?;
+            self.counted = counted;
+        }
+        self.from_file.remove(product);
+        Ok(())
+    }
+}
+
+/// Writes `counted` to `file` through `tips.tmp` beside it, so a reader never sees half a
+/// file. Only the user can read it.
+fn write_tips(file: &Path, counted: &BTreeMap<String, String>) -> std::io::Result<()> {
+    if let Some(folder) = file.parent() {
+        std::fs::create_dir_all(folder)?;
+    }
+    let text: String = counted
+        .iter()
+        .map(|(product, tip)| format!("{product} {tip}\n"))
+        .collect();
+    let temp = file.with_extension("tmp");
+    let mut out = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(&temp)?;
+    out.write_all(text.as_bytes())?;
+    out.sync_all()?;
+    std::fs::rename(&temp, file)
 }
 
 /// The merges from `old` to `new`: one for each reflog entry from just after `old` up to
@@ -896,6 +979,7 @@ struct Gone {
 impl<G: Git> PodStats<G> {
     pub(crate) fn new(
         registry: PathBuf,
+        tips_file: PathBuf,
         git: G,
         snapshot: Arc<Mutex<PodSnapshot>>,
         offset: UtcOffset,
@@ -903,7 +987,7 @@ impl<G: Git> PodStats<G> {
         Self {
             registry,
             git,
-            tips: Tips::default(),
+            tips: Tips::load(tips_file),
             snapshot,
             registry_unreadable: false,
             unavailable: HashSet::new(),
@@ -979,8 +1063,9 @@ impl<G: Git> PodStats<G> {
 
     /// Reads the product's specs and records its merges, each under the spec it names
     /// (and its stage) and with that merge's lead times, from one read of the base
-    /// branch's tip and reflog. Specs are read first, so a pod folder that cannot be read
-    /// leaves the tip where it was and the merges are counted by a later poll.
+    /// branch's tip and reflog. Specs are read first and the tip is saved before anything
+    /// is recorded, so a pod folder or tip file that cannot be read or written leaves the
+    /// tip where it was and the merges are counted by a later poll.
     async fn poll_history(
         &mut self,
         product: &Product,
@@ -1013,7 +1098,11 @@ impl<G: Git> PodStats<G> {
             })
             .collect();
         let specs = read_specs(&pod, &building, &merged, self.offset)?;
-        if let TipMove::Merges(merges) = self.tips.observe(&self.git, product, &history).await? {
+        let moved = self.tips.moved(&self.git, product, &history).await?;
+        // The tip is saved before the merges are recorded: a crash between the two loses
+        // that poll's counts but never counts them twice.
+        self.tips.save(&product.name, &history.tip)?;
+        if let TipMove::Merges(merges) = moved {
             let is_spec = |id: &str| specs.iter().any(|spec| spec.id == id);
             for merge in &merges {
                 let spec = merge.name.as_deref().map(|name| spec_ref(name, is_spec));
@@ -1220,9 +1309,14 @@ async fn run<G: Git>(mut stats: PodStats<G>, mut shutdown: watch::Receiver<()>) 
 }
 
 /// Starts reading the pods of the registry at `registry`.
-pub(crate) fn start(registry: PathBuf, shutdown: watch::Receiver<()>) -> JoinHandle<()> {
+pub(crate) fn start(
+    registry: PathBuf,
+    tips_file: PathBuf,
+    shutdown: watch::Receiver<()>,
+) -> JoinHandle<()> {
     let stats = PodStats::new(
         registry,
+        tips_file,
         SystemGit,
         gauge_snapshot(),
         telemetry::local_offset(),
