@@ -233,6 +233,22 @@ async fn the_host_maps_each_line_outcome() {
     assert_eq!(typing.type_line("%2", "line").await, Typing::EnterFailed);
 }
 
+#[tokio::test]
+async fn an_enter_step_that_fails_after_the_text_is_typed_is_enter_failed() {
+    let fake = Fake::at(DAY, "09:00:00");
+    fake.set(|state| state.fail_enter = true);
+    let typing = TmuxTyping {
+        ports: Arc::new(fake.clone()),
+        writer: Writer::Tool(questions::NAME),
+    };
+
+    let outcome = typing.type_line("%2", "line").await;
+
+    println!("evidence: outcome {outcome:?}, keys {:?}", fake.keys());
+    assert_eq!(outcome, Typing::EnterFailed);
+    assert_eq!(fake.keys(), vec![Key::Text("%2".into(), "line".into())]);
+}
+
 #[tokio::test(start_paused = true)]
 async fn a_busy_pane_is_pane_busy_at_once() {
     let fake = Fake::at(DAY, "09:00:00");

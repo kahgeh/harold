@@ -1878,3 +1878,11 @@ async fn two_tools_hold_the_pane_against_each_other() {
 
     assert!(matches!(second, Attempt::Wait(Reason::AgentBusy)));
 }
+
+#[tokio::test]
+async fn a_panicking_typing_step_is_an_error_not_a_panic() {
+    let result = typing_step(|| panic!("tmux step blew up")).await;
+
+    println!("evidence: {result:?}");
+    assert!(result.is_err());
+}
