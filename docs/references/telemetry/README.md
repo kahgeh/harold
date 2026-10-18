@@ -18,14 +18,14 @@ Add a `[telemetry]` section to `local.toml`:
 [telemetry]
 otlp_endpoint = "http://localhost:4317"
 alert_listen = "127.0.0.1:4320"
-pod_registry = "~/Dev/p/chief-of-pods/products.toml"
+pod_registry = "~/Dev/p/<your-vault>/products.toml"
 ```
 
 | Key | Turns on | When left out |
 |---|---|---|
 | `otlp_endpoint` | Export of spans, log records and metrics to the collector, over OTLP gRPC. Plain `http://` only: Harold is built without TLS, so an `https://` address is refused | Nothing is exported |
 | `alert_listen` | The alert address, `POST /alert` on this address and port | No address is opened |
-| `pod_registry` | The pod facts, read from the chief's `products.toml` | No pod folder is read and no `git` command runs |
+| `pod_registry` | The pod facts, read from the organisation's `products.toml`, in its vault | No pod folder is read and no `git` command runs |
 
 Each key is off on its own. A malformed value stops Harold at start, and `harold --check-config` fails, with an error naming the key:
 
