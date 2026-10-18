@@ -105,6 +105,15 @@ pub(super) trait QuestionStore: Send + Sync + 'static {
     ) -> impl Future<Output = Result<Option<StartedBatch>>> + Send;
     fn started_batch(&self) -> impl Future<Output = Result<Option<StartedBatch>>> + Send;
     fn batch_typed(&self, batch_id: i64, now_ms: i64) -> impl Future<Output = Result<()>> + Send;
+    /// Undoes a started batch that was never typed, in one transaction: deletes
+    /// its row and takes its questions out of it, so its answers are unsent
+    /// again and the next round builds the batch anew. Returns whether it was
+    /// released; a typed or unknown batch is left as it is.
+    fn release_batch(
+        &self,
+        batch_id: i64,
+        now_ms: i64,
+    ) -> impl Future<Output = Result<bool>> + Send;
 }
 
 pub(super) struct TursoQuestionStore {
@@ -628,6 +637,28 @@ async fn batch_typed_in(conn: &Connection, batch_id: i64, now_ms: i64) -> Result
     Ok(())
 }
 
+async fn release_batch_in(conn: &Connection, batch_id: i64, now_ms: i64) -> Result<bool> {
+    let mut rows = conn
+        .query(
+            "SELECT 1 FROM batches WHERE id = ?1 AND typed_at_ms IS NULL",
+            (batch_id,),
+        )
+        .await?;
+    let started = rows.next().await?.is_some();
+    drop(rows);
+    if !started {
+        return Ok(false);
+    }
+    conn.execute("DELETE FROM batches WHERE id = ?1", (batch_id,))
+        .await?;
+    conn.execute(
+        "UPDATE questions SET batch_id = NULL, updated_at_ms = ?2 WHERE batch_id = ?1",
+        (batch_id, now_ms),
+    )
+    .await?;
+    Ok(true)
+}
+
 impl QuestionStore for TursoQuestionStore {
     async fn put(&self, question: Question, now_ms: i64) -> Result<u32> {
         let conn = self.conn.lock().await;
@@ -703,6 +734,12 @@ impl QuestionStore for TursoQuestionStore {
         let conn = self.conn.lock().await;
         begin(&conn).await?;
         finish(&conn, batch_typed_in(&conn, batch_id, now_ms).await).await
+    }
+
+    async fn release_batch(&self, batch_id: i64, now_ms: i64) -> Result<bool> {
+        let conn = self.conn.lock().await;
+        begin(&conn).await?;
+        finish(&conn, release_batch_in(&conn, batch_id, now_ms).await).await
     }
 }
 

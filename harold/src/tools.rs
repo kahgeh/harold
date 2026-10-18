@@ -36,7 +36,7 @@ pub(crate) enum Typing {
     Typed,
     /// The text is in the input box but Enter failed; typing again would repeat it.
     EnterFailed,
-    /// The pane stayed busy, or its input box held text; nothing was typed.
+    /// The pane was busy, or its input box held text; nothing was typed.
     PaneBusy,
     /// The pane is gone; nothing was typed.
     NoPane,
@@ -53,8 +53,9 @@ impl Typing {
     }
 }
 
-/// Types one line into a pane once it is idle with an empty input box,
-/// holding the pane against Harold's other writers as the tool.
+/// Tries once to type one line into a pane, which must be idle with an empty
+/// input box, holding the pane against Harold's other writers as the tool. It
+/// never waits for a busy pane: the tool tries again on its own next round.
 pub(crate) trait PaneTyping: Send + Sync {
     fn type_line<'a>(&'a self, pane_id: &'a str, text: &'a str) -> BoxFuture<'a, Typing>;
 }
@@ -177,8 +178,8 @@ fn data_folder(store_path: &str, tool: &str) -> PathBuf {
         .join(tool)
 }
 
-/// Types a tool's line through `timed_prompts::type_line` as `writer`, holding the
-/// pane against Harold's other writers with the same pane locks they use.
+/// Types a tool's line through `timed_prompts::type_line_once` as `writer`, holding
+/// the pane against Harold's other writers with the same pane locks they use.
 struct TmuxTyping<P = TmuxPorts> {
     ports: Arc<P>,
     writer: Writer,
@@ -192,7 +193,7 @@ impl<P: Ports> PaneTyping for TmuxTyping<P> {
         // A tool may drop this future on shutdown. The typing runs in its own task,
         // so a dropped wait never cuts between the text and Enter.
         let typing = tokio::spawn(async move {
-            timed_prompts::type_line(&*ports, writer, &pane_id, &text).await
+            timed_prompts::type_line_once(&*ports, writer, &pane_id, &text).await
         });
         Box::pin(async move {
             match typing.await {

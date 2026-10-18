@@ -39,7 +39,7 @@ pub(super) async fn open_store(folder: &TempFolder) -> Arc<TursoQuestionStore> {
 #[derive(Clone, Copy)]
 pub(super) enum Step {
     Answer(Typing),
-    /// Never returns, as a pane that stays busy inside `type_line`.
+    /// Never returns, as typing still in flight inside `type_line`.
     Hang,
 }
 
@@ -47,7 +47,7 @@ pub(super) enum Step {
 /// script; once the script runs out it answers `fallback`.
 pub(super) struct FakeTyping {
     script: Mutex<VecDeque<Step>>,
-    fallback: Typing,
+    fallback: Mutex<Typing>,
     calls: Mutex<Vec<(String, String)>>,
 }
 
@@ -55,13 +55,18 @@ impl FakeTyping {
     pub(super) fn new(script: Vec<Step>, fallback: Typing) -> Arc<Self> {
         Arc::new(Self {
             script: Mutex::new(script.into()),
-            fallback,
+            fallback: Mutex::new(fallback),
             calls: Mutex::new(Vec::new()),
         })
     }
 
     pub(super) fn typed_ok() -> Arc<Self> {
         Self::new(Vec::new(), Typing::Typed)
+    }
+
+    /// Changes what the pane answers once the script has run out.
+    pub(super) fn set_fallback(&self, fallback: Typing) {
+        *self.fallback.lock().unwrap() = fallback;
     }
 
     pub(super) fn calls(&self) -> Vec<(String, String)> {
@@ -84,7 +89,7 @@ impl PaneTyping for FakeTyping {
             match step {
                 Some(Step::Answer(typing)) => typing,
                 Some(Step::Hang) => std::future::pending().await,
-                None => self.fallback,
+                None => *self.fallback.lock().unwrap(),
             }
         })
     }
@@ -108,12 +113,14 @@ impl ChiefPane for FakeChief {
     }
 }
 
-/// Forwards to a real store; its writes fail while `writes` is set, and
-/// `batch_typed` fails while `marks` is set.
+/// Forwards to a real store; its writes fail while `writes` is set,
+/// `batch_typed` fails while `marks` is set, and `release_batch` fails while
+/// `releases` is set.
 pub(super) struct FailingStore {
     pub inner: Arc<TursoQuestionStore>,
     pub writes: AtomicBool,
     pub marks: AtomicBool,
+    pub releases: AtomicBool,
 }
 
 impl FailingStore {
@@ -122,6 +129,7 @@ impl FailingStore {
             inner,
             writes: AtomicBool::new(true),
             marks: AtomicBool::new(false),
+            releases: AtomicBool::new(false),
         })
     }
 
@@ -198,6 +206,14 @@ impl QuestionStore for FailingStore {
             return Err(StoreError::Data("mark failed".into()));
         }
         self.inner.batch_typed(batch_id, now_ms).await
+    }
+
+    async fn release_batch(&self, batch_id: i64, now_ms: i64) -> Result<bool, StoreError> {
+        self.check()?;
+        if self.releases.load(Ordering::SeqCst) {
+            return Err(StoreError::Data("release failed".into()));
+        }
+        self.inner.release_batch(batch_id, now_ms).await
     }
 }
 

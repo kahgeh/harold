@@ -132,16 +132,20 @@ A `|` in a field is not changed, so a note that holds `|` reads like a separator
 
 ### Timing and restart
 
-The sender waits for the chief's pane to be idle with an empty input box. If there is no chief, the pane stays busy, or the database fails, it retries every 5 seconds without limit, and logs `answers batch waiting` once per batch with its `reason`.
+Each round, the sender looks up the chief's pane and makes one try at typing the batch: the pane must be idle with an empty input box. It does not wait for a busy pane inside the try. If there is no chief, the pane is busy or gone, or the database fails, it tries again 5 seconds later, without limit. It logs `answers batch waiting` once for each spell of waiting, with the first `reason`; the spell ends when a batch is typed or nothing is left to send.
 
-The batch is stored with its text before it is typed, and marked typed after. Once typed:
+The batch is stored with its text before the try. If nothing was typed (no chief, a busy pane, no pane), the batch is released: its row is deleted and its answers are unsent again, in one transaction. The next round builds it again from what is there then, so a question put while a batch waits holds it until that question is answered or deferred, and the chief gets one line, not two. If the release fails, it is tried again before anything else.
+
+While nothing is to be sent, the sender wakes on each write, and also looks again every 30 seconds, in case a write was stored by a call that was cancelled before it woke the sender.
+
+Once a batch is typed, it is marked typed:
 
 - Its answers become `sent`.
 - Every deferred question returns to `waiting`, at the end, so the next batch waits for it.
 
 If Enter fails after the text went in, the batch counts as typed and is never typed again, since the text is already in the box.
 
-If Harold stops between typing and marking, the batch is still open at the next start and is typed again, once, before any new batch. A line typed but not marked is the only case that can repeat. A batch whose text was never typed is typed exactly once.
+If Harold stops while a batch is being typed, or between typing and marking, the batch may have reached the pane, so it is still open at the next start and is typed again, once, before any new batch. Such a line is the only case that can repeat. A batch whose try typed nothing was released, so it is never typed twice.
 
 ## Log lines
 

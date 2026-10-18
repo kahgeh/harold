@@ -1,9 +1,12 @@
 //! One batch back to the chief: the line, and the task that types it.
 //!
 //! When no question is waiting and some answers are unsent, the sender
-//! records a batch as started, with its text, then types it into the chief's
-//! pane and marks it typed. A started batch never marked typed, from before
-//! a restart, is typed again first, once.
+//! records a batch as started, with its text, and makes one try at typing it
+//! into the chief's pane. Typed, it is marked typed. Not typed (the pane busy
+//! or gone, or no chief), it is released, so the next round, 5 s later, builds
+//! it again from what is there then and a question put meanwhile holds it. A
+//! started batch never marked typed, from before a restart, was being typed
+//! when Harold stopped; it is typed again first, once.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -18,6 +21,10 @@ use crate::tools::{ChiefPane, PaneTyping, Typing};
 
 /// How long a batch waits before the next try.
 pub(super) const RETRY: Duration = Duration::from_secs(5);
+
+/// How long an idle sender waits before it looks again without a wake: a write
+/// whose call was cancelled after it committed wakes nobody.
+pub(super) const IDLE_RECHECK: Duration = Duration::from_secs(30);
 
 const ESC: char = '\u{1b}';
 
@@ -96,7 +103,7 @@ fn answer_part(id: &str, question: &Question, answer: &Answer) -> String {
 
 /// What the sender does after one round.
 enum Next {
-    /// Nothing to send: wait for a write.
+    /// Nothing to send: wait for a write, or `IDLE_RECHECK`.
     Idle,
     /// A batch is pending: try again after `RETRY`, or sooner on a write.
     Retry,
@@ -119,8 +126,11 @@ struct Sender<S> {
     chief: Arc<dyn ChiefPane>,
     /// A batch typed but not yet marked typed; it is marked, never typed again.
     typed: Option<(i64, Typing)>,
-    /// The batch whose wait was logged (`None` when no batch could be read).
-    waiting_logged: Option<Option<i64>>,
+    /// A batch not typed whose release failed; it is released before anything else.
+    unreleased: Option<i64>,
+    /// Whether this spell of waiting was logged. A spell ends when a batch is
+    /// typed or nothing is left to send.
+    waiting_logged: bool,
 }
 
 /// Sends batches until shutdown, which also cancels a line being typed.
@@ -136,7 +146,8 @@ pub(super) async fn run<S: QuestionStore>(
         typing,
         chief,
         typed: None,
-        waiting_logged: None,
+        unreleased: None,
+        waiting_logged: false,
     };
     loop {
         let next = tokio::select! {
@@ -150,6 +161,7 @@ pub(super) async fn run<S: QuestionStore>(
                 biased;
                 _ = shutdown.changed() => return,
                 _ = wake.notified() => {}
+                _ = tokio::time::sleep(IDLE_RECHECK) => {}
             },
             Next::Retry => tokio::select! {
                 biased;
@@ -166,32 +178,39 @@ impl<S: QuestionStore> Sender<S> {
         if let Some((batch_id, how)) = self.typed {
             return self.mark_typed(batch_id, how).await;
         }
+        if let Some(batch_id) = self.unreleased {
+            if self.store.release_batch(batch_id, now_ms()).await.is_err() {
+                self.log_waiting("store_failed");
+                return Next::Retry;
+            }
+            self.unreleased = None;
+        }
         let batch = match self.next_batch().await {
             Ok(Found::Batch(batch)) => batch,
             Ok(Found::Nothing) => {
-                self.waiting_logged = None;
+                self.waiting_logged = false;
                 return Next::Idle;
             }
             // A write landed after `ready`: build the batch again from what is there now.
             Ok(Found::Changed) => return Next::Again,
             Err(_) => {
-                self.log_waiting(None, "store_failed");
+                self.log_waiting("store_failed");
                 return Next::Retry;
             }
         };
+        // The chief is looked up every round, and the line goes to the pane found now.
         let Some(pane) = self.chief.chief_pane() else {
-            self.log_waiting(Some(batch.id), "no_chief");
-            return Next::Retry;
+            return self.release(batch.id, "no_chief").await;
         };
+        // One try: a busy pane is not waited for here, but on the next round.
         match self.typing.type_line(&pane, &batch.text).await {
             how @ (Typing::Typed | Typing::EnterFailed) => {
+                // The line reached the pane, so this spell of waiting is over.
+                self.waiting_logged = false;
                 self.typed = Some((batch.id, how));
                 self.mark_typed(batch.id, how).await
             }
-            how @ (Typing::PaneBusy | Typing::NoPane) => {
-                self.log_waiting(Some(batch.id), how.reason());
-                Next::Retry
-            }
+            how @ (Typing::PaneBusy | Typing::NoPane) => self.release(batch.id, how.reason()).await,
         }
     }
 
@@ -215,13 +234,23 @@ impl<S: QuestionStore> Sender<S> {
         Ok(started.map_or(Found::Changed, Found::Batch))
     }
 
+    /// Nothing was typed, so the batch is released: the next round builds it
+    /// again, and a question put meanwhile holds it.
+    async fn release(&mut self, batch_id: i64, reason: &'static str) -> Next {
+        self.log_waiting(reason);
+        if self.store.release_batch(batch_id, now_ms()).await.is_err() {
+            self.unreleased = Some(batch_id);
+        }
+        Next::Retry
+    }
+
     async fn mark_typed(&mut self, batch_id: i64, how: Typing) -> Next {
         if self.store.batch_typed(batch_id, now_ms()).await.is_err() {
-            self.log_waiting(Some(batch_id), "store_failed");
+            self.log_waiting("store_failed");
             return Next::Retry;
         }
         self.typed = None;
-        self.waiting_logged = None;
+        self.waiting_logged = false;
         match how {
             Typing::EnterFailed => {
                 warn!(tool = NAME, reason = how.reason(), "answers batch typed")
@@ -231,12 +260,12 @@ impl<S: QuestionStore> Sender<S> {
         Next::Again
     }
 
-    /// Logs a batch's wait the first time only.
-    fn log_waiting(&mut self, batch_id: Option<i64>, reason: &str) {
-        if self.waiting_logged == Some(batch_id) {
+    /// Logs the first reason of a spell of waiting only.
+    fn log_waiting(&mut self, reason: &str) {
+        if self.waiting_logged {
             return;
         }
-        self.waiting_logged = Some(batch_id);
+        self.waiting_logged = true;
         if reason == "store_failed" {
             warn!(tool = NAME, reason, "answers batch waiting");
         } else {

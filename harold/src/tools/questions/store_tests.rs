@@ -468,3 +468,103 @@ async fn a_write_dropped_inside_its_transaction_does_not_block_the_next() {
     assert_eq!(store.put(question("Q2"), 3).await.unwrap(), 1);
     assert_eq!(listed_ids(&store).await.len(), 2);
 }
+
+/// Each question's `(id, state, batch_id)`, by id.
+async fn batch_columns(store: &TursoQuestionStore) -> Vec<(String, String, Option<i64>)> {
+    let conn = store.conn.lock().await;
+    let mut rows = conn
+        .query("SELECT id, state, batch_id FROM questions ORDER BY id", ())
+        .await
+        .unwrap();
+    let mut columns = Vec::new();
+    while let Some(row) = rows.next().await.unwrap() {
+        let batch_id = row.get_value(2).unwrap().as_integer().copied();
+        columns.push((text(&row, 0).unwrap(), text(&row, 1).unwrap(), batch_id));
+    }
+    columns
+}
+
+/// Each batch row's `(id, typed)`.
+async fn batch_rows(store: &TursoQuestionStore) -> Vec<(i64, bool)> {
+    let conn = store.conn.lock().await;
+    let mut rows = conn
+        .query("SELECT id, typed_at_ms FROM batches ORDER BY id", ())
+        .await
+        .unwrap();
+    let mut batches = Vec::new();
+    while let Some(row) = rows.next().await.unwrap() {
+        let typed = row.get_value(1).unwrap().as_integer().is_some();
+        batches.push((integer(&row, 0).unwrap(), typed));
+    }
+    batches
+}
+
+#[tokio::test]
+async fn release_batch_deletes_the_row_and_returns_its_answers_unsent() {
+    let temp = TempFolder::new();
+    let store = TursoQuestionStore::open(&temp.0).await.unwrap();
+    for id in ["Q1", "Q2", "Q3"] {
+        store.put(question(id), 1).await.unwrap();
+    }
+    answer_ok(&store, "Q1", 1).await;
+    answer_ok(&store, "Q2", 1).await;
+    store.defer("Q3", 2).await.unwrap().unwrap();
+    let batch = store
+        .start_batch(&at_v1(&["Q1", "Q2"]), "ANSWERS 2", 10)
+        .await
+        .unwrap()
+        .expect("batch started");
+    assert_eq!(batch_rows(&store).await, [(batch.id, false)]);
+
+    assert!(store.release_batch(batch.id, 11).await.unwrap());
+
+    assert!(batch_rows(&store).await.is_empty(), "the batch row is gone");
+    assert_eq!(store.started_batch().await.unwrap(), None);
+    let columns = batch_columns(&store).await;
+    assert_eq!(
+        columns,
+        [
+            ("Q1".to_string(), "answered".to_string(), None),
+            ("Q2".to_string(), "answered".to_string(), None),
+            ("Q3".to_string(), "deferred".to_string(), None),
+        ]
+    );
+    let ready = store
+        .ready()
+        .await
+        .unwrap()
+        .expect("the answers are unsent again");
+    assert_eq!(ready_answers(&ready), at_v1(&["Q1", "Q2"]));
+    assert_eq!(ready.later, ["Q3"]);
+    // A question put now holds the next batch.
+    store.put(question("Q4"), 12).await.unwrap();
+    assert!(store.ready().await.unwrap().is_none());
+    println!(
+        "evidence: released batch {}: no batch rows; questions {columns:?}",
+        batch.id
+    );
+}
+
+#[tokio::test]
+async fn a_typed_or_unknown_batch_is_not_released() {
+    let temp = TempFolder::new();
+    let store = TursoQuestionStore::open(&temp.0).await.unwrap();
+    store.put(question("Q1"), 1).await.unwrap();
+    answer_ok(&store, "Q1", 1).await;
+    let batch = store
+        .start_batch(&at_v1(&["Q1"]), "ANSWERS 1", 10)
+        .await
+        .unwrap()
+        .expect("batch started");
+    store.batch_typed(batch.id, 11).await.unwrap();
+
+    assert!(!store.release_batch(batch.id, 12).await.unwrap());
+    assert!(!store.release_batch(batch.id + 1, 12).await.unwrap());
+
+    assert_eq!(batch_rows(&store).await, [(batch.id, true)]);
+    assert_eq!(
+        batch_columns(&store).await,
+        [("Q1".to_string(), "sent".to_string(), Some(batch.id))]
+    );
+    assert!(store.ready().await.unwrap().is_none());
+}

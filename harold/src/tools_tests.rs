@@ -234,7 +234,7 @@ async fn the_host_maps_each_line_outcome() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_pane_busy_for_two_minutes_is_pane_busy() {
+async fn a_busy_pane_is_pane_busy_at_once() {
     let fake = Fake::at(DAY, "09:00:00");
     fake.set(|state| {
         state.view = panes(vec![AgentPane {
@@ -247,7 +247,10 @@ async fn a_pane_busy_for_two_minutes_is_pane_busy() {
         writer: Writer::Tool(questions::NAME),
     };
 
+    let started = tokio::time::Instant::now();
+
     assert_eq!(typing.type_line("%2", "line").await, Typing::PaneBusy);
+    assert_eq!(started.elapsed(), Duration::ZERO, "one try, no wait");
     assert!(fake.keys().is_empty());
 }
 

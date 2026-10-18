@@ -1684,7 +1684,7 @@ async fn a_spoken_prompt_and_an_alert_released_at_once_give_two_whole_lines() {
 }
 
 // ---------------------------------------------------------------------------
-// The dash writer
+// A tool's line
 // ---------------------------------------------------------------------------
 
 fn busy_chief(pane_id: &str) -> AgentPane {
@@ -1695,10 +1695,10 @@ fn busy_chief(pane_id: &str) -> AgentPane {
 }
 
 #[tokio::test]
-async fn type_line_types_into_an_idle_pane() {
+async fn type_line_once_types_into_an_idle_pane() {
     let fake = Fake::at(DAY, "09:00:00");
 
-    let outcome = type_line(&fake, Writer::Tool("questions"), "%2", "Q25 revise: no").await;
+    let outcome = type_line_once(&fake, Writer::Tool("questions"), "%2", "Q25 revise: no").await;
 
     assert_eq!(outcome, LineOutcome::Typed);
     assert_eq!(
@@ -1711,73 +1711,74 @@ async fn type_line_types_into_an_idle_pane() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn type_line_waits_for_a_busy_pane_to_go_idle() {
-    let fake = Fake::at(DAY, "09:00:00");
-    fake.set(|state| state.view = view(vec![busy_chief("%2")]));
-
-    let task = tokio::spawn({
-        let fake = fake.clone();
-        async move { type_line(&fake, Writer::Tool("questions"), "%2", "dash line").await }
-    });
-    tokio::time::sleep(Duration::from_secs(5)).await;
-    assert!(fake.keys().is_empty());
-    fake.set(|state| state.view = view(vec![chief("%2")]));
-
-    assert_eq!(task.await.unwrap(), LineOutcome::Typed);
-    assert_eq!(
-        fake.keys(),
-        vec![
-            Key::Text("%2".into(), "dash line".into()),
-            Key::Enter("%2".into()),
-        ]
-    );
-}
-
-#[tokio::test(start_paused = true)]
-async fn type_line_gives_up_with_pane_busy_after_two_minutes() {
+async fn type_line_once_at_a_busy_pane_is_pane_busy_at_once() {
     let fake = Fake::at(DAY, "09:00:00");
     fake.set(|state| state.view = view(vec![busy_chief("%2")]));
     let started = Instant::now();
 
-    let outcome = type_line(&fake, Writer::Tool("questions"), "%2", "dash line").await;
+    let outcome = type_line_once(&fake, Writer::Tool("questions"), "%2", "tool line").await;
 
     assert_eq!(outcome, LineOutcome::PaneBusy);
-    assert!(started.elapsed() >= LINE_WAIT);
+    assert_eq!(started.elapsed(), Duration::ZERO);
+    assert!(fake.keys().is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn type_line_once_into_a_box_holding_text_is_pane_busy_at_once() {
+    let fake = Fake::at(DAY, "09:00:00");
+    fake.set(|state| state.screen = Some(screen_with_box(&["❯ half a sentence"])));
+    let started = Instant::now();
+
+    let outcome = type_line_once(&fake, Writer::Tool("questions"), "%2", "tool line").await;
+
+    assert_eq!(outcome, LineOutcome::PaneBusy);
+    assert_eq!(started.elapsed(), Duration::ZERO);
     assert!(fake.keys().is_empty());
 }
 
 #[tokio::test]
-async fn type_line_without_the_pane_is_no_pane() {
+async fn type_line_once_while_the_listing_failed_is_pane_busy() {
+    let fake = Fake::at(DAY, "09:00:00");
+    fake.set(|state| state.view.listing_failed = true);
+
+    let outcome = type_line_once(&fake, Writer::Tool("questions"), "%2", "tool line").await;
+
+    assert_eq!(outcome, LineOutcome::PaneBusy);
+    assert!(fake.keys().is_empty());
+}
+
+#[tokio::test]
+async fn type_line_once_without_the_pane_is_no_pane() {
     let fake = Fake::at(DAY, "09:00:00");
 
-    let outcome = type_line(&fake, Writer::Tool("questions"), "%9", "dash line").await;
+    let outcome = type_line_once(&fake, Writer::Tool("questions"), "%9", "tool line").await;
 
     assert_eq!(outcome, LineOutcome::NoPane);
     assert!(fake.keys().is_empty());
 }
 
-#[tokio::test(start_paused = true)]
-async fn type_line_whose_enter_fails_is_failed() {
+#[tokio::test]
+async fn type_line_once_whose_enter_fails_is_failed() {
     let fake = Fake::at(DAY, "09:00:00");
     fake.set(|state| state.fail_enter = true);
 
     assert_eq!(
-        type_line(&fake, Writer::Tool("questions"), "%2", "dash line").await,
+        type_line_once(&fake, Writer::Tool("questions"), "%2", "tool line").await,
         LineOutcome::Failed
     );
     assert_eq!(
         fake.keys(),
-        vec![Key::Text("%2".into(), "dash line".into())]
+        vec![Key::Text("%2".into(), "tool line".into())]
     );
 }
 
 #[tokio::test(start_paused = true)]
-async fn type_line_and_a_voice_and_an_alert_give_whole_lines() {
+async fn a_tool_line_and_a_voice_and_an_alert_give_whole_lines() {
     let fake = Fake::at(DAY, "09:00:00");
     let agents = fake.agents();
 
     let (dash, voice, alert) = tokio::join!(
-        type_line(&fake, Writer::Tool("questions"), "%2", "dash line"),
+        type_line_once(&fake, Writer::Tool("questions"), "%2", "dash line"),
         type_when_ready(&fake, Writer::Voice, CHIEF, "🎙 hi", &agents, &[]),
         type_when_ready(&fake, Writer::Alert, CHIEF, "alert line", &agents, &[]),
     );

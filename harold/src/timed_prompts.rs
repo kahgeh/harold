@@ -321,7 +321,7 @@ pub(crate) fn box_reason(screen: Option<&str>) -> Option<Reason> {
 /// Who types into a pane: timed prompts and alerts through `type_when_ready`, phone
 /// replies through `inbound::tmux::relay_to_tmux_pane`, and a spoken turn of a call
 /// with the chief through `type_when_ready`, and a tool (named, such as the question tool)
-/// through `type_line` and `type_when_ready`.
+/// through `type_line_once`, which calls `type_when_ready`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Writer {
     TimedPrompt,
@@ -871,17 +871,12 @@ pub(crate) async fn type_when_ready<P: Ports>(
 // Typing a line for a tool
 // ---------------------------------------------------------------------------
 
-/// How long `type_line` waits for a pane to go idle.
-pub(crate) const LINE_WAIT: Duration = Duration::from_secs(120);
-
-/// How long `type_line` waits between tries.
-pub(crate) const LINE_RETRY: Duration = Duration::from_secs(1);
-
-/// How a `type_line` call ended.
+/// How a `type_line_once` call ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LineOutcome {
     Typed,
-    /// The pane stayed busy for `LINE_WAIT`.
+    /// The pane was busy, its input box held text, or the pane list could not be read;
+    /// nothing was typed.
     PaneBusy,
     /// No agent pane has the id.
     NoPane,
@@ -889,43 +884,28 @@ pub(crate) enum LineOutcome {
     Failed,
 }
 
-/// Types `text` into the agent pane `pane_id` as `writer` and presses Enter, waiting up to
-/// `LINE_WAIT` for the pane to be ready. Logs nothing: the caller logs what it needs to.
-pub(crate) async fn type_line<P: Ports>(
+/// Tries once to type `text` into the agent pane `pane_id` as `writer` and press Enter.
+/// It never waits for a busy pane: the caller tries again later. Logs nothing: the caller
+/// logs what it needs to.
+pub(crate) async fn type_line_once<P: Ports>(
     ports: &P,
     writer: Writer,
     pane_id: &str,
     text: &str,
 ) -> LineOutcome {
-    type_line_when_ready(ports, writer, pane_id, text).await
-}
-
-async fn type_line_when_ready<P: Ports>(
-    ports: &P,
-    writer: Writer,
-    pane_id: &str,
-    text: &str,
-) -> LineOutcome {
-    let deadline = Instant::now() + LINE_WAIT;
-    loop {
-        let view = ports.agents();
-        // A failed listing says nothing about the pane: wait and look again.
-        if !view.listing_failed {
-            let Some(pane) = view.panes.iter().find(|pane| pane.pane_id == pane_id) else {
-                return LineOutcome::NoPane;
-            };
-            match type_when_ready(ports, writer, &pane.folder, text, &view, &[]).await {
-                Attempt::Typed { .. } => return LineOutcome::Typed,
-                Attempt::EnterFailed { .. } => return LineOutcome::Failed,
-                Attempt::Wait(Reason::NoAgentInFolder) => return LineOutcome::NoPane,
-                Attempt::Wait(_) => {}
-            }
-        }
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            return LineOutcome::PaneBusy;
-        }
-        tokio::time::sleep(LINE_RETRY.min(remaining)).await;
+    let view = ports.agents();
+    // A failed listing says nothing about the pane: try again later.
+    if view.listing_failed {
+        return LineOutcome::PaneBusy;
+    }
+    let Some(pane) = view.panes.iter().find(|pane| pane.pane_id == pane_id) else {
+        return LineOutcome::NoPane;
+    };
+    match type_when_ready(ports, writer, &pane.folder, text, &view, &[]).await {
+        Attempt::Typed { .. } => LineOutcome::Typed,
+        Attempt::EnterFailed { .. } => LineOutcome::Failed,
+        Attempt::Wait(Reason::NoAgentInFolder) => LineOutcome::NoPane,
+        Attempt::Wait(_) => LineOutcome::PaneBusy,
     }
 }
 

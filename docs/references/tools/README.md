@@ -15,13 +15,13 @@ The host (`harold/src/tools.rs`) builds the `ToolContext` and calls `start`. The
 | Field | What it is |
 | --- | --- |
 | `data_folder` | The tool's own folder, `<parent of the store path>/tools/<name>/`. The tool opens its own database there. |
-| `typing` | A `PaneTyping`: types one line into a pane once the pane is idle with an empty input box. |
+| `typing` | A `PaneTyping`: makes one try at typing one line into a pane, which must be idle with an empty input box. It never waits for a busy pane; the tool tries again on a later round. |
 | `chief_pane` | A `ChiefPane`: the pane id of the chief, if one is running. |
 | `shutdown` | A `watch::Receiver<()>` that fires when Harold stops. |
 
 `start` gives back a `ToolHandle`: the gRPC `routes` the host adds to its server, and the `task` the host joins on shutdown. The task must end when `shutdown` fires.
 
-`PaneTyping::type_line` returns a `Typing`: `Typed`, `EnterFailed` (the text is in the input box but Enter failed, so typing it again would repeat it), `PaneBusy` or `NoPane`. It holds the pane against Harold's other writers as `Writer::Tool(name)`. Today the host builds one `TmuxTyping` with `Writer::Tool(questions::NAME)` and gives it to the one tool it starts, so the writer is the question tool's. Two tools with different names would hold the pane against each other like any two writers, but only if the host gives each its own writer. It logs nothing; the tool logs its own lines.
+`PaneTyping::type_line` returns a `Typing` at once: `Typed`, `EnterFailed` (the text is in the input box but Enter failed, so typing it again would repeat it), `PaneBusy` (the pane is busy or its input box holds text; nothing was typed) or `NoPane`. It holds the pane against Harold's other writers as `Writer::Tool(name)`. Today the host builds one `TmuxTyping` with `Writer::Tool(questions::NAME)` and gives it to the one tool it starts, so the writer is the question tool's. Two tools with different names would hold the pane against each other like any two writers, but only if the host gives each its own writer. It logs nothing; the tool logs its own lines.
 
 `ChiefPane` finds the one agent pane whose folder is `[notify] away_messages_only_from`. With no folder set, no such pane, or more than one, there is no chief and the tool should wait.
 
