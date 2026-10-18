@@ -3496,6 +3496,18 @@ mod tests {
         app
     }
 
+    /// Opens a revise note on the question's one decision, through its action row.
+    fn open_revise_note(app: &mut App) {
+        for code in [
+            KeyCode::Char('j'),
+            KeyCode::Char('j'),
+            KeyCode::Char('j'),
+            KeyCode::Enter,
+        ] {
+            app.handle_key(code);
+        }
+    }
+
     /// The row holding `needle`, and its index.
     fn row_with(lines: &str, needle: &str) -> usize {
         lines
@@ -3582,7 +3594,7 @@ mod tests {
         row_with(&lines, "enter record · esc back");
 
         app.handle_key(KeyCode::Esc);
-        app.handle_key(KeyCode::Char('r'));
+        open_revise_note(&mut app);
         for character in "bigger".chars() {
             app.handle_key(KeyCode::Char(character));
         }
@@ -3619,7 +3631,7 @@ mod tests {
     #[test]
     fn the_footer_says_esc_to_continue_while_block_keys_are_held() {
         let mut app = question_app(true);
-        app.handle_key(KeyCode::Char('r'));
+        open_revise_note(&mut app);
         // The question is withdrawn while its note is being typed.
         app.observe_questions(crate::questions::Queue::default());
         assert!(app.holding_block_keys());

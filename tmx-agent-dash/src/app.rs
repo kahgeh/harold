@@ -2776,6 +2776,18 @@ mod tests {
         }
     }
 
+    /// Opens a revise note from the block's first decision, through its action row.
+    fn open_revise_note(app: &mut App) {
+        for code in [
+            KeyCode::Char('j'),
+            KeyCode::Char('j'),
+            KeyCode::Char('j'),
+            KeyCode::Enter,
+        ] {
+            app.handle_key(code);
+        }
+    }
+
     fn question_queue(ids: &[&str]) -> crate::questions::Queue {
         crate::questions::Queue {
             questions: ids.iter().map(|id| question_view(id, 1)).collect(),
@@ -2806,7 +2818,7 @@ mod tests {
         assert_eq!(app.focus, Focus::List);
         app.handle_key(KeyCode::Esc);
 
-        // Esc on the first decision gives the focus back.
+        // Esc in the block gives the focus back.
         app.handle_key(KeyCode::Tab);
         assert_eq!(app.focus, Focus::Block);
         assert_eq!(app.handle_key(KeyCode::Esc), Effect::None);
@@ -2840,11 +2852,7 @@ mod tests {
         app.handle_key(KeyCode::Tab);
         assert_eq!(app.handle_key(KeyCode::Char('c')), Effect::None);
         assert_eq!(app.handle_key(KeyCode::Char('r')), Effect::None);
-        assert!(matches!(
-            app.questions.view().unwrap().mode,
-            Mode::Note { .. }
-        ));
-        app.handle_key(KeyCode::Esc);
+        assert_eq!(app.questions.view().unwrap().mode, Mode::Choosing);
         assert_eq!(app.handle_key(KeyCode::Enter), Effect::None);
         assert_eq!(app.questions.view().unwrap().picks.len(), 1);
         app.handle_key(KeyCode::Enter);
@@ -2860,12 +2868,11 @@ mod tests {
             Effect::None,
             "the summary ignores l"
         );
+        // Esc goes back to the last decision; its later row defers.
         app.handle_key(KeyCode::Esc);
-        app.handle_key(KeyCode::Esc);
-        assert_eq!(
-            app.handle_key(KeyCode::Char('l')),
-            Effect::Defer("Q1".into())
-        );
+        app.handle_key(KeyCode::Char('j'));
+        app.handle_key(KeyCode::Char('j'));
+        assert_eq!(app.handle_key(KeyCode::Enter), Effect::Defer("Q1".into()));
         assert_eq!(
             app.handle_key(KeyCode::Char('o')),
             Effect::OpenLink("https://example.com/spec".into())
@@ -2932,7 +2939,7 @@ mod tests {
         let mut app = call_app(CallState::Off);
         app.observe_questions(question_queue(&["Q1"]));
         app.handle_key(KeyCode::Tab);
-        app.handle_key(KeyCode::Char('r'));
+        open_revise_note(&mut app);
         app.handle_key(KeyCode::Char('a'));
         // The list fails, or the stream ends, while a note is being typed.
         app.hide_questions();
@@ -2978,7 +2985,7 @@ mod tests {
         let mut app = call_app(CallState::Off);
         app.observe_questions(question_queue(&["Q1"]));
         app.handle_key(KeyCode::Tab);
-        app.handle_key(KeyCode::Char('r'));
+        open_revise_note(&mut app);
         app.handle_key(KeyCode::Char('a'));
         app.hide_questions();
         assert!(app.swallowing_keys());
@@ -3001,7 +3008,7 @@ mod tests {
         let mut app = call_app(CallState::Off);
         app.observe_questions(question_queue(&["Q1"]));
         app.handle_key(KeyCode::Tab);
-        app.handle_key(KeyCode::Char('r'));
+        open_revise_note(&mut app);
         app.handle_key(KeyCode::Char('a'));
         app.hide_questions();
         let mut changed = question_queue(&["Q1"]);
@@ -3031,16 +3038,15 @@ mod tests {
         assert!(!app.holding_block_keys());
         assert_eq!(app.focus, Focus::Block);
         assert_eq!(app.questions.view().unwrap().notice, None);
-        assert_eq!(
-            app.handle_key(KeyCode::Char('l')),
-            Effect::Defer("Q1".into())
-        );
+        app.handle_key(KeyCode::Char('j'));
+        app.handle_key(KeyCode::Char('j'));
+        assert_eq!(app.handle_key(KeyCode::Enter), Effect::Defer("Q1".into()));
 
         // Tab also ends the hold, moving to the list as usual.
         let mut app = call_app(CallState::Off);
         app.observe_questions(question_queue(&["Q1"]));
         app.handle_key(KeyCode::Tab);
-        app.handle_key(KeyCode::Char('r'));
+        open_revise_note(&mut app);
         let mut changed = question_queue(&["Q1"]);
         changed.questions[0].version = 2;
         app.observe_questions(changed);
@@ -3068,7 +3074,7 @@ mod tests {
         assert_eq!(app.focus, Focus::Block);
         assert_eq!(app.handle_key(ctrl_q), Effect::Quit);
 
-        app.handle_key(KeyCode::Char('r'));
+        open_revise_note(&mut app);
         let mut changed = question_queue(&["Q1"]);
         changed.questions[0].version = 2;
         app.observe_questions(changed);

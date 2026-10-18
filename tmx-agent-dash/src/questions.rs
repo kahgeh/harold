@@ -127,6 +127,7 @@ pub struct BlockView {
     pub waiting: u32,
     pub ask: Option<String>,
     pub options: Vec<OptionView>,
+    /// The highlighted row: an option below `options.len()`, else an [`ANSWER_ACTIONS`] row.
     pub highlighted: usize,
     pub mode: Mode,
     /// The labels picked so far.
@@ -143,8 +144,11 @@ pub struct QuestionBlock {
     current: Option<String>,
     version: u32,
     decision: usize,
+    /// One pick per decision, in decision order. Going back with `h` keeps them, so
+    /// there can be picks for decisions after the current one.
     picks: Vec<PickView>,
-    highlighted: usize,
+    /// Each decision's highlighted row, kept while moving between decisions.
+    highlights: Vec<usize>,
     mode: Mode,
     notice: Option<String>,
     /// The notice stood on a block with no question through one listing already; the next
@@ -157,6 +161,10 @@ pub struct QuestionBlock {
 
 /// The notice when Harold could not save an answer or a deferral.
 pub const UNAVAILABLE_NOTICE: &str = "Harold can't save answers right now";
+
+/// The rows under every decision's options. Highlighted row `options.len() + i` is action
+/// `i`: `later` defers the question, and the other two open a note to send with the picks.
+pub const ANSWER_ACTIONS: [&str; 3] = ["later", "revise\u{2026}", "reject\u{2026}"];
 
 /// The longest note the block takes; Harold refuses a field of 2,000 characters.
 const NOTE_LIMIT: usize = 1_999;
@@ -337,7 +345,7 @@ impl QuestionBlock {
             waiting: self.queue.waiting,
             ask: decision.map(|d| d.ask.clone()),
             options: decision.map(|d| d.options.clone()).unwrap_or_default(),
-            highlighted: self.highlighted,
+            highlighted: self.highlights.get(self.decision).copied().unwrap_or(0),
             mode: self.mode.clone(),
             picks,
             summary,
@@ -371,40 +379,73 @@ impl QuestionBlock {
             return BlockEffect::None;
         };
         let options = &q.decisions[self.decision].options;
+        let last_row = options.len() + ANSWER_ACTIONS.len() - 1;
+        let highlighted = self.highlights[self.decision];
         match code {
-            KeyCode::Up => self.highlighted = self.highlighted.saturating_sub(1),
-            KeyCode::Down => {
-                self.highlighted = (self.highlighted + 1).min(options.len().saturating_sub(1));
+            KeyCode::Char('k') | KeyCode::Up => {
+                self.highlights[self.decision] = highlighted.saturating_sub(1);
             }
-            KeyCode::Enter => {
-                let Some(option) = options.get(self.highlighted) else {
+            KeyCode::Char('j') | KeyCode::Down => {
+                self.highlights[self.decision] = (highlighted + 1).min(last_row);
+            }
+            KeyCode::Char('l') | KeyCode::Right => {
+                // An action row is not an answer to move on with, and a free option
+                // moves on only past text it already has.
+                let Some(option) = options.get(highlighted) else {
                     return BlockEffect::None;
                 };
+                if !option.free {
+                    self.set_pick(&q, option.key.clone(), String::new());
+                } else if self.kept_text(option).is_some() {
+                    self.advance(&q);
+                }
+            }
+            KeyCode::Char('h') | KeyCode::Left => self.decision = self.decision.saturating_sub(1),
+            KeyCode::Enter => {
+                let Some(option) = options.get(highlighted) else {
+                    return self.answer_action(highlighted - options.len(), q.id);
+                };
                 if option.free {
+                    let text = self.kept_text(option).unwrap_or_default();
                     self.mode = Mode::Note {
                         kind: NoteKind::FreeText,
-                        text: String::new(),
+                        text,
                     };
                 } else {
-                    self.push_pick(&q, option.key.clone(), String::new());
+                    self.set_pick(&q, option.key.clone(), String::new());
                 }
             }
-            KeyCode::Char('r') => self.open_note(NoteKind::Revise),
-            KeyCode::Char('x') => self.open_note(NoteKind::Reject),
             KeyCode::Char('o') if is_web_link(&q.link) => return BlockEffect::OpenLink(q.link),
-            KeyCode::Char('l') => {
-                self.defer_locally(&q.id);
-                return BlockEffect::Defer(q.id);
-            }
-            KeyCode::Esc => {
-                if self.decision == 0 {
-                    return BlockEffect::Leave;
-                }
-                self.step_back(&q);
-            }
+            KeyCode::Esc => return BlockEffect::Leave,
             _ => {}
         }
         BlockEffect::None
+    }
+
+    /// Enter on [`ANSWER_ACTIONS`] row `action`.
+    fn answer_action(&mut self, action: usize, id: String) -> BlockEffect {
+        match action {
+            0 => {
+                self.defer_locally(&id);
+                BlockEffect::Defer(id)
+            }
+            1 => {
+                self.open_note(NoteKind::Revise);
+                BlockEffect::None
+            }
+            _ => {
+                self.open_note(NoteKind::Reject);
+                BlockEffect::None
+            }
+        }
+    }
+
+    /// The text of this decision's pick, when `option` is that pick.
+    fn kept_text(&self, option: &OptionView) -> Option<String> {
+        self.picks
+            .get(self.decision)
+            .filter(|p| p.key == option.key)
+            .map(|p| p.text.clone())
     }
 
     fn summary_key(&mut self, code: KeyCode) -> BlockEffect {
@@ -431,10 +472,9 @@ impl QuestionBlock {
                     note,
                 });
             }
-            KeyCode::Esc => {
-                self.mode = Mode::Choosing;
-                self.step_back(&q);
-            }
+            // The summary stands on the last decision, so going back shows it again.
+            KeyCode::Char('h') | KeyCode::Left | KeyCode::Esc => self.mode = Mode::Choosing,
+            KeyCode::Char('o') if is_web_link(&q.link) => return BlockEffect::OpenLink(q.link),
             _ => {}
         }
         BlockEffect::None
@@ -464,10 +504,11 @@ impl QuestionBlock {
                 }
                 match kind {
                     NoteKind::FreeText => {
-                        let key = q.decisions[self.decision].options[self.highlighted]
+                        let key = q.decisions[self.decision].options
+                            [self.highlights[self.decision]]
                             .key
                             .clone();
-                        self.push_pick(&q, key, typed);
+                        self.set_pick(&q, key, typed);
                     }
                     NoteKind::Revise | NoteKind::Reject => {
                         let kind = if kind == NoteKind::Revise {
@@ -499,34 +540,28 @@ impl QuestionBlock {
         };
     }
 
-    /// Records a pick, then moves to the next decision or the summary.
-    fn push_pick(&mut self, q: &QuestionView, key: String, text: String) {
-        self.picks.push(PickView {
+    /// Records the current decision's pick, replacing an earlier one, then moves on.
+    fn set_pick(&mut self, q: &QuestionView, key: String, text: String) {
+        let pick = PickView {
             decision: self.decision as u32,
             key,
             text,
-        });
+        };
+        match self.picks.get_mut(self.decision) {
+            Some(kept) => *kept = pick,
+            None => self.picks.push(pick),
+        }
+        self.advance(q);
+    }
+
+    /// Moves to the next decision, or to the summary after the last one.
+    fn advance(&mut self, q: &QuestionView) {
         if self.decision + 1 < q.decisions.len() {
             self.decision += 1;
-            self.highlighted = starting_highlight(&q.decisions[self.decision].options);
             self.mode = Mode::Choosing;
         } else {
             self.mode = Mode::Summary;
         }
-    }
-
-    /// Drops the last pick and shows its decision, highlighting what was picked.
-    fn step_back(&mut self, q: &QuestionView) {
-        let Some(dropped) = self.picks.pop() else {
-            return;
-        };
-        self.decision = dropped.decision as usize;
-        self.highlighted = q.decisions[self.decision]
-            .options
-            .iter()
-            .position(|o| o.key == dropped.key)
-            .unwrap_or(0);
-        self.mode = Mode::Choosing;
     }
 
     fn defer_locally(&mut self, id: &str) {
@@ -577,10 +612,12 @@ impl QuestionBlock {
         self.decision = 0;
         self.picks.clear();
         self.mode = Mode::Choosing;
-        self.highlighted = self
-            .question()
-            .and_then(|q| q.decisions.first())
-            .map_or(0, |d| starting_highlight(&d.options));
+        self.highlights = self.question().map_or(vec![], |q| {
+            q.decisions
+                .iter()
+                .map(|d| starting_highlight(&d.options))
+                .collect()
+        });
     }
 
     /// Makes the queue's first question current, or none.
@@ -666,29 +703,321 @@ mod tests {
         }
     }
 
+    fn press_times(block: &mut QuestionBlock, code: KeyCode, times: usize) {
+        for _ in 0..times {
+            press(block, code);
+        }
+    }
+
+    fn highlighted(block: &QuestionBlock) -> usize {
+        block.view().unwrap().highlighted
+    }
+
+    /// Highlights action row `action` of the current decision and presses Enter on it.
+    fn open_action(block: &mut QuestionBlock, action: usize) -> BlockEffect {
+        let options = block.view().unwrap().options.len();
+        press_times(block, KeyCode::Char('k'), options + ANSWER_ACTIONS.len());
+        press_times(block, KeyCode::Char('j'), options + action);
+        assert_eq!(highlighted(block), options + action);
+        press(block, KeyCode::Enter)
+    }
+
     #[test]
-    fn the_keys_walk_every_decision_to_the_summary() {
+    fn the_answer_actions_are_later_revise_and_reject() {
+        assert_eq!(
+            ANSWER_ACTIONS,
+            ["later", "revise\u{2026}", "reject\u{2026}"]
+        );
+    }
+
+    #[test]
+    fn j_and_k_move_over_options_then_the_three_actions() {
+        for (down, up) in [
+            (KeyCode::Char('j'), KeyCode::Char('k')),
+            (KeyCode::Down, KeyCode::Up),
+        ] {
+            let mut b = block(vec![question("Q1", 1, 1)]);
+            let v = b.view().unwrap();
+            assert_eq!(v.highlighted, 1, "starts on the suggested option");
+            assert_eq!(v.options.len(), 3, "the options are the real ones only");
+            assert_eq!((v.position, v.waiting), (1, 1));
+            press_times(&mut b, down, 2);
+            assert_eq!(highlighted(&b), 3, "the later row");
+            press_times(&mut b, down, 2);
+            assert_eq!(highlighted(&b), 5, "the reject row");
+            press(&mut b, down);
+            assert_eq!(highlighted(&b), 5, "stops at the last action");
+            press_times(&mut b, up, 9);
+            assert_eq!(highlighted(&b), 0, "stops at the first option");
+            assert_eq!(b.view().unwrap().mode, Mode::Choosing);
+        }
+    }
+
+    #[test]
+    fn l_picks_the_highlighted_option_and_h_goes_back_keeping_it() {
+        for (next, back) in [
+            (KeyCode::Char('l'), KeyCode::Char('h')),
+            (KeyCode::Right, KeyCode::Left),
+        ] {
+            let mut b = block(vec![question("Q1", 1, 2)]);
+            press(&mut b, KeyCode::Char('k'));
+            assert_eq!(press(&mut b, next), BlockEffect::None);
+            let v = b.view().unwrap();
+            assert_eq!(v.picks, vec!["label a".to_string()]);
+            assert_eq!(v.ask.as_deref(), Some("Ask 2?"));
+            assert_eq!(v.highlighted, 1, "decision 2 starts on its suggestion");
+            assert_eq!(press(&mut b, back), BlockEffect::None);
+            let v = b.view().unwrap();
+            assert_eq!(v.ask.as_deref(), Some("Ask 1?"));
+            assert_eq!(v.picks, vec!["label a".to_string()]);
+            assert_eq!(v.highlighted, 0);
+            assert_eq!(v.mode, Mode::Choosing);
+            assert_eq!(press(&mut b, back), BlockEffect::None);
+            assert_eq!(b.view().unwrap(), v, "h on decision 1 changes nothing");
+        }
+    }
+
+    #[test]
+    fn the_highlight_is_remembered_per_decision() {
         let mut b = block(vec![question("Q1", 1, 2)]);
-        let v = b.view().unwrap();
-        assert_eq!(v.highlighted, 1, "starts on the suggested option");
-        assert_eq!(v.ask.as_deref(), Some("Ask 1?"));
-        assert_eq!((v.position, v.waiting), (1, 1));
-        press(&mut b, KeyCode::Up);
-        assert_eq!(b.view().unwrap().highlighted, 0);
-        press(&mut b, KeyCode::Up);
-        assert_eq!(b.view().unwrap().highlighted, 0);
-        assert_eq!(press(&mut b, KeyCode::Enter), BlockEffect::None);
+        press(&mut b, KeyCode::Char('l'));
+        press(&mut b, KeyCode::Char('k'));
+        press(&mut b, KeyCode::Char('h'));
+        assert_eq!(highlighted(&b), 1, "decision 1 keeps its own highlight");
+        press(&mut b, KeyCode::Char('l'));
         let v = b.view().unwrap();
         assert_eq!(v.ask.as_deref(), Some("Ask 2?"));
-        assert_eq!(v.picks, vec!["label a".to_string()]);
-        assert_eq!(v.highlighted, 1);
-        press(&mut b, KeyCode::Down);
-        press(&mut b, KeyCode::Down);
-        press(&mut b, KeyCode::Down);
-        assert_eq!(b.view().unwrap().highlighted, 2);
-        press(&mut b, KeyCode::Up);
+        assert_eq!(v.highlighted, 0);
         press(&mut b, KeyCode::Enter);
-        assert_eq!(b.view().unwrap().mode, Mode::Summary);
+        let v = b.view().unwrap();
+        assert_eq!(v.mode, Mode::Summary);
+        assert_eq!(v.picks, vec!["label b".to_string(), "label a".to_string()]);
+    }
+
+    #[test]
+    fn each_decision_stops_at_its_own_last_action() {
+        let mut q = question("Q1", 1, 2);
+        q.decisions[1].options.pop();
+        let mut b = block(vec![q]);
+        press_times(&mut b, KeyCode::Char('j'), 9);
+        assert_eq!(highlighted(&b), 5);
+        press(&mut b, KeyCode::Char('k'));
+        press(&mut b, KeyCode::Char('k'));
+        press(&mut b, KeyCode::Char('k'));
+        press(&mut b, KeyCode::Char('k'));
+        press(&mut b, KeyCode::Char('l'));
+        let v = b.view().unwrap();
+        assert_eq!(v.ask.as_deref(), Some("Ask 2?"));
+        assert_eq!(v.options.len(), 2);
+        press_times(&mut b, KeyCode::Char('j'), 9);
+        assert_eq!(highlighted(&b), 4, "two options and three actions");
+        press(&mut b, KeyCode::Char('h'));
+        assert_eq!(highlighted(&b), 1, "decision 1 kept its highlight");
+    }
+
+    #[test]
+    fn l_on_an_action_row_does_nothing() {
+        for (action, label) in ANSWER_ACTIONS.iter().enumerate() {
+            let mut b = block(vec![question("Q1", 1, 2)]);
+            press_times(&mut b, KeyCode::Char('j'), 2 + action);
+            let before = b.view().unwrap();
+            assert_eq!(before.highlighted, 3 + action);
+            assert_eq!(press(&mut b, KeyCode::Char('l')), BlockEffect::None);
+            assert_eq!(b.view().unwrap(), before, "{label}");
+        }
+    }
+
+    #[test]
+    fn later_on_any_decision_defers() {
+        let mut b = block(vec![question("Q1", 1, 2), question("Q2", 1, 1)]);
+        press(&mut b, KeyCode::Enter);
+        assert_eq!(b.view().unwrap().ask.as_deref(), Some("Ask 2?"));
+        assert_eq!(open_action(&mut b, 0), BlockEffect::Defer("Q1".into()));
+        assert_eq!(
+            b.view().unwrap().id,
+            "Q2",
+            "the next waiting question shows"
+        );
+    }
+
+    #[test]
+    fn revise_and_reject_rows_open_a_note_that_blank_enter_cannot_send() {
+        let mut b = block(vec![question("Q1", 2, 2)]);
+        assert_eq!(open_action(&mut b, 1), BlockEffect::None);
+        assert_eq!(
+            b.view().unwrap().mode,
+            Mode::Note {
+                kind: NoteKind::Revise,
+                text: String::new()
+            }
+        );
+        assert_eq!(
+            press(&mut b, KeyCode::Enter),
+            BlockEffect::None,
+            "blank sends nothing"
+        );
+        type_text(&mut b, "fixx");
+        press(&mut b, KeyCode::Backspace);
+        assert_eq!(
+            press(&mut b, KeyCode::Enter),
+            BlockEffect::Send(Outgoing {
+                id: "Q1".into(),
+                version: 2,
+                kind: AnswerKind::Revise,
+                picks: vec![],
+                note: "fix".into(),
+            })
+        );
+
+        let mut b = block(vec![question("Q1", 2, 2)]);
+        press(&mut b, KeyCode::Enter);
+        assert_eq!(open_action(&mut b, 2), BlockEffect::None);
+        assert_eq!(
+            b.view().unwrap().mode,
+            Mode::Note {
+                kind: NoteKind::Reject,
+                text: String::new()
+            }
+        );
+        assert_eq!(press(&mut b, KeyCode::Enter), BlockEffect::None);
+        type_text(&mut b, "fix");
+        assert_eq!(
+            press(&mut b, KeyCode::Enter),
+            BlockEffect::Send(Outgoing {
+                id: "Q1".into(),
+                version: 2,
+                kind: AnswerKind::Reject,
+                picks: vec![pick(0, "b", "")],
+                note: "fix".into(),
+            })
+        );
+
+        // Esc leaves the note for the same decision and drops its text.
+        let mut b = block(vec![question("Q1", 2, 2)]);
+        press(&mut b, KeyCode::Enter);
+        open_action(&mut b, 1);
+        type_text(&mut b, "abc");
+        assert_eq!(press(&mut b, KeyCode::Esc), BlockEffect::None);
+        let v = b.view().unwrap();
+        assert_eq!(v.mode, Mode::Choosing);
+        assert_eq!(v.ask.as_deref(), Some("Ask 2?"));
+        open_action(&mut b, 1);
+        assert_eq!(
+            b.view().unwrap().mode,
+            Mode::Note {
+                kind: NoteKind::Revise,
+                text: String::new()
+            }
+        );
+    }
+
+    #[test]
+    fn r_and_x_and_q_do_nothing_in_choosing() {
+        let mut b = block(vec![question("Q1", 1, 2), question("Q2", 1, 1)]);
+        let before = b.view().unwrap();
+        for c in ['r', 'x', 'q'] {
+            assert_eq!(press(&mut b, KeyCode::Char(c)), BlockEffect::None, "{c}");
+            assert_eq!(b.view().unwrap(), before, "{c}");
+        }
+    }
+
+    #[test]
+    fn a_note_types_every_letter() {
+        let mut b = block(vec![question("Q1", 1, 1)]);
+        open_action(&mut b, 1);
+        type_text(&mut b, "hjklnNrxoq");
+        assert_eq!(
+            b.view().unwrap().mode,
+            Mode::Note {
+                kind: NoteKind::Revise,
+                text: "hjklnNrxoq".into()
+            }
+        );
+    }
+
+    #[test]
+    fn esc_leaves_from_any_decision_and_keeps_picks() {
+        let mut b = block(vec![question("Q1", 1, 2)]);
+        assert_eq!(press(&mut b, KeyCode::Esc), BlockEffect::Leave);
+        press(&mut b, KeyCode::Enter);
+        assert_eq!(press(&mut b, KeyCode::Esc), BlockEffect::Leave);
+        let v = b.view().unwrap();
+        assert_eq!(v.ask.as_deref(), Some("Ask 2?"));
+        assert_eq!(v.picks, vec!["label b".to_string()]);
+    }
+
+    #[test]
+    fn summary_h_and_esc_go_back_to_the_last_decision_keeping_picks() {
+        for back in [KeyCode::Char('h'), KeyCode::Left, KeyCode::Esc] {
+            let mut b = block(vec![question("Q1", 1, 2)]);
+            press(&mut b, KeyCode::Enter);
+            press(&mut b, KeyCode::Enter);
+            assert_eq!(b.view().unwrap().mode, Mode::Summary);
+            assert_eq!(press(&mut b, back), BlockEffect::None, "{back:?}");
+            let v = b.view().unwrap();
+            assert_eq!(v.mode, Mode::Choosing, "{back:?}");
+            assert_eq!(v.ask.as_deref(), Some("Ask 2?"));
+            assert_eq!(v.picks, vec!["label b".to_string(), "label b".to_string()]);
+            press(&mut b, KeyCode::Enter);
+            assert_eq!(b.view().unwrap().mode, Mode::Summary);
+            assert_eq!(
+                press(&mut b, KeyCode::Char('o')),
+                BlockEffect::OpenLink("https://example.com/x".into())
+            );
+            let before = b.view().unwrap();
+            for c in ['j', 'k', 'l', 'r', 'x'] {
+                assert_eq!(press(&mut b, KeyCode::Char(c)), BlockEffect::None, "{c}");
+                assert_eq!(b.view().unwrap(), before, "{c}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_free_option_revisited_keeps_its_text() {
+        let mut b = block(vec![question("Q1", 1, 2)]);
+        press(&mut b, KeyCode::Char('j'));
+        press(&mut b, KeyCode::Enter);
+        type_text(&mut b, "mine");
+        press(&mut b, KeyCode::Enter);
+        assert_eq!(b.view().unwrap().ask.as_deref(), Some("Ask 2?"));
+        press(&mut b, KeyCode::Char('h'));
+        assert_eq!(highlighted(&b), 2, "still on the free option");
+        press(&mut b, KeyCode::Char('l'));
+        let v = b.view().unwrap();
+        assert_eq!(v.ask.as_deref(), Some("Ask 2?"));
+        assert_eq!(v.picks, vec!["\"mine\"".to_string()]);
+        press(&mut b, KeyCode::Char('h'));
+        press(&mut b, KeyCode::Enter);
+        assert_eq!(
+            b.view().unwrap().mode,
+            Mode::Note {
+                kind: NoteKind::FreeText,
+                text: "mine".into()
+            }
+        );
+    }
+
+    #[test]
+    fn l_on_a_free_option_with_no_text_does_nothing() {
+        let mut b = block(vec![question("Q1", 1, 2)]);
+        press(&mut b, KeyCode::Char('j'));
+        let before = b.view().unwrap();
+        assert_eq!(press(&mut b, KeyCode::Char('l')), BlockEffect::None);
+        assert_eq!(b.view().unwrap(), before);
+    }
+
+    #[test]
+    fn l_on_a_decision_with_a_pick_replaces_it_and_keeps_later_picks() {
+        let mut b = block(vec![question("Q1", 1, 3)]);
+        press(&mut b, KeyCode::Char('l'));
+        press(&mut b, KeyCode::Char('l'));
+        press(&mut b, KeyCode::Char('h'));
+        press(&mut b, KeyCode::Char('h'));
+        press(&mut b, KeyCode::Char('k'));
+        press(&mut b, KeyCode::Char('l'));
+        let v = b.view().unwrap();
+        assert_eq!(v.ask.as_deref(), Some("Ask 2?"));
+        assert_eq!(v.picks, vec!["label a".to_string(), "label b".to_string()]);
     }
 
     #[test]
@@ -710,24 +1039,6 @@ mod tests {
     }
 
     #[test]
-    fn esc_steps_back_and_leaves_at_the_first_decision() {
-        let mut b = block(vec![question("Q1", 1, 2)]);
-        press(&mut b, KeyCode::Enter);
-        press(&mut b, KeyCode::Enter);
-        assert_eq!(b.view().unwrap().mode, Mode::Summary);
-        assert_eq!(press(&mut b, KeyCode::Esc), BlockEffect::None);
-        let v = b.view().unwrap();
-        assert_eq!(v.mode, Mode::Choosing);
-        assert_eq!(v.ask.as_deref(), Some("Ask 2?"));
-        assert_eq!(v.picks.len(), 1, "the last pick was dropped");
-        assert_eq!(press(&mut b, KeyCode::Esc), BlockEffect::None);
-        let v = b.view().unwrap();
-        assert_eq!(v.ask.as_deref(), Some("Ask 1?"));
-        assert!(v.picks.is_empty());
-        assert_eq!(press(&mut b, KeyCode::Esc), BlockEffect::Leave);
-    }
-
-    #[test]
     fn the_summary_shows_one_line_per_decision_in_words() {
         let mut b = block(vec![question("Q1", 1, 2)]);
         press(&mut b, KeyCode::Enter);
@@ -740,62 +1051,6 @@ mod tests {
                 "Ask 2? \u{2014} label a".to_string()
             ]
         );
-    }
-
-    #[test]
-    fn r_and_x_take_a_note() {
-        let mut b = block(vec![question("Q1", 2, 2)]);
-        press(&mut b, KeyCode::Enter);
-        press(&mut b, KeyCode::Char('r'));
-        assert_eq!(
-            b.view().unwrap().mode,
-            Mode::Note {
-                kind: NoteKind::Revise,
-                text: String::new()
-            }
-        );
-        assert_eq!(
-            press(&mut b, KeyCode::Enter),
-            BlockEffect::None,
-            "blank sends nothing"
-        );
-        type_text(&mut b, "make it bigg");
-        press(&mut b, KeyCode::Char('x'));
-        press(&mut b, KeyCode::Backspace);
-        press(&mut b, KeyCode::Backspace);
-        type_text(&mut b, "ger");
-        assert_eq!(
-            press(&mut b, KeyCode::Enter),
-            BlockEffect::Send(Outgoing {
-                id: "Q1".into(),
-                version: 2,
-                kind: AnswerKind::Revise,
-                picks: vec![pick(0, "b", "")],
-                note: "make it bigger".into(),
-            })
-        );
-
-        let mut b = block(vec![question("Q1", 2, 2)]);
-        press(&mut b, KeyCode::Char('x'));
-        type_text(&mut b, "no");
-        assert_eq!(
-            press(&mut b, KeyCode::Enter),
-            BlockEffect::Send(Outgoing {
-                id: "Q1".into(),
-                version: 2,
-                kind: AnswerKind::Reject,
-                picks: vec![],
-                note: "no".into(),
-            })
-        );
-
-        let mut b = block(vec![question("Q1", 2, 2)]);
-        press(&mut b, KeyCode::Char('r'));
-        type_text(&mut b, "abc");
-        press(&mut b, KeyCode::Esc);
-        let v = b.view().unwrap();
-        assert_eq!(v.mode, Mode::Choosing);
-        assert_eq!(v.ask.as_deref(), Some("Ask 1?"));
     }
 
     #[test]
@@ -866,7 +1121,7 @@ mod tests {
     #[test]
     fn a_note_stops_at_1999_characters() {
         let mut b = block(vec![question("Q1", 1, 1)]);
-        press(&mut b, KeyCode::Char('r'));
+        open_action(&mut b, 1);
         type_text(&mut b, &"a".repeat(1_999));
         type_text(&mut b, "bcd");
         match b.view().unwrap().mode {
@@ -885,15 +1140,6 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
-    }
-
-    #[test]
-    fn l_defers() {
-        let mut b = block(vec![question("Q1", 1, 1), question("Q2", 1, 1)]);
-        assert_eq!(
-            press(&mut b, KeyCode::Char('l')),
-            BlockEffect::Defer("Q1".into())
-        );
     }
 
     #[test]
@@ -1012,7 +1258,7 @@ mod tests {
         let mut b = block(vec![question("Q1", 1, 1)]);
         b.reconcile(queue(vec![]));
         assert!(b.shows_notice_only());
-        assert_eq!(press(&mut b, KeyCode::Char('x')), BlockEffect::None);
+        assert_eq!(press(&mut b, KeyCode::Char('j')), BlockEffect::None);
         assert!(!b.is_visible());
         assert!(!b.shows_notice_only());
     }

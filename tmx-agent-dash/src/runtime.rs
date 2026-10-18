@@ -2221,7 +2221,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn l_calls_defer_question() {
+    async fn the_later_row_calls_defer_question() {
         let mut core = connected_core();
         let mut queue = question("Q1", 1, 1);
         queue.questions.push(question_view("Q2", 1, 1));
@@ -2230,10 +2230,15 @@ mod tests {
         let log = run_question_stream(
             &mut core,
             &probe,
-            &[KeyCode::Tab, KeyCode::Char('l'), KeyCode::Tab],
+            &[
+                KeyCode::Tab,
+                KeyCode::Char('j'),
+                KeyCode::Enter,
+                KeyCode::Tab,
+            ],
         )
         .await;
-        let mut expected = lists(3);
+        let mut expected = lists(4);
         expected.extend([
             "defer Q1".to_string(),
             "list".to_string(),
@@ -2318,11 +2323,14 @@ mod tests {
         let (input_sender, mut input) = InputPump::channel();
         let key = |code: KeyCode| InputMessage::Key(code.into());
         input_sender.try_send(key(KeyCode::Tab)).unwrap();
-        input_sender.try_send(key(KeyCode::Char('r'))).unwrap();
+        // The revise row is two below the suggested option.
+        for code in [KeyCode::Char('j'), KeyCode::Char('j'), KeyCode::Enter] {
+            input_sender.try_send(key(code)).unwrap();
+        }
         let tool = Arc::clone(&probe);
         tokio::spawn(async move {
             // The question changes; well after a poll has found version 2, the user,
-            // still typing the note, presses `l`: as a block key it would defer.
+            // still typing the note, presses `l`: as a block key it would pick.
             tokio::time::sleep(Duration::from_millis(50)).await;
             tool.lock().unwrap().queue = Some(question("Q1", 2, 2));
             tokio::time::sleep(Duration::from_millis(150)).await;
@@ -2347,6 +2355,7 @@ mod tests {
         assert!(!log.iter().any(|call| call.starts_with("defer")), "{log:?}");
         let view = core.app.questions.view().unwrap();
         assert_eq!(view.mode, crate::questions::Mode::Choosing);
+        assert!(view.picks.is_empty(), "l picked nothing");
         assert_eq!(
             view.notice.as_deref(),
             Some("Q1 changed, your picks were cleared"),
@@ -2364,7 +2373,10 @@ mod tests {
         let (input_sender, mut input) = InputPump::channel();
         let key = |code: KeyCode| InputMessage::Key(code.into());
         input_sender.try_send(key(KeyCode::Tab)).unwrap();
-        input_sender.try_send(key(KeyCode::Char('r'))).unwrap();
+        // The revise row is two below the suggested option.
+        for code in [KeyCode::Char('j'), KeyCode::Char('j'), KeyCode::Enter] {
+            input_sender.try_send(key(code)).unwrap();
+        }
         let tool = Arc::clone(&probe);
         tokio::spawn(async move {
             // A poll finds version 2 while the user is typing the note "later".
@@ -2475,7 +2487,9 @@ mod tests {
         let probe = question_probe(Some(question("Q1", 1, 2)));
         let keys = [
             KeyCode::Tab,
-            KeyCode::Char('r'),
+            KeyCode::Char('j'),
+            KeyCode::Char('j'),
+            KeyCode::Enter,
             KeyCode::Char('a'),
             KeyCode::Char('b'),
             KeyCode::Char('c'),
@@ -2491,7 +2505,7 @@ mod tests {
             &[KeyCode::Tab, KeyCode::Char('d'), KeyCode::Tab],
         )
         .await;
-        assert_eq!(log, lists(7 + 4), "every key went to the block or was Tab");
+        assert_eq!(log, lists(9 + 4), "every key went to the block or was Tab");
         assert_eq!(
             core.app.questions.view().unwrap().mode,
             crate::questions::Mode::Note {
