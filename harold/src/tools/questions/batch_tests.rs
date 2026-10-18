@@ -976,6 +976,125 @@ async fn a_batch_in_flight_at_shutdown_is_typed_again_once_after_a_restart() {
     );
 }
 
+/// The sender typed the line and Harold stopped before the mark was recorded:
+/// the batch stays started, and the next start types it once more.
+#[tokio::test(start_paused = true)]
+async fn a_stop_after_typed_and_before_the_mark_is_typed_once_more_on_restart() {
+    let folder = TempFolder::new();
+    let store = open_store(&folder).await;
+    put(&*store, question("Q1", "s1", "abc")).await;
+    answer_a(&*store, "Q1").await;
+    let hanging = MarkHook::new(Arc::clone(&store), MarkMode::Hang);
+    let first = spawn_sender(&hanging, FakeTyping::typed_ok());
+    until("the first sender has typed", || {
+        first.typing.calls().len() == 1
+    })
+    .await;
+    // The mark never returns, so the stop lands between typing and the mark.
+    first.shutdown.send(()).unwrap();
+    first.task.await.unwrap();
+    let started = store
+        .started_batch()
+        .await
+        .unwrap()
+        .expect("the batch stays started");
+    drop(hanging);
+    drop(store);
+
+    let store: Arc<TursoQuestionStore> = open_store(&folder).await;
+    let second = spawn_sender(&store, FakeTyping::typed_ok());
+    until("the restarted sender types", || {
+        second.typing.calls().len() == 1
+    })
+    .await;
+    until_no_started_batch(&*store).await;
+    second.shutdown.send(()).unwrap();
+    second.task.await.unwrap();
+    drop(store);
+
+    let store: Arc<TursoQuestionStore> = open_store(&folder).await;
+    let third = spawn_sender(&store, FakeTyping::typed_ok());
+    third.wake.notify_one();
+    pass(30).await;
+    assert!(
+        third.typing.calls().is_empty(),
+        "typed once more, not again"
+    );
+    let lines: Vec<String> = first
+        .typing
+        .texts()
+        .into_iter()
+        .chain(second.typing.texts())
+        .collect();
+    assert_eq!(lines.len(), 2);
+    assert_eq!(lines[0], lines[1]);
+    assert_eq!(lines[0], started.text);
+    println!(
+        "evidence: batch {} typed, stopped before the mark, typed once more after the restart, nothing on a third start; {} lines: {:?}",
+        started.id,
+        lines.len(),
+        lines
+    );
+}
+
+/// The sender's own task panics after the line was typed, before the mark.
+#[tokio::test(start_paused = true)]
+async fn a_sender_panic_after_typed_ends_the_task_and_the_restart_types_once_more() {
+    let folder = TempFolder::new();
+    let store = open_store(&folder).await;
+    put(&*store, question("Q1", "s1", "abc")).await;
+    answer_a(&*store, "Q1").await;
+    let panicking = MarkHook::new(Arc::clone(&store), MarkMode::Panic);
+    let first = spawn_sender(&panicking, FakeTyping::typed_ok());
+    let error = first
+        .task
+        .await
+        .expect_err("the sender task ends in a panic");
+    assert!(error.is_panic(), "the task panicked: {error:?}");
+    let started = store
+        .started_batch()
+        .await
+        .unwrap()
+        .expect("the batch stays started");
+    drop(panicking);
+    drop(store);
+
+    let store: Arc<TursoQuestionStore> = open_store(&folder).await;
+    let second = spawn_sender(&store, FakeTyping::typed_ok());
+    until("the restarted sender types", || {
+        second.typing.calls().len() == 1
+    })
+    .await;
+    until_no_started_batch(&*store).await;
+    second.shutdown.send(()).unwrap();
+    second.task.await.unwrap();
+    drop(store);
+
+    let store: Arc<TursoQuestionStore> = open_store(&folder).await;
+    let third = spawn_sender(&store, FakeTyping::typed_ok());
+    third.wake.notify_one();
+    pass(30).await;
+    assert!(
+        third.typing.calls().is_empty(),
+        "typed once more, not again"
+    );
+    let lines: Vec<String> = first
+        .typing
+        .texts()
+        .into_iter()
+        .chain(second.typing.texts())
+        .collect();
+    assert_eq!(lines.len(), 2);
+    assert_eq!(lines[0], lines[1]);
+    assert_eq!(lines[0], started.text);
+    println!(
+        "evidence: batch {} typed, sender task panicked before the mark, typed once more after the restart, nothing on a third start; {} lines: {:?}",
+        started.id,
+        lines.len(),
+        lines
+    );
+}
+
 /// The reviewer's restart scenario: B1 may have reached the chief's pane when
 /// Harold stopped. After the restart the pane is busy and Q2 is put; B1 must be
 /// kept, not released (or Q1 would come again inside `ANSWERS 2`), and typed

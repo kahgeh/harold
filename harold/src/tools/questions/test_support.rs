@@ -217,6 +217,92 @@ impl QuestionStore for FailingStore {
     }
 }
 
+/// What `MarkHook::batch_typed` does instead of marking.
+#[derive(Clone, Copy)]
+pub(super) enum MarkMode {
+    /// Never returns, as a stop that lands before the mark is recorded.
+    Hang,
+    /// Panics, as the sender's own task failing after the line was typed.
+    Panic,
+}
+
+/// Forwards to a real store, except `batch_typed`, which hangs or panics.
+pub(super) struct MarkHook {
+    pub inner: Arc<TursoQuestionStore>,
+    pub mode: MarkMode,
+}
+
+impl MarkHook {
+    pub(super) fn new(inner: Arc<TursoQuestionStore>, mode: MarkMode) -> Arc<Self> {
+        Arc::new(Self { inner, mode })
+    }
+}
+
+impl QuestionStore for MarkHook {
+    async fn put(&self, question: Question, now_ms: i64) -> Result<u32, StoreError> {
+        self.inner.put(question, now_ms).await
+    }
+
+    async fn dismiss(
+        &self,
+        id: &str,
+        reason: &str,
+        now_ms: i64,
+    ) -> Result<Result<u32, Refusal>, StoreError> {
+        self.inner.dismiss(id, reason, now_ms).await
+    }
+
+    async fn reorder(&self, ids: &[String], now_ms: i64) -> Result<(), StoreError> {
+        self.inner.reorder(ids, now_ms).await
+    }
+
+    async fn list(&self, now_ms: i64) -> Result<Listing, StoreError> {
+        self.inner.list(now_ms).await
+    }
+
+    async fn answer(
+        &self,
+        id: &str,
+        version: u32,
+        answer: impl FnOnce(&Question) -> Result<Answer, String> + Send,
+        now_ms: i64,
+    ) -> Result<Result<Result<(), String>, Refusal>, StoreError> {
+        self.inner.answer(id, version, answer, now_ms).await
+    }
+
+    async fn defer(&self, id: &str, now_ms: i64) -> Result<Result<u32, Refusal>, StoreError> {
+        self.inner.defer(id, now_ms).await
+    }
+
+    async fn ready(&self) -> Result<Option<Ready>, StoreError> {
+        self.inner.ready().await
+    }
+
+    async fn start_batch(
+        &self,
+        answers: &[(String, u32)],
+        text: &str,
+        now_ms: i64,
+    ) -> Result<Option<StartedBatch>, StoreError> {
+        self.inner.start_batch(answers, text, now_ms).await
+    }
+
+    async fn started_batch(&self) -> Result<Option<StartedBatch>, StoreError> {
+        self.inner.started_batch().await
+    }
+
+    async fn batch_typed(&self, _batch_id: i64, _now_ms: i64) -> Result<(), StoreError> {
+        match self.mode {
+            MarkMode::Hang => std::future::pending().await,
+            MarkMode::Panic => panic!("batch_typed panicked"),
+        }
+    }
+
+    async fn release_batch(&self, batch_id: i64, now_ms: i64) -> Result<bool, StoreError> {
+        self.inner.release_batch(batch_id, now_ms).await
+    }
+}
+
 /// Log lines written while the guard lives, on this thread.
 #[derive(Clone, Default)]
 pub(super) struct Logs(Arc<Mutex<Vec<u8>>>);
