@@ -1771,14 +1771,6 @@ async fn type_line_whose_enter_fails_is_failed() {
     );
 }
 
-#[test]
-fn line_outcomes_have_the_four_reasons() {
-    assert_eq!(LineOutcome::Typed.reason(), "typed");
-    assert_eq!(LineOutcome::PaneBusy.reason(), "pane_busy");
-    assert_eq!(LineOutcome::NoPane.reason(), "no_pane");
-    assert_eq!(LineOutcome::Failed.reason(), "failed");
-}
-
 #[tokio::test(start_paused = true)]
 async fn type_line_and_a_voice_and_an_alert_give_whole_lines() {
     let fake = Fake::at(DAY, "09:00:00");

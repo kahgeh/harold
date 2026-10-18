@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 //! The question queue, Harold's first tool. Outside this module only `NAME`
 //! and `start` are used.
 

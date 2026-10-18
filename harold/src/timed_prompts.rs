@@ -328,9 +328,8 @@ pub(crate) enum Writer {
     Alert,
     PhoneReply,
     Voice,
-    /// A tool typing a line, by the tool's name. The question tool, built in a later task,
-    /// is the first to construct one.
-    #[allow(dead_code)]
+    /// A tool typing a line, by the tool's name: the question tool types its batch of
+    /// answers into the chief's pane as `Tool("questions")`.
     Tool(&'static str),
 }
 
@@ -873,16 +872,13 @@ pub(crate) async fn type_when_ready<P: Ports>(
 // ---------------------------------------------------------------------------
 
 /// How long `type_line` waits for a pane to go idle.
-#[allow(dead_code)]
 pub(crate) const LINE_WAIT: Duration = Duration::from_secs(120);
 
 /// How long `type_line` waits between tries.
-#[allow(dead_code)]
 pub(crate) const LINE_RETRY: Duration = Duration::from_secs(1);
 
 /// How a `type_line` call ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
 pub(crate) enum LineOutcome {
     Typed,
     /// The pane stayed busy for `LINE_WAIT`.
@@ -893,22 +889,8 @@ pub(crate) enum LineOutcome {
     Failed,
 }
 
-impl LineOutcome {
-    /// A short word for the outcome.
-    #[allow(dead_code)]
-    pub(crate) fn reason(self) -> &'static str {
-        match self {
-            Self::Typed => "typed",
-            Self::PaneBusy => "pane_busy",
-            Self::NoPane => "no_pane",
-            Self::Failed => "failed",
-        }
-    }
-}
-
 /// Types `text` into the agent pane `pane_id` as `writer` and presses Enter, waiting up to
 /// `LINE_WAIT` for the pane to be ready. Logs nothing: the caller logs what it needs to.
-#[allow(dead_code)]
 pub(crate) async fn type_line<P: Ports>(
     ports: &P,
     writer: Writer,
@@ -918,7 +900,6 @@ pub(crate) async fn type_line<P: Ports>(
     type_line_when_ready(ports, writer, pane_id, text).await
 }
 
-#[allow(dead_code)]
 async fn type_line_when_ready<P: Ports>(
     ports: &P,
     writer: Writer,

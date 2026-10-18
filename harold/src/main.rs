@@ -984,6 +984,9 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
         shutdown_rx.clone(),
     )
     .await?;
+    // The tools' services join the core service on one server. A tool that cannot start
+    // is logged and left out.
+    let tools = tools::start(cfg, &store_path, snapshots.clone(), shutdown_rx.clone()).await;
 
     info!(address = %addr, "Harold listening");
     let service = harold_service(
@@ -994,6 +997,7 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
         shutdown_rx.clone(),
     );
     let server_result = Server::builder()
+        .add_routes(tools.routes.clone())
         .add_service(HaroldServer::new(service))
         .serve_with_shutdown(addr, async {
             shutdown_signal().await;
@@ -1008,11 +1012,12 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
         calls.shutdown().await;
     }
 
-    // Wait for the handler, the listener, the timed-prompt task, the web app, the pod facts
-    // and the alert address to stop before returning.
+    // Wait for the handler, the listener, the timed-prompt task, the tools, the web app, the
+    // pod facts and the alert address to stop before returning.
     let _ = event_handler_handle.await;
     let _ = listener_handle.await;
     let _ = timed_prompts_handle.await;
+    tools.stopped().await;
     if let Some(running) = web_app {
         let _ = running.handle.await;
     }
