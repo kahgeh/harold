@@ -875,8 +875,9 @@ impl AgentMonitorRuntime {
     }
 
     /// A failed scan is retried by the next tick's scan, not at once: hook calls queue behind a
-    /// tick, and some of their clients give up after 3 seconds, so one tick holds the monitor
-    /// for at most `inventory_timeout`, retry or not.
+    /// tick, and some of their clients give up after 3 seconds, so a tick's scan takes at most
+    /// `inventory_timeout`, retry or not. Prompt baselines and revalidating missing panes come
+    /// on top, with their own deadlines.
     async fn inventory_tick(&mut self) -> Result<(), MonitorCommandError> {
         let held = self.held_inventory_failure.take();
         let started = tokio::time::Instant::now();
