@@ -75,7 +75,8 @@ pub(super) trait BacklogStore: Send + Sync + 'static {
         now_ms: i64,
     ) -> impl Future<Output = Result<std::result::Result<u32, Refusal>>> + Send;
     /// Removes the item and closes up the ranks after it. A reason is kept as
-    /// a `history` note, `removed <id>: <reason>`.
+    /// a `history` note titled `removed <id> (<local date of now_ms>)`, with the
+    /// body `removed <id>: <reason>`.
     fn remove_item(
         &self,
         product: &str,
@@ -120,15 +121,15 @@ pub(super) trait BacklogStore: Send + Sync + 'static {
     ) -> impl Future<Output = Result<Vec<Note>>> + Send;
     /// Whether the product has no item and no note.
     fn product_is_empty(&self, product: &str) -> impl Future<Output = Result<bool>> + Send;
-    /// Adds a queue item with the next `N<k>` id. `Place::Now` parks the old
-    /// Now at position 1; `Place::At(n)` is `Err("at")` unless n is in
-    /// 1..=parked + 1.
+    /// Adds a queue item with the next `N<k>` id and returns it with the parked
+    /// count after it. `Place::Now` parks the old Now at position 1;
+    /// `Place::At(n)` is `Err("at")` unless n is in 1..=parked + 1.
     fn add_queue_item(
         &self,
         text: &str,
         place: Place,
         now_ms: i64,
-    ) -> impl Future<Output = Result<std::result::Result<QueueItem, String>>> + Send;
+    ) -> impl Future<Output = Result<std::result::Result<(QueueItem, u32), String>>> + Send;
     /// Makes a parked item Now and parks the old Now at position 1. Returns the
     /// Now id and the parked count; a done item is `AlreadyDone`.
     fn set_now(
@@ -144,22 +145,22 @@ pub(super) trait BacklogStore: Send + Sync + 'static {
         ids: &[String],
         now_ms: i64,
     ) -> impl Future<Output = Result<std::result::Result<u32, Refusal>>> + Send;
-    /// Replaces a queue item's text.
+    /// Replaces a queue item's text. Returns the parked count.
     fn update_queue_item(
         &self,
         id: &str,
         text: &str,
         now_ms: i64,
-    ) -> impl Future<Output = Result<std::result::Result<(), Refusal>>> + Send;
-    /// Marks a queue item done and closes up the parked positions. An item
-    /// already done is `AlreadyDone`.
+    ) -> impl Future<Output = Result<std::result::Result<u32, Refusal>>> + Send;
+    /// Marks a queue item done and closes up the parked positions. Returns the
+    /// parked count after it; an item already done is `AlreadyDone`.
     fn done_queue_item(
         &self,
         id: &str,
         now_ms: i64,
-    ) -> impl Future<Output = Result<std::result::Result<(), Refusal>>> + Send;
-    /// Replaces the queue's note.
-    fn set_queue_note(&self, text: &str) -> impl Future<Output = Result<()>> + Send;
+    ) -> impl Future<Output = Result<std::result::Result<u32, Refusal>>> + Send;
+    /// Replaces the queue's note. Returns the parked count.
+    fn set_queue_note(&self, text: &str) -> impl Future<Output = Result<u32>> + Send;
     /// The queue, with the done items whose `done_at_ms >= done_since_ms`.
     fn list_queue(&self, done_since_ms: i64) -> impl Future<Output = Result<QueueListing>> + Send;
     /// Whether the queue has no item and no note.
@@ -512,11 +513,23 @@ async fn remove_item_in(
     )
     .await?;
     if let Some(reason) = reason {
-        let title = format!("removed {id}");
+        // Dated, so the export's heading for it is a history heading the import reads.
+        let title = format!("removed {id} ({})", local_date(now_ms));
         let body = format!("removed {id}: {reason}");
         insert_note(conn, product, NoteKind::History, &title, &body, now_ms).await?;
     }
     Ok(Ok(()))
+}
+
+/// The local date of `now_ms`, for the title of a removal's history note.
+pub(super) fn local_date(now_ms: i64) -> time::Date {
+    let at = time::OffsetDateTime::from_unix_timestamp_nanos(i128::from(now_ms) * 1_000_000)
+        .unwrap_or(time::OffsetDateTime::UNIX_EPOCH);
+    at.to_offset(crate::telemetry::local_offset()).date()
+}
+
+async fn parked_count(conn: &Connection) -> Result<u32> {
+    count_of(parked_ids(conn).await?.len() as i64)
 }
 
 async fn list_items_in(conn: &Connection, product: &str) -> Result<Vec<Item>> {
@@ -742,7 +755,7 @@ async fn add_queue_item_in(
     text: &str,
     place: Place,
     now_ms: i64,
-) -> Result<std::result::Result<QueueItem, String>> {
+) -> Result<std::result::Result<(QueueItem, u32), String>> {
     let parked = parked_ids(conn).await?.len() as u32;
     let (state, position) = match place {
         Place::End => (QueueState::Parked, parked + 1),
@@ -771,14 +784,15 @@ async fn add_queue_item_in(
         ),
     )
     .await?;
-    Ok(Ok(QueueItem {
+    let item = QueueItem {
         id,
         state,
         position,
         text: text.into(),
         done_at_ms: 0,
         updated_at_ms: now_ms,
-    }))
+    };
+    Ok(Ok((item, parked_count(conn).await?)))
 }
 
 async fn set_now_in(
@@ -804,8 +818,7 @@ async fn set_now_in(
             .await?;
         }
     }
-    let parked = count_of(parked_ids(conn).await?.len() as i64)?;
-    Ok(Ok((id.to_string(), parked)))
+    Ok(Ok((id.to_string(), parked_count(conn).await?)))
 }
 
 async fn order_queue_in(
@@ -842,7 +855,7 @@ async fn update_queue_item_in(
     id: &str,
     text: &str,
     now_ms: i64,
-) -> Result<std::result::Result<(), Refusal>> {
+) -> Result<std::result::Result<u32, Refusal>> {
     if queue_item_in(conn, id).await?.is_none() {
         return Ok(Err(Refusal::NotFound));
     }
@@ -851,14 +864,14 @@ async fn update_queue_item_in(
         (id, text, now_ms),
     )
     .await?;
-    Ok(Ok(()))
+    Ok(Ok(parked_count(conn).await?))
 }
 
 async fn done_queue_item_in(
     conn: &Connection,
     id: &str,
     now_ms: i64,
-) -> Result<std::result::Result<(), Refusal>> {
+) -> Result<std::result::Result<u32, Refusal>> {
     let Some(item) = queue_item_in(conn, id).await? else {
         return Ok(Err(Refusal::NotFound));
     };
@@ -874,7 +887,7 @@ async fn done_queue_item_in(
     if item.state == QueueState::Parked {
         shift_parked(conn, i64::from(item.position) + 1, -1, now_ms).await?;
     }
-    Ok(Ok(()))
+    Ok(Ok(parked_count(conn).await?))
 }
 
 async fn set_queue_note_in(conn: &Connection, text: &str) -> Result<()> {
@@ -1109,7 +1122,7 @@ impl BacklogStore for TursoBacklogStore {
         text: &str,
         place: Place,
         now_ms: i64,
-    ) -> Result<std::result::Result<QueueItem, String>> {
+    ) -> Result<std::result::Result<(QueueItem, u32), String>> {
         let conn = self.conn.lock().await;
         begin(&conn).await?;
         finish_refusable(&conn, add_queue_item_in(&conn, text, place, now_ms).await).await
@@ -1140,7 +1153,7 @@ impl BacklogStore for TursoBacklogStore {
         id: &str,
         text: &str,
         now_ms: i64,
-    ) -> Result<std::result::Result<(), Refusal>> {
+    ) -> Result<std::result::Result<u32, Refusal>> {
         let conn = self.conn.lock().await;
         begin(&conn).await?;
         finish_refusable(&conn, update_queue_item_in(&conn, id, text, now_ms).await).await
@@ -1150,16 +1163,20 @@ impl BacklogStore for TursoBacklogStore {
         &self,
         id: &str,
         now_ms: i64,
-    ) -> Result<std::result::Result<(), Refusal>> {
+    ) -> Result<std::result::Result<u32, Refusal>> {
         let conn = self.conn.lock().await;
         begin(&conn).await?;
         finish_refusable(&conn, done_queue_item_in(&conn, id, now_ms).await).await
     }
 
-    async fn set_queue_note(&self, text: &str) -> Result<()> {
+    async fn set_queue_note(&self, text: &str) -> Result<u32> {
         let conn = self.conn.lock().await;
         begin(&conn).await?;
-        finish(&conn, set_queue_note_in(&conn, text).await).await
+        let work = match set_queue_note_in(&conn, text).await {
+            Ok(()) => parked_count(&conn).await,
+            Err(error) => Err(error),
+        };
+        finish(&conn, work).await
     }
 
     async fn list_queue(&self, done_since_ms: i64) -> Result<QueueListing> {

@@ -263,7 +263,11 @@ async fn put_list_rank_and_remove_through_the_service() {
     );
     let history = notes(&service, "harold", "history").await;
     assert_eq!(history.len(), 1);
-    assert_eq!(history[0].title, "removed b");
+    assert!(
+        history[0].title.starts_with("removed b ("),
+        "{}",
+        history[0].title
+    );
     assert_eq!(history[0].body, "removed b: done elsewhere");
 }
 
@@ -511,6 +515,77 @@ async fn the_queue_flows_through_the_service() {
     for word in ["first", "urgent", "third"] {
         assert!(!text.contains(word), "{text}");
     }
+}
+
+/// The `count` of each `queue changed` line in `text`.
+fn queue_counts(text: &str) -> Vec<String> {
+    text.lines()
+        .filter(|line| line.contains("queue changed"))
+        .map(|line| {
+            let at = line.find("count=").expect(line) + "count=".len();
+            line[at..].split_whitespace().next().unwrap().to_string()
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn every_queue_write_logs_the_parked_count() {
+    let setup = Setup::new().await;
+    let service = setup.service();
+    let logs = CapturedLogs::start();
+
+    add_queue(&service, "a", false, 0).await.unwrap();
+    add_queue(&service, "b", true, 0).await.unwrap();
+    add_queue(&service, "c", false, 1).await.unwrap();
+    service
+        .update_queue_item(Request::new(pb::UpdateQueueItemRequest {
+            id: "N1".into(),
+            text: "changed".into(),
+            caller_pane: CHIEF.into(),
+        }))
+        .await
+        .unwrap();
+    service
+        .set_queue_note(Request::new(pb::SetQueueNoteRequest {
+            text: "the note".into(),
+            caller_pane: CHIEF.into(),
+        }))
+        .await
+        .unwrap();
+    done(&service, "N3").await.unwrap();
+    done(&service, "N2").await.unwrap();
+
+    assert_eq!(
+        queue_counts(&logs.text()),
+        strings(&["1", "1", "2", "2", "2", "1", "1"])
+    );
+}
+
+#[tokio::test]
+async fn a_refusal_for_an_unknown_product_logs_no_product() {
+    let setup = Setup::new().await;
+    let service = setup.service();
+    let junk = format!("JUNK-{}", "x".repeat(5_000));
+    let logs = CapturedLogs::start();
+
+    let refused = put(&service, &junk, TURSO_PANE, item("a")).await;
+    let no_pane = put(&service, &junk, "", item("a")).await;
+    let known = put(&service, "harold", "", item("a")).await;
+
+    assert_eq!(refusal(refused).1, "unknown_product");
+    assert_eq!(refusal(no_pane).1, "no_pane");
+    assert_eq!(refusal(known).1, "no_pane");
+    let text = logs.text();
+    let lines: Vec<&str> = text
+        .lines()
+        .filter(|line| line.contains("backlog write refused"))
+        .collect();
+    assert_eq!(lines.len(), 3, "{text}");
+    assert!(!text.contains("JUNK"), "{text}");
+    assert!(!lines[0].contains("product="), "{text}");
+    assert!(!lines[1].contains("product="), "{text}");
+    assert!(lines[2].contains("product=\"harold\""), "{text}");
+    println!("evidence: {}", lines[0]);
 }
 
 #[tokio::test]

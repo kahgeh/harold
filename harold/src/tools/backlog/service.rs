@@ -30,12 +30,21 @@ impl<S: BacklogStore> BacklogToolService<S> {
         self.guard
             .may_write_product(caller_pane, product)
             .map_err(|refused| {
-                info!(
-                    tool = NAME,
-                    product,
-                    reason = refused.reason(),
-                    "backlog write refused"
-                );
+                // The product is logged only when it is in the registry: the
+                // request's own string may be anything.
+                match self.guard.product_known(product) {
+                    Ok(()) => info!(
+                        tool = NAME,
+                        product,
+                        reason = refused.reason(),
+                        "backlog write refused"
+                    ),
+                    Err(_) => info!(
+                        tool = NAME,
+                        reason = refused.reason(),
+                        "backlog write refused"
+                    ),
+                }
                 denied(refused)
             })
     }
@@ -51,20 +60,11 @@ impl<S: BacklogStore> BacklogToolService<S> {
             denied(refused)
         })
     }
+}
 
-    /// Logs a change to the queue with the parked count after it.
-    async fn queue_changed(&self, parked: Option<u32>) -> Result<(), Status> {
-        let count = match parked {
-            Some(count) => count,
-            None => {
-                // No done item is as late as `i64::MAX`, so only Now and the parked are read.
-                let listing = self.store.list_queue(i64::MAX).await.map_err(unavailable)?;
-                count(listing.parked.len())
-            }
-        };
-        info!(tool = NAME, count, "queue changed");
-        Ok(())
-    }
+/// Logs a change to the queue with the parked count after it.
+fn queue_changed(count: u32) {
+    info!(tool = NAME, count, "queue changed");
 }
 
 fn invalid(field: &str) -> Status {
@@ -105,10 +105,6 @@ fn unparsed(error: ParseError) -> Status {
             Status::invalid_argument(error.to_string())
         }
     }
-}
-
-fn count(n: usize) -> u32 {
-    u32::try_from(n).unwrap_or(u32::MAX)
 }
 
 /// An id list for a ranking or an order: at least one id, none repeated.
@@ -421,13 +417,13 @@ impl<S: BacklogStore> BacklogService for BacklogToolService<S> {
             // Now is not a parked position.
             (true, _) => return Err(invalid("at")),
         };
-        let item = self
+        let (item, parked) = self
             .store
             .add_queue_item(&text, place, now_ms())
             .await
             .map_err(unavailable)?
             .map_err(|field| invalid(&field))?;
-        self.queue_changed(None).await?;
+        queue_changed(parked);
         Ok(Response::new(pb::AddQueueItemResponse {
             item: Some(queue_item_to_proto(item)),
         }))
@@ -445,7 +441,7 @@ impl<S: BacklogStore> BacklogService for BacklogToolService<S> {
             .await
             .map_err(unavailable)?
             .map_err(refused)?;
-        self.queue_changed(Some(parked)).await?;
+        queue_changed(parked);
         Ok(Response::new(pb::SetNowResponse { now, parked }))
     }
 
@@ -462,7 +458,7 @@ impl<S: BacklogStore> BacklogService for BacklogToolService<S> {
             .await
             .map_err(unavailable)?
             .map_err(refused)?;
-        self.queue_changed(Some(count)).await?;
+        queue_changed(count);
         Ok(Response::new(pb::OrderQueueResponse { count }))
     }
 
@@ -477,12 +473,13 @@ impl<S: BacklogStore> BacklogService for BacklogToolService<S> {
         } = request.into_inner();
         self.may_write_queue(&caller_pane)?;
         schema::validate_queue_text(&text).map_err(|field| invalid(&field))?;
-        self.store
+        let parked = self
+            .store
             .update_queue_item(&id, &text, now_ms())
             .await
             .map_err(unavailable)?
             .map_err(refused)?;
-        self.queue_changed(None).await?;
+        queue_changed(parked);
         Ok(Response::new(pb::UpdateQueueItemResponse {}))
     }
 
@@ -492,12 +489,13 @@ impl<S: BacklogStore> BacklogService for BacklogToolService<S> {
     ) -> Result<Response<pb::DoneQueueItemResponse>, Status> {
         let pb::DoneQueueItemRequest { id, caller_pane } = request.into_inner();
         self.may_write_queue(&caller_pane)?;
-        self.store
+        let parked = self
+            .store
             .done_queue_item(&id, now_ms())
             .await
             .map_err(unavailable)?
             .map_err(refused)?;
-        self.queue_changed(None).await?;
+        queue_changed(parked);
         Ok(Response::new(pb::DoneQueueItemResponse {}))
     }
 
@@ -508,11 +506,12 @@ impl<S: BacklogStore> BacklogService for BacklogToolService<S> {
         let pb::SetQueueNoteRequest { text, caller_pane } = request.into_inner();
         self.may_write_queue(&caller_pane)?;
         schema::validate_queue_text(&text).map_err(|field| invalid(&field))?;
-        self.store
+        let parked = self
+            .store
             .set_queue_note(&text)
             .await
             .map_err(unavailable)?;
-        self.queue_changed(None).await?;
+        queue_changed(parked);
         Ok(Response::new(pb::SetQueueNoteResponse {}))
     }
 

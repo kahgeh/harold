@@ -120,7 +120,7 @@ async fn remove_with_a_reason_adds_a_history_note() {
     let notes = store.list_notes(P, None, None).await.unwrap();
     assert_eq!(notes.len(), 1);
     assert_eq!(notes[0].kind, NoteKind::History);
-    assert_eq!(notes[0].title, "removed b");
+    assert_eq!(notes[0].title, format!("removed b ({})", local_date(3)));
     assert_eq!(notes[0].body, "removed b: done elsewhere");
     assert_eq!(notes[0].created_at_ms, 3);
 
@@ -281,7 +281,12 @@ async fn a_product_with_only_a_note_is_not_empty() {
 }
 
 async fn add(store: &TursoBacklogStore, text: &str, place: Place) -> QueueItem {
-    store.add_queue_item(text, place, 1).await.unwrap().unwrap()
+    store
+        .add_queue_item(text, place, 1)
+        .await
+        .unwrap()
+        .unwrap()
+        .0
 }
 
 /// The Now id, and the parked ids by position.
@@ -306,6 +311,76 @@ async fn now_rows(store: &TursoBacklogStore) -> i64 {
     integer(&row, 0).unwrap()
 }
 
+#[test]
+fn a_removal_is_dated_by_the_local_date() {
+    // 2026-10-18 23:30 UTC.
+    let late = 1_792_366_200_000;
+    let expected = time::OffsetDateTime::from_unix_timestamp(late / 1_000)
+        .unwrap()
+        .to_offset(crate::telemetry::local_offset())
+        .date();
+    assert_eq!(local_date(late), expected);
+    assert_eq!(local_date(0).to_string().len(), "1970-01-01".len());
+}
+
+#[tokio::test]
+async fn an_exported_removal_note_imports_back_the_same() {
+    let folder = TempFolder::new();
+    let store = open_store(&folder).await;
+    put_all(&store, P, &["a", "b"]).await;
+    store
+        .add_note(P, NoteKind::Rule, "Rank by value.", "Rank by value.", 1)
+        .await
+        .unwrap();
+    store
+        .remove_item(P, "b", Some("done elsewhere"), 1_792_366_200_000)
+        .await
+        .unwrap()
+        .unwrap();
+    let items = store.list_items(P).await.unwrap();
+    let notes = store.list_notes(P, None, None).await.unwrap();
+    let exported = markdown::export_backlog(P, &items, &notes);
+
+    let other = TempFolder::new();
+    let copy = open_store(&other).await;
+    let import = markdown::parse_backlog(&exported).unwrap();
+    copy.import_backlog(P, import, 2).await.unwrap().unwrap();
+
+    let shape = |notes: Vec<Note>| -> Vec<(NoteKind, String, String)> {
+        notes
+            .into_iter()
+            .map(|note| (note.kind, note.title, note.body))
+            .collect()
+    };
+    let imported = copy.list_notes(P, None, None).await.unwrap();
+    assert_eq!(shape(imported), shape(notes));
+    assert_eq!(listed_ids(&copy, P).await, ids(&["a"]));
+}
+
+#[tokio::test]
+async fn every_queue_write_returns_the_parked_count() {
+    let folder = TempFolder::new();
+    let store = open_store(&folder).await;
+    let added = |text: &'static str, place| {
+        let store = &store;
+        async move {
+            store
+                .add_queue_item(text, place, 1)
+                .await
+                .unwrap()
+                .unwrap()
+                .1
+        }
+    };
+    assert_eq!(added("a", Place::End).await, 1);
+    assert_eq!(added("b", Place::Now).await, 1);
+    assert_eq!(added("c", Place::At(1)).await, 2);
+    assert_eq!(store.update_queue_item("N1", "x", 2).await.unwrap(), Ok(2));
+    assert_eq!(store.set_queue_note("note").await.unwrap(), 2);
+    assert_eq!(store.done_queue_item("N1", 3).await.unwrap(), Ok(1));
+    assert_eq!(store.done_queue_item("N2", 3).await.unwrap(), Ok(1));
+}
+
 #[tokio::test]
 async fn queue_ids_count_up_from_n1() {
     let folder = TempFolder::new();
@@ -319,7 +394,7 @@ async fn queue_ids_count_up_from_n1() {
     .map(|it| it.id)
     .collect();
     assert_eq!(added, ids(&["N1", "N2", "N3"]));
-    assert_eq!(store.done_queue_item("N3", 2).await.unwrap(), Ok(()));
+    assert_eq!(store.done_queue_item("N3", 2).await.unwrap(), Ok(2));
     assert_eq!(add(&store, "d", Place::End).await.id, "N4");
 }
 
@@ -507,12 +582,12 @@ async fn done_moves_an_item_to_done_and_closes_up_the_parked_positions() {
     for text in ["b", "c", "d"] {
         add(&store, text, Place::End).await;
     }
-    assert_eq!(store.done_queue_item("N3", 5).await.unwrap(), Ok(()));
+    assert_eq!(store.done_queue_item("N3", 5).await.unwrap(), Ok(2));
     assert_eq!(
         queue_shape(&store).await,
         (Some("N1".into()), ids(&["N2", "N4"]))
     );
-    assert_eq!(store.done_queue_item("N1", 6).await.unwrap(), Ok(()));
+    assert_eq!(store.done_queue_item("N1", 6).await.unwrap(), Ok(2));
     let listing = store.list_queue(0).await.unwrap();
     assert_eq!(listing.now, None);
     let done: Vec<(&str, QueueState, u32, i64)> = listing
@@ -601,7 +676,7 @@ async fn update_replaces_a_queue_items_text() {
     add(&store, "a", Place::End).await;
     assert_eq!(
         store.update_queue_item("N1", "changed", 4).await.unwrap(),
-        Ok(())
+        Ok(1)
     );
     let parked = store.list_queue(0).await.unwrap().parked;
     assert_eq!(parked[0].text, "changed");
@@ -615,7 +690,7 @@ async fn the_queue_note_is_replaced() {
     let store = open_store(&folder).await;
     assert!(store.queue_is_empty().await.unwrap());
     assert_eq!(store.list_queue(0).await.unwrap().note, "");
-    store.set_queue_note("first").await.unwrap();
+    assert_eq!(store.set_queue_note("first").await.unwrap(), 0);
     assert!(!store.queue_is_empty().await.unwrap());
     store.set_queue_note("second").await.unwrap();
     assert_eq!(store.list_queue(0).await.unwrap().note, "second");
@@ -740,5 +815,5 @@ async fn an_import_round_trips_through_the_store() {
     );
     // The next item added gets the next id.
     let added = store.add_queue_item("later", Place::End, 2).await.unwrap();
-    assert_eq!(added.unwrap().id, "N8");
+    assert_eq!(added.unwrap().0.id, "N8");
 }
