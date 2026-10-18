@@ -9,7 +9,7 @@ use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 use turso::Connection;
 
-use super::schema::{Item, MAX_ITEMS, Note, NoteKind};
+use super::schema::{Item, MAX_ITEMS, Note, NoteKind, Place, QueueItem, QueueListing, QueueState};
 
 const DATABASE: &str = "backlog.db";
 
@@ -119,6 +119,50 @@ pub(super) trait BacklogStore: Send + Sync + 'static {
     ) -> impl Future<Output = Result<Vec<Note>>> + Send;
     /// Whether the product has no item and no note.
     fn product_is_empty(&self, product: &str) -> impl Future<Output = Result<bool>> + Send;
+    /// Adds a queue item with the next `N<k>` id. `Place::Now` parks the old
+    /// Now at position 1; `Place::At(n)` is `Err("at")` unless n is in
+    /// 1..=parked + 1.
+    fn add_queue_item(
+        &self,
+        text: &str,
+        place: Place,
+        now_ms: i64,
+    ) -> impl Future<Output = Result<std::result::Result<QueueItem, String>>> + Send;
+    /// Makes a parked item Now and parks the old Now at position 1. Returns the
+    /// Now id and the parked count; a done item is `AlreadyDone`.
+    fn set_now(
+        &self,
+        id: &str,
+        now_ms: i64,
+    ) -> impl Future<Output = Result<std::result::Result<(String, u32), Refusal>>> + Send;
+    /// Puts the listed parked ids first, in order, and the rest of the parked
+    /// after them in the order they had. Returns the parked count; an id that is
+    /// there but not parked is `NotParked`.
+    fn order_queue(
+        &self,
+        ids: &[String],
+        now_ms: i64,
+    ) -> impl Future<Output = Result<std::result::Result<u32, Refusal>>> + Send;
+    /// Replaces a queue item's text.
+    fn update_queue_item(
+        &self,
+        id: &str,
+        text: &str,
+        now_ms: i64,
+    ) -> impl Future<Output = Result<std::result::Result<(), Refusal>>> + Send;
+    /// Marks a queue item done and closes up the parked positions. An item
+    /// already done is `AlreadyDone`.
+    fn done_queue_item(
+        &self,
+        id: &str,
+        now_ms: i64,
+    ) -> impl Future<Output = Result<std::result::Result<(), Refusal>>> + Send;
+    /// Replaces the queue's note.
+    fn set_queue_note(&self, text: &str) -> impl Future<Output = Result<()>> + Send;
+    /// The queue, with the done items whose `done_at_ms >= done_since_ms`.
+    fn list_queue(&self, done_since_ms: i64) -> impl Future<Output = Result<QueueListing>> + Send;
+    /// Whether the queue has no item and no note.
+    fn queue_is_empty(&self) -> impl Future<Output = Result<bool>> + Send;
 }
 
 pub(super) struct TursoBacklogStore {
@@ -196,10 +240,10 @@ async fn finish<T>(conn: &Connection, work: Result<T>) -> Result<T> {
 
 /// Like `finish`, but a refusal is rolled back too, so a refused write leaves
 /// nothing behind.
-async fn finish_refusable<T>(
+async fn finish_refusable<T, E>(
     conn: &Connection,
-    work: Result<std::result::Result<T, Refusal>>,
-) -> Result<std::result::Result<T, Refusal>> {
+    work: Result<std::result::Result<T, E>>,
+) -> Result<std::result::Result<T, E>> {
     match work {
         Ok(Err(refusal)) => {
             conn.execute("ROLLBACK", ()).await?;
@@ -577,6 +621,297 @@ async fn product_is_empty_in(conn: &Connection, product: &str) -> Result<bool> {
     Ok(rows.next().await?.is_none())
 }
 
+const QUEUE_COLUMNS: &str = "id, state, position, text, COALESCE(done_at_ms, 0), updated_at_ms";
+
+fn queue_item_of(row: &turso::Row) -> Result<QueueItem> {
+    let state = text(row, 1)?;
+    Ok(QueueItem {
+        id: text(row, 0)?,
+        state: QueueState::parse(&state)
+            .ok_or_else(|| StoreError::Data(format!("unknown queue state {state}")))?,
+        position: count_of(integer(row, 2)?)?,
+        text: text(row, 3)?,
+        done_at_ms: integer(row, 4)?,
+        updated_at_ms: integer(row, 5)?,
+    })
+}
+
+/// The k of a queue id `N<k>`.
+fn queue_number(id: &str) -> Result<u64> {
+    id.strip_prefix('N')
+        .and_then(|k| k.parse().ok())
+        .ok_or_else(|| StoreError::Data(format!("queue id {id} is not N<k>")))
+}
+
+async fn queue_items_in(conn: &Connection) -> Result<Vec<QueueItem>> {
+    let mut items = Vec::new();
+    let mut rows = conn
+        .query(&format!("SELECT {QUEUE_COLUMNS} FROM queue_items"), ())
+        .await?;
+    while let Some(row) = rows.next().await? {
+        items.push(queue_item_of(&row)?);
+    }
+    Ok(items)
+}
+
+async fn queue_item_in(conn: &Connection, id: &str) -> Result<Option<QueueItem>> {
+    let mut rows = conn
+        .query(
+            &format!("SELECT {QUEUE_COLUMNS} FROM queue_items WHERE id = ?1"),
+            [id],
+        )
+        .await?;
+    match rows.next().await? {
+        Some(row) => Ok(Some(queue_item_of(&row)?)),
+        None => Ok(None),
+    }
+}
+
+/// The parked ids, by position.
+async fn parked_ids(conn: &Connection) -> Result<Vec<String>> {
+    let mut ids = Vec::new();
+    let mut rows = conn
+        .query(
+            "SELECT id FROM queue_items WHERE state = 'parked' ORDER BY position",
+            (),
+        )
+        .await?;
+    while let Some(row) = rows.next().await? {
+        ids.push(text(&row, 0)?);
+    }
+    Ok(ids)
+}
+
+async fn now_id(conn: &Connection) -> Result<Option<String>> {
+    let mut rows = conn
+        .query("SELECT id FROM queue_items WHERE state = 'now'", ())
+        .await?;
+    match rows.next().await? {
+        Some(row) => Ok(Some(text(&row, 0)?)),
+        None => Ok(None),
+    }
+}
+
+/// Moves the parked items at `from` and after it by `by` positions.
+async fn shift_parked(conn: &Connection, from: i64, by: i64, now_ms: i64) -> Result<()> {
+    conn.execute(
+        "UPDATE queue_items SET position = position + ?2, updated_at_ms = ?3 \
+         WHERE state = 'parked' AND position >= ?1",
+        (from, by, now_ms),
+    )
+    .await?;
+    Ok(())
+}
+
+/// Parks the Now item, if there is one, at position 1. Runs before an item is
+/// made Now, so the `one_now` index never sees two.
+async fn park_the_now(conn: &Connection, now_ms: i64) -> Result<()> {
+    let Some(id) = now_id(conn).await? else {
+        return Ok(());
+    };
+    shift_parked(conn, 1, 1, now_ms).await?;
+    conn.execute(
+        "UPDATE queue_items SET state = 'parked', position = 1, updated_at_ms = ?2 \
+         WHERE id = ?1",
+        (id, now_ms),
+    )
+    .await?;
+    Ok(())
+}
+
+async fn add_queue_item_in(
+    conn: &Connection,
+    text: &str,
+    place: Place,
+    now_ms: i64,
+) -> Result<std::result::Result<QueueItem, String>> {
+    let parked = parked_ids(conn).await?.len() as u32;
+    let (state, position) = match place {
+        Place::End => (QueueState::Parked, parked + 1),
+        Place::Now => (QueueState::Now, 0),
+        Place::At(n) if (1..=parked + 1).contains(&n) => (QueueState::Parked, n),
+        Place::At(_) => return Ok(Err("at".into())),
+    };
+    let mut highest = 0;
+    for item in queue_items_in(conn).await? {
+        highest = highest.max(queue_number(&item.id)?);
+    }
+    let id = format!("N{}", highest + 1);
+    match state {
+        QueueState::Now => park_the_now(conn, now_ms).await?,
+        _ => shift_parked(conn, i64::from(position), 1, now_ms).await?,
+    }
+    conn.execute(
+        "INSERT INTO queue_items (id, state, position, text, done_at_ms, updated_at_ms) \
+         VALUES (?1, ?2, ?3, ?4, NULL, ?5)",
+        (
+            id.as_str(),
+            state.as_str(),
+            i64::from(position),
+            text,
+            now_ms,
+        ),
+    )
+    .await?;
+    Ok(Ok(QueueItem {
+        id,
+        state,
+        position,
+        text: text.into(),
+        done_at_ms: 0,
+        updated_at_ms: now_ms,
+    }))
+}
+
+async fn set_now_in(
+    conn: &Connection,
+    id: &str,
+    now_ms: i64,
+) -> Result<std::result::Result<(String, u32), Refusal>> {
+    let Some(item) = queue_item_in(conn, id).await? else {
+        return Ok(Err(Refusal::NotFound));
+    };
+    match item.state {
+        QueueState::Done => return Ok(Err(Refusal::AlreadyDone)),
+        QueueState::Now => {}
+        QueueState::Parked => {
+            // The item's own position is overwritten when it is made Now.
+            shift_parked(conn, i64::from(item.position) + 1, -1, now_ms).await?;
+            park_the_now(conn, now_ms).await?;
+            conn.execute(
+                "UPDATE queue_items SET state = 'now', position = 0, updated_at_ms = ?2 \
+                 WHERE id = ?1",
+                (id, now_ms),
+            )
+            .await?;
+        }
+    }
+    let parked = count_of(parked_ids(conn).await?.len() as i64)?;
+    Ok(Ok((id.to_string(), parked)))
+}
+
+async fn order_queue_in(
+    conn: &Connection,
+    ids: &[String],
+    now_ms: i64,
+) -> Result<std::result::Result<u32, Refusal>> {
+    let current = parked_ids(conn).await?;
+    if let Some(id) = ids.iter().find(|id| !current.contains(id)) {
+        let refusal = match queue_item_in(conn, id).await? {
+            Some(_) => Refusal::NotParked,
+            None => Refusal::NotFound,
+        };
+        return Ok(Err(refusal));
+    }
+    let mut order: Vec<&str> = Vec::with_capacity(current.len());
+    for id in ids.iter().chain(&current) {
+        if !order.contains(&id.as_str()) {
+            order.push(id);
+        }
+    }
+    for (position, id) in order.iter().enumerate() {
+        conn.execute(
+            "UPDATE queue_items SET position = ?2, updated_at_ms = ?3 WHERE id = ?1",
+            (*id, position as i64 + 1, now_ms),
+        )
+        .await?;
+    }
+    Ok(Ok(count_of(order.len() as i64)?))
+}
+
+async fn update_queue_item_in(
+    conn: &Connection,
+    id: &str,
+    text: &str,
+    now_ms: i64,
+) -> Result<std::result::Result<(), Refusal>> {
+    if queue_item_in(conn, id).await?.is_none() {
+        return Ok(Err(Refusal::NotFound));
+    }
+    conn.execute(
+        "UPDATE queue_items SET text = ?2, updated_at_ms = ?3 WHERE id = ?1",
+        (id, text, now_ms),
+    )
+    .await?;
+    Ok(Ok(()))
+}
+
+async fn done_queue_item_in(
+    conn: &Connection,
+    id: &str,
+    now_ms: i64,
+) -> Result<std::result::Result<(), Refusal>> {
+    let Some(item) = queue_item_in(conn, id).await? else {
+        return Ok(Err(Refusal::NotFound));
+    };
+    if item.state == QueueState::Done {
+        return Ok(Err(Refusal::AlreadyDone));
+    }
+    conn.execute(
+        "UPDATE queue_items SET state = 'done', position = 0, done_at_ms = ?2, \
+         updated_at_ms = ?2 WHERE id = ?1",
+        (id, now_ms),
+    )
+    .await?;
+    if item.state == QueueState::Parked {
+        shift_parked(conn, i64::from(item.position) + 1, -1, now_ms).await?;
+    }
+    Ok(Ok(()))
+}
+
+async fn set_queue_note_in(conn: &Connection, text: &str) -> Result<()> {
+    conn.execute(
+        "INSERT OR REPLACE INTO queue_note (id, text) VALUES (1, ?1)",
+        [text],
+    )
+    .await?;
+    Ok(())
+}
+
+async fn queue_note_in(conn: &Connection) -> Result<String> {
+    let mut rows = conn
+        .query("SELECT text FROM queue_note WHERE id = 1", ())
+        .await?;
+    match rows.next().await? {
+        Some(row) => text(&row, 0),
+        None => Ok(String::new()),
+    }
+}
+
+async fn list_queue_in(conn: &Connection, done_since_ms: i64) -> Result<QueueListing> {
+    let mut listing = QueueListing {
+        now: None,
+        parked: Vec::new(),
+        done: Vec::new(),
+        note: queue_note_in(conn).await?,
+    };
+    for item in queue_items_in(conn).await? {
+        match item.state {
+            QueueState::Now => listing.now = Some(item),
+            QueueState::Parked => listing.parked.push(item),
+            QueueState::Done if item.done_at_ms >= done_since_ms => listing.done.push(item),
+            QueueState::Done => {}
+        }
+    }
+    listing.parked.sort_by_key(|item| item.position);
+    // Ids compare by their number, so N10 follows N9.
+    listing
+        .done
+        .sort_by_key(|item| (item.done_at_ms, queue_number(&item.id).unwrap_or(u64::MAX)));
+    Ok(listing)
+}
+
+async fn queue_is_empty_in(conn: &Connection) -> Result<bool> {
+    let mut rows = conn
+        .query(
+            "SELECT 1 FROM queue_items \
+             UNION ALL SELECT 1 FROM queue_note WHERE text <> '' LIMIT 1",
+            (),
+        )
+        .await?;
+    Ok(rows.next().await?.is_none())
+}
+
 impl BacklogStore for TursoBacklogStore {
     async fn put_item(
         &self,
@@ -687,6 +1022,76 @@ impl BacklogStore for TursoBacklogStore {
         let conn = self.conn.lock().await;
         roll_back_abandoned(&conn).await?;
         product_is_empty_in(&conn, product).await
+    }
+
+    async fn add_queue_item(
+        &self,
+        text: &str,
+        place: Place,
+        now_ms: i64,
+    ) -> Result<std::result::Result<QueueItem, String>> {
+        let conn = self.conn.lock().await;
+        begin(&conn).await?;
+        finish_refusable(&conn, add_queue_item_in(&conn, text, place, now_ms).await).await
+    }
+
+    async fn set_now(
+        &self,
+        id: &str,
+        now_ms: i64,
+    ) -> Result<std::result::Result<(String, u32), Refusal>> {
+        let conn = self.conn.lock().await;
+        begin(&conn).await?;
+        finish_refusable(&conn, set_now_in(&conn, id, now_ms).await).await
+    }
+
+    async fn order_queue(
+        &self,
+        ids: &[String],
+        now_ms: i64,
+    ) -> Result<std::result::Result<u32, Refusal>> {
+        let conn = self.conn.lock().await;
+        begin(&conn).await?;
+        finish_refusable(&conn, order_queue_in(&conn, ids, now_ms).await).await
+    }
+
+    async fn update_queue_item(
+        &self,
+        id: &str,
+        text: &str,
+        now_ms: i64,
+    ) -> Result<std::result::Result<(), Refusal>> {
+        let conn = self.conn.lock().await;
+        begin(&conn).await?;
+        finish_refusable(&conn, update_queue_item_in(&conn, id, text, now_ms).await).await
+    }
+
+    async fn done_queue_item(
+        &self,
+        id: &str,
+        now_ms: i64,
+    ) -> Result<std::result::Result<(), Refusal>> {
+        let conn = self.conn.lock().await;
+        begin(&conn).await?;
+        finish_refusable(&conn, done_queue_item_in(&conn, id, now_ms).await).await
+    }
+
+    async fn set_queue_note(&self, text: &str) -> Result<()> {
+        let conn = self.conn.lock().await;
+        begin(&conn).await?;
+        finish(&conn, set_queue_note_in(&conn, text).await).await
+    }
+
+    async fn list_queue(&self, done_since_ms: i64) -> Result<QueueListing> {
+        let conn = self.conn.lock().await;
+        roll_back_abandoned(&conn).await?;
+        list_queue_in(&conn, done_since_ms).await
+    }
+
+    async fn queue_is_empty(&self) -> Result<bool> {
+        let conn = self.conn.lock().await;
+        roll_back_abandoned(&conn).await?;
+        queue_is_empty_in(&conn).await
     }
 }
 

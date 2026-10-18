@@ -1,4 +1,5 @@
-//! A backlog's items and notes, and the limits they must meet. Every limit
+//! A backlog's items and notes, the chief's queue, and the limits they must
+//! meet. Every limit
 //! counts characters, not bytes, and "under N" means fewer than N.
 
 /// At most this many items in one product's backlog.
@@ -75,6 +76,66 @@ pub(super) struct Note {
     pub body: String,
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum QueueState {
+    /// The one item the chief is on; there is at most one.
+    Now,
+    /// Waiting, at positions 1..n with no gaps.
+    Parked,
+    /// Finished; kept, never removed.
+    Done,
+}
+
+impl QueueState {
+    pub(super) fn as_str(self) -> &'static str {
+        match self {
+            QueueState::Now => "now",
+            QueueState::Parked => "parked",
+            QueueState::Done => "done",
+        }
+    }
+
+    pub(super) fn parse(state: &str) -> Option<Self> {
+        match state {
+            "now" => Some(QueueState::Now),
+            "parked" => Some(QueueState::Parked),
+            "done" => Some(QueueState::Done),
+            _ => None,
+        }
+    }
+}
+
+/// One item in the chief's queue. `position` is 1..n for a parked item and 0
+/// otherwise; `done_at_ms` is 0 until the item is done.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct QueueItem {
+    pub id: String,
+    pub state: QueueState,
+    pub position: u32,
+    pub text: String,
+    pub done_at_ms: i64,
+    pub updated_at_ms: i64,
+}
+
+/// Where a new queue item goes: last of the parked, Now, or parked at a
+/// position.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Place {
+    End,
+    Now,
+    At(u32),
+}
+
+/// The queue as it is listed: the Now item, the parked by position, the done
+/// oldest first, and the queue's note (`""` when there is none).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct QueueListing {
+    pub now: Option<QueueItem>,
+    pub parked: Vec<QueueItem>,
+    pub done: Vec<QueueItem>,
+    pub note: String,
 }
 
 fn under(text: &str, limit: usize) -> bool {

@@ -278,3 +278,352 @@ async fn a_product_with_only_a_note_is_not_empty() {
         .unwrap();
     assert!(!store.product_is_empty(P).await.unwrap());
 }
+
+async fn add(store: &TursoBacklogStore, text: &str, place: Place) -> QueueItem {
+    store.add_queue_item(text, place, 1).await.unwrap().unwrap()
+}
+
+/// The Now id, and the parked ids by position.
+async fn queue_shape(store: &TursoBacklogStore) -> (Option<String>, Vec<String>) {
+    let listing = store.list_queue(0).await.unwrap();
+    for (n, item) in listing.parked.iter().enumerate() {
+        assert_eq!(item.position, n as u32 + 1, "parked positions have gaps");
+    }
+    (
+        listing.now.map(|it| it.id),
+        listing.parked.into_iter().map(|it| it.id).collect(),
+    )
+}
+
+async fn now_rows(store: &TursoBacklogStore) -> i64 {
+    let conn = store.conn.lock().await;
+    let mut rows = conn
+        .query("SELECT COUNT(*) FROM queue_items WHERE state = 'now'", ())
+        .await
+        .unwrap();
+    let row = rows.next().await.unwrap().unwrap();
+    integer(&row, 0).unwrap()
+}
+
+#[tokio::test]
+async fn queue_ids_count_up_from_n1() {
+    let folder = TempFolder::new();
+    let store = open_store(&folder).await;
+    let added: Vec<String> = [
+        add(&store, "a", Place::End).await,
+        add(&store, "b", Place::End).await,
+        add(&store, "c", Place::End).await,
+    ]
+    .into_iter()
+    .map(|it| it.id)
+    .collect();
+    assert_eq!(added, ids(&["N1", "N2", "N3"]));
+    assert_eq!(store.done_queue_item("N3", 2).await.unwrap(), Ok(()));
+    assert_eq!(add(&store, "d", Place::End).await.id, "N4");
+}
+
+#[tokio::test]
+async fn queue_ids_count_past_nine_by_number() {
+    let folder = TempFolder::new();
+    let store = open_store(&folder).await;
+    for n in 0..10 {
+        add(&store, &format!("t{n}"), Place::End).await;
+    }
+    assert_eq!(add(&store, "next", Place::End).await.id, "N11");
+    let (_, parked) = queue_shape(&store).await;
+    assert_eq!(parked[9], "N10");
+}
+
+#[tokio::test]
+async fn add_parks_at_the_end_by_default_and_at_n_when_asked() {
+    let folder = TempFolder::new();
+    let store = open_store(&folder).await;
+    let first = add(&store, "first", Place::End).await;
+    assert_eq!(first.state, QueueState::Parked);
+    assert_eq!(first.position, 1);
+    assert_eq!(first.text, "first");
+    assert_eq!(first.done_at_ms, 0);
+    add(&store, "second", Place::End).await;
+    let at_one = add(&store, "at one", Place::At(1)).await;
+    assert_eq!(at_one.position, 1);
+    let at_end = add(&store, "at end", Place::At(4)).await;
+    assert_eq!(at_end.position, 4);
+    assert_eq!(
+        queue_shape(&store).await,
+        (None, ids(&["N3", "N1", "N2", "N4"]))
+    );
+
+    for outside in [0, 6] {
+        assert_eq!(
+            store
+                .add_queue_item("x", Place::At(outside), 1)
+                .await
+                .unwrap(),
+            Err("at".to_string())
+        );
+    }
+    assert_eq!(queue_shape(&store).await.1.len(), 4);
+    // A refused add uses no id.
+    assert_eq!(add(&store, "next", Place::End).await.id, "N5");
+}
+
+#[tokio::test]
+async fn now_moves_the_old_now_to_parked_position_one() {
+    let folder = TempFolder::new();
+    let store = open_store(&folder).await;
+    add(&store, "a", Place::Now).await;
+    add(&store, "b", Place::End).await;
+    add(&store, "c", Place::End).await;
+    assert_eq!(
+        queue_shape(&store).await,
+        (Some("N1".into()), ids(&["N2", "N3"]))
+    );
+    assert_eq!(
+        store.set_now("N3", 2).await.unwrap(),
+        Ok(("N3".to_string(), 2))
+    );
+    assert_eq!(
+        queue_shape(&store).await,
+        (Some("N3".into()), ids(&["N1", "N2"]))
+    );
+    let listing = store.list_queue(0).await.unwrap();
+    let now = listing.now.unwrap();
+    assert_eq!(now.state, QueueState::Now);
+    assert_eq!(now.position, 0);
+    assert_eq!(now.updated_at_ms, 2);
+}
+
+#[tokio::test]
+async fn now_on_the_now_item_changes_nothing() {
+    let folder = TempFolder::new();
+    let store = open_store(&folder).await;
+    add(&store, "a", Place::Now).await;
+    add(&store, "b", Place::End).await;
+    assert_eq!(
+        store.set_now("N1", 2).await.unwrap(),
+        Ok(("N1".to_string(), 1))
+    );
+    assert_eq!(queue_shape(&store).await, (Some("N1".into()), ids(&["N2"])));
+}
+
+#[tokio::test]
+async fn adding_with_now_parks_the_old_now() {
+    let folder = TempFolder::new();
+    let store = open_store(&folder).await;
+    add(&store, "a", Place::Now).await;
+    add(&store, "b", Place::End).await;
+    let new = add(&store, "c", Place::Now).await;
+    assert_eq!(new.state, QueueState::Now);
+    assert_eq!(new.position, 0);
+    assert_eq!(
+        queue_shape(&store).await,
+        (Some("N3".into()), ids(&["N1", "N2"]))
+    );
+}
+
+#[tokio::test]
+async fn there_is_never_a_second_now() {
+    let folder = TempFolder::new();
+    let store = open_store(&folder).await;
+    add(&store, "a", Place::Now).await;
+    add(&store, "b", Place::Now).await;
+    add(&store, "c", Place::End).await;
+    store.set_now("N3", 2).await.unwrap().unwrap();
+    add(&store, "d", Place::Now).await;
+    store.set_now("N1", 3).await.unwrap().unwrap();
+    store.set_now("N1", 4).await.unwrap().unwrap();
+    let listing = store.list_queue(0).await.unwrap();
+    assert_eq!(listing.now.map(|it| it.id), Some("N1".into()));
+    assert_eq!(listing.parked.len(), 3);
+    assert_eq!(now_rows(&store).await, 1);
+}
+
+#[tokio::test]
+async fn the_one_now_index_refuses_a_second_now_row() {
+    let folder = TempFolder::new();
+    let store = open_store(&folder).await;
+    add(&store, "a", Place::Now).await;
+    let conn = store.conn.lock().await;
+    let second = conn
+        .execute(
+            "INSERT INTO queue_items (id, state, position, text, updated_at_ms) \
+             VALUES ('N99', 'now', 0, 'b', 1)",
+            (),
+        )
+        .await;
+    let error = second.expect_err("a second 'now' row was stored");
+    assert!(
+        error.to_string().to_uppercase().contains("UNIQUE"),
+        "{error}"
+    );
+    drop(conn);
+    assert_eq!(now_rows(&store).await, 1);
+}
+
+#[tokio::test]
+async fn order_reorders_the_parked_items() {
+    let folder = TempFolder::new();
+    let store = open_store(&folder).await;
+    for text in ["a", "b", "c", "d"] {
+        add(&store, text, Place::End).await;
+    }
+    assert_eq!(
+        store.order_queue(&ids(&["N4", "N2"]), 2).await.unwrap(),
+        Ok(4)
+    );
+    assert_eq!(
+        queue_shape(&store).await,
+        (None, ids(&["N4", "N2", "N1", "N3"]))
+    );
+}
+
+#[tokio::test]
+async fn order_with_the_now_id_is_not_parked() {
+    let folder = TempFolder::new();
+    let store = open_store(&folder).await;
+    add(&store, "a", Place::Now).await;
+    add(&store, "b", Place::End).await;
+    add(&store, "c", Place::End).await;
+    store.done_queue_item("N3", 2).await.unwrap().unwrap();
+    add(&store, "d", Place::End).await;
+    for listed in [ids(&["N4", "N1"]), ids(&["N3"])] {
+        assert_eq!(
+            store.order_queue(&listed, 3).await.unwrap(),
+            Err(Refusal::NotParked)
+        );
+    }
+    assert_eq!(
+        queue_shape(&store).await,
+        (Some("N1".into()), ids(&["N2", "N4"]))
+    );
+}
+
+#[tokio::test]
+async fn done_moves_an_item_to_done_and_closes_up_the_parked_positions() {
+    let folder = TempFolder::new();
+    let store = open_store(&folder).await;
+    add(&store, "a", Place::Now).await;
+    for text in ["b", "c", "d"] {
+        add(&store, text, Place::End).await;
+    }
+    assert_eq!(store.done_queue_item("N3", 5).await.unwrap(), Ok(()));
+    assert_eq!(
+        queue_shape(&store).await,
+        (Some("N1".into()), ids(&["N2", "N4"]))
+    );
+    assert_eq!(store.done_queue_item("N1", 6).await.unwrap(), Ok(()));
+    let listing = store.list_queue(0).await.unwrap();
+    assert_eq!(listing.now, None);
+    let done: Vec<(&str, QueueState, u32, i64)> = listing
+        .done
+        .iter()
+        .map(|it| (it.id.as_str(), it.state, it.position, it.done_at_ms))
+        .collect();
+    assert_eq!(
+        done,
+        vec![
+            ("N3", QueueState::Done, 0, 5),
+            ("N1", QueueState::Done, 0, 6)
+        ]
+    );
+    assert_eq!(
+        store.done_queue_item("N1", 7).await.unwrap(),
+        Err(Refusal::AlreadyDone)
+    );
+    assert_eq!(store.list_queue(0).await.unwrap().done[1].done_at_ms, 6);
+}
+
+#[tokio::test]
+async fn done_since_filters_by_time() {
+    let folder = TempFolder::new();
+    let store = open_store(&folder).await;
+    add(&store, "a", Place::End).await;
+    add(&store, "b", Place::End).await;
+    store.done_queue_item("N1", 100).await.unwrap().unwrap();
+    store.done_queue_item("N2", 200).await.unwrap().unwrap();
+    let since = store.list_queue(150).await.unwrap();
+    assert_eq!(
+        since
+            .done
+            .iter()
+            .map(|it| it.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["N2"]
+    );
+    assert_eq!(store.list_queue(200).await.unwrap().done.len(), 1);
+    assert_eq!(store.list_queue(0).await.unwrap().done.len(), 2);
+}
+
+#[tokio::test]
+async fn now_on_a_done_item_is_already_done() {
+    let folder = TempFolder::new();
+    let store = open_store(&folder).await;
+    add(&store, "a", Place::End).await;
+    store.done_queue_item("N1", 2).await.unwrap().unwrap();
+    assert_eq!(
+        store.set_now("N1", 3).await.unwrap(),
+        Err(Refusal::AlreadyDone)
+    );
+    let listing = store.list_queue(0).await.unwrap();
+    assert_eq!(listing.now, None);
+    assert_eq!(listing.done.len(), 1);
+}
+
+#[tokio::test]
+async fn an_unknown_id_is_not_found() {
+    let folder = TempFolder::new();
+    let store = open_store(&folder).await;
+    add(&store, "a", Place::End).await;
+    assert_eq!(
+        store.set_now("N9", 2).await.unwrap(),
+        Err(Refusal::NotFound)
+    );
+    assert_eq!(
+        store.done_queue_item("N9", 2).await.unwrap(),
+        Err(Refusal::NotFound)
+    );
+    assert_eq!(
+        store.update_queue_item("N9", "x", 2).await.unwrap(),
+        Err(Refusal::NotFound)
+    );
+    assert_eq!(
+        store.order_queue(&ids(&["N1", "N9"]), 2).await.unwrap(),
+        Err(Refusal::NotFound)
+    );
+    assert_eq!(queue_shape(&store).await, (None, ids(&["N1"])));
+}
+
+#[tokio::test]
+async fn update_replaces_a_queue_items_text() {
+    let folder = TempFolder::new();
+    let store = open_store(&folder).await;
+    add(&store, "a", Place::End).await;
+    assert_eq!(
+        store.update_queue_item("N1", "changed", 4).await.unwrap(),
+        Ok(())
+    );
+    let parked = store.list_queue(0).await.unwrap().parked;
+    assert_eq!(parked[0].text, "changed");
+    assert_eq!(parked[0].position, 1);
+    assert_eq!(parked[0].updated_at_ms, 4);
+}
+
+#[tokio::test]
+async fn the_queue_note_is_replaced() {
+    let folder = TempFolder::new();
+    let store = open_store(&folder).await;
+    assert!(store.queue_is_empty().await.unwrap());
+    assert_eq!(store.list_queue(0).await.unwrap().note, "");
+    store.set_queue_note("first").await.unwrap();
+    assert!(!store.queue_is_empty().await.unwrap());
+    store.set_queue_note("second").await.unwrap();
+    assert_eq!(store.list_queue(0).await.unwrap().note, "second");
+}
+
+#[tokio::test]
+async fn a_queue_with_only_an_item_is_not_empty() {
+    let folder = TempFolder::new();
+    let store = open_store(&folder).await;
+    add(&store, "a", Place::End).await;
+    assert!(!store.queue_is_empty().await.unwrap());
+}
