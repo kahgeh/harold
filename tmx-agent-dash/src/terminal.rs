@@ -284,6 +284,13 @@ impl TerminalGuard {
             .map_err(|error| TerminalError::new("render dashboard", error))
     }
 
+    /// Clears the screen and Ratatui's buffer, so the next draw repaints every cell.
+    pub fn clear(&mut self) -> Result<(), TerminalError> {
+        self.terminal
+            .clear()
+            .map_err(|error| TerminalError::new("clear screen", error))
+    }
+
     pub fn restore(&mut self) -> Result<(), TerminalError> {
         debug_assert_eq!(self.owner, std::thread::current().id());
         let result = self

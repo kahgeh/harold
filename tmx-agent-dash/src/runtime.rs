@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
+use crossterm::event::{self, Event, KeyEvent, KeyEventKind};
 use tokio::runtime::Builder;
 use tokio::sync::{mpsc, watch};
 use tokio::time::sleep;
@@ -137,25 +137,42 @@ async fn run_async(
         core.set_navigation_issue(status);
     }
     let mut input = InputPump::start();
-    let clock = SystemClock;
-    draw(terminal, &core.app, &clock)?;
+    run_loop(
+        source,
+        &mut core,
+        &mut input,
+        &mut shutdown,
+        terminal,
+        navigator,
+        &SystemClock,
+    )
+    .await
+}
+
+/// Opens a stream and consumes it, again and again, until a quit key or a shutdown.
+async fn run_loop<S, N, T>(
+    source: &S,
+    core: &mut RuntimeCore,
+    input: &mut InputPump,
+    shutdown: &mut impl ShutdownPort,
+    terminal: &mut T,
+    navigator: &N,
+    clock: &impl ClockPort,
+) -> Result<(), AppError>
+where
+    S: SourcePort,
+    N: PaneNavigator,
+    T: ScreenPort,
+{
+    draw(terminal, &core.app, clock)?;
     let mut retry_immediately = true;
 
     loop {
         if !retry_immediately {
-            match wait_for_retry(
-                &mut core,
-                &mut input,
-                &mut shutdown,
-                terminal,
-                navigator,
-                &clock,
-            )
-            .await?
-            {
+            match wait_for_retry(core, input, shutdown, terminal, navigator, clock).await? {
                 Control::Quit => return Ok(()),
-                Control::Retry
-                | Control::Continue
+                Control::Retry => redraw_for_retry(terminal, &core.app, clock)?,
+                Control::Continue
                 | Control::SetTtsMuted(_)
                 | Control::SetMessagingPaused(_)
                 | Control::Call(_)
@@ -166,43 +183,28 @@ async fn run_async(
         }
         retry_immediately = false;
 
-        let stream = match open_stream(
-            source,
-            &mut core,
-            &mut input,
-            &mut shutdown,
-            terminal,
-            navigator,
-            &clock,
-        )
-        .await?
-        {
-            OpenOutcome::Stream(stream) => stream,
-            OpenOutcome::RetryNow => {
-                retry_immediately = true;
-                continue;
-            }
-            OpenOutcome::RetryLater => continue,
-            OpenOutcome::Quit => return Ok(()),
-        };
+        let stream =
+            match open_stream(source, core, input, shutdown, terminal, navigator, clock).await? {
+                OpenOutcome::Stream(stream) => stream,
+                OpenOutcome::RetryNow => {
+                    redraw_for_retry(terminal, &core.app, clock)?;
+                    retry_immediately = true;
+                    continue;
+                }
+                OpenOutcome::RetryLater => continue,
+                OpenOutcome::Quit => return Ok(()),
+            };
         core.begin_stream();
 
-        let outcome = consume_stream(
-            stream,
-            &mut core,
-            &mut input,
-            &mut shutdown,
-            terminal,
-            navigator,
-            &clock,
-        )
-        .await;
+        let outcome =
+            consume_stream(stream, core, input, shutdown, terminal, navigator, clock).await;
         // The block lives only while a stream does: without Harold nothing can be
         // answered, so it hides until a stream opens and the queue is read again.
         core.app.hide_questions();
         match outcome {
             Ok(Control::Quit) => return Ok(()),
             Ok(Control::Retry) => {
+                redraw_for_retry(terminal, &core.app, clock)?;
                 retry_immediately = true;
             }
             Ok(
@@ -220,7 +222,7 @@ async fn run_async(
                     .map(runtime_status_detail)
                     .unwrap_or_else(|| "Harold stream closed".to_owned());
                 core.retry_after(&detail);
-                draw(terminal, &core.app, &clock)?;
+                draw(terminal, &core.app, clock)?;
             }
             Err(error) => return Err(error),
         }
@@ -309,11 +311,17 @@ impl StreamPort for SourceStream {
 
 trait ScreenPort {
     fn draw_screen(&mut self, app: &App, now_ms: i64) -> Result<(), TerminalError>;
+    /// Clears the whole screen, so the next draw repaints every cell.
+    fn clear_screen(&mut self) -> Result<(), TerminalError>;
 }
 
 impl ScreenPort for TerminalGuard {
     fn draw_screen(&mut self, app: &App, now_ms: i64) -> Result<(), TerminalError> {
         self.draw(app, now_ms)
+    }
+
+    fn clear_screen(&mut self) -> Result<(), TerminalError> {
+        self.clear()
     }
 }
 
@@ -450,13 +458,10 @@ where
                     // dropped: the user has not seen what it would act on. The change
                     // is found by this key's own read, or was flagged by an earlier one.
                     // A key for a block that this read hid (a notice it cleared) is
-                    // dropped too, rather than handed to the list, and so is the first
-                    // key after an earlier read hid the block under the focus.
+                    // dropped too, rather than handed to the list. Only a key that would
+                    // still reach the block is dropped: Tab, the global keys and every
+                    // key on the list act, whatever the flag says.
                     let flagged = std::mem::take(&mut core.drop_next_block_key);
-                    if flagged && core.app.focus == Focus::List && !core.app.swallowing_keys() {
-                        draw(terminal, &core.app, clock)?;
-                        continue;
-                    }
                     if core.app.wants_fresh_questions(key) {
                         let reaches_block = core.app.key_reaches_block(key);
                         let listed = stream.list_questions().await;
@@ -617,6 +622,17 @@ fn draw(terminal: &mut impl ScreenPort, app: &App, clock: &impl ClockPort) -> Re
     terminal
         .draw_screen(app, clock.now_ms())
         .map_err(AppError::from)
+}
+
+/// Ctrl+L clears the screen and draws it in full, then the stream is retried. Only
+/// Ctrl+L asks for a retry, so this runs once for each press.
+fn redraw_for_retry(
+    terminal: &mut impl ScreenPort,
+    app: &App,
+    clock: &impl ClockPort,
+) -> Result<(), AppError> {
+    terminal.clear_screen()?;
+    draw(terminal, app, clock)
 }
 
 fn local_now_ms() -> i64 {
@@ -1001,8 +1017,7 @@ struct RuntimeCore {
     /// How often the question queue is read; QUESTION_POLL_INTERVAL, shorter in tests.
     question_poll_interval: Duration,
     /// A read no key asked for changed the question under the focus: the next key, if
-    /// it goes to the block, is dropped. Or it hid the block under the focus: the next
-    /// key, now on the list, is dropped. Any key clears it.
+    /// it still goes to the block, is dropped. Any key clears it.
     drop_next_block_key: bool,
 }
 
@@ -1078,16 +1093,13 @@ impl RuntimeCore {
     }
 
     /// Takes a read no key asked for: the poll, or the read after an answer or a
-    /// deferral. If it changes the question in view while the block has the focus, the
-    /// next block key is dropped, as it was typed for what was there before. If it hides
-    /// the block that had the focus (a failed read swallows keys instead), the next key
-    /// is dropped too, rather than acting on the list. Reports whether the block changed
-    /// at all.
+    /// deferral. If it changes the question in view while the block keeps the focus, the
+    /// next block key is dropped, as it was typed for what was there before. A read that
+    /// hides the block moves the focus to the list, and the next key acts there. Reports
+    /// whether the block changed at all.
     fn questions_refreshed(&mut self, result: Result<Queue, SourceError>) -> bool {
-        let focused = self.app.focus == Focus::Block;
         let listed = self.questions_listed(result);
-        let hid = focused && !self.app.questions.is_visible() && !self.app.swallowing_keys();
-        if (listed.question_changed && self.app.focus == Focus::Block) || hid {
+        if listed.question_changed && self.app.focus == Focus::Block {
             self.drop_next_block_key = true;
         }
         listed.changed
@@ -1166,7 +1178,7 @@ impl RuntimeCore {
                         self.app.set_runtime_status(status);
                     }
                     if self.app.selected.is_none() {
-                        self.app.handle_key(KeyCode::Char('g'));
+                        self.app.select_first_row();
                     }
                 }
                 StreamControl::Continue
@@ -1258,7 +1270,8 @@ mod tests {
         Backoff, BoxFuture, ClockPort, Control, FocusProbe, InputMessage, InputPump, OpenOutcome,
         QUESTION_POLL_INTERVAL, RedrawCadence, RuntimeCore, RuntimeInput, ScreenPort, ShutdownPort,
         SourcePort, StreamControl, StreamPort, TerminalInput, call_poll_interval, consume_stream,
-        handle_input, merge_exit, open_stream, resolve_client, spawn_focus_worker, wait_for_retry,
+        handle_input, merge_exit, open_stream, resolve_client, run_loop, spawn_focus_worker,
+        wait_for_retry,
     };
     use crate::api::SourceError;
     use crate::app::Focus;
@@ -1670,9 +1683,8 @@ mod tests {
         let mut core = RuntimeCore::new(Some("client-7".into()));
         core.begin_stream();
         let mut screen = FakeScreen {
-            draws: 0,
             fail: true,
-            times: Vec::new(),
+            ..FakeScreen::default()
         };
 
         let result = consume_stream(
@@ -2338,14 +2350,11 @@ mod tests {
         let (input_sender, mut input) = InputPump::channel();
         let key = |code: KeyCode| InputMessage::Key(code.into());
         input_sender.try_send(key(KeyCode::Tab)).unwrap();
-        // The revise row is two below the suggested option.
-        for code in [KeyCode::Char('j'), KeyCode::Char('j'), KeyCode::Enter] {
-            input_sender.try_send(key(code)).unwrap();
-        }
         let tool = Arc::clone(&probe);
         tokio::spawn(async move {
-            // The question changes; well after a poll has found version 2, the user,
-            // still typing the note, presses `l`: as a block key it would pick.
+            // The question changes while the block chooses on decision 1, so no keys are
+            // held. Well after a poll has found version 2, the user presses `l`: only
+            // the flag keeps it from picking the highlighted option.
             tokio::time::sleep(Duration::from_millis(50)).await;
             tool.lock().unwrap().queue = Some(question("Q1", 2, 2));
             tokio::time::sleep(Duration::from_millis(150)).await;
@@ -2370,6 +2379,7 @@ mod tests {
         assert!(!log.iter().any(|call| call.starts_with("defer")), "{log:?}");
         let view = core.app.questions.view().unwrap();
         assert_eq!(view.mode, crate::questions::Mode::Choosing);
+        assert_eq!(view.ask.as_deref(), Some("Ask 1?"));
         assert!(view.picks.is_empty(), "l picked nothing");
         assert_eq!(
             view.notice.as_deref(),
@@ -2555,8 +2565,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_poll_that_hides_a_focused_block_drops_the_next_key() {
+    async fn a_poll_that_hides_a_focused_block_keeps_the_next_key() {
         let mut core = connected_core();
+        core.accept_snapshot(two_rows(2), 2_000);
         core.question_poll_interval = Duration::from_millis(10);
         let navigator = FakeNavigator::successful();
         core.app.observe_questions(question("Q1", 1, 1));
@@ -2564,31 +2575,72 @@ mod tests {
         core.app.question_sent("Q1", SendResult::NotWaiting);
         assert!(core.app.questions.shows_notice_only());
         assert_eq!(core.app.focus, Focus::Block);
+        let first = core.app.selected.clone();
         let probe = question_probe(Some(Queue::default()));
         let mut stream = FakeStream::pending(Arc::new(AtomicBool::new(false)));
         stream.questions = Some(Arc::clone(&probe));
         let (input_sender, mut input) = InputPump::channel();
-        // Kept open, so the input does not close before the shutdown.
+        // Kept open, so the input does not close before `q` quits.
         let _input_open = input_sender.clone();
-        let (shutdown_sender, mut shutdown) = FakeShutdown::channel();
-        let shut = Arc::new(AtomicBool::new(false));
-        let shut_by_test = Arc::clone(&shut);
+        let (_shutdown_sender, mut shutdown) = FakeShutdown::channel();
         tokio::spawn(async move {
             // The read as the stream opens keeps the notice; the next poll, 10 ms on,
-            // clears it and hides the block under the focus. Then the user presses
-            // `q`, meant for the block: on the list it would quit.
+            // clears it and hides the block under the focus. The focus is on the list
+            // now, so `j` moves the selection and `q` quits: neither is dropped.
             tokio::time::sleep(Duration::from_millis(150)).await;
-            input_sender
-                .send(InputMessage::Key(KeyCode::Char('q').into()))
-                .await
-                .unwrap();
+            for code in [KeyCode::Char('j'), KeyCode::Char('q')] {
+                input_sender
+                    .send(InputMessage::Key(code.into()))
+                    .await
+                    .unwrap();
+            }
+        });
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(5),
+            consume_stream(
+                stream,
+                &mut core,
+                &mut input,
+                &mut shutdown,
+                &mut FakeScreen::default(),
+                &FakeNavigator::successful(),
+                &FakeClock::default(),
+            ),
+        )
+        .await
+        .expect("q quit")
+        .unwrap();
+        assert_eq!(outcome, Control::Quit);
+        assert!(!core.app.questions.is_visible());
+        assert_eq!(core.app.focus, Focus::List);
+        assert_ne!(core.app.selected, first, "j moved the selection");
+        assert!(!core.drop_next_block_key);
+    }
+
+    /// Runs `consume_stream` over `keys` alone, with the block focused and
+    /// `drop_next_block_key` set, and returns how it ended.
+    async fn run_flagged(core: &mut RuntimeCore, keys: &[KeyEvent]) -> Control {
+        let probe = question_probe(Some(question("Q1", 1, 1)));
+        let mut stream = FakeStream::pending(Arc::new(AtomicBool::new(false)));
+        stream.questions = Some(Arc::clone(&probe));
+        core.app.observe_questions(question("Q1", 1, 1));
+        if core.app.focus != Focus::Block {
+            core.handle_key(KeyCode::Tab, &FakeNavigator::successful());
+        }
+        core.drop_next_block_key = true;
+        let (input_sender, mut input) = InputPump::channel();
+        let _input_open = input_sender.clone();
+        for key in keys {
+            input_sender.try_send(InputMessage::Key(*key)).unwrap();
+        }
+        let (shutdown_sender, mut shutdown) = FakeShutdown::channel();
+        tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(300)).await;
-            shut_by_test.store(true, Ordering::SeqCst);
             let _ = shutdown_sender.send(()).await;
         });
-        let outcome = consume_stream(
+        consume_stream(
             stream,
-            &mut core,
+            core,
             &mut input,
             &mut shutdown,
             &mut FakeScreen::default(),
@@ -2596,18 +2648,203 @@ mod tests {
             &FakeClock::default(),
         )
         .await
-        .unwrap();
-        assert_eq!(outcome, Control::Quit);
-        assert!(
-            shut.load(Ordering::SeqCst),
-            "q reached the list and quit before the shutdown"
-        );
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn the_guard_never_drops_tab_or_quit_keys() {
+        let ctrl = |c: char| KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL);
+        // Tab moves the focus to the list; the shutdown then ends the stream.
+        let mut core = connected_core();
+        run_flagged(&mut core, &[KeyCode::Tab.into()]).await;
+        assert_eq!(core.app.focus, Focus::List, "Tab was not dropped");
+        assert!(!core.drop_next_block_key);
+
+        for chord in ['q', 'c'] {
+            let mut core = connected_core();
+            let started = std::time::Instant::now();
+            assert_eq!(run_flagged(&mut core, &[ctrl(chord)]).await, Control::Quit);
+            assert!(
+                started.elapsed() < Duration::from_millis(250),
+                "Ctrl+{chord} quit before the shutdown"
+            );
+        }
+
+        let mut core = connected_core();
+        assert_eq!(run_flagged(&mut core, &[ctrl('l')]).await, Control::Retry);
+
+        // A block key is still dropped.
+        let mut core = connected_core();
+        run_flagged(&mut core, &[KeyCode::Char('j').into()]).await;
+        assert_eq!(core.app.questions.view().unwrap().highlighted, 1);
+    }
+
+    #[tokio::test]
+    async fn the_flow_answers_q25_then_revises_q26() {
+        let mut core = connected_core();
+        let options = |suggested: &str| {
+            ["a", "b", "c"]
+                .into_iter()
+                .map(|key| OptionView {
+                    key: key.into(),
+                    label: format!("label {key}"),
+                    impact: format!("impact {key}"),
+                    suggested: key == suggested,
+                    free: false,
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut q25 = question_view("Q25", 1, 2);
+        q25.decisions[0].options = options("a");
+        q25.decisions[1].options = options("b");
+        let q26 = question_view("Q26", 1, 1);
+        let queue = Queue {
+            questions: vec![q25, q26.clone()],
+            waiting: 2,
+            dismissed: Vec::new(),
+        };
+        let probe = question_probe(Some(queue));
+        let after_q25 = Queue {
+            questions: vec![q26],
+            waiting: 1,
+            dismissed: Vec::new(),
+        };
+        probe.lock().unwrap().answers.extend([
+            (SendResult::Recorded, Some(after_q25)),
+            (SendResult::Recorded, Some(Queue::default())),
+        ]);
+        // Tab focuses Q25, decision 1, on the suggested a. j, j highlight c; l picks it
+        // and moves to decision 2, on its suggested b. k highlights a; h goes back to
+        // decision 1 with c kept; l picks c again and returns to decision 2, a still
+        // highlighted. Enter picks a and shows the summary, and Enter sends.
+        //
+        // After Q25 is recorded, the probe's queue drops it. The block then shows Q26,
+        // and `n` with one question listed does nothing, so the block stays on Q26.
+        // (The read after the answer changed the question in view, so `n` is dropped
+        // anyway.) Q26's revise row is two below its suggested option: j, j, then
+        // Enter opens the note, the note is typed, and Enter sends it.
+        let mut keys = vec![
+            KeyCode::Tab,
+            KeyCode::Char('j'),
+            KeyCode::Char('j'),
+            KeyCode::Char('l'),
+            KeyCode::Char('k'),
+            KeyCode::Char('h'),
+            KeyCode::Char('l'),
+            KeyCode::Enter,
+            KeyCode::Enter,
+            KeyCode::Char('n'),
+            KeyCode::Char('j'),
+            KeyCode::Char('j'),
+            KeyCode::Enter,
+        ];
+        keys.extend("redo it".chars().map(KeyCode::Char));
+        keys.push(KeyCode::Enter);
+        let log = run_question_stream(&mut core, &probe, &keys).await;
+        let answers: Vec<&String> = log.iter().filter(|c| c.starts_with("answer")).collect();
+        assert_eq!(answers, ["answer Q25 v1", "answer Q26 v1"]);
+        let sent = probe.lock().unwrap().sent.clone();
+        assert_eq!(sent.len(), 2);
+        assert_eq!(sent[0].id, "Q25");
+        assert_eq!(sent[0].kind, AnswerKind::Answer);
+        let picks: Vec<(u32, &str)> = sent[0]
+            .picks
+            .iter()
+            .map(|pick| (pick.decision, pick.key.as_str()))
+            .collect();
+        assert_eq!(picks, [(0, "c"), (1, "a")]);
+        assert_eq!(sent[1].id, "Q26");
+        assert_eq!(sent[1].kind, AnswerKind::Revise);
+        assert_eq!(sent[1].note, "redo it");
         assert!(!core.app.questions.is_visible());
-        assert_eq!(core.app.focus, Focus::List);
+    }
+
+    #[tokio::test]
+    async fn ctrl_l_retries_the_stream() {
+        let mut core = connected_core();
+        let probe = question_probe(Some(question("Q1", 1, 2)));
+        let mut stream = FakeStream::pending(Arc::new(AtomicBool::new(false)));
+        stream.questions = Some(Arc::clone(&probe));
+        let reopened = Arc::new(AtomicBool::new(false));
+        let source = FakeSource::sequence([
+            FakeOpen::Stream(stream),
+            FakeOpen::Pending(Arc::clone(&reopened)),
+        ]);
+        let ctrl = |c: char| KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL);
+        let (input_sender, mut input) = InputPump::channel();
+        let opened = Arc::clone(&probe);
+        tokio::spawn(async move {
+            // The keys go once the stream has opened and read the queue, so none of
+            // them meets the open. The revise row is two below the suggested option;
+            // the note holds `abc` when Ctrl+L retries. Ctrl+Q then quits while the
+            // stream reopens.
+            while opened.lock().unwrap().log.is_empty() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            let keys = [
+                KeyCode::Tab,
+                KeyCode::Char('j'),
+                KeyCode::Char('j'),
+                KeyCode::Enter,
+                KeyCode::Char('a'),
+                KeyCode::Char('b'),
+                KeyCode::Char('c'),
+            ]
+            .map(KeyEvent::from);
+            for key in keys.into_iter().chain([ctrl('l'), ctrl('q')]) {
+                input_sender.send(InputMessage::Key(key)).await.unwrap();
+            }
+        });
+        let (_shutdown_sender, mut shutdown) = FakeShutdown::channel();
+        let mut screen = FakeScreen::default();
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            run_loop(
+                &source,
+                &mut core,
+                &mut input,
+                &mut shutdown,
+                &mut screen,
+                &FakeNavigator::successful(),
+                &FakeClock::default(),
+            ),
+        )
+        .await
+        .expect("Ctrl+Q quit")
+        .unwrap();
         assert!(
-            !core.drop_next_block_key,
-            "the dropped key cleared the flag"
+            reopened.load(Ordering::SeqCst),
+            "Ctrl+L reopened the stream"
         );
+        assert_eq!(screen.clears, 1);
+        assert!(screen.drawn_since_clear, "a draw followed the clear");
+
+        // The stream reopens, as in a_half_typed_note_survives_a_reconnect.
+        run_question_stream(&mut core, &probe, &[KeyCode::Tab]).await;
+        assert_eq!(
+            core.app.questions.view().unwrap().mode,
+            crate::questions::Mode::Note {
+                kind: crate::questions::NoteKind::Revise,
+                text: "abc".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn a_first_snapshot_with_search_typing_leaves_the_query() {
+        let mut core = RuntimeCore::new(Some("client-7".into()));
+        core.begin_stream();
+        let navigator = FakeNavigator::successful();
+        for code in ['f', 'a', 'b'] {
+            core.handle_key(KeyCode::Char(code), &navigator);
+        }
+        assert!(core.app.search.editing);
+        assert_eq!(core.app.search.query, "ab");
+        core.accept_snapshot(two_rows(1), 1_000);
+        assert_eq!(core.app.search.query, "ab");
+        assert!(core.app.search.editing);
+        let second = two_rows(1).rows[1].incarnation.clone();
+        assert_eq!(core.app.selected, Some(second));
     }
 
     #[tokio::test]
@@ -2803,11 +3040,32 @@ mod tests {
         }
     }
 
+    /// The usual snapshot with a second row, whose work summary holds `ab`.
+    fn two_rows(revision: u64) -> Snapshot {
+        let mut snapshot = snapshot(revision, MonitorHealthState::Healthy);
+        let mut row = snapshot.rows[0].clone();
+        row.incarnation = AgentIncarnation {
+            pane_id: "%8".into(),
+            pane_pid: 80,
+            agent_pid: 81,
+            agent_started_at_ms: 82,
+            provider_id: "codex".into(),
+        };
+        row.tmux_target = "agents:1.8".into();
+        row.pane_index = 8;
+        row.work_summary = Some("tab work".into());
+        snapshot.rows.push(row);
+        snapshot
+    }
+
     #[derive(Default)]
     struct FakeScreen {
         draws: usize,
         fail: bool,
         times: Vec<i64>,
+        clears: usize,
+        /// Whether a draw came after the last clear.
+        drawn_since_clear: bool,
     }
 
     impl ScreenPort for FakeScreen {
@@ -2817,6 +3075,7 @@ mod tests {
             now_ms: i64,
         ) -> Result<(), crate::terminal::TerminalError> {
             self.draws += 1;
+            self.drawn_since_clear = true;
             self.times.push(now_ms);
             if self.fail {
                 return Err(crate::terminal::TerminalError::new(
@@ -2824,6 +3083,12 @@ mod tests {
                     io::Error::other("injected render failure"),
                 ));
             }
+            Ok(())
+        }
+
+        fn clear_screen(&mut self) -> Result<(), crate::terminal::TerminalError> {
+            self.clears += 1;
+            self.drawn_since_clear = false;
             Ok(())
         }
     }
@@ -2850,22 +3115,26 @@ mod tests {
     enum FakeOpen {
         Error(SourceError),
         Pending(Arc<AtomicBool>),
+        Stream(FakeStream),
     }
 
+    /// Answers each open with the next of `opens`, in order.
     struct FakeSource {
-        open: std::sync::Mutex<Option<FakeOpen>>,
+        opens: std::sync::Mutex<VecDeque<FakeOpen>>,
     }
 
     impl FakeSource {
         fn error(error: SourceError) -> Self {
-            Self {
-                open: std::sync::Mutex::new(Some(FakeOpen::Error(error))),
-            }
+            Self::sequence([FakeOpen::Error(error)])
         }
 
         fn pending(dropped: Arc<AtomicBool>) -> Self {
+            Self::sequence([FakeOpen::Pending(dropped)])
+        }
+
+        fn sequence(opens: impl IntoIterator<Item = FakeOpen>) -> Self {
             Self {
-                open: std::sync::Mutex::new(Some(FakeOpen::Pending(dropped))),
+                opens: std::sync::Mutex::new(opens.into_iter().collect()),
             }
         }
     }
@@ -2874,9 +3143,10 @@ mod tests {
         type Stream = FakeStream;
 
         fn open_stream(&self) -> BoxFuture<'_, Result<Self::Stream, SourceError>> {
-            let behavior = self.open.lock().unwrap().take().unwrap();
+            let behavior = self.opens.lock().unwrap().pop_front().unwrap();
             match behavior {
                 FakeOpen::Error(error) => Box::pin(async move { Err(error) }),
+                FakeOpen::Stream(stream) => Box::pin(async move { Ok(stream) }),
                 FakeOpen::Pending(dropped) => Box::pin(PendingOpen {
                     _guard: DropFlag(dropped),
                 }),
