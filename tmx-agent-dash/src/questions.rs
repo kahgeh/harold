@@ -4,6 +4,8 @@
 //! to [`QuestionBlock::handle_key`], does what the returned [`BlockEffect`] asks, and reports
 //! the outcome of a send through [`QuestionBlock::sent`].
 
+use std::collections::BTreeMap;
+
 use crossterm::event::KeyCode;
 
 /// One option of a decision.
@@ -137,6 +139,17 @@ pub struct BlockView {
     pub notice: Option<String>,
 }
 
+/// The walk through a question that is not in view, kept for its version.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Kept {
+    version: u32,
+    decision: usize,
+    picks: Vec<PickView>,
+    highlights: Vec<usize>,
+    /// Choosing or Summary.
+    mode: Mode,
+}
+
 /// The block's state.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct QuestionBlock {
@@ -150,6 +163,9 @@ pub struct QuestionBlock {
     /// Each decision's highlighted row, kept while moving between decisions.
     highlights: Vec<usize>,
     mode: Mode,
+    /// The walks through listed questions other than the current one, by id. One goes
+    /// when its question is no longer listed or is listed at a higher version.
+    kept: BTreeMap<String, Kept>,
     notice: Option<String>,
     /// The notice stood on a block with no question through one listing already; the next
     /// listing that still finds no question clears it, and the block hides.
@@ -184,12 +200,19 @@ fn is_web_link(link: &str) -> bool {
 impl QuestionBlock {
     /// Takes the latest listing. The current question stays while it is listed at the same
     /// version; a higher version restarts it; a missing one is replaced with a notice.
+    /// Walks kept for other questions go when those are missing or at a higher version.
     /// A suspended block shows again, and keeps its state when its question is listed at
     /// the same version. A notice on a block with no question stays for one more listing;
     /// the one after that, still finding no question, clears it, so the block hides.
     pub fn reconcile(&mut self, queue: Queue) {
         self.suspended = false;
         self.queue = queue;
+        let listed = &self.queue.questions;
+        self.kept.retain(|id, kept| {
+            listed
+                .iter()
+                .any(|q| &q.id == id && q.version <= kept.version)
+        });
         self.follow_current();
         self.age_notice();
     }
@@ -274,7 +297,8 @@ impl QuestionBlock {
         self.is_visible() && self.question().is_none()
     }
 
-    /// Applies the outcome of a send for question `id`.
+    /// Applies the outcome of a send for question `id`. A recorded or no-longer-waiting
+    /// question leaves the queue before the next one shows, so its walk is not kept.
     pub fn sent(&mut self, id: &str, result: SendResult) {
         if self.current.as_deref() != Some(id) {
             return;
@@ -418,6 +442,8 @@ impl QuestionBlock {
                 }
             }
             KeyCode::Char('o') if is_web_link(&q.link) => return BlockEffect::OpenLink(q.link),
+            KeyCode::Char('n') => self.step(1),
+            KeyCode::Char('N') => self.step(-1),
             KeyCode::Esc => return BlockEffect::Leave,
             _ => {}
         }
@@ -478,9 +504,28 @@ impl QuestionBlock {
             // The summary stands on the last decision, so going back shows it again.
             KeyCode::Char('h') | KeyCode::Left | KeyCode::Esc => self.mode = Mode::Choosing,
             KeyCode::Char('o') if is_web_link(&q.link) => return BlockEffect::OpenLink(q.link),
+            KeyCode::Char('n') => self.step(1),
+            KeyCode::Char('N') => self.step(-1),
             _ => {}
         }
         BlockEffect::None
+    }
+
+    /// Shows the listed question `by` places from the current one, wrapping over the
+    /// listed order. With one question listed, nothing changes.
+    fn step(&mut self, by: isize) {
+        let listed = &self.queue.questions;
+        let Some(at) = listed
+            .iter()
+            .position(|q| Some(&q.id) == self.current.as_ref())
+        else {
+            return;
+        };
+        let next = (at as isize + by).rem_euclid(listed.len() as isize) as usize;
+        if next != at {
+            let id = listed[next].id.clone();
+            self.show(&id);
+        }
     }
 
     fn note_key(&mut self, code: KeyCode, kind: NoteKind, mut text: String) -> BlockEffect {
@@ -627,12 +672,54 @@ impl QuestionBlock {
     fn select_first(&mut self) {
         match self.queue.questions.first() {
             Some(q) => {
-                self.current = Some(q.id.clone());
-                self.version = q.version;
+                let id = q.id.clone();
+                self.show(&id);
             }
-            None => self.current = None,
+            None => {
+                self.current = None;
+                self.restart();
+            }
         }
-        self.restart();
+    }
+
+    /// Makes listed question `id` current. The current question's walk is kept while it
+    /// is still listed, and `id`'s kept walk comes back when it was made on the listed
+    /// version; otherwise `id` starts at decision 1.
+    fn show(&mut self, id: &str) {
+        let Some(version) = self
+            .queue
+            .questions
+            .iter()
+            .find(|q| q.id == id)
+            .map(|q| q.version)
+        else {
+            return;
+        };
+        if let Some(current) = self.question().map(|q| q.id.clone()) {
+            let mode = match self.mode {
+                Mode::Summary => Mode::Summary,
+                _ => Mode::Choosing,
+            };
+            let kept = Kept {
+                version: self.version,
+                decision: self.decision,
+                picks: std::mem::take(&mut self.picks),
+                highlights: std::mem::take(&mut self.highlights),
+                mode,
+            };
+            self.kept.insert(current, kept);
+        }
+        self.current = Some(id.to_string());
+        self.version = version;
+        match self.kept.remove(id) {
+            Some(kept) if kept.version == version => {
+                self.decision = kept.decision;
+                self.picks = kept.picks;
+                self.highlights = kept.highlights;
+                self.mode = kept.mode;
+            }
+            _ => self.restart(),
+        }
     }
 }
 
@@ -1353,5 +1440,132 @@ mod tests {
         let mut b = block(vec![question("Q1", 1, 1)]);
         b.sent("Q1", SendResult::Recorded);
         assert!(!b.is_visible());
+    }
+
+    #[test]
+    fn n_and_n_shift_move_between_questions_and_wrap() {
+        let shown_id = |b: &QuestionBlock| b.view().unwrap().id;
+        let mut b = block(vec![
+            question("Q1", 1, 1),
+            question("Q2", 1, 1),
+            question("Q3", 1, 1),
+        ]);
+        press(&mut b, KeyCode::Char('n'));
+        assert_eq!(shown_id(&b), "Q2");
+        press_times(&mut b, KeyCode::Char('n'), 2);
+        assert_eq!(shown_id(&b), "Q1", "n wraps past the last question");
+        press(&mut b, KeyCode::Char('N'));
+        assert_eq!(shown_id(&b), "Q3", "N wraps past the first question");
+        press(&mut b, KeyCode::Enter);
+        assert_eq!(b.view().unwrap().mode, Mode::Summary);
+        press(&mut b, KeyCode::Char('n'));
+        let v = b.view().unwrap();
+        assert_eq!(
+            (v.id.as_str(), v.mode),
+            ("Q1", Mode::Choosing),
+            "n moves from the summary"
+        );
+
+        let mut b = block(vec![question("Q1", 1, 2)]);
+        press(&mut b, KeyCode::Char('l'));
+        let before = b.view();
+        press(&mut b, KeyCode::Char('n'));
+        assert_eq!(b.view(), before, "one question: n does nothing");
+        press(&mut b, KeyCode::Char('N'));
+        assert_eq!(b.view(), before, "one question: N does nothing");
+    }
+
+    #[test]
+    fn n_away_and_back_keeps_the_half_picked_question() {
+        let mut b = block(vec![question("Q25", 1, 2), question("Q26", 1, 1)]);
+        press(&mut b, KeyCode::Char('l'));
+        press(&mut b, KeyCode::Char('n'));
+        assert_eq!(b.view().unwrap().id, "Q26");
+        assert!(
+            b.view().unwrap().picks.is_empty(),
+            "Q26 starts with no picks"
+        );
+        press(&mut b, KeyCode::Char('N'));
+        let v = b.view().unwrap();
+        assert_eq!(v.id, "Q25");
+        assert_eq!(v.ask.as_deref(), Some("Ask 2?"));
+        assert_eq!(v.picks, vec!["label b".to_string()]);
+    }
+
+    #[test]
+    fn kept_picks_drop_when_the_version_rises() {
+        let mut b = block(vec![question("Q25", 1, 2), question("Q26", 1, 1)]);
+        press(&mut b, KeyCode::Char('l'));
+        press(&mut b, KeyCode::Char('n'));
+        b.reconcile(queue(vec![question("Q25", 2, 2), question("Q26", 1, 1)]));
+        assert_eq!(b.view().unwrap().notice, None, "Q25 is not in view");
+        press(&mut b, KeyCode::Char('N'));
+        let v = b.view().unwrap();
+        assert_eq!(v.id, "Q25");
+        assert_eq!(v.ask.as_deref(), Some("Ask 1?"));
+        assert!(v.picks.is_empty());
+        assert_eq!(v.highlighted, 1, "the suggested option");
+        assert_eq!(v.notice, None);
+        assert_eq!(b.shown().unwrap().1, 2);
+    }
+
+    #[test]
+    fn kept_picks_go_when_the_question_is_dismissed_or_answered() {
+        let fresh = |b: &QuestionBlock| {
+            let v = b.view().unwrap();
+            assert_eq!(v.id, "Q25");
+            assert_eq!(v.ask.as_deref(), Some("Ask 1?"));
+            assert!(v.picks.is_empty());
+        };
+        let mut b = block(vec![question("Q25", 1, 2), question("Q26", 1, 1)]);
+        press(&mut b, KeyCode::Char('l'));
+        press(&mut b, KeyCode::Char('n'));
+        b.reconcile(queue(vec![question("Q26", 1, 1)]));
+        b.reconcile(queue(vec![question("Q25", 1, 2), question("Q26", 1, 1)]));
+        assert_eq!(b.view().unwrap().id, "Q26");
+        press(&mut b, KeyCode::Char('N'));
+        fresh(&b);
+
+        let mut b = block(vec![
+            question("Q27", 1, 1),
+            question("Q25", 1, 2),
+            question("Q26", 1, 1),
+        ]);
+        press(&mut b, KeyCode::Char('n'));
+        press(&mut b, KeyCode::Char('l'));
+        press(&mut b, KeyCode::Char('n'));
+        assert_eq!(b.view().unwrap().id, "Q26");
+        b.sent("Q26", SendResult::Recorded);
+        assert_eq!(b.view().unwrap().id, "Q27");
+        b.reconcile(queue(vec![question("Q27", 1, 1)]));
+        b.reconcile(queue(vec![question("Q27", 1, 1), question("Q25", 1, 2)]));
+        press(&mut b, KeyCode::Char('n'));
+        fresh(&b);
+    }
+
+    #[test]
+    fn an_answered_question_keeps_no_walk() {
+        let mut b = block(vec![question("Q1", 1, 1), question("Q2", 1, 1)]);
+        press(&mut b, KeyCode::Char('l'));
+        b.sent("Q1", SendResult::Recorded);
+        // Harold lists it again at the same version, as a stale read might.
+        b.reconcile(queue(vec![question("Q2", 1, 1), question("Q1", 1, 1)]));
+        press(&mut b, KeyCode::Char('n'));
+        let v = b.view().unwrap();
+        assert_eq!((v.id.as_str(), v.mode), ("Q1", Mode::Choosing));
+        assert!(v.picks.is_empty());
+    }
+
+    #[test]
+    fn later_keeps_the_picks() {
+        let mut b = block(vec![question("Q1", 1, 2), question("Q2", 1, 1)]);
+        press(&mut b, KeyCode::Char('l'));
+        assert_eq!(open_action(&mut b, 0), BlockEffect::Defer("Q1".into()));
+        assert_eq!(b.view().unwrap().id, "Q2");
+        press(&mut b, KeyCode::Char('n'));
+        let v = b.view().unwrap();
+        assert_eq!(v.id, "Q1");
+        assert_eq!(v.ask.as_deref(), Some("Ask 2?"));
+        assert_eq!(v.picks, vec!["label b".to_string()]);
     }
 }
