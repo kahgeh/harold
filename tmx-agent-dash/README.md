@@ -117,7 +117,7 @@ With the focus on the block, in the decision view:
 | `Enter` | Pick the highlighted option and go to the next decision. After the last decision, show the summary. A free option opens a text field first |
 | `r` | Revise: type a note saying what to change, then `Enter` records it |
 | `x` | Reject: type a note saying why, then `Enter` records it |
-| `o` | Open the question's link |
+| `o` | Open the question's link (only `http://` and `https://` links) |
 | `l` | Later: set the question aside and go on to the next one |
 | `Esc` | Step back one decision, dropping its pick. At the first decision, give the focus back to the list |
 

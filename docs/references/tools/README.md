@@ -21,7 +21,7 @@ The host (`harold/src/tools.rs`) builds the `ToolContext` and calls `start`. The
 
 `start` gives back a `ToolHandle`: the gRPC `routes` the host adds to its server, and the `task` the host joins on shutdown. The task must end when `shutdown` fires.
 
-`PaneTyping::type_line` returns a `Typing`: `Typed`, `EnterFailed` (the text is in the input box but Enter failed, so typing it again would repeat it), `PaneBusy` or `NoPane`. It holds the pane against Harold's other writers as `Writer::Tool(name)`. Two tools with different names hold the pane against each other like any two writers. It logs nothing; the tool logs its own lines.
+`PaneTyping::type_line` returns a `Typing`: `Typed`, `EnterFailed` (the text is in the input box but Enter failed, so typing it again would repeat it), `PaneBusy` or `NoPane`. It holds the pane against Harold's other writers as `Writer::Tool(name)`. Today the host builds one `TmuxTyping` with `Writer::Tool(questions::NAME)` and gives it to the one tool it starts, so the writer is the question tool's. Two tools with different names would hold the pane against each other like any two writers, but only if the host gives each its own writer. It logs nothing; the tool logs its own lines.
 
 `ChiefPane` finds the one agent pane whose folder is `[notify] away_messages_only_from`. With no folder set, no such pane, or more than one, there is no chief and the tool should wait.
 
@@ -52,9 +52,10 @@ There is no setting that turns a tool off. To stop one, remove its `start_tool` 
 1. Write the module under `harold/src/tools/<name>/` with `NAME` and `start`. Open storage in `ctx.data_folder`.
 2. Add a proto under `harold-api/proto/tools/<name>.proto`, and build it in `harold-api/build.rs`.
 3. Add `pub(crate) mod <name>;` and one `start_tool` call in the host's `start_with`, with `data_folder(store_path, <name>::NAME)`.
-4. Add a CLI subcommand under `harold tool <name>`.
-5. Log with fixed lines and the fields `tool`, `question_id` or another id, `version` and `reason`. Never log user text.
-6. Write a page here, as `docs/references/tools/<name>.md`.
+4. Give the tool its own writer. The host does not do this for you: build a `TmuxTyping { writer: Writer::Tool(<name>::NAME), .. }` for the new tool, and its own `ChiefPane` if it needs a different lookup, and put them in its `ToolContext`. Reusing the question tool's `typing` would type as `Tool("questions")`.
+5. Add a CLI subcommand under `harold tool <name>`.
+6. Log with fixed lines and the fields `tool`, `question_id` or another id, `version` and `reason`. Never log user text.
+7. Write a page here, as `docs/references/tools/<name>.md`.
 
 ## The next tool
 
