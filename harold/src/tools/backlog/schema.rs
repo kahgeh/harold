@@ -138,7 +138,7 @@ pub(super) struct QueueListing {
     pub note: String,
 }
 
-fn under(text: &str, limit: usize) -> bool {
+pub(super) fn under(text: &str, limit: usize) -> bool {
     text.chars().count() < limit
 }
 

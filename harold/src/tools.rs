@@ -33,7 +33,6 @@ pub(crate) type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 /// The reason `Products` gives when the registry is set but cannot be read. The error's
 /// own text names the registry's path, so it is not passed on.
-#[allow(dead_code)] // Read by the backlog tool.
 const REGISTRY_UNREADABLE: &str = "registry_unreadable";
 
 /// How typing one line into a pane went.
@@ -73,20 +72,17 @@ pub(crate) trait ChiefPane: Send + Sync {
 }
 
 /// Finds the folder an agent pane is in, if the pane is an agent's.
-#[allow(dead_code)] // Read by the backlog tool.
 pub(crate) trait PaneFolder: Send + Sync {
     fn folder_of(&self, pane_id: &str) -> Option<PathBuf>;
 }
 
 /// Lists the registry's products as `(name, repo)`. The word in `Err` says why the
 /// registry could not be read.
-#[allow(dead_code)] // Read by the backlog tool.
 pub(crate) trait Products: Send + Sync {
     fn products(&self) -> Result<Vec<(String, PathBuf)>, &'static str>;
 }
 
 /// What the host gives a tool when it starts.
-#[allow(dead_code)] // Read by the backlog tool.
 pub(crate) struct ToolContext {
     /// The tool's own folder, `<store folder>/tools/<name>/`.
     pub(crate) data_folder: PathBuf,
@@ -178,17 +174,45 @@ async fn start_with(
         routes: Routes::default(),
         tasks: Vec::new(),
     };
-    let started = questions::start(ToolContext {
-        data_folder: data_folder(store_path, questions::NAME),
-        typing: Some(typing),
+    let [(questions_name, questions_ctx), (backlog_name, backlog_ctx)] = contexts(
+        store_path,
+        typing,
         chief_pane,
         pane_folder,
         products,
         shutdown,
-    })
-    .await;
-    start_tool(questions::NAME, started, &mut tools);
+    );
+    start_tool(
+        questions_name,
+        questions::start(questions_ctx).await,
+        &mut tools,
+    );
+    start_tool(backlog_name, backlog::start(backlog_ctx).await, &mut tools);
     tools
+}
+
+/// Each tool's name and context, in the order they start. Only the question tool
+/// types, so the backlog tool is given no typing.
+fn contexts(
+    store_path: &str,
+    typing: Arc<dyn PaneTyping>,
+    chief_pane: Arc<dyn ChiefPane>,
+    pane_folder: Arc<dyn PaneFolder>,
+    products: Arc<dyn Products>,
+    shutdown: watch::Receiver<()>,
+) -> [(&'static str, ToolContext); 2] {
+    let context = |name: &str, typing: Option<Arc<dyn PaneTyping>>| ToolContext {
+        data_folder: data_folder(store_path, name),
+        typing,
+        chief_pane: Arc::clone(&chief_pane),
+        pane_folder: Arc::clone(&pane_folder),
+        products: Arc::clone(&products),
+        shutdown: shutdown.clone(),
+    };
+    [
+        (questions::NAME, context(questions::NAME, Some(typing))),
+        (backlog::NAME, context(backlog::NAME, None)),
+    ]
 }
 
 /// Adds a started tool's routes and task to `tools`, or logs why it could not
@@ -278,7 +302,6 @@ impl<P: Ports> ChiefPane for SnapshotChiefPane<P> {
 }
 
 /// Finds an agent pane's folder in the agent snapshot.
-#[allow(dead_code)] // Read by the backlog tool.
 struct SnapshotPaneFolder<P = TmuxPorts> {
     ports: Arc<P>,
 }
@@ -297,7 +320,6 @@ impl<P: Ports> PaneFolder for SnapshotPaneFolder<P> {
 
 /// Reads the pod registry on every call, so an edit to it shows at once. With no
 /// registry set there are no products.
-#[allow(dead_code)] // Read by the backlog tool.
 struct RegistryProducts {
     path: Option<PathBuf>,
 }

@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use harold_api::harold as hp;
+use harold_api::tools::backlog::v1 as bp;
 use harold_api::tools::questions::v1 as pb;
 use tokio::sync::watch;
 use tonic::service::Routes;
@@ -16,6 +17,8 @@ use crate::timed_prompts::tests::{CHIEF, Fake, Key, wait_until};
 use crate::timed_prompts::{AgentPane, AgentsView, Attempt, Ports, Reason, type_when_ready};
 
 const CANARY: &str = "QUEUE-CANARY-2207";
+const QUESTIONS: &str = "harold.tools.questions.v1.QuestionService";
+const BACKLOG: &str = "harold.tools.backlog.v1.BacklogService";
 const DAY: &str = "2026-10-14";
 
 /// A folder under the system's temporary folder, removed when dropped.
@@ -109,10 +112,11 @@ fn host_ports(fake: &Fake) -> HostPorts {
     )
 }
 
-/// One unary call to the question service through `routes`, framed as a gRPC client
+/// One unary call to a tool's `service` through `routes`, framed as a gRPC client
 /// frames it. A refusal comes back as its `grpc-status` code and message.
 async fn call<Req: prost::Message, Resp: prost::Message + Default>(
     routes: &Routes,
+    service: &str,
     method: &str,
     request: Req,
 ) -> Result<Resp, String> {
@@ -124,9 +128,7 @@ async fn call<Req: prost::Message, Resp: prost::Message + Default>(
     framed.extend_from_slice(&message);
     let request = tonic::codegen::http::Request::builder()
         .method("POST")
-        .uri(format!(
-            "/harold.tools.questions.v1.QuestionService/{method}"
-        ))
+        .uri(format!("/{service}/{method}"))
         .header("content-type", "application/grpc")
         .header("te", "trailers")
         .body(axum::body::Body::from(framed))
@@ -190,7 +192,7 @@ fn data_folder_is_beside_the_store() {
 async fn a_tool_that_fails_to_start_is_logged_and_harold_runs_on() {
     let logs = CapturedLogs::start();
     let folder = TempFolder::new();
-    // `tools` is a file, so the tool's data folder `<folder>/tools/questions` cannot be made.
+    // `tools` is a file, so no tool's data folder `<folder>/tools/<name>` can be made.
     std::fs::write(folder.0.join("tools"), "not a folder").unwrap();
     let (typing, chief, folders, products) = host_ports(&Fake::at(DAY, "09:00:00"));
     let (_shutdown, shutdown_rx) = watch::channel(());
@@ -211,11 +213,14 @@ async fn a_tool_that_fails_to_start_is_logged_and_harold_runs_on() {
         .lines()
         .filter(|line| line.contains("tool failed to start"))
         .collect();
-    assert_eq!(failed.len(), 1, "{text}");
     // Only `tool` and a fixed `reason`: no error text, so no path.
     assert_eq!(
-        failed[0],
-        " WARN harold::tools: tool failed to start tool=\"questions\" reason=\"store_open_failed\""
+        failed,
+        [
+            " WARN harold::tools: tool failed to start tool=\"questions\" reason=\"store_open_failed\"",
+            " WARN harold::tools: tool failed to start tool=\"backlog\" reason=\"store_open_failed\"",
+        ],
+        "{text}"
     );
     let folder_name = folder.0.file_name().unwrap().to_str().unwrap();
     assert!(!text.contains(folder_name), "{text}");
@@ -226,13 +231,18 @@ async fn a_tool_that_fails_to_start_is_logged_and_harold_runs_on() {
         "an exported record names the data folder"
     );
     // Harold runs on: the routes answer, as unimplemented, and the host stops at once.
-    let listed: Result<pb::ListQuestionsResponse, String> =
-        call(&tools.routes, "ListQuestions", pb::ListQuestionsRequest {}).await;
+    let listed: Result<pb::ListQuestionsResponse, String> = call(
+        &tools.routes,
+        QUESTIONS,
+        "ListQuestions",
+        pb::ListQuestionsRequest {},
+    )
+    .await;
     assert_eq!(listed.unwrap_err(), "12 ");
     tokio::time::timeout(Duration::from_secs(1), tools.stopped())
         .await
         .expect("a host with no tool stops at once");
-    println!("evidence: log line: {}", failed[0]);
+    println!("evidence: log lines: {failed:?}");
 }
 
 #[tokio::test]
@@ -343,6 +353,103 @@ fn tools_rs_names_no_database_type() {
     let host = include_str!("tools.rs");
     assert!(!host.to_lowercase().contains("turso"));
     assert!(!host.contains("QuestionStore"));
+    assert!(!host.contains("BacklogStore"));
+}
+
+/// Every `backlog::` in `source` that names the tool's module is `backlog::start` or
+/// `backlog::NAME`. `harold_api::tools::backlog::` is the generated proto, not the module.
+fn backlog_paths_outside_start_and_name(source: &str) -> Vec<String> {
+    source
+        .match_indices("backlog::")
+        .filter(|(at, _)| !source[..*at].ends_with("harold_api::tools::"))
+        .map(|(at, found)| &source[at + found.len()..])
+        .filter(|rest| !rest.starts_with("start") && !rest.starts_with("NAME"))
+        .map(|rest| rest.lines().next().unwrap_or_default().to_string())
+        .collect()
+}
+
+#[test]
+fn outside_the_module_only_start_and_name_are_used() {
+    for (file, source) in [
+        ("tools.rs", include_str!("tools.rs")),
+        ("cli.rs", include_str!("cli.rs")),
+    ] {
+        let others = backlog_paths_outside_start_and_name(source);
+        assert!(others.is_empty(), "{file} uses backlog::{others:?}");
+    }
+    assert!(include_str!("tools.rs").contains("backlog::start"));
+    assert_eq!(
+        backlog_paths_outside_start_and_name(
+            "backlog::store::Open; harold_api::tools::backlog::v1"
+        ),
+        ["store::Open; harold_api::tools::backlog::v1"]
+    );
+}
+
+#[tokio::test]
+async fn the_backlog_tool_starts_with_no_typing_and_creates_backlog_db() {
+    let folder = TempFolder::new();
+    let (typing, chief, folders, products) = host_ports(&Fake::at(DAY, "09:00:00"));
+    let (shutdown, shutdown_rx) = watch::channel(());
+
+    let tools = start_with(
+        &folder.store_path(),
+        typing,
+        chief,
+        folders,
+        products,
+        shutdown_rx,
+    )
+    .await;
+
+    assert_eq!(tools.tasks.len(), 2);
+    assert!(folder.0.join("tools/backlog/backlog.db").is_file());
+    let listing: bp::ListQueueResponse = call(
+        &tools.routes,
+        BACKLOG,
+        "ListQueue",
+        bp::ListQueueRequest { done_since_ms: 0 },
+    )
+    .await
+    .unwrap();
+    assert!(listing.now.is_none() && listing.parked.is_empty());
+    // The question tool still answers beside it.
+    let questions: pb::ListQuestionsResponse = call(
+        &tools.routes,
+        QUESTIONS,
+        "ListQuestions",
+        pb::ListQuestionsRequest {},
+    )
+    .await
+    .unwrap();
+    assert_eq!(questions.waiting, 0);
+    drop(shutdown);
+    tokio::time::timeout(Duration::from_secs(5), tools.stopped())
+        .await
+        .expect("both tools stop on shutdown");
+}
+
+#[test]
+fn the_backlog_tool_is_given_no_typing() {
+    let (typing, chief, folders, products) = host_ports(&Fake::at(DAY, "09:00:00"));
+    let (_shutdown, shutdown_rx) = watch::channel(());
+
+    let [(first, questions), (second, backlog)] = contexts(
+        "/Users/me/.harold/store",
+        typing,
+        chief,
+        folders,
+        products,
+        shutdown_rx,
+    );
+
+    assert_eq!((first, second), (questions::NAME, backlog::NAME));
+    assert!(questions.typing.is_some());
+    assert!(backlog.typing.is_none());
+    assert_eq!(
+        backlog.data_folder,
+        PathBuf::from("/Users/me/.harold/tools/backlog")
+    );
 }
 
 #[tokio::test]
@@ -362,11 +469,12 @@ async fn the_canary_reaches_no_log_or_export() {
         shutdown_rx,
     )
     .await;
-    assert_eq!(tools.tasks.len(), 1);
+    assert_eq!(tools.tasks.len(), 2);
     let id = unique_id();
 
     let put: pb::PutQuestionResponse = call(
         &tools.routes,
+        QUESTIONS,
         "PutQuestion",
         pb::PutQuestionRequest {
             question: Some(question(&id)),
@@ -376,6 +484,7 @@ async fn the_canary_reaches_no_log_or_export() {
     .unwrap();
     let _: pb::AnswerQuestionResponse = call(
         &tools.routes,
+        QUESTIONS,
         "AnswerQuestion",
         pb::AnswerQuestionRequest {
             id: id.clone(),
