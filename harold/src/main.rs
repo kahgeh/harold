@@ -39,8 +39,7 @@ use harold::{
     ReportAgentStateResponse, ReportNotificationRequest, ReportNotificationResponse,
     SendMessageToAwayDeviceRequest, SendMessageToAwayDeviceResponse, SetMessagingPausedRequest,
     SetMessagingPausedResponse, SetTtsMutedRequest, SetTtsMutedResponse, SpeakLineRequest,
-    SpeakLineResponse, TurnCompleteRequest, TurnCompleteResponse, TypeLineRequest,
-    TypeLineResponse, WatchAgentStatesRequest,
+    SpeakLineResponse, TurnCompleteRequest, TurnCompleteResponse, WatchAgentStatesRequest,
 };
 
 struct HaroldService {
@@ -57,8 +56,6 @@ struct HaroldService {
     shutdown: watch::Receiver<()>,
     /// Which of the two peer RPCs this Harold answers, and for whom.
     peers: peers::PeerEndpoint,
-    /// What `TypeLine` types through.
-    typing: timed_prompts::TmuxPorts,
 }
 
 /// The service Harold serves, answering the peer calls its `settings` call for.
@@ -72,12 +69,11 @@ fn harold_service(
     HaroldService {
         monitor,
         store,
-        snapshots: snapshots.clone(),
+        snapshots,
         messaging_switch: tokio::sync::Mutex::new(None),
         tts_switch: tokio::sync::Mutex::new(None),
         shutdown,
         peers: peers::PeerEndpoint::from_settings(&settings.notify.away_channel, &settings.peers),
-        typing: timed_prompts::TmuxPorts::new(snapshots, settings.agents.0.clone()),
     }
 }
 
@@ -479,25 +475,6 @@ impl Harold for HaroldService {
             harold::CallAction::Status | harold::CallAction::Unspecified => calls.status(),
         };
         Ok(Response::new(call_response(&status)))
-    }
-
-    async fn type_line(
-        &self,
-        request: Request<TypeLineRequest>,
-    ) -> Result<Response<TypeLineResponse>, Status> {
-        let TypeLineRequest { pane_id, text } = request.into_inner();
-        if !agent::runtime::valid_pane_id(&pane_id) {
-            return Err(Status::invalid_argument("pane_id is not a tmux pane id"));
-        }
-        let text = away_message::one_line(&text);
-        if text.is_empty() {
-            return Err(Status::invalid_argument("text is required"));
-        }
-        let outcome = timed_prompts::type_line(&self.typing, &pane_id, &text).await;
-        Ok(Response::new(TypeLineResponse {
-            typed: outcome == timed_prompts::LineOutcome::Typed,
-            reason: outcome.reason().to_string(),
-        }))
     }
 }
 

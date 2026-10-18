@@ -320,15 +320,18 @@ pub(crate) fn box_reason(screen: Option<&str>) -> Option<Reason> {
 
 /// Who types into a pane: timed prompts and alerts through `type_when_ready`, phone
 /// replies through `inbound::tmux::relay_to_tmux_pane`, and a spoken turn of a call
-/// with the chief through `type_when_ready`, and a line tmx-agent-dash asks for with the
-/// `TypeLine` RPC, which goes through `type_line` and `type_when_ready`.
+/// with the chief through `type_when_ready`, and a tool (named, such as the question tool)
+/// through `type_line` and `type_when_ready`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Writer {
     TimedPrompt,
     Alert,
     PhoneReply,
     Voice,
-    Dash,
+    /// A tool typing a line, by the tool's name. The question tool, built in a later task,
+    /// is the first to construct one.
+    #[allow(dead_code)]
+    Tool(&'static str),
 }
 
 /// One pane's lock and what the writers share about the pane.
@@ -866,20 +869,23 @@ pub(crate) async fn type_when_ready<P: Ports>(
 }
 
 // ---------------------------------------------------------------------------
-// The dash writer
+// Typing a line for a tool
 // ---------------------------------------------------------------------------
 
 /// How long `type_line` waits for a pane to go idle.
-pub(crate) const DASH_LINE_WAIT: Duration = Duration::from_secs(120);
+#[allow(dead_code)]
+pub(crate) const LINE_WAIT: Duration = Duration::from_secs(120);
 
 /// How long `type_line` waits between tries.
-pub(crate) const DASH_LINE_RETRY: Duration = Duration::from_secs(1);
+#[allow(dead_code)]
+pub(crate) const LINE_RETRY: Duration = Duration::from_secs(1);
 
 /// How a `type_line` call ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub(crate) enum LineOutcome {
     Typed,
-    /// The pane stayed busy for `DASH_LINE_WAIT`.
+    /// The pane stayed busy for `LINE_WAIT`.
     PaneBusy,
     /// No agent pane has the id.
     NoPane,
@@ -888,7 +894,8 @@ pub(crate) enum LineOutcome {
 }
 
 impl LineOutcome {
-    /// The reason the `TypeLine` RPC answers with.
+    /// A short word for the outcome.
+    #[allow(dead_code)]
     pub(crate) fn reason(self) -> &'static str {
         match self {
             Self::Typed => "typed",
@@ -899,20 +906,26 @@ impl LineOutcome {
     }
 }
 
-/// Types `text` into the agent pane `pane_id` and presses Enter, waiting up to
-/// `DASH_LINE_WAIT` for the pane to be ready. Logs the pane and the reason, never the text.
-pub(crate) async fn type_line<P: Ports>(ports: &P, pane_id: &str, text: &str) -> LineOutcome {
-    let outcome = type_line_when_ready(ports, pane_id, text).await;
-    if outcome == LineOutcome::Typed {
-        info!(pane_id, reason = outcome.reason(), "dash line typed");
-    } else {
-        info!(pane_id, reason = outcome.reason(), "dash line not typed");
-    }
-    outcome
+/// Types `text` into the agent pane `pane_id` as `writer` and presses Enter, waiting up to
+/// `LINE_WAIT` for the pane to be ready. Logs nothing: the caller logs what it needs to.
+#[allow(dead_code)]
+pub(crate) async fn type_line<P: Ports>(
+    ports: &P,
+    writer: Writer,
+    pane_id: &str,
+    text: &str,
+) -> LineOutcome {
+    type_line_when_ready(ports, writer, pane_id, text).await
 }
 
-async fn type_line_when_ready<P: Ports>(ports: &P, pane_id: &str, text: &str) -> LineOutcome {
-    let deadline = Instant::now() + DASH_LINE_WAIT;
+#[allow(dead_code)]
+async fn type_line_when_ready<P: Ports>(
+    ports: &P,
+    writer: Writer,
+    pane_id: &str,
+    text: &str,
+) -> LineOutcome {
+    let deadline = Instant::now() + LINE_WAIT;
     loop {
         let view = ports.agents();
         // A failed listing says nothing about the pane: wait and look again.
@@ -920,7 +933,7 @@ async fn type_line_when_ready<P: Ports>(ports: &P, pane_id: &str, text: &str) ->
             let Some(pane) = view.panes.iter().find(|pane| pane.pane_id == pane_id) else {
                 return LineOutcome::NoPane;
             };
-            match type_when_ready(ports, Writer::Dash, &pane.folder, text, &view, &[]).await {
+            match type_when_ready(ports, writer, &pane.folder, text, &view, &[]).await {
                 Attempt::Typed { .. } => return LineOutcome::Typed,
                 Attempt::EnterFailed { .. } => return LineOutcome::Failed,
                 Attempt::Wait(Reason::NoAgentInFolder) => return LineOutcome::NoPane,
@@ -931,7 +944,7 @@ async fn type_line_when_ready<P: Ports>(ports: &P, pane_id: &str, text: &str) ->
         if remaining.is_zero() {
             return LineOutcome::PaneBusy;
         }
-        tokio::time::sleep(DASH_LINE_RETRY.min(remaining)).await;
+        tokio::time::sleep(LINE_RETRY.min(remaining)).await;
     }
 }
 
