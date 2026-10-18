@@ -923,6 +923,21 @@ impl Settings {
         let settings = config.try_deserialize::<Settings>()?;
         Ok(Arc::new(settings))
     }
+
+    /// Loads only `default.toml`, so unit tests never see a developer's `local.toml`
+    /// or `HAROLD_*` environment overrides.
+    #[cfg(test)]
+    pub fn load_defaults(config_dir: &str) -> Result<Arc<Self>, ConfigError> {
+        let config = Config::builder()
+            .add_source(File::new(
+                &format!("{config_dir}/default"),
+                FileFormat::Toml,
+            ))
+            .build()?;
+
+        let settings = config.try_deserialize::<Settings>()?;
+        Ok(Arc::new(settings))
+    }
 }
 
 pub fn get_settings() -> &'static Arc<Settings> {
@@ -934,11 +949,8 @@ pub fn init_settings_for_test() {
     static INIT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
     INIT.get_or_init(|| {
         let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
-        // SAFETY: called exactly once via OnceLock before any other thread reads this var.
-        unsafe {
-            std::env::set_var("HAROLD_CONFIG_DIR", format!("{manifest_dir}/config"));
-        }
-        let s = Settings::load().expect("failed to load settings for test");
+        let s = Settings::load_defaults(&format!("{manifest_dir}/config"))
+            .expect("failed to load settings for test");
         let _ = SETTINGS.set(s);
     });
 }
@@ -955,7 +967,7 @@ mod tests {
     use serde::Deserialize;
 
     use super::{
-        AgentMonitorSettings, AgentProviderSettings, AgentSettings, is_valid_machine_name,
+        AgentMonitorSettings, AgentProviderSettings, AgentSettings, Settings, is_valid_machine_name,
         machine_name_error, machine_name_from_hostname,
     };
 
@@ -2035,5 +2047,63 @@ mod tests {
             "{WEB_APP_FOLDER}[web_app]\nlisten = \"127.0.0.1:4330\"\nallowed_login = \"a@b.c\""
         ));
         assert!(!with.iter().any(|e| e == message), "{with:?}");
+    }
+
+    /// Removes the env vars and the temp dir when dropped, even if an assertion fails.
+    struct LoadTestGuard(std::path::PathBuf);
+
+    impl Drop for LoadTestGuard {
+        fn drop(&mut self) {
+            // SAFETY: only this test touches these vars.
+            unsafe {
+                std::env::remove_var("HAROLD_CONFIG_DIR");
+                std::env::remove_var("HAROLD_ENV");
+            }
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn unique_temp_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("harold-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        dir
+    }
+
+    #[test]
+    fn load_defaults_ignores_local_toml_but_load_reads_it() {
+        let dir = unique_temp_dir("load-defaults");
+        let _guard = LoadTestGuard(dir.clone());
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        std::fs::copy(
+            format!("{manifest_dir}/config/default.toml"),
+            dir.join("default.toml"),
+        )
+        .expect("copy default.toml");
+        std::fs::write(
+            dir.join("local.toml"),
+            "[ai]\nlocal_model = \"test-model\"\nlocal_model_dir = \"/nonexistent\"",
+        )
+        .expect("write local.toml");
+        let dir_str = dir.to_str().expect("utf-8 temp dir");
+
+        let defaults = Settings::load_defaults(dir_str).expect("load_defaults");
+        assert_eq!(defaults.ai.local_model, None);
+
+        // SAFETY: this is the only test that touches these vars.
+        unsafe {
+            std::env::set_var("HAROLD_CONFIG_DIR", dir_str);
+            std::env::set_var("HAROLD_ENV", "local");
+        }
+        let loaded = Settings::load().expect("load");
+        assert_eq!(loaded.ai.local_model.as_deref(), Some("test-model"));
+    }
+
+    #[test]
+    fn load_defaults_errors_when_default_toml_missing() {
+        let dir = unique_temp_dir("load-defaults-missing");
+        let _guard = LoadTestGuard(dir.clone());
+        let dir_str = dir.to_str().expect("utf-8 temp dir");
+        assert!(Settings::load_defaults(dir_str).is_err());
     }
 }
