@@ -135,6 +135,8 @@ A notice shows under the block until the next key:
 - `<id> dismissed: <reason>`: the chief withdrew the question, with its reason (`withdrawn` when none is known). The block moves to the next question.
 - `Harold can't save answers right now`: Harold could not store the answer or the deferral. Your picks stay; try again.
 
+When no question is left, a notice stands alone in the block. It goes at the next key, wherever the focus is, and otherwise after the next read that still finds no question, a few seconds on. Then the block hides. With the focus on the list, that key also does what it does on the list. With the focus on the block, the key only clears the notice, and the focus returns to the list.
+
 ### Reconnects
 
 If the queue cannot be read, or the stream to Harold is lost, the block hides but keeps your picks and any half-typed note. They come back when the next read succeeds and the question is unchanged. If the block had the focus, keys are ignored until `Tab` or `Esc` returns them to the list.

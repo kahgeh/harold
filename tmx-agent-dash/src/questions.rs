@@ -147,6 +147,9 @@ pub struct QuestionBlock {
     highlighted: usize,
     mode: Mode,
     notice: Option<String>,
+    /// The notice stood on a block with no question through one listing already; the next
+    /// listing that still finds no question clears it, and the block hides.
+    notice_listed: bool,
     /// Hidden after a failed read or a lost stream, with the picks, mode and note kept
     /// for the next listing.
     suspended: bool,
@@ -174,10 +177,16 @@ impl QuestionBlock {
     /// Takes the latest listing. The current question stays while it is listed at the same
     /// version; a higher version restarts it; a missing one is replaced with a notice.
     /// A suspended block shows again, and keeps its state when its question is listed at
-    /// the same version.
+    /// the same version. A notice on a block with no question stays for one more listing;
+    /// the one after that, still finding no question, clears it, so the block hides.
     pub fn reconcile(&mut self, queue: Queue) {
         self.suspended = false;
         self.queue = queue;
+        self.follow_current();
+        self.age_notice();
+    }
+
+    fn follow_current(&mut self) {
         let Some(id) = self.current.clone() else {
             self.select_first();
             return;
@@ -186,13 +195,25 @@ impl QuestionBlock {
             Some(q) if q.version > self.version => {
                 self.version = q.version;
                 self.restart();
-                self.notice = Some(changed_notice(&id));
+                self.set_notice(changed_notice(&id));
             }
             Some(_) => {}
             None => {
-                self.notice = Some(self.dismissed_notice(&id));
+                self.set_notice(self.dismissed_notice(&id));
                 self.select_first();
             }
+        }
+    }
+
+    /// Counts this listing for a notice on a block with no question, and clears the
+    /// notice on its second.
+    fn age_notice(&mut self) {
+        if self.current.is_some() || self.notice.is_none() {
+            self.notice_listed = false;
+        } else if self.notice_listed {
+            self.clear_notice();
+        } else {
+            self.notice_listed = true;
         }
     }
 
@@ -231,11 +252,18 @@ impl QuestionBlock {
     /// Clears the notice, as any key in the block does.
     pub fn clear_notice(&mut self) {
         self.notice = None;
+        self.notice_listed = false;
     }
 
-    /// Sets a notice, for the runtime's own messages.
+    /// Sets a notice, also for the runtime's own messages.
     pub fn set_notice(&mut self, text: String) {
         self.notice = Some(text);
+        self.notice_listed = false;
+    }
+
+    /// Whether the block shows only a notice, with no question; any key clears it.
+    pub fn shows_notice_only(&self) -> bool {
+        self.is_visible() && self.question().is_none()
     }
 
     /// Applies the outcome of a send for question `id`.
@@ -247,20 +275,20 @@ impl QuestionBlock {
             SendResult::Recorded => {
                 self.queue.questions.retain(|q| q.id != id);
                 self.queue.waiting = self.queue.waiting.saturating_sub(1);
-                self.notice = None;
+                self.clear_notice();
                 self.select_first();
             }
             SendResult::VersionChanged => {
                 self.restart();
-                self.notice = Some(changed_notice(id));
+                self.set_notice(changed_notice(id));
             }
             SendResult::NotWaiting => {
-                self.notice = Some(self.dismissed_notice(id));
+                self.set_notice(self.dismissed_notice(id));
                 self.queue.questions.retain(|q| q.id != id);
                 self.select_first();
             }
             SendResult::Unavailable => {
-                self.notice = Some(UNAVAILABLE_NOTICE.into());
+                self.set_notice(UNAVAILABLE_NOTICE.into());
             }
         }
     }
@@ -323,13 +351,14 @@ impl QuestionBlock {
             return BlockEffect::None;
         }
         if self.question().is_none() {
+            // Any key clears a notice on a block with no question, so the block hides.
+            self.clear_notice();
             if code == KeyCode::Esc {
-                self.notice = None;
                 return BlockEffect::Leave;
             }
             return BlockEffect::None;
         }
-        self.notice = None;
+        self.clear_notice();
         match self.mode.clone() {
             Mode::Choosing => self.choosing_key(code),
             Mode::Summary => self.summary_key(code),
@@ -939,6 +968,66 @@ mod tests {
         assert_eq!(press(&mut b, KeyCode::Esc), BlockEffect::Leave);
         assert!(!b.is_visible());
         assert!(b.view().is_none());
+    }
+
+    #[test]
+    fn a_dismissal_notice_with_an_empty_queue_goes_after_the_next_empty_list() {
+        let mut b = block(vec![question("Q1", 1, 1)]);
+        let mut gone = queue(vec![]);
+        gone.dismissed = vec![("Q1".into(), "no longer needed".into())];
+        b.reconcile(gone.clone());
+        assert_eq!(
+            b.view().unwrap().notice.as_deref(),
+            Some("Q1 dismissed: no longer needed")
+        );
+
+        b.reconcile(gone);
+
+        assert!(!b.is_visible(), "the block hides when nothing waits");
+        assert!(b.view().is_none());
+        // A question that comes later shows with no old notice.
+        b.reconcile(queue(vec![question("Q2", 1, 1)]));
+        assert_eq!(b.view().unwrap().notice, None);
+    }
+
+    #[test]
+    fn a_not_waiting_notice_stays_through_the_read_after_the_send() {
+        let mut b = block(vec![question("Q1", 1, 1)]);
+        b.sent("Q1", SendResult::NotWaiting);
+        // The read the runtime makes right after the send still shows it.
+        b.reconcile(queue(vec![]));
+        assert!(
+            b.view()
+                .unwrap()
+                .notice
+                .unwrap()
+                .starts_with("Q1 dismissed: ")
+        );
+        b.reconcile(queue(vec![]));
+        assert!(!b.is_visible());
+    }
+
+    #[test]
+    fn any_key_clears_a_notice_on_a_block_with_no_question() {
+        let mut b = block(vec![question("Q1", 1, 1)]);
+        b.reconcile(queue(vec![]));
+        assert!(b.shows_notice_only());
+        assert_eq!(press(&mut b, KeyCode::Char('x')), BlockEffect::None);
+        assert!(!b.is_visible());
+        assert!(!b.shows_notice_only());
+    }
+
+    #[test]
+    fn a_notice_beside_a_question_is_not_aged_by_listings() {
+        let mut b = block(vec![question("Q1", 1, 2), question("Q2", 1, 1)]);
+        let mut q = queue(vec![question("Q2", 1, 1)]);
+        q.dismissed = vec![("Q1".into(), "no longer needed".into())];
+        b.reconcile(q.clone());
+        b.reconcile(q.clone());
+        b.reconcile(q);
+        let v = b.view().unwrap();
+        assert_eq!(v.id, "Q2");
+        assert_eq!(v.notice.as_deref(), Some("Q1 dismissed: no longer needed"));
     }
 
     #[test]

@@ -817,6 +817,11 @@ impl App {
                 _ => return Effect::None,
             }
         }
+        // A notice on a block with no question goes at the next key, and the block hides;
+        // the key still acts on the list. In the block, the block clears it itself.
+        if self.focus == Focus::List && self.questions.shows_notice_only() {
+            self.questions.clear_notice();
+        }
         if key.code == KeyCode::Tab && self.questions.is_visible() {
             self.focus = match self.focus {
                 Focus::List => Focus::Block,
@@ -2796,6 +2801,40 @@ mod tests {
             Effect::None,
             "q is not quit in the block"
         );
+    }
+
+    #[test]
+    fn a_notice_on_an_empty_block_goes_at_the_next_key_and_the_key_still_acts() {
+        let mut app = call_app(CallState::Off);
+        app.observe_questions(question_queue(&["Q1"]));
+        app.observe_questions(question_queue(&[]));
+        assert!(app.questions.shows_notice_only());
+        assert_eq!(app.focus, Focus::List);
+
+        // On the list: the notice goes and the key does what it does on the list.
+        assert_eq!(app.handle_key(KeyCode::Char('q')), Effect::Quit);
+        assert!(!app.questions.is_visible());
+
+        // In the block: the key only clears it, and the focus returns to the list.
+        app.observe_questions(question_queue(&["Q1"]));
+        app.handle_key(KeyCode::Tab);
+        app.observe_questions(question_queue(&[]));
+        assert_eq!(app.focus, Focus::Block);
+        assert_eq!(app.handle_key(KeyCode::Char('q')), Effect::None);
+        assert!(!app.questions.is_visible());
+        assert_eq!(app.focus, Focus::List);
+    }
+
+    #[test]
+    fn a_notice_on_an_empty_block_goes_after_the_next_empty_list() {
+        let mut app = call_app(CallState::Off);
+        app.observe_questions(question_queue(&["Q1"]));
+        app.handle_key(KeyCode::Tab);
+        app.observe_questions(question_queue(&[]));
+        assert!(app.questions.is_visible());
+        app.observe_questions(question_queue(&[]));
+        assert!(!app.questions.is_visible());
+        assert_eq!(app.focus, Focus::List);
     }
 
     #[test]

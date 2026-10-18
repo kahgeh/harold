@@ -449,12 +449,15 @@ where
                     // A key meant for a question that just changed, went or hid is
                     // dropped: the user has not seen what it would act on. The change
                     // is found by this key's own read, or was flagged by an earlier one.
+                    // A key for a block that this read hid (a notice it cleared) is
+                    // dropped too, rather than handed to the list.
                     let flagged = std::mem::take(&mut core.drop_next_block_key);
                     if core.app.wants_fresh_questions(key) {
                         let reaches_block = core.app.key_reaches_block(key);
                         let listed = stream.list_questions().await;
                         let changed = core.questions_listed(listed).question_changed;
-                        if reaches_block && (flagged || changed) {
+                        let hid = !core.app.questions.is_visible() && !core.app.swallowing_keys();
+                        if reaches_block && (flagged || changed || hid) {
                             draw(terminal, &core.app, clock)?;
                             continue;
                         }
@@ -2477,6 +2480,30 @@ mod tests {
                 text: "abcd".into(),
             }
         );
+    }
+
+    #[tokio::test]
+    async fn a_block_key_whose_read_clears_a_notice_is_dropped() {
+        let mut core = connected_core();
+        let navigator = FakeNavigator::successful();
+        core.app.observe_questions(question("Q1", 1, 1));
+        core.handle_key(KeyCode::Tab, &navigator);
+        core.app.question_sent("Q1", SendResult::NotWaiting);
+        assert!(core.app.questions.shows_notice_only());
+        assert_eq!(core.app.focus, Focus::Block);
+        let probe = question_probe(Some(Queue::default()));
+        // The read as the stream opens keeps the notice. `f` is meant for the block; its
+        // read clears the notice and hides the block, so it is dropped: on the list it
+        // would start a search and take the closing `q`.
+        let log = tokio::time::timeout(
+            Duration::from_secs(5),
+            run_question_stream(&mut core, &probe, &[KeyCode::Char('f')]),
+        )
+        .await
+        .expect("f was dropped, so q quit");
+        assert_eq!(log, lists(2));
+        assert!(!core.app.questions.is_visible());
+        assert_eq!(core.app.focus, Focus::List);
     }
 
     #[tokio::test]
