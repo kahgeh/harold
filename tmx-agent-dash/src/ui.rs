@@ -1346,6 +1346,7 @@ mod tests {
         let app = App::new(
             ConnectionState::Live,
             Snapshot {
+                harold_version: None,
                 tts_muted: false,
                 messaging_paused: false,
                 through_event_version: 1842,
@@ -1474,6 +1475,7 @@ mod tests {
         let app = App::new(
             ConnectionState::Live,
             Snapshot {
+                harold_version: None,
                 tts_muted: false,
                 messaging_paused: false,
                 through_event_version: 1843,
@@ -1516,6 +1518,7 @@ mod tests {
         let app = App::new(
             ConnectionState::Live,
             Snapshot {
+                harold_version: None,
                 tts_muted: false,
                 messaging_paused: false,
                 through_event_version: 1843,
@@ -1689,6 +1692,7 @@ mod tests {
         let mut app = App::new(
             ConnectionState::Stale,
             Snapshot {
+                harold_version: None,
                 tts_muted: false,
                 messaging_paused: false,
                 through_event_version: 42,
@@ -1776,6 +1780,7 @@ mod tests {
         );
 
         app.apply_later_snapshot(Snapshot {
+            harold_version: None,
             tts_muted: false,
             messaging_paused: false,
             through_event_version: 43,
@@ -1796,6 +1801,7 @@ mod tests {
         let app = App::new(
             ConnectionState::Live,
             Snapshot {
+                harold_version: None,
                 tts_muted: false,
                 messaging_paused: false,
                 through_event_version: 42,
@@ -2006,6 +2012,7 @@ mod tests {
         let unknown = App::new(
             crate::app::ConnectionState::Connecting,
             crate::app::Snapshot {
+                harold_version: None,
                 through_event_version: 0,
                 server_time_ms: 0,
                 monitor_health: Vec::new(),
@@ -2362,6 +2369,7 @@ mod tests {
 
     fn snapshot(monitor_health: Vec<MonitorHealth>, rows: Vec<AgentRow>) -> Snapshot {
         Snapshot {
+            harold_version: None,
             tts_muted: false,
             messaging_paused: false,
             through_event_version: 42,
@@ -2581,6 +2589,7 @@ mod tests {
         let mut app = App::new(
             crate::app::ConnectionState::Connecting,
             crate::app::Snapshot {
+                harold_version: None,
                 through_event_version: 0,
                 server_time_ms: 0,
                 monitor_health: Vec::new(),
@@ -3292,6 +3301,7 @@ mod tests {
         let app = App::new(
             ConnectionState::Live,
             Snapshot {
+                harold_version: None,
                 tts_muted: false,
                 messaging_paused: false,
                 through_event_version: 42,

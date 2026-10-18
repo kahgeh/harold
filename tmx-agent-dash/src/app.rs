@@ -4,6 +4,16 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::collections::HashSet;
 use std::fmt;
 
+/// Release tag compiled in by the release workflow; "source" for any other build.
+pub const DASH_VERSION: &str = version_or_source(option_env!("HAROLD_RELEASE_VERSION"));
+
+const fn version_or_source(value: Option<&'static str>) -> &'static str {
+    match value {
+        Some(version) if !version.is_empty() => version,
+        _ => "source",
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct AgentIncarnation {
     pub pane_id: String,
@@ -109,6 +119,8 @@ pub struct Snapshot {
     pub rows: Vec<AgentRow>,
     pub tts_muted: bool,
     pub messaging_paused: bool,
+    /// The release Harold reports, `None` while disconnected or when it sent none.
+    pub harold_version: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -223,6 +235,8 @@ pub enum FocusReading {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct App {
     pub connection: ConnectionState,
+    /// This dash's own release, fixed at compile time.
+    pub dash_version: String,
     pub snapshot: Snapshot,
     pub search: SearchState,
     pub palette: Option<PaletteState>,
@@ -317,6 +331,7 @@ impl App {
         let row_labels = build_labels(&snapshot.rows);
         Self {
             connection,
+            dash_version: DASH_VERSION.to_owned(),
             snapshot,
             search,
             palette: None,
@@ -626,6 +641,7 @@ impl App {
 
     pub fn mark_disconnected(&mut self) {
         self.call = None;
+        self.snapshot.harold_version = None;
         self.connection = if self.has_snapshot {
             ConnectionState::Stale
         } else {
@@ -1117,6 +1133,7 @@ mod tests {
     #[test]
     fn voice_is_unknown_until_a_snapshot_then_follows_the_snapshot() {
         let empty = Snapshot {
+            harold_version: None,
             through_event_version: 0,
             server_time_ms: 0,
             monitor_health: Vec::new(),
@@ -1166,6 +1183,7 @@ mod tests {
         app.begin_connection();
         assert_eq!(app.connection, ConnectionState::Connecting);
         app.apply_first_snapshot(Snapshot {
+            harold_version: None,
             tts_muted: false,
             messaging_paused: false,
             through_event_version: 2,
@@ -1220,6 +1238,7 @@ mod tests {
         let pane = incarnation("%1", 1, 2, 3, "codex");
         let mut app = empty_app();
         app.apply_first_snapshot(Snapshot {
+            harold_version: None,
             tts_muted: false,
             messaging_paused: false,
             through_event_version: 10,
@@ -1240,6 +1259,7 @@ mod tests {
 
         assert!(
             !app.apply_later_snapshot(Snapshot {
+                harold_version: None,
                 tts_muted: false,
                 messaging_paused: false,
                 through_event_version: 10,
@@ -1253,6 +1273,7 @@ mod tests {
 
         assert!(
             app.apply_later_snapshot(Snapshot {
+                harold_version: None,
                 tts_muted: false,
                 messaging_paused: false,
                 through_event_version: 11,
@@ -1761,6 +1782,7 @@ mod tests {
 
     fn snapshot(through_event_version: u64, server_time_ms: i64, rows: Vec<AgentRow>) -> Snapshot {
         Snapshot {
+            harold_version: None,
             tts_muted: false,
             messaging_paused: false,
             through_event_version,
@@ -1768,6 +1790,55 @@ mod tests {
             monitor_health: Vec::new(),
             rows,
         }
+    }
+
+    #[test]
+    fn a_disconnect_clears_the_harold_version_and_a_reconnect_shows_the_new_one() {
+        let search = SearchState {
+            query: String::new(),
+            editing: false,
+        };
+        let mut app = App::new(
+            ConnectionState::Connecting,
+            snapshot(0, 0, Vec::new()),
+            search,
+            None,
+        );
+        let with_version = |version: &str| Snapshot {
+            harold_version: Some(version.to_owned()),
+            ..snapshot(1, 1_000, Vec::new())
+        };
+
+        app.apply_first_snapshot(with_version("v0.8.0")).unwrap();
+        assert_eq!(app.snapshot.harold_version.as_deref(), Some("v0.8.0"));
+
+        app.mark_disconnected();
+        assert_eq!(app.snapshot.harold_version, None);
+
+        app.apply_first_snapshot(with_version("v0.9.0")).unwrap();
+        assert_eq!(app.snapshot.harold_version.as_deref(), Some("v0.9.0"));
+    }
+
+    #[test]
+    fn the_dash_version_defaults_to_source_in_tests() {
+        let search = SearchState {
+            query: String::new(),
+            editing: false,
+        };
+        let app = App::new(
+            ConnectionState::Connecting,
+            snapshot(0, 0, Vec::new()),
+            search,
+            None,
+        );
+        assert_eq!(app.dash_version, "source");
+    }
+
+    #[test]
+    fn an_unset_or_empty_release_version_is_source() {
+        assert_eq!(version_or_source(None), "source");
+        assert_eq!(version_or_source(Some("")), "source");
+        assert_eq!(version_or_source(Some("v0.9.0")), "v0.9.0");
     }
 
     fn health(state: MonitorHealthState, reason_code: &str) -> MonitorHealth {
@@ -1818,6 +1889,7 @@ mod tests {
 
     fn live_voice_app(muted: bool) -> App {
         let snapshot = Snapshot {
+            harold_version: None,
             through_event_version: 1,
             server_time_ms: 0,
             monitor_health: Vec::new(),
@@ -1916,6 +1988,7 @@ mod tests {
         let mut app = App::new(
             ConnectionState::Connecting,
             Snapshot {
+                harold_version: None,
                 through_event_version: 0,
                 server_time_ms: 0,
                 monitor_health: Vec::new(),
@@ -1983,6 +2056,7 @@ mod tests {
         let mut app = App::new(
             ConnectionState::Connecting,
             Snapshot {
+                harold_version: None,
                 through_event_version: 0,
                 server_time_ms: 0,
                 monitor_health: Vec::new(),

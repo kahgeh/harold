@@ -1020,6 +1020,7 @@ impl RuntimeCore {
             app: App::new(
                 ConnectionState::Connecting,
                 Snapshot {
+                    harold_version: None,
                     tts_muted: false,
                     messaging_paused: false,
                     through_event_version: 0,
@@ -2741,6 +2742,7 @@ mod tests {
 
     fn snapshot(revision: u64, health_state: MonitorHealthState) -> Snapshot {
         Snapshot {
+            harold_version: None,
             tts_muted: false,
             messaging_paused: false,
             through_event_version: revision,

@@ -37,6 +37,7 @@ const PANE_FIELD_LIMIT: usize = 256;
 const DIRECTORY_LIMIT: usize = 1_024;
 const SUMMARY_LIMIT: usize = 160;
 const MONITOR_FIELD_LIMIT: usize = 64;
+const HAROLD_VERSION_LIMIT: usize = 32;
 const TRANSCRIPT_LIMIT: usize = 1_024;
 const ERROR_LIMIT: usize = 512;
 /// Harold refuses a question field of 2,000 characters or more.
@@ -357,6 +358,11 @@ pub fn map_snapshot(snapshot: AgentStateSnapshot) -> Result<Snapshot, ProtocolEr
         rows,
         tts_muted: snapshot.tts_muted,
         messaging_paused: snapshot.messaging_paused,
+        harold_version: Some(sanitize_display(
+            &snapshot.harold_version,
+            HAROLD_VERSION_LIMIT,
+        ))
+        .filter(|version| !version.is_empty()),
     })
 }
 
@@ -574,6 +580,23 @@ mod tests {
         ProtocolError, SnapshotReader, SourceError, call_request_timeout, map_call, map_snapshot,
         spawn_reader,
     };
+
+    #[test]
+    fn maps_the_harold_version_cleaned_and_cut_or_none_when_empty() {
+        let map = |version: &str| {
+            map_snapshot(AgentStateSnapshot {
+                harold_version: version.into(),
+                ..Default::default()
+            })
+            .unwrap()
+            .harold_version
+        };
+        assert_eq!(map(""), None);
+        assert_eq!(map("\x1b[31m"), None);
+        assert_eq!(map("v0.9.0"), Some("v0.9.0".to_owned()));
+        assert_eq!(map("v0.9.0\x1b[31m\u{7}"), Some("v0.9.0".to_owned()));
+        assert_eq!(map(&"x".repeat(40)), Some("x".repeat(32)));
+    }
 
     #[test]
     fn maps_tts_muted_from_the_snapshot() {
