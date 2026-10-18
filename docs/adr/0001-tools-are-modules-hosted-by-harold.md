@@ -20,7 +20,7 @@ The question queue is Harold's first tool, and more are expected (the next is ea
 
 ## Consequences
 
-- A new tool adds its module, its proto in `harold-api`, its `harold tool <name>` commands in `cli.rs` and its start in `tools.rs`; it changes neither the core store nor the Harold gRPC service.
+- A new tool adds its module, its proto in `harold-api`, its `harold tool <name>` commands in `cli.rs` and their help lines in `main.rs`, and its start in `tools.rs`; it changes neither the core store nor the Harold gRPC service.
 - A rollback to an older Harold ignores `tools/<name>/`; deleting the folder empties that tool.
 - Each tool's database is separate from the core store, so the core's disk-fault handling does not cover it.
 - The data standard is still undecided; one database per tool is the current practice, not a standard.

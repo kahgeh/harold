@@ -5,11 +5,11 @@ Status: Accepted (dash-question-queue, merged at 8ab08a3)
 
 ## Context
 
-Harold's gRPC server is a plain TCP listener with no authentication. The question tool's `AnswerQuestion` is meant to be called only by the dash, on the user's keys.
+Harold's gRPC server is a plain TCP listener with no transport authentication: only the two peer calls, `ReportNotification` and `ForwardReply`, carry a secret in the request, and the tool services have none. The question tool's `AnswerQuestion` is meant to be called only by the dash, on the user's keys.
 
 ## Decision
 
-The tool services trust local callers, as the rest of Harold's API does. The dash is the only built client that answers, and the CLI has no answer command, but nothing stops a local process calling `AnswerQuestion`. The spec and docs say so plainly. No token is used.
+The tool services trust local callers, with no token or secret. The dash is the only built client that answers, and the CLI has no answer command, but nothing stops a local process calling `AnswerQuestion`. The spec and docs say so plainly.
 
 ## Consequences
 
