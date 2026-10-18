@@ -389,8 +389,8 @@ impl QuestionBlock {
                 self.highlights[self.decision] = (highlighted + 1).min(last_row);
             }
             KeyCode::Char('l') | KeyCode::Right => {
-                // An action row is not an answer to move on with, and a free option
-                // moves on only past text it already has.
+                // An action row is not an answer to move on with. A free option moves on
+                // past text it already has, and otherwise opens its text box as Enter does.
                 let Some(option) = options.get(highlighted) else {
                     return BlockEffect::None;
                 };
@@ -398,6 +398,8 @@ impl QuestionBlock {
                     self.set_pick(&q, option.key.clone(), String::new());
                 } else if self.kept_text(option).is_some() {
                     self.advance(&q);
+                } else {
+                    self.open_note(NoteKind::FreeText);
                 }
             }
             KeyCode::Char('h') | KeyCode::Left => self.decision = self.decision.saturating_sub(1),
@@ -424,19 +426,20 @@ impl QuestionBlock {
 
     /// Enter on [`ANSWER_ACTIONS`] row `action`.
     fn answer_action(&mut self, action: usize, id: String) -> BlockEffect {
-        match action {
-            0 => {
+        match ANSWER_ACTIONS.get(action).copied() {
+            Some("later") => {
                 self.defer_locally(&id);
                 BlockEffect::Defer(id)
             }
-            1 => {
+            Some("revise\u{2026}") => {
                 self.open_note(NoteKind::Revise);
                 BlockEffect::None
             }
-            _ => {
+            Some("reject\u{2026}") => {
                 self.open_note(NoteKind::Reject);
                 BlockEffect::None
             }
+            _ => BlockEffect::None,
         }
     }
 
@@ -998,12 +1001,23 @@ mod tests {
     }
 
     #[test]
-    fn l_on_a_free_option_with_no_text_does_nothing() {
-        let mut b = block(vec![question("Q1", 1, 2)]);
-        press(&mut b, KeyCode::Char('j'));
-        let before = b.view().unwrap();
-        assert_eq!(press(&mut b, KeyCode::Char('l')), BlockEffect::None);
-        assert_eq!(b.view().unwrap(), before);
+    fn l_on_a_free_option_with_no_pick_opens_its_text_box() {
+        for next in [KeyCode::Char('l'), KeyCode::Right] {
+            let mut b = block(vec![question("Q1", 1, 2)]);
+            press(&mut b, KeyCode::Char('j'));
+            assert_eq!(press(&mut b, next), BlockEffect::None);
+            let v = b.view().unwrap();
+            assert_eq!(
+                v.mode,
+                Mode::Note {
+                    kind: NoteKind::FreeText,
+                    text: String::new()
+                },
+                "{next:?}"
+            );
+            assert_eq!(v.ask.as_deref(), Some("Ask 1?"), "it does not move on");
+            assert!(v.picks.is_empty());
+        }
     }
 
     #[test]
