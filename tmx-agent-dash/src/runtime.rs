@@ -408,15 +408,15 @@ where
         // Tab), and after each answer or deferral. Each read is awaited inline and
         // bounded by VOICE_REQUEST_TIMEOUT. The chief's Now item is read beside the
         // queue as the stream opens and on each QUESTION_POLL_INTERVAL, the same way,
-        // except when that queue read failed (see `read_now`).
+        // except when that queue read timed out (see `read_now`).
         let polled = stream.call(CallAction::Status).await;
         if core.call_polled(polled) {
             draw(terminal, &core.app, clock)?;
         }
         let listed = stream.list_questions().await;
-        let questions_failed = listed.is_err();
+        let questions_timed_out = matches!(listed, Err(SourceError::TimedOut(_)));
         let changed = core.questions_listed(listed).changed;
-        let now = read_now(&mut stream, questions_failed).await;
+        let now = read_now(&mut stream, questions_timed_out).await;
         let now_changed = core.now_listed(now);
         if changed || now_changed {
             draw(terminal, &core.app, clock)?;
@@ -436,9 +436,9 @@ where
             }
             () = &mut question_poll => {
                 let listed = stream.list_questions().await;
-                let questions_failed = listed.is_err();
+                let questions_timed_out = matches!(listed, Err(SourceError::TimedOut(_)));
                 let changed = core.questions_refreshed(listed);
-                let now = read_now(&mut stream, questions_failed).await;
+                let now = read_now(&mut stream, questions_timed_out).await;
                 let now_changed = core.now_listed(now);
                 if changed || now_changed {
                     draw(terminal, &core.app, clock)?;
@@ -554,16 +554,18 @@ where
     result
 }
 
-/// The Now read that follows a question read. When the question read failed or timed
-/// out, Harold is not answering, so the Now read is skipped and the line hides, as a
-/// failed read would hide it: a hung Harold holds the keys for one timeout, not two.
+/// The Now read that follows a question read. When the question read timed out,
+/// Harold is not answering, so the Now read is skipped and the line hides, as a failed
+/// read would hide it: a hung Harold holds the keys for one timeout, not two. Any other
+/// question error (an Unimplemented question tool, say) answers at once, so the Now read
+/// still happens.
 async fn read_now<S: StreamPort>(
     stream: &mut S,
-    questions_failed: bool,
+    questions_timed_out: bool,
 ) -> Result<Option<String>, SourceError> {
-    if questions_failed {
+    if questions_timed_out {
         return Err(SourceError::Transport(
-            "skipped after a failed question read".into(),
+            "skipped after a timed-out question read".into(),
         ));
     }
     stream.list_queue_now().await
@@ -2208,11 +2210,11 @@ mod tests {
     }
 
     /// Runs `consume_stream` for `run_for` with the question poll every 20 ms, the
-    /// question tool answering `queue` (`None` fails every read) and the backlog tool
+    /// question tool as `questions` and the backlog tool
     /// answering `answers` in order, and returns how often the backlog tool was read.
     async fn run_now_stream(
         core: &mut RuntimeCore,
-        queue: Option<Queue>,
+        questions: QuestionProbe,
         answers: Vec<Result<Option<String>, SourceError>>,
         run_for: Duration,
     ) -> usize {
@@ -2222,7 +2224,7 @@ mod tests {
             reads: 0,
         }));
         let mut stream = FakeStream::pending(Arc::new(AtomicBool::new(false)));
-        stream.questions = Some(question_probe(queue));
+        stream.questions = Some(questions);
         stream.now = Some(Arc::clone(&probe));
         let (_input_sender, mut input) = InputPump::channel();
         let (shutdown_sender, mut shutdown) = FakeShutdown::channel();
@@ -2250,7 +2252,7 @@ mod tests {
         let mut core = connected_core();
         let reads = run_now_stream(
             &mut core,
-            Some(Queue::default()),
+            question_probe(Some(Queue::default())),
             vec![Ok(Some("a".into())), Ok(Some("b".into()))],
             Duration::from_millis(100),
         )
@@ -2264,7 +2266,7 @@ mod tests {
         let mut core = connected_core();
         let reads = run_now_stream(
             &mut core,
-            Some(Queue::default()),
+            question_probe(Some(Queue::default())),
             vec![
                 Ok(Some("a".into())),
                 Err(SourceError::Transport("status: Unimplemented".into())),
@@ -2285,18 +2287,36 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_failed_question_read_skips_the_now_read_and_hides_the_line() {
+    async fn a_timed_out_question_read_skips_the_now_read_and_hides_the_line() {
         let mut core = connected_core();
         core.app.observe_now(Some("a".into()));
+        let questions = question_probe(None);
+        questions.lock().unwrap().times_out = true;
         let reads = run_now_stream(
             &mut core,
-            None,
+            questions,
             vec![Ok(Some("a".into()))],
             Duration::from_millis(100),
         )
         .await;
-        assert_eq!(reads, 0, "no Now read follows a failed question read");
+        assert_eq!(reads, 0, "no Now read follows a timed-out question read");
         assert_eq!(core.app.now_line, None);
+    }
+
+    #[tokio::test]
+    async fn an_unimplemented_question_tool_still_shows_the_now_line() {
+        let mut core = connected_core();
+        // `None` answers every list with `status: Unimplemented`, at once.
+        let reads = run_now_stream(
+            &mut core,
+            question_probe(None),
+            vec![Ok(Some("a".into()))],
+            Duration::from_millis(100),
+        )
+        .await;
+        assert!(reads >= 2, "read {reads} times");
+        assert_eq!(core.app.now_line.as_deref(), Some("a"));
+        assert!(!core.app.questions.is_visible());
     }
 
     #[tokio::test]
@@ -2304,7 +2324,7 @@ mod tests {
         let mut core = connected_core();
         let reads = run_now_stream(
             &mut core,
-            Some(Queue::default()),
+            question_probe(Some(Queue::default())),
             vec![Ok(Some("a".into()))],
             Duration::from_millis(100),
         )
@@ -3329,6 +3349,8 @@ mod tests {
         log: Vec<String>,
         /// What a list answers; `None` fails it, as an older Harold without the tool does.
         queue: Option<Queue>,
+        /// Every list times out, as a hung Harold's does.
+        times_out: bool,
         /// Answers for the next lists, in order; each one also becomes `queue`.
         on_list: VecDeque<Option<Queue>>,
         /// Each answer takes the next result, and the queue lists show after it.
@@ -3448,6 +3470,11 @@ mod tests {
             state.log.push("list".into());
             if let Some(next) = state.on_list.pop_front() {
                 state.queue = next;
+            }
+            if state.times_out {
+                return Box::pin(async {
+                    Err(SourceError::TimedOut("question request timed out".into()))
+                });
             }
             let answer = state
                 .queue

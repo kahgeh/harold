@@ -75,6 +75,9 @@ impl std::error::Error for ProtocolError {}
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SourceError {
     Transport(String),
+    /// A request Harold did not answer within its timeout. It reads as a transport
+    /// error; the runtime tells it apart to skip a second read in the same poll.
+    TimedOut(String),
     Watch(String),
     Stream(String),
     Protocol(ProtocolError),
@@ -83,7 +86,10 @@ pub enum SourceError {
 impl SourceError {
     pub fn detail(&self) -> &str {
         match self {
-            Self::Transport(detail) | Self::Watch(detail) | Self::Stream(detail) => detail,
+            Self::Transport(detail)
+            | Self::TimedOut(detail)
+            | Self::Watch(detail)
+            | Self::Stream(detail) => detail,
             Self::Protocol(error) => match error {
                 ProtocolError::ZeroPanePid => "snapshot contains a zero pane PID",
                 ProtocolError::ZeroAgentPid => "snapshot contains a zero agent PID",
@@ -102,6 +108,10 @@ impl SourceError {
         Self::Transport(sanitize_display(detail.as_ref(), ERROR_LIMIT))
     }
 
+    fn timed_out(detail: impl AsRef<str>) -> Self {
+        Self::TimedOut(sanitize_display(detail.as_ref(), ERROR_LIMIT))
+    }
+
     fn watch(detail: impl AsRef<str>) -> Self {
         Self::Watch(sanitize_display(detail.as_ref(), ERROR_LIMIT))
     }
@@ -114,7 +124,9 @@ impl SourceError {
 impl fmt::Display for SourceError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Transport(detail) => write!(formatter, "failed to connect to Harold: {detail}"),
+            Self::Transport(detail) | Self::TimedOut(detail) => {
+                write!(formatter, "failed to connect to Harold: {detail}")
+            }
             Self::Watch(detail) => write!(formatter, "Harold rejected WatchAgentStates: {detail}"),
             Self::Stream(detail) => write!(formatter, "Harold state stream failed: {detail}"),
             Self::Protocol(error) => write!(formatter, "invalid Harold snapshot: {error}"),
@@ -247,7 +259,7 @@ impl SourceStream {
             client.list_questions(ListQuestionsRequest {}),
         )
         .await
-        .map_err(|_| SourceError::transport("question request timed out"))?
+        .map_err(|_| SourceError::timed_out("question request timed out"))?
         .map(|response| map_queue(response.into_inner()))
         .map_err(|error| SourceError::transport(error.to_string()))
     }
@@ -1063,6 +1075,15 @@ mod tests {
         let stream = spawn_reader(FakeReader::new([]));
         let error = stream.list_queue_now().await.unwrap_err();
         assert!(error.detail().contains("backlog tool unavailable"));
+    }
+
+    #[test]
+    fn a_timeout_reads_as_a_transport_error() {
+        let timed_out = SourceError::timed_out("question request timed out");
+        let transport = SourceError::transport("question request timed out");
+        assert_eq!(timed_out.detail(), transport.detail());
+        assert_eq!(timed_out.to_string(), transport.to_string());
+        assert_ne!(timed_out, transport);
     }
 
     #[test]
