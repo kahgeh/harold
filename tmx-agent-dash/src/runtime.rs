@@ -257,6 +257,9 @@ trait StreamPort: Sized {
     fn list_questions(&mut self) -> BoxFuture<'_, Result<Queue, SourceError>> {
         Box::pin(async { Err(SourceError::Transport("question tool unavailable".into())) })
     }
+    fn list_queue_now(&mut self) -> BoxFuture<'_, Result<Option<String>, SourceError>> {
+        Box::pin(async { Err(SourceError::Transport("backlog tool unavailable".into())) })
+    }
     fn answer_question<'a>(&'a mut self, _out: &'a Outgoing) -> BoxFuture<'a, SendResult> {
         Box::pin(async { SendResult::Unavailable })
     }
@@ -298,6 +301,10 @@ impl StreamPort for SourceStream {
     // call here would pick the trait's `&mut self` method and recurse.
     fn list_questions(&mut self) -> BoxFuture<'_, Result<Queue, SourceError>> {
         Box::pin(SourceStream::list_questions(self))
+    }
+
+    fn list_queue_now(&mut self) -> BoxFuture<'_, Result<Option<String>, SourceError>> {
+        Box::pin(SourceStream::list_queue_now(self))
     }
 
     fn answer_question<'a>(&'a mut self, out: &'a Outgoing) -> BoxFuture<'a, SendResult> {
@@ -399,13 +406,17 @@ where
         // The question queue is read the same way: as the stream opens, every
         // QUESTION_POLL_INTERVAL, before each key that goes to the block (and before
         // Tab), and after each answer or deferral. Each read is awaited inline and
-        // bounded by VOICE_REQUEST_TIMEOUT.
+        // bounded by VOICE_REQUEST_TIMEOUT. The chief's Now item is read beside the
+        // queue as the stream opens and on each QUESTION_POLL_INTERVAL, the same way.
         let polled = stream.call(CallAction::Status).await;
         if core.call_polled(polled) {
             draw(terminal, &core.app, clock)?;
         }
         let listed = stream.list_questions().await;
-        if core.questions_listed(listed).changed {
+        let changed = core.questions_listed(listed).changed;
+        let now = stream.list_queue_now().await;
+        let now_changed = core.now_listed(now);
+        if changed || now_changed {
             draw(terminal, &core.app, clock)?;
         }
         let poll = sleep(call_poll_interval(core.app.call.as_ref()));
@@ -423,7 +434,10 @@ where
             }
             () = &mut question_poll => {
                 let listed = stream.list_questions().await;
-                if core.questions_refreshed(listed) {
+                let changed = core.questions_refreshed(listed);
+                let now = stream.list_queue_now().await;
+                let now_changed = core.now_listed(now);
+                if changed || now_changed {
                     draw(terminal, &core.app, clock)?;
                 }
                 question_poll
@@ -1103,6 +1117,12 @@ impl RuntimeCore {
             self.drop_next_block_key = true;
         }
         listed.changed
+    }
+
+    /// Takes a read of the chief's Now item, and reports whether the line changed. A failed
+    /// read hides the line and sets no status, as a failed question read does.
+    fn now_listed(&mut self, result: Result<Option<String>, SourceError>) -> bool {
+        self.app.observe_now(result.ok().flatten())
     }
 
     fn open_link(&mut self, link: &str, navigator: &impl PaneNavigator) {
@@ -2169,6 +2189,86 @@ mod tests {
         assert!(core.app.questions.is_visible());
     }
 
+    /// Runs `consume_stream` for `run_for` with the question poll every 20 ms and the
+    /// backlog tool answering `answers` in order, and returns how often it was read.
+    async fn run_now_stream(
+        core: &mut RuntimeCore,
+        answers: Vec<Result<Option<String>, SourceError>>,
+        run_for: Duration,
+    ) -> usize {
+        core.question_poll_interval = Duration::from_millis(20);
+        let probe = Arc::new(std::sync::Mutex::new(NowState {
+            answers: answers.into(),
+            reads: 0,
+        }));
+        let mut stream = FakeStream::pending(Arc::new(AtomicBool::new(false)));
+        stream.now = Some(Arc::clone(&probe));
+        let (_input_sender, mut input) = InputPump::channel();
+        let (shutdown_sender, mut shutdown) = FakeShutdown::channel();
+        tokio::spawn(async move {
+            tokio::time::sleep(run_for).await;
+            let _ = shutdown_sender.send(()).await;
+        });
+        let outcome = consume_stream(
+            stream,
+            core,
+            &mut input,
+            &mut shutdown,
+            &mut FakeScreen::default(),
+            &FakeNavigator::successful(),
+            &FakeClock::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome, Control::Quit);
+        probe.lock().unwrap().reads
+    }
+
+    #[tokio::test]
+    async fn the_now_line_follows_the_question_poll() {
+        let mut core = connected_core();
+        let reads = run_now_stream(
+            &mut core,
+            vec![Ok(Some("a".into())), Ok(Some("b".into()))],
+            Duration::from_millis(100),
+        )
+        .await;
+        assert!(reads >= 2, "read {reads} times");
+        assert_eq!(core.app.now_line.as_deref(), Some("b"));
+    }
+
+    #[tokio::test]
+    async fn an_unimplemented_backlog_hides_the_now_line() {
+        let mut core = connected_core();
+        let reads = run_now_stream(
+            &mut core,
+            vec![
+                Ok(Some("a".into())),
+                Err(SourceError::Transport("status: Unimplemented".into())),
+            ],
+            Duration::from_millis(100),
+        )
+        .await;
+        assert!(reads >= 2, "read {reads} times");
+        assert_eq!(core.app.now_line, None);
+
+        // The read as the stream opens shows the line, and a failed read hides it.
+        let mut core = connected_core();
+        assert!(core.now_listed(Ok(Some("a".into()))));
+        assert_eq!(core.app.now_line.as_deref(), Some("a"));
+        assert!(core.now_listed(Err(SourceError::Transport("status: Unimplemented".into()))));
+        assert_eq!(core.app.now_line, None);
+        assert!(!core.now_listed(Ok(None)), "no Now item keeps it hidden");
+    }
+
+    #[tokio::test]
+    async fn a_stream_without_the_backlog_tool_shows_no_now_line() {
+        let mut core = connected_core();
+        let probe = question_probe(Some(question("Q1", 1, 1)));
+        run_question_stream(&mut core, &probe, &[]).await;
+        assert_eq!(core.app.now_line, None);
+    }
+
     #[tokio::test]
     async fn a_block_key_lists_first() {
         let mut core = connected_core();
@@ -2766,7 +2866,7 @@ mod tests {
         stream.questions = Some(Arc::clone(&probe));
         let reopened = Arc::new(AtomicBool::new(false));
         let source = FakeSource::sequence([
-            FakeOpen::Stream(stream),
+            FakeOpen::Stream(Box::new(stream)),
             FakeOpen::Pending(Arc::clone(&reopened)),
         ]);
         let ctrl = |c: char| KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL);
@@ -3114,7 +3214,7 @@ mod tests {
     enum FakeOpen {
         Error(SourceError),
         Pending(Arc<AtomicBool>),
-        Stream(FakeStream),
+        Stream(Box<FakeStream>),
     }
 
     /// Answers each open with the next of `opens`, in order.
@@ -3145,7 +3245,7 @@ mod tests {
             let behavior = self.opens.lock().unwrap().pop_front().unwrap();
             match behavior {
                 FakeOpen::Error(error) => Box::pin(async move { Err(error) }),
-                FakeOpen::Stream(stream) => Box::pin(async move { Ok(stream) }),
+                FakeOpen::Stream(stream) => Box::pin(async move { Ok(*stream) }),
                 FakeOpen::Pending(dropped) => Box::pin(PendingOpen {
                     _guard: DropFlag(dropped),
                 }),
@@ -3160,7 +3260,16 @@ mod tests {
         pause: Option<MuteProbe>,
         call: Option<CallProbe>,
         questions: Option<QuestionProbe>,
+        now: Option<NowProbe>,
     }
+
+    /// The backlog tool's Now reads, answered in order; the last answer repeats.
+    struct NowState {
+        answers: VecDeque<Result<Option<String>, SourceError>>,
+        reads: usize,
+    }
+
+    type NowProbe = Arc<std::sync::Mutex<NowState>>;
 
     /// The question tool as a test sees it; every call is logged.
     #[derive(Default)]
@@ -3203,6 +3312,7 @@ mod tests {
                 pause: None,
                 call: None,
                 questions: None,
+                now: None,
             }
         }
 
@@ -3214,6 +3324,7 @@ mod tests {
                 pause: None,
                 call: None,
                 questions: None,
+                now: None,
             }
         }
     }
@@ -3290,6 +3401,20 @@ mod tests {
                 .queue
                 .clone()
                 .ok_or_else(|| SourceError::Transport("status: Unimplemented".into()));
+            Box::pin(async move { answer })
+        }
+
+        fn list_queue_now(&mut self) -> BoxFuture<'_, Result<Option<String>, SourceError>> {
+            let Some(probe) = &self.now else {
+                return Box::pin(async { Err(SourceError::Transport("no backlog tool".into())) });
+            };
+            let mut state = probe.lock().unwrap();
+            state.reads += 1;
+            let answer = if state.answers.len() > 1 {
+                state.answers.pop_front().unwrap()
+            } else {
+                state.answers.front().cloned().unwrap()
+            };
             Box::pin(async move { answer })
         }
 

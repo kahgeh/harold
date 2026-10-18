@@ -252,6 +252,9 @@ pub struct App {
     pub call: Option<CallView>,
     /// The chief's questions, hidden while none waits.
     pub questions: QuestionBlock,
+    /// The first line of the chief's Now item, hidden while the queue has none or the
+    /// backlog tool cannot be read. It is never focused and takes no keys.
+    pub now_line: Option<String>,
     pub focus: Focus,
     last_snapshot_received_at_ms: Option<i64>,
     runtime_status: Option<RuntimeStatus>,
@@ -345,6 +348,7 @@ impl App {
             selected,
             call: None,
             questions: QuestionBlock::default(),
+            now_line: None,
             focus: Focus::List,
             last_snapshot_received_at_ms: None,
             runtime_status: None,
@@ -491,6 +495,13 @@ impl App {
 
     pub fn observe_call(&mut self, view: Option<CallView>) {
         self.call = view;
+    }
+
+    /// Takes the latest read of the chief's Now item, and reports whether the line changed.
+    pub fn observe_now(&mut self, line: Option<String>) -> bool {
+        let changed = self.now_line != line;
+        self.now_line = line;
+        changed
     }
 
     /// The row whose pane Harold named as the chief's in its last call answer.
@@ -2819,6 +2830,64 @@ mod tests {
         assert_eq!(app.focus, Focus::Block);
         assert_eq!(app.handle_key(KeyCode::Esc), Effect::None);
         assert_eq!(app.focus, Focus::List);
+    }
+
+    #[test]
+    fn the_now_line_never_takes_the_focus() {
+        let keys = [
+            KeyCode::Tab,
+            KeyCode::BackTab,
+            KeyCode::Down,
+            KeyCode::Up,
+            KeyCode::Char('j'),
+            KeyCode::Char('k'),
+            KeyCode::Esc,
+            KeyCode::Tab,
+            KeyCode::Tab,
+            KeyCode::Tab,
+            KeyCode::Esc,
+            KeyCode::Enter,
+        ];
+        let focus_moves = |now: Option<&str>, questions: &[&str]| {
+            let mut app = call_app(CallState::Off);
+            assert!(app.observe_now(now.map(str::to_owned)) == now.is_some());
+            if !questions.is_empty() {
+                app.observe_questions(question_queue(questions));
+            }
+            let moves: Vec<Focus> = keys
+                .iter()
+                .map(|code| {
+                    app.handle_key(*code);
+                    app.focus
+                })
+                .collect();
+            assert_eq!(app.now_line.as_deref(), now, "no key changes the Now line");
+            moves
+        };
+        for questions in [&[][..], &["Q1"][..]] {
+            assert_eq!(
+                focus_moves(Some("Ship the backlog tool"), questions),
+                focus_moves(None, questions),
+                "the focus order is the same with the Now line"
+            );
+        }
+        assert!(
+            focus_moves(Some("Ship the backlog tool"), &[])
+                .iter()
+                .all(|focus| *focus == Focus::List),
+            "with no question, Tab finds nothing to focus"
+        );
+    }
+
+    #[test]
+    fn observe_now_reports_a_change() {
+        let mut app = call_app(CallState::Off);
+        assert_eq!(app.now_line, None);
+        assert!(app.observe_now(Some("a".into())));
+        assert!(!app.observe_now(Some("a".into())));
+        assert!(app.observe_now(Some("b".into())));
+        assert!(app.observe_now(None));
+        assert!(!app.observe_now(None));
     }
 
     #[test]

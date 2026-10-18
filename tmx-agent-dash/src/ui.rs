@@ -1,7 +1,7 @@
 use std::borrow::Cow;
 
 use ratatui::Frame;
-use ratatui::layout::{Alignment, Constraint, Flex, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint, Flex, Layout, Margin, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, TableState, Wrap};
@@ -49,12 +49,13 @@ pub fn render(frame: &mut Frame<'_>, app: &App, now_ms: i64) {
     let compact = area.width < COMPACT_WIDTH || area.height < 24;
     let chrome_height = if compact { 2 } else { 3 };
     let question = app.questions.view();
+    let fixed = 3 + 3 * chrome_height + WORKSPACE_MIN + 3;
+    // The Now line takes a row only when one is spare beside the list's six rows, so at
+    // the smallest height it hides rather than squeeze the list.
+    let now_height = u16::from(app.now_line.is_some() && area.height > fixed);
     // The block takes what the list can spare above its six rows, but never less than
     // its borders and one line: on a short terminal the list gives way to it.
-    let room = area
-        .height
-        .saturating_sub(3 + 3 * chrome_height + WORKSPACE_MIN + 3)
-        .max(3);
+    let room = area.height.saturating_sub(fixed + now_height).max(3);
     let question_block = question
         .as_ref()
         .map(|view| fit_question_lines(view, area.width, room));
@@ -66,6 +67,7 @@ pub fn render(frame: &mut Frame<'_>, app: &App, now_ms: i64) {
     };
     let [
         masthead,
+        now,
         monitor,
         summary,
         search,
@@ -74,6 +76,7 @@ pub fn render(frame: &mut Frame<'_>, app: &App, now_ms: i64) {
         footer,
     ] = Layout::vertical([
         Constraint::Length(3),
+        Constraint::Length(now_height),
         Constraint::Length(chrome_height),
         Constraint::Length(chrome_height),
         Constraint::Length(chrome_height),
@@ -84,6 +87,9 @@ pub fn render(frame: &mut Frame<'_>, app: &App, now_ms: i64) {
     .areas(area);
 
     render_masthead(frame, masthead, app);
+    if let Some(line) = app.now_line.as_deref() {
+        render_now(frame, now, line);
+    }
     render_monitor(frame, monitor, app, now_ms);
     render_summary(frame, summary, app);
     render_search(frame, search, app);
@@ -492,6 +498,17 @@ fn render_masthead(frame: &mut Frame<'_>, area: Rect, app: &App) {
     frame.render_widget(
         Paragraph::new(title).block(board_block().borders(Borders::ALL)),
         area,
+    );
+}
+
+/// The chief's Now item, on one dim row under the masthead, in line with the text
+/// inside the boxes. It is cut to the width and never takes the focus.
+fn render_now(frame: &mut Frame<'_>, area: Rect, line: &str) {
+    let inner = area.inner(Margin::new(1, 0));
+    let text = fit(&format!("NOW  {line}"), usize::from(inner.width)).into_owned();
+    frame.render_widget(
+        Paragraph::new(Line::styled(text, Style::default().fg(MUTED))),
+        inner,
     );
 }
 
@@ -1473,7 +1490,7 @@ mod tests {
     use ratatui::style::{Color, Modifier};
     use ratatui::text::Line;
 
-    use super::{fit, render};
+    use super::{MUTED, fit, render};
     use crate::app::{
         AgentIncarnation, AgentRow, AgentState, App, CallState, CallView, ConnectionState,
         MonitorHealth, MonitorHealthState, SearchState, Snapshot,
@@ -3695,6 +3712,110 @@ mod tests {
                 // One line is left: it shows the highlighted row, which j/k move.
                 row_with(&lines, "▸ h  libSQL's Hrana");
             }
+            row_with(&lines, "AGENT BLOCK OCCUPANCY");
+        }
+    }
+
+    const NOW: &str = "Ship the backlog queue tool, then import the live lists after install";
+
+    fn now_app() -> App {
+        let selected = incarnation("%17", 91700, 91844, "codex");
+        let mut app = live_app(
+            vec![row(
+                selected.clone(),
+                AgentState::Busy,
+                "Codex",
+                "tmx-agent-dash:0.1",
+                "Build the question block",
+                90_000,
+            )],
+            Some(selected),
+        );
+        app.observe_now(Some(NOW.into()));
+        app
+    }
+
+    #[test]
+    fn the_now_line_sits_under_the_masthead_at_140_84_and_60_columns() {
+        let app = now_app();
+        for width in [140, 84, 60] {
+            let lines = rendered_lines(&app, width, 30, 100_000);
+            println!("--- NOW line at {width} columns ---\n{lines}");
+            let rows: Vec<&str> = lines.lines().collect();
+            assert!(rows[1].contains("TRANSPORT LIVE"), "{lines}");
+            assert!(rows[2].starts_with('└'), "the masthead is 3 rows:\n{lines}");
+            let expected = fit(&format!("NOW  {NOW}"), usize::from(width - 2)).into_owned();
+            assert_eq!(rows[3].trim_end(), format!(" {expected}"), "{lines}");
+            assert_eq!(width == 60, expected.ends_with('…'), "cut only at 60");
+            assert_eq!(row_with(&lines, "NOW  "), 3, "one Now row:\n{lines}");
+
+            let buffer = rendered_buffer(&app, width, 30, 100_000);
+            let n = &buffer[(1, 3)];
+            assert_eq!(n.symbol(), "N");
+            assert_eq!(n.fg, MUTED, "the Now line is dim secondary text");
+        }
+    }
+
+    #[test]
+    fn the_now_line_is_hidden_with_no_now_item() {
+        let mut app = now_app();
+        app.observe_now(None);
+        for width in [140, 84, 60] {
+            let lines = rendered_lines(&app, width, 30, 100_000);
+            assert!(!lines.contains("NOW  "), "{lines}");
+            assert!(!lines.contains("Ship the backlog"), "{lines}");
+        }
+    }
+
+    #[test]
+    fn the_question_block_keeps_its_place_below_the_now_line() {
+        let without = question_app(false);
+        let mut with = question_app(false);
+        with.observe_now(Some(NOW.into()));
+        let before = rendered_lines(&without, 140, 38, 100_000);
+        let lines = rendered_lines(&with, 140, 38, 100_000);
+        println!("{lines}");
+        let now = row_with(&lines, "NOW  ");
+        let title = row_with(&lines, "Q25 · 1 of 2 waiting");
+        let filter = row_with(&lines, "FILTER");
+        assert_eq!(now, 3, "under the masthead");
+        assert!(now < filter && filter < title, "below the search line");
+        assert!(
+            title < row_with(&lines, "Build the question block"),
+            "above the workspace"
+        );
+        assert_eq!(
+            title - filter,
+            row_with(&before, "Q25 · 1 of 2 waiting") - row_with(&before, "FILTER"),
+            "the block sits where it did, one row lower"
+        );
+        assert_eq!(
+            title,
+            row_with(&before, "Q25 · 1 of 2 waiting") + 1,
+            "the block moves down by the Now row only"
+        );
+    }
+
+    #[test]
+    fn the_now_line_gives_way_on_the_smallest_terminal() {
+        // At the minimum height the list keeps its six rows, so the line hides; one row
+        // more and it shows. The footer stays in view either way.
+        let with = now_app();
+        let mut without = now_app();
+        without.observe_now(None);
+        assert_eq!(
+            rendered_lines(&with, 60, 18, 100_000),
+            rendered_lines(&without, 60, 18, 100_000)
+        );
+        let lines = rendered_lines(&with, 60, 19, 100_000);
+        assert_eq!(row_with(&lines, "NOW  "), 3, "{lines}");
+        row_with(&lines, "q quit");
+        let mut question = question_app(false);
+        question.observe_now(Some(NOW.into()));
+        for (width, height) in [(60, 19), (80, 24)] {
+            let lines = rendered_lines(&question, width, height, 100_000);
+            row_with(&lines, "NOW  ");
+            row_with(&lines, "Q25 · 1 of 2 waiting");
             row_with(&lines, "AGENT BLOCK OCCUPANCY");
         }
     }

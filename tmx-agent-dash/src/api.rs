@@ -11,6 +11,9 @@ use harold_api::harold::{
     SetMessagingPausedRequest, SetTtsMutedRequest, WatchAgentStatesRequest,
     harold_client::HaroldClient,
 };
+use harold_api::tools::backlog::v1::{
+    ListQueueRequest, ListQueueResponse, backlog_service_client::BacklogServiceClient,
+};
 use harold_api::tools::questions::v1::{
     AnswerKind as ProtoAnswerKind, AnswerQuestionRequest, Decision, DecisionOption,
     DeferQuestionRequest, ListQuestionsRequest, ListQuestionsResponse, ListedQuestion, Pick,
@@ -42,6 +45,8 @@ const TRANSCRIPT_LIMIT: usize = 1_024;
 const ERROR_LIMIT: usize = 512;
 /// Harold refuses a question field of 2,000 characters or more.
 const QUESTION_FIELD_LIMIT: usize = 2_000;
+/// The Now line is one terminal row, so its text is cut well before the field's own size.
+const NOW_LINE_LIMIT: usize = 512;
 const SOURCE_CHANNEL_CAPACITY: usize = 16;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -130,6 +135,7 @@ pub struct SourceStream {
     reader: Option<JoinHandle<()>>,
     voice: Option<HaroldClient<Channel>>,
     questions: Option<QuestionServiceClient<Channel>>,
+    backlog: Option<BacklogServiceClient<Channel>>,
 }
 
 trait SnapshotReader: Send + 'static {
@@ -171,6 +177,7 @@ where
         reader: Some(reader),
         voice: None,
         questions: None,
+        backlog: None,
     }
 }
 
@@ -242,6 +249,23 @@ impl SourceStream {
         .await
         .map_err(|_| SourceError::transport("question request timed out"))?
         .map(|response| map_queue(response.into_inner()))
+        .map_err(|error| SourceError::transport(error.to_string()))
+    }
+
+    /// The first line of the chief's Now item, `None` when the queue has none, or an
+    /// error when the backlog tool cannot be reached: an older Harold answers
+    /// `Unimplemented`.
+    pub async fn list_queue_now(&self) -> Result<Option<String>, SourceError> {
+        let Some(mut client) = self.backlog.clone() else {
+            return Err(SourceError::transport("backlog tool unavailable"));
+        };
+        tokio::time::timeout(
+            VOICE_REQUEST_TIMEOUT,
+            client.list_queue(ListQueueRequest { done_since_ms: 0 }),
+        )
+        .await
+        .map_err(|_| SourceError::transport("backlog request timed out"))?
+        .map(|response| map_now(response.into_inner()))
         .map_err(|error| SourceError::transport(error.to_string()))
     }
 
@@ -328,7 +352,8 @@ impl AgentStateSource {
 
             let mut source = spawn_reader(stream);
             source.voice = Some(client);
-            source.questions = Some(QuestionServiceClient::new(channel));
+            source.questions = Some(QuestionServiceClient::new(channel.clone()));
+            source.backlog = Some(BacklogServiceClient::new(channel));
             Ok(source)
         })
     }
@@ -456,6 +481,15 @@ fn map_option(option: DecisionOption) -> OptionView {
     }
 }
 
+/// The Now item's first line, cleaned and cut, or `None` when there is no Now item or
+/// its first line is blank.
+pub fn map_now(response: ListQueueResponse) -> Option<String> {
+    let now = response.now?;
+    let line = sanitize_display(now.text.lines().next()?, NOW_LINE_LIMIT);
+    let line = line.trim();
+    (!line.is_empty()).then(|| line.to_owned())
+}
+
 fn question_text(text: &str) -> String {
     sanitize_display(text, QUESTION_FIELD_LIMIT)
 }
@@ -577,8 +611,8 @@ mod tests {
     use crate::app::{AgentState, CallAction, CallState, CallView, MonitorHealthState};
 
     use super::{
-        ProtocolError, SnapshotReader, SourceError, call_request_timeout, map_call, map_snapshot,
-        spawn_reader,
+        ProtocolError, SnapshotReader, SourceError, call_request_timeout, map_call, map_now,
+        map_snapshot, spawn_reader,
     };
 
     #[test]
@@ -1017,6 +1051,43 @@ mod tests {
         let stream = spawn_reader(FakeReader::new([]));
         let error = stream.request_tts_muted(true).await.unwrap_err();
         assert!(error.detail().contains("voice control unavailable"));
+    }
+
+    #[tokio::test]
+    async fn list_queue_now_without_a_client_reports_unavailable() {
+        let stream = spawn_reader(FakeReader::new([]));
+        let error = stream.list_queue_now().await.unwrap_err();
+        assert!(error.detail().contains("backlog tool unavailable"));
+    }
+
+    #[test]
+    fn map_now_takes_the_now_items_first_line_cleaned_or_none() {
+        use harold_api::tools::backlog::v1::{ListQueueResponse, QueueItem};
+        let response = |text: Option<&str>| ListQueueResponse {
+            now: text.map(|text| QueueItem {
+                id: "q1".into(),
+                state: "now".into(),
+                text: text.into(),
+                ..QueueItem::default()
+            }),
+            parked: vec![QueueItem {
+                text: "parked".into(),
+                ..QueueItem::default()
+            }],
+            ..ListQueueResponse::default()
+        };
+        assert_eq!(
+            map_now(response(Some("Ship \x1b[31mit\nthen the rest"))),
+            Some("Ship it".into())
+        );
+        assert_eq!(map_now(response(None)), None, "a parked item is not Now");
+        assert_eq!(map_now(response(Some(""))), None);
+        assert_eq!(map_now(response(Some("  \nsecond"))), None);
+        let long = "x".repeat(600);
+        assert_eq!(
+            map_now(response(Some(&long))).map(|line| line.chars().count()),
+            Some(512)
+        );
     }
 
     #[tokio::test]
