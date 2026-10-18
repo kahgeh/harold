@@ -177,3 +177,51 @@ fn reasons_are_the_fixed_words() {
     assert_eq!(Refused::NotChief.reason(), "not_chief");
     assert_eq!(Refused::RegistryUnreadable.reason(), "registry_unreadable");
 }
+
+#[test]
+fn an_empty_or_relative_repo_lets_no_pane_write() {
+    let s = Setup::new();
+    s.pane("%40", s.path("harold"));
+    s.pane("%46", "/anything");
+    for repo in ["", "."] {
+        let guard = s.guard_with(Ok(vec![("harold".into(), repo.into())]), Some("%2"));
+        for pane in ["%40", "%46"] {
+            assert_eq!(
+                guard.may_write_product(pane, "harold"),
+                Err(Refused::WrongProduct),
+                "repo {repo:?}, pane {pane}"
+            );
+        }
+        assert_eq!(guard.may_write_product("%2", "harold"), Ok(()));
+    }
+}
+
+#[test]
+fn a_missing_pane_path_with_parent_components_is_outside() {
+    let s = Setup::new();
+    s.pane("%47", s.path("harold/../turso"));
+    s.pane("%48", s.path("harold/gone/../../turso"));
+    let guard = s.guard();
+    for pane in ["%47", "%48"] {
+        assert_eq!(
+            guard.may_write_product(pane, "harold"),
+            Err(Refused::WrongProduct)
+        );
+    }
+    s.pane("%49", s.path("harold/missing/../x"));
+    assert_eq!(
+        guard.may_write_product("%49", "harold"),
+        Err(Refused::WrongProduct)
+    );
+}
+
+#[test]
+fn a_repo_that_is_a_symlink_holds_the_real_folder() {
+    let s = Setup::new();
+    std::os::unix::fs::symlink(s.path("harold"), s.path("repolink")).unwrap();
+    s.pane("%40", s.path("harold"));
+    s.pane("%41", s.path("harold/sub"));
+    let guard = s.guard_with(Ok(vec![("harold".into(), s.path("repolink"))]), Some("%2"));
+    assert_eq!(guard.may_write_product("%40", "harold"), Ok(()));
+    assert_eq!(guard.may_write_product("%41", "harold"), Ok(()));
+}

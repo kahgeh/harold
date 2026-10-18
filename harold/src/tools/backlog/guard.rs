@@ -1,7 +1,7 @@
 //! Who may write: a product's backlog is written from inside that product's
 //! folder or by the chief; the queue only by the chief.
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use crate::tools::{ChiefPane, PaneFolder, Products};
@@ -71,10 +71,10 @@ impl Guard {
             .pane_folder
             .folder_of(caller_pane)
             .ok_or(Refused::WrongProduct)?;
-        if canonical(&folder).starts_with(canonical(&repo)) {
-            return Ok(());
+        match is_inside(&folder, &repo) {
+            true => Ok(()),
+            false => Err(Refused::WrongProduct),
         }
-        Err(Refused::WrongProduct)
     }
 
     /// Only the chief writes the queue.
@@ -108,9 +108,26 @@ impl Guard {
     }
 }
 
-/// The path with symlinks and a trailing slash resolved; as given when it cannot be.
-fn canonical(path: &Path) -> PathBuf {
-    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+/// The folder is the repo or inside it. An empty or relative repo has no place to be
+/// inside of, and a path that cannot be resolved and holds `..` cannot be trusted.
+fn is_inside(folder: &Path, repo: &Path) -> bool {
+    if !repo.is_absolute() {
+        return false;
+    }
+    let (Some(folder), Some(repo)) = (canonical(folder), canonical(repo)) else {
+        return false;
+    };
+    folder.starts_with(repo)
+}
+
+/// The path with symlinks and a trailing slash resolved; as given when it cannot be,
+/// unless it holds `..`.
+fn canonical(path: &Path) -> Option<PathBuf> {
+    if let Ok(resolved) = std::fs::canonicalize(path) {
+        return Some(resolved);
+    }
+    let climbs = path.components().any(|c| c == Component::ParentDir);
+    (!climbs).then(|| path.to_path_buf())
 }
 
 #[cfg(test)]
