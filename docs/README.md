@@ -22,3 +22,9 @@
 
 - [Architecture](explanations/architecture.md)
 - [Channel Security: iMessage vs Telegram](explanations/channel-security.md)
+
+## Decisions
+
+- [1. Tools are modules that Harold hosts](adr/0001-tools-are-modules-hosted-by-harold.md)
+- [2. Tool services trust local callers](adr/0002-tool-services-trust-local-callers.md)
+- [3. Pod merge counts save the counted tip before recording](adr/0003-pod-merge-counts-save-the-tip-first.md)
