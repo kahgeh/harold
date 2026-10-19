@@ -189,7 +189,7 @@ Submit a distinctive prompt through the configured agent and verify this sequenc
 3. Stopping and reconnecting the watcher immediately returns the current complete snapshot.
 4. Restarting Harold returns the same projected state before later observations arrive.
 
-To verify explicit clear behavior, send a lifecycle request whose `workSummary` is present and empty. The public summary should change to the current screen fallback or become absent. A dash must render an absent summary as exactly `No work summary reported`; `grpcurl` itself simply omits the optional field.
+To verify explicit clear behavior, send a lifecycle request whose `workSummary` is present and empty. The public summary should change to the current screen fallback or become absent. A client must render an absent summary as exactly `No work summary reported`; `grpcurl` itself simply omits the optional field.
 
 For OpenCode, run the repository tests without installing packages:
 

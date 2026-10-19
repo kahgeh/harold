@@ -12,7 +12,7 @@ A call closes that loop. Harold never takes the chief's own voice for yours: it 
 
 ## Do not send the chief a voice message from the phone
 
-This section covers the desk. The web app's call, built when `[web_app]` is set (see [The phone's side](#the-phones-side)), is the phone's way to talk to the chief. Do not record a voice message to the chief from the phone outside a call. Harold drops it.
+The sections below cover the desk's call. The web app's call, built when `[web_app]` is set (see [The phone's side](#the-phones-side)), is the phone's way to talk to the chief. Do not record a voice message to the chief from the phone outside a call. Harold drops it.
 
 The reason: Messages stores a recorded message as an attachment, which reaches Harold as a row with no text and only an attachment placeholder character. Harold sends its own voice notes as attachments too, and those come back to it as the same kind of row. It therefore treats every attachment-only row as the echo of its own voice note and ignores it (`is_attachment_only` in `harold/src/channels/imessage.rs`). Your message looks identical, so it is ignored with them. Type a text message from the phone instead.
 

@@ -247,10 +247,10 @@ Transport and monitor health describe different system-level conditions:
   component healthy.
 
 Rows are grouped by project (the first word of the tmux session name) and
-ordered by name (the last component of the working directory), then pane
-id; state never changes a row's position. Each row shows the name (the
-pane id is added only when two names in a group collide, and a long name is
-truncated before that id, never the id itself; panes of different
+ordered by name (the last component of the working directory), then window and pane
+number; state never changes a row's position. Each row shows the name (the
+window and pane number, such as `:1.2`, is added only when two names in a group collide, and a long name is
+truncated before that number, never the number itself; panes of different
 sessions in one group are told apart by the session's second word, or the full
 tmux target), and a provider tag: `cc` for Claude Code, `cx` for Codex, otherwise the
 first two letters of the provider name. The selected agent's detail panel still
