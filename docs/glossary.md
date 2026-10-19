@@ -212,7 +212,7 @@ Words kept in the docs on purpose, one line each. They are plain English or a na
 - **"summary"** stays in compound words that name a work summary candidate ("explicit-summary", "fallback-summary prefix", "generated-summary", "completion summary update", "summary isolation"), and where it is the text of a turn-end update, such as "Harold's summary of a finished turn" (`docs/references/notification/README.md`) and the opening of `README.md`, or the heading "Summary" of `docs/security-audit-2026-02-27.md`.
 - **"call"** stays for the voice call and for "calls" of a person's tool or a hook in plain English. The `Call` RPC keeps its name.
 - **"version"** stays for a release or schema version, and for an event's stream version.
-- **"waiting"**, **"held"** and **"header"** stay in their ordinary senses: "waiting" for time passing, "held back", an HTTP header, a tmux session.  The senses the glossary names are reworded, except where one of the lines below says otherwise.
+- **"waiting"**, **"held"** and **"header"** stay in their ordinary senses: "waiting" for time passing, "held back", an HTTP header. The senses the glossary names are reworded, except where one of the lines below says otherwise.
 - **"the server"** stays for the web app's HTTP server (`docs/references/away-app/README.md`) and an example question in the dash README.
 - **"away device"** stays only in the command and skill name `send-message-to-away-device` and the log line `spoken line sent to the away device`.
 - **"dashboard"** stays for HyperDX dashboards (`docs/references/telemetry/README.md`) and the file path `tasks/tmux-agent-dashboard/`.
