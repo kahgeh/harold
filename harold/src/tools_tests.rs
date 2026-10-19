@@ -492,7 +492,7 @@ async fn the_canary_reaches_no_log_or_export() {
             kind: pb::AnswerKind::Revise as i32,
             picks: Vec::new(),
             note: CANARY.into(),
-            send_now: false,
+            send_now: true,
         },
     )
     .await

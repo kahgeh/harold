@@ -65,14 +65,26 @@ async fn answer(
     picks: Vec<pb::Pick>,
     note: &str,
 ) {
+    answer_with(store, id, version, kind, picks, note, false).await;
+}
+
+async fn answer_with(
+    store: &impl QuestionStore,
+    id: &str,
+    version: u32,
+    kind: Kind,
+    picks: Vec<pb::Pick>,
+    note: &str,
+    send_now: bool,
+) {
     let note = note.to_string();
     let result = store
         .answer(
             id,
             version,
-            false,
+            send_now,
             move |q| schema::resolve_picks(q, kind, &picks, &note),
-            0,
+            clock_ms(),
         )
         .await
         .unwrap();
@@ -83,13 +95,46 @@ async fn answer_a(store: &impl QuestionStore, id: &str) {
     answer(store, id, 1, Kind::Answer, vec![pick(0, "a")], "").await;
 }
 
+async fn answer_marked(store: &impl QuestionStore, id: &str) {
+    answer_with(store, id, 1, Kind::Answer, vec![pick(0, "a")], "", true).await;
+}
+
 async fn defer(store: &impl QuestionStore, id: &str) {
     store.defer(id, 0).await.unwrap().unwrap();
+}
+
+/// The listed questions, in order, each with whether it is set aside.
+async fn listed(store: &impl QuestionStore) -> Vec<(String, bool)> {
+    store
+        .list(0)
+        .await
+        .unwrap()
+        .questions
+        .into_iter()
+        .map(|l| (l.question.id, l.deferred))
+        .collect()
+}
+
+/// Waits until `n` lines were tried without letting paused time move, so the
+/// time that passed since an earlier `Instant` is exactly what the sender slept.
+async fn tried_without_waiting(sender: &Running, n: usize) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while sender.typing.calls().len() < n {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "line {n} needed paused time to pass"
+        );
+        tokio::task::yield_now().await;
+    }
 }
 
 /// Lets the sender run for `seconds` of (paused) time.
 async fn pass(seconds: u64) {
     tokio::time::sleep(Duration::from_secs(seconds)).await;
+}
+
+async fn pass_ms(ms: u64) {
+    tokio::time::sleep(Duration::from_millis(ms)).await;
 }
 
 async fn until_no_started_batch(store: &impl QuestionStore) {
@@ -183,13 +228,13 @@ impl QuestionStore for RacingStore {
         self.inner.batch_typed(batch_id, now_ms).await
     }
 
-    async fn release_batch(&self, batch_id: i64, now_ms: i64) -> Result<bool, StoreError> {
-        self.inner.release_batch(batch_id, now_ms).await
+    async fn release_batch(&self, batch_id: i64) -> Result<bool, StoreError> {
+        self.inner.release_batch(batch_id).await
     }
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_re_put_between_ready_and_start_types_nothing_until_answered_again() {
+async fn a_put_again_between_ready_and_start_types_nothing_and_looks_again() {
     let folder = TempFolder::new();
     let inner = open_store(&folder).await;
     put(&*inner, question("Q1", "s1", "abc")).await;
@@ -202,13 +247,17 @@ async fn a_re_put_between_ready_and_start_types_nothing_until_answered_again() {
     });
     let sender = spawn_sender(&racing, FakeTyping::typed_ok());
     pass(30).await;
-    assert!(
-        sender.typing.calls().is_empty(),
-        "the stale v1 line was typed: {:?}",
-        sender.typing.texts()
-    );
     assert!(racing.race.lock().unwrap().is_none(), "the race ran");
+    // The stale v1 line was not typed; the sender looked again and typed what
+    // is answered now: Q2 alone, with Q1 waiting again.
+    let second = "ANSWERS 1 | Q2 s2 sha abc: Which? A";
+    assert_eq!(sender.typing.texts(), vec![second.to_string()]);
     assert_eq!(inner.started_batch().await.unwrap(), None);
+    assert_eq!(
+        listed(&*inner).await,
+        vec![("Q1".to_string(), false)],
+        "Q1 waits again"
+    );
 
     answer(
         &*inner,
@@ -220,12 +269,14 @@ async fn a_re_put_between_ready_and_start_types_nothing_until_answered_again() {
     )
     .await;
     sender.wake.notify_one();
-    until("the batch is typed", || sender.typing.calls().len() == 1).await;
     pass(30).await;
-    let expected = "ANSWERS 2 | Q2 s2 sha abc: Which? A | Q1 s1 sha new: Which? \"second\"";
-    assert_eq!(sender.typing.texts(), vec![expected.to_string()]);
+    let third = "ANSWERS 1 | Q1 s1 sha new: Which? \"second\"";
+    assert_eq!(
+        sender.typing.texts(),
+        vec![second.to_string(), third.to_string()]
+    );
     println!(
-        "evidence: re-put of Q1 between ready and start_batch: nothing typed for 30 s; after Q1 v2 was answered: {expected}"
+        "evidence: re-put of Q1 between ready and start_batch: no stale v1 line; typed {second:?}; after Q1 v2 was answered: {third:?}"
     );
 }
 
@@ -345,9 +396,6 @@ async fn three_answers_type_one_line_with_ids_specs_shas_and_picks() {
     sender.wake.notify_one();
     answer(&*store, "Q26", 1, Kind::Answer, vec![pick(0, "l")], "").await;
     sender.wake.notify_one();
-    pass(10).await;
-    assert!(sender.typing.calls().is_empty(), "Q27 still waits");
-
     answer(&*store, "Q27", 1, Kind::Answer, vec![pick(0, "d")], "").await;
     sender.wake.notify_one();
     until("the batch is typed", || sender.typing.calls().len() == 1).await;
@@ -470,43 +518,43 @@ async fn a_deferred_question_is_listed_under_later_and_returns_to_waiting() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn one_waiting_question_holds_the_batch_until_answered_or_deferred() {
+async fn a_waiting_question_does_not_hold_the_batch_and_is_sent_when_answered() {
     let folder = TempFolder::new();
     let store = open_store(&folder).await;
     put(&*store, question("Q1", "s1", "abc")).await;
     put(&*store, question("Q2", "s2", "abc")).await;
-    answer_a(&*store, "Q1").await;
     let sender = spawn_sender(&store, FakeTyping::typed_ok());
-    pass(30).await;
-    assert!(sender.typing.calls().is_empty(), "Q2 is still waiting");
-
-    defer(&*store, "Q2").await;
+    answer_a(&*store, "Q1").await;
     sender.wake.notify_one();
-    until("the batch is typed", || sender.typing.calls().len() == 1).await;
+    pass_ms(2_900).await;
+    assert!(sender.typing.calls().is_empty(), "inside the settle");
+    pass_ms(200).await;
+    assert_eq!(
+        sender.typing.texts(),
+        vec!["ANSWERS 1 | Q1 s1 sha abc: Which? A".to_string()],
+        "Q2 does not hold the line"
+    );
     until_no_started_batch(&*store).await;
+    assert_eq!(listed(&*store).await, vec![("Q2".to_string(), false)]);
 
-    // Q2 waits again; answering it sends the next batch.
-    pass(30).await;
-    assert_eq!(sender.typing.calls().len(), 1);
     answer_a(&*store, "Q2").await;
     sender.wake.notify_one();
-    until("the second batch is typed", || {
-        sender.typing.calls().len() == 2
-    })
-    .await;
+    pass(4).await;
     let texts = sender.typing.texts();
     assert_eq!(
         texts,
         vec![
-            "ANSWERS 1 | Q1 s1 sha abc: Which? A | later: Q2".to_string(),
+            "ANSWERS 1 | Q1 s1 sha abc: Which? A".to_string(),
             "ANSWERS 1 | Q2 s2 sha abc: Which? A".to_string(),
         ]
     );
-    println!("evidence: nothing typed for 30 s while Q2 waited; then {texts:?}");
+    println!(
+        "evidence: Q1 sent after its settle with Q2 waiting; Q2 sent by the same rule: {texts:?}"
+    );
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_question_added_after_two_answers_holds_the_batch() {
+async fn a_question_added_after_two_answers_does_not_hold_the_batch() {
     let folder = TempFolder::new();
     let store = open_store(&folder).await;
     put(&*store, question("Q1", "s1", "abc")).await;
@@ -515,16 +563,11 @@ async fn a_question_added_after_two_answers_holds_the_batch() {
     answer_a(&*store, "Q2").await;
     put(&*store, question("Q3", "s3", "abc")).await;
     let sender = spawn_sender(&store, FakeTyping::typed_ok());
-    pass(30).await;
-    assert!(sender.typing.calls().is_empty(), "Q3 holds the batch");
-
-    answer_a(&*store, "Q3").await;
-    sender.wake.notify_one();
-    until("the batch is typed", || sender.typing.calls().len() == 1).await;
-    let expected =
-        "ANSWERS 3 | Q1 s1 sha abc: Which? A | Q2 s2 sha abc: Which? A | Q3 s3 sha abc: Which? A";
+    pass(4).await;
+    let expected = "ANSWERS 2 | Q1 s1 sha abc: Which? A | Q2 s2 sha abc: Which? A";
     assert_eq!(sender.typing.texts(), vec![expected.to_string()]);
-    println!("evidence: held 30 s by Q3, then {expected}");
+    assert_eq!(listed(&*store).await, vec![("Q3".to_string(), false)]);
+    println!("evidence: Q3 waiting did not hold {expected}");
 }
 
 #[tokio::test(start_paused = true)]
@@ -535,11 +578,11 @@ async fn a_busy_pane_waits_logs_once_and_types_when_idle() {
     put(&*store, question("Q1", "s1", "abc")).await;
     answer_a(&*store, "Q1").await;
     let busy = Step::Answer(Typing::PaneBusy);
-    let started = tokio::time::Instant::now();
     let sender = spawn_sender(&store, FakeTyping::new(vec![busy; 3], Typing::Typed));
     until("the first try", || sender.typing.calls().len() == 1).await;
-    // Each try is one attempt; between rounds the batch is released, not waited on.
-    assert!(started.elapsed() < Duration::from_secs(1));
+    // The first try waits out the settle; each try is then one attempt, and
+    // between rounds the batch is released, not waited on.
+    let started = tokio::time::Instant::now();
     assert_eq!(store.started_batch().await.unwrap(), None);
     until("the batch is typed", || sender.typing.calls().len() == 4).await;
     until_no_started_batch(&*store).await;
@@ -867,9 +910,10 @@ async fn start_on_a_folder_it_cannot_open_fails_with_store_open_failed() {
     assert_eq!(error.reason, "store_open_failed");
 }
 
-/// The reviewer's scenario: Q1 is answered while the chief's pane is busy, Q2 is
-/// put 20 s later, then the pane goes idle. Nothing is typed while Q2 waits;
-/// answering (or deferring) Q2 types one line. Returns the lines typed.
+/// The reviewer's scenario: Q1 is answered while the chief's pane is busy, and
+/// 20 s later Q2 is put (or put and set aside), then the pane goes idle. The
+/// next retry types one line for Q1 alone; Q2 does not hold it. Returns the
+/// lines typed and the busy tries.
 async fn a_question_added_while_a_batch_waits(defer_q2: bool) -> (Vec<String>, Vec<String>) {
     let (logs, _guard) = capture_logs();
     let folder = TempFolder::new();
@@ -885,6 +929,9 @@ async fn a_question_added_while_a_batch_waits(defer_q2: bool) -> (Vec<String>, V
     // t = 20 s: the chief puts Q2.
     pass(20).await;
     put(&*store, question("Q2", "s2", "abc")).await;
+    if defer_q2 {
+        defer(&*store, "Q2").await;
+    }
     sender.wake.notify_one();
     pass(1).await;
     assert_eq!(
@@ -893,24 +940,9 @@ async fn a_question_added_while_a_batch_waits(defer_q2: bool) -> (Vec<String>, V
         "no batch held open"
     );
 
-    // The pane goes idle; Q2 still waits, so nothing is typed for a minute.
+    // The pane goes idle; the next retry types the line, Q2 or not.
     sender.typing.set_fallback(Typing::Typed);
     let tries = sender.typing.calls().len();
-    pass(60).await;
-    assert_eq!(
-        sender.typing.calls().len(),
-        tries,
-        "typed while Q2 waited: {:?}",
-        sender.typing.texts()
-    );
-    assert!(logs.with("answers batch typed").is_empty());
-
-    if defer_q2 {
-        defer(&*store, "Q2").await;
-    } else {
-        answer_a(&*store, "Q2").await;
-    }
-    sender.wake.notify_one();
     until("the batch is typed", || {
         sender.typing.calls().len() == tries + 1
     })
@@ -927,17 +959,19 @@ async fn a_question_added_while_a_batch_waits(defer_q2: bool) -> (Vec<String>, V
         "{}",
         waiting[0]
     );
+    // Q2 waits, not set aside: the line left it, or returned it.
+    assert_eq!(listed(&*store).await, vec![("Q2".to_string(), false)]);
     let texts = sender.typing.texts();
     (texts[tries..].to_vec(), texts[..tries].to_vec())
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_question_added_while_a_batch_waits_holds_it_until_answered() {
+async fn a_question_added_while_a_batch_waits_does_not_hold_it() {
     let (typed, tried) = a_question_added_while_a_batch_waits(false).await;
-    let expected = "ANSWERS 2 | Q1 s1 sha abc: Which? A | Q2 s2 sha abc: Which? A";
+    let expected = "ANSWERS 1 | Q1 s1 sha abc: Which? A";
     assert_eq!(typed, vec![expected.to_string()]);
     println!(
-        "evidence: {} busy tries of {:?}; nothing typed for 60 s while Q2 waited at an idle pane; then one line: {}",
+        "evidence: {} busy tries of {:?}; Q2 put meanwhile; the idle pane got one line: {}",
         tried.len(),
         tried[0],
         typed[0]
@@ -945,12 +979,12 @@ async fn a_question_added_while_a_batch_waits_holds_it_until_answered() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_question_added_while_a_batch_waits_holds_it_until_answered_or_deferred() {
+async fn a_question_added_and_set_aside_while_a_batch_waits_is_listed_under_later() {
     let (typed, tried) = a_question_added_while_a_batch_waits(true).await;
     let expected = "ANSWERS 1 | Q1 s1 sha abc: Which? A | later: Q2";
     assert_eq!(typed, vec![expected.to_string()]);
     println!(
-        "evidence: {} busy tries; nothing typed for 60 s while Q2 waited at an idle pane; Q2 deferred, then one line: {}",
+        "evidence: {} busy tries; Q2 set aside meanwhile; the idle pane got one line: {}",
         tried.len(),
         typed[0]
     );
@@ -1200,7 +1234,7 @@ async fn a_restart_with_a_busy_pane_keeps_the_leftover_batch_and_types_it_once()
     assert_eq!(
         store.ready(i64::MAX / 2, 3_000).await.unwrap(),
         Readiness::Nothing,
-        "Q2 holds the next batch"
+        "nothing is unsent"
     );
     println!(
         "evidence: after a restart B1 ({}) was kept through {tries} busy tries while Q2 waited, never released; then typed once: {}; Q2 still waiting",
@@ -1284,5 +1318,395 @@ async fn an_idle_sender_looks_again_without_a_wake() {
     println!(
         "evidence: an answer stored with no wake was typed on the {IDLE_RECHECK:?} re-check: {:?}",
         sender.typing.texts()
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn three_waiting_two_answered_types_one_line_after_the_settle() {
+    let folder = TempFolder::new();
+    let store = open_store(&folder).await;
+    for n in 25..=28 {
+        put(&*store, question(&format!("Q{n}"), &format!("s{n}"), "abc")).await;
+    }
+    defer(&*store, "Q28").await;
+    let sender = spawn_sender(&store, FakeTyping::typed_ok());
+    pass(1).await;
+
+    // t = 0: Q25; t = 1 s: Q26. The line is due 3 s after Q26, at t = 4 s.
+    answer_a(&*store, "Q25").await;
+    sender.wake.notify_one();
+    pass(1).await;
+    answer_a(&*store, "Q26").await;
+    sender.wake.notify_one();
+    pass_ms(2_900).await;
+    assert!(sender.typing.calls().is_empty(), "inside the settle");
+    pass_ms(200).await;
+    let expected = "ANSWERS 2 | Q25 s25 sha abc: Which? A | Q26 s26 sha abc: Which? A | later: Q28";
+    assert_eq!(sender.typing.texts(), vec![expected.to_string()]);
+    println!("evidence: {:?}", sender.typing.texts());
+    until_no_started_batch(&*store).await;
+    // Q27 keeps waiting, and Q28 stays set aside while Q27 waits.
+    assert_eq!(
+        listed(&*store).await,
+        vec![("Q27".to_string(), false), ("Q28".to_string(), true)]
+    );
+    pass(30).await;
+    assert_eq!(sender.typing.calls().len(), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn answers_one_second_apart_type_one_line_and_five_seconds_apart_two() {
+    let folder = TempFolder::new();
+    let store = open_store(&folder).await;
+    for n in 1..=4 {
+        put(&*store, question(&format!("Q{n}"), &format!("s{n}"), "abc")).await;
+    }
+    let sender = spawn_sender(&store, FakeTyping::typed_ok());
+    answer_a(&*store, "Q1").await;
+    sender.wake.notify_one();
+    pass(1).await;
+    answer_a(&*store, "Q2").await;
+    sender.wake.notify_one();
+    pass(10).await;
+    assert_eq!(
+        sender.typing.texts(),
+        vec!["ANSWERS 2 | Q1 s1 sha abc: Which? A | Q2 s2 sha abc: Which? A".to_string()]
+    );
+
+    answer_a(&*store, "Q3").await;
+    sender.wake.notify_one();
+    pass(5).await;
+    answer_a(&*store, "Q4").await;
+    sender.wake.notify_one();
+    pass(10).await;
+    let texts = sender.typing.texts();
+    assert_eq!(texts.len(), 3, "{texts:?}");
+    assert_eq!(texts[1], "ANSWERS 1 | Q3 s3 sha abc: Which? A");
+    assert_eq!(texts[2], "ANSWERS 1 | Q4 s4 sha abc: Which? A");
+    println!("evidence: 1 s apart one line, 5 s apart two: {texts:?}");
+}
+
+#[tokio::test(start_paused = true)]
+async fn nothing_answered_types_nothing() {
+    let folder = TempFolder::new();
+    let store = open_store(&folder).await;
+    put(&*store, question("Q1", "s1", "abc")).await;
+    put(&*store, question("Q2", "s2", "abc")).await;
+    let sender = spawn_sender(&store, FakeTyping::typed_ok());
+    pass(60).await;
+    assert!(sender.typing.calls().is_empty());
+    assert_eq!(store.started_batch().await.unwrap(), None);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_marked_answer_is_typed_at_once() {
+    let folder = TempFolder::new();
+    let store = open_store(&folder).await;
+    put(&*store, question("Q1", "s1", "abc")).await;
+    put(&*store, question("Q2", "s2", "abc")).await;
+    put(&*store, question("Q3", "s3", "abc")).await;
+    let sender = spawn_sender(&store, FakeTyping::typed_ok());
+    pass(1).await;
+
+    // A marked answer goes at once, though Q2 and Q3 wait.
+    let marked_at = tokio::time::Instant::now();
+    answer_marked(&*store, "Q1").await;
+    sender.wake.notify_one();
+    tried_without_waiting(&sender, 1).await;
+    let elapsed = marked_at.elapsed();
+    assert_eq!(elapsed, Duration::ZERO);
+    assert_eq!(
+        sender.typing.texts(),
+        vec!["ANSWERS 1 | Q1 s1 sha abc: Which? A".to_string()]
+    );
+    println!(
+        "evidence: marked answer typed {elapsed:?} after it was given: {:?}",
+        sender.typing.texts()
+    );
+
+    // Unmarked at t = 0, marked at t = 1 s: one line with both, at t = 1 s.
+    until_no_started_batch(&*store).await;
+    answer_a(&*store, "Q2").await;
+    sender.wake.notify_one();
+    pass(1).await;
+    assert_eq!(sender.typing.calls().len(), 1, "Q2 is settling");
+    let marked_at = tokio::time::Instant::now();
+    answer_marked(&*store, "Q3").await;
+    sender.wake.notify_one();
+    tried_without_waiting(&sender, 2).await;
+    assert_eq!(marked_at.elapsed(), Duration::ZERO);
+    assert_eq!(
+        sender.typing.texts()[1],
+        "ANSWERS 2 | Q2 s2 sha abc: Which? A | Q3 s3 sha abc: Which? A"
+    );
+    println!(
+        "evidence: unmarked then marked: {:?}",
+        sender.typing.texts()[1]
+    );
+}
+
+/// An answer given while a line is typed: `marked` or not, it is not in that
+/// line, is not lost, and goes in the next line once.
+async fn an_answer_while_a_line_is_typed(marked: bool) -> (Vec<String>, Duration) {
+    let folder = TempFolder::new();
+    let store = open_store(&folder).await;
+    put(&*store, question("Q1", "s1", "abc")).await;
+    put(&*store, question("Q2", "s2", "abc")).await;
+    if marked {
+        answer_marked(&*store, "Q1").await;
+    } else {
+        answer_a(&*store, "Q1").await;
+    }
+    let typing = FakeTyping::typed_ok();
+    let writer = Arc::clone(&store);
+    typing.during_first_call(async move {
+        if marked {
+            answer_marked(&*writer, "Q2").await;
+        } else {
+            answer_a(&*writer, "Q2").await;
+        }
+    });
+    let sender = spawn_sender(&store, typing);
+    let waited = if marked {
+        tried_without_waiting(&sender, 1).await;
+        let first_at = tokio::time::Instant::now();
+        tried_without_waiting(&sender, 2).await;
+        first_at.elapsed()
+    } else {
+        until("the first line is tried", || {
+            sender.typing.calls().len() == 1
+        })
+        .await;
+        let first_at = tokio::time::Instant::now();
+        pass_ms(2_800).await;
+        assert_eq!(sender.typing.calls().len(), 1, "inside the second settle");
+        pass_ms(400).await;
+        assert_eq!(sender.typing.calls().len(), 2);
+        first_at.elapsed()
+    };
+    pass(30).await;
+    assert_eq!(sender.typing.calls().len(), 2, "never sent twice");
+    (sender.typing.texts(), waited)
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_answer_while_a_line_is_typed_goes_in_the_next_line_once() {
+    // The first line is due after the settle; the unmarked answer given
+    // during it is due a settle after that.
+    let (texts, waited) = an_answer_while_a_line_is_typed(false).await;
+    assert_eq!(
+        texts,
+        vec![
+            "ANSWERS 1 | Q1 s1 sha abc: Which? A".to_string(),
+            "ANSWERS 1 | Q2 s2 sha abc: Which? A".to_string(),
+        ]
+    );
+    println!(
+        "evidence: unmarked answer during a line goes next, once: {texts:?} ({waited:?} after the first)"
+    );
+
+    // A marked one goes at once after the first is typed.
+    let (texts, waited) = an_answer_while_a_line_is_typed(true).await;
+    assert_eq!(
+        texts,
+        vec![
+            "ANSWERS 1 | Q1 s1 sha abc: Which? A".to_string(),
+            "ANSWERS 1 | Q2 s2 sha abc: Which? A".to_string(),
+        ]
+    );
+    assert_eq!(waited, Duration::ZERO);
+    println!(
+        "evidence: marked answer during a line goes next at once, once: {texts:?} ({waited:?} after the first)"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_deferred_question_stays_set_aside_while_another_waits() {
+    let folder = TempFolder::new();
+    let store = open_store(&folder).await;
+    for n in 1..=3 {
+        put(&*store, question(&format!("Q{n}"), &format!("s{n}"), "abc")).await;
+    }
+    defer(&*store, "Q3").await;
+    let sender = spawn_sender(&store, FakeTyping::typed_ok());
+    answer_a(&*store, "Q1").await;
+    sender.wake.notify_one();
+    pass(5).await;
+    assert_eq!(
+        sender.typing.texts(),
+        vec!["ANSWERS 1 | Q1 s1 sha abc: Which? A | later: Q3".to_string()]
+    );
+    until_no_started_batch(&*store).await;
+    assert_eq!(
+        listed(&*store).await,
+        vec![("Q2".to_string(), false), ("Q3".to_string(), true)],
+        "Q3 stays set aside while Q2 waits"
+    );
+
+    answer_a(&*store, "Q2").await;
+    sender.wake.notify_one();
+    pass(5).await;
+    assert_eq!(
+        sender.typing.texts()[1],
+        "ANSWERS 1 | Q2 s2 sha abc: Which? A | later: Q3"
+    );
+    until_no_started_batch(&*store).await;
+    assert_eq!(listed(&*store).await, vec![("Q3".to_string(), false)]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn after_a_restart_old_unsent_answers_go_at_once_and_fresh_ones_wait_one_settle() {
+    let folder = TempFolder::new();
+    let store = open_store(&folder).await;
+    put(&*store, question("Q1", "s1", "abc")).await;
+    answer_a(&*store, "Q1").await;
+    drop(store);
+    // Harold was down for a minute.
+    pass(60).await;
+    let store: Arc<TursoQuestionStore> = open_store(&folder).await;
+    let restarted_at = tokio::time::Instant::now();
+    let sender = spawn_sender(&store, FakeTyping::typed_ok());
+    tried_without_waiting(&sender, 1).await;
+    assert_eq!(
+        restarted_at.elapsed(),
+        Duration::ZERO,
+        "old answers go at once"
+    );
+    until_no_started_batch(&*store).await;
+
+    // An answer given just before the restart waits out what is left of its settle.
+    put(&*store, question("Q2", "s2", "abc")).await;
+    answer_a(&*store, "Q2").await;
+    sender.shutdown.send(()).unwrap();
+    let _ = sender.task.await;
+    drop(store);
+    pass(1).await;
+    let store: Arc<TursoQuestionStore> = open_store(&folder).await;
+    let restarted_at = tokio::time::Instant::now();
+    let sender = spawn_sender(&store, FakeTyping::typed_ok());
+    pass_ms(1_900).await;
+    assert!(
+        sender.typing.calls().is_empty(),
+        "two seconds of the settle are left"
+    );
+    pass_ms(200).await;
+    assert_eq!(sender.typing.calls().len(), 1);
+    assert!(restarted_at.elapsed() < Duration::from_secs(3));
+}
+
+#[tokio::test(start_paused = true)]
+async fn after_a_restart_a_marked_answer_goes_at_once() {
+    let folder = TempFolder::new();
+    let store = open_store(&folder).await;
+    put(&*store, question("Q1", "s1", "abc")).await;
+    answer_marked(&*store, "Q1").await;
+    drop(store);
+    let store: Arc<TursoQuestionStore> = open_store(&folder).await;
+    let restarted_at = tokio::time::Instant::now();
+    let sender = spawn_sender(&store, FakeTyping::typed_ok());
+    tried_without_waiting(&sender, 1).await;
+    assert_eq!(restarted_at.elapsed(), Duration::ZERO);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_wake_from_a_new_question_does_not_restart_the_settle() {
+    let folder = TempFolder::new();
+    let store = open_store(&folder).await;
+    put(&*store, question("Q1", "s1", "abc")).await;
+    let sender = spawn_sender(&store, FakeTyping::typed_ok());
+    pass(1).await;
+    let answered_at = tokio::time::Instant::now();
+    answer_a(&*store, "Q1").await;
+    sender.wake.notify_one();
+    pass(2).await;
+    put(&*store, question("Q2", "s2", "abc")).await;
+    sender.wake.notify_one();
+    until("the line is tried", || sender.typing.calls().len() == 1).await;
+    let elapsed = answered_at.elapsed();
+    assert!(
+        elapsed >= SETTLE && elapsed < SETTLE + Duration::from_millis(100),
+        "the line is due 3 s after the answer, was {elapsed:?}"
+    );
+    println!(
+        "evidence: answer at 0, put at 2 s with a wake, line typed {elapsed:?} after the answer"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_busy_pane_retry_adds_no_second_settle() {
+    let folder = TempFolder::new();
+    let store = open_store(&folder).await;
+    put(&*store, question("Q1", "s1", "abc")).await;
+    let busy = Step::Answer(Typing::PaneBusy);
+    let sender = spawn_sender(&store, FakeTyping::new(vec![busy; 2], Typing::Typed));
+    pass(1).await;
+    let answered_at = tokio::time::Instant::now();
+    answer_a(&*store, "Q1").await;
+    sender.wake.notify_one();
+    until("the line is typed", || sender.typing.calls().len() == 3).await;
+    let elapsed = answered_at.elapsed();
+    // Tries at 3 s, 8 s and 13 s: the settle once, then 5 s apart.
+    let due = SETTLE + RETRY * 2;
+    assert!(
+        elapsed >= due && elapsed < due + Duration::from_millis(100),
+        "expected about {due:?}, was {elapsed:?}"
+    );
+    println!(
+        "evidence: 2 busy tries then typed {elapsed:?} after the answer (settle {SETTLE:?} once, retry {RETRY:?} twice)"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn deferring_every_waiting_question_returns_them_without_a_line() {
+    let folder = TempFolder::new();
+    let store = open_store(&folder).await;
+    put(&*store, question("Q1", "s1", "abc")).await;
+    put(&*store, question("Q2", "s2", "abc")).await;
+    let sender = spawn_sender(&store, FakeTyping::typed_ok());
+    defer(&*store, "Q1").await;
+    sender.wake.notify_one();
+    assert_eq!(
+        listed(&*store).await,
+        vec![("Q2".to_string(), false), ("Q1".to_string(), true)]
+    );
+    defer(&*store, "Q2").await;
+    sender.wake.notify_one();
+    pass(60).await;
+    let listing = listed(&*store).await;
+    assert_eq!(
+        listing,
+        vec![("Q1".to_string(), false), ("Q2".to_string(), false)]
+    );
+    assert!(sender.typing.calls().is_empty(), "no line");
+    println!("evidence: every waiting question set aside; no line typed; listed {listing:?}");
+}
+
+#[tokio::test(start_paused = true)]
+async fn deferring_the_last_waiting_question_with_an_unsent_answer_returns_it_after_the_line() {
+    let folder = TempFolder::new();
+    let store = open_store(&folder).await;
+    put(&*store, question("Q1", "s1", "abc")).await;
+    put(&*store, question("Q2", "s2", "abc")).await;
+    let sender = spawn_sender(&store, FakeTyping::typed_ok());
+    answer_a(&*store, "Q1").await;
+    defer(&*store, "Q2").await;
+    sender.wake.notify_one();
+    pass_ms(1_000).await;
+    assert_eq!(
+        listed(&*store).await,
+        vec![("Q2".to_string(), true)],
+        "set aside until the line is typed"
+    );
+    pass(5).await;
+    let texts = sender.typing.texts();
+    assert_eq!(
+        texts,
+        vec!["ANSWERS 1 | Q1 s1 sha abc: Which? A | later: Q2".to_string()]
+    );
+    until_no_started_batch(&*store).await;
+    let listing = listed(&*store).await;
+    assert_eq!(listing, vec![("Q2".to_string(), false)]);
+    println!(
+        "evidence: unsent answer, last waiting question set aside: line {texts:?}, then listed {listing:?}"
     );
 }

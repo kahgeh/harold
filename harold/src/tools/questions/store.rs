@@ -131,11 +131,7 @@ pub(super) trait QuestionStore: Send + Sync + 'static {
     /// its row and takes its questions out of it, so its answers are unsent
     /// again and the next round builds the batch anew. Returns whether it was
     /// released; a typed or unknown batch is left as it is.
-    fn release_batch(
-        &self,
-        batch_id: i64,
-        now_ms: i64,
-    ) -> impl Future<Output = Result<bool>> + Send;
+    fn release_batch(&self, batch_id: i64) -> impl Future<Output = Result<bool>> + Send;
 }
 
 pub(super) struct TursoQuestionStore {
@@ -808,7 +804,7 @@ impl QuestionStore for TursoQuestionStore {
         finish(&conn, batch_typed_in(&conn, batch_id, now_ms).await).await
     }
 
-    async fn release_batch(&self, batch_id: i64, _now_ms: i64) -> Result<bool> {
+    async fn release_batch(&self, batch_id: i64) -> Result<bool> {
         let conn = self.conn.lock().await;
         begin(&conn).await?;
         finish(&conn, release_batch_in(&conn, batch_id).await).await

@@ -510,7 +510,7 @@ async fn release_batch_deletes_the_row_and_returns_its_answers_unsent() {
         .expect("batch started");
     assert_eq!(batch_rows(&store).await, [(batch.id, false)]);
 
-    assert!(store.release_batch(batch.id, 11).await.unwrap());
+    assert!(store.release_batch(batch.id).await.unwrap());
 
     assert!(batch_rows(&store).await.is_empty(), "the batch row is gone");
     assert_eq!(store.started_batch().await.unwrap(), None);
@@ -551,8 +551,8 @@ async fn a_typed_or_unknown_batch_is_not_released() {
         .expect("batch started");
     store.batch_typed(batch.id, 11).await.unwrap();
 
-    assert!(!store.release_batch(batch.id, 12).await.unwrap());
-    assert!(!store.release_batch(batch.id + 1, 12).await.unwrap());
+    assert!(!store.release_batch(batch.id).await.unwrap());
+    assert!(!store.release_batch(batch.id + 1).await.unwrap());
 
     assert_eq!(batch_rows(&store).await, [(batch.id, true)]);
     assert_eq!(
@@ -747,7 +747,7 @@ async fn release_keeps_the_answers_updated_at() {
         .await
         .unwrap()
         .expect("batch started");
-    assert!(store.release_batch(batch.id, 6_000).await.unwrap());
+    assert!(store.release_batch(batch.id).await.unwrap());
     assert_eq!(ready_ids(store.ready(6_000, SETTLE).await.unwrap()), ["Q1"]);
 }
 

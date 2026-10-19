@@ -1,6 +1,7 @@
 //! Fakes and helpers shared by the question tool's tests.
 
 use std::collections::VecDeque;
+use std::future::Future;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -49,6 +50,8 @@ pub(super) struct FakeTyping {
     script: Mutex<VecDeque<Step>>,
     fallback: Mutex<Typing>,
     calls: Mutex<Vec<(String, String)>>,
+    /// Runs once, during the first call, as a write landing while a line is typed.
+    during_first: Mutex<Option<BoxFuture<'static, ()>>>,
 }
 
 impl FakeTyping {
@@ -57,7 +60,13 @@ impl FakeTyping {
             script: Mutex::new(script.into()),
             fallback: Mutex::new(fallback),
             calls: Mutex::new(Vec::new()),
+            during_first: Mutex::new(None),
         })
+    }
+
+    /// Runs `write` during the first call, before it answers.
+    pub(super) fn during_first_call(&self, write: impl Future<Output = ()> + Send + 'static) {
+        *self.during_first.lock().unwrap() = Some(Box::pin(write));
     }
 
     pub(super) fn typed_ok() -> Arc<Self> {
@@ -85,6 +94,10 @@ impl PaneTyping for FakeTyping {
                 .lock()
                 .unwrap()
                 .push((pane_id.to_string(), text.to_string()));
+            let during = self.during_first.lock().unwrap().take();
+            if let Some(write) = during {
+                write.await;
+            }
             let step = self.script.lock().unwrap().pop_front();
             match step {
                 Some(Step::Answer(typing)) => typing,
@@ -211,12 +224,12 @@ impl QuestionStore for FailingStore {
         self.inner.batch_typed(batch_id, now_ms).await
     }
 
-    async fn release_batch(&self, batch_id: i64, now_ms: i64) -> Result<bool, StoreError> {
+    async fn release_batch(&self, batch_id: i64) -> Result<bool, StoreError> {
         self.check()?;
         if self.releases.load(Ordering::SeqCst) {
             return Err(StoreError::Data("release failed".into()));
         }
-        self.inner.release_batch(batch_id, now_ms).await
+        self.inner.release_batch(batch_id).await
     }
 }
 
@@ -304,8 +317,8 @@ impl QuestionStore for MarkHook {
         }
     }
 
-    async fn release_batch(&self, batch_id: i64, now_ms: i64) -> Result<bool, StoreError> {
-        self.inner.release_batch(batch_id, now_ms).await
+    async fn release_batch(&self, batch_id: i64) -> Result<bool, StoreError> {
+        self.inner.release_batch(batch_id).await
     }
 }
 

@@ -1,14 +1,18 @@
 //! One batch back to the chief: the line, and the task that types it.
 //!
-//! When no question is waiting and some answers are unsent, the sender
-//! records a batch as started, with its text, and makes one try at typing it
-//! into the chief's pane. Typed, it is marked typed. Not typed (the pane busy
-//! or gone, or no chief), a batch built in this run is released, so the next
-//! round, 5 s later, builds it again from what is there then and a question
-//! put meanwhile holds it. A started batch never marked typed, found when the
-//! sender starts, was being typed when Harold stopped and may have reached the
-//! pane. It is kept, never released: it waits for the pane like any batch and
-//! is typed again once, before any new batch, even if a question waits.
+//! Questions still waiting do not hold a line back. When some answers are
+//! unsent, the sender waits out the settle (3 s from the newest unsent answer's
+//! own stamp in the store), or does not wait when an unsent answer is marked
+//! "send now". Then it records a batch as started, with its text, and makes
+//! one try at typing it into the chief's pane. Typed, it is marked typed. Not
+//! typed (the pane busy or gone, or no chief), a batch built in this run is
+//! released, so the next round, 5 s later, builds it again from what is there
+//! then; the answers keep their stamps, so the retry adds no second settle. A
+//! wake from another write ends the sleep early, and the next round asks the
+//! store again, so it never restarts the settle. A started batch never marked
+//! typed, found when the sender starts, was being typed when Harold stopped
+//! and may have reached the pane. It is kept, never released: it waits for the
+//! pane like any batch and is typed again once, before any new batch.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -19,10 +23,28 @@ use tracing::{info, warn};
 use super::schema::{Answer, Kind, Question};
 use super::store::{QuestionStore, Readiness, Ready, StartedBatch, StoreError};
 use super::{NAME, now_ms};
+use crate::tools::{ChiefPane, PaneTyping, Typing};
 
 /// How long the newest unsent answer settles before its line starts.
-const SETTLE_MS: i64 = 3_000;
-use crate::tools::{ChiefPane, PaneTyping, Typing};
+pub(super) const SETTLE: Duration = Duration::from_secs(3);
+
+/// The clock the sender reads: wall-clock milliseconds, as the store stamps
+/// answers.
+#[cfg(not(test))]
+pub(super) fn clock_ms() -> i64 {
+    now_ms()
+}
+
+/// Under test the wall clock is read once and tokio's clock moves it, so
+/// paused time ages an answer the way real time does.
+#[cfg(test)]
+pub(super) fn clock_ms() -> i64 {
+    static BASE: std::sync::OnceLock<(i64, tokio::time::Instant)> = std::sync::OnceLock::new();
+    let (wall, start) = BASE.get_or_init(|| (now_ms(), tokio::time::Instant::now()));
+    wall + tokio::time::Instant::now()
+        .duration_since(*start)
+        .as_millis() as i64
+}
 
 /// How long a batch waits before the next try.
 pub(super) const RETRY: Duration = Duration::from_secs(5);
@@ -112,6 +134,9 @@ enum Next {
     Idle,
     /// A batch is pending: try again after `RETRY`, or sooner on a write.
     Retry,
+    /// Answers are unsent and settling: ask again when the wait is over, or
+    /// sooner on a write.
+    Settle(Duration),
     /// A batch was just typed, or could not start because the answers changed:
     /// look again at once.
     Again,
@@ -125,6 +150,8 @@ enum Found {
     /// restart: it may have reached the pane, so it is kept and typed once.
     Inherited(StartedBatch),
     Nothing,
+    /// Unsent answers are still settling, for this much longer.
+    Settling(Duration),
     /// The answers changed between `ready` and `start_batch`; nothing was started.
     Changed,
 }
@@ -185,6 +212,12 @@ pub(super) async fn run<S: QuestionStore>(
                 _ = wake.notified() => {}
                 _ = tokio::time::sleep(RETRY) => {}
             },
+            Next::Settle(wait) => tokio::select! {
+                biased;
+                _ = shutdown.changed() => return,
+                _ = wake.notified() => {}
+                _ = tokio::time::sleep(wait) => {}
+            },
         }
     }
 }
@@ -195,7 +228,7 @@ impl<S: QuestionStore> Sender<S> {
             return self.mark_typed(batch_id, how).await;
         }
         if let Some(batch_id) = self.unreleased {
-            if self.store.release_batch(batch_id, now_ms()).await.is_err() {
+            if self.store.release_batch(batch_id).await.is_err() {
                 self.log_waiting("store_failed");
                 return Next::Retry;
             }
@@ -208,6 +241,7 @@ impl<S: QuestionStore> Sender<S> {
                 self.waiting_logged = None;
                 return Next::Idle;
             }
+            Ok(Found::Settling(wait)) => return Next::Settle(wait),
             // A write landed after `ready`: build the batch again from what is there now.
             Ok(Found::Changed) => return Next::Again,
             Err(_) => {
@@ -254,9 +288,18 @@ impl<S: QuestionStore> Sender<S> {
             return Ok(Found::Inherited(batch));
         }
         self.looked_for_leftover = true;
-        // Task 3 sleeps out the settle; until then a settling answer reads as idle.
-        let Readiness::Ready(ready) = self.store.ready(now_ms(), SETTLE_MS).await? else {
-            return Ok(Found::Nothing);
+        let ready = match self
+            .store
+            .ready(clock_ms(), SETTLE.as_millis() as i64)
+            .await?
+        {
+            Readiness::Nothing => return Ok(Found::Nothing),
+            Readiness::Settling { wait_ms } => {
+                return Ok(Found::Settling(
+                    Duration::from_millis(wait_ms.max(0) as u64),
+                ));
+            }
+            Readiness::Ready(ready) => ready,
         };
         let answers: Vec<(String, u32)> = ready
             .answers
@@ -265,13 +308,13 @@ impl<S: QuestionStore> Sender<S> {
             .collect();
         let started = self
             .store
-            .start_batch(&answers, &batch_line(&ready), now_ms())
+            .start_batch(&answers, &batch_line(&ready), clock_ms())
             .await?;
         Ok(started.map_or(Found::Changed, Found::Batch))
     }
 
     /// Nothing was typed. A batch built in this run is released: the next
-    /// round builds it again, and a question put meanwhile holds it. The
+    /// round builds it again, with any answer given meanwhile. The
     /// batch left from before a restart may have reached the pane, so it is
     /// kept and tried again.
     async fn not_typed(&mut self, batch_id: i64, inherited: bool, reason: &'static str) -> Next {
@@ -279,7 +322,7 @@ impl<S: QuestionStore> Sender<S> {
         if inherited {
             return Next::Retry;
         }
-        if self.store.release_batch(batch_id, now_ms()).await.is_err() {
+        if self.store.release_batch(batch_id).await.is_err() {
             self.log_waiting("store_failed");
             self.unreleased = Some(batch_id);
         }
@@ -287,7 +330,7 @@ impl<S: QuestionStore> Sender<S> {
     }
 
     async fn mark_typed(&mut self, batch_id: i64, how: Typing) -> Next {
-        if self.store.batch_typed(batch_id, now_ms()).await.is_err() {
+        if self.store.batch_typed(batch_id, clock_ms()).await.is_err() {
             self.log_waiting("store_failed");
             return Next::Retry;
         }
