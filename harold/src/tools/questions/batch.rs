@@ -17,8 +17,11 @@ use tokio::sync::{Notify, watch};
 use tracing::{info, warn};
 
 use super::schema::{Answer, Kind, Question};
-use super::store::{QuestionStore, Ready, StartedBatch, StoreError};
+use super::store::{QuestionStore, Readiness, Ready, StartedBatch, StoreError};
 use super::{NAME, now_ms};
+
+/// How long the newest unsent answer settles before its line starts.
+const SETTLE_MS: i64 = 3_000;
 use crate::tools::{ChiefPane, PaneTyping, Typing};
 
 /// How long a batch waits before the next try.
@@ -251,7 +254,8 @@ impl<S: QuestionStore> Sender<S> {
             return Ok(Found::Inherited(batch));
         }
         self.looked_for_leftover = true;
-        let Some(ready) = self.store.ready().await? else {
+        // Task 3 sleeps out the settle; until then a settling answer reads as idle.
+        let Readiness::Ready(ready) = self.store.ready(now_ms(), SETTLE_MS).await? else {
             return Ok(Found::Nothing);
         };
         let answers: Vec<(String, u32)> = ready

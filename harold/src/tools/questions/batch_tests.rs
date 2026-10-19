@@ -158,8 +158,8 @@ impl QuestionStore for RacingStore {
         self.inner.defer(id, now_ms).await
     }
 
-    async fn ready(&self) -> Result<Option<Ready>, StoreError> {
-        self.inner.ready().await
+    async fn ready(&self, now_ms: i64, settle_ms: i64) -> Result<Readiness, StoreError> {
+        self.inner.ready(now_ms, settle_ms).await
     }
 
     async fn start_batch(
@@ -700,7 +700,9 @@ async fn shutdown_stops_a_waiting_batch() {
         .expect("the sender stops at once")
         .unwrap();
     assert_eq!(store.started_batch().await.unwrap(), None, "batch released");
-    let ready = store.ready().await.unwrap().expect("Q1 is unsent again");
+    let Readiness::Ready(ready) = store.ready(i64::MAX / 2, 3_000).await.unwrap() else {
+        panic!("Q1 is unsent again");
+    };
     assert_eq!(ready.answers.len(), 1);
 
     // Inside a `type_line` that has not returned: the line may have reached the pane.
@@ -1196,8 +1198,8 @@ async fn a_restart_with_a_busy_pane_keeps_the_leftover_batch_and_types_it_once()
         .expect("Q2 listed");
     assert!(!q2.deferred, "Q2 still waiting");
     assert_eq!(
-        store.ready().await.unwrap(),
-        None,
+        store.ready(i64::MAX / 2, 3_000).await.unwrap(),
+        Readiness::Nothing,
         "Q2 holds the next batch"
     );
     println!(

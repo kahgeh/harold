@@ -74,6 +74,18 @@ pub(super) struct Ready {
     pub later: Vec<String>,
 }
 
+/// What the unsent answers allow now.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum Readiness {
+    /// No answer is unsent.
+    Nothing,
+    /// Unsent answers are still settling; `wait_ms` is in `1..=settle_ms`.
+    Settling {
+        wait_ms: i64,
+    },
+    Ready(Ready),
+}
+
 pub(super) trait QuestionStore: Send + Sync + 'static {
     /// Stores the question: version 1, or the next version of an existing id.
     fn put(&self, question: Question, now_ms: i64) -> impl Future<Output = Result<u32>> + Send;
@@ -101,10 +113,12 @@ pub(super) trait QuestionStore: Send + Sync + 'static {
         id: &str,
         now_ms: i64,
     ) -> impl Future<Output = Result<std::result::Result<u32, Refusal>>> + Send;
-    fn ready(&self) -> impl Future<Output = Result<Option<Ready>>> + Send;
+    /// The unsent answers are ready when one is marked send-now, or when the
+    /// newest has settled for `settle_ms`. Waiting questions do not hold them.
+    fn ready(&self, now_ms: i64, settle_ms: i64) -> impl Future<Output = Result<Readiness>> + Send;
     /// Records a batch of the answers `ready` returned, as `(id, version)`.
-    /// Stores nothing and returns `None` when, by now, a question is waiting
-    /// or a listed answer is no longer answered and unsent at that version.
+    /// Stores nothing and returns `None` when, by now, a listed answer is no
+    /// longer answered and unsent at that version.
     fn start_batch(
         &self,
         answers: &[(String, u32)],
@@ -523,6 +537,13 @@ async fn defer_in(
         (id, position, now_ms),
     )
     .await?;
+    // Nothing waiting and no answer in the way of a line: the set-aside
+    // questions would never come back, so they come back now.
+    if ids_in_state(conn, "waiting").await?.is_empty()
+        && ids_in_state(conn, "answered").await?.is_empty()
+    {
+        return_deferred(conn, now_ms).await?;
+    }
     Ok(Ok(existing.version))
 }
 
@@ -540,14 +561,13 @@ async fn ids_in_state(conn: &Connection, state: &str) -> Result<Vec<String>> {
     Ok(ids)
 }
 
-async fn ready_in(conn: &Connection) -> Result<Option<Ready>> {
-    if !ids_in_state(conn, "waiting").await?.is_empty() {
-        return Ok(None);
-    }
+async fn ready_in(conn: &Connection, now_ms: i64, settle_ms: i64) -> Result<Readiness> {
     let mut answers = Vec::new();
+    let mut newest = i64::MIN;
+    let mut marked = false;
     let mut rows = conn
         .query(
-            "SELECT id, version, body, answer FROM questions \
+            "SELECT id, version, body, answer, updated_at_ms, send_now FROM questions \
              WHERE state = 'answered' AND batch_id IS NULL ORDER BY position, id",
             (),
         )
@@ -555,6 +575,8 @@ async fn ready_in(conn: &Connection) -> Result<Option<Ready>> {
     while let Some(row) = rows.next().await? {
         let answer = optional_text(&row, 3)?
             .ok_or_else(|| StoreError::Data("answered question has no answer".into()))?;
+        newest = newest.max(integer(&row, 4)?);
+        marked |= integer(&row, 5)? == 1;
         answers.push((
             text(&row, 0)?,
             version_of(&row, 1)?,
@@ -564,9 +586,17 @@ async fn ready_in(conn: &Connection) -> Result<Option<Ready>> {
     }
     drop(rows);
     if answers.is_empty() {
-        return Ok(None);
+        return Ok(Readiness::Nothing);
     }
-    Ok(Some(Ready {
+    // A wall clock behind the answer counts as no time elapsed, so the wait
+    // never exceeds one settle.
+    let elapsed = now_ms.saturating_sub(newest).max(0);
+    if !marked && elapsed < settle_ms {
+        return Ok(Readiness::Settling {
+            wait_ms: settle_ms - elapsed,
+        });
+    }
+    Ok(Readiness::Ready(Ready {
         answers,
         later: ids_in_state(conn, "deferred").await?,
     }))
@@ -591,8 +621,8 @@ async fn start_batch_in(
     now_ms: i64,
 ) -> Result<Option<StartedBatch>> {
     // `ready` and this call take the lock apart, so a write may land between
-    // them: a new question to wait for, or an answer replaced.
-    if answers.is_empty() || !ids_in_state(conn, "waiting").await?.is_empty() {
+    // them: an answer replaced.
+    if answers.is_empty() {
         return Ok(None);
     }
     for (id, version) in answers {
@@ -613,9 +643,9 @@ async fn start_batch_in(
     drop(rows);
     for (question, _) in answers {
         conn.execute(
-            "UPDATE questions SET batch_id = ?2, updated_at_ms = ?3 \
+            "UPDATE questions SET batch_id = ?2 \
              WHERE id = ?1 AND state = 'answered' AND batch_id IS NULL",
-            (question.as_str(), id, now_ms),
+            (question.as_str(), id),
         )
         .await?;
     }
@@ -653,7 +683,15 @@ async fn batch_typed_in(conn: &Connection, batch_id: i64, now_ms: i64) -> Result
         (batch_id, now_ms),
     )
     .await?;
-    // Deferred questions wait again, after everything else, for the next batch.
+    // Deferred questions wait again, after everything else, once none is waiting.
+    if ids_in_state(conn, "waiting").await?.is_empty() {
+        return_deferred(conn, now_ms).await?;
+    }
+    Ok(())
+}
+
+/// Deferred questions wait again, after everything else.
+async fn return_deferred(conn: &Connection, now_ms: i64) -> Result<()> {
     for id in ids_in_state(conn, "deferred").await? {
         let position = next_position(conn).await?;
         conn.execute(
@@ -666,7 +704,7 @@ async fn batch_typed_in(conn: &Connection, batch_id: i64, now_ms: i64) -> Result
     Ok(())
 }
 
-async fn release_batch_in(conn: &Connection, batch_id: i64, now_ms: i64) -> Result<bool> {
+async fn release_batch_in(conn: &Connection, batch_id: i64) -> Result<bool> {
     let mut rows = conn
         .query(
             "SELECT 1 FROM batches WHERE id = ?1 AND typed_at_ms IS NULL",
@@ -681,8 +719,8 @@ async fn release_batch_in(conn: &Connection, batch_id: i64, now_ms: i64) -> Resu
     conn.execute("DELETE FROM batches WHERE id = ?1", (batch_id,))
         .await?;
     conn.execute(
-        "UPDATE questions SET batch_id = NULL, updated_at_ms = ?2 WHERE batch_id = ?1",
-        (batch_id, now_ms),
+        "UPDATE questions SET batch_id = NULL WHERE batch_id = ?1",
+        (batch_id,),
     )
     .await?;
     Ok(true)
@@ -741,10 +779,10 @@ impl QuestionStore for TursoQuestionStore {
         finish(&conn, defer_in(&conn, id, now_ms).await).await
     }
 
-    async fn ready(&self) -> Result<Option<Ready>> {
+    async fn ready(&self, now_ms: i64, settle_ms: i64) -> Result<Readiness> {
         let conn = self.conn.lock().await;
         roll_back_abandoned(&conn).await?;
-        ready_in(&conn).await
+        ready_in(&conn, now_ms, settle_ms).await
     }
 
     async fn start_batch(
@@ -770,10 +808,10 @@ impl QuestionStore for TursoQuestionStore {
         finish(&conn, batch_typed_in(&conn, batch_id, now_ms).await).await
     }
 
-    async fn release_batch(&self, batch_id: i64, now_ms: i64) -> Result<bool> {
+    async fn release_batch(&self, batch_id: i64, _now_ms: i64) -> Result<bool> {
         let conn = self.conn.lock().await;
         begin(&conn).await?;
-        finish(&conn, release_batch_in(&conn, batch_id, now_ms).await).await
+        finish(&conn, release_batch_in(&conn, batch_id).await).await
     }
 }
 

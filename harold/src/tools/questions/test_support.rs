@@ -10,7 +10,7 @@ use harold_api::tools::questions::v1 as pb;
 
 use super::schema::{Answer, Question};
 use super::store::{
-    Listing, QuestionStore, Ready, Refusal, StartedBatch, StoreError, TursoQuestionStore,
+    Listing, QuestionStore, Readiness, Refusal, StartedBatch, StoreError, TursoQuestionStore,
 };
 use crate::tools::{BoxFuture, ChiefPane, PaneTyping, Typing};
 
@@ -185,8 +185,8 @@ impl QuestionStore for FailingStore {
         self.inner.defer(id, now_ms).await
     }
 
-    async fn ready(&self) -> Result<Option<Ready>, StoreError> {
-        self.inner.ready().await
+    async fn ready(&self, now_ms: i64, settle_ms: i64) -> Result<Readiness, StoreError> {
+        self.inner.ready(now_ms, settle_ms).await
     }
 
     async fn start_batch(
@@ -280,8 +280,8 @@ impl QuestionStore for MarkHook {
         self.inner.defer(id, now_ms).await
     }
 
-    async fn ready(&self) -> Result<Option<Ready>, StoreError> {
-        self.inner.ready().await
+    async fn ready(&self, now_ms: i64, settle_ms: i64) -> Result<Readiness, StoreError> {
+        self.inner.ready(now_ms, settle_ms).await
     }
 
     async fn start_batch(

@@ -59,6 +59,31 @@ fn at_v1(items: &[&str]) -> Vec<(String, u32)> {
 }
 
 /// The `(id, version)` of each answer `ready` returns.
+const SETTLE: i64 = 3_000;
+
+/// The unsent answers, as `ready` reports them long after they settled.
+async fn ready_of(store: &TursoQuestionStore) -> Option<Ready> {
+    match store.ready(i64::MAX / 2, SETTLE).await.unwrap() {
+        Readiness::Ready(ready) => Some(ready),
+        _ => None,
+    }
+}
+
+async fn answer_at(store: &TursoQuestionStore, id: &str, send_now: bool, now_ms: i64) {
+    let result = store
+        .answer(id, 1, send_now, |_| Ok(an_answer()), now_ms)
+        .await
+        .unwrap();
+    assert_eq!(result, Ok(Ok(())));
+}
+
+fn ready_ids(readiness: Readiness) -> Vec<String> {
+    let Readiness::Ready(ready) = readiness else {
+        panic!("expected Ready, got {readiness:?}");
+    };
+    ready.answers.into_iter().map(|a| a.0).collect()
+}
+
 fn ready_answers(ready: &Ready) -> Vec<(String, u32)> {
     ready
         .answers
@@ -246,7 +271,7 @@ async fn answer_with_the_current_version_records_it() {
     assert_eq!(result, Ok(Ok(())));
     assert!(listed_ids(&store).await.is_empty());
 
-    let ready = store.ready().await.unwrap().unwrap();
+    let ready = ready_of(&store).await.unwrap();
     assert_eq!(ready.answers.len(), 1);
     let (id, version, q, answer) = &ready.answers[0];
     assert_eq!((id.as_str(), *version), ("Q1", 1));
@@ -266,7 +291,7 @@ async fn an_old_version_is_version_changed_and_a_dismissed_one_not_waiting() {
         .await
         .unwrap();
     assert_eq!(old, Err(Refusal::VersionChanged));
-    assert!(store.ready().await.unwrap().is_none());
+    assert!(ready_of(&store).await.is_none());
 
     assert_eq!(store.dismiss("Q1", "withdrawn", 4).await.unwrap(), Ok(2));
     let gone = store
@@ -295,27 +320,6 @@ async fn an_old_version_is_version_changed_and_a_dismissed_one_not_waiting() {
 }
 
 #[tokio::test]
-async fn ready_waits_for_every_waiting_question() {
-    let temp = TempFolder::new();
-    let store = TursoQuestionStore::open(&temp.0).await.unwrap();
-    assert!(store.ready().await.unwrap().is_none());
-    store.put(question("Q1"), 1).await.unwrap();
-    store.put(question("Q2"), 1).await.unwrap();
-    store.put(question("Q3"), 1).await.unwrap();
-    answer_ok(&store, "Q1", 1).await;
-    assert!(store.ready().await.unwrap().is_none());
-
-    store.defer("Q2", 2).await.unwrap().unwrap();
-    assert!(store.ready().await.unwrap().is_none());
-
-    answer_ok(&store, "Q3", 1).await;
-    let ready = store.ready().await.unwrap().unwrap();
-    let answered: Vec<&str> = ready.answers.iter().map(|a| a.0.as_str()).collect();
-    assert_eq!(answered, ["Q1", "Q3"]);
-    assert_eq!(ready.later, ["Q2"]);
-}
-
-#[tokio::test]
 async fn a_batch_typed_marks_answers_sent_and_deferred_waiting() {
     let temp = TempFolder::new();
     let store = TursoQuestionStore::open(&temp.0).await.unwrap();
@@ -333,17 +337,17 @@ async fn a_batch_typed_marks_answers_sent_and_deferred_waiting() {
         .expect("batch started");
     assert_eq!(batch.text, "ANSWERS 2");
     // started answers are no longer unsent
-    assert!(store.ready().await.unwrap().is_none());
+    assert!(ready_of(&store).await.is_none());
     assert_eq!(store.started_batch().await.unwrap(), Some(batch.clone()));
 
     store.batch_typed(batch.id, 11).await.unwrap();
     assert!(store.started_batch().await.unwrap().is_none());
     assert_eq!(listed_ids(&store).await, [("Q2".to_string(), false)]);
-    assert!(store.ready().await.unwrap().is_none());
+    assert!(ready_of(&store).await.is_none());
 
-    // sent answers are not sent again, and the returned question holds the next batch back
+    // sent answers are not sent again; the returned question is ready once answered
     answer_ok(&store, "Q2", 1).await;
-    let ready = store.ready().await.unwrap().unwrap();
+    let ready = ready_of(&store).await.unwrap();
     assert_eq!(ready.answers.len(), 1);
     assert_eq!(ready.answers[0].0, "Q2");
 }
@@ -363,35 +367,9 @@ async fn a_started_batch_survives_reopening() {
 
     let store = TursoQuestionStore::open(&temp.0).await.unwrap();
     assert_eq!(store.started_batch().await.unwrap(), Some(first.clone()));
-    assert!(store.ready().await.unwrap().is_none());
+    assert!(ready_of(&store).await.is_none());
     store.batch_typed(first.id, 11).await.unwrap();
     assert!(store.started_batch().await.unwrap().is_none());
-}
-
-#[tokio::test]
-async fn start_batch_refuses_when_a_question_waits() {
-    let temp = TempFolder::new();
-    let store = TursoQuestionStore::open(&temp.0).await.unwrap();
-    store.put(question("Q1"), 1).await.unwrap();
-    answer_ok(&store, "Q1", 1).await;
-    let ready = store.ready().await.unwrap().expect("Q1 is ready");
-
-    // Q2 lands between `ready` and `start_batch`.
-    store.put(question("Q2"), 2).await.unwrap();
-    let started = store
-        .start_batch(&ready_answers(&ready), "ANSWERS 1", 10)
-        .await
-        .unwrap();
-    assert_eq!(started, None);
-    assert_eq!(store.started_batch().await.unwrap(), None);
-
-    // Q1 was not claimed: once Q2 is answered, both are ready together.
-    answer_ok(&store, "Q2", 1).await;
-    let ready = store.ready().await.unwrap().unwrap();
-    assert_eq!(ready_answers(&ready), at_v1(&["Q1", "Q2"]));
-    println!(
-        "evidence: start_batch with Q2 waiting -> None, no batch stored; later ready = Q1, Q2"
-    );
 }
 
 #[tokio::test]
@@ -402,7 +380,7 @@ async fn start_batch_refuses_when_a_listed_answer_changed() {
     store.put(question("Q2"), 1).await.unwrap();
     answer_ok(&store, "Q1", 1).await;
     answer_ok(&store, "Q2", 1).await;
-    let ready = store.ready().await.unwrap().expect("Q1 and Q2 are ready");
+    let ready = ready_of(&store).await.expect("Q1 and Q2 are ready");
 
     // The chief re-puts the answered Q1 between `ready` and `start_batch`.
     assert_eq!(store.put(question("Q1"), 2).await.unwrap(), 2);
@@ -421,7 +399,7 @@ async fn start_batch_refuses_when_a_listed_answer_changed() {
         .unwrap();
     assert_eq!(started, None);
 
-    let ready = store.ready().await.unwrap().unwrap();
+    let ready = ready_of(&store).await.unwrap();
     assert_eq!(
         ready_answers(&ready),
         vec![("Q2".to_string(), 1), ("Q1".to_string(), 2)]
@@ -465,7 +443,7 @@ async fn a_write_dropped_inside_its_transaction_does_not_block_the_next() {
             .unwrap()
             .unwrap();
     }
-    assert!(store.ready().await.unwrap().is_none());
+    assert!(ready_of(&store).await.is_none());
     {
         let conn = store.conn.lock().await;
         begin(&conn).await.unwrap();
@@ -545,16 +523,15 @@ async fn release_batch_deletes_the_row_and_returns_its_answers_unsent() {
             ("Q3".to_string(), "deferred".to_string(), None),
         ]
     );
-    let ready = store
-        .ready()
-        .await
-        .unwrap()
-        .expect("the answers are unsent again");
+    let ready = store.ready(6_000, SETTLE).await.unwrap();
+    let Readiness::Ready(ready) = ready else {
+        panic!("the answers are unsent again, with no second settle: {ready:?}");
+    };
     assert_eq!(ready_answers(&ready), at_v1(&["Q1", "Q2"]));
     assert_eq!(ready.later, ["Q3"]);
-    // A question put now holds the next batch.
+    // A question put now does not hold the answers.
     store.put(question("Q4"), 12).await.unwrap();
-    assert!(store.ready().await.unwrap().is_none());
+    assert!(ready_of(&store).await.is_some());
     println!(
         "evidence: released batch {}: no batch rows; questions {columns:?}",
         batch.id
@@ -582,7 +559,7 @@ async fn a_typed_or_unknown_batch_is_not_released() {
         batch_columns(&store).await,
         [("Q1".to_string(), "sent".to_string(), Some(batch.id))]
     );
-    assert!(store.ready().await.unwrap().is_none());
+    assert!(ready_of(&store).await.is_none());
 }
 
 async fn marked(store: &TursoQuestionStore, id: &str) -> bool {
@@ -672,4 +649,224 @@ async fn put_again_clears_the_mark() {
     // an answered question is not open: the put takes the re-queue branch
     store.put(question("Q1"), 3).await.unwrap();
     assert!(!marked(&store, "Q1").await);
+}
+
+#[tokio::test]
+async fn no_unsent_answers_is_nothing() {
+    let temp = TempFolder::new();
+    let store = TursoQuestionStore::open(&temp.0).await.unwrap();
+    assert_eq!(store.ready(0, SETTLE).await.unwrap(), Readiness::Nothing);
+    store.put(question("Q1"), 1).await.unwrap();
+    assert_eq!(
+        store.ready(9_000, SETTLE).await.unwrap(),
+        Readiness::Nothing
+    );
+}
+
+#[tokio::test]
+async fn unmarked_answer_settles() {
+    let temp = TempFolder::new();
+    let store = TursoQuestionStore::open(&temp.0).await.unwrap();
+    store.put(question("Q1"), 0).await.unwrap();
+    answer_at(&store, "Q1", false, 0).await;
+    assert_eq!(
+        store.ready(1_000, SETTLE).await.unwrap(),
+        Readiness::Settling { wait_ms: 2_000 }
+    );
+    assert_eq!(ready_ids(store.ready(3_000, SETTLE).await.unwrap()), ["Q1"]);
+}
+
+#[tokio::test]
+async fn settle_runs_from_the_newest_unsent_answer() {
+    let temp = TempFolder::new();
+    let store = TursoQuestionStore::open(&temp.0).await.unwrap();
+    store.put(question("Q1"), 0).await.unwrap();
+    store.put(question("Q2"), 0).await.unwrap();
+    answer_at(&store, "Q1", false, 0).await;
+    answer_at(&store, "Q2", false, 2_000).await;
+    assert_eq!(
+        store.ready(3_000, SETTLE).await.unwrap(),
+        Readiness::Settling { wait_ms: 2_000 }
+    );
+    assert_eq!(
+        ready_ids(store.ready(5_000, SETTLE).await.unwrap()),
+        ["Q1", "Q2"]
+    );
+}
+
+#[tokio::test]
+async fn a_marked_answer_is_ready_at_once_and_takes_unmarked_ones_with_it() {
+    let temp = TempFolder::new();
+    let store = TursoQuestionStore::open(&temp.0).await.unwrap();
+    store.put(question("Q1"), 0).await.unwrap();
+    store.put(question("Q2"), 0).await.unwrap();
+    answer_at(&store, "Q2", false, 0).await;
+    answer_at(&store, "Q1", true, 1_000).await;
+    assert_eq!(
+        ready_ids(store.ready(1_000, SETTLE).await.unwrap()),
+        ["Q1", "Q2"]
+    );
+}
+
+#[tokio::test]
+async fn waiting_questions_no_longer_hold_readiness() {
+    let temp = TempFolder::new();
+    let store = TursoQuestionStore::open(&temp.0).await.unwrap();
+    for n in 25..=29 {
+        store.put(question(&format!("Q{n}")), 0).await.unwrap();
+    }
+    answer_at(&store, "Q25", false, 0).await;
+    answer_at(&store, "Q26", false, 0).await;
+    assert_eq!(
+        ready_ids(store.ready(3_000, SETTLE).await.unwrap()),
+        ["Q25", "Q26"]
+    );
+    assert_eq!(listed_ids(&store).await.len(), 3);
+}
+
+#[tokio::test]
+async fn a_wall_clock_behind_the_answer_waits_at_most_one_settle() {
+    let temp = TempFolder::new();
+    let store = TursoQuestionStore::open(&temp.0).await.unwrap();
+    store.put(question("Q1"), 0).await.unwrap();
+    answer_at(&store, "Q1", false, 10_000).await;
+    assert_eq!(
+        store.ready(4_000, SETTLE).await.unwrap(),
+        Readiness::Settling { wait_ms: SETTLE }
+    );
+}
+
+#[tokio::test]
+async fn release_keeps_the_answers_updated_at() {
+    let temp = TempFolder::new();
+    let store = TursoQuestionStore::open(&temp.0).await.unwrap();
+    store.put(question("Q1"), 0).await.unwrap();
+    answer_at(&store, "Q1", false, 0).await;
+    let batch = store
+        .start_batch(&at_v1(&["Q1"]), "ANSWERS 1", 5_000)
+        .await
+        .unwrap()
+        .expect("batch started");
+    assert!(store.release_batch(batch.id, 6_000).await.unwrap());
+    assert_eq!(ready_ids(store.ready(6_000, SETTLE).await.unwrap()), ["Q1"]);
+}
+
+#[tokio::test]
+async fn start_batch_ignores_waiting_questions_but_refuses_a_put_again_answer() {
+    let temp = TempFolder::new();
+    let store = TursoQuestionStore::open(&temp.0).await.unwrap();
+    store.put(question("Q1"), 0).await.unwrap();
+    store.put(question("Q2"), 0).await.unwrap();
+    answer_at(&store, "Q1", false, 0).await;
+    let started = store
+        .start_batch(&at_v1(&["Q1"]), "ANSWERS 1", 10)
+        .await
+        .unwrap();
+    assert!(started.is_some(), "Q2 waiting does not hold the batch");
+
+    answer_at(&store, "Q2", false, 20).await;
+    store.put(question("Q2"), 30).await.unwrap();
+    let refused = store
+        .start_batch(&at_v1(&["Q2"]), "ANSWERS 1", 40)
+        .await
+        .unwrap();
+    assert_eq!(refused, None);
+}
+
+#[tokio::test]
+async fn batch_typed_returns_deferred_only_when_nothing_waits() {
+    let temp = TempFolder::new();
+    let store = TursoQuestionStore::open(&temp.0).await.unwrap();
+    for id in ["Q1", "Q2", "Q3", "Q4"] {
+        store.put(question(id), 0).await.unwrap();
+    }
+    store.defer("Q4", 1).await.unwrap().unwrap();
+    answer_at(&store, "Q1", false, 2).await;
+    let first = store
+        .start_batch(&at_v1(&["Q1"]), "ANSWERS 1", 10)
+        .await
+        .unwrap()
+        .unwrap();
+    store.batch_typed(first.id, 11).await.unwrap();
+    assert_eq!(
+        listed_ids(&store).await,
+        [
+            ("Q2".to_string(), false),
+            ("Q3".to_string(), false),
+            ("Q4".to_string(), true)
+        ],
+        "Q2 and Q3 still wait, so Q4 stays deferred"
+    );
+
+    answer_at(&store, "Q2", false, 20).await;
+    answer_at(&store, "Q3", false, 20).await;
+    let second = store
+        .start_batch(&at_v1(&["Q2", "Q3"]), "ANSWERS 2", 30)
+        .await
+        .unwrap()
+        .unwrap();
+    store.batch_typed(second.id, 31).await.unwrap();
+    assert_eq!(listed_ids(&store).await, [("Q4".to_string(), false)]);
+}
+
+#[tokio::test]
+async fn defer_that_leaves_nothing_waiting_and_nothing_answered_returns_the_deferred() {
+    let temp = TempFolder::new();
+    let store = TursoQuestionStore::open(&temp.0).await.unwrap();
+    for id in ["Q1", "Q2", "Q3"] {
+        store.put(question(id), 0).await.unwrap();
+    }
+    store.defer("Q1", 1).await.unwrap().unwrap();
+    store.defer("Q2", 2).await.unwrap().unwrap();
+    assert_eq!(
+        listed_ids(&store).await,
+        [
+            ("Q3".to_string(), false),
+            ("Q1".to_string(), true),
+            ("Q2".to_string(), true)
+        ]
+    );
+    store.defer("Q3", 3).await.unwrap().unwrap();
+    assert_eq!(
+        listed_ids(&store).await,
+        [
+            ("Q1".to_string(), false),
+            ("Q2".to_string(), false),
+            ("Q3".to_string(), false)
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_defer_with_an_answer_in_the_way_leaves_the_deferred_deferred() {
+    let temp = TempFolder::new();
+    let store = TursoQuestionStore::open(&temp.0).await.unwrap();
+    for id in ["Q1", "Q2", "Q3"] {
+        store.put(question(id), 0).await.unwrap();
+    }
+    store.defer("Q1", 1).await.unwrap().unwrap();
+    answer_at(&store, "Q2", false, 2).await;
+    // Q2 answered and unsent.
+    store.defer("Q3", 3).await.unwrap().unwrap();
+    assert_eq!(
+        listed_ids(&store).await,
+        [("Q1".to_string(), true), ("Q3".to_string(), true)]
+    );
+
+    // Q2 in a started batch that is not typed yet.
+    store
+        .start_batch(&at_v1(&["Q2"]), "ANSWERS 1", 10)
+        .await
+        .unwrap()
+        .unwrap();
+    store.put(question("Q4"), 11).await.unwrap();
+    store.defer("Q4", 12).await.unwrap().unwrap();
+    assert_eq!(
+        listed_ids(&store).await,
+        [
+            ("Q1".to_string(), true),
+            ("Q3".to_string(), true),
+            ("Q4".to_string(), true)
+        ]
+    );
 }
