@@ -77,7 +77,12 @@ pub fn render(frame: &mut Frame<'_>, app: &App, now_ms: i64) {
     } else if app.holding_block_keys() {
         render_hold_footer(frame, footer);
     } else {
-        render_footer(frame, footer, compact || area.width < WIDE_FOOTER_WIDTH);
+        render_footer(
+            frame,
+            footer,
+            compact || area.width < WIDE_FOOTER_WIDTH,
+            app.question_stop,
+        );
     }
     render_palette(frame, area, app);
 }
@@ -1238,11 +1243,64 @@ fn detail_lines<'a>(agent: &'a crate::app::AgentRow, now_ms: i64) -> Vec<Line<'a
     ]
 }
 
-/// The footer's hints for the list, short or long. The form names a break key, the
-/// list's `c`, where a narrow footer goes on to a second line.
-fn footer_hints(compact: bool) -> Vec<Span<'static>> {
+/// The key where a narrow footer goes on to a second line: the list's `c`, or a
+/// question row's `^L`.
+fn footer_break_key(stop: Option<QStop>) -> &'static str {
+    if stop.is_some() { "^L" } else { "c" }
+}
+
+/// The footer's hints for the row under the cursor, short or long: the list's on an
+/// agent row (`stop` is `None`), the question's on a question row. Each form names a
+/// break key, see [`footer_break_key`].
+fn footer_hints(compact: bool, stop: Option<QStop>) -> Vec<Span<'static>> {
     let key = |text| Span::styled(text, Style::default().fg(INK));
     let label = |text| Span::styled(text, Style::default().fg(MUTED));
+    if let Some(stop) = stop {
+        let (first, first_words, second, second_words) = match stop {
+            QStop::Header => ("l", " open", "h", " close"),
+            QStop::Option { .. } => ("Space", " pick", "h", " close"),
+            QStop::Action(_) => ("Enter", " choose", "h", " close"),
+        };
+        if compact {
+            return vec![
+                key(" j/k"),
+                Span::raw(" move "),
+                key("n/N"),
+                Span::raw(" question "),
+                key(first),
+                Span::raw(format!("{first_words} ")),
+                key(second),
+                Span::raw(format!("{second_words} ")),
+                key("o"),
+                Span::raw(" link "),
+                key("Esc"),
+                Span::raw(" close "),
+                key("^L"),
+                Span::raw(" retry "),
+                key("^Q"),
+                Span::raw(" quit "),
+            ];
+        }
+        return vec![
+            label(" QUESTION  "),
+            key("j/k"),
+            Span::raw(" move  "),
+            key("n/N"),
+            Span::raw(" question  "),
+            key(first),
+            Span::raw(format!("{first_words}  ")),
+            key(second),
+            Span::raw(format!("{second_words}  ")),
+            key("o"),
+            Span::raw(" open link  "),
+            key("Esc"),
+            Span::raw(" close  "),
+            key("^L"),
+            Span::raw(" retry  "),
+            key("^Q"),
+            Span::raw(" quit "),
+        ];
+    }
     if compact {
         return vec![
             key(" j/k"),
@@ -1318,11 +1376,11 @@ fn render_hold_footer(frame: &mut Frame<'_>, area: Rect) {
     );
 }
 
-/// The list's footer, on one line when it fits. Otherwise it goes on to a second line at
-/// its break key (`c`), or at the last key before that when the first line still would
-/// not fit.
-fn render_footer(frame: &mut Frame<'_>, area: Rect, compact: bool) {
-    let mut hints = footer_hints(compact);
+/// The footer for the row under the cursor, on one line when it fits. Otherwise it goes
+/// on to a second line at its break key, or at the last key before that when the first
+/// line still would not fit.
+fn render_footer(frame: &mut Frame<'_>, area: Rect, compact: bool, stop: Option<QStop>) {
+    let mut hints = footer_hints(compact, stop);
     let room = usize::from(area.width).saturating_sub(2);
     if Line::from(hints.clone()).width() <= room {
         frame.render_widget(
@@ -1333,7 +1391,7 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, compact: bool) {
     }
     // Too narrow for one line: the rest goes on a second line, in the row the top
     // border would take.
-    let break_key = "c";
+    let break_key = footer_break_key(stop);
     let named = hints
         .iter()
         .position(|span| span.content == break_key)
@@ -1499,7 +1557,7 @@ mod tests {
     use ratatui::style::Color;
     use ratatui::text::Line;
 
-    use super::{MUTED, fit, render};
+    use super::{MUTED, QStop, fit, render};
     use crate::app::{
         AgentIncarnation, AgentRow, AgentState, App, CallState, CallView, ConnectionState,
         MonitorHealth, MonitorHealthState, SearchState, Snapshot,
@@ -3386,7 +3444,7 @@ mod tests {
         }
         // The long form fits exactly at its threshold, inside the footer's borders.
         assert_eq!(
-            Line::from(super::footer_hints(false)).width() + 2,
+            Line::from(super::footer_hints(false, None)).width() + 2,
             usize::from(super::WIDE_FOOTER_WIDTH)
         );
     }
@@ -3693,6 +3751,134 @@ mod tests {
     fn footer_rows(lines: &str) -> String {
         let rows: Vec<&str> = lines.lines().collect();
         rows[rows.len() - 3..].join("\n")
+    }
+
+    fn hint_text(compact: bool, stop: Option<QStop>) -> String {
+        super::footer_hints(compact, stop)
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect()
+    }
+
+    const ALL_STOPS: [Option<QStop>; 4] = [
+        None,
+        Some(QStop::Header),
+        Some(QStop::Option {
+            decision: 0,
+            option: 0,
+        }),
+        Some(QStop::Action(0)),
+    ];
+
+    #[test]
+    fn agent_row_footer_is_the_list_hints_without_tab() {
+        for compact in [false, true] {
+            let text = hint_text(compact, None);
+            for hint in ["j/k", "n/N", "f", "/", "Enter", "c", "t", "^L", "q"] {
+                assert!(text.contains(hint), "{hint} missing: {text}");
+            }
+            assert!(!text.to_lowercase().contains("tab"), "{text}");
+            assert!(!text.contains("^Q"), "{text}");
+        }
+    }
+
+    #[test]
+    fn question_row_footer_names_j_k_l_h_space_enter_n_o_esc() {
+        let has = |text: &str, key: &str, words: &str| {
+            text.contains(&format!("{key} {words}")) || text.contains(&format!("{key}{words}"))
+        };
+        for compact in [false, true] {
+            let header = hint_text(compact, Some(QStop::Header));
+            let option = hint_text(
+                compact,
+                Some(QStop::Option {
+                    decision: 0,
+                    option: 0,
+                }),
+            );
+            let action = hint_text(compact, Some(QStop::Action(1)));
+            assert!(
+                has(&header, "l", "open") && has(&header, "h", "close"),
+                "{header}"
+            );
+            assert!(
+                has(&option, "Space", "pick") && has(&option, "h", "close"),
+                "{option}"
+            );
+            assert!(action.contains("Enter"), "{action}");
+            assert!(!header.contains("Space") && !action.contains("Space"));
+            for text in [&header, &option, &action] {
+                for key in ["j/k", "n/N", "o", "Esc", "^L", "^Q"] {
+                    assert!(text.contains(key), "{key} missing: {text}");
+                }
+                assert!(
+                    !text.contains("f search") && !text.contains("talk now"),
+                    "{text}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn no_footer_contains_tab() {
+        for stop in ALL_STOPS {
+            for compact in [false, true] {
+                let text = hint_text(compact, stop);
+                assert!(!text.to_lowercase().contains("tab"), "{stop:?}: {text}");
+            }
+        }
+    }
+
+    #[test]
+    fn swallow_footer_reads_esc_back_to_the_list_the_questions_are_away() {
+        let mut app = question_app(true);
+        app.hide_questions();
+        let lines = footer_rows(&rendered_lines(&app, 140, 38, 100_000));
+        assert!(
+            lines.contains("Esc back to the list (the questions are away)"),
+            "{lines}"
+        );
+    }
+
+    #[test]
+    fn hold_footer_reads_esc_to_continue() {
+        let mut app = question_app(true);
+        open_revise_note(&mut app);
+        app.observe_questions(crate::questions::Queue::default());
+        let lines = footer_rows(&rendered_lines(&app, 140, 38, 100_000));
+        assert!(lines.contains("esc to continue"), "{lines}");
+    }
+
+    #[test]
+    fn footer_wraps_to_two_lines_at_the_break_key() {
+        for (stop, break_key) in [(None, "c"), (Some(QStop::Header), "^L")] {
+            let hints = super::footer_hints(true, stop);
+            let at = hints.iter().position(|s| s.content == break_key).unwrap();
+            let first = Line::from(hints[..at].to_vec()).width();
+            let width = u16::try_from(first + 2).unwrap();
+            let backend = TestBackend::new(width, 3);
+            let mut terminal = Terminal::new(backend).unwrap();
+            terminal
+                .draw(|frame| super::render_footer(frame, frame.area(), true, stop))
+                .unwrap();
+            let buffer = terminal.backend().buffer().clone();
+            let row = |y: u16| -> String {
+                (0..width)
+                    .map(|x| buffer[(x, y)].symbol().to_owned())
+                    .collect()
+            };
+            assert!(row(0).contains("j/k"), "{}", row(0));
+            assert!(
+                !row(0).split_whitespace().any(|w| w == break_key),
+                "{stop:?}: {}",
+                row(0)
+            );
+            assert!(
+                row(1).trim_start_matches([' ', '│']).starts_with(break_key),
+                "{stop:?}: {}",
+                row(1)
+            );
+        }
     }
 
     #[test]
