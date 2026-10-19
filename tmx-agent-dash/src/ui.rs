@@ -1,10 +1,13 @@
 use std::borrow::Cow;
 
 use ratatui::Frame;
+use ratatui::buffer::Buffer;
 use ratatui::layout::{Alignment, Constraint, Flex, Layout, Margin, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, TableState, Wrap};
+use ratatui::widgets::{
+    Block, Borders, Cell, Clear, Paragraph, Row, StatefulWidget, Table, TableState, Wrap,
+};
 
 use crate::api::HAROLD_VERSION_LIMIT;
 use crate::app::{AgentState, App, CallState, CallView, RuntimeStatus, VoiceState};
@@ -630,14 +633,35 @@ fn render_inventory(frame: &mut Frame<'_>, area: Rect, app: &App, now_ms: i64) {
         .column_spacing(COLUMN_SPACING)
         .block(block);
     let mut state = TableState::default().with_selected(selected_index);
-    frame.render_stateful_widget(table, area, &mut state);
-    // The table drew the question rows blank; the text goes over them, as wide as
-    // the list is.
-    let list = Rect {
+    let mut list = Rect {
         y: inner.y.saturating_add(1),
         height: inner.height.saturating_sub(1),
         ..inner
     };
+    let header_row = question_lines
+        .iter()
+        .position(|l| l.stop == Some(QStop::Header))
+        .zip(question_at)
+        .map(|(k, first)| first + k);
+    // A `▼` takes the list's last row. Find out on a scratch screen whether the header
+    // is below the view, and if so give the table a blank footer row for the `▼`, so
+    // the table scrolls the cursor row clear of it.
+    let mut dry_state = state;
+    table
+        .clone()
+        .render(area, &mut Buffer::empty(area), &mut dry_state);
+    let below = header_row.is_some_and(|row| {
+        row >= dry_state.offset() && row_y(&heights, dry_state.offset(), row, list.height).is_none()
+    });
+    let table = if below {
+        list.height = list.height.saturating_sub(1);
+        table.footer(Row::new(Vec::<Cell>::new()))
+    } else {
+        table
+    };
+    frame.render_stateful_widget(table, area, &mut state);
+    // The table drew the question rows blank; the text goes over them, as wide as
+    // the list is.
     let Some(first) = question_at else {
         return;
     };
@@ -654,20 +678,10 @@ fn render_inventory(frame: &mut Frame<'_>, area: Rect, app: &App, now_ms: i64) {
             );
         }
     }
-    let header = question_lines
-        .iter()
-        .position(|l| l.stop == Some(QStop::Header));
-    if let (Some(header), Some(view)) = (header, app.questions.view()) {
-        let hidden = row_y(&heights, state.offset(), first + header, list.height).is_none();
-        if hidden {
-            render_question_edge(
-                frame,
-                inner,
-                list,
-                first + header < state.offset(),
-                view.waiting,
-            );
-        }
+    if let (Some(row), Some(view)) = (header_row, app.questions.view())
+        && row_y(&heights, state.offset(), row, list.height).is_none()
+    {
+        render_question_edge(frame, inner, row < state.offset(), view.waiting);
     }
 }
 
@@ -700,11 +714,11 @@ fn row_y(heights: &[u16], offset: usize, index: usize, room: u16) -> Option<u16>
 
 /// The yellow `▲` on the list's top edge or `▼` on its bottom edge, with the count of
 /// questions waiting, while the question's header row is scrolled out of view.
-fn render_question_edge(frame: &mut Frame<'_>, inner: Rect, list: Rect, above: bool, waiting: u32) {
+fn render_question_edge(frame: &mut Frame<'_>, inner: Rect, above: bool, waiting: u32) {
     let (arrow, y) = if above {
         ('▲', inner.y)
     } else {
-        ('▼', list.bottom().saturating_sub(1))
+        ('▼', inner.bottom().saturating_sub(1))
     };
     let edge = Rect {
         y,
@@ -4076,6 +4090,12 @@ mod tests {
         let screen = text_lines(&app, 100, 24, 100_000).join("\n");
         assert!(screen.contains("▲ 2 questions waiting"), "{screen}");
         assert_eq!(style_at(&buffer, "▲ 2 questions").fg, Some(Color::Yellow));
+        assert!(
+            screen
+                .lines()
+                .any(|l| l.contains('▶') && l.contains("reject…")),
+            "{screen}"
+        );
         // Cursor on the chief's row, the header just below the view.
         let mut app = chief_questions(2, "intro");
         keys(&mut app, "jlk");
@@ -4083,6 +4103,23 @@ mod tests {
         let screen = text_lines(&app, 100, 24, 100_000).join("\n");
         assert!(screen.contains("▼ 2 questions waiting"), "{screen}");
         assert_eq!(style_at(&buffer, "▼ 2 questions").fg, Some(Color::Yellow));
+        assert!(
+            screen.lines().any(|l| l.contains('▶') && l.contains("sre")),
+            "{screen}"
+        );
+    }
+
+    #[test]
+    fn edge_marker_never_hides_the_cursor_row_on_the_chief() {
+        for (width, height) in [(100, 24), (100, 20), (100, 18), (60, 18)] {
+            let mut app = chief_questions(2, "intro");
+            keys(&mut app, "jlk");
+            let screen = text_lines(&app, width, height, 100_000).join("\n");
+            assert!(
+                screen.lines().any(|l| l.contains('▶') && l.contains("sre")),
+                "{width}x{height}:\n{screen}"
+            );
+        }
     }
 
     #[test]
