@@ -480,11 +480,10 @@ where
                     // key on the list act, whatever the flag says.
                     let flagged = std::mem::take(&mut core.drop_next_block_key);
                     if core.app.wants_fresh_questions(key) {
-                        let reaches_block = core.app.key_reaches_block(key);
                         let listed = stream.list_questions().await;
                         let changed = core.questions_listed(listed).question_changed;
                         let hid = !core.app.questions.is_visible() && !core.app.swallowing_keys();
-                        if reaches_block && (flagged || changed || hid) {
+                        if flagged || changed || hid {
                             draw(terminal, &core.app, clock)?;
                             continue;
                         }

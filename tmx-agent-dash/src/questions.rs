@@ -163,6 +163,8 @@ pub struct RowsView {
     pub open: bool,
     pub decisions: Vec<DecisionRows>,
     pub mode: Mode,
+    /// The row an open note belongs to, wherever the cursor is.
+    pub note_stop: Option<QStop>,
     pub notice: Option<String>,
 }
 
@@ -297,9 +299,28 @@ impl QuestionBlock {
         self.open
     }
 
-    /// Whether a note or a free option's text field is open.
-    pub const fn note_open(&self) -> bool {
-        matches!(self.mode, Mode::Note { .. })
+    /// Whether a note or a free option's text field is open and in view; while it is,
+    /// every key goes to it.
+    pub fn note_open(&self) -> bool {
+        !self.suspended && matches!(self.mode, Mode::Note { .. })
+    }
+
+    /// The row the open note belongs to: the free option's, or `revise…`'s or
+    /// `reject…`'s. `None` with no note, or while the rows are not shown.
+    pub fn note_stop(&self) -> Option<QStop> {
+        if !self.note_open() || !self.open || self.question().is_none() {
+            return None;
+        }
+        let Mode::Note { kind, .. } = &self.mode else {
+            return None;
+        };
+        match kind {
+            NoteKind::Revise => Some(QStop::Action(2)),
+            NoteKind::Reject => Some(QStop::Action(3)),
+            NoteKind::FreeText => self
+                .free_target
+                .map(|(decision, option)| QStop::Option { decision, option }),
+        }
     }
 
     /// The rows the cursor can stop on, in order: empty with no question in view, the
@@ -410,6 +431,7 @@ impl QuestionBlock {
                 open: false,
                 decisions: vec![],
                 mode: Mode::Choosing,
+                note_stop: None,
                 notice: self.notice.clone(),
             });
         };
@@ -456,6 +478,7 @@ impl QuestionBlock {
             open: self.open,
             decisions,
             mode: self.mode.clone(),
+            note_stop: self.note_stop(),
             notice: self.notice.clone(),
         })
     }
@@ -1650,5 +1673,25 @@ mod tests {
                 text: "abc".into()
             }
         );
+    }
+    #[test]
+    fn note_stop_names_the_row_the_open_note_belongs_to() {
+        let mut b = open_block(vec![question("Q1", 1, 2)]);
+        assert_eq!(b.note_stop(), None);
+        press(&mut b, KeyCode::Char(' '), opt_stop(1, 2));
+        assert_eq!(b.note_stop(), Some(opt_stop(1, 2)));
+        assert_eq!(b.view().unwrap().note_stop, Some(opt_stop(1, 2)));
+        press(&mut b, KeyCode::Esc, opt_stop(1, 2));
+        assert_eq!(b.note_stop(), None);
+        press(&mut b, KeyCode::Enter, QStop::Action(2));
+        assert_eq!(b.note_stop(), Some(QStop::Action(2)));
+        b.suspend();
+        assert_eq!(b.note_stop(), None, "not while the rows are away");
+        assert!(!b.note_open());
+        b.reconcile(queue(vec![question("Q1", 1, 2)]));
+        assert_eq!(b.note_stop(), Some(QStop::Action(2)));
+        press(&mut b, KeyCode::Esc, QStop::Action(2));
+        press(&mut b, KeyCode::Enter, QStop::Action(3));
+        assert_eq!(b.note_stop(), Some(QStop::Action(3)));
     }
 }

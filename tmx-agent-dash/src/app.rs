@@ -637,6 +637,7 @@ impl App {
         let kept = self.questions.kept();
         self.questions.reconcile(queue);
         let after = self.questions.shown();
+        self.leave_a_replaced_question(before.as_ref(), after.as_ref());
         let note_was_open = |reading: &Option<(String, u32, Mode)>| {
             reading
                 .as_ref()
@@ -678,11 +679,27 @@ impl App {
     /// Applies Harold's answer to a send. A recorded answer puts the cursor on the next
     /// question's header, or on the chief's row when none is left.
     pub fn question_sent(&mut self, id: &str, result: SendResult) {
+        let before = self.questions.shown();
         self.questions.sent(id, result);
-        if result == SendResult::Recorded && self.cursor_on_question() {
+        let after = self.questions.shown();
+        self.leave_a_replaced_question(before.as_ref(), after.as_ref());
+        self.settle_cursor();
+    }
+
+    /// When another question takes the place of the one the cursor was on, the cursor goes
+    /// to the new question's header: a row of the old one, such as `send`, must not carry
+    /// a key over to a question the user has not seen.
+    fn leave_a_replaced_question(
+        &mut self,
+        before: Option<&(String, u32, Mode)>,
+        after: Option<&(String, u32, Mode)>,
+    ) {
+        if let (Some((was, ..)), Some((now, ..))) = (before, after)
+            && was != now
+            && self.cursor_on_question()
+        {
             self.question_stop = Some(QStop::Header);
         }
-        self.settle_cursor();
     }
 
     /// Whether `key` should meet a fresh queue: the cursor is on the questions, so the
@@ -696,14 +713,14 @@ impl App {
             && self.cursor_on_question()
     }
 
-    /// Whether `key` goes to the questions.
-    pub fn key_reaches_block(&self, key: &KeyEvent) -> bool {
-        self.wants_fresh_questions(key)
-    }
-
     /// Keeps the cursor on a row that exists. A question row that is gone falls to the
     /// header while questions remain, else to the chief's row (or the first row).
     fn settle_cursor(&mut self) {
+        // An open note keeps the cursor on its own row, so what is typed is in view.
+        if let Some(note) = self.questions.note_stop() {
+            self.land_on(&Stop::Question(note));
+            return;
+        }
         let Some(stop) = self.question_stop else {
             return;
         };
@@ -982,10 +999,11 @@ impl App {
         if self.questions.shows_notice_only() {
             self.questions.clear_notice();
         }
+        if self.questions.note_open() {
+            let stop = self.question_stop.unwrap_or(QStop::Header);
+            return self.handle_block_key(key.code, stop);
+        }
         if let Some(stop) = self.question_stop {
-            if self.questions.note_open() {
-                return self.handle_block_key(key.code, stop);
-            }
             match key.code {
                 KeyCode::Char('j') | KeyCode::Down => self.move_cursor_clearing_notice(1),
                 KeyCode::Char('k') | KeyCode::Up => self.move_cursor_clearing_notice(-1),
@@ -3620,6 +3638,64 @@ mod tests {
         changed.questions[0].version = 2;
         app.observe_questions(changed);
         assert!(!app.holding_block_keys());
+    }
+
+    #[test]
+    fn a_withdrawn_question_moves_the_cursor_to_the_next_header() {
+        // The answer is refused: Q1 is no longer waiting.
+        let mut app = call_app(CallState::Off);
+        app.observe_questions(question_queue(&["Q1", "Q2"]));
+        app.handle_key(KeyCode::Char('j'));
+        app.handle_key(KeyCode::Char('l'));
+        app.land_on(&Stop::Question(QStop::Action(0)));
+        assert!(matches!(app.handle_key(KeyCode::Enter), Effect::Answer(_)));
+        app.question_sent("Q1", SendResult::NotWaiting);
+        assert_eq!(app.questions.view().unwrap().id, "Q2");
+        assert_eq!(app.cursor_stop(), Some(Stop::Question(QStop::Header)));
+        assert!(!matches!(app.handle_key(KeyCode::Enter), Effect::Answer(_)));
+
+        // A read withdraws Q1 while the cursor is on its `send`.
+        let mut app = call_app(CallState::Off);
+        app.observe_questions(question_queue(&["Q1", "Q2"]));
+        app.handle_key(KeyCode::Char('j'));
+        app.handle_key(KeyCode::Char('l'));
+        app.land_on(&Stop::Question(QStop::Action(0)));
+        app.observe_questions(question_queue(&["Q2"]));
+        assert_eq!(app.cursor_stop(), Some(Stop::Question(QStop::Header)));
+        assert!(!matches!(app.handle_key(KeyCode::Enter), Effect::Answer(_)));
+
+        // A new version of the same question leaves the cursor where it is.
+        let mut app = call_app(CallState::Off);
+        app.observe_questions(question_queue(&["Q1"]));
+        app.handle_key(KeyCode::Char('j'));
+        app.handle_key(KeyCode::Char('l'));
+        app.land_on(&Stop::Question(QStop::Action(0)));
+        let mut changed = question_queue(&["Q1"]);
+        changed.questions[0].version = 2;
+        app.observe_questions(changed);
+        assert_eq!(app.cursor_stop(), Some(Stop::Question(QStop::Action(0))));
+    }
+
+    #[test]
+    fn an_open_note_takes_every_key_wherever_the_cursor_is() {
+        let mut app = call_app(CallState::Off);
+        app.observe_questions(question_queue(&["Q1"]));
+        open_revise_note(&mut app);
+        app.question_stop = None;
+        select_pane(&mut app, "%1");
+        assert_eq!(app.handle_key(KeyCode::Char('j')), Effect::None);
+        assert_eq!(
+            app.questions.view().unwrap().mode,
+            Mode::Note {
+                kind: crate::questions::NoteKind::Revise,
+                text: "j".into()
+            }
+        );
+        assert_eq!(
+            app.question_stop,
+            Some(QStop::Action(2)),
+            "the cursor is back on the note's row"
+        );
     }
 
     fn ctrl(character: char) -> KeyEvent {

@@ -83,6 +83,7 @@ pub fn render(frame: &mut Frame<'_>, app: &App, now_ms: i64) {
             compact || area.width < WIDE_FOOTER_WIDTH,
             app.question_stop,
             app.questions.is_open(),
+            note_kind(&app.questions),
         );
     }
     render_palette(frame, area, app);
@@ -771,8 +772,8 @@ const QUESTION_OPTION_INDENT: usize = 10;
 /// waiting · harold · spec`, with `· from the chief` when `fallback` puts the rows at the
 /// top of the list. The open question follows it: the intro, then every decision with its
 /// options, a blank row between each, then the answer actions. `cursor` is the stop
-/// the cursor is on: its row has the `▶` marker and the yellow, bold style, and a note
-/// being typed shows under it. A notice with no question is one coral row.
+/// the cursor is on: its row has the `▶` marker and the yellow, bold style. A note being
+/// typed shows under its own row, wherever the cursor is. A notice with no question is one coral row.
 fn question_row_lines(
     view: &RowsView,
     width: usize,
@@ -882,7 +883,7 @@ fn question_row_lines(
                     let under = QUESTION_OPTION_INDENT + 4 + Line::raw(&option.key).width();
                     put(&mut out, under, &option.impact, muted, None);
                 }
-                if cursor == Some(stop)
+                if view.note_stop == Some(stop)
                     && let Some(note) = note_text(&view.mode, &[NoteKind::FreeText])
                 {
                     let under = QUESTION_OPTION_INDENT + 4 + Line::raw(&option.key).width();
@@ -909,7 +910,7 @@ fn question_row_lines(
                 ink.add_modifier(Modifier::DIM)
             };
             put(&mut out, QUESTION_OPTION_INDENT, action, style, Some(stop));
-            if cursor == Some(stop)
+            if view.note_stop == Some(stop)
                 && let Some(note) = note_text(&view.mode, &[NoteKind::Revise, NoteKind::Reject])
             {
                 put(&mut out, QUESTION_OPTION_INDENT, &note, yellow, None);
@@ -981,6 +982,17 @@ fn wrap_words(text: &str, room: usize) -> Vec<String> {
 }
 
 /// The note being typed, with its label and cursor block, when its kind is one of `kinds`.
+/// The kind of note open in the questions, if any.
+fn note_kind(questions: &crate::questions::QuestionBlock) -> Option<NoteKind> {
+    if !questions.note_open() {
+        return None;
+    }
+    match questions.view()?.mode {
+        Mode::Note { kind, .. } => Some(kind),
+        Mode::Choosing => None,
+    }
+}
+
 fn note_text(mode: &Mode, kinds: &[NoteKind]) -> Option<String> {
     let Mode::Note { kind, text } = mode else {
         return None;
@@ -1253,9 +1265,44 @@ fn footer_break_key(stop: Option<QStop>) -> &'static str {
 /// The footer's hints for the row under the cursor, short or long: the list's on an
 /// agent row (`stop` is `None`), the question's on a question row. Each form names a
 /// break key, see [`footer_break_key`].
-fn footer_hints(compact: bool, stop: Option<QStop>, open: bool) -> Vec<Span<'static>> {
+fn footer_hints(
+    compact: bool,
+    stop: Option<QStop>,
+    open: bool,
+    note: Option<NoteKind>,
+) -> Vec<Span<'static>> {
     let key = |text| Span::styled(text, Style::default().fg(INK));
     let label = |text| Span::styled(text, Style::default().fg(MUTED));
+    if let Some(note) = note {
+        // Every key types into the note, so only Enter, Esc and the global keys are named.
+        let (enter, enter_words) = match note {
+            NoteKind::FreeText => ("Enter", " keep"),
+            NoteKind::Revise | NoteKind::Reject => ("Enter", " send"),
+        };
+        if compact {
+            return vec![
+                key(" Enter"),
+                Span::raw(format!("{} ", enter_words)),
+                key("Esc"),
+                Span::raw(" discard "),
+                key("^L"),
+                Span::raw(" retry "),
+                key("^Q"),
+                Span::raw(" quit "),
+            ];
+        }
+        return vec![
+            label(" QUESTION  "),
+            key(enter),
+            Span::raw(format!("{enter_words}  ")),
+            key("Esc"),
+            Span::raw(" discard  "),
+            key("^L"),
+            Span::raw(" retry  "),
+            key("^Q"),
+            Span::raw(" quit "),
+        ];
+    }
     if let Some(stop) = stop {
         let (first, first_words, second, second_words) = match stop {
             QStop::Header if open => ("h", " close", "Enter", " close"),
@@ -1397,8 +1444,9 @@ fn render_footer(
     compact: bool,
     stop: Option<QStop>,
     open: bool,
+    note: Option<NoteKind>,
 ) {
-    let mut hints = footer_hints(compact, stop, open);
+    let mut hints = footer_hints(compact, stop, open, note);
     let room = usize::from(area.width).saturating_sub(2);
     if Line::from(hints.clone()).width() <= room {
         frame.render_widget(
@@ -3462,7 +3510,7 @@ mod tests {
         }
         // The long form fits exactly at its threshold, inside the footer's borders.
         assert_eq!(
-            Line::from(super::footer_hints(false, None, false)).width() + 2,
+            Line::from(super::footer_hints(false, None, false, None)).width() + 2,
             usize::from(super::WIDE_FOOTER_WIDTH)
         );
     }
@@ -3594,10 +3642,8 @@ mod tests {
         assert!(!has_seconds_age, "an age in seconds is shown:\n{lines}");
     }
 
-    /// One question, Q25, with one decision asking "Which protocol?" and two options,
-    /// under no chief row: its rows are at the top of the list. `focused` puts the cursor
-    /// on its header.
-    fn question_app(focused: bool) -> App {
+    /// The queue of `question_app`: Q25 with one decision and two options.
+    fn q25_queue() -> crate::questions::Queue {
         use crate::questions::{DecisionView, OptionView, QuestionView, Queue};
         let option = |key: &str, label: &str, impact: &str, suggested: bool| OptionView {
             key: key.into(),
@@ -3606,19 +3652,7 @@ mod tests {
             suggested,
             free: false,
         };
-        let selected = incarnation("%17", 91700, 91844, "codex");
-        let mut app = live_app(
-            vec![row(
-                selected.clone(),
-                AgentState::Busy,
-                "Codex",
-                "tmx-agent-dash:0.1",
-                "Build the question block",
-                90_000,
-            )],
-            Some(selected),
-        );
-        app.observe_questions(Queue {
+        Queue {
             questions: vec![QuestionView {
                 id: "Q25".into(),
                 product: "harold".into(),
@@ -3643,7 +3677,26 @@ mod tests {
             }],
             waiting: 2,
             dismissed: Vec::new(),
-        });
+        }
+    }
+
+    /// One question, Q25, with one decision asking "Which protocol?" and two options,
+    /// under no chief row: its rows are at the top of the list. `focused` puts the cursor
+    /// on its header.
+    fn question_app(focused: bool) -> App {
+        let selected = incarnation("%17", 91700, 91844, "codex");
+        let mut app = live_app(
+            vec![row(
+                selected.clone(),
+                AgentState::Busy,
+                "Codex",
+                "tmx-agent-dash:0.1",
+                "Build the question block",
+                90_000,
+            )],
+            Some(selected),
+        );
+        app.observe_questions(q25_queue());
         if focused {
             app.handle_key(KeyCode::Char('k'));
             assert!(app.cursor_on_question());
@@ -3772,7 +3825,7 @@ mod tests {
     }
 
     fn hint_text(compact: bool, stop: Option<QStop>, open: bool) -> String {
-        super::footer_hints(compact, stop, open)
+        super::footer_hints(compact, stop, open, None)
             .iter()
             .map(|span| span.content.as_ref())
             .collect()
@@ -3893,14 +3946,14 @@ mod tests {
     #[test]
     fn footer_wraps_to_two_lines_at_the_break_key() {
         for (stop, break_key) in [(None, "c"), (Some(QStop::Header), "^L")] {
-            let hints = super::footer_hints(true, stop, false);
+            let hints = super::footer_hints(true, stop, false, None);
             let at = hints.iter().position(|s| s.content == break_key).unwrap();
             let first = Line::from(hints[..at].to_vec()).width();
             let width = u16::try_from(first + 2).unwrap();
             let backend = TestBackend::new(width, 3);
             let mut terminal = Terminal::new(backend).unwrap();
             terminal
-                .draw(|frame| super::render_footer(frame, frame.area(), true, stop, false))
+                .draw(|frame| super::render_footer(frame, frame.area(), true, stop, false, None))
                 .unwrap();
             let buffer = terminal.backend().buffer().clone();
             let row = |y: u16| -> String {
@@ -4470,5 +4523,67 @@ mod tests {
             style_at(&buffer, "Harold can't save").fg,
             Some(super::CORAL)
         );
+    }
+    #[test]
+    fn a_note_stays_visible_on_its_row_when_hidden_questions_return() {
+        // Scenario A: the rows hide and come back unchanged under a half-typed note.
+        let mut app = question_app(true);
+        open_revise_note(&mut app);
+        for character in "xyz".chars() {
+            app.handle_key(KeyCode::Char(character));
+        }
+        app.hide_questions();
+        app.observe_questions(q25_queue());
+        assert_eq!(app.question_stop, Some(QStop::Action(2)));
+        let lines = rendered_lines(&app, 140, 38, 100_000);
+        row_with(&lines, "revise: xyz");
+        // The note takes the keys, so j types and Enter sends it.
+        app.handle_key(KeyCode::Char('j'));
+        assert_eq!(app.question_stop, Some(QStop::Action(2)));
+        row_with(&rendered_lines(&app, 140, 38, 100_000), "revise: xyzj");
+
+        // Scenario B: Esc while the rows are away, then `g` onto the header.
+        let mut app = question_app(true);
+        open_revise_note(&mut app);
+        for character in "xyz".chars() {
+            app.handle_key(KeyCode::Char(character));
+        }
+        app.hide_questions();
+        app.handle_key(KeyCode::Esc);
+        app.handle_key(KeyCode::Char('g'));
+        app.observe_questions(q25_queue());
+        assert_eq!(app.question_stop, Some(QStop::Action(2)));
+        row_with(&rendered_lines(&app, 140, 38, 100_000), "revise: xyz");
+    }
+
+    #[test]
+    fn the_footer_names_only_the_keys_a_note_takes() {
+        let mut app = question_app(true);
+        open_revise_note(&mut app);
+        for (width, height) in [(140, 38), (84, 30), (60, 18)] {
+            let footer = footer_rows(&rendered_lines(&app, width, height, 100_000));
+            assert!(footer.contains("Enter send"), "{footer}");
+            assert!(footer.contains("Esc discard"), "{footer}");
+            for gone in ["j/k", "close", "Enter close"] {
+                assert!(!footer.contains(gone), "{gone} in {footer}");
+            }
+        }
+        let long = super::footer_hints(
+            false,
+            Some(QStop::Option {
+                decision: 0,
+                option: 0,
+            }),
+            true,
+            Some(crate::questions::NoteKind::FreeText),
+        )
+        .iter()
+        .map(|s| s.content.as_ref())
+        .collect::<String>();
+        assert!(
+            long.contains("Enter keep") && long.contains("Esc discard"),
+            "{long}"
+        );
+        assert!(!long.contains("j/k"), "{long}");
     }
 }
