@@ -3976,26 +3976,64 @@ mod tests {
         assert_eq!(
             table,
             [
-                "`j` / ↓",
-                "`k` / ↑",
+                "`j` / `k`, ↓ / ↑",
                 "`l` / →",
                 "`h` / ←",
-                "`n` / `N`",
+                "Space",
                 "Enter",
                 "Esc",
-                "Tab",
-                "`s`",
+                "`n` / `N`",
                 "`o`",
-                "Ctrl+L",
-                "`f` / `/`",
                 "`g` / `G`",
-                "`c` / `t`",
-                "`q`",
-                "Ctrl+Q, Ctrl+C",
+                "`c` / `t`, `f`, `/`, `q`",
+                "Ctrl+L, Ctrl+Q, Ctrl+C",
             ]
         );
         for gone in ["WAITING n", "`r` | Retry", "`l` | Later", "Press `r`"] {
             assert!(!readme.contains(gone), "README still holds {gone}");
+        }
+        // No Tab key row, no `s` row, no section of the old block, no summary.
+        assert!(
+            !table.iter().any(|key| key.contains("Tab") || *key == "`s`"),
+            "the Keys table still has a Tab or s row"
+        );
+        let lower = readme.to_lowercase();
+        for gone in [
+            "question block",
+            "summary screen",
+            "send now",
+            "send-now",
+            "(s to mark)",
+            "`tab`",
+        ] {
+            assert!(!lower.contains(gone), "README still describes {gone}");
+        }
+        // The table's header names the spec's columns.
+        let header = keys_section
+            .lines()
+            .find(|line| line.starts_with('|'))
+            .unwrap_or_default();
+        assert_eq!(
+            header.split('|').map(str::trim).collect::<Vec<_>>()[1..7],
+            [
+                "Key",
+                "Agent row",
+                "Question header",
+                "Option row",
+                "Action row",
+                "Text field, search, palette, note",
+            ]
+        );
+        // What the question rows' footers and held keys say is in the README.
+        for says in [
+            "▸ 2 questions waiting",
+            "Esc back to the list (the questions are away)",
+            "esc to continue",
+            "▲",
+            "▼",
+            "· from the chief",
+        ] {
+            assert!(readme.contains(says), "README lacks {says}");
         }
     }
 

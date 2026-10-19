@@ -61,45 +61,49 @@ outside this MVP; use a trusted deployment boundary for remote connections.
 
 ## Keys
 
-The dash has three sections: the [question block](#question-block), its summary,
-and the agent list. Search, the command palette and the block's notes are text
-modes. One table gives every key. Where a cell is "—", the key does nothing in that
-section, so a key never means two things.
+The cursor moves over every row of the agent list, and the chief's questions are
+rows of that list (see [Questions](#questions)). There are no sections to move
+between. Search, the command palette, a free-text field and a note are text modes.
+One table gives every key by the row under the cursor. Where a cell says "Nothing",
+the key does nothing there, so a key never means two things.
 
-| Key | Question block (choosing) | Summary | Agent list | Search, palette, note |
-| --- | --- | --- | --- | --- |
-| `j` / ↓ | Next row: the real options, then the answer actions | — | Next visible row | ↓ moves in the palette; `j` types |
-| `k` / ↑ | Previous row | — | Previous visible row | ↑ moves in the palette; `k` types |
-| `l` / → | Pick the highlighted option and go to the next decision; nothing on an answer action | — | — | Types `l` |
-| `h` / ← | Previous decision, picks kept | Back to the last decision | — | Types `h` |
-| `n` / `N` | Next or previous waiting question (wraps) | Same | Next or previous waiting agent (wraps) | Types |
-| Enter | Pick the highlighted row: an option moves on, an answer action acts | Record the answer | Switch the invoking tmux client to the selected pane | Search: keep the query · palette: run · note: done |
-| Esc | Leave the block, picks kept | Back to the last decision | Clear an accepted filter, or nothing | Search: clear the query and leave · palette: close · note: discard and leave |
-| Tab | Focus to the list | Focus to the list | Focus to the block, while it shows | Search and palette: nothing · note: focus to the list, note kept |
-| `s` | — | Mark or unmark the answer "send now" | — | Types |
-| `o` | Open the question's link, if it is `http://` or `https://` | Same | — | Types |
-| Ctrl+L | Clear the screen, redraw, and retry the Harold connection now | Same | Same | Same: the note's text and the query are kept, and nothing is typed |
-| `f` / `/` | — | — | Search editing / command palette | Types |
-| `g` / `G` | — | — | First / last visible row | Types |
-| `c` / `t` | — | — | Call / talk now, on the chief's row | Types |
-| `q` | — | — | Quit | Types |
-| Ctrl+Q, Ctrl+C | Quit | Quit | Quit | Quit |
+| Key | Agent row | Question header | Option row | Action row | Text field, search, palette, note |
+| --- | --- | --- | --- | --- | --- |
+| `j` / `k`, ↓ / ↑ | Next or previous row, question rows included | Same | Same | Same | ↓ / ↑ move in the palette; `j` and `k` type |
+| `l` / → | Nothing | Open the question | Nothing | Nothing | Types `l` |
+| `h` / ← | Nothing | Close the question, when open | Close the question, cursor to its header | Same | Types `h` |
+| Space | Nothing | Nothing | Pick the option; a free option opens its field | Nothing | Types a space |
+| Enter | Switch the invoking tmux client to the selected pane | Open or close the question | Nothing | `send` sends the answer at once; `later` sets the question aside; `revise…` or `reject…` opens a note | Search: keep the query · palette: run · field: keep the text and pick the option · note: send it |
+| Esc | Clear an accepted filter, or nothing | Close the question, when open | Close the question, cursor to its header | Same | Search: clear the query and leave · palette: close · field or note: discard and leave |
+| `n` / `N` | Next or previous waiting agent (wraps) | Next or previous waiting question (wraps) | Same | Same | Types |
+| `o` | Nothing | Open the question's link, if it is `http://` or `https://` | Same | Same | Types |
+| `g` / `G` | First / last row | Same | Same | Same | Types |
+| `c` / `t`, `f`, `/`, `q` | `c` / `t`: call / talk now, on the chief's row · `f`: search · `/`: command palette · `q`: quit | Nothing | Nothing | Nothing | Types |
+| Ctrl+L, Ctrl+Q, Ctrl+C | Retry the Harold connection now (clearing and redrawing the screen) · quit · quit | Same | Same | Same | Same: the text and the query are kept, and nothing is typed |
 
 - **Quit keys:** Ctrl+Q and Ctrl+C quit from every mode, including a note and the
   held or swallowed keys described under [Reconnects](#reconnects). `q` quits only
-  from the agent list; anywhere else it does nothing or types itself.
+  from an agent row; on a question row it does nothing, and in a text mode it types
+  itself.
 - **Chords:** Ctrl+Q, Ctrl+C and Ctrl+L are the only Control or Alt chords that act.
   Every other chord, such as Ctrl+R or Alt+Q, does nothing in any mode, and is never
   typed or taken as the bare letter.
-- **Text modes:** in search, the palette query and a note, every printable key,
-  `h`, `j`, `k`, `l`, `n`, `N`, `r`, `x`, `o` and `q` included, types itself, and
-  `Backspace` removes the last Unicode scalar value. Outside the text modes, a key
-  not in the table, such as `r` or `x`, does nothing.
+- **Text modes:** in search, the palette query, a free-text field and a note, every
+  printable key, `h`, `j`, `k`, `l`, `n`, `N`, `r`, `x`, `o` and `q` included, types
+  itself, and `Backspace` removes the last Unicode scalar value. Outside the text
+  modes, a key not in the table, such as `r`, `x`, `s` or the Tab key, does nothing.
 - **`c` and `t`** act only while the chief's row is selected. `c` starts a call when
   none is on and the voice is not muted, and ends one during a call. `t` asks to talk
   now while the call is speaking.
 - **The palette** filters its commands as you type; ↑/↓ choose and Enter runs one,
   such as `Voice: mute` / `Voice: unmute` or `Messaging: pause` / `Messaging: resume`.
+- **The footer** gives the keys for the row under the cursor. On an agent row it lists
+  the list's keys (`j/k`, `n/N`, `f`, `/`, `Enter`, `c`, `t`, `Esc`, `^L`, `q`). On a
+  question row it lists `j/k move`, `n/N question`, `o link`, `Esc close`, `^L retry`
+  and `^Q quit`, with two keys that depend on the row: `l open` and `Enter open` on a
+  closed header, `h close` and `Enter close` on an open header, `Space pick` and
+  `h close` on an option, `Enter choose` and `h close` on an action. A narrow
+  terminal shortens the hints, and below that puts the rest on a second line.
 
 Search is a local, case-insensitive filter over provider, work summary, tmux
 target, and working directory. It never sends a search request to Harold and it
@@ -128,62 +132,93 @@ for what the switch does.
 
 ## Now line
 
-When the chief of pods has a Now item in its queue, the dash shows it on one dim line under the masthead: `NOW  ` and the item's first line, cut to the terminal's width. The dash reads it from Harold's backlog tool with the question queue, every 2 seconds; when that poll's question read timed out, the Now read is skipped and the line hides until the next poll. The line is hidden while the queue has no Now item, when Harold does not serve the backlog tool, the read fails or the stream to Harold is lost, and at the smallest height (18 rows), where the agent list keeps its six rows. It is never focused and takes no keys; the question block sits below it with the same focus and keys. See the [backlog reference](../docs/references/tools/backlog.md) for how the queue is kept.
+When the chief of pods has a Now item in its queue, the dash shows it on one dim line under the masthead: `NOW  ` and the item's first line, cut to the terminal's width. The dash reads it from Harold's backlog tool with the question queue, every 2 seconds; when that poll's question read timed out, the Now read is skipped and the line hides until the next poll. The line takes a row only when one is spare beside the agent list's six rows. It is hidden while the queue has no Now item, when Harold does not serve the backlog tool, the read fails or the stream to Harold is lost, and at the smallest height (18 rows), where the agent list keeps its six rows. It is never focused and takes no keys. See the [backlog reference](../docs/references/tools/backlog.md) for how the queue is kept.
 
-## Question block
+## Questions
 
-When the chief of pods has questions for you, the dash shows a yellow block above the agent list. It reads the queue from Harold's question tool every 2 seconds, and before each key that goes to the block. The block is hidden while no question waits. A new question never takes the focus from the agent list. See the [question queue reference](../docs/references/tools/questions.md) for how questions get in and what Harold does with the answers.
+When the chief of pods has questions for you, they appear as rows of the agent list, right under the chief's row. The dash reads the queue from Harold's question tool every 2 seconds, and before each key that lands on a question row. No row shows while no question waits. A new question never moves the cursor. See the [question queue reference](../docs/references/tools/questions.md) for how questions get in and what Harold does with the answers.
 
-The block shows the product and spec, the intro, the current decision with its options, and a key hint. Its title reads `<id> · n of m waiting`. The option the chief suggests is marked `(suggested)` and the highlight starts on it.
+### Closed and open
 
-### Focus and keys
-
-`Tab` moves the focus between the agent list and the block while the block shows. The block has a bright border with the focus and a dim one without. Footer hints show `tab question` while the block shows, and the footer gives the keys of whichever section has the focus. Control and Alt chords never reach the block. The [Keys](#keys) table gives every key in the block and its summary.
-
-Each decision lists the question's own options, then a thin rule and three dim answer actions, which have no option key:
+A closed question takes one row. With two questions waiting, the list reads:
 
 ```text
-  a  libSQL's Hrana — Existing libSQL clients work unchanged.  (suggested)
-  b  Postgres wire — …
-  z  Something else — Type your answer.
-  ─────────────
-     later
-     revise…
-     reject…
+  chief-of-pods
+▶ ○ IDLE   chief-of-pods          ◆  Asked T1 about the wire protocol
+    ▸ 2 questions waiting
+  harold
+  ● BUSY   harold-main               Building dash-one-version
 ```
 
-- `j`/`k` move the highlight over the options and then the actions. The highlight starts on the suggested option, never on an action, and each decision keeps its own highlight.
-- `Enter` on an option picks it and goes to the next decision; after the last decision the summary shows. A free option opens a text field first; when it is already the decision's pick, the field holds the text typed before.
-- `l` picks the highlighted option and moves on as `Enter` does. On a free option that is already the pick, it moves on and keeps the text; on a free option that is not the pick, it opens the text field. On an answer action it does nothing.
-- `h` goes back a decision. Every pick is kept, and `Enter` or `l` on a different option replaces that decision's pick.
-- **later** sets the question aside and shows the next waiting one. **revise…** opens a note saying what to change, and **reject…** a note saying why. `Enter` on a note records it as a revise or reject answer with the picks made so far; a blank note is not recorded.
-- `Esc` gives the focus back to the list from any decision, and the picks stay.
+Press `j` to move the cursor to the `▸ 2 questions waiting` row, then `l` or `Enter` to open it. The row becomes the question's header, `▾ T1 · 1 of 2 waiting · harold · durable-server`, and the question follows it. Every decision shows at once, each with its ask and its options, and long text wraps within the list's width:
 
-The summary lists each decision with its pick, then a `send now` row that reads `no    (s to mark)`. `s` toggles it to `yes   (s to unmark)`, and the hint line then says `s don't send now`. A marked answer goes to the chief at once; an unmarked one goes about 3 seconds after your last answer. The mark belongs to the one answer on the summary and starts at `no` on every summary; going back with `h` or `Esc` and returning keeps the mark you set until the answer is recorded. A revise or reject note has no mark, since every letter types there. `Enter` records the answer with its mark, and `h` or `Esc` goes back to the last decision. In a text field, type the text, `Backspace` removes the last character, `Enter` accepts it (blank text is not accepted) and `Esc` discards it and leaves the field. Text stops at 1,999 characters, since Harold refuses 2,000.
+```text
+    ▾ T1 · 1 of 2 waiting · harold · durable-server
+        The server needs one wire protocol for its clients.
 
-A free option does not end the walk. The text you type becomes that decision's pick, and you go on to the next decision. The answer is recorded as free text when any pick is free.
+        Which protocol should clients speak?
+          ● a  libSQL's Hrana  (suggested)
+               Existing libSQL clients work unchanged.
+          ○ b  Postgres wire
+               Any Postgres client connects.
+          ○ z  Something else
 
-`n` and `N` move to the next or previous waiting question, wrapping over the listed order, set-aside questions included. With one question listed they do nothing. The picks, decision and highlights of the question you leave are kept while the dash runs, and come back when you return to it, as do the picks of a question set aside with **later**. Kept picks belong to the version of the question they were made on: when Harold lists a higher version, or refuses an answer because the version changed, they are dropped, and the question starts at its first decision. Kept picks of a question that is answered or dismissed are gone.
+        Should the build run on every push?
+          ● y  Yes  (suggested)
+          ○ n  No
 
-Harold types a line of answers into the chief's pane about 3 seconds after the newest answer, or at once when an answer is marked send now. Questions still waiting do not hold it back. Deferred questions come back to the queue after a line is typed with no question waiting, or when a **later** leaves none waiting and no answer unsent.
+          send
+          ─────────────
+          later
+          revise…
+          reject…
+```
+
+The cursor stops on the header, on each option and on each action (`send`, `later`, `revise…`, `reject…`). It skips the intro, the asks, the impact lines and the blank rows. `j` and `k` move through all of them like any other rows: `j` from the chief's row goes to the header, then over each option and action, then on to the next agent row. `h` (or `Esc`) closes the question again with the cursor on its header; the picks are kept, and `l` on the header opens it as it was. The yellow marks the header and the row under the cursor.
+
+With several questions waiting, the open question shows one at a time, and `n` and `N` step between them. The detail panel, on a wide terminal, shows the asking agent while the cursor is on its question rows.
+
+### Picking and sending
+
+Each decision opens with its suggested option picked (`●`); an option you have not picked shows `○`, and a decision with no suggestion starts with no pick. To pick another option, move to it with `j` or `k` and press `Space`: the `●` moves to it. Moving never changes a pick. You can change any pick until the answer is sent, so this is also how you undo one.
+
+An option's impact shows on the line below its label, dim; an option with no impact has no second line. A free option such as `z  Something else` takes text of your own: `Space` on it opens a text field, holding any text typed there before. Type, then press `Enter` to keep the text and pick the option (blank text is not accepted), or `Esc` to discard it and leave the field. The option's row then shows the text after its label, cut to fit. Text stops at 1,999 characters, since Harold refuses 2,000.
+
+To answer, move to `send` and press `Enter`. The dash re-reads the queue first. The answer goes to Harold with every decision's pick, and Harold types it into the chief's pane at once. If a decision has no pick, nothing is sent and the cursor moves to that decision's first option. After a send, the next waiting question shows in its place, open, with the cursor on its header; with none left, the question rows go and the cursor moves to the chief's row.
+
+The other actions:
+
+- **later** sets the question aside, keeping its picks, and shows the next waiting one.
+- **revise…** opens a note saying what to change, and **reject…** a note saying why. `Enter` on a note sends it as a revise or reject answer, with the picks made so far and at once like `send`; a blank note is not sent. `Esc` discards the note.
+
+`n` and `N` move to the next or previous waiting question, wrapping over the listed order, set-aside questions included. With one question listed they do nothing. The picks of the question you leave are kept while the dash runs, as are the picks of a question set aside with **later** and of a closed question. Kept picks belong to the version of the question they were made on: when Harold lists a higher version, or refuses an answer because the version changed, they are dropped. Kept picks of a question that is answered or dismissed are gone.
+
+Deferred questions come back to the queue after a line is typed with no question waiting, or when a **later** leaves none waiting and no answer unsent.
+
+### When the chief's row is hidden or scrolled off
+
+- **Filtered out:** when the search filter hides the chief's row, the question rows stay, at the top of the list, and the closed row reads `▸ 2 questions waiting · from the chief`. The filter hides agent rows, never question rows.
+- **No chief's row:** when Harold names no chief pane, or that pane is not in the list, the question rows show at the top of the list the same way.
+- **Scrolled off:** the question rows scroll with the list like any rows. When the header row is out of view, the list's top or bottom edge shows `▲ 2 questions waiting` or `▼ 2 questions waiting` in yellow, on the side where it is.
+- **The smallest height** (18 rows, where the list has six): an open question scrolls within those rows and keeps the cursor in view, as the list does.
 
 ### Notices
 
-A notice shows under the block until the next key:
+A notice shows under the question's rows until the next key:
 
-- `<id> changed, your picks were cleared`: the chief put the question again. Your picks are dropped and you start at its first decision.
-- `<id> dismissed: <reason>`: the chief withdrew the question, with its reason (`withdrawn` when none is known). The block moves to the next question.
+- `<id> changed, your picks were cleared`: the chief put the question again. Your picks are dropped.
+- `<id> dismissed: <reason>`: the chief withdrew the question, with its reason (`withdrawn` when none is known). The rows move to the next question.
 - `Harold can't save answers right now`: Harold could not store the answer or the deferral. Your picks stay; try again.
 
-When no question is left, a notice stands alone in the block. It goes at the next key, wherever the focus is, and otherwise after the next read that still finds no question, a few seconds on. Then the block hides. With the focus on the list, that key also does what it does on the list. With the focus on the block, the key only clears the notice, and the focus returns to the list. If the read hides the block while it has the focus, the focus returns to the list, and the next key acts on the list. A key that would still reach a block whose question just changed is dropped, since it was typed for what was there before.
+When no question is left, a notice stands alone as one row. It goes at the next key, and otherwise after the next read that still finds no question, a few seconds on. Then the rows go. That key also does what it does on the list. A key that would still reach a question that just changed is dropped, since it was typed for what was there before, so `Enter` on `send` never sends picks made on an older version.
 
 ### Reconnects
 
-If the queue cannot be read, or the stream to Harold is lost, the block hides but keeps your picks and any half-typed note. They come back when the next read succeeds and the question is unchanged. If the block had the focus, keys are ignored until `Tab` or `Esc` returns them to the list. The footer says so.
+If the queue cannot be read, or the stream to Harold is lost, the question rows hide but keep your picks and any half-typed note. They come back when the next read succeeds and the question is unchanged. If the cursor was on a question row, keys are ignored until `Esc` returns them to the list, where the cursor already is. The footer reads `Esc back to the list (the questions are away)`.
 
-If the question changes under a half-typed note or the summary, the block keeps showing the new question and holds its keys until you press `Esc` (or `Tab`). The footer says `esc to continue`. This stops letters typed for the old question from acting on the new one. `Esc` clears the notice and starts the shown question from its first decision.
+If the question changes under a half-typed note, the rows keep showing the new question and hold their keys until you press `Esc`. The footer reads `esc to continue`. This stops letters typed for the old question from acting on the new one. `Esc` clears the notice and puts the cursor on the shown question's header.
 
-While keys are ignored or held, the quit keys still quit and Ctrl+L still retries. Ctrl+L leaves a half-typed note as it was. Ignored keys stay ignored until the block comes back. A hold ends with the reconnect: the block hides and its keys are ignored until the next read shows it again. Then keys act on the question shown, and if that question changed meanwhile, the block shows its notice and holds its keys again until `Esc` or `Tab`.
+While keys are ignored or held, the quit keys still quit and Ctrl+L still retries. Ctrl+L leaves a half-typed note as it was. A hold ends with the reconnect: the rows hide and their keys are ignored until the next read shows them again. Then keys act on the question shown, and if that question changed meanwhile, its notice shows and the keys are held again until `Esc`.
 
 ## Reading status
 
@@ -288,7 +323,7 @@ clipping.
 ### Terminal shutdown
 
 Ctrl+Q and Ctrl+C quit from every mode. `q` quits from the agent list; in search,
-the palette and a note it types itself, and in the question block it does nothing.
+the palette, a free-text field and a note it types itself, and on a question row it does nothing.
 `Esc` never quits: while editing it always clears the query and leaves editing, and
 in the agent list it clears an accepted filter or does nothing when no filter exists. `SIGINT` and `SIGTERM` also initiate shutdown.
 The runtime restores raw mode, the primary screen, and
