@@ -1,6 +1,6 @@
 # Tools
 
-A tool is a small service inside the Harold daemon that does one job for the agents and keeps its own storage. There are two: the [question queue](questions.md) and the [backlog and queue](backlog.md). This page is for a developer adding another.
+A tool is a small service inside the Harold daemon that does one job for the agents and keeps its own storage. There are two: the [question tool](questions.md) and the [backlog and queue](backlog.md). This page is for a developer adding another.
 
 ## The contract
 
@@ -61,5 +61,5 @@ There is no setting that turns a tool off. To stop one, remove its `start_tool` 
 
 ## Tools
 
-- [Question queue](questions.md): the chief's questions for the user, answered from the dash and typed back into the chief's pane.
+- [Question tool](questions.md): the chief's questions for the user, answered from the dash and typed back into the chief's pane.
 - [Backlog and queue](backlog.md): each product's ranked backlog, kept by its product manager, and the chief's own queue.

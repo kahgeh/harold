@@ -102,7 +102,7 @@ Step 5 resolves both paths first, so a trailing slash or a symlink (macOS `/var`
 
 A write to the queue (every `queue` change, an applied queue import) is refused with `no_pane` without a pane, and with `not_chief` from any pane but the chief's.
 
-This guards against mix-ups. It isn't security. The server trusts local callers, and a local process can claim any pane. It stops one product's manager writing another's backlog by mistake.
+This guards against mix-ups. It isn't security. Harold trusts local callers, and a local process can claim any pane. It stops one product's manager writing another's backlog by mistake.
 
 ## The CLI
 

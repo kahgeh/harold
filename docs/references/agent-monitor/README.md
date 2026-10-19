@@ -8,7 +8,7 @@ A pane name does not answer whether its current agent process is busy, idle, or 
 
 ## Architecture
 
-The monitor has one durable write path and one current-state projection path.
+The agent monitor has one durable write path and one current-state projection path.
 
 ```text
 ┌──────────────────────────────┐
@@ -71,7 +71,7 @@ sequenceDiagram
     participant Projector as Application projector
     participant StateDB as harold-state.db
     participant Hub as Snapshot publisher
-    participant Dashboard as Dashboard consumer
+    participant Dash as Dash consumer
 
     par scheduled inventory
         Inventory->>Runtime: complete pane and process observations
@@ -88,7 +88,7 @@ sequenceDiagram
     Projector->>StateDB: advance checkpoint and commit
     Projector->>StateDB: load complete committed snapshot
     Projector->>Hub: publish greater event-stream revision
-    Hub-->>Dashboard: complete AgentStateSnapshot
+    Hub-->>Dash: complete AgentStateSnapshot
 ```
 
 ### Startup, reconnect, and shutdown
@@ -107,7 +107,7 @@ sequenceDiagram
     Harold->>StateDB: atomically project through stream head
     Harold->>StateDB: load complete projected snapshot
     Harold->>Hub: create and seed snapshot publisher
-    Harold->>Harold: seed monitor runtime from stored snapshot
+    Harold->>Harold: seed agent monitor runtime from stored snapshot
     Harold->>OS: bind gRPC listener
     Client->>Harold: WatchAgentStates({})
     Harold-->>Client: current complete snapshot first
@@ -129,7 +129,7 @@ Agent events use the existing ordered `harold/main` `EventStream`. Append batche
 | `AgentPaneDeparted` | Full incarnation, observation time | Removes the row only when the full incarnation still matches. |
 | `AgentLifecycleObserved` | Full incarnation, `Busy`/`Idle`, adapter ID, `Unchanged`/`Clear`/`Set` summary update, observation time | Updates matching hook evidence and explicit-summary candidate, and records the adapter ID as the pane's lifecycle adapter. A report that repeats the pane's state, from the same adapter, with an `Unchanged` summary only restarts the report's grace. |
 | `AgentScreenObserved` | Full incarnation, optional `Busy`/`Idle`, optional normalized fallback summary, classifier ID, observation time | Applies each present fact independently. An absent field preserves its candidate. |
-| `AgentActivitySummaryGenerated` | Full incarnation, source basis version, generated description, generation time | Sets a generated candidate only for the matching current incarnation and activity revision; does not change agent state or stage delivery. |
+| `AgentActivitySummaryGenerated` | Full incarnation, source basis version, activity summary, generation time | Sets a generated candidate only for the matching current incarnation and activity revision; does not change agent state or stage delivery. |
 | `AgentMonitorHealthChanged` | Component, healthy/degraded flag, bounded reason code, observation time | Upserts health for the component. |
 | `TtsMuteChanged` | `{muted}` | Upserts `settings.tts_muted`, advances the snapshot revision, and creates no delivery. |
 | `MessagingPausedChanged` | `{paused}` | Upserts `settings.messaging_paused`, advances the snapshot revision, and creates no delivery. |
@@ -178,7 +178,7 @@ Lifecycle and completion input use only the matching provider's idle fragments w
 
 Placeholder rules apply when observations arrive. Changing the configuration does not retroactively change stored summaries.
 
-The public API exposes one optional effective summary. When it is absent, the dashboard—not Harold—owns the exact display copy `No work summary reported`.
+The public API exposes one optional effective summary. When it is absent, the dash—not Harold—owns the exact display copy `No work summary reported`.
 
 ## Projection and storage
 
@@ -192,11 +192,11 @@ A fresh installation creates `<store.path>/harold-state.db` from one migration, 
 | `agent_monitor_health` | Component, healthy flag, bounded reason code, observation time, and last event version |
 | `settings` | Key/value application settings; currently `tts_muted`, written by `TtsMuteChanged`, and `messaging_paused`, written by `MessagingPausedChanged` |
 
-`agent_panes` includes `summary_basis_version`, `generated_work_summary`, and `generated_summary_basis_version` from creation. These keep a generated description tied to its source revision while preserving the original source candidates. A store whose recorded migrations differ from this build's is rejected at start; Harold does not convert or reset it. A store made by v0.3.1 or earlier is such a store: install with `./scripts/install.sh --reinstall`, which archives the old data and starts a fresh store with voice not muted, messaging not paused and no panes.
+`agent_panes` includes `summary_basis_version`, `generated_work_summary`, and `generated_summary_basis_version` from creation. These keep an activity summary tied to its source revision while preserving the original source candidates. A store whose recorded migrations differ from this build's is rejected at start; Harold does not convert or reset it. A store made by v0.3.1 or earlier is such a store: install with `./scripts/install.sh --reinstall`, which archives the old data and starts a fresh store with voice not muted, messaging not paused and no panes.
 
 The state database uses WAL mode, `synchronous = NORMAL`, and a five-second busy timeout. For each projection batch, Harold opens one immediate transaction, applies agent rows, stages only externally deliverable events, advances `last_processed_event`, and commits. An error rolls the whole transaction back.
 
-Only `TurnCompleted`, `InboundMessageReceived`, and unknown event types are staged in the delivery outbox. Agent observation, generated-summary, and monitor-health events are projection-only. Unknown event types remain visible to the existing permanent-delivery failure path instead of being silently skipped.
+Only `TurnCompleted`, `InboundMessageReceived`, and unknown event types are staged in the delivery outbox. Agent observation, generated-summary, and agent-monitor-health events are projection-only. Unknown event types remain visible to the existing permanent-delivery failure path instead of being silently skipped.
 
 After commit, Harold loads the checkpoint, health, and panes with one query and publishes the complete snapshot if its `through_event_version` is greater than the in-memory revision. A revision can advance because of a non-agent event while pane content remains unchanged.
 
@@ -255,14 +255,14 @@ The pane message does not expose adapter IDs, classifier IDs, evidence provenanc
 | --- | --- |
 | `ReportAgentState` has an invalid/unknown state, malformed pane ID, or malformed adapter ID | `INVALID_ARGUMENT` |
 | The pane does not resolve to a live configured agent incarnation | `FAILED_PRECONDITION` |
-| Inventory acquisition, durable append, or monitor runtime is unavailable | `UNAVAILABLE` |
+| Inventory acquisition, durable append, or agent monitor runtime is unavailable | `UNAVAILABLE` |
 | `TurnComplete` durable append fails | `INTERNAL` |
 
 ## Configuration
 
-Optional Claude dashboard generation is configured separately under `[activity_summary]`; see the [complete settings reference](activity-summaries.md#configuration).
+Optional Claude activity summary generation is configured separately under `[activity_summary]`; see the [complete settings reference](activity-summaries.md#configuration).
 
-Default monitor configuration, from `harold/config/default.toml`:
+Default agent monitor configuration, from `harold/config/default.toml`:
 
 ```toml
 [agent_monitor]
@@ -360,7 +360,7 @@ An inventory failure preserves current panes and never infers mass departure. A 
 - Provider screen markers and styled parsing are version-sensitive. Inconclusive text is preserved as uncertainty; `codex-v1` and `claude-v1` each match one provider's rendering and guarantee nothing for another.
 - History recovery is bounded and starts with a baseline that emits no existing prompt. Lost fingerprint overlap also establishes a new baseline without adopting its contents. These rules can leave late-attached or older work without a recovered summary.
 - Harold does not infer busy/idle from CPU use, tmux window activity, or elapsed silence.
-- Harold does not navigate tmux for the dashboard and does not implement dashboard search.
+- Harold does not navigate tmux for the dash and does not implement the dash's filter.
 - The Claude Code lifecycle mod (`hooks/claude-mod/`) reports turn start and end through `harold accept`; the installer loads it through `CLAUDE_CODE_PLUGIN_DIRS`, and sessions without it rely on the screen reading.
 - The OpenCode lifecycle plugin is opt-in and is not installed by `make deploy`; its screen provider has no fallback-summary prefix.
 - The `TurnComplete` RPC is the notification ingress. Empty prompts preserve summaries and cannot explicitly clear them.

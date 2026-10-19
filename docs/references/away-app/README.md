@@ -1,6 +1,6 @@
-# Away app: the chief's thread on the phone
+# Web app: the chief's thread on the phone
 
-The away app puts one conversation with the chief of pods on the iPhone's home screen. When the chief sends you a message while you are away, Harold adds it to the app's thread and the phone shows an alert on the lock screen. You open the app, type a reply, and Harold types it into the chief's pane, marked `📱`. Every reply goes to the chief, so Harold never has to guess which pane it is for, as it does with an iMessage reply.
+The web app puts one conversation with the chief of pods on the iPhone's home screen. When the chief sends you a message while you are away, Harold adds it to the app's thread and the phone shows a push on the lock screen. You open the app, type a reply, and Harold types it into the chief's pane, marked `📱`. Every reply goes to the chief, so Harold never has to guess which pane it is for, as it does with an iMessage reply.
 
 Harold serves the app itself, from this Mac, on a loopback address (`127.0.0.1`, reachable only from the Mac). Tailscale, the private network that joins your Mac and your iPhone, carries it to the phone. iMessage keeps working alongside it, as the fallback.
 
@@ -8,7 +8,7 @@ The chief is the agent running in the folder named by `[notify] away_messages_on
 
 ## Rolling back to an earlier Harold
 
-This build adds a migration, `002_web_app`, to Harold's state database: two tables, one for the thread and one for the phones that turned on alerts. A Harold built before this one finds a migration it does not know, refuses the store, and stops at start with `incompatible state schema`.
+This build adds a migration, `002_web_app`, to Harold's state database: two tables, one for the thread and one for the phones that turned on push. A Harold built before this one finds a migration it does not know, refuses the store, and stops at start with `incompatible state schema`.
 
 To roll back, move the store aside first:
 
@@ -22,14 +22,14 @@ The moved folder keeps everything recorded until then. Moved back, it opens in t
 
 The app is built in two stages:
 
-- **Stage 1a, built:** the thread, alerts and typed replies, described below.
+- **Stage 1a, built:** the thread, push and typed replies, described below.
 - **Stage 1b, built:** calls with the chief ([Calls](#calls-stage-1b)).
 
 Both stages are built. Both are tested on the Mac before the phone: publishing the app to the phone waits until stage 0, a throwaway test on a real iPhone, has passed and you have said so.
 
 ## Setting it up
 
-Setting up takes five steps: Tailscale on both devices, `tailscale serve`, the `[web_app]` section, the home-screen icon, and alerts.
+Setting up takes five steps: Tailscale on both devices, `tailscale serve`, the `[web_app]` section, the home-screen icon, and push.
 
 ### Tailscale on the Mac and the iPhone
 
@@ -60,7 +60,7 @@ Harold also accepts only a Host ending in `.ts.net`, such as the Mac's tailnet n
 
 The login header comes from the device, not from the page, so every page open in the phone's browser carries it, as it would a cookie. Two more checks keep other pages out, and each refusal is a `403` with nothing stored or logged:
 
-- **Posts from another page:** a reply or an alert sign-up must come from the app's own page. The browser must say the request is from the same site (`Sec-Fetch-Site: same-origin`, or else an `Origin` that matches the Host), and the request must carry a header another site's page cannot send without asking first: `Datastar-Request: true`, which the page's reply form sends, or `Content-Type: application/json`, which the alert sign-up sends. Harold never grants that asking, so another site's page cannot post at all.
+- **Posts from another page:** a reply or a push sign-up must come from the app's own page. The browser must say the request is from the same site (`Sec-Fetch-Site: same-origin`, or else an `Origin` that matches the Host), and the request must carry a header another site's page cannot send without asking first: `Datastar-Request: true`, which the page's reply form sends, or `Content-Type: application/json`, which the alert sign-up sends. Harold never grants that asking, so another site's page cannot post at all.
 - **Another Host:** a page can point its own name at `127.0.0.1` and reach Harold's listener. Harold refuses every request whose Host is not the tailnet name or the loopback address, so such a page gets nothing.
 
 These checks protect against web pages and other devices, not against software on the Mac. Any program on the Mac can still reach `127.0.0.1:4330` and send a correct Host, Origin and login. The Mac's own processes are trusted, as they already are with tmux, where any of them can type into the chief's pane.
@@ -88,14 +88,14 @@ The section also needs `[notify] away_messages_only_from` set, because that fold
 
 ### Adding the app to the home screen
 
-On the iPhone, open `https://pasm4mbp.<tailnet>.ts.net/` in Safari, tap the Share button, and choose **Add to Home Screen**. The icon is called **Chief**. Open the app from that icon from now on: iOS delivers alerts only to a web app opened from the home screen, so a Safari tab does not show **Turn on alerts** at all.
+On the iPhone, open `https://pasm4mbp.<tailnet>.ts.net/` in Safari, tap the Share button, and choose **Add to Home Screen**. The icon is called **Chief**. Open the app from that icon from now on: iOS delivers pushes only to a web app opened from the home screen, so a Safari tab does not show **Turn on alerts** at all.
 
-### Turning on alerts
+### Turning on push
 
 The thread page shows **Turn on alerts** at the top until this phone has turned them on:
 
 1. Tap **Turn on alerts**. iOS asks for permission to show notifications; allow it.
-2. The phone's push service, Apple's server that delivers alerts to the phone, gives the app an address for this phone and two keys. The app sends all three to Harold, which stores them.
+2. The phone's push service, Apple's server that delivers pushes to the phone, gives the app an address for this phone and two keys. The app sends all three to Harold, which stores them.
 3. The button disappears.
 
 If you refuse permission, or Harold cannot store the address, the button stays, and you can tap it again.
@@ -121,18 +121,18 @@ While Harold cannot list the tmux panes, it does not know which pane is the chie
 
 ## What reaches the phone, and by which route
 
-With `[web_app]` set, the chief's messages always go into the app's thread. Once a phone has turned on alerts, they reach the phone as a push instead of through iMessage; until then, each also goes to iMessage, starting `(app unreachable)`. Every other agent's messages, and your iMessage replies, work as before:
+With `[web_app]` set, the chief's messages always go into the app's thread. Once a phone has turned on push, they reach the phone as a push instead of through iMessage; until then, each also goes to iMessage, starting `(app unreachable)`. Every other agent's messages, and your iMessage replies, work as before:
 
 | Message | Route |
 |---|---|
-| From the chief's pane (turn-end updates, `send-message-to-away-device`, spoken lines), with alerts turned on and no call open | **The app only, as text.** Harold puts the message in the thread and sends a push. A spoken line arrives as its text. No voice note is made. |
+| From the chief's pane (turn-end updates, `send-message-to-away-device`, spoken lines), with push turned on and no call open | **The app only, as text.** Harold puts the message in the thread and sends a push. A spoken line arrives as its text. No voice note is made. |
 | A spoken line from the chief while the phone's call is open | **The phone's call.** It plays on the phone at once, and its text is added to the thread, with no push and no iMessage. |
-| From the chief, when no phone has turned alerts on, or the push service refuses the push or cannot be reached | **iMessage only, once.** It is sent as today, starting `(app unreachable)`. A push address the service reports gone (`404` or `410`) is deleted. |
+| From the chief, when no phone has turned push on, or the push service refuses the push or cannot be reached | **iMessage only, once.** It is sent as today, starting `(app unreachable)`. A push address the service reports gone (`404` or `410`) is deleted. |
 | From any other pane | **iMessage as today.** The chief-only rule still decides what is left out. |
 | The user's iMessage replies | **As today**, routed by tag or the latest notifier. Nothing in iMessage changes. |
 
 - **Once and once only:** a push the service accepted counts as delivered, and the message does not go to iMessage too. A push it refused goes to iMessage, so nothing is lost.
-- **The alert:** it shows `Chief` and the first 120 characters of the message. The whole message waits in the thread.
+- **The push:** it shows `Chief` and the first 120 characters of the message. The whole message waits in the thread.
 
 The route applies only to messages that would reach the phone today. At the desk, with the screen unlocked, the chief's spoken lines are still said aloud. While Harold cannot list the tmux panes, it cannot tell which pane is the chief's, so the chief's messages go to iMessage as before.
 
@@ -140,7 +140,7 @@ The route applies only to messages that would reach the phone today. At the desk
 
 You tap **📞 Call**, and talk with the chief as in a phone call. Harold hears when you stop talking, types what you said into the chief's pane, marked `🎙`, plays the chief's spoken answer on the phone, and listens again. The desk's calls work the same way; the [voice input reference](../voice-input/README.md) describes them. Call mode uses the `[voice_input]` section for transcription. Without it, the **Call** button is disabled and reads `Voice is not set up on the Mac`, and `POST /call` answers `409` with the same line.
 
-Starting a call on the phone ends a call open at the desk first, so the chief does not get turns from the desk's microphone too. Nothing stops the dashboard from starting a desk call while the phone's call is open.
+Starting a call on the phone ends a call open at the desk first, so the chief does not get turns from the desk's microphone too. Nothing stops the dash from starting a desk call while the phone's call is open.
 
 Tapping **Call** on a newer screen, such as the app opened again, takes over the phone's call: the same call goes on with the newer screen, and the older screen's call ends there when Harold refuses its next piece of audio. Whatever the older screen was saying when the call was taken over is dropped, not typed.
 
@@ -176,7 +176,7 @@ iOS limits what a home-screen web app can do during a call. Stage 0 checks each 
 |---|---|
 | A home-screen web app records only while it is open and in front, so the screen must stay on. | The app keeps the screen on for the length of a call, and lets it sleep again when the call ends. |
 | The microphone stops when the phone locks or the app leaves the front. | The app ends the call, and on return shows `Call ended: the app was closed or the phone locked`. |
-| Sound pauses while the app is in the background. | The call ends the same way. The chief's answer still reaches the thread as text, with an alert. |
+| Sound pauses while the app is in the background. | The call ends the same way. The chief's answer still reaches the thread as text, with a push. |
 
 Nothing records or plays while the phone is locked or the app is in the background. If the phone vanishes without ending the call, Harold ends it 15 seconds after the last piece of audio, while nothing plays.
 
@@ -242,7 +242,7 @@ Harold's key pair lives in `web-push/vapid.pem`, beside the store folder: `~/bin
 
 Each push travels through the phone's push service, so that service sees some of it:
 
-- **The alert's text:** encrypted for the phone, so the push service cannot read it.
+- **The push's text:** encrypted for the phone, so the push service cannot read it.
 - **Your login:** every push carries a signed token naming a contact for the sender, as the push protocol (VAPID) requires. Harold names `mailto:<allowed_login>`, so the phone's push service receives your Tailscale login with every push.
 - **The address:** the push service issued it, so it knows which phone the push is for.
 

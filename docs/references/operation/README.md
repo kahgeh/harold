@@ -230,14 +230,14 @@ Use diagnostics only when intentionally testing notification delivery. See [inst
 
 ## Pausing messaging
 
-Harold has a kill switch for the away channel. While messaging is paused the daemon keeps running, and so do the agent monitor, the dashboard stream and at-desk TTS, but nothing moves over iMessage or Telegram:
+Harold has a messaging pause for the away channel. While messaging is paused the daemon keeps running, and so do the agent monitor, the dash stream and at-desk TTS, but nothing moves over iMessage or Telegram:
 
 - no away notification, confirmation or error reply is sent;
 - no inbound message is routed to a pane, including messages already waiting in the delivery outbox;
 - messages that arrive are discarded, not queued. The listener still moves its cursor past them, so nothing is replayed on resume;
 - `harold send-message-to-away-device` is refused: it prints `messaging is paused` and exits 1. A message the daemon stored before the pause is skipped and is not sent on resume.
 
-Use it when the away channel misbehaves, for example when Harold keeps answering its own messages. Pausing keeps the agent monitor, the dashboard stream and at-desk TTS running, which `haroldctl stop` turns off with the rest of Harold. The pause is stored as a `MessagingPausedChanged` stream event and projected into the `settings` table of the Turso state database, so it survives a restart and stays on until you resume.
+Use it when the away channel misbehaves, for example when Harold keeps answering its own messages. Pausing keeps the agent monitor, the dash stream and at-desk TTS running, which `haroldctl stop` turns off with the rest of Harold. The pause is stored as a `MessagingPausedChanged` stream event and projected into the `settings` table of the Turso state database, so it survives a restart and stays on until you resume.
 
 From `tmx-agent-dash`: press `/`, type `messaging`, and run `Messaging: pause`. The masthead of every connected dash then shows `■ MSG PAUSED`. `Messaging: resume` turns messaging back on.
 
@@ -256,7 +256,7 @@ Send `{"paused": false}` to resume. The RPC handler flips the in-process switch 
 
 ## Inventory timeout
 
-If the dashboard reports `MONITOR DEGRADED inventory:timeout`, check
+If the dash reports `MONITOR DEGRADED inventory:timeout`, check
 `~/bin/harold/harold.log` for the component's failure and recovery messages.
 Inventory scans can take longer when macOS schedules Harold in the background.
 The inventory deadline defaults to 3000 ms and can be overridden in local.toml:

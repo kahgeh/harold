@@ -1,6 +1,6 @@
 # Install or Reinstall Harold
 
-Install Harold and its dashboard from the latest macOS release. This is the recommended path: it downloads ready-built programs, checks their checksum, and asks for your channel settings. Rust and a source checkout are unnecessary.
+Install Harold and the dash from the latest macOS release. This is the recommended path: it downloads ready-built programs, checks their checksum, and asks for your channel settings. Rust and a source checkout are unnecessary.
 
 The installer starts Harold to verify installation, and launchd starts it again at every login; `haroldctl stop` keeps it off until `haroldctl start`. The first install shows a macOS "Background Items Added" notice naming `harold`: that is Harold starting at login.
 
@@ -167,7 +167,7 @@ The [inbound routing reference](../references/inbound-message-routing/README.md#
 
 Success requires both the managed process owning the listening socket and Harold returning a current agent-state snapshot. The installer performs this same check before reporting success. It does not send a test notification.
 
-Start the dashboard from inside tmux:
+Start the dash from inside tmux:
 
 ```sh
 ~/bin/tmx-agent-dash
@@ -287,7 +287,7 @@ The Codex adapter parses Codex transcript events and supports both `event_msg` u
 
 ## 6. Test notifications when ready
 
-The service readiness check establishes that Harold is running. It does not prove that macOS permissions, provider hooks, or channel credentials work end to end. After completing those steps, submit a controlled task through a configured agent and verify the dashboard and expected notification.
+The service readiness check establishes that Harold is running. It does not prove that macOS permissions, provider hooks, or channel credentials work end to end. After completing those steps, submit a controlled task through a configured agent and verify the dash and expected notification.
 
 The daemon also provides an explicit diagnostic command that can speak or send an away-channel message. Run it only when you intend to test those effects:
 

@@ -189,7 +189,7 @@ Submit a distinctive prompt through the configured agent and verify this sequenc
 3. Stopping and reconnecting the watcher immediately returns the current complete snapshot.
 4. Restarting Harold returns the same projected state before later observations arrive.
 
-To verify explicit clear behavior, send a lifecycle request whose `workSummary` is present and empty. The public summary should change to the current screen fallback or become absent. A dashboard must render an absent summary as exactly `No work summary reported`; `grpcurl` itself simply omits the optional field.
+To verify explicit clear behavior, send a lifecycle request whose `workSummary` is present and empty. The public summary should change to the current screen fallback or become absent. A dash must render an absent summary as exactly `No work summary reported`; `grpcurl` itself simply omits the optional field.
 
 For OpenCode, run the repository tests without installing packages:
 
@@ -202,19 +202,19 @@ node --test hooks/opencode/harold-plugin.test.mjs
 Use a disposable Codex pane and a separate Harold instance with its own store and listener, following the isolation setup below. Disable notification effects in that instance and set `[activity_summary].enabled = false` so `workSummary` exposes the exact recovered instruction. Keep provider hooks from reporting to that listener during this check.
 
 1. Start Codex and let Harold discover the process and capture its initial baseline before submitting test work. A prompt already present at first capture is deliberately ineligible.
-2. Submit a harmless distinctive instruction, such as `Explain the fixture retry loop without editing files`. Observe the source instruction in the snapshot and dashboard after a Busy transition or eligible retry.
+2. Submit a harmless distinctive instruction, such as `Explain the fixture retry loop without editing files`. Observe the source instruction in the snapshot and the dash after a Busy transition or eligible retry.
 3. Submit another distinctive instruction and produce enough harmless output to move its submitted block above the visible grid while it remains within retained history. Leave a different instruction typed but unsent in the composer. After recovery, require the newest submitted instruction; the draft must never appear.
 4. Submit the same harmless instruction again. Its new occurrence must advance the snapshot revision while repeated polling without another submission must not create repeated source events.
 5. Stop Codex and relaunch it in the same pane. Confirm a new incarnation with no inherited summary despite retained scrollback. Let its baseline settle, then submit new work and confirm recovery for that incarnation.
-6. Enable activity summarization only after the source checks pass. Submit another harmless task and confirm the generated description describes that task without claiming unreported completion.
+6. Enable activity summarization only after the source checks pass. Submit another harmless task and confirm the activity summary describes that task without claiming unreported completion.
 
 If a state edge is missed, allow the 30-second Busy retry. A prompt already in the baseline, outside retained history, or in a snapshot that lost every overlap anchor is not eligible. Increasing the history bound cannot retroactively establish provenance. See [capture timing and acquisition rules](../references/agent-monitor/screen-adapters.md#capture-requests-and-timing).
 
 Record provider versions, process and pane identities, configuration, snapshot revisions, and sanitized synthetic task wording. Keep raw terminal captures ephemeral. These checks establish Codex screen recovery; they do not establish Claude-specific parsing or three-provider hook acceptance.
 
-## 8. Run real-provider dashboard acceptance
+## 8. Run real-provider dash acceptance
 
-Fixtures and fake provider processes do not satisfy this check. Use the real installed Claude Code, Codex, and OpenCode CLIs, their real hook/plugin paths, the real `WatchAgentStates` stream, and the dashboard that consumes it.
+Fixtures and fake provider processes do not satisfy this check. Use the real installed Claude Code, Codex, and OpenCode CLIs, their real hook/plugin paths, the real `WatchAgentStates` stream, and the dash that consumes it.
 
 1. Build the ready revision and create a disposable state directory:
 
@@ -235,7 +235,7 @@ Fixtures and fake provider processes do not satisfy this check. Use the real ins
 
    Use a temporary config overlay if the repository config is not already valid for the local machine. This command starts an acceptance instance; it does not deploy or replace the installed Harold binary.
 
-3. Start the real snapshot watcher and point the dashboard at the same endpoint:
+3. Start the real snapshot watcher and point the dash at the same endpoint:
 
    ```sh
    proto_dir="$PWD/harold-api/proto"
@@ -259,7 +259,7 @@ Fixtures and fake provider processes do not satisfy this check. Use the real ins
    opencode .
    ```
 
-5. Submit a different controlled task to each real provider. Give each task unique visible wording and enough duration to observe Busy. In the dashboard and watcher, require all of the following:
+5. Submit a different controlled task to each real provider. Give each task unique visible wording and enough duration to observe Busy. In the dash and watcher, require all of the following:
 
    - each row carries the expected pane, provider, agent PID, and process start time;
    - every provider changes from Busy to Idle;
@@ -284,7 +284,7 @@ Confirm the agent is currently running in that pane and its executable command m
 
 ### `UNAVAILABLE: agent state report unavailable`
 
-Check Harold's logs and the `monitorHealth` entries. Inventory or event append may be unavailable, or the serialized monitor runtime may have stopped. Retry only after the underlying failure is corrected; an unavailable response does not claim durable acceptance.
+Check Harold's logs and the `monitorHealth` entries. Inventory or event append may be unavailable, or the serialized agent monitor runtime may have stopped. Retry only after the underlying failure is corrected; an unavailable response does not claim durable acceptance.
 
 ### State remains `Unknown`
 

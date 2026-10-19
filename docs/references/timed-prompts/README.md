@@ -148,4 +148,4 @@ If the event cannot be stored after a prompt was typed, Harold logs the error an
 - **A `;` at the end of `text` is not typed.** By tmux's rules a `;` at the end of an argument ends the tmux command. A `text` that is only `;` types nothing.
 - **One time a day for each entry.** There are no days of the week, dates or intervals.
 - **Nothing is sent to the phone** when a prompt is typed or skipped. Pausing messages to the phone has no effect on timed prompts.
-- **Not on the dashboard.** The log is where to see what happened to a prompt.
+- **Not on the dash.** The log is where to see what happened to a prompt.

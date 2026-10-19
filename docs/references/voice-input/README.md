@@ -12,7 +12,7 @@ A call closes that loop. Harold never takes the chief's own voice for yours: it 
 
 ## Do not send the chief a voice message from the phone
 
-This reference covers the desk only. The same conversation on the phone is a later part of away-web-app, and until it exists, do not record a voice message to the chief from the phone. Harold drops it.
+This section covers the desk. The web app's call, built when `[web_app]` is set (see [The phone's side](#the-phones-side)), is the phone's way to talk to the chief. Do not record a voice message to the chief from the phone outside a call. Harold drops it.
 
 The reason: Messages stores a recorded message as an attachment, which reaches Harold as a row with no text and only an attachment placeholder character. Harold sends its own voice notes as attachments too, and those come back to it as the same kind of row. It therefore treats every attachment-only row as the echo of its own voice note and ignores it (`is_attachment_only` in `harold/src/channels/imessage.rs`). Your message looks identical, so it is ignored with them. Type a text message from the phone instead.
 
@@ -20,14 +20,14 @@ The reason: Messages stores a recorded message as an attachment, which reaches H
 
 ### Starting and ending
 
-In tmx-agent-dash, select the chief's row and press `c`. The chief's row is the one whose pane Harold names in its answer to the dashboard, so the button follows the chief if it restarts in another pane.
+In tmx-agent-dash, select the chief's row and press `c`. The chief's row is the one whose pane Harold names in its answer to the dash, so the button follows the chief if it restarts in another pane.
 
 | Key | On the chief's row | On any other row |
 |---|---|---|
 | `c` | Starts a call when none is on and Harold's voice is not muted. Ends the call during one. | Nothing |
 | `t` | Talk now, while the chief speaks ([Talk now](#talk-now)). | Nothing |
 
-The command palette (opened with `/`) also lists `Call: start` when a call can start and `Call: end` during a call, from any row. Typing `call` in the palette finds them. Talk now has no palette entry. The dashboard captures no mouse events, so the buttons are pressed only with their keys. The footer lists `c call` and `t talk now`.
+The command palette (opened with `/`) also lists `Call: start` when a call can start and `Call: end` during a call, from any row. Typing `call` in the palette finds them. Talk now has no palette entry. The dash captures no mouse events, so the buttons are pressed only with their keys. The footer lists `c call` and `t talk now`.
 
 When a call starts, Harold:
 
@@ -76,10 +76,10 @@ The call ends in one of these ways. Each is the `reason` of the `call ended` log
 | `voice_failed` | The voice worker failed to load or died twice ([If the worker dies](#if-the-worker-dies)), or the call's folder could not be made. |
 | `microphone_failed` | `ffmpeg` could not start, or ended during the call. |
 | `shutdown` | Harold stopped while the call was open. |
-| `idle` | For 10 minutes no turn was cut and no sound played. Harold says `Bye.` and ends the call ([Where this differs from the spec](#where-this-differs-from-the-spec)). |
+| `idle` | For 10 minutes no turn was cut and no sound played. Harold says `Bye.` and ends the call ([Where this differs from the original design](#where-this-differs-from-the-original-design)). |
 | `voice_muted` | Harold's voice was muted during the call ([No call while Harold's voice is muted](#no-call-while-harolds-voice-is-muted)). |
 
-When the voice or the microphone fails, Harold says `The voice failed. Call ended.` through the `[tts]` command. Ending the call stops `ffmpeg`, the voice worker and `caffeinate`, deletes the call's folder, and clears the transcript the dashboard shows. A turn still waiting for a busy chief is not dropped: it keeps its retry after the call ends ([A turn waiting for a busy chief](#a-turn-waiting-for-a-busy-chief)).
+When the voice or the microphone fails, Harold says `The voice failed. Call ended.` through the `[tts]` command. Ending the call stops `ffmpeg`, the voice worker and `caffeinate`, deletes the call's folder, and clears the transcript the dash shows. A turn still waiting for a busy chief is not dropped: it keeps its retry after the call ends ([A turn waiting for a busy chief](#a-turn-waiting-for-a-busy-chief)).
 
 The 10-minute clock starts again on every turn cut and every sound played, the tick included. When it runs out while something is going on (you are speaking, a sound plays or waits, a turn waits for a busy chief, or Harold is transcribing or waiting for the chief), the clock starts again instead.
 
@@ -105,7 +105,7 @@ When Harold has said `The chief is busy. I'll pass it on when it's free.`, the t
 
 The button sits at the right edge of the chief's work cell, so a call never changes the list's column widths. During a call the cell's text is the last thing typed, `🎙 <transcript>`, or else what became of the last turn (`nothing heard`, `chief busy`, `failed`).
 
-The dashboard asks Harold for the call's state once when its stream opens, every 500 ms while a call is on, and every 5 seconds otherwise, so the button finds the chief's pane before any call. A poll that fails hides the button and shows no status line, so a dashboard talking to an older Harold without calls shows nothing. Only a failed `c` or `t` press shows a status.
+The dash asks Harold for the call's state once when its stream opens, every 500 ms while a call is on, and every 5 seconds otherwise, so the button finds the chief's pane before any call. A poll that fails hides the button and shows no status line, so a dash talking to an older Harold without calls shows nothing. Only a failed `c` or `t` press shows a status.
 
 | State | Button | Colour |
 |---|---|---|
@@ -116,7 +116,7 @@ The dashboard asks Harold for the call's state once when its stream opens, every
 | `[voice_input]` absent | `[c] 📞 call: not set up` | muted; `c` does nothing |
 | Harold's voice is muted | `[c] 📞 call: voice muted` | muted; `c` does nothing until you unmute |
 
-The bars use `▁▂▃▄▅▆▇` and step once every 150 ms. They come from the clock, so the dashboard's redraw rate (every 100 ms) does not change.
+The bars use `▁▂▃▄▅▆▇` and step once every 150 ms. They come from the clock, so the dash's redraw rate (every 100 ms) does not change.
 
 **Narrow terminals.** The button uses the full text whenever it fits in the work cell, and otherwise shortens in this order:
 
@@ -125,7 +125,7 @@ The bars use `▁▂▃▄▅▆▇` and step once every 150 ms. They come from 
 
 While the chief speaks, `[t] talk now` is kept ahead of the state words. The pair shrinks as `[c] 📞 ▂▄▆▄▂ chief speaking · end call [t] talk now`, then `[c] 📞 ▂▄▆▄▂ end call [t] talk now`, then `[c] 📞 end call [t] talk now`, then `[c] 📞 end call [t] talk`, then `[c] 📞 end call` alone. The last step hides the talk-now button, and `t` still works.
 
-The other states shorten like this: off is always `[c] 📞 call`; not set up and voice muted shorten to `[c] 📞 not set up` and `[c] 📞 voice muted`. The narrowest text is used when none fits. The dashboard's tests cover `end call` at every width.
+The other states shorten like this: off is always `[c] 📞 call`; not set up and voice muted shorten to `[c] 📞 not set up` and `[c] 📞 voice muted`. The narrowest text is used when none fits. The dash's tests cover `end call` at every width.
 
 ### Talk now
 
@@ -145,18 +145,18 @@ A call plays its sound through Harold's voice, so Harold starts no call while th
 
 Muting the voice during a call ends the call at once, with no last words. The call checks the mute as each block of samples arrives. The state turns off, the last result is `voice muted`, and the log gets `call ended` with `reason = voice_muted`.
 
-### Where this differs from the spec
+### Where this differs from the original design
 
-Harold differs from the spec in these behaviours, each for the reason given:
+Harold differs from the original design in these behaviours, each for the reason given:
 
-- **The button shortens in a narrow terminal.** The spec gives only the full button texts. Harold drops the state words first, then the bars, and keeps `[t] talk now` ahead of the state words ([Narrow terminals](#the-button)). The reason: the button sits inside the chief's work cell so a call never changes the list's column widths, and in a narrow terminal the full text would cut off `end call`, the words that say how to end the call.
-- **A turn said before `bye` keeps its 2-minute retry after the call ends.** The spec drops any turn not yet typed when the call ends. Harold passes the turn on once the chief is free ([Hanging up by voice](#hanging-up-by-voice)). The reason: you said the turn for the chief, and hanging up in the same breath should not lose it. The retry needs no microphone or speaker.
-- **`caffeinate` keeps the display awake for the call.** The spec does not cover the screen. Harold holds `caffeinate -d -w <Harold's pid>` while a call is open ([The display and the lock screen](#the-display-and-the-lock-screen)). The reason: when the screen locks from being idle, Harold sends the chief's line to the phone instead of saying it into the call. The known limit: a lock you make by hand still sends the line to the phone.
-- **START refuses while Harold's voice is muted.** The spec does not cover Harold's mute. Harold starts no call, and the button shows `[c] 📞 call: voice muted` ([No call while Harold's voice is muted](#no-call-while-harolds-voice-is-muted)). The reason: a call plays its sound through Harold's voice, so a call with the voice muted could hear you but never answer.
-- **A forgotten call ends by itself.** A call with no turn cut and no sound played for 10 minutes says `Bye.` and ends with `reason = idle`. The spec has no such limit. The reason: `caffeinate` keeps the Mac awake and unlocked for as long as a call is open, so a call left open must end by itself.
-- **Muting the voice ends an open call.** The spec does not cover Harold's mute. In the same spirit as START refusing while the voice is muted, muting the voice during a call ends it at once, with `reason = voice_muted`.
-- **Held lines wait at most 10 seconds after talk now.** The spec holds other agents' updates until your next turn. Harold plays them 10 seconds after talk now when you start no turn, because another agent's update is delivered from a thread that waits until its line has been said, and a held line would stall that delivery.
-- **A turn Harold promised to pass on is not dropped when the call ends.** The spec drops any turn not yet typed when the call ends. Harold keeps trying to type it until 2 minutes after it was first held ([A turn waiting for a busy chief](#a-turn-waiting-for-a-busy-chief)). The reason: Harold has said `I'll pass it on when it's free.`, and ending the call must not break that promise. Only Harold stopping drops it.
+- **The button shortens in a narrow terminal.** The original design gives only the full button texts. Harold drops the state words first, then the bars, and keeps `[t] talk now` ahead of the state words ([Narrow terminals](#the-button)). The reason: the button sits inside the chief's work cell so a call never changes the list's column widths, and in a narrow terminal the full text would cut off `end call`, the words that say how to end the call.
+- **A turn said before `bye` keeps its 2-minute retry after the call ends.** The original design drops any turn not yet typed when the call ends. Harold passes the turn on once the chief is free ([Hanging up by voice](#hanging-up-by-voice)). The reason: you said the turn for the chief, and hanging up in the same breath should not lose it. The retry needs no microphone or speaker.
+- **`caffeinate` keeps the display awake for the call.** The original design does not cover the screen. Harold holds `caffeinate -d -w <Harold's pid>` while a call is open ([The display and the lock screen](#the-display-and-the-lock-screen)). The reason: when the screen locks from being idle, Harold sends the chief's line to the phone instead of saying it into the call. The known limit: a lock you make by hand still sends the line to the phone.
+- **START refuses while Harold's voice is muted.** The original design does not cover Harold's mute. Harold starts no call, and the button shows `[c] 📞 call: voice muted` ([No call while Harold's voice is muted](#no-call-while-harolds-voice-is-muted)). The reason: a call plays its sound through Harold's voice, so a call with the voice muted could hear you but never answer.
+- **A forgotten call ends by itself.** A call with no turn cut and no sound played for 10 minutes says `Bye.` and ends with `reason = idle`. The original design has no such limit. The reason: `caffeinate` keeps the Mac awake and unlocked for as long as a call is open, so a call left open must end by itself.
+- **Muting the voice ends an open call.** The original design does not cover Harold's mute. In the same spirit as START refusing while the voice is muted, muting the voice during a call ends it at once, with `reason = voice_muted`.
+- **Held lines wait at most 10 seconds after talk now.** The original design holds other agents' updates until your next turn. Harold plays them 10 seconds after talk now when you start no turn, because another agent's update is delivered from a thread that waits until its line has been said, and a held line would stall that delivery.
+- **A turn Harold promised to pass on is not dropped when the call ends.** The original design drops any turn not yet typed when the call ends. Harold keeps trying to type it until 2 minutes after it was first held ([A turn waiting for a busy chief](#a-turn-waiting-for-a-busy-chief)). The reason: Harold has said `I'll pass it on when it's free.`, and ending the call must not break that promise. Only Harold stopping drops it.
 
 ## The end-of-speech rule
 
@@ -231,7 +231,7 @@ Any answer with `"ok"` other than true means that one request failed. The worker
 
 **Phrases.** Harold's own phrases are made once by the worker and kept in `$TMPDIR/harold-voice-phrases/` as `<first 16 hex of sha256(voice + "\n" + phrase)>.wav`, so a later call plays them without waiting. Two phrases always go through the `[tts]` command, never the worker, because the worker is the thing that failed: `The voice stopped. One moment.` and `The voice failed. Call ended.` `There's no chief running.` at the start comes before any worker exists, so it plays from the phrase folder when the file is there, and otherwise through `[tts]`.
 
-**Memory.** About 2 GB while a call is open, between turns as well: Whisper large-v3-turbo about 1.6 GB and Kokoro about 0.35 GB. None between calls. This is the spec's estimate, not measured.
+**Memory.** About 2 GB while a call is open, between turns as well: Whisper large-v3-turbo about 1.6 GB and Kokoro about 0.35 GB. None between calls. This is the original design's estimate, not measured.
 
 ### If the worker dies
 
@@ -317,9 +317,9 @@ tmx-agent-dash controls the call over one gRPC call in `harold-api/proto/harold.
 | `state` | `OFF`, `LISTENING`, `TRANSCRIBING`, `WAITING`, `SPEAKING`, `NOT_SET_UP` |
 | `last_result` | `TYPED`, `NOTHING_HEARD`, `NO_CHIEF`, `CHIEF_BUSY`, `FAILED`, `VOICE_MUTED`; unspecified before any turn has ended in the call |
 
-The dashboard shows `TRANSCRIBING` and `WAITING` both as `chief thinking`. It waits up to 8 seconds for the answer to `START`, `STOP` or `TALK_NOW`, longer than the 5 seconds Harold may take to close the voice worker when a call ends, and up to 2 seconds for a `STATUS` poll, which Harold answers at once. `chief_pane_id` is empty when no chief runs. `START` answers once the call listens or has ended. A state the dashboard does not know counts as not set up.
+The dash shows `TRANSCRIBING` and `WAITING` both as `chief thinking`. It waits up to 8 seconds for the answer to `START`, `STOP` or `TALK_NOW`, longer than the 5 seconds Harold may take to close the voice worker when a call ends, and up to 2 seconds for a `STATUS` poll, which Harold answers at once. `chief_pane_id` is empty when no chief runs. `START` answers once the call listens or has ended. A state the dash does not know counts as not set up.
 
-## The shared core and away-web-app
+## The shared core and the web app
 
 The conversation core is one design with two places for audio. It does four things: it finds the end of speech, takes turns, turns speech into text, and types the text into the chief's pane marked `🎙`. This page's call is the desk's: the microphone through `ffmpeg` and the speakers through `afplay`. away-web-app's call mode (its stage 1b) adds only the phone's side, recording and playing audio in the app and carrying it to and from the Mac, by supplying its own source and sink. The phone's side is built; [The phone's side](#the-phones-side) describes it.
 
@@ -355,7 +355,7 @@ Tests use a fake source, sink, worker and pane; nothing in them touches the micr
 
 ## The phone's side
 
-away-web-app's call mode (its stage 1b) runs on this core. [The away app reference](../away-app/README.md#calls-stage-1b) describes what you see and hear; this section is what the phone supplies in place of the desk's parts. The phone's calls are built only when `[web_app]` is set, on the same `MacPorts`, so the transcription worker, the chief's pane and the voice name are the desk's.
+The web app's call (its stage 1b) runs on this core. [The web app reference](../away-app/README.md#calls-stage-1b) describes what you see and hear; this section is what the phone supplies in place of the desk's parts. The phone's calls are built only when `[web_app]` is set, on the same `MacPorts`, so the transcription worker, the chief's pane and the voice name are the desk's.
 
 **The source and the sink.**
 
@@ -366,7 +366,7 @@ away-web-app's call mode (its stage 1b) runs on this core. [The away app referen
 
 **The phone's own voice.** What Harold says only through `[tts]` at the desk, `The voice stopped. One moment.` and `The voice failed. Call ended.`, and any sound the phone never fetched, goes to the phone as a line, not a sound. The app says it with the phone's `speechSynthesis`, and reports it said. The core waits for that report, or for 2 seconds plus 80 milliseconds for each character, whichever comes first. Harold's voice mute silences the Mac's speakers, not the phone, so it does not end or refuse a phone's call. Until the call opens (its worker has started), the sink and the phone's own voice offer nothing and return at once: a call that ends before it opens answers `POST /call` with `409` and the line, which the phone shows, so `There's no chief running.` and a voice failure at the start are shown, not heard.
 
-**`say_in_open_call`.** `harold speak` and other agents' turn-end updates reach an open call through `say_in_open_call`. It asks the desk's call first, then the phone's, and the first with a call open takes the line. Before the screen lock decides where the chief's spoken line goes, the projector asks only the phone's call (`say_in_phone_call`). With no phone call open, the line goes by the lock's rules, as at the desk: with the screen unlocked it is said through `say_in_open_call`, into the desk's call if one is open; with the screen locked it goes to the phone, as [The display and the lock screen](#the-display-and-the-lock-screen) describes. A line the chief says in the phone's call plays on the phone and is added to the thread as text, with no push and no iMessage. Starting a call on the phone ends a call open at the desk first. Nothing stops the dashboard from starting a desk call while the phone's call is open.
+**`say_in_open_call`.** `harold speak` and other agents' turn-end updates reach an open call through `say_in_open_call`. It asks the desk's call first, then the phone's, and the first with a call open takes the line. Before the screen lock decides where the chief's spoken line goes, the projector asks only the phone's call (`say_in_phone_call`). With no phone call open, the line goes by the lock's rules, as at the desk: with the screen unlocked it is said through `say_in_open_call`, into the desk's call if one is open; with the screen locked it goes to the phone, as [The display and the lock screen](#the-display-and-the-lock-screen) describes. A line the chief says in the phone's call plays on the phone and is added to the thread as text, with no push and no iMessage. Starting a call on the phone ends a call open at the desk first. Nothing stops the dash from starting a desk call while the phone's call is open.
 
 **A newer screen.** A `POST /call` while the phone's call is open takes it over: the call and its worker go on, the call gets a new id, and its pieces are stamped from that request's arrival. The older screen's pieces are refused, and those it posted that still wait are not read. The call forgets the turn being spoken (`CallControl::forget_turn`, which resets the speech detector and keeps the background level), and the source forgets it again just before the newer screen's first piece, so whatever the older screen was saying is dropped, not typed.
 

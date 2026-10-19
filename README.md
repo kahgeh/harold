@@ -23,9 +23,9 @@ The public agent-state stream starts with a complete current snapshot, then send
 
 See the [architecture explanation](docs/explanations/architecture.md), [agent-monitor reference](docs/references/agent-monitor/README.md), and [hook setup guide](docs/how-tos/setup-agent-monitor-hooks.md).
 
-## Dashboard
+## Dash
 
-The [`tmx-agent-dash`](tmx-agent-dash/README.md) terminal dashboard shows Harold's current agent-pane projection and can switch the invoking tmux client to a selected pane.
+The [`tmx-agent-dash`](tmx-agent-dash/README.md) terminal dash shows Harold's current agent-pane projection and can switch the invoking tmux client to a selected pane.
 
 Install the latest release on an Apple Silicon Mac (macOS 15+):
 
@@ -39,7 +39,7 @@ For a source build, run `./scripts/install.sh` from a checkout.
 
 The installer verifies readiness, and launchd starts Harold again at every login; `haroldctl stop` keeps it off until `haroldctl start`. Use `./scripts/install.sh --reinstall` for fresh storage with retained settings. See [installation and reinstallation](docs/how-tos/setup.md) for another-Mac setup.
 
-Then start the dashboard inside the tmux client it should navigate:
+Then start the dash inside the tmux client it should navigate:
 
 ```sh
 tmx-agent-dash

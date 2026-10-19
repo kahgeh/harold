@@ -1,4 +1,4 @@
-# Tmux Agent Dashboard
+# Tmux Agent Dash
 
 `tmx-agent-dash` is a keyboard-driven terminal view of the agent-pane projection
 published by Harold. It shows transport and monitor health separately, keeps the
@@ -12,7 +12,7 @@ the invoking tmux client to the selected pane.
 - Harold with the `WatchAgentStates` gRPC service available
 - The containing Harold workspace, with the shared API crate at `../harold-api`
 
-Viewing works outside tmux, but pane navigation is disabled. Start the dashboard
+Viewing works outside tmux, but pane navigation is disabled. Start the dash
 inside the tmux client that should move when you press `Enter`. When several
 clients are attached to that session, tmux moves the most recently active one.
 
@@ -22,14 +22,14 @@ From the containing Harold workspace root, build every release binary:
 make build
 ```
 
-Install the same workspace revision, including the signed on-demand dashboard
+Install the same workspace revision, including the signed on-demand dash
 command at `~/bin/tmx-agent-dash`:
 
 ```sh
 make deploy
 ```
 
-For standalone dashboard development from this package directory, use Cargo:
+For standalone dash development from this package directory, use Cargo:
 
 ```sh
 cargo build --release
@@ -120,7 +120,7 @@ offered in the palette only while the connection is LIVE and a snapshot has
 arrived; otherwise the palette shows `Commands unavailable until connected`.
 Before the first snapshot the masthead shows `○ VOICE —`.
 
-`Messaging: pause` is the kill switch for Harold's away channel: it stops all
+`Messaging: pause` is the messaging pause for Harold's away channel: it stops all
 iMessage or Telegram traffic, in both directions, without stopping Harold.
 `Messaging: resume` turns it back on. Both are offered under the same conditions
 as the voice commands. While Harold reports messaging as paused, the masthead of
@@ -140,7 +140,7 @@ When the chief of pods has a Now item in its queue, the dash shows it on one dim
 
 ## Questions
 
-When the chief of pods has questions for you, they appear as rows of the agent list, right under the chief's row. The dash reads the queue from Harold's question tool every 2 seconds, and before each key that lands on a question row. No row shows while no question waits. A new question never moves the cursor. See the [question queue reference](../docs/references/tools/questions.md) for how questions get in and what Harold does with the answers.
+When the chief of pods has questions for you, they appear as rows of the agent list, right under the chief's row. The dash reads the questions from Harold's question tool every 2 seconds, and before each key that lands on a question row. No row shows while no question waits. A new question never moves the cursor. See the [question tool reference](../docs/references/tools/questions.md) for how questions get in and what Harold does with the answers.
 
 ### Closed and open
 
@@ -188,7 +188,7 @@ Each decision opens with its suggested option picked (`●`); an option you have
 
 An option's impact shows on the line below its label, dim; an option with no impact has no second line. A free option such as `z  Something else` takes text of your own: `Space` on it opens a text field, holding any text typed there before. Type, then press `Enter` to keep the text and pick the option (blank text is not accepted), or `Esc` to discard it and leave the field. The option's row then shows the text after its label, cut to fit. Text stops at 1,999 characters, since Harold refuses 2,000.
 
-To answer, move to `send` and press `Enter`. The dash re-reads the queue first. The answer goes to Harold with every decision's pick, and Harold types it into the chief's pane at once. If a decision has no pick, nothing is sent and the cursor moves to that decision's first option. After a send, the next waiting question shows in its place, open, with the cursor on its header; with none left, the question rows go and the cursor moves to the chief's row.
+To answer, move to `send` and press `Enter`. The dash re-reads the questions first. The answer goes to Harold with every decision's pick, and Harold types it into the chief's pane at once. If a decision has no pick, nothing is sent and the cursor moves to that decision's first option. After a send, the next waiting question shows in its place, open, with the cursor on its header; with none left, the question rows go and the cursor moves to the chief's row.
 
 The other actions:
 
@@ -197,7 +197,7 @@ The other actions:
 
 `n` and `N` move to the next or previous waiting question, wrapping over the listed order, set-aside questions included. With one question listed they do nothing. The picks of the question you leave are kept while the dash runs, as are the picks of a question set aside with **later** and of a closed question. Kept picks belong to the version of the question they were made on: when Harold lists a higher version, or refuses an answer because the version changed, they are dropped. Kept picks of a question that is answered or dismissed are gone.
 
-Deferred questions come back to the queue after a line is typed with no question waiting, or when a **later** leaves none waiting and no answer unsent.
+Questions set aside come back after a line is typed with no question waiting, or when a **later** leaves none waiting and no answer unsent.
 
 ### When the chief's row is hidden or scrolled off
 
@@ -212,13 +212,13 @@ A notice shows under the question's rows until the next key:
 
 - `<id> changed, your picks were cleared`: the chief put the question again. Your picks are dropped.
 - `<id> dismissed: <reason>`: the chief withdrew the question, with its reason (`withdrawn` when none is known). The rows move to the next question.
-- `Harold can't save answers right now`: Harold could not store the answer or the deferral. Your picks stay; try again.
+- `Harold can't save answers right now`: Harold could not store the answer or set the question aside. Your picks stay; try again.
 
 When no question is left, a notice stands alone as one row. It goes at the next key, and otherwise after the next read that still finds no question, a few seconds on. Then the rows go. That key also does what it does on the list. A key that would still reach a question that just changed is dropped, since it was typed for what was there before, so `Enter` on `send` never sends picks made on an older version.
 
 ### Reconnects
 
-If the queue cannot be read, or the stream to Harold is lost, the question rows hide but keep your picks and any half-typed note. They come back when the next read succeeds and the question is unchanged. If the cursor was on a question row, keys are ignored while the rows are away, and the footer reads `Esc back to the list (the questions are away)`; `Esc` returns the keys to the list, where the cursor already is. If the rows come back first, the cursor returns on its own to the row the open note belongs to (the `revise…` or `reject…` row, or the option with the text field) and typing resumes, with no `Esc` needed when the question is unchanged. If you pressed `Esc` to the list first and the questions then come back unchanged with a note still open, the cursor returns to the note's row all the same, and the first key after that is dropped. A note stays visible under its own row wherever the cursor is.
+If the questions cannot be read, or the stream to Harold is lost, the question rows hide but keep your picks and any half-typed note. They come back when the next read succeeds and the question is unchanged. If the cursor was on a question row, keys are ignored while the rows are away, and the footer reads `Esc back to the list (the questions are away)`; `Esc` returns the keys to the list, where the cursor already is. If the rows come back first, the cursor returns on its own to the row the open note belongs to (the `revise…` or `reject…` row, or the option with the text field) and typing resumes, with no `Esc` needed when the question is unchanged. If you pressed `Esc` to the list first and the questions then come back unchanged with a note still open, the cursor returns to the note's row all the same, and the first key after that is dropped. A note stays visible under its own row wherever the cursor is.
 
 If the question changes under a half-typed note or text field, the rows keep showing the new question and hold their keys until you press `Esc`. The footer reads `esc to continue`. This stops letters typed for the old question from acting on the new one. `Esc` clears the notice and leaves the cursor where it is when that row still exists in the new question (a changed question keeps its open state, so the cursor stays on the `revise…` or `reject…` row or the option where you were typing); it moves to the header only when that row is gone.
 
@@ -248,9 +248,9 @@ Transport and monitor health describe different system-level conditions:
 
 Rows are grouped by project (the first word of the tmux session name) and
 ordered by name (the last component of the working directory), then pane
-address; state never changes a row's position. Each row shows the name (the
-pane address is added only when two names in a group collide, and a long name is
-truncated before that address, never the address itself; panes of different
+id; state never changes a row's position. Each row shows the name (the
+pane id is added only when two names in a group collide, and a long name is
+truncated before that id, never the id itself; panes of different
 sessions in one group are told apart by the session's second word, or the full
 tmux target), and a provider tag: `cc` for Claude Code, `cx` for Codex, otherwise the
 first two letters of the provider name. The selected agent's detail panel still
@@ -291,29 +291,29 @@ An absent or empty work summary is displayed exactly as:
 No work summary reported
 ```
 
-The dashboard consumes only Harold's classified pane state and bounded work
+The dash consumes only Harold's classified pane state and bounded work
 summary. Raw pane screen content and evidence provenance do not reach or appear
-in the dashboard.
+in the dash.
 
 ## Troubleshooting
 
 ### Harold is unavailable
 
-The dashboard keeps retrying with a capped backoff and shows the selected
+The dash keeps retrying with a capped backoff and shows the selected
 endpoint plus a sanitized error. Press Ctrl+L to retry immediately; the message reads `Press Ctrl+L to retry now`. Before the
 first snapshot, no rows are shown; after a disconnect, the last accepted rows
 remain visible as stale.
 
 ### Navigation is unavailable
 
-The dashboard requires non-empty `TMUX` and `TMUX_PANE` values from its invoking
+The dash requires non-empty `TMUX` and `TMUX_PANE` values from its invoking
 process before it discovers a client. Run it from the tmux client you intend to
-navigate. An outside-tmux dashboard remains usable for viewing and searching but
+navigate. An outside-tmux dash remains usable for viewing and searching but
 will show `NAVIGATION UNAVAILABLE`.
 
 ### Pane switching fails
 
-If the selected pane disappears or tmux rejects the switch, the dashboard keeps
+If the selected pane disappears or tmux rejects the switch, the dash keeps
 running, preserves its rows and selection, and shows a sanitized
 `NAVIGATION FAILED` status. Select another live row or wait for the next Harold
 snapshot.
@@ -339,7 +339,7 @@ standard error.
 This repository includes deterministic renderer, runtime, terminal-lifecycle,
 API-mapping, and tmux-command tests. Live isolated Harold testing has verified
 real Codex and OpenCode inventory, busy-to-idle lifecycle reporting, concurrent
-current work summaries, summary isolation, and removal of persisted Codex input
+work summaries, summary isolation, and removal of persisted Codex input
 placeholders by the final reviewed Harold implementation across an exact-fixture,
 same-store restart/replay. Live Claude Code lifecycle coverage is not yet
 claimed because its isolated test process requires interactive login, and the

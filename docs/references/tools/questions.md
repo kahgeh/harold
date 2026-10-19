@@ -1,6 +1,6 @@
-# Question Queue
+# Question Tool
 
-The question queue is Harold's first [tool](README.md). The chief of pods puts questions in. The user answers them from the dash. Harold types the answers back into the chief's pane as one line, a few seconds after they are given, or at once when the user marks an answer "send now".
+The question tool is Harold's first [tool](README.md). The chief of pods puts questions in. The user answers them from the dash. Harold types the answers back into the chief's pane as one line, a few seconds after they are given, or at once when the user sends every answer with `send` in the dash.
 
 The service is `harold.tools.questions.v1.QuestionService`. It trusts local callers: there is no token. The proto is `harold-api/proto/tools/questions.proto`.
 
@@ -48,13 +48,13 @@ A broken rule is refused with the field's name and nothing is stored. The CLI on
 | `ReorderQuestions` | chief | Puts the listed ids that are waiting or deferred first, in that order, keeping their state. Other ids are ignored, so a race with a dismissal is harmless. |
 | `ListQuestions` | dash | Returns the waiting questions, then the deferred ones (flagged `deferred`), the count `waiting`, and `dismissed`: the id and reason of every question dismissed in the last hour. |
 | `AnswerQuestion` | dash | Answers a question at the version the dash saw. |
-| `DeferQuestion` | dash | Sets a question aside. It stays in the queue and returns to `waiting` later (see [The batch line](#the-batch-line)). |
+| `DeferQuestion` | dash | Sets a question aside. It stays with the other questions and returns to `waiting` later (see [The answers line](#the-answers-line)). |
 
 The `waiting` count in `ListQuestions` is the number of questions listed, deferred ones included.
 
 ### Answers
 
-`AnswerQuestion` takes `id`, `version`, a `kind`, `picks`, a `note` and `send_now`. `send_now` is a flag, false by default: when true, the answer is marked "send now" and goes to the chief at once (see [The batch line](#the-batch-line)). Callers that omit it get false, so they behave as before. A pick has a `decision` (counting from 0), an option `key`, and `text` for a free option.
+`AnswerQuestion` takes `id`, `version`, a `kind`, `picks`, a `note` and `send_now`. `send_now` is a flag, false by default: when true, the answer goes to the chief at once (the dash's `send` sets it; see [The answers line](#the-answers-line)). Callers that omit it get false, so they behave as before. A pick has a `decision` (counting from 0), an option `key`, and `text` for a free option.
 
 | Kind | Picks | Note |
 | --- | --- | --- |
@@ -89,25 +89,25 @@ harold tool questions dismiss Q25 --reason "spec withdrawn"   # dismissed Q25
 
 `list` prints `<id> v<version> <product> <spec>`, with ` (deferred)` after a deferred one. Any other use prints `invalid argument: usage is harold tool questions put|dismiss|order|list`. If the daemon is not running the CLI prints `the Harold daemon is not reachable`, and after 3 seconds without an answer, `the Harold daemon did not answer within 3 seconds`.
 
-The user answers in the dash, not through the CLI. See the [dash README](../../../tmx-agent-dash/README.md#question-block).
+The user answers in the dash, not through the CLI. See the [dash README](../../../tmx-agent-dash/README.md#questions).
 
 ## States
 
 A question is in one state:
 
 - `waiting`: it needs an answer.
-- `deferred`: set aside with `DeferQuestion`. It can still be answered. It returns to `waiting`, at the end, after a line is typed with no question waiting, and at a defer that leaves no question waiting and no answer unsent.
+- `deferred`: set aside with `DeferQuestion`. It can still be answered. It returns to `waiting`, at the end, after a line is typed with no question waiting, and at a `later` that leaves no question waiting and no answer unsent.
 - `answered`: it has an answer that is not yet in a batch.
 - `sent`: its answer was typed to the chief.
 - `dismissed`: the chief withdrew it.
 
 `PutQuestion` on a dismissed or sent id makes it `waiting` again at the next version.
 
-## The batch line
+## The answers line
 
-A batch starts when at least one answer is unsent and 3 seconds (the settle) have passed since the newest unsent answer was given, or at once when any unsent answer is marked send now. Questions still `waiting` do not hold it back. The line holds every unsent answer, marked or not, so an unmarked answer still in its settle goes in it and its settle ends. Answers given within 3 seconds of each other go in one line. A batch also needs the answers to be unchanged since they were read: if a question is put again between reading and starting, nothing starts and the sender looks again. A question put again loses its mark with its answer.
+A batch starts when at least one answer is unsent and 3 seconds (the settle) have passed since the newest unsent answer was given, or at once when any unsent answer has `send_now` set. Questions still `waiting` do not hold it back. The line holds every unsent answer, whether or not `send_now` is set, so an answer still in its settle goes in it and its settle ends. Answers given within 3 seconds of each other go in one line. A batch also needs the answers to be unchanged since they were read: if a question is put again between reading and starting, nothing starts and the sender looks again. A question put again loses its `send_now` flag with its answer.
 
-The settle is measured from the answer's own `updated_at_ms` in the store. It does not restart on other writes, such as a new question or a defer, or on the 5-second retry. After a restart of Harold, unsent answers wait at most one settle, and a marked one goes at once. An answer given while a line is being typed is not in that line; it stays unsent and goes in the next line, once.
+The settle is measured from the answer's own `updated_at_ms` in the store. It does not restart on other writes, such as a new question or a `later`, or on the 5-second retry. After a restart of Harold, unsent answers wait at most one settle, and one with `send_now` set goes at once. An answer given while a line is being typed is not in that line; it stays unsent and goes in the next line, once.
 
 The line is typed into the chief's pane with Enter:
 
@@ -115,13 +115,13 @@ The line is typed into the chief's pane with Enter:
 ANSWERS 3 | Q25 durable-server sha d84bf386a2a5: protocol libSQL's Hrana; build yes | Q26 voice-x: revise "make the button bigger" | Q27 old-y: reject "not needed" | later: Q28
 ```
 
-- `ANSWERS <n>` counts answers, not the deferred ids.
+- `ANSWERS <n>` counts answers, not the ids set aside.
 - An `answer` or `free_text` part is `<id> <spec> sha <sha>: <pick>; <pick>`. A pick is `<ask> <label>`. A free option's pick is `<ask> "<typed text>"`, for example `Q28 net-z sha 3333: Which? "use HTTP/3"`.
 - A `revise` or `reject` part is `<id> <spec>: revise "<note>"` or `<id> <spec>: reject "<note>"`. It has no `sha`.
-- ` | later: <id>, <id>` is added only when some question is deferred. It lists the questions still set aside when the line is built, so an early line can repeat an id that stays set aside.
-- The line does not say which answer was marked.
+- ` | later: <id>, <id>` is added only when some question is set aside. It lists the questions still set aside when the line is built, so an early line can repeat an id that stays set aside.
+- The line does not say which answer had `send_now` set.
 
-Answers come in the queue's order.
+Answers come in the order of the questions.
 
 ### Cleaning
 
@@ -137,14 +137,14 @@ A `|` in a field is not changed, so a note that holds `|` reads like a separator
 
 Each round, the sender looks up the chief's pane and makes one try at typing the batch: the pane must be idle with an empty input box. It does not wait for a busy pane inside the try. If there is no chief, the pane is busy or gone, or the database fails, it tries again 5 seconds later, without limit. It logs `answers batch waiting` when a spell of waiting starts, with its `reason`, and again each time the `reason` changes, for example `store_failed` when a release fails after `pane_busy`. The spell ends when a batch is typed or nothing is left to send.
 
-The batch is stored with its text before the try. If nothing was typed (no chief, a busy pane, no pane), a batch built since Harold started is released: its row is deleted and its answers are unsent again, in one transaction. The next round builds it again from what is there then, so an answer given while a batch waits joins it, and the chief gets one line, not two. A marked answer stays marked through the retry. If the release fails, it is tried again before anything else. A panic in the typing task counts as a busy pane, so its batch is released too.
+The batch is stored with its text before the try. If nothing was typed (no chief, a busy pane, no pane), a batch built since Harold started is released: its row is deleted and its answers are unsent again, in one transaction. The next round builds it again from what is there then, so an answer given while a batch waits joins it, and the chief gets one line, not two. An answer's `send_now` flag stays set through the retry. If the release fails, it is tried again before anything else. A panic in the typing task counts as a busy pane, so its batch is released too.
 
 While nothing is to be sent, the sender wakes on each write, and also looks again every 30 seconds, in case a write was stored by a call that was cancelled before it woke the sender.
 
 Once a batch is typed, it is marked typed:
 
 - Its answers become `sent`.
-- Every deferred question returns to `waiting`, at the end, if no question is `waiting`. Otherwise they stay set aside, so `later` keeps meaning "after everything else".
+- Every question set aside returns to `waiting`, at the end, if no question is `waiting`. Otherwise they stay set aside, so `later` keeps meaning "after everything else".
 
 If Enter fails after the text went in, the batch counts as typed and is never typed again, since the text is already in the box.
 
@@ -172,4 +172,4 @@ Migration `002_answer_send_now.sql` adds `send_now INTEGER NOT NULL DEFAULT 0` t
 The core store is untouched. To roll back:
 
 - Run an older Harold. It ignores `tools/questions/`.
-- Move `questions.db` aside (or delete it) to empty the queue. Harold makes a fresh one at the next start.
+- Move `questions.db` aside (or delete it) to empty the question tool. Harold makes a fresh one at the next start.
