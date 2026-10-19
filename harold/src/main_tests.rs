@@ -2288,9 +2288,10 @@ mod one_trace_per_turn {
 }
 
 #[tokio::test]
-async fn with_no_telemetry_section_nothing_is_opened_or_run() {
-    let cfg = crate::peers::settings_with("");
-    assert!(cfg.telemetry.otlp_endpoint.is_none());
+async fn with_export_off_nothing_is_opened_or_run() {
+    let cfg = crate::peers::settings_with("[telemetry]\nexport = false\n");
+    assert!(cfg.telemetry.otlp_endpoint.is_some());
+    assert!(!cfg.telemetry.export);
 
     let (guard, build_failed) =
         crate::telemetry::TelemetryGuard::for_settings(&cfg.telemetry, &cfg.machine_name);

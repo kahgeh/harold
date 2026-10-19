@@ -7,6 +7,10 @@ port = 50060
 #   HAROLD__IMESSAGE__RECIPIENT="+61..."
 #   HAROLD__IMESSAGE__HANDLE_ID=36
 
+[telemetry]
+# The local collector. Set `export = false` in local.toml to turn export off.
+otlp_endpoint = "http://localhost:4317"
+
 [chat_db]
 path = "~/Library/Messages/chat.db"
 

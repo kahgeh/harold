@@ -336,10 +336,15 @@ pub struct LogSettings {
     pub level: String,
 }
 
-/// Where Harold sends its telemetry and takes alerts. Each key is optional: with none
-/// set, nothing is exported, no alert address is opened and no pod is read.
-#[derive(Debug, Clone, Default, Deserialize)]
+/// Where Harold sends its telemetry and takes alerts. `default.toml` sets the collector's
+/// address, so export is on unless `export` is false. With no `alert_listen` no alert
+/// address is opened, and with no `pod_registry` no pod is read.
+#[derive(Debug, Clone, Deserialize)]
 pub struct TelemetrySettings {
+    /// Whether Harold sends to the collector. False is export off: no pipeline is built,
+    /// though `otlp_endpoint` is still checked.
+    #[serde(default = "export_on")]
+    pub export: bool,
     /// The OpenTelemetry collector's gRPC address, such as `http://localhost:4317`.
     pub otlp_endpoint: Option<String>,
     /// The address and port Harold takes alerts on, such as `127.0.0.1:4320`.
@@ -347,6 +352,21 @@ pub struct TelemetrySettings {
     /// The path of the chief's `products.toml`. Set it on one Mac only, or merges are
     /// counted twice.
     pub pod_registry: Option<String>,
+}
+
+fn export_on() -> bool {
+    true
+}
+
+impl Default for TelemetrySettings {
+    fn default() -> Self {
+        Self {
+            export: true,
+            otlp_endpoint: None,
+            alert_listen: None,
+            pod_registry: None,
+        }
+    }
 }
 
 impl TelemetrySettings {
@@ -1483,14 +1503,36 @@ mod tests {
     }
 
     #[test]
-    fn telemetry_is_off_when_the_section_is_absent() {
+    fn telemetry_exports_to_the_local_collector_by_default() {
         let settings = default_settings_with("");
-        assert!(settings.telemetry.otlp_endpoint.is_none());
+        assert_eq!(
+            settings.telemetry.otlp_endpoint.as_deref(),
+            Some("http://localhost:4317")
+        );
+        assert!(settings.telemetry.export);
         assert!(settings.telemetry.alert_listen.is_none());
         assert!(settings.telemetry.pod_registry.is_none());
         assert_eq!(settings.telemetry.alert_addr(), None);
         assert_eq!(settings.telemetry.pod_registry_path(), None);
         assert!(telemetry_validate_errors("").is_empty());
+    }
+
+    #[test]
+    fn export_off_has_no_error_and_keeps_the_endpoint_check() {
+        assert!(telemetry_validate_errors("[telemetry]\nexport = false\n").is_empty());
+        assert_eq!(
+            telemetry_validate_errors(
+                "[telemetry]\nexport = false\notlp_endpoint = \"localhost:4317\"\n"
+            ),
+            ["telemetry.otlp_endpoint must be an http:// address such as http://localhost:4317"]
+        );
+    }
+
+    #[test]
+    fn export_true_is_the_default() {
+        let settings = default_settings_with("[telemetry]\nexport = true\n");
+        assert!(settings.telemetry.export);
+        assert!(!default_settings_with("[telemetry]\nexport = false\n").telemetry.export);
     }
 
     #[test]
@@ -1605,6 +1647,7 @@ mod tests {
     #[test]
     fn telemetry_errors_lists_every_malformed_key() {
         let telemetry = super::TelemetrySettings {
+            export: true,
             otlp_endpoint: Some("localhost:4317".into()),
             alert_listen: Some("4320".into()),
             pod_registry: Some(String::new()),

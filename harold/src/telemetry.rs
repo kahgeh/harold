@@ -1007,15 +1007,16 @@ impl TelemetryGuard {
         Self { pipeline: None }
     }
 
-    /// The guard `telemetry` asks for: the OTLP pipeline when `otlp_endpoint` is set, and
-    /// none otherwise. With an endpoint that cannot be used, also the reason, and no
+    /// The guard `telemetry` asks for: the OTLP pipeline when export is on and
+    /// `otlp_endpoint` is set, and none otherwise. With an endpoint that cannot be used, also the reason, and no
     /// pipeline.
     pub(crate) fn for_settings(
         telemetry: &TelemetrySettings,
         machine: &str,
     ) -> (Self, Option<opentelemetry_otlp::ExporterBuildError>) {
-        let Some(endpoint) = telemetry.otlp_endpoint.as_deref() else {
-            return (Self::off(), None);
+        let endpoint = match telemetry.otlp_endpoint.as_deref() {
+            Some(endpoint) if telemetry.export => endpoint,
+            _ => return (Self::off(), None),
         };
         match Pipeline::otlp(endpoint, machine, ExportHealth::logging(endpoint)) {
             Ok(pipeline) => (
