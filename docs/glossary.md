@@ -35,7 +35,9 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 | away channel | The one of iMessage and Telegram that `[notify] away_channel` picks | — |
 | web app | The home-screen app on the phone that holds the chief's thread | "away app", "home-screen app" |
 | thread | The web app's one conversation with the chief | — |
-| push | A lock-screen notification on the phone, sent through the phone's push service | "alert" for a push |
+| phone notification | Any message Harold sends to the phone, tagged with its machine and pane: a turn-end update, an agent message or a spoken line, sent by iMessage, Telegram or the web app | "notification" alone, "phone message" |
+| latest notifier | The Mac that sent the latest phone notification. A reply with no routing tag goes to it | — |
+| push | How the web app shows a phone notification on the phone's lock screen, through the phone's push service | "alert" for a push |
 | machine name | This Mac's name, as tagged on its messages | — |
 | hub, member | With Telegram on two Macs: the hub reads the chat and forwards replies, a member gets them from the hub | — |
 | routing tag | The `[machine/pane]` text at the start of a reply that picks its pane | — |
@@ -140,11 +142,11 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 | `InboundMessageReceived` | The event recorded when a phone reply arrives | — |
 | projector | The part of Harold that reads the event stream and updates the state database and the outbox | — |
 | reducer | The rules the projector applies to an agent's observations to work out its state | — |
-| checkpoint | The projector's saved position in the event stream | — |
+| checkpoint | The projector's saved position in the event stream | "cursor" for the saved position |
 | state database | The Turso database `harold-state.db` that holds the current agent view, the outbox and the checkpoint | "SQLite" for it |
 | outbox | The stored list of delivery work, such as a turn-end update to send or a phone reply to route | "queue" for it |
-| delivery handler | The part of Harold that reads the outbox, checks the notification rules and whether the user is at the desk, then leaves out, speaks or sends a turn-end update, or routes a phone reply to its pane | "dispatcher", "delivery worker" |
-| channel listener | The part of Harold that receives phone messages from the away channel and records each in the event stream | "poller", "watcher" for it |
+| delivery handler | The part of Harold that reads the outbox, checks the `[notify]` settings and whether the user is at the desk, then leaves out, speaks or sends a turn-end update, or routes a phone reply to its pane | "dispatcher", "delivery worker" |
+| channel listener | The part of Harold that receives replies from the away channel and records each in the event stream | "poller", "watcher" for it |
 | snapshot | The complete current view of every agent, as the dash receives it | — |
 | snapshot publisher | The part of Harold that sends snapshots to clients | — |
 | `WatchAgentStates` | The gRPC stream that sends a client a snapshot when it connects, then each new one | — |
