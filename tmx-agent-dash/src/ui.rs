@@ -4099,6 +4099,7 @@ mod tests {
                 "Enter",
                 "Esc",
                 "Tab",
+                "`s`",
                 "`o`",
                 "Ctrl+L",
                 "`f` / `/`",
