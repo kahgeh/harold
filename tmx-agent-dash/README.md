@@ -103,7 +103,7 @@ the key does nothing there, so a key never means two things.
   open link, `^L` retry and `^Q` quit, and `Esc` close on every row except a closed
   row, where `Esc` does nothing. Two keys depend on the row: `l` and `Enter` open
   a closed row, `h` and `Enter` close an open question header, `Space` picks and `h`
-  closes on an option, `Enter` chooses and `h` closes on an action. A narrow terminal
+  closes on an option, `Enter` chooses and `h` closes on an action row. A narrow terminal
   shortens the hints (`link` for `open link`, no label), and below that puts the rest
   on a second line. While a note or an option's text field is open, every key types
   into it, so the footer lists only `Enter` (`send` for a note, `keep` for a text
@@ -178,7 +178,7 @@ Press `j` to move the cursor to the `▸ 2 questions waiting` row, then `l` or `
           reject…
 ```
 
-The cursor stops on the header, on each option and on each action (`send`, `later`, `revise…`, `reject…`). It skips the intro, the asks, the impact lines and the blank rows. `j` and `k` move through all of them like any other rows: `j` from the chief's row goes to the header, then over each option and action, then on to the next agent row. `h` (or `Esc`) closes the question again with the cursor on its header; the picks are kept, and `l` on the header opens it as it was. The yellow marks the header and the row under the cursor.
+The cursor stops on the header, on each option and on each action row (`send`, `later`, `revise…`, `reject…`). It skips the intro, the asks, the impact lines and the blank rows. `j` and `k` move through all of them like any other rows: `j` from the chief's row goes to the header, then over each option and action row, then on to the next agent row. `h` (or `Esc`) closes the question again with the cursor on its header; the picks are kept, and `l` on the header opens it as it was. The yellow marks the header and the row under the cursor.
 
 With several questions waiting, the open question shows one at a time, and `n` and `N` step between them. The detail panel, on a wide terminal, shows the asking agent while the cursor is on its question rows.
 

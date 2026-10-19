@@ -43,11 +43,11 @@ A broken rule is refused with the field's name and nothing is stored. The CLI on
 
 | RPC | Who | What it does |
 | --- | --- | --- |
-| `PutQuestion` | chief | Adds a question. With an existing id it raises the version and makes the question `waiting` again, with no answer, whatever its state. A waiting or deferred question keeps its place; any other goes last. Returns `id` and `version`. |
+| `PutQuestion` | chief | Adds a question. With an existing id it raises the question version and makes the question `waiting` again, with no answer, whatever its state. A waiting or deferred question keeps its place; any other goes last. Returns `id` and `version`. |
 | `DismissQuestion` | chief | Withdraws a waiting or deferred question, with a `reason` the dash shows. |
 | `ReorderQuestions` | chief | Puts the listed ids that are waiting or deferred first, in that order, keeping their state. Other ids are ignored, so a race with a dismissal is harmless. |
 | `ListQuestions` | dash | Returns the waiting questions, then the deferred ones (flagged `deferred`), the count `waiting`, and `dismissed`: the id and reason of every question dismissed in the last hour. |
-| `AnswerQuestion` | dash | Answers a question at the version the dash saw. |
+| `AnswerQuestion` | dash | Answers a question at the question version the dash saw. |
 | `DeferQuestion` | dash | Sets a question aside. It stays with the other questions and returns to `waiting` later (see [The answers line](#the-answers-line)). |
 
 The `waiting` count in `ListQuestions` is the number of questions listed, deferred ones included.
@@ -101,7 +101,7 @@ A question is in one state:
 - `sent`: its answer was typed to the chief.
 - `dismissed`: the chief withdrew it.
 
-`PutQuestion` on a dismissed or sent id makes it `waiting` again at the next version.
+`PutQuestion` on a dismissed or sent id makes it `waiting` again at the next question version.
 
 ## The answers line
 
