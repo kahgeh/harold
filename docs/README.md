@@ -10,6 +10,10 @@
 
 - [Prerequisites](prerequisites.md)
 
+## Glossary
+
+- [Glossary](glossary.md)
+
 ## References
 
 - [Agent Monitor](references/agent-monitor/README.md)
