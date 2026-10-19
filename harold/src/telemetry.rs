@@ -1,6 +1,7 @@
 //! Harold's logs and telemetry. `harold.log` is written as it always was. When
-//! `[telemetry] otlp_endpoint` is set, spans and log records are also exported to an
-//! OpenTelemetry collector over OTLP, carrying only the fields on `ALLOWED_FIELDS`.
+//! export is on (`[telemetry] export`, true by default) and `otlp_endpoint` is set, spans
+//! and log records are also exported to an OpenTelemetry collector over OTLP, carrying
+//! only the fields on `ALLOWED_FIELDS`.
 //!
 //! Export is queued in memory and sent in batches by background threads, so a slow or
 //! missing collector never slows Harold down. An unreachable collector is reported in
@@ -1045,8 +1046,8 @@ impl TelemetryGuard {
     }
 }
 
-/// Installs the global log subscriber: `harold.log` as before and, when `otlp_endpoint`
-/// is set, the OTLP export of spans and log records. Also sets the global tracer and
+/// Installs the global log subscriber: `harold.log` as before and, when export is on and
+/// `otlp_endpoint` is set, the OTLP export of spans and log records. Also sets the global tracer and
 /// meter providers.
 ///
 /// Must run inside the tokio runtime: the exporters' gRPC channel is made here and its

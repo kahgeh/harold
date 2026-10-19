@@ -109,6 +109,21 @@ fn config_probe_returns_only_resolved_nonsecret_settings_without_opening_storage
 }
 
 #[test]
+fn config_probe_passes_with_export_off() {
+    let output =
+        Fixture::new(&format!("{VALID}\n[telemetry]\nexport = false\n")).run(&["--check-config"]);
+    assert!(output.status.success(), "{output:?}");
+}
+
+#[test]
+fn config_probe_rejects_a_malformed_endpoint_even_with_export_off() {
+    let overlay =
+        format!("{VALID}\n[telemetry]\nexport = false\notlp_endpoint = 'localhost:4317'\n");
+    let output = Fixture::new(&overlay).run(&["--check-config"]);
+    assert!(!output.status.success());
+}
+
+#[test]
 fn config_probe_rejects_invalid_typed_config_and_address_without_opening_storage() {
     for overlay in [
         "[imessage]\nhandle_ids = 'wrong type'\n",
@@ -755,6 +770,8 @@ impl Fixture {
             .env("HAROLD_CONFIG_DIR", &self.0)
             .env("HAROLD_ENV", "local")
             .env("HAROLD__STORE__PATH", self.store())
+            // The shipped default.toml exports to localhost:4317: a test daemon must not.
+            .env("HAROLD__TELEMETRY__EXPORT", "false")
             // Not the real home or tmux server: a running daemon must not read real state.
             .env("HOME", &self.0)
             .env("TMUX_TMPDIR", &self.0)
