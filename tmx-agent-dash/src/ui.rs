@@ -8,6 +8,7 @@ use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, Table
 
 use crate::api::HAROLD_VERSION_LIMIT;
 use crate::app::{AgentState, App, CallState, CallView, RuntimeStatus, VoiceState};
+use crate::questions::{ANSWER_ACTIONS, Mode, NoteKind, QStop, RowsView};
 use crate::text::{display_work_summary, sanitize_display};
 
 const BOARD: Color = Color::Rgb(20, 20, 16);
@@ -363,7 +364,7 @@ fn render_workspace(frame: &mut Frame<'_>, area: Rect, app: &App, now_ms: i64) {
 
 fn render_live_workspace(frame: &mut Frame<'_>, area: Rect, app: &App, now_ms: i64) {
     let visible = app.visible_rows();
-    if visible.is_empty() {
+    if visible.is_empty() && app.questions.view().is_none() {
         let (title, guidance) = if app.snapshot.rows.is_empty() {
             (
                 "No configured agent panes found",
@@ -506,9 +507,28 @@ fn render_inventory(frame: &mut Frame<'_>, area: Rect, app: &App, now_ms: i64) {
     let widths = inventory_widths(wide);
     let work_width = work_cell_width(area, &widths);
     let chief = app.chief_row().map(|row| &row.incarnation);
+    let groups = app.visible_groups();
+    // The rows of an open question follow the chief's row, or lead the list when the
+    // chief's row is not in it.
+    let chief_shown = groups
+        .iter()
+        .any(|(_, agents)| agents.iter().any(|a| chief == Some(&a.incarnation)));
+    let text_width = usize::from(area.width.saturating_sub(2));
+    let question_lines = app
+        .questions
+        .view()
+        .map(|view| question_row_lines(&view, text_width, !chief_shown, app.question_stop))
+        .unwrap_or_default();
     let mut rows = Vec::new();
+    // Each row's height with its margin, for finding where a question row landed.
+    let mut heights = Vec::new();
+    // The table row of the question's first line; its lines follow one to a row.
+    let mut question_at = None;
     let mut selected_index = None;
-    for (group, agents) in app.visible_groups() {
+    if !chief_shown {
+        push_question_rows(&question_lines, &mut rows, &mut heights, &mut question_at);
+    }
+    for (group, agents) in groups {
         let mut header = Row::new(vec![
             Cell::from(""),
             Cell::from(Line::styled(
@@ -516,17 +536,21 @@ fn render_inventory(frame: &mut Frame<'_>, area: Rect, app: &App, now_ms: i64) {
                 Style::default().fg(AMBER).add_modifier(Modifier::BOLD),
             )),
         ]);
-        if wide && !rows.is_empty() {
+        let margin = wide && !rows.is_empty();
+        if margin {
             header = header.top_margin(1);
         }
         rows.push(header);
+        heights.push(1 + u16::from(margin));
         for agent in agents {
+            // The cursor is on the chief's row only when it is not on a question row.
             let selected = app.selected.as_ref() == Some(&agent.incarnation);
-            if selected {
+            let on_cursor = selected && app.question_stop.is_none();
+            if on_cursor {
                 selected_index = Some(rows.len());
             }
-            let marker = if selected { "▶ " } else { "  " };
-            let style = if selected {
+            let marker = if on_cursor { "▶ " } else { "  " };
+            let style = if on_cursor {
                 Style::default()
                     .fg(INK)
                     .bg(Color::Rgb(41, 40, 30))
@@ -578,7 +602,18 @@ fn render_inventory(frame: &mut Frame<'_>, area: Rect, app: &App, now_ms: i64) {
                 cells.push(Cell::from(age(now_ms, agent.last_transition_at_ms)));
             }
             rows.push(Row::new(cells).style(style));
+            heights.push(1);
+            if chief == Some(&agent.incarnation) {
+                push_question_rows(&question_lines, &mut rows, &mut heights, &mut question_at);
+            }
         }
+    }
+    if let Some(at) = question_at
+        && let Some(cursor) = question_lines
+            .iter()
+            .position(|l| l.stop.is_some() && l.stop == app.question_stop)
+    {
+        selected_index = Some(at + cursor);
     }
     let header = if wide {
         Row::new(["STATE", "WHERE", "", "", "WORK SUMMARY", "AGE"])
@@ -589,12 +624,354 @@ fn render_inventory(frame: &mut Frame<'_>, area: Rect, app: &App, now_ms: i64) {
         .title(" AGENT BLOCK OCCUPANCY ")
         .title_top(focus_tracking_title(app).right_aligned())
         .borders(Borders::ALL);
+    let inner = block.inner(area);
     let table = Table::new(rows, widths)
         .header(header.style(Style::default().fg(MUTED).add_modifier(Modifier::BOLD)))
         .column_spacing(COLUMN_SPACING)
         .block(block);
     let mut state = TableState::default().with_selected(selected_index);
     frame.render_stateful_widget(table, area, &mut state);
+    // The table drew the question rows blank; the text goes over them, as wide as
+    // the list is.
+    let list = Rect {
+        y: inner.y.saturating_add(1),
+        height: inner.height.saturating_sub(1),
+        ..inner
+    };
+    let Some(first) = question_at else {
+        return;
+    };
+    for (k, line) in question_lines.iter().enumerate() {
+        if let Some(y) = row_y(&heights, state.offset(), first + k, list.height) {
+            let row = Rect {
+                y: list.y + y,
+                height: 1,
+                ..list
+            };
+            frame.render_widget(
+                Paragraph::new(Line::styled(line.text.as_str(), line.style)),
+                row,
+            );
+        }
+    }
+    let header = question_lines
+        .iter()
+        .position(|l| l.stop == Some(QStop::Header));
+    if let (Some(header), Some(view)) = (header, app.questions.view()) {
+        let hidden = row_y(&heights, state.offset(), first + header, list.height).is_none();
+        if hidden {
+            render_question_edge(
+                frame,
+                inner,
+                list,
+                first + header < state.offset(),
+                view.waiting,
+            );
+        }
+    }
+}
+
+/// Appends a blank table row for each of the question's lines, the cursor row with its
+/// background, and notes where the first one is.
+fn push_question_rows<'a>(
+    lines: &[QLine],
+    rows: &mut Vec<Row<'a>>,
+    heights: &mut Vec<u16>,
+    first: &mut Option<usize>,
+) {
+    *first = Some(rows.len());
+    for line in lines {
+        rows.push(
+            Row::new(Vec::<Cell>::new()).style(Style::default().bg(line.style.bg.unwrap_or(BOARD))),
+        );
+        heights.push(1);
+    }
+}
+
+/// The y, from the top of the table's rows, of row `index` when the table shows
+/// from row `offset`, or `None` when it is not within `room` rows.
+fn row_y(heights: &[u16], offset: usize, index: usize, room: u16) -> Option<u16> {
+    if index < offset {
+        return None;
+    }
+    let y: u16 = heights[offset..index].iter().sum();
+    (y < room).then_some(y)
+}
+
+/// The yellow `▲` on the list's top edge or `▼` on its bottom edge, with the count of
+/// questions waiting, while the question's header row is scrolled out of view.
+fn render_question_edge(frame: &mut Frame<'_>, inner: Rect, list: Rect, above: bool, waiting: u32) {
+    let (arrow, y) = if above {
+        ('▲', inner.y)
+    } else {
+        ('▼', list.bottom().saturating_sub(1))
+    };
+    let edge = Rect {
+        y,
+        height: 1,
+        ..inner
+    };
+    frame.render_widget(Clear, edge);
+    frame.render_widget(
+        Paragraph::new(Line::styled(
+            format!("{arrow} {}", waiting_label(waiting)),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ))
+        .style(Style::default().bg(BOARD)),
+        edge,
+    );
+}
+
+/// One drawn row of an open or closed question.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct QLine {
+    text: String,
+    style: Style,
+    /// The stop the row is, on its first row only; set for cursor stops, never for text.
+    stop: Option<QStop>,
+}
+
+/// `1 question waiting` or `N questions waiting`.
+fn waiting_label(waiting: u32) -> String {
+    match waiting {
+        1 => "1 question waiting".into(),
+        n => format!("{n} questions waiting"),
+    }
+}
+
+/// The columns before a question's text: the cursor marker, then the indent.
+const QUESTION_HEADER_INDENT: usize = 4;
+const QUESTION_TEXT_INDENT: usize = 8;
+const QUESTION_OPTION_INDENT: usize = 10;
+
+/// The rows a question draws in the list, wrapped to `width`, each with its style. The
+/// header row leads: closed it reads `▸ N questions waiting`, open `▾ T1 · 1 of 2
+/// waiting · harold · spec`, with `· from the chief` when `fallback` puts the rows at the
+/// top of the list. The open question follows it: the intro, then every decision with its
+/// options, a blank row between each, then the answer actions. `cursor` is the stop
+/// the cursor is on: its row has the `▶` marker and the yellow, bold style, and a note
+/// being typed shows under it. A notice with no question is one coral row.
+fn question_row_lines(
+    view: &RowsView,
+    width: usize,
+    fallback: bool,
+    cursor: Option<QStop>,
+) -> Vec<QLine> {
+    let mut out = Vec::new();
+    let muted = Style::default().fg(MUTED);
+    let ink = Style::default().fg(INK);
+    let notice = view.notice.as_ref().map(|text| {
+        (
+            text,
+            Style::default().fg(CORAL).add_modifier(Modifier::BOLD),
+        )
+    });
+    if view.id.is_empty() {
+        if let Some((text, style)) = notice {
+            wrap_into(&mut out, QUESTION_HEADER_INDENT, text, width, style, None);
+        }
+        return out;
+    }
+    let yellow = Style::default()
+        .fg(Color::Yellow)
+        .add_modifier(Modifier::BOLD);
+    let on_cursor = Style::default()
+        .fg(Color::Yellow)
+        .bg(Color::Rgb(41, 40, 30))
+        .add_modifier(Modifier::BOLD);
+    // The text of a row, wrapped; a cursor stop has the marker and the cursor style.
+    let put =
+        |out: &mut Vec<QLine>, indent: usize, text: &str, style: Style, stop: Option<QStop>| {
+            let here = stop.is_some() && stop == cursor;
+            let first = out.len();
+            wrap_into(
+                out,
+                indent,
+                text,
+                width,
+                if here { on_cursor } else { style },
+                stop,
+            );
+            if here {
+                out[first].text.replace_range(..2, "▶ ");
+            }
+        };
+    let from = if fallback { " · from the chief" } else { "" };
+    if !view.open {
+        let text = format!("▸ {}{from}", waiting_label(view.waiting));
+        put(
+            &mut out,
+            QUESTION_HEADER_INDENT,
+            &text,
+            yellow,
+            Some(QStop::Header),
+        );
+    } else {
+        let text = format!(
+            "▾ {} · {} of {} waiting · {} · {}{from}",
+            view.id, view.position, view.waiting, view.product, view.spec
+        );
+        put(
+            &mut out,
+            QUESTION_HEADER_INDENT,
+            &text,
+            yellow,
+            Some(QStop::Header),
+        );
+        let blank = |out: &mut Vec<QLine>| {
+            out.push(QLine {
+                text: String::new(),
+                style: ink,
+                stop: None,
+            });
+        };
+        if !view.intro.is_empty() {
+            put(&mut out, QUESTION_TEXT_INDENT, &view.intro, ink, None);
+            blank(&mut out);
+        }
+        for (d, decision) in view.decisions.iter().enumerate() {
+            put(
+                &mut out,
+                QUESTION_TEXT_INDENT,
+                &decision.ask,
+                ink.add_modifier(Modifier::BOLD),
+                None,
+            );
+            for (o, option) in decision.options.iter().enumerate() {
+                let stop = QStop::Option {
+                    decision: d,
+                    option: o,
+                };
+                let mark = if option.picked { '●' } else { '○' };
+                let suggested = if option.suggested {
+                    "  (suggested)"
+                } else {
+                    ""
+                };
+                let mut text = format!("{mark} {}  {}", option.key, option.label);
+                if let Some(typed) = option.free_text.as_deref().filter(|t| !t.is_empty()) {
+                    let room =
+                        width.saturating_sub(QUESTION_OPTION_INDENT + Line::raw(&text).width() + 2);
+                    text = format!("{text}: {}", fit(typed, room));
+                }
+                text.push_str(suggested);
+                put(&mut out, QUESTION_OPTION_INDENT, &text, ink, Some(stop));
+                if !option.impact.is_empty() {
+                    let under = QUESTION_OPTION_INDENT + 4 + Line::raw(&option.key).width();
+                    put(&mut out, under, &option.impact, muted, None);
+                }
+                if cursor == Some(stop)
+                    && let Some(note) = note_text(&view.mode, &[NoteKind::FreeText])
+                {
+                    let under = QUESTION_OPTION_INDENT + 4 + Line::raw(&option.key).width();
+                    put(&mut out, under, &note, yellow, None);
+                }
+            }
+            blank(&mut out);
+        }
+        for (a, action) in ANSWER_ACTIONS.iter().enumerate() {
+            let stop = QStop::Action(a);
+            // The rule sits between `send` and the other actions.
+            if a == 1 {
+                put(
+                    &mut out,
+                    QUESTION_OPTION_INDENT,
+                    "─────────────",
+                    muted,
+                    None,
+                );
+            }
+            let style = if a == 0 {
+                ink
+            } else {
+                ink.add_modifier(Modifier::DIM)
+            };
+            put(&mut out, QUESTION_OPTION_INDENT, action, style, Some(stop));
+            if cursor == Some(stop)
+                && let Some(note) = note_text(&view.mode, &[NoteKind::Revise, NoteKind::Reject])
+            {
+                put(&mut out, QUESTION_OPTION_INDENT, &note, yellow, None);
+            }
+        }
+    }
+    if let Some((text, style)) = notice {
+        put(&mut out, QUESTION_HEADER_INDENT, text, style, None);
+    }
+    out
+}
+
+/// Appends `text` as rows within `width`, after `indent` spaces on each; only the first
+/// row has the `stop`.
+fn wrap_into(
+    out: &mut Vec<QLine>,
+    indent: usize,
+    text: &str,
+    width: usize,
+    style: Style,
+    stop: Option<QStop>,
+) {
+    let room = width.saturating_sub(indent).max(1);
+    let pad = " ".repeat(indent);
+    for (n, piece) in wrap_words(text, room).into_iter().enumerate() {
+        out.push(QLine {
+            text: format!("{pad}{piece}"),
+            style,
+            stop: stop.filter(|_| n == 0),
+        });
+    }
+}
+
+/// `text` broken at spaces into pieces no wider than `room`; a word wider than `room` is
+/// broken inside.
+fn wrap_words(text: &str, room: usize) -> Vec<String> {
+    let mut pieces = Vec::new();
+    let mut current = String::new();
+    for word in text.split(' ') {
+        let mut word = word.to_string();
+        while Line::raw(word.as_str()).width() > room {
+            if !current.is_empty() {
+                pieces.push(std::mem::take(&mut current));
+            }
+            let mut head = String::new();
+            for c in word.chars() {
+                head.push(c);
+                if Line::raw(head.as_str()).width() > room && head.chars().count() > 1 {
+                    head.pop();
+                    break;
+                }
+            }
+            word = word[head.len()..].to_string();
+            pieces.push(head);
+        }
+        let joined = if current.is_empty() {
+            word.clone()
+        } else {
+            format!("{current} {word}")
+        };
+        if Line::raw(joined.as_str()).width() <= room {
+            current = joined;
+        } else {
+            pieces.push(std::mem::replace(&mut current, word));
+        }
+    }
+    pieces.push(current);
+    pieces
+}
+
+/// The note being typed, with its label and cursor block, when its kind is one of `kinds`.
+fn note_text(mode: &Mode, kinds: &[NoteKind]) -> Option<String> {
+    let Mode::Note { kind, text } = mode else {
+        return None;
+    };
+    let label = match kind {
+        _ if !kinds.contains(kind) => return None,
+        NoteKind::Revise => "revise:",
+        NoteKind::Reject => "reject:",
+        NoteKind::FreeText => "answer:",
+    };
+    Some(format!("{label} {text}█"))
 }
 
 /// The column widths. A call never changes them: the chief's buttons share its
@@ -3404,5 +3781,374 @@ mod tests {
         for gone in ["WAITING n", "`r` | Retry", "`l` | Later", "Press `r`"] {
             assert!(!readme.contains(gone), "README still holds {gone}");
         }
+    }
+
+    // --- The question rows of the list ---
+
+    /// T1, with two decisions: three options (one free, one with no impact) and two.
+    fn t1(intro: &str) -> crate::questions::QuestionView {
+        use crate::questions::{DecisionView, OptionView, QuestionView};
+        let option =
+            |key: &str, label: &str, impact: &str, suggested: bool, free: bool| OptionView {
+                key: key.into(),
+                label: label.into(),
+                impact: impact.into(),
+                suggested,
+                free,
+            };
+        QuestionView {
+            id: "T1".into(),
+            product: "harold".into(),
+            spec: "durable-server".into(),
+            sha: "d84bf386a2a5".into(),
+            link: "https://example.com/spec".into(),
+            intro: intro.into(),
+            version: 1,
+            deferred: false,
+            decisions: vec![
+                DecisionView {
+                    ask: "Which protocol should clients speak?".into(),
+                    options: vec![
+                        option(
+                            "a",
+                            "libSQL's Hrana",
+                            "Existing libSQL clients work unchanged.",
+                            true,
+                            false,
+                        ),
+                        option("b", "Postgres wire", "", false, false),
+                        option("z", "Something else", "", false, true),
+                    ],
+                },
+                DecisionView {
+                    ask: "Should the build run on every push?".into(),
+                    options: vec![
+                        option("y", "Yes", "", true, false),
+                        option("n", "No", "", false, false),
+                    ],
+                },
+            ],
+        }
+    }
+
+    /// The layout of `user_layout` with `%3` named as the chief's pane and T1 listed
+    /// with `waiting` questions waiting, closed.
+    fn chief_questions(waiting: u32, intro: &str) -> App {
+        let mut app = call_layout(chief_call(CallState::Off));
+        app.selected = app.chief_row().map(|row| row.incarnation.clone());
+        app.observe_questions(crate::questions::Queue {
+            questions: vec![t1(intro)],
+            waiting,
+            dismissed: Vec::new(),
+        });
+        app
+    }
+
+    fn keys(app: &mut App, text: &str) {
+        for c in text.chars() {
+            app.handle_key(KeyCode::Char(c));
+        }
+    }
+
+    /// The chief with T1 open and the cursor on its header.
+    fn open_chief_question() -> App {
+        let mut app = chief_questions(2, "The server needs one wire protocol.");
+        keys(&mut app, "jl");
+        assert!(app.questions.is_open() && app.cursor_on_question());
+        app
+    }
+
+    /// What a screen line holds between the list's borders.
+    fn inner(line: &str) -> &str {
+        line.trim_start_matches('│').trim_end_matches('│').trim()
+    }
+
+    #[test]
+    fn closed_row_under_chief_reads_n_questions_waiting_and_no_block_between_filter_and_list() {
+        let app = chief_questions(2, "intro");
+        let lines = text_lines(&app, 100, 60, 100_000);
+        let chief = lines
+            .iter()
+            .position(|l| l.contains("sre") && l.contains("IDLE"))
+            .expect("the chief's row");
+        assert_eq!(inner(&lines[chief + 1]), "▸ 2 questions waiting");
+        assert!(
+            lines[12].contains("AGENT BLOCK OCCUPANCY"),
+            "the list follows the filter at once:\n{}",
+            lines.join("\n")
+        );
+        let one = chief_questions(1, "intro");
+        assert!(rendered(&one, 100, 60, 100_000).contains("▸ 1 question waiting"));
+    }
+
+    #[test]
+    fn open_question_shows_blank_rows_between_intro_decisions_and_actions() {
+        let lines = text_lines(&open_chief_question(), 100, 60, 100_000);
+        let at = |needle: &str| {
+            lines
+                .iter()
+                .position(|l| l.contains(needle))
+                .unwrap_or_else(|| panic!("missing {needle:?}:\n{}", lines.join("\n")))
+        };
+        assert_eq!(
+            inner(&lines[at("▾ T1")]),
+            "▶   ▾ T1 · 1 of 2 waiting · harold · durable-server"
+        );
+        assert_eq!(inner(&lines[at("The server needs") + 1]), "");
+        assert_eq!(inner(&lines[at("Should the build") - 1]), "");
+        assert_eq!(inner(&lines[at("send") - 1]), "");
+    }
+
+    #[test]
+    fn option_marks_follow_picks() {
+        let mut app = open_chief_question();
+        let screen = rendered_lines(&app, 100, 60, 100_000);
+        assert!(
+            screen.contains("● a  libSQL's Hrana  (suggested)"),
+            "{screen}"
+        );
+        assert!(screen.contains("○ b  Postgres wire"), "{screen}");
+        assert!(screen.contains("● y  Yes  (suggested)"), "{screen}");
+        keys(&mut app, "jj ");
+        let screen = rendered_lines(&app, 100, 60, 100_000);
+        assert!(screen.contains("● b  Postgres wire"), "{screen}");
+        assert!(
+            screen.contains("○ a  libSQL's Hrana  (suggested)"),
+            "{screen}"
+        );
+    }
+
+    #[test]
+    fn impact_on_own_row_and_no_dash_without_impact() {
+        let lines = text_lines(&open_chief_question(), 100, 60, 100_000);
+        let a = lines.iter().position(|l| l.contains("● a")).unwrap();
+        assert_eq!(
+            inner(&lines[a + 1]),
+            "Existing libSQL clients work unchanged."
+        );
+        let b = lines.iter().position(|l| l.contains("○ b")).unwrap();
+        assert!(lines[b + 1].contains("○ z"), "no impact row after b");
+        assert!(
+            !lines[12..].iter().any(|l| l.contains('—')),
+            "no dash in the list:\n{}",
+            lines.join("\n")
+        );
+        let impact = style_at(
+            &rendered_buffer(&open_chief_question(), 100, 60, 100_000),
+            "Existing libSQL",
+        );
+        assert_eq!(impact.fg, Some(MUTED));
+    }
+
+    #[test]
+    fn send_is_first_action_then_rule_then_later_revise_reject() {
+        let lines = text_lines(&open_chief_question(), 100, 60, 100_000);
+        let at = |needle: &str| {
+            lines
+                .iter()
+                .position(|l| inner(l).ends_with(needle))
+                .unwrap_or_else(|| panic!("missing {needle:?}:\n{}", lines.join("\n")))
+        };
+        let n = at("○ n  No");
+        assert_eq!(inner(&lines[n + 1]), "");
+        assert_eq!(at("send"), n + 2);
+        assert_eq!(at("─────────────"), n + 3);
+        assert_eq!(at("later"), n + 4);
+        assert_eq!(at("revise…"), n + 5);
+        assert_eq!(at("reject…"), n + 6);
+    }
+
+    #[test]
+    fn no_summary_screen_or_send_now_row_drawn() {
+        let mut app = open_chief_question();
+        keys(&mut app, "jjjjjj");
+        let screen = rendered_lines(&app, 100, 60, 100_000);
+        for gone in ["send now", "picked:", "enter record"] {
+            assert!(!screen.contains(gone), "{gone:?} drawn:\n{screen}");
+        }
+    }
+
+    #[test]
+    fn free_pick_shows_text_after_label_cut_to_fit() {
+        let mut app = open_chief_question();
+        keys(&mut app, "jjj ");
+        assert!(app.questions.note_open());
+        keys(&mut app, "my own protocol");
+        let lines = text_lines(&app, 100, 60, 100_000);
+        let z = lines
+            .iter()
+            .position(|l| l.contains("z  Something else"))
+            .unwrap();
+        assert_eq!(inner(&lines[z + 1]), "answer: my own protocol█");
+        app.handle_key(KeyCode::Enter);
+        let lines = text_lines(&app, 100, 60, 100_000);
+        let z = lines
+            .iter()
+            .position(|l| l.contains("z  Something else"))
+            .unwrap();
+        assert!(inner(&lines[z]).contains("● z  Something else: my own protocol"));
+        // Too long for a narrow list: cut with an ellipsis, on the one row.
+        keys(&mut app, " ");
+        keys(
+            &mut app,
+            " and a very long tail that cannot fit on the row at all",
+        );
+        app.handle_key(KeyCode::Enter);
+        let lines = text_lines(&app, 60, 40, 100_000);
+        let z = lines
+            .iter()
+            .position(|l| l.contains("z  Something else"))
+            .unwrap();
+        assert!(lines[z].contains('…'), "{}", lines[z]);
+        assert!(lines[z + 1].contains("send") || inner(&lines[z + 1]).is_empty());
+    }
+
+    #[test]
+    fn long_text_wraps_within_list_width() {
+        let intro = "alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa quebec romeo sierra tango uniform victor whiskey xray yankee zulu";
+        let app = {
+            let mut app = chief_questions(2, intro);
+            keys(&mut app, "jl");
+            app
+        };
+        let lines = text_lines(&app, 60, 60, 100_000);
+        let first = lines.iter().position(|l| l.contains("alpha")).unwrap();
+        let last = lines.iter().position(|l| l.contains("zulu")).unwrap();
+        assert!(
+            last > first,
+            "wrapped onto more rows:\n{}",
+            lines.join("\n")
+        );
+        for line in &lines[first..=last] {
+            assert!(line.starts_with('│') && line.ends_with('│'), "{line:?}");
+        }
+        let words: String = lines[first..=last]
+            .iter()
+            .map(|l| inner(l))
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert_eq!(words, intro);
+    }
+
+    #[test]
+    fn filtered_out_chief_puts_rows_at_top_with_from_the_chief() {
+        let mut app = chief_questions(2, "intro");
+        keys(&mut app, "fmain");
+        app.handle_key(KeyCode::Enter);
+        assert!(
+            app.visible_rows()
+                .iter()
+                .all(|row| row.incarnation.pane_id != "%3")
+        );
+        let lines = text_lines(&app, 100, 60, 100_000);
+        assert_eq!(
+            inner(&lines[14]),
+            "▸ 2 questions waiting · from the chief",
+            "{}",
+            lines.join("\n")
+        );
+    }
+
+    #[test]
+    fn no_chief_pane_same() {
+        let mut app = user_layout();
+        app.observe_questions(crate::questions::Queue {
+            questions: vec![t1("intro")],
+            waiting: 2,
+            dismissed: Vec::new(),
+        });
+        let lines = text_lines(&app, 100, 60, 100_000);
+        assert_eq!(
+            inner(&lines[14]),
+            "▸ 2 questions waiting · from the chief",
+            "{}",
+            lines.join("\n")
+        );
+    }
+
+    #[test]
+    fn header_scrolled_off_shows_edge_marker() {
+        // Cursor at the end of an open question: the header is above the view.
+        let mut app = open_chief_question();
+        keys(&mut app, "jjjjjjjjj");
+        keys(&mut app, "jj");
+        let buffer = rendered_buffer(&app, 100, 24, 100_000);
+        let screen = text_lines(&app, 100, 24, 100_000).join("\n");
+        assert!(screen.contains("▲ 2 questions waiting"), "{screen}");
+        assert_eq!(style_at(&buffer, "▲ 2 questions").fg, Some(Color::Yellow));
+        // Cursor on the chief's row, the header just below the view.
+        let mut app = chief_questions(2, "intro");
+        keys(&mut app, "jlk");
+        let buffer = rendered_buffer(&app, 100, 24, 100_000);
+        let screen = text_lines(&app, 100, 24, 100_000).join("\n");
+        assert!(screen.contains("▼ 2 questions waiting"), "{screen}");
+        assert_eq!(style_at(&buffer, "▼ 2 questions").fg, Some(Color::Yellow));
+    }
+
+    #[test]
+    fn eighteen_row_terminal_keeps_cursor_row_in_view_with_six_list_rows() {
+        let mut app = open_chief_question();
+        app.observe_now(Some(NOW.into()));
+        keys(&mut app, &"j".repeat(9));
+        let lines = text_lines(&app, 60, 18, 100_000);
+        let list: Vec<&String> = lines[9..15].iter().collect();
+        assert!(
+            list[0].contains("AGENT BLOCK OCCUPANCY"),
+            "{}",
+            lines.join("\n")
+        );
+        assert!(list[5].starts_with('└'), "{}", lines.join("\n"));
+        assert!(
+            list.iter()
+                .any(|l| l.contains("▶") && l.contains("reject…")),
+            "{}",
+            lines.join("\n")
+        );
+        assert!(!lines.iter().any(|l| l.contains("Ship the backlog")));
+    }
+
+    #[test]
+    fn cursor_marker_on_question_row_not_on_chief_row() {
+        let mut app = open_chief_question();
+        let lines = text_lines(&app, 100, 60, 100_000);
+        assert!(!chief_line(&lines).contains('▶'));
+        let header = lines.iter().find(|l| l.contains("▾ T1")).unwrap();
+        assert!(header.starts_with("│▶"), "{header}");
+        let buffer = rendered_buffer(&app, 100, 60, 100_000);
+        assert_eq!(style_at(&buffer, "▾ T1").fg, Some(Color::Yellow));
+        app.handle_key(KeyCode::Char('k'));
+        let lines = text_lines(&app, 100, 60, 100_000);
+        assert!(chief_line(&lines).contains('▶'));
+        assert!(!lines.iter().any(|l| l.contains("▶") && l.contains("▾ T1")));
+    }
+
+    #[test]
+    fn detail_panel_shows_the_asker_while_cursor_on_question_rows() {
+        let mut app = open_chief_question();
+        keys(&mut app, "jj");
+        let screen = rendered_lines(&app, 140, 40, 100_000);
+        assert!(screen.contains("SELECTED SIGNAL"), "{screen}");
+        assert!(screen.contains("home:0.3"), "{screen}");
+    }
+
+    #[test]
+    fn notice_only_block_draws_one_coral_row_under_the_chief() {
+        let mut app = call_layout(chief_call(CallState::Off));
+        app.questions
+            .set_notice(crate::questions::UNAVAILABLE_NOTICE.into());
+        let lines = text_lines(&app, 100, 60, 100_000);
+        let chief = lines
+            .iter()
+            .position(|l| l.contains("sre") && l.contains("IDLE"))
+            .unwrap();
+        assert_eq!(
+            inner(&lines[chief + 1]),
+            crate::questions::UNAVAILABLE_NOTICE
+        );
+        let buffer = rendered_buffer(&app, 100, 60, 100_000);
+        assert_eq!(
+            style_at(&buffer, "Harold can't save").fg,
+            Some(super::CORAL)
+        );
     }
 }
