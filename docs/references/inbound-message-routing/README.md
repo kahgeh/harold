@@ -91,10 +91,10 @@ Two Macs, `studio` and `laptop`, both run Harold.
 1. At 10:00 an agent on `studio` finishes and Harold sends `🤖 [studio/alir-app main:0.1] Tests pass (…)`.
 2. At 10:05 an agent on `laptop` finishes and Harold sends `🤖 [laptop/harold main:0.0] Build done (…)`.
 3. You reply `yes, merge it` from your phone, with no tag.
-4. Both Macs read the reply. The latest notification, the one sent last, names `laptop`. `laptop` routes the reply and `studio` drops it without a message.
+4. Both Macs read the reply. The latest phone notification, the one sent last, names `laptop`. `laptop` routes the reply and `studio` drops it without a message.
 5. You reply `[studio/alir-app main:0.1] revert that`. The tag names `studio`, so `studio` routes it and `laptop` drops it without a message.
 
-The Mac that sent the latest notification is called the latest notifier.
+The Mac that sent the latest phone notification is called the latest notifier.
 
 ### When it is on
 
@@ -106,7 +106,7 @@ Every message Harold sends to the away channel starts with `🤖`, so the listen
 
 | Message | Form |
 |---|---|
-| Notification | `🤖 [<machine_name>/<pane_label>] <body>` |
+| Phone notification | `🤖 [<machine_name>/<pane_label>] <body>` |
 | Question follow-up | `🤖 <question>`, unchanged |
 | Agent message | `🤖 [<machine_name>/<pane_label>] <text>` |
 | Confirmation | `🤖 ✓ Delivered to [<machine_name>/<pane_label>]` |
@@ -132,8 +132,8 @@ Each Harold applies this rule to every inbound reply before any pane discovery, 
 1. The tag has the form `machine/pane` or `machine`. If `machine` is this Mac's `machine_name`, this Mac owns the reply and routes it with the pane part. If it names another Mac, this Mac drops the reply.
 2. The tag matches no known machine name (for example `[alir-app]`). Ownership follows rule 3, and the owning Mac uses the tag to pick the pane.
 3. The reply has no tag. This Mac owns it only if it is the latest notifier. Otherwise it drops it.
-4. A `🤖 [name/…]` message counts as a notification only when `name` is a known machine name. No other `🤖` text that starts with a bracket is taken for a Mac's notification: not a question that begins `[1/2]`, and not a notification in the earlier format such as `🤖 [harold:0.1] …`. A tag for a Mac that has not notified yet is still recognised.
-5. No notification is found in the recent conversation. Every Mac owns the reply.
+4. A `🤖 [name/…]` message counts as a phone notification only when `name` is a known machine name. No other `🤖` text that starts with a bracket is taken for a Mac's phone notification: not a question that begins `[1/2]`, and not a phone notification in the earlier format such as `🤖 [harold:0.1] …`. A tag for a Mac that has not notified yet is still recognised.
+5. No phone notification is found in the recent conversation. Every Mac owns the reply.
 
 A reply with `forwarded = true` skips this rule: this Mac owns it, as described under [Architecture](#architecture). Within the owning Mac, routing is unchanged: tag match, semantic resolution, `last_away_notification_source_agent`, `my-agent` fallback.
 
@@ -147,7 +147,7 @@ At startup the listener reads the last 50 marked rows. If the marked rows cannot
 
 Telegram lets one process read the bot's updates, and a bot never receives its own messages. So one Mac, the hub, is the only Mac that calls `getUpdates`, and the other Macs, the members, start no Telegram listener. The Macs tell each other what they need to know. The hub-and-member path has unit tests only. It has not been run on two Macs.
 
-- A member calls `ReportNotification` on the hub before it sends a notification. The hub records its own notifications in the order they happen. The latest report is the latest notifier. No timestamps are compared between Macs.
+- A member calls `ReportNotification` on the hub before it sends a phone notification. The hub records its own phone notifications in the order they happen. The latest report is the latest notifier. No timestamps are compared between Macs.
 - When a reply arrives, the hub applies the ownership rule. It keeps a reply it owns and stores it with `forwarded = true`. For any other reply it calls `ForwardReply` on the member that owns it, and the member stores the reply with `forwarded = true`. A forwarded reply is never forwarded again.
 - If forwarding fails, the hub sends `🤖 [<hub machine_name>] could not reach <machine>` and does not route the reply itself.
 - Both RPCs return `PERMISSION_DENIED` and do nothing when `away_channel = "imessage"`.
@@ -162,7 +162,7 @@ sequenceDiagram
     Member->>Hub: ReportNotification { machine: laptop, secret }
     Hub->>Hub: record laptop as the latest notifier
     Member->>Channel: sendMessage "🤖 [laptop/harold main:0.0] Build done"
-    Channel-->>Phone: notification
+    Channel-->>Phone: phone notification
     Phone->>Channel: "yes, merge it"
     Hub->>Channel: getUpdates
     Channel-->>Hub: "yes, merge it"
@@ -205,16 +205,16 @@ Harold refuses to start with an error that names the setting when any of these h
 ### Failure modes
 
 - **The latest notifier is asleep or offline.** On iMessage no Mac claims an untagged reply, so it is lost and you get no message. On Telegram the hub sends `could not reach <machine>`. A tagged reply to an awake Mac works.
-- **No notification is found.** The history was cleared, or `machines` is empty. Every Mac owns an untagged reply, so a Mac without a matching pane sends a "no pane found" error and Macs with matching panes may both deliver.
-- **A notification lands just before the reply.** Harold decides ownership when it handles the reply, against the latest notifier at that moment.
-- **A notification is stamped in the future (iMessage only).** A Mac whose clock is ahead stamps its notification with a later send time than any real one. It stays the latest notifier until that time passes, a restart does not clear it while the row is among the last 50 marked rows, and the other Macs drop untagged replies meanwhile. Tagged replies still work.
-- **Clocks differ between Macs (iMessage only).** The latest notifier follows the send time each Mac stamps on its notification. If two Macs notify within their clock difference, the one stamped later is the latest notifier on both Macs, even if it was sent first.
-- **Messages in iCloud does not sync a Mac's sent notifications to the other Mac.** Each Mac sees only its own notifications and owns every untagged reply.
+- **No phone notification is found.** The history was cleared, or `machines` is empty. Every Mac owns an untagged reply, so a Mac without a matching pane sends a "no pane found" error and Macs with matching panes may both deliver.
+- **A phone notification lands just before the reply.** Harold decides ownership when it handles the reply, against the latest notifier at that moment.
+- **A phone notification is stamped in the future (iMessage only).** A Mac whose clock is ahead stamps its phone notification with a later send time than any real one. It stays the latest notifier until that time passes, a restart does not clear it while the row is among the last 50 marked rows, and the other Macs drop untagged replies meanwhile. Tagged replies still work.
+- **Clocks differ between Macs (iMessage only).** The latest notifier follows the send time each Mac stamps on its phone notification. If two Macs notify within their clock difference, the one stamped later is the latest notifier on both Macs, even if it was sent first.
+- **Messages in iCloud does not sync a Mac's sent phone notifications to the other Mac.** Each Mac sees only its own phone notifications and owns every untagged reply.
 - **Two Macs have the same `machine_name`.** This is a configuration error that Harold does not detect.
-- **An old Harold runs on one Mac.** Its notifications carry no machine name, so it never becomes the latest notifier. Upgrade all Macs together.
+- **An old Harold runs on one Mac.** Its phone notifications carry no machine name, so it never becomes the latest notifier. Upgrade all Macs together.
 - **The hub is off.** Telegram replies are not read. Telegram queues updates, and Harold discards the queued ones when it starts.
-- **The hub restarts.** It keeps its latest notifier in memory only. Until the next notification from any Mac, the hub keeps every untagged reply itself.
-- **A member's report fails.** The hub is unreachable. The notification is still sent, and the hub's latest notifier is stale until the next notification.
+- **The hub restarts.** It keeps its latest notifier in memory only. Until the next phone notification from any Mac, the hub keeps every untagged reply itself.
+- **A member's report fails.** The hub is unreachable. The phone notification is still sent, and the hub's latest notifier is stale until the next phone notification.
 - **A member is unreachable or not in `peers.members`.** The hub sends `🤖 [<hub>] could not reach <machine>` and does not route the reply itself.
 - **A forward times out after the member stored the reply.** The hub waits 5 seconds and then reports `could not reach <machine>`, even though the member may already have stored and routed the reply. You can receive both that message and a `✓ Delivered` from the member. The member does not deliver the reply twice.
 - **The hub is paused.** The hub discards every reply it reads, including replies meant for members, because it checks for pause before it decides ownership. A paused Mac discards a reply whether or not it owns it.

@@ -1,6 +1,6 @@
 # How to set up Telegram as the away channel
 
-This guide switches Harold's away-mode notifications and inbound message routing from iMessage to Telegram. Once configured, all away notifications, reply confirmations, and file readout responses go through a Telegram bot.
+This guide switches Harold's away-mode phone notifications and inbound message routing from iMessage to Telegram. Once configured, all away phone notifications, reply confirmations, and file readout responses go through a Telegram bot.
 
 ## Prerequisites
 
@@ -82,19 +82,19 @@ To test the away path, lock your screen first:
 ~/bin/harold/harold --diagnostics --delay 10
 ```
 
-Lock your screen during the 10-second window. You should receive a diagnostic notification in Telegram.
+Lock your screen during the 10-second window. You should receive a diagnostic phone notification in Telegram.
 
 ## 6. Test the full loop
 
 1. Lock your screen
 2. Trigger an agent turn completion from a configured Claude, Codex, or other Harold hook
-3. Check Telegram for the notification
+3. Check Telegram for the phone notification
 4. Reply in Telegram — verify the reply routes to the correct agent pane
 5. Check the agent pane received your message prefixed with the phone emoji
 
 ## Several Macs: a hub and members
 
-Telegram lets only one process read a bot's replies. With Harold on several Macs, one Mac, the hub, reads the replies and forwards each one to the Mac that should receive it. The other Macs, the members, do not read Telegram. A reply with no tag goes to the Mac that sent the latest notification. Skip this section if you run Harold on one Mac.
+Telegram lets only one process read a bot's replies. With Harold on several Macs, one Mac, the hub, reads the replies and forwards each one to the Mac that should receive it. The other Macs, the members, do not read Telegram. A reply with no tag goes to the Mac that sent the latest phone notification. Skip this section if you run Harold on one Mac.
 
 This path has unit tests only. It has not been run live on two Macs.
 
@@ -142,9 +142,9 @@ The examples use two Macs: `studio` is the hub and `laptop` is a member.
 What to expect:
 
 - A member does not poll Telegram. Only the hub does.
-- A reply with no tag goes to the Mac that sent the latest notification. A tag such as `[laptop]` or `[laptop/harold main:0.0]` goes to that Mac.
+- A reply with no tag goes to the Mac that sent the latest phone notification. A tag such as `[laptop]` or `[laptop/harold main:0.0]` goes to that Mac.
 - When the Mac that should receive a reply is off or unreachable, the hub sends `🤖 [studio] could not reach laptop` and does not route the reply itself.
-- After the hub restarts, it keeps every untagged reply itself until the next notification from any Mac.
+- After the hub restarts, it keeps every untagged reply itself until the next phone notification from any Mac.
 
 The peer RPCs between Macs are plain HTTP. Tailscale encrypts the traffic and limits who can reach the port. With `grpc.host` on a Tailscale address, the existing RPCs, which check no secret, are reachable from your tailnet; see the [security audit follow-up](../security-audit-2026-02-27.md#follow-up-2026-10-11-grpc-beyond-loopback-for-several-macs). Keep the secrets in `local.toml`, which the installer makes readable by you only. launchd starts the installed service, so a variable in your shell never reaches it, and `haroldctl` and the installer clear inherited Harold overrides for their own configuration and readiness checks. A variable set for all of launchd with `launchctl setenv` does reach the service, so do not put a secret there; the service's own seven variables, `HAROLD_LAUNCHD` among them, win on a clash.
 
@@ -163,7 +163,7 @@ away_channel = "imessage"
 
 When `away_channel = "telegram"`:
 
-- **Outbound notifications** use the Telegram Bot API `sendMessage` instead of AppleScript/Messages.app
+- **Outbound phone notifications** use the Telegram Bot API `sendMessage` instead of AppleScript/Messages.app
 - **Reply confirmations** (delivered, error messages) are sent via Telegram instead of iMessage
 - **Inbound listener** long-polls Telegram `getUpdates` instead of watching `chat.db`. With several Macs, only the hub does this and a member starts no listener
 - Messages from the bot (prefixed with the robot emoji) are filtered out, same as iMessage

@@ -150,12 +150,12 @@ If you run Harold on more than one Mac signed into the same Apple ID, each Mac n
    ```
 
    To use a name other than the hostname, set `machine_name = "studio"` on that Mac. A name is not empty and has no whitespace, `/`, `:`, `[` or `]`. Put both settings above the first `[section]` header in the file.
-3. Upgrade and configure all Macs together. A Mac running an older Harold sends notifications without a machine name, and the other Macs cannot tell it apart.
-4. Turn on Messages in iCloud on every Mac, so that a notification one Mac sends also appears in the other Macs' Messages. Each Mac decides who owns an untagged reply by reading the latest notification in its own Messages database (`~/Library/Messages/chat.db`), including notifications sent by the other Macs. Without this sync, each Mac sees only its own notifications and owns every untagged reply, as it does without `machines`.
-5. Check the sync. Trigger a notification on one Mac, then look for the same message on the other Mac: it must have the same `guid` (the message's unique id) and the same `date` (its send time) in both Macs' `chat.db`. You may inspect your own `chat.db` with `sqlite3`, for example `sqlite3 ~/Library/Messages/chat.db "select guid, date from message order by date desc limit 3"`. The terminal needs Full Disk Access to read it.
+3. Upgrade and configure all Macs together. A Mac running an older Harold sends phone notifications without a machine name, and the other Macs cannot tell it apart.
+4. Turn on Messages in iCloud on every Mac, so that a phone notification one Mac sends also appears in the other Macs' Messages. Each Mac decides who owns an untagged reply by reading the latest phone notification in its own Messages database (`~/Library/Messages/chat.db`), including phone notifications sent by the other Macs. Without this sync, each Mac sees only its own phone notifications and owns every untagged reply, as it does without `machines`.
+5. Check the sync. Trigger a phone notification on one Mac, then look for the same message on the other Mac: it must have the same `guid` (the message's unique id) and the same `date` (its send time) in both Macs' `chat.db`. You may inspect your own `chat.db` with `sqlite3`, for example `sqlite3 ~/Library/Messages/chat.db "select guid, date from message order by date desc limit 3"`. The terminal needs Full Disk Access to read it.
 6. Restart Harold on each Mac with `~/bin/haroldctl restart`. Harold refuses to start when `machines` does not include this Mac's name.
 
-To check it, lock your screen on one Mac and trigger an agent turn completion. The turn-end update starts with `🤖 [<machine_name>/…]`. Reply without a tag: only the Mac that sent the latest notification answers. A reply that starts with `[<machine_name>]` or `[<machine_name>/<pane>]` goes to that Mac.
+To check it, lock your screen on one Mac and trigger an agent turn completion. The turn-end update starts with `🤖 [<machine_name>/…]`. Reply without a tag: only the Mac that sent the latest phone notification answers. A reply that starts with `[<machine_name>]` or `[<machine_name>/<pane>]` goes to that Mac.
 
 The [inbound routing reference](../references/inbound-message-routing/README.md#several-macs) explains the rules and the failure modes. For Telegram, see [Several Macs: a hub and members](setup-telegram.md#several-macs-a-hub-and-members).
 
@@ -165,7 +165,7 @@ The [inbound routing reference](../references/inbound-message-routing/README.md#
 ~/bin/haroldctl status
 ```
 
-Success requires both the managed process owning the listening socket and Harold returning a current agent-state snapshot. The installer performs this same check before reporting success. It does not send a test notification.
+Success requires both the managed process owning the listening socket and Harold returning a current agent-state snapshot. The installer performs this same check before reporting success. It does not send a test phone notification.
 
 Start the dash from inside tmux:
 
