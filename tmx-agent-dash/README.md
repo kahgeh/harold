@@ -229,7 +229,7 @@ While keys are ignored or held, the quit keys still quit and Ctrl+L still retrie
 Each row has Harold's latest classified agent state:
 
 - `BUSY` means Harold currently classifies the agent as working.
-- `IDLE` means Harold currently classifies the agent as waiting.
+- `IDLE` means Harold currently classifies the agent as idle.
 - `UNKNOWN` means Harold cannot yet classify the agent conclusively.
 
 Transport and agent monitor health describe different system-level conditions:

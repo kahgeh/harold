@@ -161,7 +161,7 @@ Moving the files in and out is under [Import and export](#import-and-export).
 | `refused: not run in a tmux pane` | `no_pane`: `TMUX_PANE` is not set. |
 | `the Harold daemon does not serve the backlog` | The tool did not start, so the service is missing (`Unimplemented`). |
 | `the Harold daemon is not reachable` | The daemon is not running. |
-| `the Harold daemon did not answer within 3 seconds` | Any call but import and export, after 3 seconds. |
+| `the Harold daemon did not answer within 3 seconds` | Any command but import and export, after 3 seconds. |
 | `the Harold daemon did not answer within 30 seconds` | An import or export, after 30 seconds. |
 | `invalid JSON: <what>` | `put`, `note add` or `note update` got empty or broken JSON, such as `invalid JSON: id is missing`. Nothing is sent. |
 | `cannot read <file>: <error>` | An import file can't be read. Nothing is sent. |
