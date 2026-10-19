@@ -356,7 +356,7 @@ An inventory failure preserves current panes and never infers mass departure. A 
 
 ## Lifecycle limits
 
-- `WatchAgentStates` is snapshot-then-stream, not cursor replay. Slow consumers may coalesce obsolete in-memory snapshots; reconnecting restores the latest complete state.
+- `WatchAgentStates` is snapshot-then-stream, not replay from a checkpoint. Slow consumers may coalesce obsolete in-memory snapshots; reconnecting restores the latest complete state.
 - Provider screen markers and styled parsing are version-sensitive. Inconclusive text is preserved as uncertainty; `codex-v1` and `claude-v1` each match one provider's rendering and guarantee nothing for another.
 - History recovery is bounded and starts with a baseline that emits no existing prompt. Lost fingerprint overlap also establishes a new baseline without adopting its contents. These rules can leave late-attached or older work without a recovered work summary.
 - Harold does not infer busy/idle from CPU use, tmux window activity, or elapsed silence.
