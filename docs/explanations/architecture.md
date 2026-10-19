@@ -73,9 +73,9 @@ flowchart LR
 | agent monitor | Finds agents with the process inventory, and works out their state from hooks, reports and screen adapters | `harold/src/agent/` |
 | event stream and state database | Stores accepted observations and messages in order, and the current agent view, the outbox and the checkpoint | `harold/src/store.rs`, `harold/src/store/` |
 | projector and reducer | Reads the event stream, works out each agent's state, and stages delivery work in the outbox | `harold/src/store.rs`, `harold/src/agent/reducer.rs` |
-| delivery handler | Reads the outbox, and leaves out, speaks or sends each turn-end update | `harold/src/outbound/`, `harold/src/projector.rs` |
+| delivery handler | Reads the outbox, and leaves out, speaks or sends each turn-end update | `harold/src/outbound/`, `harold/src/projector.rs`, `harold/src/tmux.rs` |
 | channels and channel listener | Send to the phone by iMessage or Telegram, and record the user's replies in the event stream | `harold/src/channels/` |
-| reply routing | Decides which Mac owns a reply by its routing tag or the latest notifier, picks the pane by the tag or the other fallbacks, and types it there | `harold/src/inbound/`, `harold/src/tmux.rs` |
+| reply routing | Decides which Mac owns a reply by its routing tag or the latest notifier, picks the pane by the tag or the other fallbacks, and types it there | `harold/src/inbound/` |
 | peers | Hub and member on two Macs, and the peer RPCs between them | `harold/src/peers.rs` |
 | snapshot publisher | Sends snapshots to clients over `WatchAgentStates` | `harold/src/agent/snapshot.rs`, `harold/src/main.rs` |
 | tool host, question tool, backlog tool | Hosts tools with their own storage and gRPC services (ADR 0001) | `harold/src/tools.rs`, `harold/src/tools/` |
@@ -105,7 +105,7 @@ What other components or products depend on, each with where its contract is wri
 - **The alert address:** `POST /alert` on `[telemetry] alert_listen`, where HyperDX's webhooks post. Contract: the [telemetry reference](../references/telemetry/README.md).
 - **The pod registry:** Harold reads the vault's `products.toml` for pod stats. Contract: the [telemetry reference](../references/telemetry/README.md).
 - **The routing tag** on replies. Contract: the [inbound routing reference](../references/inbound-message-routing/README.md).
-- **Files under the store folder:** the event stream, `harold-state.db`, each tool's database and the web app's key. Contracts: the [operation reference](../references/operation/README.md), the [tools references](../references/tools/README.md) and the [web app reference](../references/away-app/README.md).
+- **Files in Harold's data folder:** under the store folder, the event stream (`log/`) and `harold-state.db`; beside it, each tool's database (`tools/<tool>`) and the web app's key (`web-push/vapid.pem`). Contracts: the [operation reference](../references/operation/README.md), the [tools references](../references/tools/README.md) and the [web app reference](../references/away-app/README.md).
 - **Telemetry:** export is on by default, over OTLP gRPC to the collector at `http://localhost:4317`, and `[telemetry] export = false` sets it off. Contract: the [telemetry reference](../references/telemetry/README.md).
 
 ## Decisions

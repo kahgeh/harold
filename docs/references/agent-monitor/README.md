@@ -365,4 +365,4 @@ An inventory failure preserves current panes and never infers mass departure. A 
 - The OpenCode lifecycle plugin is opt-in and is not installed by `make deploy`; its screen provider has no fallback-summary prefix.
 - The `TurnComplete` RPC is the turn-end update ingress. Empty prompts preserve work summaries and cannot explicitly clear them.
 
-For operational registration and verification, see [Set up agent monitor hooks](../../how-tos/setup-agent-monitor-hooks.md). For rationale, see [Harold Architecture](../../explanations/architecture.md).
+For operational registration and verification, see [Set up agent monitor hooks](../../how-tos/setup-agent-monitor-hooks.md). For rationale, see [Architecture: Harold](../../explanations/architecture.md).

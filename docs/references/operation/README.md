@@ -30,7 +30,7 @@ The installer writes one launchd job definition, `service.plist`, and puts it in
 | Event handler | Project state, stage delivery work, and deliver turn-end updates and replies |
 | Channel listener | Collect incoming messages for the event stream |
 
-The runtime components share Harold's store and shutdown signal. See [Harold Architecture](../../explanations/architecture.md) for their data flow.
+The runtime components share Harold's store and shutdown signal. See [Architecture: Harold](../../explanations/architecture.md) for their data flow.
 
 ## macOS permissions
 
