@@ -208,7 +208,7 @@ The canonical schema is `harold-api/proto/harold.proto`. The service exposes exa
 | --- | --- | --- |
 | `TurnComplete` | Existing five scalar fields: `pane_id = 1`, `pane_label = 2`, `last_user_prompt = 3`, `assistant_message = 4`, `main_context = 5` | Unary `accepted = true` after durable append. Existing field numbers are unchanged. |
 | `ReportAgentState` | `pane_id = 1`, `state = 2`, `adapter_id = 3`, `optional work_summary = 4` | Unary `accepted = true` after the pane-plus-lifecycle batch is durably appended. Projection may follow asynchronously. |
-| `WatchAgentStates` | Empty request | Server stream whose first message is the complete current snapshot, followed by complete snapshots at greater revisions. There is no cursor. |
+| `WatchAgentStates` | Empty request | Server stream whose first message is the complete current snapshot, followed by complete snapshots at greater revisions. There is nothing to replay from; a client reconnects and gets the latest complete snapshot. |
 | `SetTtsMuted` | `muted = 1` | Unary; responds with the requested `muted` value after the `TtsMuteChanged` event is durably appended, or immediately when the value is unchanged. The new value is visible in a later snapshot. See [Notification](../notification/README.md#muting-voice). |
 | `SetMessagingPaused` | `paused = 1` | Unary; responds with the requested `paused` value after the `MessagingPausedChanged` event is durably appended, or immediately when both the published snapshot and the in-process switch already hold that value. The away channel stops or resumes as soon as the event is appended; the new value is visible in a later snapshot. See [Operation](../operation/README.md#pausing-messaging). |
 

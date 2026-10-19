@@ -72,15 +72,15 @@ flowchart LR
 | --- | --- | --- |
 | agent monitor | Finds agents with the process inventory, and works out their state from hooks, reports and screen adapters | `harold/src/agent/` |
 | event stream and state database | Stores accepted observations and messages in order, and the current agent view, the outbox and the checkpoint | `harold/src/store.rs`, `harold/src/store/` |
-| projector and reducer | Reads the event stream, works out each agent's state, and stages delivery work in the outbox | `harold/src/projector.rs`, `harold/src/agent/reducer.rs` |
-| delivery handler | Reads the outbox, and leaves out, speaks or sends each turn-end update | `harold/src/outbound/` |
+| projector and reducer | Reads the event stream, works out each agent's state, and stages delivery work in the outbox | `harold/src/store.rs`, `harold/src/agent/reducer.rs` |
+| delivery handler | Reads the outbox, and leaves out, speaks or sends each turn-end update | `harold/src/outbound/`, `harold/src/projector.rs` |
 | channels and channel listener | Send to the phone by iMessage or Telegram, and record the user's replies in the event stream | `harold/src/channels/` |
-| reply routing | Picks the pane for a reply by its routing tag, the latest notifier or the other fallbacks, and types it there | `harold/src/inbound/`, `harold/src/tmux.rs` |
+| reply routing | Decides which Mac owns a reply by its routing tag or the latest notifier, picks the pane by the tag or the other fallbacks, and types it there | `harold/src/inbound/`, `harold/src/tmux.rs` |
 | peers | Hub and member on two Macs, and the peer RPCs between them | `harold/src/peers.rs` |
 | snapshot publisher | Sends snapshots to clients over `WatchAgentStates` | `harold/src/agent/snapshot.rs`, `harold/src/main.rs` |
 | tool host, question tool, backlog tool | Hosts tools with their own storage and gRPC services (ADR 0001) | `harold/src/tools.rs`, `harold/src/tools/` |
 | calls and voice worker | Voice calls with the chief, and the process that turns lines into audio and speech into text | `harold/src/voice_input.rs`, `harold/src/voice_input/`, `harold/src/voice_worker.py` |
-| web app | The phone's home-screen app: the thread, push and calls | `harold/src/web_app/`, `harold/static/web_app/`, `harold/templates/web_app/` |
+| web app | The phone's web app: the thread, push and calls | `harold/src/web_app/`, `harold/static/web_app/`, `harold/templates/web_app/` |
 | activity summaries | Optional work summaries that Claude Code writes from an agent's evidence | `harold/src/activity_summary.rs` |
 | timed prompts | Text typed into a pane at a set time each day | `harold/src/timed_prompts.rs` |
 | alerts | HyperDX alerts typed to the chief | `harold/src/alerts.rs` |
@@ -102,6 +102,8 @@ What other components or products depend on, each with where its contract is wri
 - **Settings:** `default.toml` and `local.toml`, read in that order, with `local.toml` laid over `default.toml`. Contract: `harold/config/local.template.toml` and each feature's reference page.
 - **The web app's HTTP routes.** Contract: the [web app reference](../references/away-app/README.md).
 - **Lines Harold types into panes:** the answers line, alerts, timed prompts and phone replies. Contracts: the [questions reference](../references/tools/questions.md), the [telemetry reference](../references/telemetry/README.md), the [timed prompts reference](../references/timed-prompts/README.md) and the [inbound routing reference](../references/inbound-message-routing/README.md).
+- **The alert address:** `POST /alert` on `[telemetry] alert_listen`, where HyperDX's webhooks post. Contract: the [telemetry reference](../references/telemetry/README.md).
+- **The pod registry:** Harold reads the vault's `products.toml` for pod stats. Contract: the [telemetry reference](../references/telemetry/README.md).
 - **The routing tag** on replies. Contract: the [inbound routing reference](../references/inbound-message-routing/README.md).
 - **Files under the store folder:** the event stream, `harold-state.db`, each tool's database and the web app's key. Contracts: the [operation reference](../references/operation/README.md), the [tools references](../references/tools/README.md) and the [web app reference](../references/away-app/README.md).
 - **Telemetry:** export is on by default, over OTLP gRPC to the collector at `http://localhost:4317`, and `[telemetry] export = false` sets it off. Contract: the [telemetry reference](../references/telemetry/README.md).
@@ -110,11 +112,11 @@ What other components or products depend on, each with where its contract is wri
 
 One line per architectural decision, oldest first. Each date is the commit that brought the decision into the page that records it.
 
-- 2026-08-24: The event stream lives in an OpenData log and the state in Turso, both inside the Harold process, so no other service has to run. [Agent monitor reference](../references/agent-monitor/README.md#projection-and-storage)
 - 2026-08-24: Identity comes before state: an incarnation, not a pane, owns a state, so a new agent in an old pane starts at Unknown. [Agent monitor reference](../references/agent-monitor/README.md#incarnation-identity)
 - 2026-08-24: Hooks win during a grace period, then conclusive screen evidence decides, so a late repaint or a missed hook does not leave a wrong state. [Agent monitor reference](../references/agent-monitor/README.md#reconciliation-contract)
 - 2026-08-24: The projector stages the outbox in the same transaction as the state and the checkpoint, so a retryable delivery failure never undoes a recorded event. [Agent monitor reference](../references/agent-monitor/README.md#projection-and-storage)
 - 2026-10-11: Two Macs run as hub and member, with a shared secret on the peer RPCs, because Telegram lets only one process read a bot's replies. [Inbound routing reference](../references/inbound-message-routing/README.md)
+- 2026-10-16: The event stream lives in an OpenData log and the state in Turso, both inside the Harold process, so no other service has to run. [Operation reference](../references/operation/README.md)
 - 2026-10-18: The web app is served on loopback and carried to the phone by `tailscale serve`, so nothing listens beyond the Mac. [Web app reference](../references/away-app/README.md)
 - 2026-10-18: ADR 0001, tools are modules Harold hosts, so a new tool needs no change to the core store or the Harold gRPC service. [ADR 0001](../adr/0001-tools-are-modules-hosted-by-harold.md)
 - 2026-10-18: ADR 0002, tool services trust local callers, because the gRPC listener has no transport authentication and only the peer RPCs carry a secret. [ADR 0002](../adr/0002-tool-services-trust-local-callers.md)
@@ -124,7 +126,7 @@ One line per architectural decision, oldest first. Each date is the commit that 
 
 Each place Harold does not follow the organisation's `knowledge/standards.md`, why, and until when:
 
-- **Other languages beside Rust.** The voice worker (`harold/src/voice_worker.py`) and the installer (`scripts/`) are Python, the Claude Code mod is TypeScript, and the OpenCode plugin is JavaScript (`hooks/`). Each fits the program it extends, and the standard raises another language as a question, not a breach. Until: not set.
+- **Other languages beside Rust.** The voice worker (`harold/src/voice_worker.py`), the installer (`scripts/*.py`) and the turn-complete hooks (`hooks/providers/`, `hooks/shared/`) are Python, `scripts/install.sh` and `scripts/bootstrap.sh` are shell, the Claude Code mod is TypeScript, and the OpenCode plugin and the web app's scripts (`harold/static/web_app/`) are JavaScript. Each fits the program it extends, and the standard raises another language as a question, not a breach. Until: not set.
 - **axum's version.** Harold uses axum `0.8.8` (`harold/Cargo.toml`), unpinned, where the standard names `=0.8.7`. No one has said why. Until: not set.
 - **Dependency audits** are not recorded in Harold's `README.md`, which the standard's practice suggests. Until: not set.
 
@@ -173,7 +175,7 @@ See the [agent monitor reference](../references/agent-monitor/README.md#projecti
 
 ### Why the agent monitor uses several sources
 
-A start hook may say an agent is busy while its terminal still displays the previous idle screen. Later, a completion hook might be missed even though the terminal clearly shows the agent waiting for input. Harold needs rules for both situations.
+A start hook may say an agent is busy while its terminal still displays the previous idle screen. Later, a completion hook might be missed even though the terminal clearly shows the agent idle at its prompt. Harold needs rules for both situations.
 
 Each source answers a different question:
 
