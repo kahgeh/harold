@@ -1,10 +1,10 @@
 # Inbound Message Routing
 
-Inbound message routing routes messages from your phone (via iMessage or Telegram, depending on the configured away channel) to the correct agent session running in a tmux pane.
+Inbound message routing routes messages from your phone (via iMessage or Telegram, depending on the configured away channel) to the correct agent running in a tmux pane.
 
 ## Problem
 
-Messaging from your phone means you know which agent you meant but the message arrives as plain text with no session context. With multiple agent sessions running, there is no obvious way to get your message to the right one.
+Messaging from your phone means you know which agent you meant but the message arrives as plain text with no agent context. With multiple agents running, there is no obvious way to get your message to the right one.
 
 ## Architecture
 
@@ -177,8 +177,8 @@ sequenceDiagram
 
 Every Harold runs a gRPC server, `harold-api`, on `grpc.host` and `grpc.port` (default `127.0.0.1:50060`). On every Mac in a hub-and-member setup, `grpc.host` is set to that Mac's Tailscale address, and each `url` is the other Mac's Tailscale address, for example `http://laptop.tailnet:50060`.
 
-- Each call opens one connection to the configured `url`, sends one request and closes. Connecting and the call each time out after 5 seconds. A failed call is not retried.
-- The calls are plain gRPC over HTTP. Tailscale provides the encryption and limits who can reach the port.
+- Each peer RPC opens one connection to the configured `url`, sends one request and closes. Connecting and the RPC each time out after 5 seconds. A failed RPC is not retried.
+- The peer RPCs are plain gRPC over HTTP. Tailscale provides the encryption and limits who can reach the port.
 - With `grpc.host` on a Tailscale address, Harold no longer listens on `127.0.0.1`. Clients on the same Mac that default to `127.0.0.1` or `localhost` cannot reach it: start `tmx-agent-dash` with `--endpoint http://<tailscale-ip>:50060`, and set `HAROLD_ADDR=<tailscale-ip>:50060` for the OpenCode plugin. The Claude hooks read the address from the service metadata and keep working.
 - Only `ReportNotification` and `ForwardReply` check the secret. Harold compares it in constant time, and an empty secret never matches. The existing RPCs check nothing. See the [security audit follow-up](../../security-audit-2026-02-27.md#follow-up-2026-10-11-grpc-beyond-loopback-for-several-macs).
 

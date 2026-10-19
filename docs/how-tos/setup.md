@@ -155,7 +155,7 @@ If you run Harold on more than one Mac signed into the same Apple ID, each Mac n
 5. Check the sync. Trigger a notification on one Mac, then look for the same message on the other Mac: it must have the same `guid` (the message's unique id) and the same `date` (its send time) in both Macs' `chat.db`. You may inspect your own `chat.db` with `sqlite3`, for example `sqlite3 ~/Library/Messages/chat.db "select guid, date from message order by date desc limit 3"`. The terminal needs Full Disk Access to read it.
 6. Restart Harold on each Mac with `~/bin/haroldctl restart`. Harold refuses to start when `machines` does not include this Mac's name.
 
-To check it, lock your screen on one Mac and trigger an agent turn completion. The notification starts with `🤖 [<machine_name>/…]`. Reply without a tag: only the Mac that sent the latest notification answers. A reply that starts with `[<machine_name>]` or `[<machine_name>/<pane>]` goes to that Mac.
+To check it, lock your screen on one Mac and trigger an agent turn completion. The turn-end update starts with `🤖 [<machine_name>/…]`. Reply without a tag: only the Mac that sent the latest notification answers. A reply that starts with `[<machine_name>]` or `[<machine_name>/<pane>]` goes to that Mac.
 
 The [inbound routing reference](../references/inbound-message-routing/README.md#several-macs) explains the rules and the failure modes. For Telegram, see [Several Macs: a hub and members](setup-telegram.md#several-macs-a-hub-and-members).
 

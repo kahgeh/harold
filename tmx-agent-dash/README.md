@@ -109,8 +109,8 @@ the key does nothing there, so a key never means two things.
   into it, so the footer lists only `Enter` (`send` for a note, `keep` for a text
   field), `Esc` discard, `^L` and `^Q`.
 
-Search is a local, case-insensitive filter over provider, work summary, tmux
-target, and working directory. It never sends a search request to Harold and it
+Search is a local, case-insensitive filter over provider, work summary, `session:window.pane`
+name, and working directory. It never sends a search request to Harold and it
 does not pause incoming snapshots. The search line reports visible and total
 row counts while a filter is active. Press `f` to start editing the search query.
 
@@ -136,7 +136,7 @@ for what the switch does.
 
 ## Now line
 
-When the chief of pods has a Now item in its queue, the dash shows it on one dim line under the masthead: `NOW  ` and the item's first line, cut to the terminal's width. The dash reads it from Harold's backlog tool with the question tool, every 2 seconds; when that poll's question read timed out, the Now read is skipped and the line hides until the next poll. The line takes a row only when one is spare beside the agent list's six rows. It is hidden while the queue has no Now item, when Harold does not serve the backlog tool, the read fails or the stream to Harold is lost, and at the smallest height (18 rows), where the agent list keeps its six rows. It is never focused and takes no keys. See the [backlog reference](../docs/references/tools/backlog.md) for how the queue is kept.
+When the chief of pods has a Now item in its queue, the dash shows it on one dim line under the masthead: `NOW  ` and the item's first line, cut to the terminal's width. The dash reads it from Harold's backlog tool with the question tool, every 2 seconds; when that poll's question read timed out, the Now read is skipped and the line hides until the next poll. The line takes a row only when one is spare beside the agent list's six rows. It is hidden while the queue has no Now item, when Harold does not serve the backlog tool, the read fails or the stream to Harold is lost, and at the smallest height (18 rows), where the agent list keeps its six rows. The cursor never lands on it and it takes no keys. See the [backlog reference](../docs/references/tools/backlog.md) for how the queue is kept.
 
 ## Questions
 
@@ -292,7 +292,7 @@ No work summary reported
 ```
 
 The dash consumes only Harold's classified pane state and bounded work
-work summary. Raw pane screen content and evidence provenance do not reach or appear
+summary. Raw pane screen content and evidence provenance do not reach or appear
 in the dash.
 
 ## Troubleshooting

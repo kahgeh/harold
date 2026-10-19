@@ -43,4 +43,4 @@ Harold supports two away channels for notifications and inbound message routing 
 
 Use **iMessage** when possible — it provides E2EE with no credentials to manage or leak. Choose **Telegram** when you need cross-platform access (e.g. notifications on a non-Apple device) and accept the trade-off that message content is visible to Telegram's servers and that a bot token must be protected.
 
-In either case, Harold's inbound message filtering (handle IDs for iMessage, chat ID for Telegram) ensures that only messages from the expected conversation are processed and relayed to agent sessions.
+In either case, Harold's inbound message filtering (handle IDs for iMessage, chat ID for Telegram) ensures that only messages from the expected conversation are processed and relayed to agents.

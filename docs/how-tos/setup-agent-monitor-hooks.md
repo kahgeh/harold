@@ -72,7 +72,7 @@ A lifecycle adapter calls `ReportAgentState` with:
 - a bounded adapter identifier;
 - an optional `workSummary`.
 
-Use a JSON encoder and pass the request on standard input so prompt content does not appear in process arguments. This fixed-value command demonstrates the wire call:
+Use a JSON encoder and pass the request on standard input so prompt content does not appear in process arguments. This fixed-value command demonstrates the wire request:
 
 ```sh
 proto_dir=/path/to/harold/harold-api/proto
@@ -134,7 +134,7 @@ The plugin removes complete ESC and C1 CSI, OSC, DCS, SOS, PM, and APC terminal 
 
 ## 6. Use the Claude Code lifecycle mod
 
-Claude Code's `Stop` hook tells Harold when a turn ends, but nothing tells it when a turn starts, and a turn Claude Code starts by itself (a background subagent finishing and waking the session) has no start hook at all. The repository's Claude Code mod in `hooks/claude-mod/` fills the gap. It runs `harold accept` with one of four events, each with `--pane "$TMUX_PANE" --adapter claude.lifecycle`:
+Claude Code's `Stop` hook tells Harold when a turn ends, but nothing tells it when a turn starts, and a turn Claude Code starts by itself (a background subagent finishing and waking the agent) has no start hook at all. The repository's Claude Code mod in `hooks/claude-mod/` fills the gap. It runs `harold accept` with one of four events, each with `--pane "$TMUX_PANE" --adapter claude.lifecycle`:
 
 | Event | Sent when | Harold sets |
 |---|---|---|
@@ -143,7 +143,7 @@ Claude Code's `Stop` hook tells Harold when a turn ends, but nothing tells it wh
 | `turn-completed` | A main-session turn ends with no subagent working | Idle |
 | `subagents-finished` | The last working subagent ends while no main turn is running | Idle |
 
-A pane works while its main turn runs or while a subagent is `pending`, `running` or `waiting`, so a pane with a background subagent shows as busy after Claude's own turn has ended. `accept` makes one `ReportAgentState` call to the running daemon and sends no work summary, so the work summary Harold holds is kept. The mod only watches; it never changes a prompt, a reply or a tool call.
+A pane works while its main turn runs or while a subagent is `pending`, `running` or `waiting`, so a pane with a background subagent shows as busy after Claude's own turn has ended. `accept` makes one `ReportAgentState` RPC to the running daemon and sends no work summary, so the work summary Harold holds is kept. The mod only watches; it never changes a prompt, a reply or a tool call.
 
 The installer copies the mod to `~/bin/harold/hooks/claude-mod/` and names that folder in `CLAUDE_CODE_PLUGIN_DIRS`, in the `env` block of `~/.claude/settings.json`. It follows five rules:
 
@@ -157,7 +157,7 @@ The installer copies the mod to `~/bin/harold/hooks/claude-mod/` and names that 
 
 If `settings.json` is a symlink, the installer edits the file it points to and keeps the backup beside that file. It keeps the file's permissions, and it writes nothing if the mod's folder path contains `:`, which a `:`-separated list cannot hold; it then tells you to load the mod with `claude --plugin-dir`. A Claude Code session that is already running loads the mod the next time it starts. To load it in one session from a checkout, run `claude --plugin-dir hooks/claude-mod` and set `HAROLD_BIN` to the `harold` program to run.
 
-The mod interface is early access: a Claude Code release can stop the mod from loading. Harold then falls back to reading the screen, which remains the only source for a session without the mod. While the mod reports on a pane, Harold does not let the screen reading set the pane's state: a busy report stands while it is under `agent_monitor.report_grace_ms` (30 seconds) old, and an idle report stands until the screen has read busy for 30 seconds without a break. Past either point the screen reading decides until the mod reports again. For such a pane the `Stop` hook's `TurnComplete` call does not set the state. Keep the `Stop` hook from section 3: it sends the `TurnComplete` call that produces turn-end updates, which the mod does not.
+The mod interface is early access: a Claude Code release can stop the mod from loading. Harold then falls back to reading the screen, which remains the only source for an agent without the mod. While the mod reports on a pane, Harold does not let the screen reading set the pane's state: a busy report stands while it is under `agent_monitor.report_grace_ms` (30 seconds) old, and an idle report stands until the screen has read busy for 30 seconds without a break. Past either point the screen reading decides until the mod reports again. For such a pane the `Stop` hook's `TurnComplete` call does not set the state. Keep the `Stop` hook from section 3: it sends the `TurnComplete` call that produces turn-end updates, which the mod does not.
 
 Check the mod without a session:
 

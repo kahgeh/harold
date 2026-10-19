@@ -4,7 +4,7 @@ Harold currently requires macOS for screen-lock detection and speech. Run instal
 
 ## Release installation tools
 
-The recommended release installer requires an Apple Silicon Mac running macOS 15 or newer, Python 3.9 or newer, tmux, and grpcurl. Agent sessions run inside tmux. The installer also checks macOS tools codesign, launchctl, plutil, and lsof.
+The recommended release installer requires an Apple Silicon Mac running macOS 15 or newer, Python 3.9 or newer, tmux, and grpcurl. Agents run inside tmux. The installer also checks macOS tools codesign, launchctl, plutil, and lsof.
 
 With Homebrew available:
 

@@ -11,7 +11,7 @@ Away from your desk: A long-running doc-gen or complex fix finishes while you're
 
 Zero Idle Time: Voice announcements of turn completion.
 
-Remote Command: Use iMessage to feed the beast from anywhere. Review a summary, text a correction, and keep the session moving.
+Remote Command: Use iMessage to feed the beast from anywhere. Review a summary, text a correction, and keep the agent moving.
 
 Contextual Routing: Don't worry about which agent is which. Harold knows exactly where your input belongs, ensuring your workflow stays unbroken across every tmux pane.
 

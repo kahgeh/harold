@@ -234,7 +234,7 @@ Every other field is dropped before export, including `text`, `msg`, `raw_output
 
 Export never slows Harold:
 
-- Spans, log records and metrics are queued in memory and sent in batches by a background task. A full queue drops the newest item.
+- Spans, log records and metrics are queued in memory and sent in batches by a background job. A full queue drops the newest item.
 - Each send gives up after 5 seconds.
 - Shutdown waits at most 2 seconds for queued data.
 - An unreachable collector logs one `telemetry export failing (collector unreachable at <endpoint>)` line, and one `telemetry export recovered` line when sends work again. It never logs one line per batch.

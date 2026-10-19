@@ -99,7 +99,7 @@ Each event is projected once and has one row in the delivery outbox. Harold proj
 
 Harold refuses to start on a folder whose `harold-state.db` cursor is past every version its `log/` can hold, as after `log/` is deleted, or replaced with an older log or another folder's log. It stops with `harold-state.db has read the event log up to version <cursor>, but the log in <folder>/log ends before it; the store folder is inconsistent`.
 
-A folder with a log and no `harold-state.db` opens, and Harold builds a new `harold-state.db` from every event in the log. The new delivery outbox has nothing marked delivered, so deleting `harold-state.db` while keeping `log/` queues every stored reply, turn end, agent message and spoken line for delivery again.
+A folder with a log and no `harold-state.db` opens, and Harold builds a new `harold-state.db` from every event in the log. The new delivery outbox has nothing marked delivered, so deleting `harold-state.db` while keeping `log/` puts every stored reply, turn end, agent message and spoken line back in the outbox for delivery again.
 
 A record whose value is not a Harold envelope does not stop the events after it. Harold reads such a record as an event of type `UndecodableEvent` and logs `stored record is not a Harold event`. The event goes to the delivery outbox like any other. The event handler has no delivery for that type, so it marks the event permanently undeliverable and logs `event is permanently undeliverable; continuing`. The events after it are projected and delivered as usual.
 

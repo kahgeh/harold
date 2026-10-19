@@ -5,7 +5,7 @@ The backlog tool is Harold's second [tool](README.md). It holds two kinds of lis
 - **each product's backlog**, kept by that product's manager: up to 5 ranked items and the notes around them;
 - **the chief's queue**: the one thing the user is on now, the parked items, and the done ones.
 
-Agents change the lists with `harold tool backlog ...`, one small call at a time, and anyone can read them. The tool moves each `backlog.md` and `queue.md` in once, without losing a line, and can write the markdown back out at any time.
+Agents change the lists with `harold tool backlog ...`, one small command at a time, and anyone can read them. The tool moves each `backlog.md` and `queue.md` in once, without losing a line, and can write the markdown back out at any time.
 
 The service is `harold.tools.backlog.v1.BacklogService`. The proto is `harold-api/proto/tools/backlog.proto`. It trusts local callers, as the [ADR](../../adr/0002-tool-services-trust-local-callers.md) says; the [write check](#who-may-write) only prevents mix-ups. The tool types into no pane: the host gives it no `typing`.
 
@@ -55,18 +55,18 @@ An evidence pointer is a reference, such as `harold.log:3685`, a commit, a file 
 
 ### Notes
 
-A note has a `kind`, a `title` (one line, under 2,000 characters), a `body` (markdown, under 20,000 characters), and the times it was made and last changed. There are four kinds:
+A backlog note has a `kind`, a `title` (one line, under 2,000 characters), a `body` (markdown, under 20,000 characters), and the times it was made and last changed. There are four kinds:
 
 | Kind | What it holds | Changes |
 | --- | --- | --- |
 | `rule` | The user's standing rules at the top of the backlog. | Add, update, remove. |
 | `history` | The dated sections. | Append only: an update or removal is refused with `append_only`. |
 | `held` | "In flight with another session". | Add, update, remove. |
-| `left_out` | "Looked at and left out", one note per entry. | Add, update, remove. |
+| `left_out` | "Looked at and left out", one backlog note per entry. | Add, update, remove. |
 
-Removing an item with a reason also adds a `history` note, in the same transaction. Its title is `removed <id> (YYYY-MM-DD)`, with the local date, and its body is `removed <id>: <reason>`. The date in the title is what lets an export of it import again. An empty reason adds no note.
+Removing an item with a reason also adds a `history` backlog note, in the same transaction. Its title is `removed <id> (YYYY-MM-DD)`, with the local date, and its body is `removed <id>: <reason>`. The date in the title is what lets an export of it import again. An empty reason adds no backlog note.
 
-Note ids are integers, shared by every product. A new note takes the highest id plus 1, so after the note with the highest id is removed, the next note gets that id again. History notes can't be removed, so this happens only with `rule`, `held` and `left_out` notes.
+Backlog note ids are integers, shared by every product. A new backlog note takes the highest id plus 1, so after the backlog note with the highest id is removed, the next backlog note gets that id again. History backlog notes can't be removed, so this happens only with `rule`, `held` and `left_out` backlog notes.
 
 ## The chief's queue
 
@@ -80,7 +80,7 @@ Each item has an id, `N1`, `N2` and so on, and a `text` (markdown, under 4,000 c
 
 How the items move:
 
-- `add` parks a new item at the end. `--at <n>` parks it at position n, which must be 1 to parked + 1, or the call is refused with `invalid at`. `--now` makes it Now and parks the old Now at position 1.
+- `add` parks a new item at the end. `--at <n>` parks it at position n, which must be 1 to parked + 1, or the command is refused with `invalid at`. `--now` makes it Now and parks the old Now at position 1.
 - `now <id>` makes a parked item Now and parks the old Now at position 1. A done item is refused with `already_done`. An item that is already Now stays as it is.
 - `order <id>...` puts the listed parked ids first, in order, and the other parked after them in the order they had. An id that isn't parked is refused with `not_parked`.
 - `done <id>` marks a Now or parked item done. Done on the Now item leaves no Now. An item already done is refused with `already_done`.
@@ -211,10 +211,10 @@ The checks run in this order:
 
 1. **Who:** an applied import is a write, so it is checked like any [write](#who-may-write). A dry run needs no pane, but a backlog dry run still refuses a product that isn't in the registry with `unknown_product`.
 2. **Every line has a place:** a line the importer can't place is refused with `unparsed line <n>`, rather than dropped.
-3. **The limits:** each item and note must meet its rules (`invalid <field>`); two items with one id are `invalid id`; more than 5 items are `backlog_full`.
+3. **The limits:** each item and backlog note must meet its rules (`invalid <field>`); two items with one id are `invalid id`; more than 5 items are `backlog_full`.
 4. **Empty:** a product that has any item or note, or a queue that has any item or a note, is refused with `not_empty`. A second `--apply` is refused this way, so nothing is stored twice.
 
-Import and export wait 30 seconds for the daemon; every other call waits 3. A timed-out `--apply` may still have been stored, because the daemon can finish after the CLI has given up. `harold tool backlog list <product>` or `queue list` shows whether it was; if it was, another `--apply` is refused with `not_empty`.
+Import and export wait 30 seconds for the daemon; every other command waits 3. A timed-out `--apply` may still have been stored, because the daemon can finish after the CLI has given up. `harold tool backlog list <product>` or `queue list` shows whether it was; if it was, another `--apply` is refused with `not_empty`.
 
 The tool never writes or deletes `backlog.md` or `queue.md`. Once an import is applied, the product manager or the chief renames the file, so no one edits the old copy. `export` prints the markdown whenever someone wants it.
 
@@ -234,11 +234,11 @@ Only lines at column 0 that start `# ` or `## ` are headings; an indented `  ## 
 
 An item's lines are `- <field>: <value>`, for `value`, `size`, `risk`, `reason`, `paths`, `after` and `evidence`, in that order, each at most once. The value starts on the field's line. An indented line continues the field above it, joined with a newline, up to a blank line. `evidence` is split at each `; `. Any other line, a field out of order or repeated, or a field with no value is `unparsed line <n>`.
 
-In the held and left-out sections, a block starts at each column-0 `- ` bullet, or at a column-0 line after a blank line. Indented lines continue it, and so do blank lines followed by one. The note's title is the block's first line without its `- `, cut to 80 characters; its body is the block as written.
+In the held and left-out sections, a block starts at each column-0 `- ` bullet, or at a column-0 line after a blank line. Indented lines continue it, and so do blank lines followed by one. The backlog note's title is the block's first line without its `- `, cut to 80 characters; its body is the block as written.
 
-The export writes `# Backlog: <product>`, then the rule notes' bodies, the items by rank (each field with a value, as `- <field>: <value>`, with the evidence joined by `; `), the history notes as `## <title>` and body, then `## In flight with another session (not ranked)` and the held notes, and `## Looked at and left out` and the left-out notes, each kind only when it has notes. Notes go by id, with one blank line between blocks.
+The export writes `# Backlog: <product>`, then the rule notes' bodies, the items by rank (each field with a value, as `- <field>: <value>`, with the evidence joined by `; `), the history notes as `## <title>` and body, then `## In flight with another session (not ranked)` and the held notes, and `## Looked at and left out` and the left-out notes, each kind only when it has backlog notes. Backlog notes go by id, with one blank line between blocks.
 
-Every line of the source that isn't blank and isn't a heading appears in the export, in the same order within its section. A note added through `note add` comes back the same way only if it keeps the file's shape: a `history` note's title needs a date, and a `rule` note's body needs to be one paragraph, since a blank line would split it into two rules on the next import. The export writes only the body of a `rule`, `held` or `left_out` note, not its title. On the next import the title is the body's first line, cut to 80 characters (without its `- ` for held and left-out notes), so a title set by hand is lost unless it matches that.
+Every line of the source that isn't blank and isn't a heading appears in the export, in the same order within its section. A backlog note added through `note add` comes back the same way only if it keeps the file's shape: a `history` backlog note's title needs a date, and a `rule` backlog note's body needs to be one paragraph, since a blank line would split it into two rules on the next import. The export writes only the body of a `rule`, `held` or `left_out` backlog note, not its title. On the next import the title is the body's first line, cut to 80 characters (without its `- ` for held and left-out notes), so a title set by hand is lost unless it matches that.
 
 ### The `queue.md` layout
 

@@ -95,11 +95,11 @@ Harold checks each transcript before typing it. It takes the transcript's last w
 
 The chief's answer to a last turn arrives as it would with no call open: said aloud at the desk.
 
-A turn said before `bye` while the chief is busy keeps its ordinary 2-minute retry after the call has ended. Harold hands it to a background task that tries every second, holds no audio, and gives up after 2 minutes.
+A turn said before `bye` while the chief is busy keeps its ordinary 2-minute retry after the call has ended. Harold hands it to a background job that tries every second, holds no audio, and gives up after 2 minutes.
 
 ### A turn waiting for a busy chief
 
-When Harold has said `The chief is busy. I'll pass it on when it's free.`, the turn reaches the chief even if the call ends first. You press `c`, say `bye`, or the call ends by itself (idle, a muted voice, or a failed voice), and Harold hands the waiting turn to the same background task a turn said before `bye` uses. The task tries every second, holds no audio, and logs `spoken prompt typed` once the chief is free. It gives up 2 minutes after the turn was first held, not 2 minutes after the call ended, and then logs `spoken prompt dropped` with `reason = chief_busy`. A turn said before `bye` that joins a waiting turn keeps that turn's 2 minutes too. When Harold itself stops, the waiting turn is dropped and nothing more runs.
+When Harold has said `The chief is busy. I'll pass it on when it's free.`, the turn reaches the chief even if the call ends first. You press `c`, say `bye`, or the call ends by itself (idle, a muted voice, or a failed voice), and Harold hands the waiting turn to the same background job a turn said before `bye` uses. The job tries every second, holds no audio, and logs `spoken prompt typed` once the chief is free. It gives up 2 minutes after the turn was first held, not 2 minutes after the call ended, and then logs `spoken prompt dropped` with `reason = chief_busy`. A turn said before `bye` that joins a waiting turn keeps that turn's 2 minutes too. When Harold itself stops, the waiting turn is dropped and nothing more runs.
 
 ### The button
 
