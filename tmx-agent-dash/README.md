@@ -99,11 +99,13 @@ the key does nothing there, so a key never means two things.
   such as `Voice: mute` / `Voice: unmute` or `Messaging: pause` / `Messaging: resume`.
 - **The footer** gives the keys for the row under the cursor. On an agent row it lists
   the list's keys (`j/k`, `n/N`, `f`, `/`, `Enter`, `c`, `t`, `Esc`, `^L`, `q`). On a
-  question row it lists `j/k move`, `n/N question`, `o link`, `Esc close`, `^L retry`
-  and `^Q quit`, with two keys that depend on the row: `l open` and `Enter open` on a
-  closed header, `h close` and `Enter close` on an open header, `Space pick` and
-  `h close` on an option, `Enter choose` and `h close` on an action. A narrow
-  terminal shortens the hints, and below that puts the rest on a second line.
+  question row, under a `QUESTION` label, it lists `j/k` move, `n/N` question, `o`
+  open link, `^L` retry and `^Q` quit, and `Esc` close on every row except a closed
+  header, where `Esc` does nothing. Two keys depend on the row: `l` and `Enter` open
+  a closed header, `h` and `Enter` close an open header, `Space` picks and `h`
+  closes on an option, `Enter` chooses and `h` closes on an action. A narrow terminal
+  shortens the hints (`link` for `open link`, no label), and below that puts the rest
+  on a second line.
 
 Search is a local, case-insensitive filter over provider, work summary, tmux
 target, and working directory. It never sends a search request to Harold and it
@@ -180,7 +182,7 @@ With several questions waiting, the open question shows one at a time, and `n` a
 
 ### Picking and sending
 
-Each decision opens with its suggested option picked (`●`); an option you have not picked shows `○`, and a decision with no suggestion starts with no pick. To pick another option, move to it with `j` or `k` and press `Space`: the `●` moves to it. Moving never changes a pick. You can change any pick until the answer is sent, so this is also how you undo one.
+Each decision opens with its suggested option picked (`●`); an option you have not picked shows `○`, and a decision with no suggested option, or whose suggested option is a free one, starts with no pick (a free suggested option still shows `(suggested)`, with `○`). To pick another option, move to it with `j` or `k` and press `Space`: the `●` moves to it. Moving never changes a pick. You can change any pick until the answer is sent, so this is also how you undo one.
 
 An option's impact shows on the line below its label, dim; an option with no impact has no second line. A free option such as `z  Something else` takes text of your own: `Space` on it opens a text field, holding any text typed there before. Type, then press `Enter` to keep the text and pick the option (blank text is not accepted), or `Esc` to discard it and leave the field. The option's row then shows the text after its label, cut to fit. Text stops at 1,999 characters, since Harold refuses 2,000.
 
@@ -214,11 +216,11 @@ When no question is left, a notice stands alone as one row. It goes at the next 
 
 ### Reconnects
 
-If the queue cannot be read, or the stream to Harold is lost, the question rows hide but keep your picks and any half-typed note. They come back when the next read succeeds and the question is unchanged. If the cursor was on a question row, keys are ignored until `Esc` returns them to the list, where the cursor already is. The footer reads `Esc back to the list (the questions are away)`.
+If the queue cannot be read, or the stream to Harold is lost, the question rows hide but keep your picks and any half-typed note. They come back when the next read succeeds and the question is unchanged. If the cursor was on a question row, keys are ignored while the rows are away, and the footer reads `Esc back to the list (the questions are away)`; `Esc` returns the keys to the list, where the cursor already is. If the rows come back first, the cursor returns to the question's header on its own and typing resumes, with no `Esc` needed when the question is unchanged.
 
-If the question changes under a half-typed note, the rows keep showing the new question and hold their keys until you press `Esc`. The footer reads `esc to continue`. This stops letters typed for the old question from acting on the new one. `Esc` clears the notice and puts the cursor on the shown question's header.
+If the question changes under a half-typed note or text field, the rows keep showing the new question and hold their keys until you press `Esc`. The footer reads `esc to continue`. This stops letters typed for the old question from acting on the new one. `Esc` clears the notice and leaves the cursor where it is when that row still exists in the new question (a changed question keeps its open state, so the cursor stays on the `revise…` or `reject…` row or the option where you were typing); it moves to the header only when that row is gone.
 
-While keys are ignored or held, the quit keys still quit and Ctrl+L still retries. Ctrl+L leaves a half-typed note as it was. A hold ends with the reconnect: the rows hide and their keys are ignored until the next read shows them again. Then keys act on the question shown, and if that question changed meanwhile, its notice shows and the keys are held again until `Esc`.
+While keys are ignored or held, the quit keys still quit and Ctrl+L still retries. Ctrl+L leaves a half-typed note as it was. A hold ends with the reconnect: the rows hide and their keys are ignored until the next read shows them again. Then keys act on the question shown, and if that question changed while a note or text field was open, its notice shows and the keys are held again until `Esc`.
 
 ## Reading status
 

@@ -1263,8 +1263,10 @@ fn footer_hints(compact: bool, stop: Option<QStop>, open: bool) -> Vec<Span<'sta
             QStop::Option { .. } => ("Space", " pick", "h", " close"),
             QStop::Action(_) => ("Enter", " choose", "h", " close"),
         };
+        // Esc closes an open question; on a closed header it does nothing.
+        let esc_listed = !matches!(stop, QStop::Header) || open;
         if compact {
-            return vec![
+            let mut hints = vec![
                 key(" j/k"),
                 Span::raw(" move "),
                 key("n/N"),
@@ -1275,15 +1277,19 @@ fn footer_hints(compact: bool, stop: Option<QStop>, open: bool) -> Vec<Span<'sta
                 Span::raw(format!("{second_words} ")),
                 key("o"),
                 Span::raw(" link "),
-                key("Esc"),
-                Span::raw(" close "),
+            ];
+            if esc_listed {
+                hints.extend([key("Esc"), Span::raw(" close ")]);
+            }
+            hints.extend([
                 key("^L"),
                 Span::raw(" retry "),
                 key("^Q"),
                 Span::raw(" quit "),
-            ];
+            ]);
+            return hints;
         }
-        return vec![
+        let mut hints = vec![
             label(" QUESTION  "),
             key("j/k"),
             Span::raw(" move  "),
@@ -1295,13 +1301,17 @@ fn footer_hints(compact: bool, stop: Option<QStop>, open: bool) -> Vec<Span<'sta
             Span::raw(format!("{second_words}  ")),
             key("o"),
             Span::raw(" open link  "),
-            key("Esc"),
-            Span::raw(" close  "),
+        ];
+        if esc_listed {
+            hints.extend([key("Esc"), Span::raw(" close  ")]);
+        }
+        hints.extend([
             key("^L"),
             Span::raw(" retry  "),
             key("^Q"),
             Span::raw(" quit "),
-        ];
+        ]);
+        return hints;
     }
     if compact {
         return vec![
@@ -3779,6 +3789,16 @@ mod tests {
     ];
 
     #[test]
+    fn a_closed_header_footer_does_not_list_esc() {
+        for compact in [false, true] {
+            let closed = hint_text(compact, Some(QStop::Header), false);
+            assert!(!closed.contains("Esc"), "{closed}");
+            let open = hint_text(compact, Some(QStop::Header), true);
+            assert!(open.contains("Esc"), "{open}");
+        }
+    }
+
+    #[test]
     fn agent_row_footer_is_the_list_hints_without_tab() {
         for compact in [false, true] {
             let text = hint_text(compact, None, false);
@@ -3823,10 +3843,15 @@ mod tests {
             );
             assert!(action.contains("Enter"), "{action}");
             assert!(!header.contains("Space") && !action.contains("Space"));
+            assert!(!closed.contains("Esc"), "{closed}");
             for text in [&closed, &header, &option, &action] {
-                for key in ["j/k", "n/N", "o", "Esc", "^L", "^Q"] {
+                for key in ["j/k", "n/N", "o", "^L", "^Q"] {
                     assert!(text.contains(key), "{key} missing: {text}");
                 }
+                assert!(
+                    std::ptr::eq(text, &closed) || text.contains("Esc"),
+                    "{text}"
+                );
                 assert!(
                     !text.contains("f search") && !text.contains("talk now"),
                     "{text}"
@@ -4024,6 +4049,24 @@ mod tests {
                 "Text field, search, palette, note",
             ]
         );
+        // The Option row's cells for Space, Enter, h and l.
+        let row_of = |key: &str| -> Vec<String> {
+            keys_section
+                .lines()
+                .find(|line| line.starts_with(&format!("| {key} |")))
+                .map(|line| line.split('|').map(|c| c.trim().to_string()).collect())
+                .unwrap_or_default()
+        };
+        assert_eq!(
+            row_of("Space")[4],
+            "Pick the option; a free option opens its field"
+        );
+        assert_eq!(row_of("Enter")[4], "Nothing");
+        assert_eq!(
+            row_of("`h` / ←")[4],
+            "Close the question, cursor to its header"
+        );
+        assert_eq!(row_of("`l` / →")[4], "Nothing");
         // What the question rows' footers and held keys say is in the README.
         for says in [
             "▸ 2 questions waiting",
