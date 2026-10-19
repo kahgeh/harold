@@ -141,6 +141,7 @@ enum Part {
 fn fit_question_lines(view: &BlockView, width: u16, room: u16) -> (Vec<Line<'static>>, u16) {
     let mut parts = question_lines(view);
     let inner_width = width.saturating_sub(2);
+    narrow_summary_hint(view, &mut parts, usize::from(inner_width));
     let limit = usize::from(room.min(QUESTION_BLOCK_MAX).saturating_sub(2));
     let height = |parts: &[(Part, Line<'static>)]| {
         parts
@@ -160,6 +161,22 @@ fn fit_question_lines(view: &BlockView, width: u16, room: u16) -> (Vec<Line<'sta
     let lines: Vec<Line<'static>> = parts.into_iter().map(|(_, line)| line).collect();
     let content = measured_wrapped_height(&lines, inner_width).min(limit);
     (lines, u16::try_from(content + 2).unwrap_or(u16::MAX))
+}
+
+/// The summary hint without its words, for a pane too narrow for it: the keys stay,
+/// `s` among them.
+const NARROW_SUMMARY_HINT: &str = "enter · s · h";
+
+/// Swaps the summary's hint for the one without words when the full hint would wrap.
+fn narrow_summary_hint(view: &BlockView, parts: &mut [(Part, Line<'static>)], width: usize) {
+    if view.mode != Mode::Summary {
+        return;
+    }
+    for (part, line) in parts.iter_mut() {
+        if *part == Part::Hint && line.width() > width {
+            *line = Line::styled(NARROW_SUMMARY_HINT, Style::default().fg(MUTED));
+        }
+    }
 }
 
 /// Keeps as many option and action rows around the highlighted one as fit in
@@ -298,7 +315,16 @@ fn question_lines(view: &BlockView) -> Vec<(Part, Line<'static>)> {
             for line in &view.summary {
                 lines.push((Part::Body, Line::styled(line.clone(), ink)));
             }
-            lines.push((Part::Hint, Line::styled("enter record · esc back", muted)));
+            let (mark, hint) = if view.send_now {
+                (
+                    "yes   (s to unmark)",
+                    "enter record · s don't send now · h back",
+                )
+            } else {
+                ("no    (s to mark)", "enter record · s send now · h back")
+            };
+            lines.push((Part::Body, Line::styled(format!("send now   {mark}"), ink)));
+            lines.push((Part::Hint, Line::styled(hint, muted)));
         }
         Mode::Note { kind, text } => {
             let label = match kind {
@@ -3690,7 +3716,8 @@ mod tests {
         app.handle_key(KeyCode::Enter);
         let lines = rendered_lines(&app, 140, 38, 100_000);
         row_with(&lines, "Which protocol? — libSQL's Hrana");
-        row_with(&lines, "enter record · esc back");
+        row_with(&lines, "send now   no    (s to mark)");
+        row_with(&lines, "enter record · s send now · h back");
 
         app.handle_key(KeyCode::Esc);
         open_revise_note(&mut app);
@@ -3699,6 +3726,48 @@ mod tests {
         }
         let lines = rendered_lines(&app, 140, 38, 100_000);
         row_with(&lines, "revise: bigger");
+    }
+
+    #[test]
+    fn s_marks_the_summary_and_the_hint_follows() {
+        let mut app = question_app(true);
+        app.handle_key(KeyCode::Enter);
+        app.handle_key(KeyCode::Char('s'));
+        let lines = rendered_lines(&app, 140, 38, 100_000);
+        row_with(&lines, "send now   yes   (s to unmark)");
+        row_with(&lines, "enter record · s don't send now · h back");
+        assert!(!lines.contains("send now   no"), "{lines}");
+    }
+
+    #[test]
+    fn the_summary_row_and_hint_at_three_widths() {
+        let mut app = question_app(true);
+        app.handle_key(KeyCode::Enter);
+        for marked in [false, true] {
+            if marked {
+                app.handle_key(KeyCode::Char('s'));
+            }
+            for width in [140, 84, 60] {
+                let lines = rendered_lines(&app, width, 38, 100_000);
+                let shown: Vec<&str> = lines
+                    .lines()
+                    .filter(|line| line.contains("send now") || line.contains("enter"))
+                    .map(str::trim_end)
+                    .collect();
+                println!("marked={marked} width={width}\n{}\n", shown.join("\n"));
+            }
+        }
+        // 60 columns keeps the words; a pane too narrow for them keeps `s`.
+        let lines = rendered_lines(&app, 60, 38, 100_000);
+        row_with(&lines, "enter record · s don't send now · h back");
+        let (view, narrow) = (app.questions.view().unwrap(), 20);
+        let (lines, _) = super::fit_question_lines(&view, narrow, 30);
+        let hint: String = lines
+            .iter()
+            .map(|line| line.to_string())
+            .find(|text| text.starts_with("enter"))
+            .unwrap();
+        assert!(hint.contains(" s "), "{hint}");
     }
 
     #[test]

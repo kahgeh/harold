@@ -2413,6 +2413,7 @@ mod tests {
                     text: String::new(),
                 }],
                 note: String::new(),
+                send_now: false,
             }]
         );
         assert!(!core.app.questions.is_visible());

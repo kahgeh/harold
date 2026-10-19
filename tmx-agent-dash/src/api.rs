@@ -282,22 +282,7 @@ impl SourceStream {
         let Some(mut client) = self.questions.clone() else {
             return SendResult::Unavailable;
         };
-        let request = AnswerQuestionRequest {
-            id: out.id.clone(),
-            version: out.version,
-            kind: proto_answer_kind(out.kind) as i32,
-            picks: out
-                .picks
-                .iter()
-                .map(|pick| Pick {
-                    decision: pick.decision,
-                    key: pick.key.clone(),
-                    text: pick.text.clone(),
-                })
-                .collect(),
-            note: out.note.clone(),
-            send_now: false,
-        };
+        let request = answer_request(out);
         match tokio::time::timeout(VOICE_REQUEST_TIMEOUT, client.answer_question(request)).await {
             Ok(result) => answer_send_result(result.map(|_| ())),
             Err(_) => SendResult::Unavailable,
@@ -412,6 +397,25 @@ pub(crate) fn answer_send_result(result: Result<(), tonic::Status>) -> SendResul
         (tonic::Code::FailedPrecondition, "version_changed") => SendResult::VersionChanged,
         (tonic::Code::FailedPrecondition, "not_waiting") => SendResult::NotWaiting,
         _ => SendResult::Unavailable,
+    }
+}
+
+fn answer_request(out: &Outgoing) -> AnswerQuestionRequest {
+    AnswerQuestionRequest {
+        id: out.id.clone(),
+        version: out.version,
+        kind: proto_answer_kind(out.kind) as i32,
+        picks: out
+            .picks
+            .iter()
+            .map(|pick| Pick {
+                decision: pick.decision,
+                key: pick.key.clone(),
+                text: pick.text.clone(),
+            })
+            .collect(),
+        note: out.note.clone(),
+        send_now: out.send_now,
     }
 }
 
@@ -1460,6 +1464,21 @@ mod question_tests {
                 SendResult::Unavailable,
                 "{status:?}"
             );
+        }
+    }
+
+    #[test]
+    fn the_answer_request_carries_send_now() {
+        for send_now in [false, true] {
+            let out = crate::questions::Outgoing {
+                id: "Q1".into(),
+                version: 2,
+                kind: crate::questions::AnswerKind::Answer,
+                picks: vec![],
+                note: String::new(),
+                send_now,
+            };
+            assert_eq!(super::answer_request(&out).send_now, send_now);
         }
     }
 }

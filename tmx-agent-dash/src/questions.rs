@@ -75,6 +75,8 @@ pub struct Outgoing {
     pub kind: AnswerKind,
     pub picks: Vec<PickView>,
     pub note: String,
+    /// The summary's "send now" mark; a note answer is always unmarked.
+    pub send_now: bool,
 }
 
 /// What a note is for.
@@ -136,6 +138,8 @@ pub struct BlockView {
     pub picks: Vec<String>,
     /// One `<ask> — <label>` line per picked decision.
     pub summary: Vec<String>,
+    /// The summary's "send now" mark.
+    pub send_now: bool,
     pub notice: Option<String>,
 }
 
@@ -148,6 +152,7 @@ struct Kept {
     highlights: Vec<usize>,
     /// Choosing or Summary.
     mode: Mode,
+    send_now: bool,
 }
 
 /// The block's state.
@@ -163,6 +168,9 @@ pub struct QuestionBlock {
     /// Each decision's highlighted row, kept while moving between decisions.
     highlights: Vec<usize>,
     mode: Mode,
+    /// The "send now" mark for the answer on the summary. It is kept through going back
+    /// and returning, and goes with a restart or the recorded answer.
+    send_now: bool,
     /// The walks through listed questions other than the current one, by id. One goes
     /// when its question is no longer listed or is listed at a higher version.
     kept: BTreeMap<String, Kept>,
@@ -307,6 +315,7 @@ impl QuestionBlock {
             SendResult::Recorded => {
                 self.queue.questions.retain(|q| q.id != id);
                 self.queue.waiting = self.queue.waiting.saturating_sub(1);
+                self.send_now = false;
                 self.clear_notice();
                 self.select_first();
             }
@@ -344,6 +353,7 @@ impl QuestionBlock {
                 mode: Mode::Choosing,
                 picks: vec![],
                 summary: vec![],
+                send_now: false,
                 notice: self.notice.clone(),
             });
         };
@@ -373,6 +383,7 @@ impl QuestionBlock {
             mode: self.mode.clone(),
             picks,
             summary,
+            send_now: self.send_now,
             notice: self.notice.clone(),
         })
     }
@@ -499,11 +510,13 @@ impl QuestionBlock {
                     kind,
                     picks: self.picks.clone(),
                     note,
+                    send_now: self.send_now,
                 });
             }
             // The summary stands on the last decision, so going back shows it again.
             KeyCode::Char('h') | KeyCode::Left | KeyCode::Esc => self.mode = Mode::Choosing,
             KeyCode::Char('o') if is_web_link(&q.link) => return BlockEffect::OpenLink(q.link),
+            KeyCode::Char('s') => self.send_now = !self.send_now,
             KeyCode::Char('n') => self.step(1),
             KeyCode::Char('N') => self.step(-1),
             _ => {}
@@ -570,6 +583,7 @@ impl QuestionBlock {
                             kind,
                             picks: self.picks.clone(),
                             note: typed,
+                            send_now: false,
                         });
                     }
                 }
@@ -659,6 +673,7 @@ impl QuestionBlock {
     fn restart(&mut self) {
         self.decision = 0;
         self.picks.clear();
+        self.send_now = false;
         self.mode = Mode::Choosing;
         self.highlights = self.question().map_or(vec![], |q| {
             q.decisions
@@ -706,6 +721,7 @@ impl QuestionBlock {
                 picks: std::mem::take(&mut self.picks),
                 highlights: std::mem::take(&mut self.highlights),
                 mode,
+                send_now: self.send_now,
             };
             self.kept.insert(current, kept);
         }
@@ -717,6 +733,7 @@ impl QuestionBlock {
                 self.picks = kept.picks;
                 self.highlights = kept.highlights;
                 self.mode = kept.mode;
+                self.send_now = kept.send_now;
             }
             _ => self.restart(),
         }
@@ -956,6 +973,7 @@ mod tests {
                 kind: AnswerKind::Revise,
                 picks: vec![],
                 note: "fix".into(),
+                send_now: false,
             })
         );
 
@@ -979,6 +997,7 @@ mod tests {
                 kind: AnswerKind::Reject,
                 picks: vec![pick(0, "b", "")],
                 note: "fix".into(),
+                send_now: false,
             })
         );
 
@@ -1135,6 +1154,7 @@ mod tests {
                 kind: AnswerKind::Answer,
                 picks: vec![pick(0, "b", ""), pick(1, "a", "")],
                 note: String::new(),
+                send_now: false,
             })
         );
     }
@@ -1180,6 +1200,7 @@ mod tests {
                 kind: AnswerKind::FreeText,
                 picks: vec![pick(0, "z", "my words")],
                 note: "my words".into(),
+                send_now: false,
             })
         );
 
@@ -1215,6 +1236,7 @@ mod tests {
                 kind: AnswerKind::FreeText,
                 picks: vec![pick(0, "z", "mine"), pick(1, "b", "")],
                 note: "mine".into(),
+                send_now: false,
             })
         );
     }
@@ -1567,5 +1589,126 @@ mod tests {
         assert_eq!(v.id, "Q1");
         assert_eq!(v.ask.as_deref(), Some("Ask 2?"));
         assert_eq!(v.picks, vec!["label b".to_string()]);
+    }
+
+    fn at_summary(version: u32) -> QuestionBlock {
+        let mut b = block(vec![question("Q1", version, 1)]);
+        press(&mut b, KeyCode::Enter);
+        assert_eq!(b.view().unwrap().mode, Mode::Summary);
+        b
+    }
+
+    fn sent_send_now(effect: BlockEffect) -> bool {
+        match effect {
+            BlockEffect::Send(out) => out.send_now,
+            other => panic!("not a send: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn s_toggles_send_now_on_the_summary() {
+        let mut b = at_summary(1);
+        assert!(!b.view().unwrap().send_now);
+        press(&mut b, KeyCode::Char('s'));
+        assert!(b.view().unwrap().send_now);
+        press(&mut b, KeyCode::Char('s'));
+        assert!(!b.view().unwrap().send_now);
+    }
+
+    #[test]
+    fn the_mark_is_kept_through_h_and_back() {
+        let mut b = at_summary(1);
+        press(&mut b, KeyCode::Char('s'));
+        press(&mut b, KeyCode::Char('h'));
+        assert_eq!(b.view().unwrap().mode, Mode::Choosing);
+        press(&mut b, KeyCode::Enter);
+        assert_eq!(b.view().unwrap().mode, Mode::Summary);
+        assert!(b.view().unwrap().send_now);
+        press(&mut b, KeyCode::Esc);
+        press(&mut b, KeyCode::Enter);
+        assert!(b.view().unwrap().send_now);
+    }
+
+    #[test]
+    fn the_mark_is_kept_while_another_question_is_shown() {
+        let mut b = block(vec![question("Q1", 1, 1), question("Q2", 1, 1)]);
+        press(&mut b, KeyCode::Enter);
+        press(&mut b, KeyCode::Char('s'));
+        press(&mut b, KeyCode::Char('n'));
+        assert!(!b.view().unwrap().send_now);
+        press(&mut b, KeyCode::Char('N'));
+        assert!(b.view().unwrap().send_now);
+    }
+
+    #[test]
+    fn enter_sends_the_answer_with_send_now() {
+        let mut b = at_summary(1);
+        press(&mut b, KeyCode::Char('s'));
+        assert!(sent_send_now(press(&mut b, KeyCode::Enter)));
+        let mut b = at_summary(1);
+        assert!(!sent_send_now(press(&mut b, KeyCode::Enter)));
+    }
+
+    #[test]
+    fn the_mark_starts_at_no_on_every_summary() {
+        // After the answer is recorded, the next question's summary starts unmarked.
+        let mut b = block(vec![question("Q1", 1, 1), question("Q2", 1, 1)]);
+        press(&mut b, KeyCode::Enter);
+        press(&mut b, KeyCode::Char('s'));
+        b.sent("Q1", SendResult::Recorded);
+        assert_eq!(b.view().unwrap().id, "Q2");
+        press(&mut b, KeyCode::Enter);
+        assert_eq!(b.view().unwrap().mode, Mode::Summary);
+        assert!(!b.view().unwrap().send_now);
+
+        // A higher version restarts the walk, and the mark with it.
+        let mut b = at_summary(1);
+        press(&mut b, KeyCode::Char('s'));
+        b.reconcile(Queue {
+            questions: vec![question("Q1", 2, 1)],
+            ..Queue::default()
+        });
+        assert!(!b.view().unwrap().send_now);
+        press(&mut b, KeyCode::Enter);
+        assert!(!b.view().unwrap().send_now);
+
+        // So does a version the send was refused for.
+        let mut b = at_summary(1);
+        press(&mut b, KeyCode::Char('s'));
+        b.sent("Q1", SendResult::VersionChanged);
+        press(&mut b, KeyCode::Enter);
+        assert!(!b.view().unwrap().send_now);
+    }
+
+    #[test]
+    fn choosing_ignores_s() {
+        let mut b = block(vec![question("Q1", 1, 1)]);
+        press(&mut b, KeyCode::Char('s'));
+        assert!(!b.view().unwrap().send_now);
+        press(&mut b, KeyCode::Enter);
+        assert!(!b.view().unwrap().send_now);
+    }
+
+    #[test]
+    fn revise_and_reject_notes_type_s_and_send_unmarked() {
+        for kind in [NoteKind::Revise, NoteKind::Reject] {
+            let mut b = at_summary(1);
+            press(&mut b, KeyCode::Char('s'));
+            press(&mut b, KeyCode::Char('h'));
+            b.open_note(kind);
+            press(&mut b, KeyCode::Char('s'));
+            press(&mut b, KeyCode::Char('s'));
+            let Mode::Note { text, .. } = b.view().unwrap().mode else {
+                panic!("not in a note");
+            };
+            assert_eq!(text, "ss");
+            match press(&mut b, KeyCode::Enter) {
+                BlockEffect::Send(out) => {
+                    assert_eq!(out.note, "ss");
+                    assert!(!out.send_now);
+                }
+                other => panic!("not a send: {other:?}"),
+            }
+        }
     }
 }
