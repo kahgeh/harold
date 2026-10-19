@@ -27,7 +27,7 @@ The installer writes one launchd job definition, `service.plist`, and puts it in
 | `haroldctl` / `service.py` | Serialize control operations and manage the exact launchd service |
 | gRPC server | Accept hook reports and stream current agent snapshots |
 | Agent monitor | Resolve agent identity and record lifecycle/screen observations |
-| Event handler | Project state, stage delivery work, and dispatch notifications/replies |
+| Event handler | Project state, stage delivery work, and deliver turn-end updates and replies |
 | Channel listener | Collect incoming messages for the event stream |
 
 The runtime components share Harold's store and shutdown signal. See [Harold Architecture](../../explanations/architecture.md) for their data flow.
@@ -78,7 +78,7 @@ Harold keeps everything it records in one folder: `<prefix>/harold/data/store/` 
 | `log/` | The event stream. Each event, such as a reply arriving or an agent finishing a turn, is one record in an OpenData log under the key `harold/main`. Its value is a JSON envelope with the event's `id`, `type`, `payload`, `created_at_ms`, `trace_id`, `span_id` and `actor`. The log stores its data with SlateDB on the local filesystem, under the prefix `harold` inside `log/`. Harold sets no retention, so the log keeps every event. |
 | `log-settings.toml` | The log's SlateDB settings. Harold writes this file each time it opens the store, with no settings in it, so SlateDB's defaults apply. Neither an edit to this file nor a `SlateDb.toml` in the working directory changes the log. |
 | `harold.lock` | A lock Harold holds while it runs. A second Harold started on the same folder stops at start with `store is in use by another Harold`. macOS releases the lock when Harold exits, including when it is killed. |
-| `harold-state.db` and `harold-state.db-wal` | The state database, opened with turso 0.8.3. Its five data tables hold the agent panes and monitor health, the delivery outbox, the settings (mute, pause and each timed prompt's last day), and the cursor: the version of the last event projected into these tables. |
+| `harold-state.db` and `harold-state.db-wal` | The state database, opened with turso 0.8.3. Its five data tables hold the agent panes and agent monitor health, the delivery outbox, the settings (mute, pause and each timed prompt's last day), and the cursor: the version of the last event projected into these tables. |
 
 An event's version is its log sequence number plus one, so the first event in an empty store is version 1 and version 0 means no event yet. Versions only rise, but they have gaps, because the log reserves sequence numbers in blocks each time it opens: in a store whose first event is version 1, the first event after a restart is version 4097. `harold --check-ready` prints `through_event_version` in these numbers.
 
@@ -99,7 +99,7 @@ Each event is projected once and has one row in the delivery outbox. Harold proj
 
 Harold refuses to start on a folder whose `harold-state.db` cursor is past every version its `log/` can hold, as after `log/` is deleted, or replaced with an older log or another folder's log. It stops with `harold-state.db has read the event log up to version <cursor>, but the log in <folder>/log ends before it; the store folder is inconsistent`.
 
-A folder with a log and no `harold-state.db` opens, and Harold builds a new `harold-state.db` from every event in the log. The new delivery outbox has nothing marked delivered, so deleting `harold-state.db` while keeping `log/` queues every stored reply, turn end, message for the away device and spoken line for delivery again.
+A folder with a log and no `harold-state.db` opens, and Harold builds a new `harold-state.db` from every event in the log. The new delivery outbox has nothing marked delivered, so deleting `harold-state.db` while keeping `log/` queues every stored reply, turn end, agent message and spoken line for delivery again.
 
 A record whose value is not a Harold envelope does not stop the events after it. Harold reads such a record as an event of type `UndecodableEvent` and logs `stored record is not a Harold event`. The event goes to the delivery outbox like any other. The event handler has no delivery for that type, so it marks the event permanently undeliverable and logs `event is permanently undeliverable; continuing`. The events after it are projected and delivered as usual.
 
@@ -157,7 +157,7 @@ For the default installation:
 | `ensure` | `bootstrap` and `kickstart` only when needed | Starts Harold unless `stop` disabled it or it gave up after a crash loop; then prints why and exits 1 |
 | `status` | `print`, `print-disabled` | Prints JSON with `ready`, `pid`, `grpc_addr` and `autostart`: `on`, `off (stopped with haroldctl stop)` or `off (gave up after a crash loop)` |
 
-`start` is idempotent. It succeeds only when the launchd service's PID owns the configured listening socket and a read-only gRPC request receives the initial `WatchAgentStates` snapshot. It does not use `TurnComplete` or notification diagnostics as a probe. An unrelated listener is an error, not a process to kill. A start that fails readiness unloads the job and leaves it enabled.
+`start` is idempotent. It succeeds only when the launchd service's PID owns the configured listening socket and a read-only gRPC request receives the initial `WatchAgentStates` snapshot. It does not use `TurnComplete` or the turn-end update diagnostics as a probe. An unrelated listener is an error, not a process to kill. A start that fails readiness unloads the job and leaves it enabled.
 
 Hooks call `ensure` before sending a completion, so a Harold stopped with `haroldctl stop` stays off and the hook skips its report. They use the managed endpoint and do not spawn a daemon directly.
 
@@ -208,7 +208,7 @@ To roll back, run the commands in the archived bundle's `ROLLBACK.md`. Before th
 
 ## Shutdown
 
-`haroldctl stop` disables the job, unloads it, and waits for its process to stop within a bounded period. A clean shutdown exits 0 and marks the crash file `clean`. Within Harold, SIGINT or SIGTERM closes the shared shutdown signal, ends snapshot streams, drains in-flight RPCs, and joins the event handler and listener. The monitor has a bounded shutdown deadline.
+`haroldctl stop` disables the job, unloads it, and waits for its process to stop within a bounded period. A clean shutdown exits 0 and marks the crash file `clean`. Within Harold, SIGINT or SIGTERM closes the shared shutdown signal, ends snapshot streams, drains in-flight RPCs, and joins the event handler and listener. The agent monitor has a bounded shutdown deadline.
 
 An RPC that appends after the handler has stopped remains durable and is projected at the next start. Event-stream and state-database writes commit as operations complete; shutdown does not require a separate final checkpoint.
 
@@ -222,17 +222,17 @@ An RPC that appends after the handler has stopped remains durable and is project
 
 These direct commands use the invoking process's normal configuration environment. `haroldctl status` runs the readiness check with the installed environment and adds process ownership verification.
 
-## Notification diagnostics
+## Turn-end update diagnostics
 
 `harold --diagnostics [--delay N]` explicitly tests screen-lock detection, TTS, and the selected away channel. It can speak or send a message. It runs as its own process and does not consult the messaging pause, so it sends on the away channel even while messaging is paused. A bare `--delay` defaults to ten seconds, allowing time to lock the screen.
 
-Use diagnostics only when intentionally testing notification delivery. See [installation and setup](../../how-tos/setup.md) for the manual macOS permissions and provider-hook steps that remain after the service is ready.
+Use diagnostics only when intentionally testing turn-end update delivery. See [installation and setup](../../how-tos/setup.md) for the manual macOS permissions and provider-hook steps that remain after the service is ready.
 
 ## Pausing messaging
 
 Harold has a messaging pause for the away channel. While messaging is paused the daemon keeps running, and so do the agent monitor, the dash stream and at-desk TTS, but nothing moves over iMessage or Telegram:
 
-- no away notification, confirmation or error reply is sent;
+- no away turn-end update, confirmation or error reply is sent;
 - no inbound message is routed to a pane, including messages already waiting in the delivery outbox;
 - messages that arrive are discarded, not queued. The listener still moves its cursor past them, so nothing is replayed on resume;
 - `harold send-message-to-away-device` is refused: it prints `messaging is paused` and exits 1. A message the daemon stored before the pause is skipped and is not sent on resume.

@@ -1,9 +1,9 @@
 # Tmux Agent Dash
 
 `tmx-agent-dash` is a keyboard-driven terminal view of the agent-pane projection
-published by Harold. It shows transport and monitor health separately, keeps the
+published by Harold. It shows transport and agent monitor health separately, keeps the
 last committed rows visible through degraded or stale periods, and can switch
-the invoking tmux client to the selected pane.
+the invoking tmux client to the pane under the cursor.
 
 ## Prerequisites
 
@@ -73,7 +73,7 @@ the key does nothing there, so a key never means two things.
 | `l` / → | Nothing | Open the question | Nothing | Nothing | Types `l` |
 | `h` / ← | Nothing | Close the question, when open | Close the question, cursor to its header | Same | Types `h` |
 | Space | Nothing | Nothing | Pick the option; a free option opens its field | Nothing | Types a space |
-| Enter | Switch the invoking tmux client to the selected pane | Open or close the question | Nothing | `send` sends the answer at once; `later` sets the question aside; `revise…` or `reject…` opens a note | Search: keep the query · palette: run · field: keep the text and pick the option · note: send it |
+| Enter | Switch the invoking tmux client to the pane under the cursor | Open or close the question | Nothing | `send` sends the answer at once; `later` sets the question aside; `revise…` or `reject…` opens a note | Search: keep the query · palette: run · field: keep the text and pick the option · note: send it |
 | Esc | Clear an accepted filter, or nothing | Close the question, when open | Close the question, cursor to its header | Same | Search: clear the query and leave · palette: close · field or note: discard and leave |
 | `n` / `N` | Next or previous waiting agent (wraps) | Next or previous waiting question (wraps) | Same | Same | Types |
 | `o` | Nothing | Open the question's link, if it is `http://` or `https://` | Same | Same | Types |
@@ -92,7 +92,7 @@ the key does nothing there, so a key never means two things.
   printable key, `h`, `j`, `k`, `l`, `n`, `N`, `r`, `x`, `o` and `q` included, types
   itself, and `Backspace` removes the last Unicode scalar value. Outside the text
   modes, a key not in the table, such as `r`, `x`, `s` or the Tab key, does nothing.
-- **`c` and `t`** act only while the chief's row is selected. `c` starts a call when
+- **`c` and `t`** act only while the cursor is on the chief's row. `c` starts a call when
   none is on and the voice is not muted, and ends one during a call. `t` asks to talk
   now while the call is speaking.
 - **The palette** filters its commands as you type; ↑/↓ choose and Enter runs one,
@@ -101,8 +101,8 @@ the key does nothing there, so a key never means two things.
   the list's keys (`j/k`, `n/N`, `f`, `/`, `Enter`, `c`, `t`, `Esc`, `^L`, `q`). On a
   question row, under a `QUESTION` label, it lists `j/k` move, `n/N` question, `o`
   open link, `^L` retry and `^Q` quit, and `Esc` close on every row except a closed
-  header, where `Esc` does nothing. Two keys depend on the row: `l` and `Enter` open
-  a closed header, `h` and `Enter` close an open header, `Space` picks and `h`
+  row, where `Esc` does nothing. Two keys depend on the row: `l` and `Enter` open
+  a closed row, `h` and `Enter` close an open question header, `Space` picks and `h`
   closes on an option, `Enter` chooses and `h` closes on an action. A narrow terminal
   shortens the hints (`link` for `open link`, no label), and below that puts the rest
   on a second line. While a note or an option's text field is open, every key types
@@ -190,12 +190,12 @@ An option's impact shows on the line below its label, dim; an option with no imp
 
 To answer, move to `send` and press `Enter`. The dash re-reads the questions first. The answer goes to Harold with every decision's pick, and Harold types it into the chief's pane at once. If a decision has no pick, nothing is sent and the cursor moves to that decision's first option. After a send, the next waiting question shows in its place, open, with the cursor on its header; with none left, the question rows go and the cursor moves to the chief's row.
 
-The other actions:
+The other action rows:
 
 - **later** sets the question aside, keeping its picks, and shows the next waiting one.
 - **revise…** opens a note saying what to change, and **reject…** a note saying why. `Enter` on a note sends it as a revise or reject answer, with the picks made so far and at once like `send`; a blank note is not sent. `Esc` discards the note.
 
-`n` and `N` move to the next or previous waiting question, wrapping over the listed order, set-aside questions included. With one question listed they do nothing. The picks of the question you leave are kept while the dash runs, as are the picks of a question set aside with **later** and of a closed question. Kept picks belong to the version of the question they were made on: when Harold lists a higher version, or refuses an answer because the version changed, they are dropped. Kept picks of a question that is answered or dismissed are gone.
+`n` and `N` move to the next or previous waiting question, wrapping over the listed order, set-aside questions included. With one question listed they do nothing. The picks of the question you leave are kept while the dash runs, as are the picks of a question set aside with **later** and of a closed question. Kept picks belong to the question version they were made on: when Harold lists a higher question version, or refuses an answer because the question version changed, they are dropped. Kept picks of a question that is answered or dismissed are gone.
 
 Questions set aside come back after a line is typed with no question waiting, or when a **later** leaves none waiting and no answer unsent.
 
@@ -214,7 +214,7 @@ A notice shows under the question's rows until the next key:
 - `<id> dismissed: <reason>`: the chief withdrew the question, with its reason (`withdrawn` when none is known). The rows move to the next question.
 - `Harold can't save answers right now`: Harold could not store the answer or set the question aside. Your picks stay; try again.
 
-When no question is left, a notice stands alone as one row. It goes at the next key, and otherwise after the next read that still finds no question, a few seconds on. Then the rows go. That key also does what it does on the list. A key that would still reach a question that just changed is dropped, since it was typed for what was there before, so `Enter` on `send` never sends picks made on an older version.
+When no question is left, a notice stands alone as one row. It goes at the next key, and otherwise after the next read that still finds no question, a few seconds on. Then the rows go. That key also does what it does on the list. A key that would still reach a question that just changed is dropped, since it was typed for what was there before, so `Enter` on `send` never sends picks made on an older question version.
 
 ### Reconnects
 
@@ -232,18 +232,18 @@ Each row has Harold's latest classified agent state:
 - `IDLE` means Harold currently classifies the agent as waiting.
 - `UNKNOWN` means Harold cannot yet classify the agent conclusively.
 
-Transport and monitor health describe different system-level conditions:
+Transport and agent monitor health describe different system-level conditions:
 
 - `LIVE` means the Harold stream delivered the current accepted snapshot.
 - `CONNECTING` and `UNAVAILABLE` describe connection startup or retry.
 - `STALE` means the stream disconnected after a snapshot; the last committed
   rows remain visible and are labelled stale.
-- `MONITOR DEGRADED` takes precedence when any Harold monitor component is
+- `MONITOR DEGRADED` takes precedence when any Harold agent monitor component is
   degraded. The transport may still be live, and the last committed rows remain
   visible.
-- `MONITOR UNKNOWN` appears when there are no monitor observations, or when any
+- `MONITOR UNKNOWN` appears when there are no agent monitor observations, or when any
   component is unknown and none is degraded.
-- `MONITOR HEALTHY` requires one or more monitor observations with every
+- `MONITOR HEALTHY` requires one or more agent monitor observations with every
   component healthy.
 
 Rows are grouped by project (the first word of the tmux session name) and
@@ -252,16 +252,16 @@ number; state never changes a row's position. Each row shows the name (the
 window and pane number, such as `:1.2`, is added only when two names in a group collide, and a long name is
 truncated before that number, never the number itself; panes of different
 sessions in one group are told apart by the session's second word, or the full
-tmux target), and a provider tag: `cc` for Claude Code, `cx` for Codex, otherwise the
-first two letters of the provider name. The selected agent's detail panel still
-shows the full tmux target and working directory. Narrower terminals drop some
-footer hints (the long footer needs 127 columns and 24 rows; below that it switches to a shorter set, on two lines when one cannot hold it). Selection follows a stable agent
+`session:window.pane` name), and a provider tag: `cc` for Claude Code, `cx` for Codex, otherwise the
+first two letters of the provider name. The detail panel for the agent under the cursor still
+shows the full `session:window.pane` name and working directory. Narrower terminals drop some
+footer hints (the long footer needs 127 columns and 24 rows; below that it switches to a shorter set, on two lines when one cannot hold it). The cursor follows a stable agent
 incarnation when possible. A restarted agent in the same pane is a new
-incarnation and does not inherit the old selection.
+incarnation and does not inherit the old cursor.
 
 ### Waiting agents
 
-Rows of waiting agents are marked with `◆`. `n` and `N` move the selection to the
+Rows of waiting agents are marked with `◆`. `n` and `N` move the cursor to the
 next or previous waiting agent, oldest first, and wrap around. If a search filter
 hides that agent, the filter is cleared.
 
@@ -292,7 +292,7 @@ No work summary reported
 ```
 
 The dash consumes only Harold's classified pane state and bounded work
-summary. Raw pane screen content and evidence provenance do not reach or appear
+work summary. Raw pane screen content and evidence provenance do not reach or appear
 in the dash.
 
 ## Troubleshooting
@@ -313,15 +313,15 @@ will show `NAVIGATION UNAVAILABLE`.
 
 ### Pane switching fails
 
-If the selected pane disappears or tmux rejects the switch, the dash keeps
-running, preserves its rows and selection, and shows a sanitized
-`NAVIGATION FAILED` status. Select another live row or wait for the next Harold
+If the pane under the cursor disappears or tmux rejects the switch, the dash keeps
+running, preserves its rows and cursor, and shows a sanitized
+`NAVIGATION FAILED` status. Move the cursor to another live row or wait for the next Harold
 snapshot.
 
 ### The layout is replaced by a resize message
 
 Resize the terminal to at least 60 columns by 18 rows. Wider and taller terminals
-add the selected agent's complete current-work detail when it fits without
+add the complete work summary detail of the agent under the cursor when it fits without
 clipping.
 
 ### Terminal shutdown

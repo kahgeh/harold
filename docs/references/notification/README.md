@@ -1,6 +1,6 @@
 # Notification
 
-Notification notifies the user of completed agent turns, via voice when at the desk or the configured away channel (iMessage or Telegram) when away.
+This reference covers the turn-end update: how Harold tells the user a turn ended, by voice when at the desk or the configured away channel (iMessage or Telegram) when away.
 
 ## Problem
 
@@ -8,7 +8,7 @@ AI agents finish turns silently. Without active monitoring you won't know a task
 
 ## Architecture
 
-Harold's event handler stages `TurnCompleted` events in its durable outbox and calls `notify()` in stream-version order. Successful deliveries and intentional skips are marked complete. TTS command, Telegram HTTP/configuration, and iMessage process failures remain pending and are tried again, after 1 second, then 2, 4, 8, 16 and 32 seconds, then 60 seconds before each of the last three tries. Meanwhile no later delivery is tried, so deliveries keep their order. The failures are counted with the delivery in the outbox, so a restart does not start the count again, though the first try after a restart comes at once. At the 10th failure Harold gives the delivery up: it is recorded as a terminal failure with its last error, Harold logs `delivery given up` (`outcome = given_up`, `reason = too_many_tries`, never the message or the error), and moves on to the next delivery at once. With the alert address on, Harold also types `harold alert: delivery-given-up firing` into the chief's pane; see [How an alert reaches the chief](../telemetry/README.md#how-an-alert-reaches-the-chief). Malformed payloads and unknown event types are recorded as terminal failures so one poison event cannot block later work. The notification path is chosen based on runtime checks: whether the completing pane's tmux session has an attached client, whether the completing pane is the one the user is looking at, and whether the screen is locked.
+Harold's event handler stages `TurnCompleted` events in its durable outbox and calls `notify()` in stream-version order. Successful deliveries and intentional skips are marked complete. TTS command, Telegram HTTP/configuration, and iMessage process failures remain pending and are tried again, after 1 second, then 2, 4, 8, 16 and 32 seconds, then 60 seconds before each of the last three tries. Meanwhile no later delivery is tried, so deliveries keep their order. The failures are counted with the delivery in the outbox, so a restart does not start the count again, though the first try after a restart comes at once. At the 10th failure Harold gives the delivery up: it is recorded as a terminal failure with its last error, Harold logs `delivery given up` (`outcome = given_up`, `reason = too_many_tries`, never the message or the error), and moves on to the next delivery at once. With the alert address on, Harold also types `harold alert: delivery-given-up firing` into the chief's pane; see [How an alert reaches the chief](../telemetry/README.md#how-an-alert-reaches-the-chief). Malformed payloads and unknown event types are recorded as terminal failures so one poison event cannot block later work. The path of the turn-end update is chosen based on runtime checks: whether the completing pane's tmux session has an attached client, whether the completing pane is the one the user is looking at, and whether the screen is locked.
 
 Summarisation uses different backends depending on the path:
 
@@ -78,7 +78,7 @@ Config keys (`[tts]`):
 
 `SetTtsMuted(muted)` turns the at-desk TTS channel off or on. The flag is stored as a `TtsMuteChanged` stream event and projected into the `settings` table, so it persists across daemon restarts until changed back. It is part of the agent-state snapshot (`tts_muted`), which is how `tmx-agent-dash` shows `VOICE ON` / `VOICE MUTED`.
 
-- Mute gates only the at-desk TTS channel. The delivery is recorded as an intentional skip. Away notifications (iMessage, Telegram) are unaffected; they have their own switch, described below.
+- Mute gates only the at-desk TTS channel. The delivery is recorded as an intentional skip. Turn-end updates to the away channel (iMessage, Telegram) are unaffected; they have their own switch, described below.
 - A `TurnCompleted` delivered in the same projection batch as a mute change observes the post-batch value.
 - Limitation: `SetTtsMuted` compares the requested value against the daemon's last published snapshot, so two opposite requests from a non-dash client within the projection window may drop the second. The dash always sends from confirmed state and is unaffected.
 
@@ -88,9 +88,9 @@ Config keys (`[tts]`):
 
 ## Away: iMessage or Telegram
 
-The away channel is selected by `[notify] away_channel` (`"imessage"` or `"telegram"`). Both channels share the same notification flow and prefix all outgoing messages with `🤖`. This serves two purposes:
+The away channel is selected by `[notify] away_channel` (`"imessage"` or `"telegram"`). Both channels share the same delivery flow and prefix all outgoing messages with `🤖`. This serves two purposes:
 
-- **Inbound filtering** — the listener skips messages starting with `🤖` so Harold doesn't route its own notifications back to agents as user replies
+- **Inbound filtering** — the listener skips messages starting with `🤖` so Harold doesn't route its own messages back to agents as user replies
 - **Visual distinction** — on your phone you can immediately tell which messages are from Harold vs from you
 
 ### Common steps (both channels)
@@ -100,7 +100,7 @@ The away channel is selected by `[notify] away_channel` (`"imessage"` or `"teleg
 3. Message assembled: `🤖 [<machine_name>/<pane_label>] <main body> (<main_context>)`. `machine_name` is this Mac's name, which defaults to the output of `hostname -s`.
 4. Trailing question (if present) sent as a second `🤖`-prefixed message, `🤖 <question>`, without a tag
 
-Confirmations and error replies carry the machine name too: `🤖 ✓ Delivered to [<machine_name>/<pane_label>]` and `🤖 [<machine_name>] <detail>`. The machine name tells you which Mac a notification came from and lets a reply reach that Mac. See [Several Macs](../inbound-message-routing/README.md#several-macs).
+Confirmations and error replies carry the machine name too: `🤖 ✓ Delivered to [<machine_name>/<pane_label>]` and `🤖 [<machine_name>] <detail>`. The machine name tells you which Mac a message came from and lets a reply reach that Mac. See [Several Macs](../inbound-message-routing/README.md#several-macs).
 
 ### iMessage-specific
 
@@ -116,7 +116,7 @@ Config keys (`[imessage]`):
 
 ### Telegram-specific
 
-5. Before the notification is sent, the Mac records which Mac sent the latest notification, so that a reply with no tag can be routed to it. The hub records itself as the latest notifier. A member calls `ReportNotification` on the hub with its machine name and the shared secret. A failed report is logged and the notification is still sent. On iMessage nothing is reported: the other Macs read the notification's row in `chat.db`.
+5. Before a message is sent, the Mac records which Mac sent the latest message, so that a reply with no tag can be routed to it. The hub records itself as the latest notifier. A member calls `ReportNotification` on the hub with its machine name and the shared secret. A failed report is logged and the message is still sent. On iMessage nothing is reported: the other Macs read the message's row in `chat.db`.
 6. Messages sent via Telegram Bot API `sendMessage` to the configured chat ID
 
 Config keys (`[telegram]`):
@@ -124,7 +124,7 @@ Config keys (`[telegram]`):
 | Key         | Description                                |
 | ----------- | ------------------------------------------ |
 | `bot_token` | Telegram bot token from @BotFather         |
-| `chat_id`   | Numeric chat ID for the notification chat  |
+| `chat_id`   | Numeric chat ID for the chat Harold sends to  |
 
 ## Updates Harold leaves out while you are away
 
@@ -189,7 +189,7 @@ The files are checked first, then the chief's folder. Harold writes each line at
 
 ### Where Harold looks for the files
 
-`<folder>` is the pane's folder, the working directory tmux reports for it (`pane_current_path`), when the agent monitor tracks the pane. A new pane has no folder until the monitor's next listing of tmux panes, and a failed listing does not clear the folders: Harold keeps those of the last listing that worked and uses them for this rule.
+`<folder>` is the pane's folder, the working directory tmux reports for it (`pane_current_path`), when the agent monitor tracks the pane. A new pane has no folder until the agent monitor's next listing of tmux panes, and a failed listing does not clear the folders: Harold keeps those of the last listing that worked and uses them for this rule.
 
 For a pane with no folder, Harold looks in the places a pod writes. The registry is the file named by `[telemetry] pod_registry`. Harold reads the base checkout of each product in it, and looks at that checkout's `.superpowers/pod/agent-panes` and at the `.superpowers/baton/agent-pane` of every folder beside the base checkout, where baton puts its worktrees. These are plain file reads on the turn-end path, with no git command. With no registry set, or one Harold cannot read, Harold checks only the pane's own folder, and a pane with no folder is spoken.
 
@@ -210,19 +210,19 @@ The rule applies only with the screen unlocked. Updates to the phone while away 
 
 ## Messages an agent sends
 
-A notification is Harold's summary of a finished turn. An agent can also send the user text of its own, at a moment it chooses, with one command:
+A turn-end update is Harold's summary of a finished turn. An agent can also send the user text of its own, at a moment it chooses, with one command:
 
 ```
 ~/bin/harold/harold send-message-to-away-device --src-id "$TMUX_PANE" 'Pod 3 is blocked on a merge conflict in store.rs'
 ```
 
-The phone shows `🤖 [<machine_name>/<pane_label>] Pod 3 is blocked on a merge conflict in store.rs`. A reply to it is routed like a reply to a notification: an untagged reply goes back to the pane that sent the message.
+The phone shows `🤖 [<machine_name>/<pane_label>] Pod 3 is blocked on a merge conflict in store.rs`. A reply to it is routed like a reply to a turn-end update: an untagged reply goes back to the pane that sent the message.
 
-The command calls the daemon's `SendMessageToAwayDevice` RPC and waits up to 3 seconds. The daemon makes the text one line, checks that it has 1 to 1,000 characters, that messaging is not paused and that the pane hosts an agent the monitor tracks, and then stores an `AwayMessageRequested` event. The command exits 0 once the event is stored, which is before the phone has the message. Otherwise it prints one line on standard error and exits 1. The event handler takes the event from the delivery outbox in stream-version order and sends it through the away channel. Before it sends, the handler checks the messaging pause and then the folder rule in [From agents outside one folder](#from-agents-outside-one-folder). A message that rule drops is never sent, and its command has already exited 0.
+The command calls the daemon's `SendMessageToAwayDevice` RPC and waits up to 3 seconds. The daemon makes the text one line, checks that it has 1 to 1,000 characters, that messaging is not paused and that the pane hosts an agent the agent monitor tracks, and then stores an `AwayMessageRequested` event. The command exits 0 once the event is stored, which is before the phone has the message. Otherwise it prints one line on standard error and exits 1. The event handler takes the event from the delivery outbox in stream-version order and sends it through the away channel. Before it sends, the handler checks the messaging pause and then the folder rule in [From agents outside one folder](#from-agents-outside-one-folder). A message that rule drops is never sent, and its command has already exited 0.
 
-It differs from a turn-end notification in these ways:
+It differs from a turn-end update in these ways:
 
-| | Turn-end notification | Agent message |
+| | Turn-end update | Agent message |
 |---|---|---|
 | Started by | The agent's turn ending | The agent running the command |
 | Text | Harold's summary of the agent's final reply, 280 characters at most | The agent's text as written, made one line, 1,000 characters at most |
@@ -233,7 +233,7 @@ It differs from a turn-end notification in these ways:
 | Duplicate checks | The 30-second window, and on iMessage the recent-outgoing check | None: the same text sent twice arrives twice |
 | Messaging pause | Recorded as an intentional skip | The command is refused with `messaging is paused`; a message already stored is skipped and not sent later |
 
-A send that fails stays pending and is tried again, as a failed notification is, up to 10 tries. The `send-message-to-away-device` skill, which the installer links for Claude Code and Codex, teaches an agent the command; see [setup](../../how-tos/setup.md).
+A send that fails stays pending and is tried again, as a failed turn-end update is, up to 10 tries. The `send-message-to-away-device` skill, which the installer links for Claude Code and Codex, teaches an agent the command; see [setup](../../how-tos/setup.md).
 
 ## Lines the chief speaks
 
@@ -245,7 +245,7 @@ The chief hands Harold a sentence or two of its own for the user to hear:
 
 At the desk Harold says the line; away from it, Harold sends the line to the phone as a voice note. Harold adds nothing to the line, and its model writes no summary of it.
 
-The command calls the daemon's `SpeakLine` RPC and waits up to 3 seconds. The daemon makes the text one line (line breaks and tabs become spaces), checks that it has 1 to 300 characters and that the pane hosts an agent the monitor tracks, and then stores a `SpokenLineRequested` event. The command exits 0 once the event is stored, which is before the line is said or sent. Otherwise it prints one line on standard error, stores nothing and exits 1:
+The command calls the daemon's `SpeakLine` RPC and waits up to 3 seconds. The daemon makes the text one line (line breaks and tabs become spaces), checks that it has 1 to 300 characters and that the pane hosts an agent the agent monitor tracks, and then stores a `SpokenLineRequested` event. The command exits 0 once the event is stored, which is before the line is said or sent. Otherwise it prints one line on standard error, stores nothing and exits 1:
 
 | Refusal | Line printed |
 | --- | --- |

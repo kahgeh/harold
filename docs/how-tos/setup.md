@@ -285,9 +285,9 @@ statusMessage = "Notifying Harold"
 
 The Codex adapter parses Codex transcript events and supports both `event_msg` user/agent messages and `response_item` role-based messages.
 
-## 6. Test notifications when ready
+## 6. Test turn-end updates when ready
 
-The service readiness check establishes that Harold is running. It does not prove that macOS permissions, provider hooks, or channel credentials work end to end. After completing those steps, submit a controlled task through a configured agent and verify the dash and expected notification.
+The service readiness check establishes that Harold is running. It does not prove that macOS permissions, provider hooks, or channel credentials work end to end. After completing those steps, submit a controlled task through a configured agent and verify the dash and the expected turn-end update.
 
 The daemon also provides an explicit diagnostic command that can speak or send an away-channel message. Run it only when you intend to test those effects:
 

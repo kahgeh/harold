@@ -20,7 +20,7 @@ The reason: Messages stores a recorded message as an attachment, which reaches H
 
 ### Starting and ending
 
-In tmx-agent-dash, select the chief's row and press `c`. The chief's row is the one whose pane Harold names in its answer to the dash, so the button follows the chief if it restarts in another pane.
+In tmx-agent-dash, put the cursor on the chief's row and press `c`. The chief's row is the one whose pane Harold names in its answer to the dash, so the button follows the chief if it restarts in another pane.
 
 | Key | On the chief's row | On any other row |
 |---|---|---|
@@ -309,7 +309,7 @@ The first turn of a call can take longer, while the worker loads: up to 15 secon
 
 ## The `Call` RPC
 
-tmx-agent-dash controls the call over one gRPC call in `harold-api/proto/harold.proto`: `Call(CallRequest { action }) returns (CallResponse { state, chief_pane_id, last_transcript, last_result })`.
+tmx-agent-dash controls the call over one RPC in `harold-api/proto/harold.proto`: `Call(CallRequest { action }) returns (CallResponse { state, chief_pane_id, last_transcript, last_result })`.
 
 | Field | Values |
 |---|---|
@@ -328,7 +328,7 @@ The core, in `harold/src/voice_input.rs`, is internal Rust, not an API. A call i
 **`AudioSource`** is where a call's audio comes from.
 
 - `next_block(&mut self)` resolves to the next block of 16 kHz mono samples as `i16` values, of any length, an empty block included. The byte order of whatever carries them is the source's business.
-- `None` means the source has ended (`ffmpeg` exited, the phone hung up), and every later call returns `None`. The core then ends the call with `microphone_failed`.
+- `None` means the source has ended (`ffmpeg` exited, the phone hung up), and every later read returns `None`. The core then ends the call with `microphone_failed`.
 - It is cancel-safe: dropping the future before it resolves loses no samples and shifts none.
 
 **`AudioSink`** is where a call's sound goes. The core plays one file at a time and knows when each ends.
@@ -349,7 +349,7 @@ The core, in `harold/src/voice_input.rs`, is internal Rust, not an API. A call i
 | `voice_muted` | Whether Harold's voice is muted now. |
 | `keep_awake` | Hold the display awake for the call. |
 
-`CallControl` runs at most one call. `start`, `stop`, `talk_now` and `status` are what the `Call` RPC calls. `say_blocking` plays a line in the open call from a blocking thread, which is how `harold speak` and other agents' turn-end updates reach it. `CallControl::say`, its async twin, is compiled only in tests (`#[cfg(test)]`). The phone's call does not need it: every line it says arrives on a blocking thread (the projector's `spawn_blocking`) and goes through `say_blocking`, as at the desk.
+`CallControl` runs at most one call. `start`, `stop`, `talk_now` and `status` are what the `Call` RPC invokes. `say_blocking` plays a line in the open call from a blocking thread, which is how `harold speak` and other agents' turn-end updates reach it. `CallControl::say`, its async twin, is compiled only in tests (`#[cfg(test)]`). The phone's call does not need it: every line it says arrives on a blocking thread (the projector's `spawn_blocking`) and goes through `say_blocking`, as at the desk.
 
 Tests use a fake source, sink, worker and pane; nothing in them touches the microphone, the speakers or a model.
 

@@ -17,7 +17,7 @@ Contextual Routing: Don't worry about which agent is which. Harold knows exactly
 
 ## How it works
 
-Harold inventories configured agent processes in tmux, combines explicit lifecycle hooks with provider-specific visible-screen evidence, and stores the resulting current state durably. Existing stop hooks also report completed turns for notification and non-destructive work-summary updates.
+Harold inventories configured agent processes in tmux, combines explicit lifecycle hooks with provider-specific visible-screen evidence, and stores the resulting current state durably. Existing stop hooks also report completed turns for turn-end updates and non-destructive work-summary updates.
 
 The public agent-state stream starts with a complete current snapshot, then sends later revisions. Raw pane captures remain inside the screen adapter; only classified state and a normalized work summary can cross the acquisition boundary.
 
@@ -25,7 +25,7 @@ See the [architecture explanation](docs/explanations/architecture.md), [agent-mo
 
 ## Dash
 
-The [`tmx-agent-dash`](tmx-agent-dash/README.md) terminal dash shows Harold's current agent-pane projection and can switch the invoking tmux client to a selected pane.
+The [`tmx-agent-dash`](tmx-agent-dash/README.md) terminal dash shows Harold's current agent-pane projection and can switch the invoking tmux client to the pane under the cursor.
 
 Install the latest release on an Apple Silicon Mac (macOS 15+):
 

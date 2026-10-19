@@ -36,7 +36,7 @@ The installer checks service readiness without sending messages. Channel permiss
 
 ## Optional AI features
 
-Claude CLI is used for semantic routing and generated summaries when configured. Install and authenticate it before enabling those features. Basic monitoring and notification fallbacks do not require it. Optional activity-summary generation remains disabled in installer-created settings.
+Claude CLI is used for semantic routing and generated summaries when configured. Install and authenticate it before enabling those features. Basic monitoring and turn-end update fallbacks do not require it. Optional activity-summary generation remains disabled in installer-created settings.
 
 ## Agent hooks
 

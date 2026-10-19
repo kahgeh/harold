@@ -39,9 +39,9 @@ Every field except `intro`, `impact`, `suggested` and `free` is required. The ru
 
 A broken rule is refused with the field's name and nothing is stored. The CLI only translates the JSON; the daemon checks the rules.
 
-## The six calls
+## The six RPCs
 
-| Call | Who | What it does |
+| RPC | Who | What it does |
 | --- | --- | --- |
 | `PutQuestion` | chief | Adds a question. With an existing id it raises the version and makes the question `waiting` again, with no answer, whatever its state. A waiting or deferred question keeps its place; any other goes last. Returns `id` and `version`. |
 | `DismissQuestion` | chief | Withdraws a waiting or deferred question, with a `reason` the dash shows. |
@@ -139,7 +139,7 @@ Each round, the sender looks up the chief's pane and makes one try at typing the
 
 The batch is stored with its text before the try. If nothing was typed (no chief, a busy pane, no pane), a batch built since Harold started is released: its row is deleted and its answers are unsent again, in one transaction. The next round builds it again from what is there then, so an answer given while a batch waits joins it, and the chief gets one line, not two. An answer's `send_now` flag stays set through the retry. If the release fails, it is tried again before anything else. A panic in the typing task counts as a busy pane, so its batch is released too.
 
-While nothing is to be sent, the sender wakes on each write, and also looks again every 30 seconds, in case a write was stored by a call that was cancelled before it woke the sender.
+While nothing is to be sent, the sender wakes on each write, and also looks again every 30 seconds, in case a write was stored by an RPC that was cancelled before it woke the sender.
 
 Once a batch is typed, it is marked typed:
 

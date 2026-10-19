@@ -55,7 +55,7 @@ Every pane-scoped agent event identifies the complete current agent incarnation:
 | `agent_started_at_ms` | OS-reported agent-process start time |
 | `provider_id` | Named provider ID, or `unknown` for an ambiguous provider match |
 
-Any change creates a new incarnation. A replacement begins at `Unknown` with no lifecycle state, screen state, explicit summary, or fallback summary. Events for a different incarnation remain in history but are ignored by the current projection.
+Any change creates a new incarnation. A replacement begins at `Unknown` with no lifecycle state, screen state, explicit work summary, or fallback work summary. Events for a different incarnation remain in history but are ignored by the current projection.
 
 ## Interaction diagrams
 
@@ -76,7 +76,7 @@ sequenceDiagram
     par scheduled inventory
         Inventory->>Runtime: complete pane and process observations
     and explicit lifecycle
-        Hook->>Runtime: pane ID, Busy/Idle, optional summary update
+        Hook->>Runtime: pane ID, Busy/Idle, optional work summary update
     and screen acquisition
         Screen->>Runtime: matching incarnation, optional state, ordered prompt scan
     end
@@ -127,17 +127,17 @@ Agent events use the existing ordered `harold/main` `EventStream`. Append batche
 | --- | --- | --- |
 | `AgentPaneObserved` | Pane metadata, provider display data, full incarnation, observation time | Inserts or refreshes the matching pane. A new incarnation replaces the row and starts `Unknown` with empty evidence. |
 | `AgentPaneDeparted` | Full incarnation, observation time | Removes the row only when the full incarnation still matches. |
-| `AgentLifecycleObserved` | Full incarnation, `Busy`/`Idle`, adapter ID, `Unchanged`/`Clear`/`Set` summary update, observation time | Updates matching hook evidence and explicit-summary candidate, and records the adapter ID as the pane's lifecycle adapter. A report that repeats the pane's state, from the same adapter, with an `Unchanged` summary only restarts the report's grace. |
-| `AgentScreenObserved` | Full incarnation, optional `Busy`/`Idle`, optional normalized fallback summary, classifier ID, observation time | Applies each present fact independently. An absent field preserves its candidate. |
+| `AgentLifecycleObserved` | Full incarnation, `Busy`/`Idle`, adapter ID, `Unchanged`/`Clear`/`Set` work summary update, observation time | Updates matching hook evidence and explicit-summary candidate, and records the adapter ID as the pane's lifecycle adapter. A report that repeats the pane's state, from the same adapter, with an `Unchanged` work summary only restarts the report's grace. |
+| `AgentScreenObserved` | Full incarnation, optional `Busy`/`Idle`, optional normalized fallback work summary, classifier ID, observation time | Applies each present fact independently. An absent field preserves its candidate. |
 | `AgentActivitySummaryGenerated` | Full incarnation, source basis version, activity summary, generation time | Sets a generated candidate only for the matching current incarnation and activity revision; does not change agent state or stage delivery. |
 | `AgentMonitorHealthChanged` | Component, healthy/degraded flag, bounded reason code, observation time | Upserts health for the component. |
 | `TtsMuteChanged` | `{muted}` | Upserts `settings.tts_muted`, advances the snapshot revision, and creates no delivery. |
 | `MessagingPausedChanged` | `{paused}` | Upserts `settings.messaging_paused`, advances the snapshot revision, and creates no delivery. |
-| `TurnCompleted` | Five notification fields plus optional resolved incarnation and `Unchanged`/`Set` completion summary update | Always preserves notification behavior. A matching resolved incarnation also supplies a non-destructive summary update, and supplies idle evidence only while the pane has no lifecycle adapter. |
+| `TurnCompleted` | Five turn-end update fields plus optional resolved incarnation and `Unchanged`/`Set` completion summary update | Always preserves turn-end update behavior. A matching resolved incarnation also supplies a non-destructive work summary update, and supplies idle evidence only while the pane has no lifecycle adapter. |
 
-`ReportAgentState` resolves the current incarnation and appends `AgentPaneObserved` immediately before `AgentLifecycleObserved` in one batch. A resolved `TurnComplete` appends `AgentPaneObserved` immediately before `TurnCompleted`. An unresolved completion still appends `TurnCompleted` for notification but does not alter agent state.
+`ReportAgentState` resolves the current incarnation and appends `AgentPaneObserved` immediately before `AgentLifecycleObserved` in one batch. A resolved `TurnComplete` appends `AgentPaneObserved` immediately before `TurnCompleted`. An unresolved completion still appends `TurnCompleted` for a turn-end update but does not alter agent state.
 
-Repeated inventory metadata and repeated captures of the same screen evidence do not append events. A screen event is appended when its state changes or the acquisition checkpoint proves a new eligible submitted occurrence. That occurrence can repeat the previous instruction text. State and summary do not both need to be present.
+Repeated inventory metadata and repeated captures of the same screen evidence do not append events. A screen event is appended when its state changes or the acquisition checkpoint proves a new eligible submitted occurrence. That occurrence can repeat the previous instruction text. State and work summary do not both need to be present.
 
 ## Reconciliation contract
 
@@ -152,7 +152,7 @@ Repeated inventory metadata and repeated captures of the same screen evidence do
 7. Inconclusive screen state preserves existing evidence. With no conclusive lifecycle or screen evidence, effective state is `Unknown`.
 8. `last_transition_at_ms` changes only when effective state changes.
 
-The projection changes only when an event is stored, so each period ends at a screen sample, not on a timer. The runtime holds a conflicting screen state back as an acquisition result and appends it at the first sample that meets rule 3, 4 or 5. Later identical samples are deduplicated within that lifecycle epoch. Summary changes remain independent and can append during a grace period.
+The projection changes only when an event is stored, so each period ends at a screen sample, not on a timer. The runtime holds a conflicting screen state back as an acquisition result and appends it at the first sample that meets rule 3, 4 or 5. Later identical samples are deduplicated within that lifecycle epoch. Work summary changes remain independent and can append during a grace period.
 
 The Claude Code mod reports `Busy` every 10 seconds while a pane works, so its report stays under 30 seconds old unless three reports in a row are lost.
 
@@ -172,13 +172,13 @@ Harold keeps an explicit candidate and a provider-screen candidate for each inca
 | Provider-screen fallback | Inconclusive or no new submitted occurrence | Preserve prior fallback |
 | Provider-screen fallback | Newly acquired substantive submitted occurrence | Replace the screen candidate and advance the activity revision, even for repeated text; it becomes the source fallback when newer than the explicit candidate |
 
-All summary inputs pass through the same terminal sanitizer. It removes C0 and C1 controls and complete ESC control sequences, collapses Unicode whitespace to single spaces, trims the result, and truncates it to 160 Unicode scalar values. Screen acquisition and the runtime defense reject only exact equality with a normalized configured idle fragment; a substantive prompt that merely mentions the placeholder remains valid. A conclusive state from the same observation remains usable, and placeholder/absence does not refresh or clear the prior screen candidate.
+All work summary inputs pass through the same terminal sanitizer. It removes C0 and C1 controls and complete ESC control sequences, collapses Unicode whitespace to single spaces, trims the result, and truncates it to 160 Unicode scalar values. Screen acquisition and the runtime defense reject only exact equality with a normalized configured idle fragment; a substantive prompt that merely mentions the placeholder remains valid. A conclusive state from the same observation remains usable, and placeholder/absence does not refresh or clear the prior screen candidate.
 
 Lifecycle and completion input use only the matching provider's idle fragments when the incarnation names a currently configured provider. If the provider ID is missing, `unknown`, or no longer configured, Harold compares against every configured provider's fragments. An exact match becomes `Unchanged` before event serialization; completion also clears the raw prompt. Another provider's placeholder remains legitimate for a known provider, and text that merely contains a placeholder remains substantive. For example, `Explain why the UI says Ask Codex to do anything` is a valid instruction.
 
-Placeholder rules apply when observations arrive. Changing the configuration does not retroactively change stored summaries.
+Placeholder rules apply when observations arrive. Changing the configuration does not retroactively change stored work summaries.
 
-The public API exposes one optional effective summary. When it is absent, the dash—not Harold—owns the exact display copy `No work summary reported`.
+The public API exposes one optional effective work summary. When it is absent, the dash—not Harold—owns the exact display copy `No work summary reported`.
 
 ## Projection and storage
 
@@ -188,7 +188,7 @@ A fresh installation creates `<store.path>/harold-state.db` from one migration, 
 | --- | --- |
 | `last_processed_event` | Last event-stream version processed for each namespace and partition |
 | `delivery_outbox` | Pending and completed external delivery work, including retry state |
-| `agent_panes` | Pane/display metadata, full incarnation, hook and screen evidence, the lifecycle adapter that last reported (`lifecycle_adapter_id`, empty until one does), explicit and fallback summary candidates with internal timestamps, effective state/summary, last transition, and last event version |
+| `agent_panes` | Pane/display metadata, full incarnation, hook and screen evidence, the lifecycle adapter that last reported (`lifecycle_adapter_id`, empty until one does), explicit and fallback work summary candidates with internal timestamps, effective state/work summary, last transition, and last event version |
 | `agent_monitor_health` | Component, healthy flag, bounded reason code, observation time, and last event version |
 | `settings` | Key/value application settings; currently `tts_muted`, written by `TtsMuteChanged`, and `messaging_paused`, written by `MessagingPausedChanged` |
 
@@ -247,7 +247,7 @@ The canonical schema is `harold-api/proto/harold.proto`. The service exposes exa
 | `last_transition_at_ms` | 13 | `int64` |
 | `work_summary` | 14 | `optional string` |
 
-The pane message does not expose adapter IDs, classifier IDs, evidence provenance, raw screen text, internal summary timestamps, or search behavior. The service has no search RPC or query field. Consumers perform search locally over the snapshots they already hold.
+The pane message does not expose adapter IDs, classifier IDs, evidence provenance, raw screen text, internal work summary timestamps, or search behavior. The service has no search RPC or query field. Consumers perform search locally over the snapshots they already hold.
 
 ### RPC failure statuses
 
@@ -305,19 +305,19 @@ Tmux pane inventory uses tab-separated fields and explicitly requests UTF-8 outp
 
 Process selection prefers a matching process in the pane TTY's foreground process group. Otherwise it selects the shallowest matching descendant of the pane root, with PID as a deterministic tie-breaker. Multiple named provider matches produce provider `unknown` rather than choosing configuration order. Missing trustworthy process start time degrades inventory and does not create an incarnation.
 
-The shipped named defaults cover Codex, Claude, and OpenCode state markers. Codex explicitly selects `codex-v1`. Claude explicitly selects `claude-v1`, which recognizes its running status row and otherwise behaves as `generic-v1` with its configured summary prefix; it has no Claude-specific styled prompt parser. OpenCode uses `generic-v1` without `summary_line_prefixes`, so screen acquisition supplies state but no fallback summary. Its opt-in lifecycle plugin can still send explicit summaries. The `screen_adapter` setting defaults to `generic-v1`; selecting a provider ID alone does not select a parser.
+The shipped named defaults cover Codex, Claude, and OpenCode state markers. Codex explicitly selects `codex-v1`. Claude explicitly selects `claude-v1`, which recognizes its running status row and otherwise behaves as `generic-v1` with its configured work summary prefix; it has no Claude-specific styled prompt parser. OpenCode uses `generic-v1` without `summary_line_prefixes`, so screen acquisition supplies state but no fallback work summary. Its opt-in lifecycle plugin can still send explicit work summaries. The `screen_adapter` setting defaults to `generic-v1`; selecting a provider ID alone does not select a parser.
 
 See [provider screen adapters](screen-adapters.md) for capture timing, incarnation baselines, prompt selection, and provider limitations.
 
 ## Privacy and field bounds
 
-The capture port invokes `tmux capture-pane` for an already identified pane. Visible classification starts at row `0`; conditional recovery preserves styles and starts at the negative configured history depth. Raw captures remain within the capture and adapter boundary and are not stored or logged, including on failure. Adapters return typed state and ordered prompt fingerprints with optional normalized candidates. The runtime retains only fingerprints in its ephemeral acquisition checkpoint and forwards at most one eligible summary through the existing screen event.
+The capture port invokes `tmux capture-pane` for an already identified pane. Visible classification starts at row `0`; conditional recovery preserves styles and starts at the negative configured history depth. Raw captures remain within the capture and adapter boundary and are not stored or logged, including on failure. Adapters return typed state and ordered prompt fingerprints with optional normalized candidates. The runtime retains only fingerprints in its ephemeral acquisition checkpoint and forwards at most one eligible work summary through the existing screen event.
 
 Before durable append or publication, tmux-derived metadata is terminal-sanitized and bounded:
 
 | Value | Maximum Unicode scalar values |
 | --- | ---: |
-| tmux target, session name, provider display name | 256 |
+| `session:window.pane` name, session name, provider display name | 256 |
 | working directory | 1024 |
 | work summary | 160 |
 | health component | 64 ASCII identifier bytes |
@@ -340,29 +340,29 @@ The public snapshot reports `inventory` and `screen` health after a component fi
 | `task_failed` | The bounded acquisition worker could not start or return |
 | `ok` | Recovery to healthy |
 
-By default the monitor scans the inventory and reads each pane's screen every 2 seconds (`inventory_interval_ms`, `screen_interval_ms`). A read that fails gets one retry, and only a retry that fails too degrades its component.
+By default the agent monitor scans the inventory and reads each pane's screen every 2 seconds (`inventory_interval_ms`, `screen_interval_ms`). A read that fails gets one retry, and only a retry that fails too degrades its component.
 
-An inventory scan that fails is retried by the next tick's scan, with the same `inventory_timeout_ms` deadline. A scan that times out is stopped, which kills its child command, and the tick keeps the last 50 ms of its deadline (a tenth of it at most) for that worker to let go of the inventory gate. So a tick's scan takes at most `inventory_timeout_ms`, retry or not. If the stopped scan is still running at the next tick, that tick finds the gate busy, and the retry counts as failed. This departs from the monitor-timeouts spec, which retries the scan at once with twice the deadline. Hook calls wait on the monitor's one task, and `harold send-message-to-away-device` and `harold speak` wait for the monitor to resolve their pane before they store anything. Their clients give up after 3 seconds, and a scan retried at once could hold them for up to 9.
+An inventory scan that fails is retried by the next tick's scan, with the same `inventory_timeout_ms` deadline. A scan that times out is stopped, which kills its child command, and the tick keeps the last 50 ms of its deadline (a tenth of it at most) for that worker to let go of the inventory gate. So a tick's scan takes at most `inventory_timeout_ms`, retry or not. If the stopped scan is still running at the next tick, that tick finds the gate busy, and the retry counts as failed. This departs from the monitor-timeouts spec, which retries the scan at once with twice the deadline. Hook calls wait on the agent monitor's one task, and `harold send-message-to-away-device` and `harold speak` wait for the agent monitor to resolve their pane before they store anything. Their clients give up after 3 seconds, and a scan retried at once could hold them for up to 9.
 
 A pane's screen read is retried at once, with a 2,000 ms deadline (the capture command's own limit), fixed in the code. A first try still running is asked to stop, which kills its child command, and the retry waits within its own deadline for that worker to finish, so the two never run together. A retry that times out is stopped the same way. A first try that returns `busy` is not retried. A screen pass retries at most one read: after its first retry, whether that works or not, the remaining panes are read once each. Revalidating a departed pane, resolving a pane, and prompt recovery are not retried.
 
 Hook calls (lifecycle reports, turn-completes, pane resolution) queue behind a tick. An inventory tick's scan holds them for at most `inventory_timeout_ms`, 3 seconds with the shipped settings. A screen pass's reads hold them for 500 ms per pane, plus at most one 2,000 ms retry. As on main, other steps of a tick add to that, each with its own deadline: a prompt baseline or prompt recovery for a pane (500 ms), and revalidating a pane missing from two scans (`inventory_timeout_ms`). A turn-complete or lifecycle report whose client gives up meanwhile is still queued, applied and stored, and a turn-complete loses only its telemetry link. A call that needs its pane resolved before it stores anything fails and stores nothing: `harold send-message-to-away-device` and `harold speak` wait 3 seconds, then exit with an error.
 
-A retry that works logs one info line, `agent monitor read retried`, with `component` (`inventory` or `screen`), `pane_id` for a screen read, and `elapsed_ms` from the first try's start to the retry's success. For the inventory, that spans the tick between them. It changes no health: there is no warning, and the monitor is not marked degraded. When the retry fails too, the component degrades with the retry's reason code, and `agent monitor degraded` is logged at warning level; the next scheduled read, with its own retry, tries again, and `agent monitor recovered` is logged when one works.
+A retry that works logs one info line, `agent monitor read retried`, with `component` (`inventory` or `screen`), `pane_id` for a screen read, and `elapsed_ms` from the first try's start to the retry's success. For the inventory, that spans the tick between them. It changes no health: there is no warning, and the agent monitor is not marked degraded. When the retry fails too, the component degrades with the retry's reason code, and `agent monitor degraded` is logged at warning level; the next scheduled read, with its own retry, tries again, and `agent monitor recovered` is logged when one works.
 
 A worker that does not stop causes later attempts to return internal `busy` without starting another worker or changing public health. A deadline miss remains `timeout` until a later acquisition succeeds. Degradation and recovery are logged on health transitions with component and reason code; process commands and screen content are excluded.
 
-An inventory failure preserves current panes and never infers mass departure. A screen failure preserves lifecycle state and the prior fallback. Projector failures leave the checkpoint and projection unchanged and are retried by the event-handler loop. A schema initialization, startup catch-up, or snapshot-load error prevents the server from becoming ready.
+An inventory failure preserves current panes and never infers mass departure. A screen failure preserves lifecycle state and the prior fallback. Projector failures leave the checkpoint and projection unchanged and are retried by the event-handler loop. A schema initialization, startup catch-up, or snapshot-load error prevents Harold from becoming ready.
 
 ## Lifecycle limits
 
 - `WatchAgentStates` is snapshot-then-stream, not cursor replay. Slow consumers may coalesce obsolete in-memory snapshots; reconnecting restores the latest complete state.
 - Provider screen markers and styled parsing are version-sensitive. Inconclusive text is preserved as uncertainty; `codex-v1` and `claude-v1` each match one provider's rendering and guarantee nothing for another.
-- History recovery is bounded and starts with a baseline that emits no existing prompt. Lost fingerprint overlap also establishes a new baseline without adopting its contents. These rules can leave late-attached or older work without a recovered summary.
+- History recovery is bounded and starts with a baseline that emits no existing prompt. Lost fingerprint overlap also establishes a new baseline without adopting its contents. These rules can leave late-attached or older work without a recovered work summary.
 - Harold does not infer busy/idle from CPU use, tmux window activity, or elapsed silence.
 - Harold does not navigate tmux for the dash and does not implement the dash's filter.
-- The Claude Code lifecycle mod (`hooks/claude-mod/`) reports turn start and end through `harold accept`; the installer loads it through `CLAUDE_CODE_PLUGIN_DIRS`, and sessions without it rely on the screen reading.
+- The Claude Code lifecycle mod (`hooks/claude-mod/`) reports turn start and end through `harold accept`; the installer loads it through `CLAUDE_CODE_PLUGIN_DIRS`, and agents without it rely on the screen reading.
 - The OpenCode lifecycle plugin is opt-in and is not installed by `make deploy`; its screen provider has no fallback-summary prefix.
-- The `TurnComplete` RPC is the notification ingress. Empty prompts preserve summaries and cannot explicitly clear them.
+- The `TurnComplete` RPC is the turn-end update ingress. Empty prompts preserve work summaries and cannot explicitly clear them.
 
 For operational registration and verification, see [Set up agent monitor hooks](../../how-tos/setup-agent-monitor-hooks.md). For rationale, see [Harold Architecture](../../explanations/architecture.md).
