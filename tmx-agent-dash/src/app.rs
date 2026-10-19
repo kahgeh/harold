@@ -626,12 +626,15 @@ impl App {
         }
     }
 
-    /// Takes the latest question queue. A new question never moves the cursor.
+    /// Takes the latest question queue. A new question never moves the cursor. The cursor
+    /// goes back to the open note's row, wherever it was, and to the new question's
+    /// header when the question in view is replaced by another while it is on the
+    /// questions. A new version of the same question leaves it where it is.
     ///
     /// When the cursor is on the questions and the question in view changes while a note
     /// was open, question keys are held until Esc. Questions that hid under the cursor
-    /// and come back take the cursor back, on the header: as they were, typing resumes;
-    /// changed, their keys are held.
+    /// and come back take the cursor back (on the note's row when a note is open, else
+    /// the header): as they were, typing resumes; changed, their keys are held.
     pub fn observe_questions(&mut self, queue: Queue) {
         let before = self.questions.shown();
         let kept = self.questions.kept();
@@ -676,8 +679,10 @@ impl App {
         self.swallowing_keys
     }
 
-    /// Applies Harold's answer to a send. A recorded answer puts the cursor on the next
-    /// question's header, or on the chief's row when none is left.
+    /// Applies Harold's answer to a send. Whenever another question takes the place of
+    /// the one answered (recorded, or no longer waiting), the cursor goes to the new
+    /// question's header, or to the chief's row when none is left. A refused or
+    /// unavailable answer leaves the cursor where it is.
     pub fn question_sent(&mut self, id: &str, result: SendResult) {
         let before = self.questions.shown();
         self.questions.sent(id, result);

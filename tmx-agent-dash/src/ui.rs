@@ -981,7 +981,6 @@ fn wrap_words(text: &str, room: usize) -> Vec<String> {
     pieces
 }
 
-/// The note being typed, with its label and cursor block, when its kind is one of `kinds`.
 /// The kind of note open in the questions, if any.
 fn note_kind(questions: &crate::questions::QuestionBlock) -> Option<NoteKind> {
     if !questions.note_open() {
@@ -993,6 +992,7 @@ fn note_kind(questions: &crate::questions::QuestionBlock) -> Option<NoteKind> {
     }
 }
 
+/// The note being typed, with its label and cursor block, when its kind is one of `kinds`.
 fn note_text(mode: &Mode, kinds: &[NoteKind]) -> Option<String> {
     let Mode::Note { kind, text } = mode else {
         return None;
