@@ -1,4 +1,4 @@
-use crate::questions::{BlockEffect, Mode, Outgoing, QuestionBlock, Queue, SendResult};
+use crate::questions::{BlockEffect, Mode, Outgoing, QStop, QuestionBlock, Queue, SendResult};
 use crate::text::normalize_search;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::collections::HashSet;
@@ -224,12 +224,11 @@ pub(crate) enum RuntimeStatus {
     SourceError(String),
 }
 
-/// Where the keys go: the agent list, or the question block above it.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum Focus {
-    #[default]
-    List,
-    Block,
+/// A row the cursor can stop on: an agent row, or a row of the chief's questions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Stop {
+    Agent(AgentIncarnation),
+    Question(QStop),
 }
 
 /// What the tmux focus probe saw: the user's active pane, or nothing usable.
@@ -255,7 +254,9 @@ pub struct App {
     /// The first line of the chief's Now item, hidden while the queue has none or the
     /// backlog tool cannot be read. It is never focused and takes no keys.
     pub now_line: Option<String>,
-    pub focus: Focus,
+    /// `Some` when the cursor is on that row of the questions; `selected` then names the
+    /// asker's row (the chief's) when it shows.
+    pub question_stop: Option<QStop>,
     last_snapshot_received_at_ms: Option<i64>,
     runtime_status: Option<RuntimeStatus>,
     has_snapshot: bool,
@@ -265,12 +266,12 @@ pub struct App {
     waiting: Vec<AgentIncarnation>,
     active_pane: Option<String>,
     focus_tracking: bool,
-    /// The block hid while it had the focus: keys are swallowed until Tab or Esc, so a
-    /// note being typed never turns into list commands.
+    /// The questions hid while the cursor was on them: keys are swallowed until Esc, so
+    /// a note being typed never turns into list commands.
     swallowing_keys: bool,
-    /// The question under the focus changed while a note or the summary was in view, or
-    /// came back changed: block keys are dropped until Esc (stay in the block) or Tab
-    /// (go to the list), so letters typed for the old question never act on the new one.
+    /// The question under the cursor changed while a note was open, or came back changed:
+    /// question keys are dropped until Esc, so letters typed for the old question never
+    /// act on the new one.
     holding_block_keys: bool,
 }
 
@@ -349,7 +350,7 @@ impl App {
             call: None,
             questions: QuestionBlock::default(),
             now_line: None,
-            focus: Focus::List,
+            question_stop: None,
             last_snapshot_received_at_ms: None,
             runtime_status: None,
             has_snapshot: matches!(connection, ConnectionState::Live | ConnectionState::Stale),
@@ -534,95 +535,214 @@ impl App {
         }
     }
 
-    /// Takes the latest question queue. A new question never takes the focus; the
-    /// focus returns to the list when the block hides.
+    /// Whether the cursor is on a row of the questions.
+    pub const fn cursor_on_question(&self) -> bool {
+        self.question_stop.is_some()
+    }
+
+    /// The row whose pane Harold named as the chief's, when it shows in the list.
+    fn visible_chief(&self) -> Option<&AgentRow> {
+        let chief = self.chief_row()?;
+        self.visible_rows()
+            .into_iter()
+            .find(|row| row.incarnation == chief.incarnation)
+    }
+
+    /// Every row the cursor can stop on, in list order: the visible agent rows, with the
+    /// questions' rows right after the chief's row, or at the top when the chief's row is
+    /// filtered out or none is named.
+    pub fn stops(&self) -> Vec<Stop> {
+        let question_stops = self.questions.stops();
+        let chief = self.visible_chief().map(|row| row.incarnation.clone());
+        let mut stops = Vec::new();
+        if chief.is_none() {
+            stops.extend(question_stops.iter().copied().map(Stop::Question));
+        }
+        for row in self.visible_rows() {
+            stops.push(Stop::Agent(row.incarnation.clone()));
+            if chief.as_ref() == Some(&row.incarnation) {
+                stops.extend(question_stops.iter().copied().map(Stop::Question));
+            }
+        }
+        stops
+    }
+
+    /// The stop the cursor is on.
+    fn cursor_stop(&self) -> Option<Stop> {
+        match self.question_stop {
+            Some(stop) => Some(Stop::Question(stop)),
+            None => self.selected.clone().map(Stop::Agent),
+        }
+    }
+
+    /// Puts the cursor on `stop`. Landing on a question row selects the chief's row when
+    /// it shows, so the detail panel names the asker.
+    fn land_on(&mut self, stop: &Stop) {
+        match stop {
+            Stop::Agent(incarnation) => {
+                self.question_stop = None;
+                self.selected = Some(incarnation.clone());
+            }
+            Stop::Question(question) => {
+                self.question_stop = Some(*question);
+                if let Some(chief) = self.visible_chief().map(|row| row.incarnation.clone()) {
+                    self.selected = Some(chief);
+                }
+            }
+        }
+    }
+
+    fn move_cursor(&mut self, delta: isize) {
+        let stops = self.stops();
+        let at = self
+            .cursor_stop()
+            .and_then(|current| stops.iter().position(|stop| *stop == current));
+        let target = match at {
+            Some(index) => index
+                .saturating_add_signed(delta)
+                .min(stops.len().saturating_sub(1)),
+            None => 0,
+        };
+        if let Some(stop) = stops.get(target) {
+            self.land_on(stop);
+        }
+    }
+
+    fn move_cursor_clearing_notice(&mut self, delta: isize) {
+        self.questions.clear_notice();
+        self.move_cursor(delta);
+    }
+
+    fn move_to_boundary_clearing_notice(&mut self, last: bool) {
+        self.questions.clear_notice();
+        self.move_to_boundary(last);
+    }
+
+    fn move_to_boundary(&mut self, last: bool) {
+        let stops = self.stops();
+        let stop = if last { stops.last() } else { stops.first() };
+        if let Some(stop) = stop {
+            self.land_on(stop);
+        }
+    }
+
+    /// Takes the latest question queue. A new question never moves the cursor.
     ///
-    /// When the block has the focus and the question in view changes while a note or the
-    /// summary was showing, block keys are held until Esc or Tab. A block that hid under
-    /// the focus and comes back takes the focus back: as it was, typing resumes; changed,
-    /// its keys are held.
+    /// When the cursor is on the questions and the question in view changes while a note
+    /// was open, question keys are held until Esc. Questions that hid under the cursor
+    /// and come back take the cursor back, on the header: as they were, typing resumes;
+    /// changed, their keys are held.
     pub fn observe_questions(&mut self, queue: Queue) {
         let before = self.questions.shown();
         let kept = self.questions.kept();
         self.questions.reconcile(queue);
         let after = self.questions.shown();
-        if self.swallowing_keys && self.questions.is_visible() {
-            self.swallowing_keys = false;
-            self.focus = Focus::Block;
-            self.holding_block_keys = after != kept;
-        } else if self.focus == Focus::Block
-            && after != before
-            && before
+        let note_was_open = |reading: &Option<(String, u32, Mode)>| {
+            reading
                 .as_ref()
-                .is_some_and(|(_, _, mode)| !matches!(mode, Mode::Choosing))
-        {
+                .is_some_and(|(_, _, mode)| matches!(mode, Mode::Note { .. }))
+        };
+        if self.swallowing_keys && !self.questions.stops().is_empty() {
+            self.swallowing_keys = false;
+            self.question_stop = Some(QStop::Header);
+            self.holding_block_keys = after != kept && note_was_open(&kept);
+        } else if self.cursor_on_question() && after != before && note_was_open(&before) {
             self.holding_block_keys = true;
         }
-        self.settle_focus();
+        self.settle_cursor();
     }
 
-    /// Whether block keys are held after the question in view changed under them.
+    /// Whether question keys are held after the question in view changed under them.
     pub fn holding_block_keys(&self) -> bool {
         self.holding_block_keys
     }
 
-    /// Hides the block without a notice, for when the queue cannot be read or the stream
-    /// is lost. The block keeps its picks, mode and note for the next listing. If it had
-    /// the focus, keys are swallowed until Tab or Esc.
+    /// Hides the questions without a notice, for when the queue cannot be read or the
+    /// stream is lost. They keep their picks, note and open state for the next listing.
+    /// If the cursor was on them, keys are swallowed until Esc.
     pub fn hide_questions(&mut self) {
+        let was_on_questions = self.cursor_on_question();
         self.questions.suspend();
-        if self.focus == Focus::Block {
+        if was_on_questions && self.questions.stops().is_empty() {
             self.swallowing_keys = true;
         }
         self.holding_block_keys = false;
-        self.settle_focus();
+        self.settle_cursor();
     }
 
-    /// Whether keys are being swallowed after the block hid under the focus.
+    /// Whether keys are being swallowed after the questions hid under the cursor.
     pub fn swallowing_keys(&self) -> bool {
         self.swallowing_keys
     }
 
-    /// Applies Harold's answer to a send.
+    /// Applies Harold's answer to a send. A recorded answer puts the cursor on the next
+    /// question's header, or on the chief's row when none is left.
     pub fn question_sent(&mut self, id: &str, result: SendResult) {
         self.questions.sent(id, result);
-        self.settle_focus();
+        if result == SendResult::Recorded && self.cursor_on_question() {
+            self.question_stop = Some(QStop::Header);
+        }
+        self.settle_cursor();
     }
 
-    /// Whether `key` should meet a fresh queue: it goes to the block, or it is `Tab`.
-    /// A global key never does: it acts the same whatever the queue holds.
+    /// Whether `key` should meet a fresh queue: the cursor is on the questions, so the
+    /// key goes to them. A global key never does: it acts the same whatever the queue
+    /// holds.
     pub fn wants_fresh_questions(&self, key: &KeyEvent) -> bool {
         !is_global_key(key)
             && !self.swallowing_keys
             && !self.search.editing
             && self.palette.is_none()
-            && (self.focus == Focus::Block || key.code == KeyCode::Tab)
+            && self.cursor_on_question()
     }
 
-    /// Whether `key` goes to the question block.
+    /// Whether `key` goes to the questions.
     pub fn key_reaches_block(&self, key: &KeyEvent) -> bool {
-        self.wants_fresh_questions(key) && self.focus == Focus::Block && key.code != KeyCode::Tab
+        self.wants_fresh_questions(key)
     }
 
-    fn settle_focus(&mut self) {
-        if !self.questions.is_visible() {
-            self.focus = Focus::List;
-            self.holding_block_keys = false;
+    /// Keeps the cursor on a row that exists. A question row that is gone falls to the
+    /// header while questions remain, else to the chief's row (or the first row).
+    fn settle_cursor(&mut self) {
+        let Some(stop) = self.question_stop else {
+            return;
+        };
+        let stops = self.questions.stops();
+        if stops.contains(&stop) {
+            return;
+        }
+        if stops.is_empty() {
+            if self.holding_block_keys {
+                // A note was open when the question went: the cursor stays until Esc, so
+                // letters typed for it never act on the list.
+                return;
+            }
+            self.question_stop = None;
+            if let Some(chief) = self.visible_chief().map(|row| row.incarnation.clone()) {
+                self.selected = Some(chief);
+            } else {
+                self.select_first_if_hidden();
+            }
+        } else {
+            self.question_stop = Some(QStop::Header);
         }
     }
 
-    fn handle_block_key(&mut self, code: KeyCode) -> Effect {
-        let effect = match self.questions.handle_key(code) {
+    fn handle_block_key(&mut self, code: KeyCode, stop: QStop) -> Effect {
+        let effect = match self.questions.handle_key(code, stop) {
             BlockEffect::None => Effect::None,
-            BlockEffect::Leave => {
-                self.focus = Focus::List;
+            BlockEffect::Cursor(next) => {
+                self.question_stop = Some(next);
                 Effect::None
             }
             BlockEffect::OpenLink(link) => Effect::OpenLink(link),
-            BlockEffect::Defer(id) => Effect::Defer(id),
+            BlockEffect::Defer(id) => {
+                self.question_stop = Some(QStop::Header);
+                Effect::Defer(id)
+            }
             BlockEffect::Send(out) => Effect::Answer(out),
         };
-        self.settle_focus();
+        self.settle_cursor();
         effect
     }
 
@@ -835,8 +955,8 @@ impl App {
             return Effect::None;
         }
         if self.swallowing_keys {
-            // Tab or Esc returns the keys to the list, which already has the focus.
-            if matches!(key.code, KeyCode::Tab | KeyCode::Esc) {
+            // Esc returns the keys to the list, which already has the cursor.
+            if key.code == KeyCode::Esc {
                 self.swallowing_keys = false;
             }
             return Effect::None;
@@ -847,34 +967,33 @@ impl App {
         if self.palette.is_some() {
             return self.handle_palette_key(key.code);
         }
-        if self.holding_block_keys && self.focus == Focus::Block {
-            match key.code {
-                // Esc reads the change: the notice goes and the shown question is chosen
-                // from, from its first decision.
-                KeyCode::Esc => {
-                    self.holding_block_keys = false;
-                    self.questions.clear_notice();
-                    self.settle_focus();
-                    return Effect::None;
-                }
-                KeyCode::Tab => self.holding_block_keys = false,
-                _ => return Effect::None,
+        if self.holding_block_keys && self.cursor_on_question() {
+            // Esc reads the change: the notice goes and the shown question is read from
+            // its header. Every other key is dropped.
+            if key.code == KeyCode::Esc {
+                self.holding_block_keys = false;
+                self.questions.clear_notice();
+                self.settle_cursor();
             }
-        }
-        // A notice on a block with no question goes at the next key, and the block hides;
-        // the key still acts on the list. In the block, the block clears it itself.
-        if self.focus == Focus::List && self.questions.shows_notice_only() {
-            self.questions.clear_notice();
-        }
-        if key.code == KeyCode::Tab && self.questions.is_visible() {
-            self.focus = match self.focus {
-                Focus::List => Focus::Block,
-                Focus::Block => Focus::List,
-            };
             return Effect::None;
         }
-        if self.focus == Focus::Block {
-            return self.handle_block_key(key.code);
+        // A notice on a block with no question goes at the next key, and the block hides;
+        // the key still acts on the list.
+        if self.questions.shows_notice_only() {
+            self.questions.clear_notice();
+        }
+        if let Some(stop) = self.question_stop {
+            if self.questions.note_open() {
+                return self.handle_block_key(key.code, stop);
+            }
+            match key.code {
+                KeyCode::Char('j') | KeyCode::Down => self.move_cursor_clearing_notice(1),
+                KeyCode::Char('k') | KeyCode::Up => self.move_cursor_clearing_notice(-1),
+                KeyCode::Char('g') => self.move_to_boundary_clearing_notice(false),
+                KeyCode::Char('G') => self.move_to_boundary_clearing_notice(true),
+                code => return self.handle_block_key(code, stop),
+            }
+            return Effect::None;
         }
 
         match key.code {
@@ -890,10 +1009,10 @@ impl App {
                 self.search.query.clear();
                 self.search_changed();
             }
-            KeyCode::Char('j') | KeyCode::Down => self.select_relative(1),
-            KeyCode::Char('k') | KeyCode::Up => self.select_relative(-1),
-            KeyCode::Char('g') => self.select_boundary(false),
-            KeyCode::Char('G') => self.select_boundary(true),
+            KeyCode::Char('j') | KeyCode::Down => self.move_cursor(1),
+            KeyCode::Char('k') | KeyCode::Up => self.move_cursor(-1),
+            KeyCode::Char('g') => self.move_to_boundary(false),
+            KeyCode::Char('G') => self.move_to_boundary(true),
             KeyCode::Char('c') if self.chief_row_selected() => {
                 if let Some(action) = self.call_press() {
                     return Effect::Call(action);
@@ -1022,22 +1141,6 @@ impl App {
             .visible_rows()
             .first()
             .map(|row| row.incarnation.clone());
-    }
-
-    fn select_relative(&mut self, delta: isize) {
-        let visible = self.visible_rows();
-        let Some(current) = self.selected.as_ref() else {
-            self.selected = visible.first().map(|row| row.incarnation.clone());
-            return;
-        };
-        let Some(index) = visible.iter().position(|row| &row.incarnation == current) else {
-            self.selected = visible.first().map(|row| row.incarnation.clone());
-            return;
-        };
-        let next = index
-            .saturating_add_signed(delta)
-            .min(visible.len().saturating_sub(1));
-        self.selected = visible.get(next).map(|row| row.incarnation.clone());
     }
 
     fn select_boundary(&mut self, last: bool) {
@@ -2784,16 +2887,22 @@ mod tests {
         }
     }
 
-    /// Opens a revise note from the block's first decision, through its action row.
+    fn agent(pane_id: &str) -> Stop {
+        Stop::Agent(incarnation(pane_id, 1, 2, 3, "claude"))
+    }
+
+    /// Puts the cursor on the first question's header (under the chief's row), opens the
+    /// question and opens a revise note through its action row.
     fn open_revise_note(app: &mut App) {
-        for code in [
-            KeyCode::Char('j'),
-            KeyCode::Char('j'),
-            KeyCode::Char('j'),
-            KeyCode::Enter,
-        ] {
-            app.handle_key(code);
+        select_pane(app, "%3");
+        app.handle_key(KeyCode::Char('j'));
+        app.handle_key(KeyCode::Char('l'));
+        // Four options, then send, later and revise….
+        for _ in 0..7 {
+            app.handle_key(KeyCode::Char('j'));
         }
+        app.handle_key(KeyCode::Enter);
+        assert!(app.questions.note_open());
     }
 
     fn question_queue(ids: &[&str]) -> crate::questions::Queue {
@@ -2805,36 +2914,455 @@ mod tests {
     }
 
     #[test]
-    fn tab_moves_the_focus() {
+    fn queue_rows_sit_under_the_chief_row() {
         let mut app = call_app(CallState::Off);
-        assert_eq!(app.handle_key(KeyCode::Tab), Effect::None);
-        assert_eq!(app.focus, Focus::List, "no block, no focus to move");
-
-        app.observe_questions(question_queue(&["Q1"]));
-        assert_eq!(app.handle_key(KeyCode::Tab), Effect::None);
-        assert_eq!(app.focus, Focus::Block);
-        assert_eq!(app.handle_key(KeyCode::Tab), Effect::None);
-        assert_eq!(app.focus, Focus::List);
-
-        // Search and palette editing keep their keys.
-        app.handle_key(KeyCode::Char('f'));
-        app.handle_key(KeyCode::Tab);
-        assert_eq!(app.focus, Focus::List);
-        app.handle_key(KeyCode::Enter);
-        app.handle_key(KeyCode::Char('/'));
-        app.handle_key(KeyCode::Tab);
-        assert_eq!(app.focus, Focus::List);
-        app.handle_key(KeyCode::Esc);
-
-        // Esc in the block gives the focus back.
-        app.handle_key(KeyCode::Tab);
-        assert_eq!(app.focus, Focus::Block);
-        assert_eq!(app.handle_key(KeyCode::Esc), Effect::None);
-        assert_eq!(app.focus, Focus::List);
+        app.observe_call(Some(call_view(CallState::Off, "%2")));
+        app.observe_questions(question_queue(&["Q1", "Q2"]));
+        assert_eq!(
+            app.stops(),
+            [
+                agent("%1"),
+                agent("%2"),
+                Stop::Question(QStop::Header),
+                agent("%3")
+            ],
+            "closed, the questions are one stop under the chief's row"
+        );
+        // Without questions, only agent rows.
+        app.observe_questions(question_queue(&[]));
+        app.observe_questions(question_queue(&[]));
+        assert_eq!(app.stops(), [agent("%1"), agent("%2"), agent("%3")]);
     }
 
     #[test]
-    fn the_now_line_never_takes_the_focus() {
+    fn j_walks_an_open_question_in_order() {
+        let mut app = call_app(CallState::Off);
+        app.observe_call(Some(call_view(CallState::Off, "%2")));
+        app.observe_questions(question_queue(&["Q1"]));
+        select_pane(&mut app, "%2");
+        app.handle_key(KeyCode::Char('j'));
+        assert_eq!(app.cursor_stop(), Some(Stop::Question(QStop::Header)));
+        assert_eq!(app.handle_key(KeyCode::Char('l')), Effect::None);
+        let mut want = vec![Stop::Question(QStop::Header)];
+        for decision in 0..2 {
+            for option in 0..2 {
+                want.push(Stop::Question(QStop::Option { decision, option }));
+            }
+        }
+        want.extend((0..4).map(|action| Stop::Question(QStop::Action(action))));
+        want.push(agent("%3"));
+        assert_eq!(
+            app.stops(),
+            [vec![agent("%1"), agent("%2")], want.clone()].concat()
+        );
+
+        let mut walked = vec![app.cursor_stop().unwrap()];
+        for _ in 1..want.len() {
+            app.handle_key(KeyCode::Char('j'));
+            walked.push(app.cursor_stop().unwrap());
+        }
+        assert_eq!(walked, want);
+        assert_eq!(app.selected.as_ref().unwrap().pane_id, "%3");
+
+        // k goes back the same way, to the chief's row.
+        let mut back = vec![app.cursor_stop().unwrap()];
+        for _ in 1..want.len() {
+            app.handle_key(KeyCode::Char('k'));
+            back.push(app.cursor_stop().unwrap());
+        }
+        back.push({
+            app.handle_key(KeyCode::Char('k'));
+            app.cursor_stop().unwrap()
+        });
+        let mut reversed = want.clone();
+        reversed.reverse();
+        reversed.push(agent("%2"));
+        assert_eq!(back, reversed);
+        assert!(!app.cursor_on_question());
+        assert_eq!(app.selected.as_ref().unwrap().pane_id, "%2");
+    }
+
+    #[test]
+    fn the_arrow_keys_and_g_walk_the_same_stops() {
+        let mut app = call_app(CallState::Off);
+        app.observe_questions(question_queue(&["Q1"]));
+        app.handle_key(KeyCode::Char('g'));
+        assert_eq!(app.cursor_stop(), Some(agent("%1")));
+        app.handle_key(KeyCode::Char('G'));
+        assert_eq!(app.cursor_stop(), Some(Stop::Question(QStop::Header)));
+        app.handle_key(KeyCode::Up);
+        assert_eq!(app.cursor_stop(), Some(agent("%3")));
+        app.handle_key(KeyCode::Down);
+        assert_eq!(app.cursor_stop(), Some(Stop::Question(QStop::Header)));
+        app.handle_key(KeyCode::Char('l'));
+        app.handle_key(KeyCode::Char('G'));
+        assert_eq!(app.cursor_stop(), Some(Stop::Question(QStop::Action(3))));
+        app.handle_key(KeyCode::Char('g'));
+        assert_eq!(app.cursor_stop(), Some(agent("%1")));
+    }
+
+    #[test]
+    fn closed_question_is_one_stop() {
+        let mut app = call_app(CallState::Off);
+        app.observe_questions(question_queue(&["Q1"]));
+        app.handle_key(KeyCode::Char('j'));
+        assert_eq!(app.cursor_stop(), Some(Stop::Question(QStop::Header)));
+        let before = key_state(&app);
+        app.handle_key(KeyCode::Char('j'));
+        assert_eq!(
+            key_state(&app),
+            before,
+            "j on the last stop changes nothing"
+        );
+        app.handle_key(KeyCode::Char('k'));
+        assert_eq!(app.cursor_stop(), Some(agent("%3")));
+
+        // The chief in the middle: j passes the closed row to the next agent row.
+        app.observe_call(Some(call_view(CallState::Off, "%2")));
+        select_pane(&mut app, "%2");
+        app.handle_key(KeyCode::Char('j'));
+        assert_eq!(app.cursor_stop(), Some(Stop::Question(QStop::Header)));
+        app.handle_key(KeyCode::Char('j'));
+        assert_eq!(app.cursor_stop(), Some(agent("%3")));
+
+        select_pane(&mut app, "%1");
+        let before = key_state(&app);
+        app.handle_key(KeyCode::Char('k'));
+        assert_eq!(
+            key_state(&app),
+            before,
+            "k on the first stop changes nothing"
+        );
+    }
+
+    #[test]
+    fn fallback_stops_at_top_when_chief_filtered_out_or_unnamed() {
+        let header = Stop::Question(QStop::Header);
+        // The chief's row is filtered out.
+        let mut app = call_app(CallState::Off);
+        app.observe_questions(question_queue(&["Q1"]));
+        app.handle_key(KeyCode::Char('f'));
+        type_text(&mut app, "harold");
+        app.handle_key(KeyCode::Enter);
+        assert_eq!(app.stops(), [header.clone(), agent("%1"), agent("%2")]);
+        // No chief pane named, or one that is not in the list.
+        for named in ["", "%9"] {
+            let mut app = call_app(CallState::Off);
+            app.observe_call(Some(call_view(CallState::Off, named)));
+            app.observe_questions(question_queue(&["Q1"]));
+            assert_eq!(
+                app.stops(),
+                [header.clone(), agent("%1"), agent("%2"), agent("%3")],
+                "{named:?}"
+            );
+            // Landing on the rows leaves the selection where it was.
+            let selected = app.selected.clone();
+            app.handle_key(KeyCode::Char('g'));
+            assert_eq!(app.cursor_stop(), Some(header.clone()));
+            assert_eq!(app.selected, selected);
+        }
+    }
+
+    #[test]
+    fn new_question_does_not_move_cursor() {
+        let mut app = call_app(CallState::Off);
+        select_pane(&mut app, "%1");
+        app.observe_questions(question_queue(&["Q1"]));
+        assert_eq!(app.cursor_stop(), Some(agent("%1")));
+        app.observe_questions(question_queue(&["Q1", "Q2"]));
+        assert_eq!(app.cursor_stop(), Some(agent("%1")));
+        assert!(!app.questions.is_open(), "a new question starts closed");
+
+        // On a question row, a new question leaves the cursor there.
+        app.handle_key(KeyCode::Char('G'));
+        app.handle_key(KeyCode::Char('l'));
+        app.handle_key(KeyCode::Char('j'));
+        let on = app.cursor_stop();
+        app.observe_questions(question_queue(&["Q1", "Q2", "Q3"]));
+        assert_eq!(app.cursor_stop(), on);
+        app.handle_key(KeyCode::Char('G'));
+        let last = app.cursor_stop();
+        assert_eq!(last, Some(Stop::Question(QStop::Action(3))));
+    }
+
+    #[test]
+    fn tab_and_backtab_do_nothing_on_every_row() {
+        let mut app = call_app(CallState::Off);
+        app.observe_call(Some(call_view(CallState::Off, "%2")));
+        app.observe_questions(question_queue(&["Q1"]));
+        select_pane(&mut app, "%2");
+        app.handle_key(KeyCode::Char('j'));
+        app.handle_key(KeyCode::Char('l'));
+        for stop in app.stops() {
+            app.land_on(&stop);
+            let before = key_state(&app);
+            for code in [KeyCode::Tab, KeyCode::BackTab] {
+                assert_eq!(app.handle_key(code), Effect::None, "{stop:?}");
+                assert_eq!(key_state(&app), before, "{stop:?} {code:?}");
+            }
+        }
+        // And no question at all.
+        let mut app = call_app(CallState::Off);
+        let before = key_state(&app);
+        assert_eq!(app.handle_key(KeyCode::Tab), Effect::None);
+        assert_eq!(key_state(&app), before);
+    }
+
+    #[test]
+    fn queue_emptying_under_cursor_lands_on_chief_row() {
+        let mut app = call_app(CallState::Off);
+        app.observe_call(Some(call_view(CallState::Off, "%2")));
+        app.observe_questions(question_queue(&["Q1"]));
+        select_pane(&mut app, "%2");
+        app.handle_key(KeyCode::Char('j'));
+        app.handle_key(KeyCode::Char('l'));
+        for _ in 0..3 {
+            app.handle_key(KeyCode::Char('j'));
+        }
+        assert_eq!(
+            app.cursor_stop(),
+            Some(Stop::Question(QStop::Option {
+                decision: 1,
+                option: 0
+            }))
+        );
+        // The question is answered elsewhere.
+        app.observe_questions(question_queue(&[]));
+        assert!(!app.cursor_on_question());
+        assert_eq!(app.cursor_stop(), Some(agent("%2")));
+        assert!(!app.swallowing_keys(), "the notice shows; no keys are lost");
+    }
+
+    #[test]
+    fn higher_version_clamps_cursor_to_header() {
+        let mut app = call_app(CallState::Off);
+        app.observe_questions(question_queue(&["Q1"]));
+        app.handle_key(KeyCode::Char('j'));
+        app.handle_key(KeyCode::Char('l'));
+        app.land_on(&Stop::Question(QStop::Option {
+            decision: 1,
+            option: 1,
+        }));
+        let mut changed = question_queue(&["Q1"]);
+        changed.questions[0].version = 2;
+        changed.questions[0].decisions.truncate(1);
+        app.observe_questions(changed);
+        assert_eq!(app.cursor_stop(), Some(Stop::Question(QStop::Header)));
+        assert!(app.questions.stops().contains(&QStop::Header));
+    }
+
+    #[test]
+    fn esc_alone_ends_swallowed_and_held_keys() {
+        // Swallowed: the questions hid while the cursor was on them.
+        let mut app = call_app(CallState::Off);
+        app.observe_questions(question_queue(&["Q1"]));
+        app.handle_key(KeyCode::Char('j'));
+        app.hide_questions();
+        assert!(app.swallowing_keys());
+        for code in [KeyCode::Tab, KeyCode::BackTab, KeyCode::Char('q')] {
+            assert_eq!(app.handle_key(code), Effect::None);
+            assert!(app.swallowing_keys(), "{code:?} does not end it");
+        }
+        assert_eq!(app.handle_key(KeyCode::Esc), Effect::None);
+        assert!(!app.swallowing_keys());
+        assert_eq!(app.cursor_stop(), Some(agent("%3")));
+
+        // Held: the question changed under an open note.
+        let mut app = call_app(CallState::Off);
+        app.observe_questions(question_queue(&["Q1"]));
+        open_revise_note(&mut app);
+        let mut changed = question_queue(&["Q1"]);
+        changed.questions[0].version = 2;
+        app.observe_questions(changed);
+        assert!(app.holding_block_keys());
+        for code in [
+            KeyCode::Tab,
+            KeyCode::BackTab,
+            KeyCode::Char('x'),
+            KeyCode::Enter,
+        ] {
+            assert_eq!(app.handle_key(code), Effect::None);
+            assert!(app.holding_block_keys(), "{code:?} does not end it");
+        }
+        app.handle_key(KeyCode::Esc);
+        assert!(!app.holding_block_keys());
+        assert!(app.cursor_on_question());
+    }
+
+    #[test]
+    fn s_c_t_f_slash_q_do_nothing_on_question_rows() {
+        let mut app = call_app(CallState::Off);
+        app.observe_questions(question_queue(&["Q1"]));
+        app.observe_call(Some(call_view(CallState::Speaking, "%3")));
+        app.handle_key(KeyCode::Char('j'));
+        app.handle_key(KeyCode::Char('l'));
+        for stop in app
+            .stops()
+            .into_iter()
+            .filter(|s| matches!(s, Stop::Question(_)))
+        {
+            app.land_on(&stop);
+            for character in ['s', 'c', 't', 'f', '/', 'q'] {
+                let before = key_state(&app);
+                assert_eq!(
+                    app.handle_key(KeyCode::Char(character)),
+                    Effect::None,
+                    "{stop:?} {character}"
+                );
+                assert_eq!(key_state(&app), before, "{stop:?} {character}");
+            }
+        }
+        assert!(app.search.query.is_empty() && !app.search.editing && app.palette.is_none());
+    }
+
+    #[test]
+    fn n_on_question_row_steps_questions_and_on_agent_row_steps_agents() {
+        let mut app = waiting_app();
+        app.observe_questions(question_queue(&["Q1", "Q2"]));
+        // On an agent row, n goes to the next waiting agent, as before.
+        assert_eq!(app.handle_key(KeyCode::Char('n')), Effect::None);
+        assert_eq!(app.selected.as_ref().unwrap().pane_id, "%3");
+        // On a question row, n steps the questions and leaves the agent alone.
+        app.handle_key(KeyCode::Char('j'));
+        assert!(app.cursor_on_question());
+        let selected = app.selected.clone();
+        assert_eq!(app.questions.view().unwrap().id, "Q1");
+        assert_eq!(app.handle_key(KeyCode::Char('n')), Effect::None);
+        assert_eq!(app.questions.view().unwrap().id, "Q2");
+        assert_eq!(app.selected, selected);
+        assert_eq!(app.handle_key(shift_n()), Effect::None);
+        assert_eq!(app.questions.view().unwrap().id, "Q1");
+        assert_eq!(app.selected, selected);
+        assert_eq!(app.cursor_stop(), Some(Stop::Question(QStop::Header)));
+
+        // From an option row the cursor returns to the header.
+        app.handle_key(KeyCode::Char('l'));
+        app.handle_key(KeyCode::Char('j'));
+        assert_ne!(app.cursor_stop(), Some(Stop::Question(QStop::Header)));
+        app.handle_key(KeyCode::Char('n'));
+        assert_eq!(app.cursor_stop(), Some(Stop::Question(QStop::Header)));
+    }
+
+    #[test]
+    fn enter_on_agent_row_still_switches_pane() {
+        let mut app = call_app(CallState::Off);
+        app.observe_call(Some(call_view(CallState::Off, "%2")));
+        app.observe_questions(question_queue(&["Q1"]));
+        select_pane(&mut app, "%2");
+        assert_eq!(
+            app.handle_key(KeyCode::Enter),
+            Effect::Navigate {
+                pane_id: "%2".into()
+            }
+        );
+        // On the question's header, Enter opens it and switches nothing.
+        app.handle_key(KeyCode::Char('j'));
+        assert_eq!(app.handle_key(KeyCode::Enter), Effect::None);
+        assert!(app.questions.is_open());
+        assert_eq!(app.handle_key(KeyCode::Enter), Effect::None);
+        assert!(!app.questions.is_open());
+    }
+
+    #[test]
+    fn after_send_cursor_on_next_header_or_chief_row() {
+        let mut app = call_app(CallState::Off);
+        app.observe_questions(question_queue(&["Q1", "Q2"]));
+        app.handle_key(KeyCode::Char('j'));
+        app.handle_key(KeyCode::Char('l'));
+        app.land_on(&Stop::Question(QStop::Action(0)));
+        let Effect::Answer(out) = app.handle_key(KeyCode::Enter) else {
+            panic!("Enter on send answers");
+        };
+        assert_eq!((out.id.as_str(), out.send_now), ("Q1", true));
+        app.question_sent("Q1", SendResult::Recorded);
+        assert_eq!(app.cursor_stop(), Some(Stop::Question(QStop::Header)));
+        assert_eq!(app.questions.view().unwrap().id, "Q2");
+        assert!(app.questions.is_open(), "the next question shows open");
+
+        app.land_on(&Stop::Question(QStop::Action(0)));
+        let Effect::Answer(out) = app.handle_key(KeyCode::Enter) else {
+            panic!("Enter on send answers");
+        };
+        app.question_sent(&out.id, SendResult::Recorded);
+        assert!(!app.cursor_on_question());
+        assert_eq!(app.cursor_stop(), Some(agent("%3")), "the chief's row");
+    }
+
+    #[test]
+    fn send_with_a_missing_pick_moves_the_cursor_to_that_decision() {
+        let mut app = call_app(CallState::Off);
+        let mut queue = question_queue(&["Q1"]);
+        queue.questions[0].decisions[1].options[0].suggested = false;
+        app.observe_questions(queue);
+        app.handle_key(KeyCode::Char('j'));
+        app.handle_key(KeyCode::Char('l'));
+        app.land_on(&Stop::Question(QStop::Action(0)));
+        assert_eq!(app.handle_key(KeyCode::Enter), Effect::None);
+        assert_eq!(
+            app.cursor_stop(),
+            Some(Stop::Question(QStop::Option {
+                decision: 1,
+                option: 0
+            }))
+        );
+        assert_eq!(app.handle_key(KeyCode::Char(' ')), Effect::None);
+        app.land_on(&Stop::Question(QStop::Action(0)));
+        assert!(matches!(app.handle_key(KeyCode::Enter), Effect::Answer(_)));
+    }
+
+    #[test]
+    fn later_moves_the_cursor_to_the_new_current_header() {
+        let mut app = call_app(CallState::Off);
+        app.observe_questions(question_queue(&["Q1", "Q2"]));
+        app.handle_key(KeyCode::Char('j'));
+        app.handle_key(KeyCode::Char('l'));
+        app.land_on(&Stop::Question(QStop::Action(1)));
+        assert_eq!(app.handle_key(KeyCode::Enter), Effect::Defer("Q1".into()));
+        assert_eq!(app.cursor_stop(), Some(Stop::Question(QStop::Header)));
+        assert_eq!(app.questions.view().unwrap().id, "Q2");
+    }
+
+    #[test]
+    fn o_opens_the_link_on_any_question_row() {
+        let mut app = call_app(CallState::Off);
+        app.observe_questions(question_queue(&["Q1"]));
+        app.handle_key(KeyCode::Char('j'));
+        app.handle_key(KeyCode::Char('l'));
+        for stop in app
+            .stops()
+            .into_iter()
+            .filter(|s| matches!(s, Stop::Question(_)))
+        {
+            app.land_on(&stop);
+            assert_eq!(
+                app.handle_key(KeyCode::Char('o')),
+                Effect::OpenLink("https://example.com/spec".into()),
+                "{stop:?}"
+            );
+        }
+        // On an agent row, `o` does nothing.
+        select_pane(&mut app, "%1");
+        app.question_stop = None;
+        assert_eq!(app.handle_key(KeyCode::Char('o')), Effect::None);
+    }
+
+    #[test]
+    fn filter_changes_never_move_the_cursor_off_a_question_row() {
+        let mut app = call_app(CallState::Off);
+        app.observe_questions(question_queue(&["Q1"]));
+        app.handle_key(KeyCode::Char('j'));
+        assert!(app.cursor_on_question());
+        // A snapshot arrives and the filter is applied from outside the keys.
+        app.search.query = "voice".into();
+        app.search_changed();
+        assert!(app.cursor_on_question());
+        app.apply_later_snapshot(fleet([Idle, Idle, Busy], 2))
+            .unwrap();
+        assert!(app.cursor_on_question());
+    }
+
+    #[test]
+    fn the_now_line_never_takes_the_cursor() {
         let keys = [
             KeyCode::Tab,
             KeyCode::BackTab,
@@ -2844,22 +3372,20 @@ mod tests {
             KeyCode::Char('k'),
             KeyCode::Esc,
             KeyCode::Tab,
-            KeyCode::Tab,
-            KeyCode::Tab,
             KeyCode::Esc,
             KeyCode::Enter,
         ];
-        let focus_moves = |now: Option<&str>, questions: &[&str]| {
+        let cursor_moves = |now: Option<&str>, questions: &[&str]| {
             let mut app = call_app(CallState::Off);
             assert!(app.observe_now(now.map(str::to_owned)) == now.is_some());
             if !questions.is_empty() {
                 app.observe_questions(question_queue(questions));
             }
-            let moves: Vec<Focus> = keys
+            let moves: Vec<Option<Stop>> = keys
                 .iter()
                 .map(|code| {
                     app.handle_key(*code);
-                    app.focus
+                    app.cursor_stop()
                 })
                 .collect();
             assert_eq!(app.now_line.as_deref(), now, "no key changes the Now line");
@@ -2867,17 +3393,11 @@ mod tests {
         };
         for questions in [&[][..], &["Q1"][..]] {
             assert_eq!(
-                focus_moves(Some("Ship the backlog tool"), questions),
-                focus_moves(None, questions),
-                "the focus order is the same with the Now line"
+                cursor_moves(Some("Ship the backlog tool"), questions),
+                cursor_moves(None, questions),
+                "the cursor order is the same with the Now line"
             );
         }
-        assert!(
-            focus_moves(Some("Ship the backlog tool"), &[])
-                .iter()
-                .all(|focus| *focus == Focus::List),
-            "with no question, Tab finds nothing to focus"
-        );
     }
 
     #[test]
@@ -2900,75 +3420,45 @@ mod tests {
     }
 
     #[test]
-    fn tab_in_the_summary_moves_the_focus_to_the_list() {
+    fn r_and_l_do_nothing_and_c_calls_on_an_agent_row() {
         let mut app = call_app(CallState::Off);
         app.observe_questions(question_queue(&["Q1"]));
-        app.handle_key(KeyCode::Tab);
-        // Enter picks each decision's suggested option, and the summary shows.
-        app.handle_key(KeyCode::Enter);
-        app.handle_key(KeyCode::Enter);
-        assert_eq!(
-            app.questions.view().unwrap().mode,
-            crate::questions::Mode::Summary
-        );
-
-        assert_eq!(app.handle_key(KeyCode::Tab), Effect::None);
-        assert_eq!(app.focus, Focus::List);
-        assert_eq!(
-            app.questions.view().unwrap().mode,
-            crate::questions::Mode::Summary,
-            "the summary is kept"
-        );
-    }
-
-    #[test]
-    fn r_and_l_do_nothing_and_c_calls_in_the_list() {
-        let mut app = call_app(CallState::Off);
-        app.observe_questions(question_queue(&["Q1"]));
-        assert_eq!(app.focus, Focus::List);
+        assert!(!app.cursor_on_question());
         assert_eq!(app.handle_key(KeyCode::Char('r')), Effect::None);
         assert_eq!(
             app.handle_key(KeyCode::Char('c')),
             Effect::Call(CallAction::Start)
         );
-        let before = app.selected.clone();
+        let before = key_state(&app);
         assert_eq!(app.handle_key(KeyCode::Char('l')), Effect::None);
-        assert_eq!(app.selected, before, "nothing waits, so l stays put");
-        assert_eq!(app.questions.view().unwrap().mode, Mode::Choosing);
-        assert!(app.questions.view().unwrap().picks.is_empty());
+        assert_eq!(key_state(&app), before, "l opens nothing from an agent row");
+        assert!(!app.questions.is_open());
     }
 
     #[test]
-    fn block_keys_apply_only_with_focus() {
+    fn question_keys_apply_only_on_question_rows() {
         let mut app = call_app(CallState::Off);
         app.observe_questions(question_queue(&["Q1", "Q2"]));
-        app.handle_key(KeyCode::Enter);
-        assert!(app.questions.view().unwrap().picks.is_empty());
-
-        app.handle_key(KeyCode::Tab);
+        app.handle_key(KeyCode::Char('j'));
+        assert!(app.cursor_on_question());
         assert_eq!(app.handle_key(KeyCode::Char('c')), Effect::None);
         assert_eq!(app.handle_key(KeyCode::Char('r')), Effect::None);
-        assert_eq!(app.questions.view().unwrap().mode, Mode::Choosing);
-        assert_eq!(app.handle_key(KeyCode::Enter), Effect::None);
-        assert_eq!(app.questions.view().unwrap().picks.len(), 1);
-        app.handle_key(KeyCode::Enter);
+        assert_eq!(app.handle_key(KeyCode::Char('l')), Effect::None);
+        assert!(app.questions.is_open());
+        // Space picks; the picks start on the suggestions.
+        app.handle_key(KeyCode::Char('j'));
+        app.handle_key(KeyCode::Char('j'));
+        assert_eq!(app.handle_key(KeyCode::Char(' ')), Effect::None);
+        app.land_on(&Stop::Question(QStop::Action(0)));
         match app.handle_key(KeyCode::Enter) {
             Effect::Answer(out) => {
                 assert_eq!((out.id.as_str(), out.version), ("Q1", 1));
                 assert_eq!(out.kind, AnswerKind::Answer);
+                assert_eq!(out.picks[0].key, "b");
+                assert_eq!(out.picks[1].key, "a");
             }
             other => panic!("{other:?}"),
         }
-        assert_eq!(
-            app.handle_key(KeyCode::Char('l')),
-            Effect::None,
-            "the summary ignores l"
-        );
-        // Esc goes back to the last decision; its later row defers.
-        app.handle_key(KeyCode::Esc);
-        app.handle_key(KeyCode::Char('j'));
-        app.handle_key(KeyCode::Char('j'));
-        assert_eq!(app.handle_key(KeyCode::Enter), Effect::Defer("Q1".into()));
         assert_eq!(
             app.handle_key(KeyCode::Char('o')),
             Effect::OpenLink("https://example.com/spec".into())
@@ -2976,7 +3466,7 @@ mod tests {
         assert_eq!(
             app.handle_key(KeyCode::Char('q')),
             Effect::None,
-            "q is not quit in the block"
+            "q is not quit on a question row"
         );
     }
 
@@ -2986,60 +3476,55 @@ mod tests {
         app.observe_questions(question_queue(&["Q1"]));
         app.observe_questions(question_queue(&[]));
         assert!(app.questions.shows_notice_only());
-        assert_eq!(app.focus, Focus::List);
+        assert!(!app.cursor_on_question());
 
-        // On the list: the notice goes and the key does what it does on the list.
+        // The notice goes and the key does what it does on the list.
         assert_eq!(app.handle_key(KeyCode::Char('q')), Effect::Quit);
         assert!(!app.questions.is_visible());
 
-        // In the block: the key only clears it, and the focus returns to the list.
+        // With the cursor on the question, the read that withdraws it moves the cursor to
+        // the chief's row; the next key clears the notice and acts there.
         app.observe_questions(question_queue(&["Q1"]));
-        app.handle_key(KeyCode::Tab);
+        app.handle_key(KeyCode::Char('j'));
         app.observe_questions(question_queue(&[]));
-        assert_eq!(app.focus, Focus::Block);
-        assert_eq!(app.handle_key(KeyCode::Char('q')), Effect::None);
+        assert!(!app.cursor_on_question());
+        assert_eq!(app.handle_key(KeyCode::Char('q')), Effect::Quit);
         assert!(!app.questions.is_visible());
-        assert_eq!(app.focus, Focus::List);
     }
 
     #[test]
     fn a_notice_on_an_empty_block_goes_after_the_next_empty_list() {
         let mut app = call_app(CallState::Off);
         app.observe_questions(question_queue(&["Q1"]));
-        app.handle_key(KeyCode::Tab);
+        app.handle_key(KeyCode::Char('j'));
         app.observe_questions(question_queue(&[]));
         assert!(app.questions.is_visible());
         app.observe_questions(question_queue(&[]));
         assert!(!app.questions.is_visible());
-        assert_eq!(app.focus, Focus::List);
+        assert!(!app.cursor_on_question());
     }
 
     #[test]
-    fn a_new_question_does_not_take_the_focus() {
+    fn hiding_the_questions_returns_the_cursor_to_the_chief_row() {
         let mut app = call_app(CallState::Off);
-        app.observe_questions(question_queue(&["Q1"]));
-        assert_eq!(app.focus, Focus::List);
         app.observe_questions(question_queue(&["Q1", "Q2"]));
-        assert_eq!(app.focus, Focus::List);
-
-        // When the block hides, the focus returns to the list.
-        app.handle_key(KeyCode::Tab);
-        assert_eq!(app.focus, Focus::Block);
+        app.handle_key(KeyCode::Char('j'));
+        assert!(app.cursor_on_question());
         app.hide_questions();
         assert!(!app.questions.is_visible());
-        assert_eq!(app.focus, Focus::List);
+        assert!(!app.cursor_on_question());
+        assert_eq!(app.cursor_stop(), Some(agent("%3")));
     }
 
     #[test]
-    fn keys_after_the_block_hides_under_focus_do_not_reach_the_list() {
+    fn keys_after_the_questions_hide_under_the_cursor_do_not_reach_the_list() {
         let mut app = call_app(CallState::Off);
         app.observe_questions(question_queue(&["Q1"]));
-        app.handle_key(KeyCode::Tab);
         open_revise_note(&mut app);
         app.handle_key(KeyCode::Char('a'));
         // The list fails, or the stream ends, while a note is being typed.
         app.hide_questions();
-        assert_eq!(app.focus, Focus::List);
+        assert!(!app.cursor_on_question());
         assert!(app.swallowing_keys());
         for code in [
             KeyCode::Char('q'),
@@ -3048,10 +3533,12 @@ mod tests {
             KeyCode::Char('r'),
             KeyCode::Char('f'),
             KeyCode::Char('/'),
+            KeyCode::Tab,
         ] {
             assert_eq!(app.handle_key(code), Effect::None, "{code:?}");
         }
         assert!(!app.search.editing && app.palette.is_none());
+        assert!(app.swallowing_keys(), "Tab does not end it");
         assert_eq!(app.handle_key(KeyCode::Esc), Effect::None);
         assert!(!app.swallowing_keys());
         assert_eq!(
@@ -3059,16 +3546,7 @@ mod tests {
             Effect::Call(CallAction::Start)
         );
 
-        // Tab ends it too, and the list keeps the focus.
-        app.observe_questions(question_queue(&["Q1"]));
-        app.handle_key(KeyCode::Tab);
-        app.hide_questions();
-        assert_eq!(app.handle_key(KeyCode::Char('q')), Effect::None);
-        assert_eq!(app.handle_key(KeyCode::Tab), Effect::None);
-        assert_eq!(app.focus, Focus::List);
-        assert_eq!(app.handle_key(KeyCode::Char('q')), Effect::Quit);
-
-        // Without the focus, a hidden block swallows nothing.
+        // Without the cursor on the questions, hidden questions swallow nothing.
         let mut app = call_app(CallState::Off);
         app.observe_questions(question_queue(&["Q1"]));
         app.hide_questions();
@@ -3077,16 +3555,15 @@ mod tests {
     }
 
     #[test]
-    fn a_returning_block_takes_the_focus_back_and_typing_resumes() {
+    fn returning_questions_take_the_cursor_back_and_typing_resumes() {
         let mut app = call_app(CallState::Off);
         app.observe_questions(question_queue(&["Q1"]));
-        app.handle_key(KeyCode::Tab);
         open_revise_note(&mut app);
         app.handle_key(KeyCode::Char('a'));
         app.hide_questions();
         assert!(app.swallowing_keys());
         app.observe_questions(question_queue(&["Q1"]));
-        assert_eq!(app.focus, Focus::Block);
+        assert!(app.cursor_on_question());
         assert!(!app.swallowing_keys());
         assert!(!app.holding_block_keys());
         app.handle_key(KeyCode::Char('b'));
@@ -3100,17 +3577,16 @@ mod tests {
     }
 
     #[test]
-    fn a_returning_block_that_changed_swallows_until_esc() {
+    fn returning_questions_that_changed_hold_keys_until_esc() {
         let mut app = call_app(CallState::Off);
         app.observe_questions(question_queue(&["Q1"]));
-        app.handle_key(KeyCode::Tab);
         open_revise_note(&mut app);
         app.handle_key(KeyCode::Char('a'));
         app.hide_questions();
         let mut changed = question_queue(&["Q1"]);
         changed.questions[0].version = 2;
         app.observe_questions(changed);
-        assert_eq!(app.focus, Focus::Block);
+        assert!(app.cursor_on_question());
         assert!(!app.swallowing_keys());
         assert!(app.holding_block_keys());
         for code in [
@@ -3124,37 +3600,22 @@ mod tests {
         }
         let view = app.questions.view().unwrap();
         assert_eq!(view.mode, Mode::Choosing);
-        assert!(view.picks.is_empty());
         assert_eq!(
             view.notice.as_deref(),
             Some("Q1 changed, your picks were cleared")
         );
-        // Esc reads the change: the notice goes, and the question is chosen from.
+        // Esc reads the change: the notice goes, and the question is read from.
         assert_eq!(app.handle_key(KeyCode::Esc), Effect::None);
         assert!(!app.holding_block_keys());
-        assert_eq!(app.focus, Focus::Block);
+        assert!(app.cursor_on_question());
         assert_eq!(app.questions.view().unwrap().notice, None);
-        app.handle_key(KeyCode::Char('j'));
-        app.handle_key(KeyCode::Char('j'));
+        app.land_on(&Stop::Question(QStop::Action(1)));
         assert_eq!(app.handle_key(KeyCode::Enter), Effect::Defer("Q1".into()));
 
-        // Tab also ends the hold, moving to the list as usual.
+        // A change while no note is open does not hold.
         let mut app = call_app(CallState::Off);
         app.observe_questions(question_queue(&["Q1"]));
-        app.handle_key(KeyCode::Tab);
-        open_revise_note(&mut app);
-        let mut changed = question_queue(&["Q1"]);
-        changed.questions[0].version = 2;
-        app.observe_questions(changed);
-        assert!(app.holding_block_keys(), "a change under a note holds too");
-        assert_eq!(app.handle_key(KeyCode::Tab), Effect::None);
-        assert_eq!(app.focus, Focus::List);
-        assert!(!app.holding_block_keys());
-
-        // A change while choosing does not hold.
-        let mut app = call_app(CallState::Off);
-        app.observe_questions(question_queue(&["Q1"]));
-        app.handle_key(KeyCode::Tab);
+        app.handle_key(KeyCode::Char('j'));
         let mut changed = question_queue(&["Q1"]);
         changed.questions[0].version = 2;
         app.observe_questions(changed);
@@ -3170,21 +3631,21 @@ mod tests {
         KeyEvent::new(KeyCode::Char('N'), KeyModifiers::SHIFT)
     }
 
-    /// Everything a key could change: the focus, the selection, search, the palette,
-    /// the swallow and hold flags, and the block.
+    /// Everything a key could change: the cursor, the selection, search, the palette,
+    /// the swallow and hold flags, and the questions.
     type KeyState = (
-        Focus,
+        Option<QStop>,
         Option<AgentIncarnation>,
         SearchState,
         Option<PaletteState>,
         bool,
         bool,
-        Option<crate::questions::BlockView>,
+        Option<crate::questions::RowsView>,
     );
 
     fn key_state(app: &App) -> KeyState {
         (
-            app.focus,
+            app.question_stop,
             app.selected.clone(),
             app.search.clone(),
             app.palette.clone(),
@@ -3217,12 +3678,14 @@ mod tests {
             app
         };
         let mut block = list();
-        block.handle_key(KeyCode::Tab);
-        let mut summary = block.clone();
-        summary.handle_key(KeyCode::Enter);
-        summary.handle_key(KeyCode::Enter);
-        assert_eq!(summary.questions.view().unwrap().mode, Mode::Summary);
-        let mut note = block.clone();
+        select_pane(&mut block, "%3");
+        block.handle_key(KeyCode::Char('j'));
+        assert!(block.cursor_on_question());
+        let mut open = block.clone();
+        open.handle_key(KeyCode::Char('l'));
+        open.handle_key(KeyCode::Char('j'));
+        assert!(open.questions.is_open());
+        let mut note = list();
         open_revise_note(&mut note);
         type_text(&mut note, "ab");
         let mut search = list();
@@ -3240,7 +3703,7 @@ mod tests {
         vec![
             ("list", list()),
             ("block", block),
-            ("summary", summary),
+            ("open", open),
             ("note", note),
             ("search", search),
             ("palette", palette),
@@ -3346,28 +3809,12 @@ mod tests {
     }
 
     #[test]
-    fn n_in_the_block_moves_questions_not_agents() {
-        let mut app = waiting_app();
-        app.observe_questions(question_queue(&["Q1", "Q2"]));
-        app.handle_key(KeyCode::Tab);
-        let selected = app.selected.clone();
-        assert_eq!(app.questions.view().unwrap().id, "Q1");
-        assert_eq!(app.handle_key(KeyCode::Char('n')), Effect::None);
-        assert_eq!(app.questions.view().unwrap().id, "Q2");
-        assert_eq!(app.selected, selected);
-        assert_eq!(app.handle_key(shift_n()), Effect::None);
-        assert_eq!(app.questions.view().unwrap().id, "Q1");
-        assert_eq!(app.selected, selected);
-        assert_eq!(app.focus, Focus::Block);
-    }
-
-    #[test]
-    fn list_keys_do_nothing_in_the_block() {
+    fn list_keys_do_nothing_on_question_rows() {
         for (mode, app) in apps_in_every_mode() {
-            if !matches!(mode, "block" | "summary") {
+            if !matches!(mode, "block" | "open") {
                 continue;
             }
-            for character in ['f', '/', 'g', 'G', 'c', 't', 'q'] {
+            for character in ['f', '/', 'c', 't', 'q', 's'] {
                 let mut app = app.clone();
                 app.observe_call(Some(call_view(CallState::Speaking, "%3")));
                 select_pane(&mut app, "%3");

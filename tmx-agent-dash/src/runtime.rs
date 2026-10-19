@@ -14,8 +14,8 @@ use tokio::time::sleep;
 
 use crate::api::{AgentStateSource, SourceError, SourceStream};
 use crate::app::{
-    App, CallAction, CallView, ConnectionState, Effect, Focus, FocusReading, RuntimeStatus,
-    SearchState, Snapshot, SnapshotError,
+    App, CallAction, CallView, ConnectionState, Effect, FocusReading, RuntimeStatus, SearchState,
+    Snapshot, SnapshotError,
 };
 use crate::cli::Options;
 use crate::navigation::{NavigationError, PaneNavigator, TmuxNavigator};
@@ -404,8 +404,8 @@ where
         // may take 5 s.
         //
         // The question queue is read the same way: as the stream opens, every
-        // QUESTION_POLL_INTERVAL, before each key that goes to the block (and before
-        // Tab), and after each answer or deferral. Each read is awaited inline and
+        // QUESTION_POLL_INTERVAL, before each key that goes to the question rows, and
+        // after each answer or deferral. Each read is awaited inline and
         // bounded by VOICE_REQUEST_TIMEOUT. The chief's Now item is read beside the
         // queue as the stream opens and on each QUESTION_POLL_INTERVAL, the same way,
         // except when that queue read timed out (see `read_now`).
@@ -476,7 +476,7 @@ where
                     // is found by this key's own read, or was flagged by an earlier one.
                     // A key for a block that this read hid (a notice it cleared) is
                     // dropped too, rather than handed to the list. Only a key that would
-                    // still reach the block is dropped: Tab, the global keys and every
+                    // still reach the question rows is dropped: the global keys and every
                     // key on the list act, whatever the flag says.
                     let flagged = std::mem::take(&mut core.drop_next_block_key);
                     if core.app.wants_fresh_questions(key) {
@@ -1050,8 +1050,8 @@ struct RuntimeCore {
     endpoint_display: String,
     /// How often the question queue is read; QUESTION_POLL_INTERVAL, shorter in tests.
     question_poll_interval: Duration,
-    /// A read no key asked for changed the question under the focus: the next key, if
-    /// it still goes to the block, is dropped. Any key clears it.
+    /// A read no key asked for changed the question under the cursor: the next key, if
+    /// it still goes to the question rows, is dropped. Any key clears it.
     drop_next_block_key: bool,
 }
 
@@ -1127,13 +1127,13 @@ impl RuntimeCore {
     }
 
     /// Takes a read no key asked for: the poll, or the read after an answer or a
-    /// deferral. If it changes the question in view while the block keeps the focus, the
-    /// next block key is dropped, as it was typed for what was there before. A read that
-    /// hides the block moves the focus to the list, and the next key acts there. Reports
+    /// deferral. If it changes the question in view while the cursor is on its rows, the
+    /// next key for them is dropped, as it was typed for what was there before. A read that
+    /// hides the rows moves the cursor to the chief's row, and the next key acts there. Reports
     /// whether the block changed at all.
     fn questions_refreshed(&mut self, result: Result<Queue, SourceError>) -> bool {
         let listed = self.questions_listed(result);
-        if listed.question_changed && self.app.focus == Focus::Block {
+        if listed.question_changed && self.app.cursor_on_question() {
             self.drop_next_block_key = true;
         }
         listed.changed
@@ -1314,14 +1314,14 @@ mod tests {
         wait_for_retry,
     };
     use crate::api::SourceError;
-    use crate::app::Focus;
     use crate::app::{
         AgentIncarnation, AgentRow, AgentState, CallAction, CallState, CallView, ConnectionState,
         FocusReading, MonitorHealth, MonitorHealthState, RuntimeStatus, Snapshot,
     };
     use crate::navigation::{NavigationError, PaneNavigator};
     use crate::questions::{
-        AnswerKind, DecisionView, OptionView, Outgoing, PickView, QuestionView, Queue, SendResult,
+        AnswerKind, DecisionView, OptionView, Outgoing, PickView, QStop, QuestionView, Queue,
+        SendResult,
     };
     use std::collections::VecDeque;
 
@@ -2152,10 +2152,12 @@ mod tests {
         let mut stream = FakeStream::pending(Arc::new(AtomicBool::new(false)));
         stream.questions = Some(Arc::clone(probe));
         let (input_sender, mut input) = InputPump::channel();
-        for key in keys.iter().copied().chain([KeyCode::Char('q')]) {
-            input_sender
-                .try_send(InputMessage::Key(key.into()))
-                .unwrap();
+        for key in keys
+            .iter()
+            .map(|code| KeyEvent::from(*code))
+            .chain([ctrl_q()])
+        {
+            input_sender.try_send(InputMessage::Key(key)).unwrap();
         }
         let (_shutdown_sender, mut shutdown) = FakeShutdown::channel();
         let outcome = consume_stream(
@@ -2171,6 +2173,37 @@ mod tests {
         .unwrap();
         assert_eq!(outcome, Control::Quit);
         probe.lock().unwrap().log.clone()
+    }
+
+    /// Ends a run of keys: Ctrl+Q quits wherever the cursor is, and is never read for.
+    fn ctrl_q() -> KeyEvent {
+        KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL)
+    }
+
+    /// `k` from the agent row to the question's header (the question's rows are at the
+    /// top of the list here, as no chief is named), `l` to open it, then `G` to the agent
+    /// row after them and `k` four times to `send`, for a question with two or more
+    /// options on each decision.
+    const TO_SEND: [KeyCode; 7] = [
+        KeyCode::Char('k'),
+        KeyCode::Char('l'),
+        KeyCode::Char('G'),
+        KeyCode::Char('k'),
+        KeyCode::Char('k'),
+        KeyCode::Char('k'),
+        KeyCode::Char('k'),
+    ];
+
+    /// The picked option key of each decision of the question in view.
+    fn picked(core: &RuntimeCore) -> Vec<Option<String>> {
+        core.app
+            .questions
+            .view()
+            .unwrap()
+            .decisions
+            .iter()
+            .map(|d| d.options.iter().find(|o| o.picked).map(|o| o.key.clone()))
+            .collect()
     }
 
     fn lists(n: usize) -> Vec<String> {
@@ -2342,19 +2375,30 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_block_key_lists_first() {
+    async fn a_key_on_a_question_row_lists_first() {
         let mut core = connected_core();
         let probe = question_probe(Some(question("Q1", 1, 2)));
         let log = run_question_stream(
             &mut core,
             &probe,
-            &[KeyCode::Char('j'), KeyCode::Tab, KeyCode::Up, KeyCode::Tab],
+            &[
+                KeyCode::Char('j'),
+                KeyCode::Char('k'),
+                KeyCode::Char('l'),
+                KeyCode::Char('j'),
+            ],
         )
         .await;
-        // Once as the stream opens, then before Tab, Up and Tab; not before j or q.
-        assert_eq!(log, lists(4));
-        assert_eq!(core.app.questions.view().unwrap().highlighted, 0);
-        assert_eq!(core.app.focus, Focus::List);
+        // Once as the stream opens, then before `l` and the second `j`; not before the
+        // first `j` or the `k` that brings the cursor onto the question, nor Ctrl+Q.
+        assert_eq!(log, lists(3));
+        assert_eq!(
+            core.app.question_stop,
+            Some(QStop::Option {
+                decision: 0,
+                option: 0
+            })
+        );
     }
 
     #[tokio::test]
@@ -2367,15 +2411,24 @@ mod tests {
             Some(question("Q1", 1, 2)),
             Some(question("Q1", 2, 2)),
         ]);
+        // Space on the first option would pick `a`; its read finds version 2.
         run_question_stream(
             &mut core,
             &probe,
-            &[KeyCode::Tab, KeyCode::Enter, KeyCode::Enter, KeyCode::Tab],
+            &[
+                KeyCode::Char('k'),
+                KeyCode::Char('l'),
+                KeyCode::Char('j'),
+                KeyCode::Char(' '),
+            ],
         )
         .await;
         let view = core.app.questions.view().unwrap();
-        assert_eq!(view.ask.as_deref(), Some("Ask 1?"));
-        assert!(view.picks.is_empty(), "the second Enter was not applied");
+        assert_eq!(
+            picked(&core),
+            [Some("b".to_string()), Some("b".to_string())],
+            "Space was not applied"
+        );
         assert_eq!(
             view.notice.as_deref(),
             Some("Q1 changed, your picks were cleared")
@@ -2383,7 +2436,34 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn enter_on_the_summary_calls_answer_question() {
+    async fn enter_on_send_is_dropped_when_the_read_finds_a_higher_version() {
+        let mut core = connected_core();
+        let probe = question_probe(Some(question("Q1", 2, 1)));
+        {
+            let mut state = probe.lock().unwrap();
+            // The stream's open and the five keys before Enter that read, `l`, `G` and three
+            // `k`, find version 2 as listed;
+            // the read before Enter finds version 3.
+            state.on_list = VecDeque::from(vec![Some(question("Q1", 2, 1)); 6]);
+            state.on_list.push_back(Some(question("Q1", 3, 1)));
+        }
+        let mut keys = TO_SEND.to_vec();
+        keys.push(KeyCode::Enter);
+        let log = run_question_stream(&mut core, &probe, &keys).await;
+        assert_eq!(log, lists(7));
+        let state = probe.lock().unwrap();
+        assert!(state.sent.is_empty(), "nothing was answered");
+        assert!(!state.log.iter().any(|call| call.starts_with("answer")));
+        drop(state);
+        assert_eq!(
+            core.app.questions.view().unwrap().notice.as_deref(),
+            Some("Q1 changed, your picks were cleared")
+        );
+        assert_eq!(core.app.question_stop, Some(QStop::Action(0)));
+    }
+
+    #[tokio::test]
+    async fn enter_on_send_calls_answer_question() {
         let mut core = connected_core();
         let probe = question_probe(Some(question("Q1", 3, 1)));
         probe
@@ -2391,13 +2471,10 @@ mod tests {
             .unwrap()
             .answers
             .push_back((SendResult::Recorded, Some(Queue::default())));
-        let log = run_question_stream(
-            &mut core,
-            &probe,
-            &[KeyCode::Tab, KeyCode::Enter, KeyCode::Enter],
-        )
-        .await;
-        let mut expected = lists(4);
+        let mut keys = TO_SEND.to_vec();
+        keys.push(KeyCode::Enter);
+        let log = run_question_stream(&mut core, &probe, &keys).await;
+        let mut expected = lists(7);
         expected.extend(["answer Q1 v3".to_string(), "list".to_string()]);
         assert_eq!(log, expected);
         let sent = probe.lock().unwrap().sent.clone();
@@ -2413,11 +2490,14 @@ mod tests {
                     text: String::new(),
                 }],
                 note: String::new(),
-                send_now: false,
+                send_now: true,
             }]
         );
         assert!(!core.app.questions.is_visible());
-        assert_eq!(core.app.focus, Focus::List);
+        assert!(
+            !core.app.cursor_on_question(),
+            "the cursor is on a row of the list"
+        );
     }
 
     #[tokio::test]
@@ -2431,22 +2511,22 @@ mod tests {
             &mut core,
             &probe,
             &[
-                KeyCode::Tab,
-                KeyCode::Char('j'),
+                KeyCode::Char('k'),
+                KeyCode::Char('l'),
+                KeyCode::Char('G'),
+                KeyCode::Char('k'),
+                KeyCode::Char('k'),
+                KeyCode::Char('k'),
                 KeyCode::Enter,
-                KeyCode::Tab,
             ],
         )
         .await;
-        let mut expected = lists(4);
-        expected.extend([
-            "defer Q1".to_string(),
-            "list".to_string(),
-            "list".to_string(),
-        ]);
+        let mut expected = lists(6);
+        expected.extend(["defer Q1".to_string(), "list".to_string()]);
         assert_eq!(log, expected);
         let view = core.app.questions.view().unwrap();
         assert_eq!((view.id.as_str(), view.position), ("Q2", 1));
+        assert_eq!(core.app.question_stop, Some(QStop::Header));
     }
 
     #[tokio::test]
@@ -2460,17 +2540,16 @@ mod tests {
             .unwrap()
             .answers
             .push_back((SendResult::VersionChanged, Some(changed)));
-        let enter3 = [KeyCode::Enter, KeyCode::Enter, KeyCode::Enter];
-        let keys: Vec<KeyCode> = [KeyCode::Tab]
-            .into_iter()
-            .chain(enter3)
-            .chain([KeyCode::Tab])
-            .collect();
+        let mut keys = TO_SEND.to_vec();
+        keys.push(KeyCode::Enter);
         let log = run_question_stream(&mut core, &probe, &keys).await;
         assert!(log.contains(&"answer Q1 v1".to_string()));
         let view = core.app.questions.view().unwrap();
-        assert_eq!(view.ask.as_deref(), Some("Changed?"));
-        assert!(view.picks.is_empty());
+        assert_eq!(view.decisions[0].ask, "Changed?");
+        assert_eq!(
+            picked(&core),
+            [Some("b".to_string()), Some("b".to_string())]
+        );
         assert_eq!(view.mode, crate::questions::Mode::Choosing);
         assert_eq!(
             view.notice.as_deref(),
@@ -2483,8 +2562,7 @@ mod tests {
             .unwrap()
             .answers
             .push_back((SendResult::Recorded, Some(Queue::default())));
-        let keys: Vec<KeyCode> = [KeyCode::Tab].into_iter().chain(enter3).collect();
-        let log = run_question_stream(&mut core, &probe, &keys).await;
+        let log = run_question_stream(&mut core, &probe, &[KeyCode::Enter]).await;
         assert!(log.contains(&"answer Q1 v2".to_string()), "{log:?}");
     }
 
@@ -2497,24 +2575,21 @@ mod tests {
             .unwrap()
             .answers
             .push_back((SendResult::Unavailable, None));
-        let log = run_question_stream(
-            &mut core,
-            &probe,
-            &[KeyCode::Tab, KeyCode::Enter, KeyCode::Enter, KeyCode::Tab],
-        )
-        .await;
+        let mut keys = TO_SEND.to_vec();
+        keys.push(KeyCode::Enter);
+        let log = run_question_stream(&mut core, &probe, &keys).await;
         assert!(log.contains(&"answer Q1 v1".to_string()));
         let view = core.app.questions.view().unwrap();
-        assert_eq!(view.mode, crate::questions::Mode::Summary);
-        assert_eq!(view.picks.len(), 1);
+        assert_eq!(picked(&core), [Some("b".to_string())]);
         assert_eq!(
             view.notice.as_deref(),
             Some("Harold can't save answers right now")
         );
+        assert_eq!(core.app.question_stop, Some(QStop::Action(0)));
     }
 
     #[tokio::test]
-    async fn a_poll_found_change_drops_the_next_block_key() {
+    async fn a_poll_found_change_drops_the_next_question_key() {
         let mut core = connected_core();
         core.question_poll_interval = Duration::from_millis(10);
         let probe = question_probe(Some(question("Q1", 1, 2)));
@@ -2522,17 +2597,20 @@ mod tests {
         stream.questions = Some(Arc::clone(&probe));
         let (input_sender, mut input) = InputPump::channel();
         let key = |code: KeyCode| InputMessage::Key(code.into());
-        input_sender.try_send(key(KeyCode::Tab)).unwrap();
+        // The cursor goes to the first option of the open question.
+        for code in [KeyCode::Char('k'), KeyCode::Char('l'), KeyCode::Char('j')] {
+            input_sender.try_send(key(code)).unwrap();
+        }
         let tool = Arc::clone(&probe);
         tokio::spawn(async move {
-            // The question changes while the block chooses on decision 1, so no keys are
-            // held. Well after a poll has found version 2, the user presses `l`: only
-            // the flag keeps it from picking the highlighted option.
+            // The question changes while no note is open, so no keys are held. Well
+            // after a poll has found version 2, the user presses Space: only the flag
+            // keeps it from picking the first option.
             tokio::time::sleep(Duration::from_millis(50)).await;
             tool.lock().unwrap().queue = Some(question("Q1", 2, 2));
             tokio::time::sleep(Duration::from_millis(150)).await;
-            for code in [KeyCode::Char('l'), KeyCode::Tab, KeyCode::Char('q')] {
-                input_sender.send(key(code)).await.unwrap();
+            for message in [key(KeyCode::Char(' ')), InputMessage::Key(ctrl_q())] {
+                input_sender.send(message).await.unwrap();
             }
         });
         let (_shutdown_sender, mut shutdown) = FakeShutdown::channel();
@@ -2552,8 +2630,11 @@ mod tests {
         assert!(!log.iter().any(|call| call.starts_with("defer")), "{log:?}");
         let view = core.app.questions.view().unwrap();
         assert_eq!(view.mode, crate::questions::Mode::Choosing);
-        assert_eq!(view.ask.as_deref(), Some("Ask 1?"));
-        assert!(view.picks.is_empty(), "l picked nothing");
+        assert_eq!(
+            picked(&core),
+            [Some("b".to_string()), Some("b".to_string())],
+            "Space picked nothing"
+        );
         assert_eq!(
             view.notice.as_deref(),
             Some("Q1 changed, your picks were cleared"),
@@ -2570,9 +2651,15 @@ mod tests {
         stream.questions = Some(Arc::clone(&probe));
         let (input_sender, mut input) = InputPump::channel();
         let key = |code: KeyCode| InputMessage::Key(code.into());
-        input_sender.try_send(key(KeyCode::Tab)).unwrap();
-        // The revise row is two below the suggested option.
-        for code in [KeyCode::Char('j'), KeyCode::Char('j'), KeyCode::Enter] {
+        // Open the question and the revise note: two above the agent row after them.
+        for code in [
+            KeyCode::Char('k'),
+            KeyCode::Char('l'),
+            KeyCode::Char('G'),
+            KeyCode::Char('k'),
+            KeyCode::Char('k'),
+            KeyCode::Enter,
+        ] {
             input_sender.try_send(key(code)).unwrap();
         }
         let tool = Arc::clone(&probe);
@@ -2582,9 +2669,13 @@ mod tests {
             tool.lock().unwrap().queue = Some(question("Q1", 2, 2));
             tokio::time::sleep(Duration::from_millis(150)).await;
             let typed = "later".chars().map(KeyCode::Char).chain([KeyCode::Enter]);
-            for code in typed.chain([KeyCode::Tab, KeyCode::Char('q')]) {
+            for code in typed.chain([KeyCode::Tab, KeyCode::Esc]) {
                 input_sender.send(key(code)).await.unwrap();
             }
+            input_sender
+                .send(InputMessage::Key(ctrl_q()))
+                .await
+                .unwrap();
         });
         let (_shutdown_sender, mut shutdown) = FakeShutdown::channel();
         let outcome = consume_stream(
@@ -2601,14 +2692,20 @@ mod tests {
         assert_eq!(outcome, Control::Quit);
         let log = probe.lock().unwrap().log.clone();
         assert!(!log.iter().any(|call| call.starts_with("defer")), "{log:?}");
+        assert!(
+            !log.iter().any(|call| call.starts_with("answer")),
+            "{log:?}"
+        );
         let view = core.app.questions.view().unwrap();
         assert_eq!(view.mode, crate::questions::Mode::Choosing);
-        assert!(view.picks.is_empty(), "Enter picked nothing");
         assert_eq!(
-            view.notice.as_deref(),
-            Some("Q1 changed, your picks were cleared")
+            picked(&core),
+            [Some("b".to_string()), Some("b".to_string())],
+            "the typed letters and Enter changed nothing"
         );
-        assert!(!core.app.holding_block_keys(), "Tab ended the hold");
+        assert!(!core.app.holding_block_keys(), "Esc ended the hold");
+        assert_eq!(view.notice, None, "Esc read the change");
+        assert!(core.app.cursor_on_question());
     }
 
     #[test]
@@ -2616,7 +2713,8 @@ mod tests {
         let mut core = connected_core();
         let navigator = FakeNavigator::successful();
         core.app.observe_questions(question("Q1", 1, 2));
-        core.handle_key(KeyCode::Tab, &navigator);
+        core.handle_key(KeyCode::Char('k'), &navigator);
+        assert!(core.app.cursor_on_question());
         assert!(core.questions_refreshed(Ok(question("Q1", 2, 2))));
         assert!(core.drop_next_block_key);
         core.drop_next_block_key = false;
@@ -2626,8 +2724,9 @@ mod tests {
         core.drop_next_block_key = false;
         assert!(!core.questions_refreshed(Ok(question("Q1", 3, 2))));
         assert!(!core.drop_next_block_key, "an unchanged read flags nothing");
-        // Without the focus there is nothing to drop.
-        core.handle_key(KeyCode::Tab, &navigator);
+        // With the cursor on the list there is nothing to drop.
+        core.handle_key(KeyCode::Char('j'), &navigator);
+        assert!(!core.app.cursor_on_question());
         assert!(core.questions_refreshed(Ok(question("Q1", 4, 2))));
         assert!(!core.drop_next_block_key);
     }
@@ -2637,15 +2736,29 @@ mod tests {
         let mut core = connected_core();
         let navigator = FakeNavigator::successful();
         core.app.observe_questions(question("Q1", 1, 2));
-        core.handle_key(KeyCode::Tab, &navigator);
-        core.handle_key(KeyCode::Enter, &navigator);
+        // Open the question and pick `a` on its first decision.
+        for code in [
+            KeyCode::Char('k'),
+            KeyCode::Char('l'),
+            KeyCode::Char('j'),
+            KeyCode::Char(' '),
+        ] {
+            core.handle_key(code, &navigator);
+        }
+        assert_eq!(
+            picked(&core),
+            [Some("a".to_string()), Some("b".to_string())]
+        );
         core.questions_listed(Err(SourceError::Transport("unavailable".into())));
         assert!(!core.app.questions.is_visible());
         assert_eq!(core.app.runtime_status(), None);
         core.questions_listed(Ok(question("Q1", 1, 2)));
         let view = core.app.questions.view().unwrap();
-        assert_eq!(view.ask.as_deref(), Some("Ask 2?"));
-        assert_eq!(view.picks, vec!["label b".to_string()]);
+        assert_eq!(
+            picked(&core),
+            [Some("a".to_string()), Some("b".to_string())]
+        );
+        assert!(view.open);
         assert_eq!(view.notice, None, "a failed list leaves no notice");
     }
 
@@ -2654,13 +2767,21 @@ mod tests {
         let mut core = connected_core();
         let navigator = FakeNavigator::successful();
         core.app.observe_questions(question("Q1", 1, 2));
-        core.handle_key(KeyCode::Tab, &navigator);
-        core.handle_key(KeyCode::Enter, &navigator);
+        for code in [
+            KeyCode::Char('k'),
+            KeyCode::Char('l'),
+            KeyCode::Char('j'),
+            KeyCode::Char(' '),
+        ] {
+            core.handle_key(code, &navigator);
+        }
         core.questions_listed(Err(SourceError::Transport("unavailable".into())));
         core.questions_listed(Ok(question("Q1", 2, 2)));
         let view = core.app.questions.view().unwrap();
-        assert_eq!(view.ask.as_deref(), Some("Ask 1?"));
-        assert!(view.picks.is_empty());
+        assert_eq!(
+            picked(&core),
+            [Some("b".to_string()), Some("b".to_string())]
+        );
         assert_eq!(
             view.notice.as_deref(),
             Some("Q1 changed, your picks were cleared")
@@ -2684,26 +2805,23 @@ mod tests {
         let mut core = connected_core();
         let probe = question_probe(Some(question("Q1", 1, 2)));
         let keys = [
-            KeyCode::Tab,
-            KeyCode::Char('j'),
-            KeyCode::Char('j'),
+            KeyCode::Char('k'),
+            KeyCode::Char('l'),
+            KeyCode::Char('G'),
+            KeyCode::Char('k'),
+            KeyCode::Char('k'),
             KeyCode::Enter,
             KeyCode::Char('a'),
             KeyCode::Char('b'),
             KeyCode::Char('c'),
-            KeyCode::Tab,
         ];
         run_question_stream(&mut core, &probe, &keys).await;
-        // The stream ends: run_async hides the block.
+        // The stream ends: run_async hides the questions.
         core.app.hide_questions();
         assert!(!core.app.questions.is_visible());
-        let log = run_question_stream(
-            &mut core,
-            &probe,
-            &[KeyCode::Tab, KeyCode::Char('d'), KeyCode::Tab],
-        )
-        .await;
-        assert_eq!(log, lists(9 + 4), "every key went to the block or was Tab");
+        let log = run_question_stream(&mut core, &probe, &[KeyCode::Char('d')]).await;
+        // Read as each stream opens, and before each key on the question rows.
+        assert_eq!(log, lists(8 + 2));
         assert_eq!(
             core.app.questions.view().unwrap().mode,
             crate::questions::Mode::Note {
@@ -2714,40 +2832,47 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_block_key_whose_read_clears_a_notice_is_dropped() {
+    async fn a_question_key_whose_read_withdraws_the_question_is_dropped() {
         let mut core = connected_core();
         let navigator = FakeNavigator::successful();
         core.app.observe_questions(question("Q1", 1, 1));
-        core.handle_key(KeyCode::Tab, &navigator);
-        core.app.question_sent("Q1", SendResult::NotWaiting);
-        assert!(core.app.questions.shows_notice_only());
-        assert_eq!(core.app.focus, Focus::Block);
+        core.handle_key(KeyCode::Char('k'), &navigator);
+        assert!(core.app.cursor_on_question());
+        // The read as the stream opens still lists Q1. The read before `f` finds it gone:
+        // `f` was meant for the question row, so it is dropped. On the list it would
+        // start a search and take the closing Ctrl+Q's place.
         let probe = question_probe(Some(Queue::default()));
-        // The read as the stream opens keeps the notice. `f` is meant for the block; its
-        // read clears the notice and hides the block, so it is dropped: on the list it
-        // would start a search and take the closing `q`.
+        probe.lock().unwrap().on_list =
+            VecDeque::from([Some(question("Q1", 1, 1)), Some(Queue::default())]);
         let log = tokio::time::timeout(
             Duration::from_secs(5),
             run_question_stream(&mut core, &probe, &[KeyCode::Char('f')]),
         )
         .await
-        .expect("f was dropped, so q quit");
+        .expect("Ctrl+Q quit");
         assert_eq!(log, lists(2));
-        assert!(!core.app.questions.is_visible());
-        assert_eq!(core.app.focus, Focus::List);
+        assert!(!core.app.search.editing, "f was dropped");
+        assert!(
+            !core.app.cursor_on_question(),
+            "the cursor went to the list"
+        );
     }
 
     #[tokio::test]
-    async fn a_poll_that_hides_a_focused_block_keeps_the_next_key() {
+    async fn a_poll_that_withdraws_the_question_under_the_cursor_keeps_the_next_key() {
         let mut core = connected_core();
         core.accept_snapshot(two_rows(2), 2_000);
         core.question_poll_interval = Duration::from_millis(10);
         let navigator = FakeNavigator::successful();
         core.app.observe_questions(question("Q1", 1, 1));
-        core.handle_key(KeyCode::Tab, &navigator);
+        core.handle_key(KeyCode::Char('k'), &navigator);
+        assert!(core.app.cursor_on_question());
         core.app.question_sent("Q1", SendResult::NotWaiting);
         assert!(core.app.questions.shows_notice_only());
-        assert_eq!(core.app.focus, Focus::Block);
+        assert!(
+            !core.app.cursor_on_question(),
+            "the cursor is on the list now"
+        );
         let first = core.app.selected.clone();
         let probe = question_probe(Some(Queue::default()));
         let mut stream = FakeStream::pending(Arc::new(AtomicBool::new(false)));
@@ -2758,8 +2883,8 @@ mod tests {
         let (_shutdown_sender, mut shutdown) = FakeShutdown::channel();
         tokio::spawn(async move {
             // The read as the stream opens keeps the notice; the next poll, 10 ms on,
-            // clears it and hides the block under the focus. The focus is on the list
-            // now, so `j` moves the selection and `q` quits: neither is dropped.
+            // clears it. The cursor is on the list, so `j` moves the selection and `q`
+            // quits: neither is dropped.
             tokio::time::sleep(Duration::from_millis(150)).await;
             for code in [KeyCode::Char('j'), KeyCode::Char('q')] {
                 input_sender
@@ -2785,20 +2910,21 @@ mod tests {
         .unwrap();
         assert_eq!(outcome, Control::Quit);
         assert!(!core.app.questions.is_visible());
-        assert_eq!(core.app.focus, Focus::List);
+        assert!(!core.app.cursor_on_question());
         assert_ne!(core.app.selected, first, "j moved the selection");
         assert!(!core.drop_next_block_key);
     }
 
-    /// Runs `consume_stream` over `keys` alone, with the block focused and
-    /// `drop_next_block_key` set, and returns how it ended.
-    async fn run_flagged(core: &mut RuntimeCore, keys: &[KeyEvent]) -> Control {
+    /// Runs `consume_stream` over `keys` alone, with `drop_next_block_key` set and the
+    /// cursor on the question's header, or on the list, and returns how it ended.
+    async fn run_flagged(core: &mut RuntimeCore, keys: &[KeyEvent], on_question: bool) -> Control {
         let probe = question_probe(Some(question("Q1", 1, 1)));
         let mut stream = FakeStream::pending(Arc::new(AtomicBool::new(false)));
         stream.questions = Some(Arc::clone(&probe));
         core.app.observe_questions(question("Q1", 1, 1));
-        if core.app.focus != Focus::Block {
-            core.handle_key(KeyCode::Tab, &FakeNavigator::successful());
+        if on_question {
+            core.handle_key(KeyCode::Char('k'), &FakeNavigator::successful());
+            assert!(core.app.cursor_on_question());
         }
         core.drop_next_block_key = true;
         let (input_sender, mut input) = InputPump::channel();
@@ -2825,18 +2951,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_guard_never_drops_tab_or_quit_keys() {
+    async fn the_guard_never_drops_quit_keys_or_a_key_on_the_list() {
         let ctrl = |c: char| KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL);
-        // Tab moves the focus to the list; the shutdown then ends the stream.
-        let mut core = connected_core();
-        run_flagged(&mut core, &[KeyCode::Tab.into()]).await;
-        assert_eq!(core.app.focus, Focus::List, "Tab was not dropped");
-        assert!(!core.drop_next_block_key);
-
         for chord in ['q', 'c'] {
             let mut core = connected_core();
             let started = std::time::Instant::now();
-            assert_eq!(run_flagged(&mut core, &[ctrl(chord)]).await, Control::Quit);
+            assert_eq!(
+                run_flagged(&mut core, &[ctrl(chord)], true).await,
+                Control::Quit
+            );
             assert!(
                 started.elapsed() < Duration::from_millis(250),
                 "Ctrl+{chord} quit before the shutdown"
@@ -2844,12 +2967,25 @@ mod tests {
         }
 
         let mut core = connected_core();
-        assert_eq!(run_flagged(&mut core, &[ctrl('l')]).await, Control::Retry);
+        assert_eq!(
+            run_flagged(&mut core, &[ctrl('l')], true).await,
+            Control::Retry
+        );
 
-        // A block key is still dropped.
+        // A key for the question row is dropped.
         let mut core = connected_core();
-        run_flagged(&mut core, &[KeyCode::Char('j').into()]).await;
-        assert_eq!(core.app.questions.view().unwrap().highlighted, 1);
+        run_flagged(&mut core, &[KeyCode::Char('l').into()], true).await;
+        assert!(!core.app.questions.is_open(), "l was dropped");
+        assert!(!core.drop_next_block_key);
+
+        // On the list, a key acts whatever the flag says: `g` goes to the question.
+        let mut core = connected_core();
+        run_flagged(&mut core, &[KeyCode::Char('g').into()], false).await;
+        assert_eq!(
+            core.app.question_stop,
+            Some(QStop::Header),
+            "g was not dropped"
+        );
     }
 
     #[tokio::test]
@@ -2886,28 +3022,34 @@ mod tests {
             (SendResult::Recorded, Some(after_q25)),
             (SendResult::Recorded, Some(Queue::default())),
         ]);
-        // Tab focuses Q25, decision 1, on the suggested a. j, j highlight c; l picks it
-        // and moves to decision 2, on its suggested b. k highlights a; h goes back to
-        // decision 1 with c kept; l picks c again and returns to decision 2, a still
-        // highlighted. Enter picks a and shows the summary, and Enter sends.
+        // k puts the cursor on Q25's header and l opens it. Both decisions start on their
+        // suggestions, a and b. j, j, j go to the option c of decision 1, and Space picks
+        // it. j goes to decision 2's first option, and Space picks a there. G goes to the
+        // agent row after the question's rows, and k four times to send; Enter sends.
         //
-        // After Q25 is recorded, the probe's queue drops it. The block then shows Q26,
-        // and `n` with one question listed does nothing, so the block stays on Q26.
-        // Q26's revise row is two below its suggested option: j, j, then Enter opens
-        // the note, the note is typed, and Enter sends it.
+        // After Q25 is recorded, the probe's queue drops it. The cursor goes to Q26's
+        // header, the question open, and `n` with one question listed does nothing. G, k, k
+        // go to Q26's revise row; Enter opens the note, the note is typed, and Enter
+        // sends it.
         let mut keys = vec![
-            KeyCode::Tab,
-            KeyCode::Char('j'),
-            KeyCode::Char('j'),
-            KeyCode::Char('l'),
             KeyCode::Char('k'),
-            KeyCode::Char('h'),
             KeyCode::Char('l'),
-            KeyCode::Enter,
+            KeyCode::Char('j'),
+            KeyCode::Char('j'),
+            KeyCode::Char('j'),
+            KeyCode::Char(' '),
+            KeyCode::Char('j'),
+            KeyCode::Char(' '),
+            KeyCode::Char('G'),
+            KeyCode::Char('k'),
+            KeyCode::Char('k'),
+            KeyCode::Char('k'),
+            KeyCode::Char('k'),
             KeyCode::Enter,
             KeyCode::Char('n'),
-            KeyCode::Char('j'),
-            KeyCode::Char('j'),
+            KeyCode::Char('G'),
+            KeyCode::Char('k'),
+            KeyCode::Char('k'),
             KeyCode::Enter,
         ];
         keys.extend("redo it".chars().map(KeyCode::Char));
@@ -2925,9 +3067,11 @@ mod tests {
             .map(|pick| (pick.decision, pick.key.as_str()))
             .collect();
         assert_eq!(picks, [(0, "c"), (1, "a")]);
+        assert!(sent[0].send_now);
         assert_eq!(sent[1].id, "Q26");
         assert_eq!(sent[1].kind, AnswerKind::Revise);
         assert_eq!(sent[1].note, "redo it");
+        assert!(sent[1].send_now);
         assert!(!core.app.questions.is_visible());
     }
 
@@ -2947,16 +3091,18 @@ mod tests {
         let opened = Arc::clone(&probe);
         tokio::spawn(async move {
             // The keys go once the stream has opened and read the queue, so none of
-            // them meets the open. The revise row is two below the suggested option;
-            // the note holds `abc` when Ctrl+L retries. Ctrl+Q then quits while the
+            // them meets the open. The revise row is two above the last row; the note
+            // holds `abc` when Ctrl+L retries. Ctrl+Q then quits while the
             // stream reopens.
             while opened.lock().unwrap().log.is_empty() {
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
             let keys = [
-                KeyCode::Tab,
-                KeyCode::Char('j'),
-                KeyCode::Char('j'),
+                KeyCode::Char('k'),
+                KeyCode::Char('l'),
+                KeyCode::Char('G'),
+                KeyCode::Char('k'),
+                KeyCode::Char('k'),
                 KeyCode::Enter,
                 KeyCode::Char('a'),
                 KeyCode::Char('b'),
@@ -2992,7 +3138,7 @@ mod tests {
         assert!(screen.drawn_since_clear, "a draw followed the clear");
 
         // The stream reopens, as in a_half_typed_note_survives_a_reconnect.
-        run_question_stream(&mut core, &probe, &[KeyCode::Tab]).await;
+        run_question_stream(&mut core, &probe, &[]).await;
         assert_eq!(
             core.app.questions.view().unwrap().mode,
             crate::questions::Mode::Note {
@@ -3039,7 +3185,7 @@ mod tests {
             // The answer goes just before the first poll is due, at 1 s. Its read keeps
             // the notice; a poll right after it would clear it at once.
             tokio::time::sleep(Duration::from_millis(900)).await;
-            for code in [KeyCode::Tab, KeyCode::Enter, KeyCode::Enter] {
+            for code in TO_SEND.into_iter().chain([KeyCode::Enter]) {
                 input_sender
                     .send(InputMessage::Key(code.into()))
                     .await
@@ -3078,18 +3224,19 @@ mod tests {
         let mut core = connected_core();
         let navigator = FakeNavigator::successful();
         core.app.observe_questions(question("Q1", 1, 1));
-        core.handle_key(KeyCode::Tab, &navigator);
-        assert_eq!(core.app.focus, Focus::Block);
+        core.handle_key(KeyCode::Char('k'), &navigator);
+        assert!(core.app.cursor_on_question());
         // An older Harold answers Unimplemented; Harold down fails the same way.
         let probe = question_probe(None);
-        // The keys are swallowed until Esc, so `j` (and `q`, before Esc) do nothing.
+        // The keys are swallowed until Esc, so `j` does nothing.
         let log = run_question_stream(&mut core, &probe, &[KeyCode::Char('j'), KeyCode::Esc]).await;
+        assert!(!core.app.swallowing_keys(), "Esc ended it");
         assert_eq!(log, lists(1));
         assert!(
             !core.app.questions.is_visible(),
             "no withdrawn notice either"
         );
-        assert_eq!(core.app.focus, Focus::List);
+        assert!(!core.app.cursor_on_question());
         assert_eq!(core.app.runtime_status(), None);
     }
 
@@ -3111,14 +3258,11 @@ mod tests {
         stream.questions = Some(Arc::clone(&probe));
         let (input_sender, mut input) = InputPump::channel();
         for key in [
-            KeyCode::Tab,
-            KeyCode::Char('o'),
-            KeyCode::Tab,
-            KeyCode::Char('q'),
+            KeyEvent::from(KeyCode::Char('k')),
+            KeyEvent::from(KeyCode::Char('o')),
+            ctrl_q(),
         ] {
-            input_sender
-                .try_send(InputMessage::Key(key.into()))
-                .unwrap();
+            input_sender.try_send(InputMessage::Key(key)).unwrap();
         }
         let (_shutdown_sender, mut shutdown) = FakeShutdown::channel();
         let navigator = LinkNavigator(RefCell::new(Vec::new()));

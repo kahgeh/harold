@@ -1,4 +1,4 @@
-//! The question block's state machine: the keys, the picks and the notices.
+//! The question rows' state machine: the keys, the picks and the notices.
 //!
 //! Pure and free of IO. The runtime maps Harold's question queue into [`Queue`], feeds keys
 //! to [`QuestionBlock::handle_key`], does what the returned [`BlockEffect`] asks, and reports
@@ -14,7 +14,7 @@ pub struct OptionView {
     pub key: String,
     pub label: String,
     pub impact: String,
-    /// The option the chief or product manager suggests; the highlight starts on it.
+    /// The option the chief or product manager suggests; its pick starts on it.
     pub suggested: bool,
     /// A free option asks for typed text instead of a fixed answer.
     pub free: bool,
@@ -75,7 +75,7 @@ pub struct Outgoing {
     pub kind: AnswerKind,
     pub picks: Vec<PickView>,
     pub note: String,
-    /// The summary's "send now" mark; a revise or reject note has none, so it is false.
+    /// Harold's send-now mark. Every answer from the dash sets it, since `send` means now.
     pub send_now: bool,
 }
 
@@ -87,24 +87,35 @@ pub enum NoteKind {
     FreeText,
 }
 
-/// What the block is doing.
+/// What the block is doing: `Choosing` means no note is open.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum Mode {
     #[default]
     Choosing,
-    Summary,
     Note {
         kind: NoteKind,
         text: String,
     },
 }
 
+/// A row the cursor can stop on within the question's rows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QStop {
+    Header,
+    Option {
+        decision: usize,
+        option: usize,
+    },
+    /// An [`ANSWER_ACTIONS`] row.
+    Action(usize),
+}
+
 /// What the runtime does after a key.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BlockEffect {
     None,
-    /// Give the focus back to the agent list.
-    Leave,
+    /// Move the cursor to this stop.
+    Cursor(QStop),
     OpenLink(String),
     Defer(String),
     Send(Outgoing),
@@ -119,9 +130,29 @@ pub enum SendResult {
     Unavailable,
 }
 
+/// One option as the rows draw it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OptionRows {
+    pub key: String,
+    pub label: String,
+    pub impact: String,
+    pub suggested: bool,
+    pub free: bool,
+    pub picked: bool,
+    /// The text of a picked free option.
+    pub free_text: Option<String>,
+}
+
+/// One decision as the rows draw it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DecisionRows {
+    pub ask: String,
+    pub options: Vec<OptionRows>,
+}
+
 /// Everything the drawing needs.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BlockView {
+pub struct RowsView {
     pub id: String,
     pub product: String,
     pub spec: String,
@@ -129,30 +160,17 @@ pub struct BlockView {
     /// The current question's place in the listed order, from 1.
     pub position: usize,
     pub waiting: u32,
-    pub ask: Option<String>,
-    pub options: Vec<OptionView>,
-    /// The highlighted row: an option below `options.len()`, else an [`ANSWER_ACTIONS`] row.
-    pub highlighted: usize,
+    pub open: bool,
+    pub decisions: Vec<DecisionRows>,
     pub mode: Mode,
-    /// The labels picked so far.
-    pub picks: Vec<String>,
-    /// One `<ask> — <label>` line per picked decision.
-    pub summary: Vec<String>,
-    /// The summary's "send now" mark.
-    pub send_now: bool,
     pub notice: Option<String>,
 }
 
-/// The walk through a question that is not in view, kept for its version.
+/// The picks of a question that is not in view, kept for its version.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Kept {
     version: u32,
-    decision: usize,
-    picks: Vec<PickView>,
-    highlights: Vec<usize>,
-    /// Choosing or Summary.
-    mode: Mode,
-    send_now: bool,
+    picks: Vec<Option<PickView>>,
 }
 
 /// The block's state.
@@ -161,18 +179,15 @@ pub struct QuestionBlock {
     queue: Queue,
     current: Option<String>,
     version: u32,
-    decision: usize,
-    /// One pick per decision, in decision order. Going back with `h` keeps them, so
-    /// there can be picks for decisions after the current one.
-    picks: Vec<PickView>,
-    /// Each decision's highlighted row, kept while moving between decisions.
-    highlights: Vec<usize>,
+    /// One optional pick per decision of the current question, in decision order.
+    picks: Vec<Option<PickView>>,
     mode: Mode,
-    /// The "send now" mark for the answer on the summary. It is kept through going back
-    /// and returning, and goes with a restart or the recorded answer.
-    send_now: bool,
-    /// The walks through listed questions other than the current one, by id. One goes
-    /// when its question is no longer listed or is listed at a higher version.
+    /// The free option whose text field is open: (decision, option).
+    free_target: Option<(usize, usize)>,
+    /// Whether the question shows its rows. One flag for the block, not per question.
+    open: bool,
+    /// The picks of listed questions other than the current one, by id. One goes when
+    /// its question is no longer listed or is listed at a higher version.
     kept: BTreeMap<String, Kept>,
     notice: Option<String>,
     /// The notice stood on a block with no question through one listing already; the next
@@ -186,9 +201,9 @@ pub struct QuestionBlock {
 /// The notice when Harold could not save an answer or a deferral.
 pub const UNAVAILABLE_NOTICE: &str = "Harold can't save answers right now";
 
-/// The rows under every decision's options. Highlighted row `options.len() + i` is action
-/// `i`: `later` defers the question, and the other two open a note to send with the picks.
-pub const ANSWER_ACTIONS: [&str; 3] = ["later", "revise\u{2026}", "reject\u{2026}"];
+/// The rows under every decision's options. `send` sends the picks, `later` defers the
+/// question, and the other two open a note to send with the picks.
+pub const ANSWER_ACTIONS: [&str; 4] = ["send", "later", "revise\u{2026}", "reject\u{2026}"];
 
 /// The longest note the block takes; Harold refuses a field of 2,000 characters.
 const NOTE_LIMIT: usize = 1_999;
@@ -197,18 +212,33 @@ fn changed_notice(id: &str) -> String {
     format!("{id} changed, your picks were cleared")
 }
 
-fn starting_highlight(options: &[OptionView]) -> usize {
-    options.iter().position(|o| o.suggested).unwrap_or(0)
-}
-
 fn is_web_link(link: &str) -> bool {
     link.starts_with("https://") || link.starts_with("http://")
+}
+
+/// Each decision's starting pick: its suggested option, unless that one is free (it has
+/// no text yet), else none.
+fn starting_picks(q: &QuestionView) -> Vec<Option<PickView>> {
+    q.decisions
+        .iter()
+        .enumerate()
+        .map(|(decision, d)| {
+            d.options
+                .iter()
+                .find(|o| o.suggested && !o.free)
+                .map(|o| PickView {
+                    decision: decision as u32,
+                    key: o.key.clone(),
+                    text: String::new(),
+                })
+        })
+        .collect()
 }
 
 impl QuestionBlock {
     /// Takes the latest listing. The current question stays while it is listed at the same
     /// version; a higher version restarts it; a missing one is replaced with a notice.
-    /// Walks kept for other questions go when those are missing or at a higher version.
+    /// Picks kept for other questions go when those are missing or at a higher version.
     /// A suspended block shows again, and keeps its state when its question is listed at
     /// the same version. A notice on a block with no question stays for one more listing;
     /// the one after that, still finding no question, clears it, so the block hides.
@@ -262,6 +292,36 @@ impl QuestionBlock {
         !self.suspended && (!self.queue.questions.is_empty() || self.notice.is_some())
     }
 
+    /// Whether the question shows its rows.
+    pub const fn is_open(&self) -> bool {
+        self.open
+    }
+
+    /// Whether a note or a free option's text field is open.
+    pub const fn note_open(&self) -> bool {
+        matches!(self.mode, Mode::Note { .. })
+    }
+
+    /// The rows the cursor can stop on, in order: empty with no question in view, the
+    /// header alone while closed, and when open the header, every option in decision
+    /// order, then the answer actions.
+    pub fn stops(&self) -> Vec<QStop> {
+        if !self.is_visible() {
+            return vec![];
+        }
+        let Some(q) = self.question() else {
+            return vec![];
+        };
+        let mut stops = vec![QStop::Header];
+        if self.open {
+            for (decision, d) in q.decisions.iter().enumerate() {
+                stops.extend((0..d.options.len()).map(|option| QStop::Option { decision, option }));
+            }
+            stops.extend((0..ANSWER_ACTIONS.len()).map(QStop::Action));
+        }
+        stops
+    }
+
     /// Hides the block and keeps everything, until the next [`QuestionBlock::reconcile`].
     /// It adds no notice.
     pub fn suspend(&mut self) {
@@ -306,7 +366,8 @@ impl QuestionBlock {
     }
 
     /// Applies the outcome of a send for question `id`. A recorded or no-longer-waiting
-    /// question leaves the queue before the next one shows, so its walk is not kept.
+    /// question leaves the queue before the next one shows, so its picks are not kept.
+    /// The next question shows open when the block was open; with none left it closes.
     pub fn sent(&mut self, id: &str, result: SendResult) {
         if self.current.as_deref() != Some(id) {
             return;
@@ -315,7 +376,6 @@ impl QuestionBlock {
             SendResult::Recorded => {
                 self.queue.questions.retain(|q| q.id != id);
                 self.queue.waiting = self.queue.waiting.saturating_sub(1);
-                self.send_now = false;
                 self.clear_notice();
                 self.select_first();
             }
@@ -335,37 +395,53 @@ impl QuestionBlock {
     }
 
     /// What to draw, or `None` when the block is hidden.
-    pub fn view(&self) -> Option<BlockView> {
+    pub fn view(&self) -> Option<RowsView> {
         if !self.is_visible() {
             return None;
         }
         let Some(q) = self.question() else {
-            return Some(BlockView {
+            return Some(RowsView {
                 id: String::new(),
                 product: String::new(),
                 spec: String::new(),
                 intro: String::new(),
                 position: 0,
                 waiting: self.queue.waiting,
-                ask: None,
-                options: vec![],
-                highlighted: 0,
+                open: false,
+                decisions: vec![],
                 mode: Mode::Choosing,
-                picks: vec![],
-                summary: vec![],
-                send_now: false,
                 notice: self.notice.clone(),
             });
         };
-        let decision = q.decisions.get(self.decision);
-        let picks: Vec<String> = self.picks.iter().map(|p| self.pick_label(q, p)).collect();
-        let summary = self
-            .picks
+        let decisions = q
+            .decisions
             .iter()
-            .zip(&picks)
-            .map(|(p, label)| format!("{} \u{2014} {label}", q.decisions[p.decision as usize].ask))
+            .enumerate()
+            .map(|(d, decision)| DecisionRows {
+                ask: decision.ask.clone(),
+                options: decision
+                    .options
+                    .iter()
+                    .map(|o| {
+                        let pick = self
+                            .picks
+                            .get(d)
+                            .and_then(Option::as_ref)
+                            .filter(|p| p.key == o.key);
+                        OptionRows {
+                            key: o.key.clone(),
+                            label: o.label.clone(),
+                            impact: o.impact.clone(),
+                            suggested: o.suggested,
+                            free: o.free,
+                            picked: pick.is_some(),
+                            free_text: pick.filter(|_| o.free).map(|p| p.text.clone()),
+                        }
+                    })
+                    .collect(),
+            })
             .collect();
-        Some(BlockView {
+        Some(RowsView {
             id: q.id.clone(),
             product: q.product.clone(),
             spec: q.spec.clone(),
@@ -377,102 +453,131 @@ impl QuestionBlock {
                 .position(|x| x.id == q.id)
                 .map_or(1, |i| i + 1),
             waiting: self.queue.waiting,
-            ask: decision.map(|d| d.ask.clone()),
-            options: decision.map(|d| d.options.clone()).unwrap_or_default(),
-            highlighted: self.highlights.get(self.decision).copied().unwrap_or(0),
+            open: self.open,
+            decisions,
             mode: self.mode.clone(),
-            picks,
-            summary,
-            send_now: self.send_now,
             notice: self.notice.clone(),
         })
     }
 
-    /// Handles one key and says what the runtime should do.
-    pub fn handle_key(&mut self, code: KeyCode) -> BlockEffect {
+    /// Handles one key on `stop` and says what the runtime should do. While a note is
+    /// open every key goes to the note, whatever the stop.
+    pub fn handle_key(&mut self, code: KeyCode, stop: QStop) -> BlockEffect {
         if self.suspended {
             return BlockEffect::None;
         }
         if self.question().is_none() {
             // Any key clears a notice on a block with no question, so the block hides.
             self.clear_notice();
-            if code == KeyCode::Esc {
-                return BlockEffect::Leave;
-            }
             return BlockEffect::None;
         }
         self.clear_notice();
         match self.mode.clone() {
-            Mode::Choosing => self.choosing_key(code),
-            Mode::Summary => self.summary_key(code),
+            Mode::Choosing => self.choosing_key(code, stop),
             Mode::Note { kind, text } => self.note_key(code, kind, text),
         }
     }
 
-    fn choosing_key(&mut self, code: KeyCode) -> BlockEffect {
+    fn choosing_key(&mut self, code: KeyCode, stop: QStop) -> BlockEffect {
         let Some(q) = self.question().cloned() else {
             return BlockEffect::None;
         };
-        let options = &q.decisions[self.decision].options;
-        let last_row = options.len() + ANSWER_ACTIONS.len() - 1;
-        let highlighted = self.highlights[self.decision];
+        // A closed question has only its header.
+        let stop = if self.open { stop } else { QStop::Header };
         match code {
-            KeyCode::Char('k') | KeyCode::Up => {
-                self.highlights[self.decision] = highlighted.saturating_sub(1);
-            }
-            KeyCode::Char('j') | KeyCode::Down => {
-                self.highlights[self.decision] = (highlighted + 1).min(last_row);
-            }
-            KeyCode::Char('l') | KeyCode::Right => {
-                // An action row is not an answer to move on with. A free option moves on
-                // past text it already has, and otherwise opens its text box as Enter does.
-                let Some(option) = options.get(highlighted) else {
-                    return BlockEffect::None;
-                };
-                if !option.free {
-                    self.set_pick(&q, option.key.clone(), String::new());
-                } else if self.kept_text(option).is_some() {
-                    self.advance(&q);
-                } else {
-                    self.open_note(NoteKind::FreeText);
-                }
-            }
-            KeyCode::Char('h') | KeyCode::Left => self.decision = self.decision.saturating_sub(1),
-            KeyCode::Enter => {
-                let Some(option) = options.get(highlighted) else {
-                    return self.answer_action(highlighted - options.len(), q.id);
-                };
-                if option.free {
-                    let text = self.kept_text(option).unwrap_or_default();
-                    self.mode = Mode::Note {
-                        kind: NoteKind::FreeText,
-                        text,
-                    };
-                } else {
-                    self.set_pick(&q, option.key.clone(), String::new());
-                }
-            }
             KeyCode::Char('o') if is_web_link(&q.link) => return BlockEffect::OpenLink(q.link),
-            KeyCode::Char('n') => self.step(1),
-            KeyCode::Char('N') => self.step(-1),
-            KeyCode::Esc => return BlockEffect::Leave,
+            KeyCode::Char('n') if self.step(1) => return BlockEffect::Cursor(QStop::Header),
+            KeyCode::Char('N') if self.step(-1) => return BlockEffect::Cursor(QStop::Header),
+            KeyCode::Char('h') | KeyCode::Left | KeyCode::Esc if self.open => {
+                self.open = false;
+                return BlockEffect::Cursor(QStop::Header);
+            }
+            KeyCode::Char('l') | KeyCode::Right if stop == QStop::Header => self.open = true,
+            KeyCode::Enter => match stop {
+                QStop::Header => {
+                    self.open = !self.open;
+                    return BlockEffect::Cursor(QStop::Header);
+                }
+                QStop::Option { .. } => {}
+                QStop::Action(action) => return self.answer_action(action, &q),
+            },
+            KeyCode::Char(' ') => {
+                if let QStop::Option { decision, option } = stop {
+                    self.pick(&q, decision, option);
+                }
+            }
             _ => {}
         }
         BlockEffect::None
     }
 
+    /// Picks option `option` of `decision`; a free option opens its field instead,
+    /// holding the text it was picked with before.
+    fn pick(&mut self, q: &QuestionView, decision: usize, option: usize) {
+        let Some(chosen) = q
+            .decisions
+            .get(decision)
+            .and_then(|d| d.options.get(option))
+        else {
+            return;
+        };
+        if chosen.free {
+            let text = self
+                .picks
+                .get(decision)
+                .and_then(Option::as_ref)
+                .filter(|p| p.key == chosen.key)
+                .map(|p| p.text.clone())
+                .unwrap_or_default();
+            self.free_target = Some((decision, option));
+            self.mode = Mode::Note {
+                kind: NoteKind::FreeText,
+                text,
+            };
+        } else {
+            self.set_pick(decision, chosen.key.clone(), String::new());
+        }
+    }
+
     /// Enter on [`ANSWER_ACTIONS`] row `action`.
-    fn answer_action(&mut self, action: usize, id: String) -> BlockEffect {
-        match ANSWER_ACTIONS.get(action).copied() {
-            Some("later") => {
-                self.defer_locally(&id);
-                BlockEffect::Defer(id)
+    fn answer_action(&mut self, action: usize, q: &QuestionView) -> BlockEffect {
+        match action {
+            0 => {
+                // The first decision without a pick stops the send.
+                if let Some(decision) =
+                    (0..q.decisions.len()).find(|d| self.picks.get(*d).is_none_or(Option::is_none))
+                {
+                    return BlockEffect::Cursor(if q.decisions[decision].options.is_empty() {
+                        QStop::Header
+                    } else {
+                        QStop::Option {
+                            decision,
+                            option: 0,
+                        }
+                    });
+                }
+                let last_free = self
+                    .picks
+                    .iter()
+                    .flatten()
+                    .rev()
+                    .find(|p| self.is_free(q, p))
+                    .map(|p| p.text.clone());
+                let (kind, note) = match last_free {
+                    Some(text) => (AnswerKind::FreeText, text),
+                    None => (AnswerKind::Answer, String::new()),
+                };
+                BlockEffect::Send(self.outgoing(q, kind, note))
             }
-            Some("revise\u{2026}") => {
+            1 => {
+                self.defer_locally(&q.id);
+                BlockEffect::Defer(q.id.clone())
+            }
+            2 => {
                 self.open_note(NoteKind::Revise);
                 BlockEffect::None
             }
-            Some("reject\u{2026}") => {
+            3 => {
                 self.open_note(NoteKind::Reject);
                 BlockEffect::None
             }
@@ -480,65 +585,34 @@ impl QuestionBlock {
         }
     }
 
-    /// The text of this decision's pick, when `option` is that pick.
-    fn kept_text(&self, option: &OptionView) -> Option<String> {
-        self.picks
-            .get(self.decision)
-            .filter(|p| p.key == option.key)
-            .map(|p| p.text.clone())
-    }
-
-    fn summary_key(&mut self, code: KeyCode) -> BlockEffect {
-        let Some(q) = self.question().cloned() else {
-            return BlockEffect::None;
-        };
-        match code {
-            KeyCode::Enter => {
-                let last_free = self
-                    .picks
-                    .iter()
-                    .rev()
-                    .find(|p| self.is_free(&q, p))
-                    .map(|p| p.text.clone());
-                let (kind, note) = match last_free {
-                    Some(text) => (AnswerKind::FreeText, text),
-                    None => (AnswerKind::Answer, String::new()),
-                };
-                return BlockEffect::Send(Outgoing {
-                    id: q.id,
-                    version: self.version,
-                    kind,
-                    picks: self.picks.clone(),
-                    note,
-                    send_now: self.send_now,
-                });
-            }
-            // The summary stands on the last decision, so going back shows it again.
-            KeyCode::Char('h') | KeyCode::Left | KeyCode::Esc => self.mode = Mode::Choosing,
-            KeyCode::Char('o') if is_web_link(&q.link) => return BlockEffect::OpenLink(q.link),
-            KeyCode::Char('s') => self.send_now = !self.send_now,
-            KeyCode::Char('n') => self.step(1),
-            KeyCode::Char('N') => self.step(-1),
-            _ => {}
+    fn outgoing(&self, q: &QuestionView, kind: AnswerKind, note: String) -> Outgoing {
+        Outgoing {
+            id: q.id.clone(),
+            version: self.version,
+            kind,
+            picks: self.picks.iter().flatten().cloned().collect(),
+            note,
+            send_now: true,
         }
-        BlockEffect::None
     }
 
     /// Shows the listed question `by` places from the current one, wrapping over the
-    /// listed order. With one question listed, nothing changes.
-    fn step(&mut self, by: isize) {
+    /// listed order, and reports whether another question came into view.
+    fn step(&mut self, by: isize) -> bool {
         let listed = &self.queue.questions;
         let Some(at) = listed
             .iter()
             .position(|q| Some(&q.id) == self.current.as_ref())
         else {
-            return;
+            return false;
         };
         let next = (at as isize + by).rem_euclid(listed.len() as isize) as usize;
-        if next != at {
-            let id = listed[next].id.clone();
-            self.show(&id);
+        if next == at {
+            return false;
         }
+        let id = listed[next].id.clone();
+        self.show(&id);
+        true
     }
 
     fn note_key(&mut self, code: KeyCode, kind: NoteKind, mut text: String) -> BlockEffect {
@@ -556,6 +630,7 @@ impl QuestionBlock {
             }
             KeyCode::Esc => {
                 self.mode = Mode::Choosing;
+                self.free_target = None;
                 return BlockEffect::None;
             }
             KeyCode::Enter => {
@@ -565,11 +640,15 @@ impl QuestionBlock {
                 }
                 match kind {
                     NoteKind::FreeText => {
-                        let key = q.decisions[self.decision].options
-                            [self.highlights[self.decision]]
-                            .key
-                            .clone();
-                        self.set_pick(&q, key, typed);
+                        if let Some((decision, option)) = self.free_target.take()
+                            && let Some(chosen) = q
+                                .decisions
+                                .get(decision)
+                                .and_then(|d| d.options.get(option))
+                        {
+                            self.set_pick(decision, chosen.key.clone(), typed);
+                        }
+                        self.mode = Mode::Choosing;
                     }
                     NoteKind::Revise | NoteKind::Reject => {
                         let kind = if kind == NoteKind::Revise {
@@ -577,14 +656,7 @@ impl QuestionBlock {
                         } else {
                             AnswerKind::Reject
                         };
-                        return BlockEffect::Send(Outgoing {
-                            id: q.id,
-                            version: self.version,
-                            kind,
-                            picks: self.picks.clone(),
-                            note: typed,
-                            send_now: false,
-                        });
+                        return BlockEffect::Send(self.outgoing(&q, kind, typed));
                     }
                 }
                 return BlockEffect::None;
@@ -602,27 +674,14 @@ impl QuestionBlock {
         };
     }
 
-    /// Records the current decision's pick, replacing an earlier one, then moves on.
-    fn set_pick(&mut self, q: &QuestionView, key: String, text: String) {
-        let pick = PickView {
-            decision: self.decision as u32,
-            key,
-            text,
-        };
-        match self.picks.get_mut(self.decision) {
-            Some(kept) => *kept = pick,
-            None => self.picks.push(pick),
-        }
-        self.advance(q);
-    }
-
-    /// Moves to the next decision, or to the summary after the last one.
-    fn advance(&mut self, q: &QuestionView) {
-        if self.decision + 1 < q.decisions.len() {
-            self.decision += 1;
-            self.mode = Mode::Choosing;
-        } else {
-            self.mode = Mode::Summary;
+    /// Records `decision`'s pick, replacing an earlier one.
+    fn set_pick(&mut self, decision: usize, key: String, text: String) {
+        if let Some(slot) = self.picks.get_mut(decision) {
+            *slot = Some(PickView {
+                decision: decision as u32,
+                key,
+                text,
+            });
         }
     }
 
@@ -641,22 +700,9 @@ impl QuestionBlock {
     }
 
     fn is_free(&self, q: &QuestionView, pick: &PickView) -> bool {
-        q.decisions[pick.decision as usize]
-            .options
-            .iter()
-            .any(|o| o.key == pick.key && o.free)
-    }
-
-    fn pick_label(&self, q: &QuestionView, pick: &PickView) -> String {
-        if self.is_free(q, pick) {
-            return format!("\"{}\"", pick.text);
-        }
-        q.decisions[pick.decision as usize]
-            .options
-            .iter()
-            .find(|o| o.key == pick.key)
-            .map(|o| o.label.clone())
-            .unwrap_or_default()
+        q.decisions
+            .get(pick.decision as usize)
+            .is_some_and(|d| d.options.iter().any(|o| o.key == pick.key && o.free))
     }
 
     fn dismissed_notice(&self, id: &str) -> String {
@@ -669,21 +715,15 @@ impl QuestionBlock {
         format!("{id} dismissed: {reason}")
     }
 
-    /// Decision 1 of the current question, with no picks.
+    /// The current question with its starting picks and no note.
     fn restart(&mut self) {
-        self.decision = 0;
-        self.picks.clear();
-        self.send_now = false;
         self.mode = Mode::Choosing;
-        self.highlights = self.question().map_or(vec![], |q| {
-            q.decisions
-                .iter()
-                .map(|d| starting_highlight(&d.options))
-                .collect()
-        });
+        self.free_target = None;
+        self.picks = self.question().map_or(vec![], starting_picks);
     }
 
-    /// Makes the queue's first question current, or none.
+    /// Makes the queue's first question current, or none. With none the block closes, so
+    /// a queue that fills again starts closed.
     fn select_first(&mut self) {
         match self.queue.questions.first() {
             Some(q) => {
@@ -692,14 +732,15 @@ impl QuestionBlock {
             }
             None => {
                 self.current = None;
+                self.open = false;
                 self.restart();
             }
         }
     }
 
-    /// Makes listed question `id` current. The current question's walk is kept while it
-    /// is still listed, and `id`'s kept walk comes back when it was made on the listed
-    /// version; otherwise `id` starts at decision 1.
+    /// Makes listed question `id` current. The current question's picks are kept while
+    /// it is still listed, and `id`'s kept picks come back when they were made on the
+    /// listed version; otherwise `id` starts with its suggested picks.
     fn show(&mut self, id: &str) {
         let Some(version) = self
             .queue
@@ -711,30 +752,18 @@ impl QuestionBlock {
             return;
         };
         if let Some(current) = self.question().map(|q| q.id.clone()) {
-            let mode = match self.mode {
-                Mode::Summary => Mode::Summary,
-                _ => Mode::Choosing,
-            };
             let kept = Kept {
                 version: self.version,
-                decision: self.decision,
                 picks: std::mem::take(&mut self.picks),
-                highlights: std::mem::take(&mut self.highlights),
-                mode,
-                send_now: self.send_now,
             };
             self.kept.insert(current, kept);
         }
         self.current = Some(id.to_string());
         self.version = version;
+        self.mode = Mode::Choosing;
+        self.free_target = None;
         match self.kept.remove(id) {
-            Some(kept) if kept.version == version => {
-                self.decision = kept.decision;
-                self.picks = kept.picks;
-                self.highlights = kept.highlights;
-                self.mode = kept.mode;
-                self.send_now = kept.send_now;
-            }
+            Some(kept) if kept.version == version => self.picks = kept.picks,
             _ => self.restart(),
         }
     }
@@ -792,13 +821,28 @@ mod tests {
         block
     }
 
-    fn press(block: &mut QuestionBlock, code: KeyCode) -> BlockEffect {
-        block.handle_key(code)
+    /// A block that is open, as after `l` on the header.
+    fn open_block(questions: Vec<QuestionView>) -> QuestionBlock {
+        let mut b = block(questions);
+        assert_eq!(
+            press(&mut b, KeyCode::Char('l'), QStop::Header),
+            BlockEffect::None
+        );
+        assert!(b.is_open());
+        b
+    }
+
+    fn press(block: &mut QuestionBlock, code: KeyCode, stop: QStop) -> BlockEffect {
+        block.handle_key(code, stop)
+    }
+
+    fn opt_stop(decision: usize, option: usize) -> QStop {
+        QStop::Option { decision, option }
     }
 
     fn type_text(block: &mut QuestionBlock, text: &str) {
         for c in text.chars() {
-            press(block, KeyCode::Char(c));
+            press(block, KeyCode::Char(c), QStop::Header);
         }
     }
 
@@ -810,375 +854,270 @@ mod tests {
         }
     }
 
-    fn press_times(block: &mut QuestionBlock, code: KeyCode, times: usize) {
-        for _ in 0..times {
-            press(block, code);
-        }
+    /// The picked option key of every decision.
+    fn picked(block: &QuestionBlock) -> Vec<Option<String>> {
+        block
+            .view()
+            .unwrap()
+            .decisions
+            .iter()
+            .map(|d| d.options.iter().find(|o| o.picked).map(|o| o.key.clone()))
+            .collect()
     }
 
-    fn highlighted(block: &QuestionBlock) -> usize {
-        block.view().unwrap().highlighted
-    }
-
-    /// Highlights action row `action` of the current decision and presses Enter on it.
-    fn open_action(block: &mut QuestionBlock, action: usize) -> BlockEffect {
-        let options = block.view().unwrap().options.len();
-        press_times(block, KeyCode::Char('k'), options + ANSWER_ACTIONS.len());
-        press_times(block, KeyCode::Char('j'), options + action);
-        assert_eq!(highlighted(block), options + action);
-        press(block, KeyCode::Enter)
+    fn keys(keys: &[&str]) -> Vec<Option<String>> {
+        keys.iter()
+            .map(|k| (!k.is_empty()).then(|| (*k).to_string()))
+            .collect()
     }
 
     #[test]
-    fn the_answer_actions_are_later_revise_and_reject() {
+    fn the_answer_actions_are_send_later_revise_and_reject() {
         assert_eq!(
             ANSWER_ACTIONS,
-            ["later", "revise\u{2026}", "reject\u{2026}"]
+            ["send", "later", "revise\u{2026}", "reject\u{2026}"]
         );
     }
 
     #[test]
-    fn j_and_k_move_over_options_then_the_three_actions() {
-        for (down, up) in [
-            (KeyCode::Char('j'), KeyCode::Char('k')),
-            (KeyCode::Down, KeyCode::Up),
-        ] {
-            let mut b = block(vec![question("Q1", 1, 1)]);
-            let v = b.view().unwrap();
-            assert_eq!(v.highlighted, 1, "starts on the suggested option");
-            assert_eq!(v.options.len(), 3, "the options are the real ones only");
-            assert_eq!((v.position, v.waiting), (1, 1));
-            press_times(&mut b, down, 2);
-            assert_eq!(highlighted(&b), 3, "the later row");
-            press_times(&mut b, down, 2);
-            assert_eq!(highlighted(&b), 5, "the reject row");
-            press(&mut b, down);
-            assert_eq!(highlighted(&b), 5, "stops at the last action");
-            press_times(&mut b, up, 9);
-            assert_eq!(highlighted(&b), 0, "stops at the first option");
-            assert_eq!(b.view().unwrap().mode, Mode::Choosing);
-        }
-    }
+    fn starting_picks_follow_suggested() {
+        let b = block(vec![question("Q1", 1, 1)]);
+        assert_eq!(picked(&b), keys(&["b"]));
 
-    #[test]
-    fn l_picks_the_highlighted_option_and_h_goes_back_keeping_it() {
-        for (next, back) in [
-            (KeyCode::Char('l'), KeyCode::Char('h')),
-            (KeyCode::Right, KeyCode::Left),
-        ] {
-            let mut b = block(vec![question("Q1", 1, 2)]);
-            press(&mut b, KeyCode::Char('k'));
-            assert_eq!(press(&mut b, next), BlockEffect::None);
-            let v = b.view().unwrap();
-            assert_eq!(v.picks, vec!["label a".to_string()]);
-            assert_eq!(v.ask.as_deref(), Some("Ask 2?"));
-            assert_eq!(v.highlighted, 1, "decision 2 starts on its suggestion");
-            assert_eq!(press(&mut b, back), BlockEffect::None);
-            let v = b.view().unwrap();
-            assert_eq!(v.ask.as_deref(), Some("Ask 1?"));
-            assert_eq!(v.picks, vec!["label a".to_string()]);
-            assert_eq!(v.highlighted, 0);
-            assert_eq!(v.mode, Mode::Choosing);
-            assert_eq!(press(&mut b, back), BlockEffect::None);
-            assert_eq!(b.view().unwrap(), v, "h on decision 1 changes nothing");
-        }
-    }
-
-    #[test]
-    fn the_highlight_is_remembered_per_decision() {
-        let mut b = block(vec![question("Q1", 1, 2)]);
-        press(&mut b, KeyCode::Char('l'));
-        press(&mut b, KeyCode::Char('k'));
-        press(&mut b, KeyCode::Char('h'));
-        assert_eq!(highlighted(&b), 1, "decision 1 keeps its own highlight");
-        press(&mut b, KeyCode::Char('l'));
-        let v = b.view().unwrap();
-        assert_eq!(v.ask.as_deref(), Some("Ask 2?"));
-        assert_eq!(v.highlighted, 0);
-        press(&mut b, KeyCode::Enter);
-        let v = b.view().unwrap();
-        assert_eq!(v.mode, Mode::Summary);
-        assert_eq!(v.picks, vec!["label b".to_string(), "label a".to_string()]);
-    }
-
-    #[test]
-    fn each_decision_stops_at_its_own_last_action() {
         let mut q = question("Q1", 1, 2);
-        q.decisions[1].options.pop();
-        let mut b = block(vec![q]);
-        press_times(&mut b, KeyCode::Char('j'), 9);
-        assert_eq!(highlighted(&b), 5);
-        press(&mut b, KeyCode::Char('k'));
-        press(&mut b, KeyCode::Char('k'));
-        press(&mut b, KeyCode::Char('k'));
-        press(&mut b, KeyCode::Char('k'));
-        press(&mut b, KeyCode::Char('l'));
-        let v = b.view().unwrap();
-        assert_eq!(v.ask.as_deref(), Some("Ask 2?"));
-        assert_eq!(v.options.len(), 2);
-        press_times(&mut b, KeyCode::Char('j'), 9);
-        assert_eq!(highlighted(&b), 4, "two options and three actions");
-        press(&mut b, KeyCode::Char('h'));
-        assert_eq!(highlighted(&b), 1, "decision 1 kept its highlight");
+        q.decisions[1].options[1].suggested = false;
+        let b = block(vec![q]);
+        assert_eq!(picked(&b), keys(&["b", ""]), "none suggested, none picked");
+
+        // A suggested free option has no text yet, so it starts with no pick.
+        let mut q = question("Q1", 1, 1);
+        q.decisions[0].options[1].suggested = false;
+        q.decisions[0].options[2].suggested = true;
+        assert_eq!(picked(&block(vec![q])), keys(&[""]));
     }
 
     #[test]
-    fn l_on_an_action_row_does_nothing() {
-        for (action, label) in ANSWER_ACTIONS.iter().enumerate() {
-            let mut b = block(vec![question("Q1", 1, 2)]);
-            press_times(&mut b, KeyCode::Char('j'), 2 + action);
-            let before = b.view().unwrap();
-            assert_eq!(before.highlighted, 3 + action);
-            assert_eq!(press(&mut b, KeyCode::Char('l')), BlockEffect::None);
-            assert_eq!(b.view().unwrap(), before, "{label}");
-        }
-    }
-
-    #[test]
-    fn later_on_any_decision_defers() {
-        let mut b = block(vec![question("Q1", 1, 2), question("Q2", 1, 1)]);
-        press(&mut b, KeyCode::Enter);
-        assert_eq!(b.view().unwrap().ask.as_deref(), Some("Ask 2?"));
-        assert_eq!(open_action(&mut b, 0), BlockEffect::Defer("Q1".into()));
-        assert_eq!(
-            b.view().unwrap().id,
-            "Q2",
-            "the next waiting question shows"
-        );
-    }
-
-    #[test]
-    fn revise_and_reject_rows_open_a_note_that_blank_enter_cannot_send() {
-        let mut b = block(vec![question("Q1", 2, 2)]);
-        assert_eq!(open_action(&mut b, 1), BlockEffect::None);
-        assert_eq!(
-            b.view().unwrap().mode,
-            Mode::Note {
-                kind: NoteKind::Revise,
-                text: String::new()
-            }
-        );
-        assert_eq!(
-            press(&mut b, KeyCode::Enter),
-            BlockEffect::None,
-            "blank sends nothing"
-        );
-        type_text(&mut b, "fixx");
-        press(&mut b, KeyCode::Backspace);
-        assert_eq!(
-            press(&mut b, KeyCode::Enter),
-            BlockEffect::Send(Outgoing {
-                id: "Q1".into(),
-                version: 2,
-                kind: AnswerKind::Revise,
-                picks: vec![],
-                note: "fix".into(),
-                send_now: false,
-            })
-        );
-
-        let mut b = block(vec![question("Q1", 2, 2)]);
-        press(&mut b, KeyCode::Enter);
-        assert_eq!(open_action(&mut b, 2), BlockEffect::None);
-        assert_eq!(
-            b.view().unwrap().mode,
-            Mode::Note {
-                kind: NoteKind::Reject,
-                text: String::new()
-            }
-        );
-        assert_eq!(press(&mut b, KeyCode::Enter), BlockEffect::None);
-        type_text(&mut b, "fix");
-        assert_eq!(
-            press(&mut b, KeyCode::Enter),
-            BlockEffect::Send(Outgoing {
-                id: "Q1".into(),
-                version: 2,
-                kind: AnswerKind::Reject,
-                picks: vec![pick(0, "b", "")],
-                note: "fix".into(),
-                send_now: false,
-            })
-        );
-
-        // Esc leaves the note for the same decision and drops its text.
-        let mut b = block(vec![question("Q1", 2, 2)]);
-        press(&mut b, KeyCode::Enter);
-        open_action(&mut b, 1);
-        type_text(&mut b, "abc");
-        assert_eq!(press(&mut b, KeyCode::Esc), BlockEffect::None);
-        let v = b.view().unwrap();
-        assert_eq!(v.mode, Mode::Choosing);
-        assert_eq!(v.ask.as_deref(), Some("Ask 2?"));
-        open_action(&mut b, 1);
-        assert_eq!(
-            b.view().unwrap().mode,
-            Mode::Note {
-                kind: NoteKind::Revise,
-                text: String::new()
-            }
-        );
-    }
-
-    #[test]
-    fn r_and_x_and_q_do_nothing_in_choosing() {
-        let mut b = block(vec![question("Q1", 1, 2), question("Q2", 1, 1)]);
-        let before = b.view().unwrap();
-        for c in ['r', 'x', 'q'] {
-            assert_eq!(press(&mut b, KeyCode::Char(c)), BlockEffect::None, "{c}");
-            assert_eq!(b.view().unwrap(), before, "{c}");
-        }
-    }
-
-    #[test]
-    fn a_note_types_every_letter() {
-        let mut b = block(vec![question("Q1", 1, 1)]);
-        open_action(&mut b, 1);
-        type_text(&mut b, "hjklnNrxoq");
-        assert_eq!(
-            b.view().unwrap().mode,
-            Mode::Note {
-                kind: NoteKind::Revise,
-                text: "hjklnNrxoq".into()
-            }
-        );
-    }
-
-    #[test]
-    fn esc_leaves_from_any_decision_and_keeps_picks() {
+    fn stops_closed_then_open() {
         let mut b = block(vec![question("Q1", 1, 2)]);
-        assert_eq!(press(&mut b, KeyCode::Esc), BlockEffect::Leave);
-        press(&mut b, KeyCode::Enter);
-        assert_eq!(press(&mut b, KeyCode::Esc), BlockEffect::Leave);
-        let v = b.view().unwrap();
-        assert_eq!(v.ask.as_deref(), Some("Ask 2?"));
-        assert_eq!(v.picks, vec!["label b".to_string()]);
+        assert_eq!(b.stops(), vec![QStop::Header]);
+        assert!(!b.view().unwrap().open);
+        press(&mut b, KeyCode::Char('l'), QStop::Header);
+        let mut want = vec![QStop::Header];
+        for decision in 0..2 {
+            want.extend((0..3).map(|option| opt_stop(decision, option)));
+        }
+        want.extend((0..4).map(QStop::Action));
+        assert_eq!(b.stops(), want);
+        assert!(b.view().unwrap().open);
     }
 
     #[test]
-    fn summary_h_and_esc_go_back_to_the_last_decision_keeping_picks() {
-        for back in [KeyCode::Char('h'), KeyCode::Left, KeyCode::Esc] {
-            let mut b = block(vec![question("Q1", 1, 2)]);
-            press(&mut b, KeyCode::Enter);
-            press(&mut b, KeyCode::Enter);
-            assert_eq!(b.view().unwrap().mode, Mode::Summary);
-            assert_eq!(press(&mut b, back), BlockEffect::None, "{back:?}");
-            let v = b.view().unwrap();
-            assert_eq!(v.mode, Mode::Choosing, "{back:?}");
-            assert_eq!(v.ask.as_deref(), Some("Ask 2?"));
-            assert_eq!(v.picks, vec!["label b".to_string(), "label b".to_string()]);
-            press(&mut b, KeyCode::Enter);
-            assert_eq!(b.view().unwrap().mode, Mode::Summary);
+    fn no_stops_without_a_question_or_while_hidden() {
+        let mut b = QuestionBlock::default();
+        assert!(b.stops().is_empty());
+        let mut b2 = block(vec![question("Q1", 1, 1)]);
+        b2.suspend();
+        assert!(b2.stops().is_empty());
+        b.reconcile(queue(vec![]));
+        assert!(b.stops().is_empty());
+    }
+
+    #[test]
+    fn header_opens_and_closes_with_l_right_enter_h_left_esc() {
+        for open in [KeyCode::Char('l'), KeyCode::Right, KeyCode::Enter] {
+            let mut b = block(vec![question("Q1", 1, 1)]);
+            press(&mut b, open, QStop::Header);
+            assert!(b.is_open(), "{open:?}");
+        }
+        for close in [
+            KeyCode::Char('h'),
+            KeyCode::Left,
+            KeyCode::Esc,
+            KeyCode::Enter,
+        ] {
+            let mut b = open_block(vec![question("Q1", 1, 1)]);
             assert_eq!(
-                press(&mut b, KeyCode::Char('o')),
-                BlockEffect::OpenLink("https://example.com/x".into())
+                press(&mut b, close, QStop::Header),
+                BlockEffect::Cursor(QStop::Header),
+                "{close:?}"
             );
-            let before = b.view().unwrap();
-            for c in ['j', 'k', 'l', 'r', 'x'] {
-                assert_eq!(press(&mut b, KeyCode::Char(c)), BlockEffect::None, "{c}");
-                assert_eq!(b.view().unwrap(), before, "{c}");
+            assert!(!b.is_open(), "{close:?}");
+        }
+        // On a closed header, h and Esc do nothing, and l on an open header does nothing.
+        let mut b = block(vec![question("Q1", 1, 1)]);
+        for code in [KeyCode::Char('h'), KeyCode::Esc] {
+            assert_eq!(press(&mut b, code, QStop::Header), BlockEffect::None);
+            assert!(!b.is_open());
+        }
+        let mut b = open_block(vec![question("Q1", 1, 1)]);
+        assert_eq!(
+            press(&mut b, KeyCode::Char('l'), QStop::Header),
+            BlockEffect::None
+        );
+        assert!(b.is_open());
+    }
+
+    #[test]
+    fn h_left_and_esc_on_an_option_or_action_close_with_the_cursor_on_the_header() {
+        for stop in [opt_stop(0, 1), QStop::Action(0), QStop::Action(3)] {
+            for code in [KeyCode::Char('h'), KeyCode::Left, KeyCode::Esc] {
+                let mut b = open_block(vec![question("Q1", 1, 1)]);
+                assert_eq!(
+                    press(&mut b, code, stop),
+                    BlockEffect::Cursor(QStop::Header),
+                    "{stop:?} {code:?}"
+                );
+                assert!(!b.is_open());
             }
         }
     }
 
     #[test]
-    fn a_free_option_revisited_keeps_its_text() {
-        let mut b = block(vec![question("Q1", 1, 2)]);
-        press(&mut b, KeyCode::Char('j'));
-        press(&mut b, KeyCode::Enter);
-        type_text(&mut b, "mine");
-        press(&mut b, KeyCode::Enter);
-        assert_eq!(b.view().unwrap().ask.as_deref(), Some("Ask 2?"));
-        press(&mut b, KeyCode::Char('h'));
-        assert_eq!(highlighted(&b), 2, "still on the free option");
-        press(&mut b, KeyCode::Char('l'));
-        let v = b.view().unwrap();
-        assert_eq!(v.ask.as_deref(), Some("Ask 2?"));
-        assert_eq!(v.picks, vec!["\"mine\"".to_string()]);
-        press(&mut b, KeyCode::Char('h'));
-        press(&mut b, KeyCode::Enter);
+    fn l_does_nothing_on_options_and_actions() {
+        for stop in [opt_stop(0, 0), QStop::Action(0), QStop::Action(2)] {
+            for code in [KeyCode::Char('l'), KeyCode::Right] {
+                let mut b = open_block(vec![question("Q1", 1, 1)]);
+                let before = b.view();
+                assert_eq!(press(&mut b, code, stop), BlockEffect::None);
+                assert_eq!(b.view(), before);
+            }
+        }
+    }
+
+    #[test]
+    fn space_picks_and_other_keys_do_not() {
+        let mut b = open_block(vec![question("Q1", 1, 1)]);
+        assert_eq!(picked(&b), keys(&["b"]));
+        assert_eq!(
+            press(&mut b, KeyCode::Char(' '), opt_stop(0, 0)),
+            BlockEffect::None
+        );
+        assert_eq!(picked(&b), keys(&["a"]), "a picked, b unpicked");
+        for code in [
+            KeyCode::Char('j'),
+            KeyCode::Char('k'),
+            KeyCode::Char('l'),
+            KeyCode::Enter,
+            KeyCode::Down,
+            KeyCode::Right,
+        ] {
+            press(&mut b, code, opt_stop(0, 1));
+            assert_eq!(picked(&b), keys(&["a"]), "{code:?}");
+        }
+        // Space elsewhere picks nothing.
+        press(&mut b, KeyCode::Char(' '), QStop::Header);
+        press(&mut b, KeyCode::Char(' '), QStop::Action(1));
+        assert_eq!(picked(&b), keys(&["a"]));
+    }
+
+    #[test]
+    fn close_keeps_picks() {
+        let mut b = open_block(vec![question("Q1", 1, 2)]);
+        press(&mut b, KeyCode::Char(' '), opt_stop(1, 0));
+        let before = picked(&b);
+        assert_eq!(before, keys(&["b", "a"]));
+        assert_eq!(
+            press(&mut b, KeyCode::Char('h'), opt_stop(1, 0)),
+            BlockEffect::Cursor(QStop::Header)
+        );
+        press(&mut b, KeyCode::Char('l'), QStop::Header);
+        assert_eq!(picked(&b), before);
+    }
+
+    #[test]
+    fn send_with_missing_pick_moves_cursor() {
+        let mut q = question("Q1", 1, 3);
+        q.decisions[1].options[1].suggested = false;
+        q.decisions[2].options[1].suggested = false;
+        let mut b = open_block(vec![q]);
+        assert_eq!(
+            press(&mut b, KeyCode::Enter, QStop::Action(0)),
+            BlockEffect::Cursor(opt_stop(1, 0))
+        );
+        press(&mut b, KeyCode::Char(' '), opt_stop(1, 2));
         assert_eq!(
             b.view().unwrap().mode,
             Mode::Note {
                 kind: NoteKind::FreeText,
-                text: "mine".into()
+                text: String::new()
             }
         );
-    }
-
-    #[test]
-    fn l_on_a_free_option_with_no_pick_opens_its_text_box() {
-        for next in [KeyCode::Char('l'), KeyCode::Right] {
-            let mut b = block(vec![question("Q1", 1, 2)]);
-            press(&mut b, KeyCode::Char('j'));
-            assert_eq!(press(&mut b, next), BlockEffect::None);
-            let v = b.view().unwrap();
-            assert_eq!(
-                v.mode,
-                Mode::Note {
-                    kind: NoteKind::FreeText,
-                    text: String::new()
-                },
-                "{next:?}"
-            );
-            assert_eq!(v.ask.as_deref(), Some("Ask 1?"), "it does not move on");
-            assert!(v.picks.is_empty());
-        }
-    }
-
-    #[test]
-    fn l_on_a_decision_with_a_pick_replaces_it_and_keeps_later_picks() {
-        let mut b = block(vec![question("Q1", 1, 3)]);
-        press(&mut b, KeyCode::Char('l'));
-        press(&mut b, KeyCode::Char('l'));
-        press(&mut b, KeyCode::Char('h'));
-        press(&mut b, KeyCode::Char('h'));
-        press(&mut b, KeyCode::Char('k'));
-        press(&mut b, KeyCode::Char('l'));
-        let v = b.view().unwrap();
-        assert_eq!(v.ask.as_deref(), Some("Ask 2?"));
-        assert_eq!(v.picks, vec!["label a".to_string(), "label b".to_string()]);
-    }
-
-    #[test]
-    fn enter_on_the_summary_sends_the_answer_with_its_version() {
-        let mut b = block(vec![question("Q1", 3, 2)]);
-        press(&mut b, KeyCode::Enter);
-        press(&mut b, KeyCode::Up);
-        press(&mut b, KeyCode::Enter);
+        type_text(&mut b, "x");
+        press(&mut b, KeyCode::Enter, opt_stop(1, 2));
         assert_eq!(
-            press(&mut b, KeyCode::Enter),
+            press(&mut b, KeyCode::Enter, QStop::Action(0)),
+            BlockEffect::Cursor(opt_stop(2, 0)),
+            "the next missing decision"
+        );
+        press(&mut b, KeyCode::Char(' '), opt_stop(2, 0));
+        assert!(matches!(
+            press(&mut b, KeyCode::Enter, QStop::Action(0)),
+            BlockEffect::Send(_)
+        ));
+    }
+
+    #[test]
+    fn send_returns_every_pick_with_version_and_send_now() {
+        let mut b = open_block(vec![question("Q1", 3, 2)]);
+        press(&mut b, KeyCode::Char(' '), opt_stop(1, 0));
+        assert_eq!(
+            press(&mut b, KeyCode::Enter, QStop::Action(0)),
             BlockEffect::Send(Outgoing {
                 id: "Q1".into(),
                 version: 3,
                 kind: AnswerKind::Answer,
                 picks: vec![pick(0, "b", ""), pick(1, "a", "")],
                 note: String::new(),
-                send_now: false,
+                send_now: true,
             })
         );
     }
 
     #[test]
-    fn the_summary_shows_one_line_per_decision_in_words() {
-        let mut b = block(vec![question("Q1", 1, 2)]);
-        press(&mut b, KeyCode::Enter);
-        press(&mut b, KeyCode::Up);
-        press(&mut b, KeyCode::Enter);
-        assert_eq!(
-            b.view().unwrap().summary,
-            vec![
-                "Ask 1? \u{2014} label b".to_string(),
-                "Ask 2? \u{2014} label a".to_string()
-            ]
-        );
+    fn s_does_nothing() {
+        let mut b = open_block(vec![question("Q1", 1, 1)]);
+        let before = b.view();
+        for stop in [
+            QStop::Header,
+            opt_stop(0, 0),
+            QStop::Action(0),
+            QStop::Action(1),
+        ] {
+            assert_eq!(press(&mut b, KeyCode::Char('s'), stop), BlockEffect::None);
+            assert_eq!(b.view(), before);
+        }
     }
 
     #[test]
-    fn a_free_option_takes_text() {
-        let mut b = block(vec![question("Q1", 1, 1)]);
-        press(&mut b, KeyCode::Down);
-        press(&mut b, KeyCode::Enter);
+    fn other_letters_and_tab_do_nothing_on_question_stops() {
+        let mut b = open_block(vec![question("Q1", 1, 2), question("Q2", 1, 1)]);
+        let before = b.view();
+        for code in [
+            KeyCode::Char('c'),
+            KeyCode::Char('t'),
+            KeyCode::Char('f'),
+            KeyCode::Char('/'),
+            KeyCode::Char('q'),
+            KeyCode::Char('x'),
+            KeyCode::Tab,
+            KeyCode::BackTab,
+            KeyCode::Char('j'),
+            KeyCode::Char('k'),
+        ] {
+            for stop in [QStop::Header, opt_stop(0, 0), QStop::Action(2)] {
+                assert_eq!(press(&mut b, code, stop), BlockEffect::None, "{code:?}");
+                assert_eq!(b.view(), before, "{code:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn free_option_space_opens_field_enter_picks_blank_rejected() {
+        let mut b = open_block(vec![question("Q1", 1, 1)]);
+        assert_eq!(
+            press(&mut b, KeyCode::Char(' '), opt_stop(0, 2)),
+            BlockEffect::None
+        );
         assert_eq!(
             b.view().unwrap().mode,
             Mode::Note {
@@ -1186,65 +1125,131 @@ mod tests {
                 text: String::new()
             }
         );
-        assert_eq!(press(&mut b, KeyCode::Enter), BlockEffect::None);
-        type_text(&mut b, "my words");
-        assert_eq!(press(&mut b, KeyCode::Enter), BlockEffect::None);
-        let v = b.view().unwrap();
-        assert_eq!(v.mode, Mode::Summary);
-        assert_eq!(v.summary, vec!["Ask 1? \u{2014} \"my words\"".to_string()]);
+        assert_eq!(picked(&b), keys(&["b"]), "no change before Enter");
         assert_eq!(
-            press(&mut b, KeyCode::Enter),
+            press(&mut b, KeyCode::Enter, opt_stop(0, 2)),
+            BlockEffect::None
+        );
+        assert!(b.note_open(), "blank is not accepted");
+        type_text(&mut b, "   ");
+        assert_eq!(
+            press(&mut b, KeyCode::Enter, opt_stop(0, 2)),
+            BlockEffect::None
+        );
+        assert!(b.note_open(), "whitespace is not accepted");
+        type_text(&mut b, "my words");
+        press(&mut b, KeyCode::Enter, opt_stop(0, 2));
+        assert!(!b.note_open());
+        assert_eq!(picked(&b), keys(&["z"]));
+        let v = b.view().unwrap();
+        assert_eq!(
+            v.decisions[0].options[2].free_text.as_deref(),
+            Some("my words")
+        );
+        assert_eq!(
+            press(&mut b, KeyCode::Enter, QStop::Action(0)),
             BlockEffect::Send(Outgoing {
                 id: "Q1".into(),
                 version: 1,
                 kind: AnswerKind::FreeText,
                 picks: vec![pick(0, "z", "my words")],
                 note: "my words".into(),
-                send_now: false,
+                send_now: true,
             })
         );
 
-        // Esc leaves the note without a pick
-        let mut b = block(vec![question("Q1", 1, 1)]);
-        press(&mut b, KeyCode::Down);
-        press(&mut b, KeyCode::Enter);
-        type_text(&mut b, "abc");
-        press(&mut b, KeyCode::Esc);
-        let v = b.view().unwrap();
-        assert_eq!(v.mode, Mode::Choosing);
-        assert!(v.picks.is_empty());
+        // The field holds the earlier text; Esc discards what was typed and keeps the pick.
+        press(&mut b, KeyCode::Char(' '), opt_stop(0, 2));
+        assert_eq!(
+            b.view().unwrap().mode,
+            Mode::Note {
+                kind: NoteKind::FreeText,
+                text: "my words".into()
+            }
+        );
+        type_text(&mut b, "!!");
+        press(&mut b, KeyCode::Esc, opt_stop(0, 2));
+        assert!(!b.note_open());
+        assert_eq!(
+            b.view().unwrap().decisions[0].options[2]
+                .free_text
+                .as_deref(),
+            Some("my words")
+        );
+        // Picking another option replaces it; the free text is gone from the view.
+        press(&mut b, KeyCode::Char(' '), opt_stop(0, 0));
+        assert_eq!(picked(&b), keys(&["a"]));
+        assert_eq!(b.view().unwrap().decisions[0].options[2].free_text, None);
     }
 
     #[test]
-    fn a_free_option_on_an_early_decision_continues_to_the_next() {
-        let mut b = block(vec![question("Q1", 1, 2)]);
-        press(&mut b, KeyCode::Down);
-        press(&mut b, KeyCode::Enter);
-        type_text(&mut b, "mine");
-        press(&mut b, KeyCode::Enter);
-        let v = b.view().unwrap();
-        assert_eq!(v.mode, Mode::Choosing);
-        assert_eq!(v.ask.as_deref(), Some("Ask 2?"));
-        assert_eq!(v.picks, vec!["\"mine\"".to_string()]);
-        press(&mut b, KeyCode::Enter);
-        assert_eq!(b.view().unwrap().mode, Mode::Summary);
+    fn a_note_types_every_letter() {
+        let mut b = open_block(vec![question("Q1", 1, 1)]);
+        press(&mut b, KeyCode::Enter, QStop::Action(2));
+        type_text(&mut b, "hjklnNrxoqs ");
         assert_eq!(
-            press(&mut b, KeyCode::Enter),
-            BlockEffect::Send(Outgoing {
-                id: "Q1".into(),
-                version: 1,
-                kind: AnswerKind::FreeText,
-                picks: vec![pick(0, "z", "mine"), pick(1, "b", "")],
-                note: "mine".into(),
-                send_now: false,
-            })
+            b.view().unwrap().mode,
+            Mode::Note {
+                kind: NoteKind::Revise,
+                text: "hjklnNrxoqs ".into()
+            }
         );
+        assert!(b.is_open());
+    }
+
+    #[test]
+    fn revise_note_sends_with_picks_and_send_now_true() {
+        for (action, kind) in [(2, AnswerKind::Revise), (3, AnswerKind::Reject)] {
+            let mut b = open_block(vec![question("Q1", 2, 2)]);
+            assert_eq!(
+                press(&mut b, KeyCode::Enter, QStop::Action(action)),
+                BlockEffect::None
+            );
+            assert_eq!(
+                press(&mut b, KeyCode::Enter, QStop::Action(action)),
+                BlockEffect::None,
+                "blank sends nothing"
+            );
+            type_text(&mut b, "fixx");
+            press(&mut b, KeyCode::Backspace, QStop::Action(action));
+            assert_eq!(
+                press(&mut b, KeyCode::Enter, QStop::Action(action)),
+                BlockEffect::Send(Outgoing {
+                    id: "Q1".into(),
+                    version: 2,
+                    kind,
+                    picks: vec![pick(0, "b", ""), pick(1, "b", "")],
+                    note: "fix".into(),
+                    send_now: true,
+                })
+            );
+        }
+        // A decision with no pick does not stop a note: the picks so far go.
+        let mut q = question("Q1", 2, 2);
+        q.decisions[1].options[1].suggested = false;
+        let mut b = open_block(vec![q]);
+        press(&mut b, KeyCode::Enter, QStop::Action(3));
+        type_text(&mut b, "no");
+        match press(&mut b, KeyCode::Enter, QStop::Action(3)) {
+            BlockEffect::Send(out) => assert_eq!(out.picks, vec![pick(0, "b", "")]),
+            other => panic!("{other:?}"),
+        }
+        // Esc leaves the note, dropping its text.
+        let mut b = open_block(vec![question("Q1", 2, 2)]);
+        press(&mut b, KeyCode::Enter, QStop::Action(2));
+        type_text(&mut b, "abc");
+        assert_eq!(
+            press(&mut b, KeyCode::Esc, QStop::Action(2)),
+            BlockEffect::None
+        );
+        assert_eq!(b.view().unwrap().mode, Mode::Choosing);
+        assert!(b.is_open());
     }
 
     #[test]
     fn a_note_stops_at_1999_characters() {
-        let mut b = block(vec![question("Q1", 1, 1)]);
-        open_action(&mut b, 1);
+        let mut b = open_block(vec![question("Q1", 1, 1)]);
+        press(&mut b, KeyCode::Enter, QStop::Action(2));
         type_text(&mut b, &"a".repeat(1_999));
         type_text(&mut b, "bcd");
         match b.view().unwrap().mode {
@@ -1254,9 +1259,9 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
-        press(&mut b, KeyCode::Backspace);
-        press(&mut b, KeyCode::Char('z'));
-        match press(&mut b, KeyCode::Enter) {
+        press(&mut b, KeyCode::Backspace, QStop::Action(2));
+        press(&mut b, KeyCode::Char('z'), QStop::Action(2));
+        match press(&mut b, KeyCode::Enter, QStop::Action(2)) {
             BlockEffect::Send(out) => {
                 assert_eq!(out.note.chars().count(), 1_999);
                 assert!(out.note.ends_with('z'));
@@ -1266,18 +1271,223 @@ mod tests {
     }
 
     #[test]
-    fn o_opens_only_an_http_link() {
-        let mut q = question("Q1", 1, 1);
-        q.link = "https://example.com/x".into();
-        let mut b = block(vec![q.clone()]);
+    fn later_keeps_picks_and_defers() {
+        let mut b = open_block(vec![question("Q1", 1, 2), question("Q2", 1, 1)]);
+        press(&mut b, KeyCode::Char(' '), opt_stop(1, 0));
         assert_eq!(
-            press(&mut b, KeyCode::Char('o')),
-            BlockEffect::OpenLink("https://example.com/x".into())
+            press(&mut b, KeyCode::Enter, QStop::Action(1)),
+            BlockEffect::Defer("Q1".into())
         );
+        let v = b.view().unwrap();
+        assert_eq!(v.id, "Q2", "the next waiting question shows");
+        assert!(v.open, "and stays open");
+        press(&mut b, KeyCode::Char('n'), QStop::Header);
+        assert_eq!(b.view().unwrap().id, "Q1");
+        assert_eq!(picked(&b), keys(&["b", "a"]));
+
+        // With one question, later shows it again with its picks.
+        let mut b = open_block(vec![question("Q1", 1, 1)]);
+        press(&mut b, KeyCode::Char(' '), opt_stop(0, 0));
+        assert_eq!(
+            press(&mut b, KeyCode::Enter, QStop::Action(1)),
+            BlockEffect::Defer("Q1".into())
+        );
+        assert_eq!(picked(&b), keys(&["a"]));
+    }
+
+    #[test]
+    fn n_and_n_shift_wrap_and_keep_open() {
+        let shown_id = |b: &QuestionBlock| b.view().unwrap().id;
+        let mut b = open_block(vec![
+            question("Q1", 1, 1),
+            question("Q2", 1, 1),
+            question("Q3", 1, 1),
+        ]);
+        assert_eq!(
+            press(&mut b, KeyCode::Char('n'), opt_stop(0, 1)),
+            BlockEffect::Cursor(QStop::Header)
+        );
+        assert_eq!(shown_id(&b), "Q2");
+        press(&mut b, KeyCode::Char('n'), QStop::Header);
+        press(&mut b, KeyCode::Char('n'), QStop::Action(0));
+        assert_eq!(shown_id(&b), "Q1", "n wraps past the last question");
+        assert_eq!(
+            press(&mut b, KeyCode::Char('N'), QStop::Header),
+            BlockEffect::Cursor(QStop::Header)
+        );
+        assert_eq!(shown_id(&b), "Q3", "N wraps past the first question");
+        assert!(b.is_open());
+
+        // Closed, n steps and stays closed.
+        let mut b = block(vec![question("Q1", 1, 1), question("Q2", 1, 1)]);
+        press(&mut b, KeyCode::Char('n'), QStop::Header);
+        assert_eq!(shown_id(&b), "Q2");
+        assert!(!b.is_open());
+
+        // With one question, n does nothing.
+        let mut b = open_block(vec![question("Q1", 1, 1)]);
+        let before = b.view();
+        assert_eq!(
+            press(&mut b, KeyCode::Char('n'), opt_stop(0, 1)),
+            BlockEffect::None
+        );
+        assert_eq!(
+            press(&mut b, KeyCode::Char('N'), opt_stop(0, 1)),
+            BlockEffect::None
+        );
+        assert_eq!(b.view(), before);
+    }
+
+    #[test]
+    fn n_away_and_back_keeps_the_picks() {
+        let mut b = open_block(vec![question("Q25", 1, 2), question("Q26", 1, 1)]);
+        press(&mut b, KeyCode::Char(' '), opt_stop(0, 0));
+        press(&mut b, KeyCode::Char('n'), QStop::Header);
+        assert_eq!(b.view().unwrap().id, "Q26");
+        assert_eq!(picked(&b), keys(&["b"]), "Q26 starts with its suggestion");
+        press(&mut b, KeyCode::Char('N'), QStop::Header);
+        assert_eq!(b.view().unwrap().id, "Q25");
+        assert_eq!(picked(&b), keys(&["a", "b"]));
+    }
+
+    #[test]
+    fn higher_version_re_presets_picks_and_sets_notice() {
+        let mut b = open_block(vec![question("Q1", 1, 2)]);
+        press(&mut b, KeyCode::Char(' '), opt_stop(0, 0));
+        b.reconcile(queue(vec![question("Q1", 2, 2)]));
+        let v = b.view().unwrap();
+        assert_eq!(picked(&b), keys(&["b", "b"]));
+        assert_eq!(
+            v.notice.as_deref(),
+            Some("Q1 changed, your picks were cleared")
+        );
+        assert!(v.open, "the question stays open");
+        match press(&mut b, KeyCode::Enter, QStop::Action(0)) {
+            BlockEffect::Send(out) => assert_eq!(out.version, 2),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn kept_picks_drop_when_the_version_rises() {
+        let mut b = open_block(vec![question("Q25", 1, 2), question("Q26", 1, 1)]);
+        press(&mut b, KeyCode::Char(' '), opt_stop(0, 0));
+        press(&mut b, KeyCode::Char('n'), QStop::Header);
+        b.reconcile(queue(vec![question("Q25", 2, 2), question("Q26", 1, 1)]));
+        assert_eq!(b.view().unwrap().notice, None, "Q25 is not in view");
+        press(&mut b, KeyCode::Char('N'), QStop::Header);
+        assert_eq!(b.view().unwrap().id, "Q25");
+        assert_eq!(picked(&b), keys(&["b", "b"]), "back to the suggestions");
+        assert_eq!(b.view().unwrap().notice, None);
+        assert_eq!(b.shown().unwrap().1, 2);
+    }
+
+    #[test]
+    fn kept_picks_go_when_the_question_is_dismissed_or_answered() {
+        let mut b = open_block(vec![question("Q25", 1, 2), question("Q26", 1, 1)]);
+        press(&mut b, KeyCode::Char(' '), opt_stop(0, 0));
+        press(&mut b, KeyCode::Char('n'), QStop::Header);
+        b.reconcile(queue(vec![question("Q26", 1, 1)]));
+        b.reconcile(queue(vec![question("Q25", 1, 2), question("Q26", 1, 1)]));
+        assert_eq!(b.view().unwrap().id, "Q26");
+        press(&mut b, KeyCode::Char('N'), QStop::Header);
+        assert_eq!(picked(&b), keys(&["b", "b"]));
+
+        let mut b = open_block(vec![question("Q1", 1, 1), question("Q2", 1, 1)]);
+        press(&mut b, KeyCode::Char(' '), opt_stop(0, 0));
+        b.sent("Q1", SendResult::Recorded);
+        // Harold lists it again at the same version, as a stale read might.
+        b.reconcile(queue(vec![question("Q2", 1, 1), question("Q1", 1, 1)]));
+        press(&mut b, KeyCode::Char('n'), QStop::Header);
+        assert_eq!(b.view().unwrap().id, "Q1");
+        assert_eq!(picked(&b), keys(&["b"]), "the answered walk was not kept");
+    }
+
+    #[test]
+    fn recorded_send_shows_next_question_open() {
+        let mut b = open_block(vec![question("Q1", 1, 1), question("Q2", 1, 1)]);
+        b.sent("Q1", SendResult::Recorded);
+        let v = b.view().unwrap();
+        assert_eq!((v.id.as_str(), v.position, v.waiting), ("Q2", 1, 1));
+        assert!(v.open);
+        assert_eq!(b.stops().len(), 1 + 3 + 4);
+        b.sent("Q2", SendResult::Recorded);
+        assert!(!b.is_visible());
+        assert!(!b.is_open());
+        assert!(b.stops().is_empty());
+        // A question that comes later starts closed.
+        b.reconcile(queue(vec![question("Q3", 1, 1)]));
+        assert!(!b.view().unwrap().open);
+    }
+
+    #[test]
+    fn not_waiting_shows_the_dismissal() {
+        let mut b = block(vec![question("Q1", 1, 1), question("Q2", 1, 1)]);
+        b.sent("Q1", SendResult::Recorded);
+        b.sent("Q2", SendResult::NotWaiting);
+        assert!(
+            b.view()
+                .unwrap()
+                .notice
+                .unwrap()
+                .starts_with("Q2 dismissed: ")
+        );
+    }
+
+    #[test]
+    fn zero_decision_question_stops_and_sends() {
+        let mut b = block(vec![question("Q1", 4, 0)]);
+        assert_eq!(b.stops(), vec![QStop::Header]);
+        press(&mut b, KeyCode::Char('l'), QStop::Header);
+        assert_eq!(
+            b.stops(),
+            vec![
+                QStop::Header,
+                QStop::Action(0),
+                QStop::Action(1),
+                QStop::Action(2),
+                QStop::Action(3)
+            ]
+        );
+        assert_eq!(
+            press(&mut b, KeyCode::Enter, QStop::Action(0)),
+            BlockEffect::Send(Outgoing {
+                id: "Q1".into(),
+                version: 4,
+                kind: AnswerKind::Answer,
+                picks: vec![],
+                note: String::new(),
+                send_now: true,
+            })
+        );
+    }
+
+    #[test]
+    fn a_decision_with_no_options_sends_the_cursor_to_the_header() {
+        let mut q = question("Q1", 1, 2);
+        q.decisions[1].options.clear();
+        let mut b = open_block(vec![q]);
+        assert_eq!(
+            press(&mut b, KeyCode::Enter, QStop::Action(0)),
+            BlockEffect::Cursor(QStop::Header)
+        );
+        assert_eq!(b.stops().len(), 1 + 3 + 4);
+    }
+
+    #[test]
+    fn o_opens_only_an_http_link_on_any_stop() {
+        let mut q = question("Q1", 1, 1);
+        let mut b = open_block(vec![q.clone()]);
+        for stop in [QStop::Header, opt_stop(0, 0), QStop::Action(2)] {
+            assert_eq!(
+                press(&mut b, KeyCode::Char('o'), stop),
+                BlockEffect::OpenLink("https://example.com/x".into())
+            );
+        }
         q.link = "http://example.com".into();
         let mut b = block(vec![q.clone()]);
         assert!(matches!(
-            press(&mut b, KeyCode::Char('o')),
+            press(&mut b, KeyCode::Char('o'), QStop::Header),
             BlockEffect::OpenLink(_)
         ));
         for bad in [
@@ -1289,7 +1499,7 @@ mod tests {
             q.link = bad.into();
             let mut b = block(vec![q.clone()]);
             assert_eq!(
-                press(&mut b, KeyCode::Char('o')),
+                press(&mut b, KeyCode::Char('o'), QStop::Header),
                 BlockEffect::None,
                 "{bad}"
             );
@@ -1297,29 +1507,8 @@ mod tests {
     }
 
     #[test]
-    fn a_higher_version_drops_the_picks() {
-        let mut b = block(vec![question("Q1", 1, 2)]);
-        press(&mut b, KeyCode::Enter);
-        b.reconcile(queue(vec![question("Q1", 2, 2)]));
-        let v = b.view().unwrap();
-        assert_eq!(v.ask.as_deref(), Some("Ask 1?"));
-        assert!(v.picks.is_empty());
-        assert_eq!(
-            v.notice.as_deref(),
-            Some("Q1 changed, your picks were cleared")
-        );
-        press(&mut b, KeyCode::Enter);
-        press(&mut b, KeyCode::Enter);
-        match press(&mut b, KeyCode::Enter) {
-            BlockEffect::Send(out) => assert_eq!(out.version, 2),
-            other => panic!("{other:?}"),
-        }
-    }
-
-    #[test]
     fn a_dismissal_removes_the_question_with_its_reason() {
         let mut b = block(vec![question("Q1", 1, 2), question("Q2", 1, 1)]);
-        press(&mut b, KeyCode::Enter);
         let mut q = queue(vec![question("Q2", 1, 1)]);
         q.dismissed = vec![("Q1".into(), "no longer needed".into())];
         b.reconcile(q);
@@ -1330,11 +1519,15 @@ mod tests {
         let mut b = block(vec![question("Q1", 1, 1)]);
         b.reconcile(queue(vec![]));
         assert!(b.is_visible());
+        assert!(b.stops().is_empty(), "a notice has no stops");
         assert_eq!(
             b.view().unwrap().notice.as_deref(),
             Some("Q1 dismissed: withdrawn")
         );
-        assert_eq!(press(&mut b, KeyCode::Esc), BlockEffect::Leave);
+        assert_eq!(
+            press(&mut b, KeyCode::Esc, QStop::Header),
+            BlockEffect::None
+        );
         assert!(!b.is_visible());
         assert!(b.view().is_none());
     }
@@ -1349,12 +1542,9 @@ mod tests {
             b.view().unwrap().notice.as_deref(),
             Some("Q1 dismissed: no longer needed")
         );
-
         b.reconcile(gone);
-
         assert!(!b.is_visible(), "the block hides when nothing waits");
         assert!(b.view().is_none());
-        // A question that comes later shows with no old notice.
         b.reconcile(queue(vec![question("Q2", 1, 1)]));
         assert_eq!(b.view().unwrap().notice, None);
     }
@@ -1363,7 +1553,6 @@ mod tests {
     fn a_not_waiting_notice_stays_through_the_read_after_the_send() {
         let mut b = block(vec![question("Q1", 1, 1)]);
         b.sent("Q1", SendResult::NotWaiting);
-        // The read the runtime makes right after the send still shows it.
         b.reconcile(queue(vec![]));
         assert!(
             b.view()
@@ -1381,7 +1570,10 @@ mod tests {
         let mut b = block(vec![question("Q1", 1, 1)]);
         b.reconcile(queue(vec![]));
         assert!(b.shows_notice_only());
-        assert_eq!(press(&mut b, KeyCode::Char('j')), BlockEffect::None);
+        assert_eq!(
+            press(&mut b, KeyCode::Char('j'), QStop::Header),
+            BlockEffect::None
+        );
         assert!(!b.is_visible());
         assert!(!b.shows_notice_only());
     }
@@ -1400,315 +1592,63 @@ mod tests {
     }
 
     #[test]
-    fn a_reorder_keeps_the_current_question() {
-        let mut b = block(vec![question("Q1", 1, 2), question("Q2", 1, 1)]);
-        press(&mut b, KeyCode::Enter);
+    fn a_reorder_keeps_the_current_question_and_its_picks() {
+        let mut b = open_block(vec![question("Q1", 1, 2), question("Q2", 1, 1)]);
+        press(&mut b, KeyCode::Char(' '), opt_stop(0, 0));
         b.reconcile(queue(vec![question("Q2", 1, 1), question("Q1", 1, 2)]));
         let v = b.view().unwrap();
         assert_eq!(v.id, "Q1");
         assert_eq!(v.position, 2);
-        assert_eq!(v.picks.len(), 1);
+        assert_eq!(picked(&b), keys(&["a", "b"]));
         assert_eq!(v.notice, None);
     }
 
     #[test]
     fn unavailable_keeps_the_picks_and_enter_retries() {
-        let mut b = block(vec![question("Q1", 1, 1)]);
-        press(&mut b, KeyCode::Enter);
-        let first = press(&mut b, KeyCode::Enter);
+        let mut b = open_block(vec![question("Q1", 1, 1)]);
+        let first = press(&mut b, KeyCode::Enter, QStop::Action(0));
         assert!(matches!(first, BlockEffect::Send(_)));
         b.sent("Q1", SendResult::Unavailable);
         let v = b.view().unwrap();
-        assert_eq!(v.mode, Mode::Summary);
         assert_eq!(
             v.notice.as_deref(),
             Some("Harold can't save answers right now")
         );
-        assert_eq!(press(&mut b, KeyCode::Enter), first);
+        assert_eq!(press(&mut b, KeyCode::Enter, QStop::Action(0)), first);
     }
 
     #[test]
-    fn version_changed_on_send_clears_the_picks() {
-        let mut b = block(vec![question("Q1", 1, 2)]);
-        press(&mut b, KeyCode::Enter);
-        press(&mut b, KeyCode::Enter);
-        press(&mut b, KeyCode::Enter);
+    fn version_changed_on_send_re_presets_the_picks() {
+        let mut b = open_block(vec![question("Q1", 1, 2)]);
+        press(&mut b, KeyCode::Char(' '), opt_stop(0, 0));
         b.sent("Q1", SendResult::VersionChanged);
-        let v = b.view().unwrap();
-        assert_eq!(v.mode, Mode::Choosing);
-        assert_eq!(v.ask.as_deref(), Some("Ask 1?"));
-        assert!(v.picks.is_empty());
+        assert_eq!(picked(&b), keys(&["b", "b"]));
         assert_eq!(
-            v.notice.as_deref(),
+            b.view().unwrap().notice.as_deref(),
             Some("Q1 changed, your picks were cleared")
         );
     }
 
     #[test]
-    fn recorded_shows_the_next_and_not_waiting_shows_the_dismissal() {
-        let mut b = block(vec![question("Q1", 1, 1), question("Q2", 1, 1)]);
-        b.sent("Q1", SendResult::Recorded);
-        let v = b.view().unwrap();
-        assert_eq!((v.id.as_str(), v.position, v.waiting), ("Q2", 1, 1));
-        b.sent("Q2", SendResult::NotWaiting);
-        assert!(
-            b.view()
-                .unwrap()
-                .notice
-                .unwrap()
-                .starts_with("Q2 dismissed: ")
-        );
-        b.sent("Q2", SendResult::Recorded);
-        let mut b = block(vec![question("Q1", 1, 1)]);
-        b.sent("Q1", SendResult::Recorded);
-        assert!(!b.is_visible());
-    }
-
-    #[test]
-    fn n_and_n_shift_move_between_questions_and_wrap() {
-        let shown_id = |b: &QuestionBlock| b.view().unwrap().id;
-        let mut b = block(vec![
-            question("Q1", 1, 1),
-            question("Q2", 1, 1),
-            question("Q3", 1, 1),
-        ]);
-        press(&mut b, KeyCode::Char('n'));
-        assert_eq!(shown_id(&b), "Q2");
-        press_times(&mut b, KeyCode::Char('n'), 2);
-        assert_eq!(shown_id(&b), "Q1", "n wraps past the last question");
-        press(&mut b, KeyCode::Char('N'));
-        assert_eq!(shown_id(&b), "Q3", "N wraps past the first question");
-        press(&mut b, KeyCode::Enter);
-        assert_eq!(b.view().unwrap().mode, Mode::Summary);
-        press(&mut b, KeyCode::Char('n'));
-        let v = b.view().unwrap();
+    fn a_suspended_block_keeps_its_note_and_open_state() {
+        let mut b = open_block(vec![question("Q1", 1, 1)]);
+        press(&mut b, KeyCode::Enter, QStop::Action(2));
+        type_text(&mut b, "abc");
+        b.suspend();
+        assert!(b.view().is_none());
         assert_eq!(
-            (v.id.as_str(), v.mode),
-            ("Q1", Mode::Choosing),
-            "n moves from the summary"
+            press(&mut b, KeyCode::Char('x'), QStop::Header),
+            BlockEffect::None
         );
-
-        let mut b = block(vec![question("Q1", 1, 2)]);
-        press(&mut b, KeyCode::Char('l'));
-        let before = b.view();
-        press(&mut b, KeyCode::Char('n'));
-        assert_eq!(b.view(), before, "one question: n does nothing");
-        press(&mut b, KeyCode::Char('N'));
-        assert_eq!(b.view(), before, "one question: N does nothing");
-    }
-
-    #[test]
-    fn n_away_and_back_keeps_the_half_picked_question() {
-        let mut b = block(vec![question("Q25", 1, 2), question("Q26", 1, 1)]);
-        press(&mut b, KeyCode::Char('l'));
-        press(&mut b, KeyCode::Char('n'));
-        assert_eq!(b.view().unwrap().id, "Q26");
-        assert!(
-            b.view().unwrap().picks.is_empty(),
-            "Q26 starts with no picks"
-        );
-        press(&mut b, KeyCode::Char('N'));
+        b.reconcile(queue(vec![question("Q1", 1, 1)]));
         let v = b.view().unwrap();
-        assert_eq!(v.id, "Q25");
-        assert_eq!(v.ask.as_deref(), Some("Ask 2?"));
-        assert_eq!(v.picks, vec!["label b".to_string()]);
-    }
-
-    #[test]
-    fn kept_picks_drop_when_the_version_rises() {
-        let mut b = block(vec![question("Q25", 1, 2), question("Q26", 1, 1)]);
-        press(&mut b, KeyCode::Char('l'));
-        press(&mut b, KeyCode::Char('n'));
-        b.reconcile(queue(vec![question("Q25", 2, 2), question("Q26", 1, 1)]));
-        assert_eq!(b.view().unwrap().notice, None, "Q25 is not in view");
-        press(&mut b, KeyCode::Char('N'));
-        let v = b.view().unwrap();
-        assert_eq!(v.id, "Q25");
-        assert_eq!(v.ask.as_deref(), Some("Ask 1?"));
-        assert!(v.picks.is_empty());
-        assert_eq!(v.highlighted, 1, "the suggested option");
-        assert_eq!(v.notice, None);
-        assert_eq!(b.shown().unwrap().1, 2);
-    }
-
-    #[test]
-    fn kept_picks_go_when_the_question_is_dismissed_or_answered() {
-        let fresh = |b: &QuestionBlock| {
-            let v = b.view().unwrap();
-            assert_eq!(v.id, "Q25");
-            assert_eq!(v.ask.as_deref(), Some("Ask 1?"));
-            assert!(v.picks.is_empty());
-        };
-        let mut b = block(vec![question("Q25", 1, 2), question("Q26", 1, 1)]);
-        press(&mut b, KeyCode::Char('l'));
-        press(&mut b, KeyCode::Char('n'));
-        b.reconcile(queue(vec![question("Q26", 1, 1)]));
-        b.reconcile(queue(vec![question("Q25", 1, 2), question("Q26", 1, 1)]));
-        assert_eq!(b.view().unwrap().id, "Q26");
-        press(&mut b, KeyCode::Char('N'));
-        fresh(&b);
-
-        let mut b = block(vec![
-            question("Q27", 1, 1),
-            question("Q25", 1, 2),
-            question("Q26", 1, 1),
-        ]);
-        press(&mut b, KeyCode::Char('n'));
-        press(&mut b, KeyCode::Char('l'));
-        press(&mut b, KeyCode::Char('n'));
-        assert_eq!(b.view().unwrap().id, "Q26");
-        b.sent("Q26", SendResult::Recorded);
-        assert_eq!(b.view().unwrap().id, "Q27");
-        b.reconcile(queue(vec![question("Q27", 1, 1)]));
-        b.reconcile(queue(vec![question("Q27", 1, 1), question("Q25", 1, 2)]));
-        press(&mut b, KeyCode::Char('n'));
-        fresh(&b);
-    }
-
-    #[test]
-    fn an_answered_question_keeps_no_walk() {
-        let mut b = block(vec![question("Q1", 1, 1), question("Q2", 1, 1)]);
-        press(&mut b, KeyCode::Char('l'));
-        b.sent("Q1", SendResult::Recorded);
-        // Harold lists it again at the same version, as a stale read might.
-        b.reconcile(queue(vec![question("Q2", 1, 1), question("Q1", 1, 1)]));
-        press(&mut b, KeyCode::Char('n'));
-        let v = b.view().unwrap();
-        assert_eq!((v.id.as_str(), v.mode), ("Q1", Mode::Choosing));
-        assert!(v.picks.is_empty());
-    }
-
-    #[test]
-    fn later_keeps_the_picks() {
-        let mut b = block(vec![question("Q1", 1, 2), question("Q2", 1, 1)]);
-        press(&mut b, KeyCode::Char('l'));
-        assert_eq!(open_action(&mut b, 0), BlockEffect::Defer("Q1".into()));
-        assert_eq!(b.view().unwrap().id, "Q2");
-        press(&mut b, KeyCode::Char('n'));
-        let v = b.view().unwrap();
-        assert_eq!(v.id, "Q1");
-        assert_eq!(v.ask.as_deref(), Some("Ask 2?"));
-        assert_eq!(v.picks, vec!["label b".to_string()]);
-    }
-
-    fn at_summary(version: u32) -> QuestionBlock {
-        let mut b = block(vec![question("Q1", version, 1)]);
-        press(&mut b, KeyCode::Enter);
-        assert_eq!(b.view().unwrap().mode, Mode::Summary);
-        b
-    }
-
-    fn sent_send_now(effect: BlockEffect) -> bool {
-        match effect {
-            BlockEffect::Send(out) => out.send_now,
-            other => panic!("not a send: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn s_toggles_send_now_on_the_summary() {
-        let mut b = at_summary(1);
-        assert!(!b.view().unwrap().send_now);
-        press(&mut b, KeyCode::Char('s'));
-        assert!(b.view().unwrap().send_now);
-        press(&mut b, KeyCode::Char('s'));
-        assert!(!b.view().unwrap().send_now);
-    }
-
-    #[test]
-    fn the_mark_is_kept_through_h_and_back() {
-        let mut b = at_summary(1);
-        press(&mut b, KeyCode::Char('s'));
-        press(&mut b, KeyCode::Char('h'));
-        assert_eq!(b.view().unwrap().mode, Mode::Choosing);
-        press(&mut b, KeyCode::Enter);
-        assert_eq!(b.view().unwrap().mode, Mode::Summary);
-        assert!(b.view().unwrap().send_now);
-        press(&mut b, KeyCode::Esc);
-        press(&mut b, KeyCode::Enter);
-        assert!(b.view().unwrap().send_now);
-    }
-
-    #[test]
-    fn the_mark_is_kept_while_another_question_is_shown() {
-        let mut b = block(vec![question("Q1", 1, 1), question("Q2", 1, 1)]);
-        press(&mut b, KeyCode::Enter);
-        press(&mut b, KeyCode::Char('s'));
-        press(&mut b, KeyCode::Char('n'));
-        assert!(!b.view().unwrap().send_now);
-        press(&mut b, KeyCode::Char('N'));
-        assert!(b.view().unwrap().send_now);
-    }
-
-    #[test]
-    fn enter_sends_the_answer_with_send_now() {
-        let mut b = at_summary(1);
-        press(&mut b, KeyCode::Char('s'));
-        assert!(sent_send_now(press(&mut b, KeyCode::Enter)));
-        let mut b = at_summary(1);
-        assert!(!sent_send_now(press(&mut b, KeyCode::Enter)));
-    }
-
-    #[test]
-    fn the_mark_starts_at_no_on_every_summary() {
-        // After the answer is recorded, the next question's summary starts unmarked.
-        let mut b = block(vec![question("Q1", 1, 1), question("Q2", 1, 1)]);
-        press(&mut b, KeyCode::Enter);
-        press(&mut b, KeyCode::Char('s'));
-        b.sent("Q1", SendResult::Recorded);
-        assert_eq!(b.view().unwrap().id, "Q2");
-        press(&mut b, KeyCode::Enter);
-        assert_eq!(b.view().unwrap().mode, Mode::Summary);
-        assert!(!b.view().unwrap().send_now);
-
-        // A higher version restarts the walk, and the mark with it.
-        let mut b = at_summary(1);
-        press(&mut b, KeyCode::Char('s'));
-        b.reconcile(Queue {
-            questions: vec![question("Q1", 2, 1)],
-            ..Queue::default()
-        });
-        assert!(!b.view().unwrap().send_now);
-        press(&mut b, KeyCode::Enter);
-        assert!(!b.view().unwrap().send_now);
-
-        // So does a version the send was refused for.
-        let mut b = at_summary(1);
-        press(&mut b, KeyCode::Char('s'));
-        b.sent("Q1", SendResult::VersionChanged);
-        press(&mut b, KeyCode::Enter);
-        assert!(!b.view().unwrap().send_now);
-    }
-
-    #[test]
-    fn choosing_ignores_s() {
-        let mut b = block(vec![question("Q1", 1, 1)]);
-        press(&mut b, KeyCode::Char('s'));
-        assert!(!b.view().unwrap().send_now);
-        press(&mut b, KeyCode::Enter);
-        assert!(!b.view().unwrap().send_now);
-    }
-
-    #[test]
-    fn revise_and_reject_notes_type_s_and_send_unmarked() {
-        for kind in [NoteKind::Revise, NoteKind::Reject] {
-            let mut b = at_summary(1);
-            press(&mut b, KeyCode::Char('s'));
-            press(&mut b, KeyCode::Char('h'));
-            b.open_note(kind);
-            press(&mut b, KeyCode::Char('s'));
-            press(&mut b, KeyCode::Char('s'));
-            let Mode::Note { text, .. } = b.view().unwrap().mode else {
-                panic!("not in a note");
-            };
-            assert_eq!(text, "ss");
-            match press(&mut b, KeyCode::Enter) {
-                BlockEffect::Send(out) => {
-                    assert_eq!(out.note, "ss");
-                    assert!(!out.send_now);
-                }
-                other => panic!("not a send: {other:?}"),
+        assert!(v.open);
+        assert_eq!(
+            v.mode,
+            Mode::Note {
+                kind: NoteKind::Revise,
+                text: "abc".into()
             }
-        }
+        );
     }
 }
