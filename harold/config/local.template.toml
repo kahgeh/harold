@@ -65,8 +65,9 @@ command = "say"
 # away_channel = "telegram"      # "imessage" or "telegram"
 # away_messages_only_from = "/Users/you/Dev/chief-of-pods"  # while an agent runs in this folder, only its panes send to the phone: turn-end updates and messages agents send
 
-# Telemetry: leave a key out to turn that part off. Set pod_registry on one Mac only, or merges are counted twice.
+# Telemetry: export to the local collector is on by default (default.toml sets otlp_endpoint). Set export = false to turn it off. Leave alert_listen and pod_registry out to turn those off. Set pod_registry on one Mac only, or merges are counted twice.
 # [telemetry]
+# export = false                                                   # export off: Harold sends nothing to the collector and logs no warning
 # otlp_endpoint = "http://localhost:4317"                          # the OpenTelemetry collector's gRPC address, http:// only (no TLS); Harold sends its traces, logs and metrics here
 # alert_listen = "127.0.0.1:4320"                                  # the address and port Harold takes alerts on
 # pod_registry = "/Users/you/Dev/p/<your-vault>/products.toml"    # the organisation's products.toml, in its vault, read every minute for pod facts

@@ -1532,7 +1532,11 @@ mod tests {
     fn export_true_is_the_default() {
         let settings = default_settings_with("[telemetry]\nexport = true\n");
         assert!(settings.telemetry.export);
-        assert!(!default_settings_with("[telemetry]\nexport = false\n").telemetry.export);
+        assert!(
+            !default_settings_with("[telemetry]\nexport = false\n")
+                .telemetry
+                .export
+        );
     }
 
     #[test]

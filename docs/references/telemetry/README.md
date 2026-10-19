@@ -12,7 +12,14 @@ The local stack already runs a collector that accepts OTLP, the standard format 
 
 ## Settings
 
-Add a `[telemetry]` section to `local.toml`:
+Export is on by default: `default.toml` sets `otlp_endpoint = "http://localhost:4317"`, so a Mac whose `local.toml` has no `[telemetry]` section sends to the local collector. To set export off, put this in `local.toml`:
+
+```toml
+[telemetry]
+export = false
+```
+
+The other keys go in the same section of `local.toml`:
 
 ```toml
 [telemetry]
@@ -23,11 +30,12 @@ pod_registry = "~/Dev/p/<your-vault>/products.toml"
 
 | Key | Turns on | When left out |
 |---|---|---|
-| `otlp_endpoint` | Export of spans, log records and metrics to the collector, over OTLP gRPC. Plain `http://` only: Harold is built without TLS, so an `https://` address is refused | Nothing is exported |
+| `export` | Export, when true. False is export off: no pipeline is built, nothing is sent and no line is logged. `otlp_endpoint` is still checked | True: export is on |
+| `otlp_endpoint` | The collector's address for export of spans, log records and metrics, over OTLP gRPC. Plain `http://` only: Harold is built without TLS, so an `https://` address is refused | `http://localhost:4317`, from `default.toml` |
 | `alert_listen` | The alert address, `POST /alert` on this address and port | No address is opened |
 | `pod_registry` | The pod facts, read from the organisation's `products.toml`, in its vault | No pod folder is read and no `git` command runs |
 
-Each key is off on its own. A malformed value stops Harold at start, and `harold --check-config` fails, with an error naming the key:
+`alert_listen` and `pod_registry` are off on their own. A malformed value stops Harold at start, and `harold --check-config` fails, with an error naming the key:
 
 ```
 telemetry.otlp_endpoint must be an http:// address such as http://localhost:4317

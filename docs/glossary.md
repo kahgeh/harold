@@ -20,6 +20,9 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 | build worker | An agent building one spec in its own worktree | "slot" for the worker |
 | slot | A place for one build worker in a pod, busy or free | — |
 | pod registry | The vault's `products.toml`, named by `[telemetry] pod_registry` | — |
+| collector | The OpenTelemetry collector at `http://localhost:4317`, part of the local stack. It takes Harold's traces, logs and metrics over OTLP gRPC and stores them in ClickHouse | "ClickHouse" for where Harold sends, "exporter", "agent" for the collector |
+| local stack | The services in `~/Dev/p/sre/stack` on a Mac, which are the collector, ClickHouse and HyperDX | "SRE stack", "observability stack", "HyperDX" for the whole |
+| export, export on, export off | Harold sending to the collector, set by `[telemetry] export` and `otlp_endpoint`. Export is on by default; `export = false` sets it off | "telemetry on/off" for export, "disabled", "enabled", "no address", "push" |
 | user | The person Harold works for | — |
 | phone | The user's iPhone, reached by iMessage, Telegram or the web app | "away device", except in the skill name `send-message-to-away-device` |
 

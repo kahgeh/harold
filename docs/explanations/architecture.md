@@ -103,6 +103,8 @@ Ordinary agent observations and generated dashboard descriptions do not create n
 
 ## Startup, restart, and shutdown
 
+Harold reads its settings from `default.toml`, then lays `local.toml` over it, and export to the local collector is on by default.
+
 On a fresh installation, Harold creates its state database with the complete current schema. Before accepting client traffic, it catches the stored view up to the event history. It then loads the complete saved snapshot and starts publishing. A dashboard cannot connect halfway through that recovery and receive a partially rebuilt view.
 
 Persistent observations, projected state, and accepted generated descriptions survive restart. Temporary work, such as pending description requests and scrollback fingerprints, does not. History capture establishes a fresh baseline when monitoring resumes.
