@@ -80,7 +80,7 @@ async fn listed_ids(store: &TursoQuestionStore) -> Vec<(String, bool)> {
 
 async fn answer_ok(store: &TursoQuestionStore, id: &str, version: u32) {
     let result = store
-        .answer(id, version, |_| Ok(an_answer()), 5)
+        .answer(id, version, false, |_| Ok(an_answer()), 5)
         .await
         .unwrap();
     assert_eq!(result, Ok(Ok(())));
@@ -111,7 +111,10 @@ async fn open_creates_and_migrates_questions_db() {
     assert!(folder.join(DATABASE).exists());
     assert_eq!(store.put(question("Q1"), 1).await.unwrap(), 1);
     drop(store);
-    assert_eq!(migration_rows(&folder).await, ["001_questions"]);
+    assert_eq!(
+        migration_rows(&folder).await,
+        ["001_questions", "002_answer_send_now"]
+    );
 }
 
 #[tokio::test]
@@ -124,7 +127,10 @@ async fn reopening_keeps_the_rows_and_applies_nothing_twice() {
     let store = TursoQuestionStore::open(&temp.0).await.unwrap();
     assert_eq!(listed_ids(&store).await, [("Q1".to_string(), false)]);
     drop(store);
-    assert_eq!(migration_rows(&temp.0).await, ["001_questions"]);
+    assert_eq!(
+        migration_rows(&temp.0).await,
+        ["001_questions", "002_answer_send_now"]
+    );
 }
 
 #[tokio::test]
@@ -218,7 +224,7 @@ async fn answer_with_the_current_version_records_it() {
 
     // the closure's refusal stores nothing
     let refused = store
-        .answer("Q1", 1, |_| Err("picks".to_string()), 2)
+        .answer("Q1", 1, false, |_| Err("picks".to_string()), 2)
         .await
         .unwrap();
     assert_eq!(refused, Ok(Err("picks".to_string())));
@@ -228,6 +234,7 @@ async fn answer_with_the_current_version_records_it() {
         .answer(
             "Q1",
             1,
+            false,
             |q| {
                 assert_eq!(q.id, "Q1");
                 Ok(an_answer())
@@ -254,14 +261,23 @@ async fn an_old_version_is_version_changed_and_a_dismissed_one_not_waiting() {
     let store = TursoQuestionStore::open(&temp.0).await.unwrap();
     store.put(question("Q1"), 1).await.unwrap();
     store.put(question("Q1"), 2).await.unwrap();
-    let old = store.answer("Q1", 1, |_| Ok(an_answer()), 3).await.unwrap();
+    let old = store
+        .answer("Q1", 1, false, |_| Ok(an_answer()), 3)
+        .await
+        .unwrap();
     assert_eq!(old, Err(Refusal::VersionChanged));
     assert!(store.ready().await.unwrap().is_none());
 
     assert_eq!(store.dismiss("Q1", "withdrawn", 4).await.unwrap(), Ok(2));
-    let gone = store.answer("Q1", 2, |_| Ok(an_answer()), 5).await.unwrap();
+    let gone = store
+        .answer("Q1", 2, false, |_| Ok(an_answer()), 5)
+        .await
+        .unwrap();
     assert_eq!(gone, Err(Refusal::NotWaiting));
-    let unknown = store.answer("zz", 1, |_| Ok(an_answer()), 5).await.unwrap();
+    let unknown = store
+        .answer("zz", 1, false, |_| Ok(an_answer()), 5)
+        .await
+        .unwrap();
     assert_eq!(unknown, Err(Refusal::NotWaiting));
     assert_eq!(
         store.dismiss("Q1", "again", 6).await.unwrap(),
@@ -432,7 +448,7 @@ async fn a_write_dropped_inside_its_transaction_does_not_block_the_next() {
     {
         let conn = store.conn.lock().await;
         begin(&conn).await.unwrap();
-        let applied = answer_in(&conn, "Q1", 1, |_| Ok(an_answer()), 2)
+        let applied = answer_in(&conn, "Q1", 1, false, |_| Ok(an_answer()), 2)
             .await
             .unwrap();
         assert_eq!(applied, Ok(Ok(())));
@@ -443,7 +459,7 @@ async fn a_write_dropped_inside_its_transaction_does_not_block_the_next() {
     {
         let conn = store.conn.lock().await;
         begin(&conn).await.unwrap();
-        answer_in(&conn, "Q1", 1, |_| Ok(an_answer()), 2)
+        answer_in(&conn, "Q1", 1, false, |_| Ok(an_answer()), 2)
             .await
             .unwrap()
             .unwrap()
@@ -453,7 +469,7 @@ async fn a_write_dropped_inside_its_transaction_does_not_block_the_next() {
     {
         let conn = store.conn.lock().await;
         begin(&conn).await.unwrap();
-        answer_in(&conn, "Q1", 1, |_| Ok(an_answer()), 2)
+        answer_in(&conn, "Q1", 1, false, |_| Ok(an_answer()), 2)
             .await
             .unwrap()
             .unwrap()
@@ -567,4 +583,93 @@ async fn a_typed_or_unknown_batch_is_not_released() {
         [("Q1".to_string(), "sent".to_string(), Some(batch.id))]
     );
     assert!(store.ready().await.unwrap().is_none());
+}
+
+async fn marked(store: &TursoQuestionStore, id: &str) -> bool {
+    store.marked(id).await
+}
+
+#[tokio::test]
+async fn migration_002_adds_send_now_defaulting_to_zero_and_a_second_open_applies_nothing() {
+    let temp = TempFolder::new();
+    std::fs::create_dir_all(&temp.0).unwrap();
+    // A database as the first release left it: migration 001 only, one row.
+    let database = turso::Builder::new_local(temp.0.join(DATABASE).to_str().unwrap())
+        .build()
+        .await
+        .unwrap();
+    let conn = database.connect().unwrap();
+    let first = MIGRATIONS[0].1;
+    conn.execute_batch(first).await.unwrap();
+    conn.execute(
+        "CREATE TABLE _migrations (id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE, \
+         checksum TEXT NOT NULL, applied_at_ms INTEGER NOT NULL)",
+        (),
+    )
+    .await
+    .unwrap();
+    conn.execute(
+        "INSERT INTO _migrations (name, checksum, applied_at_ms) VALUES (?1, ?2, 0)",
+        (
+            "001_questions",
+            hex::encode(Sha256::digest(first.as_bytes())),
+        ),
+    )
+    .await
+    .unwrap();
+    conn.execute(
+        "INSERT INTO questions (id, version, position, state, body, updated_at_ms) \
+         VALUES ('Q1', 1, 1, 'waiting', ?1, 0)",
+        [serde_json::to_string(&question("Q1")).unwrap()],
+    )
+    .await
+    .unwrap();
+    drop(conn);
+    drop(database);
+
+    let store = TursoQuestionStore::open(&temp.0).await.unwrap();
+    assert!(!marked(&store, "Q1").await);
+    drop(store);
+    assert_eq!(
+        migration_rows(&temp.0).await,
+        ["001_questions", "002_answer_send_now"]
+    );
+
+    let store = TursoQuestionStore::open(&temp.0).await.unwrap();
+    assert!(!marked(&store, "Q1").await);
+    drop(store);
+    assert_eq!(migration_rows(&temp.0).await.len(), 2);
+}
+
+#[tokio::test]
+async fn answer_with_send_now_stores_the_mark() {
+    let temp = TempFolder::new();
+    let store = TursoQuestionStore::open(&temp.0).await.unwrap();
+    store.put(question("Q1"), 1).await.unwrap();
+    store.put(question("Q2"), 1).await.unwrap();
+    let marked_answer = store
+        .answer("Q1", 1, true, |_| Ok(an_answer()), 2)
+        .await
+        .unwrap();
+    assert_eq!(marked_answer, Ok(Ok(())));
+    answer_ok(&store, "Q2", 1).await;
+    assert!(marked(&store, "Q1").await);
+    assert!(!marked(&store, "Q2").await);
+}
+
+#[tokio::test]
+async fn put_again_clears_the_mark() {
+    let temp = TempFolder::new();
+    let store = TursoQuestionStore::open(&temp.0).await.unwrap();
+    store.put(question("Q1"), 1).await.unwrap();
+    store
+        .answer("Q1", 1, true, |_| Ok(an_answer()), 2)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(marked(&store, "Q1").await);
+    // an answered question is not open: the put takes the re-queue branch
+    store.put(question("Q1"), 3).await.unwrap();
+    assert!(!marked(&store, "Q1").await);
 }

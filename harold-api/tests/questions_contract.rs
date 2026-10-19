@@ -204,7 +204,8 @@ fn question_fields_keep_their_numbers() {
             ("version", 2),
             ("kind", 3),
             ("picks", 4),
-            ("note", 5)
+            ("note", 5),
+            ("send_now", 6)
         ])
     );
     assert!(message_fields("AnswerQuestionResponse").is_empty());
@@ -257,6 +258,22 @@ fn answer_question_request_round_trips_with_picks() {
             },
         ],
         note: "n".to_string(),
+        send_now: false,
     };
     assert_eq!(round_trip(&request), request);
+}
+
+#[test]
+fn answer_question_request_omitting_send_now_decodes_unmarked() {
+    // Field 1 (id) = "q-1" only, as an older client sends it.
+    let bytes = [0x0a, 0x03, b'q', b'-', b'1'];
+    let request = AnswerQuestionRequest::decode(bytes.as_slice()).expect("decode");
+    assert!(!request.send_now);
+
+    let marked = AnswerQuestionRequest {
+        send_now: true,
+        ..request
+    };
+    let decoded = AnswerQuestionRequest::decode(marked.encode_to_vec().as_slice()).expect("decode");
+    assert!(decoded.send_now);
 }

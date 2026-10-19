@@ -296,6 +296,7 @@ impl SourceStream {
                 })
                 .collect(),
             note: out.note.clone(),
+            send_now: false,
         };
         match tokio::time::timeout(VOICE_REQUEST_TIMEOUT, client.answer_question(request)).await {
             Ok(result) => answer_send_result(result.map(|_| ())),

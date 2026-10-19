@@ -13,10 +13,16 @@ use super::schema::{Answer, Question};
 const DATABASE: &str = "questions.db";
 const DISMISSAL_VISIBLE_MS: i64 = 3_600_000;
 
-const MIGRATIONS: [(&str, &str); 1] = [(
-    "001_questions",
-    include_str!("migrations/001_questions.sql"),
-)];
+const MIGRATIONS: [(&str, &str); 2] = [
+    (
+        "001_questions",
+        include_str!("migrations/001_questions.sql"),
+    ),
+    (
+        "002_answer_send_now",
+        include_str!("migrations/002_answer_send_now.sql"),
+    ),
+];
 
 #[derive(Debug, thiserror::Error)]
 pub(super) enum StoreError {
@@ -81,10 +87,12 @@ pub(super) trait QuestionStore: Send + Sync + 'static {
     fn list(&self, now_ms: i64) -> impl Future<Output = Result<Listing>> + Send;
     /// Records the answer the closure resolves from the stored question. The
     /// inner `Err(field)` is the closure's refusal; nothing is stored then.
+    /// `send_now` is the mark that asks for the line without the settle wait.
     fn answer(
         &self,
         id: &str,
         version: u32,
+        send_now: bool,
         answer: impl FnOnce(&Question) -> std::result::Result<Answer, String> + Send,
         now_ms: i64,
     ) -> impl Future<Output = Result<std::result::Result<std::result::Result<(), String>, Refusal>>> + Send;
@@ -139,6 +147,20 @@ impl TursoQuestionStore {
             conn: Mutex::new(conn),
             _database: database,
         })
+    }
+}
+
+#[cfg(test)]
+impl TursoQuestionStore {
+    /// Whether the stored question carries the send-now mark.
+    pub(super) async fn marked(&self, id: &str) -> bool {
+        let conn = self.conn.lock().await;
+        let mut rows = conn
+            .query("SELECT send_now FROM questions WHERE id = ?1", [id])
+            .await
+            .unwrap();
+        let row = rows.next().await.unwrap().expect("question row");
+        integer(&row, 0).unwrap() == 1
     }
 }
 
@@ -323,7 +345,7 @@ async fn put_in(conn: &Connection, question: &Question, now_ms: i64) -> Result<u
     if open_state(&existing.state) {
         conn.execute(
             "UPDATE questions SET version = ?2, state = 'waiting', body = ?3, answer = NULL, \
-             reason = '', batch_id = NULL, updated_at_ms = ?4 WHERE id = ?1",
+             reason = '', batch_id = NULL, send_now = 0, updated_at_ms = ?4 WHERE id = ?1",
             (question.id.as_str(), i64::from(version), body, now_ms),
         )
         .await?;
@@ -331,7 +353,7 @@ async fn put_in(conn: &Connection, question: &Question, now_ms: i64) -> Result<u
         let position = next_position(conn).await?;
         conn.execute(
             "UPDATE questions SET version = ?2, position = ?5, state = 'waiting', body = ?3, \
-             answer = NULL, reason = '', batch_id = NULL, updated_at_ms = ?4 WHERE id = ?1",
+             answer = NULL, reason = '', batch_id = NULL, send_now = 0, updated_at_ms = ?4 WHERE id = ?1",
             (
                 question.id.as_str(),
                 i64::from(version),
@@ -442,6 +464,7 @@ async fn answer_in(
     conn: &Connection,
     id: &str,
     version: u32,
+    send_now: bool,
     resolve: impl FnOnce(&Question) -> std::result::Result<Answer, String>,
     now_ms: i64,
 ) -> Result<std::result::Result<std::result::Result<(), String>, Refusal>> {
@@ -470,8 +493,14 @@ async fn answer_in(
         Err(field) => return Ok(Ok(Err(field))),
     };
     conn.execute(
-        "UPDATE questions SET state = 'answered', answer = ?2, updated_at_ms = ?3 WHERE id = ?1",
-        (id, serde_json::to_string(&answer)?, now_ms),
+        "UPDATE questions SET state = 'answered', answer = ?2, updated_at_ms = ?3, \
+         send_now = ?4 WHERE id = ?1",
+        (
+            id,
+            serde_json::to_string(&answer)?,
+            now_ms,
+            i64::from(send_now),
+        ),
     )
     .await?;
     Ok(Ok(Ok(())))
@@ -693,12 +722,17 @@ impl QuestionStore for TursoQuestionStore {
         &self,
         id: &str,
         version: u32,
+        send_now: bool,
         answer: impl FnOnce(&Question) -> std::result::Result<Answer, String> + Send,
         now_ms: i64,
     ) -> Result<std::result::Result<std::result::Result<(), String>, Refusal>> {
         let conn = self.conn.lock().await;
         begin(&conn).await?;
-        finish(&conn, answer_in(&conn, id, version, answer, now_ms).await).await
+        finish(
+            &conn,
+            answer_in(&conn, id, version, send_now, answer, now_ms).await,
+        )
+        .await
     }
 
     async fn defer(&self, id: &str, now_ms: i64) -> Result<std::result::Result<u32, Refusal>> {

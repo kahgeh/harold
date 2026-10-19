@@ -170,11 +170,14 @@ impl QuestionStore for FailingStore {
         &self,
         id: &str,
         version: u32,
+        send_now: bool,
         answer: impl FnOnce(&Question) -> Result<Answer, String> + Send,
         now_ms: i64,
     ) -> Result<Result<Result<(), String>, Refusal>, StoreError> {
         self.check()?;
-        self.inner.answer(id, version, answer, now_ms).await
+        self.inner
+            .answer(id, version, send_now, answer, now_ms)
+            .await
     }
 
     async fn defer(&self, id: &str, now_ms: i64) -> Result<Result<u32, Refusal>, StoreError> {
@@ -264,10 +267,13 @@ impl QuestionStore for MarkHook {
         &self,
         id: &str,
         version: u32,
+        send_now: bool,
         answer: impl FnOnce(&Question) -> Result<Answer, String> + Send,
         now_ms: i64,
     ) -> Result<Result<Result<(), String>, Refusal>, StoreError> {
-        self.inner.answer(id, version, answer, now_ms).await
+        self.inner
+            .answer(id, version, send_now, answer, now_ms)
+            .await
     }
 
     async fn defer(&self, id: &str, now_ms: i64) -> Result<Result<u32, Refusal>, StoreError> {

@@ -48,6 +48,25 @@ async fn answer<S: QuestionStore>(
             kind: kind as i32,
             picks,
             note: note.into(),
+            send_now: false,
+        }))
+        .await
+        .map(|_| ())
+}
+
+async fn answer_marked<S: QuestionStore>(
+    service: &QuestionToolService<S>,
+    id: &str,
+    send_now: bool,
+) -> Result<(), tonic::Status> {
+    service
+        .answer_question(Request::new(pb::AnswerQuestionRequest {
+            id: id.into(),
+            version: 1,
+            kind: pb::AnswerKind::Answer as i32,
+            picks: vec![pick(0, "a")],
+            note: String::new(),
+            send_now,
         }))
         .await
         .map(|_| ())
@@ -388,4 +407,42 @@ async fn log_lines_carry_only_tool_id_version_reason() {
         "evidence: {} log lines, none holds QUEUE-CANARY-2207",
         lines.len()
     );
+}
+
+#[tokio::test]
+async fn answer_question_passes_send_now_to_the_store() {
+    let folder = TempFolder::new();
+    let store = open_store(&folder).await;
+    let service = service(Arc::clone(&store));
+    put(&service, question("Q1", "spec-1", "abc123"))
+        .await
+        .unwrap();
+    answer_marked(&service, "Q1", true).await.unwrap();
+    assert!(store.marked("Q1").await);
+}
+
+#[tokio::test]
+async fn an_old_client_omitting_send_now_records_unmarked() {
+    let folder = TempFolder::new();
+    let store = open_store(&folder).await;
+    let service = service(Arc::clone(&store));
+    put(&service, question("Q1", "spec-1", "abc123"))
+        .await
+        .unwrap();
+    // An old client's bytes carry no field 6.
+    let old = pb::AnswerQuestionRequest {
+        id: "Q1".into(),
+        version: 1,
+        kind: pb::AnswerKind::Answer as i32,
+        picks: vec![pick(0, "a")],
+        note: String::new(),
+        send_now: false,
+    };
+    let bytes = prost::Message::encode_to_vec(&old);
+    let request = <pb::AnswerQuestionRequest as prost::Message>::decode(bytes.as_slice()).unwrap();
+    service
+        .answer_question(Request::new(request))
+        .await
+        .unwrap();
+    assert!(!store.marked("Q1").await);
 }

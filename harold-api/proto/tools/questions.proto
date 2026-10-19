@@ -120,6 +120,8 @@ message AnswerQuestionRequest {
   AnswerKind kind = 3;
   repeated Pick picks = 4;
   string note = 5;
+  // Asks for the ANSWERS line at once, without the settle wait.
+  bool send_now = 6;
 }
 
 message AnswerQuestionResponse {}

@@ -70,6 +70,7 @@ async fn answer(
         .answer(
             id,
             version,
+            false,
             move |q| schema::resolve_picks(q, kind, &picks, &note),
             0,
         )
@@ -144,10 +145,13 @@ impl QuestionStore for RacingStore {
         &self,
         id: &str,
         version: u32,
+        send_now: bool,
         answer: impl FnOnce(&schema::Question) -> Result<schema::Answer, String> + Send,
         now_ms: i64,
     ) -> Result<Result<Result<(), String>, Refusal>, StoreError> {
-        self.inner.answer(id, version, answer, now_ms).await
+        self.inner
+            .answer(id, version, send_now, answer, now_ms)
+            .await
     }
 
     async fn defer(&self, id: &str, now_ms: i64) -> Result<Result<u32, Refusal>, StoreError> {

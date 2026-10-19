@@ -142,12 +142,13 @@ impl<S: QuestionStore> QuestionService for QuestionToolService<S> {
             kind,
             picks,
             note,
+            send_now,
         } = request.into_inner();
         let kind = kind_from_proto(kind)?;
         let resolve =
             move |question: &schema::Question| schema::resolve_picks(question, kind, &picks, &note);
         self.store
-            .answer(&id, version, resolve, now_ms())
+            .answer(&id, version, send_now, resolve, now_ms())
             .await
             .map_err(unavailable)?
             .map_err(refused)?
