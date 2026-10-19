@@ -21,7 +21,7 @@ The host (`harold/src/tools.rs`) builds the `ToolContext` and calls `start`. The
 | `products` | A `Products`: `products()` gives the products of the pod registry (`[telemetry] pod_registry`, the vault's `products.toml`), each as its name and its `repo` folder. It reads the registry on each call, so an edit shows at once. With no `pod_registry` set the list is empty; a registry that is set but can't be read gives `Err("registry_unreadable")`. |
 | `shutdown` | A `watch::Receiver<()>` that fires when Harold stops. |
 
-`start` gives back a `ToolHandle`: the gRPC `routes` the host adds to its server, and the background job the host joins on shutdown. The job must end when `shutdown` fires.
+`start` gives back a `ToolHandle`: the gRPC `routes` the host adds to its server, and `task`, the background job the host joins on shutdown. The job must end when `shutdown` fires.
 
 `PaneTyping::type_line` returns a `Typing` at once: `Typed`, `EnterFailed` (the text is in the input box but Enter failed, so typing it again would repeat it), `PaneBusy` (the pane is busy or its input box holds text; nothing was typed) or `NoPane`. It holds the pane against Harold's other writers as `Writer::Tool(name)`. The host builds one `TmuxTyping` with `Writer::Tool(questions::NAME)` and gives it to the question tool only; the backlog tool types nothing and gets `None`. Two tools with different names would hold the pane against each other like any two writers, but only if the host gives each its own writer. It logs nothing; the tool logs its own lines.
 

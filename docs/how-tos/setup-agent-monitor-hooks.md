@@ -180,7 +180,7 @@ grpcurl -plaintext \
   harold.Harold/WatchAgentStates
 ```
 
-The first response is a complete snapshot. Confirm that the target pane includes all five incarnation fields—`paneId`, `panePid`, `agentPid`, `agentStartedAtMs`, and `providerId`—plus `state` and, when available, `workSummary`.
+The first response is a complete snapshot. Confirm that the test pane includes all five incarnation fields—`paneId`, `panePid`, `agentPid`, `agentStartedAtMs`, and `providerId`—plus `state` and, when available, `workSummary`.
 
 Submit a distinctive prompt through the configured agent and verify this sequence:
 

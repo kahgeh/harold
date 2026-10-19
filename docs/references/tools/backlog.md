@@ -2,7 +2,7 @@
 
 The backlog tool is Harold's second [tool](README.md). It holds two kinds of list that agents used to keep in markdown files:
 
-- **each product's backlog**, kept by that product's manager: up to 5 ranked items and the notes around them;
+- **each product's backlog**, kept by that product's manager: up to 5 ranked items and the backlog notes around them;
 - **the chief's queue**: the one thing the user is on now, the parked items, and the done ones.
 
 Agents change the lists with `harold tool backlog ...`, one small command at a time, and anyone can read them. The tool moves each `backlog.md` and `queue.md` in once, without losing a line, and can write the markdown back out at any time.
@@ -13,7 +13,7 @@ The service is `harold.tools.backlog.v1.BacklogService`. The proto is `harold-ap
 
 The products are the ones in Harold's pod registry, the vault's `products.toml` named by `[telemetry] pod_registry`. The tool keeps no list of its own. A product's folder is its `repo` there. A write for a product that isn't in the registry is refused with `unknown_product`; a product dropped from the registry keeps its backlog readable.
 
-Each product's backlog holds ranked items and notes.
+Each product's backlog holds ranked items and backlog notes.
 
 ### Items
 
@@ -53,7 +53,7 @@ A product holds at most 5 items, ranked 1 to 5:
 
 An evidence pointer is a reference, such as `harold.log:3685`, a commit, a file and line, or "who, when". Raw log or transcript text doesn't belong in one. The tool can't tell the difference; it checks only the lengths.
 
-### Notes
+### Backlog notes
 
 A backlog note has a `kind`, a `title` (one line, under 2,000 characters), a `body` (markdown, under 20,000 characters), and the times it was made and last changed. There are four kinds:
 
@@ -90,7 +90,7 @@ How the items move:
 
 Every write carries the caller's pane, which the CLI reads from `TMUX_PANE`. Reads need no pane.
 
-A write to a product's backlog (items, notes, an applied import) is checked in this order:
+A write to a product's backlog (items, backlog notes, an applied import) is checked in this order:
 
 1. No pane: refused with `no_pane`.
 2. The registry is set but can't be read: refused with `registry_unreadable`. The product isn't in the registry: refused with `unknown_product`.
@@ -178,9 +178,9 @@ The CLI takes any word starting with `--` as a flag, so an item id that starts w
 | --- | --- | --- |
 | `PermissionDenied` | `no_pane`, `wrong_product`, `not_chief` | The [write check](#who-may-write) refused the caller. |
 | `NotFound` | `unknown_product` | A write, or a dry-run backlog import, names a product that isn't in the registry. |
-| `NotFound` | `not_found` | The item, note or queue id isn't there. |
+| `NotFound` | `not_found` | The item, backlog note or queue id isn't there. |
 | `FailedPrecondition` | `backlog_full` | A 6th item, by `put` or by import. |
-| `FailedPrecondition` | `append_only` | An update or removal of a `history` note. |
+| `FailedPrecondition` | `append_only` | An update or removal of a `history` backlog note. |
 | `FailedPrecondition` | `not_empty` | An import into a product or queue that already holds something. |
 | `FailedPrecondition` | `not_parked` | `queue order` names an id that is Now or done. |
 | `FailedPrecondition` | `already_done` | `queue now` or `queue done` on a done item. |
@@ -212,7 +212,7 @@ The checks run in this order:
 1. **Who:** an applied import is a write, so it is checked like any [write](#who-may-write). A dry run needs no pane, but a backlog dry run still refuses a product that isn't in the registry with `unknown_product`.
 2. **Every line has a place:** a line the importer can't place is refused with `unparsed line <n>`, rather than dropped.
 3. **The limits:** each item and backlog note must meet its rules (`invalid <field>`); two items with one id are `invalid id`; more than 5 items are `backlog_full`.
-4. **Empty:** a product that has any item or note, or a queue that has any item or a note, is refused with `not_empty`. A second `--apply` is refused this way, so nothing is stored twice.
+4. **Empty:** a product that has any item or backlog note, or a queue that has any item or a queue note, is refused with `not_empty`. A second `--apply` is refused this way, so nothing is stored twice.
 
 Import and export wait 30 seconds for the daemon; every other command waits 3. A timed-out `--apply` may still have been stored, because the daemon can finish after the CLI has given up. `harold tool backlog list <product>` or `queue list` shows whether it was; if it was, another `--apply` is refused with `not_empty`.
 
@@ -225,11 +225,11 @@ Only lines at column 0 that start `# ` or `## ` are headings; an indented `  ## 
 | Part of the file | Becomes |
 | --- | --- |
 | The `# ` title, as the first line that isn't blank | Nothing; it is skipped. A `# ` line anywhere else is `unparsed line <n>`. |
-| Each paragraph before the first `## ` heading | A `rule` note. Its title is its first line, cut to 80 characters; its body is the paragraph as written. |
+| Each paragraph before the first `## ` heading | A `rule` backlog note. Its title is its first line, cut to 80 characters; its body is the paragraph as written. |
 | `## <n>. <id>: <title>` and its lines | An item, ranked in the order the items appear. |
-| `## In flight with another session...` (a heading that starts with that text) | `held` notes, one per block. |
-| `## Looked at and left out...` | `left_out` notes, one per block. |
-| Any other `## ` heading that holds a `YYYY-MM-DD` date | A `history` note. Its title is the heading after `## `; its body is the section's lines as written, without the blank lines at its start and end. |
+| `## In flight with another session...` (a heading that starts with that text) | `held` backlog notes, one per block. |
+| `## Looked at and left out...` | `left_out` backlog notes, one per block. |
+| Any other `## ` heading that holds a `YYYY-MM-DD` date | A `history` backlog note. Its title is the heading after `## `; its body is the section's lines as written, without the blank lines at its start and end. |
 | A `## ` heading with no date | `unparsed line <n>`. |
 
 An item's lines are `- <field>: <value>`, for `value`, `size`, `risk`, `reason`, `paths`, `after` and `evidence`, in that order, each at most once. The value starts on the field's line. An indented line continues the field above it, joined with a newline, up to a blank line. `evidence` is split at each `; `. Any other line, a field out of order or repeated, or a field with no value is `unparsed line <n>`.
@@ -254,13 +254,13 @@ In any section a column-0 `Nothing.` is skipped. Any other line that isn't part 
 
 The importer reads one bullet under `## Now`. A second top-level bullet there is refused with `unparsed line <n>`, naming that bullet's line. To import such a file, fold the extra bullet into `## Parked`, or merge it into the Now item as indented lines, then import again.
 
-The done items are dated at local midnight of the first `YYYY-MM-DD` in the note, with the UTC offset the CLI sends. A note with no date dates them at the time of the import. So imported done items show under "Done today" only when that date is today.
+The done items are dated at local midnight of the first `YYYY-MM-DD` in the queue note, with the UTC offset the CLI sends. A queue note with no date dates them at the time of the import. So imported done items show under "Done today" only when that date is today.
 
-The export writes `# Queue`, the note, `## Now` (`- <text>`), `## Parked` (`<n>. <text>`, numbered 1 to n), and `## Done` with every done item (`- <text>`). An empty section holds `Nothing.`.
+The export writes `# Queue`, the queue note, `## Now` (`- <text>`), `## Parked` (`<n>. <text>`, numbered 1 to n), and `## Done` with every done item (`- <text>`). An empty section holds `Nothing.`.
 
 ## Log lines
 
-Seven fixed lines, with only the fields `tool`, `product`, `item_id` or `note_id`, `count` and `reason`. No item, note or queue text is ever logged.
+Seven fixed lines, with only the fields `tool`, `product`, `item_id` or `note_id`, `count` and `reason`. No item, backlog note or queue text is ever logged.
 
 | Line | Fields | Notes |
 | --- | --- | --- |
@@ -269,10 +269,10 @@ Seven fixed lines, with only the fields `tool`, `product`, `item_id` or `note_id
 | `backlog ranked` | `tool`, `product`, `count` | `count` is the number of items. |
 | `backlog note added` | `tool`, `product`, `note_id` | |
 | `queue changed` | `tool`, `count` | After each `queue add`, `now`, `order`, `update`, `done` and `note`; `count` is the number of parked items after it. |
-| `backlog imported` | `tool`, `product`, `count` | After an applied import; `count` is the number of items and notes stored. A queue import has no `product`, and its `count` is the number of queue items. |
+| `backlog imported` | `tool`, `product`, `count` | After an applied import; `count` is the number of items and backlog notes stored. A queue import has no `product`, and its `count` is the number of queue items. |
 | `backlog write refused` | `tool`, `product`, `reason` | `reason` is `no_pane`, `unknown_product`, `wrong_product`, `not_chief` or `registry_unreadable`. `product` is there only when it is in the registry, since the request's own string may be anything. |
 
-A note update or removal logs nothing. A tool that can't start logs `tool failed to start` with `tool=backlog reason=store_open_failed`.
+A backlog note update or removal logs nothing. A tool that can't start logs `tool failed to start` with `tool=backlog reason=store_open_failed`.
 
 ## Data folder and rollback
 
