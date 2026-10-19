@@ -117,13 +117,12 @@ iMessage or Telegram traffic, in both directions, without stopping Harold.
 `Messaging: resume` turns it back on. Both are offered under the same conditions
 as the voice commands. While Harold reports messaging as paused, the masthead of
 every connected dash shows `■ MSG PAUSED` after the voice state; nothing is shown
-while messaging is running. The masthead title shows Harold's release version
-(`source` for a source build; nothing before the first snapshot, after a
-disconnect, or from an older Harold that sends no version); `(DASH v…)` follows
-when the dash was built from another release. As the line gets tight the `DASH`
-part goes first, then `HAROLD / TMUX` shortens to `TMX DASH`, then `TMX DASH`
-goes, then `REV`, then the version, so transport, voice and the paused marker
-stay visible. A failed request is reported as `MESSAGING ERROR: …`. See Harold's
+while messaging is running. The masthead title always shows the dash's own release version (`source` for a
+source build), whatever Harold reports and even before the first snapshot or after a
+disconnect. A dash left running through an install shows its old version until it is
+restarted. As the line gets tight `HAROLD / TMUX` shortens to `TMX DASH`, then `TMX DASH`
+goes, then `REV`, then the version, so transport, voice and the paused marker stay
+visible. A failed request is reported as `MESSAGING ERROR: …`. See Harold's
 [operation reference](../docs/references/operation/README.md#pausing-messaging)
 for what the switch does.
 

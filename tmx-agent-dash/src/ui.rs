@@ -451,51 +451,31 @@ fn render_masthead(frame: &mut Frame<'_>, area: Rect, app: &App) {
     }
     let amber = Style::default().fg(AMBER);
     let version_style = Style::default().fg(INK).add_modifier(Modifier::BOLD);
-    let harold_version = app.snapshot.harold_version.as_deref();
-    // Harold's version arrives cut to the limit, so the dash's own is cut the same way
-    // before the two are compared.
     let dash_version = sanitize_display(&app.dash_version, HAROLD_VERSION_LIMIT);
-    let differs = harold_version.filter(|version| *version != dash_version);
-    let version_span = |text: String| Span::styled(text, version_style);
+    let version_span = Span::styled(dash_version, version_style);
     let compact = area.width < COMPACT_WIDTH;
     let mut candidates: Vec<(Vec<Span<'static>>, bool)> = Vec::new();
     if !compact {
-        if let Some(version) = differs {
-            candidates.push((
-                vec![
-                    Span::styled(" HAROLD / TMUX  ", amber),
-                    version_span(format!("{version} (DASH {dash_version})")),
-                    Span::raw("  ·  "),
-                ],
-                true,
-            ));
-        }
-        let mut lead = vec![Span::styled(" HAROLD / TMUX  ", amber)];
-        if let Some(version) = harold_version {
-            lead.push(version_span(version.to_owned()));
-            lead.push(Span::raw("  ·  "));
-        } else {
-            lead.push(Span::raw("·  "));
-        }
-        candidates.push((lead, true));
+        candidates.push((
+            vec![
+                Span::styled(" HAROLD / TMUX  ", amber),
+                version_span.clone(),
+                Span::raw("  ·  "),
+            ],
+            true,
+        ));
     }
-    let mut lead = vec![Span::styled(" TMX DASH ", amber)];
-    if let Some(version) = harold_version {
-        lead.push(version_span(version.to_owned()));
-        lead.push(Span::raw(" · "));
-    } else {
-        lead.push(Span::raw("· "));
-    }
-    candidates.push((lead, true));
-    let mut lead = vec![Span::raw(" ")];
-    if let Some(version) = harold_version {
-        lead.push(version_span(version.to_owned()));
-        lead.push(Span::raw("  ·  "));
-    }
+    candidates.push((
+        vec![
+            Span::styled(" TMX DASH ", amber),
+            version_span.clone(),
+            Span::raw(" · "),
+        ],
+        true,
+    ));
+    let lead = vec![Span::raw(" "), version_span, Span::raw("  ·  ")];
     candidates.push((lead.clone(), true));
-    if harold_version.is_some() {
-        candidates.push((lead, false));
-    }
+    candidates.push((lead, false));
     candidates.push((vec![Span::raw(" ")], false));
     let line = |lead: Vec<Span<'static>>, with_revision: bool| {
         Line::from(
@@ -507,10 +487,9 @@ fn render_masthead(frame: &mut Frame<'_>, area: Rect, app: &App) {
         )
     };
     let available = usize::from(area.width.saturating_sub(2));
-    // The header shapes are tried in this order and the first that fits wins: Harold's
-    // version with `(DASH …)`, the version alone, `TMX DASH` and the version, the
-    // version alone without the title, then without `REV`, then no version at all. Transport,
-    // voice and the paused marker always remain.
+    // The header shapes are tried in this order and the first that fits wins: `HAROLD / TMUX`
+    // and the dash's version, `TMX DASH` and the version, the version alone, then without
+    // `REV`, then no version at all. Transport, voice and the paused marker always remain.
     let mut lines = candidates
         .into_iter()
         .map(|(lead, with_revision)| line(lead, with_revision))
@@ -2238,26 +2217,26 @@ mod tests {
     }
 
     #[test]
-    fn masthead_shows_harolds_version_in_place_of_the_board_title() {
-        let same = rendered(
-            &versioned_app(Some("v0.9.0"), "v0.9.0", false),
-            140,
-            38,
-            100_000,
-        );
-        assert!(same.contains("HAROLD / TMUX  v0.9.0  ·  TRANSPORT LIVE  ·  REV #00043"));
-        assert!(!same.contains("AGENT SIGNAL BOARD"));
-        assert!(!same.contains("DASH"));
-
+    fn masthead_shows_the_dashs_own_version_only() {
         let differs = rendered(
             &versioned_app(Some("v0.8.0"), "v0.9.0", false),
             140,
             38,
             100_000,
         );
-        assert!(differs.contains("HAROLD / TMUX  v0.8.0 (DASH v0.9.0)  ·  TRANSPORT LIVE"));
+        assert!(differs.contains("HAROLD / TMUX  v0.9.0  ·  TRANSPORT LIVE  ·  REV #00043"));
+        assert!(!differs.contains("v0.8.0"));
+        assert!(!differs.contains("(DASH"));
 
-        // Both built from source, so no DASH part.
+        let same = rendered(
+            &versioned_app(Some("v0.9.0"), "v0.9.0", false),
+            140,
+            38,
+            100_000,
+        );
+        assert!(same.contains("HAROLD / TMUX  v0.9.0  ·  TRANSPORT LIVE"));
+        assert!(!same.contains("AGENT SIGNAL BOARD"));
+
         let source = rendered(
             &versioned_app(Some("source"), "source", false),
             140,
@@ -2267,8 +2246,7 @@ mod tests {
         assert!(source.contains("HAROLD / TMUX  source  ·"));
 
         let none = rendered(&versioned_app(None, "v0.9.0", false), 140, 38, 100_000);
-        assert!(none.contains("HAROLD / TMUX  ·  TRANSPORT LIVE"));
-        assert!(!none.contains("DASH v0.9.0"));
+        assert!(none.contains("HAROLD / TMUX  v0.9.0  ·  TRANSPORT LIVE"));
     }
 
     #[test]
@@ -2276,18 +2254,18 @@ mod tests {
         let app = versioned_app(Some("v0.8.0"), "v0.9.0", true);
 
         let wide = rendered(&app, 140, 38, 100_000);
-        assert!(wide.contains("HAROLD / TMUX  v0.8.0 (DASH v0.9.0)  ·  TRANSPORT LIVE  ·  REV #00043  ·  ● VOICE ON  ·  ■ MSG PAUSED"));
+        assert!(wide.contains("HAROLD / TMUX  v0.9.0  ·  TRANSPORT LIVE  ·  REV #00043  ·  ● VOICE ON  ·  ■ MSG PAUSED"));
 
-        // The DASH part goes first, then HAROLD / TMUX becomes TMX DASH.
+        // HAROLD / TMUX becomes TMX DASH.
         let medium = rendered(&app, 84, 38, 100_000);
         assert!(medium.contains(
-            "TMX DASH v0.8.0 · TRANSPORT LIVE  ·  REV #00043  ·  ● VOICE ON  ·  ■ MSG PAUSED"
+            "TMX DASH v0.9.0 · TRANSPORT LIVE  ·  REV #00043  ·  ● VOICE ON  ·  ■ MSG PAUSED"
         ));
-        assert!(!medium.contains("DASH v0.9.0"));
+        assert!(!medium.contains("v0.8.0"));
 
         // Then TMX DASH and REV; the version, transport, voice and the paused marker remain.
         let minimum = rendered(&app, 60, 18, 100_000);
-        assert!(minimum.contains("v0.8.0  ·  TRANSPORT LIVE  ·  ● VOICE ON  ·  ■ MSG PAUSED"));
+        assert!(minimum.contains("v0.9.0  ·  TRANSPORT LIVE  ·  ● VOICE ON  ·  ■ MSG PAUSED"));
         assert!(!minimum.contains("TMX DASH"));
         assert!(!minimum.contains("REV #"));
     }
@@ -2301,11 +2279,11 @@ mod tests {
     }
 
     #[test]
-    fn masthead_shows_no_dash_part_when_a_long_tag_is_cut_on_the_harold_side() {
+    fn masthead_cuts_a_long_dash_tag_to_the_limit() {
         let tag = "v1.2.3-a-very-long-release-tag-012345678";
         assert_eq!(tag.chars().count(), 40);
         let cut: String = tag.chars().take(HAROLD_VERSION_LIMIT).collect();
-        let app = versioned_app(Some(&cut), tag, false);
+        let app = versioned_app(None, tag, false);
         let content = rendered(&app, 200, 38, 100_000);
         assert!(content.contains(&format!("HAROLD / TMUX  {cut}  ·  TRANSPORT LIVE")));
         assert!(!content.contains("(DASH"));
@@ -2350,7 +2328,7 @@ mod tests {
 
         let content = rendered(&app, 60, 18, 100_000);
 
-        assert!(content.contains("TMX DASH"));
+        assert!(!content.contains("TMX DASH"));
         assert!(content.contains("TRANSPORT LIVE"));
         assert!(content.contains("REV #00042"));
         assert!(!content.contains("Terminal too small"));
