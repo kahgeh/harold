@@ -2,7 +2,7 @@
 
 Harold can send its traces, logs and metrics to an OpenTelemetry collector, so they show in the local HyperDX. The data answers two questions: how the pods are moving, and whether a reply from the phone reaches the agent it was meant for. Four HyperDX alerts come back to Harold, which types them into the chief's pane.
 
-With the settings left out, Harold works and logs exactly as before.
+With `export = false`, Harold works and logs exactly as before.
 
 ## Problem
 
@@ -47,7 +47,7 @@ A well-formed alert address that cannot be listened on, such as a port another p
 
 Every export carries the resource attributes `service.name = "harold"` and `harold.machine = <machine_name>`, so the data of PasM4MBP and PasM1Mac stays apart. Set `pod_registry` on one Mac only. Both Macs reading the same pods would count every merge twice.
 
-`harold.log` is written as today, with telemetry on or off: the same lines, with message text still in them.
+`harold.log` is written as today, with export on or off: the same lines, with message text still in them.
 
 ## Pod facts
 

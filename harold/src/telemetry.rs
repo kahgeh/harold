@@ -1009,8 +1009,8 @@ impl TelemetryGuard {
     }
 
     /// The guard `telemetry` asks for: the OTLP pipeline when export is on and
-    /// `otlp_endpoint` is set, and none otherwise. With an endpoint that cannot be used, also the reason, and no
-    /// pipeline.
+    /// `otlp_endpoint` is set, and none otherwise. With an endpoint that cannot be used,
+    /// also the reason, and no pipeline.
     pub(crate) fn for_settings(
         telemetry: &TelemetrySettings,
         machine: &str,
@@ -1047,8 +1047,8 @@ impl TelemetryGuard {
 }
 
 /// Installs the global log subscriber: `harold.log` as before and, when export is on and
-/// `otlp_endpoint` is set, the OTLP export of spans and log records. Also sets the global tracer and
-/// meter providers.
+/// `otlp_endpoint` is set, the OTLP export of spans and log records. Also sets the global
+/// tracer and meter providers.
 ///
 /// Must run inside the tokio runtime: the exporters' gRPC channel is made here and its
 /// connection task runs on the runtime.
