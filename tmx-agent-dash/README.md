@@ -76,6 +76,7 @@ section, so a key never means two things.
 | Enter | Pick the highlighted row: an option moves on, an answer action acts | Record the answer | Switch the invoking tmux client to the selected pane | Search: keep the query · palette: run · note: done |
 | Esc | Leave the block, picks kept | Back to the last decision | Clear an accepted filter, or nothing | Search: clear the query and leave · palette: close · note: discard and leave |
 | Tab | Focus to the list | Focus to the list | Focus to the block, while it shows | Search and palette: nothing · note: focus to the list, note kept |
+| `s` | — | Mark or unmark the answer "send now" | — | Types |
 | `o` | Open the question's link, if it is `http://` or `https://` | Same | — | Types |
 | Ctrl+L | Clear the screen, redraw, and retry the Harold connection now | Same | Same | Same: the note's text and the query are kept, and nothing is typed |
 | `f` / `/` | — | — | Search editing / command palette | Types |
@@ -159,13 +160,13 @@ Each decision lists the question's own options, then a thin rule and three dim a
 - **later** sets the question aside and shows the next waiting one. **revise…** opens a note saying what to change, and **reject…** a note saying why. `Enter` on a note records it as a revise or reject answer with the picks made so far; a blank note is not recorded.
 - `Esc` gives the focus back to the list from any decision, and the picks stay.
 
-The summary lists each decision with its pick: `Enter` records the answer, and `h` or `Esc` goes back to the last decision. In a text field, type the text, `Backspace` removes the last character, `Enter` accepts it (blank text is not accepted) and `Esc` discards it and leaves the field. Text stops at 1,999 characters, since Harold refuses 2,000.
+The summary lists each decision with its pick, then a `send now` row that reads `no    (s to mark)`. `s` toggles it to `yes    (s to unmark)`, and the hint line then says `s don't send now`. A marked answer goes to the chief at once; an unmarked one goes about 3 seconds after your last answer. The mark belongs to the one answer on the summary and starts at `no` on every summary; going back with `h` or `Esc` and returning keeps the mark you set until the answer is recorded. A revise or reject note has no mark, since every letter types there. `Enter` records the answer with its mark, and `h` or `Esc` goes back to the last decision. In a text field, type the text, `Backspace` removes the last character, `Enter` accepts it (blank text is not accepted) and `Esc` discards it and leaves the field. Text stops at 1,999 characters, since Harold refuses 2,000.
 
 A free option does not end the walk. The text you type becomes that decision's pick, and you go on to the next decision. The answer is recorded as free text when any pick is free.
 
 `n` and `N` move to the next or previous waiting question, wrapping over the listed order, set-aside questions included. With one question listed they do nothing. The picks, decision and highlights of the question you leave are kept while the dash runs, and come back when you return to it, as do the picks of a question set aside with **later**. Kept picks belong to the version of the question they were made on: when Harold lists a higher version, or refuses an answer because the version changed, they are dropped, and the question starts at its first decision. Kept picks of a question that is answered or dismissed are gone.
 
-When Harold has everything it needs, it types one line of answers into the chief's pane. Deferred questions come back to the queue after that line is typed.
+Harold types a line of answers into the chief's pane about 3 seconds after the newest answer, or at once when an answer is marked send now. Questions still waiting do not hold it back. Deferred questions come back to the queue after a line is typed with no question waiting, or when a **later** leaves none waiting and no answer unsent.
 
 ### Notices
 
