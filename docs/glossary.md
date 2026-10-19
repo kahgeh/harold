@@ -210,3 +210,5 @@ Words kept in the docs on purpose, one line each. They are plain English or a na
 - **"the server"** stays for the web app's HTTP server (`docs/references/away-app/README.md`) and an example question in the dash README.
 - **"away device"** stays only in the command and skill name `send-message-to-away-device` and the log line `spoken line sent to the away device`.
 - **"dashboard"** stays for HyperDX dashboards (`docs/references/telemetry/README.md`) and the file path `tasks/tmux-agent-dashboard/`.
+- **"selected"** and **"selection"** stay where they mean a choice made by configuration or the agent monitor (`[notify] away_channel`, the selected adapter, process selection, the selected `HAROLD_ENV` overlay, a prompt candidate) or the endpoint the dash shows. Where the dash's cursor was meant, the docs say "cursor".
+- **"monitor"** stays in `monitor-timeouts` (a spec's name) and the `MONITOR DEGRADED`, `MONITOR UNKNOWN` and `MONITOR HEALTHY` literals.
