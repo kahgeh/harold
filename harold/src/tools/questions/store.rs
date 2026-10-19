@@ -584,10 +584,10 @@ async fn ready_in(conn: &Connection, now_ms: i64, settle_ms: i64) -> Result<Read
     if answers.is_empty() {
         return Ok(Readiness::Nothing);
     }
-    // A wall clock behind the answer counts as no time elapsed, so the wait
-    // never exceeds one settle.
-    let elapsed = now_ms.saturating_sub(newest).max(0);
-    if !marked && elapsed < settle_ms {
+    // A stamp in the future (the wall clock stepped back) counts as settled,
+    // so it never holds a line back.
+    let elapsed = now_ms.saturating_sub(newest);
+    if !marked && (0..settle_ms).contains(&elapsed) {
         return Ok(Readiness::Settling {
             wait_ms: settle_ms - elapsed,
         });

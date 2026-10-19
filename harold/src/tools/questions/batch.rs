@@ -35,15 +35,18 @@ pub(super) fn clock_ms() -> i64 {
     now_ms()
 }
 
-/// Under test the wall clock is read once and tokio's clock moves it, so
-/// paused time ages an answer the way real time does.
+/// Under test the wall clock is read once per test thread and tokio's clock
+/// moves it, so paused time ages an answer the way real time does.
 #[cfg(test)]
 pub(super) fn clock_ms() -> i64 {
-    static BASE: std::sync::OnceLock<(i64, tokio::time::Instant)> = std::sync::OnceLock::new();
-    let (wall, start) = BASE.get_or_init(|| (now_ms(), tokio::time::Instant::now()));
-    wall + tokio::time::Instant::now()
-        .duration_since(*start)
-        .as_millis() as i64
+    thread_local! {
+        static BASE: (i64, tokio::time::Instant) = (now_ms(), tokio::time::Instant::now());
+    }
+    BASE.with(|(wall, start)| {
+        wall + tokio::time::Instant::now()
+            .duration_since(*start)
+            .as_millis() as i64
+    })
 }
 
 /// How long a batch waits before the next try.

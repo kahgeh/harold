@@ -1710,3 +1710,30 @@ async fn deferring_the_last_waiting_question_with_an_unsent_answer_returns_it_af
         "evidence: unsent answer, last waiting question set aside: line {texts:?}, then listed {listing:?}"
     );
 }
+
+#[tokio::test(start_paused = true)]
+async fn an_answer_stamped_in_the_future_is_typed_within_one_settle() {
+    let folder = TempFolder::new();
+    let store = open_store(&folder).await;
+    put(&*store, question("Q1", "s1", "abc")).await;
+    let result = store
+        .answer(
+            "Q1",
+            1,
+            false,
+            |q| schema::resolve_picks(q, Kind::Answer, &[pick(0, "a")], ""),
+            clock_ms() + 10_000,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result, Ok(Ok(())));
+    let started = tokio::time::Instant::now();
+    let sender = spawn_sender(&store, FakeTyping::typed_ok());
+    pass(3).await;
+    assert_eq!(sender.typing.calls().len(), 1, "typed within one settle");
+    println!(
+        "evidence: answer stamped 10 s ahead of the clock, typed within {:?} of the sender starting: {:?}",
+        started.elapsed(),
+        sender.typing.texts()
+    );
+}

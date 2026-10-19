@@ -10,7 +10,7 @@
 //   ListQuestions    the waiting and deferred questions, the count waiting,
 //                    and recently dismissed ids with their reasons.
 //   AnswerQuestion   answers a question at the version the dash saw.
-//   DeferQuestion    sets a question aside; it stays waiting for a later batch.
+//   DeferQuestion    sets a question aside; it returns to waiting once a batch is typed and nothing else waits.
 //
 // Refusals:
 //   InvalidArgument      message "invalid <field>" for a broken rule; nothing

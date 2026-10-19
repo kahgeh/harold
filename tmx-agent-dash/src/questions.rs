@@ -75,7 +75,7 @@ pub struct Outgoing {
     pub kind: AnswerKind,
     pub picks: Vec<PickView>,
     pub note: String,
-    /// The summary's "send now" mark; a note answer is always unmarked.
+    /// The summary's "send now" mark; a revise or reject note has none, so it is false.
     pub send_now: bool,
 }
 

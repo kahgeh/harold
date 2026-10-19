@@ -725,15 +725,12 @@ async fn waiting_questions_no_longer_hold_readiness() {
 }
 
 #[tokio::test]
-async fn a_wall_clock_behind_the_answer_waits_at_most_one_settle() {
+async fn a_wall_clock_behind_the_answer_does_not_hold_the_line_back() {
     let temp = TempFolder::new();
     let store = TursoQuestionStore::open(&temp.0).await.unwrap();
     store.put(question("Q1"), 0).await.unwrap();
     answer_at(&store, "Q1", false, 10_000).await;
-    assert_eq!(
-        store.ready(4_000, SETTLE).await.unwrap(),
-        Readiness::Settling { wait_ms: SETTLE }
-    );
+    assert_eq!(ready_ids(store.ready(4_000, SETTLE).await.unwrap()), ["Q1"]);
 }
 
 #[tokio::test]
