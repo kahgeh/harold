@@ -76,15 +76,15 @@ impl TestServer {
         let (shutdown, shutdown_rx) = watch::channel(());
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let state = AppState {
+        let state = AppState::for_tests(
             store,
-            allowed_login: Arc::from(LOGIN),
-            public_key: Arc::from("BPublicKeyForTheTestPage"),
-            loopback_hosts: Arc::from(loopback_hosts("127.0.0.1:0", addr)),
-            shutdown: shutdown_rx,
+            LOGIN,
+            "BPublicKeyForTheTestPage",
+            Arc::from(loopback_hosts("127.0.0.1:0", addr)),
+            shutdown_rx,
             calls,
-            identity: Default::default(),
-        };
+            Default::default(),
+        );
         let handle = tokio::spawn(async move {
             let _ = axum::serve(listener, router(state)).await;
         });
@@ -921,6 +921,9 @@ async fn shutdown_ends_an_open_phone_call() {
         &directory.store_path(),
         shutdown_rx,
         Some(api),
+        crate::web_app::idle_hub(),
+        None,
+        &crate::web_app::idle_grpc(),
     )
     .await
     .expect("the app starts");

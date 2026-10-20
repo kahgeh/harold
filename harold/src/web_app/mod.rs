@@ -13,8 +13,10 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tracing::{error, warn};
 
+use crate::agent::domain::AgentSnapshot;
+use crate::agent::snapshot::AgentSnapshotHub;
 use crate::outbound::AppRoute;
-use crate::settings::{WebAppIcon, WebAppSettings};
+use crate::settings::{GrpcSettings, WebAppIcon, WebAppSettings};
 use crate::store::HaroldStore;
 use call::PhoneCallApi;
 use push::{Pusher, VapidKey, vapid_key_path};
@@ -48,6 +50,7 @@ pub(crate) mod pages;
 pub(crate) mod push;
 pub(crate) mod replies;
 pub(crate) mod route;
+pub(crate) mod todos;
 pub(crate) mod updates;
 
 #[cfg(test)]
@@ -90,6 +93,72 @@ pub(crate) struct AppState {
     pub calls: Option<Arc<dyn PhoneCallApi>>,
     /// The app's name and icon.
     pub identity: Arc<WebAppIdentity>,
+    /// The agent panes as the latest snapshot sees them: where the chief is and whether it
+    /// is busy.
+    pub snapshots: watch::Receiver<AgentSnapshot>,
+    /// `[notify] chief`, the folder the chief runs in.
+    pub chief_folder: Option<Arc<str>>,
+    /// The question tool's service, reached through Harold's own gRPC address.
+    pub questions: todos::Questions,
+    /// Bumped by each todo post, so every open page reads the todos again at once.
+    pub todos_changed: Arc<watch::Sender<u64>>,
+}
+
+#[cfg(test)]
+impl AppState {
+    /// A state for tests, with an idle agent snapshot, no chief folder and no question
+    /// service reachable.
+    pub(crate) fn for_tests(
+        store: Arc<HaroldStore>,
+        allowed_login: &str,
+        public_key: &str,
+        loopback_hosts: Arc<[String]>,
+        shutdown: watch::Receiver<()>,
+        calls: Option<Arc<dyn PhoneCallApi>>,
+        identity: WebAppIdentity,
+    ) -> Self {
+        Self {
+            store,
+            allowed_login: Arc::from(allowed_login),
+            public_key: Arc::from(public_key),
+            loopback_hosts,
+            shutdown,
+            calls,
+            identity: Arc::new(identity),
+            snapshots: idle_snapshots(),
+            chief_folder: None,
+            questions: todos::Questions::lazy(&idle_grpc()),
+            todos_changed: Arc::new(watch::channel(0).0),
+        }
+    }
+}
+
+/// An agent snapshot hub with no panes, kept alive for the whole test run.
+#[cfg(test)]
+pub(crate) fn idle_hub() -> &'static AgentSnapshotHub {
+    use crate::store::EventVersion;
+    Box::leak(Box::new(AgentSnapshotHub::new(AgentSnapshot {
+        through_event_version: EventVersion::start(),
+        server_time_ms: 0,
+        monitor_health: Vec::new(),
+        panes: Vec::new(),
+        tts_muted: false,
+        messaging_paused: false,
+    })))
+}
+
+#[cfg(test)]
+pub(crate) fn idle_snapshots() -> watch::Receiver<AgentSnapshot> {
+    idle_hub().subscribe()
+}
+
+/// A gRPC address nothing listens on.
+#[cfg(test)]
+pub(crate) fn idle_grpc() -> GrpcSettings {
+    GrpcSettings {
+        host: "127.0.0.1".to_owned(),
+        port: 1,
+    }
 }
 
 /// The app's routes, every one of them, the 404 fallback included, behind
@@ -140,6 +209,9 @@ pub(crate) async fn start(
     store_path: &Path,
     shutdown: watch::Receiver<()>,
     calls: Option<Arc<dyn PhoneCallApi>>,
+    snapshots: &AgentSnapshotHub,
+    chief_folder: Option<&str>,
+    grpc: &GrpcSettings,
 ) -> Result<Running, String> {
     let addr = settings
         .listen_addr()
@@ -166,6 +238,10 @@ pub(crate) async fn start(
         shutdown: shutdown.clone(),
         calls: calls.clone(),
         identity: Arc::new(identity),
+        snapshots: snapshots.subscribe(),
+        chief_folder: chief_folder.map(Arc::from),
+        questions: todos::Questions::lazy(grpc),
+        todos_changed: Arc::new(watch::channel(0).0),
     };
     let pusher = Arc::new(Pusher::new(key, &settings.allowed_login));
     let route: Arc<dyn AppRoute> = Arc::new(WebAppRoute::new(Arc::clone(&store), pusher));
@@ -205,12 +281,24 @@ pub(crate) async fn start_if_set(
     store_path: &Path,
     shutdown: watch::Receiver<()>,
     calls: Option<Arc<dyn PhoneCallApi>>,
+    snapshots: &AgentSnapshotHub,
+    chief_folder: Option<&str>,
+    grpc: &GrpcSettings,
 ) -> Option<Running> {
     let settings = settings?;
-    start(settings, store, store_path, shutdown, calls)
-        .await
-        .inspect_err(|error| warn!(error = %error, "web app unavailable"))
-        .ok()
+    start(
+        settings,
+        store,
+        store_path,
+        shutdown,
+        calls,
+        snapshots,
+        chief_folder,
+        grpc,
+    )
+    .await
+    .inspect_err(|error| warn!(error = %error, "web app unavailable"))
+    .ok()
 }
 
 /// When the thread starts: `THREAD_DAYS` days ago, in milliseconds since the Unix epoch.

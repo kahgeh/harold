@@ -66,15 +66,15 @@ impl TestServer {
         let (shutdown, shutdown_rx) = watch::channel(());
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let state = AppState {
+        let state = AppState::for_tests(
             store,
-            allowed_login: Arc::from(LOGIN),
-            public_key: Arc::from(PUBLIC_KEY),
-            loopback_hosts: Arc::from(loopback_hosts("127.0.0.1:0", addr)),
-            shutdown: shutdown_rx,
-            calls: None,
-            identity: Arc::new(identity),
-        };
+            LOGIN,
+            PUBLIC_KEY,
+            Arc::from(loopback_hosts("127.0.0.1:0", addr)),
+            shutdown_rx,
+            None,
+            identity,
+        );
         let handle = tokio::spawn(async move {
             let _ = axum::serve(listener, router(state)).await;
         });
@@ -297,7 +297,17 @@ async fn no_section_starts_nothing() {
     let store = directory.store().await;
     let (_shutdown, shutdown_rx) = watch::channel(());
 
-    let running = start_if_set(None, store, &directory.store_path(), shutdown_rx, None).await;
+    let running = start_if_set(
+        None,
+        store,
+        &directory.store_path(),
+        shutdown_rx,
+        None,
+        super::idle_hub(),
+        None,
+        &super::idle_grpc(),
+    )
+    .await;
 
     assert!(running.is_none());
     assert!(!vapid_key_path(&directory.store_path()).exists());
@@ -315,6 +325,9 @@ async fn start_serves_until_shutdown() {
         &directory.store_path(),
         shutdown_rx,
         None,
+        super::idle_hub(),
+        None,
+        &super::idle_grpc(),
     )
     .await
     .expect("the app starts");
@@ -344,6 +357,9 @@ async fn an_address_in_use_runs_without_the_app() {
         &directory.store_path(),
         shutdown_rx,
         None,
+        super::idle_hub(),
+        None,
+        &super::idle_grpc(),
     )
     .await;
 
@@ -371,6 +387,9 @@ async fn old_thread_rows_are_pruned_at_start() {
         &directory.store_path(),
         shutdown_rx,
         None,
+        super::idle_hub(),
+        None,
+        &super::idle_grpc(),
     )
     .await
     .expect("the app starts");
@@ -471,6 +490,9 @@ async fn start_refuses_an_icon_that_cannot_be_read() {
         &directory.store_path(),
         shutdown_rx,
         None,
+        super::idle_hub(),
+        None,
+        &super::idle_grpc(),
     )
     .await
     .err()

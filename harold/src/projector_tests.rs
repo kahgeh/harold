@@ -4188,15 +4188,15 @@ async fn run_the_app_path_with_a_canary() -> Vec<String> {
     let (_shutdown, shutdown_rx) = tokio::sync::watch::channel(());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let state = AppState {
-        store: Arc::clone(&store),
-        allowed_login: Arc::from(APP_LOGIN),
-        public_key: Arc::from(public_key.as_str()),
-        loopback_hosts: Arc::from(loopback_hosts("127.0.0.1:0", addr)),
-        shutdown: shutdown_rx,
-        calls: None,
-        identity: Default::default(),
-    };
+    let state = AppState::for_tests(
+        Arc::clone(&store),
+        APP_LOGIN,
+        public_key.as_str(),
+        Arc::from(loopback_hosts("127.0.0.1:0", addr)),
+        shutdown_rx,
+        None,
+        Default::default(),
+    );
     let server = tokio::spawn(async move {
         let _ = axum::serve(listener, router(state)).await;
     });
