@@ -219,6 +219,8 @@ pub struct StepRows {
 /// A todo other than the open one, drawn as one row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OtherRow {
+    /// Its place in the listed order: the `n` of its [`QStop::Other`].
+    pub index: usize,
     pub kind: TodoKind,
     pub id: String,
     pub ticked_count: usize,
@@ -631,8 +633,10 @@ impl QuestionBlock {
             .queue
             .questions
             .iter()
-            .filter(|other| other.id != q.id)
-            .map(|other| OtherRow {
+            .enumerate()
+            .filter(|(_, other)| other.id != q.id)
+            .map(|(index, other)| OtherRow {
+                index,
                 kind: other.kind(),
                 id: other.id.clone(),
                 ticked_count: other.ticked_count(),
@@ -669,6 +673,16 @@ impl QuestionBlock {
             note_stop: self.note_stop(),
             notice: self.notice.clone(),
         })
+    }
+
+    /// Whether the current todo has a link `o` can open.
+    pub fn has_web_link(&self) -> bool {
+        self.question().is_some_and(|q| is_web_link(&q.link))
+    }
+
+    /// Whether the current todo is instructions.
+    pub fn on_instructions(&self) -> bool {
+        self.question().is_some_and(QuestionView::is_instructions)
     }
 
     /// Handles one key on `stop` and says what the runtime should do. While a note is
@@ -2278,6 +2292,7 @@ mod tests {
             view.others,
             vec![
                 OtherRow {
+                    index: 1,
                     kind: TodoKind::Question,
                     id: "Q1".into(),
                     ticked_count: 0,
@@ -2286,6 +2301,7 @@ mod tests {
                     label: "spec".into(),
                 },
                 OtherRow {
+                    index: 2,
                     kind: TodoKind::Instructions,
                     id: "I2".into(),
                     ticked_count: 1,

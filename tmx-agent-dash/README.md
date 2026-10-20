@@ -61,29 +61,29 @@ outside this MVP; use a trusted deployment boundary for remote connections.
 
 ## Keys
 
-The cursor moves over every row of the agent list, and the chief's questions are
-rows of that list (see [Questions](#questions)). There are no sections to move
-between. Search, the command palette, a free-text field and a note are text modes.
-One table gives every key by the row under the cursor. Where a cell says "Nothing",
-the key does nothing there, so a key never means two things.
+The cursor moves over every row of the agent list, and the chief's todos (its
+questions and instructions) are rows of that list (see [Todos](#todos)). There are
+no sections to move between. Search, the command palette, a free-text field and a
+note are text modes. One table gives every key by the row under the cursor. Where a
+cell says "Nothing", the key does nothing there, so a key never means two things.
 
-| Key | Agent row | Question header | Option row | Action row | Text field, search, palette, note |
-| --- | --- | --- | --- | --- | --- |
-| `j` / `k`, ↓ / ↑ | Next or previous row, question rows included | Same | Same | Same | ↓ / ↑ move in the palette; `j` and `k` type |
-| `l` / → | Nothing | Open the question | Nothing | Nothing | Types `l` |
-| `h` / ← | Nothing | Close the question, when open | Close the question, cursor to its header | Same | Types `h` |
-| Space | Nothing | Nothing | Pick the option; a free option opens its field | Nothing | Types a space |
-| Enter | Switch the invoking tmux client to the pane under the cursor | Open or close the question | Nothing | `send` sends the answer at once; `later` sets the question aside; `revise…` or `reject…` opens a note | Search: keep the query · palette: run · field: keep the text and pick the option · note: send it |
-| Esc | Clear an accepted filter, or nothing | Close the question, when open | Close the question, cursor to its header | Same | Search: clear the query and leave · palette: close · field or note: discard and leave |
-| `n` / `N` | Next or previous waiting agent (wraps) | Next or previous waiting question (wraps) | Same | Same | Types |
-| `o` | Nothing | Open the question's link, if it is `http://` or `https://` | Same | Same | Types |
-| `g` / `G` | First / last row | Same | Same | Same | Types |
-| `c` / `t`, `f`, `/`, `q` | `c` / `t`: call / talk now, on the chief's row · `f`: search · `/`: command palette · `q`: quit | Nothing | Nothing | Nothing | Types |
-| Ctrl+L, Ctrl+Q, Ctrl+C | Retry the Harold connection now (clearing and redrawing the screen) · quit · quit | Same | Same | Same | Same: the text and the query are kept, and nothing is typed |
+| Key | Agent row | Todo header | Option row | Action row | Step row | Text field, search, palette, note |
+| --- | --- | --- | --- | --- | --- | --- |
+| `j` / `k`, ↓ / ↑ | Next or previous row, todo rows included | Same | Same | Same | Same | ↓ / ↑ move in the palette; `j` and `k` type |
+| `l` / → | Nothing | Open the todo (on another todo's row, open that todo) | Nothing | Nothing | Nothing | Types `l` |
+| `h` / ← | Nothing | Close the todo, when open | Close the todo, cursor to its header | Same | Same | Types `h` |
+| Space | Nothing | Nothing | Pick the option; a free option opens its field | Nothing | Tick the step, or untick it | Types a space |
+| Enter | Switch the invoking tmux client to the pane under the cursor | Open or close the todo | Nothing | `send` sends the answer at once; `later` sets the question aside; `revise…` or `reject…` opens a note; `done` tells the chief you are done; `ignore` tells it you will not | Nothing | Search: keep the query · palette: run · field: keep the text and pick the option · note: send it |
+| Esc | Clear an accepted filter, or nothing | Close the todo, when open | Close the todo, cursor to its header | Same | Same | Search: clear the query and leave · palette: close · field or note: discard and leave |
+| `n` / `N` | Next or previous waiting agent (wraps) | Next or previous waiting todo (wraps) | Same | Same | Same | Types |
+| `o` | Nothing | Open the todo's link, if it is `http://` or `https://` | Same | Same | Same | Types |
+| `g` / `G` | First / last row | Same | Same | Same | Same | Types |
+| `c` / `t`, `f`, `/`, `q` | `c` / `t`: call / talk now, on the chief's row · `f`: search · `/`: command palette · `q`: quit | Nothing | Nothing | Nothing | Nothing | Types |
+| Ctrl+L, Ctrl+Q, Ctrl+C | Retry the Harold connection now (clearing and redrawing the screen) · quit · quit | Same | Same | Same | Same | Same: the text and the query are kept, and nothing is typed |
 
 - **Quit keys:** Ctrl+Q and Ctrl+C quit from every mode, including a note and the
   held or swallowed keys described under [Reconnects](#reconnects). `q` quits only
-  from an agent row; on a question row it does nothing, and in a text mode it types
+  from an agent row; on a todo row it does nothing, and in a text mode it types
   itself.
 - **Chords:** Ctrl+Q, Ctrl+C and Ctrl+L are the only Control or Alt chords that act.
   Every other chord, such as Ctrl+R or Alt+Q, does nothing in any mode, and is never
@@ -99,65 +99,62 @@ the key does nothing there, so a key never means two things.
   such as `Voice: mute` / `Voice: unmute` or `Messaging: pause` / `Messaging: resume`.
 - **The footer** gives the keys for the row under the cursor. On an agent row it lists
   the list's keys (`j/k`, `n/N`, `f`, `/`, `Enter`, `c`, `t`, `Esc`, `^L`, `q`). On a
-  question row, under a `QUESTION` label, it lists `j/k` move, `n/N` question, `o`
-  open link, `^L` retry and `^Q` quit, and `Esc` close on every row except a closed
-  row, where `Esc` does nothing. Two keys depend on the row: `l` and `Enter` open
-  a closed row, `h` and `Enter` close an open question header, `Space` picks and `h`
-  closes on an option, `Enter` chooses and `h` closes on an action row. A narrow terminal
-  shortens the hints (`link` for `open link`, no label), and below that puts the rest
-  on a second line. While a note or an option's text field is open, every key types
-  into it, so the footer lists only `Enter` (`send` for a note, `keep` for a text
-  field), `Esc` discard, `^L` and `^Q`.
-
-Search is a local, case-insensitive filter over provider, work summary, `session:window.pane`
-name, and working directory. It never sends a search request to Harold and it
-does not pause incoming snapshots. The search line reports visible and total
-row counts while a filter is active. Press `f` to start editing the search query.
-
-The masthead shows the confirmed voice state as `● VOICE ON` or `○ VOICE MUTED`,
-taken from the Harold snapshot rather than from local guesses. Voice commands are
-offered in the palette only while the connection is LIVE and a snapshot has
-arrived; otherwise the palette shows `Commands unavailable until connected`.
-Before the first snapshot the masthead shows `○ VOICE —`.
-
-`Messaging: pause` is the messaging pause for Harold's away channel: it stops all
-iMessage or Telegram traffic, in both directions, without stopping Harold.
-`Messaging: resume` turns it back on. Both are offered under the same conditions
-as the voice commands. While Harold reports messaging as paused, the masthead of
-every connected dash shows `■ MSG PAUSED` after the voice state; nothing is shown
-while messaging is running. The masthead title always shows the dash's own release version (`source` for a
-source build), whatever Harold reports and even before the first snapshot or after a
-disconnect. A dash left running through an install shows its old version until it is
-restarted. As the line gets tight `HAROLD / TMUX` shortens to `TMX DASH`, then `TMX DASH`
-goes, then `REV`, then the version, so transport, voice and the paused marker stay
-visible. A failed request is reported as `MESSAGING ERROR: …`. See Harold's
-[operation reference](../docs/references/operation/README.md#pausing-messaging)
-for what the switch does.
+  todo row, under a `TODO` label, it lists the row's own keys first, then `j/k` move,
+  `n/N` todo, `o` link (only when the todo has a web link), `Esc` close, `^L` retry and
+  `^Q` quit. The first keys depend on the row: `l` open on a closed todo and on another
+  todo's row, `h` close on an open header, `Space` tick and `h` close on a step,
+  `Space` pick and `h` close on an option, `Enter` choose and `h` close on a question's
+  action row, `Enter` done and `Enter` ignore on the instructions' `done` and `ignore`.
+  A closed todo and another todo's row list neither `o` nor `Esc`. A narrow terminal
+  puts the rest on a second line. While a note or an option's text field is open, every
+  key types into it, so the footer lists only `Enter` (`send` for a note, `keep` for a
+  text field), `Esc` discard, `^L` and `^Q`.
 
 ## Now line
 
 When the chief of pods has a Now item in its queue, the dash shows it on one dim line under the masthead: `NOW  ` and the item's first line, cut to the terminal's width. The dash reads it from Harold's backlog tool with the question tool, every 2 seconds; when that poll's question read timed out, the Now read is skipped and the line hides until the next poll. The line takes a row only when one is spare beside the agent list's six rows. It is hidden while the queue has no Now item, when Harold does not serve the backlog tool, the read fails or the stream to Harold is lost, and at the smallest height (18 rows), where the agent list keeps its six rows. The cursor never lands on it and it takes no keys. See the [backlog reference](../docs/references/tools/backlog.md) for how the queue is kept.
 
-## Questions
+## Todos
 
-When the chief of pods has questions for you, they appear as rows of the agent list, right under the chief's row. The dash reads the questions from Harold's question tool every 2 seconds, and before each key that lands on a question row. No row shows while no question waits. A new question never moves the cursor. See the [question tool reference](../docs/references/tools/questions.md) for how questions get in and what Harold does with the answers.
+When the chief of pods has something for you, a todo, it appears as rows of the agent list, right under the chief's row. A todo is one of two kinds: a question to answer (id `Q1`) or instructions to follow by hand (id `I1`), and every header and row names its kind. The dash reads the todos from Harold's question tool every 2 seconds, and before each key that lands on a todo row. No row shows while no todo waits. A new todo never moves the cursor. See the [question tool reference](../docs/references/tools/questions.md) for how todos get in and what Harold does with the answers.
 
 ### Closed and open
 
-A closed question takes one row. With two questions waiting, the list reads:
+Closed todos take one row, counting questions and instructions together. With an instructions todo and a question waiting, the list reads:
 
 ```text
   chief-of-pods
-▶ ○ IDLE   chief-of-pods          ◆  Asked T1 about the wire protocol
-    ▸ 2 questions waiting
+▶ ○ IDLE   chief-of-pods          ◆  Put I1 and Q1 for you
+    ▸ 2 todos waiting
   harold
   ● BUSY   harold-main               Building dash-one-version
 ```
 
-Press `j` to move the cursor to the `▸ 2 questions waiting` row, then `l` or `Enter` to open it. The row becomes the question's header, `▾ T1 · 1 of 2 waiting · harold · durable-server`, and the question follows it. Every decision shows at once, each with its ask and its options, and long text wraps within the list's width:
+Press `j` to move the cursor to the `▸ 2 todos waiting` row, then `l` or `Enter` to open it. The first todo in the chief's order opens in full and the row becomes its header; every other todo stays one row under it. For instructions, the header is `▾ I1 · instructions · 1 of 2 todos · 0 of 4 ticked · harold · Install Harold 0.15.0 on PasM1Mac`, and the steps follow it, each with its detail dim underneath. `Space` ticks a step (`[✓]`) and ticks it off again, in any order; ticking sends nothing and Harold keeps the ticks, so a restart or a second dash shows the same ones. `done` tells the chief you are done, `ignore` that you will not do them:
 
 ```text
-    ▾ T1 · 1 of 2 waiting · harold · durable-server
+    ▾ I1 · instructions · 1 of 2 todos · 2 of 4 ticked · harold · Install Harold 0.15.0 on PasM1Mac
+        Do these on PasM1Mac, then tick each one here.
+
+          [✓] 1  Open Terminal
+          [✓] 2  Run make deploy in ~/Dev/p/harold/main
+                 It asks for your password once.
+          [ ] 3  Turn on harold in System Settings › Privacy & Security › Accessibility
+                 harold shows in the list after its first start.
+          [ ] 4  Run harold status and check it says running 0.15.0
+
+          done
+          ─────────────
+          ignore
+    ▸ Q1 · question · harold · durable-server
+```
+
+When every step is ticked, a row `✓ All 4 ticked. Press done to tell the chief.` points to `done`. `Enter` on `done` sends at once; with steps left unticked, the chief is told how many were ticked. `Enter` on `ignore` sends at once too, and the instructions leave your todos. When a todo is answered, the next one opens in its place with the cursor on its header.
+
+A question's header is `▾ Q1 · question · 1 of 2 todos · harold · durable-server` (`1 of 1 todo` for one), and the question follows it. Every decision shows at once, each with its ask and its options, and long text wraps within the list's width:
+
+```text
+    ▾ Q1 · question · 1 of 2 todos · harold · durable-server
         The server needs one wire protocol for its clients.
 
         Which protocol should clients speak?
@@ -176,11 +173,12 @@ Press `j` to move the cursor to the `▸ 2 questions waiting` row, then `l` or `
           later
           revise…
           reject…
+    ▸ I1 · instructions · 0 of 4 ticked · harold · Install Harold 0.15.0 on PasM1Mac
 ```
 
-The cursor stops on the header, on each option and on each action row (`send`, `later`, `revise…`, `reject…`). It skips the intro, the asks, the impact lines and the blank rows. `j` and `k` move through all of them like any other rows: `j` from the chief's row goes to the header, then over each option and action row, then on to the next agent row. `h` (or `Esc`) closes the question again with the cursor on its header; the picks are kept, and `l` on the header opens it as it was. The yellow marks the header and the row under the cursor.
+The cursor stops on the header, on each option or step, on each action row (`send`, `later`, `revise…`, `reject…`, or `done` and `ignore`) and on each other todo's row. It skips the intro, the asks, the details, the impact lines and the blank rows. `j` and `k` move through all of them like any other rows: `j` from the chief's row goes to the header, then over each option or step and action row and each other todo's row, then on to the next agent row. `l` or `Enter` on another todo's row opens that todo. `h` (or `Esc`) closes the todo again with the cursor on its header; the picks are kept, and `l` on the header opens it as it was. The yellow marks the header and the row under the cursor.
 
-With several questions waiting, the open question shows one at a time, and `n` and `N` step between them. The detail panel, on a wide terminal, shows the asking agent while the cursor is on its question rows.
+With several todos waiting, the open todo shows in full one at a time, and `n` and `N` step between them. The detail panel, on a wide terminal, shows the asking agent while the cursor is on its todo rows.
 
 ### Picking and sending
 
@@ -188,7 +186,7 @@ Each decision opens with its suggested option picked (`●`); an option you have
 
 An option's impact shows on the line below its label, dim; an option with no impact has no second line. A free option such as `z  Something else` takes text of your own: `Space` on it opens a text field, holding any text typed there before. Type, then press `Enter` to keep the text and pick the option (blank text is not accepted), or `Esc` to discard it and leave the field. The option's row then shows the text after its label, cut to fit. Text stops at 1,999 characters, since Harold refuses 2,000.
 
-To answer, move to `send` and press `Enter`. The dash re-reads the questions first. The answer goes to Harold with every decision's pick, and Harold types it into the chief's pane at once. If a decision has no pick, nothing is sent and the cursor moves to that decision's first option. After a send, the next waiting question shows in its place, open, with the cursor on its header; with none left, the question rows go and the cursor moves to the chief's row.
+To answer, move to `send` and press `Enter`. The dash re-reads the questions first. The answer goes to Harold with every decision's pick, and Harold types it into the chief's pane at once. If a decision has no pick, nothing is sent and the cursor moves to that decision's first option. After a send, the next waiting todo shows in its place, open, with the cursor on its header; with none left, the todo rows go and the cursor moves to the chief's row.
 
 The other action rows:
 
@@ -201,17 +199,18 @@ Questions set aside come back after a line is typed with no question waiting, or
 
 ### When the chief's row is hidden or scrolled off
 
-- **Filtered out:** when the search filter hides the chief's row, the question rows stay, at the top of the list, and the closed row reads `▸ 2 questions waiting · from the chief`. The filter hides agent rows, never question rows.
-- **No chief's row:** when Harold names no chief pane, or that pane is not in the list, the question rows show at the top of the list the same way.
-- **Scrolled off:** the question rows scroll with the list like any rows. When the header row is out of view, the list's top or bottom edge shows `▲ 2 questions waiting` or `▼ 2 questions waiting` in yellow, on the side where it is.
-- **The smallest height** (18 rows, where the list has six): an open question scrolls within those rows and keeps the cursor in view, as the list does.
+- **Filtered out:** when the search filter hides the chief's row, the todo rows stay, at the top of the list, and the closed row reads `▸ 2 todos waiting · from the chief`. The filter hides agent rows, never todo rows.
+- **No chief's row:** when Harold names no chief pane, or that pane is not in the list, the todo rows show at the top of the list the same way.
+- **Scrolled off:** the todo rows scroll with the list like any rows. When the header row is out of view, the list's top or bottom edge shows `▲ 2 todos waiting` or `▼ 2 todos waiting` in yellow, on the side where it is.
+- **The smallest height** (18 rows, where the list has six): an open todo, a long step list included, scrolls within those rows and keeps the cursor in view, as the list does.
 
 ### Notices
 
-A notice shows under the question's rows until the next key:
+A notice shows under the todo's rows until the next key:
 
 - `<id> changed, your picks were cleared`: the chief put the question again. Your picks are dropped.
-- `<id> dismissed: <reason>`: the chief withdrew the question, with its reason (`withdrawn` when none is known). The rows move to the next question.
+- `<id> changed, ticks kept for unchanged steps`: the chief put the instructions again. A step keeps its tick when its text is unchanged.
+- `<id> dismissed: <reason>`: the chief withdrew the question, with its reason (`withdrawn` when none is known). The rows move to the next todo.
 - `Harold can't save answers right now`: Harold could not store the answer or set the question aside. Your picks stay; try again.
 
 When no question is left, a notice stands alone as one row. It goes at the next key, and otherwise after the next read that still finds no question, a few seconds on. Then the rows go. That key also does what it does on the list. A key that would still reach a question that just changed is dropped, since it was typed for what was there before, so `Enter` on `send` never sends picks made on an older question version.

@@ -11,7 +11,9 @@ use ratatui::widgets::{
 
 use crate::api::HAROLD_VERSION_LIMIT;
 use crate::app::{AgentState, App, CallState, CallView, RuntimeStatus, VoiceState};
-use crate::questions::{ANSWER_ACTIONS, Mode, NoteKind, QStop, RowsView};
+use crate::questions::{
+    ANSWER_ACTIONS, INSTRUCTION_ACTIONS, Mode, NoteKind, QStop, RowsView, TodoKind,
+};
 use crate::text::{display_work_summary, sanitize_display};
 
 const BOARD: Color = Color::Rgb(20, 20, 16);
@@ -84,6 +86,10 @@ pub fn render(frame: &mut Frame<'_>, app: &App, now_ms: i64) {
             app.question_stop,
             app.questions.is_open(),
             note_kind(&app.questions),
+            TodoFacts {
+                link: app.questions.has_web_link(),
+                instructions: app.questions.on_instructions(),
+            },
         );
     }
     render_palette(frame, area, app);
@@ -720,7 +726,7 @@ fn row_y(heights: &[u16], offset: usize, index: usize, room: u16) -> Option<u16>
 }
 
 /// The yellow `▲` on the list's top edge or `▼` on its bottom edge, with the count of
-/// questions waiting, while the question's header row is scrolled out of view.
+/// todos waiting, while the todo's header row is scrolled out of view.
 fn render_question_edge(frame: &mut Frame<'_>, inner: Rect, above: bool, waiting: u32) {
     let (arrow, y) = if above {
         ('▲', inner.y)
@@ -754,11 +760,27 @@ struct QLine {
     stop: Option<QStop>,
 }
 
-/// `1 question waiting` or `N questions waiting`.
+/// `1 todo waiting` or `N todos waiting`.
 fn waiting_label(waiting: u32) -> String {
     match waiting {
-        1 => "1 question waiting".into(),
-        n => format!("{n} questions waiting"),
+        1 => "1 todo waiting".into(),
+        n => format!("{n} todos waiting"),
+    }
+}
+
+/// `1 todo` or `N todos`.
+fn todos_count(n: u32) -> String {
+    match n {
+        1 => "1 todo".into(),
+        n => format!("{n} todos"),
+    }
+}
+
+/// The kind as the headers and rows name it.
+fn kind_word(kind: TodoKind) -> &'static str {
+    match kind {
+        TodoKind::Question => "question",
+        TodoKind::Instructions => "instructions",
     }
 }
 
@@ -767,11 +789,13 @@ const QUESTION_HEADER_INDENT: usize = 4;
 const QUESTION_TEXT_INDENT: usize = 8;
 const QUESTION_OPTION_INDENT: usize = 10;
 
-/// The rows a question draws in the list, wrapped to `width`, each with its style. The
-/// header row leads: closed it reads `▸ N questions waiting`, open `▾ T1 · 1 of 2
-/// waiting · harold · spec`, with `· from the chief` when `fallback` puts the rows at the
-/// top of the list. The open question follows it: the intro, then every decision with its
-/// options, a blank row between each, then the answer actions. `cursor` is the stop
+/// The rows the todos draw in the list, wrapped to `width`, each with its style. The
+/// header row leads: closed it reads `▸ N todos waiting`, open `▾ Q1 · question · 1 of 2
+/// todos · harold · spec` (instructions add `· 0 of 4 ticked` and show their title), with
+/// `· from the chief` when `fallback` puts the rows at the top of the list. The open
+/// question follows it: the intro, then every decision with its options, a blank row
+/// between each, then the answer actions. Open instructions draw the intro, the steps
+/// with their detail, then `done` and `ignore`. One row per other todo comes last. `cursor` is the stop
 /// the cursor is on: its row has the `▶` marker and the yellow, bold style. A note being
 /// typed shows under its own row, wherever the cursor is. A notice with no question is one coral row.
 fn question_row_lines(
@@ -802,22 +826,32 @@ fn question_row_lines(
         .fg(Color::Yellow)
         .bg(Color::Rgb(41, 40, 30))
         .add_modifier(Modifier::BOLD);
-    // The text of a row, wrapped; a cursor stop has the marker and the cursor style.
+    // The text of a row, wrapped after `prefix` on its first row and under it on the
+    // others; a cursor stop has the marker and the cursor style.
+    let put_hanging = |out: &mut Vec<QLine>,
+                       indent: usize,
+                       prefix: &str,
+                       text: &str,
+                       style: Style,
+                       stop: Option<QStop>| {
+        let here = stop.is_some() && stop == cursor;
+        let first = out.len();
+        wrap_hanging(
+            out,
+            indent,
+            prefix,
+            text,
+            width,
+            if here { on_cursor } else { style },
+            stop,
+        );
+        if here {
+            out[first].text.replace_range(..2, "▶ ");
+        }
+    };
     let put =
         |out: &mut Vec<QLine>, indent: usize, text: &str, style: Style, stop: Option<QStop>| {
-            let here = stop.is_some() && stop == cursor;
-            let first = out.len();
-            wrap_into(
-                out,
-                indent,
-                text,
-                width,
-                if here { on_cursor } else { style },
-                stop,
-            );
-            if here {
-                out[first].text.replace_range(..2, "▶ ");
-            }
+            put_hanging(out, indent, "", text, style, stop);
         };
     let from = if fallback { " · from the chief" } else { "" };
     if !view.open {
@@ -830,9 +864,23 @@ fn question_row_lines(
             Some(QStop::Header),
         );
     } else {
+        let ticked = match view.kind {
+            TodoKind::Instructions => {
+                format!(" · {} of {} ticked", view.ticked_count, view.steps.len())
+            }
+            TodoKind::Question => String::new(),
+        };
+        let label = match view.kind {
+            TodoKind::Instructions => &view.title,
+            TodoKind::Question => &view.spec,
+        };
         let text = format!(
-            "▾ {} · {} of {} waiting · {} · {}{from}",
-            view.id, view.position, view.waiting, view.product, view.spec
+            "▾ {} · {} · {} of {}{ticked} · {} · {label}{from}",
+            view.id,
+            kind_word(view.kind),
+            view.position,
+            todos_count(view.waiting),
+            view.product,
         );
         put(
             &mut out,
@@ -892,7 +940,44 @@ fn question_row_lines(
             }
             blank(&mut out);
         }
-        for (a, action) in ANSWER_ACTIONS.iter().enumerate() {
+        for (i, step) in view.steps.iter().enumerate() {
+            let mark = if step.ticked { '✓' } else { ' ' };
+            let prefix = format!("[{mark}] {}  ", i + 1);
+            let under = QUESTION_OPTION_INDENT + Line::raw(&prefix).width();
+            put_hanging(
+                &mut out,
+                QUESTION_OPTION_INDENT,
+                &prefix,
+                &step.text,
+                ink,
+                Some(QStop::Step(i)),
+            );
+            if !step.detail.is_empty() {
+                put(
+                    &mut out,
+                    under,
+                    &step.detail,
+                    ink.add_modifier(Modifier::DIM),
+                    None,
+                );
+            }
+        }
+        if !view.steps.is_empty() {
+            blank(&mut out);
+            if view.all_ticked {
+                let notice = format!(
+                    "✓ All {} ticked. Press done to tell the chief.",
+                    view.steps.len()
+                );
+                put(&mut out, QUESTION_TEXT_INDENT, &notice, ink, None);
+                blank(&mut out);
+            }
+        }
+        let actions: &[&str] = match view.kind {
+            TodoKind::Instructions => &INSTRUCTION_ACTIONS,
+            TodoKind::Question => &ANSWER_ACTIONS,
+        };
+        for (a, action) in actions.iter().enumerate() {
             let stop = QStop::Action(a);
             // The rule sits between `send` and the other actions.
             if a == 1 {
@@ -916,6 +1001,28 @@ fn question_row_lines(
                 put(&mut out, QUESTION_OPTION_INDENT, &note, yellow, None);
             }
         }
+        for other in &view.others {
+            let ticked = match other.kind {
+                TodoKind::Instructions => {
+                    format!(" · {} of {} ticked", other.ticked_count, other.steps_total)
+                }
+                TodoKind::Question => String::new(),
+            };
+            let text = format!(
+                "▸ {} · {}{ticked} · {} · {}",
+                other.id,
+                kind_word(other.kind),
+                other.product,
+                other.label
+            );
+            put(
+                &mut out,
+                QUESTION_HEADER_INDENT,
+                &text,
+                yellow,
+                Some(QStop::Other(other.index)),
+            );
+        }
     }
     if let Some((text, style)) = notice {
         put(&mut out, QUESTION_HEADER_INDENT, text, style, None);
@@ -933,11 +1040,31 @@ fn wrap_into(
     style: Style,
     stop: Option<QStop>,
 ) {
-    let room = width.saturating_sub(indent).max(1);
+    wrap_hanging(out, indent, "", text, width, style, stop);
+}
+
+/// Like [`wrap_into`], with `prefix` before the text on the first row; the other rows
+/// keep the text under the first row's.
+fn wrap_hanging(
+    out: &mut Vec<QLine>,
+    indent: usize,
+    prefix: &str,
+    text: &str,
+    width: usize,
+    style: Style,
+    stop: Option<QStop>,
+) {
+    let hang = Line::raw(prefix).width();
+    let room = width.saturating_sub(indent + hang).max(1);
     let pad = " ".repeat(indent);
     for (n, piece) in wrap_words(text, room).into_iter().enumerate() {
+        let lead = if n == 0 {
+            prefix.to_string()
+        } else {
+            " ".repeat(hang)
+        };
         out.push(QLine {
-            text: format!("{pad}{piece}"),
+            text: format!("{pad}{lead}{piece}"),
             style,
             stop: stop.filter(|_| n == 0),
         });
@@ -1262,6 +1389,15 @@ fn footer_break_key(stop: Option<QStop>) -> &'static str {
     if stop.is_some() { "^L" } else { "c" }
 }
 
+/// What the footer needs to know of the current todo.
+#[derive(Debug, Clone, Copy, Default)]
+struct TodoFacts {
+    /// It has a web link `o` opens.
+    link: bool,
+    /// It is instructions, not a question.
+    instructions: bool,
+}
+
 /// The footer's hints for the row under the cursor, short or long: the list's on an
 /// agent row (`stop` is `None`), the question's on a question row. Each form names a
 /// break key, see [`footer_break_key`].
@@ -1270,6 +1406,8 @@ fn footer_hints(
     stop: Option<QStop>,
     open: bool,
     note: Option<NoteKind>,
+    link: bool,
+    instructions: bool,
 ) -> Vec<Span<'static>> {
     let key = |text| Span::styled(text, Style::default().fg(INK));
     let label = |text| Span::styled(text, Style::default().fg(MUTED));
@@ -1281,18 +1419,19 @@ fn footer_hints(
         };
         if compact {
             return vec![
-                key(" Enter"),
-                Span::raw(format!("{} ", enter_words)),
+                label(" TODO  "),
+                key("Enter"),
+                Span::raw(format!("{}  ", enter_words)),
                 key("Esc"),
-                Span::raw(" discard "),
+                Span::raw(" discard  "),
                 key("^L"),
-                Span::raw(" retry "),
+                Span::raw(" retry  "),
                 key("^Q"),
                 Span::raw(" quit "),
             ];
         }
         return vec![
-            label(" QUESTION  "),
+            label(" TODO  "),
             key(enter),
             Span::raw(format!("{enter_words}  ")),
             key("Esc"),
@@ -1304,62 +1443,34 @@ fn footer_hints(
         ];
     }
     if let Some(stop) = stop {
-        let (first, first_words, second, second_words) = match stop {
-            QStop::Header if open => ("h", " close", "Enter", " close"),
-            QStop::Header => ("l", " open", "Enter", " open"),
-            QStop::Option { .. } => ("Space", " pick", "h", " close"),
-            QStop::Action(_) => ("Enter", " choose", "h", " close"),
-            QStop::Step(_) => ("Space", " tick", "h", " close"),
-            QStop::Other(_) => ("l", " open", "h", " close"),
-        };
-        // Esc closes an open question; on a closed header it does nothing.
-        let esc_listed = !matches!(stop, QStop::Header) || open;
-        if compact {
-            let mut hints = vec![
-                key(" j/k"),
-                Span::raw(" move "),
-                key("n/N"),
-                Span::raw(" question "),
-                key(first),
-                Span::raw(format!("{first_words} ")),
-                key(second),
-                Span::raw(format!("{second_words} ")),
-                key("o"),
-                Span::raw(" link "),
-            ];
-            if esc_listed {
-                hints.extend([key("Esc"), Span::raw(" close ")]);
+        // The same words in both layouts: the label, then each key with its words.
+        let mut pairs: Vec<(&str, &str)> = Vec::new();
+        match stop {
+            QStop::Header if open => pairs.push(("h", " close")),
+            QStop::Header | QStop::Other(_) => pairs.push(("l", " open")),
+            QStop::Option { .. } => pairs.extend([("Space", " pick"), ("h", " close")]),
+            QStop::Step(_) => pairs.extend([("Space", " tick"), ("h", " close")]),
+            QStop::Action(0) if instructions => pairs.extend([("Enter", " done"), ("h", " close")]),
+            QStop::Action(1) if instructions => {
+                pairs.extend([("Enter", " ignore"), ("h", " close")]);
             }
-            hints.extend([
-                key("^L"),
-                Span::raw(" retry "),
-                key("^Q"),
-                Span::raw(" quit "),
-            ]);
-            return hints;
+            QStop::Action(_) => pairs.extend([("Enter", " choose"), ("h", " close")]),
         }
-        let mut hints = vec![
-            label(" QUESTION  "),
-            key("j/k"),
-            Span::raw(" move  "),
-            key("n/N"),
-            Span::raw(" question  "),
-            key(first),
-            Span::raw(format!("{first_words}  ")),
-            key(second),
-            Span::raw(format!("{second_words}  ")),
-            key("o"),
-            Span::raw(" open link  "),
-        ];
-        if esc_listed {
-            hints.extend([key("Esc"), Span::raw(" close  ")]);
+        pairs.extend([("j/k", " move"), ("n/N", " todo")]);
+        // The row of a todo that is not open names neither its link nor Esc.
+        let inside = open && !matches!(stop, QStop::Other(_));
+        if inside && link {
+            pairs.push(("o", " link"));
         }
-        hints.extend([
-            key("^L"),
-            Span::raw(" retry  "),
-            key("^Q"),
-            Span::raw(" quit "),
-        ]);
+        if inside {
+            pairs.push(("Esc", " close"));
+        }
+        pairs.extend([("^L", " retry"), ("^Q", " quit")]);
+        let mut hints = vec![label(" TODO  ")];
+        for (k, (name, words)) in pairs.iter().enumerate() {
+            let gap = if k + 1 == pairs.len() { " " } else { "  " };
+            hints.extend([key(name), Span::raw(format!("{words}{gap}"))]);
+        }
         return hints;
     }
     if compact {
@@ -1447,8 +1558,9 @@ fn render_footer(
     stop: Option<QStop>,
     open: bool,
     note: Option<NoteKind>,
+    todo: TodoFacts,
 ) {
-    let mut hints = footer_hints(compact, stop, open, note);
+    let mut hints = footer_hints(compact, stop, open, note, todo.link, todo.instructions);
     let room = usize::from(area.width).saturating_sub(2);
     if Line::from(hints.clone()).width() <= room {
         frame.render_widget(
@@ -3512,7 +3624,7 @@ mod tests {
         }
         // The long form fits exactly at its threshold, inside the footer's borders.
         assert_eq!(
-            Line::from(super::footer_hints(false, None, false, None)).width() + 2,
+            Line::from(super::footer_hints(false, None, false, None, false, false)).width() + 2,
             usize::from(super::WIDE_FOOTER_WIDTH)
         );
     }
@@ -3830,7 +3942,7 @@ mod tests {
     }
 
     fn hint_text(compact: bool, stop: Option<QStop>, open: bool) -> String {
-        super::footer_hints(compact, stop, open, None)
+        super::footer_hints(compact, stop, open, None, true, false)
             .iter()
             .map(|span| span.content.as_ref())
             .collect()
@@ -3889,12 +4001,12 @@ mod tests {
                 has(&closed, "l", "open") && !has(&closed, "h", "close"),
                 "{closed}"
             );
-            assert!(has(&closed, "Enter", "open"), "{closed}");
+            assert!(!closed.contains("Enter"), "{closed}");
             assert!(
                 has(&header, "h", "close") && !has(&header, "l", "open"),
                 "{header}"
             );
-            assert!(has(&header, "Enter", "close"), "{header}");
+            assert!(!header.contains("Enter"), "{header}");
             assert!(
                 has(&option, "Space", "pick") && has(&option, "h", "close"),
                 "{option}"
@@ -3951,14 +4063,24 @@ mod tests {
     #[test]
     fn footer_wraps_to_two_lines_at_the_break_key() {
         for (stop, break_key) in [(None, "c"), (Some(QStop::Header), "^L")] {
-            let hints = super::footer_hints(true, stop, false, None);
+            let hints = super::footer_hints(true, stop, false, None, false, false);
             let at = hints.iter().position(|s| s.content == break_key).unwrap();
             let first = Line::from(hints[..at].to_vec()).width();
             let width = u16::try_from(first + 2).unwrap();
             let backend = TestBackend::new(width, 3);
             let mut terminal = Terminal::new(backend).unwrap();
             terminal
-                .draw(|frame| super::render_footer(frame, frame.area(), true, stop, false, None))
+                .draw(|frame| {
+                    super::render_footer(
+                        frame,
+                        frame.area(),
+                        true,
+                        stop,
+                        false,
+                        None,
+                        super::TodoFacts::default(),
+                    )
+                })
                 .unwrap();
             let buffer = terminal.backend().buffer().clone();
             let row = |y: u16| -> String {
@@ -4097,13 +4219,14 @@ mod tests {
             .find(|line| line.starts_with('|'))
             .unwrap_or_default();
         assert_eq!(
-            header.split('|').map(str::trim).collect::<Vec<_>>()[1..7],
+            header.split('|').map(str::trim).collect::<Vec<_>>()[1..8],
             [
                 "Key",
                 "Agent row",
-                "Question header",
+                "Todo header",
                 "Option row",
                 "Action row",
+                "Step row",
                 "Text field, search, palette, note",
             ]
         );
@@ -4120,14 +4243,12 @@ mod tests {
             "Pick the option; a free option opens its field"
         );
         assert_eq!(row_of("Enter")[4], "Nothing");
-        assert_eq!(
-            row_of("`h` / ←")[4],
-            "Close the question, cursor to its header"
-        );
+        assert_eq!(row_of("`h` / ←")[4], "Close the todo, cursor to its header");
         assert_eq!(row_of("`l` / →")[4], "Nothing");
+        assert_eq!(row_of("Space")[6], "Tick the step, or untick it");
         // What the question rows' footers and held keys say is in the README.
         for says in [
-            "▸ 2 questions waiting",
+            "▸ 2 todos waiting",
             "Esc back to the list (the questions are away)",
             "esc to continue",
             "▲",
@@ -4140,7 +4261,7 @@ mod tests {
 
     // --- The question rows of the list ---
 
-    /// T1, with two decisions: three options (one free, one with no impact) and two.
+    /// Q1, with two decisions: three options (one free, one with no impact) and two.
     fn t1(intro: &str) -> crate::questions::QuestionView {
         use crate::questions::{DecisionView, OptionView, QuestionView};
         let option =
@@ -4152,7 +4273,7 @@ mod tests {
                 free,
             };
         QuestionView {
-            id: "T1".into(),
+            id: "Q1".into(),
             product: "harold".into(),
             spec: "durable-server".into(),
             sha: "d84bf386a2a5".into(),
@@ -4190,7 +4311,7 @@ mod tests {
     }
 
     /// The layout of `user_layout` with `%3` named as the chief's pane and T1 listed
-    /// with `waiting` questions waiting, closed.
+    /// with `waiting` todos waiting, closed.
     fn chief_questions(waiting: u32, intro: &str) -> App {
         let mut app = call_layout(chief_call(CallState::Off));
         app.selected = app.chief_row().map(|row| row.incarnation.clone());
@@ -4199,7 +4320,7 @@ mod tests {
                 .map(|n| {
                     let mut q = t1(intro);
                     if n > 1 {
-                        q.id = format!("T{n}");
+                        q.id = format!("Q{n}");
                     }
                     q
                 })
@@ -4216,7 +4337,7 @@ mod tests {
         }
     }
 
-    /// The chief with T1 open and the cursor on its header.
+    /// The chief with Q1 open and the cursor on its header.
     fn open_chief_question() -> App {
         let mut app = chief_questions(2, "The server needs one wire protocol.");
         keys(&mut app, "jl");
@@ -4237,14 +4358,14 @@ mod tests {
             .iter()
             .position(|l| l.contains("sre") && l.contains("IDLE"))
             .expect("the chief's row");
-        assert_eq!(inner(&lines[chief + 1]), "▸ 2 questions waiting");
+        assert_eq!(inner(&lines[chief + 1]), "▸ 2 todos waiting");
         assert!(
             lines[12].contains("AGENT BLOCK OCCUPANCY"),
             "the list follows the filter at once:\n{}",
             lines.join("\n")
         );
         let one = chief_questions(1, "intro");
-        assert!(rendered(&one, 100, 60, 100_000).contains("▸ 1 question waiting"));
+        assert!(rendered(&one, 100, 60, 100_000).contains("▸ 1 todo waiting"));
     }
 
     #[test]
@@ -4257,8 +4378,8 @@ mod tests {
                 .unwrap_or_else(|| panic!("missing {needle:?}:\n{}", lines.join("\n")))
         };
         assert_eq!(
-            inner(&lines[at("▾ T1")]),
-            "▶   ▾ T1 · 1 of 2 waiting · harold · durable-server"
+            inner(&lines[at("▾ Q1")]),
+            "▶   ▾ Q1 · question · 1 of 2 todos · harold · durable-server"
         );
         assert_eq!(inner(&lines[at("The server needs") + 1]), "");
         assert_eq!(inner(&lines[at("Should the build") - 1]), "");
@@ -4409,7 +4530,7 @@ mod tests {
         let lines = text_lines(&app, 100, 60, 100_000);
         assert_eq!(
             inner(&lines[14]),
-            "▸ 2 questions waiting · from the chief",
+            "▸ 2 todos waiting · from the chief",
             "{}",
             lines.join("\n")
         );
@@ -4421,7 +4542,7 @@ mod tests {
         app.observe_questions(crate::questions::Queue {
             questions: vec![t1("intro"), {
                 let mut q = t1("intro");
-                q.id = "T2".into();
+                q.id = "Q2".into();
                 q
             }],
             waiting: 2,
@@ -4430,7 +4551,7 @@ mod tests {
         let lines = text_lines(&app, 100, 60, 100_000);
         assert_eq!(
             inner(&lines[14]),
-            "▸ 2 questions waiting · from the chief",
+            "▸ 2 todos waiting · from the chief",
             "{}",
             lines.join("\n")
         );
@@ -4445,8 +4566,8 @@ mod tests {
         keys(&mut app, "jj");
         let buffer = rendered_buffer(&app, 100, 24, 100_000);
         let screen = text_lines(&app, 100, 24, 100_000).join("\n");
-        assert!(screen.contains("▲ 2 questions waiting"), "{screen}");
-        assert_eq!(style_at(&buffer, "▲ 2 questions").fg, Some(Color::Yellow));
+        assert!(screen.contains("▲ 2 todos waiting"), "{screen}");
+        assert_eq!(style_at(&buffer, "▲ 2 todos").fg, Some(Color::Yellow));
         assert!(
             screen
                 .lines()
@@ -4458,8 +4579,8 @@ mod tests {
         keys(&mut app, "jlk");
         let buffer = rendered_buffer(&app, 100, 24, 100_000);
         let screen = text_lines(&app, 100, 24, 100_000).join("\n");
-        assert!(screen.contains("▼ 2 questions waiting"), "{screen}");
-        assert_eq!(style_at(&buffer, "▼ 2 questions").fg, Some(Color::Yellow));
+        assert!(screen.contains("▼ 2 todos waiting"), "{screen}");
+        assert_eq!(style_at(&buffer, "▼ 2 todos").fg, Some(Color::Yellow));
         assert!(
             screen.lines().any(|l| l.contains('▶') && l.contains("sre")),
             "{screen}"
@@ -4506,14 +4627,14 @@ mod tests {
         let mut app = open_chief_question();
         let lines = text_lines(&app, 100, 60, 100_000);
         assert!(!chief_line(&lines).contains('▶'));
-        let header = lines.iter().find(|l| l.contains("▾ T1")).unwrap();
+        let header = lines.iter().find(|l| l.contains("▾ Q1")).unwrap();
         assert!(header.starts_with("│▶"), "{header}");
         let buffer = rendered_buffer(&app, 100, 60, 100_000);
-        assert_eq!(style_at(&buffer, "▾ T1").fg, Some(Color::Yellow));
+        assert_eq!(style_at(&buffer, "▾ Q1").fg, Some(Color::Yellow));
         app.handle_key(KeyCode::Char('k'));
         let lines = text_lines(&app, 100, 60, 100_000);
         assert!(chief_line(&lines).contains('▶'));
-        assert!(!lines.iter().any(|l| l.contains("▶") && l.contains("▾ T1")));
+        assert!(!lines.iter().any(|l| l.contains("▶") && l.contains("▾ Q1")));
     }
 
     #[test]
@@ -4597,6 +4718,8 @@ mod tests {
             }),
             true,
             Some(crate::questions::NoteKind::FreeText),
+            true,
+            false,
         )
         .iter()
         .map(|s| s.content.as_ref())
@@ -4606,5 +4729,364 @@ mod tests {
             "{long}"
         );
         assert!(!long.contains("j/k"), "{long}");
+    }
+
+    // --- Todos: the mockups of the spec ---
+
+    fn step(text: &str, detail: &str) -> crate::questions::StepView {
+        crate::questions::StepView {
+            text: text.into(),
+            detail: detail.into(),
+        }
+    }
+
+    /// I1 of the spec's mockups: four steps, two with a detail.
+    fn i1(ticked: &[u32]) -> crate::questions::QuestionView {
+        crate::questions::QuestionView {
+            id: "I1".into(),
+            product: "harold".into(),
+            spec: String::new(),
+            sha: String::new(),
+            link: "https://example.com/i1".into(),
+            intro: "Do these on PasM1Mac, then tick each one here.".into(),
+            version: 1,
+            deferred: false,
+            decisions: vec![],
+            title: "Install Harold 0.15.0 on PasM1Mac".into(),
+            steps: vec![
+                step("Open Terminal", ""),
+                step(
+                    "Run make deploy in ~/Dev/p/harold/main",
+                    "It asks for your password once.",
+                ),
+                step(
+                    "Turn on harold in System Settings \u{203a} Privacy & Security \u{203a} Accessibility",
+                    "harold shows in the list after its first start.",
+                ),
+                step("Run harold status and check it says running 0.15.0", ""),
+            ],
+            ticked: ticked.to_vec(),
+        }
+    }
+
+    /// Q1 of the spec's mockups: one decision with two options.
+    fn q1_single() -> crate::questions::QuestionView {
+        use crate::questions::{DecisionView, OptionView};
+        let mut q = t1("The server needs one wire protocol for its clients.");
+        q.decisions = vec![DecisionView {
+            ask: "Which protocol should clients speak?".into(),
+            options: vec![
+                OptionView {
+                    key: "a".into(),
+                    label: "libSQL's Hrana".into(),
+                    impact: "Existing libSQL clients work unchanged.".into(),
+                    suggested: true,
+                    free: false,
+                },
+                OptionView {
+                    key: "b".into(),
+                    label: "Postgres wire".into(),
+                    impact: "Any Postgres client connects.".into(),
+                    suggested: false,
+                    free: false,
+                },
+            ],
+        }];
+        q
+    }
+
+    fn todo_app(questions: Vec<crate::questions::QuestionView>) -> App {
+        let mut app = call_layout(chief_call(CallState::Off));
+        app.selected = app.chief_row().map(|row| row.incarnation.clone());
+        let waiting = questions.len() as u32;
+        app.observe_questions(crate::questions::Queue {
+            questions,
+            waiting,
+            dismissed: Vec::new(),
+        });
+        app
+    }
+
+    /// I1 then Q1, closed, the cursor on the chief.
+    fn closed_todos() -> App {
+        todo_app(vec![i1(&[]), q1_single()])
+    }
+
+    /// I1 open with `ticked`, the cursor on its header.
+    fn open_i1(ticked: &[u32]) -> App {
+        let mut app = todo_app(vec![i1(ticked), q1_single()]);
+        keys(&mut app, "jl");
+        assert!(app.questions.is_open() && app.cursor_on_question());
+        app
+    }
+
+    /// The todo's rows as the mockups draw them: what follows the list's left border,
+    /// from the row holding `first` for `count` rows, trailing spaces cut.
+    fn todo_block(app: &App, width: u16, first: &str, count: usize) -> Vec<String> {
+        let lines = text_lines(app, width, 60, 100_000);
+        let at = lines
+            .iter()
+            .position(|l| l.contains(first))
+            .unwrap_or_else(|| panic!("missing {first:?}:\n{}", lines.join("\n")));
+        lines[at..at + count]
+            .iter()
+            .map(|l| {
+                l.trim_start_matches('\u{2502}')
+                    .trim_end_matches('\u{2502}')
+                    .trim_end()
+                    .to_string()
+            })
+            .collect()
+    }
+
+    fn footer_inner(app: &App, width: u16, height: u16) -> String {
+        let lines = text_lines(app, width, height, 100_000);
+        lines[lines.len() - 3..]
+            .iter()
+            .filter(|l| !l.starts_with('\u{250c}') && !l.starts_with('\u{2514}'))
+            .map(|l| inner(l).to_string())
+            .collect::<Vec<_>>()
+            .join(" / ")
+    }
+
+    const MOCK_I1_STEPS: [&str; 12] = [
+        "        Do these on PasM1Mac, then tick each one here.",
+        "",
+        "          [ ] 1  Open Terminal",
+        "          [ ] 2  Run make deploy in ~/Dev/p/harold/main",
+        "                 It asks for your password once.",
+        "          [ ] 3  Turn on harold in System Settings \u{203a} Privacy & Security \u{203a} Accessibility",
+        "                 harold shows in the list after its first start.",
+        "          [ ] 4  Run harold status and check it says running 0.15.0",
+        "",
+        "          done",
+        "          \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}",
+        "          ignore",
+    ];
+
+    #[test]
+    fn mockup_1_closed_row_counts_both_kinds() {
+        let mut app = closed_todos();
+        let lines = text_lines(&app, 107, 40, 100_000);
+        let chief = lines
+            .iter()
+            .position(|l| l.contains("sre") && l.contains("IDLE"))
+            .unwrap();
+        assert_eq!(inner(&lines[chief + 1]), "\u{25b8} 2 todos waiting");
+        keys(&mut app, "j");
+        assert_eq!(
+            footer_inner(&app, 107, 40),
+            "TODO  l open  j/k move  n/N todo  ^L retry  ^Q quit"
+        );
+    }
+
+    #[test]
+    fn mockup_2_instructions_open_with_the_cursor_on_the_header() {
+        let app = open_i1(&[]);
+        let rows = todo_block(&app, 107, "\u{25be} I1", 15);
+        assert_eq!(
+            rows[0],
+            "\u{25b6}   \u{25be} I1 \u{b7} instructions \u{b7} 1 of 2 todos \u{b7} 0 of 4 ticked \u{b7} harold \u{b7} Install Harold 0.15.0 on PasM1Mac"
+        );
+        assert_eq!(rows[1..13], MOCK_I1_STEPS);
+        assert_eq!(
+            rows[13],
+            "    \u{25b8} Q1 \u{b7} question \u{b7} harold \u{b7} durable-server"
+        );
+        assert_eq!(
+            footer_inner(&app, 107, 40),
+            "TODO  h close  j/k move  n/N todo  o link  Esc close  ^L retry  ^Q quit"
+        );
+        let buffer = rendered_buffer(&app, 107, 40, 100_000);
+        assert_eq!(style_at(&buffer, "\u{25be} I1").fg, Some(Color::Yellow));
+        assert!(
+            style_at(&buffer, "It asks for your password")
+                .add_modifier
+                .contains(ratatui::style::Modifier::DIM)
+        );
+        assert_eq!(
+            style_at(&buffer, "\u{25b8} Q1").fg,
+            Some(Color::Yellow),
+            "other todo rows read like headers"
+        );
+    }
+
+    #[test]
+    fn mockup_3_partly_ticked_with_the_cursor_on_step_3() {
+        let mut app = open_i1(&[1, 2]);
+        keys(&mut app, "jjj");
+        let rows = todo_block(&app, 107, "\u{25be} I1", 11);
+        assert!(
+            rows[0]
+                .ends_with("2 of 4 ticked \u{b7} harold \u{b7} Install Harold 0.15.0 on PasM1Mac")
+        );
+        assert!(rows[0].starts_with("    \u{25be} I1"), "{}", rows[0]);
+        assert_eq!(rows[3], "          [\u{2713}] 1  Open Terminal");
+        assert_eq!(
+            rows[4],
+            "          [\u{2713}] 2  Run make deploy in ~/Dev/p/harold/main"
+        );
+        assert_eq!(
+            rows[6],
+            "\u{25b6}         [ ] 3  Turn on harold in System Settings \u{203a} Privacy & Security \u{203a} Accessibility"
+        );
+        assert_eq!(
+            footer_inner(&app, 107, 40),
+            "TODO  Space tick  h close  j/k move  n/N todo  o link  Esc close  ^L retry  ^Q quit"
+        );
+        let buffer = rendered_buffer(&app, 107, 40, 100_000);
+        assert_eq!(style_at(&buffer, "[ ] 3").fg, Some(Color::Yellow));
+    }
+
+    #[test]
+    fn mockup_4_every_step_ticked_points_to_done() {
+        let mut app = open_i1(&[1, 2, 3, 4]);
+        keys(&mut app, "jjjjj");
+        let rows = todo_block(&app, 107, "\u{25be} I1", 17);
+        assert!(rows[0].contains("4 of 4 ticked"));
+        assert_eq!(rows[9], "");
+        assert_eq!(
+            rows[10],
+            "        \u{2713} All 4 ticked. Press done to tell the chief."
+        );
+        assert_eq!(rows[11], "");
+        assert_eq!(rows[12], "\u{25b6}         done");
+        assert_eq!(rows[14], "          ignore");
+        assert_eq!(
+            footer_inner(&app, 107, 40),
+            "TODO  Enter done  h close  j/k move  n/N todo  o link  Esc close  ^L retry  ^Q quit"
+        );
+        let buffer = rendered_buffer(&app, 107, 40, 100_000);
+        assert_eq!(style_at(&buffer, "All 4 ticked").fg, Some(super::INK));
+        assert_eq!(
+            style_at(&buffer, "\u{25b6}         done").fg,
+            Some(Color::Yellow)
+        );
+        keys(&mut app, "jj");
+        assert_eq!(
+            footer_inner(&app, 107, 40),
+            "TODO  l open  j/k move  n/N todo  ^L retry  ^Q quit"
+        );
+        keys(&mut app, "k");
+        assert!(footer_inner(&app, 107, 40).starts_with("TODO  Enter ignore  h close"));
+    }
+
+    #[test]
+    fn mockup_5_the_question_after_done_has_one_of_one_todo() {
+        let app = {
+            let mut app = todo_app(vec![q1_single()]);
+            keys(&mut app, "jl");
+            app
+        };
+        let rows = todo_block(&app, 107, "\u{25be} Q1", 13);
+        assert_eq!(
+            rows[0],
+            "\u{25b6}   \u{25be} Q1 \u{b7} question \u{b7} 1 of 1 todo \u{b7} harold \u{b7} durable-server"
+        );
+        assert_eq!(
+            rows[1],
+            "        The server needs one wire protocol for its clients."
+        );
+        assert_eq!(rows[3], "        Which protocol should clients speak?");
+        assert_eq!(rows[4], "          \u{25cf} a  libSQL's Hrana  (suggested)");
+        assert_eq!(rows[9], "          send");
+        assert_eq!(
+            footer_inner(&app, 107, 40),
+            "TODO  h close  j/k move  n/N todo  o link  Esc close  ^L retry  ^Q quit"
+        );
+    }
+
+    #[test]
+    fn question_footers_by_stop_in_both_layouts() {
+        let mut app = todo_app(vec![q1_single(), i1(&[])]);
+        keys(&mut app, "jl");
+        keys(&mut app, "j");
+        assert!(footer_inner(&app, 107, 40).starts_with("TODO  Space pick  h close  j/k move"));
+        keys(&mut app, "jjj");
+        assert!(footer_inner(&app, 107, 40).starts_with("TODO  Enter choose  h close  j/k move"));
+        for compact in [false, true] {
+            let text = hint_text(compact, Some(QStop::Step(0)), true);
+            assert_eq!(
+                text,
+                " TODO  Space tick  h close  j/k move  n/N todo  o link  Esc close  ^L retry  ^Q quit "
+            );
+            let no_link: String =
+                super::footer_hints(compact, Some(QStop::Header), true, None, false, false)
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect();
+            assert!(!no_link.contains("o link"), "{no_link}");
+        }
+    }
+
+    #[test]
+    fn instructions_footer_wraps_at_60_columns_with_both_halves() {
+        let mut app = open_i1(&[1, 2]);
+        keys(&mut app, "jjj");
+        let footer = footer_inner(&app, 60, 18);
+        assert!(footer.contains("TODO  Space tick"), "{footer}");
+        assert!(footer.contains("^Q quit"), "{footer}");
+    }
+
+    #[test]
+    fn todo_states_fit_60x18_and_keep_the_cursor_row_in_view() {
+        for (ticked, moves, want) in [
+            (vec![], "", "I1"),
+            (vec![1, 2], "jjj", "[ ] 3"),
+            (vec![1, 2, 3, 4], "jjjjj", "done"),
+            (vec![1, 2, 3, 4], "jjjjjjjj", "Q1"),
+        ] {
+            let mut app = open_i1(&ticked);
+            keys(&mut app, moves);
+            let screen = text_lines(&app, 60, 18, 100_000);
+            assert!(
+                screen
+                    .iter()
+                    .any(|l| l.contains('\u{25b6}') && l.contains(want)),
+                "{want}:\n{}",
+                screen.join("\n")
+            );
+        }
+        let app = closed_todos();
+        let screen = text_lines(&app, 60, 18, 100_000).join("\n");
+        assert!(screen.contains("2 todos waiting"), "{screen}");
+    }
+
+    #[test]
+    fn edge_markers_count_todos_for_instructions() {
+        let mut app = open_i1(&[1, 2, 3, 4]);
+        keys(&mut app, "jjjjjjj");
+        let screen = text_lines(&app, 60, 18, 100_000).join("\n");
+        assert!(screen.contains("\u{25b2} 2 todos waiting"), "{screen}");
+    }
+
+    #[test]
+    fn kind_is_named_in_every_header_and_row() {
+        let app = open_i1(&[]);
+        let screen = text_lines(&app, 107, 60, 100_000).join("\n");
+        assert!(screen.contains("I1 \u{b7} instructions \u{b7}"), "{screen}");
+        assert!(screen.contains("Q1 \u{b7} question \u{b7}"), "{screen}");
+        let q = open_chief_question();
+        let screen = text_lines(&q, 107, 60, 100_000).join("\n");
+        assert!(
+            screen.contains("Q1 \u{b7} question \u{b7} 1 of 2 todos"),
+            "{screen}"
+        );
+        assert!(
+            screen.contains("\u{25b8} Q2 \u{b7} question \u{b7} harold \u{b7} durable-server"),
+            "{screen}"
+        );
+    }
+
+    #[test]
+    fn filtered_out_chief_reads_todos_from_the_chief() {
+        let mut app = closed_todos();
+        keys(&mut app, "fmain");
+        app.handle_key(KeyCode::Enter);
+        let lines = text_lines(&app, 100, 60, 100_000);
+        assert_eq!(
+            inner(&lines[14]),
+            "\u{25b8} 2 todos waiting \u{b7} from the chief"
+        );
     }
 }
