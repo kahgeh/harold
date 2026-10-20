@@ -16,6 +16,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use jwt_simple::prelude::ES256KeyPair;
+use opentelemetry::KeyValue;
 use reqwest::blocking::Client;
 use reqwest::header::{HeaderName, HeaderValue};
 use tracing::{info, warn};
@@ -25,6 +26,7 @@ use web_push::{
 };
 
 use crate::store::AppPushSubscribed;
+use crate::telemetry::instruments;
 
 /// How long a push may take to get its answer's status. Reading the body stops once
 /// this much time has passed since the push started; a read already waiting may take
@@ -207,6 +209,9 @@ impl Pusher {
                 "app push refused"
             ),
         }
+        instruments()
+            .web_app_pushes
+            .add(1, &[KeyValue::new("outcome", outcome.as_str())]);
         outcome
     }
 

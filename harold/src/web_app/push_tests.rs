@@ -166,6 +166,46 @@ async fn gone_and_refused_and_unreachable_are_told_apart() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn each_push_outcome_adds_one_to_the_push_counter() {
+    let service = FakePushService::start(201).await;
+    let (key, _directory) = fresh_key();
+    let pusher = Arc::new(Pusher::new(key, LOGIN));
+    let subscription = service.subscription(1);
+    let closed_port = std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("bind")
+        .local_addr()
+        .expect("address")
+        .port();
+    let closed = AppPushSubscribed {
+        endpoint: format!("http://127.0.0.1:{closed_port}/push/1"),
+        ..subscription.clone()
+    };
+    let counted = |outcome: &str| {
+        crate::telemetry::test_support::counter_value(
+            "harold.web_app.pushes",
+            &[("outcome", outcome)],
+        )
+        .unwrap_or(0)
+    };
+
+    // Other tests push too and the counter is process-wide, so each outcome is checked
+    // for a rise of at least 1 by its own push.
+    for (status, outcome) in [
+        (201, "accepted"),
+        (410, "gone"),
+        (500, "refused"),
+    ] {
+        service.set_status(status);
+        let before = counted(outcome);
+        push(&pusher, &subscription, "hello").await;
+        assert!(counted(outcome) > before, "{outcome}");
+    }
+    let before = counted("unreachable");
+    push(&pusher, &closed, "hello").await;
+    assert!(counted("unreachable") > before, "unreachable");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_push_service_that_does_not_answer_counts_as_unreachable() {
     let service = FakePushService::start_silent().await;
     let (key, _directory) = fresh_key();
