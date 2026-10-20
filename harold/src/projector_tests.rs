@@ -4521,7 +4521,7 @@ async fn nothing_is_counted_under_the_mute_the_pause_or_on_a_channel_not_set_up(
     environment.set_not_set_up(Channel::Imessage);
     let logs = CapturedLogs::start();
     let unset =
-        dispatcher.dispatch_with_pause(&away_delivery(json!(message_from("%2", "x"))), None, false);
+        dispatcher.dispatch_with_pause(&away_delivery(json!(message_from("%1", "x"))), None, false);
     assert!(matches!(unset, Ok(DeliveryOutcome::Skipped)));
     assert!(
         logs.text()

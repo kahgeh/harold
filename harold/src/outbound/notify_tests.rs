@@ -1055,10 +1055,13 @@ fn what_the_chief_rule_the_mute_the_pause_and_a_message_this_turn_hold_counts_ne
     );
     assert!(text.contains("reason=\"chief\""), "{text}");
 
-    // The voice mute and the pause.
+    // The voice mute, on a pane the lists let through (the chief rule would hold the
+    // chief), and the pause.
+    let listed = TrackedAgents::in_folders(&[("%2", &format!("{tree}/harold"))]);
     super::set_tts_muted(true);
-    notify_turn_among(&desk, &NotifyState::default(), &agents, &turn("%1", "b")).unwrap();
+    let muted = notify_turn_among(&desk, &NotifyState::default(), &listed, &turn("%2", "b"));
     super::set_tts_muted(false);
+    assert_eq!(muted, Ok(DeliveryOutcome::Skipped));
     super::set_messaging_paused(true);
     let phone = FakeEnvironment::locked(&overrides);
     notify_turn_among(&phone, &NotifyState::default(), &agents, &turn("%1", "c")).unwrap();
@@ -1070,9 +1073,15 @@ fn what_the_chief_rule_the_mute_the_pause_and_a_message_this_turn_hold_counts_ne
     let outcome = notify_turn_among(&phone, &state, &agents, &turn("%1", "d"));
     assert_eq!(outcome, Ok(DeliveryOutcome::Skipped));
 
-    for channel in ["imessage", "machine_audio_output", "web_app"] {
-        for outcome in ["sent", "kept"] {
-            assert_eq!(notified(&chief, channel, outcome), 0, "{channel} {outcome}");
+    for agent in [chief.clone(), format!("{tree}/harold")] {
+        for channel in ["imessage", "machine_audio_output", "web_app"] {
+            for outcome in ["sent", "kept"] {
+                assert_eq!(
+                    notified(&agent, channel, outcome),
+                    0,
+                    "{agent} {channel} {outcome}"
+                );
+            }
         }
     }
 }

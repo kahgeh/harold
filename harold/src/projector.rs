@@ -805,7 +805,10 @@ async fn handle_next_delivery_inner(
             if let Err(error) = store.mark_delivered(&event_id).await {
                 return Err(HandlerError::NotMarkedDelivered { event_id, error });
             }
-            if outcome == DeliveryOutcome::Skipped {
+            if matches!(
+                outcome,
+                DeliveryOutcome::Skipped | DeliveryOutcome::HeldBack { .. }
+            ) {
                 in_delivery(delivering.as_ref(), || {
                     info!(
                         event_id,

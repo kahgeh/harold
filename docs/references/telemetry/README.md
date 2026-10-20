@@ -563,7 +563,7 @@ dashboard() { hdx "$HYPERDX_URL/api/v2/dashboards" | jq -c --arg name "$1" '.dat
 # "Harold": an update must keep each filter's id, as it keeps the product filter's. The tiles keep theirs by the ids in the file.
 old=$(dashboard "Harold")
 fill dashboard.json \
-  | jq --argjson old "$old" '.filters |= map(. as $filter | .id = ($old.filters[] | select(.name == $filter.name) | .id))' \
+  | jq --argjson old "$old" '.filters |= map(. as $filter | ([$old.filters[] | select(.name == $filter.name) | .id][0]) as $id | if $id then .id = $id else . end)' \
   | hdx -X PUT "$HYPERDX_URL/api/v2/dashboards/$(echo "$old" | jq -r .id)" --data-binary @-
 
 # "Harold trends" has no filters.

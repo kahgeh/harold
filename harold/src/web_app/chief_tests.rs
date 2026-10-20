@@ -195,3 +195,27 @@ fn a_partial_chief_entry_finds_the_chief_and_two_matches_are_no_chief() {
     );
     assert_eq!(find_chief(&two, Some("chief-of-pods")), ChiefPane::Several);
 }
+
+#[test]
+fn find_chief_logs_the_state_once_per_change() {
+    let logs = crate::outbound::fake::CapturedLogs::start();
+    let one = snapshot(
+        Some(true),
+        vec![pane_in("%1", CHIEF, EffectiveAgentState::Idle)],
+    );
+    let two = snapshot(
+        Some(true),
+        vec![
+            pane_in("%1", CHIEF, EffectiveAgentState::Idle),
+            pane_in("%3", "/b/chief", EffectiveAgentState::Idle),
+        ],
+    );
+    // `chief` is a partial entry here, so both panes match it.
+    for snapshot in [&two, &two, &one, &one, &two] {
+        find_chief(snapshot, Some("chief"));
+    }
+    let text = logs.text();
+    assert_eq!(text.matches("chief pane changed").count(), 3, "{text}");
+    assert!(text.contains("state=\"ambiguous\""), "{text}");
+    assert!(!text.contains("chief pane ambiguous"), "{text}");
+}

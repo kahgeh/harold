@@ -838,8 +838,10 @@ pub(crate) async fn type_when_ready<P: Ports>(
 ) -> Attempt {
     let locks = ports.pane_locks();
     locks.observe(view);
-    // A tool types into a pane's own folder, which is not necessarily the chief's.
-    if !matches!(writer, Writer::Tool(_)) && !view.listing_failed {
+    // Only the alert and the call always type into the chief's folder. A timed prompt's
+    // folder is any folder, and a tool types into a pane's own, so neither says anything
+    // about the chief's state.
+    if matches!(writer, Writer::Alert | Writer::Voice) && !view.listing_failed {
         note_chief(&lookup_in_folder(
             view.panes
                 .iter()

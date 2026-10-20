@@ -1886,3 +1886,33 @@ async fn a_panicking_typing_step_is_an_error_not_a_panic() {
     println!("evidence: {result:?}");
     assert!(result.is_err());
 }
+
+#[tokio::test]
+async fn only_the_alert_and_the_call_note_the_chief_state() {
+    let fake = Fake::at(DAY, "09:00:00");
+    let two = view(vec![chief("%2"), chief("%3")]);
+
+    // A timed prompt's folder is any folder: a wait there says nothing of the chief.
+    let logs = crate::outbound::fake::CapturedLogs::start();
+    let timed = type_when_ready(&fake, Writer::TimedPrompt, CHIEF, "p", &two, &[]).await;
+    assert!(matches!(
+        timed,
+        Attempt::Wait(Reason::SeveralAgentsInFolder { agents: 2 })
+    ));
+    assert!(!logs.text().contains("chief pane changed"));
+
+    // The alert always types into the chief's folder, so it reports the change once.
+    for _ in 0..2 {
+        let alert = type_when_ready(&fake, Writer::Alert, CHIEF, "a", &two, &[]).await;
+        assert!(matches!(
+            alert,
+            Attempt::Wait(Reason::SeveralAgentsInFolder { agents: 2 })
+        ));
+    }
+    let text = logs.text();
+    assert_eq!(text.matches("chief pane changed").count(), 1, "{text}");
+    assert!(
+        text.contains("state=\"ambiguous\"") && text.contains("count=2"),
+        "{text}"
+    );
+}
