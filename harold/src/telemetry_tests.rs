@@ -29,6 +29,44 @@ fn the_model_failed_fallback_is_counted_from_0_at_start() {
 }
 
 #[test]
+fn the_web_app_push_counter_is_counted_from_0_at_start() {
+    test_support::install();
+    register_phone_counters();
+    for outcome in ["accepted", "gone", "refused", "unreachable"] {
+        let counted =
+            test_support::exact_counter_value("harold.web_app.pushes", &[("outcome", outcome)]);
+        assert!(counted.is_some(), "{outcome}");
+    }
+}
+
+#[test]
+fn seconds_and_event_id_are_exported_on_a_log_record() {
+    test_support::install();
+    let event_id = format!("event-{}", uuid::Uuid::new_v4());
+    tracing::info!(event_id = %event_id, seconds = 7_u64, "app page disconnected");
+    tracing::warn!(event_id = %event_id, "app reply state not recorded");
+    let logs = test_support::logs();
+    let records: Vec<_> = logs
+        .iter()
+        .filter(|l| format!("{:?}", l.record).contains(&event_id))
+        .collect();
+    assert_eq!(records.len(), 2);
+    for record in &records {
+        let keys: Vec<&str> = record
+            .record
+            .attributes_iter()
+            .map(|(key, _)| key.as_str())
+            .collect();
+        assert!(keys.contains(&"event_id"), "{keys:?}");
+    }
+    assert!(
+        records
+            .iter()
+            .any(|r| r.record.attributes_iter().any(|(k, _)| k.as_str() == "seconds"))
+    );
+}
+
+#[test]
 fn only_allowed_fields_leave_a_span() {
     test_support::install();
     let pane = unique_pane();

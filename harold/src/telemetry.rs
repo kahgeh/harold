@@ -89,6 +89,8 @@ pub(crate) const ALLOWED_FIELDS: &[&str] = &[
     "run",
     "cost_usd",
     "agent",
+    "seconds",
+    "event_id",
 ];
 
 /// How long shutting the exporters down may take in all.
@@ -183,6 +185,8 @@ pub(crate) struct Instruments {
     pub watch_cost_usd: Counter<f64>,
     /// `harold.notifications`, `{notification}`, by `agent`, `channel` and `outcome`.
     pub notifications: Counter<u64>,
+    /// `harold.web_app.pushes`, `{push}`, by `outcome`.
+    pub web_app_pushes: Counter<u64>,
 }
 
 static INSTRUMENTS: OnceLock<Instruments> = OnceLock::new();
@@ -238,6 +242,7 @@ pub(crate) fn instruments() -> &'static Instruments {
             watch_runs: counter("watch.runs", "{run}"),
             watch_cost_usd: meter.f64_counter("watch.cost_usd").with_unit("USD").build(),
             notifications: counter("harold.notifications", "{notification}"),
+            web_app_pushes: counter("harold.web_app.pushes", "{push}"),
         }
     })
 }
@@ -277,6 +282,11 @@ pub(crate) fn register_phone_counters() {
             KeyValue::new("reason", "model_failed"),
         ],
     );
+    for outcome in ["accepted", "gone", "refused", "unreachable"] {
+        instruments
+            .web_app_pushes
+            .add(0, &[KeyValue::new("outcome", outcome)]);
+    }
     for channel in PHONE_CHANNELS {
         for resolved_by in ResolvedBy::ALL {
             let channel = KeyValue::new("channel", channel);
