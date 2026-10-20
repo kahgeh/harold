@@ -123,16 +123,10 @@ async fn a_failing_subscription_read_is_not_pushed_subscriptions_unread_and_warn
     let directory = TestDirectory::new();
     let (store, route) = route_with(&directory, &[]).await;
     // Another connection to the state database takes the table away, so the read fails.
-    let state = turso::Builder::new_local(
-        directory
-            .0
-            .join("harold-state.db")
-            .to_str()
-            .unwrap(),
-    )
-    .build()
-    .await
-    .unwrap();
+    let state = turso::Builder::new_local(directory.0.join("harold-state.db").to_str().unwrap())
+        .build()
+        .await
+        .unwrap();
     state
         .connect()
         .unwrap()

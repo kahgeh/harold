@@ -462,6 +462,97 @@ async fn markup_in_a_reply_is_escaped_in_the_page_and_the_stream() {
     assert!(!added.contains("@post('/x')"), "{added}");
 }
 
+/// Waits up to 2 s for a captured line holding `wanted`.
+async fn line_with(logs: &CapturedLogs, wanted: &str) -> String {
+    for _ in 0..40 {
+        if let Some(line) = logs.text().lines().find(|line| line.contains(wanted)) {
+            return line.to_owned();
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("no line with {wanted}: {}", logs.text());
+}
+
+/// Current-thread runtime, so `CapturedLogs` sees the server's tasks.
+#[tokio::test(flavor = "current_thread")]
+async fn opening_updates_logs_connected_and_dropping_the_page_logs_page_gone_once() {
+    let directory = TestDirectory::new();
+    let store = directory.store().await;
+    let server = TestServer::serve(store.clone()).await;
+    let logs = CapturedLogs::start();
+
+    let mut updates = server.updates().await;
+    updates.next().await.expect("the whole thread");
+    let connected = line_with(&logs, "app page connected").await;
+    assert!(connected.contains("INFO"), "{connected}");
+    assert!(!logs.text().contains("app page disconnected"));
+
+    drop(updates);
+    // Harold notices the closed page at its next patch, so one is provoked.
+    store
+        .add_chief_app_message("e1", now_ms(), CANARY)
+        .await
+        .unwrap();
+
+    let line = line_with(&logs, "app page disconnected").await;
+    assert!(line.contains("INFO"), "{line}");
+    assert!(line.contains(r#"reason="page_gone""#), "{line}");
+    assert!(line.contains("seconds="), "{line}");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let text = logs.text();
+    assert_eq!(text.matches("app page disconnected").count(), 1, "{text}");
+    assert!(!text.contains(CANARY), "{text}");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn shutdown_logs_disconnected_with_shutdown() {
+    let directory = TestDirectory::new();
+    let store = directory.store().await;
+    let mut server = TestServer::serve(store).await;
+    let logs = CapturedLogs::start();
+    let mut updates = server.updates().await;
+    updates.next().await.expect("the whole thread");
+
+    drop(server.shutdown.take());
+
+    let line = line_with(&logs, "app page disconnected").await;
+    assert!(line.contains(r#"reason="shutdown""#), "{line}");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn an_unreadable_store_logs_not_connected_with_store_unread() {
+    let directory = TestDirectory::new();
+    let store = directory.store().await;
+    // Another connection to the state database takes the table away, so the read fails.
+    let state = turso::Builder::new_local(
+        directory
+            .0
+            .join("store")
+            .join("harold-state.db")
+            .to_str()
+            .unwrap(),
+    )
+    .build()
+    .await
+    .unwrap();
+    state
+        .connect()
+        .unwrap()
+        .execute("DROP TABLE app_messages", ())
+        .await
+        .unwrap();
+    let server = TestServer::serve(store).await;
+    let logs = CapturedLogs::start();
+
+    let response = server.get("/updates").await;
+
+    assert_eq!(response.status(), 503);
+    let line = line_with(&logs, "app page not connected").await;
+    assert!(line.contains("WARN"), "{line}");
+    assert!(line.contains(r#"reason="store_unread""#), "{line}");
+    assert!(!logs.text().contains("app page connected"));
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn the_stream_ends_at_shutdown() {
     let directory = TestDirectory::new();

@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 use std::convert::Infallible;
+use std::time::Instant;
 
 use askama::Template;
 use axum::extract::State;
@@ -14,6 +15,7 @@ use axum::response::{IntoResponse, Response};
 use datastar::prelude::{ElementPatchMode, PatchElements};
 use tokio::sync::{mpsc, watch};
 use tokio_stream::wrappers::ReceiverStream;
+use tracing::{info, warn};
 
 use super::pages::{CallSection, MessageView};
 use super::{AppState, thread_start_ms};
@@ -40,15 +42,20 @@ pub(crate) async fn get_updates(State(state): State<AppState>) -> Response {
     let changes = state.store.watch_app_thread();
     let mut call = state.calls.as_ref().map(|calls| calls.view());
     let Ok(messages) = state.store.app_messages_since(thread_start_ms()).await else {
+        warn!(reason = "store_unread", "app page not connected");
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
     let Some(whole) = whole_thread(&messages) else {
+        warn!(reason = "render_failed", "app page not connected");
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     };
     let section = match call.as_mut() {
         Some(view) => match call_screen(&view.borrow_and_update()) {
             Some(section) => Some(section),
-            None => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+            None => {
+                warn!(reason = "render_failed", "app page not connected");
+                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            }
         },
         None => None,
     };
@@ -59,6 +66,7 @@ pub(crate) async fn get_updates(State(state): State<AppState>) -> Response {
     if let Some(section) = section {
         let _ = patches.try_send(Ok(section));
     }
+    info!("app page connected");
     tokio::spawn(follow_thread(
         state,
         changes,
@@ -71,24 +79,43 @@ pub(crate) async fn get_updates(State(state): State<AppState>) -> Response {
         .into_response()
 }
 
-/// Sends a patch for each new or changed row on every change of the thread, and the call
-/// screen on every change of the call. Returns at shutdown, when the page has gone (a send
-/// fails), or when the store stops telling of changes.
+/// Follows the thread until the page goes, and logs how it ended and how long the page was
+/// connected. Harold notices a closed page at the next patch or keep-alive.
 async fn follow_thread(
+    state: AppState,
+    changes: watch::Receiver<u64>,
+    call: Option<watch::Receiver<PhoneView>>,
+    known: HashMap<String, Shown>,
+    patches: mpsc::Sender<Result<Event, Infallible>>,
+) {
+    let connected = Instant::now();
+    let reason = send_patches(state, changes, call, known, patches).await;
+    info!(
+        reason,
+        seconds = connected.elapsed().as_secs(),
+        "app page disconnected"
+    );
+}
+
+/// Sends a patch for each new or changed row on every change of the thread, and the call
+/// screen on every change of the call. Returns why it stopped: `shutdown`, `page_gone`
+/// (the page has gone: a send fails) or `store_stopped` (the store stops telling of
+/// changes).
+async fn send_patches(
     state: AppState,
     mut changes: watch::Receiver<u64>,
     mut call: Option<watch::Receiver<PhoneView>>,
     mut known: HashMap<String, Shown>,
     patches: mpsc::Sender<Result<Event, Infallible>>,
-) {
+) -> &'static str {
     let mut shutdown = state.shutdown.clone();
     loop {
         tokio::select! {
-            _ = shutdown.changed() => return,
-            () = patches.closed() => return,
+            _ = shutdown.changed() => return "shutdown",
+            () = patches.closed() => return "page_gone",
             changed = changes.changed() => {
                 if changed.is_err() {
-                    return;
+                    return "store_stopped";
                 }
             }
             section = call_changed(&mut call) => {
@@ -96,7 +123,7 @@ async fn follow_thread(
                 if let Some(section) = section
                     && patches.send(Ok(section)).await.is_err()
                 {
-                    return;
+                    return "page_gone";
                 }
                 continue;
             }
@@ -112,7 +139,7 @@ async fn follow_thread(
                 continue;
             };
             if patches.send(Ok(patch)).await.is_err() {
-                return;
+                return "page_gone";
             }
         }
     }

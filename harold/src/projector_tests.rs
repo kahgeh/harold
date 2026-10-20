@@ -22,7 +22,9 @@ use crate::inbound::RouteReport;
 use crate::inbound::ownership::agent_message_text;
 use crate::outbound::fake::{CapturedLogs, FakeEnvironment};
 use crate::outbound::notify_tests::{FAKE_MACHINE, FakeApp, FakeAwayText};
-use crate::outbound::{AppDelivery, AppRoute, NotPushedReason, ChiefApp, DeliveryOutcome, SystemEnvironment};
+use crate::outbound::{
+    AppDelivery, AppRoute, ChiefApp, DeliveryOutcome, NotPushedReason, SystemEnvironment,
+};
 use crate::store::{
     AwayMessageRequested, EventVersion, HaroldStore, InboundMessage, NewEvent, PendingDelivery,
     SpokenLineRequested, TurnCompleted, WriteFault, append_agent_events,
@@ -3679,7 +3681,10 @@ async fn a_failed_thread_write_is_retryable_and_sends_nothing() {
 async fn a_chief_turn_end_records_the_app_as_its_channel_and_the_fallback_as_today() {
     for (delivery, channel) in [
         (AppDelivery::Pushed, "app"),
-        (AppDelivery::NotPushed(NotPushedReason::NoSubscriptions), "imessage"),
+        (
+            AppDelivery::NotPushed(NotPushedReason::NoSubscriptions),
+            "imessage",
+        ),
     ] {
         let directory = TestDirectory::new();
         let with = with_app(&directory, chief_and_pod(), FakeApp::new(delivery)).await;

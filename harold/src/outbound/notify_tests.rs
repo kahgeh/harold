@@ -6,8 +6,7 @@ use super::fake::{CapturedLogs, FakeEnvironment, turn};
 use super::left_out::TrackedAgents;
 use super::{
     AppDelivery, AppRoute, AwayText, ChiefApp, DeliveryOutcome, NotPushedReason, NotifyState,
-    OutboundChannel, deliver_from_chief,
-    is_chief_pane, notify, notify_with_app,
+    OutboundChannel, deliver_from_chief, is_chief_pane, notify, notify_with_app,
 };
 use crate::inbound::ownership::agent_message_text;
 use crate::store::{AppReplyState, TurnCompleted};

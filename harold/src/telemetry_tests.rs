@@ -59,11 +59,11 @@ fn seconds_and_event_id_are_exported_on_a_log_record() {
             .collect();
         assert!(keys.contains(&"event_id"), "{keys:?}");
     }
-    assert!(
-        records
-            .iter()
-            .any(|r| r.record.attributes_iter().any(|(k, _)| k.as_str() == "seconds"))
-    );
+    assert!(records.iter().any(|r| {
+        r.record
+            .attributes_iter()
+            .any(|(k, _)| k.as_str() == "seconds")
+    }));
 }
 
 #[test]

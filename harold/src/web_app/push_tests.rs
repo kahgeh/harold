@@ -190,11 +190,7 @@ async fn each_push_outcome_adds_one_to_the_push_counter() {
 
     // Other tests push too and the counter is process-wide, so each outcome is checked
     // for a rise of at least 1 by its own push.
-    for (status, outcome) in [
-        (201, "accepted"),
-        (410, "gone"),
-        (500, "refused"),
-    ] {
+    for (status, outcome) in [(201, "accepted"), (410, "gone"), (500, "refused")] {
         service.set_status(status);
         let before = counted(outcome);
         push(&pusher, &subscription, "hello").await;
