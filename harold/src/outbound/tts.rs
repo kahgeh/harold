@@ -438,7 +438,7 @@ pub(crate) fn update_line_with(
         ModelRun::Failed(_) => FallbackReason::ModelFailed,
         ModelRun::NoModel => FallbackReason::NoModel,
     };
-    info!(reason = %refused.as_str(), channel, "turn-end update fell back");
+    info!(reason = %refused.as_str(), channel = %channel, "turn-end update fell back");
     count_update("fallback", refused.as_str());
     fallback_sentence(agent)
 }
