@@ -8,6 +8,7 @@ fn job(folder: &std::path::Path) -> ModelJob {
         model: "haiku".into(),
         system_prompt: "RULES\n\nSKILL BODY".into(),
         allowed_tools: None,
+        add_dirs: Vec::new(),
         run_budget_usd_micros: None,
         facts_json: br#"{"now":"x"}"#.to_vec(),
         timeout: Duration::from_secs(10),
@@ -86,6 +87,27 @@ fn allowed_tools_reach_the_flag_exactly_as_written_and_are_left_out_when_none() 
         let args = texts(claude_args(&asked, false));
         assert_eq!(args[position(&args, "--allowedTools").unwrap() + 1], tools);
     }
+}
+
+#[test]
+fn add_dirs_become_one_flag_each_in_order_before_allowed_tools() {
+    let mut asked = job(std::path::Path::new("/tmp"));
+    asked.add_dirs = vec!["/h/bin/harold".into(), "/with space/x".into()];
+    asked.allowed_tools = Some("Write".into());
+    let args = texts(claude_args(&asked, false));
+    let flags: Vec<usize> = (0..args.len())
+        .filter(|i| args[*i] == "--add-dir")
+        .collect();
+    assert_eq!(flags.len(), 2);
+    assert_eq!(args[flags[0] + 1], "/h/bin/harold");
+    assert_eq!(args[flags[1] + 1], "/with space/x");
+    assert!(flags[1] < position(&args, "--allowedTools").unwrap());
+}
+
+#[test]
+fn no_add_dir_flag_when_the_list_is_empty() {
+    let args = texts(claude_args(&job(std::path::Path::new("/tmp")), false));
+    assert!(position(&args, "--add-dir").is_none());
 }
 
 struct Temp(PathBuf);

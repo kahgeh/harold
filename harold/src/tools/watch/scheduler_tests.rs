@@ -485,6 +485,21 @@ async fn the_skill_is_read_afresh_at_each_run() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn an_edited_add_dirs_reaches_the_next_runs_job() {
+    let h = harness(settings(), vec![answer("QUIET", 0.01)]).await;
+    h.start("w", 10, 120).await;
+    pass(Duration::from_secs(5)).await;
+    h.folder
+        .write_skill("pod-watch", "---\nadd-dirs: /a, /b\n---\nNEW\n");
+
+    pass(10 * MINUTE).await;
+
+    let jobs = h.runner.jobs.lock().unwrap().clone();
+    assert!(jobs[0].add_dirs.is_empty());
+    assert_eq!(jobs[1].add_dirs, ["/a", "/b"]);
+}
+
+#[tokio::test(start_paused = true)]
 async fn the_job_has_the_folder_model_budget_and_facts() {
     let h = harness(
         WatchSettings {

@@ -520,6 +520,7 @@ impl Scheduler {
             model: self.deps.settings.model.clone(),
             system_prompt: answer::system_prompt(&skill.body),
             allowed_tools: skill.allowed_tools,
+            add_dirs: skill.add_dirs,
             run_budget_usd_micros: budget,
             facts_json: serde_json::to_vec(&facts).unwrap_or_default(),
             timeout: self.run_limit,

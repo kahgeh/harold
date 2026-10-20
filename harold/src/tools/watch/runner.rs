@@ -35,6 +35,8 @@ pub(super) struct ModelJob {
     pub system_prompt: String,
     /// The skill's `allowed-tools`, exactly as written.
     pub allowed_tools: Option<String>,
+    /// The skill's `add-dirs`, one `--add-dir` each.
+    pub add_dirs: Vec<String>,
     pub run_budget_usd_micros: Option<i64>,
     pub facts_json: Vec<u8>,
     pub timeout: Duration,
@@ -64,7 +66,8 @@ pub(super) fn usd_text(micros: i64) -> String {
 }
 
 /// The arguments of one run. `--allowedTools` is the skill's `allowed-tools` as
-/// written, and is left out when the skill has none.
+/// written, and is left out when the skill has none. `--add-dir` comes once per `add-dirs`
+/// entry, before it.
 pub(super) fn claude_args(job: &ModelJob, max_turns: bool) -> Vec<OsString> {
     let mut args: Vec<OsString> = ["--print", "--safe-mode", "--no-session-persistence"]
         .into_iter()
@@ -81,6 +84,9 @@ pub(super) fn claude_args(job: &ModelJob, max_turns: bool) -> Vec<OsString> {
     }
     if max_turns {
         flag("--max-turns", MAX_TURNS);
+    }
+    for dir in &job.add_dirs {
+        flag("--add-dir", dir);
     }
     if let Some(tools) = &job.allowed_tools {
         flag("--allowedTools", tools);

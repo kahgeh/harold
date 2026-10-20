@@ -422,12 +422,19 @@ fn tilde_entries_pass_as_written_without_home() {
 
 #[test]
 fn add_dirs_in_frontmatter_that_never_closes_are_not_read() {
-    assert!(parse_skill("---\nadd-dirs: /x\nno end\n", Some("/h")).add_dirs.is_empty());
+    assert!(
+        parse_skill("---\nadd-dirs: /x\nno end\n", Some("/h"))
+            .add_dirs
+            .is_empty()
+    );
 }
 
 #[test]
 fn read_skill_reads_add_dirs() {
-    let temp = Temp::with_skill("pod-watch", "---\nadd-dirs: /x\nallowed-tools: Write\n---\nB\n");
+    let temp = Temp::with_skill(
+        "pod-watch",
+        "---\nadd-dirs: /x\nallowed-tools: Write\n---\nB\n",
+    );
     let skill = read_skill(&temp.0, "pod-watch", &[]).unwrap();
     assert_eq!(skill.add_dirs, ["/x"]);
     assert_eq!(skill.allowed_tools.as_deref(), Some("Write"));
