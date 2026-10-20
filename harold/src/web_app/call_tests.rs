@@ -910,6 +910,8 @@ async fn shutdown_ends_an_open_phone_call() {
     let settings = WebAppSettings {
         listen: "127.0.0.1:0".into(),
         allowed_login: LOGIN.into(),
+        app_name: None,
+        icon: None,
     };
     let api: Arc<dyn PhoneCallApi> = calls.clone();
     let running = start(

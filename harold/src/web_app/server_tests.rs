@@ -95,6 +95,8 @@ fn settings(listen: &str) -> WebAppSettings {
     WebAppSettings {
         listen: listen.into(),
         allowed_login: LOGIN.into(),
+        app_name: None,
+        icon: None,
     }
 }
 

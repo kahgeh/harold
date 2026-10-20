@@ -521,9 +521,63 @@ pub(crate) struct WebAppSettings {
     pub listen: String,
     /// The Tailscale login allowed to use the app.
     pub allowed_login: String,
+    /// The name on the home screen and in the app's title; "Chief" when left out.
+    pub app_name: Option<String>,
+    /// The path of the app's PNG icon, with a leading `~/` expanded; no icon when left out.
+    pub icon: Option<String>,
+}
+
+/// The longest `app_name`, in characters.
+const APP_NAME_MAX: usize = 30;
+const ICON_MIN_SIDE: u32 = 180;
+const ICON_MAX_SIDE: u32 = 1024;
+const ICON_MAX_BYTES: usize = 1024 * 1024;
+const PNG_SIGNATURE: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+
+/// The app's icon, read once at start.
+#[derive(Debug, Clone)]
+pub(crate) struct WebAppIcon {
+    pub bytes: Vec<u8>,
+    /// The icon's width and height in pixels, which are equal.
+    pub side: u32,
+}
+
+/// A PNG's side when it is a square of `ICON_MIN_SIDE` to `ICON_MAX_SIDE` pixels, read from
+/// the signature and the IHDR chunk's width and height.
+fn square_png_side(bytes: &[u8]) -> Option<u32> {
+    if bytes.len() > ICON_MAX_BYTES || bytes.len() < 24 || bytes[..8] != PNG_SIGNATURE {
+        return None;
+    }
+    let width = u32::from_be_bytes(bytes[16..20].try_into().ok()?);
+    let height = u32::from_be_bytes(bytes[20..24].try_into().ok()?);
+    (width == height && (ICON_MIN_SIDE..=ICON_MAX_SIDE).contains(&width)).then_some(width)
 }
 
 impl WebAppSettings {
+    /// The name under the icon.
+    pub(crate) fn name(&self) -> &str {
+        self.app_name.as_deref().unwrap_or("Chief")
+    }
+
+    /// Reads and checks the icon file. Ok(None) when no icon is set; Err is the message
+    /// Harold refuses to start with. The bytes are never part of a message.
+    pub(crate) fn load_icon(&self) -> Result<Option<WebAppIcon>, String> {
+        let Some(icon) = &self.icon else {
+            return Ok(None);
+        };
+        let path = expand_tilde(icon);
+        let unreadable = || format!("web_app.icon cannot be read: {path}");
+        if !std::path::Path::new(&path).is_absolute() {
+            return Err(unreadable());
+        }
+        let bytes = std::fs::read(&path).map_err(|_| unreadable())?;
+        let side = square_png_side(&bytes).ok_or_else(|| {
+            "web_app.icon must be a square PNG of 180 to 1024 pixels a side, at most 1 MB"
+                .to_owned()
+        })?;
+        Ok(Some(WebAppIcon { bytes, side }))
+    }
+
     /// The listen address. `Settings::validate` reports one that does not parse.
     pub(crate) fn listen_addr(&self) -> Option<SocketAddr> {
         self.listen.parse().ok()
@@ -548,6 +602,15 @@ fn web_app_errors(web_app: Option<&WebAppSettings>, chief_folder: Option<&str>) 
     }
     if chief_folder.is_none() {
         errors.push("web_app needs notify.chief, the chief's folder".into());
+    }
+    if let Some(name) = &web_app.app_name {
+        let length = name.chars().count();
+        if length == 0 || length > APP_NAME_MAX || name.chars().any(char::is_control) {
+            errors.push("web_app.app_name must be 1 to 30 characters on one line".into());
+        }
+    }
+    if let Err(error) = web_app.load_icon() {
+        errors.push(error);
     }
     errors
 }
@@ -2561,6 +2624,119 @@ mod tests {
             "{WEB_APP_FOLDER}[web_app]\nlisten = \"127.0.0.1:4330\"\nallowed_login = \"a@b.c\""
         ));
         assert!(!with.iter().any(|e| e == message), "{with:?}");
+    }
+
+    /// A PNG header of the given size: the signature, an IHDR chunk, and `padding` extra bytes.
+    fn png(width: u32, height: u32, padding: usize) -> Vec<u8> {
+        let mut bytes = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 13];
+        bytes.extend(b"IHDR");
+        bytes.extend(width.to_be_bytes());
+        bytes.extend(height.to_be_bytes());
+        bytes.extend([8, 6, 0, 0, 0]);
+        bytes.resize(bytes.len() + padding, 0);
+        bytes
+    }
+
+    const ICON_MESSAGE: &str =
+        "web_app.icon must be a square PNG of 180 to 1024 pixels a side, at most 1 MB";
+    const NAME_MESSAGE: &str = "web_app.app_name must be 1 to 30 characters on one line";
+
+    fn icon_errors(file: &str, contents: &[u8]) -> Vec<String> {
+        let dir = std::env::temp_dir().join(format!("harold-icon-{}-{file}", std::process::id()));
+        let _guard = TempDirGuard(dir.clone());
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("icon.png");
+        std::fs::write(&path, contents).unwrap();
+        web_app_validate_errors(&format!(
+            "{WEB_APP_FOLDER}[web_app]\nlisten = \"127.0.0.1:4330\"\nallowed_login = \"a@b.c\"\nicon = \"{}\"",
+            path.display()
+        ))
+    }
+
+    #[test]
+    fn validate_refuses_an_icon_that_is_not_a_square_png_of_180_to_1024() {
+        let big = png(512, 512, 2 * 1024 * 1024);
+        let cases: [(&str, Vec<u8>); 6] = [
+            (
+                "jpeg",
+                vec![
+                    0xFF, 0xD8, 0xFF, 0xE0, 0, 0x10, b'J', b'F', b'I', b'F', 0, 1, 1, 0, 0, 1, 0,
+                    1, 0, 0, 0, 0, 0, 0,
+                ],
+            ),
+            ("small", png(100, 100, 0)),
+            ("wide", png(200, 100, 0)),
+            ("huge", png(2048, 2048, 0)),
+            ("heavy", big),
+            ("short", vec![0x89, b'P', b'N', b'G']),
+        ];
+        for (name, bytes) in cases {
+            let errors = icon_errors(name, &bytes);
+            assert!(
+                errors.iter().any(|e| e == ICON_MESSAGE),
+                "{name}: {errors:?}"
+            );
+        }
+        for (name, bytes) in [("min", png(180, 180, 0)), ("max", png(1024, 1024, 100))] {
+            let errors = icon_errors(name, &bytes);
+            assert!(
+                !errors.iter().any(|e| e.starts_with("web_app.icon")),
+                "{name}: {errors:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_refuses_an_icon_that_cannot_be_read() {
+        for path in ["/no/such/icon.png", "relative/icon.png"] {
+            let errors = web_app_validate_errors(&format!(
+                "{WEB_APP_FOLDER}[web_app]\nlisten = \"127.0.0.1:4330\"\nallowed_login = \"a@b.c\"\nicon = \"{path}\""
+            ));
+            let message = format!("web_app.icon cannot be read: {path}");
+            assert!(errors.iter().any(|e| *e == message), "{path}: {errors:?}");
+        }
+    }
+
+    #[test]
+    fn a_tilde_icon_path_is_expanded() {
+        let home = std::env::var("HOME").expect("HOME is set");
+        let errors = web_app_validate_errors(&format!(
+            "{WEB_APP_FOLDER}[web_app]\nlisten = \"127.0.0.1:4330\"\nallowed_login = \"a@b.c\"\nicon = \"~/no-such-icon.png\""
+        ));
+        let message = format!("web_app.icon cannot be read: {home}/no-such-icon.png");
+        assert!(errors.iter().any(|e| *e == message), "{errors:?}");
+    }
+
+    #[test]
+    fn validate_refuses_an_app_name_that_is_empty_long_or_multiline() {
+        for name in ["", &"x".repeat(31), "two\\nlines"] {
+            let errors = web_app_validate_errors(&format!(
+                "{WEB_APP_FOLDER}[web_app]\nlisten = \"127.0.0.1:4330\"\nallowed_login = \"a@b.c\"\napp_name = \"{name}\""
+            ));
+            assert!(
+                errors.iter().any(|e| e == NAME_MESSAGE),
+                "{name:?}: {errors:?}"
+            );
+        }
+        for name in ["Chief M4", &"é".repeat(30)] {
+            let errors = web_app_validate_errors(&format!(
+                "{WEB_APP_FOLDER}[web_app]\nlisten = \"127.0.0.1:4330\"\nallowed_login = \"a@b.c\"\napp_name = \"{name}\""
+            ));
+            assert!(
+                !errors.iter().any(|e| e == NAME_MESSAGE),
+                "{name:?}: {errors:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn without_the_keys_the_app_is_called_chief_and_has_no_icon() {
+        let settings = crate::peers::settings_with(
+            "[web_app]\nlisten = \"127.0.0.1:4330\"\nallowed_login = \"a@b.c\"",
+        );
+        let web_app = settings.web_app.unwrap();
+        assert_eq!(web_app.name(), "Chief");
+        assert!(web_app.load_icon().unwrap().is_none());
     }
 
     /// Removes the temp dir when dropped, even if an assertion fails.
