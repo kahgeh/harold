@@ -16,8 +16,8 @@ use harold_api::tools::backlog::v1::{
 };
 use harold_api::tools::questions::v1::{
     AnswerKind as ProtoAnswerKind, AnswerQuestionRequest, Decision, DecisionOption,
-    DeferQuestionRequest, ListQuestionsRequest, ListQuestionsResponse, ListedQuestion, Pick,
-    question_service_client::QuestionServiceClient,
+    DeferQuestionRequest, ListQuestionsRequest, ListQuestionsResponse, ListedQuestion, Pick, Step,
+    TickStepRequest, question_service_client::QuestionServiceClient,
 };
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -28,7 +28,7 @@ use crate::app::{
     MonitorHealthState, Snapshot,
 };
 use crate::questions::{
-    AnswerKind, DecisionView, OptionView, Outgoing, QuestionView, Queue, SendResult,
+    AnswerKind, DecisionView, OptionView, Outgoing, QuestionView, Queue, SendResult, StepView,
 };
 use crate::text::sanitize_display;
 
@@ -289,6 +289,17 @@ impl SourceStream {
         }
     }
 
+    pub async fn tick_step(&self, id: &str, version: u32, step: u32, ticked: bool) -> SendResult {
+        let Some(mut client) = self.questions.clone() else {
+            return SendResult::Unavailable;
+        };
+        let request = tick_request(id, version, step, ticked);
+        match tokio::time::timeout(VOICE_REQUEST_TIMEOUT, client.tick_step(request)).await {
+            Ok(result) => tick_send_result(result.map(|_| ())),
+            Err(_) => SendResult::Unavailable,
+        }
+    }
+
     pub async fn defer_question(&self, id: &str) -> Result<(), SourceError> {
         let Some(mut client) = self.questions.clone() else {
             return Err(SourceError::transport("question tool unavailable"));
@@ -400,6 +411,25 @@ pub(crate) fn answer_send_result(result: Result<(), tonic::Status>) -> SendResul
     }
 }
 
+/// What `TickStep`'s answer means. The dash only sends steps in range, so an
+/// `invalid step` means the item is not the instructions it saw: it is no longer waiting.
+pub(crate) fn tick_send_result(result: Result<(), tonic::Status>) -> SendResult {
+    match result {
+        Err(status) if status.code() == tonic::Code::InvalidArgument => SendResult::NotWaiting,
+        other => answer_send_result(other),
+    }
+}
+
+/// The tick request; `step` counts from 1, as the tool does.
+pub(crate) fn tick_request(id: &str, version: u32, step: u32, ticked: bool) -> TickStepRequest {
+    TickStepRequest {
+        id: id.to_owned(),
+        version,
+        step,
+        ticked,
+    }
+}
+
 fn answer_request(out: &Outgoing) -> AnswerQuestionRequest {
     AnswerQuestionRequest {
         id: out.id.clone(),
@@ -459,7 +489,8 @@ pub fn map_queue(response: ListQuestionsResponse) -> Queue {
 
 fn map_listed_question(listed: ListedQuestion) -> Option<QuestionView> {
     let question = listed.question?;
-    if question.decisions.is_empty()
+    let instructions = !question.steps.is_empty();
+    if instructions == !question.decisions.is_empty()
         || question
             .decisions
             .iter()
@@ -477,10 +508,17 @@ fn map_listed_question(listed: ListedQuestion) -> Option<QuestionView> {
         version: listed.version,
         deferred: listed.deferred,
         decisions: question.decisions.into_iter().map(map_decision).collect(),
-        title: String::new(),
-        steps: vec![],
-        ticked: vec![],
+        title: question_text(&question.title),
+        steps: question.steps.into_iter().map(map_step).collect(),
+        ticked: listed.ticked,
     })
+}
+
+fn map_step(step: Step) -> StepView {
+    StepView {
+        text: question_text(&step.text),
+        detail: question_text(&step.detail),
+    }
 }
 
 fn map_decision(decision: Decision) -> DecisionView {
@@ -1314,10 +1352,11 @@ mod tests {
 #[cfg(test)]
 mod question_tests {
     use harold_api::tools::questions::v1::{
-        Decision, DecisionOption, Dismissed, ListQuestionsResponse, ListedQuestion, Question,
+        AnswerKind as ProtoAnswerKind, Decision, DecisionOption, Dismissed, ListQuestionsResponse,
+        ListedQuestion, Question, Step,
     };
 
-    use super::{answer_send_result, map_queue};
+    use super::{answer_send_result, map_queue, proto_answer_kind, tick_request};
     use crate::questions::SendResult;
 
     fn option(key: &str, suggested: bool, free: bool) -> DecisionOption {
@@ -1489,5 +1528,120 @@ mod question_tests {
             };
             assert_eq!(super::answer_request(&out).send_now, send_now);
         }
+    }
+
+    #[test]
+    fn map_queue_maps_instructions_with_steps_and_ticks() {
+        let queue = map_queue(ListQuestionsResponse {
+            questions: vec![ListedQuestion {
+                question: Some(Question {
+                    id: "I1".into(),
+                    product: "harold".into(),
+                    spec: String::new(),
+                    sha: String::new(),
+                    link: String::new(),
+                    intro: "do these".into(),
+                    decisions: vec![],
+                    title: "Ship it".into(),
+                    steps: vec![
+                        Step {
+                            text: "one".into(),
+                            detail: "first".into(),
+                        },
+                        Step {
+                            text: "two".into(),
+                            detail: String::new(),
+                        },
+                    ],
+                }),
+                version: 3,
+                deferred: false,
+                ticked: vec![2],
+            }],
+            waiting: 1,
+            dismissed: vec![],
+        });
+        assert_eq!(queue.questions.len(), 1);
+        let q = &queue.questions[0];
+        assert!(q.is_instructions());
+        assert_eq!(q.title, "Ship it");
+        assert_eq!(q.steps.len(), 2);
+        assert_eq!(q.steps[0].text, "one");
+        assert_eq!(q.steps[0].detail, "first");
+        assert_eq!(q.ticked, vec![2]);
+        assert_eq!(
+            (q.spec.as_str(), q.sha.as_str(), q.link.as_str()),
+            ("", "", "")
+        );
+        assert!(q.decisions.is_empty());
+        assert_eq!(queue.waiting, 1);
+
+        // Neither steps nor decisions is still dropped.
+        let mut none = listed("Q8", 1, false, vec![]);
+        none.question.as_mut().unwrap().title = "t".into();
+        let queue = map_queue(ListQuestionsResponse {
+            questions: vec![none],
+            waiting: 1,
+            dismissed: vec![],
+        });
+        assert!(queue.questions.is_empty());
+    }
+
+    #[test]
+    fn map_queue_cleans_step_text() {
+        let mut item = listed("I1", 1, false, vec![]);
+        let question = item.question.as_mut().unwrap();
+        question.title = "\x1b[31mTitle\x1b[0m".into();
+        question.steps = vec![Step {
+            text: "\x1b[2Jrun\r".into(),
+            detail: "line\x1b]0;x\x07 one".into(),
+        }];
+        let queue = map_queue(ListQuestionsResponse {
+            questions: vec![item],
+            waiting: 1,
+            dismissed: vec![],
+        });
+        let q = &queue.questions[0];
+        assert_eq!(q.steps[0].text, "run");
+        assert_eq!(q.steps[0].detail, "line one");
+        assert!(!q.title.contains('\x1b'));
+    }
+
+    #[test]
+    fn tick_request_has_one_based_step() {
+        let request = tick_request("I1", 4, 1, true);
+        assert_eq!(
+            (
+                request.id.as_str(),
+                request.version,
+                request.step,
+                request.ticked
+            ),
+            ("I1", 4, 1, true)
+        );
+        assert!(!tick_request("I1", 4, 2, false).ticked);
+    }
+
+    #[test]
+    fn done_and_ignore_map_to_proto_kinds() {
+        use crate::questions::AnswerKind;
+        assert_eq!(proto_answer_kind(AnswerKind::Done), ProtoAnswerKind::Done);
+        assert_eq!(
+            proto_answer_kind(AnswerKind::Ignore),
+            ProtoAnswerKind::Ignore
+        );
+    }
+
+    #[test]
+    fn a_tick_refusal_of_invalid_step_means_not_waiting() {
+        assert_eq!(
+            super::tick_send_result(Err(tonic::Status::invalid_argument("invalid step"))),
+            SendResult::NotWaiting
+        );
+        assert_eq!(
+            super::tick_send_result(Err(tonic::Status::failed_precondition("version_changed"))),
+            SendResult::VersionChanged
+        );
+        assert_eq!(super::tick_send_result(Ok(())), SendResult::Recorded);
     }
 }

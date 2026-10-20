@@ -283,13 +283,21 @@ struct SearchableRow {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Effect {
     None,
-    Navigate { pane_id: String },
+    Navigate {
+        pane_id: String,
+    },
     Retry,
     Quit,
     SetTtsMuted(bool),
     SetMessagingPaused(bool),
     Call(CallAction),
     Answer(Outgoing),
+    Tick {
+        id: String,
+        version: u32,
+        step: u32,
+        ticked: bool,
+    },
     Defer(String),
     OpenLink(String),
 }
@@ -691,6 +699,16 @@ impl App {
         self.settle_cursor();
     }
 
+    /// Applies Harold's answer to a tick of `step` (from 1) of instructions `id`. A
+    /// refusal that drops the instructions moves the cursor as a send does.
+    pub fn question_ticked(&mut self, id: &str, step: u32, ticked: bool, result: SendResult) {
+        let before = self.questions.shown();
+        self.questions.ticked(id, step, ticked, result);
+        let after = self.questions.shown();
+        self.leave_a_replaced_question(before.as_ref(), after.as_ref());
+        self.settle_cursor();
+    }
+
     /// When another question takes the place of the one the cursor was on, the cursor goes
     /// to the new question's header: a row of the old one, such as `send`, must not carry
     /// a key over to a question the user has not seen.
@@ -763,8 +781,17 @@ impl App {
                 Effect::Defer(id)
             }
             BlockEffect::Send(out) => Effect::Answer(out),
-            // Task 5 wires the tick to the runtime.
-            BlockEffect::Tick { .. } => Effect::None,
+            BlockEffect::Tick {
+                id,
+                version,
+                step,
+                ticked,
+            } => Effect::Tick {
+                id,
+                version,
+                step,
+                ticked,
+            },
         };
         self.settle_cursor();
         effect
@@ -3648,6 +3675,74 @@ mod tests {
         changed.questions[0].version = 2;
         app.observe_questions(changed);
         assert!(!app.holding_block_keys());
+    }
+
+    fn instructions_queue(id: &str, steps: usize) -> crate::questions::Queue {
+        let mut q = question_view(id, 1);
+        q.decisions = vec![];
+        q.title = "Do these".into();
+        q.steps = (1..=steps)
+            .map(|n| crate::questions::StepView {
+                text: format!("step {n}"),
+                detail: String::new(),
+            })
+            .collect();
+        crate::questions::Queue {
+            questions: vec![q],
+            waiting: 1,
+            dismissed: Vec::new(),
+        }
+    }
+
+    fn open_instructions(app: &mut App) {
+        app.handle_key(KeyCode::Char('j'));
+        app.handle_key(KeyCode::Char('l'));
+    }
+
+    #[test]
+    fn space_on_a_step_returns_a_tick_effect() {
+        let mut app = call_app(CallState::Off);
+        app.observe_questions(instructions_queue("I1", 3));
+        open_instructions(&mut app);
+        app.land_on(&Stop::Question(QStop::Step(1)));
+        assert_eq!(
+            app.handle_key(KeyCode::Char(' ')),
+            Effect::Tick {
+                id: "I1".into(),
+                version: 1,
+                step: 2,
+                ticked: true
+            }
+        );
+    }
+
+    #[test]
+    fn done_row_enter_returns_an_answer_effect_with_done() {
+        let mut app = call_app(CallState::Off);
+        app.observe_questions(instructions_queue("I1", 2));
+        open_instructions(&mut app);
+        app.land_on(&Stop::Question(QStop::Action(0)));
+        let Effect::Answer(out) = app.handle_key(KeyCode::Enter) else {
+            panic!("Enter on done answers");
+        };
+        assert_eq!(
+            (out.id.as_str(), out.kind),
+            ("I1", crate::questions::AnswerKind::Done)
+        );
+    }
+
+    #[test]
+    fn question_ticked_recorded_updates_the_view() {
+        let mut app = call_app(CallState::Off);
+        app.observe_questions(instructions_queue("I1", 3));
+        open_instructions(&mut app);
+        app.land_on(&Stop::Question(QStop::Step(0)));
+        app.question_ticked("I1", 1, true, SendResult::Recorded);
+        assert_eq!(app.questions.view().unwrap().ticked_count, 1);
+        assert_eq!(app.cursor_stop(), Some(Stop::Question(QStop::Step(0))));
+        // A refused tick of a withdrawn item moves the cursor off it.
+        app.question_ticked("I1", 2, true, SendResult::NotWaiting);
+        assert!(app.questions.view().unwrap().id.is_empty());
     }
 
     #[test]

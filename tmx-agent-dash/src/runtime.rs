@@ -177,6 +177,7 @@ where
                 | Control::SetMessagingPaused(_)
                 | Control::Call(_)
                 | Control::Answer(_)
+                | Control::Tick { .. }
                 | Control::Defer(_)
                 | Control::OpenLink(_) => {}
             }
@@ -213,6 +214,7 @@ where
                 | Control::SetMessagingPaused(_)
                 | Control::Call(_)
                 | Control::Answer(_)
+                | Control::Tick { .. }
                 | Control::Defer(_)
                 | Control::OpenLink(_),
             ) => {
@@ -263,6 +265,15 @@ trait StreamPort: Sized {
     fn answer_question<'a>(&'a mut self, _out: &'a Outgoing) -> BoxFuture<'a, SendResult> {
         Box::pin(async { SendResult::Unavailable })
     }
+    fn tick_step<'a>(
+        &'a mut self,
+        _id: &'a str,
+        _version: u32,
+        _step: u32,
+        _ticked: bool,
+    ) -> BoxFuture<'a, SendResult> {
+        Box::pin(async { SendResult::Unavailable })
+    }
     fn defer_question<'a>(&'a mut self, _id: &'a str) -> BoxFuture<'a, Result<(), SourceError>> {
         Box::pin(async { Err(SourceError::Transport("question tool unavailable".into())) })
     }
@@ -309,6 +320,16 @@ impl StreamPort for SourceStream {
 
     fn answer_question<'a>(&'a mut self, out: &'a Outgoing) -> BoxFuture<'a, SendResult> {
         Box::pin(SourceStream::answer_question(self, out))
+    }
+
+    fn tick_step<'a>(
+        &'a mut self,
+        id: &'a str,
+        version: u32,
+        step: u32,
+        ticked: bool,
+    ) -> BoxFuture<'a, SendResult> {
+        Box::pin(SourceStream::tick_step(self, id, version, step, ticked))
     }
 
     fn defer_question<'a>(&'a mut self, id: &'a str) -> BoxFuture<'a, Result<(), SourceError>> {
@@ -370,6 +391,7 @@ where
                     | Control::SetMessagingPaused(_)
                     | Control::Call(_)
                     | Control::Answer(_)
+                | Control::Tick { .. }
                     | Control::Defer(_)
                     | Control::OpenLink(_) => draw(terminal, &core.app, clock)?,
                 }
@@ -503,6 +525,23 @@ where
                     draw(terminal, &core.app, clock)?;
                     continue;
                 }
+                if let Control::Tick {
+                    id,
+                    version,
+                    step,
+                    ticked,
+                } = &control
+                {
+                    let result = stream.tick_step(id, *version, *step, *ticked).await;
+                    core.app.question_ticked(id, *step, *ticked, result);
+                    let listed = stream.list_questions().await;
+                    core.questions_refreshed(listed);
+                    question_poll
+                        .as_mut()
+                        .reset(tokio::time::Instant::now() + core.question_poll_interval);
+                    draw(terminal, &core.app, clock)?;
+                    continue;
+                }
                 if let Control::Defer(id) = &control {
                     if stream.defer_question(id).await.is_err() {
                         core.app.questions.set_notice(UNAVAILABLE_NOTICE.into());
@@ -597,6 +636,7 @@ async fn wait_for_retry(
                         | Control::SetMessagingPaused(_)
                         | Control::Call(_)
                         | Control::Answer(_)
+                | Control::Tick { .. }
                         | Control::Defer(_)
                         | Control::OpenLink(_)
                 ) {
@@ -1023,6 +1063,12 @@ enum Control {
     SetMessagingPaused(bool),
     Call(CallAction),
     Answer(Outgoing),
+    Tick {
+        id: String,
+        version: u32,
+        step: u32,
+        ticked: bool,
+    },
     Defer(String),
     OpenLink(String),
 }
@@ -1267,6 +1313,17 @@ impl RuntimeCore {
             Effect::SetMessagingPaused(paused) => Control::SetMessagingPaused(paused),
             Effect::Call(action) => Control::Call(action),
             Effect::Answer(out) => Control::Answer(out),
+            Effect::Tick {
+                id,
+                version,
+                step,
+                ticked,
+            } => Control::Tick {
+                id,
+                version,
+                step,
+                ticked,
+            },
             Effect::Defer(id) => Control::Defer(id),
             Effect::OpenLink(link) => Control::OpenLink(link),
             Effect::Navigate { pane_id } => {
@@ -2503,6 +2560,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_tick_calls_the_source_and_relists() {
+        let mut core = connected_core();
+        let mut view = question_view("I1", 2, 0);
+        view.title = "Do these".into();
+        view.steps = vec![
+            crate::questions::StepView {
+                text: "one".into(),
+                detail: String::new(),
+            },
+            crate::questions::StepView {
+                text: "two".into(),
+                detail: String::new(),
+            },
+        ];
+        let queue = Queue {
+            questions: vec![view],
+            waiting: 1,
+            dismissed: Vec::new(),
+        };
+        let probe = question_probe(Some(queue));
+        probe.lock().unwrap().ticks.push_back(SendResult::Recorded);
+        // k to the header, l opens it, j to the first step, space ticks it.
+        let keys = [
+            KeyCode::Char('k'),
+            KeyCode::Char('l'),
+            KeyCode::Char('j'),
+            KeyCode::Char(' '),
+        ];
+        let log = run_question_stream(&mut core, &probe, &keys).await;
+        let mut expected = lists(4);
+        expected.extend(["tick I1 v2 s1 true".to_string(), "list".to_string()]);
+        assert_eq!(log, expected);
+    }
+
+    #[tokio::test]
     async fn the_later_row_calls_defer_question() {
         let mut core = connected_core();
         let mut queue = question("Q1", 1, 1);
@@ -3505,6 +3597,8 @@ mod tests {
         /// Each answer takes the next result, and the queue lists show after it.
         answers: VecDeque<(SendResult, Option<Queue>)>,
         sent: Vec<Outgoing>,
+        /// Each tick takes the next result.
+        ticks: VecDeque<SendResult>,
     }
 
     type QuestionProbe = Arc<std::sync::Mutex<QuestionState>>;
@@ -3662,6 +3756,24 @@ mod tests {
             if let Some(next) = next {
                 state.queue = Some(next);
             }
+            Box::pin(async move { result })
+        }
+
+        fn tick_step<'a>(
+            &'a mut self,
+            id: &'a str,
+            version: u32,
+            step: u32,
+            ticked: bool,
+        ) -> BoxFuture<'a, SendResult> {
+            let Some(probe) = &self.questions else {
+                return Box::pin(async { SendResult::Unavailable });
+            };
+            let mut state = probe.lock().unwrap();
+            state
+                .log
+                .push(format!("tick {id} v{version} s{step} {ticked}"));
+            let result = state.ticks.pop_front().unwrap_or(SendResult::Unavailable);
             Box::pin(async move { result })
         }
 
