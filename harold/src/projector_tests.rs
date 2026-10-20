@@ -22,7 +22,7 @@ use crate::inbound::RouteReport;
 use crate::inbound::ownership::agent_message_text;
 use crate::outbound::fake::{CapturedLogs, FakeEnvironment};
 use crate::outbound::notify_tests::{FAKE_MACHINE, FakeApp, FakeAwayText};
-use crate::outbound::{AppDelivery, AppRoute, ChiefApp, DeliveryOutcome, SystemEnvironment};
+use crate::outbound::{AppDelivery, AppRoute, NotPushedReason, ChiefApp, DeliveryOutcome, SystemEnvironment};
 use crate::store::{
     AwayMessageRequested, EventVersion, HaroldStore, InboundMessage, NewEvent, PendingDelivery,
     SpokenLineRequested, TurnCompleted, WriteFault, append_agent_events,
@@ -3479,7 +3479,7 @@ async fn chief_away_message_not_pushed_goes_to_imessage_once() {
     let with = with_app(
         &directory,
         chief_and_pod(),
-        FakeApp::new(AppDelivery::NotPushed),
+        FakeApp::new(AppDelivery::NotPushed(NotPushedReason::NoSubscriptions)),
     )
     .await;
 
@@ -3591,7 +3591,7 @@ async fn locked_chief_spoken_line_not_pushed_goes_to_imessage_as_text() {
     let with = with_app(
         &directory,
         chief_and_pod(),
-        FakeApp::new(AppDelivery::NotPushed),
+        FakeApp::new(AppDelivery::NotPushed(NotPushedReason::NoSubscriptions)),
     )
     .await;
 
@@ -3679,7 +3679,7 @@ async fn a_failed_thread_write_is_retryable_and_sends_nothing() {
 async fn a_chief_turn_end_records_the_app_as_its_channel_and_the_fallback_as_today() {
     for (delivery, channel) in [
         (AppDelivery::Pushed, "app"),
-        (AppDelivery::NotPushed, "imessage"),
+        (AppDelivery::NotPushed(NotPushedReason::NoSubscriptions), "imessage"),
     ] {
         let directory = TestDirectory::new();
         let with = with_app(&directory, chief_and_pod(), FakeApp::new(delivery)).await;
@@ -4200,7 +4200,7 @@ async fn chief_message_the_app_cannot_push_is_dropped_when_the_chief_is_not_on_i
     let with = with_app_settings(
         &directory,
         chief_and_pod(),
-        FakeApp::new(AppDelivery::NotPushed),
+        FakeApp::new(AppDelivery::NotPushed(NotPushedReason::NoSubscriptions)),
         CHIEF_ON_APP_ONLY,
     )
     .await;

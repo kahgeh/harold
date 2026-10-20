@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use super::WebAppRoute;
-use crate::outbound::{AppDelivery, AppRoute};
+use crate::outbound::{AppDelivery, AppRoute, NotPushedReason};
 use crate::store::{
     AppPushSubscribed, AppReplyState, AppSender, HaroldStore, append_app_push_subscribed,
     append_app_reply,
@@ -92,12 +92,68 @@ async fn a_gone_subscription_is_deleted_and_the_message_is_not_pushed() {
 
     let delivery = deliver(&route, "event-1", "All pods are green").await;
 
-    assert_eq!(delivery, AppDelivery::NotPushed);
+    assert_eq!(
+        delivery,
+        AppDelivery::NotPushed(NotPushedReason::NoneAccepted)
+    );
     assert_eq!(service.requests().len(), 1);
     // Deleted by the AppPushUnsubscribed event the route stored.
     store.project_unhandled_events(100).await.unwrap();
     assert!(store.app_push_subscriptions().await.unwrap().is_empty());
     assert_eq!(store.app_messages_since(0).await.unwrap().len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn all_pushes_refused_is_not_pushed_none_accepted() {
+    let service = FakePushService::start(500).await;
+    let directory = TestDirectory::new();
+    let (_store, route) = route_with(&directory, &[service.subscription(1)]).await;
+
+    let delivery = deliver(&route, "event-1", "All pods are green").await;
+
+    assert_eq!(
+        delivery,
+        AppDelivery::NotPushed(NotPushedReason::NoneAccepted)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failing_subscription_read_is_not_pushed_subscriptions_unread_and_warns() {
+    const CANARY: &str = "APP-CANARY-9182";
+    let directory = TestDirectory::new();
+    let (store, route) = route_with(&directory, &[]).await;
+    // Another connection to the state database takes the table away, so the read fails.
+    let state = turso::Builder::new_local(
+        directory
+            .0
+            .join("harold-state.db")
+            .to_str()
+            .unwrap(),
+    )
+    .build()
+    .await
+    .unwrap();
+    state
+        .connect()
+        .unwrap()
+        .execute("DROP TABLE app_push_subscriptions", ())
+        .await
+        .unwrap();
+    assert!(store.app_push_subscriptions().await.is_err());
+    let logs = crate::outbound::fake::CapturedLogs::start();
+
+    // On this thread, so that the capture sees the route's lines.
+    let delivery = tokio::task::block_in_place(|| route.deliver("event-1", CANARY)).unwrap();
+
+    assert_eq!(
+        delivery,
+        AppDelivery::NotPushed(NotPushedReason::SubscriptionsUnread)
+    );
+    assert_eq!(store.app_messages_since(0).await.unwrap().len(), 1);
+    let text = logs.text();
+    assert!(text.contains("WARN"), "{text}");
+    assert!(text.contains("app push subscriptions not read"), "{text}");
+    assert!(!text.contains(CANARY), "{text}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -131,7 +187,10 @@ async fn no_subscription_is_not_pushed_but_the_thread_keeps_the_message() {
 
     let delivery = deliver(&route, "event-1", "All pods are green").await;
 
-    assert_eq!(delivery, AppDelivery::NotPushed);
+    assert_eq!(
+        delivery,
+        AppDelivery::NotPushed(NotPushedReason::NoSubscriptions)
+    );
     let messages = store.app_messages_since(0).await.unwrap();
     assert_eq!(messages.len(), 1);
     assert_eq!(messages[0].text, "All pods are green");

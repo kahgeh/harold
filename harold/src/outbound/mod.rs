@@ -15,7 +15,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::channels;
 use crate::inbound::ownership::agent_message_text;
@@ -324,8 +324,29 @@ pub(crate) fn report_held(
 pub(crate) enum AppDelivery {
     /// At least one push service accepted the alert.
     Pushed,
-    /// No phone is subscribed, or no push service accepted the alert.
-    NotPushed,
+    /// No push was accepted, for the reason given.
+    NotPushed(NotPushedReason),
+}
+
+/// Why the web app pushed nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NotPushedReason {
+    /// No phone is subscribed.
+    NoSubscriptions,
+    /// The list of subscriptions could not be read.
+    SubscriptionsUnread,
+    /// Every push was refused, unreachable or gone.
+    NoneAccepted,
+}
+
+impl NotPushedReason {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::NoSubscriptions => "no_subscriptions",
+            Self::SubscriptionsUnread => "subscriptions_unread",
+            Self::NoneAccepted => "none_accepted",
+        }
+    }
 }
 
 /// The web app as the delivery loop sees it. The daemon uses `web_app::route::WebAppRoute`;
@@ -341,6 +362,8 @@ pub(crate) trait AppRoute: Send + Sync {
 /// `channels::send` and `channels::summarise_for_notification`; tests pass a fake.
 pub(crate) trait AwayText: Send + Sync {
     fn machine_name(&self) -> String;
+    /// The away channel's name: `imessage` or `telegram`.
+    fn channel(&self) -> &'static str;
     fn summarise(&self, turn: &TurnCompleted) -> String;
     fn send(&self, text: &str) -> Result<(), String>;
 }
@@ -350,6 +373,10 @@ pub(crate) struct SystemAwayText;
 impl AwayText for SystemAwayText {
     fn machine_name(&self) -> String {
         get_settings().machine_name.clone()
+    }
+
+    fn channel(&self) -> &'static str {
+        get_settings().notify.away().key()
     }
 
     fn summarise(&self, turn: &TurnCompleted) -> String {
@@ -397,8 +424,21 @@ pub(crate) fn deliver_from_chief(
 ) -> Result<CarriedBy, String> {
     match chief_app.app.deliver(event_id, text)? {
         AppDelivery::Pushed => Ok(CarriedBy::App),
-        AppDelivery::NotPushed if !chief_app.away_allowed => Ok(CarriedBy::Held),
-        AppDelivery::NotPushed => {
+        AppDelivery::NotPushed(reason) if !chief_app.away_allowed => {
+            warn!(
+                reason = reason.as_str(),
+                outcome = "held",
+                "app message not pushed"
+            );
+            Ok(CarriedBy::Held)
+        }
+        AppDelivery::NotPushed(reason) => {
+            warn!(
+                reason = reason.as_str(),
+                outcome = "away",
+                channel = chief_app.away.channel(),
+                "app message not pushed"
+            );
             chief_app
                 .away
                 .send(&format!("{APP_UNREACHABLE} {away_text}"))?;

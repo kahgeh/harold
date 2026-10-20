@@ -5,7 +5,8 @@ use super::NotifyEnvironment;
 use super::fake::{CapturedLogs, FakeEnvironment, turn};
 use super::left_out::TrackedAgents;
 use super::{
-    AppDelivery, AppRoute, AwayText, ChiefApp, DeliveryOutcome, NotifyState, OutboundChannel,
+    AppDelivery, AppRoute, AwayText, ChiefApp, DeliveryOutcome, NotPushedReason, NotifyState,
+    OutboundChannel, deliver_from_chief,
     is_chief_pane, notify, notify_with_app,
 };
 use crate::inbound::ownership::agent_message_text;
@@ -801,9 +802,18 @@ impl AppRoute for FakeApp {
 #[derive(Default)]
 pub(crate) struct FakeAwayText {
     sends: Mutex<Vec<String>>,
+    channel: Option<&'static str>,
 }
 
 impl FakeAwayText {
+    /// The away channel this fake names; `imessage` unless set.
+    fn on_channel(channel: &'static str) -> Self {
+        Self {
+            channel: Some(channel),
+            ..Self::default()
+        }
+    }
+
     /// Each text sent, oldest first.
     pub(crate) fn sends(&self) -> Vec<String> {
         self.sends.lock().unwrap().clone()
@@ -813,6 +823,10 @@ impl FakeAwayText {
 impl AwayText for FakeAwayText {
     fn machine_name(&self) -> String {
         FAKE_MACHINE.to_string()
+    }
+
+    fn channel(&self) -> &'static str {
+        self.channel.unwrap_or("imessage")
     }
 
     fn summarise(&self, _turn: &TurnCompleted) -> String {
@@ -867,7 +881,7 @@ fn locked_chief_turn_goes_to_the_app_and_not_the_away_channel() {
 #[test]
 fn chief_turn_not_pushed_goes_to_imessage_once_with_the_prefix() {
     let environment = FakeEnvironment::locked("");
-    let app = FakeApp::new(AppDelivery::NotPushed);
+    let app = FakeApp::new(AppDelivery::NotPushed(NotPushedReason::NoSubscriptions));
     let away = FakeAwayText::default();
 
     let outcome = notify_chief_turn(&environment, &app, &away, &turn("%1", "report"));
@@ -1106,4 +1120,63 @@ fn an_update_held_back_on_a_channel_not_set_up_counts_nothing_but_is_still_logge
             .contains("notification skipped (not in notify.imessage)")
     );
     assert_eq!(notified(&format!("{tree}/harold"), "imessage", "kept"), 0);
+}
+
+#[test]
+fn not_pushed_logs_app_message_not_pushed_with_reason_and_outcome() {
+    const CANARY: &str = "APP-CANARY-4417";
+    for reason in [
+        NotPushedReason::NoSubscriptions,
+        NotPushedReason::SubscriptionsUnread,
+        NotPushedReason::NoneAccepted,
+    ] {
+        for (channel, away_allowed) in [("imessage", true), ("telegram", true), ("imessage", false)]
+        {
+            let app = FakeApp::new(AppDelivery::NotPushed(reason));
+            let away = FakeAwayText::on_channel(channel);
+            let chief_app = ChiefApp {
+                app: &app,
+                away: &away,
+                away_allowed,
+            };
+            let logs = CapturedLogs::start();
+
+            deliver_from_chief(&chief_app, "event-1", CANARY, CANARY).unwrap();
+
+            let text = logs.text();
+            let line = text
+                .lines()
+                .find(|line| line.contains("app message not pushed"))
+                .unwrap_or_else(|| panic!("no line: {text}"));
+            assert!(line.contains("WARN"), "{line}");
+            assert!(
+                line.contains(&format!("reason=\"{}\"", reason.as_str())),
+                "{line}"
+            );
+            if away_allowed {
+                assert!(line.contains("outcome=\"away\""), "{line}");
+                assert!(line.contains(&format!("channel=\"{channel}\"")), "{line}");
+            } else {
+                assert!(line.contains("outcome=\"held\""), "{line}");
+                assert!(!line.contains("channel="), "{line}");
+            }
+            assert!(!text.contains(CANARY), "{text}");
+        }
+    }
+}
+
+#[test]
+fn a_pushed_message_logs_no_app_message_not_pushed() {
+    let app = FakeApp::new(AppDelivery::Pushed);
+    let away = FakeAwayText::default();
+    let chief_app = ChiefApp {
+        app: &app,
+        away: &away,
+        away_allowed: true,
+    };
+    let logs = CapturedLogs::start();
+
+    deliver_from_chief(&chief_app, "event-1", "text", "text").unwrap();
+
+    assert!(!logs.text().contains("app message not pushed"));
 }

@@ -4,9 +4,10 @@
 use std::sync::Arc;
 
 use time::OffsetDateTime;
+use tracing::warn;
 
 use super::push::{PushOutcome, Pusher, alert_body};
-use crate::outbound::{AppDelivery, AppRoute};
+use crate::outbound::{AppDelivery, AppRoute, NotPushedReason};
 use crate::store::{AppPushUnsubscribed, AppReplyState, HaroldStore, append_app_push_unsubscribed};
 
 pub(crate) struct WebAppRoute {
@@ -42,11 +43,17 @@ impl AppRoute for WebAppRoute {
             .block_on(self.store.add_chief_app_message(event_id, now_ms(), text))
             .map_err(|error| format!("app thread write failed: {error}"))?;
 
-        // A listing that fails pushes nothing: the message goes to iMessage instead.
-        let subscriptions = self
-            .runtime
-            .block_on(self.store.app_push_subscriptions())
-            .unwrap_or_default();
+        // A listing that fails pushes nothing: the message goes to the away channel instead.
+        let subscriptions = match self.runtime.block_on(self.store.app_push_subscriptions()) {
+            Ok(subscriptions) => subscriptions,
+            Err(error) => {
+                warn!(error = %error, "app push subscriptions not read");
+                return Ok(AppDelivery::NotPushed(NotPushedReason::SubscriptionsUnread));
+            }
+        };
+        if subscriptions.is_empty() {
+            return Ok(AppDelivery::NotPushed(NotPushedReason::NoSubscriptions));
+        }
         let body = alert_body(text);
         let mut pushed = false;
         let mut gone = Vec::new();
@@ -68,7 +75,7 @@ impl AppRoute for WebAppRoute {
         Ok(if pushed {
             AppDelivery::Pushed
         } else {
-            AppDelivery::NotPushed
+            AppDelivery::NotPushed(NotPushedReason::NoneAccepted)
         })
     }
 
