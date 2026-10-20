@@ -441,3 +441,114 @@ async fn the_skill_its_tools_the_facts_the_answer_and_the_report_reach_no_log_or
         assert!(!exported.contains(canary), "{canary} in an export");
     }
 }
+
+const CAUSE_FIELDS: [&str; 5] = [
+    "exit_code=",
+    "signal=",
+    "subtype=",
+    "is_error=",
+    "num_turns=",
+];
+
+#[tokio::test(start_paused = true)]
+async fn a_process_failed_run_logs_how_it_ended_and_what_claude_code_reported_without_text() {
+    test_support::install();
+    let logs = CapturedLogs::start();
+    let h = harness(
+        settings(),
+        vec![
+            Step::Exit {
+                stdout: r#"{"subtype":"error_max_turns","is_error":true,"num_turns":8,"result":"CAUSE-CANARY-1"}"#.into(),
+                exit: Exit {
+                    code: Some(3),
+                    signal: None,
+                },
+            },
+            Step::Exit {
+                stdout: "CAUSE-CANARY-2 not json".into(),
+                exit: Exit {
+                    code: None,
+                    signal: Some(15),
+                },
+            },
+            Step::Raw {
+                stdout: r#"{"subtype":"Bad CAUSE-CANARY-3","is_error":true}"#.into(),
+                ok: false,
+            },
+        ],
+    )
+    .await;
+    let name = unique("cause");
+    h.start(&name, 2, 120).await;
+    pass(Duration::from_secs(5 * 60)).await;
+
+    let text = logs.text();
+    let failed = lines(&text, "watch run failed", &name);
+    assert_eq!(failed.len(), 3, "{text}");
+    for field in [
+        "exit_code=3",
+        "subtype=\"error_max_turns\"",
+        "is_error=true",
+        "num_turns=8",
+    ] {
+        assert!(failed[0].contains(field), "{field}: {}", failed[0]);
+    }
+    assert!(!failed[0].contains("signal="), "{}", failed[0]);
+    assert!(failed[1].contains("signal=15") && failed[1].contains("subtype=\"unreadable_json\""));
+    assert!(!failed[1].contains("exit_code="), "{}", failed[1]);
+    assert!(failed[2].contains("subtype=\"other\"") && failed[2].contains("is_error=true"));
+    assert!(!failed[2].contains("num_turns="), "{}", failed[2]);
+    let exported = test_support::exported_text();
+    for canary in ["CAUSE-CANARY-1", "CAUSE-CANARY-2", "CAUSE-CANARY-3"] {
+        assert!(!text.contains(canary), "{canary} in harold.log");
+        assert!(!exported.contains(canary), "{canary} in an export");
+    }
+    // The export filter keeps all five.
+    for field in CAUSE_FIELDS {
+        let key = field.trim_end_matches('=');
+        assert!(crate::telemetry::ALLOWED_FIELDS.contains(&key), "{key}");
+    }
+    // They reach the export on the line itself.
+    let logged = exported_logs_of(&name)
+        .iter()
+        .map(|log| format!("{:?}", log.record))
+        .find(|record| record.contains("watch run failed") && record.contains("error_max_turns"))
+        .expect("the failed line is exported");
+    assert!(
+        logged.contains("exit_code") && logged.contains("num_turns"),
+        "{logged}"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn other_failures_log_none_of_the_cause_fields() {
+    test_support::install();
+    let logs = CapturedLogs::start();
+    let h = harness(
+        settings(),
+        vec![
+            Step::Raw {
+                stdout:
+                    r#"{"subtype":"error_max_budget_usd","is_error":true,"total_cost_usd":0.05}"#
+                        .into(),
+                ok: false,
+            },
+            Step::Hang,
+            Step::NoStart,
+        ],
+    )
+    .await;
+    let name = unique("nocause");
+    h.start(&name, 2, 120).await;
+    pass(Duration::from_secs(20 * 60)).await;
+
+    let text = logs.text();
+    let failed = lines(&text, "watch run failed", &name);
+    assert_eq!(failed.len(), 3, "{text}");
+    // NoStart is a process_failed run too, but it never ran, so it has nothing to say.
+    for line in &failed {
+        for field in CAUSE_FIELDS {
+            assert!(!line.contains(field), "{field} in {line}");
+        }
+    }
+}

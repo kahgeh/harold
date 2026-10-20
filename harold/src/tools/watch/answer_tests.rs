@@ -83,7 +83,12 @@ fn a_good_output_gives_the_answer_and_the_cost() {
         read,
         Read {
             answer: Ok(Answer::Report("x".into())),
-            cost_usd: Some(0.012)
+            cost_usd: Some(0.012),
+            cause: Some(Cause {
+                subtype: Some("success".into()),
+                is_error: Some(false),
+                num_turns: None
+            })
         }
     );
 }
@@ -100,7 +105,12 @@ fn bad_outputs_map_to_their_failures() {
         ),
         Read {
             answer: Err(Failure::UnreadableAnswer),
-            cost_usd: Some(0.01)
+            cost_usd: Some(0.01),
+            cause: Some(Cause {
+                subtype: Some("success".into()),
+                is_error: Some(false),
+                num_turns: None
+            })
         }
     );
     assert_eq!(
@@ -110,7 +120,12 @@ fn bad_outputs_map_to_their_failures() {
         ),
         Read {
             answer: Err(Failure::RunBudgetReached),
-            cost_usd: Some(0.05)
+            cost_usd: Some(0.05),
+            cause: Some(Cause {
+                subtype: Some("error_max_budget_usd".into()),
+                is_error: Some(true),
+                num_turns: None
+            })
         }
     );
     assert_eq!(
@@ -153,4 +168,59 @@ fn failure_names_are_the_reasons_the_log_carries() {
             "skill_missing"
         ]
     );
+}
+
+fn cause_of(json: &str) -> Cause {
+    read_output(json.as_bytes(), false).cause.unwrap()
+}
+
+#[test]
+fn the_cause_is_read_from_the_json() {
+    let read = read_output(
+        br#"{"subtype":"error_max_turns","is_error":true,"num_turns":8}"#,
+        true,
+    );
+    assert_eq!(read.answer, Err(Failure::ProcessFailed));
+    assert_eq!(
+        read.cause,
+        Some(Cause {
+            subtype: Some("error_max_turns".into()),
+            is_error: Some(true),
+            num_turns: Some(8)
+        })
+    );
+    let none = cause_of("{}");
+    assert_eq!(
+        (none.subtype, none.is_error, none.num_turns),
+        (None, None, None)
+    );
+}
+
+#[test]
+fn an_out_of_shape_subtype_becomes_other() {
+    let subtype = |value: &str| cause_of(&format!(r#"{{"subtype":"{value}"}}"#)).subtype;
+    assert_eq!(subtype("Bad subtype!").as_deref(), Some("other"));
+    assert_eq!(subtype("Upper").as_deref(), Some("other"));
+    assert_eq!(subtype("").as_deref(), Some("other"));
+    assert_eq!(subtype(&"a".repeat(41)).as_deref(), Some("other"));
+    assert_eq!(subtype(&"a".repeat(40)), Some("a".repeat(40)));
+    assert_eq!(
+        subtype("error_during_execution").as_deref(),
+        Some("error_during_execution")
+    );
+}
+
+#[test]
+fn output_that_is_not_json_is_unreadable_json() {
+    for text in ["not json", ""] {
+        let read = read_output(text.as_bytes(), true);
+        assert_eq!(
+            read.cause,
+            Some(Cause {
+                subtype: Some("unreadable_json".into()),
+                is_error: None,
+                num_turns: None
+            })
+        );
+    }
 }

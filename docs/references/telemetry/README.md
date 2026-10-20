@@ -239,7 +239,8 @@ No exported item carries what the user or an agent wrote, a voice line, the AI m
 pane_id, pane, session.id, session.source, component, reason, outcome, channel,
 resolved_by, kind, started_by, turn.start, state, alert, pod.product, spec.id,
 spec.state_at, spec.words, spec.revisions, phase, change, event_type,
-event_version, result, watch, run, cost_usd, agent, seconds, event_id
+event_version, result, watch, run, cost_usd, agent, seconds, event_id,
+exit_code, signal, subtype, is_error, num_turns
 ```
 
 Every other field is dropped before export, including `text`, `msg`, `raw_output`, `tag` and `error`. Span events and links are dropped too, and an error status loses its description.

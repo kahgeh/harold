@@ -13,16 +13,20 @@ use tokio::sync::watch as signal;
 use tokio::time::Instant;
 use tracing::Instrument as _;
 
-use super::answer::{self, Answer, Failure};
+use super::answer::{self, Answer, Cause, Failure};
 use super::clock::{clock_ms, day_bounds, local_text};
 use super::facts::{self, Sources, WatchEntry};
 use super::obs::{self, EndReason, How, RunObs};
 use super::report::{ReportSlot, Target, Typist};
-use super::runner::{ModelJob, ModelResult, ModelRunner, RUN_LIMIT};
+use super::runner::{Exit, ModelJob, ModelResult, ModelRunner, RUN_LIMIT};
 use super::store::{NewWatch, RunRecord, StoreError, Streak, WatchRow, WatchStore};
 use super::validate::{Checked, ReportTo, read_skill, to_micros};
 use crate::settings::WatchSettings;
 use crate::tools::{Agents, ChiefPane, PaneTyping, Pods};
+
+/// The answer or the failure, the reported cost, and how the process ended with what
+/// Claude Code reported (for a run that exited).
+type ModelOutcome = (Result<Answer, Failure>, Option<f64>, Option<(Exit, Cause)>);
 
 /// At most this many watches run at once.
 pub(super) const MAX_WATCHES: usize = 5;
@@ -410,7 +414,7 @@ impl Scheduler {
             }
         }
 
-        let (answer, reported_cost) = {
+        let (answer, reported_cost, why) = {
             let model = self
                 .model_result(row, run_no, budget, obs, cancelled, shutdown)
                 .await;
@@ -445,7 +449,13 @@ impl Scheduler {
         };
         match &answer {
             Ok(_) => obs.finished(&outcome, cost_usd, duration_ms),
-            Err(failure) => obs.failed(*failure, cost_usd),
+            Err(Failure::ProcessFailed) => match &why {
+                Some((exit, cause)) => {
+                    obs.failed(Failure::ProcessFailed, cost_usd, Some(*exit), Some(cause))
+                }
+                None => obs.failed(Failure::ProcessFailed, cost_usd, None, None),
+            },
+            Err(failure) => obs.failed(*failure, cost_usd, None, None),
         }
         let now = clock_ms();
         let record = RunRecord {
@@ -492,10 +502,10 @@ impl Scheduler {
         obs: &RunObs,
         cancelled: &mut signal::Receiver<bool>,
         shutdown: &mut signal::Receiver<()>,
-    ) -> Option<(Result<Answer, Failure>, Option<f64>)> {
+    ) -> Option<ModelOutcome> {
         let folder = std::path::Path::new(&row.folder);
         let Ok(skill) = read_skill(folder, &row.skill, &self.deps.settings.skill_folders) else {
-            return Some((Err(Failure::SkillMissing), None));
+            return Some((Err(Failure::SkillMissing), None, None));
         };
         obs.set_add_dirs(skill.add_dirs.len());
         let sources = Sources {
@@ -540,11 +550,12 @@ impl Scheduler {
             },
         );
         Some(match result {
-            ModelResult::FailedToStart => (Err(Failure::ProcessFailed), None),
-            ModelResult::Killed => (Err(Failure::Timeout), None),
-            ModelResult::Exited { stdout, ok } => {
+            ModelResult::FailedToStart => (Err(Failure::ProcessFailed), None, None),
+            ModelResult::Killed => (Err(Failure::Timeout), None, None),
+            ModelResult::Exited { stdout, ok, exit } => {
                 let read = answer::read_output(&stdout, ok);
-                (read.answer, read.cost_usd)
+                let why = read.cause.map(|cause| (exit, cause));
+                (read.answer, read.cost_usd, why)
             }
         })
     }

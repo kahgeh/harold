@@ -90,21 +90,46 @@ pub(super) fn parse_answer(result: &str) -> Option<Answer> {
 #[derive(Deserialize)]
 struct ClaudeJson {
     #[serde(default)]
-    is_error: bool,
+    is_error: Option<bool>,
     #[serde(default)]
     subtype: Option<String>,
+    #[serde(default)]
+    num_turns: Option<u32>,
     #[serde(default)]
     result: Option<String>,
     #[serde(default)]
     total_cost_usd: Option<f64>,
 }
 
-/// What a run that exited gave: the answer or the failure, and the cost Claude Code
-/// reported, when it did.
+/// What Claude Code reported about how a run went. Never holds text: the subtype is
+/// cut to a fixed shape.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct Cause {
+    pub subtype: Option<String>,
+    pub is_error: Option<bool>,
+    pub num_turns: Option<u32>,
+}
+
+/// The longest subtype kept.
+const SUBTYPE_MAX_CHARS: usize = 40;
+
+/// The subtype when it is a short name of `a-z`, `0-9` and `_`, else `other`.
+fn clean_subtype(subtype: &str) -> String {
+    let fits = !subtype.is_empty()
+        && subtype.len() <= SUBTYPE_MAX_CHARS
+        && subtype
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_');
+    if fits { subtype } else { "other" }.to_owned()
+}
+
+/// What a run that exited gave: the answer or the failure, the cost Claude Code
+/// reported, when it did, and its cause.
 #[derive(Debug, PartialEq)]
 pub(super) struct Read {
     pub answer: Result<Answer, Failure>,
     pub cost_usd: Option<f64>,
+    pub cause: Option<Cause>,
 }
 
 /// Reads Claude Code's JSON output. `exited_ok` is whether its exit status was success.
@@ -113,14 +138,26 @@ pub(super) fn read_output(stdout: &[u8], exited_ok: bool) -> Read {
         return Read {
             answer: Err(Failure::ProcessFailed),
             cost_usd: None,
+            cause: Some(Cause {
+                subtype: Some("unreadable_json".to_owned()),
+                is_error: None,
+                num_turns: None,
+            }),
         };
     };
     let cost_usd = json
         .total_cost_usd
         .filter(|cost| cost.is_finite() && *cost >= 0.0);
+    let cause = Cause {
+        subtype: json.subtype.as_deref().map(clean_subtype),
+        is_error: json.is_error,
+        num_turns: json.num_turns,
+    };
     let answer = if json.subtype.as_deref() == Some("error_max_budget_usd") {
         Err(Failure::RunBudgetReached)
-    } else if !exited_ok || json.is_error || json.subtype.as_deref().is_some_and(|s| s != "success")
+    } else if !exited_ok
+        || json.is_error == Some(true)
+        || json.subtype.as_deref().is_some_and(|s| s != "success")
     {
         Err(Failure::ProcessFailed)
     } else {
@@ -129,7 +166,11 @@ pub(super) fn read_output(stdout: &[u8], exited_ok: bool) -> Read {
             .and_then(parse_answer)
             .ok_or(Failure::UnreadableAnswer)
     };
-    Read { answer, cost_usd }
+    Read {
+        answer,
+        cost_usd,
+        cause: Some(cause),
+    }
 }
 
 #[cfg(test)]

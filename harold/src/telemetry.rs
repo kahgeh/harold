@@ -91,6 +91,11 @@ pub(crate) const ALLOWED_FIELDS: &[&str] = &[
     "agent",
     "seconds",
     "event_id",
+    "exit_code",
+    "signal",
+    "subtype",
+    "is_error",
+    "num_turns",
 ];
 
 /// How long shutting the exporters down may take in all.

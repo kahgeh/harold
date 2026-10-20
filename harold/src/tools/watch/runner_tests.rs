@@ -156,7 +156,7 @@ echo '{"subtype":"success","is_error":false,"result":"QUIET","total_cost_usd":0.
 
     let result = runner.run(&asked).await;
 
-    let ModelResult::Exited { stdout, ok } = result else {
+    let ModelResult::Exited { stdout, ok, .. } = result else {
         panic!("{result:?}")
     };
     assert!(ok);
@@ -195,7 +195,30 @@ async fn a_failing_exit_is_reported_with_its_output() {
         runner.run(&job(&work.0)).await,
         ModelResult::Exited {
             stdout: b"oops\n".to_vec(),
-            ok: false
+            ok: false,
+            exit: Exit {
+                code: Some(3),
+                signal: None
+            }
+        }
+    );
+}
+
+#[tokio::test]
+async fn a_child_killed_by_a_signal_reports_the_signal() {
+    let temp = Temp::new();
+    let work = Temp::new();
+    let cli = temp.script("fake-claude", "cat > /dev/null; kill -TERM $$");
+    let runner = ClaudeRunner::new(cli, path_env());
+    let ModelResult::Exited { ok, exit, .. } = runner.run(&job(&work.0)).await else {
+        panic!("expected an exit");
+    };
+    assert!(!ok);
+    assert_eq!(
+        exit,
+        Exit {
+            code: None,
+            signal: Some(15)
         }
     );
 }

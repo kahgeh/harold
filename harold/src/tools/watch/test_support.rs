@@ -10,7 +10,7 @@ use crate::pod_stats::PodSnapshot;
 use crate::timed_prompts::InputBox;
 use crate::tools::{AgentFact, Agents, BoxFuture, ChiefPane, PaneTyping, Pods, Typing};
 
-use super::runner::{ModelJob, ModelResult, ModelRunner};
+use super::runner::{Exit, ModelJob, ModelResult, ModelRunner};
 
 pub(super) struct TempFolder(pub std::path::PathBuf);
 
@@ -178,6 +178,11 @@ pub(super) enum Step {
         stdout: String,
         ok: bool,
     },
+    /// Exits not ok with this output and exit.
+    Exit {
+        stdout: String,
+        exit: Exit,
+    },
     /// Runs past the limit.
     Hang,
     NoStart,
@@ -259,11 +264,18 @@ impl ModelRunner for FakeRunner {
                     ModelResult::Exited {
                         stdout: json.to_string().into_bytes(),
                         ok: true,
+                        exit: Exit::default(),
                     }
                 }
                 Step::Raw { stdout, ok } => ModelResult::Exited {
                     stdout: stdout.into_bytes(),
                     ok,
+                    exit: Exit::default(),
+                },
+                Step::Exit { stdout, exit } => ModelResult::Exited {
+                    stdout: stdout.into_bytes(),
+                    ok: false,
+                    exit,
                 },
                 Step::Hang => {
                     tokio::time::sleep(job.timeout).await;

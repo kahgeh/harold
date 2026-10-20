@@ -3,6 +3,7 @@
 //! kills the whole group when the run is over time.
 
 use std::ffi::{OsStr, OsString};
+use std::os::unix::process::ExitStatusExt;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
@@ -42,11 +43,19 @@ pub(super) struct ModelJob {
     pub timeout: Duration,
 }
 
+/// How a process ended: its exit code, or the signal that ended it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct Exit {
+    pub code: Option<i32>,
+    pub signal: Option<i32>,
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum ModelResult {
     Exited {
         stdout: Vec<u8>,
         ok: bool,
+        exit: Exit,
     },
     /// Over time: the process group was killed.
     Killed,
@@ -142,10 +151,11 @@ impl ClaudeRunner {
         let _ = child.wait().await;
         match result {
             Err(_) => ModelResult::Killed,
-            Ok(Some((stdout, ok))) => ModelResult::Exited { stdout, ok },
+            Ok(Some((stdout, ok, exit))) => ModelResult::Exited { stdout, ok, exit },
             Ok(None) => ModelResult::Exited {
                 stdout: Vec::new(),
                 ok: false,
+                exit: Exit::default(),
             },
         }
     }
@@ -176,7 +186,7 @@ impl Drop for GroupGuard {
 
 /// Writes the facts, reads the output up to the limit, and waits for the exit. `None`
 /// when a pipe failed.
-async fn exchange(child: &mut Child, facts: &[u8]) -> Option<(Vec<u8>, bool)> {
+async fn exchange(child: &mut Child, facts: &[u8]) -> Option<(Vec<u8>, bool, Exit)> {
     let mut stdin = child.stdin.take()?;
     let stdout = child.stdout.take()?;
     let write = async move {
@@ -196,7 +206,11 @@ async fn exchange(child: &mut Child, facts: &[u8]) -> Option<(Vec<u8>, bool)> {
     };
     let (_, output) = tokio::join!(write, read);
     let status = child.wait().await.ok()?;
-    Some((output?, status.success()))
+    let exit = Exit {
+        code: status.code(),
+        signal: status.signal(),
+    };
+    Some((output?, status.success(), exit))
 }
 
 /// Sends SIGKILL to every process in the group led by `pid`. Nothing to kill is not an

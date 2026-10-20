@@ -9,7 +9,8 @@ use opentelemetry::KeyValue;
 use tracing::field::Empty;
 use tracing::{Span, info, info_span, warn};
 
-use super::answer::Failure;
+use super::answer::{Cause, Failure};
+use super::runner::Exit;
 use crate::telemetry::{self, TRACE_TARGET};
 
 /// How a watch started: the `how` of `watch started`.
@@ -188,8 +189,15 @@ impl RunObs {
         self.count_run(outcome);
     }
 
-    /// A failed run. `cost_usd` is what the run is counted at.
-    pub(super) fn failed(&self, reason: Failure, cost_usd: Option<f64>) {
+    /// A failed run. `cost_usd` is what the run is counted at. `exit` and `cause` are
+    /// given for a `process_failed` run that exited; the fields not known are left out.
+    pub(super) fn failed(
+        &self,
+        reason: Failure,
+        cost_usd: Option<f64>,
+        exit: Option<Exit>,
+        cause: Option<&Cause>,
+    ) {
         let reason = reason.as_str();
         self.span.record("outcome", reason);
         self.span.record("reason", reason);
@@ -201,6 +209,11 @@ impl RunObs {
                 reason,
                 cost_usd,
                 add_dirs = self.add_dirs.load(Ordering::Relaxed),
+                exit_code = exit.and_then(|e| e.code),
+                signal = exit.and_then(|e| e.signal),
+                subtype = cause.and_then(|c| c.subtype.as_deref()),
+                is_error = cause.and_then(|c| c.is_error),
+                num_turns = cause.and_then(|c| c.num_turns),
                 "watch run failed"
             );
         });
