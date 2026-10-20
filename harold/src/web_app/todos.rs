@@ -2,17 +2,34 @@
 //! on Harold's own address, as the dash does. The web app never calls into the tool's
 //! module (ADR 0001).
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+use std::convert::Infallible;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use askama::Template;
+use axum::body::Bytes;
+use axum::extract::State;
+use axum::http::StatusCode;
+use axum::response::sse::{Event, Sse};
+use axum::response::{IntoResponse, Response};
+use datastar::prelude::PatchElements;
 use harold_api::tools::questions::v1::question_service_client::QuestionServiceClient;
-use harold_api::tools::questions::v1::{ListQuestionsRequest, ListedQuestion};
+use harold_api::tools::questions::v1::{
+    AnswerKind, AnswerQuestionRequest, DeferQuestionRequest, ListQuestionsRequest, ListedQuestion,
+    Pick, TickStepRequest,
+};
 use tonic::transport::{Channel, Endpoint};
+use tonic::{Code, Status};
 use tracing::{info, warn};
 
+use super::AppState;
 use crate::settings::GrpcSettings;
+
+/// How long a write to the question tool may take.
+const WRITE_LIMIT: Duration = Duration::from_secs(5);
+/// The largest todo form read, in bytes.
+const FORM_MAX_BYTES: usize = 16 * 1024;
 
 /// How long one read of the todos may take, as the dash allows.
 const READ_LIMIT: Duration = Duration::from_secs(2);
@@ -102,11 +119,6 @@ impl Questions {
             }
         }
         Self::section(&shared)
-    }
-
-    /// The todos as last read, without reading.
-    pub(crate) fn current(&self) -> TodosSection {
-        Self::section(&self.shared.lock().unwrap_or_else(|e| e.into_inner()))
     }
 
     /// Shows `text` on the card of todo `id` until it is gone or answered.
@@ -317,4 +329,335 @@ impl Card {
             can_send,
         })
     }
+}
+
+// ---------------------------------------------------------------------------
+// The posts
+// ---------------------------------------------------------------------------
+
+/// What a post did, as `app todo answered` logs it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    Answer,
+    FreeText,
+    Later,
+    Tick,
+    Done,
+    Ignore,
+}
+
+impl Kind {
+    fn word(self) -> &'static str {
+        match self {
+            Self::Answer => "answer",
+            Self::FreeText => "free_text",
+            Self::Later => "later",
+            Self::Tick => "tick",
+            Self::Done => "done",
+            Self::Ignore => "ignore",
+        }
+    }
+}
+
+/// How the question tool answered a write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Outcome {
+    Sent,
+    VersionChanged,
+    NotWaiting,
+    Unavailable,
+}
+
+impl Outcome {
+    fn word(self) -> &'static str {
+        match self {
+            Self::Sent => "sent",
+            Self::VersionChanged => "version_changed",
+            Self::NotWaiting => "not_waiting",
+            Self::Unavailable => "unavailable",
+        }
+    }
+
+    fn of(result: Result<Result<(), Status>, tokio::time::error::Elapsed>) -> Self {
+        match result {
+            Ok(Ok(())) => Self::Sent,
+            Ok(Err(status)) if status.code() == Code::FailedPrecondition => {
+                match status.message() {
+                    "version_changed" => Self::VersionChanged,
+                    "not_waiting" => Self::NotWaiting,
+                    _ => Self::Unavailable,
+                }
+            }
+            Ok(Err(_)) | Err(_) => Self::Unavailable,
+        }
+    }
+
+    /// The words on the card for a refusal.
+    fn notice(self, id: &str) -> Option<String> {
+        match self {
+            Self::Sent => None,
+            Self::VersionChanged => Some(format!("{id} changed. Look again before you send.")),
+            Self::NotWaiting => Some(format!("{id} was already answered or withdrawn.")),
+            Self::Unavailable => Some("Harold can't send this right now. Try again.".to_owned()),
+        }
+    }
+}
+
+/// A todo form as posted: its fields in order, repeats kept.
+struct Form(Vec<(String, String)>);
+
+impl Form {
+    /// None when the body is not `application/x-www-form-urlencoded` text.
+    fn parse(body: &[u8]) -> Option<Self> {
+        if body.len() > FORM_MAX_BYTES {
+            return None;
+        }
+        let text = std::str::from_utf8(body).ok()?;
+        let mut fields = Vec::new();
+        for pair in text.split('&').filter(|pair| !pair.is_empty()) {
+            let (name, value) = pair.split_once('=').unwrap_or((pair, ""));
+            fields.push((decode(name)?, decode(value)?));
+        }
+        Some(Self(fields))
+    }
+
+    fn get(&self, name: &str) -> Option<&str> {
+        self.0
+            .iter()
+            .find(|(field, _)| field == name)
+            .map(|(_, value)| value.as_str())
+    }
+
+    /// The todo's id: present and not blank.
+    fn id(&self) -> Option<String> {
+        let id = self.get("id")?.trim();
+        (!id.is_empty()).then(|| id.to_owned())
+    }
+
+    fn version(&self) -> Option<u32> {
+        self.get("version")?.parse().ok()
+    }
+}
+
+/// Decodes one `application/x-www-form-urlencoded` name or value.
+fn decode(text: &str) -> Option<String> {
+    let mut bytes = Vec::with_capacity(text.len());
+    let mut rest = text.bytes();
+    while let Some(byte) = rest.next() {
+        match byte {
+            b'+' => bytes.push(b' '),
+            b'%' => {
+                let high = char::from(rest.next()?).to_digit(16)?;
+                let low = char::from(rest.next()?).to_digit(16)?;
+                bytes.push(u8::try_from(high * 16 + low).ok()?);
+            }
+            other => bytes.push(other),
+        }
+    }
+    String::from_utf8(bytes).ok()
+}
+
+impl Questions {
+    /// The listed todo `id`, as last read.
+    fn find(&self, id: &str) -> Option<ListedQuestion> {
+        let shared = self.shared.lock().unwrap_or_else(|e| e.into_inner());
+        shared
+            .last
+            .as_ref()?
+            .iter()
+            .find(|listed| listed.question.as_ref().is_some_and(|q| q.id == id))
+            .cloned()
+    }
+
+    /// The picks a form holds, as the tool takes them, and whether any is free. None when
+    /// the form is malformed: a `pick.<n>` that is not a number or is repeated, an empty
+    /// key, a decision the todo does not have, a free pick without words, or a todo whose
+    /// decisions are not all picked.
+    fn picks(&self, id: &str, form: &Form) -> Option<(Vec<Pick>, bool)> {
+        let known = self.find(id).and_then(|listed| listed.question);
+        let mut picks = BTreeMap::new();
+        let mut any_free = false;
+        for (name, key) in &form.0 {
+            let Some(number) = name.strip_prefix("pick.") else {
+                continue;
+            };
+            let decision: u32 = number.parse().ok()?;
+            if key.is_empty() || picks.contains_key(&decision) {
+                return None;
+            }
+            let text = form.get(&format!("text.{decision}")).unwrap_or("").trim();
+            let free = match &known {
+                Some(question) => {
+                    let options = &question.decisions.get(decision as usize)?.options;
+                    options.iter().find(|option| &option.key == key)?.free
+                }
+                None => !text.is_empty(),
+            };
+            if free && text.is_empty() {
+                return None;
+            }
+            any_free |= free;
+            picks.insert(
+                decision,
+                Pick {
+                    decision,
+                    key: key.clone(),
+                    text: if free { text.to_owned() } else { String::new() },
+                },
+            );
+        }
+        if let Some(question) = &known
+            && picks.len() != question.decisions.len()
+        {
+            return None;
+        }
+        (!picks.is_empty()).then(|| (picks.into_values().collect(), any_free))
+    }
+
+    async fn answer(&self, request: AnswerQuestionRequest) -> Outcome {
+        let mut client = self.client.clone();
+        let result = tokio::time::timeout(WRITE_LIMIT, client.answer_question(request)).await;
+        Outcome::of(result.map(|r| r.map(|_| ())))
+    }
+
+    async fn defer(&self, id: String) -> Outcome {
+        let mut client = self.client.clone();
+        let result = tokio::time::timeout(
+            WRITE_LIMIT,
+            client.defer_question(DeferQuestionRequest { id }),
+        )
+        .await;
+        Outcome::of(result.map(|r| r.map(|_| ())))
+    }
+
+    async fn tick(&self, request: TickStepRequest) -> Outcome {
+        let mut client = self.client.clone();
+        let result = tokio::time::timeout(WRITE_LIMIT, client.tick_step(request)).await;
+        Outcome::of(result.map(|r| r.map(|_| ())))
+    }
+}
+
+/// Logs the post, sets or clears the card's notice, reads the todos again, wakes every open
+/// page, and answers with the redrawn page.
+async fn finish(state: &AppState, kind: Kind, id: &str, outcome: Outcome) -> Response {
+    info!(
+        kind = kind.word(),
+        result = outcome.word(),
+        "app todo answered"
+    );
+    match outcome.notice(id) {
+        Some(notice) => state.questions.set_notice(id, &notice),
+        None => state.questions.clear_notice(id),
+    }
+    let section = state.questions.refresh().await;
+    state.todos_changed.send_modify(|posts| *posts += 1);
+    let page = section.render().unwrap_or_default();
+    let count = section.count().render().unwrap_or_default();
+    let patch: Event = PatchElements::new(format!("{page}{count}")).into();
+    Sse::new(tokio_stream::once(Ok::<Event, Infallible>(patch))).into_response()
+}
+
+fn malformed() -> Response {
+    StatusCode::BAD_REQUEST.into_response()
+}
+
+/// `POST /todos/answer`: the picks of a question, sent to the chief at once.
+pub(crate) async fn post_answer(State(state): State<AppState>, body: Bytes) -> Response {
+    let Some(form) = Form::parse(&body) else {
+        return malformed();
+    };
+    let (Some(id), Some(version)) = (form.id(), form.version()) else {
+        return malformed();
+    };
+    let Some((picks, any_free)) = state.questions.picks(&id, &form) else {
+        return malformed();
+    };
+    let kind = if any_free {
+        Kind::FreeText
+    } else {
+        Kind::Answer
+    };
+    let outcome = state
+        .questions
+        .answer(AnswerQuestionRequest {
+            id: id.clone(),
+            version,
+            kind: if any_free {
+                AnswerKind::FreeText
+            } else {
+                AnswerKind::Answer
+            } as i32,
+            picks,
+            note: String::new(),
+            send_now: true,
+        })
+        .await;
+    finish(&state, kind, &id, outcome).await
+}
+
+/// `POST /todos/later`: sets a question aside.
+pub(crate) async fn post_later(State(state): State<AppState>, body: Bytes) -> Response {
+    let Some(id) = Form::parse(&body).and_then(|form| form.id()) else {
+        return malformed();
+    };
+    let outcome = state.questions.defer(id.clone()).await;
+    finish(&state, Kind::Later, &id, outcome).await
+}
+
+/// `POST /todos/tick`: ticks or unticks one step of instructions.
+pub(crate) async fn post_tick(State(state): State<AppState>, body: Bytes) -> Response {
+    let Some(form) = Form::parse(&body) else {
+        return malformed();
+    };
+    let (Some(id), Some(version)) = (form.id(), form.version()) else {
+        return malformed();
+    };
+    let Some(step) = form
+        .get("step")
+        .and_then(|step| step.parse::<u32>().ok())
+        .filter(|step| *step >= 1)
+    else {
+        return malformed();
+    };
+    let ticked = form.get("ticked") == Some("true");
+    let outcome = state
+        .questions
+        .tick(TickStepRequest {
+            id: id.clone(),
+            version,
+            step,
+            ticked,
+        })
+        .await;
+    finish(&state, Kind::Tick, &id, outcome).await
+}
+
+/// `POST /todos/done` and `POST /todos/ignore`: closes instructions.
+async fn close(state: AppState, body: Bytes, kind: Kind, answer: AnswerKind) -> Response {
+    let Some(form) = Form::parse(&body) else {
+        return malformed();
+    };
+    let (Some(id), Some(version)) = (form.id(), form.version()) else {
+        return malformed();
+    };
+    let outcome = state
+        .questions
+        .answer(AnswerQuestionRequest {
+            id: id.clone(),
+            version,
+            kind: answer as i32,
+            picks: Vec::new(),
+            note: String::new(),
+            send_now: true,
+        })
+        .await;
+    finish(&state, kind, &id, outcome).await
+}
+
+pub(crate) async fn post_done(State(state): State<AppState>, body: Bytes) -> Response {
+    close(state, body, Kind::Done, AnswerKind::Done).await
+}
+
+pub(crate) async fn post_ignore(State(state): State<AppState>, body: Bytes) -> Response {
+    close(state, body, Kind::Ignore, AnswerKind::Ignore).await
 }

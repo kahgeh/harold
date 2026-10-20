@@ -6,9 +6,8 @@
 (function () {
   const pages = document.getElementById("pages");
   const thread = document.getElementById("thread");
-  const todos = document.getElementById("todos");
   const messages = document.getElementById("messages");
-  if (!pages || !thread || !todos || !messages) {
+  if (!pages || !thread || !messages) {
     return;
   }
   const newMessage = document.getElementById("new-message");
@@ -83,7 +82,7 @@
 
   document.getElementById("to-todos").addEventListener("click", (event) => {
     event.preventDefault();
-    show(todos);
+    show(document.getElementById("todos"));
   });
   document.getElementById("to-thread").addEventListener("click", (event) => {
     event.preventDefault();
@@ -111,6 +110,45 @@
     }).observe(responding, { childList: true, subtree: true });
   }
 
+  // A question's Send is on only when every decision has a pick and each free pick has
+  // words. The stream redraws #todos, so the checks run again after every change to it.
+  function syncSend(form) {
+    const send = form.querySelector("button.send");
+    const decisions = form.querySelectorAll("fieldset");
+    if (!send || decisions.length === 0) {
+      return;
+    }
+    let ready = true;
+    decisions.forEach((decision) => {
+      const picked = decision.querySelector("input[type=radio]:checked");
+      if (!picked) {
+        ready = false;
+      } else if (picked.hasAttribute("data-free")) {
+        const words = picked.closest("label").querySelector(".free-text");
+        if (!words || words.value.trim() === "") {
+          ready = false;
+        }
+      }
+    });
+    send.disabled = !ready;
+  }
+
+  function syncSends() {
+    document.querySelectorAll("#todos form.todo-form").forEach(syncSend);
+  }
+
+  function syncOne(event) {
+    const form = event.target.closest && event.target.closest("form.todo-form");
+    if (form) {
+      syncSend(form);
+    }
+  }
+
+  document.addEventListener("input", syncOne);
+  document.addEventListener("change", syncOne);
+  new MutationObserver(syncSends).observe(pages, { childList: true, subtree: true });
+
   scrollToBottom();
   syncPage();
+  syncSends();
 })();

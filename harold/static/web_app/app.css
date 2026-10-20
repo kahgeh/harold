@@ -447,3 +447,148 @@ body.in-call > .call-screen {
   color: var(--text-1);
   font-size: 15px;
 }
+
+/* The todo page: one card for each question or set of instructions. */
+
+#todos {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 12px;
+}
+
+.todos-empty {
+  margin: 24px 0;
+  color: var(--text-2);
+  text-align: center;
+}
+
+.card {
+  padding: 12px;
+  border: 1px solid var(--surface-4);
+  border-radius: 14px;
+  background: var(--surface-2);
+}
+
+.card.later {
+  opacity: 0.75;
+}
+
+.card p,
+.card h3 {
+  margin: 0;
+}
+
+.card-top {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.card h3 {
+  margin-top: 4px;
+  font-size: 17px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.card-intro,
+.card-link {
+  margin-top: 6px;
+  overflow-wrap: anywhere;
+}
+
+.card-link a {
+  color: var(--brand);
+}
+
+.card fieldset {
+  margin: 12px 0 0;
+  padding: 0;
+  border: 0;
+}
+
+.card legend {
+  padding: 0;
+  font-weight: 600;
+}
+
+.option,
+.step {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 8px;
+  min-height: var(--target);
+  padding: 8px 0;
+}
+
+.option input[type="radio"],
+.step input[type="checkbox"] {
+  flex: none;
+  margin: 0;
+  accent-color: var(--brand);
+}
+
+.option-label {
+  flex: 1;
+  min-width: 0;
+}
+
+.suggested {
+  color: var(--brand);
+  font-size: 12px;
+  font-style: normal;
+}
+
+.impact {
+  display: block;
+  flex-basis: 100%;
+  padding-left: 24px;
+  color: var(--text-2);
+  font-size: 13px;
+}
+
+.free-text {
+  display: none;
+  flex-basis: 100%;
+  min-height: 40px;
+  margin-left: 24px;
+  padding: 0 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface-1);
+}
+
+.option input:checked ~ .free-text {
+  display: block;
+}
+
+.step-form {
+  margin: 0;
+}
+
+.step {
+  align-items: flex-start;
+}
+
+.step .impact {
+  padding-left: 0;
+}
+
+.notice {
+  margin-top: 8px;
+  color: var(--end);
+  font-size: 14px;
+}
+
+.card-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.later-button {
+  border: 1px solid var(--border);
+  background: var(--surface-3);
+  color: var(--text-1);
+}

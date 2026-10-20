@@ -519,3 +519,281 @@ async fn the_stream_sends_the_todos_and_the_count_when_the_list_changes() {
     );
     assert!(patch.contains(r#"<section id="todos""#), "{patch}");
 }
+
+// ---------------------------------------------------------------------------
+// The posts
+// ---------------------------------------------------------------------------
+
+const PAGE_HEADERS: [(&str, &str); 3] = [
+    ("content-type", "application/x-www-form-urlencoded"),
+    ("datastar-request", "true"),
+    ("sec-fetch-site", "same-origin"),
+];
+
+impl TestServer {
+    /// Posts `body` as the app's own page does.
+    async fn post(&self, path: &str, body: &str) -> reqwest::Response {
+        let mut request = reqwest::Client::new()
+            .post(self.url(path))
+            .header("Tailscale-User-Login", LOGIN)
+            .header("origin", format!("http://{}", self.addr));
+        for (name, value) in PAGE_HEADERS {
+            request = request.header(name, value);
+        }
+        request.body(body.to_owned()).send().await.unwrap()
+    }
+}
+
+/// A server whose question service lists Q1 and I1, with the list already read.
+async fn served_with_todos() -> (FakeServer, TestServer, TestDirectory) {
+    let service = FakeServer::start().await;
+    service
+        .fake
+        .set_list(vec![question("Q1", 2, false), instructions("I1", 3)]);
+    let directory = TestDirectory::new();
+    let server = TestServer::serve(directory.store().await, service.questions()).await;
+    // The page's own read fills the list the posts check picks against.
+    let page = server.get("/").await.text().await.unwrap();
+    assert!(page.contains(r#"id="todo-Q1""#), "{page}");
+    (service, server, directory)
+}
+
+fn pick(decision: u32, key: &str, text: &str) -> pb::Pick {
+    pb::Pick {
+        decision,
+        key: key.into(),
+        text: text.into(),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn each_route_calls_its_rpc_with_the_form_fields_and_send_now() {
+    let (service, server, _directory) = served_with_todos().await;
+
+    for (path, body) in [
+        ("/todos/answer", "id=Q1&version=2&pick.0=a&pick.1=x"),
+        (
+            "/todos/answer",
+            "id=Q1&version=2&pick.0=b&pick.1=y&text.1=my+own%20words%21",
+        ),
+        ("/todos/later", "id=Q1"),
+        ("/todos/tick", "id=I1&version=3&step=1&ticked=true"),
+        ("/todos/tick", "id=I1&version=3&step=2"),
+        ("/todos/done", "id=I1&version=3"),
+        ("/todos/ignore", "id=I1&version=3"),
+    ] {
+        let response = server.post(path, body).await;
+        assert_eq!(response.status(), 200, "{path} {body}");
+        let redrawn = response.text().await.unwrap();
+        assert!(
+            redrawn.contains(r#"<section id="todos""#),
+            "{path}: {redrawn}"
+        );
+        assert!(redrawn.contains(r#"id="todo-count""#), "{path}: {redrawn}");
+    }
+
+    let answer = |version, kind, picks, id: &str| {
+        Call::Answer(pb::AnswerQuestionRequest {
+            id: id.into(),
+            version,
+            kind: kind as i32,
+            picks,
+            note: String::new(),
+            send_now: true,
+        })
+    };
+    assert_eq!(
+        service.fake.calls(),
+        vec![
+            answer(
+                2,
+                pb::AnswerKind::Answer,
+                vec![pick(0, "a", ""), pick(1, "x", "")],
+                "Q1"
+            ),
+            answer(
+                2,
+                pb::AnswerKind::FreeText,
+                vec![pick(0, "b", ""), pick(1, "y", "my own words!")],
+                "Q1"
+            ),
+            Call::Defer("Q1".into()),
+            Call::Tick(pb::TickStepRequest {
+                id: "I1".into(),
+                version: 3,
+                step: 1,
+                ticked: true
+            }),
+            Call::Tick(pb::TickStepRequest {
+                id: "I1".into(),
+                version: 3,
+                step: 2,
+                ticked: false
+            }),
+            answer(3, pb::AnswerKind::Done, Vec::new(), "I1"),
+            answer(3, pb::AnswerKind::Ignore, Vec::new(), "I1"),
+        ]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refusal_draws_its_notice_on_the_card() {
+    let (service, server, _directory) = served_with_todos().await;
+    for (refusal, wanted) in [
+        (
+            Status::failed_precondition("version_changed"),
+            "Q1 changed. Look again before you send.",
+        ),
+        (
+            Status::failed_precondition("not_waiting"),
+            "Q1 was already answered or withdrawn.",
+        ),
+        (
+            Status::unavailable("down"),
+            "Harold can&#39;t send this right now. Try again.",
+        ),
+    ] {
+        service.fake.0.lock().unwrap().write_refusal = Some(refusal);
+
+        let response = server
+            .post("/todos/answer", "id=Q1&version=2&pick.0=a&pick.1=x")
+            .await;
+
+        assert_eq!(response.status(), 200);
+        let redrawn = response.text().await.unwrap();
+        assert!(
+            redrawn.contains(&format!(r#"<p class="notice" role="status">{wanted}</p>"#)),
+            "{wanted}: {redrawn}"
+        );
+    }
+    assert!(service.fake.calls().is_empty());
+
+    // The next good answer takes the notice off.
+    service.fake.0.lock().unwrap().write_refusal = None;
+    let redrawn = server
+        .post("/todos/answer", "id=Q1&version=2&pick.0=a&pick.1=x")
+        .await
+        .text()
+        .await
+        .unwrap();
+    assert!(!redrawn.contains(r#"class="notice""#), "{redrawn}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_malformed_form_gives_400_and_no_call() {
+    let (service, server, _directory) = served_with_todos().await;
+
+    for (path, body) in [
+        ("/todos/answer", ""),
+        ("/todos/answer", "version=2&pick.0=a&pick.1=x"),
+        ("/todos/answer", "id=&version=2&pick.0=a&pick.1=x"),
+        ("/todos/answer", "id=Q1&version=two&pick.0=a&pick.1=x"),
+        ("/todos/answer", "id=Q1&version=-1&pick.0=a&pick.1=x"),
+        ("/todos/answer", "id=Q1&version=2&pick.0=a"),
+        (
+            "/todos/answer",
+            "id=Q1&version=2&pick.0=a&pick.0=b&pick.1=x",
+        ),
+        ("/todos/answer", "id=Q1&version=2&pick.x=a&pick.1=x"),
+        ("/todos/answer", "id=Q1&version=2&pick.0=a&pick.5=x"),
+        ("/todos/answer", "id=Q1&version=2&pick.0=zzz&pick.1=x"),
+        ("/todos/answer", "id=Q1&version=2&pick.0=a&pick.1=y"),
+        (
+            "/todos/answer",
+            "id=Q1&version=2&pick.0=a&pick.1=y&text.1=+++",
+        ),
+        ("/todos/answer", "id=Q1&version=2&pick.0=a&pick.1=%ZZ"),
+        ("/todos/later", ""),
+        ("/todos/later", "id=+"),
+        ("/todos/tick", "id=I1&version=3&step=0&ticked=true"),
+        ("/todos/tick", "id=I1&version=3&step=one"),
+        ("/todos/tick", "id=I1&version=3"),
+        ("/todos/tick", "id=I1&step=1"),
+        ("/todos/done", "id=I1"),
+        ("/todos/ignore", "version=3"),
+    ] {
+        let response = server.post(path, body).await;
+        assert_eq!(response.status(), 400, "{path} {body}");
+    }
+
+    assert!(service.fake.calls().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn only_a_post_with_the_login_and_the_same_origin_reaches_the_tool() {
+    let (service, server, _directory) = served_with_todos().await;
+    let forms = [
+        ("/todos/answer", "id=Q1&version=2&pick.0=a&pick.1=x"),
+        ("/todos/later", "id=Q1"),
+        ("/todos/tick", "id=I1&version=3&step=1&ticked=true"),
+        ("/todos/done", "id=I1&version=3"),
+        ("/todos/ignore", "id=I1&version=3"),
+    ];
+    let client = reqwest::Client::new();
+
+    for (path, body) in forms {
+        // No login at all, and a wrong one.
+        for login in [None, Some("someone@example.com")] {
+            let mut request = client.post(server.url(path)).body(body.to_owned());
+            for (name, value) in PAGE_HEADERS {
+                request = request.header(name, value);
+            }
+            if let Some(login) = login {
+                request = request.header("Tailscale-User-Login", login);
+            }
+            let status = request.send().await.unwrap().status();
+            assert!(status.is_client_error(), "{path} login {login:?}: {status}");
+        }
+        // The login, from another site.
+        for (name, value) in [
+            ("sec-fetch-site", "cross-site"),
+            ("origin", "https://evil.example"),
+        ] {
+            let response = client
+                .post(server.url(path))
+                .header("Tailscale-User-Login", LOGIN)
+                .header("datastar-request", "true")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .header(name, value)
+                .body(body.to_owned())
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), 403, "{path} {name}");
+        }
+    }
+    assert!(service.fake.calls().is_empty());
+
+    for (path, body) in forms {
+        assert_eq!(server.post(path, body).await.status(), 200, "{path}");
+    }
+    assert_eq!(service.fake.calls().len(), 5);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn each_post_logs_its_kind_and_result_but_never_the_todo_id() {
+    let logs = CapturedLogs::start();
+    let (service, server, _directory) = served_with_todos().await;
+
+    server
+        .post("/todos/answer", "id=Q1&version=2&pick.0=a&pick.1=x")
+        .await;
+    service.fake.0.lock().unwrap().write_refusal = Some(Status::failed_precondition("not_waiting"));
+    server.post("/todos/later", "id=Q1").await;
+
+    let text = logs.text();
+    let lines: Vec<&str> = text
+        .lines()
+        .filter(|line| line.contains("app todo answered"))
+        .collect();
+    assert_eq!(lines.len(), 2, "{text}");
+    assert!(
+        lines[0].contains("kind=\"answer\"") && lines[0].contains("result=\"sent\""),
+        "{text}"
+    );
+    assert!(
+        lines[1].contains("kind=\"later\"") && lines[1].contains("result=\"not_waiting\""),
+        "{text}"
+    );
+    assert!(lines.iter().all(|line| !line.contains("Q1")), "{text}");
+}
