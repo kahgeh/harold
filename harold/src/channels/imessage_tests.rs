@@ -12,9 +12,10 @@ use crate::util::sanitise_for_applescript;
 
 use super::{
     ChatDb, Cursors, Direction, FetchedRow, MarkedRow, NotificationPlan, RecentRows, TWIN_WINDOW,
-    apple_date_to_utc, attachment_args, is_marked_as_harold, max_rowid_of, notification_message,
-    notification_plan, parse_max_rowid, poll_chat_db, poll_db, read_start, record_row, send_script,
-    start_cursors, start_listener_cursors, start_listener_reading, wait_for_start_row,
+    apple_date_to_utc, attachment_args, is_marked_as_harold, log_notification_send, log_send,
+    max_rowid_of, notification_message, notification_plan, parse_max_rowid, poll_chat_db, poll_db,
+    read_start, record_row, send_script, start_cursors, start_listener_cursors,
+    start_listener_reading, wait_for_start_row,
 };
 
 #[test]
@@ -1716,4 +1717,62 @@ fn a_failed_attachment_send_discards_osascript_output_and_logs_no_words() {
         super::send_attachment_with("true", &note, "me@example.com"),
         Ok(())
     );
+}
+
+/// A tracing writer that collects what the subscriber prints.
+#[derive(Clone, Default)]
+struct LogCapture(std::sync::Arc<Mutex<Vec<u8>>>);
+
+impl std::io::Write for LogCapture {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogCapture {
+    type Writer = LogCapture;
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
+
+/// What `log` prints to a tracing subscriber while it runs.
+fn captured_log(log: impl FnOnce()) -> String {
+    let capture = LogCapture::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(capture.clone())
+        .with_ansi(false)
+        .finish();
+    tracing::subscriber::with_default(subscriber, log);
+    String::from_utf8(capture.0.lock().unwrap().clone()).unwrap()
+}
+
+#[test]
+fn notification_send_line_shows_chars_and_no_text() {
+    let text = "zebra-quokka \u{1F600} secret plan";
+    let out = captured_log(|| log_notification_send(text));
+    assert!(out.contains("sending iMessage notification"), "{out}");
+    assert!(
+        out.contains(&format!("chars={}", text.chars().count())),
+        "{out}"
+    );
+    assert!(!out.contains("zebra"), "{out}");
+    assert!(!out.contains("secret"), "{out}");
+}
+
+#[test]
+fn send_line_shows_chars_and_no_text() {
+    let text = "Delivered: quokka-7731 budget";
+    let out = captured_log(|| log_send(text));
+    assert!(out.contains("sending iMessage"), "{out}");
+    assert!(
+        out.contains(&format!("chars={}", text.chars().count())),
+        "{out}"
+    );
+    assert!(!out.contains("quokka"), "{out}");
+    assert!(!out.contains("budget"), "{out}");
 }
