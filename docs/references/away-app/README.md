@@ -4,7 +4,7 @@ The web app puts one conversation with the chief of pods on the iPhone's home sc
 
 Harold serves the app itself, from this Mac, on a loopback address (`127.0.0.1`, reachable only from the Mac). Tailscale, the private network that joins your Mac and your iPhone, carries it to the phone. iMessage keeps working alongside it, as the fallback.
 
-The chief is the agent running in the folder named by `[notify] away_messages_only_from`.
+The chief is the one agent running in a folder `[notify] chief` matches.
 
 ## Rolling back to an earlier Harold
 
@@ -80,10 +80,10 @@ allowed_login = "<your Tailscale login>"
 | `listen` | The address and port Harold listens on. It must be a loopback address, such as `127.0.0.1:4330`. |
 | `allowed_login` | Your Tailscale login, exactly as Tailscale Serve sends it in `Tailscale-User-Login`. |
 
-The section also needs `[notify] away_messages_only_from` set, because that folder decides which agent is the chief.
+The section also needs `[notify] chief` (the default `"chief-of-pods"` will do), because that entry decides which agent is the chief. The chief reaches the app only when its folder is on `[notify] web_app`.
 
 - **Absent:** Harold serves nothing, listens on no port, and every message reaches the phone as before.
-- **Invalid:** a `listen` that is not a loopback address and port, an empty `allowed_login`, or no `away_messages_only_from` stops Harold at start with an error naming the key. `--check-config` fails too, but prints only `invalid configuration`; start Harold to see which key is wrong.
+- **Invalid:** a `listen` that is not a loopback address and port, an empty `allowed_login`, or no `notify.chief` stops Harold at start with an error naming the key. `--check-config` fails too, but prints only `invalid configuration`; start Harold to see which key is wrong.
 - **Cannot start:** when Harold cannot listen on the address or read its key, it logs `web app unavailable` with the address or the key's path, and runs without the app. Messages then reach the phone through iMessage.
 
 ### Adding the app to the home screen

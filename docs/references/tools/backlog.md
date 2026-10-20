@@ -94,7 +94,7 @@ A write to a product's backlog (items, backlog notes, an applied import) is chec
 
 1. No pane: refused with `no_pane`.
 2. The registry is set but can't be read: refused with `registry_unreadable`. The product isn't in the registry: refused with `unknown_product`.
-3. The pane is the chief's: allowed. The chief's pane is the one agent pane whose folder is `[notify] away_messages_only_from`.
+3. The pane is the chief's: allowed. The chief's pane is the one agent pane whose folder `[notify] chief` matches.
 4. The pane isn't an agent's, so it has no folder: refused with `wrong_product`.
 5. The pane's folder is the product's `repo` or inside it: allowed. Otherwise: refused with `wrong_product`.
 

@@ -122,16 +122,20 @@ With iMessage, the installer prints whether the permissions carried over. When t
 
 The installer cannot check that these steps were done: reading macOS's permission records needs Full Disk Access itself.
 
-### Optional: messages from one agent only
+### Which agents Harold lets speak
 
-If one agent reports to your phone on behalf of the others, name the folder it runs in. While an agent is running there, only panes in that folder send to your phone. For every other pane Harold leaves out the turn-end update it would send with the screen locked, and drops any message the pane's agent sends with `harold send-message-to-away-device`:
+Harold gives each way it can reach you its own list of the folders whose agents may use it, and names the chief's folder. Out of the box only an agent in a folder called `chief-of-pods` is heard on any channel, so **on a Mac where no agent runs in such a folder Harold hears nothing from any agent until you say otherwise.** Add this to `local.toml`, with your own folders (full paths, or `~/…`):
 
 ```toml
 [notify]
-away_messages_only_from = "/Users/you/Dev/chief-of-pods"
+chief = "/Users/you/Dev/chief-of-pods"                    # which pane is the chief
+imessage = ["/Users/you/Dev/chief-of-pods"]               # who may reach the phone by iMessage
+telegram = ["/Users/you/Dev/chief-of-pods"]               # who may reach the phone by Telegram
+web_app = ["/Users/you/Dev/chief-of-pods"]                # who may reach the phone through the web app
+machine_audio_output = ["/Users/you/Dev/chief-of-pods"]   # who may be spoken aloud on the Mac
 ```
 
-The value is an absolute path. An agent whose message is dropped is not told: its command still exits 0. See [Updates Harold leaves out while you are away](../references/notification/README.md#updates-harold-leaves-out-while-you-are-away).
+An empty list (`machine_audio_output = []`) lets no agent use that channel, and `["*"]` lets every agent use it. An agent held back is not told: its command still exits 0. The old key `away_messages_only_from` is still read, as `chief` and as every list you do not set, with a warning at start; replace it with these keys. See [Channels](../references/notification/README.md#channels).
 
 ### Several Macs on iMessage
 

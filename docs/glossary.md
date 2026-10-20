@@ -32,7 +32,7 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 | --- | --- | --- |
 | at the desk | The Mac's screen is unlocked, so Harold speaks on the Mac | — |
 | away | The Mac's screen is locked, so Harold writes to the phone | — |
-| away channel | The one of iMessage and Telegram that `[notify] away_channel` picks | — |
+| away channel | The one of iMessage and Telegram that `[notify] away_channel` picks. It is one of the channels: the one the phone gets by iMessage or Telegram. | — |
 | web app | The home-screen app on the phone that holds the chief's thread | "away app", "home-screen app" |
 | thread | The web app's one conversation with the chief | — |
 | phone notification | Any message Harold sends to the phone, tagged with its machine and pane: a turn-end update, an agent message or a spoken line, sent by iMessage, Telegram or the web app | "notification" alone, "phone message" |
@@ -67,8 +67,11 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 | agent message | Text an agent asks Harold to send to the phone (`send-message-to-away-device`) | — |
 | spoken line | A line the chief asks Harold to say (`harold speak`) | — |
 | voice note | A spoken line sent to the phone as audio | — |
-| left out | A turn-end update Harold chose not to say or send | — |
-| dropped | An agent message or spoken line Harold chose not to send | — |
+| left out | A turn-end update Harold chose not to say or send. It names the channel list that held the pane back | — |
+| dropped | An agent message or spoken line Harold chose not to send. It names the channel list that held the pane back | — |
+| channel | One of the four ways Harold reaches the user, each with its own list in `[notify]`: `imessage`, `telegram`, `web_app` and `machine_audio_output` | "away channel" for it (the away channel is only iMessage or Telegram, the one `away_channel` picks), "route", "output" alone |
+| channel list | A channel's list in `[notify]` of the folders whose agents may use that channel | "allowlist", "whitelist", "only_from" |
+| `notify.chief` | The `[notify] chief` entry that names the chief's pane by its folder. It decides which pane is the chief, not what the chief may use | "chief folder setting", "away_messages_only_from" for it |
 | voice, voice mute | Harold's speech at the desk, and the switch that silences it (`Voice: mute`) | — |
 | messaging pause | The switch that stops all phone traffic in both directions (`Messaging: pause`) | "kill switch" as its name |
 | call | A voice conversation with the chief, at the Mac or in the web app | "call" for an RPC or a function |

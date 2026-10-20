@@ -2,7 +2,7 @@
 
 A call lets you talk to the chief of pods at the Mac instead of typing. You press one key in tmx-agent-dash. Harold listens through the microphone, turns what you say into text, types the text into the chief's pane, and plays the chief's spoken answer. Harold then listens again, until you end the call.
 
-The chief is the agent running in the folder named by `[notify] away_messages_only_from`.
+The chief is the one agent running in a folder `[notify] chief` matches. With several, there is no chief.
 
 ## Problem
 
@@ -342,7 +342,7 @@ The core, in `harold/src/voice_input.rs`, is internal Rust, not an API. A call i
 |---|---|
 | `open_source`, `sink` | Open the call's source; give the one sink every call plays through. |
 | `start_worker(call_dir)` | Start the voice worker; loading goes on in the background. |
-| `panes`, `chief_folder` | The chief's pane and the folder (`[notify] away_messages_only_from`). |
+| `panes`, `chief_folder` | The chief's pane and the folder (`[notify] chief`). |
 | `speak_with_tts`, `stop_desk_line` | Say a line with the `[tts]` command and resolve when it ends; stop such a line. |
 | `turn_end_update(prompt)` | The desk's turn-end update for a turn that ended without `harold speak`. |
 | `calls_dir`, `phrases_dir`, `voice_name` | Where call folders and kept phrases live, and the Kokoro voice in each phrase's file name. |

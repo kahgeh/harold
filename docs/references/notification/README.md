@@ -43,14 +43,14 @@ TurnCompleted event (pane_id from $TMUX_PANE in stop hook)
   │      active pane == completing pane → skip (return)
   │
   ├─ ioreg → IOConsoleLocked = true?
-  │   ├─ no  → away_messages_only_from set, an agent in that folder,
-  │   │          and this pane the chief's, a build worker's or a pod session's?
+  │   ├─ no  → this pane the chief's, or not on notify.machine_audio_output?
   │   │          → leave out (return)
   │   │        notify_at_desk()
   │   └─ yes → messaging paused? → skip (return)
   │           mark was under 10 minutes old? → leave out (return)
-  │           away_messages_only_from set, an agent in that folder,
-  │             and this pane outside it? → leave out (return)
+  │           pane on neither notify.web_app (the chief, with the app)
+  │             nor the away channel's list (notify.imessage or notify.telegram)?
+  │             → leave out (return)
   │           channels::notify_away() (iMessage or Telegram per config)
 ```
 
@@ -128,7 +128,7 @@ Config keys (`[telegram]`):
 
 ## Updates Harold leaves out while you are away
 
-With the screen locked, every agent's finished turn sends an update to the phone. Two rules leave an update out. Both leave out only an update that would go to the phone. At the desk, a separate rule keeps some panes quiet; see [Updates Harold does not speak for the chief, build workers and pod sessions](#updates-harold-does-not-speak-for-the-chief-build-workers-and-pod-sessions). The second rule also drops a message an agent asked Harold to send.
+With the screen locked, an agent's finished turn sends an update to the phone unless one of two rules leaves it out. Rule A (below) covers a pane that messaged the phone this turn. The channel lists (see [Channels](#channels)) cover which panes may use the phone at all, and they also drop a message an agent asked Harold to send. At the desk the same lists decide who is spoken; see [Updates Harold does not speak at the desk](#updates-harold-does-not-speak-at-the-desk).
 
 ### After a message the agent sent itself
 
@@ -136,77 +136,88 @@ An agent that runs `harold send-message-to-away-device` and then ends its turn w
 
 When Harold sends an agent's message, it records the pane and the time. The pane's next `TurnCompleted` removes the record, and if the record is under 10 minutes old the update is left out with the log line `notification skipped (pane messaged the phone this turn)`. The record affects one turn: the pane's following turn sends its update. The 10-minute limit is there because Harold is not told about every turn end (Claude Code runs no hook for a turn you interrupt), and without it an old record would hide the update of a later turn. The record is kept in memory, so after a daemon restart between the message and the end of the turn the update is sent.
 
-### From agents outside one folder
+### Channels
 
-When one agent reports to the phone for the others, name the folder it runs in:
+Harold has four ways to reach you. Each is a **channel** with its own list in `[notify]` of the folders whose agents may use it, and `chief` names the chief's pane:
 
 ```toml
 [notify]
-away_messages_only_from = "/Users/you/Dev/chief-of-pods"
+chief = "chief-of-pods"                   # which pane is the chief, matched by folder
+imessage = ["chief-of-pods"]              # who may reach the phone by iMessage
+telegram = ["chief-of-pods"]              # who may reach the phone by Telegram
+web_app = ["chief-of-pods"]               # who may reach the phone through the web app
+machine_audio_output = ["chief-of-pods"]  # who may be spoken aloud on the Mac
 ```
 
-While an agent Harold tracks is running in that folder, only panes in that folder send to the phone. A pane that a pod or baton file names (see [the table of panes](#updates-harold-does-not-speak-for-the-chief-build-workers-and-pod-sessions)) is treated as outside the folder whether or not an agent runs there and whether or not the agent monitor could list the panes. Every other pane follows the rule above. The rule covers both kinds of message a pane sends:
+These are Harold's defaults (`default.toml`). With nothing in `local.toml`, only an agent in a folder called `chief-of-pods` is heard on any channel, and a Mac where no agent runs in such a folder hears nothing from any agent until `local.toml` says otherwise.
 
-| Kind | From a pane in the folder | From a pane outside the folder | Log line for the pane outside |
-| --- | --- | --- | --- |
-| Turn-end update, with the screen locked | Sent | Left out | `notification skipped (updates come from <folder> only)` |
-| Message sent with `harold send-message-to-away-device`, with the screen locked or not | Sent | Dropped | `away message dropped (messages come from <folder> only)` |
+| Key | The channel | What goes out on it |
+| --- | --- | --- |
+| `imessage` | iMessage to the phone, when `away_channel = "imessage"` | Turn-end updates while the screen is locked, messages agents ask Harold to send, and spoken lines while away (as voice notes) |
+| `telegram` | Telegram to the phone, when `away_channel = "telegram"` | The same as iMessage |
+| `web_app` | The web app on the phone (`[web_app]`): its thread, its push and its call | The same, as text in the thread with a push, or a spoken line played in the phone's call |
+| `machine_audio_output` | Speech on the Mac: the `[tts]` command, and the Mac's call | Turn-end updates at the desk, `harold speak` lines at the desk, and other agents' updates said into a call at the Mac |
 
-Harold writes each line at `INFO` with the pane in a `pane_id` field. `<folder>` is the setting as written. Neither line holds the text of a message. While no agent is running in the folder, every pane sends both kinds, except a pane a pod or baton file names, which is treated as outside the folder.
+Only one of `imessage` and `telegram` is in use at a time, the one `away_channel` names. The other's list is read and checked, but not used.
 
-The agent that sent a dropped message is not told. Its command prints nothing and exits 0, as it does when the message is sent: Harold stores the request first and drops it when it comes to send it. Nothing is sent later. The pane does not become the one an untagged reply goes to, and the drop does not set the record described in "After a message the agent sent itself". An agent that messages the phone and then waits for a reply waits without knowing none will come.
+**What a list holds.** Each entry is a folder:
+
+| Entry | Matches | Example |
+| --- | --- | --- |
+| Starts with `/` | the pane's folder exactly | `/Users/you/Dev/p/chief-of-pods` |
+| Starts with `~/` | the same, with `~` as the home folder | `~/Dev/p/chief-of-pods` |
+| `*` | every pane, whatever its folder (lists only) | `["*"]` |
+| Anything else | a folder whose last whole path components are the entry's | `chief-of-pods` matches `/Users/x/Dev/p/chief-of-pods`, but not `/Users/x/chief-of-pods-old` or `/Users/x/Dev/p/chief-of-pods/tools` |
+
+Each comparison ignores one trailing `/` on either side, keeps case and does not resolve symbolic links. A subfolder of a matching folder does not match. **An empty list lets no agent use that channel** (`machine_audio_output = []` is a silent desk while the phone still works), and `["*"]` lets every agent use it. A partial entry such as `chief-of-pods` matches any folder with that name, a second clone included; write the full path to rule that out.
+
+Harold takes a pane's folder, the working directory tmux reports for it, from its latest listing of tmux panes each time it decides. A failed listing keeps the last good one. A pane Harold has no folder for yet may use no channel (except through `*`), and a pane that `cd`s out of a listed folder is held back from the next listing. While no agent runs in a listed folder, such as while the chief restarts, nothing goes out on that channel.
+
+**The chief.** `chief` is one entry that names the chief's pane. It gets typed answers from the question tool, alerts, the Mac's calls and the web app's route; whether it may use a channel is up to that channel's list, like any pane. `"*"` is refused in `chief`. When more than one pane matches `chief`, Harold treats the chief as absent for all those uses and logs `chief pane ambiguous` with a `count` and no folder; those panes still use the channels their folders match.
+
+**What each request meets.**
+
+| What a pane asks for | Channel and list | Not on the list |
+| --- | --- | --- |
+| A turn-end update, at the desk | `machine_audio_output`, except the chief's own | `spoken update left out (not in notify.machine_audio_output)` |
+| A turn-end update during a call at the Mac | `machine_audio_output` | the same line |
+| A line it asks Harold to speak, at the desk | `machine_audio_output` | `spoken line dropped (not in notify.machine_audio_output)` |
+| A turn-end update, screen locked | the phone, below | `notification skipped (not in notify.<key>)` |
+| An agent message it asks Harold to send | the phone, below | `agent message dropped (not in notify.<key>)` |
+| A line it asks Harold to speak, screen locked or in the phone's call | the phone, below | `spoken line dropped (not in notify.<key>)` |
+
+**The phone** checks, in order: with `[web_app]` set and the chief on `web_app`, the message goes to the app (its thread with a push, or played in the phone's call when it is open; the call also takes a spoken line from any pane on `web_app`). Otherwise, or when the app can't take it (no phone has push turned on, or the push is refused), it goes by `away_channel` if the pane is on that channel's list, and a message the app couldn't take starts `(app unreachable)`. Otherwise it is held back, and the line names the last list checked. The voice mute and the messaging pause are looked at before any list.
+
+Harold writes each of these lines at `INFO` with the pane in a `pane_id` field. None holds message or spoken text. `<key>` is the channel's key.
+
+The terms "left out" (a turn-end update Harold chose not to say or send) and "dropped" (an agent message or spoken line) keep the glossary's meaning; the lines above name the list that held the pane back.
 
 | Key | Description |
 | --- | --- |
-| `away_messages_only_from` | Optional. An absolute path. Harold compares it as text with the working directory tmux reports for a pane (`pane_current_path`), ignoring one trailing `/`. It does not resolve symbolic links, and a subfolder counts as another folder. A value that is empty or does not start with `/` stops the daemon at start. Harold reads it at start, so a change takes effect at the next restart. |
+| `chief` | An entry (above). Harold checks it at start: an empty entry, one of only slashes, or one holding `..` or `.` as a folder stops the daemon, naming the key and the entry. |
+| `imessage`, `telegram`, `web_app`, `machine_audio_output` | Lists of entries. Harold checks every list at start, including the one `away_channel` does not use; `*` is allowed. |
 
-The key was named `away_updates_only_from` while it covered turn-end updates only. Harold does not start with the old name in the configuration: it prints `notify.away_updates_only_from is now notify.away_messages_only_from; rename the key`.
+A key inside `[notify]` that Harold does not know, such as `imesage`, stops the start. `away_updates_only_from` stops it with `notify.away_updates_only_from is now notify.away_messages_only_from; rename the key`. Harold reads the lists at start, so a change takes effect at the next restart.
 
-- The rule covers every turn of a pane outside the folder, including one you started in that pane yourself.
-- A pane the agent monitor has not listed yet counts as outside the folder.
-- A pane in the folder is never affected. After it sends a message of its own, its turn-end update for that turn is still left out by the first rule.
+**The old key.** When `local.toml` sets `[notify] away_messages_only_from`, Harold reads its folder as `chief` and as each channel list that `local.toml` does not set, and logs once at start, at `WARN`, `notify.away_messages_only_from is replaced by notify.chief and the channel lists`. Keys set alongside it win. Replace it with the new keys at the next install.
+
+The agent that sent a dropped message is not told. Its command prints nothing and exits 0, as it does when the message is sent: Harold stores the request first and drops it when it comes to send it. Nothing is sent later. The pane does not become the one an untagged reply goes to, and the drop does not set the record described in "After a message the agent sent itself". An agent that messages the phone and then waits for a reply waits without knowing none will come.
+
+- The lists cover every turn of a pane that is not on them, including one you started in that pane yourself.
 - Harold's own answers to a reply from your phone, such as `🤖 ✓ Delivered to […]`, are still sent.
-- Each Mac's Harold checks its own panes. An agent in the folder on another Mac is not seen.
-- While the agent monitor cannot list tmux panes, the rule leaves nothing out and drops nothing for a pane that no pod or baton file names. A pane such a file names is still left out and dropped.
+- Each Mac's Harold checks its own panes. An agent on another Mac is not seen.
 
 ### What leaving an update out means
 
 Harold sends nothing to the phone for that turn: no summary and no trailing question. The event is marked handled and is not retried. The pane does not become the one an untagged reply goes to. The turn is recorded in the 30-second duplicate check, so a repeat of the same `TurnCompleted` is left out as well. The `TurnCompleted` event is still stored, so the dash and the pane's work summary update as usual.
 
-## Updates Harold does not speak for the chief, build workers and pod sessions
+## Updates Harold does not speak at the desk
 
-At the desk, Harold says a short update each time an agent's turn ends. When one agent, the chief, tells the user what the others are doing with [`harold speak`](#lines-the-chief-speaks), those updates would talk over it. So Harold says no turn-end update for the build workers and the pod sessions, and none for the chief itself while it is tracked. Any other pane, such as an agent the user drives, is spoken.
-
-The rule applies only when `[notify] away_messages_only_from` is set (see [From agents outside one folder](#from-agents-outside-one-folder)). The chief is any agent in that folder. A build worker or a pod session is a pane that a file names, and the chief need not run for the file to count. Harold sorts the pane whose turn ended like this:
-
-| Pane | How Harold recognises it | Log line |
-| --- | --- | --- |
-| A build worker | A line of `<folder>/.superpowers/baton/agent-pane` is the pane's id, such as `%47`. Baton writes this file in the worker's worktree. | `spoken update left out (build worker)` |
-| A pod session (pod-coordination or a product manager) | A line of `<folder>/.superpowers/pod/agent-panes` is the pane's id. Pod sessions run in the product's base checkout itself, and `pod start` is to write the file there; until it does, pod sessions are spoken. | `spoken update left out (pod session)` |
-| The chief | Its folder is the one `away_messages_only_from` names, the pane is tracked, and the last listing of tmux panes worked | `spoken update left out (chief)` |
-
-The files are checked first, then the chief's folder. Harold writes each line at `INFO` with the pane in a `pane_id` field. It only reads files: it trims each line before comparing it with the pane's id, and a file that is missing or cannot be read names no pane. With no pod running, no file names a pane, so every pane but the chief's is spoken.
-
-### Where Harold looks for the files
-
-`<folder>` is the pane's folder, the working directory tmux reports for it (`pane_current_path`), when the agent monitor tracks the pane. A new pane has no folder until the agent monitor's next listing of tmux panes, and a failed listing does not clear the folders: Harold keeps those of the last listing that worked and uses them for this rule.
-
-For a pane with no folder, Harold looks in the places a pod writes. The registry is the file named by `[telemetry] pod_registry`. Harold reads the base checkout of each product in it, and looks at that checkout's `.superpowers/pod/agent-panes` and at the `.superpowers/baton/agent-pane` of every folder beside the base checkout, where baton puts its worktrees. These are plain file reads on the turn-end path, with no git command. With no registry set, or one Harold cannot read, Harold checks only the pane's own folder, and a pane with no folder is spoken.
-
-### Entries Harold refuses
-
-tmux numbers panes from `%0` again after its server restarts, so a file can list an old pane id that a different pane now has. A file's change time alone does not show this, because an append after a restart makes the older lines look new. So Harold decides by what it knows about the pane:
-
-| The pane | The entry counts only if | Otherwise `reason` is |
-| --- | --- | --- |
-| Tracked, so its folder is known | The folder is a base checkout in the registry or a folder beside one. There is no time test. | `outside_pod_folders` |
-| Not tracked | The file was modified after the tmux server started | `older_than_tmux_server`, or `no_tmux_start_time` when Harold could not read the start time |
-
-Harold reads the start time with `tmux display-message -p '#{start_time}'` and keeps it for a minute, so it runs that command at most once a minute. A refused entry is logged at `INFO` as `pod pane entry ignored` with the `pane_id` and `reason` fields, and the update is spoken as for any other pane. With no registry set, the check for a tracked pane is skipped.
+At the desk, Harold says a short update each time an agent's turn ends. When one agent, the chief, tells the user what the others are doing with [`harold speak`](#lines-the-chief-speaks), those updates would talk over it. So Harold says an update only for a pane on `machine_audio_output` (see [Channels](#channels)), and none for the chief itself while it is tracked. The log line is `spoken update left out (chief)` for the chief and `spoken update left out (not in notify.machine_audio_output)` for any other pane that is held back, written at `INFO` with the pane in a `pane_id` field. A worktree, a base checkout, the architect's folder, a subfolder of a listed folder and a pane Harold has no folder for are all held back unless a list names their folder.
 
 The rule is checked after the voice mute and the two skips for an active session or pane, so an update those skip is logged by them instead. An update the rule leaves out is handled as in [What leaving an update out means](#what-leaving-an-update-out-means): nothing is said, the event is not retried, and a repeat of the turn within 30 seconds is left out too.
 
-The rule applies only with the screen unlocked. Updates to the phone while away follow `away_messages_only_from`, which keeps every pane outside the chief's folder off the phone, and a pane a pod or baton file names counts as outside it.
+The rule applies only with the screen unlocked. With the screen locked, the phone's lists decide (see [Channels](#channels)).
 
 ## Messages an agent sends
 
@@ -218,7 +229,7 @@ A turn-end update is Harold's summary of a finished turn. An agent can also send
 
 The phone shows `🤖 [<machine_name>/<pane_label>] Pod 3 is blocked on a merge conflict in store.rs`. A reply to it is routed like a reply to a turn-end update: an untagged reply goes back to the pane that sent the message.
 
-The command calls the daemon's `SendMessageToAwayDevice` RPC and waits up to 3 seconds. The daemon makes the text one line, checks that it has 1 to 1,000 characters, that messaging is not paused and that the pane hosts an agent the agent monitor tracks, and then stores an `AwayMessageRequested` event. The command exits 0 once the event is stored, which is before the phone has the message. Otherwise it prints one line on standard error and exits 1. The event handler takes the event from the delivery outbox in stream-version order and sends it through the away channel. Before it sends, the handler checks the messaging pause and then the folder rule in [From agents outside one folder](#from-agents-outside-one-folder). A message that rule drops is never sent, and its command has already exited 0.
+The command calls the daemon's `SendMessageToAwayDevice` RPC and waits up to 3 seconds. The daemon makes the text one line, checks that it has 1 to 1,000 characters, that messaging is not paused and that the pane hosts an agent the agent monitor tracks, and then stores an `AwayMessageRequested` event. The command exits 0 once the event is stored, which is before the phone has the message. Otherwise it prints one line on standard error and exits 1. The event handler takes the event from the delivery outbox in stream-version order and sends it through the away channel. Before it sends, the handler checks the messaging pause and then the phone's lists in [Channels](#channels). A message they drop is never sent, and its command has already exited 0.
 
 It differs from a turn-end update in these ways:
 
@@ -227,8 +238,8 @@ It differs from a turn-end update in these ways:
 | Started by | The agent's turn ending | The agent running the command |
 | Text | Harold's summary of the agent's final reply, 280 characters at most | The agent's text as written, made one line, 1,000 characters at most |
 | Form | `🤖 [machine_name/pane_label] body (context)`, with a trailing question sent separately | `🤖 [machine_name/pane_label] text`, one message |
-| Presence checks | Sent to the phone only when the screen is locked; skipped when the session or pane is active; left out by the two rules in "Updates Harold leaves out while you are away" | None: sent whether the screen is locked or not |
-| Folder rule (`away_messages_only_from`) | Left out for a pane outside the folder (or one a pod or baton file names), while the screen is locked | Dropped for a pane outside the folder (or one a pod or baton file names), whether the screen is locked or not; the command still exits 0 |
+| Presence checks | Sent to the phone only when the screen is locked; skipped when the session or pane is active; left out by the rules in "Updates Harold leaves out while you are away" | None: sent whether the screen is locked or not |
+| Channel lists | Left out for a pane the phone's lists do not name, while the screen is locked | Dropped for a pane the phone's lists do not name, whether the screen is locked or not; the command still exits 0 |
 | Voice mute | Silences the at-desk path | Does not apply |
 | Duplicate checks | The 30-second window, and on iMessage the recent-outgoing check | None: the same text sent twice arrives twice |
 | Messaging pause | Recorded as an intentional skip | The command is refused with `messaging is paused`; a message already stored is skipped and not sent later |
@@ -261,7 +272,7 @@ Harold stores the line and then handles it:
 
 | Situation | What Harold does |
 |---|---|
-| `away_messages_only_from` is set, and the line comes from a pane a pod or baton file names, or from a pane outside that folder while an agent runs there | Drops it and logs `spoken line dropped (lines come from <folder> only) pane_id=…` |
+| The pane is not on the list of the channel the line would use (`machine_audio_output` at the desk, the phone's lists while away) | Drops it and logs `spoken line dropped (not in notify.<key>) pane_id=…`. The voice mute and the messaging pause are looked at first. |
 | Screen locked (away), messaging not paused | Makes a voice note of the line (described below) and sends it to the configured iMessage recipient with Messages, as an attachment in the same chat. With Telegram, it sends the line as text. |
 | Screen locked, messaging paused | Dropped and logged, as other away messages are |
 | Screen unlocked (at the desk), voice on | Says the line with the configured `[tts]` command, as turn-end updates are said, without adding anything to it |
