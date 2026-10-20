@@ -1,7 +1,9 @@
 //! Every span, counter and log line of the watch tool. The scheduler calls only these
 //! functions, so no other log site exists. None takes the skill's text, its
-//! `allowed-tools`, the facts, a command's output, the answer or a report: nothing here
+//! `allowed-tools`, its `add-dirs` folders (only their number), the facts, a command's output, the answer or a report: nothing here
 //! could carry them.
+
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use opentelemetry::KeyValue;
 use tracing::field::Empty;
@@ -106,6 +108,8 @@ pub(super) struct RunObs {
     watch: String,
     folder: String,
     run: u32,
+    /// How many folders the skill's `add-dirs` gave the run; never the paths.
+    add_dirs: AtomicU32,
 }
 
 impl RunObs {
@@ -124,7 +128,15 @@ impl RunObs {
             watch: watch.to_owned(),
             folder: folder.to_owned(),
             run,
+            add_dirs: AtomicU32::new(0),
         }
+    }
+
+    /// The number of `add-dirs` folders of the skill the run read. Written to
+    /// `harold.log` on the run's last line only.
+    pub(super) fn set_add_dirs(&self, count: usize) {
+        self.add_dirs
+            .store(u32::try_from(count).unwrap_or(u32::MAX), Ordering::Relaxed);
     }
 
     pub(super) fn span(&self) -> &Span {
@@ -169,6 +181,7 @@ impl RunObs {
                 outcome,
                 cost_usd,
                 duration_ms,
+                add_dirs = self.add_dirs.load(Ordering::Relaxed),
                 "watch run finished"
             );
         });
@@ -187,6 +200,7 @@ impl RunObs {
                 run = self.run,
                 reason,
                 cost_usd,
+                add_dirs = self.add_dirs.load(Ordering::Relaxed),
                 "watch run failed"
             );
         });

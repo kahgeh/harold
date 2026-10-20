@@ -348,6 +348,43 @@ async fn a_skipped_run_is_logged_with_its_reason() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn run_lines_carry_the_number_of_add_dirs_and_never_a_path() {
+    test_support::install();
+    let logs = CapturedLogs::start();
+    let h = harness(
+        settings(),
+        vec![answer("REPORT found", 0.01), Step::NoStart],
+    )
+    .await;
+    h.folder.write_skill(
+        "pod-watch",
+        "---\nadd-dirs: /ADDDIR-CANARY-6643/a, ~/ADDDIR-CANARY-6643/b\n---\nRules\n",
+    );
+    let name = unique("adddirs");
+    h.start(&name, 10, 120).await;
+    pass(Duration::from_secs(15 * 60)).await;
+    // The skill goes: the run fails before it can read any folder.
+    std::fs::remove_file(h.folder.0.join(".claude/skills/pod-watch/SKILL.md")).unwrap();
+    pass(Duration::from_secs(10 * 60)).await;
+
+    let jobs = h.runner.jobs.lock().unwrap().clone();
+    assert_eq!(jobs[0].add_dirs.len(), 2);
+    let text = logs.text();
+    let finished = lines(&text, "watch run finished", &name);
+    assert!(finished[0].contains("add_dirs=2"), "{}", finished[0]);
+    let failed = lines(&text, "watch run failed", &name);
+    assert!(failed[0].contains("process_failed") && failed[0].contains("add_dirs=2"));
+    assert!(failed[1].contains("skill_missing") && failed[1].contains("add_dirs=0"));
+    let exported = test_support::exported_text();
+    assert!(!text.contains("ADDDIR-CANARY-6643"), "path in harold.log");
+    assert!(
+        !exported.contains("ADDDIR-CANARY-6643"),
+        "path in an export"
+    );
+    assert!(!exported.contains("add_dirs"), "add_dirs is exported");
+}
+
+#[tokio::test(start_paused = true)]
 async fn the_skill_its_tools_the_facts_the_answer_and_the_report_reach_no_log_or_export() {
     test_support::install();
     let logs = CapturedLogs::start();
@@ -365,7 +402,7 @@ async fn the_skill_its_tools_the_facts_the_answer_and_the_report_reach_no_log_or
     .await;
     h.folder.write_skill(
         "pod-watch",
-        "---\nallowed-tools: Bash(TOOL-CANARY-3391:*)\n---\nSKILL-CANARY-2207 rules\n",
+        "---\nallowed-tools: Bash(TOOL-CANARY-3391:*)\nadd-dirs: /DIRS-CANARY-4418/x\n---\nSKILL-CANARY-2207 rules\n",
     );
     h.agents.agents.lock().unwrap()[0].work_summary = Some("FACT-CANARY-8812".into());
     let name = unique("canary");
@@ -380,6 +417,7 @@ async fn the_skill_its_tools_the_facts_the_answer_and_the_report_reach_no_log_or
         jobs[0].allowed_tools.as_deref(),
         Some("Bash(TOOL-CANARY-3391:*)")
     );
+    assert_eq!(jobs[0].add_dirs, ["/DIRS-CANARY-4418/x"]);
     assert!(String::from_utf8_lossy(&jobs[0].facts_json).contains("FACT-CANARY-8812"));
     assert!(
         h.typing
@@ -393,6 +431,7 @@ async fn the_skill_its_tools_the_facts_the_answer_and_the_report_reach_no_log_or
     for canary in [
         "SKILL-CANARY-2207",
         "TOOL-CANARY-3391",
+        "DIRS-CANARY-4418",
         "FACT-CANARY-8812",
         "ANSWER-CANARY-5521",
         "ANSWER-CANARY-5522",

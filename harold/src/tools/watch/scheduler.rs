@@ -497,6 +497,7 @@ impl Scheduler {
         let Ok(skill) = read_skill(folder, &row.skill, &self.deps.settings.skill_folders) else {
             return Some((Err(Failure::SkillMissing), None));
         };
+        obs.set_add_dirs(skill.add_dirs.len());
         let sources = Sources {
             agents: &self.deps.agents,
             pods: &self.deps.pods,
