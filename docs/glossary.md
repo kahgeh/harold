@@ -95,12 +95,19 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 
 | Term | Meaning | Not to use |
 | --- | --- | --- |
-| question | Something the chief asks the user, with an id such as `T1` and one or more decisions | — |
-| waiting question | A question not yet answered, set aside or dismissed | "waiting" alone |
-| question rows | The rows the questions take in the agent list, under the asking agent's row: the closed row, or the question header and every row under it | "question block" |
-| closed row | The one row `▸ n questions waiting` that stands for the questions while closed | — |
-| question header | The first of an open question's rows: `▾ T1 · 1 of 2 waiting · …` | — |
-| edge marker | `▲` or `▼` with the count, at the list's edge when the question rows are scrolled out of view | — |
+| todo | Something the chief puts in the dash for you, either a question to answer or instructions to follow, with an id such as `Q1` or `I1` | "task", "item" (an item is a backlog entry), "request", "question" for both kinds |
+| question | Something the chief asks the user, with an id such as `Q1` and one or more decisions. A question is one kind of todo. | — |
+| instructions | One set of numbered steps the chief asks you to do by hand, a todo with an id such as `I1`. It is not a question: the question tool holds both in one table, and the API carries instructions in a `Question` message with `steps` in place of `decisions`. | "step list", "checklist", "question" for it |
+| step | One numbered line of instructions, with its text and optional detail | "task", "item" |
+| tick, ticked, untick | A step marked `[✓]` with `Space`, and the reverse. The ticked count, `2 of 4 ticked`, is the steps ticked out of all steps. | "check", or "done" for a single step |
+| done | The action row of instructions that tells the chief they are done, and the answers line's `done` | "send" for it, "done" for a single step |
+| ignore | The action row of instructions that tells the chief you will not do them, and takes them off your todos | "later", "set aside", "reject" for it |
+| waiting question | A question not yet answered, set aside or dismissed. Instructions are never one. | "waiting" alone |
+| todo rows | Every row the todos take under the chief's row: the closed row while closed, and while open the open todo's rows plus the other todos' todo rows | "question rows", "question block" |
+| closed row | The one row `▸ n todos waiting` that stands for every todo while closed | — |
+| todo header | The first row of an open todo, a question's or instructions': `▾ I1 · instructions · 1 of 2 todos · …` | "question header" |
+| todo row | The one row of a single todo that is not open, `▸ Q1 · question · …`, shown under the open todo. One todo row is not "todo rows". | "closed row" for it |
+| edge marker | `▲` or `▼` with the todos count, at the list's edge when the todo rows are scrolled out of view | — |
 | decision | One choice within a question, with its ask and options | — |
 | ask | A decision's own question text | — |
 | option, option row | One answer a decision offers, with its key, label and impact, and its row | — |
@@ -109,12 +116,12 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 | pick | The option chosen for a decision, marked `●` and made with Space | — |
 | free option | An option that takes the user's own text | — |
 | text field | Where the user types a free option's text | — |
-| action row | One of the rows under the options: `send`, `later`, `revise…`, `reject…` | "actions" alone |
+| action row | A question's `send`, `later`, `revise…`, `reject…`, or the `done` and `ignore` of instructions | "actions" alone |
 | send | The action row that sends the answer with every decision's pick, at once | "record", "send now" |
 | later, set aside | The action row `later`, and what it does: the question waits until no other question is waiting | "defer" and "deferred" in what the user reads. `DeferQuestion` is the API's name |
 | revise…, reject… | The action rows that open a note asking for a change, or saying why not | — |
 | note | The text typed for `revise…` or `reject…` | "note" for a backlog note |
-| notice | A short line under the question rows, such as `T1 changed, your picks were cleared` | — |
+| notice | A short line under the todo rows, such as `Q1 changed, your picks were cleared` | — |
 | question version | The count that rises each time the chief puts a question again | "version" alone |
 | answers line | The line starting `ANSWERS` that Harold types into the chief's pane | "batch line" |
 | settle | The 3 seconds Harold waits after the newest answer before typing an answers line, for answers not sent at once | — |
@@ -124,7 +131,7 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 | Term | Meaning | Not to use |
 | --- | --- | --- |
 | tool | A module Harold hosts, with its own storage and gRPC service (ADR 0001) | — |
-| question tool | The tool that holds the chief's questions and the user's answers | "question queue" as its name |
+| question tool | The tool that holds the chief's todos (questions and instructions) and the user's answers | "question queue" as its name |
 | backlog tool | The tool that holds each product's backlog and the chief's queue | — |
 | backlog | A product's top 5 items, ranked, and its backlog notes | — |
 | item | One entry in a backlog | — |
@@ -174,7 +181,7 @@ Each of these words has one sense in Harold. Anything else is named another way:
 | version | Never alone | question version, release version |
 | waiting | Never alone | waiting agent, waiting question |
 | held | Never alone | held keys, held backlog note |
-| header | The question header | masthead, for the dash's top line |
+| header | The todo header | masthead, for the dash's top line |
 
 ## Not yet consistent
 

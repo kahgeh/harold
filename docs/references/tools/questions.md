@@ -1,6 +1,6 @@
 # Question Tool
 
-The question tool is Harold's first [tool](README.md). The chief of pods puts questions in. The user answers them from the dash. Harold types the answers back into the chief's pane as one line, a few seconds after they are given, or at once when the user sends every answer with `send` in the dash.
+The question tool is Harold's first [tool](README.md). The chief of pods puts todos in, of two kinds: questions and instructions. The user answers questions and follows instructions from the dash. Harold types the answers back into the chief's pane as one line, a few seconds after they are given, or at once when the user sends every answer with `send` in the dash.
 
 The service is `harold.tools.questions.v1.QuestionService`. It trusts local callers: there is no token. The proto is `harold-api/proto/tools/questions.proto`.
 
@@ -39,18 +39,53 @@ Every field except `intro`, `impact`, `suggested` and `free` is required. The ru
 
 A broken rule is refused with the field's name and nothing is stored. The CLI only translates the JSON; the daemon checks the rules.
 
-## The six RPCs
+## Instructions
+
+Instructions are a todo of the other kind: numbered steps the user does by hand. The chief writes them as JSON with `steps` in place of `decisions` and passes them to the same `harold tool questions put`. The question tool holds both in one table, and the API carries instructions in a `Question` message.
+
+```json
+{
+  "id": "I1",
+  "product": "harold",
+  "title": "Install Harold 0.15.0 on PasM1Mac",
+  "intro": "Do these on PasM1Mac, then tick each one here.",
+  "link": "https://example.com/specs/release-install.md",
+  "steps": [
+    {"text": "Open Terminal"},
+    {"text": "Run make deploy in ~/Dev/p/harold/main", "detail": "It asks for your password once."}
+  ]
+}
+```
+
+`id`, `product`, `title` and `steps` are required. `intro`, `link`, `spec` and `sha` are optional. The rules:
+
+- A put holds `decisions` or `steps`, never both. A put with neither is refused as `invalid decisions`; one with both, as `invalid steps`.
+- `id` follows the same rule as for a question. `product` and `title` are not blank. `title` is what the dash shows in the instructions' row.
+- There are 1 to 20 steps (more than 20 is `invalid steps`). Each step has a `text`, which is not blank, and an optional `detail`.
+- Every text field, `text` and `detail` included, is under 2,000 characters. `link`, when present, starts with `https://` or `http://`.
+- A question with a `title` is refused as `invalid title`.
+
+A refusal names the field, such as `invalid steps.2.text` or `invalid steps.2.detail`. The ids are the chief's to choose; the tool does not check the first letter, and examples use `Q1` for questions and `I1` for instructions.
+
+Instructions are never a waiting question. They are left out of the `waiting` count in `ListQuestions`, and so they do not hold back questions set aside with `later`.
+
+## The seven RPCs
 
 | RPC | Who | What it does |
 | --- | --- | --- |
-| `PutQuestion` | chief | Adds a question. With an existing id it raises the question version and makes the question `waiting` again, with no answer, whatever its state. A waiting or deferred question keeps its place; any other goes last. Returns `id` and `version`. |
-| `DismissQuestion` | chief | Withdraws a waiting or deferred question, with a `reason` the dash shows. |
-| `ReorderQuestions` | chief | Puts the listed ids that are waiting or deferred first, in that order, keeping their state. Other ids are ignored, so a race with a dismissal is harmless. |
-| `ListQuestions` | dash | Returns the waiting questions, then the deferred ones (flagged `deferred`), the count `waiting`, and `dismissed`: the id and reason of every question dismissed in the last hour. |
+| `PutQuestion` | chief | Adds a question or instructions. With an existing id it raises the question version and makes the question `waiting` again, with no answer, whatever its state. A waiting or deferred question keeps its place; any other goes last. Returns `id` and `version`. |
+| `DismissQuestion` | chief | Withdraws a waiting or deferred question or instructions, with a `reason` the dash shows. |
+| `ReorderQuestions` | chief | Puts the listed ids, of questions and instructions, that are waiting or deferred first, in that order, keeping their state. Other ids are ignored, so a race with a dismissal is harmless. |
+| `ListQuestions` | dash | Returns the waiting todos, then the deferred ones (flagged `deferred`), the count `waiting`, and `dismissed`: the id and reason of every question dismissed in the last hour. |
 | `AnswerQuestion` | dash | Answers a question at the question version the dash saw. |
 | `DeferQuestion` | dash | Sets a question aside. It stays with the other questions and returns to `waiting` later (see [The answers line](#the-answers-line)). |
+| `TickStep` | dash | Ticks or unticks one step of waiting instructions (see [Ticking](#ticking)). |
 
-The `waiting` count in `ListQuestions` is the number of questions listed, deferred ones included.
+The `waiting` count in `ListQuestions` is the number of questions listed, deferred ones included. Instructions are listed but not counted. Each listed item carries `ticked`: the step numbers ticked, counting from 1, empty for a question.
+
+### Ticking
+
+`TickStep` takes `id`, `version`, `step` (counted from 1) and `ticked` (true to tick, false to untick). The ticks are stored with the instructions, in the `ticks` column, so a dash restart, a reconnect or a second dash shows the same ticks. Ticking sends nothing to the chief. When the chief puts the same id again, a step keeps its tick if its text is unchanged.
 
 ### Answers
 
@@ -62,8 +97,10 @@ The `waiting` count in `ListQuestions` is the number of questions listed, deferr
 | `FREE_TEXT` | One per decision, in order, at least one of them free. A free pick must have `text`. | Optional; not sent. |
 | `REVISE` | Any picks made so far, in order. | Required: what to change. |
 | `REJECT` | Any picks made so far, in order. | Required: why. |
+| `DONE` | None. | None. For instructions only. |
+| `IGNORE` | None. | None. For instructions only. |
 
-`UNSPECIFIED` is refused. A free option does not end the walk through the decisions: its typed text becomes that decision's pick, and the dash goes on to the next decision. The answer is `FREE_TEXT` when any pick is free.
+`DONE` tells the chief the user is done with the instructions; `IGNORE` tells the chief the user will not do them. The dash sends both with `send_now` set. `DONE` and `IGNORE` are refused for a question, and `ANSWER`, `FREE_TEXT`, `REVISE` and `REJECT` for instructions, as `invalid kind`. `DONE` and `IGNORE` with picks or a note are refused as `invalid picks` or `invalid note`. `UNSPECIFIED` is refused. A free option does not end the walk through the decisions: its typed text becomes that decision's pick, and the dash goes on to the next decision. The answer is `FREE_TEXT` when any pick is free.
 
 The note is sent only with `REVISE` and `REJECT`. For `ANSWER` and `FREE_TEXT` it is not sent; the typed text of a free pick travels as that pick.
 
@@ -71,9 +108,10 @@ The note is sent only with `REVISE` and `REJECT`. For `ANSWER` and `FREE_TEXT` i
 
 | Status | Message | When |
 | --- | --- | --- |
-| `InvalidArgument` | `invalid <field>` | A rule is broken. The field is named, such as `invalid link`, `invalid decisions.1.options.2.key`, `invalid picks`, `invalid note` or `invalid kind`. Nothing is stored. |
-| `FailedPrecondition` | `version_changed` | The question was put again since the dash read it. |
-| `FailedPrecondition` | `not_waiting` | The question is dismissed, already answered, or unknown. |
+| `InvalidArgument` | `invalid <field>` | A rule is broken. The field is named, such as `invalid link`, `invalid decisions.1.options.2.key`, `invalid picks`, `invalid note`, `invalid kind`, `invalid steps` or `invalid step`. Nothing is stored. |
+| `FailedPrecondition` | `version_changed` | The question or instructions were put again since the dash read them. |
+| `FailedPrecondition` | `not_waiting` | The question or instructions are dismissed, already answered, or unknown. |
+| `InvalidArgument` | `invalid step` | `TickStep` names a step number below 1 or above the number of steps, which includes any step of a question. `TickStep` checks `not_waiting` and `version_changed` first. |
 | `Unavailable` | `the question database is unavailable` | A database write failed. |
 
 ## The CLI
@@ -84,16 +122,17 @@ The chief uses `harold tool questions`. Each command prints one line, or the ref
 harold tool questions put < question.json        # stored Q25 v1
 harold tool questions list                       # one line per question, then "<n> waiting"
 harold tool questions order Q27 Q25              # ordered 2
+harold tool questions put < instructions.json     # stored I1 v1
 harold tool questions dismiss Q25 --reason "spec withdrawn"   # dismissed Q25
 ```
 
-`list` prints `<id> v<version> <product> <spec>`, with ` (deferred)` after a deferred one. Any other use prints `invalid argument: usage is harold tool questions put|dismiss|order|list`. If the daemon is not running the CLI prints `the Harold daemon is not reachable`, and after 3 seconds without an answer, `the Harold daemon did not answer within 3 seconds`.
+`put` accepts the JSON for a question or for instructions. `order` and `dismiss` take ids of either. `list` prints `<id> v<version> <product> <spec>`, with ` (deferred)` after a deferred one, and `<id> v<version> <product> steps <ticked>/<n>` for instructions, such as `I1 v1 harold steps 2/4`. Any other use prints `invalid argument: usage is harold tool questions put|dismiss|order|list`. If the daemon is not running the CLI prints `the Harold daemon is not reachable`, and after 3 seconds without an answer, `the Harold daemon did not answer within 3 seconds`.
 
-The user answers in the dash, not through the CLI. See the [dash README](../../../tmx-agent-dash/README.md#questions).
+The user answers in the dash, not through the CLI. See the [dash README](../../../tmx-agent-dash/README.md#todos).
 
 ## States
 
-A question is in one state:
+A question, or a set of instructions, is in one state:
 
 - `waiting`: it needs an answer.
 - `deferred`: set aside with `DeferQuestion`. It can still be answered. It returns to `waiting`, at the end, after a line is typed with no question waiting, and at a `later` that leaves no question waiting and no answer unsent.
@@ -119,6 +158,7 @@ ANSWERS 3 | Q25 durable-server sha d84bf386a2a5: protocol libSQL's Hrana; build 
 - An `answer` or `free_text` part is `<id> <spec> sha <sha>: <pick>; <pick>`. A pick is `<ask> <label>`. A free option's pick is `<ask> "<typed text>"`, for example `Q28 net-z sha 3333: Which? "use HTTP/3"`.
 - A `revise` or `reject` part is `<id> <spec>: revise "<note>"` or `<id> <spec>: reject "<note>"`. It has no `sha`.
 - ` | later: <id>, <id>` is added only when some question is set aside. It lists the questions still set aside when the line is built, so an early line can repeat an id that stays set aside.
+- A part for instructions is `<id> <product>: done`, `<id> <product>: done, <ticked> of <n> ticked` when some steps are unticked, or `<id> <product>: ignored`. It has no `sha`, and counts in `ANSWERS <n>`. For example, `I1 harold: done, 3 of 4 ticked`.
 - The line does not say which answer had `send_now` set.
 
 Answers come in the order of the questions.
@@ -152,22 +192,25 @@ If Harold stops while a batch is being typed, or between typing and marking, the
 
 ## Log lines
 
-Six fixed lines, with only the fields `tool`, `question_id`, `version` and `reason`. No question or answer text is ever logged.
+Seven fixed lines, with only the fields `tool`, `question_id`, `version` and `reason`. No question or answer text is ever logged.
 
 | Line | Fields | Notes |
 | --- | --- | --- |
 | `question stored` | `tool`, `question_id`, `version` | |
 | `question dismissed` | `tool`, `question_id`, `version` | |
 | `question answered` | `tool`, `question_id`, `version` | |
+| `step ticked` | `tool`, `question_id`, `version`, `reason` | `reason` is `ticked` or `unticked`. No step text is logged. |
 | `answers batch typed` | `tool`, `reason` | `reason` is `typed`, or `enter_failed` when Enter failed after the text went in (a warning). |
 | `answers batch waiting` | `tool`, `reason` | `reason` is `no_chief`, `pane_busy`, `no_pane` or `store_failed`. |
 | `tool failed to start` | `tool`, `reason` | `reason` is `store_open_failed`. |
 
 ## Data folder and rollback
 
-The data folder is `<parent of the store path>/tools/questions/`. It holds `questions.db`, a Turso database with two tables: `questions` (the question, its state and answer, and the dismissal `reason`) and `batches` (each line's text and whether it was typed).
+The data folder is `<parent of the store path>/tools/questions/`. It holds `questions.db`, a Turso database with two tables: `questions` (the question or instructions, their state and answer, the ticked step numbers, and the dismissal `reason`) and `batches` (each line's text and whether it was typed).
 
 Migration `002_answer_send_now.sql` adds `send_now INTEGER NOT NULL DEFAULT 0` to `questions`; existing rows get 0. A Harold that has the questions tool but not migration 002 refuses the migrated `questions.db`, as it does for any migration, so rolling back to it means moving `questions.db` aside.
+
+Migration `003_step_ticks.sql` adds `ticks TEXT NOT NULL DEFAULT ''` to `questions`: the ticked step numbers. The instructions themselves go in the existing `body` column. An older Harold refuses the migrated `questions.db`; roll back by moving `questions.db` aside.
 
 The core store is untouched. To roll back:
 

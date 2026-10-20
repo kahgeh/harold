@@ -88,7 +88,7 @@ flowchart LR
 | CLI | `harold` and its subcommands: `tool`, `speak`, `send-message-to-away-device` and the rest | `harold/src/cli.rs` |
 | haroldctl and the installer | Install, start, stop and check the service | `scripts/` |
 | hooks, Claude Code mod, OpenCode plugin | Tell Harold what an agent did | `hooks/` |
-| tmx-agent-dash | The dash: agent rows, question rows, voice and messaging switches | `tmx-agent-dash/` |
+| tmx-agent-dash | The dash: agent rows, todo rows, voice and messaging switches | `tmx-agent-dash/` |
 | API contracts | The protobuf definitions shared by Harold, the dash and the tools | `harold-api/` |
 
 ## Interfaces
@@ -172,6 +172,10 @@ The **outbox** is a persistent list of delivery work, such as sending a turn-end
 The **snapshot publisher** sends the saved agent view to clients through the `WatchAgentStates` gRPC stream. A snapshot is the complete current view. The dash receives one when it connects, followed by updated snapshots, so it can reconnect without reconstructing every change it missed.
 
 See the [agent monitor reference](../references/agent-monitor/README.md#projection-and-storage) for the storage and API contracts.
+
+### The question tool's todos
+
+The question tool holds the chief's todos, of two kinds: questions to answer and instructions to follow by hand. Both live in the same `questions` table. The dash stores each tick of an instruction's step with `TickStep`, in the `ticks` column, so the ticks survive a dash restart. The `done` and `ignore` actions store a `DONE` or `IGNORE` answer, which goes in the next answers line at once. This stays inside the question tool, so it needs no ADR beyond ADR 0001. See the [questions reference](../references/tools/questions.md).
 
 ### Why the agent monitor uses several sources
 
