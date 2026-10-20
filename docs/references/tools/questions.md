@@ -212,7 +212,7 @@ Nine fixed lines, with only the fields `tool`, `question_id`, `version` and `rea
 | `question answered` | `tool`, `question_id`, `version` | |
 | `step ticked` | `tool`, `question_id`, `version`, `reason` | `reason` is `ticked` or `unticked`. No step text is logged. |
 | `picks saved` | `tool`, `question_id`, `version` | Info. No pick, key or text is logged. |
-| `picks not saved` | `tool`, `question_id`, `version`, `reason` | A warning; `reason` is `store_failed`. `harold.log` holds the database error beside it. |
+| `picks not saved` | `tool`, `question_id`, `version`, `reason` | A warning; `reason` is `store_failed`. |
 | `answers batch typed` | `tool`, `reason` | `reason` is `typed`, or `enter_failed` when Enter failed after the text went in (a warning). |
 | `answers batch waiting` | `tool`, `reason` | `reason` is `no_chief`, `pane_busy`, `no_pane` or `store_failed`. |
 | `tool failed to start` | `tool`, `reason` | `reason` is `store_open_failed`. |

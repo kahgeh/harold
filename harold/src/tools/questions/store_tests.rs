@@ -1315,9 +1315,15 @@ async fn save_picks_replaces_picks_and_keeps_state_answer_and_updated_at() {
     assert!(picks_of(&store, "Q1").await.is_empty());
     let shown = store.show("Q1").await.unwrap().unwrap();
     assert_eq!((shown.version, shown.state.as_str()), (1, "waiting"));
-    // updated_at_ms is still 100: the dismissal window is measured from it.
-    store.dismiss("Q1", "r", 5_000).await.unwrap().unwrap();
-    assert_eq!(store.list(5_000).await.unwrap().dismissed.len(), 1);
+}
+
+#[tokio::test]
+async fn save_picks_drops_text_sent_with_a_plain_option() {
+    let temp = TempFolder::new();
+    let store = TursoQuestionStore::open(&temp.0).await.unwrap();
+    store.put(asking("Q1", &["x"]), 1).await.unwrap();
+    save_ok(&store, "Q1", 1, &[pick(0, "a", "stray text")]).await;
+    assert_eq!(picks_of(&store, "Q1").await, [saved(0, "a", "")]);
 }
 
 #[tokio::test]

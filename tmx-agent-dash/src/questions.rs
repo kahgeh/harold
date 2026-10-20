@@ -292,6 +292,9 @@ pub struct QuestionBlock {
     /// Ids of instructions answered `done` or `ignore` here, so that the same id listed
     /// again says its ticks were kept. Kept small.
     answered_instructions: Vec<String>,
+    /// Ids that went missing while shown here, so that a question listed again says its
+    /// picks were kept or cleared. Kept small.
+    gone: Vec<String>,
     /// The notice stood on a block with no question through one listing already; the next
     /// listing that still finds no question clears it, and the block hides.
     notice_listed: bool,
@@ -409,6 +412,23 @@ impl QuestionBlock {
             self.answered_instructions.retain(|x| x != &id);
             self.set_notice(instructions_changed_notice(&id));
         }
+        // A question withdrawn while shown and put again: its picks come from the listing.
+        let back = self.gone.iter().find_map(|id| {
+            self.queue
+                .questions
+                .iter()
+                .find(|q| &q.id == id && !q.is_instructions())
+        });
+        if let Some(q) = back {
+            let id = q.id.clone();
+            let notice = if q.picks.is_empty() {
+                changed_notice(&id)
+            } else {
+                picks_kept_notice(&id)
+            };
+            self.gone.retain(|x| x != &id);
+            self.set_notice(notice);
+        }
     }
 
     fn follow_current(&mut self) {
@@ -432,6 +452,11 @@ impl QuestionBlock {
             }
             Some(_) => {}
             None => {
+                self.gone.retain(|x| x != &id);
+                self.gone.push(id.clone());
+                if self.gone.len() > 16 {
+                    self.gone.remove(0);
+                }
                 self.set_notice(self.dismissed_notice(&id));
                 self.select_first();
             }
@@ -1125,7 +1150,7 @@ impl QuestionBlock {
 
     /// Makes listed question `id` current. The current question's picks are kept while
     /// it is still listed, and `id`'s kept picks come back when they were made on the
-    /// listed version; otherwise `id` starts with its suggested picks.
+    /// listed version; otherwise `id` starts from its saved picks and suggestions.
     fn show(&mut self, id: &str) {
         let Some(version) = self
             .queue
@@ -1458,6 +1483,38 @@ mod tests {
             Some("Q1 changed, picks kept for unchanged decisions")
         );
         assert_eq!(picked(&b), keys(&["b", "a"]));
+        b.reconcile(queue(vec![question("Q1", 3, 2)]));
+        assert_eq!(
+            b.view().unwrap().notice.as_deref(),
+            Some("Q1 changed, your picks were cleared")
+        );
+    }
+
+    #[test]
+    fn a_question_dismissed_then_put_again_says_picks_kept() {
+        let mut b = open_block(vec![question("Q1", 1, 2)]);
+        press(&mut b, KeyCode::Char(' '), opt_stop(0, 0));
+        // The chief dismisses Q1; the dash reads the empty listing first.
+        let mut gone = queue(vec![]);
+        gone.dismissed = vec![("Q1".into(), "stale".into())];
+        b.reconcile(gone);
+        assert_eq!(
+            b.view().unwrap().notice.as_deref(),
+            Some("Q1 dismissed: stale")
+        );
+        b.reconcile(queue(vec![with_picks(
+            question("Q1", 2, 2),
+            vec![pick(0, "a", "")],
+        )]));
+        let view = b.view().unwrap();
+        assert_eq!(
+            view.notice.as_deref(),
+            Some("Q1 changed, picks kept for unchanged decisions")
+        );
+        assert_eq!(view.id, "Q1");
+        assert_eq!(picked(&b), keys(&["a", "b"]));
+        // Put again once more with no picks: the cleared form, once only.
+        b.reconcile(queue(vec![]));
         b.reconcile(queue(vec![question("Q1", 3, 2)]));
         assert_eq!(
             b.view().unwrap().notice.as_deref(),

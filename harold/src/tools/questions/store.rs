@@ -832,12 +832,24 @@ async fn save_picks_in(
     if let Err(field) = check_picks(&question, picks) {
         return Ok(Ok(Err(field)));
     }
+    // Text belongs to a free option only, as in an answer.
     let saved: Vec<SavedPick> = picks
         .iter()
-        .map(|pick| SavedPick {
-            decision: pick.decision,
-            key: pick.key.clone(),
-            text: pick.text.clone(),
+        .map(|pick| {
+            let free = question
+                .decisions
+                .get(pick.decision as usize)
+                .and_then(|d| d.options.iter().find(|o| o.key == pick.key))
+                .is_some_and(|o| o.free);
+            SavedPick {
+                decision: pick.decision,
+                key: pick.key.clone(),
+                text: if free {
+                    pick.text.clone()
+                } else {
+                    String::new()
+                },
+            }
         })
         .collect();
     conn.execute(

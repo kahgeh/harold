@@ -411,7 +411,7 @@ where
                     | Control::Call(_)
                     | Control::Answer(_)
                     | Control::Tick { .. }
-                | Control::SavePicks { .. }
+                    | Control::SavePicks { .. }
                     | Control::Defer(_)
                     | Control::OpenLink(_) => draw(terminal, &core.app, clock)?,
                 }
@@ -672,7 +672,7 @@ async fn wait_for_retry(
                         | Control::Call(_)
                         | Control::Answer(_)
                         | Control::Tick { .. }
-                | Control::SavePicks { .. }
+                        | Control::SavePicks { .. }
                         | Control::Defer(_)
                         | Control::OpenLink(_)
                 ) {
