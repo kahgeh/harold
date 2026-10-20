@@ -242,14 +242,23 @@ pub(crate) const PHONE_CHANNELS: [&str; 4] = ["imessage", "telegram", "forwarded
 /// after `init_telemetry`, when export is on.
 pub(crate) fn register_phone_counters() {
     let instruments = instruments();
-    // `model_failed` is what `local-model-failing` reads, so it is counted from 0 too.
-    instruments.turn_end_updates.add(
-        0,
-        &[
-            KeyValue::new("outcome", "fallback"),
-            KeyValue::new("reason", "model_failed"),
-        ],
-    );
+    // `model_failed` is what `local-model-failing` reads, and the trends panel shows every
+    // reason, so each set of `harold.turn_end_updates` is counted from 0.
+    for (outcome, reason) in [
+        ("model", "none"),
+        ("fallback", "no_model"),
+        ("fallback", "model_failed"),
+        ("fallback", "too_long"),
+        ("fallback", "no_name"),
+    ] {
+        instruments.turn_end_updates.add(
+            0,
+            &[
+                KeyValue::new("outcome", outcome),
+                KeyValue::new("reason", reason),
+            ],
+        );
+    }
     for channel in PHONE_CHANNELS {
         for resolved_by in ResolvedBy::ALL {
             let channel = KeyValue::new("channel", channel);

@@ -347,7 +347,7 @@ Harold sends counters and histograms as running totals, the OpenTelemetry defaul
 
 - `harold.phone_requests`, for each `outcome` (`typed`, `unavailable`), `channel` and `resolved_by`;
 - `harold.phone_requests.wrong`, for each `channel` and `resolved_by`;
-- `harold.turn_end_updates`, for `outcome = fallback` with `reason = model_failed`, which `local-model-failing` reads.
+- `harold.turn_end_updates`, for `model` (reason `none`) and for `fallback` with each `reason` (`no_model`, `model_failed`, `too_long`, `no_name`): `local-model-failing` reads `model_failed`, and the "Turn-end updates by reason" panel shows them all.
 
 The pod facts do the same for each product on its first poll: `pod.merges` with no `spec.id`, and `pod.merged_lines` for each `change`. Each series then has a first point of 0 before anything happens, and the first real request after a restart is a rise HyperDX can see.
 
@@ -387,7 +387,7 @@ The lead-time cards and the "Start to completion" panel apply the rule to the hi
 Two limits remain:
 
 - A series whose previous point is older than the lookback counts from 0. After a restart that is right, because the counter starts again at 0. If the collector was unreachable for longer than the lookback while Harold kept running, the rise during the outage is counted when export resumes.
-- The builder panel "Phone requests reaching the right agent" and the two counter alerts, `phone-request-unavailable` and `wrong-agent`, still use HyperDX's reading. They depend on the counting from 0 above.
+- The builder panels "Phone requests reaching the right agent" and "Turn-end updates by reason" and the three counter alerts, `phone-request-unavailable`, `wrong-agent` and `local-model-failing`, still use HyperDX's reading. They depend on the counting from 0 above.
 
 ## The alerts
 

@@ -18,14 +18,22 @@ fn unique_pane() -> String {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn the_model_failed_fallback_is_counted_from_0_at_start() {
+fn every_turn_end_update_outcome_is_counted_from_0_at_start() {
     test_support::install();
     register_phone_counters();
-    let counted = test_support::exact_counter_value(
-        "harold.turn_end_updates",
-        &[("outcome", "fallback"), ("reason", "model_failed")],
-    );
-    assert!(counted.is_some());
+    for (outcome, reason) in [
+        ("model", "none"),
+        ("fallback", "no_model"),
+        ("fallback", "model_failed"),
+        ("fallback", "too_long"),
+        ("fallback", "no_name"),
+    ] {
+        let counted = test_support::exact_counter_value(
+            "harold.turn_end_updates",
+            &[("outcome", outcome), ("reason", reason)],
+        );
+        assert!(counted.is_some(), "{outcome} {reason}");
+    }
 }
 
 #[test]
