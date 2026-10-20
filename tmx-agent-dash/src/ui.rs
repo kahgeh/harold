@@ -754,10 +754,10 @@ struct QLine {
     stop: Option<QStop>,
 }
 
-/// `2 questions waiting` or `N questions waiting`.
+/// `1 question waiting` or `N questions waiting`.
 fn waiting_label(waiting: u32) -> String {
     match waiting {
-        1 => "2 questions waiting".into(),
+        1 => "1 question waiting".into(),
         n => format!("{n} questions waiting"),
     }
 }
@@ -4244,7 +4244,7 @@ mod tests {
             lines.join("\n")
         );
         let one = chief_questions(1, "intro");
-        assert!(rendered(&one, 100, 60, 100_000).contains("▸ 2 questions waiting"));
+        assert!(rendered(&one, 100, 60, 100_000).contains("▸ 1 question waiting"));
     }
 
     #[test]
