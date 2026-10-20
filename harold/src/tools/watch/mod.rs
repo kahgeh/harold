@@ -3,6 +3,7 @@
 //! module only `NAME` and `start` are used.
 
 mod answer;
+mod runner;
 mod validate;
 
 use crate::tools::{ToolContext, ToolError, ToolHandle};
