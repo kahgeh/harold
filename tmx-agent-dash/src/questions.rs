@@ -39,6 +39,48 @@ pub struct QuestionView {
     pub version: u32,
     pub deferred: bool,
     pub decisions: Vec<DecisionView>,
+    /// Instructions only: the title shown in their rows.
+    pub title: String,
+    /// Instructions only: the numbered steps.
+    pub steps: Vec<StepView>,
+    /// Instructions only: the ticked step numbers, from 1.
+    pub ticked: Vec<u32>,
+}
+
+/// One step of instructions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StepView {
+    pub text: String,
+    pub detail: String,
+}
+
+impl QuestionView {
+    /// Instructions hold steps; a question holds decisions.
+    pub fn is_instructions(&self) -> bool {
+        !self.steps.is_empty()
+    }
+
+    fn kind(&self) -> TodoKind {
+        if self.is_instructions() {
+            TodoKind::Instructions
+        } else {
+            TodoKind::Question
+        }
+    }
+
+    /// How many steps are ticked, counting each listed step once.
+    fn ticked_count(&self) -> usize {
+        (1..=self.steps.len() as u32)
+            .filter(|n| self.ticked.contains(n))
+            .count()
+    }
+}
+
+/// The two kinds of todo.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TodoKind {
+    Question,
+    Instructions,
 }
 
 /// What `ListQuestions` returned.
@@ -57,6 +99,10 @@ pub enum AnswerKind {
     Revise,
     Reject,
     FreeText,
+    /// Instructions are done.
+    Done,
+    /// Instructions are not wanted.
+    Ignore,
 }
 
 /// One pick. `decision` counts from 0; `text` is only set for a free option.
@@ -106,8 +152,13 @@ pub enum QStop {
         decision: usize,
         option: usize,
     },
-    /// An [`ANSWER_ACTIONS`] row.
+    /// An [`ANSWER_ACTIONS`] row, or an [`INSTRUCTION_ACTIONS`] row on instructions.
     Action(usize),
+    /// Step `n` (from 0) of the open instructions.
+    Step(usize),
+    /// A todo that is not the open one, as an index into the listed order
+    /// (`Queue.questions`), so the open todo's own index is never used.
+    Other(usize),
 }
 
 /// What the runtime does after a key.
@@ -119,6 +170,13 @@ pub enum BlockEffect {
     OpenLink(String),
     Defer(String),
     Send(Outgoing),
+    /// Tick (`ticked` true) or untick step `step` (from 1) of the instructions.
+    Tick {
+        id: String,
+        version: u32,
+        step: u32,
+        ticked: bool,
+    },
 }
 
 /// The outcome of a send.
@@ -150,18 +208,47 @@ pub struct DecisionRows {
     pub options: Vec<OptionRows>,
 }
 
+/// One step as the rows draw it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StepRows {
+    pub text: String,
+    pub detail: String,
+    pub ticked: bool,
+}
+
+/// A todo other than the open one, drawn as one row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OtherRow {
+    pub kind: TodoKind,
+    pub id: String,
+    pub ticked_count: usize,
+    pub steps_total: usize,
+    pub product: String,
+    /// The spec of a question, the title of instructions.
+    pub label: String,
+}
+
 /// Everything the drawing needs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RowsView {
+    pub kind: TodoKind,
     pub id: String,
     pub product: String,
     pub spec: String,
+    pub title: String,
     pub intro: String,
-    /// The current question's place in the listed order, from 1.
+    /// The current todo's place in the listed order, from 1.
     pub position: usize,
+    /// The number of listed todos.
     pub waiting: u32,
     pub open: bool,
     pub decisions: Vec<DecisionRows>,
+    pub steps: Vec<StepRows>,
+    pub ticked_count: usize,
+    /// Instructions with every step ticked.
+    pub all_ticked: bool,
+    /// The other todos in listed order.
+    pub others: Vec<OtherRow>,
     pub mode: Mode,
     /// The row an open note belongs to, wherever the cursor is.
     pub note_stop: Option<QStop>,
@@ -207,11 +294,18 @@ pub const UNAVAILABLE_NOTICE: &str = "Harold can't save answers right now";
 /// question, and the other two open a note to send with the picks.
 pub const ANSWER_ACTIONS: [&str; 4] = ["send", "later", "revise\u{2026}", "reject\u{2026}"];
 
+/// The rows under instructions' steps.
+pub const INSTRUCTION_ACTIONS: [&str; 2] = ["done", "ignore"];
+
 /// The longest note the block takes; Harold refuses a field of 2,000 characters.
 const NOTE_LIMIT: usize = 1_999;
 
 fn changed_notice(id: &str) -> String {
     format!("{id} changed, your picks were cleared")
+}
+
+fn instructions_changed_notice(id: &str) -> String {
+    format!("{id} changed, ticks kept for unchanged steps")
 }
 
 fn is_web_link(link: &str) -> bool {
@@ -265,8 +359,14 @@ impl QuestionBlock {
         match self.queue.questions.iter().find(|q| q.id == id) {
             Some(q) if q.version > self.version => {
                 self.version = q.version;
+                let notice = if q.is_instructions() {
+                    // The ticks are the server's: nothing local to clear.
+                    instructions_changed_notice(&id)
+                } else {
+                    changed_notice(&id)
+                };
                 self.restart();
-                self.set_notice(changed_notice(&id));
+                self.set_notice(notice);
             }
             Some(_) => {}
             None => {
@@ -292,6 +392,11 @@ impl QuestionBlock {
     /// suspended.
     pub fn is_visible(&self) -> bool {
         !self.suspended && (!self.queue.questions.is_empty() || self.notice.is_some())
+    }
+
+    /// The number of listed todos, both kinds, set-aside questions included.
+    pub fn todos_waiting(&self) -> usize {
+        self.queue.questions.len()
     }
 
     /// Whether the question shows its rows.
@@ -338,7 +443,20 @@ impl QuestionBlock {
             for (decision, d) in q.decisions.iter().enumerate() {
                 stops.extend((0..d.options.len()).map(|option| QStop::Option { decision, option }));
             }
-            stops.extend((0..ANSWER_ACTIONS.len()).map(QStop::Action));
+            if q.is_instructions() {
+                stops.extend((0..q.steps.len()).map(QStop::Step));
+                stops.extend((0..INSTRUCTION_ACTIONS.len()).map(QStop::Action));
+            } else {
+                stops.extend((0..ANSWER_ACTIONS.len()).map(QStop::Action));
+            }
+            stops.extend(
+                self.queue
+                    .questions
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, other)| other.id != q.id)
+                    .map(|(i, _)| QStop::Other(i)),
+            );
         }
         stops
     }
@@ -393,6 +511,29 @@ impl QuestionBlock {
         if self.current.as_deref() != Some(id) {
             return;
         }
+        self.apply_result(id, result);
+    }
+
+    /// Applies the outcome of a tick of `step` (from 1) of instructions `id`. A recorded
+    /// tick changes the local ticks; the other outcomes act as for a send.
+    pub fn ticked(&mut self, id: &str, step: u32, ticked: bool, result: SendResult) {
+        if self.current.as_deref() != Some(id) {
+            return;
+        }
+        if result == SendResult::Recorded {
+            if let Some(q) = self.queue.questions.iter_mut().find(|q| q.id == id) {
+                q.ticked.retain(|n| *n != step);
+                if ticked {
+                    q.ticked.push(step);
+                    q.ticked.sort_unstable();
+                }
+            }
+            return;
+        }
+        self.apply_result(id, result);
+    }
+
+    fn apply_result(&mut self, id: &str, result: SendResult) {
         match result {
             SendResult::Recorded => {
                 self.queue.questions.retain(|q| q.id != id);
@@ -401,8 +542,13 @@ impl QuestionBlock {
                 self.select_first();
             }
             SendResult::VersionChanged => {
+                let instructions = self.question().is_some_and(QuestionView::is_instructions);
                 self.restart();
-                self.set_notice(changed_notice(id));
+                self.set_notice(if instructions {
+                    instructions_changed_notice(id)
+                } else {
+                    changed_notice(id)
+                });
             }
             SendResult::NotWaiting => {
                 self.set_notice(self.dismissed_notice(id));
@@ -422,14 +568,20 @@ impl QuestionBlock {
         }
         let Some(q) = self.question() else {
             return Some(RowsView {
+                kind: TodoKind::Question,
                 id: String::new(),
                 product: String::new(),
                 spec: String::new(),
+                title: String::new(),
                 intro: String::new(),
                 position: 0,
-                waiting: self.queue.waiting,
+                waiting: self.todos_waiting() as u32,
                 open: false,
                 decisions: vec![],
+                steps: vec![],
+                ticked_count: 0,
+                all_ticked: false,
+                others: vec![],
                 mode: Mode::Choosing,
                 note_stop: None,
                 notice: self.notice.clone(),
@@ -463,10 +615,41 @@ impl QuestionBlock {
                     .collect(),
             })
             .collect();
+        let steps: Vec<StepRows> = q
+            .steps
+            .iter()
+            .enumerate()
+            .map(|(i, step)| StepRows {
+                text: step.text.clone(),
+                detail: step.detail.clone(),
+                ticked: q.ticked.contains(&(i as u32 + 1)),
+            })
+            .collect();
+        let ticked_count = q.ticked_count();
+        let others = self
+            .queue
+            .questions
+            .iter()
+            .filter(|other| other.id != q.id)
+            .map(|other| OtherRow {
+                kind: other.kind(),
+                id: other.id.clone(),
+                ticked_count: other.ticked_count(),
+                steps_total: other.steps.len(),
+                product: other.product.clone(),
+                label: if other.is_instructions() {
+                    other.title.clone()
+                } else {
+                    other.spec.clone()
+                },
+            })
+            .collect();
         Some(RowsView {
+            kind: q.kind(),
             id: q.id.clone(),
             product: q.product.clone(),
             spec: q.spec.clone(),
+            title: q.title.clone(),
             intro: q.intro.clone(),
             position: self
                 .queue
@@ -474,9 +657,13 @@ impl QuestionBlock {
                 .iter()
                 .position(|x| x.id == q.id)
                 .map_or(1, |i| i + 1),
-            waiting: self.queue.waiting,
+            waiting: self.todos_waiting() as u32,
             open: self.open,
             decisions,
+            all_ticked: !steps.is_empty() && ticked_count == steps.len(),
+            steps,
+            ticked_count,
+            others,
             mode: self.mode.clone(),
             note_stop: self.note_stop(),
             notice: self.notice.clone(),
@@ -516,22 +703,71 @@ impl QuestionBlock {
                 return BlockEffect::Cursor(QStop::Header);
             }
             KeyCode::Char('l') | KeyCode::Right if stop == QStop::Header => self.open = true,
+            KeyCode::Char('l') | KeyCode::Right if matches!(stop, QStop::Other(_)) => {
+                return self.open_other(stop);
+            }
             KeyCode::Enter => match stop {
                 QStop::Header => {
                     self.open = !self.open;
                     return BlockEffect::Cursor(QStop::Header);
                 }
-                QStop::Option { .. } => {}
+                QStop::Option { .. } | QStop::Step(_) => {}
+                QStop::Other(_) => return self.open_other(stop),
+                QStop::Action(action) if q.is_instructions() => {
+                    return self.instruction_action(action, &q);
+                }
                 QStop::Action(action) => return self.answer_action(action, &q),
             },
-            KeyCode::Char(' ') => {
-                if let QStop::Option { decision, option } = stop {
+            KeyCode::Char(' ') => match stop {
+                QStop::Option { decision, option } if !q.is_instructions() => {
                     self.pick(&q, decision, option);
                 }
-            }
+                QStop::Step(i) if q.is_instructions() && i < q.steps.len() => {
+                    let step = i as u32 + 1;
+                    return BlockEffect::Tick {
+                        id: q.id.clone(),
+                        version: self.version,
+                        step,
+                        ticked: !q.ticked.contains(&step),
+                    };
+                }
+                _ => {}
+            },
             _ => {}
         }
         BlockEffect::None
+    }
+
+    /// Makes the todo at `Other` stop current, keeping the block open.
+    fn open_other(&mut self, stop: QStop) -> BlockEffect {
+        let QStop::Other(i) = stop else {
+            return BlockEffect::None;
+        };
+        let Some(id) = self.queue.questions.get(i).map(|q| q.id.clone()) else {
+            return BlockEffect::None;
+        };
+        if self.current.as_deref() == Some(id.as_str()) {
+            return BlockEffect::None;
+        }
+        self.show(&id);
+        BlockEffect::Cursor(QStop::Header)
+    }
+
+    /// Enter on [`INSTRUCTION_ACTIONS`] row `action`. `done` needs no count: Harold counts.
+    fn instruction_action(&mut self, action: usize, q: &QuestionView) -> BlockEffect {
+        let kind = match action {
+            0 => AnswerKind::Done,
+            1 => AnswerKind::Ignore,
+            _ => return BlockEffect::None,
+        };
+        BlockEffect::Send(Outgoing {
+            id: q.id.clone(),
+            version: self.version,
+            kind,
+            picks: vec![],
+            note: String::new(),
+            send_now: true,
+        })
     }
 
     /// Picks option `option` of `decision`; a free option opens its field instead,
@@ -774,7 +1010,12 @@ impl QuestionBlock {
         else {
             return;
         };
-        if let Some(current) = self.question().map(|q| q.id.clone()) {
+        // Only a question has picks to keep; instructions' ticks are the server's.
+        if let Some(current) = self
+            .question()
+            .filter(|q| !q.is_instructions())
+            .map(|q| q.id.clone())
+        {
             let kept = Kept {
                 version: self.version,
                 picks: std::mem::take(&mut self.picks),
@@ -816,6 +1057,9 @@ mod tests {
             intro: "intro".into(),
             version,
             deferred: false,
+            title: String::new(),
+            steps: vec![],
+            ticked: vec![],
             decisions: (1..=decisions)
                 .map(|n| DecisionView {
                     ask: format!("Ask {n}?"),
@@ -1693,5 +1937,355 @@ mod tests {
         press(&mut b, KeyCode::Esc, QStop::Action(2));
         press(&mut b, KeyCode::Enter, QStop::Action(3));
         assert_eq!(b.note_stop(), Some(QStop::Action(3)));
+    }
+
+    fn instructions(id: &str, version: u32, steps: usize) -> QuestionView {
+        QuestionView {
+            id: id.into(),
+            product: "prod".into(),
+            spec: String::new(),
+            sha: String::new(),
+            link: "https://example.com/i".into(),
+            intro: "do these".into(),
+            version,
+            deferred: false,
+            decisions: vec![],
+            title: format!("Title {id}"),
+            steps: (1..=steps)
+                .map(|n| StepView {
+                    text: format!("step {n}"),
+                    detail: format!("detail {n}"),
+                })
+                .collect(),
+            ticked: vec![],
+        }
+    }
+
+    fn with_ticks(mut q: QuestionView, ticks: &[u32]) -> QuestionView {
+        q.ticked = ticks.to_vec();
+        q
+    }
+
+    fn send_of(effect: BlockEffect) -> Outgoing {
+        match effect {
+            BlockEffect::Send(out) => out,
+            other => panic!("expected Send, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_instruction_actions_are_done_and_ignore() {
+        assert_eq!(INSTRUCTION_ACTIONS, ["done", "ignore"]);
+    }
+
+    #[test]
+    fn closed_block_counts_both_kinds() {
+        let mut deferred = question("Q2", 1, 1);
+        deferred.deferred = true;
+        let b = block(vec![
+            instructions("I1", 1, 2),
+            question("Q1", 1, 1),
+            deferred,
+        ]);
+        assert_eq!(b.todos_waiting(), 3);
+        let view = b.view().unwrap();
+        assert_eq!((view.waiting, view.open), (3, false));
+        assert_eq!(b.stops(), vec![QStop::Header]);
+    }
+
+    #[test]
+    fn open_stops_for_each_kind_in_order_with_the_other_todos() {
+        let mut b = open_block(vec![
+            instructions("I1", 1, 3),
+            question("Q1", 1, 1),
+            instructions("I2", 1, 1),
+        ]);
+        let mut want = vec![QStop::Header];
+        want.extend((0..3).map(QStop::Step));
+        want.extend((0..2).map(QStop::Action));
+        want.extend([QStop::Other(1), QStop::Other(2)]);
+        assert_eq!(b.stops(), want);
+
+        press(&mut b, KeyCode::Char('l'), QStop::Other(1));
+        let mut want = vec![QStop::Header];
+        want.extend((0..3).map(|option| opt_stop(0, option)));
+        want.extend((0..4).map(QStop::Action));
+        want.extend([QStop::Other(0), QStop::Other(2)]);
+        assert_eq!(b.stops(), want);
+    }
+
+    #[test]
+    fn space_on_a_step_asks_to_tick_then_untick() {
+        let mut b = open_block(vec![with_ticks(instructions("I1", 4, 3), &[2])]);
+        assert_eq!(
+            press(&mut b, KeyCode::Char(' '), QStop::Step(0)),
+            BlockEffect::Tick {
+                id: "I1".into(),
+                version: 4,
+                step: 1,
+                ticked: true
+            }
+        );
+        assert_eq!(
+            press(&mut b, KeyCode::Char(' '), QStop::Step(1)),
+            BlockEffect::Tick {
+                id: "I1".into(),
+                version: 4,
+                step: 2,
+                ticked: false
+            }
+        );
+        // Space changes nothing locally.
+        assert_eq!(b.view().unwrap().ticked_count, 1);
+        assert_eq!(
+            press(&mut b, KeyCode::Char(' '), QStop::Action(0)),
+            BlockEffect::None
+        );
+    }
+
+    #[test]
+    fn ticked_applies_locally_on_recorded() {
+        let mut b = open_block(vec![instructions("I1", 1, 3)]);
+        b.ticked("I1", 2, true, SendResult::Recorded);
+        b.ticked("I1", 3, true, SendResult::Recorded);
+        let ticks = |b: &QuestionBlock| -> Vec<bool> {
+            b.view().unwrap().steps.iter().map(|s| s.ticked).collect()
+        };
+        assert_eq!(ticks(&b), vec![false, true, true]);
+        b.ticked("I1", 2, false, SendResult::Recorded);
+        assert_eq!(ticks(&b), vec![false, false, true]);
+        assert_eq!(b.view().unwrap().ticked_count, 1);
+    }
+
+    #[test]
+    fn ticked_unavailable_changes_nothing_and_says_so() {
+        let mut b = open_block(vec![instructions("I1", 1, 2)]);
+        b.ticked("I1", 1, true, SendResult::Unavailable);
+        assert_eq!(b.view().unwrap().ticked_count, 0);
+        assert_eq!(
+            b.view().unwrap().notice.as_deref(),
+            Some(UNAVAILABLE_NOTICE)
+        );
+    }
+
+    #[test]
+    fn ticked_version_changed_sets_the_notice() {
+        let mut b = open_block(vec![instructions("I1", 1, 2)]);
+        b.ticked("I1", 1, true, SendResult::VersionChanged);
+        let view = b.view().unwrap();
+        assert_eq!(view.ticked_count, 0);
+        assert_eq!(
+            view.notice.as_deref(),
+            Some("I1 changed, ticks kept for unchanged steps")
+        );
+    }
+
+    #[test]
+    fn ticked_not_waiting_drops_the_todo_and_opens_the_next() {
+        let mut b = open_block(vec![instructions("I1", 1, 2), question("Q1", 1, 1)]);
+        b.ticked("I1", 1, true, SendResult::NotWaiting);
+        let view = b.view().unwrap();
+        assert_eq!(view.id, "Q1");
+        assert!(view.open);
+        assert_eq!(view.notice.as_deref(), Some("I1 dismissed: withdrawn"));
+    }
+
+    #[test]
+    fn done_sends_a_done_answer_with_send_now() {
+        let mut b = open_block(vec![instructions("I1", 3, 2)]);
+        let out = send_of(press(&mut b, KeyCode::Enter, QStop::Action(0)));
+        assert_eq!(
+            out,
+            Outgoing {
+                id: "I1".into(),
+                version: 3,
+                kind: AnswerKind::Done,
+                picks: vec![],
+                note: String::new(),
+                send_now: true,
+            }
+        );
+    }
+
+    #[test]
+    fn ignore_sends_an_ignore_answer() {
+        let mut b = open_block(vec![instructions("I1", 3, 2)]);
+        let out = send_of(press(&mut b, KeyCode::Enter, QStop::Action(1)));
+        assert_eq!((out.kind, out.send_now), (AnswerKind::Ignore, true));
+        assert!(out.picks.is_empty() && out.note.is_empty());
+    }
+
+    #[test]
+    fn done_and_ignore_rows_have_no_other_keys() {
+        let mut b = open_block(vec![instructions("I1", 1, 2)]);
+        for stop in [QStop::Action(0), QStop::Action(1)] {
+            for c in ['r', 'x', 'q', ' '] {
+                assert_eq!(press(&mut b, KeyCode::Char(c), stop), BlockEffect::None);
+            }
+            assert!(!b.note_open());
+        }
+        // No row past ignore.
+        assert_eq!(
+            press(&mut b, KeyCode::Enter, QStop::Action(2)),
+            BlockEffect::None
+        );
+        assert_eq!(
+            b.stops()
+                .iter()
+                .filter(|s| matches!(s, QStop::Action(_)))
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn l_on_another_todo_opens_it_and_closes_the_open_one_keeping_question_picks() {
+        let mut b = open_block(vec![question("Q1", 1, 1), instructions("I1", 1, 2)]);
+        press(&mut b, KeyCode::Char(' '), opt_stop(0, 0));
+        assert_eq!(picked(&b), keys(&["a"]));
+        for code in [KeyCode::Char('l'), KeyCode::Right, KeyCode::Enter] {
+            let mut b = b.clone();
+            assert_eq!(
+                press(&mut b, code, QStop::Other(1)),
+                BlockEffect::Cursor(QStop::Header),
+                "{code:?}"
+            );
+            let view = b.view().unwrap();
+            assert_eq!(
+                (view.id.as_str(), view.kind, view.open),
+                ("I1", TodoKind::Instructions, true)
+            );
+            assert_eq!(view.others.len(), 1);
+            assert_eq!(view.others[0].id, "Q1");
+            // Back: the question's pick is still there.
+            press(&mut b, code, QStop::Other(0));
+            assert_eq!(b.view().unwrap().id, "Q1");
+            assert_eq!(picked(&b), keys(&["a"]), "{code:?}");
+        }
+    }
+
+    #[test]
+    fn n_wraps_across_kinds() {
+        let mut b = block(vec![
+            instructions("I1", 1, 2),
+            question("Q1", 1, 1),
+            instructions("I2", 1, 1),
+        ]);
+        let id = |b: &QuestionBlock| b.view().unwrap().id;
+        for want in ["Q1", "I2", "I1"] {
+            assert_eq!(
+                press(&mut b, KeyCode::Char('n'), QStop::Header),
+                BlockEffect::Cursor(QStop::Header)
+            );
+            assert_eq!(id(&b), want);
+        }
+        press(&mut b, KeyCode::Char('N'), QStop::Header);
+        assert_eq!(id(&b), "I2");
+    }
+
+    #[test]
+    fn a_higher_instructions_version_keeps_ticks_and_says_so() {
+        let mut b = open_block(vec![with_ticks(instructions("I1", 1, 3), &[1])]);
+        b.reconcile(queue(vec![with_ticks(instructions("I1", 2, 3), &[1, 3])]));
+        let view = b.view().unwrap();
+        assert!(view.open);
+        assert_eq!(
+            view.notice.as_deref(),
+            Some("I1 changed, ticks kept for unchanged steps")
+        );
+        assert_eq!(view.ticked_count, 2);
+        // A question still clears its picks.
+        let mut b = open_block(vec![question("Q1", 1, 1)]);
+        b.reconcile(queue(vec![question("Q1", 2, 1)]));
+        assert_eq!(
+            b.view().unwrap().notice.as_deref(),
+            Some("Q1 changed, your picks were cleared")
+        );
+    }
+
+    #[test]
+    fn a_dismissed_instruction_reads_dismissed_reason() {
+        let mut b = open_block(vec![instructions("I1", 1, 2), question("Q1", 1, 1)]);
+        let mut q = queue(vec![question("Q1", 1, 1)]);
+        q.dismissed = vec![("I1".into(), "superseded".into())];
+        b.reconcile(q);
+        let view = b.view().unwrap();
+        assert_eq!(view.notice.as_deref(), Some("I1 dismissed: superseded"));
+        assert_eq!(view.id, "Q1");
+    }
+
+    #[test]
+    fn sent_recorded_opens_the_next_todo_open() {
+        let mut b = open_block(vec![instructions("I1", 1, 2), question("Q1", 1, 1)]);
+        send_of(press(&mut b, KeyCode::Enter, QStop::Action(0)));
+        b.sent("I1", SendResult::Recorded);
+        let view = b.view().unwrap();
+        assert_eq!(
+            (view.id.as_str(), view.kind, view.open),
+            ("Q1", TodoKind::Question, true)
+        );
+        assert_eq!(view.waiting, 1);
+        assert_eq!(b.stops()[0], QStop::Header);
+    }
+
+    #[test]
+    fn all_ticked_flag() {
+        let mut b = open_block(vec![instructions("I1", 1, 2)]);
+        assert!(!b.view().unwrap().all_ticked);
+        b.ticked("I1", 1, true, SendResult::Recorded);
+        assert!(!b.view().unwrap().all_ticked);
+        b.ticked("I1", 2, true, SendResult::Recorded);
+        assert!(b.view().unwrap().all_ticked);
+        assert!(
+            !open_block(vec![question("Q1", 1, 1)])
+                .view()
+                .unwrap()
+                .all_ticked
+        );
+    }
+
+    #[test]
+    fn view_names_kind_title_and_ticked_count() {
+        let b = open_block(vec![
+            with_ticks(instructions("I1", 1, 4), &[1, 3, 9]),
+            question("Q1", 1, 1),
+            with_ticks(instructions("I2", 1, 3), &[2]),
+        ]);
+        let view = b.view().unwrap();
+        assert_eq!(view.kind, TodoKind::Instructions);
+        assert_eq!(view.title, "Title I1");
+        assert_eq!((view.ticked_count, view.steps.len()), (2, 4));
+        assert_eq!((view.position, view.waiting), (1, 3));
+        assert_eq!(view.steps[0].detail, "detail 1");
+        assert_eq!(
+            view.others,
+            vec![
+                OtherRow {
+                    kind: TodoKind::Question,
+                    id: "Q1".into(),
+                    ticked_count: 0,
+                    steps_total: 0,
+                    product: "prod".into(),
+                    label: "spec".into(),
+                },
+                OtherRow {
+                    kind: TodoKind::Instructions,
+                    id: "I2".into(),
+                    ticked_count: 1,
+                    steps_total: 3,
+                    product: "prod".into(),
+                    label: "Title I2".into(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn o_opens_the_instructions_link() {
+        let mut b = open_block(vec![instructions("I1", 1, 1)]);
+        assert_eq!(
+            press(&mut b, KeyCode::Char('o'), QStop::Step(0)),
+            BlockEffect::OpenLink("https://example.com/i".into())
+        );
     }
 }

@@ -2125,6 +2125,9 @@ mod tests {
             intro: "intro".into(),
             version,
             deferred: false,
+            title: String::new(),
+            steps: vec![],
+            ticked: vec![],
             decisions: (1..=decisions)
                 .map(|n| DecisionView {
                     ask: format!("Ask {n}?"),
@@ -2516,11 +2519,12 @@ mod tests {
                 KeyCode::Char('k'),
                 KeyCode::Char('k'),
                 KeyCode::Char('k'),
+                KeyCode::Char('k'),
                 KeyCode::Enter,
             ],
         )
         .await;
-        let mut expected = lists(6);
+        let mut expected = lists(7);
         expected.extend(["defer Q1".to_string(), "list".to_string()]);
         assert_eq!(log, expected);
         let view = core.app.questions.view().unwrap();
@@ -3040,6 +3044,7 @@ mod tests {
             KeyCode::Char('j'),
             KeyCode::Char(' '),
             KeyCode::Char('G'),
+            KeyCode::Char('k'),
             KeyCode::Char('k'),
             KeyCode::Char('k'),
             KeyCode::Char('k'),

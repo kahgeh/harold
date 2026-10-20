@@ -1309,6 +1309,8 @@ fn footer_hints(
             QStop::Header => ("l", " open", "Enter", " open"),
             QStop::Option { .. } => ("Space", " pick", "h", " close"),
             QStop::Action(_) => ("Enter", " choose", "h", " close"),
+            QStop::Step(_) => ("Space", " tick", "h", " close"),
+            QStop::Other(_) => ("l", " open", "h", " close"),
         };
         // Esc closes an open question; on a closed header it does nothing.
         let esc_listed = !matches!(stop, QStop::Header) || open;
@@ -3662,6 +3664,9 @@ mod tests {
                 intro: "The server needs a wire protocol.".into(),
                 version: 1,
                 deferred: false,
+                title: String::new(),
+                steps: vec![],
+                ticked: vec![],
                 decisions: vec![DecisionView {
                     ask: "Which protocol?".into(),
                     options: vec![
@@ -4155,6 +4160,9 @@ mod tests {
             intro: intro.into(),
             version: 1,
             deferred: false,
+            title: String::new(),
+            steps: vec![],
+            ticked: vec![],
             decisions: vec![
                 DecisionView {
                     ask: "Which protocol should clients speak?".into(),
@@ -4221,7 +4229,7 @@ mod tests {
             .iter()
             .position(|l| l.contains("sre") && l.contains("IDLE"))
             .expect("the chief's row");
-        assert_eq!(inner(&lines[chief + 1]), "▸ 2 questions waiting");
+        assert_eq!(inner(&lines[chief + 1]), "▸ 1 question waiting");
         assert!(
             lines[12].contains("AGENT BLOCK OCCUPANCY"),
             "the list follows the filter at once:\n{}",
@@ -4242,7 +4250,7 @@ mod tests {
         };
         assert_eq!(
             inner(&lines[at("▾ T1")]),
-            "▶   ▾ T1 · 1 of 2 waiting · harold · durable-server"
+            "▶   ▾ T1 · 1 of 1 waiting · harold · durable-server"
         );
         assert_eq!(inner(&lines[at("The server needs") + 1]), "");
         assert_eq!(inner(&lines[at("Should the build") - 1]), "");
@@ -4393,7 +4401,7 @@ mod tests {
         let lines = text_lines(&app, 100, 60, 100_000);
         assert_eq!(
             inner(&lines[14]),
-            "▸ 2 questions waiting · from the chief",
+            "▸ 1 question waiting · from the chief",
             "{}",
             lines.join("\n")
         );
@@ -4410,7 +4418,7 @@ mod tests {
         let lines = text_lines(&app, 100, 60, 100_000);
         assert_eq!(
             inner(&lines[14]),
-            "▸ 2 questions waiting · from the chief",
+            "▸ 1 question waiting · from the chief",
             "{}",
             lines.join("\n")
         );
@@ -4424,8 +4432,8 @@ mod tests {
         keys(&mut app, "jj");
         let buffer = rendered_buffer(&app, 100, 24, 100_000);
         let screen = text_lines(&app, 100, 24, 100_000).join("\n");
-        assert!(screen.contains("▲ 2 questions waiting"), "{screen}");
-        assert_eq!(style_at(&buffer, "▲ 2 questions").fg, Some(Color::Yellow));
+        assert!(screen.contains("▲ 1 question waiting"), "{screen}");
+        assert_eq!(style_at(&buffer, "▲ 1 question").fg, Some(Color::Yellow));
         assert!(
             screen
                 .lines()
@@ -4437,8 +4445,8 @@ mod tests {
         keys(&mut app, "jlk");
         let buffer = rendered_buffer(&app, 100, 24, 100_000);
         let screen = text_lines(&app, 100, 24, 100_000).join("\n");
-        assert!(screen.contains("▼ 2 questions waiting"), "{screen}");
-        assert_eq!(style_at(&buffer, "▼ 2 questions").fg, Some(Color::Yellow));
+        assert!(screen.contains("▼ 1 question waiting"), "{screen}");
+        assert_eq!(style_at(&buffer, "▼ 1 question").fg, Some(Color::Yellow));
         assert!(
             screen.lines().any(|l| l.contains('▶') && l.contains("sre")),
             "{screen}"

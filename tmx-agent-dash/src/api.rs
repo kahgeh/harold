@@ -425,6 +425,8 @@ fn proto_answer_kind(kind: AnswerKind) -> ProtoAnswerKind {
         AnswerKind::Revise => ProtoAnswerKind::Revise,
         AnswerKind::Reject => ProtoAnswerKind::Reject,
         AnswerKind::FreeText => ProtoAnswerKind::FreeText,
+        AnswerKind::Done => ProtoAnswerKind::Done,
+        AnswerKind::Ignore => ProtoAnswerKind::Ignore,
     }
 }
 
@@ -475,6 +477,9 @@ fn map_listed_question(listed: ListedQuestion) -> Option<QuestionView> {
         version: listed.version,
         deferred: listed.deferred,
         decisions: question.decisions.into_iter().map(map_decision).collect(),
+        title: String::new(),
+        steps: vec![],
+        ticked: vec![],
     })
 }
 

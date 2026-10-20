@@ -763,6 +763,8 @@ impl App {
                 Effect::Defer(id)
             }
             BlockEffect::Send(out) => Effect::Answer(out),
+            // Task 5 wires the tick to the runtime.
+            BlockEffect::Tick { .. } => Effect::None,
         };
         self.settle_cursor();
         effect
@@ -2897,6 +2899,9 @@ mod tests {
             intro: "intro".into(),
             version,
             deferred: false,
+            title: String::new(),
+            steps: vec![],
+            ticked: vec![],
             decisions: vec![
                 DecisionView {
                     ask: "Ask 1?".into(),
@@ -3105,7 +3110,7 @@ mod tests {
         assert_eq!(app.cursor_stop(), on);
         app.handle_key(KeyCode::Char('G'));
         let last = app.cursor_stop();
-        assert_eq!(last, Some(Stop::Question(QStop::Action(3))));
+        assert_eq!(last, Some(Stop::Question(QStop::Other(2))));
     }
 
     #[test]
