@@ -486,7 +486,7 @@ impl Scheduler {
         shutdown: &mut signal::Receiver<()>,
     ) -> Option<(Result<Answer, Failure>, Option<f64>)> {
         let folder = std::path::Path::new(&row.folder);
-        let Ok(skill) = read_skill(folder, &row.skill) else {
+        let Ok(skill) = read_skill(folder, &row.skill, &self.deps.settings.skill_folders) else {
             return Some((Err(Failure::SkillMissing), None));
         };
         let sources = Sources {

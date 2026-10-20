@@ -4,7 +4,7 @@ What Harold is made of and how its parts talk, kept true by the pod that builds 
 
 ## Purpose
 
-Harold watches the coding agents in the user's tmux panes on each Mac, tells the user when one finishes, at the desk or on the phone, and routes the user's replies back to the right pane. It also hosts tools the chief of pods uses: the question tool and the backlog tool.
+Harold watches the coding agents in the user's tmux panes on each Mac, tells the user when one finishes, at the desk or on the phone, and routes the user's replies back to the right pane. It also hosts tools: the question tool and the backlog tool, which the chief of pods uses, and the watch tool, which any agent can use.
 
 ## Components
 
@@ -25,7 +25,7 @@ flowchart LR
     routing["reply routing"]
     publisher["snapshot publisher"]
     peers["peers"]
-    toolhost["tool host: question tool, backlog tool"]
+    toolhost["tool host: question tool, backlog tool, watch tool"]
     voice["calls and voice worker"]
     webapp["web app"]
     extras["activity summaries, timed prompts, alerts, telemetry and pod stats"]
@@ -78,7 +78,7 @@ flowchart LR
 | reply routing | Decides which Mac owns a reply by its routing tag or the latest notifier, picks the pane by the tag or the other fallbacks, and types it there | `harold/src/inbound/` |
 | peers | Hub and member on two Macs, and the peer RPCs between them | `harold/src/peers.rs` |
 | snapshot publisher | Sends snapshots to clients over `WatchAgentStates` | `harold/src/agent/snapshot.rs`, `harold/src/main.rs` |
-| tool host, question tool, backlog tool | Hosts tools with their own storage and gRPC services (ADR 0001) | `harold/src/tools.rs`, `harold/src/tools/` |
+| tool host, question tool, backlog tool, watch tool | Hosts tools with their own storage and gRPC services (ADR 0001) | `harold/src/tools.rs`, `harold/src/tools/` |
 | calls and voice worker | Voice calls with the chief, and the process that turns lines into audio and speech into text | `harold/src/voice_input.rs`, `harold/src/voice_input/`, `harold/src/voice_worker.py` |
 | web app | The phone's web app: the thread, push and calls | `harold/src/web_app/`, `harold/static/web_app/`, `harold/templates/web_app/` |
 | activity summaries | Optional work summaries that Claude Code writes from an agent's evidence | `harold/src/activity_summary.rs` |
@@ -96,12 +96,12 @@ flowchart LR
 What other components or products depend on, each with where its contract is written:
 
 - **The Harold gRPC service** (`harold-api/proto/harold.proto`): `WatchAgentStates`, `TurnComplete`, `ReportAgentState`, `SpeakLine`, `SendMessageToAwayDevice`, `Call`, `SetTtsMuted`, `SetMessagingPaused`, and the peer RPCs `ReportNotification` and `ForwardReply`. Contracts: the proto and the [agent monitor reference](../references/agent-monitor/README.md#grpc-contract).
-- **The tool services** (`harold-api/proto/tools/questions.proto`, `harold-api/proto/tools/backlog.proto`). Contracts: the [tools references](../references/tools/README.md).
+- **The tool services** (`harold-api/proto/tools/questions.proto`, `harold-api/proto/tools/backlog.proto`, `harold-api/proto/tools/watch.proto`). Contracts: the [tools references](../references/tools/README.md).
 - **Commands:** `harold` and `haroldctl`. Contracts: the [operation reference](../references/operation/README.md) and the tools references.
 - **Hook payloads** from Claude Code, Codex and OpenCode. Contract: [Set up agent monitor hooks](../how-tos/setup-agent-monitor-hooks.md).
 - **Settings:** `default.toml` and `local.toml`, read in that order, with `local.toml` laid over `default.toml`. Contract: `harold/config/local.template.toml` and each feature's reference page.
 - **The web app's HTTP routes.** Contract: the [web app reference](../references/away-app/README.md).
-- **Lines Harold types into panes:** the answers line, alerts, timed prompts and phone replies. Contracts: the [questions reference](../references/tools/questions.md), the [telemetry reference](../references/telemetry/README.md), the [timed prompts reference](../references/timed-prompts/README.md) and the [inbound routing reference](../references/inbound-message-routing/README.md).
+- **Lines Harold types into panes:** the answers line, alerts, timed prompts, phone replies and `WATCH` lines. Contracts: the [questions reference](../references/tools/questions.md), the [watch reference](../references/tools/watch.md), the [telemetry reference](../references/telemetry/README.md), the [timed prompts reference](../references/timed-prompts/README.md) and the [inbound routing reference](../references/inbound-message-routing/README.md).
 - **The alert address:** `POST /alert` on `[telemetry] alert_listen`, where HyperDX's webhooks post. Contract: the [telemetry reference](../references/telemetry/README.md).
 - **The pod registry:** Harold reads the vault's `products.toml` for pod stats. Contract: the [telemetry reference](../references/telemetry/README.md).
 - **The routing tag** on replies. Contract: the [inbound routing reference](../references/inbound-message-routing/README.md).
@@ -121,6 +121,8 @@ One line per architectural decision, oldest first. Each date is the commit that 
 - 2026-10-18: ADR 0001, tools are modules Harold hosts, so a new tool needs no change to the core store or the Harold gRPC service. [ADR 0001](../adr/0001-tools-are-modules-hosted-by-harold.md)
 - 2026-10-18: ADR 0002, tool services trust local callers, because the gRPC listener has no transport authentication and only the peer RPCs carry a secret. [ADR 0002](../adr/0002-tool-services-trust-local-callers.md)
 - 2026-10-18: ADR 0003, pod merge counts save the tip first, so a failed write changes nothing and a later poll counts the merges. [ADR 0003](../adr/0003-pod-merge-counts-save-the-tip-first.md)
+- 2026-10-20: ADR 0004, tools may read Harold's agent list and pod facts through two read-only ports, so the watch tool can hand a model what a pod check needs. [ADR 0004](../adr/0004-tools-may-read-agents-and-pods.md)
+- 2026-10-20: ADR 0005, a tool may run a hosted model with the tools a skill allows, unchecked, because the skill's author decides what a run may do. [ADR 0005](../adr/0005-a-tool-may-run-a-hosted-model-with-the-tools-a-skill-allows.md)
 
 ## Departures from the standards
 
@@ -176,6 +178,17 @@ See the [agent monitor reference](../references/agent-monitor/README.md#projecti
 ### The question tool's todos
 
 The question tool holds the chief's todos, of two kinds: questions to answer and instructions to follow by hand. Both live in the same `questions` table. The dash stores each tick of instructions' step with `TickStep`, in the `ticks` column, so the ticks survive a dash restart. The `done` and `ignore` action rows store a `DONE` or `IGNORE` answer, which goes in the next answers line at once. This stays inside the question tool, so it needs no ADR beyond ADR 0001. See the [questions reference](../references/tools/questions.md).
+
+### The watch tool's model launch
+
+The watch tool is the one place where Harold starts a model that can use tools. Its trust boundary, step by step:
+
+- **Who names what.** Any local agent runs `harold tool watch start` and names the watch, its skill and, by its working directory, its folder. The tool does not trust the folder: it must be an absolute path to an existing folder, and Harold stores its canonical form. The skill is a folder name under `<folder>/.claude/skills/`, and its `SKILL.md` must lie, links followed, inside that folder or inside a watch skill folder the user lists in `[watch] skill_folders` (so a skill kept in the chief-of-pods repository or an organisation repository can be linked in). This is checked at `start` and again at every run. A watch skill folder is shared trust: anyone who can change a listed folder changes what every watch linking there does at its next run.
+- **What the model may use.** The skill's `allowed-tools` goes to Claude Code as `--allowedTools`, exactly as written and unchecked. The skill's author decides what a run may do ([ADR 0005](../adr/0005-a-tool-may-run-a-hosted-model-with-the-tools-a-skill-allows.md)). The caller can change the skill while the watch runs.
+- **What the model sees, and where it goes.** The model gets a fixed system prompt (the answer format), the skill's text and the facts from the `agents` and `pods` ports ([ADR 0004](../adr/0004-tools-may-read-agents-and-pods.md)). The facts, the skill's text, the files the run reads and the output of the commands it runs go to Anthropic's hosted model.
+- **What comes out.** Harold types one line of at most 300 characters, in the fixed `WATCH` forms, and only into the chief's pane or the pane of the agent in the watch's own folder, under the timed prompts' checks. Nothing from the run reaches a log or an export.
+
+See the [watch reference](../references/tools/watch.md).
 
 ### Why the agent monitor uses several sources
 

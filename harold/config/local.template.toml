@@ -32,6 +32,9 @@ effort = "low"
 # daily_budget_usd = 1.00       # every watch together, per local day
 # run_budget_usd = 0.05         # a run's limit when start gives no --run-budget
 # max_run_budget_usd = 0.10     # the most --run-budget may ask
+# Folders a watch skill's real path may lie in, besides the watch's own .claude/skills/.
+# Absolute paths only (~/ is not expanded). The organisation repositories' watch skills:
+# skill_folders = ["/Users/kahgeh/Dev/p/chief-of-pods/skills/watches", "/Users/kahgeh/Dev/p/personal-chief/skills/watches"]
 
 # Override the named provider list only when custom process or visible-screen
 # markers are required. Overrides replace the complete [[agents]] list.

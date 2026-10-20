@@ -142,7 +142,7 @@ fn a_skill_that_leaves_the_skills_folder_is_unknown() {
     .unwrap();
     assert_eq!(check(&request(&temp.0)), Err(Refusal::UnknownSkill));
     assert_eq!(
-        read_skill(&temp.0, "pod-watch"),
+        read_skill(&temp.0, "pod-watch", &[]),
         Err(SkillMissing),
         "the run looks again"
     );
@@ -222,7 +222,7 @@ fn allowed_tools_come_back_exactly_as_written() {
         let text =
             format!("---\nname: pod-watch\nallowed-tools: {tools}\n---\nCheck every product.\n");
         let temp = Temp::with_skill("pod-watch", &text);
-        let skill = read_skill(&temp.0, "pod-watch").unwrap();
+        let skill = read_skill(&temp.0, "pod-watch", &[]).unwrap();
         assert_eq!(skill.allowed_tools.as_deref(), Some(tools));
         assert_eq!(skill.body, "Check every product.\n");
     }
@@ -231,10 +231,10 @@ fn allowed_tools_come_back_exactly_as_written() {
 #[test]
 fn a_skill_without_allowed_tools_or_frontmatter_has_none() {
     let temp = Temp::with_skill("pod-watch", "---\nname: pod-watch\n---\nBody\n");
-    let skill = read_skill(&temp.0, "pod-watch").unwrap();
+    let skill = read_skill(&temp.0, "pod-watch", &[]).unwrap();
     assert_eq!((skill.allowed_tools, skill.body.as_str()), (None, "Body\n"));
     let temp = Temp::with_skill("pod-watch", "Just text\n");
-    let skill = read_skill(&temp.0, "pod-watch").unwrap();
+    let skill = read_skill(&temp.0, "pod-watch", &[]).unwrap();
     assert_eq!(
         (skill.allowed_tools, skill.body.as_str()),
         (None, "Just text\n")
@@ -242,7 +242,7 @@ fn a_skill_without_allowed_tools_or_frontmatter_has_none() {
     // Frontmatter that never closes is not frontmatter, and its tools are not read.
     let temp = Temp::with_skill("pod-watch", "---\nallowed-tools: Write\nno end\n");
     assert_eq!(
-        read_skill(&temp.0, "pod-watch").unwrap().allowed_tools,
+        read_skill(&temp.0, "pod-watch", &[]).unwrap().allowed_tools,
         None
     );
 }
@@ -251,9 +251,132 @@ fn a_skill_without_allowed_tools_or_frontmatter_has_none() {
 fn a_deleted_skill_is_missing() {
     let temp = Temp::with_skill("pod-watch", "x");
     std::fs::remove_file(temp.0.join(".claude/skills/pod-watch/SKILL.md")).unwrap();
-    assert_eq!(read_skill(&temp.0, "pod-watch"), Err(SkillMissing));
+    assert_eq!(read_skill(&temp.0, "pod-watch", &[]), Err(SkillMissing));
     assert_eq!(
-        read_skill(&temp.0.join("gone"), "pod-watch"),
+        read_skill(&temp.0.join("gone"), "pod-watch", &[]),
+        Err(SkillMissing)
+    );
+}
+
+/// A folder with the skill kept in a watch skill folder, linked into `.claude/skills/`.
+struct Linked {
+    work: Temp,
+    kept: Temp,
+}
+
+impl Linked {
+    /// `kept/<dir>/pod-watch/SKILL.md`, linked from `work/.claude/skills/pod-watch`.
+    fn new(dir: &str) -> Self {
+        let kept = Temp::new();
+        let skill = kept.0.join(dir).join("pod-watch");
+        std::fs::create_dir_all(&skill).unwrap();
+        std::fs::write(
+            skill.join("SKILL.md"),
+            "---\nallowed-tools: Write\n---\nLinked.\n",
+        )
+        .unwrap();
+        let work = Temp::new();
+        let skills = work.0.join(".claude/skills");
+        std::fs::create_dir_all(&skills).unwrap();
+        symlink(&skill, skills.join("pod-watch")).unwrap();
+        Self { work, kept }
+    }
+
+    fn listed(&self, dir: &str) -> WatchSettings {
+        WatchSettings {
+            skill_folders: vec![self.kept.0.join(dir).to_str().unwrap().to_string()],
+            ..WatchSettings::default()
+        }
+    }
+}
+
+#[test]
+fn a_skill_linked_into_a_listed_folder_is_accepted_and_read_from_there() {
+    let linked = Linked::new("watches");
+    let cfg = linked.listed("watches");
+    assert!(check_start(&request(&linked.work.0), &cfg).is_ok());
+    let skill = read_skill(&linked.work.0, "pod-watch", &cfg.skill_folders).unwrap();
+    assert_eq!(skill.allowed_tools.as_deref(), Some("Write"));
+    assert_eq!(skill.body, "Linked.\n");
+}
+
+#[test]
+fn a_linked_skill_is_refused_when_skill_folders_is_unset_or_lists_another_folder() {
+    let linked = Linked::new("watches");
+    assert_eq!(
+        check_start(&request(&linked.work.0), &WatchSettings::default()),
+        Err(Refusal::UnknownSkill)
+    );
+    let other = WatchSettings {
+        skill_folders: vec![
+            "/no/such/folder".into(),
+            linked.kept.0.join("skills").to_str().unwrap().into(),
+        ],
+        ..WatchSettings::default()
+    };
+    assert_eq!(
+        check_start(&request(&linked.work.0), &other),
+        Err(Refusal::UnknownSkill)
+    );
+    assert_eq!(
+        read_skill(&linked.work.0, "pod-watch", &other.skill_folders),
+        Err(SkillMissing)
+    );
+}
+
+#[test]
+fn a_sibling_folder_whose_name_only_starts_the_same_is_not_inside_a_listed_folder() {
+    // The skill is kept in `watches-old`, and `watches` is listed.
+    let linked = Linked::new("watches-old");
+    std::fs::create_dir_all(linked.kept.0.join("watches")).unwrap();
+    let cfg = linked.listed("watches");
+    assert_eq!(
+        check_start(&request(&linked.work.0), &cfg),
+        Err(Refusal::UnknownSkill)
+    );
+    // And a skill in another folder of the same repository.
+    let linked = Linked::new("skills");
+    std::fs::create_dir_all(linked.kept.0.join("watches")).unwrap();
+    let cfg = linked.listed("watches");
+    assert_eq!(
+        check_start(&request(&linked.work.0), &cfg),
+        Err(Refusal::UnknownSkill)
+    );
+}
+
+#[test]
+fn a_listed_folder_that_is_itself_a_link_is_compared_by_its_real_path() {
+    let linked = Linked::new("real-watches");
+    symlink(
+        linked.kept.0.join("real-watches"),
+        linked.kept.0.join("via-link"),
+    )
+    .unwrap();
+    let cfg = linked.listed("via-link");
+    assert!(check_start(&request(&linked.work.0), &cfg).is_ok());
+}
+
+#[test]
+fn a_listed_folder_that_is_missing_matches_nothing_and_an_own_skill_still_works() {
+    let temp = Temp::with_skill("pod-watch", "x");
+    let cfg = WatchSettings {
+        skill_folders: vec!["/Users/nobody/not-cloned/skills/watches".into()],
+        ..WatchSettings::default()
+    };
+    assert!(check_start(&request(&temp.0), &cfg).is_ok());
+}
+
+#[test]
+fn a_link_moved_outside_every_listed_folder_makes_the_run_find_no_skill() {
+    let linked = Linked::new("watches");
+    let cfg = linked.listed("watches");
+    assert!(read_skill(&linked.work.0, "pod-watch", &cfg.skill_folders).is_ok());
+    let elsewhere = Linked::new("elsewhere");
+    let link = linked.work.0.join(".claude/skills/pod-watch");
+    std::fs::remove_file(&link).unwrap();
+    symlink(elsewhere.kept.0.join("elsewhere/pod-watch"), &link).unwrap();
+    assert_eq!(
+        read_skill(&linked.work.0, "pod-watch", &cfg.skill_folders),
         Err(SkillMissing)
     );
 }

@@ -34,6 +34,9 @@ model = "haiku"
 # daily_budget_usd = 1.00
 # run_budget_usd = 0.05
 # max_run_budget_usd = 0.10
+# Optional. Folders a watch skill's real path may lie in, besides the watch's own
+# .claude/skills/ (absolute paths; a skill is linked into .claude/skills/ from one of them):
+# skill_folders = ["/Users/kahgeh/Dev/p/chief-of-pods/skills/watches", "/Users/kahgeh/Dev/p/personal-chief/skills/watches"]
 
 [agent_monitor]
 inventory_interval_ms = 2000

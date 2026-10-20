@@ -99,7 +99,7 @@ pub(super) fn check_start(
         _ => return Err(Refusal::Invalid("report_to")),
     };
     let run_budget_usd_micros = run_budget(request.run_budget_usd, cfg)?;
-    skill_path(&folder, &request.skill).ok_or(Refusal::UnknownSkill)?;
+    skill_path(&folder, &request.skill, &cfg.skill_folders).ok_or(Refusal::UnknownSkill)?;
     Ok(Checked {
         name: request.name.clone(),
         folder,
@@ -147,21 +147,36 @@ fn canonical_folder(folder: &str) -> Option<PathBuf> {
     canonical.is_dir().then_some(canonical)
 }
 
-/// `<folder>/.claude/skills/<skill>/SKILL.md`, if it is a file whose real path lies
-/// inside `<folder>/.claude/skills/`.
-fn skill_path(folder: &Path, skill: &str) -> Option<PathBuf> {
+/// `<folder>/.claude/skills/<skill>/SKILL.md`, if it is a file whose real path lies inside
+/// `<folder>/.claude/skills/` or inside one of the user's `skill_folders`. Paths are
+/// compared part by part, so `/x/watches-old/a` is not inside `/x/watches`, and each root
+/// is compared by its real path, so a listed folder that is itself a link counts as what
+/// it points to. A root that does not exist matches nothing.
+fn skill_path(folder: &Path, skill: &str, skill_folders: &[String]) -> Option<PathBuf> {
     if !is_token(skill) {
         return None;
     }
-    let skills = std::fs::canonicalize(folder.join(".claude").join("skills")).ok()?;
+    let skills = folder.join(".claude").join("skills");
     let file = std::fs::canonicalize(skills.join(skill).join("SKILL.md")).ok()?;
-    (file.starts_with(&skills) && file.is_file()).then_some(file)
+    let own = std::fs::canonicalize(&skills).ok();
+    let listed = skill_folders
+        .iter()
+        .filter_map(|listed| std::fs::canonicalize(listed).ok());
+    let inside = own
+        .into_iter()
+        .chain(listed)
+        .any(|root| file.starts_with(&root));
+    (inside && file.is_file()).then_some(file)
 }
 
 /// Reads the skill afresh. The same location rule as `check_start`, so a link that
 /// was changed after the watch started is caught at the run.
-pub(super) fn read_skill(folder: &Path, skill: &str) -> Result<Skill, SkillMissing> {
-    let path = skill_path(folder, skill).ok_or(SkillMissing)?;
+pub(super) fn read_skill(
+    folder: &Path,
+    skill: &str,
+    skill_folders: &[String],
+) -> Result<Skill, SkillMissing> {
+    let path = skill_path(folder, skill, skill_folders).ok_or(SkillMissing)?;
     let size = std::fs::metadata(&path).map_err(|_| SkillMissing)?.len();
     if size > MAX_SKILL_BYTES {
         return Err(SkillMissing);

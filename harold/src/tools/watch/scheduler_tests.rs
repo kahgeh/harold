@@ -731,3 +731,44 @@ async fn a_watch_whose_time_ran_out_while_harold_was_down_ends_on_resume() {
 
     assert_eq!(h.row("w").await.stop_reason.as_deref(), Some("ended"));
 }
+
+#[tokio::test(start_paused = true)]
+async fn a_linked_skill_runs_from_a_listed_folder_and_fails_when_its_link_leaves_it() {
+    let kept = TempFolder::new();
+    let listed = kept.0.join("watches");
+    let (inside, outside) = (listed.join("pod-watch"), kept.0.join("other/pod-watch"));
+    for dir in [&inside, &outside] {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(dir.join("SKILL.md"), "Linked rules.\n").unwrap();
+    }
+    let h = harness(
+        WatchSettings {
+            skill_folders: vec![listed.to_string_lossy().into_owned()],
+            ..settings()
+        },
+        vec![answer("QUIET", 0.01)],
+    )
+    .await;
+    let link = h.folder.0.join(".claude/skills/pod-watch");
+    std::fs::remove_dir_all(&link).unwrap();
+    std::os::unix::fs::symlink(&inside, &link).unwrap();
+    h.start("w", 10, 120).await;
+    pass(Duration::from_secs(5)).await;
+    assert_eq!(h.runner.calls(), 1);
+    assert!(
+        h.runner.jobs.lock().unwrap()[0]
+            .system_prompt
+            .ends_with("Linked rules.\n")
+    );
+
+    // The link now points outside every listed folder.
+    std::fs::remove_file(&link).unwrap();
+    std::os::unix::fs::symlink(&outside, &link).unwrap();
+    pass(35 * MINUTE).await;
+
+    assert_eq!(h.runner.calls(), 1, "no model run without an allowed skill");
+    assert_eq!(
+        h.typing.typed(),
+        ["WATCH w stopped: 3 runs in a row failed (skill_missing)"]
+    );
+}

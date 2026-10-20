@@ -190,6 +190,9 @@ pub(crate) struct WatchSettings {
     pub run_budget_usd: Option<f64>,
     /// The most `--run-budget` may ask.
     pub max_run_budget_usd: Option<f64>,
+    /// Folders a watch skill's real path may lie in, besides the watch's own
+    /// `.claude/skills/`. Absolute paths only.
+    pub skill_folders: Vec<String>,
 }
 
 impl Default for WatchSettings {
@@ -199,6 +202,7 @@ impl Default for WatchSettings {
             daily_budget_usd: None,
             run_budget_usd: None,
             max_run_budget_usd: None,
+            skill_folders: Vec::new(),
         }
     }
 }
@@ -226,6 +230,15 @@ impl WatchSettings {
             if value.is_some_and(|value| !(value.is_finite() && value > 0.0)) {
                 errors.push(format!("watch.{name} must be above 0 when set"));
             }
+        }
+        // `~/` is not expanded, as for timed prompts' `folder`. A folder that does not
+        // exist is not an error: one Mac can list an organisation repository it has not
+        // cloned.
+        if self.skill_folders.iter().any(|folder| {
+            !folder.starts_with('/') || folder.len() > 4_096 || folder.chars().any(char::is_control)
+        }) {
+            errors
+                .push("watch.skill_folders entries must be absolute paths starting with /".into());
         }
         if let (Some(run), Some(max)) = (self.run_budget_usd, self.max_run_budget_usd)
             && run > max
@@ -1240,6 +1253,25 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(nan.validate().len(), 1);
+    }
+
+    #[test]
+    fn watch_skill_folders_are_absolute_paths_and_optional() {
+        assert!(parse_watch("[watch]\n").skill_folders.is_empty());
+        let listed = parse_watch(
+            "[watch]\nskill_folders = [\"/Users/x/chief-of-pods/skills/watches\", \"/Users/x/org/skills/watches\"]\n",
+        );
+        assert_eq!(listed.skill_folders.len(), 2);
+        assert!(listed.validate().is_empty());
+        // A folder that is not there is not an error.
+        let missing = parse_watch("[watch]\nskill_folders = [\"/no/such/folder\"]\n");
+        assert!(missing.validate().is_empty());
+        for bad in ["~/Dev/p/chief-of-pods/skills/watches", "skills/watches", ""] {
+            let settings = parse_watch(&format!("[watch]\nskill_folders = [\"{bad}\"]\n"));
+            let errors = settings.validate();
+            assert_eq!(errors.len(), 1, "{bad:?}: {errors:?}");
+            assert!(errors[0].contains("watch.skill_folders"), "{errors:?}");
+        }
     }
 
     #[test]

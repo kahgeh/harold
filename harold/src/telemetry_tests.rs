@@ -1719,9 +1719,7 @@ fn dotted_names(text: &str) -> Vec<String> {
     let mut names = Vec::new();
     for (start, _) in text.char_indices() {
         let rest = &text[start..];
-        if !(rest.starts_with("pod.")
-            || rest.starts_with("harold.")
-            || rest.starts_with("watch."))
+        if !(rest.starts_with("pod.") || rest.starts_with("harold.") || rest.starts_with("watch."))
         {
             continue;
         }
