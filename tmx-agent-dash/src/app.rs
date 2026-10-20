@@ -1,4 +1,6 @@
-use crate::questions::{BlockEffect, Mode, Outgoing, QStop, QuestionBlock, Queue, SendResult};
+use crate::questions::{
+    BlockEffect, Mode, Outgoing, PickView, QStop, QuestionBlock, Queue, SendResult,
+};
 use crate::text::normalize_search;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::collections::HashSet;
@@ -292,6 +294,11 @@ pub enum Effect {
     SetMessagingPaused(bool),
     Call(CallAction),
     Answer(Outgoing),
+    SavePicks {
+        id: String,
+        version: u32,
+        picks: Vec<PickView>,
+    },
     Tick {
         id: String,
         version: u32,
@@ -699,6 +706,15 @@ impl App {
         self.settle_cursor();
     }
 
+    /// Applies Harold's answer to a save of the picks of question `id` at `version`.
+    pub fn question_picks_saved(&mut self, id: &str, version: u32, result: SendResult) {
+        let before = self.questions.shown();
+        self.questions.picks_saved(id, version, result);
+        let after = self.questions.shown();
+        self.leave_a_replaced_question(before.as_ref(), after.as_ref());
+        self.settle_cursor();
+    }
+
     /// Applies Harold's answer to a tick of `step` (from 1) of instructions `id`. A
     /// refusal that drops the instructions moves the cursor as a send does.
     pub fn question_ticked(&mut self, id: &str, step: u32, ticked: bool, result: SendResult) {
@@ -781,6 +797,9 @@ impl App {
                 Effect::Defer(id)
             }
             BlockEffect::Send(out) => Effect::Answer(out),
+            BlockEffect::SavePicks { id, version, picks } => {
+                Effect::SavePicks { id, version, picks }
+            }
             BlockEffect::Tick {
                 id,
                 version,
@@ -2929,6 +2948,7 @@ mod tests {
             title: String::new(),
             steps: vec![],
             ticked: vec![],
+            picks: vec![],
             decisions: vec![
                 DecisionView {
                     ask: "Ask 1?".into(),
@@ -3360,7 +3380,10 @@ mod tests {
                 option: 0
             }))
         );
-        assert_eq!(app.handle_key(KeyCode::Char(' ')), Effect::None);
+        assert!(matches!(
+            app.handle_key(KeyCode::Char(' ')),
+            Effect::SavePicks { .. }
+        ));
         app.land_on(&Stop::Question(QStop::Action(0)));
         assert!(matches!(app.handle_key(KeyCode::Enter), Effect::Answer(_)));
     }
@@ -3503,7 +3526,10 @@ mod tests {
         // Space picks; the picks start on the suggestions.
         app.handle_key(KeyCode::Char('j'));
         app.handle_key(KeyCode::Char('j'));
-        assert_eq!(app.handle_key(KeyCode::Char(' ')), Effect::None);
+        assert!(matches!(
+            app.handle_key(KeyCode::Char(' ')),
+            Effect::SavePicks { .. }
+        ));
         app.land_on(&Stop::Question(QStop::Action(0)));
         match app.handle_key(KeyCode::Enter) {
             Effect::Answer(out) => {
@@ -3748,6 +3774,19 @@ mod tests {
         assert_eq!(
             (out.id.as_str(), out.kind),
             ("I1", crate::questions::AnswerKind::Done)
+        );
+    }
+
+    #[test]
+    fn question_picks_saved_unavailable_sets_the_notice() {
+        let mut app = call_app(CallState::Off);
+        app.observe_questions(question_queue(&["Q1"]));
+        app.handle_key(KeyCode::Char('j'));
+        app.handle_key(KeyCode::Char('l'));
+        app.question_picks_saved("Q1", 1, SendResult::Unavailable);
+        assert_eq!(
+            app.questions.view().unwrap().notice.as_deref(),
+            Some("Harold can't save your picks right now")
         );
     }
 

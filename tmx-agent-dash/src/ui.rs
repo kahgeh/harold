@@ -3868,6 +3868,7 @@ mod tests {
                 title: String::new(),
                 steps: vec![],
                 ticked: vec![],
+                picks: vec![],
                 decisions: vec![DecisionView {
                     ask: "Which protocol?".into(),
                     options: vec![
@@ -4373,6 +4374,7 @@ mod tests {
             title: String::new(),
             steps: vec![],
             ticked: vec![],
+            picks: vec![],
             decisions: vec![
                 DecisionView {
                     ask: "Which protocol should clients speak?".into(),
@@ -4855,6 +4857,7 @@ mod tests {
                 step("Run harold status and check it says running 0.15.0", ""),
             ],
             ticked: ticked.to_vec(),
+            picks: vec![],
         }
     }
 

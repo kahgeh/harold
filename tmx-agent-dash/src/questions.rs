@@ -45,6 +45,8 @@ pub struct QuestionView {
     pub steps: Vec<StepView>,
     /// Instructions only: the ticked step numbers, from 1.
     pub ticked: Vec<u32>,
+    /// A question only: the picks Harold has saved.
+    pub picks: Vec<PickView>,
 }
 
 /// One step of instructions.
@@ -170,6 +172,12 @@ pub enum BlockEffect {
     OpenLink(String),
     Defer(String),
     Send(Outgoing),
+    /// Save the question's current picks, in decision order.
+    SavePicks {
+        id: String,
+        version: u32,
+        picks: Vec<PickView>,
+    },
     /// Tick (`ticked` true) or untick step `step` (from 1) of the instructions.
     Tick {
         id: String,
@@ -305,6 +313,13 @@ pub const INSTRUCTION_ACTIONS: [&str; 2] = ["done", "ignore"];
 /// The longest note the block takes; Harold refuses a field of 2,000 characters.
 const NOTE_LIMIT: usize = 1_999;
 
+/// The notice when Harold could not save a pick.
+pub const PICKS_UNAVAILABLE_NOTICE: &str = "Harold can't save your picks right now";
+
+fn picks_kept_notice(id: &str) -> String {
+    format!("{id} changed, picks kept for unchanged decisions")
+}
+
 fn changed_notice(id: &str) -> String {
     format!("{id} changed, your picks were cleared")
 }
@@ -317,21 +332,41 @@ fn is_web_link(link: &str) -> bool {
     link.starts_with("https://") || link.starts_with("http://")
 }
 
-/// Each decision's starting pick: its suggested option, unless that one is free (it has
-/// no text yet), else none.
+/// Each decision's starting pick: the pick Harold has saved for it, when its key is still
+/// an option (a free option needs its text); else its suggested option, unless that one is
+/// free (it has no text yet); else none.
 fn starting_picks(q: &QuestionView) -> Vec<Option<PickView>> {
     q.decisions
         .iter()
         .enumerate()
         .map(|(decision, d)| {
-            d.options
+            let saved = q
+                .picks
                 .iter()
-                .find(|o| o.suggested && !o.free)
-                .map(|o| PickView {
-                    decision: decision as u32,
-                    key: o.key.clone(),
-                    text: String::new(),
-                })
+                .find(|p| p.decision as usize == decision)
+                .and_then(|p| {
+                    let option = d.options.iter().find(|o| o.key == p.key)?;
+                    let text = if option.free {
+                        p.text.clone()
+                    } else {
+                        String::new()
+                    };
+                    (!option.free || !text.is_empty()).then(|| PickView {
+                        decision: decision as u32,
+                        key: p.key.clone(),
+                        text,
+                    })
+                });
+            saved.or_else(|| {
+                d.options
+                    .iter()
+                    .find(|o| o.suggested && !o.free)
+                    .map(|o| PickView {
+                        decision: decision as u32,
+                        key: o.key.clone(),
+                        text: String::new(),
+                    })
+            })
         })
         .collect()
 }
@@ -387,8 +422,10 @@ impl QuestionBlock {
                 let notice = if q.is_instructions() {
                     // The ticks are the server's: nothing local to clear.
                     instructions_changed_notice(&id)
-                } else {
+                } else if q.picks.is_empty() {
                     changed_notice(&id)
+                } else {
+                    picks_kept_notice(&id)
                 };
                 self.restart();
                 self.set_notice(notice);
@@ -557,6 +594,20 @@ impl QuestionBlock {
             return;
         }
         self.apply_result(id, result);
+    }
+
+    /// Applies the outcome of saving the picks of question `id` at `version`. A save for a
+    /// question or version no longer shown changes nothing. A failed save keeps the pick;
+    /// the next pick or send carries it. The other refusals act as for a send.
+    pub fn picks_saved(&mut self, id: &str, version: u32, result: SendResult) {
+        if self.current.as_deref() != Some(id) || self.version != version {
+            return;
+        }
+        match result {
+            SendResult::Recorded => {}
+            SendResult::Unavailable => self.set_notice(PICKS_UNAVAILABLE_NOTICE.into()),
+            SendResult::VersionChanged | SendResult::NotWaiting => self.apply_result(id, result),
+        }
     }
 
     fn apply_result(&mut self, id: &str, result: SendResult) {
@@ -774,7 +825,9 @@ impl QuestionBlock {
             },
             KeyCode::Char(' ') => match stop {
                 QStop::Option { decision, option } if !q.is_instructions() => {
-                    self.pick(&q, decision, option);
+                    if self.pick(&q, decision, option) {
+                        return self.save_picks(&q);
+                    }
                 }
                 QStop::Step(i) if q.is_instructions() && i < q.steps.len() => {
                     let step = i as u32 + 1;
@@ -824,15 +877,25 @@ impl QuestionBlock {
         })
     }
 
-    /// Picks option `option` of `decision`; a free option opens its field instead,
-    /// holding the text it was picked with before.
-    fn pick(&mut self, q: &QuestionView, decision: usize, option: usize) {
+    /// The effect that saves the question's current picks.
+    fn save_picks(&self, q: &QuestionView) -> BlockEffect {
+        BlockEffect::SavePicks {
+            id: q.id.clone(),
+            version: self.version,
+            picks: self.picks.iter().flatten().cloned().collect(),
+        }
+    }
+
+    /// Picks option `option` of `decision` and says whether a pick was made; a free option
+    /// opens its field instead, holding the text it was picked with before, and picks
+    /// nothing until `Enter`.
+    fn pick(&mut self, q: &QuestionView, decision: usize, option: usize) -> bool {
         let Some(chosen) = q
             .decisions
             .get(decision)
             .and_then(|d| d.options.get(option))
         else {
-            return;
+            return false;
         };
         if chosen.free {
             let text = self
@@ -847,8 +910,10 @@ impl QuestionBlock {
                 kind: NoteKind::FreeText,
                 text,
             };
+            false
         } else {
             self.set_pick(decision, chosen.key.clone(), String::new());
+            true
         }
     }
 
@@ -962,6 +1027,7 @@ impl QuestionBlock {
                             self.set_pick(decision, chosen.key.clone(), typed);
                         }
                         self.mode = Mode::Choosing;
+                        return self.save_picks(&q);
                     }
                     NoteKind::Revise | NoteKind::Reject => {
                         let kind = if kind == NoteKind::Revise {
@@ -972,7 +1038,6 @@ impl QuestionBlock {
                         return BlockEffect::Send(self.outgoing(&q, kind, typed));
                     }
                 }
-                return BlockEffect::None;
             }
             _ => {}
         }
@@ -1121,6 +1186,7 @@ mod tests {
             title: String::new(),
             steps: vec![],
             ticked: vec![],
+            picks: vec![],
             decisions: (1..=decisions)
                 .map(|n| DecisionView {
                     ask: format!("Ask {n}?"),
@@ -1312,13 +1378,155 @@ mod tests {
         }
     }
 
+    fn with_picks(mut q: QuestionView, picks: Vec<PickView>) -> QuestionView {
+        q.picks = picks;
+        q
+    }
+
+    fn save_of(effect: BlockEffect) -> (String, u32, Vec<PickView>) {
+        match effect {
+            BlockEffect::SavePicks { id, version, picks } => (id, version, picks),
+            other => panic!("expected SavePicks, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_pick_sends_one_save_with_all_current_picks() {
+        let mut b = open_block(vec![question("Q1", 3, 2)]);
+        let (id, version, picks) = save_of(press(&mut b, KeyCode::Char(' '), opt_stop(0, 0)));
+        assert_eq!((id.as_str(), version), ("Q1", 3));
+        // Decision 0 now holds a; decision 1 still holds its suggestion b.
+        assert_eq!(picks, vec![pick(0, "a", ""), pick(1, "b", "")]);
+    }
+
+    #[test]
+    fn a_kept_free_text_sends_one_save_and_half_typed_text_sends_none() {
+        let mut b = open_block(vec![question("Q1", 1, 1)]);
+        assert_eq!(
+            press(&mut b, KeyCode::Char(' '), opt_stop(0, 2)),
+            BlockEffect::None,
+            "a free option only opens its field"
+        );
+        type_text(&mut b, "later");
+        let (_, _, picks) = save_of(press(&mut b, KeyCode::Enter, opt_stop(0, 2)));
+        assert_eq!(picks, vec![pick(0, "z", "later")]);
+        // Esc on a half-typed field saves nothing and keeps the earlier pick.
+        press(&mut b, KeyCode::Char(' '), opt_stop(0, 2));
+        type_text(&mut b, "x");
+        assert_eq!(
+            press(&mut b, KeyCode::Esc, opt_stop(0, 2)),
+            BlockEffect::None
+        );
+        assert_eq!(picked(&b), keys(&["z"]));
+    }
+
+    #[test]
+    fn a_fresh_block_starts_from_listed_picks_and_suggestions_for_the_rest() {
+        let q = with_picks(
+            question("Q1", 1, 3),
+            vec![pick(0, "a", ""), pick(2, "z", "typed")],
+        );
+        let b = open_block(vec![q]);
+        // Decision 1 has no saved pick: its suggestion b.
+        assert_eq!(picked(&b), keys(&["a", "b", "z"]));
+        let view = b.view().unwrap();
+        assert_eq!(
+            view.decisions[2].options[2].free_text.as_deref(),
+            Some("typed")
+        );
+    }
+
+    #[test]
+    fn a_listed_pick_with_an_unknown_key_or_empty_free_text_is_ignored() {
+        let q = with_picks(
+            question("Q1", 1, 3),
+            vec![pick(0, "gone", ""), pick(1, "z", ""), pick(7, "a", "")],
+        );
+        let b = open_block(vec![q]);
+        assert_eq!(picked(&b), keys(&["b", "b", "b"]));
+    }
+
+    #[test]
+    fn a_higher_version_with_picks_says_picks_kept_and_without_says_cleared() {
+        let mut b = open_block(vec![question("Q1", 1, 2)]);
+        b.reconcile(queue(vec![with_picks(
+            question("Q1", 2, 2),
+            vec![pick(1, "a", "")],
+        )]));
+        assert_eq!(
+            b.view().unwrap().notice.as_deref(),
+            Some("Q1 changed, picks kept for unchanged decisions")
+        );
+        assert_eq!(picked(&b), keys(&["b", "a"]));
+        b.reconcile(queue(vec![question("Q1", 3, 2)]));
+        assert_eq!(
+            b.view().unwrap().notice.as_deref(),
+            Some("Q1 changed, your picks were cleared")
+        );
+    }
+
+    #[test]
+    fn an_older_listing_at_the_same_version_does_not_undo_a_pick() {
+        let mut b = open_block(vec![question("Q1", 1, 1)]);
+        press(&mut b, KeyCode::Char(' '), opt_stop(0, 0));
+        // A listing read before the save landed carries no picks.
+        b.reconcile(queue(vec![question("Q1", 1, 1)]));
+        assert_eq!(picked(&b), keys(&["a"]));
+    }
+
+    #[test]
+    fn a_failed_save_says_so_keeps_the_pick_and_the_next_pick_carries_it() {
+        let mut b = open_block(vec![question("Q1", 1, 2)]);
+        press(&mut b, KeyCode::Char(' '), opt_stop(0, 0));
+        b.picks_saved("Q1", 1, SendResult::Unavailable);
+        assert_eq!(
+            b.view().unwrap().notice.as_deref(),
+            Some("Harold can't save your picks right now")
+        );
+        assert_eq!(picked(&b), keys(&["a", "b"]));
+        let (_, _, picks) = save_of(press(&mut b, KeyCode::Char(' '), opt_stop(1, 0)));
+        assert_eq!(picks, vec![pick(0, "a", ""), pick(1, "a", "")]);
+    }
+
+    #[test]
+    fn a_recorded_save_changes_nothing_and_a_stale_result_is_ignored() {
+        let mut b = open_block(vec![question("Q1", 2, 1)]);
+        press(&mut b, KeyCode::Char(' '), opt_stop(0, 0));
+        let before = b.view();
+        b.picks_saved("Q1", 2, SendResult::Recorded);
+        assert_eq!(b.view(), before);
+        b.picks_saved("Q1", 1, SendResult::Unavailable);
+        b.picks_saved("Q9", 2, SendResult::Unavailable);
+        assert_eq!(b.view(), before);
+    }
+
+    #[test]
+    fn a_save_refused_for_version_or_waiting_acts_as_for_a_send() {
+        let mut b = open_block(vec![question("Q1", 1, 1), question("Q2", 1, 1)]);
+        b.picks_saved("Q1", 1, SendResult::VersionChanged);
+        assert_eq!(
+            b.view().unwrap().notice.as_deref(),
+            Some("Q1 changed, your picks were cleared")
+        );
+        b.picks_saved("Q1", 1, SendResult::NotWaiting);
+        assert_eq!(b.view().unwrap().id, "Q2");
+    }
+
     #[test]
     fn space_picks_and_other_keys_do_not() {
         let mut b = open_block(vec![question("Q1", 1, 1)]);
         assert_eq!(picked(&b), keys(&["b"]));
         assert_eq!(
             press(&mut b, KeyCode::Char(' '), opt_stop(0, 0)),
-            BlockEffect::None
+            BlockEffect::SavePicks {
+                id: "Q1".into(),
+                version: 1,
+                picks: vec![PickView {
+                    decision: 0,
+                    key: "a".into(),
+                    text: String::new()
+                }]
+            }
         );
         assert_eq!(picked(&b), keys(&["a"]), "a picked, b unpicked");
         for code in [
@@ -2019,6 +2227,7 @@ mod tests {
                 })
                 .collect(),
             ticked: vec![],
+            picks: vec![],
         }
     }
 

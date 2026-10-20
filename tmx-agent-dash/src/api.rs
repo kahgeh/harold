@@ -16,8 +16,8 @@ use harold_api::tools::backlog::v1::{
 };
 use harold_api::tools::questions::v1::{
     AnswerKind as ProtoAnswerKind, AnswerQuestionRequest, Decision, DecisionOption,
-    DeferQuestionRequest, ListQuestionsRequest, ListQuestionsResponse, ListedQuestion, Pick, Step,
-    TickStepRequest, question_service_client::QuestionServiceClient,
+    DeferQuestionRequest, ListQuestionsRequest, ListQuestionsResponse, ListedQuestion, Pick,
+    SavePicksRequest, Step, TickStepRequest, question_service_client::QuestionServiceClient,
 };
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -28,7 +28,8 @@ use crate::app::{
     MonitorHealthState, Snapshot,
 };
 use crate::questions::{
-    AnswerKind, DecisionView, OptionView, Outgoing, QuestionView, Queue, SendResult, StepView,
+    AnswerKind, DecisionView, OptionView, Outgoing, PickView, QuestionView, Queue, SendResult,
+    StepView,
 };
 use crate::text::sanitize_display;
 
@@ -300,6 +301,17 @@ impl SourceStream {
         }
     }
 
+    pub async fn save_picks(&self, id: &str, version: u32, picks: &[PickView]) -> SendResult {
+        let Some(mut client) = self.questions.clone() else {
+            return SendResult::Unavailable;
+        };
+        let request = save_picks_request(id, version, picks);
+        match tokio::time::timeout(VOICE_REQUEST_TIMEOUT, client.save_picks(request)).await {
+            Ok(result) => answer_send_result(result.map(|_| ())),
+            Err(_) => SendResult::Unavailable,
+        }
+    }
+
     pub async fn defer_question(&self, id: &str) -> Result<(), SourceError> {
         let Some(mut client) = self.questions.clone() else {
             return Err(SourceError::transport("question tool unavailable"));
@@ -430,20 +442,29 @@ pub(crate) fn tick_request(id: &str, version: u32, step: u32, ticked: bool) -> T
     }
 }
 
+/// The save request; decisions count from 0, as the tool does.
+pub(crate) fn save_picks_request(id: &str, version: u32, picks: &[PickView]) -> SavePicksRequest {
+    SavePicksRequest {
+        id: id.to_owned(),
+        version,
+        picks: picks.iter().map(proto_pick).collect(),
+    }
+}
+
+fn proto_pick(pick: &PickView) -> Pick {
+    Pick {
+        decision: pick.decision,
+        key: pick.key.clone(),
+        text: pick.text.clone(),
+    }
+}
+
 fn answer_request(out: &Outgoing) -> AnswerQuestionRequest {
     AnswerQuestionRequest {
         id: out.id.clone(),
         version: out.version,
         kind: proto_answer_kind(out.kind) as i32,
-        picks: out
-            .picks
-            .iter()
-            .map(|pick| Pick {
-                decision: pick.decision,
-                key: pick.key.clone(),
-                text: pick.text.clone(),
-            })
-            .collect(),
+        picks: out.picks.iter().map(proto_pick).collect(),
         note: out.note.clone(),
         send_now: out.send_now,
     }
@@ -511,7 +532,16 @@ fn map_listed_question(listed: ListedQuestion) -> Option<QuestionView> {
         title: question_text(&question.title),
         steps: question.steps.into_iter().map(map_step).collect(),
         ticked: listed.ticked,
+        picks: listed.picks.into_iter().map(map_pick).collect(),
     })
+}
+
+fn map_pick(pick: Pick) -> PickView {
+    PickView {
+        decision: pick.decision,
+        key: question_text(&pick.key),
+        text: question_text(&pick.text),
+    }
 }
 
 fn map_step(step: Step) -> StepView {
@@ -1356,7 +1386,9 @@ mod question_tests {
         ListedQuestion, Question, Step,
     };
 
-    use super::{answer_send_result, map_queue, proto_answer_kind, tick_request};
+    use super::{
+        answer_send_result, map_queue, proto_answer_kind, save_picks_request, tick_request,
+    };
     use crate::questions::SendResult;
 
     fn option(key: &str, suggested: bool, free: bool) -> DecisionOption {
@@ -1385,6 +1417,7 @@ mod question_tests {
             version,
             deferred,
             ticked: vec![],
+            picks: vec![],
         }
     }
 
@@ -1437,6 +1470,7 @@ mod question_tests {
                     version: 1,
                     deferred: false,
                     ticked: vec![],
+                    picks: vec![],
                 },
                 hostile,
             ],
@@ -1557,6 +1591,7 @@ mod question_tests {
                 version: 3,
                 deferred: false,
                 ticked: vec![2],
+                picks: vec![],
             }],
             waiting: 1,
             dismissed: vec![],
@@ -1620,6 +1655,66 @@ mod question_tests {
             ("I1", 4, 1, true)
         );
         assert!(!tick_request("I1", 4, 2, false).ticked);
+    }
+
+    #[test]
+    fn save_picks_request_keeps_decisions_from_zero_and_free_text() {
+        let picks = [
+            crate::questions::PickView {
+                decision: 0,
+                key: "a".into(),
+                text: String::new(),
+            },
+            crate::questions::PickView {
+                decision: 2,
+                key: "z".into(),
+                text: "typed".into(),
+            },
+        ];
+        let request = save_picks_request("Q43", 3, &picks);
+        assert_eq!((request.id.as_str(), request.version), ("Q43", 3));
+        let sent: Vec<(u32, &str, &str)> = request
+            .picks
+            .iter()
+            .map(|p| (p.decision, p.key.as_str(), p.text.as_str()))
+            .collect();
+        assert_eq!(sent, [(0, "a", ""), (2, "z", "typed")]);
+    }
+
+    #[test]
+    fn map_queue_maps_the_listed_picks() {
+        let mut item = listed(
+            "Q43",
+            2,
+            false,
+            vec![decision("Which?", vec![option("a", false, false)])],
+        );
+        item.picks = vec![super::Pick {
+            decision: 0,
+            key: "a".into(),
+            text: String::new(),
+        }];
+        let queue = map_queue(ListQuestionsResponse {
+            questions: vec![item],
+            waiting: 1,
+            dismissed: vec![],
+        });
+        assert_eq!(
+            queue.questions[0].picks,
+            [crate::questions::PickView {
+                decision: 0,
+                key: "a".into(),
+                text: String::new()
+            }]
+        );
+    }
+
+    #[test]
+    fn a_save_that_breaks_the_pick_rule_reads_as_unavailable() {
+        assert_eq!(
+            answer_send_result(Err(tonic::Status::invalid_argument("invalid picks"))),
+            SendResult::Unavailable
+        );
     }
 
     #[test]

@@ -19,7 +19,7 @@ use crate::app::{
 };
 use crate::cli::Options;
 use crate::navigation::{NavigationError, PaneNavigator, TmuxNavigator};
-use crate::questions::{Outgoing, Queue, SendResult, UNAVAILABLE_NOTICE};
+use crate::questions::{Outgoing, PickView, Queue, SendResult, UNAVAILABLE_NOTICE};
 use crate::terminal::{TerminalError, TerminalGuard};
 use crate::text::sanitize_display;
 
@@ -178,6 +178,7 @@ where
                 | Control::Call(_)
                 | Control::Answer(_)
                 | Control::Tick { .. }
+                | Control::SavePicks { .. }
                 | Control::Defer(_)
                 | Control::OpenLink(_) => {}
             }
@@ -215,6 +216,7 @@ where
                 | Control::Call(_)
                 | Control::Answer(_)
                 | Control::Tick { .. }
+                | Control::SavePicks { .. }
                 | Control::Defer(_)
                 | Control::OpenLink(_),
             ) => {
@@ -274,6 +276,14 @@ trait StreamPort: Sized {
     ) -> BoxFuture<'a, SendResult> {
         Box::pin(async { SendResult::Unavailable })
     }
+    fn save_picks<'a>(
+        &'a mut self,
+        _id: &'a str,
+        _version: u32,
+        _picks: &'a [PickView],
+    ) -> BoxFuture<'a, SendResult> {
+        Box::pin(async { SendResult::Unavailable })
+    }
     fn defer_question<'a>(&'a mut self, _id: &'a str) -> BoxFuture<'a, Result<(), SourceError>> {
         Box::pin(async { Err(SourceError::Transport("question tool unavailable".into())) })
     }
@@ -330,6 +340,15 @@ impl StreamPort for SourceStream {
         ticked: bool,
     ) -> BoxFuture<'a, SendResult> {
         Box::pin(SourceStream::tick_step(self, id, version, step, ticked))
+    }
+
+    fn save_picks<'a>(
+        &'a mut self,
+        id: &'a str,
+        version: u32,
+        picks: &'a [PickView],
+    ) -> BoxFuture<'a, SendResult> {
+        Box::pin(SourceStream::save_picks(self, id, version, picks))
     }
 
     fn defer_question<'a>(&'a mut self, id: &'a str) -> BoxFuture<'a, Result<(), SourceError>> {
@@ -392,6 +411,7 @@ where
                     | Control::Call(_)
                     | Control::Answer(_)
                     | Control::Tick { .. }
+                | Control::SavePicks { .. }
                     | Control::Defer(_)
                     | Control::OpenLink(_) => draw(terminal, &core.app, clock)?,
                 }
@@ -542,6 +562,21 @@ where
                     draw(terminal, &core.app, clock)?;
                     continue;
                 }
+                if let Control::SavePicks { id, version, picks } = &control {
+                    let result = stream.save_picks(id, *version, picks).await;
+                    core.app.question_picks_saved(id, *version, result);
+                    // A saved pick changes nothing the listing shows; a refusal means the
+                    // question moved on, so read it again.
+                    if result != SendResult::Recorded {
+                        let listed = stream.list_questions().await;
+                        core.questions_refreshed(listed);
+                        question_poll
+                            .as_mut()
+                            .reset(tokio::time::Instant::now() + core.question_poll_interval);
+                    }
+                    draw(terminal, &core.app, clock)?;
+                    continue;
+                }
                 if let Control::Defer(id) = &control {
                     if stream.defer_question(id).await.is_err() {
                         core.app.questions.set_notice(UNAVAILABLE_NOTICE.into());
@@ -637,6 +672,7 @@ async fn wait_for_retry(
                         | Control::Call(_)
                         | Control::Answer(_)
                         | Control::Tick { .. }
+                | Control::SavePicks { .. }
                         | Control::Defer(_)
                         | Control::OpenLink(_)
                 ) {
@@ -1063,6 +1099,11 @@ enum Control {
     SetMessagingPaused(bool),
     Call(CallAction),
     Answer(Outgoing),
+    SavePicks {
+        id: String,
+        version: u32,
+        picks: Vec<PickView>,
+    },
     Tick {
         id: String,
         version: u32,
@@ -1313,6 +1354,7 @@ impl RuntimeCore {
             Effect::SetMessagingPaused(paused) => Control::SetMessagingPaused(paused),
             Effect::Call(action) => Control::Call(action),
             Effect::Answer(out) => Control::Answer(out),
+            Effect::SavePicks { id, version, picks } => Control::SavePicks { id, version, picks },
             Effect::Tick {
                 id,
                 version,
@@ -2185,6 +2227,7 @@ mod tests {
             title: String::new(),
             steps: vec![],
             ticked: vec![],
+            picks: vec![],
             decisions: (1..=decisions)
                 .map(|n| DecisionView {
                     ask: format!("Ask {n}?"),
@@ -2592,6 +2635,39 @@ mod tests {
         let mut expected = lists(4);
         expected.extend(["tick I1 v2 s1 true".to_string(), "list".to_string()]);
         assert_eq!(log, expected);
+    }
+
+    #[tokio::test]
+    async fn a_pick_saves_without_relisting_and_a_refusal_relists() {
+        let mut core = connected_core();
+        let probe = question_probe(Some(question("Q1", 1, 1)));
+        probe.lock().unwrap().saves.push_back(SendResult::Recorded);
+        probe
+            .lock()
+            .unwrap()
+            .saves
+            .push_back(SendResult::VersionChanged);
+        // k to the header, l opens it, j to the first option, space picks it; again.
+        let keys = [
+            KeyCode::Char('k'),
+            KeyCode::Char('l'),
+            KeyCode::Char('j'),
+            KeyCode::Char(' '),
+            KeyCode::Char(' '),
+        ];
+        let log = run_question_stream(&mut core, &probe, &keys).await;
+        let mut expected = lists(4);
+        // Every key that reaches the question reads the list first; a recorded save
+        // adds none after it, the refused one does.
+        expected.extend([
+            "save Q1 v1 n1".to_string(),
+            "list".to_string(),
+            "save Q1 v1 n1".to_string(),
+            "list".to_string(),
+        ]);
+        assert_eq!(log, expected);
+        let saved = probe.lock().unwrap().saved.clone();
+        assert_eq!(saved[0][0].decision, 0);
     }
 
     #[tokio::test]
@@ -3599,6 +3675,10 @@ mod tests {
         sent: Vec<Outgoing>,
         /// Each tick takes the next result.
         ticks: VecDeque<SendResult>,
+        /// Each save takes the next result; with none left it is recorded.
+        saves: VecDeque<SendResult>,
+        /// The picks of every save.
+        saved: Vec<Vec<PickView>>,
     }
 
     type QuestionProbe = Arc<std::sync::Mutex<QuestionState>>;
@@ -3774,6 +3854,24 @@ mod tests {
                 .log
                 .push(format!("tick {id} v{version} s{step} {ticked}"));
             let result = state.ticks.pop_front().unwrap_or(SendResult::Unavailable);
+            Box::pin(async move { result })
+        }
+
+        fn save_picks<'a>(
+            &'a mut self,
+            id: &'a str,
+            version: u32,
+            picks: &'a [PickView],
+        ) -> BoxFuture<'a, SendResult> {
+            let Some(probe) = &self.questions else {
+                return Box::pin(async { SendResult::Unavailable });
+            };
+            let mut state = probe.lock().unwrap();
+            state
+                .log
+                .push(format!("save {id} v{version} n{}", picks.len()));
+            state.saved.push(picks.to_vec());
+            let result = state.saves.pop_front().unwrap_or(SendResult::Recorded);
             Box::pin(async move { result })
         }
 
