@@ -177,7 +177,7 @@ See the [agent monitor reference](../references/agent-monitor/README.md#projecti
 
 ### The question tool's todos
 
-The question tool holds the chief's todos, of two kinds: questions to answer and instructions to follow by hand. Both live in the same `questions` table. The dash stores each tick of instructions' step with `TickStep`, in the `ticks` column, so the ticks survive a dash restart. The `done` and `ignore` action rows store a `DONE` or `IGNORE` answer, which goes in the next answers line at once. This stays inside the question tool, so it needs no ADR beyond ADR 0001. See the [questions reference](../references/tools/questions.md).
+The question tool holds the chief's todos, of two kinds: questions to answer and instructions to follow by hand. Both live in the same `questions` table. The dash stores each tick of instructions' step with `TickStep`, in the `ticks` column, so the ticks survive a dash restart. The dash stores each pick with `SavePicks` in the `picks` column of the `questions` table, so picks survive a dash restart and carry to the next question version for unchanged decisions, and the chief reads them with `ShowQuestion`. The `done` and `ignore` action rows store a `DONE` or `IGNORE` answer, which goes in the next answers line at once. This stays inside the question tool, so it needs no ADR beyond ADR 0001. See the [questions reference](../references/tools/questions.md).
 
 ### The watch tool's model launch
 

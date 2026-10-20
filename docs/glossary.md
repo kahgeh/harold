@@ -125,6 +125,7 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 | impact | An option's one line saying what choosing it means | — |
 | suggested | The option the chief suggests, marked `(suggested)` | — |
 | pick | The option chosen for a decision, marked `●` and made with Space | — |
+| saved picks | The picks Harold holds for a question as the user makes them, stored in the `questions` table, before and after an answer is sent, and carried to the next question version for unchanged decisions | "draft", "unsent answer" |
 | free option | An option that takes the user's own text | — |
 | text field | Where the user types a free option's text | — |
 | action row | A question's `send`, `later`, `revise…`, `reject…`, or the `done` and `ignore` of instructions | "actions" alone |
@@ -132,7 +133,7 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 | later, set aside | The action row `later`, and what it does: the question waits until no other question is waiting | "defer" and "deferred" in what the user reads. `DeferQuestion` is the API's name |
 | revise…, reject… | The action rows that open a note asking for a change, or saying why not | — |
 | note | The text typed for `revise…` or `reject…` | "note" for a backlog note |
-| notice | A short line under the todo rows, such as `Q1 changed, your picks were cleared` | — |
+| notice | A short line under the todo rows, such as `Q1 changed, your picks were cleared`, `Q1 changed, picks kept for unchanged decisions` or `Harold can't save your picks right now` | — |
 | question version | The count that rises each time the chief puts a question again | "version" alone |
 | answers line | The line starting `ANSWERS` that Harold types into the chief's pane | "batch line" |
 | settle | The 3 seconds Harold waits after the newest answer before typing an answers line, for answers not sent at once | — |

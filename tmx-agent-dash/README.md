@@ -218,7 +218,7 @@ The other action rows:
 - **later** sets the question aside, keeping its picks, and shows the next waiting one.
 - **revise…** opens a note saying what to change, and **reject…** a note saying why. `Enter` on a note sends it as a revise or reject answer, with the picks made so far and at once like `send`; a blank note is not sent. `Esc` discards the note.
 
-`n` and `N` move to the next or previous waiting question, wrapping over the listed order, set-aside questions included. With one question listed they do nothing. The picks of the question you leave are kept while the dash runs, as are the picks of a question set aside with **later** and of a closed question. Kept picks belong to the question version they were made on: when Harold lists a higher question version, or refuses an answer because the question version changed, they are dropped. Kept picks of a question that is answered or dismissed are gone.
+`n` and `N` move to the next or previous waiting question, wrapping over the listed order, set-aside questions included. With one question listed they do nothing. The picks of the question you leave stay, as do the picks of a question set aside with **later** and of a closed question. Every pick is saved in Harold as you make it (a `Space` on an option, or `Enter` on a free option's text; text half-typed is not saved until `Enter`), so a dash restart, a reconnect or a second dash shows the same saved picks. A question that opens at a question version the dash holds no picks for starts from its saved picks, and a decision with no saved pick starts from its suggested option. Saved picks belong to the question version they were made on, but the chief putting a question again keeps the picks on decisions whose ask and options did not change: the notice says so. The saved picks of a question that is answered or dismissed stay in Harold until the id is put again.
 
 Questions set aside come back after a line is typed with no question waiting, or when a **later** leaves none waiting and no answer unsent.
 
@@ -233,10 +233,12 @@ Questions set aside come back after a line is typed with no question waiting, or
 
 A notice shows under the todo's rows until the next key:
 
-- `<id> changed, your picks were cleared`: the chief put the question again. Your picks are dropped.
+- `<id> changed, picks kept for unchanged decisions`: the chief put the question again. A decision keeps its saved pick when its ask and options are unchanged.
+- `<id> changed, your picks were cleared`: the chief put the question again and no saved pick fits. Your picks are dropped.
 - `<id> changed, ticks kept for unchanged steps`: the chief put the instructions again. A step keeps its tick when its text is unchanged.
 - `<id> dismissed: <reason>`: the chief withdrew the question, with its reason (`withdrawn` when none is known). The rows move to the next todo.
 - `Harold can't save answers right now`: Harold could not store the answer or set the question aside. Your picks stay; try again.
+- `Harold can't save your picks right now`: Harold could not store a pick. The pick stays on screen, and your next pick or `send` carries it.
 
 When no question is left, a notice stands alone as one row. It goes at the next key, and otherwise after the next read that still finds no question, a few seconds on. Then the rows go. That key also does what it does on the list. A key that would still reach a question that just changed is dropped, since it was typed for what was there before, so `Enter` on `send` never sends picks made on an older question version.
 

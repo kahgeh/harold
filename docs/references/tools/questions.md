@@ -69,7 +69,7 @@ A refusal names the field, such as `invalid steps.2.text` or `invalid steps.2.de
 
 Instructions are never a waiting question. They are left out of the `waiting` count in `ListQuestions`, and so they do not hold back questions set aside with `later`.
 
-## The seven RPCs
+## The nine RPCs
 
 | RPC | Who | What it does |
 | --- | --- | --- |
@@ -80,12 +80,20 @@ Instructions are never a waiting question. They are left out of the `waiting` co
 | `AnswerQuestion` | dash | Answers a question at the question version the dash saw. |
 | `DeferQuestion` | dash | Sets a question aside (`later`). Instructions cannot be set aside: it is refused as `invalid id`. It stays with the other questions and returns to `waiting` later (see [The answers line](#the-answers-line)). |
 | `TickStep` | dash | Ticks or unticks one step of waiting instructions (see [Ticking](#ticking)). |
+| `SavePicks` | dash | Replaces the saved picks of a waiting or deferred question (see [Saved picks](#saved-picks)). |
+| `ShowQuestion` | chief, CLI | Returns a stored question in any state with its question version, state, dismissal reason and saved picks. An id that was never stored is `NotFound` `unknown_question`. |
 
-The `waiting` count in `ListQuestions` is the number of questions listed, deferred ones included. Instructions are listed but not counted. Each listed item carries `ticked`: the step numbers ticked, counting from 1, empty for a question.
+The `waiting` count in `ListQuestions` is the number of questions listed, deferred ones included. Instructions are listed but not counted. Each listed item carries `ticked`: the step numbers ticked, counting from 1, empty for a question, and `picks`: the saved picks of a question, empty for instructions.
 
 ### Ticking
 
 `TickStep` takes `id`, `version`, `step` (counted from 1) and `ticked` (true to tick, false to untick). The ticks are stored with the instructions, in the `ticks` column, so a dash restart, a reconnect or a second dash shows the same ticks. Ticking sends nothing to the chief. When the chief puts the same id again, a step keeps its tick if its text is unchanged.
+
+### Saved picks
+
+`SavePicks` takes `id`, `version` and `picks`, and replaces the question's saved picks. The picks follow the `REVISE` rule below: any picks made so far, in order, with valid keys and `text` for a free pick; an empty list clears them. It is refused as `version_changed`, `not_waiting` (the question is answered, dismissed or unknown) or `invalid picks`, as `AnswerQuestion` is. It changes nothing but the picks: not `updated_at_ms`, the state or the answer, and it does not wake the answers sender. `AnswerQuestion` also writes its picks, so the column always holds the latest. The picks live in the `picks` column, so a dash restart, a reconnect or a second dash shows them, and they stay readable with `ShowQuestion` after the question is answered, sent or dismissed.
+
+When the chief puts the same id again, in any state, a decision takes the saved pick of an old decision whose `ask` and every option field (`key`, `label`, `impact`, `suggested`, `free`) are the same, each old decision used once, in order. The pick's `decision` is renumbered to the new place; other picks are dropped.
 
 ### Answers
 
@@ -113,6 +121,7 @@ The note is sent only with `REVISE` and `REJECT`. For `ANSWER` and `FREE_TEXT` i
 | `FailedPrecondition` | `version_changed` | The question or instructions were put again since the dash read them. |
 | `FailedPrecondition` | `not_waiting` | The question or instructions are dismissed, already answered, or unknown. |
 | `InvalidArgument` | `invalid step` | `TickStep` names a step number below 1 or above the number of steps, which includes any step of a question. `TickStep` checks `not_waiting` and `version_changed` first. |
+| `NotFound` | `unknown_question` | `ShowQuestion` names an id that was never stored. |
 | `Unavailable` | `the question database is unavailable` | A database write failed. |
 
 ## The CLI
@@ -125,9 +134,10 @@ harold tool questions list                       # one line per question, then "
 harold tool questions order Q3 Q1              # ordered 2
 harold tool questions put < instructions.json     # stored I1 v1
 harold tool questions dismiss Q1 --reason "spec withdrawn"   # dismissed Q1
+harold tool questions show Q1                    # the question and each decision's pick
 ```
 
-`put` accepts the JSON for a question or for instructions. `order` and `dismiss` take ids of either. `list` prints `<id> v<version> <product> <spec>`, with ` (deferred)` after a deferred one, and `<id> v<version> <product> steps <ticked>/<n>` for instructions, such as `I1 v1 harold steps 2/4`. Any other use prints `invalid argument: usage is harold tool questions put|dismiss|order|list`. If the daemon is not running the CLI prints `the Harold daemon is not reachable`, and after 3 seconds without an answer, `the Harold daemon did not answer within 3 seconds`.
+`put` accepts the JSON for a question or for instructions. `order` and `dismiss` take ids of either. `list` prints `<id> v<version> <product> <spec> picks <picked>/<decisions>`, with ` (deferred)` after a deferred one, and `<id> v<version> <product> steps <ticked>/<n>` for instructions, such as `I1 v1 harold steps 2/4`. `show` prints a head line `<id> v<version> <product> <spec> <state>`, then one line per decision: `  <n> <ask>: <key> <label>`, `  <n> <ask>: <key> "<text>"` for a free pick, or `  <n> <ask>: no pick`. Any other use prints `invalid argument: usage is harold tool questions put|dismiss|order|list|show`. If the daemon is not running the CLI prints `the Harold daemon is not reachable`, and after 3 seconds without an answer, `the Harold daemon did not answer within 3 seconds`.
 
 The user answers in the dash, not through the CLI. See the [dash README](../../../tmx-agent-dash/README.md#todos).
 
@@ -193,7 +203,7 @@ If Harold stops while a batch is being typed, or between typing and marking, the
 
 ## Log lines
 
-Seven fixed lines, with only the fields `tool`, `question_id`, `version` and `reason`. No question or answer text is ever logged.
+Nine fixed lines, with only the fields `tool`, `question_id`, `version` and `reason`. No question or answer text is ever logged.
 
 | Line | Fields | Notes |
 | --- | --- | --- |
@@ -201,17 +211,21 @@ Seven fixed lines, with only the fields `tool`, `question_id`, `version` and `re
 | `question dismissed` | `tool`, `question_id`, `version` | |
 | `question answered` | `tool`, `question_id`, `version` | |
 | `step ticked` | `tool`, `question_id`, `version`, `reason` | `reason` is `ticked` or `unticked`. No step text is logged. |
+| `picks saved` | `tool`, `question_id`, `version` | Info. No pick, key or text is logged. |
+| `picks not saved` | `tool`, `question_id`, `version`, `reason` | A warning; `reason` is `store_failed`. `harold.log` holds the database error beside it. |
 | `answers batch typed` | `tool`, `reason` | `reason` is `typed`, or `enter_failed` when Enter failed after the text went in (a warning). |
 | `answers batch waiting` | `tool`, `reason` | `reason` is `no_chief`, `pane_busy`, `no_pane` or `store_failed`. |
 | `tool failed to start` | `tool`, `reason` | `reason` is `store_open_failed`. |
 
 ## Data folder and rollback
 
-The data folder is `<parent of the store path>/tools/questions/`. It holds `questions.db`, a Turso database with two tables: `questions` (the question or instructions, their state and answer, the ticked step numbers, and the dismissal `reason`) and `batches` (each line's text and whether it was typed).
+The data folder is `<parent of the store path>/tools/questions/`. It holds `questions.db`, a Turso database with two tables: `questions` (the question or instructions, their state and answer, the ticked step numbers, the saved picks, and the dismissal `reason`) and `batches` (each line's text and whether it was typed).
 
 Migration `002_answer_send_now.sql` adds `send_now INTEGER NOT NULL DEFAULT 0` to `questions`; existing rows get 0. A Harold that has the questions tool but not migration 002 refuses the migrated `questions.db`, as it does for any migration, so rolling back to it means moving `questions.db` aside.
 
 Migration `003_step_ticks.sql` adds `ticks TEXT NOT NULL DEFAULT ''` to `questions`: the ticked step numbers. The instructions themselves go in the existing `body` column. An older Harold refuses the migrated `questions.db`; roll back by moving `questions.db` aside.
+
+Migration `004_saved_picks.sql` adds `picks TEXT NOT NULL DEFAULT ''` to `questions`: the latest picks as JSON, one entry per picked decision (`decision`, `key`, `text`). An older Harold refuses the migrated `questions.db`; roll back by moving `questions.db` aside, as for 002 and 003.
 
 The core store is untouched. To roll back:
 
