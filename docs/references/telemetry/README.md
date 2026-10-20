@@ -184,6 +184,10 @@ A reply whose payload failed for good never finishes, and is dropped after an ho
 | `harold.turn` | the turn's start – the stop hook reached Harold | `pane_id`, `session.id`, `started_by`, and `session.source`, `turn.start` when they apply |
 | `harold.turn_complete` | the hook's call handled and its event stored | `pane_id` |
 | `harold.delivery`, and `harold.voice_note` inside it | the turn-end update sent or said | `kind`, `channel`, `outcome` |
+| `harold.turn_end_update`, beside `harold.turn_complete` | making the spoken turn-end update's sentence | `pane_id`, `channel` (`desk` or `call`), `outcome` (`model` or `fallback`), `reason` when it fell back (`no_model`, `model_failed`, `too_long`, `no_name`) |
+| `harold.local_model`, inside it | the local model's run | `result` (`answered`, `failed`, `no_model`) |
+
+`harold.turn_end_update` writes the INFO line `turn-end update fell back` (`reason`) when it says the fallback sentence. A model that fails writes the WARN line `local model failed` with `reason` `spawn_failed` (`uv` not found or not runnable), `exit_status` (the model crashed or is not installed) or `empty_output`; the exit status stays in `harold.log`, which errors do not leave for HyperDX. No span, line or counter holds the sentence, the prompt or the model's text.
 
 `harold.delivery`'s `outcome` is `delivered`, `skipped`, `failed` (a send that failed before its 10th try, which is tried again, or a malformed payload, which is not) or `given_up` (its 10th failure; it is not tried again).
 
@@ -209,6 +213,7 @@ Metrics are sent every 30 seconds. Every metric also carries `harold.machine`.
 | `harold.phone_requests` | counter, `{request}` | `channel`, `outcome` (`typed`, `unavailable`), `resolved_by` |
 | `harold.phone_requests.wrong` | counter, `{request}` | `channel`, `resolved_by` |
 | `harold.phone_request.latency` | histogram, `s`, buckets 1, 2, 5, 10, 30, 60, 120, 300, 600 | `channel`, `resolved_by` |
+| `harold.turn_end_updates` | counter, `{update}` | `outcome` (`model`, `fallback`), `reason` (`none` for `model`, otherwise as on `harold.turn_end_update`) |
 | `harold.turns` | counter, `{turn}` | `session.id`, `pane_id`, `started_by` |
 | `harold.turn.duration` | histogram, `s`, buckets 10, 30, 60, 120, 300, 600, 1800, 3600 | `started_by` |
 | `pod.specs` | gauge, `{spec}` | `pod.product`, `state` |
@@ -277,8 +282,10 @@ Each tile's window is written into its query: `TimeUnix >= now() - INTERVAL 24 H
 | Specs | Spec size, median words | the median `pod.spec.words` of specs first ready in the period | SQL: specs whose first sample past `drafted` falls in the period |
 | Specs | Waiting for you, p50 | the median `pod.spec.lead_time`, phase `waiting_for_user` | SQL: the counter rule over the histogram's count and sum |
 | Specs | Build, p50 | the median `pod.spec.lead_time`, phase `build` | SQL: the counter rule over the histogram's count and sum |
+| Turn-end updates | Turn-end update, model p95 | the 95th percentile of the duration of `harold.local_model` spans with `result = answered`: the delay the user hears after a turn ends | SQL: the 95th percentile of those spans. Info only: tuning, no alert |
+| Turn-end updates | Turn-end updates in full sentences | `model` divided by all `harold.turn_end_updates` over the last 7 days (its earlier tile is "previous 7 days"). Below 70% means the prompt and the model no longer agree on one sentence naming the agent | SQL: the counter rule, `model` rises over all rises. Info only: no alert. `too_long` and `no_name` are shown apart on the "Turn-end updates by reason" panel |
 
-Fourteen of the sixteen cards are raw SQL tiles. Only the two slot cards use HyperDX's builder. The SQL tiles read ClickHouse through the connection, for three reasons:
+Sixteen of the eighteen cards are raw SQL tiles. Only the two slot cards use HyperDX's builder. The SQL tiles read ClickHouse through the connection, for three reasons:
 
 - HyperDX's builder cannot express some cards, such as a median of per-session counts.
 - HyperDX's own counter reading loses the first point of every new series ([Counters in HyperDX](#counters-in-hyperdx)).
@@ -325,6 +332,8 @@ Special cases:
 | Specs by state | How many specs are where, in each pod? | `pod.specs` per product and state, over time | builder line per product and state |
 | Spec size | How big are the specs, and does a bigger spec mean a bigger change? | `pod.spec.words` per spec, with `pod.merged_lines` for the merged ones | builder table of words per product, spec and state |
 | Start to completion | How long from a spec being ready to it being on main, and how much of that is waiting for me? | `pod.spec.lead_time` per phase, p50 and p95 | SQL table per product and phase, the counter rule over the histogram's count and sum |
+| Turn-end update, model time | How long does the local model keep the spoken update waiting? | the duration of `harold.local_model` spans with `result = answered`, median and 95th percentile; the first week's p95 is the baseline for a later change | builder line over the traces source |
+| Turn-end updates by reason | Is the update a whole sentence, and when not, which rule refused it? | `harold.turn_end_updates` per day: `model`, `too_long`, `no_name`, `model_failed`, `no_model` | builder line |
 
 The SQL panels read the time range's points and, for the counter rule, the day before it.
 
@@ -337,7 +346,8 @@ Harold sends counters and histograms as running totals, the OpenTelemetry defaul
 **Counting from 0 at start.** With export on, Harold records 0 once, at start, for every attribute set of the counters the alerts read:
 
 - `harold.phone_requests`, for each `outcome` (`typed`, `unavailable`), `channel` and `resolved_by`;
-- `harold.phone_requests.wrong`, for each `channel` and `resolved_by`.
+- `harold.phone_requests.wrong`, for each `channel` and `resolved_by`;
+- `harold.turn_end_updates`, for `outcome = fallback` with `reason = model_failed`, which `local-model-failing` reads.
 
 The pod facts do the same for each product on its first poll: `pod.merges` with no `spec.id`, and `pod.merged_lines` for each `change`. Each series then has a first point of 0 before anything happens, and the first real request after a restart is a rise HyperDX can see.
 
@@ -387,6 +397,7 @@ Two limits remain:
 | `phone-request-slow` | The 95th percentile latency is above 60 seconds in an hour with at least 3 requests | 95th percentile of the duration of typed `harold.phone_request` spans above 60 seconds, every hour, on the traces source |
 | `wrong-agent` | A request is counted as wrong | sum of `harold.phone_requests.wrong` above 0, every 5 minutes |
 | `slot-idle` | A slot is free for more than 2 hours in a row between 08:00 and 23:00 local | for each product, the last sample of each 15-minute window has at least 1 slot free, for 8 windows in a row |
+| `local-model-failing` | The local model failed more than 3 times in an hour, so every turn-end update is the fallback sentence. Severity: warn. Action: the chief checks `uv` and `mlx_lm` (the `reason` on `local model failed` in the turn's trace says which). Expected rate: 0 | sum of `harold.turn_end_updates` with `reason = model_failed` above 3, every hour |
 
 Their basis is the period the spec drew, 11 to 15 October:
 
@@ -394,6 +405,8 @@ Their basis is the period the spec drew, 11 to 15 October:
 - `phone-request-slow` would never have fired: the median was 6 seconds, the 95th percentile 11 seconds, and the highest hourly 95th percentile 37 seconds.
 - `wrong-agent` would have fired once, on 14 October at 08:42.
 - `slot-idle` would have fired every day: at most 2 of harold's 3 slots were ever busy at once. This is the gap the keep-3-busy rule is about.
+
+`local-model-slow` is not an alert: the model's run time only needs tuning, and nobody is asked to act on it. It is the card "Turn-end update, model p95" (severity info, no action) and its trends panel. This is a deviation from the approved spec, agreed by the chief under the rule of one alert per failure.
 
 Merges, turns per session and the spec facts have no alert. They describe throughput, and no level of them is wrong in itself.
 
@@ -420,7 +433,7 @@ When the port is taken at start, Harold logs `alert address unavailable` (`reaso
 
 Harold answers:
 
-- `204` for a post naming one of the four alerts with state `firing` or `cleared`. It then types exactly `harold alert: <name> <state>` into the pane of the agent running in the chief's folder, the one `[notify] chief` matches.
+- `204` for a post naming one of the five alerts with state `firing` or `cleared`. It then types exactly `harold alert: <name> <state>` into the pane of the agent running in the chief's folder, the one `[notify] chief` matches.
 - `400` for anything else, including another path or method. It logs `alert ignored (unknown alert)` and types nothing.
 
 Harold also types lines of its own the same way. The first is `harold alert: delivery-given-up firing`, when it gives up a delivery after 10 failed tries (see the [notification reference](../notification/README.md#architecture)). It carries no message text. It is typed only when `alert_listen` is set and the address opened, with the checks below, as a posted line is. A post naming `delivery-given-up` is answered `400`.
@@ -521,7 +534,7 @@ done
 Then create each alert's webhook and the alert pointing at it. A webhook that already exists is reused. An alert that already exists is left for the update commands, so a second run creates nothing:
 
 ```sh
-for name in phone-request-unavailable phone-request-slow wrong-agent slot-idle; do
+for name in phone-request-unavailable phone-request-slow wrong-agent slot-idle local-model-failing; do
   WEBHOOK_ID=$(webhook_id "harold-alerts-$name") || break
   if [ -z "$WEBHOOK_ID" ]; then
     WEBHOOK_ID=$(fill "webhook-$name.json" | hdx -X POST "$HYPERDX_URL/api/v2/webhooks" --data-binary @- | jq -r '.data.id // .id')
@@ -551,7 +564,7 @@ fill trends.json | hdx -X PUT "$HYPERDX_URL/api/v2/dashboards/$(dashboard "Harol
 Then update each alert's webhook and the alert. The loop looks up both ids before it sends either PUT, and stops at the first name whose webhook or alert is missing or is named twice:
 
 ```sh
-for name in phone-request-unavailable phone-request-slow wrong-agent slot-idle; do
+for name in phone-request-unavailable phone-request-slow wrong-agent slot-idle local-model-failing; do
   WEBHOOK_ID=$(webhook_id "harold-alerts-$name") || break
   [ -n "$WEBHOOK_ID" ] || { echo "no webhook harold-alerts-$name: create it first" >&2; break; }
   id=$(alert_id "$name") || break
@@ -561,10 +574,10 @@ for name in phone-request-unavailable phone-request-slow wrong-agent slot-idle; 
 done
 ```
 
-A HyperDX set up from the earlier single-webhook files has one webhook named `harold-alerts` and none of the four. Create the four with this loop, which skips any that already exist, then run the update loop above:
+A HyperDX set up from the earlier single-webhook files has one webhook named `harold-alerts` and none of the per-alert ones. Create them with this loop, which skips any that already exist, then run the update loop above:
 
 ```sh
-for name in phone-request-unavailable phone-request-slow wrong-agent slot-idle; do
+for name in phone-request-unavailable phone-request-slow wrong-agent slot-idle local-model-failing; do
   WEBHOOK_ID=$(webhook_id "harold-alerts-$name") || break
   [ -z "$WEBHOOK_ID" ] || continue
   fill "webhook-$name.json" | hdx -X POST "$HYPERDX_URL/api/v2/webhooks" --data-binary @- | jq -r '.data.id // .id'

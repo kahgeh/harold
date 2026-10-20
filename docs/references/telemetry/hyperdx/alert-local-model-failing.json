@@ -1,0 +1,31 @@
+{
+  "name": "local-model-failing",
+  "note": "local-model-failing",
+  "message": "The local model failed more than 3 times in the last hour, so every turn-end update is the fallback sentence.",
+  "source": "inline",
+  "chartConfig": {
+    "name": "local-model-failing",
+    "displayType": "line",
+    "sourceId": "@METRICS_SOURCE_ID@",
+    "select": [
+      {
+        "aggFn": "sum",
+        "valueExpression": "Value",
+        "metricName": "harold.turn_end_updates",
+        "metricType": "sum",
+        "where": "Attributes['reason'] = 'model_failed'",
+        "whereLanguage": "sql"
+      }
+    ]
+  },
+  "threshold": 3,
+  "thresholdType": "above_exclusive",
+  "interval": "1h",
+  "channel": {
+    "type": "webhook",
+    "webhookId": "@WEBHOOK_ID@"
+  },
+  "tags": [
+    "harold"
+  ]
+}

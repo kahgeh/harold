@@ -220,6 +220,99 @@
         "sourceId": "@METRICS_SOURCE_ID@",
         "sqlTemplate": "SELECT Attributes['pod.product'] AS product, Attributes['phase'] AS phase, quantileExactWeighted(0.5)(total_rise / count_rise, toUInt64(count_rise)) AS p50, quantileExactWeighted(0.95)(total_rise / count_rise, toUInt64(count_rise)) AS p95 FROM (SELECT TimeUnix, Attributes, if(count < count_before, count, count - count_before) AS count_rise, if(count < count_before, total, total - total_before) AS total_rise FROM (SELECT TimeUnix, Attributes, toFloat64(Count) AS count, Sum AS total, lagInFrame(toFloat64(Count), 1, toFloat64(0)) OVER (PARTITION BY cityHash64(MetricName, ResourceAttributes, Attributes) ORDER BY TimeUnix ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS count_before, lagInFrame(Sum, 1, toFloat64(0)) OVER (PARTITION BY cityHash64(MetricName, ResourceAttributes, Attributes) ORDER BY TimeUnix ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS total_before FROM $__sourceTable(histogram) WHERE MetricName = 'pod.spec.lead_time' AND TimeUnix >= $__fromTime - INTERVAL 1 DAY AND TimeUnix <= $__toTime AND $__filters)) WHERE $__timeFilter(TimeUnix) AND count_rise > 0 GROUP BY product, phase ORDER BY product, phase"
       }
+    },
+    {
+      "id": "turn-end-update-model-time",
+      "name": "Turn-end update, model time",
+      "x": 0,
+      "y": 30,
+      "w": 12,
+      "h": 6,
+      "config": {
+        "displayType": "line",
+        "sourceId": "@TRACES_SOURCE_ID@",
+        "select": [
+          {
+            "aggFn": "quantile",
+            "level": 0.5,
+            "valueExpression": "Duration / 1e9",
+            "alias": "median",
+            "where": "ServiceName = 'harold' AND SpanName = 'harold.local_model' AND SpanAttributes['result'] = 'answered'",
+            "whereLanguage": "sql"
+          },
+          {
+            "aggFn": "quantile",
+            "level": 0.95,
+            "valueExpression": "Duration / 1e9",
+            "alias": "p95",
+            "where": "ServiceName = 'harold' AND SpanName = 'harold.local_model' AND SpanAttributes['result'] = 'answered'",
+            "whereLanguage": "sql"
+          }
+        ],
+        "numberFormat": {
+          "output": "time",
+          "factor": 1
+        }
+      }
+    },
+    {
+      "id": "turn-end-updates-by-reason",
+      "name": "Turn-end updates by reason",
+      "x": 12,
+      "y": 30,
+      "w": 12,
+      "h": 6,
+      "config": {
+        "displayType": "line",
+        "sourceId": "@METRICS_SOURCE_ID@",
+        "select": [
+          {
+            "aggFn": "sum",
+            "valueExpression": "Value",
+            "metricName": "harold.turn_end_updates",
+            "metricType": "sum",
+            "where": "Attributes['outcome'] = 'model'",
+            "whereLanguage": "sql",
+            "alias": "model"
+          },
+          {
+            "aggFn": "sum",
+            "valueExpression": "Value",
+            "metricName": "harold.turn_end_updates",
+            "metricType": "sum",
+            "where": "Attributes['reason'] = 'too_long'",
+            "whereLanguage": "sql",
+            "alias": "too_long"
+          },
+          {
+            "aggFn": "sum",
+            "valueExpression": "Value",
+            "metricName": "harold.turn_end_updates",
+            "metricType": "sum",
+            "where": "Attributes['reason'] = 'no_name'",
+            "whereLanguage": "sql",
+            "alias": "no_name"
+          },
+          {
+            "aggFn": "sum",
+            "valueExpression": "Value",
+            "metricName": "harold.turn_end_updates",
+            "metricType": "sum",
+            "where": "Attributes['reason'] = 'model_failed'",
+            "whereLanguage": "sql",
+            "alias": "model_failed"
+          },
+          {
+            "aggFn": "sum",
+            "valueExpression": "Value",
+            "metricName": "harold.turn_end_updates",
+            "metricType": "sum",
+            "where": "Attributes['reason'] = 'no_model'",
+            "whereLanguage": "sql",
+            "alias": "no_model"
+          }
+        ]
+      }
     }
   ]
 }

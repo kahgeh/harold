@@ -14,11 +14,11 @@ Summarisation uses different backends depending on the path:
 
 | Path              | Summary backend                      | Max input                     | Output                                            |
 | ----------------- | ------------------------------------ | ----------------------------- | ------------------------------------------------- |
-| At desk (TTS)     | Local model (`mlx_lm`)               | 500 chars of last_user_prompt | 3–8 words, ≤20 tokens                             |
+| At desk (TTS)     | Local model (`mlx_lm`)               | The agent's name, the project and 500 chars of last_user_prompt | one sentence of at most 25 words naming the agent, ≤48 tokens |
 | Away (iMessage)   | AI CLI or 280-char truncation        | Full assistant_message         | `🤖 [machine_name/pane_label] body (context)` + trailing question |
 | Away (Telegram)   | AI CLI or 280-char truncation        | Full assistant_message         | `🤖 [machine_name/pane_label] body (context)` + trailing question |
 
-If the local model is not configured, the TTS summary falls back to `"Work complete"`.
+If the local model is not configured, fails, or gives no sentence that names the agent, the turn-end update is the fallback sentence, `<Name> has finished and is waiting.`, such as `The chief has finished and is waiting.`
 
 ## Decision flow
 
@@ -58,8 +58,8 @@ TurnCompleted event (pane_id from $TMUX_PANE in stop hook)
 
 ## At-desk: TTS
 
-1. `build_short_summary()` — runs `uv run mlx_lm.generate` in `ai.local_model_dir` with a system prompt asking for a 3–8 word completion summary; strips `<think>...</think>` blocks from reasoning models
-2. Message assembled: `"<summary> on <main_context> and waiting for further instructions"`
+1. `ask_model()` — runs `uv run mlx_lm.generate` in `ai.local_model_dir` with a system prompt asking for one plain past-tense sentence of under about 20 words that says who did what, given the agent's name (`the chief`, `the architect` or `the <main_context> agent`), the project (`main_context`) and the last request
+2. The answer is made one sentence: `<think>...</think>` blocks and outer quotes are stripped, lines are joined, the text is cut at the first `.`, `!` or `?` followed by a space or the end, and one full stop is added. An empty answer, one over 25 words, or one that does not contain the agent's name (case and hyphens ignored) is refused, and the message is the fallback sentence; Harold logs `turn-end update fell back` with its `reason`, never the text
 3. TTS command run: `<tts.command> [tts.args...] [-v tts.voice] "<message>"`
 4. If the primary command fails to start or exits non-zero, Harold runs the fallback command when configured: `<tts.fallback_command> [tts.fallback_args...] [-v tts.fallback_voice] "<message>"`
 
@@ -313,9 +313,9 @@ sequenceDiagram
     Handler->>Tmux: display-message -t <session> -p #{session_attached} → attached?
     note over Handler: not attached → proceed
     Handler->>Handler: ioreg → IOConsoleLocked = false
-    Handler->>LocalModel: system prompt + "User's last request: <last_user_prompt>" → ≤20 tokens
-    LocalModel-->>Handler: "Fixed event handler shutdown"
-    Handler->>TTS: say [-v Samantha] "Fixed event handler... on harold and waiting for further instructions"
+    Handler->>LocalModel: system prompt + agent name, project, "Last request: <last_user_prompt>" → ≤48 tokens
+    LocalModel-->>Handler: "The harold agent fixed the event handler shutdown."
+    Handler->>TTS: say [-v Samantha] "The harold agent fixed the event handler shutdown."
     Handler->>Store: mark delivery complete
     note over Handler: at-desk does not update last_away_notification_source_agent
 ```

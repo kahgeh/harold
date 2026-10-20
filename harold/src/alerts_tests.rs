@@ -103,15 +103,22 @@ fn known_alerts_make_the_exact_line() {
 }
 
 #[test]
-fn the_four_alerts_are_the_ones_in_the_spec() {
+fn the_five_alerts_are_the_ones_in_the_specs() {
     assert_eq!(
         ALERT_NAMES,
         [
             "phone-request-unavailable",
             "phone-request-slow",
             "wrong-agent",
-            "slot-idle"
+            "slot-idle",
+            "local-model-failing"
         ]
+    );
+    // `local-model-slow` is a dashboard card, not an alert.
+    assert!(alert_line(br#"{"alert":"local-model-slow","state":"firing"}"#).is_err());
+    assert_eq!(
+        alert_line(br#"{"alert":"local-model-failing","state":"firing"}"#),
+        Ok("harold alert: local-model-failing firing".into())
     );
 }
 
