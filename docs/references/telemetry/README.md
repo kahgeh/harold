@@ -420,7 +420,7 @@ When the port is taken at start, Harold logs `alert address unavailable` (`reaso
 
 Harold answers:
 
-- `204` for a post naming one of the four alerts with state `firing` or `cleared`. It then types exactly `harold alert: <name> <state>` into the pane of the agent running in the chief's folder, `[notify] away_messages_only_from`.
+- `204` for a post naming one of the four alerts with state `firing` or `cleared`. It then types exactly `harold alert: <name> <state>` into the pane of the agent running in the chief's folder, the one `[notify] chief` matches.
 - `400` for anything else, including another path or method. It logs `alert ignored (unknown alert)` and types nothing.
 
 Harold also types lines of its own the same way. The first is `harold alert: delivery-given-up firing`, when it gives up a delivery after 10 failed tries (see the [notification reference](../notification/README.md#architecture)). It carries no message text. It is typed only when `alert_listen` is set and the address opened, with the checks below, as a posted line is. A post naming `delivery-given-up` is answered `400`.
