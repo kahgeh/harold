@@ -4,16 +4,18 @@ use std::future::Future;
 use std::path::Path;
 use std::time::Duration;
 
+use harold_api::tools::questions::v1 as pb;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 use turso::Connection;
 
-use super::schema::{Answer, Kind, Question};
+use super::schema::{Answer, Kind, Question, check_picks};
 
 const DATABASE: &str = "questions.db";
 const DISMISSAL_VISIBLE_MS: i64 = 3_600_000;
 
-const MIGRATIONS: [(&str, &str); 3] = [
+const MIGRATIONS: [(&str, &str); 4] = [
     (
         "001_questions",
         include_str!("migrations/001_questions.sql"),
@@ -25,6 +27,10 @@ const MIGRATIONS: [(&str, &str); 3] = [
     (
         "003_step_ticks",
         include_str!("migrations/003_step_ticks.sql"),
+    ),
+    (
+        "004_saved_picks",
+        include_str!("migrations/004_saved_picks.sql"),
     ),
 ];
 
@@ -59,6 +65,24 @@ pub(super) enum TickRefusal {
     InvalidStep,
 }
 
+/// One saved pick: `decision` counts from 0; `text` is set only for a free option.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(super) struct SavedPick {
+    pub decision: u32,
+    pub key: String,
+    pub text: String,
+}
+
+/// A stored question as `ShowQuestion` reports it, in any state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct Shown {
+    pub question: Question,
+    pub version: u32,
+    pub state: String,
+    pub reason: String,
+    pub picks: Vec<SavedPick>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Listed {
     pub question: Question,
@@ -66,6 +90,8 @@ pub(super) struct Listed {
     pub deferred: bool,
     /// Ticked step numbers, from 1, ascending. Empty for a question.
     pub ticked: Vec<u32>,
+    /// The saved picks of a question, by decision.
+    pub picks: Vec<SavedPick>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -137,6 +163,16 @@ pub(super) trait QuestionStore: Send + Sync + 'static {
         ticked: bool,
         now_ms: i64,
     ) -> impl Future<Output = Result<std::result::Result<(), TickRefusal>>> + Send;
+    /// Replaces the saved picks of a waiting or deferred question at `version`.
+    /// The inner `Err(field)` is `picks`; nothing is stored then.
+    fn save_picks(
+        &self,
+        id: &str,
+        version: u32,
+        picks: &[pb::Pick],
+    ) -> impl Future<Output = Result<std::result::Result<std::result::Result<(), String>, Refusal>>> + Send;
+    /// The stored question in any state, with its saved picks; `None` for an unknown id.
+    fn show(&self, id: &str) -> impl Future<Output = Result<Option<Shown>>> + Send;
     /// The unsent answers are ready when one is marked send-now, or when the
     /// newest has settled for `settle_ms`. Waiting questions do not hold them.
     fn ready(&self, now_ms: i64, settle_ms: i64) -> impl Future<Output = Result<Readiness>> + Send;
@@ -381,6 +417,39 @@ fn format_ticks(ticks: &[u32]) -> String {
         .join(",")
 }
 
+fn parse_picks(picks: &str) -> Vec<SavedPick> {
+    serde_json::from_str(picks).unwrap_or_default()
+}
+
+fn format_picks(picks: &[SavedPick]) -> Result<String> {
+    if picks.is_empty() {
+        return Ok(String::new());
+    }
+    Ok(serde_json::to_string(picks)?)
+}
+
+/// The saved picks of the new version: a decision takes the pick of an old decision with
+/// the same ask and options, each old decision used once, in order, renumbered.
+fn carried_picks(old: &Question, old_picks: &[SavedPick], new: &Question) -> Vec<SavedPick> {
+    let mut available: Vec<&SavedPick> = old_picks.iter().collect();
+    let mut carried = Vec::new();
+    for (i, decision) in new.decisions.iter().enumerate() {
+        let found = available.iter().position(|pick| {
+            old.decisions
+                .get(pick.decision as usize)
+                .is_some_and(|d| d.ask == decision.ask && d.options == decision.options)
+        });
+        if let Some(at) = found {
+            let pick = available.remove(at);
+            carried.push(SavedPick {
+                decision: i as u32,
+                ..pick.clone()
+            });
+        }
+    }
+    carried
+}
+
 /// The ticks of the new version: a step is ticked when an old ticked step has
 /// the same text, each old step used once, in order.
 fn carried_ticks(old: &Question, old_ticks: &[u32], new: &Question) -> Vec<u32> {
@@ -414,12 +483,20 @@ async fn put_in(conn: &Connection, question: &Question, now_ms: i64) -> Result<u
         return Ok(1);
     };
     let version = existing.version + 1;
-    let ticks = format_ticks(&carried_ticks_of(conn, &question.id, question).await?);
+    let (ticks, picks) = carried_of(conn, &question.id, question).await?;
+    let (ticks, picks) = (format_ticks(&ticks), format_picks(&picks)?);
     if open_state(&existing.state) {
         conn.execute(
             "UPDATE questions SET version = ?2, state = 'waiting', body = ?3, answer = NULL, \
-             reason = '', batch_id = NULL, send_now = 0, updated_at_ms = ?4, ticks = ?5 WHERE id = ?1",
-            (question.id.as_str(), i64::from(version), body, now_ms, ticks),
+             reason = '', batch_id = NULL, send_now = 0, updated_at_ms = ?4, ticks = ?5, picks = ?6 WHERE id = ?1",
+            (
+                question.id.as_str(),
+                i64::from(version),
+                body,
+                now_ms,
+                ticks,
+                picks,
+            ),
         )
         .await?;
     } else {
@@ -427,7 +504,7 @@ async fn put_in(conn: &Connection, question: &Question, now_ms: i64) -> Result<u
         conn.execute(
             "UPDATE questions SET version = ?2, position = ?5, state = 'waiting', body = ?3, \
              answer = NULL, reason = '', batch_id = NULL, send_now = 0, updated_at_ms = ?4, \
-             ticks = ?6 WHERE id = ?1",
+             ticks = ?6, picks = ?7 WHERE id = ?1",
             (
                 question.id.as_str(),
                 i64::from(version),
@@ -435,6 +512,7 @@ async fn put_in(conn: &Connection, question: &Question, now_ms: i64) -> Result<u
                 now_ms,
                 position,
                 ticks,
+                picks,
             ),
         )
         .await?;
@@ -442,15 +520,26 @@ async fn put_in(conn: &Connection, question: &Question, now_ms: i64) -> Result<u
     Ok(version)
 }
 
-async fn carried_ticks_of(conn: &Connection, id: &str, new: &Question) -> Result<Vec<u32>> {
+/// The ticks and the saved picks the new version of `id` carries from the stored one.
+async fn carried_of(
+    conn: &Connection,
+    id: &str,
+    new: &Question,
+) -> Result<(Vec<u32>, Vec<SavedPick>)> {
     let mut rows = conn
-        .query("SELECT body, ticks FROM questions WHERE id = ?1", [id])
+        .query(
+            "SELECT body, ticks, picks FROM questions WHERE id = ?1",
+            [id],
+        )
         .await?;
     let Some(row) = rows.next().await? else {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), Vec::new()));
     };
     let old: Question = serde_json::from_str(&text(&row, 0)?)?;
-    Ok(carried_ticks(&old, &parse_ticks(&text(&row, 1)?), new))
+    Ok((
+        carried_ticks(&old, &parse_ticks(&text(&row, 1)?), new),
+        carried_picks(&old, &parse_picks(&text(&row, 2)?), new),
+    ))
 }
 
 async fn dismiss_in(
@@ -515,7 +604,7 @@ async fn list_in(conn: &Connection, now_ms: i64) -> Result<Listing> {
     let mut questions = Vec::new();
     let mut rows = conn
         .query(
-            "SELECT body, version, state, ticks FROM questions WHERE state IN ('waiting','deferred') \
+            "SELECT body, version, state, ticks, picks FROM questions WHERE state IN ('waiting','deferred') \
              ORDER BY CASE state WHEN 'waiting' THEN 0 ELSE 1 END, position, id",
             (),
         )
@@ -526,6 +615,7 @@ async fn list_in(conn: &Connection, now_ms: i64) -> Result<Listing> {
             version: version_of(&row, 1)?,
             deferred: text(&row, 2)? == "deferred",
             ticked: parse_ticks(&text(&row, 3)?),
+            picks: parse_picks(&text(&row, 4)?),
         });
     }
     drop(rows);
@@ -583,14 +673,28 @@ async fn answer_in(
     if answer.kind == Kind::Done {
         answer.ticked = u32::try_from(ticks.len()).unwrap_or(u32::MAX);
     }
+    let saved: Vec<SavedPick> = answer
+        .picks
+        .iter()
+        .map(|picked| SavedPick {
+            decision: picked.decision,
+            key: picked.key.clone(),
+            text: if picked.free {
+                picked.label.clone()
+            } else {
+                String::new()
+            },
+        })
+        .collect();
     conn.execute(
         "UPDATE questions SET state = 'answered', answer = ?2, updated_at_ms = ?3, \
-         send_now = ?4 WHERE id = ?1",
+         send_now = ?4, picks = ?5 WHERE id = ?1",
         (
             id,
             serde_json::to_string(&answer)?,
             now_ms,
             i64::from(send_now),
+            format_picks(&saved)?,
         ),
     )
     .await?;
@@ -698,6 +802,69 @@ async fn tick_in(
     )
     .await?;
     Ok(Ok(()))
+}
+
+async fn save_picks_in(
+    conn: &Connection,
+    id: &str,
+    version: u32,
+    picks: &[pb::Pick],
+) -> Result<std::result::Result<std::result::Result<(), String>, Refusal>> {
+    let mut rows = conn
+        .query(
+            "SELECT version, state, body FROM questions WHERE id = ?1",
+            [id],
+        )
+        .await?;
+    let Some(row) = rows.next().await? else {
+        return Ok(Err(Refusal::NotWaiting));
+    };
+    let current = version_of(&row, 0)?;
+    let state = text(&row, 1)?;
+    let question: Question = serde_json::from_str(&text(&row, 2)?)?;
+    drop(rows);
+    if !open_state(&state) {
+        return Ok(Err(Refusal::NotWaiting));
+    }
+    if current != version {
+        return Ok(Err(Refusal::VersionChanged));
+    }
+    if let Err(field) = check_picks(&question, picks) {
+        return Ok(Ok(Err(field)));
+    }
+    let saved: Vec<SavedPick> = picks
+        .iter()
+        .map(|pick| SavedPick {
+            decision: pick.decision,
+            key: pick.key.clone(),
+            text: pick.text.clone(),
+        })
+        .collect();
+    conn.execute(
+        "UPDATE questions SET picks = ?2 WHERE id = ?1",
+        (id, format_picks(&saved)?),
+    )
+    .await?;
+    Ok(Ok(Ok(())))
+}
+
+async fn show_in(conn: &Connection, id: &str) -> Result<Option<Shown>> {
+    let mut rows = conn
+        .query(
+            "SELECT body, version, state, reason, picks FROM questions WHERE id = ?1",
+            [id],
+        )
+        .await?;
+    let Some(row) = rows.next().await? else {
+        return Ok(None);
+    };
+    Ok(Some(Shown {
+        question: serde_json::from_str(&text(&row, 0)?)?,
+        version: version_of(&row, 1)?,
+        state: text(&row, 2)?,
+        reason: text(&row, 3)?,
+        picks: parse_picks(&text(&row, 4)?),
+    }))
 }
 
 async fn ids_in_state(conn: &Connection, state: &str) -> Result<Vec<String>> {
@@ -943,6 +1110,23 @@ impl QuestionStore for TursoQuestionStore {
         let conn = self.conn.lock().await;
         begin(&conn).await?;
         finish(&conn, tick_in(&conn, id, version, step, ticked).await).await
+    }
+
+    async fn save_picks(
+        &self,
+        id: &str,
+        version: u32,
+        picks: &[pb::Pick],
+    ) -> Result<std::result::Result<std::result::Result<(), String>, Refusal>> {
+        let conn = self.conn.lock().await;
+        begin(&conn).await?;
+        finish(&conn, save_picks_in(&conn, id, version, picks).await).await
+    }
+
+    async fn show(&self, id: &str) -> Result<Option<Shown>> {
+        let conn = self.conn.lock().await;
+        roll_back_abandoned(&conn).await?;
+        show_in(&conn, id).await
     }
 
     async fn ready(&self, now_ms: i64, settle_ms: i64) -> Result<Readiness> {

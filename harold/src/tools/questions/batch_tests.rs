@@ -9,7 +9,8 @@ use tokio::task::JoinHandle;
 use super::*;
 use crate::tools::questions::schema::{self, Kind};
 use crate::tools::questions::store::{
-    Listing, QuestionStore, Refusal, StartedBatch, StoreError, TickRefusal, TursoQuestionStore,
+    Listing, QuestionStore, Refusal, Shown, StartedBatch, StoreError, TickRefusal,
+    TursoQuestionStore,
 };
 use crate::tools::questions::test_support::*;
 use crate::tools::{Typing, questions};
@@ -214,6 +215,19 @@ impl QuestionStore for RacingStore {
         self.inner.tick(id, version, step, ticked, now_ms).await
     }
 
+    async fn save_picks(
+        &self,
+        id: &str,
+        version: u32,
+        picks: &[pb::Pick],
+    ) -> Result<Result<Result<(), String>, Refusal>, StoreError> {
+        self.inner.save_picks(id, version, picks).await
+    }
+
+    async fn show(&self, id: &str) -> Result<Option<Shown>, StoreError> {
+        self.inner.show(id).await
+    }
+
     async fn ready(&self, now_ms: i64, settle_ms: i64) -> Result<Readiness, StoreError> {
         self.inner.ready(now_ms, settle_ms).await
     }
@@ -317,6 +331,8 @@ fn a_free_pick_on_an_early_decision_renders_in_place() {
     })
     .unwrap();
     let picked = |ask: &str, label: &str, free| schema::Picked {
+        decision: 0,
+        key: String::new(),
         ask: ask.into(),
         label: label.into(),
         free,
@@ -481,6 +497,8 @@ fn a_note_with_a_pipe_or_quote_is_typed_as_is() {
         ticked: 0,
         kind: Kind::Answer,
         picks: vec![schema::Picked {
+            decision: 0,
+            key: String::new(),
             ask: "Which?".into(),
             label: "A".into(),
             free: false,

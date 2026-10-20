@@ -64,6 +64,12 @@ pub(super) enum Kind {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) struct Picked {
+    /// Where the pick sits among the decisions, from 0, and the option's key: what
+    /// `SavePicks` stores. Answers stored before saved picks hold neither.
+    #[serde(default)]
+    pub decision: u32,
+    #[serde(default)]
+    pub key: String,
     pub ask: String,
     pub label: String,
     pub free: bool,
@@ -300,6 +306,19 @@ pub(super) fn resolve_instructions(
     })
 }
 
+/// Whether the picks follow the `REVISE` rule for the question: any picks so far, in
+/// order, keys valid, a free pick with text. The error is `picks`.
+pub(super) fn check_picks(q: &Question, picks: &[pb::Pick]) -> Result<(), String> {
+    if q.is_instructions() {
+        return if picks.is_empty() {
+            Ok(())
+        } else {
+            Err("picks".into())
+        };
+    }
+    resolve_picks(q, Kind::Revise, picks, "x").map(|_| ())
+}
+
 /// Matches the picks to the question's decisions. The error is `picks` or `note`.
 pub(super) fn resolve_picks(
     q: &Question,
@@ -334,12 +353,16 @@ pub(super) fn resolve_picks(
                 return Err("picks".into());
             }
             picked.push(Picked {
+                decision: pick.decision,
+                key: pick.key.clone(),
                 ask: decision.ask.clone(),
                 label: pick.text.clone(),
                 free: true,
             });
         } else {
             picked.push(Picked {
+                decision: pick.decision,
+                key: pick.key.clone(),
                 ask: decision.ask.clone(),
                 label: option.label.clone(),
                 free: false,

@@ -45,6 +45,8 @@ fn an_answer() -> Answer {
         ticked: 0,
         kind: Kind::Answer,
         picks: vec![Picked {
+            decision: 0,
+            key: "a".into(),
             ask: "Which?".into(),
             label: "A".into(),
             free: false,
@@ -141,7 +143,12 @@ async fn open_creates_and_migrates_questions_db() {
     drop(store);
     assert_eq!(
         migration_rows(&folder).await,
-        ["001_questions", "002_answer_send_now", "003_step_ticks"]
+        [
+            "001_questions",
+            "002_answer_send_now",
+            "003_step_ticks",
+            "004_saved_picks"
+        ]
     );
 }
 
@@ -157,7 +164,12 @@ async fn reopening_keeps_the_rows_and_applies_nothing_twice() {
     drop(store);
     assert_eq!(
         migration_rows(&temp.0).await,
-        ["001_questions", "002_answer_send_now", "003_step_ticks"]
+        [
+            "001_questions",
+            "002_answer_send_now",
+            "003_step_ticks",
+            "004_saved_picks"
+        ]
     );
 }
 
@@ -612,13 +624,18 @@ async fn migration_002_adds_send_now_defaulting_to_zero_and_a_second_open_applie
     drop(store);
     assert_eq!(
         migration_rows(&temp.0).await,
-        ["001_questions", "002_answer_send_now", "003_step_ticks"]
+        [
+            "001_questions",
+            "002_answer_send_now",
+            "003_step_ticks",
+            "004_saved_picks"
+        ]
     );
 
     let store = TursoQuestionStore::open(&temp.0).await.unwrap();
     assert!(!marked(&store, "Q1").await);
     drop(store);
-    assert_eq!(migration_rows(&temp.0).await.len(), 3);
+    assert_eq!(migration_rows(&temp.0).await.len(), 4);
 }
 
 #[tokio::test]
@@ -949,7 +966,12 @@ async fn migration_003_adds_ticks_to_a_database_with_rows() {
     drop(store);
     assert_eq!(
         migration_rows(&temp.0).await,
-        ["001_questions", "002_answer_send_now", "003_step_ticks"]
+        [
+            "001_questions",
+            "002_answer_send_now",
+            "003_step_ticks",
+            "004_saved_picks"
+        ]
     );
 }
 
@@ -1219,4 +1241,264 @@ async fn defer_refuses_instructions() {
         Err(Refusal::NotAQuestion)
     );
     assert_eq!(listed_ids(&store).await, [("I1".to_string(), false)]);
+}
+
+fn choice(key: &str, label: &str, suggested: bool, free: bool) -> Choice {
+    Choice {
+        key: key.into(),
+        label: label.into(),
+        impact: format!("impact {key}"),
+        suggested,
+        free,
+    }
+}
+
+/// A question whose decisions are `(ask, options)`; the options are `a`, `b` and free `z`.
+fn asking(id: &str, asks: &[&str]) -> Question {
+    let mut q = question(id);
+    q.decisions = asks
+        .iter()
+        .map(|ask| Decision {
+            ask: (*ask).into(),
+            options: vec![
+                choice("a", "A", false, false),
+                choice("b", "B", false, false),
+                choice("z", "Other", false, true),
+            ],
+        })
+        .collect();
+    q
+}
+
+fn pick(decision: u32, key: &str, text: &str) -> pb::Pick {
+    pb::Pick {
+        decision,
+        key: key.into(),
+        text: text.into(),
+    }
+}
+
+fn saved(decision: u32, key: &str, text: &str) -> SavedPick {
+    SavedPick {
+        decision,
+        key: key.into(),
+        text: text.into(),
+    }
+}
+
+async fn save_ok(store: &TursoQuestionStore, id: &str, version: u32, picks: &[pb::Pick]) {
+    assert_eq!(
+        store.save_picks(id, version, picks).await.unwrap(),
+        Ok(Ok(()))
+    );
+}
+
+async fn picks_of(store: &TursoQuestionStore, id: &str) -> Vec<SavedPick> {
+    store.show(id).await.unwrap().expect("stored").picks
+}
+
+#[tokio::test]
+async fn save_picks_replaces_picks_and_keeps_state_answer_and_updated_at() {
+    let temp = TempFolder::new();
+    let store = TursoQuestionStore::open(&temp.0).await.unwrap();
+    store.put(asking("Q1", &["x", "y"]), 100).await.unwrap();
+    save_ok(&store, "Q1", 1, &[pick(0, "a", ""), pick(1, "z", "typed")]).await;
+    assert_eq!(
+        picks_of(&store, "Q1").await,
+        [saved(0, "a", ""), saved(1, "z", "typed")]
+    );
+    let listing = store.list(100).await.unwrap();
+    assert_eq!(listing.questions[0].picks.len(), 2);
+    save_ok(&store, "Q1", 1, &[pick(1, "b", "")]).await;
+    assert_eq!(picks_of(&store, "Q1").await, [saved(1, "b", "")]);
+    save_ok(&store, "Q1", 1, &[]).await;
+    assert!(picks_of(&store, "Q1").await.is_empty());
+    let shown = store.show("Q1").await.unwrap().unwrap();
+    assert_eq!((shown.version, shown.state.as_str()), (1, "waiting"));
+    // updated_at_ms is still 100: the dismissal window is measured from it.
+    store.dismiss("Q1", "r", 5_000).await.unwrap().unwrap();
+    assert_eq!(store.list(5_000).await.unwrap().dismissed.len(), 1);
+}
+
+#[tokio::test]
+async fn save_picks_leaves_updated_at_alone() {
+    let temp = TempFolder::new();
+    let store = TursoQuestionStore::open(&temp.0).await.unwrap();
+    store.put(asking("Q1", &["x"]), 100).await.unwrap();
+    let before = store.ready(100, 1).await.unwrap();
+    save_ok(&store, "Q1", 1, &[pick(0, "a", "")]).await;
+    assert_eq!(store.ready(100, 1).await.unwrap(), before);
+    let conn = store.conn.lock().await;
+    let mut rows = conn
+        .query("SELECT updated_at_ms FROM questions WHERE id = 'Q1'", ())
+        .await
+        .unwrap();
+    let row = rows.next().await.unwrap().unwrap();
+    assert_eq!(integer(&row, 0).unwrap(), 100);
+}
+
+#[tokio::test]
+async fn save_picks_refuses_wrong_version_answered_dismissed_and_bad_picks() {
+    let temp = TempFolder::new();
+    let store = TursoQuestionStore::open(&temp.0).await.unwrap();
+    store.put(asking("Q1", &["x", "y"]), 1).await.unwrap();
+    assert_eq!(
+        store.save_picks("Q1", 2, &[]).await.unwrap(),
+        Err(Refusal::VersionChanged)
+    );
+    assert_eq!(
+        store.save_picks("nope", 1, &[]).await.unwrap(),
+        Err(Refusal::NotWaiting)
+    );
+    for bad in [
+        vec![pick(0, "nope", "")],
+        vec![pick(1, "a", ""), pick(0, "a", "")],
+        vec![pick(5, "a", "")],
+        vec![pick(0, "z", "  ")],
+        vec![pick(0, "a", ""), pick(0, "b", "")],
+    ] {
+        assert_eq!(
+            store.save_picks("Q1", 1, &bad).await.unwrap(),
+            Ok(Err("picks".to_string())),
+            "{bad:?}"
+        );
+    }
+    assert!(picks_of(&store, "Q1").await.is_empty());
+    store.put(instructions("I1", &["a"]), 1).await.unwrap();
+    assert_eq!(
+        store
+            .save_picks("I1", 1, &[pick(0, "a", "")])
+            .await
+            .unwrap(),
+        Ok(Err("picks".to_string()))
+    );
+    answer_at(&store, "Q1", false, 2).await;
+    assert_eq!(
+        store.save_picks("Q1", 1, &[]).await.unwrap(),
+        Err(Refusal::NotWaiting)
+    );
+    store.put(asking("Q2", &["x"]), 3).await.unwrap();
+    store.dismiss("Q2", "r", 4).await.unwrap().unwrap();
+    assert_eq!(
+        store.save_picks("Q2", 1, &[]).await.unwrap(),
+        Err(Refusal::NotWaiting)
+    );
+}
+
+#[tokio::test]
+async fn answer_writes_its_picks_to_the_column() {
+    let temp = TempFolder::new();
+    let store = TursoQuestionStore::open(&temp.0).await.unwrap();
+    store.put(asking("Q1", &["x", "y"]), 1).await.unwrap();
+    let picks = [pick(0, "b", ""), pick(1, "z", "typed")];
+    let result = store
+        .answer(
+            "Q1",
+            1,
+            false,
+            |q| crate::tools::questions::schema::resolve(q, Kind::FreeText, &picks, "typed"),
+            2,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result, Ok(Ok(())));
+    assert_eq!(
+        picks_of(&store, "Q1").await,
+        [saved(0, "b", ""), saved(1, "z", "typed")]
+    );
+}
+
+#[tokio::test]
+async fn put_again_carries_picks_of_unchanged_decisions_renumbered() {
+    let temp = TempFolder::new();
+    let store = TursoQuestionStore::open(&temp.0).await.unwrap();
+    store.put(asking("Q1", &["x", "y"]), 1).await.unwrap();
+    save_ok(&store, "Q1", 1, &[pick(0, "a", ""), pick(1, "z", "typed")]).await;
+    // After a save: a new decision first, then y, then x.
+    store.put(asking("Q1", &["w", "y", "x"]), 2).await.unwrap();
+    assert_eq!(
+        picks_of(&store, "Q1").await,
+        [saved(1, "z", "typed"), saved(2, "a", "")]
+    );
+    // After dismissal.
+    store.dismiss("Q1", "r", 3).await.unwrap().unwrap();
+    assert_eq!(picks_of(&store, "Q1").await.len(), 2);
+    store.put(asking("Q1", &["y"]), 4).await.unwrap();
+    assert_eq!(picks_of(&store, "Q1").await, [saved(0, "z", "typed")]);
+    // After an answer.
+    let picks = [pick(0, "b", "")];
+    store
+        .answer(
+            "Q1",
+            3,
+            false,
+            |q| crate::tools::questions::schema::resolve(q, Kind::Revise, &picks, "n"),
+            5,
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    store.put(asking("Q1", &["y", "y"]), 6).await.unwrap();
+    assert_eq!(picks_of(&store, "Q1").await, [saved(0, "b", "")]);
+}
+
+#[tokio::test]
+async fn put_again_drops_a_pick_when_ask_or_any_option_field_changed() {
+    let temp = TempFolder::new();
+    let store = TursoQuestionStore::open(&temp.0).await.unwrap();
+    store.put(asking("Q1", &["x"]), 1).await.unwrap();
+    let changes: [fn(&mut Question); 6] = [
+        |q| q.decisions[0].ask = "other".into(),
+        |q| q.decisions[0].options[0].label = "L".into(),
+        |q| q.decisions[0].options[0].impact = "I".into(),
+        |q| q.decisions[0].options[0].suggested = true,
+        |q| q.decisions[0].options[2].free = false,
+        |q| q.decisions[0].options[0].key = "k".into(),
+    ];
+    for (i, change) in changes.iter().enumerate() {
+        // Each round puts the question twice: the changed one, then the original.
+        let version = u32::try_from(i).unwrap() * 2 + 1;
+        save_ok(&store, "Q1", version, &[pick(0, "b", "")]).await;
+        let mut changed = asking("Q1", &["x"]);
+        change(&mut changed);
+        store.put(changed, 10).await.unwrap();
+        assert!(picks_of(&store, "Q1").await.is_empty(), "change {i}");
+        store.put(asking("Q1", &["x"]), 11).await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn a_row_with_empty_or_unparsable_picks_reads_as_none() {
+    let temp = TempFolder::new();
+    let store = TursoQuestionStore::open(&temp.0).await.unwrap();
+    store.put(asking("Q1", &["x"]), 1).await.unwrap();
+    assert!(picks_of(&store, "Q1").await.is_empty());
+    {
+        let conn = store.conn.lock().await;
+        conn.execute(
+            "UPDATE questions SET picks = 'not json' WHERE id = 'Q1'",
+            (),
+        )
+        .await
+        .unwrap();
+    }
+    assert!(picks_of(&store, "Q1").await.is_empty());
+    assert!(store.list(1).await.unwrap().questions[0].picks.is_empty());
+}
+
+#[tokio::test]
+async fn show_returns_a_dismissed_questions_picks_and_none_for_an_unknown_id() {
+    let temp = TempFolder::new();
+    let store = TursoQuestionStore::open(&temp.0).await.unwrap();
+    store.put(asking("Q1", &["x"]), 1).await.unwrap();
+    save_ok(&store, "Q1", 1, &[pick(0, "a", "")]).await;
+    store.dismiss("Q1", "stale", 2).await.unwrap().unwrap();
+    let shown = store.show("Q1").await.unwrap().unwrap();
+    assert_eq!(
+        (shown.state.as_str(), shown.reason.as_str(), shown.version),
+        ("dismissed", "stale", 1)
+    );
+    assert_eq!(shown.picks, [saved(0, "a", "")]);
+    assert!(store.show("nope").await.unwrap().is_none());
 }

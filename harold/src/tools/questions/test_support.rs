@@ -11,7 +11,7 @@ use harold_api::tools::questions::v1 as pb;
 
 use super::schema::{Answer, Question};
 use super::store::{
-    Listing, QuestionStore, Readiness, Refusal, StartedBatch, StoreError, TickRefusal,
+    Listing, QuestionStore, Readiness, Refusal, Shown, StartedBatch, StoreError, TickRefusal,
     TursoQuestionStore,
 };
 use crate::tools::{BoxFuture, ChiefPane, PaneTyping, Typing};
@@ -211,6 +211,21 @@ impl QuestionStore for FailingStore {
         self.inner.tick(id, version, step, ticked, now_ms).await
     }
 
+    async fn save_picks(
+        &self,
+        id: &str,
+        version: u32,
+        picks: &[pb::Pick],
+    ) -> Result<Result<Result<(), String>, Refusal>, StoreError> {
+        self.check()?;
+        self.inner.save_picks(id, version, picks).await
+    }
+
+    async fn show(&self, id: &str) -> Result<Option<Shown>, StoreError> {
+        self.check()?;
+        self.inner.show(id).await
+    }
+
     async fn ready(&self, now_ms: i64, settle_ms: i64) -> Result<Readiness, StoreError> {
         self.inner.ready(now_ms, settle_ms).await
     }
@@ -315,6 +330,19 @@ impl QuestionStore for MarkHook {
         now_ms: i64,
     ) -> Result<Result<(), TickRefusal>, StoreError> {
         self.inner.tick(id, version, step, ticked, now_ms).await
+    }
+
+    async fn save_picks(
+        &self,
+        id: &str,
+        version: u32,
+        picks: &[pb::Pick],
+    ) -> Result<Result<Result<(), String>, Refusal>, StoreError> {
+        self.inner.save_picks(id, version, picks).await
+    }
+
+    async fn show(&self, id: &str) -> Result<Option<Shown>, StoreError> {
+        self.inner.show(id).await
     }
 
     async fn ready(&self, now_ms: i64, settle_ms: i64) -> Result<Readiness, StoreError> {
