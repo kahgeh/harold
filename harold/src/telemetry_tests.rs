@@ -2410,8 +2410,8 @@ fn create_alerts() -> String {
 fn the_create_loop_makes_each_alert_with_its_own_webhook() {
     let stand_in = StandIn::new();
     let stderr = stand_in.run(&create_alerts());
-    assert_eq!(stand_in.objects("webhooks").len(), 5, "{stderr}");
-    assert_eq!(stand_in.objects("alerts").len(), 5, "{stderr}");
+    assert_eq!(stand_in.objects("webhooks").len(), 6, "{stderr}");
+    assert_eq!(stand_in.objects("alerts").len(), 6, "{stderr}");
     for name in crate::alerts::ALERT_NAMES {
         let webhook = stand_in.only("webhooks", &format!("harold-alerts-{name}"));
         let alert = stand_in.only("alerts", name);
@@ -2425,8 +2425,8 @@ fn the_create_loop_run_twice_makes_nothing_new() {
     stand_in.run(&create_alerts());
     stand_in.forget_calls();
     let stderr = stand_in.run(&create_alerts());
-    assert_eq!(stand_in.objects("webhooks").len(), 5, "{stderr}");
-    assert_eq!(stand_in.objects("alerts").len(), 5, "{stderr}");
+    assert_eq!(stand_in.objects("webhooks").len(), 6, "{stderr}");
+    assert_eq!(stand_in.objects("alerts").len(), 6, "{stderr}");
     for name in crate::alerts::ALERT_NAMES {
         assert!(
             stderr.contains(&format!(
@@ -2602,8 +2602,8 @@ done"#,
         .map(|name| stand_in.only("webhooks", &format!("harold-alerts-{name}"))["id"].clone());
     stand_in.forget_calls();
     let stderr = stand_in.run(&readme_block("A HyperDX set up from the earlier"));
-    // The old webhook, the two kept, and the three created.
-    assert_eq!(stand_in.objects("webhooks").len(), 6, "{stderr}");
+    // The old webhook, the two kept, and the four created.
+    assert_eq!(stand_in.objects("webhooks").len(), 7, "{stderr}");
     for name in crate::alerts::ALERT_NAMES {
         stand_in.only("webhooks", &format!("harold-alerts-{name}"));
     }
@@ -2613,7 +2613,7 @@ done"#,
     }
     let calls = stand_in.calls();
     let posts = calls.iter().filter(|call| call.starts_with("POST")).count();
-    assert_eq!(posts, 3, "{calls:?}");
+    assert_eq!(posts, 4, "{calls:?}");
 }
 
 #[test]
