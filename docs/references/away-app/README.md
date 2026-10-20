@@ -128,7 +128,7 @@ With `[web_app]` set, the chief's messages always go into the app's thread. Once
 | From the chief's pane (turn-end updates, `send-message-to-away-device`, spoken lines), with push turned on and no call open | **The app only, as text.** Harold puts the message in the thread and sends a push. A spoken line arrives as its text. No voice note is made. |
 | A spoken line from the chief while the phone's call is open | **The phone's call.** It plays on the phone at once, and its text is added to the thread, with no push and no iMessage. |
 | From the chief, when no phone has turned push on, or the push service refuses the push or cannot be reached | **iMessage only, once.** It is sent as today, starting `(app unreachable)`. A push address the service reports gone (`404` or `410`) is deleted. |
-| From any other pane | **iMessage as today.** The chief-only rule still decides what is left out. |
+| From any other pane | **iMessage as today.** The away channel's list (`notify.imessage` or `notify.telegram`) decides what is left out. |
 | The user's iMessage replies | **As today**, routed by tag or the latest notifier. Nothing in iMessage changes. |
 
 - **Once and once only:** a push the service accepted counts as delivered, and the message does not go to iMessage too. A push it refused goes to iMessage, so nothing is lost.

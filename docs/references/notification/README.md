@@ -337,7 +337,7 @@ sequenceDiagram
     Handler->>Store: stage event and checkpoint in one transaction
     Store-->>Handler: pending TurnCompleted delivery
     Handler->>Handler: ioreg → IOConsoleLocked = true
-    note over Handler: left out here if the pane messaged the phone this turn,<br/>or if updates come from another folder only
+    note over Handler: left out here if the pane messaged the phone this turn,<br/>or if the phone's lists do not name the pane
     Handler->>Handler: summarise_for_notification() via AI CLI (fallback: truncate to 280 chars)
     Handler->>Handler: split_body() → main body + trailing question (if ends in ?)
     Handler->>Channel: send "🤖 [studio/harold:0.3] <body> (harold)"
