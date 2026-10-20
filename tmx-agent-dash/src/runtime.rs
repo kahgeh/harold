@@ -636,7 +636,7 @@ async fn wait_for_retry(
                         | Control::SetMessagingPaused(_)
                         | Control::Call(_)
                         | Control::Answer(_)
-                    | Control::Tick { .. }
+                        | Control::Tick { .. }
                         | Control::Defer(_)
                         | Control::OpenLink(_)
                 ) {

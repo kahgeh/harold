@@ -24,8 +24,8 @@
 //   InvalidArgument      message "invalid <field>" for a broken rule; nothing
 //                        is stored. `invalid step` is a step number that is 0
 //                        or past the last step, or a tick on a question.
-//   FailedPrecondition   message "version_changed" (the question changed since
-//                        the dash read it) or "not_waiting" (it is no longer
+//   FailedPrecondition   message "version_changed" (the question or instructions
+//                        changed since the dash read it) or "not_waiting" (it is no longer
 //                        waiting for an answer).
 //   Unavailable          the database write failed.
 //

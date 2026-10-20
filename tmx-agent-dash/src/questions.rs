@@ -745,10 +745,14 @@ impl QuestionBlock {
         // A closed question has only its header.
         let stop = if self.open { stop } else { QStop::Header };
         match code {
-            KeyCode::Char('o') if is_web_link(&q.link) => return BlockEffect::OpenLink(q.link),
+            KeyCode::Char('o') if is_web_link(&q.link) && !matches!(stop, QStop::Other(_)) => {
+                return BlockEffect::OpenLink(q.link);
+            }
             KeyCode::Char('n') if self.step(1) => return BlockEffect::Cursor(QStop::Header),
             KeyCode::Char('N') if self.step(-1) => return BlockEffect::Cursor(QStop::Header),
-            KeyCode::Char('h') | KeyCode::Left | KeyCode::Esc if self.open => {
+            KeyCode::Char('h') | KeyCode::Left | KeyCode::Esc
+                if self.open && !matches!(stop, QStop::Other(_)) =>
+            {
                 self.open = false;
                 return BlockEffect::Cursor(QStop::Header);
             }
@@ -2304,6 +2308,54 @@ mod tests {
         b.sent("Q1", SendResult::Recorded);
         b.reconcile(queue(vec![question("Q1", 2, 1)]));
         assert_eq!(b.view().and_then(|v| v.notice), None);
+    }
+
+    #[test]
+    fn o_h_left_and_esc_do_nothing_on_another_todos_row() {
+        let mut b = open_block(vec![instructions("I1", 1, 2), question("Q1", 1, 1)]);
+        for code in [
+            KeyCode::Char('o'),
+            KeyCode::Char('h'),
+            KeyCode::Left,
+            KeyCode::Esc,
+        ] {
+            assert_eq!(press(&mut b, code, QStop::Other(1)), BlockEffect::None);
+            assert!(b.is_open(), "{code:?} closed the block");
+            assert_eq!(b.view().unwrap().id, "I1");
+        }
+        // `l` still opens that todo.
+        assert_eq!(
+            press(&mut b, KeyCode::Char('l'), QStop::Other(1)),
+            BlockEffect::Cursor(QStop::Header)
+        );
+        assert_eq!(b.view().unwrap().id, "Q1");
+    }
+
+    #[test]
+    fn a_suspended_instructions_block_takes_the_listed_ticks_back() {
+        let mut b = open_block(vec![instructions("I1", 1, 4)]);
+        assert!(b.stops().contains(&QStop::Step(2)));
+        b.suspend();
+        assert!(b.view().is_none());
+        b.reconcile(queue(vec![with_ticks(instructions("I1", 1, 4), &[1, 3])]));
+        let v = b.view().unwrap();
+        assert!(v.open);
+        assert_eq!(v.ticked_count, 2);
+        assert_eq!(v.notice, None);
+        assert!(v.steps[0].ticked && !v.steps[1].ticked && v.steps[2].ticked);
+        assert!(
+            b.stops().contains(&QStop::Step(2)),
+            "the step is still there"
+        );
+        // A key on that step acts on it at once.
+        assert!(matches!(
+            press(&mut b, KeyCode::Char(' '), QStop::Step(2)),
+            BlockEffect::Tick {
+                step: 3,
+                ticked: false,
+                ..
+            }
+        ));
     }
 
     #[test]

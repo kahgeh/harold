@@ -3632,6 +3632,26 @@ mod tests {
     }
 
     #[test]
+    fn returning_instructions_show_the_listed_ticks_and_stay_open() {
+        let mut app = call_app(CallState::Off);
+        app.observe_questions(instructions_queue("I1", 4));
+        open_instructions(&mut app);
+        for _ in 0..3 {
+            app.handle_key(KeyCode::Char('j'));
+        }
+        assert_eq!(app.question_stop, Some(QStop::Step(2)));
+        app.hide_questions();
+        let mut ticked = instructions_queue("I1", 4);
+        ticked.questions[0].ticked = vec![1, 3];
+        app.observe_questions(ticked);
+        let view = app.questions.view().unwrap();
+        assert!(view.open);
+        assert_eq!(view.ticked_count, 2);
+        assert!(!app.holding_block_keys());
+        assert!(app.stops().contains(&Stop::Question(QStop::Step(2))));
+    }
+
+    #[test]
     fn returning_questions_that_changed_hold_keys_until_esc() {
         let mut app = call_app(CallState::Off);
         app.observe_questions(question_queue(&["Q1"]));

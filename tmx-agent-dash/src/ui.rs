@@ -4310,7 +4310,7 @@ mod tests {
         }
     }
 
-    /// The layout of `user_layout` with `%3` named as the chief's pane and T1 listed
+    /// The layout of `user_layout` with `%3` named as the chief's pane and Q1 listed
     /// with `waiting` todos waiting, closed.
     fn chief_questions(waiting: u32, intro: &str) -> App {
         let mut app = call_layout(chief_call(CallState::Off));

@@ -155,7 +155,7 @@ Closed todos take one row, counting questions and instructions together. With an
   ● BUSY   harold-main               Building dash-one-version
 ```
 
-Press `j` to move the cursor to the `▸ 2 todos waiting` row, then `l` or `Enter` to open it. The first todo in the chief's order opens in full and the row becomes its header; every other todo stays one row under it. For instructions, the header is `▾ I1 · instructions · 1 of 2 todos · 0 of 4 ticked · harold · Install Harold 0.15.0 on PasM1Mac`, and the steps follow it, each with its detail dim underneath. `Space` ticks a step (`[✓]`) and ticks it off again, in any order; ticking sends nothing and Harold keeps the ticks, so a restart or a second dash shows the same ones. `done` tells the chief you are done, `ignore` that you will not do them:
+Press `j` to move the cursor to the `▸ 2 todos waiting` row, then `l` or `Enter` to open it. The first todo in the chief's order opens in full and the row becomes its header; every other todo stays one row under it. For instructions, the header is `▾ I1 · instructions · 1 of 2 todos · 0 of 4 ticked · harold · Install Harold 0.15.0 on PasM1Mac`, and the steps follow it, each with its detail dim underneath. `Space` ticks a step (`[✓]`) and unticks it again, in any order; ticking sends nothing and Harold keeps the ticks, so a restart or a second dash shows the same ones. `done` tells the chief you are done, `ignore` that you will not do them:
 
 ```text
     ▾ I1 · instructions · 1 of 2 todos · 2 of 4 ticked · harold · Install Harold 0.15.0 on PasM1Mac
