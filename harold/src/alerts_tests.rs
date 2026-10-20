@@ -114,7 +114,7 @@ fn the_five_alerts_are_the_ones_in_the_specs() {
             "local-model-failing"
         ]
     );
-    // `local-model-slow` is a dashboard card, not an alert.
+    // `local-model-slow` is not an alert.
     assert!(alert_line(br#"{"alert":"local-model-slow","state":"firing"}"#).is_err());
     assert_eq!(
         alert_line(br#"{"alert":"local-model-failing","state":"firing"}"#),

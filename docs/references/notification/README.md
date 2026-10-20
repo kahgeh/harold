@@ -59,7 +59,7 @@ TurnCompleted event (pane_id from $TMUX_PANE in stop hook)
 ## At-desk: TTS
 
 1. `ask_model()` — runs `uv run mlx_lm.generate` in `ai.local_model_dir` with a system prompt asking for one plain past-tense sentence of under about 20 words that says who did what, given the agent's name (`the chief`, `the architect` or `the <main_context> agent`), the project (`main_context`) and the last request
-2. The answer is made one sentence: `<think>...</think>` blocks and outer quotes are stripped, lines are joined, the text is cut at the first `.`, `!` or `?` followed by a space or the end, and one full stop is added. An empty answer, one over 25 words, or one that does not contain the agent's name (case and hyphens ignored) is refused, and the message is the fallback sentence; Harold logs `turn-end update fell back` with its `reason`, never the text
+2. The answer is made one sentence: `<think>...</think>` blocks and outer quotes are stripped, lines are joined, the text is cut at the first `.`, `!` or `?` followed by a space or the end, and one full stop is added. An empty answer, one over 25 words, or one that does not contain the agent's name (case and hyphens ignored) is refused, and the message is the fallback sentence; Harold logs `turn-end update fell back` with its `reason` and `channel`, never the text
 3. TTS command run: `<tts.command> [tts.args...] [-v tts.voice] "<message>"`
 4. If the primary command fails to start or exits non-zero, Harold runs the fallback command when configured: `<tts.fallback_command> [tts.fallback_args...] [-v tts.fallback_voice] "<message>"`
 
