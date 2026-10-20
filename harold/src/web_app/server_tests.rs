@@ -304,9 +304,7 @@ async fn no_section_starts_nothing() {
         &directory.store_path(),
         shutdown_rx,
         None,
-        super::idle_hub(),
-        None,
-        &super::idle_grpc(),
+        super::idle_agents(&super::idle_grpc()),
     )
     .await;
 
@@ -326,9 +324,7 @@ async fn start_serves_until_shutdown() {
         &directory.store_path(),
         shutdown_rx,
         None,
-        super::idle_hub(),
-        None,
-        &super::idle_grpc(),
+        super::idle_agents(&super::idle_grpc()),
     )
     .await
     .expect("the app starts");
@@ -358,9 +354,7 @@ async fn an_address_in_use_runs_without_the_app() {
         &directory.store_path(),
         shutdown_rx,
         None,
-        super::idle_hub(),
-        None,
-        &super::idle_grpc(),
+        super::idle_agents(&super::idle_grpc()),
     )
     .await;
 
@@ -388,9 +382,7 @@ async fn old_thread_rows_are_pruned_at_start() {
         &directory.store_path(),
         shutdown_rx,
         None,
-        super::idle_hub(),
-        None,
-        &super::idle_grpc(),
+        super::idle_agents(&super::idle_grpc()),
     )
     .await
     .expect("the app starts");
@@ -491,9 +483,7 @@ async fn start_refuses_an_icon_that_cannot_be_read() {
         &directory.store_path(),
         shutdown_rx,
         None,
-        super::idle_hub(),
-        None,
-        &super::idle_grpc(),
+        super::idle_agents(&super::idle_grpc()),
     )
     .await
     .err()

@@ -80,6 +80,17 @@ impl Default for WebAppIdentity {
     }
 }
 
+/// What the web app needs to know of the agents and the question tool, given at start.
+#[derive(Clone, Copy)]
+pub(crate) struct Agents<'a> {
+    /// The agent panes, to find the chief and see whether it is busy.
+    pub snapshots: &'a AgentSnapshotHub,
+    /// `[notify] chief`, the chief's folder.
+    pub chief_folder: Option<&'a str>,
+    /// Harold's own gRPC address, where the question tool's service listens.
+    pub grpc: &'a GrpcSettings,
+}
+
 /// What every route can reach.
 #[derive(Clone)]
 pub(crate) struct AppState {
@@ -156,6 +167,16 @@ pub(crate) fn idle_snapshots() -> watch::Receiver<AgentSnapshot> {
     idle_hub().subscribe()
 }
 
+/// Idle agents: no panes, no chief folder, `grpc` for the question tool.
+#[cfg(test)]
+pub(crate) fn idle_agents(grpc: &GrpcSettings) -> Agents<'_> {
+    Agents {
+        snapshots: idle_hub(),
+        chief_folder: None,
+        grpc,
+    }
+}
+
 /// A gRPC address nothing listens on.
 #[cfg(test)]
 pub(crate) fn idle_grpc() -> GrpcSettings {
@@ -218,9 +239,7 @@ pub(crate) async fn start(
     store_path: &Path,
     shutdown: watch::Receiver<()>,
     calls: Option<Arc<dyn PhoneCallApi>>,
-    snapshots: &AgentSnapshotHub,
-    chief_folder: Option<&str>,
-    grpc: &GrpcSettings,
+    agents: Agents<'_>,
 ) -> Result<Running, String> {
     let addr = settings
         .listen_addr()
@@ -247,9 +266,9 @@ pub(crate) async fn start(
         shutdown: shutdown.clone(),
         calls: calls.clone(),
         identity: Arc::new(identity),
-        snapshots: snapshots.subscribe(),
-        chief_folder: chief_folder.map(Arc::from),
-        questions: todos::Questions::lazy(grpc),
+        snapshots: agents.snapshots.subscribe(),
+        chief_folder: agents.chief_folder.map(Arc::from),
+        questions: todos::Questions::lazy(agents.grpc),
         todos_changed: Arc::new(watch::channel(0).0),
     };
     let pusher = Arc::new(Pusher::new(key, &settings.allowed_login));
@@ -290,24 +309,13 @@ pub(crate) async fn start_if_set(
     store_path: &Path,
     shutdown: watch::Receiver<()>,
     calls: Option<Arc<dyn PhoneCallApi>>,
-    snapshots: &AgentSnapshotHub,
-    chief_folder: Option<&str>,
-    grpc: &GrpcSettings,
+    agents: Agents<'_>,
 ) -> Option<Running> {
     let settings = settings?;
-    start(
-        settings,
-        store,
-        store_path,
-        shutdown,
-        calls,
-        snapshots,
-        chief_folder,
-        grpc,
-    )
-    .await
-    .inspect_err(|error| warn!(error = %error, "web app unavailable"))
-    .ok()
+    start(settings, store, store_path, shutdown, calls, agents)
+        .await
+        .inspect_err(|error| warn!(error = %error, "web app unavailable"))
+        .ok()
 }
 
 /// When the thread starts: `THREAD_DAYS` days ago, in milliseconds since the Unix epoch.

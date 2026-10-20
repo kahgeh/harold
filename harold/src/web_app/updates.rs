@@ -263,7 +263,7 @@ async fn agents_changed(agents: &mut Option<watch::Receiver<crate::agent::domain
     };
     if receiver.changed().await.is_err() {
         *agents = None;
-        return std::future::pending().await;
+        std::future::pending().await
     }
 }
 

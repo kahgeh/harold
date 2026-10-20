@@ -128,10 +128,11 @@ pub(crate) fn split_links(text: &str) -> Vec<Part> {
 impl From<AppMessage> for MessageView {
     fn from(message: AppMessage) -> Self {
         let user = message.sender == AppSender::User;
-        let mark = user.then(|| match message.state {
-            Some(AppReplyState::Typed | AppReplyState::WaitingChiefBusy) => Mark::Typed,
-            _ => Mark::Stored,
-        });
+        let mark = match message.state {
+            _ if !user => None,
+            Some(AppReplyState::Typed | AppReplyState::WaitingChiefBusy) => Some(Mark::Typed),
+            _ => Some(Mark::Stored),
+        };
         let words = match message.state {
             Some(
                 state @ (AppReplyState::WaitingChiefBusy

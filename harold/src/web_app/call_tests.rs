@@ -921,9 +921,7 @@ async fn shutdown_ends_an_open_phone_call() {
         &directory.store_path(),
         shutdown_rx,
         Some(api),
-        crate::web_app::idle_hub(),
-        None,
-        &crate::web_app::idle_grpc(),
+        crate::web_app::idle_agents(&crate::web_app::idle_grpc()),
     )
     .await
     .expect("the app starts");

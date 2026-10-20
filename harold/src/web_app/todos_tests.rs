@@ -204,7 +204,6 @@ pub(super) struct TestServer {
     pub addr: SocketAddr,
     _shutdown: watch::Sender<()>,
     handle: JoinHandle<()>,
-    pub state: AppState,
 }
 
 impl TestServer {
@@ -222,15 +221,13 @@ impl TestServer {
             Default::default(),
         );
         state.questions = questions;
-        let served = state.clone();
         let handle = tokio::spawn(async move {
-            let _ = axum::serve(listener, router(served)).await;
+            let _ = axum::serve(listener, router(state)).await;
         });
         Self {
             addr,
             _shutdown: shutdown,
             handle,
-            state,
         }
     }
 
