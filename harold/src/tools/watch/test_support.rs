@@ -148,15 +148,12 @@ impl FakeTyping {
 
 impl PaneTyping for FakeTyping {
     fn type_line<'a>(&'a self, pane_id: &'a str, text: &'a str) -> BoxFuture<'a, Typing> {
-        let answer = if *self.busy.lock().unwrap() {
-            Typing::PaneBusy
-        } else {
-            self.script
-                .lock()
-                .unwrap()
-                .pop_front()
-                .unwrap_or(Typing::Typed)
-        };
+        let answer = self
+            .script
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or(Typing::Typed);
         if matches!(answer, Typing::Typed | Typing::EnterFailed) {
             self.lines
                 .lock()
