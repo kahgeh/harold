@@ -138,20 +138,6 @@ impl Scheduler {
         })
     }
 
-    #[cfg(test)]
-    pub(super) fn with_timings(
-        deps: Deps,
-        model_wait: Duration,
-        run_limit: Duration,
-        retry: Duration,
-    ) -> Arc<Self> {
-        let mut scheduler = Arc::try_unwrap(Self::new(deps)).ok().expect("one owner");
-        scheduler.model_wait = model_wait;
-        scheduler.run_limit = run_limit;
-        scheduler.retry = retry;
-        Arc::new(scheduler)
-    }
-
     fn state(&self) -> MutexGuard<'_, State> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
@@ -670,3 +656,7 @@ pub(super) async fn run(scheduler: Arc<Scheduler>, mut shutdown: signal::Receive
 #[cfg(test)]
 #[path = "scheduler_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "observability_tests.rs"]
+mod observability_tests;

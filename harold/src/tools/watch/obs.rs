@@ -276,7 +276,3 @@ impl ReportObs {
         );
     }
 }
-
-#[cfg(test)]
-#[path = "obs_tests.rs"]
-mod tests;

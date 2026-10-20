@@ -12,24 +12,25 @@ use crate::tools::watch::validate::Checked;
 const CHIEF_PANE: &str = "%1";
 const MINUTE: Duration = Duration::from_secs(60);
 
-struct Harness {
-    folder: TempFolder,
-    data: TempFolder,
-    store: Arc<WatchStore>,
-    scheduler: Arc<Scheduler>,
-    runner: Arc<FakeRunner>,
-    typing: Arc<FakeTyping>,
-    agents: Arc<FakeAgents>,
-    chief: Arc<FakeChief>,
-    pods: Arc<FakePods>,
-    stop: signal::Sender<()>,
+pub(super) struct Harness {
+    pub(super) folder: TempFolder,
+    /// The store's folder, removed when the harness drops.
+    pub(super) _data: TempFolder,
+    pub(super) store: Arc<WatchStore>,
+    pub(super) scheduler: Arc<Scheduler>,
+    pub(super) runner: Arc<FakeRunner>,
+    pub(super) typing: Arc<FakeTyping>,
+    pub(super) agents: Arc<FakeAgents>,
+    pub(super) chief: Arc<FakeChief>,
+    pub(super) pods: Arc<FakePods>,
+    pub(super) stop: signal::Sender<()>,
 }
 
-fn settings() -> WatchSettings {
+pub(super) fn settings() -> WatchSettings {
     WatchSettings::default()
 }
 
-async fn harness(settings: WatchSettings, steps: Vec<Step>) -> Harness {
+pub(super) async fn harness(settings: WatchSettings, steps: Vec<Step>) -> Harness {
     let folder = TempFolder::with_skill(
         "pod-watch",
         "---\nname: pod-watch\nallowed-tools: Bash(bin/pod slots:*)\n---\nCheck.\n",
@@ -51,7 +52,7 @@ async fn harness(settings: WatchSettings, steps: Vec<Step>) -> Harness {
     );
     Harness {
         folder,
-        data,
+        _data: data,
         store,
         scheduler,
         runner,
@@ -88,7 +89,7 @@ fn build(
 }
 
 impl Harness {
-    fn checked(&self, name: &str, every: u32, minutes: u32) -> Checked {
+    pub(super) fn checked(&self, name: &str, every: u32, minutes: u32) -> Checked {
         Checked {
             name: name.into(),
             folder: self.folder.0.clone(),
@@ -101,33 +102,21 @@ impl Harness {
         }
     }
 
-    async fn start(&self, name: &str, every: u32, minutes: u32) {
+    pub(super) async fn start(&self, name: &str, every: u32, minutes: u32) {
         self.scheduler
             .start(self.checked(name, every, minutes))
             .await
             .unwrap();
     }
 
-    async fn row(&self, name: &str) -> WatchRow {
+    pub(super) async fn row(&self, name: &str) -> WatchRow {
         self.store.get(name).await.unwrap().unwrap()
     }
 }
 
 /// Lets `how_long` of paused time pass, so every timer inside it fires.
-async fn pass(how_long: Duration) {
+pub(super) async fn pass(how_long: Duration) {
     tokio::time::sleep(how_long).await;
-}
-
-/// Passes time in 1-second steps until `done`, for at most `limit`.
-async fn until(limit: Duration, mut done: impl FnMut() -> bool) -> bool {
-    let steps = limit.as_secs();
-    for _ in 0..=steps {
-        if done() {
-            return true;
-        }
-        tokio::time::sleep(Duration::from_secs(1)).await;
-    }
-    done()
 }
 
 #[test]

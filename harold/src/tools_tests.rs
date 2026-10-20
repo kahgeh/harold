@@ -263,6 +263,7 @@ async fn a_tool_that_fails_to_start_is_logged_and_harold_runs_on() {
         [
             " WARN harold::tools: tool failed to start tool=\"questions\" reason=\"store_open_failed\"",
             " WARN harold::tools: tool failed to start tool=\"backlog\" reason=\"store_open_failed\"",
+            " WARN harold::tools: tool failed to start tool=\"watch\" reason=\"store_open_failed\"",
         ],
         "{text}"
     );
@@ -447,7 +448,7 @@ async fn the_backlog_tool_starts_with_no_typing_and_creates_backlog_db() {
     )
     .await;
 
-    assert_eq!(tools.tasks.len(), 2);
+    assert_eq!(tools.tasks.len(), 3);
     assert!(folder.0.join("tools/backlog/backlog.db").is_file());
     let listing: bp::ListQueueResponse = call(
         &tools.routes,
@@ -520,7 +521,7 @@ async fn the_canary_reaches_no_log_or_export() {
         shutdown_rx,
     )
     .await;
-    assert_eq!(tools.tasks.len(), 2);
+    assert_eq!(tools.tasks.len(), 3);
     let id = unique_id();
 
     let put: pb::PutQuestionResponse = call(
@@ -634,7 +635,7 @@ async fn the_backlog_canary_reaches_no_log_or_export() {
         shutdown_rx,
     )
     .await;
-    assert_eq!(tools.tasks.len(), 2);
+    assert_eq!(tools.tasks.len(), 3);
     // An item id no other test uses, so this test's lines can be told apart.
     let id = unique_id();
 

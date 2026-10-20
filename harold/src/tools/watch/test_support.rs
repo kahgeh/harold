@@ -128,17 +128,11 @@ pub(super) struct FakeTyping {
     pub lines: Mutex<Vec<(String, String)>>,
     /// Answers in order; `Typed` once the script is empty.
     pub script: Mutex<VecDeque<Typing>>,
-    /// Every answer is `PaneBusy` while true.
-    pub busy: Mutex<bool>,
 }
 
 impl FakeTyping {
     pub(super) fn new() -> Arc<Self> {
         Arc::new(Self::default())
-    }
-
-    pub(super) fn set_busy(&self, busy: bool) {
-        *self.busy.lock().unwrap() = busy;
     }
 
     /// Only the lines that were typed (not refused).
@@ -222,13 +216,6 @@ impl FakeRunner {
             running: Mutex::new(0),
             max_running: Mutex::new(0),
         })
-    }
-
-    pub(super) fn set(&self, steps: Vec<Step>) {
-        if let Some(last) = steps.last() {
-            *self.last.lock().unwrap() = last.clone();
-        }
-        *self.steps.lock().unwrap() = steps.into();
     }
 
     pub(super) fn calls(&self) -> usize {
