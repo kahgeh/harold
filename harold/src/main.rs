@@ -775,6 +775,7 @@ fn print_help() {
     println!("                          Withdraw a question, with a reason the dash shows");
     println!("  harold tool questions order ID...   Put the listed questions first, in order");
     println!("  harold tool questions list          List the waiting questions");
+    println!("  harold tool questions show ID       Print a question's picks");
     println!("  harold tool watch start NAME --skill SKILL --every MINUTES --for MINUTES");
     println!("                          [--report-to chief|self] [--run-budget USD] [--every-run]");
     println!(

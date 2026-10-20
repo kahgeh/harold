@@ -114,7 +114,7 @@ const NOT_STORED_LINE: &str = "the Harold daemon could not store the message";
 pub(crate) const SPEAK_COMMAND: &str = "speak";
 pub(crate) const TOOL_COMMAND: &str = "tool";
 const TOOL_USAGE_LINE: &str =
-    "invalid argument: usage is harold tool questions put|dismiss|order|list";
+    "invalid argument: usage is harold tool questions put|dismiss|order|list|show";
 const SPEAK_ARGUMENTS: &str = "invalid argument: usage is speak --src-id ID TEXT";
 const SPOKEN_LENGTH_LINE: &str = "the spoken line must be 1 to 300 characters";
 const SPOKEN_NOT_STORED_LINE: &str = "the Harold daemon could not store the spoken line";
@@ -202,6 +202,7 @@ pub(crate) enum ToolCommand {
     QuestionsDismiss { id: String, reason: String },
     QuestionsOrder { ids: Vec<String> },
     QuestionsList,
+    QuestionsShow { id: String },
     Backlog(BacklogCommand),
     Watch(WatchCommand),
 }
@@ -542,6 +543,7 @@ fn parse_tool(args: &[&str]) -> Result<ToolCommand, String> {
         ["watch", rest @ ..] => parse_watch(rest).map(ToolCommand::Watch),
         ["questions", "put"] => Ok(ToolCommand::QuestionsPut),
         ["questions", "list"] => Ok(ToolCommand::QuestionsList),
+        ["questions", "show", id] => Ok(ToolCommand::QuestionsShow { id: (*id).into() }),
         ["questions", "dismiss", id, "--reason", reason] => Ok(ToolCommand::QuestionsDismiss {
             id: (*id).into(),
             reason: (*reason).into(),
@@ -870,9 +872,43 @@ fn list_line(listed: &questions::ListedQuestion) -> String {
     }
     let deferred = if listed.deferred { " (deferred)" } else { "" };
     format!(
-        "{} v{} {} {}{deferred}",
-        question.id, listed.version, question.product, question.spec
+        "{} v{} {} {} picks {}/{}{deferred}",
+        question.id,
+        listed.version,
+        question.product,
+        question.spec,
+        listed.picks.len(),
+        question.decisions.len()
     )
+}
+
+/// The `show` output: a head line, then one line per decision with its pick.
+fn show_lines(shown: &questions::ShowQuestionResponse) -> String {
+    let question = shown.question.clone().unwrap_or_default();
+    let mut lines = vec![format!(
+        "{} v{} {} {} {}",
+        question.id, shown.version, question.product, question.spec, shown.state
+    )];
+    for (index, decision) in question.decisions.iter().enumerate() {
+        let picked = shown
+            .picks
+            .iter()
+            .find(|pick| pick.decision as usize == index);
+        let what = match picked {
+            None => "no pick".to_string(),
+            Some(pick) if !pick.text.is_empty() => format!("{} \"{}\"", pick.key, pick.text),
+            Some(pick) => {
+                let label = decision
+                    .options
+                    .iter()
+                    .find(|option| option.key == pick.key)
+                    .map_or("", |option| option.label.as_str());
+                format!("{} {label}", pick.key)
+            }
+        };
+        lines.push(format!("  {} {}: {what}", index + 1, decision.ask));
+    }
+    lines.join("\n")
 }
 
 /// The line printed for a refusal from the question service: its status message.
@@ -1110,6 +1146,14 @@ pub(crate) async fn tool_within(
                 let mut lines: Vec<String> = listed.questions.iter().map(list_line).collect();
                 lines.push(format!("{} waiting", listed.waiting));
                 Ok(lines.join("\n"))
+            }
+            ToolCommand::QuestionsShow { id } => {
+                let shown = client
+                    .show_question(questions::ShowQuestionRequest { id: id.clone() })
+                    .await
+                    .map_err(refused)?
+                    .into_inner();
+                Ok(show_lines(&shown))
             }
             // `tool` runs a backlog command through `backlog_within`, and a watch
             // command through `watch_within`.
@@ -1994,7 +2038,7 @@ mod tests {
 
     #[test]
     fn an_unknown_tool_command_is_refused_with_usage() {
-        let usage = "invalid argument: usage is harold tool questions put|dismiss|order|list";
+        let usage = "invalid argument: usage is harold tool questions put|dismiss|order|list|show";
         for words in [
             vec!["tool"],
             vec!["tool", "questions"],
@@ -2014,7 +2058,10 @@ mod tests {
         let result = parse(&["tool", "questions", "answer", "q-1"]);
         assert_eq!(
             result,
-            Err("invalid argument: usage is harold tool questions put|dismiss|order|list".into())
+            Err(
+                "invalid argument: usage is harold tool questions put|dismiss|order|list|show"
+                    .into()
+            )
         );
     }
 
@@ -2111,7 +2158,84 @@ mod tests {
             ticked: vec![],
             picks: vec![],
         };
-        assert_eq!(list_line(&question), "Q1 v1 harold dash (deferred)");
+        assert_eq!(
+            list_line(&question),
+            "Q1 v1 harold dash picks 0/0 (deferred)"
+        );
+    }
+
+    #[test]
+    fn show_parses_with_one_id() {
+        assert_eq!(
+            parse(&["tool", "questions", "show", "Q43"]),
+            Ok(Mode::Tool(ToolCommand::QuestionsShow { id: "Q43".into() }))
+        );
+        assert!(parse(&["tool", "questions", "show"]).is_err());
+        assert!(parse(&["tool", "questions", "show", "a", "b"]).is_err());
+    }
+
+    fn option(key: &str, label: &str, free: bool) -> questions::DecisionOption {
+        questions::DecisionOption {
+            key: key.into(),
+            label: label.into(),
+            free,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn show_prints_the_head_each_pick_free_text_and_no_pick() {
+        let decision = |ask: &str| questions::Decision {
+            ask: ask.into(),
+            options: vec![option("a", "Alpha", false), option("z", "Other", true)],
+        };
+        let shown = questions::ShowQuestionResponse {
+            question: Some(questions::Question {
+                id: "Q43".into(),
+                product: "harold".into(),
+                spec: "watch-jobs".into(),
+                decisions: vec![decision("Which?"), decision("How?"), decision("When?")],
+                ..Default::default()
+            }),
+            version: 2,
+            state: "waiting".into(),
+            reason: String::new(),
+            picks: vec![
+                questions::Pick {
+                    decision: 0,
+                    key: "a".into(),
+                    text: String::new(),
+                },
+                questions::Pick {
+                    decision: 2,
+                    key: "z".into(),
+                    text: "on Friday".into(),
+                },
+            ],
+        };
+        assert_eq!(
+            show_lines(&shown),
+            "Q43 v2 harold watch-jobs waiting\n  1 Which?: a Alpha\n  2 How?: no pick\n  3 When?: z \"on Friday\""
+        );
+    }
+
+    #[test]
+    fn list_line_shows_picks_n_of_m() {
+        let decision = questions::Decision::default();
+        let listed = questions::ListedQuestion {
+            question: Some(questions::Question {
+                id: "Q43".into(),
+                product: "harold".into(),
+                spec: "watch-jobs".into(),
+                decisions: vec![decision; 4],
+                ..Default::default()
+            }),
+            version: 1,
+            deferred: false,
+            ticked: vec![],
+            picks: vec![questions::Pick::default(); 2],
+        };
+        assert_eq!(list_line(&listed), "Q43 v1 harold watch-jobs picks 2/4");
     }
 
     #[test]
@@ -2229,6 +2353,10 @@ mod tests {
                 String::new(),
             ),
             (ToolCommand::QuestionsList, String::new()),
+            (
+                ToolCommand::QuestionsShow { id: "q-1".into() },
+                String::new(),
+            ),
         ] {
             lines.push(tool(&address, &command, input.as_bytes()).await.unwrap());
         }
@@ -2250,26 +2378,39 @@ mod tests {
         .await
         .unwrap_err();
 
+        let unknown = tool(
+            &address,
+            &ToolCommand::QuestionsShow { id: "q-9".into() },
+            &b""[..],
+        )
+        .await
+        .unwrap_err();
+
         server.abort();
         accept.abort();
         drop(stop);
         let _ = handle.task.await;
         println!("{lines:#?}\nrefused: {refused}\nmissing: {missing}");
+        assert_eq!(unknown, "unknown_question");
+        assert_eq!(
+            lines[8],
+            "q-1 v2 harold dash dismissed\n  1 Which store?: no pick"
+        );
 
         assert_eq!(lines[0], "stored q-1 v1");
         assert_eq!(lines[1], "stored q-1 v2");
         assert_eq!(lines[2], "stored q-2 v1");
         assert_eq!(
             lines[3],
-            "q-1 v2 harold dash\nq-2 v1 harold other\n2 waiting"
+            "q-1 v2 harold dash picks 0/1\nq-2 v1 harold other picks 0/1\n2 waiting"
         );
         assert_eq!(lines[4], "ordered 2");
         assert_eq!(
             lines[5],
-            "q-2 v1 harold other\nq-1 v2 harold dash\n2 waiting"
+            "q-2 v1 harold other picks 0/1\nq-1 v2 harold dash picks 0/1\n2 waiting"
         );
         assert_eq!(lines[6], "dismissed q-1");
-        assert_eq!(lines[7], "q-2 v1 harold other\n1 waiting");
+        assert_eq!(lines[7], "q-2 v1 harold other picks 0/1\n1 waiting");
         assert_eq!(refused, "invalid link");
         assert_eq!(missing, "not_waiting");
     }
@@ -2624,7 +2765,10 @@ mod tests {
         // The question tool keeps its own usage line.
         assert_eq!(
             parse(&["tool", "questions"]),
-            Err("invalid argument: usage is harold tool questions put|dismiss|order|list".into())
+            Err(
+                "invalid argument: usage is harold tool questions put|dismiss|order|list|show"
+                    .into()
+            )
         );
     }
 
