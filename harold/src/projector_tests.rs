@@ -13,8 +13,9 @@ use super::{
     project_and_publish_agent_snapshot, route_message, run_event_handler, stored_envelope,
 };
 use crate::agent::domain::{
-    AgentEvent, AgentIncarnation, AgentMonitorHealthChanged, AgentPaneDeparted,
-    AgentPaneObservation, AgentPaneObserved, CompletionSummaryUpdate,
+    AgentEvent, AgentIncarnation, AgentLifecycleObserved, AgentMonitorHealthChanged,
+    AgentPaneDeparted, AgentPaneObservation, AgentPaneObserved, CompletionSummaryUpdate,
+    ObservedAgentState, WorkSummaryUpdate,
 };
 use crate::agent::snapshot::AgentSnapshotHub;
 use crate::inbound::AgentAddress;
@@ -3908,6 +3909,86 @@ async fn a_paused_to_chief_reply_is_not_typed_and_says_so() {
         with.app.reply_states(),
         [(event_id, crate::store::AppReplyState::NotSentPaused)]
     );
+}
+
+/// `app reply state` is logged with the reply's event id and the state, before the write,
+/// and never holds the reply's text.
+#[tokio::test]
+async fn each_app_reply_state_is_logged_with_the_event_id() {
+    const CANARY: &str = "APP-CANARY-5530";
+    let pane = "%app-chief-logged";
+    let busy_chief = {
+        let mut events = chief_in(pane);
+        events.push(AgentEvent::LifecycleObserved(AgentLifecycleObserved {
+            incarnation: incarnation(pane, 10),
+            state: ObservedAgentState::Busy,
+            adapter_id: "claude.lifecycle".into(),
+            work_summary: WorkSummaryUpdate::Unchanged,
+            observed_at_ms: i64::MAX / 2,
+        }));
+        events
+    };
+    let cases = [
+        (chief_in(pane), false, "typed"),
+        (busy_chief, false, "waiting_chief_busy"),
+        (
+            vec![agent_observed("%2", 20, "/work/harold")],
+            false,
+            "not_sent_no_chief",
+        ),
+        (chief_in(pane), true, "not_sent_paused"),
+    ];
+    for (events, paused, state) in cases {
+        let directory = TestDirectory::new();
+        let with = to_chief(&directory, events, FakeApp::new(AppDelivery::Pushed)).await;
+        let event_id = unique_event_id();
+        let logs = CapturedLogs::start();
+
+        with.dispatcher
+            .dispatch_with_pause(
+                &inbound_delivery(&event_id, app_reply(CANARY)),
+                None,
+                paused,
+            )
+            .unwrap();
+
+        let text = logs.text();
+        let line = text
+            .lines()
+            .find(|line| line.contains("app reply state") && line.contains(&event_id))
+            .unwrap_or_else(|| panic!("{state}: {text}"));
+        assert!(line.contains("INFO"), "{line}");
+        assert!(line.contains(&format!("state=\"{state}\"")), "{line}");
+        assert!(!text.contains(CANARY), "{text}");
+    }
+}
+
+#[tokio::test]
+async fn a_failed_reply_state_write_logs_the_state_and_then_not_recorded() {
+    let directory = TestDirectory::new();
+    let with = to_chief(
+        &directory,
+        chief_in("%app-chief-logged-fails"),
+        FakeApp::new(AppDelivery::Pushed).failing_reply_states(),
+    )
+    .await;
+    let event_id = unique_event_id();
+    let logs = CapturedLogs::start();
+
+    with.dispatcher
+        .dispatch_with_pause(
+            &inbound_delivery(&event_id, app_reply("hello")),
+            None,
+            false,
+        )
+        .unwrap();
+
+    let text = logs.text();
+    let state = text.find("app reply state ").expect("the state line");
+    let failed = text
+        .find("app reply state not recorded")
+        .expect("the failure");
+    assert!(state < failed, "{text}");
 }
 
 #[tokio::test]

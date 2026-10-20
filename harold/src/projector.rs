@@ -88,6 +88,16 @@ struct ProductionDispatcher {
     alerts: Option<AlertQueue>,
 }
 
+/// The word `app reply state` logs for `state`.
+fn reply_state_word(state: AppReplyState) -> &'static str {
+    match state {
+        AppReplyState::Typed => "typed",
+        AppReplyState::WaitingChiefBusy => "waiting_chief_busy",
+        AppReplyState::NotSentNoChief => "not_sent_no_chief",
+        AppReplyState::NotSentPaused => "not_sent_paused",
+    }
+}
+
 impl DeliveryDispatcher for ProductionDispatcher {
     fn dispatch(&self, delivery: &PendingDelivery) -> Result<DeliveryOutcome, DispatchError> {
         self.dispatch_with_pause(delivery, None, crate::outbound::is_messaging_paused())
@@ -234,6 +244,7 @@ impl ProductionDispatcher {
         let Some(app) = self.app.as_deref() else {
             return;
         };
+        info!(event_id, state = reply_state_word(state), "app reply state");
         if let Err(error) = app.set_reply_state(event_id, state) {
             warn!(event_id, error, "app reply state not recorded");
         }
