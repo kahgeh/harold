@@ -475,7 +475,7 @@ fn web_app_errors(web_app: Option<&WebAppSettings>, chief_folder: Option<&str>) 
         errors.push("web_app.allowed_login must be your Tailscale login".into());
     }
     if chief_folder.is_none() {
-        errors.push("web_app needs notify.away_messages_only_from, the chief's folder".into());
+        errors.push("web_app needs notify.chief, the chief's folder".into());
     }
     errors
 }
@@ -492,19 +492,146 @@ impl StoreSettings {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct NotifySettings {
     pub skip_if_session_active: bool,
     pub skip_if_pane_active: bool,
     pub away_channel: String,
-    /// The folder messages for the away device come from while an agent runs in it:
-    /// turn-end updates and the messages agents ask Harold to send. An absolute path,
-    /// compared as text with a pane's working directory.
+    /// Which pane is the chief, matched by folder as one entry (see `same_folder`).
+    #[serde(default)]
+    pub chief: Option<String>,
+    /// Who may reach the phone by iMessage: folder entries. Empty means nobody and
+    /// `["*"]` means everyone.
+    #[serde(default)]
+    pub imessage: Vec<String>,
+    /// Who may reach the phone by Telegram.
+    #[serde(default)]
+    pub telegram: Vec<String>,
+    /// Who may reach the phone through the web app.
+    #[serde(default)]
+    pub web_app: Vec<String>,
+    /// Who may be spoken aloud on the Mac.
+    #[serde(default)]
+    pub machine_audio_output: Vec<String>,
+    /// The key `chief` and the channel lists replace. Read so that its folder can stand in
+    /// for them (`apply_old_key`).
     #[serde(default)]
     pub away_messages_only_from: Option<String>,
     /// The name `away_messages_only_from` had while it covered turn-end updates only.
     /// Read only so that `validate` can report it.
     #[serde(default)]
     away_updates_only_from: Option<String>,
+}
+
+/// One way Harold reaches the user. Each has a list in `[notify]` under its key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Channel {
+    Imessage,
+    Telegram,
+    WebApp,
+    MachineAudioOutput,
+}
+
+impl Channel {
+    /// The channel's key in `[notify]`.
+    pub(crate) fn key(self) -> &'static str {
+        match self {
+            Self::Imessage => "imessage",
+            Self::Telegram => "telegram",
+            Self::WebApp => "web_app",
+            Self::MachineAudioOutput => "machine_audio_output",
+        }
+    }
+}
+
+/// The entry that lets every pane through a channel list.
+pub(crate) const EVERYONE: &str = "*";
+
+impl NotifySettings {
+    /// The folders whose agents may use `channel`.
+    pub(crate) fn list(&self, channel: Channel) -> &[String] {
+        match channel {
+            Channel::Imessage => &self.imessage,
+            Channel::Telegram => &self.telegram,
+            Channel::WebApp => &self.web_app,
+            Channel::MachineAudioOutput => &self.machine_audio_output,
+        }
+    }
+
+    /// The channel `away_channel` names: the one the phone gets by iMessage or Telegram.
+    pub(crate) fn away(&self) -> Channel {
+        if self.away_channel == "telegram" {
+            Channel::Telegram
+        } else {
+            Channel::Imessage
+        }
+    }
+}
+
+/// Reads `away_messages_only_from` as `chief` and as each channel list that the local
+/// layers (`local_keys`, the `[notify]` keys they set) do not set. Returns whether the old
+/// key was set, so the caller can warn once.
+pub(crate) fn apply_old_key(notify: &mut NotifySettings, local_keys: &[String]) -> bool {
+    let Some(folder) = notify.away_messages_only_from.clone() else {
+        return false;
+    };
+    let set = |key: &str| local_keys.iter().any(|local| local == key);
+    if !set("chief") {
+        notify.chief = Some(folder.clone());
+    }
+    for (key, list) in [
+        ("imessage", &mut notify.imessage),
+        ("telegram", &mut notify.telegram),
+        ("web_app", &mut notify.web_app),
+        ("machine_audio_output", &mut notify.machine_audio_output),
+    ] {
+        if !set(key) {
+            *list = vec![folder.clone()];
+        }
+    }
+    true
+}
+
+/// What is wrong with one entry of `chief` or a channel list, naming `key` and the entry.
+/// `everyone_ok` lets `"*"` through, as in the lists.
+fn entry_error(key: &str, entry: &str, everyone_ok: bool) -> Option<String> {
+    if everyone_ok && entry == EVERYONE {
+        return None;
+    }
+    if entry == EVERYONE {
+        return Some(format!("notify.{key} must name a folder, not \"{entry}\""));
+    }
+    let mut components = entry.split('/').filter(|part| !part.is_empty()).peekable();
+    let problem = if components.peek().is_none() {
+        "must not be empty or only slashes"
+    } else if components.any(|part| part == ".." || part == ".") {
+        "must not hold \"..\" or \".\" as a folder"
+    } else {
+        return None;
+    };
+    Some(format!("notify.{key} entry \"{entry}\" {problem}"))
+}
+
+fn notify_entry_errors(notify: &NotifySettings) -> Vec<String> {
+    let mut errors: Vec<String> = notify
+        .chief
+        .iter()
+        .filter_map(|entry| entry_error("chief", entry, false))
+        .collect();
+    for channel in [
+        Channel::Imessage,
+        Channel::Telegram,
+        Channel::WebApp,
+        Channel::MachineAudioOutput,
+    ] {
+        errors.extend(
+            notify
+                .list(channel)
+                .iter()
+                .filter_map(|entry| entry_error(channel.key(), entry, true)),
+        );
+    }
+    errors
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -877,12 +1004,13 @@ impl Settings {
         errors.extend(away_updates_only_from_error(
             self.notify.away_updates_only_from.as_deref(),
         ));
+        errors.extend(notify_entry_errors(&self.notify));
         errors.extend(timed_prompts_errors(&self.timed_prompts));
         errors.extend(telemetry_errors(&self.telemetry));
         errors.extend(voice_input_errors(self.voice_input.as_ref()));
         errors.extend(web_app_errors(
             self.web_app.as_ref(),
-            self.notify.away_messages_only_from.as_deref(),
+            self.notify.chief.as_deref(),
         ));
         match self.notify.away_channel.as_str() {
             "imessage" => {
@@ -940,7 +1068,24 @@ impl Settings {
             )
             .build()?;
 
-        let settings = config.try_deserialize::<Settings>()?;
+        let mut settings = config.try_deserialize::<Settings>()?;
+        let local = Config::builder()
+            .add_source(File::new(&format!("{config_dir}/{env}"), FileFormat::Toml).required(false))
+            .add_source(
+                config::Environment::with_prefix("HAROLD")
+                    .separator("__")
+                    .try_parsing(true),
+            )
+            .build()?;
+        let local_keys = local
+            .get_table("notify")
+            .map(|table| table.into_keys().collect::<Vec<_>>())
+            .unwrap_or_default();
+        if apply_old_key(&mut settings.notify, &local_keys) {
+            warn!(
+                "notify.away_messages_only_from is replaced by notify.chief and the channel lists"
+            );
+        }
         Ok(Arc::new(settings))
     }
 
@@ -1327,15 +1472,30 @@ mod tests {
         assert!(is_valid_machine_name(name), "{name:?}");
     }
 
-    /// The shipped default configuration with `overrides` laid over it.
+    /// The shipped default configuration with `overrides` laid over it, as `Settings::load`
+    /// reads it: the old key is applied against the keys `overrides` sets.
     fn default_settings_with(overrides: &str) -> super::Settings {
+        let (settings, _) = default_settings_and_warning(overrides);
+        settings
+    }
+
+    /// `default_settings_with`, and whether the old key was set (the start warns then).
+    fn default_settings_and_warning(overrides: &str) -> (super::Settings, bool) {
         let default = format!("{}/config/default", env!("CARGO_MANIFEST_DIR"));
-        Config::builder()
+        let mut settings: super::Settings = Config::builder()
             .add_source(File::new(&default, FileFormat::Toml))
             .add_source(File::from_str(overrides, FileFormat::Toml))
             .build()
             .and_then(Config::try_deserialize)
-            .expect("default configuration with overrides should deserialize")
+            .expect("default configuration with overrides should deserialize");
+        let local_keys: Vec<String> = Config::builder()
+            .add_source(File::from_str(overrides, FileFormat::Toml))
+            .build()
+            .and_then(|local| local.get_table("notify"))
+            .map(|table| table.into_keys().collect())
+            .unwrap_or_default();
+        let warned = super::apply_old_key(&mut settings.notify, &local_keys);
+        (settings, warned)
     }
 
     /// The errors `validate()` reports about the message folder, under its new key or
@@ -1420,6 +1580,162 @@ mod tests {
                 "notify.away_messages_only_from must be an absolute path starting with \"/\", got \"chief-of-pods\"",
                 OLD_KEY_ERROR,
             ]
+        );
+    }
+
+    const LIST_KEYS: [&str; 4] = ["imessage", "telegram", "web_app", "machine_audio_output"];
+
+    fn notify_errors(overrides: &str) -> Vec<String> {
+        default_settings_with(overrides)
+            .validate()
+            .into_iter()
+            .filter(|error| error.starts_with("notify.") && !error.starts_with("notify.away_"))
+            .collect()
+    }
+
+    #[test]
+    fn defaults_carry_the_five_keys() {
+        let settings = default_settings_with("");
+        assert_eq!(settings.notify.chief.as_deref(), Some("chief-of-pods"));
+        for channel in [
+            super::Channel::Imessage,
+            super::Channel::Telegram,
+            super::Channel::WebApp,
+            super::Channel::MachineAudioOutput,
+        ] {
+            assert_eq!(settings.notify.list(channel), ["chief-of-pods"]);
+        }
+        assert!(notify_errors("").is_empty());
+    }
+
+    #[test]
+    fn bad_entries_stop_the_start_naming_key_and_entry() {
+        for key in [
+            "chief",
+            "imessage",
+            "telegram",
+            "web_app",
+            "machine_audio_output",
+        ] {
+            for entry in ["", "/", "//", "a/../b", "..", ".", "a/./b"] {
+                let value = if key == "chief" {
+                    format!("\"{entry}\"")
+                } else {
+                    format!("[\"{entry}\"]")
+                };
+                let errors = notify_errors(&format!("[notify]\n{key} = {value}"));
+                assert!(
+                    errors.iter().any(|e| e.contains(&format!("notify.{key}"))
+                        && e.contains(&format!("\"{entry}\""))),
+                    "{key} {entry:?}: {errors:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_bad_entry_in_the_unused_channels_list_still_stops_the_start() {
+        let telegram = notify_errors("[notify]\naway_channel = \"imessage\"\ntelegram = [\"..\"]");
+        assert!(
+            telegram.iter().any(|e| e.contains("notify.telegram")),
+            "{telegram:?}"
+        );
+        let imessage = notify_errors("[notify]\naway_channel = \"telegram\"\nimessage = [\"..\"]");
+        assert!(
+            imessage.iter().any(|e| e.contains("notify.imessage")),
+            "{imessage:?}"
+        );
+    }
+
+    #[test]
+    fn star_is_valid_in_lists_and_refused_in_chief() {
+        for key in LIST_KEYS {
+            assert!(
+                notify_errors(&format!("[notify]\n{key} = [\"*\"]")).is_empty(),
+                "{key}"
+            );
+            assert!(
+                notify_errors(&format!("[notify]\n{key} = []")).is_empty(),
+                "{key}"
+            );
+        }
+        let errors = notify_errors("[notify]\nchief = \"*\"");
+        assert!(
+            errors.iter().any(|e| e.contains("notify.chief")),
+            "{errors:?}"
+        );
+    }
+
+    #[test]
+    fn unknown_notify_key_stops_the_start_and_known_ones_load() {
+        let default = format!("{}/config/default", env!("CARGO_MANIFEST_DIR"));
+        let result: Result<super::Settings, _> = Config::builder()
+            .add_source(File::new(&default, FileFormat::Toml))
+            .add_source(File::from_str(
+                "[notify]\nimesage = [\"x\"]",
+                FileFormat::Toml,
+            ))
+            .build()
+            .and_then(Config::try_deserialize);
+        let error = result.expect_err("unknown key").to_string();
+        assert!(error.contains("imesage"), "{error}");
+
+        let known = "[notify]\nskip_if_session_active = false\nskip_if_pane_active = true\naway_channel = \"imessage\"\naway_messages_only_from = \"/a\"\nchief = \"/a\"\nimessage = [\"/a\"]\ntelegram = [\"/a\"]\nweb_app = [\"/a\"]\nmachine_audio_output = [\"/a\"]";
+        default_settings_with(known);
+    }
+
+    #[test]
+    fn old_key_alone_fills_chief_and_all_lists_and_warns() {
+        let (settings, warned) =
+            default_settings_and_warning("[notify]\naway_messages_only_from = \"/old\"");
+        assert!(warned);
+        assert_eq!(settings.notify.chief.as_deref(), Some("/old"));
+        for key in [
+            super::Channel::Imessage,
+            super::Channel::Telegram,
+            super::Channel::WebApp,
+            super::Channel::MachineAudioOutput,
+        ] {
+            assert_eq!(settings.notify.list(key), ["/old"]);
+        }
+    }
+
+    #[test]
+    fn new_keys_win_over_old_key_and_an_empty_list_is_not_refilled() {
+        let (settings, warned) = default_settings_and_warning(
+            "[notify]\naway_messages_only_from = \"/old\"\nimessage = [\"b\"]\ntelegram = []\nchief = \"c\"",
+        );
+        assert!(warned);
+        assert_eq!(settings.notify.imessage, ["b"]);
+        assert!(settings.notify.telegram.is_empty());
+        assert_eq!(settings.notify.chief.as_deref(), Some("c"));
+        assert_eq!(settings.notify.web_app, ["/old"]);
+        assert_eq!(settings.notify.machine_audio_output, ["/old"]);
+    }
+
+    #[test]
+    fn no_old_key_changes_nothing_and_does_not_warn() {
+        let (settings, warned) = default_settings_and_warning("");
+        assert!(!warned);
+        assert_eq!(settings.notify.imessage, ["chief-of-pods"]);
+    }
+
+    #[test]
+    fn channel_keys_and_the_away_pick() {
+        assert_eq!(super::Channel::WebApp.key(), "web_app");
+        assert_eq!(
+            super::Channel::MachineAudioOutput.key(),
+            "machine_audio_output"
+        );
+        assert_eq!(
+            default_settings_with("").notify.away(),
+            super::Channel::Imessage
+        );
+        assert_eq!(
+            default_settings_with("[notify]\naway_channel = \"telegram\"")
+                .notify
+                .away(),
+            super::Channel::Telegram
         );
     }
 
@@ -2041,7 +2357,7 @@ mod tests {
         crate::peers::settings_with(overrides).validate()
     }
 
-    const WEB_APP_FOLDER: &str = "[notify]\naway_messages_only_from = \"/work/chief-of-pods\"\n";
+    const WEB_APP_FOLDER: &str = "[notify]\nchief = \"/work/chief-of-pods\"\n";
 
     #[test]
     fn web_app_is_off_when_the_section_is_absent() {
@@ -2085,10 +2401,12 @@ mod tests {
 
     #[test]
     fn validate_reports_web_app_without_the_chiefs_folder() {
-        let message = "web_app needs notify.away_messages_only_from, the chief's folder";
-        let without = web_app_validate_errors(
+        let message = "web_app needs notify.chief, the chief's folder";
+        let mut settings = crate::peers::settings_with(
             "[web_app]\nlisten = \"127.0.0.1:4330\"\nallowed_login = \"a@b.c\"",
         );
+        settings.notify.chief = None;
+        let without = settings.validate();
         assert!(without.iter().any(|e| e == message), "{without:?}");
         let with = web_app_validate_errors(&format!(
             "{WEB_APP_FOLDER}[web_app]\nlisten = \"127.0.0.1:4330\"\nallowed_login = \"a@b.c\""

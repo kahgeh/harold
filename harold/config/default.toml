@@ -84,6 +84,13 @@ path = "~/.harold/store"
 skip_if_session_active = true
 skip_if_pane_active = false
 away_channel = "imessage"
+# Which pane is the chief, matched by folder. Each list says whose agents may use that
+# channel: [] is nobody, ["*"] is everyone.
+chief = "chief-of-pods"
+imessage = ["chief-of-pods"]
+telegram = ["chief-of-pods"]
+web_app = ["chief-of-pods"]
+machine_audio_output = ["chief-of-pods"]
 
 # Timed prompts: none by default. Add [[timed_prompts]] entries in local.toml.
 # See docs/references/timed-prompts/README.md.

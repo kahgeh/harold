@@ -63,7 +63,11 @@ command = "say"
 # skip_if_session_active = true  # skip if completing pane is in the active tmux session
 # skip_if_pane_active = false    # skip if completing pane is the active pane and screen is unlocked
 # away_channel = "telegram"      # "imessage" or "telegram"
-# away_messages_only_from = "/Users/you/Dev/chief-of-pods"  # while an agent runs in this folder, only its panes send to the phone: turn-end updates and messages agents send
+# chief = "/Users/you/Dev/chief-of-pods"                 # which pane is the chief, matched by folder
+# imessage = ["/Users/you/Dev/chief-of-pods"]            # whose agents may reach the phone by iMessage; [] is nobody, ["*"] is everyone
+# telegram = ["/Users/you/Dev/chief-of-pods"]            # the same for Telegram
+# web_app = ["/Users/you/Dev/chief-of-pods"]             # the same for the web app
+# machine_audio_output = ["/Users/you/Dev/chief-of-pods"]  # whose agents may be spoken aloud on the Mac; [] is nobody, ["*"] is everyone
 
 # Telemetry: export to the local collector is on by default (default.toml sets otlp_endpoint). Set export = false to turn it off. Leave alert_listen and pod_registry out to turn those off. Set pod_registry on one Mac only, or merges are counted twice.
 # [telemetry]
