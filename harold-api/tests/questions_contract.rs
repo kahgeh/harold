@@ -109,7 +109,7 @@ fn fields(expected: &[(&str, i32)]) -> Vec<(String, i32)> {
 }
 
 #[test]
-fn question_service_lists_its_six_rpcs() {
+fn question_service_lists_its_seven_rpcs() {
     let descriptor = questions_file_descriptor()
         .service
         .into_iter()
@@ -130,6 +130,7 @@ fn question_service_lists_its_six_rpcs() {
             "ListQuestions",
             "AnswerQuestion",
             "DeferQuestion",
+            "TickStep",
         ]
     );
 }
@@ -160,7 +161,13 @@ fn question_fields_keep_their_numbers() {
             ("link", 5),
             ("intro", 6),
             ("decisions", 7),
+            ("title", 8),
+            ("steps", 9),
         ])
+    );
+    assert_eq!(
+        message_fields("Step"),
+        fields(&[("text", 1), ("detail", 2)])
     );
     assert_eq!(
         message_fields("PutQuestionRequest"),
@@ -187,7 +194,12 @@ fn question_fields_keep_their_numbers() {
     );
     assert_eq!(
         message_fields("ListedQuestion"),
-        fields(&[("question", 1), ("version", 2), ("deferred", 3)])
+        fields(&[
+            ("question", 1),
+            ("version", 2),
+            ("deferred", 3),
+            ("ticked", 4)
+        ])
     );
     assert_eq!(
         message_fields("Dismissed"),
@@ -211,6 +223,11 @@ fn question_fields_keep_their_numbers() {
     assert!(message_fields("AnswerQuestionResponse").is_empty());
     assert_eq!(message_fields("DeferQuestionRequest"), fields(&[("id", 1)]));
     assert!(message_fields("DeferQuestionResponse").is_empty());
+    assert_eq!(
+        message_fields("TickStepRequest"),
+        fields(&[("id", 1), ("version", 2), ("step", 3), ("ticked", 4)])
+    );
+    assert!(message_fields("TickStepResponse").is_empty());
 }
 
 #[test]
@@ -233,6 +250,8 @@ fn answer_kinds_keep_their_numbers() {
             ("ANSWER_KIND_REVISE", 2),
             ("ANSWER_KIND_REJECT", 3),
             ("ANSWER_KIND_FREE_TEXT", 4),
+            ("ANSWER_KIND_DONE", 5),
+            ("ANSWER_KIND_IGNORE", 6),
         ])
     );
     assert_eq!(AnswerKind::Answer as i32, 1);
