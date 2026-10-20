@@ -17,7 +17,8 @@ use tokio::sync::{mpsc, watch};
 use tokio_stream::wrappers::ReceiverStream;
 use tracing::{info, warn};
 
-use super::pages::{CallSection, MessageView};
+use super::chief::find_chief;
+use super::pages::{CallSection, MessageView, RespondingSection, awaiting_chief, dots_show};
 use super::{AppState, thread_start_ms};
 use crate::store::{AppMessage, AppReplyState};
 use crate::voice_input::PhoneView;
@@ -60,9 +61,16 @@ pub(crate) async fn get_updates(State(state): State<AppState>) -> Response {
         None => None,
     };
     let (patches, queued) = mpsc::channel(PATCHES_QUEUED);
-    // The channel has room for both, and nothing reads it yet: these sends cannot wait or
-    // fail.
+    let dots = Dots::of(&state, &messages);
+    // The channel has room for all of them, and nothing reads it yet: these sends cannot
+    // wait or fail.
     let _ = patches.try_send(Ok(whole));
+    // The page was drawn without the dots, so they are sent only when they are on.
+    if dots.shown
+        && let Some(patch) = responding_patch(true)
+    {
+        let _ = patches.try_send(Ok(patch));
+    }
     if let Some(section) = section {
         let _ = patches.try_send(Ok(section));
     }
@@ -72,6 +80,7 @@ pub(crate) async fn get_updates(State(state): State<AppState>) -> Response {
         changes,
         call,
         shown(&messages),
+        dots,
         patches,
     ));
     Sse::new(ReceiverStream::<Result<Event, Infallible>>::new(queued))
@@ -86,10 +95,11 @@ async fn follow_thread(
     changes: watch::Receiver<u64>,
     call: Option<watch::Receiver<PhoneView>>,
     known: HashMap<String, Shown>,
+    dots: Dots,
     patches: mpsc::Sender<Result<Event, Infallible>>,
 ) {
     let connected = Instant::now();
-    let reason = send_patches(state, changes, call, known, patches).await;
+    let reason = send_patches(state, changes, call, known, dots, patches).await;
     info!(
         reason,
         seconds = connected.elapsed().as_secs(),
@@ -106,9 +116,11 @@ async fn send_patches(
     mut changes: watch::Receiver<u64>,
     mut call: Option<watch::Receiver<PhoneView>>,
     mut known: HashMap<String, Shown>,
+    mut dots: Dots,
     patches: mpsc::Sender<Result<Event, Infallible>>,
 ) -> &'static str {
     let mut shutdown = state.shutdown.clone();
+    let mut agents = Some(state.snapshots.clone());
     loop {
         tokio::select! {
             _ = shutdown.changed() => return "shutdown",
@@ -117,6 +129,14 @@ async fn send_patches(
                 if changed.is_err() {
                     return "store_stopped";
                 }
+            }
+            () = agents_changed(&mut agents) => {
+                if let Some(patch) = dots.refresh(&state)
+                    && patches.send(Ok(patch)).await.is_err()
+                {
+                    return "page_gone";
+                }
+                continue;
             }
             section = call_changed(&mut call) => {
                 // A screen that cannot be drawn waits for the next change.
@@ -134,6 +154,8 @@ async fn send_patches(
         };
         // Rows pruned from the thread drop out of `known` here.
         let before = std::mem::replace(&mut known, shown(&messages));
+        dots.awaiting = awaiting_chief(&messages);
+        let dots_patch = dots.refresh(&state);
         for message in messages {
             let Some(patch) = patch_for(before.get(&message.event_id), message) else {
                 continue;
@@ -142,6 +164,57 @@ async fn send_patches(
                 return "page_gone";
             }
         }
+        // After the rows, so a chief row lands before the dots go.
+        if let Some(patch) = dots_patch
+            && patches.send(Ok(patch)).await.is_err()
+        {
+            return "page_gone";
+        }
+    }
+}
+
+/// Whether the responding dots show, and whether the newest row is a reply awaiting the
+/// chief, which only a read of the thread can change.
+struct Dots {
+    awaiting: bool,
+    shown: bool,
+}
+
+impl Dots {
+    fn of(state: &AppState, messages: &[AppMessage]) -> Self {
+        let awaiting = awaiting_chief(messages);
+        let chief = find_chief(&state.snapshots.borrow(), state.chief_folder.as_deref());
+        Self {
+            awaiting,
+            shown: dots_show(awaiting, &chief),
+        }
+    }
+
+    /// The patch that brings the page to the dots as they now are, if they changed.
+    fn refresh(&mut self, state: &AppState) -> Option<Event> {
+        let chief = find_chief(&state.snapshots.borrow(), state.chief_folder.as_deref());
+        let on = dots_show(self.awaiting, &chief);
+        if on == self.shown {
+            return None;
+        }
+        self.shown = on;
+        responding_patch(on)
+    }
+}
+
+/// One patch replacing `#responding`, morphed by its id.
+fn responding_patch(on: bool) -> Option<Event> {
+    Some(PatchElements::new(RespondingSection { on }.render().ok()?).into())
+}
+
+/// Resolves when the agent snapshot next changes. Never resolves once the hub has gone.
+async fn agents_changed(agents: &mut Option<watch::Receiver<crate::agent::domain::AgentSnapshot>>) {
+    let Some(receiver) = agents.as_mut() else {
+        return std::future::pending().await;
+    };
+    if receiver.changed().await.is_err() {
+        *agents = None;
+        return std::future::pending().await;
     }
 }
 

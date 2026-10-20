@@ -11,8 +11,13 @@ use super::origin::loopback_hosts;
 use super::pages::CONTENT_SECURITY_POLICY;
 use super::replies::REPLY_MAX_CHARS;
 use super::{AppState, router};
+use crate::agent::domain::{
+    AgentIncarnation, AgentPaneObservation, AgentPaneProjection, AgentSnapshot, EffectiveAgentState,
+};
+use crate::agent::snapshot::AgentSnapshotHub;
 use crate::outbound::fake::CapturedLogs;
 use crate::store::{AppPushSubscribed, AppReplyState, EventVersion, HaroldStore, append_app_reply};
+use crate::timed_prompts::tests::snapshot;
 
 const LOGIN: &str = "chief@example.com";
 const CANARY: &str = "APP-CANARY-7731";
@@ -51,10 +56,19 @@ struct TestServer {
 
 impl TestServer {
     async fn serve(store: Arc<HaroldStore>) -> Self {
+        Self::serve_with(store, super::idle_snapshots(), None).await
+    }
+
+    /// Serves with the agent snapshots in `snapshots` and `chief_folder` as the chief's.
+    async fn serve_with(
+        store: Arc<HaroldStore>,
+        snapshots: watch::Receiver<AgentSnapshot>,
+        chief_folder: Option<&str>,
+    ) -> Self {
         let (shutdown, shutdown_rx) = watch::channel(());
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let state = AppState::for_tests(
+        let mut state = AppState::for_tests(
             store,
             LOGIN,
             "BPublicKeyForTheTestPage",
@@ -63,6 +77,8 @@ impl TestServer {
             None,
             Default::default(),
         );
+        state.snapshots = snapshots;
+        state.chief_folder = chief_folder.map(Arc::from);
         let handle = tokio::spawn(async move {
             let _ = axum::serve(listener, router(state)).await;
         });
@@ -808,6 +824,183 @@ async fn the_send_button_is_disabled_while_a_reply_is_posting() {
     );
     assert!(
         page.contains(r#"<button type="submit" data-attr:disabled="$sending">Send</button>"#),
+        "{page}"
+    );
+}
+
+const CHIEF_FOLDER: &str = "/a/chief";
+
+fn chief_pane(state: EffectiveAgentState) -> AgentPaneProjection {
+    AgentPaneProjection {
+        pane: AgentPaneObservation {
+            incarnation: AgentIncarnation {
+                pane_id: "%1".into(),
+                pane_pid: 10,
+                agent_pid: 20,
+                agent_started_at_ms: 1_000,
+                provider_id: "claude".into(),
+            },
+            tmux_target: "pods:0.1".into(),
+            session_name: "pods".into(),
+            window_index: 0,
+            pane_index: 1,
+            working_directory: CHIEF_FOLDER.into(),
+            provider_display_name: "Claude".into(),
+            observed_at_ms: 2_000,
+        },
+        hook_state: None,
+        hook_observed_at_ms: None,
+        lifecycle_adapter_id: None,
+        screen_state: None,
+        screen_classifier_id: None,
+        screen_observed_at_ms: None,
+        effective_state: state,
+        explicit_work_summary: None,
+        explicit_work_summary_updated_at_ms: None,
+        screen_work_summary: None,
+        screen_work_summary_updated_at_ms: None,
+        summary_basis_version: EventVersion::start(),
+        generated_work_summary: None,
+        generated_summary_basis_version: None,
+        work_summary: None,
+        last_transition_at_ms: 2_000,
+        last_event_version: EventVersion::start(),
+    }
+}
+
+/// Publishes a snapshot whose only pane is the chief's in `state`, as event version `n`.
+fn publish_chief(hub: &AgentSnapshotHub, n: u64, state: EffectiveAgentState) {
+    let mut snapshot = snapshot(Some(true), vec![chief_pane(state)]);
+    snapshot.through_event_version = EventVersion::new(n).unwrap();
+    hub.publish_committed(snapshot);
+}
+
+/// The text of the next `#responding` patch, skipping nothing: fails if another patch comes.
+async fn next_responding(updates: &mut EventReader) -> String {
+    let patch = updates.next().await.expect("a responding patch");
+    assert!(patch.contains(r#"id="responding""#), "{patch}");
+    patch
+}
+
+async fn typed_reply(store: &HaroldStore) -> String {
+    append_app_reply(store, "a reply").await.unwrap();
+    store.project_unhandled_events(100).await.unwrap();
+    let reply = store.app_messages_since(0).await.unwrap().pop().unwrap();
+    store
+        .set_app_reply_state(&reply.event_id, AppReplyState::Typed)
+        .await
+        .unwrap();
+    reply.event_id
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_responding_dots_follow_the_chief_while_a_typed_reply_is_the_newest_row() {
+    let directory = TestDirectory::new();
+    let store = directory.store().await;
+    typed_reply(&store).await;
+    let hub = AgentSnapshotHub::new(snapshot(
+        Some(true),
+        vec![chief_pane(EffectiveAgentState::Idle)],
+    ));
+    let server = TestServer::serve_with(store.clone(), hub.subscribe(), Some(CHIEF_FOLDER)).await;
+    let mut updates = server.updates().await;
+    updates.next().await.expect("the whole thread");
+    updates.expect_quiet(Duration::from_millis(200)).await;
+
+    publish_chief(&hub, 1, EffectiveAgentState::Busy);
+    let on = next_responding(&mut updates).await;
+    assert!(on.contains("dots"), "{on}");
+
+    store
+        .add_chief_app_message("c1", now_ms(), "done")
+        .await
+        .unwrap();
+    let row = updates.next().await.expect("the chief row");
+    assert!(row.contains(r#"id="m-c1""#), "{row}");
+    let off = next_responding(&mut updates).await;
+    assert!(!off.contains("dots"), "{off}");
+
+    // The chief row is the newest now, so a busy chief shows nothing.
+    publish_chief(&hub, 2, EffectiveAgentState::Idle);
+    publish_chief(&hub, 3, EffectiveAgentState::Busy);
+    updates.expect_quiet(Duration::from_millis(300)).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_dots_go_when_the_chief_turns_idle_with_no_message() {
+    let directory = TestDirectory::new();
+    let store = directory.store().await;
+    typed_reply(&store).await;
+    let hub = AgentSnapshotHub::new(snapshot(
+        Some(true),
+        vec![chief_pane(EffectiveAgentState::Busy)],
+    ));
+    let server = TestServer::serve_with(store, hub.subscribe(), Some(CHIEF_FOLDER)).await;
+    let mut updates = server.updates().await;
+    updates.next().await.expect("the whole thread");
+    let on = next_responding(&mut updates).await;
+    assert!(on.contains("dots"), "{on}");
+
+    publish_chief(&hub, 1, EffectiveAgentState::Idle);
+
+    let off = next_responding(&mut updates).await;
+    assert!(!off.contains("dots"), "{off}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn no_dots_for_a_reply_not_sent_or_without_a_chief() {
+    let directory = TestDirectory::new();
+    let store = directory.store().await;
+    append_app_reply(&store, "a reply").await.unwrap();
+    store.project_unhandled_events(100).await.unwrap();
+    let reply = store.app_messages_since(0).await.unwrap().pop().unwrap();
+    store
+        .set_app_reply_state(&reply.event_id, AppReplyState::NotSentNoChief)
+        .await
+        .unwrap();
+    let hub = AgentSnapshotHub::new(snapshot(
+        Some(true),
+        vec![chief_pane(EffectiveAgentState::Busy)],
+    ));
+    let server = TestServer::serve_with(store.clone(), hub.subscribe(), Some(CHIEF_FOLDER)).await;
+    let mut updates = server.updates().await;
+    updates.next().await.expect("the whole thread");
+    updates.expect_quiet(Duration::from_millis(200)).await;
+    let page = server.get("/").await.text().await.unwrap();
+    assert!(!page.contains("class=\"dots\""), "{page}");
+
+    // A typed reply but no chief folder, and a listing that failed, show none either.
+    store
+        .set_app_reply_state(&reply.event_id, AppReplyState::Typed)
+        .await
+        .unwrap();
+    let no_folder = TestServer::serve_with(store.clone(), hub.subscribe(), None).await;
+    let page = no_folder.get("/").await.text().await.unwrap();
+    assert!(!page.contains("class=\"dots\""), "{page}");
+    let failed = AgentSnapshotHub::new(snapshot(
+        Some(false),
+        vec![chief_pane(EffectiveAgentState::Busy)],
+    ));
+    let listing = TestServer::serve_with(store, failed.subscribe(), Some(CHIEF_FOLDER)).await;
+    let page = listing.get("/").await.text().await.unwrap();
+    assert!(!page.contains("class=\"dots\""), "{page}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_page_draws_the_dots_when_it_loads_into_a_typed_reply_and_a_busy_chief() {
+    let directory = TestDirectory::new();
+    let store = directory.store().await;
+    typed_reply(&store).await;
+    let hub = AgentSnapshotHub::new(snapshot(
+        Some(true),
+        vec![chief_pane(EffectiveAgentState::Busy)],
+    ));
+    let server = TestServer::serve_with(store, hub.subscribe(), Some(CHIEF_FOLDER)).await;
+
+    let page = server.get("/").await.text().await.unwrap();
+
+    assert!(
+        page.contains(r#"<div id="responding""#) && page.contains(r#"class="dots""#),
         "{page}"
     );
 }

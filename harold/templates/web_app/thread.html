@@ -24,6 +24,7 @@
 <p id="call-notice" class="call-notice" role="status" hidden></p>
 <main>
 {% include "web_app/messages.html" %}
+{{ responding|safe }}
 </main>
 <form id="reply" class="bar bottom" data-indicator:sending data-on:submit="@post('/replies')">
 <input type="text" data-bind:reply maxlength="1000" placeholder="Reply to the chief" aria-label="Reply to the chief" autocomplete="off">

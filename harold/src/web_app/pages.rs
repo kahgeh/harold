@@ -6,6 +6,7 @@ use axum::http::{HeaderValue, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{Html, IntoResponse, Response};
 
+use super::chief::{ChiefPane, find_chief};
 use super::{AppState, DATASTAR_JS, WebAppIdentity, thread_start_ms};
 use crate::store::{AppMessage, AppReplyState, AppSender};
 use crate::voice_input::{CallState, PhoneView, Said, Speaker};
@@ -37,6 +38,8 @@ pub(crate) struct ThreadPage {
     pub call_set_up: bool,
     /// The call screen, shown by `call.js` while a call lasts.
     pub call: CallSection,
+    /// The responding dots, under the thread.
+    pub responding: RespondingSection,
 }
 
 /// One row of the thread, as `#messages` shows it.
@@ -141,6 +144,35 @@ impl From<AppMessage> for MessageView {
     }
 }
 
+/// `#responding`, under the newest message: the three dots while the chief works on your
+/// last reply, empty otherwise.
+#[derive(Template)]
+#[template(
+    source = r#"<div id="responding" class="responding" role="status">{% if on %}<span class="dots" aria-label="the chief is responding"><i></i><i></i><i></i></span>{% endif %}</div>"#,
+    ext = "html"
+)]
+pub(crate) struct RespondingSection {
+    pub on: bool,
+}
+
+/// True when the newest row is your reply, typed into the chief's pane or waiting for it
+/// (`awaiting_chief`).
+pub(crate) fn awaiting_chief(messages: &[AppMessage]) -> bool {
+    messages.last().is_some_and(|last| {
+        last.sender == AppSender::User
+            && matches!(
+                last.state,
+                Some(AppReplyState::Typed | AppReplyState::WaitingChiefBusy)
+            )
+    })
+}
+
+/// Whether the responding dots show: the chief is the one pane in its folder and busy,
+/// while the newest row is a reply awaiting it.
+pub(crate) fn dots_show(awaiting: bool, chief: &ChiefPane) -> bool {
+    awaiting && matches!(chief, ChiefPane::One { busy: true, .. })
+}
+
 /// `#call`, the call screen as the server draws it. `call.js` plays what its
 /// `data-harold-*` attributes name, and the stream morphs it as the call changes.
 #[derive(Template)]
@@ -239,6 +271,10 @@ pub(crate) async fn get_thread(State(state): State<AppState>) -> Response {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
     let calls = state.calls.as_ref();
+    let chief = find_chief(&state.snapshots.borrow(), state.chief_folder.as_deref());
+    let responding = RespondingSection {
+        on: dots_show(awaiting_chief(&messages), &chief),
+    };
     let page = ThreadPage {
         app_name: state.identity.name.clone(),
         has_icon: state.identity.icon.is_some(),
@@ -248,6 +284,7 @@ pub(crate) async fn get_thread(State(state): State<AppState>) -> Response {
         call: calls.map_or_else(CallSection::off, |calls| {
             CallSection::from(&*calls.view().borrow())
         }),
+        responding,
     };
     match page.render() {
         Ok(html) => Html(html).into_response(),
