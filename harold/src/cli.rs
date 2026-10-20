@@ -268,7 +268,9 @@ fn parse_watch_start(name: &str, flags: &[&str]) -> Result<WatchCommand, String>
             .map_err(|_| format!("invalid {field}"))
     };
     if let Some(text) = &budget
-        && !text.parse::<f64>().is_ok_and(f64::is_finite)
+        && !text
+            .parse::<f64>()
+            .is_ok_and(|budget| budget.is_finite() && budget > 0.0)
     {
         return Err("invalid run_budget_usd".into());
     }
@@ -3413,6 +3415,24 @@ mod tests {
             ]),
             Err("invalid run_budget_usd".into())
         );
+        for budget in ["0", "-0.5"] {
+            assert_eq!(
+                watch(&[
+                    "start",
+                    "w",
+                    "--skill",
+                    "s",
+                    "--every",
+                    "10",
+                    "--for",
+                    "5",
+                    "--run-budget",
+                    budget
+                ]),
+                Err("invalid run_budget_usd".into()),
+                "{budget}"
+            );
+        }
     }
 
     #[test]

@@ -233,7 +233,7 @@
         "displayType": "table",
         "connectionId": "@CLICKHOUSE_CONNECTION_ID@",
         "sourceId": "@TRACES_SOURCE_ID@",
-        "sqlTemplate": "SELECT quantile(0.5)(Duration / 1e9) AS median_seconds, quantile(0.95)(Duration / 1e9) AS p95_seconds, avg(toFloat64OrNull(SpanAttributes['cost_usd'])) AS cost_usd_per_run, count() AS runs FROM $__sourceTable WHERE ServiceName = 'harold' AND SpanName = 'harold.watch.run' AND $__timeFilter(Timestamp)"
+        "sqlTemplate": "SELECT quantile(0.5)(Duration / 1e9) AS median_seconds, quantile(0.95)(Duration / 1e9) AS p95_seconds, avg(toFloat64OrNull(SpanAttributes['cost_usd'])) AS cost_usd_per_run, count() AS runs FROM $__sourceTable WHERE ServiceName = 'harold' AND SpanName = 'harold.watch.run' AND SpanAttributes['outcome'] NOT IN ('skipped', 'stopped') AND $__timeFilter(Timestamp)"
       }
     }
   ]

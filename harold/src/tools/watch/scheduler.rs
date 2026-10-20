@@ -91,6 +91,8 @@ pub(super) struct Scheduler {
     /// One model at a time across all watches.
     model: tokio::sync::Mutex<()>,
     state: Mutex<State>,
+    /// One `start` at a time, so the limit and a replacement are checked and stored together.
+    start_lock: tokio::sync::Mutex<()>,
     model_wait: Duration,
     run_limit: Duration,
     retry: Duration,
@@ -116,6 +118,10 @@ pub(super) fn total_runs(row: &WatchRow) -> u32 {
     ((span + every - 1) / every).max(1) as u32
 }
 
+fn counted(count: u32, one: &str, many: &str) -> String {
+    format!("{count} {}", if count == 1 { one } else { many })
+}
+
 fn dollars(micros: i64) -> String {
     format!("${:.2}", micros as f64 / 1_000_000.0)
 }
@@ -132,6 +138,7 @@ impl Scheduler {
             typist,
             model: tokio::sync::Mutex::new(()),
             state: Mutex::default(),
+            start_lock: tokio::sync::Mutex::new(()),
             model_wait: MODEL_WAIT,
             run_limit: RUN_LIMIT,
             retry: RETRY,
@@ -156,6 +163,7 @@ impl Scheduler {
 
     /// Starts a watch, or replaces a running one of the same name. Returns when it ends.
     pub(super) async fn start(self: &Arc<Self>, checked: Checked) -> Result<i64, StartRefusal> {
+        let _one_start = self.start_lock.lock().await;
         let store = &self.deps.store;
         let running = store
             .running()
@@ -594,16 +602,20 @@ impl Scheduler {
             ended.runs,
             ended.cost_usd_micros as f64 / 1_000_000.0,
         );
-        let Some(live) = live else {
-            return;
+        // A watch that ran out while Harold was down has no task: its closing line still
+        // goes out, through a slot of its own.
+        let slot = match live {
+            Some(live) => live.slot,
+            None if reason == EndReason::Stopped => return,
+            None => ReportSlot::new(Arc::clone(&self.typist), Self::target(row), self.retry),
         };
         let closing = match reason {
             EndReason::Stopped => None,
             EndReason::Ended => Some(format!(
-                "WATCH {} ended: {} runs, {} reports, {}",
+                "WATCH {} ended: {}, {}, {}",
                 ended.name,
-                ended.runs,
-                ended.reports,
+                counted(ended.runs, "run", "runs"),
+                counted(ended.reports, "report", "reports"),
                 dollars(ended.cost_usd_micros)
             )),
             EndReason::RunsFailing => Some(format!(
@@ -618,8 +630,7 @@ impl Scheduler {
                 dollars(daily.or(self.daily_budget_micros()).unwrap_or(0))
             )),
         };
-        live.slot
-            .close(closing.map(|line| (line, obs::ReportObs::new(&ended.name, ended.runs))));
+        slot.close(closing.map(|line| (line, obs::ReportObs::new(&ended.name, ended.runs))));
     }
 
     /// The daily budget would be passed: every running watch stops with its own closing

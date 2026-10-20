@@ -253,10 +253,7 @@ async fn a_waiting_report_is_dropped_when_the_watch_ends_and_only_the_closing_li
     h.agents.set_state(CHIEF_PANE, EffectiveAgentState::Idle);
     pass(Duration::from_secs(6)).await;
 
-    assert_eq!(
-        h.typing.typed(),
-        ["WATCH w ended: 1 runs, 1 reports, $0.01"]
-    );
+    assert_eq!(h.typing.typed(), ["WATCH w ended: 1 run, 1 report, $0.01"]);
 }
 
 #[tokio::test(start_paused = true)]
@@ -730,6 +727,25 @@ async fn a_watch_whose_time_ran_out_while_harold_was_down_ends_on_resume() {
     pass(Duration::from_secs(10)).await;
 
     assert_eq!(h.row("w").await.stop_reason.as_deref(), Some("ended"));
+    assert_eq!(
+        h.typing.typed(),
+        ["WATCH w ended: 1 run, 0 reports, $0.01"],
+        "the closing line goes out even though the watch ran out while Harold was down"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn concurrent_starts_keep_to_five_watches() {
+    let h = harness(settings(), vec![answer("QUIET", 0.01)]).await;
+    for index in 0..4 {
+        h.start(&format!("w{index}"), 10, 120).await;
+    }
+    let (a, b) = tokio::join!(
+        h.scheduler.start(h.checked("x", 10, 120)),
+        h.scheduler.start(h.checked("y", 10, 120)),
+    );
+    assert_eq!(a.is_ok() as u8 + b.is_ok() as u8, 1, "{a:?} {b:?}");
+    assert_eq!(h.store.running().await.unwrap().len(), 5);
 }
 
 #[tokio::test(start_paused = true)]

@@ -161,7 +161,7 @@ No line carries any of the skill's text, its `allowed-tools`, the facts, the com
 
 `watch`, `run` and `cost_usd` are on the telemetry reference's allowed fields. The folder stays out of spans and log exports. The [telemetry reference](../telemetry/README.md) has the `watch-cost-high` alert (severity warn, rarely) and the panel "Watch runs: cost and duration per run".
 
-To find out why runs fail, filter `harold.watch.run` spans by a failure `outcome`: `watch` and `run` name the run, `reason` the failure, and the `harold.watch.model` child's `result` and duration tell a timeout (`killed` at 120 seconds) from a process that did not start (`failed_to_start`: Claude Code is missing or logged out). `harold.log` keeps the process's exit status beside it, since errors are not exported. For `unreadable_answer` the answer is not logged, so run the skill by hand with the same facts.
+To find out why runs fail, filter `harold.watch.run` spans by a failure `outcome`: `watch` and `run` name the run, `reason` the failure, and the `harold.watch.model` child's `result` and duration tell a timeout (`killed` at 120 seconds) from a process that did not start (`failed_to_start`: Claude Code is missing or logged out). For `unreadable_answer` the answer is not logged, so run the skill by hand with the same facts.
 
 ## Data
 
