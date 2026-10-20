@@ -2,6 +2,7 @@
 //! schedule, and Harold types `WATCH` lines to the chief or to the agent. Outside this
 //! module only `NAME` and `start` are used.
 
+mod answer;
 mod validate;
 
 use crate::tools::{ToolContext, ToolError, ToolHandle};
