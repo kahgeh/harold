@@ -38,6 +38,7 @@ pub(crate) struct FakeEnvironment {
     /// The error the next turn-end send fails with, once.
     fail_next: Mutex<Option<String>>,
     delivered: Mutex<Vec<(OutboundChannel, String)>>,
+    delivered_as_chief: Mutex<Vec<bool>>,
     away_messages: Mutex<Vec<String>>,
     reply_targets: Mutex<Vec<String>>,
     spoken_lines: Mutex<Vec<String>>,
@@ -71,6 +72,7 @@ impl FakeEnvironment {
             fail_sends: AtomicBool::new(false),
             fail_next: Mutex::new(None),
             delivered: Mutex::new(Vec::new()),
+            delivered_as_chief: Mutex::new(Vec::new()),
             away_messages: Mutex::new(Vec::new()),
             reply_targets: Mutex::new(Vec::new()),
             spoken_lines: Mutex::new(Vec::new()),
@@ -108,6 +110,11 @@ impl FakeEnvironment {
     /// Makes the next turn-end send fail with `error`, and the ones after it succeed.
     pub(crate) fn fail_next_send_with(&self, error: &str) {
         *self.fail_next.lock().unwrap() = Some(error.to_string());
+    }
+
+    /// Whether each turn-end update handed to `deliver` was the chief's pane's.
+    pub(crate) fn delivered_as_chief(&self) -> Vec<bool> {
+        self.delivered_as_chief.lock().unwrap().clone()
     }
 
     /// Each turn-end update delivered: the channel and the pane.
@@ -162,7 +169,9 @@ impl NotifyEnvironment for FakeEnvironment {
         channel: &OutboundChannel,
         turn: &TurnCompleted,
         _trace_id: &str,
+        is_chief: bool,
     ) -> Result<(DeliveryOutcome, Option<AgentAddress>), String> {
+        self.delivered_as_chief.lock().unwrap().push(is_chief);
         if let Some(error) = self.fail_next.lock().unwrap().take() {
             return Err(error);
         }

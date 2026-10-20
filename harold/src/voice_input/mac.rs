@@ -318,11 +318,13 @@ impl CallPorts for MacPorts {
     async fn turn_end_update(&self, prompt: &str) -> String {
         let prompt = prompt.to_string();
         let context = last_component(self.chief_folder.as_deref().unwrap_or_default());
-        let update =
-            tokio::task::spawn_blocking(move || tts::desk_update_line(&prompt, &context)).await;
+        let update = tokio::task::spawn_blocking(move || {
+            tts::desk_update_line(&prompt, &tts::AgentName::Chief, &context, "call", "")
+        })
+        .await;
         update.unwrap_or_else(|_| {
             warn!("turn-end update not made");
-            "Work complete".to_string()
+            tts::fallback_sentence(&tts::AgentName::Chief)
         })
     }
 

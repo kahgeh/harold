@@ -1,11 +1,12 @@
 use std::sync::Mutex;
 use std::time::Duration;
 
+use super::NotifyEnvironment;
 use super::fake::{CapturedLogs, FakeEnvironment, turn};
 use super::left_out::TrackedAgents;
 use super::{
     AppDelivery, AppRoute, AwayText, ChiefApp, DeliveryOutcome, NotifyState, OutboundChannel,
-    notify, notify_with_app,
+    is_chief_pane, notify, notify_with_app,
 };
 use crate::inbound::ownership::agent_message_text;
 use crate::store::{AppReplyState, TurnCompleted};
@@ -412,6 +413,15 @@ fn chief_and_pod() -> TrackedAgents {
 }
 
 #[test]
+fn a_turn_is_the_chiefs_when_its_pane_is_the_one_notify_chief_finds() {
+    let environment = FakeEnvironment::new(ONLY_FROM_CHIEF);
+    let settings = environment.notify_settings();
+    assert!(is_chief_pane(settings, &chief_and_pod(), "%1"));
+    assert!(!is_chief_pane(settings, &chief_and_pod(), "%2"));
+    assert!(!is_chief_pane(settings, &chief_and_pod(), "%9"));
+}
+
+#[test]
 fn pane_off_the_list_sends_nothing_to_the_phone() {
     let environment = FakeEnvironment::locked(ONLY_FROM_CHIEF);
     let state = NotifyState::default();
@@ -519,6 +529,7 @@ fn desk_speaks_only_listed_agents_and_never_the_chief() {
         environment.delivered(),
         [(OutboundChannel::Tts, "%2".to_string())]
     );
+    assert_eq!(environment.delivered_as_chief(), [false]);
     let text = logs.text();
     assert!(
         text.contains("spoken update left out (chief) pane_id=%1"),

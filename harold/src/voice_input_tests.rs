@@ -229,8 +229,7 @@ impl Drop for FakeAwake {
 // The fake ports
 // ---------------------------------------------------------------------------
 
-pub(crate) const UPDATE: &str =
-    "Work complete on chief-of-pods and waiting for further instructions";
+pub(crate) const UPDATE: &str = "The chief has finished and is waiting.";
 
 #[derive(Default)]
 pub(crate) struct PortsState {

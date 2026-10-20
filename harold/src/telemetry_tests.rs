@@ -18,6 +18,17 @@ fn unique_pane() -> String {
 // ---------------------------------------------------------------------------
 
 #[test]
+fn the_model_failed_fallback_is_counted_from_0_at_start() {
+    test_support::install();
+    register_phone_counters();
+    let counted = test_support::exact_counter_value(
+        "harold.turn_end_updates",
+        &[("outcome", "fallback"), ("reason", "model_failed")],
+    );
+    assert!(counted.is_some());
+}
+
+#[test]
 fn only_allowed_fields_leave_a_span() {
     test_support::install();
     let pane = unique_pane();

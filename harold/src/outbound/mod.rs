@@ -100,8 +100,15 @@ impl OutboundChannel {
         &self,
         turn: &TurnCompleted,
         trace_id: &str,
+        is_chief: bool,
     ) -> Result<(DeliveryOutcome, Option<AgentAddress>), String> {
-        self.notify_with_switches(turn, trace_id, is_tts_muted(), is_messaging_paused())
+        self.notify_with_switches(
+            turn,
+            trace_id,
+            is_chief,
+            is_tts_muted(),
+            is_messaging_paused(),
+        )
     }
 
     /// Why this channel stays silent under the given switches, if it does. The voice
@@ -120,6 +127,7 @@ impl OutboundChannel {
         &self,
         turn: &TurnCompleted,
         trace_id: &str,
+        is_chief: bool,
         tts_muted: bool,
         messaging_paused: bool,
     ) -> Result<(DeliveryOutcome, Option<AgentAddress>), String> {
@@ -129,7 +137,7 @@ impl OutboundChannel {
         }
         match self {
             OutboundChannel::Tts => {
-                if tts::notify_at_desk(turn, trace_id) {
+                if tts::notify_at_desk_as(turn, trace_id, is_chief) {
                     Ok((DeliveryOutcome::Delivered, None))
                 } else {
                     Err("TTS notification command failed".into())
@@ -184,6 +192,7 @@ pub(crate) trait NotifyEnvironment: Send + Sync {
         channel: &OutboundChannel,
         turn: &TurnCompleted,
         trace_id: &str,
+        is_chief: bool,
     ) -> Result<(DeliveryOutcome, Option<AgentAddress>), String>;
     /// Send a message an agent asked for through the away channel.
     fn send_away_message(&self, message: &AwayMessageRequested) -> Result<(), String>;
@@ -224,8 +233,9 @@ impl NotifyEnvironment for SystemEnvironment {
         channel: &OutboundChannel,
         turn: &TurnCompleted,
         trace_id: &str,
+        is_chief: bool,
     ) -> Result<(DeliveryOutcome, Option<AgentAddress>), String> {
-        channel.notify(turn, trace_id)
+        channel.notify(turn, trace_id, is_chief)
     }
 
     fn send_away_message(&self, message: &AwayMessageRequested) -> Result<(), String> {
@@ -425,6 +435,12 @@ fn channel_name(channel: OutboundChannel, away_channel: &str) -> &'static str {
     }
 }
 
+/// Whether `pane_id` is the chief's pane, found as `notify.chief` finds it, so the update
+/// names `the chief` and not `the <project> agent`.
+fn is_chief_pane(cfg: &NotifySettings, agents: &left_out::TrackedAgents, pane_id: &str) -> bool {
+    agents.chief_pane_id(cfg.chief.as_deref()) == Some(pane_id)
+}
+
 /// Leave a turn-end update out: nothing is sent or said, no reply target is recorded,
 /// and the turn is recorded in the duplicate check so that a repeat of it is left
 /// out as well. The log line names the pane.
@@ -592,7 +608,12 @@ fn notify_routed(
                 (DeliveryOutcome::Delivered, source)
             })
         }
-        None => environment.deliver(&channel, turn, trace_id),
+        None => environment.deliver(
+            &channel,
+            turn,
+            trace_id,
+            is_chief_pane(cfg, agents, &turn.pane_id),
+        ),
     };
     let (outcome, source_agent) = match delivered {
         Ok(delivered) => delivered,
@@ -642,7 +663,8 @@ mod tests {
 
     #[test]
     fn muted_tts_channel_skips_without_running_the_command() {
-        let outcome = OutboundChannel::Tts.notify_with_switches(&turn(), "trace", true, false);
+        let outcome =
+            OutboundChannel::Tts.notify_with_switches(&turn(), "trace", false, true, false);
         assert!(matches!(outcome, Ok((DeliveryOutcome::Skipped, None))));
     }
 

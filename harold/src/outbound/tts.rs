@@ -4,16 +4,71 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use opentelemetry::KeyValue;
 use tracing::{info, warn};
 
 use crate::settings::{TtsSettings, get_settings};
 use crate::store::TurnCompleted;
+use crate::telemetry::{TRACE_TARGET, instruments};
 use crate::voice_input::{Speaker, say_in_open_call};
 
-fn run_local_model(system_prompt: &str, prompt: &str, max_tokens: u32) -> Option<String> {
+/// What one run of the local model came to. `Failed` holds the `reason` of the
+/// `local model failed` line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ModelRun {
+    Answered(String),
+    Failed(&'static str),
+    NoModel,
+}
+
+impl ModelRun {
+    fn result(&self) -> &'static str {
+        match self {
+            ModelRun::Answered(_) => "answered",
+            ModelRun::Failed(_) => "failed",
+            ModelRun::NoModel => "no_model",
+        }
+    }
+}
+
+/// Runs the local model inside a `harold.local_model` span. No text of the prompt or the
+/// answer is logged or recorded.
+fn run_local_model(system_prompt: &str, prompt: &str, max_tokens: u32) -> ModelRun {
     let cfg = get_settings();
-    let model = cfg.ai.local_model.as_deref()?;
-    let model_dir = cfg.ai.local_model_dir.as_deref()?;
+    let configured = cfg
+        .ai
+        .local_model
+        .as_deref()
+        .zip(cfg.ai.local_model_dir.as_deref());
+    run_local_model_with(configured, system_prompt, prompt, max_tokens)
+}
+
+/// `run_local_model` with the model and its folder given, `None` when none is configured.
+fn run_local_model_with(
+    configured: Option<(&str, &str)>,
+    system_prompt: &str,
+    prompt: &str,
+    max_tokens: u32,
+) -> ModelRun {
+    let span = tracing::info_span!(
+        target: TRACE_TARGET,
+        "harold.local_model",
+        result = tracing::field::Empty
+    );
+    let run = span.in_scope(|| run_model_command(configured, system_prompt, prompt, max_tokens));
+    span.record("result", run.result());
+    run
+}
+
+fn run_model_command(
+    configured: Option<(&str, &str)>,
+    system_prompt: &str,
+    prompt: &str,
+    max_tokens: u32,
+) -> ModelRun {
+    let Some((model, model_dir)) = configured else {
+        return ModelRun::NoModel;
+    };
 
     let out = Command::new("uv")
         .args([
@@ -29,14 +84,30 @@ fn run_local_model(system_prompt: &str, prompt: &str, max_tokens: u32) -> Option
             &max_tokens.to_string(),
         ])
         .current_dir(model_dir)
-        .output()
-        .ok()?;
-
+        .output();
+    let out = match out {
+        Ok(out) => out,
+        Err(error) => return model_failed("spawn_failed", &error.to_string()),
+    };
     if !out.status.success() {
-        return None;
+        return model_failed("exit_status", &out.status.to_string());
     }
+    match model_text(&String::from_utf8_lossy(&out.stdout)) {
+        Some(text) => ModelRun::Answered(text),
+        None => model_failed("empty_output", ""),
+    }
+}
 
-    let output = String::from_utf8_lossy(&out.stdout).trim().to_string();
+/// Logs `local model failed`. `detail` (an exit status or an OS error, never model text)
+/// stays in `harold.log`: the field `detail` is not exported.
+fn model_failed(reason: &'static str, detail: &str) -> ModelRun {
+    warn!(reason = %reason, detail = %detail, "local model failed");
+    ModelRun::Failed(reason)
+}
+
+/// The model's answer in `stdout`, or `None` when it holds no text.
+fn model_text(stdout: &str) -> Option<String> {
+    let output = stdout.trim().to_string();
     if output.is_empty() {
         return None;
     }
@@ -188,16 +259,19 @@ pub(crate) fn clean_sentence(answer: &str, agent: &AgentName) -> Result<String, 
     Ok(format!("{body}."))
 }
 
-fn build_short_summary(last_user_prompt: &str) -> String {
-    let system_prompt = "You are a notification assistant. Given a user's last request, \
-         write ONLY a brief 3-8 word summary of what was completed. \
-         Do not include any thinking, explanations, or extra text. \
-         Output format: Just the summary message.";
+/// The model's answer for `agent`, from the agent's name, the project and the last request.
+fn ask_model(last_user_prompt: &str, agent: &AgentName, project: &str) -> ModelRun {
+    let system_prompt = "You are a notification assistant. Write ONE plain sentence, under \
+         about 20 words, in the past tense, saying who did what. Name the agent as given. \
+         Do not include any thinking, preamble or extra text. \
+         Output format: just the sentence.";
     let prompt = format!(
-        "User's last request: {}\n\nWrite a 3-8 word summary of what was done:",
+        "Agent: {}\nProject: {}\nLast request: {}\n\nWrite the one sentence:",
+        agent.spoken(),
+        project,
         last_user_prompt.chars().take(500).collect::<String>(),
     );
-    run_local_model(system_prompt, &prompt, 20).unwrap_or_else(|| "Work complete".into())
+    run_local_model(system_prompt, &prompt, 48)
 }
 
 /// How long a line being said waits between checks that it has ended or been stopped.
@@ -332,21 +406,95 @@ fn notify_with_fallback_from(
     }
 }
 
-/// The turn-end update the desk says, shared by `notify_at_desk` and a call.
-pub(crate) fn desk_update_line(last_user_prompt: &str, main_context: &str) -> String {
-    let summary = build_short_summary(last_user_prompt);
-    format!("{summary} on {main_context} and waiting for further instructions")
+/// The turn-end update the desk says, shared by `notify_at_desk` and a call. `channel` is
+/// `desk` or `call`, and `pane_id` the agent's pane (empty when it is not known).
+pub(crate) fn desk_update_line(
+    last_user_prompt: &str,
+    agent: &AgentName,
+    project: &str,
+    channel: &'static str,
+    pane_id: &str,
+) -> String {
+    update_line_with(agent, channel, pane_id, || {
+        ask_model(last_user_prompt, agent, project)
+    })
+}
+
+/// `desk_update_line` with the model's run given, inside `harold.turn_end_update`. The
+/// span, the counter and the `turn-end update fell back` line hold the outcome and the
+/// reason only, never the sentence or the model's text.
+pub(crate) fn update_line_with(
+    agent: &AgentName,
+    channel: &'static str,
+    pane_id: &str,
+    run: impl FnOnce() -> ModelRun,
+) -> String {
+    let span = tracing::info_span!(
+        target: TRACE_TARGET,
+        "harold.turn_end_update",
+        pane_id = %pane_id,
+        channel,
+        outcome = tracing::field::Empty,
+        reason = tracing::field::Empty
+    );
+    span.in_scope(|| {
+        let refused = match run() {
+            ModelRun::Answered(answer) => match clean_sentence(&answer, agent) {
+                Ok(sentence) => {
+                    record_update(&span, "model", None);
+                    return sentence;
+                }
+                Err(reason) => reason,
+            },
+            ModelRun::Failed(_) => FallbackReason::ModelFailed,
+            ModelRun::NoModel => FallbackReason::NoModel,
+        };
+        info!(reason = %refused.as_str(), "turn-end update fell back");
+        record_update(&span, "fallback", Some(refused));
+        fallback_sentence(agent)
+    })
+}
+
+fn record_update(span: &tracing::Span, outcome: &'static str, reason: Option<FallbackReason>) {
+    span.record("outcome", outcome);
+    let reason = reason.map_or("none", FallbackReason::as_str);
+    if outcome == "fallback" {
+        span.record("reason", reason);
+    }
+    instruments().turn_end_updates.add(
+        1,
+        &[
+            KeyValue::new("outcome", outcome),
+            KeyValue::new("reason", reason),
+        ],
+    );
 }
 
 /// Says another agent's turn-end update in the open call, or with the `[tts]` command
-/// when no call is open.
-pub fn notify_at_desk(turn: &TurnCompleted, _trace_id: &str) -> bool {
-    let message = desk_update_line(&turn.last_user_prompt, &turn.main_context);
+/// when no call is open. `is_chief` is whether the turn is the chief's pane's.
+pub fn notify_at_desk_as(turn: &TurnCompleted, _trace_id: &str, is_chief: bool) -> bool {
+    let agent = if is_chief {
+        AgentName::Chief
+    } else {
+        AgentName::Named(turn.main_context.clone())
+    };
+    let message = desk_update_line(
+        &turn.last_user_prompt,
+        &agent,
+        &turn.main_context,
+        "desk",
+        &turn.pane_id,
+    );
     if let Some(said) = say_in_open_call(&message, Speaker::OtherAgent) {
         return said;
     }
     let tts = &get_settings().tts;
     notify_with_fallback(tts, &message, desk_line_stopper())
+}
+
+/// `notify_at_desk_as` for a pane that is not the chief's.
+pub fn notify_at_desk(turn: &TurnCompleted, trace_id: &str) -> bool {
+    notify_at_desk_as(turn, trace_id, false)
 }
 
 /// `line` as it is passed as a program's last argument: a line that starts with `-` gets
@@ -609,13 +757,196 @@ mod tests {
         );
     }
 
+    /// Serialises the tests that read the process-wide counter.
+    static COUNTER: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn updates_counted(outcome: &str, reason: &str) -> u64 {
+        crate::telemetry::test_support::exact_counter_value(
+            "harold.turn_end_updates",
+            &[("outcome", outcome), ("reason", reason)],
+        )
+        .unwrap_or(0)
+    }
+
+    fn update_span(pane: &str) -> opentelemetry_sdk::trace::SpanData {
+        crate::telemetry::test_support::spans()
+            .into_iter()
+            .find(|s| {
+                s.name == "harold.turn_end_update"
+                    && s.attributes.iter().any(|kv| kv.value.as_str() == pane)
+            })
+            .expect("a turn-end update span")
+    }
+
+    fn attribute(span: &opentelemetry_sdk::trace::SpanData, key: &str) -> Option<String> {
+        span.attributes
+            .iter()
+            .find(|kv| kv.key.as_str() == key)
+            .map(|kv| kv.value.to_string())
+    }
+
+    #[test]
+    fn a_kept_model_answer_is_one_model_span_and_counts_once() {
+        let _serial = COUNTER.lock().unwrap_or_else(|e| e.into_inner());
+        let architect = AgentName::Named("architect".into());
+        let before = updates_counted("model", "none");
+        let pane = format!("%kept-{}", uuid::Uuid::new_v4());
+        let logs = crate::outbound::fake::CapturedLogs::start();
+
+        let line = update_line_with(&architect, "desk", &pane, || {
+            ModelRun::Answered("MODEL-TEXT-1 The architect reviewed it. SECRET".into())
+        });
+
+        println!("evidence: kept: {line}");
+        assert_eq!(line, "MODEL-TEXT-1 The architect reviewed it.");
+        let span = update_span(&pane);
+        assert_eq!(attribute(&span, "outcome").as_deref(), Some("model"));
+        assert_eq!(attribute(&span, "channel").as_deref(), Some("desk"));
+        assert_eq!(attribute(&span, "reason"), None);
+        assert_eq!(updates_counted("model", "none"), before + 1);
+        assert!(!logs.text().contains("fell back"));
+        assert!(!logs.text().contains("MODEL-TEXT-1"));
+        assert!(!crate::telemetry::test_support::exported_text().contains("MODEL-TEXT-1"));
+    }
+
+    #[test]
+    fn a_refused_answer_falls_back_with_its_reason_and_no_text() {
+        let _serial = COUNTER.lock().unwrap_or_else(|e| e.into_inner());
+        let architect = AgentName::Named("architect".into());
+        let cases = [
+            ("The agent fixed the wording. CANARY-9", "no_name"),
+            ("", "no_name"),
+            (
+                &format!("The architect {}CANARY-9.", "did it ".repeat(30)),
+                "too_long",
+            ),
+        ];
+        for (answer, reason) in cases {
+            let before = updates_counted("fallback", reason);
+            let pane = format!("%refused-{}", uuid::Uuid::new_v4());
+            let logs = crate::outbound::fake::CapturedLogs::start();
+
+            let line = update_line_with(&architect, "call", &pane, || {
+                ModelRun::Answered(answer.to_string())
+            });
+
+            println!("evidence: refused ({reason}): {line}");
+            assert_eq!(line, "The architect has finished and is waiting.");
+            let text = logs.text();
+            assert!(
+                text.contains(&format!("turn-end update fell back reason={reason}")),
+                "{text}"
+            );
+            assert!(
+                !text.contains("CANARY-9") && !text.contains("wording"),
+                "{text}"
+            );
+            let span = update_span(&pane);
+            assert_eq!(attribute(&span, "outcome").as_deref(), Some("fallback"));
+            assert_eq!(attribute(&span, "reason").as_deref(), Some(reason));
+            assert_eq!(attribute(&span, "channel").as_deref(), Some("call"));
+            assert_eq!(updates_counted("fallback", reason), before + 1);
+        }
+        assert!(!crate::telemetry::test_support::exported_text().contains("CANARY-9"));
+    }
+
+    #[test]
+    fn no_model_and_a_failed_model_fall_back_and_a_model_that_cannot_start_says_why() {
+        let _serial = COUNTER.lock().unwrap_or_else(|e| e.into_inner());
+        let chief = AgentName::Chief;
+        let no_model_before = updates_counted("fallback", "no_model");
+        let failed_before = updates_counted("fallback", "model_failed");
+        let logs = crate::outbound::fake::CapturedLogs::start();
+
+        crate::settings::init_settings_for_test();
+        let no_model = desk_update_line("fix it", &chief, "chief-of-pods", "desk", "%nm");
+        println!("evidence: no model: {no_model}");
+        assert_eq!(no_model, "The chief has finished and is waiting.");
+
+        let run = run_local_model_with(Some(("m", "/nonexistent-harold-test-dir")), "s", "p", 48);
+        assert_eq!(run, ModelRun::Failed("spawn_failed"));
+        let pane = format!("%failed-{}", uuid::Uuid::new_v4());
+        let line = update_line_with(&chief, "desk", &pane, || run);
+        assert_eq!(line, "The chief has finished and is waiting.");
+
+        let text = logs.text();
+        assert!(
+            text.contains("local model failed reason=\"spawn_failed\"")
+                || text.contains("local model failed reason=spawn_failed"),
+            "{text}"
+        );
+        assert!(
+            text.contains("turn-end update fell back reason=model_failed"),
+            "{text}"
+        );
+        assert!(
+            text.contains("turn-end update fell back reason=no_model"),
+            "{text}"
+        );
+        assert_eq!(updates_counted("fallback", "no_model"), no_model_before + 1);
+        assert_eq!(
+            updates_counted("fallback", "model_failed"),
+            failed_before + 1
+        );
+        let model_spans: Vec<_> = crate::telemetry::test_support::spans()
+            .into_iter()
+            .filter(|s| s.name == "harold.local_model")
+            .collect();
+        assert!(
+            model_spans
+                .iter()
+                .any(|s| attribute(s, "result").as_deref() == Some("failed"))
+        );
+        assert!(
+            model_spans
+                .iter()
+                .any(|s| attribute(s, "result").as_deref() == Some("no_model"))
+        );
+    }
+
+    #[test]
+    fn a_model_answer_is_read_from_mlx_lm_output() {
+        assert_eq!(
+            model_text("loading\n==========\nThe architect left.\n==========\nstats"),
+            Some("The architect left.".to_string())
+        );
+        assert_eq!(model_text("  \n"), None);
+    }
+
+    #[test]
+    fn with_default_settings_every_agent_gets_the_fallback_sentence() {
+        crate::settings::init_settings_for_test();
+        for (agent, project, expected) in [
+            (
+                AgentName::Chief,
+                "chief-of-pods",
+                "The chief has finished and is waiting.",
+            ),
+            (
+                AgentName::Named("architect".into()),
+                "architect",
+                "The architect has finished and is waiting.",
+            ),
+            (
+                AgentName::Named("questions-typed-panic".into()),
+                "questions-typed-panic",
+                "The questions-typed-panic agent has finished and is waiting.",
+            ),
+        ] {
+            let line = desk_update_line("fix it", &agent, project, "desk", "%d");
+            assert_eq!(line, expected);
+            assert!(!line.contains("waiting for further instructions"));
+            assert!(!line.contains(&format!(" on {project}")));
+        }
+    }
+
     #[test]
     fn desk_update_line_reads_like_the_desk() {
         crate::settings::init_settings_for_test();
 
         assert_eq!(
-            desk_update_line("x", "chief-of-pods"),
-            "Work complete on chief-of-pods and waiting for further instructions"
+            desk_update_line("x", &AgentName::Chief, "chief-of-pods", "desk", "%1"),
+            "The chief has finished and is waiting."
         );
     }
 }
