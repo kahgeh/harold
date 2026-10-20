@@ -1,6 +1,6 @@
 # Telemetry
 
-Harold can send its traces, logs and metrics to an OpenTelemetry collector, so they show in the local HyperDX. The data answers two questions: how the pods are moving, and whether a reply from the phone reaches the agent it was meant for. Four HyperDX alerts come back to Harold, which types them into the chief's pane.
+Harold can send its traces, logs and metrics to an OpenTelemetry collector, so they show in the local HyperDX. The data answers two questions: how the pods are moving, and whether a reply from the phone reaches the agent it was meant for. Five HyperDX alerts come back to Harold, which types them into the chief's pane.
 
 With `export = false`, Harold works and logs exactly as before.
 
@@ -188,6 +188,8 @@ A reply whose payload failed for good never finishes, and is dropped after an ho
 
 `turn-end update fell back` (INFO, `reason` and `channel`) is written when Harold says the fallback sentence. A model that fails writes the WARN line `local model failed` with `reason` `spawn_failed` (`uv` not found or not runnable), `exit_status` (the model crashed or is not installed) or `empty_output`; the exit status stays in `harold.log`, which errors do not leave for HyperDX. No span, line or counter holds the sentence, the prompt or the model's text.
 
+A watch run is a trace of its own: `harold.watch.run`, one run of a watch, with `harold.watch.model` (the Claude Code process, with `result`: `exited`, `killed` or `failed_to_start`) inside it. The run span has `watch`, `run`, `outcome` (`quiet`, `report`, `skipped` or a failure reason), `reason` and `cost_usd`, and the run's log lines carry its trace id.
+
 `harold.delivery`'s `outcome` is `delivered`, `skipped`, `failed` (a send that failed before its 10th try, which is tried again, or a malformed payload, which is not) or `given_up` (its 10th failure; it is not tried again).
 
 Every log record written inside one of these spans carries its trace id and span id, so HyperDX opens a turn's logs from its trace and finds the trace from any of its lines.
@@ -218,6 +220,8 @@ Metrics are sent every 30 seconds. Every metric also carries `harold.machine`.
 | `pod.specs` | gauge, `{spec}` | `pod.product`, `state` |
 | `pod.spec.words` | gauge, `{word}` | `pod.product`, `spec.id`, `state` |
 | `pod.spec.lead_time` | histogram, `s`, buckets 600, 1800, 3600, 7200, 14400, 43200, 86400, 172800 | `pod.product`, `phase` (`waiting_for_user`, `build`), `spec.revisions`, `spec.id`, `spec.stage` when the merge is a stage |
+| `watch.runs` | counter, `{run}` | `folder`, `outcome` (`quiet`, `report`, `skipped`, or a failure reason: `timeout`, `process_failed`, `run_budget_reached`, `unreadable_answer`, `skill_missing`) |
+| `watch.cost_usd` | counter, `USD` | `folder` |
 
 `pod.specs` reports every state of every product, 0 included, so a card can read 0.
 
@@ -233,7 +237,7 @@ No exported item carries what the user or an agent wrote, a voice line, the AI m
 pane_id, pane, session.id, session.source, component, reason, outcome, channel,
 resolved_by, kind, started_by, turn.start, state, alert, pod.product, spec.id,
 spec.state_at, spec.words, spec.revisions, phase, change, event_type,
-event_version, result
+event_version, result, watch, run, cost_usd
 ```
 
 Every other field is dropped before export, including `text`, `msg`, `raw_output`, `tag` and `error`. Span events and links are dropped too, and an error status loses its description.
@@ -331,6 +335,7 @@ Special cases:
 | Specs by state | How many specs are where, in each pod? | `pod.specs` per product and state, over time | builder line per product and state |
 | Spec size | How big are the specs, and does a bigger spec mean a bigger change? | `pod.spec.words` per spec, with `pod.merged_lines` for the merged ones | builder table of words per product, spec and state |
 | Start to completion | How long from a spec being ready to it being on main, and how much of that is waiting for me? | `pod.spec.lead_time` per phase, p50 and p95 | SQL table per product and phase, the counter rule over the histogram's count and sum |
+| Watch runs: cost and duration per run | Are the watches cheap and quick? As a guide, a run takes under 60 seconds and costs 1 to 2 cents | the `harold.watch.run` spans: median and 95th percentile duration, and the mean `cost_usd` per run | SQL table over the traces source, for the time range |
 
 The SQL panels read the time range's points and, for the counter rule, the day before it.
 
@@ -395,6 +400,7 @@ Two limits remain:
 | `wrong-agent` | A request is counted as wrong | sum of `harold.phone_requests.wrong` above 0, every 5 minutes |
 | `slot-idle` | A slot is free for more than 2 hours in a row between 08:00 and 23:00 local | for each product, the last sample of each 15-minute window has at least 1 slot free, for 8 windows in a row |
 | `local-model-failing` | The local model failed more than 3 times in an hour, so every turn-end update is the fallback sentence. Severity: warn. Action: the chief checks `uv` and `mlx_lm` (the `reason` on `local model failed` in the turn's trace says which). Expected rate: 0 | sum of `harold.turn_end_updates` with `reason = model_failed` above 3, every hour |
+| `watch-cost-high` | Watches spent more than $1.00 in a day. Severity: warn. Action: the chief stops or tunes the watch (`harold tool watch list` shows the spend; `watch.cost_usd` by `folder` names the folder, and the `harold.watch.run` spans with the highest `cost_usd` name the watch and run). Expected firing rate: rarely. No budget ships, so this is the only spending signal until the user sets one | sum of `watch.cost_usd` above 1.00, over 1 day |
 
 Their basis is the period the spec drew, 11 to 15 October:
 
@@ -404,6 +410,8 @@ Their basis is the period the spec drew, 11 to 15 October:
 - `slot-idle` would have fired every day: at most 2 of harold's 3 slots were ever busy at once. This is the gap the keep-3-busy rule is about.
 
 `local-model-slow` is not an alert, and has no panel: the model's run time only needs tuning, and nobody is asked to act on it. The card "Turn-end update, model p95" (severity info, no action) shows the duration of the `harold.local_model` span. These are deviations from the approved spec, agreed by the chief.
+
+- `watch-cost-high` is a signal, not a limit: it does not stop a watch. Failing runs are not an alert of their own: after 3 runs in a row fail, the watch stops and types `WATCH <name> stopped: 3 runs in a row failed (<reason>)` into the chief's pane, and the failure outcomes of `watch.runs` show the rest.
 
 Merges, turns per session and the spec facts have no alert. They describe throughput, and no level of them is wrong in itself.
 
@@ -531,7 +539,7 @@ done
 Then create each alert's webhook and the alert pointing at it. A webhook that already exists is reused. An alert that already exists is left for the update commands, so a second run creates nothing:
 
 ```sh
-for name in phone-request-unavailable phone-request-slow wrong-agent slot-idle local-model-failing; do
+for name in phone-request-unavailable phone-request-slow wrong-agent slot-idle local-model-failing watch-cost-high; do
   WEBHOOK_ID=$(webhook_id "harold-alerts-$name") || break
   if [ -z "$WEBHOOK_ID" ]; then
     WEBHOOK_ID=$(fill "webhook-$name.json" | hdx -X POST "$HYPERDX_URL/api/v2/webhooks" --data-binary @- | jq -r '.data.id // .id')
@@ -561,7 +569,7 @@ fill trends.json | hdx -X PUT "$HYPERDX_URL/api/v2/dashboards/$(dashboard "Harol
 Then update each alert's webhook and the alert. The loop looks up both ids before it sends either PUT, and stops at the first name whose webhook or alert is missing or is named twice:
 
 ```sh
-for name in phone-request-unavailable phone-request-slow wrong-agent slot-idle local-model-failing; do
+for name in phone-request-unavailable phone-request-slow wrong-agent slot-idle local-model-failing watch-cost-high; do
   WEBHOOK_ID=$(webhook_id "harold-alerts-$name") || break
   [ -n "$WEBHOOK_ID" ] || { echo "no webhook harold-alerts-$name: create it first" >&2; break; }
   id=$(alert_id "$name") || break
@@ -574,7 +582,7 @@ done
 A HyperDX set up from the earlier single-webhook files has one webhook named `harold-alerts` and none of the per-alert ones. Create them with this loop, which skips any that already exist, then run the update loop above:
 
 ```sh
-for name in phone-request-unavailable phone-request-slow wrong-agent slot-idle local-model-failing; do
+for name in phone-request-unavailable phone-request-slow wrong-agent slot-idle local-model-failing watch-cost-high; do
   WEBHOOK_ID=$(webhook_id "harold-alerts-$name") || break
   [ -z "$WEBHOOK_ID" ] || continue
   fill "webhook-$name.json" | hdx -X POST "$HYPERDX_URL/api/v2/webhooks" --data-binary @- | jq -r '.data.id // .id'

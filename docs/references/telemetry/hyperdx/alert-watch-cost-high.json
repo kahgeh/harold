@@ -1,0 +1,31 @@
+{
+  "name": "watch-cost-high",
+  "note": "watch-cost-high",
+  "message": "Watches have spent more than $1.00 in the last day.",
+  "source": "inline",
+  "chartConfig": {
+    "name": "watch-cost-high",
+    "displayType": "line",
+    "sourceId": "@METRICS_SOURCE_ID@",
+    "select": [
+      {
+        "aggFn": "sum",
+        "valueExpression": "Value",
+        "metricName": "watch.cost_usd",
+        "metricType": "sum",
+        "where": "",
+        "whereLanguage": "sql"
+      }
+    ]
+  },
+  "threshold": 1,
+  "thresholdType": "above_exclusive",
+  "interval": "1d",
+  "channel": {
+    "type": "webhook",
+    "webhookId": "@WEBHOOK_ID@"
+  },
+  "tags": [
+    "harold"
+  ]
+}

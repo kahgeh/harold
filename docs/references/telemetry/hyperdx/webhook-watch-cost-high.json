@@ -1,0 +1,10 @@
+{
+  "name": "harold-alerts-watch-cost-high",
+  "service": "generic",
+  "url": "http://host.containers.internal:4320/alert",
+  "description": "Posts each Harold alert to Harold's alert address, which types it into the chief's pane.",
+  "headers": {
+    "Content-Type": "application/json"
+  },
+  "body": "{\"alert\": \"watch-cost-high\", \"state\": \"{{#if (eq status 'firing')}}firing{{else if (eq status 'resolved')}}cleared{{else}}{{status}}{{/if}}\"}"
+}

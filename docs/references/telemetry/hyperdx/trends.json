@@ -220,6 +220,21 @@
         "sourceId": "@METRICS_SOURCE_ID@",
         "sqlTemplate": "SELECT Attributes['pod.product'] AS product, Attributes['phase'] AS phase, quantileExactWeighted(0.5)(total_rise / count_rise, toUInt64(count_rise)) AS p50, quantileExactWeighted(0.95)(total_rise / count_rise, toUInt64(count_rise)) AS p95 FROM (SELECT TimeUnix, Attributes, if(count < count_before, count, count - count_before) AS count_rise, if(count < count_before, total, total - total_before) AS total_rise FROM (SELECT TimeUnix, Attributes, toFloat64(Count) AS count, Sum AS total, lagInFrame(toFloat64(Count), 1, toFloat64(0)) OVER (PARTITION BY cityHash64(MetricName, ResourceAttributes, Attributes) ORDER BY TimeUnix ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS count_before, lagInFrame(Sum, 1, toFloat64(0)) OVER (PARTITION BY cityHash64(MetricName, ResourceAttributes, Attributes) ORDER BY TimeUnix ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS total_before FROM $__sourceTable(histogram) WHERE MetricName = 'pod.spec.lead_time' AND TimeUnix >= $__fromTime - INTERVAL 1 DAY AND TimeUnix <= $__toTime AND $__filters)) WHERE $__timeFilter(TimeUnix) AND count_rise > 0 GROUP BY product, phase ORDER BY product, phase"
       }
+    },
+    {
+      "id": "watch-runs-cost-and-duration",
+      "name": "Watch runs: cost and duration per run",
+      "x": 12,
+      "y": 24,
+      "w": 12,
+      "h": 6,
+      "config": {
+        "configType": "sql",
+        "displayType": "table",
+        "connectionId": "@CLICKHOUSE_CONNECTION_ID@",
+        "sourceId": "@TRACES_SOURCE_ID@",
+        "sqlTemplate": "SELECT quantile(0.5)(Duration / 1e9) AS median_seconds, quantile(0.95)(Duration / 1e9) AS p95_seconds, avg(toFloat64OrNull(SpanAttributes['cost_usd'])) AS cost_usd_per_run, count() AS runs FROM $__sourceTable WHERE ServiceName = 'harold' AND SpanName = 'harold.watch.run' AND $__timeFilter(Timestamp)"
+      }
     }
   ]
 }

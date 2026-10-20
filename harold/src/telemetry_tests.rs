@@ -1478,6 +1478,8 @@ const METRICS: &[&str] = &[
     "pod.specs",
     "pod.spec.words",
     "pod.spec.lead_time",
+    "watch.runs",
+    "watch.cost_usd",
 ];
 
 /// The Metrics table's attributes, plus the two resource attributes every export carries.
@@ -1498,6 +1500,8 @@ const ATTRIBUTES: &[&str] = &[
     "spec.revisions",
     "harold.machine",
     "service.name",
+    "folder",
+    "cost_usd",
 ];
 
 /// The spec's span table. The trends panel "One turn, end to end" lists `harold.turn`.
@@ -1509,6 +1513,8 @@ const SPANS: &[&str] = &[
     "harold.delivery",
     "harold.voice_note",
     "harold.local_model",
+    "harold.watch.run",
+    "harold.watch.model",
 ];
 
 /// The spec's cards table: group, card, the metrics or spans its tile reads, and how it
@@ -1668,7 +1674,7 @@ const HISTOGRAM_RULE: [&str; 4] = [
 ];
 
 /// The spec's trends table, in order.
-const TREND_PANELS: [&str; 9] = [
+const TREND_PANELS: [&str; 10] = [
     "Slots",
     "Merges to main",
     "Phone requests reaching the right agent",
@@ -1678,6 +1684,7 @@ const TREND_PANELS: [&str; 9] = [
     "Specs by state",
     "Spec size",
     "Start to completion",
+    "Watch runs: cost and duration per run",
 ];
 
 fn definitions() -> PathBuf {
@@ -1712,7 +1719,10 @@ fn dotted_names(text: &str) -> Vec<String> {
     let mut names = Vec::new();
     for (start, _) in text.char_indices() {
         let rest = &text[start..];
-        if !(rest.starts_with("pod.") || rest.starts_with("harold.")) {
+        if !(rest.starts_with("pod.")
+            || rest.starts_with("harold.")
+            || rest.starts_with("watch."))
+        {
             continue;
         }
         let before = text[..start].chars().next_back();
@@ -1772,6 +1782,7 @@ fn every_definition_is_valid_json_naming_only_known_metrics_and_attributes() {
             "alert-phone-request-slow.json",
             "alert-phone-request-unavailable.json",
             "alert-slot-idle.json",
+            "alert-watch-cost-high.json",
             "alert-wrong-agent.json",
             "dashboard.json",
             "trends.json",
@@ -1779,6 +1790,7 @@ fn every_definition_is_valid_json_naming_only_known_metrics_and_attributes() {
             "webhook-phone-request-slow.json",
             "webhook-phone-request-unavailable.json",
             "webhook-slot-idle.json",
+            "webhook-watch-cost-high.json",
             "webhook-wrong-agent.json",
         ]
     );
@@ -2047,7 +2059,7 @@ fn every_tile_that_counts_a_running_total_uses_the_counter_rule() {
 }
 
 #[test]
-fn the_trends_dashboard_has_the_nine_panels() {
+fn the_trends_dashboard_has_the_ten_panels() {
     let trends = definition("trends.json");
     assert_eq!(trends["name"], "Harold trends");
     assert_eq!(tile_names(&trends), TREND_PANELS);
@@ -2105,6 +2117,15 @@ fn the_alert_files_carry_the_spec_thresholds() {
             "above_exclusive",
             60,
         ),
+        (
+            "watch-cost-high",
+            METRICS_SOURCE,
+            "watch.cost_usd",
+            "sum",
+            1.0,
+            "above_exclusive",
+            1440,
+        ),
     ];
     assert_eq!(
         expected.map(|(name, ..)| name),
@@ -2137,6 +2158,7 @@ fn the_alert_files_carry_the_spec_thresholds() {
             "5m" => 5,
             "15m" => 15,
             "1h" => 60,
+            "1d" => 1440,
             other => panic!("{name}: unexpected interval {other}"),
         };
         let windows = alert["numConsecutiveWindows"].as_i64().unwrap_or(1);
@@ -2582,6 +2604,7 @@ done"#,
         .map(|name| stand_in.only("webhooks", &format!("harold-alerts-{name}"))["id"].clone());
     stand_in.forget_calls();
     let stderr = stand_in.run(&readme_block("A HyperDX set up from the earlier"));
+    // The old webhook, the two kept, and the three created.
     assert_eq!(stand_in.objects("webhooks").len(), 6, "{stderr}");
     for name in crate::alerts::ALERT_NAMES {
         stand_in.only("webhooks", &format!("harold-alerts-{name}"));

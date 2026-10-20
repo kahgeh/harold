@@ -111,7 +111,8 @@ fn the_five_alerts_are_the_ones_in_the_specs() {
             "phone-request-slow",
             "wrong-agent",
             "slot-idle",
-            "local-model-failing"
+            "local-model-failing",
+            "watch-cost-high"
         ]
     );
     // `local-model-slow` is not an alert.
@@ -120,6 +121,9 @@ fn the_five_alerts_are_the_ones_in_the_specs() {
         alert_line(br#"{"alert":"local-model-failing","state":"firing"}"#),
         Ok("harold alert: local-model-failing firing".into())
     );
+    // The watch tool's failing runs are a dashboard card, not an alert: the watch types
+    // its own closing line when three runs in a row fail.
+    assert!(!ALERT_NAMES.contains(&"watch-runs-failing"));
 }
 
 #[test]
