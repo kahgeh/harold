@@ -15,19 +15,20 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 
-use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tonic::service::Routes;
 use tracing::warn;
 
+use crate::agent::domain::EffectiveAgentState;
 use crate::agent::snapshot::AgentSnapshotHub;
 use crate::outbound::left_out::same_folder;
-use crate::pod_stats;
-use crate::settings::Settings;
-use crate::timed_prompts::{self, LineOutcome, Ports, TmuxPorts, Writer};
+use crate::pod_stats::{self, PodSnapshot};
+use crate::settings::{AgentProviderSettings, Settings, WatchSettings};
+use crate::timed_prompts::{self, InputBox, LineOutcome, Ports, TmuxPorts, Writer};
 
 pub(crate) mod backlog;
 pub(crate) mod questions;
+pub(crate) mod watch;
 
 pub(crate) type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
@@ -82,6 +83,36 @@ pub(crate) trait Products: Send + Sync {
     fn products(&self) -> Result<Vec<(String, PathBuf)>, &'static str>;
 }
 
+/// One agent pane as the agent list shows it, copied out of Harold's snapshot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AgentFact {
+    pub pane_id: String,
+    /// `session:window.pane`, as tmux names the pane.
+    pub tmux_target: String,
+    pub folder: String,
+    pub provider_id: String,
+    /// Whether the pane's provider uses the screen adapter whose input box Harold reads.
+    pub reads_as_claude: bool,
+    pub state: EffectiveAgentState,
+    /// Wall-clock milliseconds when the pane entered `state`.
+    pub state_since_ms: i64,
+    pub work_summary: Option<String>,
+}
+
+/// Harold's current agent list, read only. Every call returns a copy.
+pub(crate) trait Agents: Send + Sync {
+    fn agents(&self) -> Vec<AgentFact>;
+
+    /// A fresh reading of the pane's Claude Code input box. `None` when the screen
+    /// could not be read.
+    fn input_box<'a>(&'a self, pane_id: &'a str) -> BoxFuture<'a, Option<InputBox>>;
+}
+
+/// Pod stats' latest snapshot, read only. Every call returns a copy.
+pub(crate) trait Pods: Send + Sync {
+    fn pods(&self) -> PodSnapshot;
+}
+
 /// What the host gives a tool when it starts.
 pub(crate) struct ToolContext {
     /// The tool's own folder, `<store folder>/tools/<name>/`.
@@ -91,7 +122,28 @@ pub(crate) struct ToolContext {
     pub(crate) chief_pane: Arc<dyn ChiefPane>,
     pub(crate) pane_folder: Arc<dyn PaneFolder>,
     pub(crate) products: Arc<dyn Products>,
-    pub(crate) shutdown: watch::Receiver<()>,
+    /// Read only: a tool can see the agent list and cannot change it.
+    pub(crate) agents: Arc<dyn Agents>,
+    /// Read only: pod stats' latest snapshot.
+    pub(crate) pods: Arc<dyn Pods>,
+    /// The `[watch]` settings, for the watch tool.
+    pub(crate) watch_settings: WatchSettings,
+    /// The environment a tool's hosted-model process runs with, and nothing else.
+    pub(crate) model_environment: Vec<(std::ffi::OsString, std::ffi::OsString)>,
+    pub(crate) cli_path: String,
+    pub(crate) shutdown: tokio::sync::watch::Receiver<()>,
+}
+
+/// The ports and settings the host reads for tools beyond the typing, chief and
+/// folder lookups.
+pub(crate) struct Extras {
+    /// Types as `Writer::Tool("watch")`, so the pane locks tell the writers apart.
+    pub(crate) watch_typing: Arc<dyn PaneTyping>,
+    pub(crate) agents: Arc<dyn Agents>,
+    pub(crate) pods: Arc<dyn Pods>,
+    pub(crate) watch_settings: WatchSettings,
+    pub(crate) model_environment: Vec<(std::ffi::OsString, std::ffi::OsString)>,
+    pub(crate) cli_path: String,
 }
 
 /// What a started tool gives back: the gRPC routes the host adds to its
@@ -135,9 +187,9 @@ pub(crate) async fn start(
     cfg: &Settings,
     store_path: &str,
     snapshots: AgentSnapshotHub,
-    shutdown: watch::Receiver<()>,
+    shutdown: tokio::sync::watch::Receiver<()>,
 ) -> Tools {
-    let ports = Arc::new(TmuxPorts::new(snapshots, cfg.agents.0.clone()));
+    let ports = Arc::new(TmuxPorts::new(snapshots.clone(), cfg.agents.0.clone()));
     let typing = TmuxTyping {
         ports: Arc::clone(&ports),
         writer: Writer::Tool(questions::NAME),
@@ -146,16 +198,33 @@ pub(crate) async fn start(
         ports: Arc::clone(&ports),
         folder: cfg.notify.chief.clone(),
     };
-    let pane_folder = SnapshotPaneFolder { ports };
+    let agents = SnapshotAgents {
+        ports: Arc::clone(&ports),
+        snapshots,
+        providers: cfg.agents.0.clone(),
+    };
     let products = RegistryProducts {
         path: cfg.telemetry.pod_registry_path(),
     };
+    let extras = Extras {
+        watch_typing: Arc::new(TmuxTyping {
+            ports: Arc::clone(&ports),
+            writer: Writer::Tool(watch::NAME),
+        }),
+        agents: Arc::new(agents),
+        pods: Arc::new(GaugePods),
+        watch_settings: cfg.watch.clone(),
+        model_environment: cfg.activity_summary.environment.0.clone(),
+        cli_path: cfg.activity_summary.cli_path.clone(),
+    };
+    let pane_folder = SnapshotPaneFolder { ports };
     start_with(
         store_path,
         Arc::new(typing),
         Arc::new(chief_pane),
         Arc::new(pane_folder),
         Arc::new(products),
+        extras,
         shutdown,
     )
     .await
@@ -168,18 +237,24 @@ async fn start_with(
     chief_pane: Arc<dyn ChiefPane>,
     pane_folder: Arc<dyn PaneFolder>,
     products: Arc<dyn Products>,
-    shutdown: watch::Receiver<()>,
+    extras: Extras,
+    shutdown: tokio::sync::watch::Receiver<()>,
 ) -> Tools {
     let mut tools = Tools {
         routes: Routes::default(),
         tasks: Vec::new(),
     };
-    let [(questions_name, questions_ctx), (backlog_name, backlog_ctx)] = contexts(
+    let [
+        (questions_name, questions_ctx),
+        (backlog_name, backlog_ctx),
+        (watch_name, watch_ctx),
+    ] = contexts(
         store_path,
         typing,
         chief_pane,
         pane_folder,
         products,
+        extras,
         shutdown,
     );
     start_tool(
@@ -188,30 +263,42 @@ async fn start_with(
         &mut tools,
     );
     start_tool(backlog_name, backlog::start(backlog_ctx).await, &mut tools);
+    start_tool(watch_name, watch::start(watch_ctx).await, &mut tools);
     tools
 }
 
-/// Each tool's name and context, in the order they start. Only the question tool
-/// types, so the backlog tool is given no typing.
+/// Each tool's name and context, in the order they start. The question tool types as
+/// `questions`, the watch tool as `watch` through `extras.watch_typing`, and the backlog tool is
+/// given no typing.
 fn contexts(
     store_path: &str,
     typing: Arc<dyn PaneTyping>,
     chief_pane: Arc<dyn ChiefPane>,
     pane_folder: Arc<dyn PaneFolder>,
     products: Arc<dyn Products>,
-    shutdown: watch::Receiver<()>,
-) -> [(&'static str, ToolContext); 2] {
+    extras: Extras,
+    shutdown: tokio::sync::watch::Receiver<()>,
+) -> [(&'static str, ToolContext); 3] {
     let context = |name: &str, typing: Option<Arc<dyn PaneTyping>>| ToolContext {
         data_folder: data_folder(store_path, name),
         typing,
         chief_pane: Arc::clone(&chief_pane),
         pane_folder: Arc::clone(&pane_folder),
         products: Arc::clone(&products),
+        agents: Arc::clone(&extras.agents),
+        pods: Arc::clone(&extras.pods),
+        watch_settings: extras.watch_settings.clone(),
+        model_environment: extras.model_environment.clone(),
+        cli_path: extras.cli_path.clone(),
         shutdown: shutdown.clone(),
     };
     [
         (questions::NAME, context(questions::NAME, Some(typing))),
         (backlog::NAME, context(backlog::NAME, None)),
+        (
+            watch::NAME,
+            context(watch::NAME, Some(Arc::clone(&extras.watch_typing))),
+        ),
     ]
 }
 
@@ -323,6 +410,54 @@ impl<P: Ports> PaneFolder for SnapshotPaneFolder<P> {
     }
 }
 
+/// The agent list from Harold's snapshot, with each pane's time in state and work summary.
+struct SnapshotAgents<P = TmuxPorts> {
+    ports: Arc<P>,
+    snapshots: AgentSnapshotHub,
+    providers: Vec<AgentProviderSettings>,
+}
+
+impl<P: Ports> Agents for SnapshotAgents<P> {
+    fn agents(&self) -> Vec<AgentFact> {
+        let snapshot = self.snapshots.current();
+        let view = timed_prompts::agents_view(&snapshot, &self.providers);
+        snapshot
+            .panes
+            .iter()
+            .zip(view.panes)
+            .map(|(projection, pane)| AgentFact {
+                pane_id: pane.pane_id,
+                tmux_target: projection.pane.tmux_target.clone(),
+                folder: pane.folder,
+                provider_id: projection.pane.incarnation.provider_id.clone(),
+                reads_as_claude: pane.reads_as_claude,
+                state: pane.state,
+                state_since_ms: projection.last_transition_at_ms,
+                work_summary: projection.work_summary.clone(),
+            })
+            .collect()
+    }
+
+    fn input_box<'a>(&'a self, pane_id: &'a str) -> BoxFuture<'a, Option<InputBox>> {
+        Box::pin(async move {
+            let screen = self.ports.read_screen(pane_id).await?;
+            Some(timed_prompts::read_input_box(&screen))
+        })
+    }
+}
+
+/// Pod stats' snapshot, the one the pod gauges read.
+struct GaugePods;
+
+impl Pods for GaugePods {
+    fn pods(&self) -> PodSnapshot {
+        pod_stats::gauge_snapshot()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+}
+
 /// Reads the pod registry on every call, so an edit to it shows at once. With no
 /// registry set there are no products.
 struct RegistryProducts {
@@ -344,4 +479,4 @@ impl Products for RegistryProducts {
 
 #[cfg(test)]
 #[path = "tools_tests.rs"]
-mod tests;
+pub(crate) mod tests;

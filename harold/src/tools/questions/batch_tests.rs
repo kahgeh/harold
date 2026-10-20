@@ -865,6 +865,11 @@ async fn start_creates_questions_db_and_serves() {
         chief_pane: FakeChief::at(Some(CHIEF_PANE)),
         pane_folder: Arc::new(NoFolder),
         products: Arc::new(NoProducts),
+        agents: Arc::new(crate::tools::tests::NoAgents),
+        pods: Arc::new(crate::tools::tests::NoPods),
+        watch_settings: Default::default(),
+        model_environment: Vec::new(),
+        cli_path: "claude".into(),
         shutdown: shutdown_rx,
     })
     .await
@@ -917,6 +922,11 @@ async fn start_on_a_folder_it_cannot_open_fails_with_store_open_failed() {
         chief_pane: FakeChief::at(Some(CHIEF_PANE)),
         pane_folder: Arc::new(NoFolder),
         products: Arc::new(NoProducts),
+        agents: Arc::new(crate::tools::tests::NoAgents),
+        pods: Arc::new(crate::tools::tests::NoPods),
+        watch_settings: Default::default(),
+        model_environment: Vec::new(),
+        cli_path: "claude".into(),
         shutdown: shutdown_rx,
     })
     .await;

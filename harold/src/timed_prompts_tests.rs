@@ -343,7 +343,7 @@ fn pane_typed_into_this_round_counts_as_busy() {
     assert!(pick_pane(&agents, CHIEF, &["%9".to_string()]).is_ok());
 }
 
-fn projection(
+pub(crate) fn projection(
     pane_id: &str,
     provider_id: &str,
     folder: &str,
@@ -386,7 +386,7 @@ fn projection(
     }
 }
 
-fn provider(id: &str, screen_adapter: ScreenAdapter) -> AgentProviderSettings {
+pub(crate) fn provider(id: &str, screen_adapter: ScreenAdapter) -> AgentProviderSettings {
     AgentProviderSettings {
         id: id.into(),
         display_name: id.into(),
@@ -488,7 +488,7 @@ pub(crate) enum Key {
 pub(crate) struct FakeState {
     now: Option<LocalNow>,
     pub(crate) view: AgentsView,
-    screen: Option<String>,
+    pub(crate) screen: Option<String>,
     fail_text: bool,
     pub(crate) fail_enter: bool,
     pub(crate) keys: Vec<Key>,

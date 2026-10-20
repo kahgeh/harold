@@ -43,6 +43,47 @@ impl Drop for TempFolder {
     }
 }
 
+/// Agents and pods that hold nothing, for a test of a tool that does not read them.
+pub(crate) struct NoAgents;
+
+impl Agents for NoAgents {
+    fn agents(&self) -> Vec<AgentFact> {
+        Vec::new()
+    }
+
+    fn input_box<'a>(&'a self, _pane_id: &'a str) -> BoxFuture<'a, Option<InputBox>> {
+        Box::pin(async { None })
+    }
+}
+
+pub(crate) struct NoPods;
+
+impl Pods for NoPods {
+    fn pods(&self) -> PodSnapshot {
+        PodSnapshot::default()
+    }
+}
+
+/// The extras the host reads, empty.
+pub(crate) fn no_extras() -> Extras {
+    Extras {
+        watch_typing: Arc::new(NoTyping),
+        agents: Arc::new(NoAgents),
+        pods: Arc::new(NoPods),
+        watch_settings: WatchSettings::default(),
+        model_environment: Vec::new(),
+        cli_path: "claude".into(),
+    }
+}
+
+struct NoTyping;
+
+impl PaneTyping for NoTyping {
+    fn type_line<'a>(&'a self, _pane_id: &'a str, _text: &'a str) -> BoxFuture<'a, Typing> {
+        Box::pin(async { Typing::NoPane })
+    }
+}
+
 /// A question id no other test uses, so exported records can be told apart.
 fn unique_id() -> String {
     format!("C-{}", &uuid::Uuid::new_v4().simple().to_string()[..12])
@@ -205,6 +246,7 @@ async fn a_tool_that_fails_to_start_is_logged_and_harold_runs_on() {
         chief,
         folders,
         products,
+        no_extras(),
         shutdown_rx,
     )
     .await;
@@ -400,6 +442,7 @@ async fn the_backlog_tool_starts_with_no_typing_and_creates_backlog_db() {
         chief,
         folders,
         products,
+        no_extras(),
         shutdown_rx,
     )
     .await;
@@ -436,18 +479,23 @@ fn the_backlog_tool_is_given_no_typing() {
     let (typing, chief, folders, products) = host_ports(&Fake::at(DAY, "09:00:00"));
     let (_shutdown, shutdown_rx) = watch::channel(());
 
-    let [(first, questions), (second, backlog)] = contexts(
+    let [(first, questions), (second, backlog), (third, watch_ctx)] = contexts(
         "/Users/me/.harold/store",
         typing,
         chief,
         folders,
         products,
+        no_extras(),
         shutdown_rx,
     );
 
-    assert_eq!((first, second), (questions::NAME, backlog::NAME));
+    assert_eq!(
+        (first, second, third),
+        (questions::NAME, backlog::NAME, crate::tools::watch::NAME)
+    );
     assert!(questions.typing.is_some());
     assert!(backlog.typing.is_none());
+    assert!(watch_ctx.typing.is_some());
     assert_eq!(
         backlog.data_folder,
         PathBuf::from("/Users/me/.harold/tools/backlog")
@@ -468,6 +516,7 @@ async fn the_canary_reaches_no_log_or_export() {
         chief,
         folders,
         products,
+        no_extras(),
         shutdown_rx,
     )
     .await;
@@ -581,6 +630,7 @@ async fn the_backlog_canary_reaches_no_log_or_export() {
         Arc::new(FixedChief("%2")),
         folders,
         Arc::new(products),
+        no_extras(),
         shutdown_rx,
     )
     .await;
@@ -806,6 +856,7 @@ async fn the_core_service_and_the_tool_share_one_server() {
         chief,
         folders,
         products,
+        no_extras(),
         shutdown_rx,
     )
     .await;
@@ -886,6 +937,11 @@ async fn the_question_tool_refuses_to_start_without_typing() {
         pane_folder,
         products,
         shutdown: shutdown_rx,
+        agents: Arc::new(NoAgents),
+        pods: Arc::new(NoPods),
+        watch_settings: WatchSettings::default(),
+        model_environment: Vec::new(),
+        cli_path: "claude".into(),
     })
     .await;
 
@@ -935,4 +991,71 @@ fn the_pane_folder_is_the_agents_folder_in_the_snapshot() {
 
     assert_eq!(folder.folder_of("%40"), Some(PathBuf::from("/work/harold")));
     assert_eq!(folder.folder_of("%99"), None);
+}
+
+#[test]
+fn the_agents_port_copies_each_pane_with_its_state_time_and_work_summary() {
+    use crate::agent::domain::AgentSnapshot;
+    use crate::settings::ScreenAdapter;
+    use crate::timed_prompts::tests::{projection, provider, snapshot};
+
+    let mut pane = projection("%7", "claude", "/work/harold", EffectiveAgentState::Busy);
+    pane.last_transition_at_ms = 9_000;
+    pane.work_summary = Some("Writing the watch tool".into());
+    let hub = AgentSnapshotHub::new(snapshot(None, vec![pane]));
+    let agents = SnapshotAgents {
+        ports: Arc::new(Fake::at(DAY, "09:00:00")),
+        snapshots: hub.clone(),
+        providers: vec![provider("claude", ScreenAdapter::ClaudeV1)],
+    };
+
+    let mut listed = agents.agents();
+    assert_eq!(
+        listed,
+        vec![AgentFact {
+            pane_id: "%7".into(),
+            tmux_target: "pods:0.1".into(),
+            folder: "/work/harold".into(),
+            provider_id: "claude".into(),
+            reads_as_claude: true,
+            state: EffectiveAgentState::Busy,
+            state_since_ms: 9_000,
+            work_summary: Some("Writing the watch tool".into()),
+        }]
+    );
+    // A copy: changing it changes nothing in Harold's snapshot.
+    listed[0].work_summary = None;
+    listed.clear();
+    let again = agents.agents();
+    assert_eq!(again.len(), 1);
+    assert_eq!(
+        again[0].work_summary.as_deref(),
+        Some("Writing the watch tool")
+    );
+    let current: AgentSnapshot = hub.current();
+    assert_eq!(current.panes.len(), 1);
+}
+
+#[tokio::test]
+async fn the_agents_port_reads_the_input_box_from_a_fresh_screen() {
+    let fake = Fake::at(DAY, "09:00:00");
+    let agents = SnapshotAgents {
+        ports: Arc::new(fake.clone()),
+        snapshots: AgentSnapshotHub::new(crate::timed_prompts::tests::snapshot(None, Vec::new())),
+        providers: Vec::new(),
+    };
+    // The fake's screen starts with an empty box.
+    assert_eq!(agents.input_box("%2").await, Some(InputBox::Empty));
+    fake.set(|state| state.screen = None);
+    assert_eq!(agents.input_box("%2").await, None);
+}
+
+#[test]
+fn the_pods_port_returns_a_copy_of_the_gauge_snapshot() {
+    let mut first = GaugePods.pods();
+    first.slots.insert(
+        "invented".into(),
+        pod_stats::SlotCounts { busy: 1, free: 1 },
+    );
+    assert!(!GaugePods.pods().slots.contains_key("invented"));
 }

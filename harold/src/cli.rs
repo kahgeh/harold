@@ -1945,6 +1945,11 @@ mod tests {
             chief_pane: std::sync::Arc::new(NoChief),
             pane_folder: std::sync::Arc::new(NoFolder),
             products: std::sync::Arc::new(NoProducts),
+            agents: std::sync::Arc::new(crate::tools::tests::NoAgents),
+            pods: std::sync::Arc::new(crate::tools::tests::NoPods),
+            watch_settings: Default::default(),
+            model_environment: Vec::new(),
+            cli_path: "claude".into(),
             shutdown,
         })
         .await
@@ -2583,6 +2588,11 @@ mod tests {
                 ("harold".into(), harold),
                 ("turso".into(), turso),
             ])),
+            agents: std::sync::Arc::new(crate::tools::tests::NoAgents),
+            pods: std::sync::Arc::new(crate::tools::tests::NoPods),
+            watch_settings: Default::default(),
+            model_environment: Vec::new(),
+            cli_path: "claude".into(),
             shutdown,
         })
         .await
@@ -2986,6 +2996,11 @@ mod tests {
             chief_pane: std::sync::Arc::new(NoChief),
             pane_folder: std::sync::Arc::new(NoFolder),
             products: std::sync::Arc::new(NoProducts),
+            agents: std::sync::Arc::new(crate::tools::tests::NoAgents),
+            pods: std::sync::Arc::new(crate::tools::tests::NoPods),
+            watch_settings: Default::default(),
+            model_environment: Vec::new(),
+            cli_path: "claude".into(),
             shutdown,
         })
         .await

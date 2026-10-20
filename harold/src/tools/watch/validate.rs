@@ -1,0 +1,216 @@
+//! Checking a `StartWatch` request, and finding and reading a watch's skill. The watch
+//! tool trusts local callers (ADR 0002) but not their values: every field is checked
+//! here, and the skill is looked up again, with the same rule, at each run.
+
+use std::path::{Path, PathBuf};
+
+use harold_api::tools::watch::v1::StartWatchRequest;
+
+use crate::settings::WatchSettings;
+
+const MAX_NAME_LEN: usize = 64;
+const EVERY_MINUTES: std::ops::RangeInclusive<u32> = 2..=240;
+const FOR_MINUTES: std::ops::RangeInclusive<u32> = 1..=1440;
+const MIN_RUN_BUDGET_MICROS: i64 = 10_000;
+/// A `SKILL.md` larger than this is treated as missing: it would not fit a model prompt.
+const MAX_SKILL_BYTES: u64 = 256 * 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ReportTo {
+    Chief,
+    /// The agent running in the watch's own folder.
+    SelfPane,
+}
+
+impl ReportTo {
+    pub(super) fn as_str(self) -> &'static str {
+        match self {
+            ReportTo::Chief => "chief",
+            ReportTo::SelfPane => "self",
+        }
+    }
+}
+
+/// A start request that passed every check.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct Checked {
+    pub name: String,
+    /// The canonical folder: links followed, no trailing slash.
+    pub folder: PathBuf,
+    pub skill: String,
+    pub report_to: ReportTo,
+    pub every_minutes: u32,
+    pub for_minutes: u32,
+    pub every_run: bool,
+    /// `None` when `start` gave none and `[watch] run_budget_usd` is not set.
+    pub run_budget_usd_micros: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum Refusal {
+    /// The field named in `invalid <field>`.
+    Invalid(&'static str),
+    UnknownSkill,
+}
+
+/// A skill read from `SKILL.md`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct Skill {
+    /// The frontmatter's `allowed-tools`, exactly as written, or `None` when absent.
+    pub allowed_tools: Option<String>,
+    /// The text after the frontmatter.
+    pub body: String,
+}
+
+/// The skill's file is not there, leaves `.claude/skills/`, or cannot be read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct SkillMissing;
+
+fn is_token(text: &str) -> bool {
+    !text.is_empty()
+        && text.len() <= MAX_NAME_LEN
+        && text
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+}
+
+/// Checks every field of a start request. `UnknownSkill` is last: a skill is looked for
+/// only when everything else is valid.
+pub(super) fn check_start(
+    request: &StartWatchRequest,
+    cfg: &WatchSettings,
+) -> Result<Checked, Refusal> {
+    if !is_token(&request.name) {
+        return Err(Refusal::Invalid("name"));
+    }
+    let folder = canonical_folder(&request.folder).ok_or(Refusal::Invalid("folder"))?;
+    if !is_token(&request.skill) {
+        return Err(Refusal::Invalid("skill"));
+    }
+    if !EVERY_MINUTES.contains(&request.every_minutes) {
+        return Err(Refusal::Invalid("every_minutes"));
+    }
+    if !FOR_MINUTES.contains(&request.for_minutes) {
+        return Err(Refusal::Invalid("for_minutes"));
+    }
+    let report_to = match request.report_to.as_str() {
+        "chief" => ReportTo::Chief,
+        "" | "self" => ReportTo::SelfPane,
+        _ => return Err(Refusal::Invalid("report_to")),
+    };
+    let run_budget_usd_micros = run_budget(request.run_budget_usd, cfg)?;
+    skill_path(&folder, &request.skill).ok_or(Refusal::UnknownSkill)?;
+    Ok(Checked {
+        name: request.name.clone(),
+        folder,
+        skill: request.skill.clone(),
+        report_to,
+        every_minutes: request.every_minutes,
+        for_minutes: request.for_minutes,
+        every_run: request.every_run,
+        run_budget_usd_micros,
+    })
+}
+
+/// The run budget in millionths of a dollar. 0 means none given, so the setting applies
+/// when it is set.
+fn run_budget(asked: f64, cfg: &WatchSettings) -> Result<Option<i64>, Refusal> {
+    const INVALID: Refusal = Refusal::Invalid("run_budget_usd");
+    if asked == 0.0 {
+        return Ok(cfg.run_budget_usd.map(to_micros));
+    }
+    if !asked.is_finite() || asked < 0.0 {
+        return Err(INVALID);
+    }
+    let micros = to_micros(asked);
+    if micros < MIN_RUN_BUDGET_MICROS
+        || cfg
+            .max_run_budget_usd
+            .is_some_and(|max| micros > to_micros(max))
+    {
+        return Err(INVALID);
+    }
+    Ok(Some(micros))
+}
+
+pub(super) fn to_micros(usd: f64) -> i64 {
+    (usd * 1_000_000.0).round() as i64
+}
+
+/// The canonical form of an absolute folder that exists, else `None`.
+fn canonical_folder(folder: &str) -> Option<PathBuf> {
+    let path = Path::new(folder);
+    if !path.is_absolute() {
+        return None;
+    }
+    let canonical = std::fs::canonicalize(path).ok()?;
+    canonical.is_dir().then_some(canonical)
+}
+
+/// `<folder>/.claude/skills/<skill>/SKILL.md`, if it is a file whose real path lies
+/// inside `<folder>/.claude/skills/`.
+fn skill_path(folder: &Path, skill: &str) -> Option<PathBuf> {
+    if !is_token(skill) {
+        return None;
+    }
+    let skills = std::fs::canonicalize(folder.join(".claude").join("skills")).ok()?;
+    let file = std::fs::canonicalize(skills.join(skill).join("SKILL.md")).ok()?;
+    (file.starts_with(&skills) && file.is_file()).then_some(file)
+}
+
+/// Reads the skill afresh. The same location rule as `check_start`, so a link that
+/// was changed after the watch started is caught at the run.
+pub(super) fn read_skill(folder: &Path, skill: &str) -> Result<Skill, SkillMissing> {
+    let path = skill_path(folder, skill).ok_or(SkillMissing)?;
+    let size = std::fs::metadata(&path).map_err(|_| SkillMissing)?.len();
+    if size > MAX_SKILL_BYTES {
+        return Err(SkillMissing);
+    }
+    let text = std::fs::read_to_string(&path).map_err(|_| SkillMissing)?;
+    Ok(parse_skill(&text))
+}
+
+fn parse_skill(text: &str) -> Skill {
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+    let Some(rest) = text
+        .strip_prefix("---\n")
+        .or_else(|| text.strip_prefix("---\r\n"))
+    else {
+        return Skill {
+            allowed_tools: None,
+            body: text.to_owned(),
+        };
+    };
+    let mut allowed_tools = None;
+    let mut consumed = 0;
+    let mut closed = false;
+    for line in rest.split_inclusive('\n') {
+        consumed += line.len();
+        let bare = line.trim_end_matches(['\n', '\r']);
+        if bare == "---" {
+            closed = true;
+            break;
+        }
+        if let Some(value) = bare.strip_prefix("allowed-tools:") {
+            let value = value.trim();
+            if !value.is_empty() {
+                allowed_tools = Some(value.to_owned());
+            }
+        }
+    }
+    if !closed {
+        // Frontmatter that never closes is not frontmatter: the whole text is the body.
+        return Skill {
+            allowed_tools: None,
+            body: text.to_owned(),
+        };
+    }
+    Skill {
+        allowed_tools,
+        body: rest[consumed..].to_owned(),
+    }
+}
+
+#[cfg(test)]
+#[path = "validate_tests.rs"]
+mod tests;
