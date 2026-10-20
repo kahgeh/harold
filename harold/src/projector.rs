@@ -15,12 +15,14 @@ use crate::inbound::{
     type_into_pane_quietly,
 };
 use crate::outbound::left_out::{
-    TrackedAgents, message_dropped_reason, spoken_line_dropped_reason,
+    TrackedAgents, agent_message_dropped, desk_line_dropped_reason, message_dropped_reason,
+    spoken_line_dropped, spoken_line_dropped_reason,
 };
 use crate::outbound::{
     AppRoute, AwayText, CarriedBy, ChiefApp, DeliveryOutcome, NotifyEnvironment, NotifyState,
     SystemAwayText, SystemEnvironment, deliver_from_chief, notify_with_app,
 };
+use crate::settings::Channel;
 use crate::store::{
     AppReplyState, AwayMessageRequested, EventVersion, HaroldStore, InboundMessage,
     PendingDelivery, ProjectionBatch, ReceivedReply, SpokenLineRequested, StoreError,
@@ -152,14 +154,15 @@ impl ProductionDispatcher {
     fn chief_app(&self, pane_id: &str) -> Option<ChiefApp<'_>> {
         let app = self.app.as_deref()?;
         let snapshots = self.snapshots.as_ref()?;
-        let chief_folder = self
-            .environment
-            .notify_settings()
-            .away_messages_only_from
-            .as_deref();
-        is_chief_pane(&snapshots.current(), chief_folder, pane_id).then(|| ChiefApp {
+        let settings = self.environment.notify_settings();
+        let current = snapshots.current();
+        let agents = TrackedAgents::from_snapshot(&current);
+        let on_app = is_chief_pane(&current, settings.chief.as_deref(), pane_id)
+            && agents.may_use(settings, Channel::WebApp, pane_id);
+        on_app.then(|| ChiefApp {
             app,
             away: self.away_text.as_ref(),
+            away_allowed: agents.may_use(settings, settings.away(), pane_id),
         })
     }
 
@@ -169,11 +172,7 @@ impl ProductionDispatcher {
         let Some(snapshots) = self.snapshots.as_ref() else {
             return ChiefPane::NoChief;
         };
-        let chief_folder = self
-            .environment
-            .notify_settings()
-            .away_messages_only_from
-            .as_deref();
+        let chief_folder = self.environment.notify_settings().chief.as_deref();
         find_chief(&snapshots.current(), chief_folder)
     }
 
@@ -243,10 +242,7 @@ impl ProductionDispatcher {
     fn tracked_agents(&self) -> TrackedAgents {
         self.snapshots
             .as_ref()
-            .map(|snapshots| {
-                TrackedAgents::from_snapshot(&snapshots.current())
-                    .with_pod_files(self.environment.pod_files())
-            })
+            .map(|snapshots| TrackedAgents::from_snapshot(&snapshots.current()))
             .unwrap_or_default()
     }
 
@@ -280,16 +276,17 @@ impl ProductionDispatcher {
                 // Whether the web app carried the message, in which case no reply target
                 // is recorded: a reply to it comes through the app.
                 let carried_by_app = Cell::new(false);
+                // Whether the app could not push the message and the pane is not on the
+                // away channel's list, so it went nowhere.
+                let held = Cell::new(false);
                 dispatch_away_message(
                     delivery,
                     messaging_paused,
                     |pane_id| {
                         message_dropped_reason(
-                            self.environment
-                                .notify_settings()
-                                .away_messages_only_from
-                                .as_deref(),
+                            self.environment.notify_settings(),
                             &self.tracked_agents(),
+                            self.chief_app(pane_id).is_some(),
                             pane_id,
                         )
                     },
@@ -309,9 +306,19 @@ impl ProductionDispatcher {
                             &away_text,
                         )?;
                         carried_by_app.set(carried_by == CarriedBy::App);
+                        if carried_by == CarriedBy::Held {
+                            held.set(true);
+                            let key = self.environment.notify_settings().away().key();
+                            let reason = agent_message_dropped(key);
+                            info!(pane_id = %message.pane_id, "{reason}");
+                        }
                         Ok(())
                     },
                     |source| {
+                        // A message held back sent nothing: no mark and no reply target.
+                        if held.get() {
+                            return;
+                        }
                         // The pane's mark: its turn-end update for this turn is left out.
                         self.notify_state
                             .mark_requested_message(source.pane_id(), self.environment.now());
@@ -327,17 +334,34 @@ impl ProductionDispatcher {
                 crate::outbound::is_tts_muted(),
                 |pane_id| {
                     spoken_line_dropped_reason(
-                        self.environment
-                            .notify_settings()
-                            .away_messages_only_from
-                            .as_deref(),
+                        self.environment.notify_settings(),
+                        &self.tracked_agents(),
+                        self.chief_app(pane_id).is_some(),
+                        pane_id,
+                    )
+                },
+                |pane_id| {
+                    desk_line_dropped_reason(
+                        self.environment.notify_settings(),
                         &self.tracked_agents(),
                         pane_id,
                     )
                 },
                 self.environment.as_ref(),
                 |pane_id| self.chief_app(pane_id),
-                |text| crate::voice_input::say_in_phone_call(text, Speaker::Chief),
+                |pane_id, text| {
+                    // The phone's call is the web app's.
+                    let on_app = self.tracked_agents().may_use(
+                        self.environment.notify_settings(),
+                        Channel::WebApp,
+                        pane_id,
+                    );
+                    if on_app {
+                        crate::voice_input::say_in_phone_call(text, Speaker::Chief)
+                    } else {
+                        None
+                    }
+                },
             ),
             other => Err(DispatchError::Permanent(format!(
                 "unknown event type: {other}"
@@ -482,42 +506,44 @@ fn dispatch_spoken_line(
     delivery: &PendingDelivery,
     messaging_paused: bool,
     voice_muted: bool,
-    drop_reason: impl FnOnce(&str) -> Option<String>,
+    drop_reason: impl Fn(&str) -> Option<String>,
     environment: &dyn NotifyEnvironment,
 ) -> Result<DeliveryOutcome, DispatchError> {
     dispatch_spoken_line_with_app(
         delivery,
         messaging_paused,
         voice_muted,
-        drop_reason,
+        &drop_reason,
+        &drop_reason,
         environment,
         |_| None,
-        |_| None,
+        |_, _| None,
     )
 }
 
-/// `dispatch_spoken_line` with the app route. On the locked-screen branch only,
-/// `chief_app` is asked with the line's pane id: when it gives the app route, the line goes
-/// to the app as text, and to iMessage as text when the app does not push it. No voice
-/// note is made for it.
+/// `dispatch_spoken_line` with the app route. The phone's call comes first: `in_call` is
+/// asked with the line's pane id and text, and says the line in the open call, if any.
+/// On the locked-screen branch, `chief_app` is asked with the pane id: when it gives the
+/// app route, the line goes to the app as text, and to iMessage as text when the app does
+/// not push it. No voice note is made for it. `phone_drop` and `desk_drop` give the log
+/// line for a pane not on the list of the branch taken, once the voice mute and the
+/// messaging pause have been looked at.
+#[allow(clippy::too_many_arguments)]
 fn dispatch_spoken_line_with_app<'a>(
     delivery: &PendingDelivery,
     messaging_paused: bool,
     voice_muted: bool,
-    drop_reason: impl FnOnce(&str) -> Option<String>,
+    phone_drop: impl FnOnce(&str) -> Option<String>,
+    desk_drop: impl FnOnce(&str) -> Option<String>,
     environment: &dyn NotifyEnvironment,
     chief_app: impl FnOnce(&str) -> Option<ChiefApp<'a>>,
-    in_call: impl FnOnce(&str) -> Option<bool>,
+    in_call: impl FnOnce(&str, &str) -> Option<bool>,
 ) -> Result<DeliveryOutcome, DispatchError> {
     let line = serde_json::from_value::<SpokenLineRequested>(delivery.payload.clone()).map_err(
         |error| DispatchError::Permanent(format!("invalid SpokenLineRequested payload: {error}")),
     )?;
     let pane_id = line.pane_id.as_str();
-    if let Some(reason) = drop_reason(pane_id) {
-        info!(pane_id = %pane_id, "{reason}");
-        return Ok(DeliveryOutcome::Skipped);
-    }
-    if in_call(&line.text) == Some(true) {
+    if in_call(pane_id, &line.text) == Some(true) {
         info!(pane_id = %pane_id, "spoken line said in the open call");
         return Ok(DeliveryOutcome::Delivered);
     }
@@ -526,9 +552,19 @@ fn dispatch_spoken_line_with_app<'a>(
             info!(pane_id = %pane_id, "spoken line dropped (messaging paused)");
             return Ok(DeliveryOutcome::Skipped);
         }
+        if let Some(reason) = phone_drop(pane_id) {
+            info!(pane_id = %pane_id, "{reason}");
+            return Ok(DeliveryOutcome::Skipped);
+        }
         if let Some(chief_app) = chief_app(pane_id) {
-            deliver_from_chief(&chief_app, &delivery.event_id, &line.text, &line.text)
-                .map_err(DispatchError::Retryable)?;
+            let carried_by =
+                deliver_from_chief(&chief_app, &delivery.event_id, &line.text, &line.text)
+                    .map_err(DispatchError::Retryable)?;
+            if carried_by == CarriedBy::Held {
+                let reason = spoken_line_dropped(environment.notify_settings().away().key());
+                info!(pane_id = %pane_id, "{reason}");
+                return Ok(DeliveryOutcome::Skipped);
+            }
             return Ok(DeliveryOutcome::Delivered);
         }
         environment
@@ -539,6 +575,10 @@ fn dispatch_spoken_line_with_app<'a>(
     }
     if voice_muted {
         info!(pane_id = %pane_id, "spoken line dropped (voice off)");
+        return Ok(DeliveryOutcome::Skipped);
+    }
+    if let Some(reason) = desk_drop(pane_id) {
+        info!(pane_id = %pane_id, "{reason}");
         return Ok(DeliveryOutcome::Skipped);
     }
     environment

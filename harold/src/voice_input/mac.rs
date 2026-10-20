@@ -246,7 +246,7 @@ impl MacPorts {
                 .voice_input
                 .as_ref()
                 .and_then(|voice_input| WorkerCommand::from_settings(voice_input, tts)),
-            chief_folder: settings.notify.away_messages_only_from.clone(),
+            chief_folder: settings.notify.chief.clone(),
             tts: Arc::new(TtsSettings {
                 command: tts.command.clone(),
                 voice: tts.voice.clone(),

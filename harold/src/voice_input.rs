@@ -100,7 +100,7 @@ pub(crate) trait CallPorts: Send + Sync + 'static {
     /// Starts the worker for a call whose folder is `call_dir`; loading goes on in the background.
     fn start_worker(&self, call_dir: &Path) -> Result<Self::Worker, WorkerError>;
     fn panes(&self) -> &Self::Panes;
-    /// `[notify] away_messages_only_from`.
+    /// `[notify] chief`.
     fn chief_folder(&self) -> Option<String>;
     /// Says `line` with the `[tts]` command; resolves when it has ended.
     fn speak_with_tts(&self, line: &str) -> impl Future<Output = ()> + Send;

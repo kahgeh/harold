@@ -45,13 +45,26 @@ pub(crate) struct FakeEnvironment {
 }
 
 impl FakeEnvironment {
-    /// The shipped default settings with `overrides` (TOML) laid over them. The screen
-    /// starts unlocked, no tmux client is attached, and sends succeed.
+    /// The shipped default settings with `overrides` (TOML) laid over them, except that each
+    /// channel list the overrides leave out is `["*"]`: every pane may use it, so a test
+    /// that is not about the lists need not name a folder. The screen starts unlocked, no
+    /// tmux client is attached, and sends succeed.
     pub(crate) fn new(overrides: &str) -> Self {
+        let mut notify = crate::peers::settings_with(overrides).notify;
+        for (key, list) in [
+            ("imessage", &mut notify.imessage),
+            ("telegram", &mut notify.telegram),
+            ("web_app", &mut notify.web_app),
+            ("machine_audio_output", &mut notify.machine_audio_output),
+        ] {
+            if !overrides.contains(&format!("{key} =")) {
+                *list = vec!["*".to_string()];
+            }
+        }
         Self {
             started: Instant::now(),
             elapsed: Mutex::new(Duration::ZERO),
-            settings: crate::peers::settings_with(overrides).notify,
+            settings: notify,
             screen_locked: AtomicBool::new(false),
             session_attached: AtomicBool::new(false),
             active_pane: Mutex::new(None),

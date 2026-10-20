@@ -1,17 +1,15 @@
-//! The decisions behind the two rules that keep a message off the away device. Rule A: the
-//! pane sent a message with `harold send-message-to-away-device` this turn, so its
-//! turn-end update is left out. Rule B: `[notify] away_messages_only_from` names a folder,
-//! and the pane is outside it, so its turn-end update is left out and its requested
-//! message is dropped. Rule B acts for an ordinary pane only while an agent runs in that
-//! folder; a pane that a pod `agent-panes` file or a baton `agent-pane` file names counts
-//! as outside it whether or not the chief runs. The quiet rule: the turn-end update of such
-//! a named pane (a pod session or build worker) is not spoken at the desk, whether or not
-//! the chief runs, and neither is the chief's own pane while it is tracked.
+//! The decisions behind what keeps a message off the user's channels. Rule A: the pane sent
+//! a message with `harold send-message-to-away-device` this turn, so its turn-end update is
+//! left out. The channel lists: `[notify]` has one list of folders for each of Harold's four
+//! channels (`imessage`, `telegram`, `web_app` and `machine_audio_output`), and a pane may
+//! use a channel only when its folder, as the latest good listing of tmux panes has it,
+//! matches an entry on that channel's list. `chief` names the chief's pane by the same
+//! matching; the chief's own turn-end update is not spoken at the desk.
 
-use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
 
 use crate::agent::domain::AgentSnapshot;
+use crate::settings::{Channel, EVERYONE, NotifySettings};
 
 /// How long after a pane's requested message its mark still leaves a turn-end update
 /// out. Harold is not told about every turn end, so without a limit a mark could hide the
@@ -26,43 +24,56 @@ pub(crate) fn mark_is_fresh(marked_at: Instant, now: Instant) -> bool {
     now.saturating_duration_since(marked_at) < MARK_LIFETIME
 }
 
-/// The monitor health component that reports whether the last listing of tmux panes
-/// worked (`set_health("inventory", ..)` in `agent/runtime.rs`).
-const INVENTORY_COMPONENT: &str = "inventory";
-
 fn without_one_trailing_slash(path: &str) -> &str {
     path.strip_suffix('/').unwrap_or(path)
 }
 
-/// Whether two paths name the same folder: equal as text once one trailing `/` is taken
-/// off each. Symbolic links are not resolved, and a subfolder is another folder.
-pub(crate) fn same_folder(a: &str, b: &str) -> bool {
-    without_one_trailing_slash(a) == without_one_trailing_slash(b)
+/// Whether `folder`, a pane's working directory, matches `entry`, an entry of `chief` or of
+/// a channel list. The entry rule: `/…` is the folder exactly, `~/…` the same with `~` as
+/// the home folder, `*` any folder, and anything else a folder whose last whole path
+/// components are the entry's. One trailing `/` is ignored on either side. Symbolic links
+/// are not resolved, components are compared whole and as text, and a subfolder of a
+/// matching folder does not match.
+pub(crate) fn same_folder(folder: &str, entry: &str) -> bool {
+    entry_matches(folder, entry, std::env::var("HOME").ok().as_deref())
 }
 
-/// The agent panes Harold tracks and the working directory tmux reports for each.
+/// `same_folder` with the home folder given.
+pub(crate) fn entry_matches(folder: &str, entry: &str, home: Option<&str>) -> bool {
+    if entry == EVERYONE {
+        return true;
+    }
+    let folder = without_one_trailing_slash(folder);
+    let entry = without_one_trailing_slash(entry);
+    if entry.starts_with('/') {
+        return folder == entry;
+    }
+    if let Some(rest) = entry.strip_prefix("~/") {
+        return home.is_some_and(|home| {
+            folder
+                .strip_prefix(without_one_trailing_slash(home))
+                .and_then(|tail| tail.strip_prefix('/'))
+                == Some(rest)
+        });
+    }
+    let mut folder_parts = folder.rsplit('/');
+    entry
+        .rsplit('/')
+        .all(|part| folder_parts.next() == Some(part))
+}
+
+/// The agent panes Harold tracks and the working directory tmux reports for each, from the
+/// latest good listing: while a listing fails the snapshot keeps the last good one's panes.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(crate) struct TrackedAgents {
     /// Pane id and working directory.
     folder_by_pane: Vec<(String, String)>,
-    /// The last listing of tmux panes failed, so `folder_by_pane` is the last good one's.
-    listing_failed: bool,
-    /// Where pod and baton files are looked for, and when the tmux server started.
-    pod_files: PodFiles,
 }
 
 impl TrackedAgents {
-    /// The panes in `snapshot`. While the monitor's last listing of tmux panes failed the
-    /// snapshot holds panes Harold saw earlier: they are kept for folder lookups, but
-    /// rule B's view of the chief ignores them, so it acts only for an agent Harold can
-    /// see now (and for panes a pod file names).
+    /// The panes in `snapshot`.
     pub(crate) fn from_snapshot(snapshot: &AgentSnapshot) -> Self {
-        let listing_failed = snapshot
-            .monitor_health
-            .iter()
-            .any(|health| health.component == INVENTORY_COMPONENT && !health.healthy);
         Self {
-            listing_failed,
             folder_by_pane: snapshot
                 .panes
                 .iter()
@@ -73,13 +84,7 @@ impl TrackedAgents {
                     )
                 })
                 .collect(),
-            pod_files: PodFiles::default(),
         }
-    }
-
-    /// These agents with the places pod and baton files are looked for.
-    pub(crate) fn with_pod_files(self, pod_files: PodFiles) -> Self {
-        Self { pod_files, ..self }
     }
 
     #[cfg(test)]
@@ -89,27 +94,7 @@ impl TrackedAgents {
                 .iter()
                 .map(|(pane_id, folder)| (pane_id.to_string(), folder.to_string()))
                 .collect(),
-            listing_failed: false,
-            pod_files: PodFiles::default(),
         }
-    }
-
-    /// Rule B's and the quiet rule's chief view: whether an agent Harold can see now runs
-    /// in `folder`. Nothing is seen while the listing has failed.
-    fn any_in(&self, folder: &str) -> bool {
-        !self.listing_failed
-            && self
-                .folder_by_pane
-                .iter()
-                .any(|(_, pane_folder)| same_folder(pane_folder, folder))
-    }
-
-    fn pane_is_in(&self, pane_id: &str, folder: &str) -> bool {
-        !self.listing_failed
-            && self
-                .folder_by_pane
-                .iter()
-                .any(|(id, pane_folder)| id == pane_id && same_folder(pane_folder, folder))
     }
 
     fn folder_of(&self, pane_id: &str) -> Option<&str> {
@@ -118,255 +103,146 @@ impl TrackedAgents {
             .find(|(id, _)| id == pane_id)
             .map(|(_, folder)| folder.as_str())
     }
-}
 
-/// Rule B's condition. The folder, as written in the setting, when all three hold:
-/// `only_from` is set, a tracked agent pane is in it, and `pane_id` is not in it. Also the
-/// folder when `only_from` is set and a pod file names `pane_id`, whether or not the chief
-/// runs and whether or not the listing worked.
-fn folder_pane_is_outside<'a>(
-    only_from: Option<&'a str>,
-    agents: &TrackedAgents,
-    pane_id: &str,
-) -> Option<&'a str> {
-    let folder = only_from?;
-    if pod_role(&agents.pod_files, agents.folder_of(pane_id), pane_id).is_some() {
-        return Some(folder);
-    }
-    if !agents.any_in(folder) || agents.pane_is_in(pane_id, folder) {
-        return None;
-    }
-    Some(folder)
-}
-
-/// Rule B for a turn-end update. The log line for leaving out the update of `pane_id`.
-pub(crate) fn only_from_reason(
-    only_from: Option<&str>,
-    agents: &TrackedAgents,
-    pane_id: &str,
-) -> Option<String> {
-    let folder = folder_pane_is_outside(only_from, agents, pane_id)?;
-    Some(format!(
-        "notification skipped (updates come from {folder} only)"
-    ))
-}
-
-/// Rule B for a message a pane asked Harold to send. The log line for dropping the
-/// message of `pane_id`. The line never holds the message's text.
-pub(crate) fn message_dropped_reason(
-    only_from: Option<&str>,
-    agents: &TrackedAgents,
-    pane_id: &str,
-) -> Option<String> {
-    let folder = folder_pane_is_outside(only_from, agents, pane_id)?;
-    Some(format!(
-        "away message dropped (messages come from {folder} only)"
-    ))
-}
-
-/// Rule B for a line a pane asked Harold to speak. The log line for dropping the line of
-/// `pane_id`. The line never holds the spoken text.
-pub(crate) fn spoken_line_dropped_reason(
-    only_from: Option<&str>,
-    agents: &TrackedAgents,
-    pane_id: &str,
-) -> Option<String> {
-    let folder = folder_pane_is_outside(only_from, agents, pane_id)?;
-    Some(format!(
-        "spoken line dropped (lines come from {folder} only)"
-    ))
-}
-
-/// The file in a build worker's folder that names its pane, written by baton.
-const BATON_AGENT_PANE: &str = ".superpowers/baton/agent-pane";
-/// The file in a product's base checkout, where pod sessions run, that lists their panes,
-/// written by `pod start`.
-const POD_AGENT_PANES: &str = ".superpowers/pod/agent-panes";
-
-/// Whether the file at `path` has a line that is `pane_id` once trimmed. A missing or
-/// unreadable file names no pane.
-fn names_pane(path: &Path, pane_id: &str) -> bool {
-    std::fs::read_to_string(path).is_ok_and(|text| text.lines().any(|line| line.trim() == pane_id))
-}
-
-/// What a pane's role in a pod is, as a file says.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum PodRole {
-    /// Named in a worktree's baton `agent-pane`.
-    BuildWorker,
-    /// Listed in a base checkout's pod `agent-panes`.
-    PodSession,
-}
-
-/// Where pod files can be, and when the tmux server started. tmux numbers panes from `%0`
-/// again after a restart, so a file's entry is trusted only as far as these allow.
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub(crate) struct PodFiles {
-    /// The base checkout of each product in the pod registry. Empty when the registry is
-    /// unset or unreadable.
-    bases: Vec<PathBuf>,
-    /// When the tmux server started, if Harold could read it.
-    tmux_started: Option<SystemTime>,
-}
-
-impl PodFiles {
-    pub(crate) fn new(bases: Vec<PathBuf>, tmux_started: Option<SystemTime>) -> Self {
-        Self {
-            bases,
-            tmux_started,
+    /// Whether `pane_id` may use `channel`: its folder matches an entry on the channel's
+    /// list, or the list holds `*`. An empty list lets no pane through, and a pane Harold
+    /// has no folder for yet matches only `*`.
+    pub(crate) fn may_use(
+        &self,
+        settings: &NotifySettings,
+        channel: Channel,
+        pane_id: &str,
+    ) -> bool {
+        let list = settings.list(channel);
+        if list.iter().any(|entry| entry == EVERYONE) {
+            return true;
         }
+        let Some(folder) = self.folder_of(pane_id) else {
+            return false;
+        };
+        list.iter().any(|entry| same_folder(folder, entry))
     }
-}
 
-/// Why a file's entry for a pane was refused.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Ignored {
-    /// A tracked pane whose folder is no product's base checkout or worktree.
-    OutsidePodFolders,
-    /// An untracked pane named in a file last changed before the tmux server started.
-    OlderThanTmuxServer,
-    /// An untracked pane, and the tmux start time is unknown.
-    NoTmuxStartTime,
-}
-
-impl Ignored {
-    fn reason(self) -> &'static str {
-        match self {
-            Self::OutsidePodFolders => "outside_pod_folders",
-            Self::OlderThanTmuxServer => "older_than_tmux_server",
-            Self::NoTmuxStartTime => "no_tmux_start_time",
+    /// The chief's pane: the one pane whose folder matches `chief`. With several matching
+    /// panes there is no chief, and the count is logged, with no folder.
+    pub(crate) fn chief_pane_id(&self, chief: Option<&str>) -> Option<&str> {
+        let chief = chief?;
+        let mut matching = self
+            .folder_by_pane
+            .iter()
+            .filter(|(_, folder)| same_folder(folder, chief));
+        let first = matching.next()?;
+        if matching.next().is_none() {
+            return Some(first.0.as_str());
         }
-    }
-}
-
-/// The role a file in `folder` gives `pane_id`: its baton file first, then `agent-panes`.
-fn role_in_folder(folder: &Path, pane_id: &str) -> Option<PodRole> {
-    if names_pane(&folder.join(BATON_AGENT_PANE), pane_id) {
-        Some(PodRole::BuildWorker)
-    } else if names_pane(&folder.join(POD_AGENT_PANES), pane_id) {
-        Some(PodRole::PodSession)
-    } else {
+        let count = self
+            .folder_by_pane
+            .iter()
+            .filter(|(_, folder)| same_folder(folder, chief))
+            .count();
+        tracing::info!(count, "chief pane ambiguous");
         None
     }
 }
 
-/// Whether `folder` is a base checkout, or a folder beside one (where baton puts worktrees).
-fn is_pod_folder(files: &PodFiles, folder: &str) -> bool {
-    let folder_parent = Path::new(without_one_trailing_slash(folder)).parent();
-    files.bases.iter().any(|base| {
-        let base = base.to_string_lossy();
-        same_folder(&base, folder)
-            || Path::new(without_one_trailing_slash(&base)).parent() == folder_parent
-    })
+/// The log line for a turn-end update held off the phone by the list under `key`.
+pub(crate) fn notification_skipped(key: &str) -> String {
+    format!("notification skipped (not in notify.{key})")
 }
 
-/// Whether `file` was changed after the tmux server started, or why not.
-fn file_is_current(files: &PodFiles, file: &Path) -> Result<(), Ignored> {
-    let started = files.tmux_started.ok_or(Ignored::NoTmuxStartTime)?;
-    let changed = std::fs::metadata(file).and_then(|meta| meta.modified());
-    match changed {
-        Ok(changed) if changed > started => Ok(()),
-        _ => Err(Ignored::OlderThanTmuxServer),
-    }
+/// The log line for an agent message held off the phone by the list under `key`.
+pub(crate) fn agent_message_dropped(key: &str) -> String {
+    format!("agent message dropped (not in notify.{key})")
 }
 
-/// The files that can name a pane Harold has no folder for, with the role each gives:
-/// each base checkout's `agent-panes`, and the baton file of each folder beside a base.
-fn candidate_files(files: &PodFiles) -> Vec<(PathBuf, PodRole)> {
-    let mut candidates: Vec<(PathBuf, PodRole)> = Vec::new();
-    let mut add = |path: PathBuf, role: PodRole| {
-        if !candidates.iter().any(|(known, _)| *known == path) {
-            candidates.push((path, role));
-        }
-    };
-    for base in &files.bases {
-        add(base.join(POD_AGENT_PANES), PodRole::PodSession);
-        let base = PathBuf::from(without_one_trailing_slash(&base.to_string_lossy()));
-        let Some(parent) = base.parent() else {
-            continue;
-        };
-        let Ok(entries) = std::fs::read_dir(parent) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            add(entry.path().join(BATON_AGENT_PANE), PodRole::BuildWorker);
-        }
-    }
-    candidates
+/// The log line for a spoken line held off a channel by the list under `key`.
+pub(crate) fn spoken_line_dropped(key: &str) -> String {
+    format!("spoken line dropped (not in notify.{key})")
 }
 
-/// The decision behind `pod_role`, with the refusal as a value.
-fn classify(
-    files: &PodFiles,
-    tracked_folder: Option<&str>,
+/// The key of the list that holds `pane_id` off the phone, or `None` when the pane may use
+/// it. The phone's order: the app (`via_app`, the app route is open to this pane), then the
+/// list of the channel `away_channel` names. The key is the last list checked.
+pub(crate) fn phone_held_back(
+    settings: &NotifySettings,
+    agents: &TrackedAgents,
+    via_app: bool,
     pane_id: &str,
-) -> Result<Option<PodRole>, Ignored> {
-    if let Some(folder) = tracked_folder {
-        let Some(role) = role_in_folder(Path::new(folder), pane_id) else {
-            return Ok(None);
-        };
-        if !files.bases.is_empty() && !is_pod_folder(files, folder) {
-            return Err(Ignored::OutsidePodFolders);
-        }
-        return Ok(Some(role));
+) -> Option<&'static str> {
+    let away = settings.away();
+    if via_app || agents.may_use(settings, away, pane_id) {
+        return None;
     }
-    let mut refused = None;
-    for (file, role) in candidate_files(files) {
-        if !names_pane(&file, pane_id) {
-            continue;
-        }
-        match file_is_current(files, &file) {
-            Ok(()) => return Ok(Some(role)),
-            Err(ignored) => refused = refused.or(Some(ignored)),
-        }
-    }
-    refused.map_or(Ok(None), Err)
+    Some(away.key())
 }
 
-/// Whether a file names `pane_id` as a pod session or a build worker. `tracked_folder` is
-/// the pane's own folder when Harold knows it. A refused entry is logged and counts for
-/// nothing.
-fn pod_role(files: &PodFiles, tracked_folder: Option<&str>, pane_id: &str) -> Option<PodRole> {
-    match classify(files, tracked_folder, pane_id) {
-        Ok(role) => role,
-        Err(ignored) => {
-            tracing::info!(pane_id, reason = ignored.reason(), "pod pane entry ignored");
-            None
-        }
-    }
-}
-
-/// The quiet rule. The log line for not speaking the turn-end update of `pane_id` at the
-/// desk: a pane a pod file names is a pod session's or a build worker's, whether or not an
-/// agent runs in `only_from`; and while an agent runs there, a pane in that folder is the
-/// chief's. Any other pane is spoken.
-pub(crate) fn quiet_reason(
-    only_from: Option<&str>,
+/// The log line for leaving out the turn-end update of `pane_id` at the desk: the chief's
+/// own is not spoken, and nor is one from a pane that is not on `machine_audio_output`.
+pub(crate) fn desk_update_reason(
+    settings: &NotifySettings,
     agents: &TrackedAgents,
     pane_id: &str,
 ) -> Option<String> {
-    let folder = only_from?;
-    let role = match pod_role(&agents.pod_files, agents.folder_of(pane_id), pane_id) {
-        Some(PodRole::BuildWorker) => "build worker",
-        Some(PodRole::PodSession) => "pod session",
-        None if agents.pane_is_in(pane_id, folder) => "chief",
-        None => return None,
-    };
-    Some(format!("spoken update left out ({role})"))
+    if agents.chief_pane_id(settings.chief.as_deref()) == Some(pane_id) {
+        return Some("spoken update left out (chief)".to_string());
+    }
+    if !agents.may_use(settings, Channel::MachineAudioOutput, pane_id) {
+        return Some(format!(
+            "spoken update left out (not in notify.{})",
+            Channel::MachineAudioOutput.key()
+        ));
+    }
+    None
 }
 
-/// The log line for leaving out the turn-end update of `pane_id`, when either rule
-/// applies. Rule A is looked at first, so its line is the one written when both apply.
+/// The log line for leaving out the locked-screen turn-end update of `pane_id`, when either
+/// rule applies. Rule A is looked at first, so its line is the one written when both apply.
 pub(crate) fn left_out_reason(
     messaged_this_turn: bool,
-    only_from: Option<&str>,
+    settings: &NotifySettings,
     agents: &TrackedAgents,
+    via_app: bool,
     pane_id: &str,
 ) -> Option<String> {
     if messaged_this_turn {
         return Some(MESSAGED_THIS_TURN.to_string());
     }
-    only_from_reason(only_from, agents, pane_id)
+    let key = phone_held_back(settings, agents, via_app, pane_id)?;
+    Some(notification_skipped(key))
+}
+
+/// The log line for dropping a message `pane_id` asked Harold to send. Never holds the text.
+pub(crate) fn message_dropped_reason(
+    settings: &NotifySettings,
+    agents: &TrackedAgents,
+    via_app: bool,
+    pane_id: &str,
+) -> Option<String> {
+    let key = phone_held_back(settings, agents, via_app, pane_id)?;
+    Some(agent_message_dropped(key))
+}
+
+/// The log line for dropping a line `pane_id` asked Harold to speak on the phone. Never
+/// holds the spoken text.
+pub(crate) fn spoken_line_dropped_reason(
+    settings: &NotifySettings,
+    agents: &TrackedAgents,
+    via_app: bool,
+    pane_id: &str,
+) -> Option<String> {
+    let key = phone_held_back(settings, agents, via_app, pane_id)?;
+    Some(spoken_line_dropped(key))
+}
+
+/// The log line for dropping a line `pane_id` asked Harold to speak at the desk.
+pub(crate) fn desk_line_dropped_reason(
+    settings: &NotifySettings,
+    agents: &TrackedAgents,
+    pane_id: &str,
+) -> Option<String> {
+    let key = Channel::MachineAudioOutput.key();
+    (!agents.may_use(settings, Channel::MachineAudioOutput, pane_id))
+        .then(|| spoken_line_dropped(key))
 }
 
 #[cfg(test)]
@@ -374,10 +250,16 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::{
-        BATON_AGENT_PANE, Ignored, MARK_LIFETIME, MESSAGED_THIS_TURN, POD_AGENT_PANES, PodFiles,
-        PodRole, TrackedAgents, classify, left_out_reason, mark_is_fresh, message_dropped_reason,
-        names_pane, only_from_reason, same_folder, spoken_line_dropped_reason,
+        MARK_LIFETIME, MESSAGED_THIS_TURN, TrackedAgents, desk_line_dropped_reason,
+        desk_update_reason, entry_matches, left_out_reason, mark_is_fresh, message_dropped_reason,
+        phone_held_back, spoken_line_dropped_reason,
     };
+    use crate::agent::domain::{
+        AgentIncarnation, AgentPaneObservation, AgentPaneProjection, AgentSnapshot,
+        EffectiveAgentState, MonitorHealthProjection,
+    };
+    use crate::settings::{Channel, NotifySettings};
+    use crate::store::EventVersion;
 
     #[test]
     fn mark_counts_until_it_is_10_minutes_old() {
@@ -399,372 +281,230 @@ mod tests {
         ));
     }
 
-    const CHIEF: &str = "/work/chief-of-pods";
+    const HOME: Option<&str> = Some("/Users/x");
+    const CHIEF: &str = "/Users/x/Dev/p/chief-of-pods";
 
     #[test]
-    fn same_folder_ignores_one_trailing_slash_on_either_side() {
-        assert!(same_folder(CHIEF, CHIEF));
-        assert!(same_folder("/work/chief-of-pods/", CHIEF));
-        assert!(same_folder(CHIEF, "/work/chief-of-pods/"));
-        assert!(same_folder("/", "/"));
-        assert!(!same_folder("/work/chief-of-pods//", CHIEF));
-    }
-
-    #[test]
-    fn same_folder_is_a_text_comparison_of_the_whole_path() {
-        assert!(!same_folder("/work/chief-of-pods/sub", CHIEF));
-        assert!(!same_folder("/work", CHIEF));
-        assert!(!same_folder("/work/chief-of-pods-old", CHIEF));
-        assert!(!same_folder("/Work/chief-of-pods", CHIEF));
-        assert!(!same_folder("/work/harold", CHIEF));
-    }
-
-    fn reason() -> Option<String> {
-        Some("notification skipped (updates come from /work/chief-of-pods only)".to_string())
-    }
-
-    #[test]
-    fn rule_b_does_nothing_without_the_setting() {
-        let agents = TrackedAgents::in_folders(&[("%1", CHIEF), ("%2", "/work/harold")]);
-        assert_eq!(only_from_reason(None, &agents, "%2"), None);
-    }
-
-    #[test]
-    fn pane_outside_the_folder_is_left_out_while_an_agent_is_in_it() {
-        let agents = TrackedAgents::in_folders(&[("%1", CHIEF), ("%2", "/work/harold")]);
-        assert_eq!(only_from_reason(Some(CHIEF), &agents, "%2"), reason());
-    }
-
-    #[test]
-    fn panes_in_the_folder_are_never_left_out() {
-        let agents =
-            TrackedAgents::in_folders(&[("%1", CHIEF), ("%3", CHIEF), ("%2", "/work/harold")]);
-        assert_eq!(only_from_reason(Some(CHIEF), &agents, "%1"), None);
-        assert_eq!(only_from_reason(Some(CHIEF), &agents, "%3"), None);
-    }
-
-    #[test]
-    fn no_pane_is_left_out_while_no_agent_is_in_the_folder() {
-        let agents = TrackedAgents::in_folders(&[("%2", "/work/harold")]);
-        assert_eq!(only_from_reason(Some(CHIEF), &agents, "%2"), None);
-        assert_eq!(
-            only_from_reason(Some(CHIEF), &TrackedAgents::default(), "%2"),
-            None
-        );
-    }
-
-    #[test]
-    fn pane_in_a_subfolder_is_outside_the_folder() {
-        let agents = TrackedAgents::in_folders(&[("%1", CHIEF), ("%2", "/work/chief-of-pods/sub")]);
-        assert_eq!(only_from_reason(Some(CHIEF), &agents, "%2"), reason());
-    }
-
-    #[test]
-    fn untracked_pane_is_outside_the_folder() {
-        let agents = TrackedAgents::in_folders(&[("%1", CHIEF)]);
-        assert_eq!(only_from_reason(Some(CHIEF), &agents, "%9"), reason());
-    }
-
-    #[test]
-    fn setting_with_a_trailing_slash_matches_the_same_panes_and_is_logged_as_written() {
-        let agents = TrackedAgents::in_folders(&[("%1", CHIEF), ("%2", "/work/harold")]);
-        let setting = "/work/chief-of-pods/";
-
-        assert_eq!(only_from_reason(Some(setting), &agents, "%1"), None);
-        assert_eq!(
-            only_from_reason(Some(setting), &agents, "%2"),
-            Some("notification skipped (updates come from /work/chief-of-pods/ only)".to_string())
-        );
-    }
-
-    #[test]
-    fn rule_a_line_is_the_one_written_when_both_rules_apply() {
-        let agents = TrackedAgents::in_folders(&[("%1", CHIEF), ("%2", "/work/harold")]);
-
-        // Pane %2 is outside the update folder, so rule B applies to it as well.
-        assert_eq!(only_from_reason(Some(CHIEF), &agents, "%2"), reason());
-        assert_eq!(
-            left_out_reason(true, Some(CHIEF), &agents, "%2"),
-            Some(MESSAGED_THIS_TURN.to_string())
-        );
-        assert_eq!(left_out_reason(false, Some(CHIEF), &agents, "%2"), reason());
-        assert_eq!(left_out_reason(false, Some(CHIEF), &agents, "%1"), None);
-    }
-
-    fn dropped() -> Option<String> {
-        Some("away message dropped (messages come from /work/chief-of-pods only)".to_string())
-    }
-
-    #[test]
-    fn message_rule_does_nothing_without_the_setting() {
-        let agents = TrackedAgents::in_folders(&[("%1", CHIEF), ("%2", "/work/harold")]);
-        assert_eq!(message_dropped_reason(None, &agents, "%2"), None);
-    }
-
-    #[test]
-    fn message_from_outside_the_folder_is_dropped_while_an_agent_is_in_it() {
-        let agents = TrackedAgents::in_folders(&[("%1", CHIEF), ("%2", "/work/harold")]);
-        assert_eq!(
-            message_dropped_reason(Some(CHIEF), &agents, "%2"),
-            dropped()
-        );
-    }
-
-    #[test]
-    fn messages_from_panes_in_the_folder_are_never_dropped() {
-        let agents =
-            TrackedAgents::in_folders(&[("%1", CHIEF), ("%3", CHIEF), ("%2", "/work/harold")]);
-        assert_eq!(message_dropped_reason(Some(CHIEF), &agents, "%1"), None);
-        assert_eq!(message_dropped_reason(Some(CHIEF), &agents, "%3"), None);
-    }
-
-    #[test]
-    fn no_message_is_dropped_while_no_agent_is_in_the_folder() {
-        let agents = TrackedAgents::in_folders(&[("%2", "/work/harold")]);
-        assert_eq!(message_dropped_reason(Some(CHIEF), &agents, "%2"), None);
-        assert_eq!(
-            message_dropped_reason(Some(CHIEF), &TrackedAgents::default(), "%2"),
-            None
-        );
-    }
-
-    #[test]
-    fn message_from_a_subfolder_is_dropped() {
-        let agents = TrackedAgents::in_folders(&[("%1", CHIEF), ("%2", "/work/chief-of-pods/sub")]);
-        assert_eq!(
-            message_dropped_reason(Some(CHIEF), &agents, "%2"),
-            dropped()
-        );
-    }
-
-    #[test]
-    fn message_from_an_untracked_pane_is_dropped_while_an_agent_is_in_the_folder() {
-        let agents = TrackedAgents::in_folders(&[("%1", CHIEF)]);
-        assert_eq!(
-            message_dropped_reason(Some(CHIEF), &agents, "%9"),
-            dropped()
-        );
-    }
-
-    #[test]
-    fn message_rule_matches_a_setting_with_a_trailing_slash_and_logs_it_as_written() {
-        let agents = TrackedAgents::in_folders(&[("%1", CHIEF), ("%2", "/work/harold")]);
-        let setting = "/work/chief-of-pods/";
-
-        assert_eq!(message_dropped_reason(Some(setting), &agents, "%1"), None);
-        assert_eq!(
-            message_dropped_reason(Some(setting), &agents, "%2"),
-            Some("away message dropped (messages come from /work/chief-of-pods/ only)".to_string())
-        );
-    }
-
-    #[test]
-    fn spoken_line_from_outside_the_folder_is_dropped_while_an_agent_is_in_it() {
-        let agents = TrackedAgents::in_folders(&[("%1", CHIEF), ("%2", "/work/harold")]);
-        assert_eq!(
-            spoken_line_dropped_reason(Some(CHIEF), &agents, "%2"),
-            Some("spoken line dropped (lines come from /work/chief-of-pods only)".to_string())
-        );
-        assert_eq!(spoken_line_dropped_reason(Some(CHIEF), &agents, "%1"), None);
-        assert_eq!(spoken_line_dropped_reason(None, &agents, "%2"), None);
-        let no_chief = TrackedAgents::in_folders(&[("%2", "/work/harold")]);
-        assert_eq!(
-            spoken_line_dropped_reason(Some(CHIEF), &no_chief, "%2"),
-            None
-        );
-    }
-
-    #[test]
-    fn a_pane_file_names_a_pane_on_any_line_ignoring_whitespace() {
-        let path = std::env::temp_dir().join(format!("harold-panes-{}", uuid::Uuid::new_v4()));
-        std::fs::write(&path, "%2610\n  %7  \n").unwrap();
-        assert!(names_pane(&path, "%2610"));
-        assert!(names_pane(&path, "%7"));
-        assert!(!names_pane(&path, "%26"));
-        assert!(!names_pane(std::path::Path::new("/no/such/file"), "%1"));
-        let _ = std::fs::remove_file(path);
-    }
-
-    /// A folder under the system temp folder, removed when dropped.
-    struct TempDir(std::path::PathBuf);
-
-    impl TempDir {
-        fn new() -> Self {
-            let path = std::env::temp_dir().join(format!("harold-pod-{}", uuid::Uuid::new_v4()));
-            std::fs::create_dir_all(&path).unwrap();
-            Self(path)
-        }
-
-        fn folder(&self, name: &str) -> std::path::PathBuf {
-            let path = self.0.join(name);
-            std::fs::create_dir_all(&path).unwrap();
-            path
-        }
-    }
-
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
-
-    fn write_in(folder: &std::path::Path, file: &str, text: &str) {
-        let path = folder.join(file);
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(path, text).unwrap();
-    }
-
-    fn hour_ago() -> Option<std::time::SystemTime> {
-        Some(std::time::SystemTime::now() - Duration::from_secs(3600))
-    }
-
-    fn hour_ahead() -> Option<std::time::SystemTime> {
-        Some(std::time::SystemTime::now() + Duration::from_secs(3600))
-    }
-
-    fn path_text(path: &std::path::Path) -> &str {
-        path.to_str().unwrap()
-    }
-
-    #[test]
-    fn tracked_pane_in_base_checkout_listed_in_agent_panes_is_a_pod_session() {
-        let temp = TempDir::new();
-        let base = temp.folder("harold");
-        write_in(&base, POD_AGENT_PANES, "%5\n");
-        let files = PodFiles::new(vec![base.clone()], None);
-
-        assert_eq!(
-            classify(&files, Some(path_text(&base)), "%5"),
-            Ok(Some(PodRole::PodSession))
-        );
-        assert_eq!(classify(&files, Some(path_text(&base)), "%6"), Ok(None));
-    }
-
-    #[test]
-    fn tracked_pane_in_worktree_beside_base_named_by_baton_file_is_a_build_worker() {
-        let temp = TempDir::new();
-        let base = temp.folder("harold");
-        let worktree = temp.folder("feature");
-        write_in(&worktree, BATON_AGENT_PANE, "%9\n");
-        let files = PodFiles::new(vec![format!("{}/", base.display()).into()], None);
-
-        assert_eq!(
-            classify(&files, Some(path_text(&worktree)), "%9"),
-            Ok(Some(PodRole::BuildWorker))
-        );
-    }
-
-    #[test]
-    fn tracked_pane_in_unrelated_folder_is_ignored_with_outside_pod_folders() {
-        let temp = TempDir::new();
-        let base = temp.folder("products/harold");
-        let elsewhere = temp.folder("other/place");
-        write_in(&elsewhere, POD_AGENT_PANES, "%5\n");
-        write_in(&elsewhere, BATON_AGENT_PANE, "%6\n");
-        let files = PodFiles::new(vec![base], hour_ago());
-
-        for pane in ["%5", "%6"] {
-            let result = classify(&files, Some(path_text(&elsewhere)), pane);
-            assert_eq!(result, Err(Ignored::OutsidePodFolders));
-            assert_eq!(Ignored::OutsidePodFolders.reason(), "outside_pod_folders");
-            assert_eq!(
-                super::pod_role(&files, Some(path_text(&elsewhere)), pane),
-                None
+    fn full_and_home_entries_match_only_that_folder() {
+        for entry in [
+            CHIEF,
+            "~/Dev/p/chief-of-pods",
+            "/Users/x/Dev/p/chief-of-pods/",
+        ] {
+            assert!(entry_matches(CHIEF, entry, HOME), "{entry}");
+            assert!(
+                entry_matches("/Users/x/Dev/p/chief-of-pods/", entry, HOME),
+                "{entry}"
             );
+            assert!(!entry_matches("/tmp/chief-of-pods", entry, HOME), "{entry}");
+            assert!(!entry_matches(
+                "/Users/x/Dev/p/chief-of-pods/tools",
+                entry,
+                HOME
+            ));
+        }
+        assert!(!entry_matches(CHIEF, "~/Dev/p/chief-of-pods", None));
+    }
+
+    #[test]
+    fn partial_entries_match_whole_trailing_components() {
+        assert!(entry_matches(CHIEF, "chief-of-pods", HOME));
+        assert!(entry_matches(
+            "/Users/x/Dev/p/chief-of-pods/",
+            "chief-of-pods",
+            HOME
+        ));
+        assert!(!entry_matches(
+            "/Users/x/chief-of-pods-old",
+            "chief-of-pods",
+            HOME
+        ));
+        assert!(!entry_matches(
+            "/Users/x/Dev/p/chief-of-pods/tools",
+            "chief-of-pods",
+            HOME
+        ));
+        assert!(!entry_matches(
+            "/Users/x/Dev/p/Chief-of-pods",
+            "chief-of-pods",
+            HOME
+        ));
+        assert!(entry_matches(CHIEF, "p/chief-of-pods", HOME));
+        assert!(!entry_matches(
+            "/Users/x/Dev/q/chief-of-pods",
+            "p/chief-of-pods",
+            HOME
+        ));
+        assert!(entry_matches("/tmp/chief-of-pods", "chief-of-pods", HOME));
+    }
+
+    #[test]
+    fn star_matches_any_folder() {
+        assert!(entry_matches("/anything", "*", HOME));
+    }
+
+    fn settings(overrides: &str) -> NotifySettings {
+        let default = format!("{}/config/default", env!("CARGO_MANIFEST_DIR"));
+        let all: crate::settings::Settings = config::Config::builder()
+            .add_source(config::File::new(&default, config::FileFormat::Toml))
+            .add_source(config::File::from_str(overrides, config::FileFormat::Toml))
+            .build()
+            .and_then(config::Config::try_deserialize)
+            .expect("settings");
+        all.notify
+    }
+
+    const ALL_CHANNELS: [Channel; 4] = [
+        Channel::Imessage,
+        Channel::Telegram,
+        Channel::WebApp,
+        Channel::MachineAudioOutput,
+    ];
+
+    #[test]
+    fn with_the_defaults_only_the_chief_may_use_a_channel() {
+        let notify = settings("");
+        let agents = TrackedAgents::in_folders(&[
+            ("%1", "/any/where/chief-of-pods"),
+            ("%2", "/work/harold"),
+            ("%3", "/any/where/chief-of-pods/tools"),
+        ]);
+        for channel in ALL_CHANNELS {
+            assert!(agents.may_use(&notify, channel, "%1"), "{channel:?}");
+            assert!(!agents.may_use(&notify, channel, "%2"), "{channel:?}");
+            assert!(!agents.may_use(&notify, channel, "%3"), "{channel:?}");
+            assert!(!agents.may_use(&notify, channel, "%9"), "{channel:?}");
         }
     }
 
     #[test]
-    fn untracked_pane_listed_in_a_base_checkout_file_newer_than_tmux_start_is_quiet() {
-        let temp = TempDir::new();
-        let base = temp.folder("harold");
-        write_in(&base, POD_AGENT_PANES, "%5\n");
-        let files = PodFiles::new(vec![base], hour_ago());
+    fn an_empty_list_lets_nobody_through_and_star_lets_everyone() {
+        let agents = TrackedAgents::in_folders(&[("%1", "/any/where/chief-of-pods"), ("%2", "/w")]);
+        for channel in ALL_CHANNELS {
+            let key = channel.key();
+            let nobody = settings(&format!("[notify]\n{key} = []"));
+            let everyone = settings(&format!("[notify]\n{key} = [\"*\"]"));
+            for pane in ["%1", "%2", "%9"] {
+                assert!(!agents.may_use(&nobody, channel, pane), "{key} {pane}");
+                assert!(agents.may_use(&everyone, channel, pane), "{key} {pane}");
+            }
+        }
+    }
 
-        assert_eq!(classify(&files, None, "%5"), Ok(Some(PodRole::PodSession)));
+    #[test]
+    fn each_list_decides_on_its_own() {
+        let notify = settings("[notify]\nmachine_audio_output = [\"a\"]\nimessage = [\"b\"]");
+        let agents = TrackedAgents::in_folders(&[("%1", "/w/a"), ("%2", "/w/b")]);
+        assert!(agents.may_use(&notify, Channel::MachineAudioOutput, "%1"));
+        assert!(!agents.may_use(&notify, Channel::Imessage, "%1"));
+        assert!(!agents.may_use(&notify, Channel::MachineAudioOutput, "%2"));
+        assert!(agents.may_use(&notify, Channel::Imessage, "%2"));
         assert_eq!(
-            super::pod_role(&files, None, "%5"),
-            Some(PodRole::PodSession)
+            message_dropped_reason(&notify, &agents, false, "%1").as_deref(),
+            Some("agent message dropped (not in notify.imessage)")
         );
-        assert_eq!(classify(&files, None, "%6"), Ok(None));
-    }
-
-    #[test]
-    fn untracked_pane_named_in_a_worktree_baton_file_is_a_build_worker() {
-        let temp = TempDir::new();
-        let base = temp.folder("harold");
-        let worktree = temp.folder("feature");
-        temp.folder("empty-sibling");
-        write_in(&worktree, BATON_AGENT_PANE, "%9\n");
-        let files = PodFiles::new(vec![base], hour_ago());
-
-        assert_eq!(classify(&files, None, "%9"), Ok(Some(PodRole::BuildWorker)));
-    }
-
-    #[test]
-    fn untracked_pane_in_file_older_than_tmux_start_is_ignored_older_than_tmux_server() {
-        let temp = TempDir::new();
-        let base = temp.folder("harold");
-        write_in(&base, POD_AGENT_PANES, "%5\n");
-        let files = PodFiles::new(vec![base], hour_ahead());
-
-        let result = classify(&files, None, "%5");
-        assert_eq!(result, Err(Ignored::OlderThanTmuxServer));
         assert_eq!(
-            Ignored::OlderThanTmuxServer.reason(),
-            "older_than_tmux_server"
+            desk_update_reason(&notify, &agents, "%2").as_deref(),
+            Some("spoken update left out (not in notify.machine_audio_output)")
         );
-        assert_eq!(super::pod_role(&files, None, "%5"), None);
+        assert_eq!(message_dropped_reason(&notify, &agents, false, "%2"), None);
     }
 
     #[test]
-    fn untracked_pane_with_no_tmux_start_time_is_ignored_no_tmux_start_time() {
-        let temp = TempDir::new();
-        let base = temp.folder("harold");
-        write_in(&base, POD_AGENT_PANES, "%5\n");
-        let files = PodFiles::new(vec![base], None);
-
-        assert_eq!(classify(&files, None, "%5"), Err(Ignored::NoTmuxStartTime));
-        assert_eq!(Ignored::NoTmuxStartTime.reason(), "no_tmux_start_time");
-    }
-
-    #[test]
-    fn pane_23_does_not_match_a_file_holding_238() {
-        let temp = TempDir::new();
-        let base = temp.folder("harold");
-        write_in(&base, POD_AGENT_PANES, "%238\r\n\n  %2380  \n");
-        let files = PodFiles::new(vec![base.clone()], hour_ago());
-
-        assert_eq!(classify(&files, None, "%23"), Ok(None));
-        assert_eq!(classify(&files, Some(path_text(&base)), "%23"), Ok(None));
+    fn telegram_list_decides_when_away_channel_is_telegram() {
+        let notify = settings(
+            "[notify]\naway_channel = \"telegram\"\nimessage = [\"*\"]\ntelegram = [\"a\"]",
+        );
+        let agents = TrackedAgents::in_folders(&[("%1", "/w/a"), ("%2", "/w/b")]);
+        assert_eq!(phone_held_back(&notify, &agents, false, "%1"), None);
         assert_eq!(
-            classify(&files, None, "%238"),
-            Ok(Some(PodRole::PodSession))
+            phone_held_back(&notify, &agents, false, "%2"),
+            Some("telegram")
         );
     }
 
     #[test]
-    fn no_registry_bases_checks_only_the_panes_own_folder() {
-        let temp = TempDir::new();
-        let folder = temp.folder("anywhere");
-        write_in(&folder, POD_AGENT_PANES, "%5\n");
-        let files = PodFiles::default();
-
+    fn app_route_lets_the_pane_through_and_rule_a_comes_first() {
+        let notify = settings("");
+        let agents = TrackedAgents::in_folders(&[("%2", "/work/harold")]);
+        assert_eq!(phone_held_back(&notify, &agents, true, "%2"), None);
         assert_eq!(
-            classify(&files, Some(path_text(&folder)), "%5"),
-            Ok(Some(PodRole::PodSession))
+            left_out_reason(true, &notify, &agents, false, "%2").as_deref(),
+            Some(MESSAGED_THIS_TURN)
         );
-        assert_eq!(classify(&files, None, "%5"), Ok(None));
+        assert_eq!(
+            left_out_reason(false, &notify, &agents, false, "%2").as_deref(),
+            Some("notification skipped (not in notify.imessage)")
+        );
+        assert_eq!(left_out_reason(false, &notify, &agents, true, "%2"), None);
+        assert_eq!(
+            spoken_line_dropped_reason(&notify, &agents, false, "%2").as_deref(),
+            Some("spoken line dropped (not in notify.imessage)")
+        );
+        assert_eq!(
+            desk_line_dropped_reason(&notify, &agents, "%2").as_deref(),
+            Some("spoken line dropped (not in notify.machine_audio_output)")
+        );
     }
 
-    // -- Pod and build-worker panes, whether or not the chief runs ----------------------
+    #[test]
+    fn chief_is_quiet_at_the_desk_and_two_matching_panes_are_no_chief() {
+        let notify = settings("");
+        let one = TrackedAgents::in_folders(&[
+            ("%1", "/Users/x/Dev/p/chief-of-pods"),
+            ("%2", "/work/harold"),
+        ]);
+        assert_eq!(one.chief_pane_id(notify.chief.as_deref()), Some("%1"));
+        assert_eq!(
+            desk_update_reason(&notify, &one, "%1").as_deref(),
+            Some("spoken update left out (chief)")
+        );
+        let two = TrackedAgents::in_folders(&[
+            ("%1", "/Users/x/Dev/p/chief-of-pods"),
+            ("%2", "/tmp/chief-of-pods"),
+        ]);
+        assert_eq!(two.chief_pane_id(notify.chief.as_deref()), None);
+        for channel in ALL_CHANNELS {
+            assert!(two.may_use(&notify, channel, "%1"));
+            assert!(two.may_use(&notify, channel, "%2"));
+        }
+        assert_eq!(desk_update_reason(&notify, &two, "%1"), None);
+        let gone = TrackedAgents::in_folders(&[("%2", "/tmp/chief-of-pods")]);
+        assert_eq!(gone.chief_pane_id(notify.chief.as_deref()), Some("%2"));
+    }
 
-    use super::{pod_role, quiet_reason};
-    use crate::agent::domain::{
-        AgentIncarnation, AgentPaneObservation, AgentPaneProjection, AgentSnapshot,
-        EffectiveAgentState, MonitorHealthProjection,
-    };
-    use crate::store::EventVersion;
+    #[test]
+    fn no_agent_in_a_listed_folder_holds_every_pane_back() {
+        let notify = settings("");
+        let agents = TrackedAgents::in_folders(&[("%2", "/work/harold"), ("%3", "/work/b")]);
+        for pane in ["%2", "%3", "%9"] {
+            for channel in ALL_CHANNELS {
+                assert!(!agents.may_use(&notify, channel, pane));
+            }
+        }
+    }
+
+    #[test]
+    fn a_failed_listing_keeps_the_last_good_folders() {
+        let notify = settings("");
+        let snapshot = snapshot_of(false, &[("%1", "/x/chief-of-pods"), ("%7", "/work/harold")]);
+        let agents = TrackedAgents::from_snapshot(&snapshot);
+        assert!(agents.may_use(&notify, Channel::Imessage, "%1"));
+        assert!(!agents.may_use(&notify, Channel::Imessage, "%7"));
+    }
+
+    #[test]
+    fn a_folder_is_not_kept_past_the_latest_listing() {
+        let notify = settings("");
+        let before =
+            TrackedAgents::from_snapshot(&snapshot_of(true, &[("%5", "/x/chief-of-pods")]));
+        let after = TrackedAgents::from_snapshot(&snapshot_of(true, &[("%5", "/work/other")]));
+        assert!(before.may_use(&notify, Channel::MachineAudioOutput, "%5"));
+        assert!(!after.may_use(&notify, Channel::MachineAudioOutput, "%5"));
+        let back = TrackedAgents::from_snapshot(&snapshot_of(true, &[("%5", "/x/chief-of-pods")]));
+        assert!(!after.may_use(&notify, Channel::Imessage, "%5"));
+        assert!(back.may_use(&notify, Channel::Imessage, "%5"));
+    }
 
     fn snapshot_of(inventory_healthy: bool, panes: &[(&str, &str)]) -> AgentSnapshot {
         let version = EventVersion::from_column(3).expect("valid revision");
@@ -819,195 +559,5 @@ mod tests {
             tts_muted: false,
             messaging_paused: false,
         }
-    }
-
-    /// A base checkout %2 (pod session) runs in, a worktree beside it where baton worker
-    /// %3 runs, and a registry naming the base.
-    struct Pod {
-        _temp: TempDir,
-        base: String,
-        worktree: String,
-        files: PodFiles,
-    }
-
-    fn pod_fixture() -> Pod {
-        let temp = TempDir::new();
-        let base = temp.folder("harold");
-        let worktree = temp.folder("feature");
-        write_in(&base, POD_AGENT_PANES, "%2\n%8\n");
-        write_in(&worktree, BATON_AGENT_PANE, "%3\n");
-        let files = PodFiles::new(vec![base.clone()], hour_ago());
-        Pod {
-            base: path_text(&base).to_string(),
-            worktree: path_text(&worktree).to_string(),
-            _temp: temp,
-            files,
-        }
-    }
-
-    const POD_LINE: &str = "spoken update left out (pod session)";
-    const WORKER_LINE: &str = "spoken update left out (build worker)";
-
-    #[test]
-    fn chief_absent_pod_pane_is_left_out_as_pod_session() {
-        let pod = pod_fixture();
-        let agents = TrackedAgents::in_folders(&[("%2", &pod.base), ("%7", "/work/harold")])
-            .with_pod_files(pod.files.clone());
-
-        assert_eq!(
-            quiet_reason(Some(CHIEF), &agents, "%2"),
-            Some(POD_LINE.to_string())
-        );
-        assert_eq!(quiet_reason(Some(CHIEF), &agents, "%7"), None);
-    }
-
-    #[test]
-    fn chief_absent_baton_pane_is_left_out_as_build_worker() {
-        let pod = pod_fixture();
-        let agents =
-            TrackedAgents::in_folders(&[("%3", &pod.worktree)]).with_pod_files(pod.files.clone());
-
-        assert_eq!(
-            quiet_reason(Some(CHIEF), &agents, "%3"),
-            Some(WORKER_LINE.to_string())
-        );
-    }
-
-    #[test]
-    fn failed_listing_still_leaves_out_a_pod_pane_from_the_last_listing() {
-        let pod = pod_fixture();
-        let snapshot = snapshot_of(
-            false,
-            &[
-                ("%2", &pod.base),
-                ("%3", &pod.worktree),
-                ("%7", "/work/other"),
-            ],
-        );
-        let agents = TrackedAgents::from_snapshot(&snapshot).with_pod_files(pod.files.clone());
-
-        assert_eq!(
-            quiet_reason(Some(CHIEF), &agents, "%2"),
-            Some(POD_LINE.to_string())
-        );
-        assert_eq!(
-            quiet_reason(Some(CHIEF), &agents, "%3"),
-            Some(WORKER_LINE.to_string())
-        );
-        assert_eq!(quiet_reason(Some(CHIEF), &agents, "%7"), None);
-    }
-
-    #[test]
-    fn untracked_pane_in_pod_file_is_left_out() {
-        let pod = pod_fixture();
-        let agents = TrackedAgents::default().with_pod_files(pod.files.clone());
-
-        // %8 is listed in the base's agent-panes; %3 is named by the worktree's baton file.
-        assert_eq!(
-            quiet_reason(Some(CHIEF), &agents, "%8"),
-            Some(POD_LINE.to_string())
-        );
-        assert_eq!(
-            quiet_reason(Some(CHIEF), &agents, "%3"),
-            Some(WORKER_LINE.to_string())
-        );
-        assert_eq!(quiet_reason(Some(CHIEF), &agents, "%9"), None);
-    }
-
-    #[test]
-    fn no_pod_files_speaks_every_pane_chief_present_or_absent() {
-        let present =
-            TrackedAgents::in_folders(&[("%1", CHIEF), ("%2", "/work/harold"), ("%3", "/work/x")]);
-        let absent = TrackedAgents::in_folders(&[("%2", "/work/harold"), ("%3", "/work/x")]);
-
-        for pane in ["%2", "%3", "%9"] {
-            assert_eq!(quiet_reason(Some(CHIEF), &present, pane), None);
-            assert_eq!(quiet_reason(Some(CHIEF), &absent, pane), None);
-        }
-    }
-
-    #[test]
-    fn chiefs_own_tracked_pane_is_still_quiet() {
-        let present = TrackedAgents::in_folders(&[("%1", CHIEF), ("%2", "/work/harold")]);
-
-        assert_eq!(
-            quiet_reason(Some(CHIEF), &present, "%1"),
-            Some("spoken update left out (chief)".to_string())
-        );
-        assert_eq!(quiet_reason(None, &present, "%1"), None);
-    }
-
-    #[test]
-    fn stale_named_entry_outside_pod_folders_is_spoken() {
-        let temp = TempDir::new();
-        let base = temp.folder("products/harold");
-        let elsewhere = temp.folder("other/place");
-        write_in(&elsewhere, POD_AGENT_PANES, "%5\n");
-        let files = PodFiles::new(vec![base], hour_ago());
-        let agents = TrackedAgents::in_folders(&[("%5", path_text(&elsewhere))])
-            .with_pod_files(files.clone());
-
-        assert_eq!(quiet_reason(Some(CHIEF), &agents, "%5"), None);
-        assert_eq!(only_from_reason(Some(CHIEF), &agents, "%5"), None);
-        assert_eq!(pod_role(&files, Some(path_text(&elsewhere)), "%5"), None);
-    }
-
-    #[test]
-    fn chief_absent_pod_pane_update_skipped_message_and_spoken_line_dropped() {
-        let pod = pod_fixture();
-        let agents = TrackedAgents::in_folders(&[("%2", &pod.base), ("%3", &pod.worktree)])
-            .with_pod_files(pod.files.clone());
-
-        for pane in ["%2", "%3"] {
-            assert_eq!(only_from_reason(Some(CHIEF), &agents, pane), reason());
-            assert_eq!(
-                message_dropped_reason(Some(CHIEF), &agents, pane),
-                dropped()
-            );
-            assert_eq!(
-                spoken_line_dropped_reason(Some(CHIEF), &agents, pane),
-                Some("spoken line dropped (lines come from /work/chief-of-pods only)".to_string())
-            );
-            assert_eq!(only_from_reason(None, &agents, pane), None);
-        }
-    }
-
-    #[test]
-    fn chief_absent_unnamed_pane_still_reaches_phone() {
-        let pod = pod_fixture();
-        let agents = TrackedAgents::in_folders(&[("%2", &pod.base), ("%7", "/work/harold")])
-            .with_pod_files(pod.files.clone());
-
-        assert_eq!(only_from_reason(Some(CHIEF), &agents, "%7"), None);
-        assert_eq!(message_dropped_reason(Some(CHIEF), &agents, "%7"), None);
-        assert_eq!(spoken_line_dropped_reason(Some(CHIEF), &agents, "%9"), None);
-    }
-
-    #[test]
-    fn failed_listing_rule_b_follows_named_panes_only() {
-        let pod = pod_fixture();
-        let snapshot = snapshot_of(
-            false,
-            &[("%1", CHIEF), ("%2", &pod.base), ("%7", "/work/harold")],
-        );
-        let agents = TrackedAgents::from_snapshot(&snapshot).with_pod_files(pod.files.clone());
-
-        // A pane a file names: left out, message and spoken line dropped.
-        assert_eq!(only_from_reason(Some(CHIEF), &agents, "%2"), reason());
-        assert_eq!(
-            message_dropped_reason(Some(CHIEF), &agents, "%2"),
-            dropped()
-        );
-        assert!(spoken_line_dropped_reason(Some(CHIEF), &agents, "%2").is_some());
-        // Panes no file names: rule B does nothing while the listing has failed, as today.
-        assert_eq!(only_from_reason(Some(CHIEF), &agents, "%7"), None);
-        assert_eq!(only_from_reason(Some(CHIEF), &agents, "%9"), None);
-        assert_eq!(message_dropped_reason(Some(CHIEF), &agents, "%7"), None);
-        // The healthy listing of the same panes acts on %7 too.
-        let healthy = TrackedAgents::from_snapshot(&snapshot_of(
-            true,
-            &[("%1", CHIEF), ("%7", "/work/harold")],
-        ));
-        assert_eq!(only_from_reason(Some(CHIEF), &healthy, "%7"), reason());
     }
 }

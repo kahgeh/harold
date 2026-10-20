@@ -1716,3 +1716,16 @@ async fn shutdown_ends_the_call_and_cleans_up() {
 // The worker's health, sounds that cannot play, the turn before a bye, and a second START.
 #[path = "voice_input_call_tests.rs"]
 mod call_tests;
+
+#[test]
+fn two_agents_in_the_chiefs_folder_are_no_chief() {
+    let h = Harness::new();
+    assert_eq!(super::call::chief_pane(&h.ports).as_deref(), Some("%2"));
+    h.ports.0.panes.set(|s| {
+        let mut second = s.view.panes[0].clone();
+        second.pane_id = "%9".into();
+        s.view.panes.push(second);
+    });
+
+    assert_eq!(super::call::chief_pane(&h.ports), None);
+}

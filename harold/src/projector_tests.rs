@@ -1378,7 +1378,7 @@ async fn update_waits_behind_a_message_whose_send_fails_and_is_then_left_out() {
 // Rule B: the dispatcher reads the tracked agent panes from the snapshot hub
 // ---------------------------------------------------------------------------
 
-const ONLY_FROM_CHIEF: &str = "[notify]\naway_messages_only_from = \"/work/chief-of-pods\"";
+const ONLY_FROM_CHIEF: &str = "[notify]\nchief = \"/work/chief-of-pods\"\nimessage = [\"/work/chief-of-pods\"]\nmachine_audio_output = [\"/work/chief-of-pods\"]";
 
 fn incarnation(pane_id: &str, pid: u32) -> AgentIncarnation {
     AgentIncarnation {
@@ -1509,7 +1509,7 @@ async fn two_agents_in_the_update_folder_both_send_their_updates() {
 }
 
 #[tokio::test]
-async fn update_is_sent_once_the_agent_in_the_update_folder_has_exited() {
+async fn update_stays_held_back_once_the_agent_in_the_update_folder_has_exited() {
     let directory = TestDirectory::new();
     let mut events = chief_and_pod();
     events.push(AgentEvent::PaneDeparted(AgentPaneDeparted {
@@ -1523,11 +1523,11 @@ async fn update_is_sent_once_the_agent_in_the_update_folder_has_exited() {
 
     drain(&store, &snapshots, &dispatcher).await;
 
-    assert_eq!(environment.reply_targets(), ["%2"]);
+    assert!(environment.reply_targets().is_empty());
 }
 
 #[tokio::test]
-async fn update_is_sent_while_harold_cannot_list_the_tmux_panes() {
+async fn update_stays_held_back_while_harold_cannot_list_the_tmux_panes() {
     let directory = TestDirectory::new();
     let mut events = chief_and_pod();
     events.push(AgentEvent::MonitorHealthChanged(
@@ -1545,7 +1545,7 @@ async fn update_is_sent_while_harold_cannot_list_the_tmux_panes() {
 
     drain(&store, &snapshots, &dispatcher).await;
 
-    assert_eq!(environment.reply_targets(), ["%2"]);
+    assert!(environment.reply_targets().is_empty());
 }
 
 #[tokio::test]
@@ -1633,8 +1633,8 @@ async fn requested_message_from_outside_the_folder_is_dropped() {
     assert!(environment.reply_targets().is_empty());
     assert!(store.next_pending_delivery().await.unwrap().is_none());
 
-    // The drop set no mark. Once the chief has gone the folder rule no longer applies,
-    // so only a mark could leave out the pane's turn-end update, and the update is sent.
+    // The drop set no mark. The pane is still off the list once the chief has gone, so the
+    // update is held back by the list, as before.
     append_agent_events(&store, vec![chief_departed()])
         .await
         .unwrap();
@@ -1644,8 +1644,8 @@ async fn requested_message_from_outside_the_folder_is_dropped() {
 
     drain(&store, &snapshots, &dispatcher).await;
 
-    assert_eq!(environment.delivered().len(), 1);
-    assert_eq!(environment.reply_targets(), ["%2"]);
+    assert!(environment.delivered().is_empty());
+    assert!(environment.reply_targets().is_empty());
     assert!(environment.away_messages().is_empty());
 }
 
@@ -1707,7 +1707,7 @@ async fn requested_message_from_outside_the_folder_is_dropped_with_the_screen_un
 }
 
 #[tokio::test]
-async fn requested_message_is_sent_while_no_agent_is_in_the_folder() {
+async fn requested_message_is_dropped_while_no_agent_is_in_the_folder() {
     let directory = TestDirectory::new();
     let (store, snapshots, environment, dispatcher) =
         only_from_chief(&directory, vec![agent_observed("%2", 20, "/work/harold")]).await;
@@ -1715,8 +1715,8 @@ async fn requested_message_is_sent_while_no_agent_is_in_the_folder() {
 
     drain(&store, &snapshots, &dispatcher).await;
 
-    assert_eq!(environment.away_messages(), ["Pod 3 is blocked"]);
-    assert_eq!(environment.reply_targets(), ["%2"]);
+    assert!(environment.away_messages().is_empty());
+    assert!(environment.reply_targets().is_empty());
 }
 
 #[tokio::test]
@@ -1733,7 +1733,7 @@ async fn requested_message_is_sent_without_the_setting() {
 }
 
 #[tokio::test]
-async fn requested_message_is_sent_while_harold_cannot_list_the_tmux_panes() {
+async fn requested_message_off_the_list_is_dropped_while_harold_cannot_list_the_tmux_panes() {
     let directory = TestDirectory::new();
     let mut events = chief_and_pod();
     events.push(AgentEvent::MonitorHealthChanged(
@@ -1749,18 +1749,17 @@ async fn requested_message_is_sent_while_harold_cannot_list_the_tmux_panes() {
 
     drain(&store, &snapshots, &dispatcher).await;
 
-    assert_eq!(environment.away_messages(), ["Pod 3 is blocked"]);
-    assert_eq!(environment.reply_targets(), ["%2"]);
+    assert!(environment.away_messages().is_empty());
+    assert!(environment.reply_targets().is_empty());
 }
 
 #[tokio::test]
-async fn message_whose_send_failed_is_dropped_once_an_agent_runs_in_the_folder() {
+async fn listed_agents_message_whose_send_failed_is_sent_on_the_retry() {
     let directory = TestDirectory::new();
     let (store, snapshots, environment, dispatcher) =
-        only_from_chief(&directory, vec![agent_observed("%2", 20, "/work/harold")]).await;
-    request_message(&store, "%2", "Pod 3 is blocked").await;
+        only_from_chief(&directory, chief_and_pod()).await;
+    request_message(&store, "%1", "Pod 3 is blocked").await;
 
-    // No agent is in the folder, so the message is tried, and the send fails.
     environment.set_fail_sends(true);
     let error = handle_next_delivery_inner(&store, Arc::clone(&dispatcher), Some(&snapshots), None)
         .await
@@ -1768,24 +1767,15 @@ async fn message_whose_send_failed_is_dropped_once_an_agent_runs_in_the_folder()
     assert!(error.to_string().contains("channel down"));
     assert!(store.next_pending_delivery().await.unwrap().is_some());
 
-    // The chief starts and the channel works again: the next try drops the message.
     environment.set_fail_sends(false);
-    append_agent_events(
-        &store,
-        vec![agent_observed("%1", 10, "/work/chief-of-pods")],
-    )
-    .await
-    .unwrap();
-
     drain(&store, &snapshots, &dispatcher).await;
 
-    assert!(environment.away_messages().is_empty());
-    assert!(environment.reply_targets().is_empty());
-    assert!(store.next_pending_delivery().await.unwrap().is_none());
+    assert_eq!(environment.away_messages(), ["Pod 3 is blocked"]);
+    assert_eq!(environment.reply_targets(), ["%1"]);
 }
 
 #[tokio::test]
-async fn message_stored_while_the_chief_ran_is_sent_once_the_chief_has_exited() {
+async fn message_stored_while_the_chief_ran_is_still_dropped_once_the_chief_has_exited() {
     let directory = TestDirectory::new();
     let (store, snapshots, environment, dispatcher) =
         only_from_chief(&directory, chief_and_pod()).await;
@@ -1797,8 +1787,8 @@ async fn message_stored_while_the_chief_ran_is_sent_once_the_chief_has_exited() 
 
     drain(&store, &snapshots, &dispatcher).await;
 
-    assert_eq!(environment.away_messages(), ["Pod 3 is blocked"]);
-    assert_eq!(environment.reply_targets(), ["%2"]);
+    assert!(environment.away_messages().is_empty());
+    assert!(environment.reply_targets().is_empty());
 }
 
 /// The dispatcher of `only_from_chief` once a handler round has published pane %1 (in the
@@ -1828,9 +1818,7 @@ async fn dropped_message_is_logged_with_its_pane_and_without_its_text() {
     assert!(environment.away_messages().is_empty());
     let text = logs.text();
     assert!(
-        text.contains(
-            "away message dropped (messages come from /work/chief-of-pods only) pane_id=%2"
-        ),
+        text.contains("agent message dropped (not in notify.imessage) pane_id=%2"),
         "{text}"
     );
     assert!(!text.contains("Pod 3 is blocked"), "{text}");
@@ -1854,9 +1842,7 @@ async fn update_after_a_dropped_message_is_left_out_by_the_folder_rule_not_the_m
     assert!(environment.reply_targets().is_empty());
     let text = logs.text();
     assert!(
-        text.contains(
-            "notification skipped (updates come from /work/chief-of-pods only) pane_id=%2"
-        ),
+        text.contains("notification skipped (not in notify.imessage) pane_id=%2"),
         "{text}"
     );
     assert!(
@@ -2131,9 +2117,16 @@ fn dispatch_line_with_call(
         false,
         false,
         |_| None,
+        |_| None,
         environment,
-        |_| Some(ChiefApp { app, away }),
-        |text| {
+        |_| {
+            Some(ChiefApp {
+                app,
+                away,
+                away_allowed: true,
+            })
+        },
+        |_, text| {
             assert_eq!(text, "hi");
             asked.set(asked.get() + 1);
             in_call
@@ -2199,14 +2192,16 @@ fn a_spoken_line_with_no_phone_call_open_goes_by_the_lock_rules() {
             messaging_paused,
             false,
             |_| None,
+            |_| None,
             &environment,
             |_| {
                 Some(ChiefApp {
                     app: &app,
                     away: &away,
+                    away_allowed: true,
                 })
             },
-            |text| say_in_phone_call_over(None, text, Speaker::Chief),
+            |_, text| say_in_phone_call_over(None, text, Speaker::Chief),
         );
 
         if delivered {
@@ -3371,13 +3366,23 @@ struct WithApp {
 }
 
 async fn with_app(directory: &TestDirectory, events: Vec<AgentEvent>, app: FakeApp) -> WithApp {
+    with_app_settings(directory, events, app, ONLY_FROM_CHIEF).await
+}
+
+/// `with_app` with `overrides` as the `[notify]` settings.
+async fn with_app_settings(
+    directory: &TestDirectory,
+    events: Vec<AgentEvent>,
+    app: FakeApp,
+    overrides: &str,
+) -> WithApp {
     let store = HaroldStore::open(&directory.0).await.unwrap();
     append_agent_events(&store, events).await.unwrap();
     let snapshots = AgentSnapshotHub::new(store.load_agent_snapshot().await.unwrap());
     project_and_publish_agent_snapshot(&store, &snapshots, 500)
         .await
         .unwrap();
-    let environment = Arc::new(FakeEnvironment::locked(ONLY_FROM_CHIEF));
+    let environment = Arc::new(FakeEnvironment::locked(overrides));
     let app = Arc::new(app);
     let away = Arc::new(FakeAwayText::default());
     let route: Arc<dyn AppRoute> = app.clone();
@@ -3467,11 +3472,11 @@ async fn chief_away_message_not_pushed_goes_to_imessage_once() {
 async fn other_panes_messages_are_handled_as_today() {
     let mut chief_gone = chief_and_pod();
     chief_gone.push(chief_departed());
-    // While the chief runs, rule B drops %2's message and leaves out its update. Once the
-    // chief has gone, both are sent as today.
+    // %2 is on no list, so its message is dropped and its update left out, whether or not
+    // the chief runs.
     for (events, expected) in [
         (chief_and_pod(), DeliveryOutcome::Skipped),
-        (chief_gone, DeliveryOutcome::Delivered),
+        (chief_gone, DeliveryOutcome::Skipped),
     ] {
         let directory = TestDirectory::new();
         let with = with_app(
@@ -4143,4 +4148,139 @@ async fn run_the_app_path_with_a_canary() -> Vec<String> {
         subscription.auth,
         public_key,
     ]
+}
+
+// ---------------------------------------------------------------------------
+// The channel lists at the dispatcher: each phone step and the desk check their own
+// ---------------------------------------------------------------------------
+
+const CHIEF_ON_APP_ONLY: &str = "[notify]\nchief = \"/work/chief-of-pods\"\nweb_app = [\"/work/chief-of-pods\"]\nimessage = []\nmachine_audio_output = [\"/work/chief-of-pods\"]";
+
+#[tokio::test]
+async fn chief_message_the_app_cannot_push_is_dropped_when_the_chief_is_not_on_imessage() {
+    let directory = TestDirectory::new();
+    let with = with_app_settings(
+        &directory,
+        chief_and_pod(),
+        FakeApp::new(AppDelivery::NotPushed),
+        CHIEF_ON_APP_ONLY,
+    )
+    .await;
+    let logs = CapturedLogs::start();
+
+    let outcome = with.dispatcher.dispatch(&away_delivery(json!(message_from(
+        "%1",
+        "All pods are green"
+    ))));
+
+    assert!(matches!(outcome, Ok(DeliveryOutcome::Delivered)));
+    assert!(with.away.sends().is_empty());
+    assert!(with.environment.away_messages().is_empty());
+    assert!(with.environment.reply_targets().is_empty());
+    let text = logs.text();
+    assert!(
+        text.contains("agent message dropped (not in notify.imessage) pane_id=%1"),
+        "{text}"
+    );
+    assert!(!text.contains("All pods are green"), "{text}");
+}
+
+#[tokio::test]
+async fn chief_off_the_web_app_list_goes_by_imessage_and_not_to_the_app() {
+    let directory = TestDirectory::new();
+    let with = with_app_settings(
+        &directory,
+        chief_and_pod(),
+        FakeApp::new(AppDelivery::Pushed),
+        "[notify]\nchief = \"/work/chief-of-pods\"\nweb_app = []\nimessage = [\"/work/chief-of-pods\"]",
+    )
+    .await;
+
+    let outcome = with.dispatcher.dispatch(&away_delivery(json!(message_from(
+        "%1",
+        "All pods are green"
+    ))));
+
+    assert!(matches!(outcome, Ok(DeliveryOutcome::Delivered)));
+    assert!(with.app.delivered().is_empty());
+    assert_eq!(with.environment.away_messages(), ["All pods are green"]);
+}
+
+#[tokio::test]
+async fn spoken_lines_from_unlisted_panes_are_dropped_on_each_channel_naming_its_key() {
+    let directory = TestDirectory::new();
+    let (store, snapshots, environment, dispatcher) =
+        only_from_chief(&directory, chief_and_pod()).await;
+    drain(&store, &snapshots, &dispatcher).await;
+    let line = |pane: &str| {
+        spoken_delivery(json!(SpokenLineRequested {
+            pane_id: pane.into(),
+            text: "All green.".into(),
+        }))
+    };
+    let logs = CapturedLogs::start();
+
+    // Screen locked: the phone's list.
+    assert!(matches!(
+        dispatcher.dispatch(&line("%2")),
+        Ok(DeliveryOutcome::Skipped)
+    ));
+    assert!(matches!(
+        dispatcher.dispatch(&line("%1")),
+        Ok(DeliveryOutcome::Delivered)
+    ));
+    assert_eq!(environment.voice_notes(), ["All green."]);
+    // Screen unlocked: the desk's list.
+    environment.set_screen_locked(false);
+    assert!(matches!(
+        dispatcher.dispatch(&line("%2")),
+        Ok(DeliveryOutcome::Skipped)
+    ));
+    assert!(matches!(
+        dispatcher.dispatch(&line("%1")),
+        Ok(DeliveryOutcome::Delivered)
+    ));
+    assert_eq!(environment.spoken_lines(), ["All green."]);
+    let text = logs.text();
+    assert!(
+        text.contains("spoken line dropped (not in notify.imessage) pane_id=%2"),
+        "{text}"
+    );
+    assert!(
+        text.contains("spoken line dropped (not in notify.machine_audio_output) pane_id=%2"),
+        "{text}"
+    );
+    assert!(!text.contains("All green."), "{text}");
+}
+
+#[tokio::test]
+async fn two_panes_matching_chief_are_no_chief_for_the_app_and_still_use_the_lists() {
+    let directory = TestDirectory::new();
+    let overrides = "[notify]\nchief = \"chief-of-pods\"\nimessage = [\"chief-of-pods\"]\nweb_app = [\"chief-of-pods\"]";
+    let events = vec![
+        agent_observed("%1", 10, "/Users/x/Dev/p/chief-of-pods"),
+        agent_observed("%2", 20, "/tmp/chief-of-pods"),
+    ];
+    let with = with_app_settings(
+        &directory,
+        events,
+        FakeApp::new(AppDelivery::Pushed),
+        overrides,
+    )
+    .await;
+    let logs = CapturedLogs::start();
+
+    for pane in ["%1", "%2"] {
+        let outcome = with
+            .dispatcher
+            .dispatch(&away_delivery(json!(message_from(pane, "hi"))));
+        assert!(matches!(outcome, Ok(DeliveryOutcome::Delivered)));
+    }
+
+    assert!(with.app.delivered().is_empty());
+    assert_eq!(with.environment.away_messages(), ["hi", "hi"]);
+    let text = logs.text();
+    assert!(text.contains("chief pane ambiguous"), "{text}");
+    assert!(text.contains("count=2"), "{text}");
+    assert!(!text.contains("/tmp/chief-of-pods"), "{text}");
 }

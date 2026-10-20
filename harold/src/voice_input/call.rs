@@ -130,16 +130,22 @@ pub(super) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// The pane of the agent in the chief's folder.
+/// The pane of the agent in the chief's folder. With several agents in a folder `chief`
+/// matches there is no chief.
 pub(super) fn chief_pane<P: CallPorts>(ports: &P) -> Option<String> {
     let folder = ports.chief_folder()?;
-    ports
+    let mut in_folder = ports
         .panes()
         .agents()
         .panes
         .into_iter()
-        .find(|pane| same_folder(&pane.folder, &folder))
-        .map(|pane| pane.pane_id)
+        .filter(|pane| same_folder(&pane.folder, &folder));
+    let chief = in_folder.next()?;
+    if in_folder.next().is_some() {
+        info!(count = 2 + in_folder.count(), "chief pane ambiguous");
+        return None;
+    }
+    Some(chief.pane_id)
 }
 
 /// Whether an agent runs in `folder`. A pane list that failed to read counts as yes, as it

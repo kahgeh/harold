@@ -144,7 +144,7 @@ pub(crate) async fn start(
     };
     let chief_pane = SnapshotChiefPane {
         ports: Arc::clone(&ports),
-        folder: cfg.notify.away_messages_only_from.clone(),
+        folder: cfg.notify.chief.clone(),
     };
     let pane_folder = SnapshotPaneFolder { ports };
     let products = RegistryProducts {
@@ -280,8 +280,8 @@ impl<P: Ports> PaneTyping for TmuxTyping<P> {
 }
 
 /// Finds the chief's pane in the agent snapshot: the one agent pane whose folder
-/// is `[notify] away_messages_only_from`. With no folder set, no such pane, or
-/// more than one, there is no chief.
+/// `[notify] chief` matches. With no entry set, no such pane, or more than one, there is no
+/// chief.
 struct SnapshotChiefPane<P = TmuxPorts> {
     ports: Arc<P>,
     folder: Option<String>,
@@ -297,7 +297,12 @@ impl<P: Ports> ChiefPane for SnapshotChiefPane<P> {
             .into_iter()
             .filter(|pane| same_folder(&pane.folder, folder));
         let chief = in_folder.next()?;
-        in_folder.next().is_none().then_some(chief.pane_id)
+        let several = in_folder.next().is_some();
+        if several {
+            tracing::info!(count = 2 + in_folder.count(), "chief pane ambiguous");
+            return None;
+        }
+        Some(chief.pane_id)
     }
 }
 

@@ -157,7 +157,7 @@ fn is_chief_pane_is_false_while_the_listing_fails_or_without_a_folder() {
     );
     assert!(!is_chief_pane(&listing_failed, Some(CHIEF), "%1"));
 
-    // Every pane in the chief's folder counts as the chief's.
+    // With two panes in the chief's folder there is no chief.
     let two_chiefs = snapshot(
         Some(true),
         vec![
@@ -165,6 +165,33 @@ fn is_chief_pane_is_false_while_the_listing_fails_or_without_a_folder() {
             pane_in("%3", CHIEF, EffectiveAgentState::Busy),
         ],
     );
-    assert!(is_chief_pane(&two_chiefs, Some(CHIEF), "%1"));
-    assert!(is_chief_pane(&two_chiefs, Some(CHIEF), "%3"));
+    assert!(!is_chief_pane(&two_chiefs, Some(CHIEF), "%1"));
+    assert!(!is_chief_pane(&two_chiefs, Some(CHIEF), "%3"));
+}
+
+#[test]
+fn a_partial_chief_entry_finds_the_chief_and_two_matches_are_no_chief() {
+    let one = snapshot(
+        Some(true),
+        vec![pane_in(
+            "%1",
+            "/Users/x/Dev/p/chief-of-pods",
+            EffectiveAgentState::Idle,
+        )],
+    );
+    assert!(is_chief_pane(&one, Some("chief-of-pods"), "%1"));
+    assert!(!is_chief_pane(&one, Some("chief-of-pods-old"), "%1"));
+
+    let two = snapshot(
+        Some(true),
+        vec![
+            pane_in(
+                "%1",
+                "/Users/x/Dev/p/chief-of-pods",
+                EffectiveAgentState::Idle,
+            ),
+            pane_in("%2", "/tmp/chief-of-pods", EffectiveAgentState::Idle),
+        ],
+    );
+    assert_eq!(find_chief(&two, Some("chief-of-pods")), ChiefPane::Several);
 }

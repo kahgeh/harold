@@ -1176,7 +1176,7 @@ async fn start_telemetry_tasks(
     let (alerts, alert_queue) = match cfg.telemetry.alert_addr() {
         Some(alert_addr) => alerts::start(
             alert_addr,
-            cfg.notify.away_messages_only_from.clone(),
+            cfg.notify.chief.clone(),
             timed_prompts::TmuxPorts::new(snapshots.clone(), cfg.agents.0.clone()),
             shutdown_rx.clone(),
         )
