@@ -319,7 +319,7 @@ impl CallPorts for MacPorts {
         let prompt = prompt.to_string();
         let context = last_component(self.chief_folder.as_deref().unwrap_or_default());
         let update = tokio::task::spawn_blocking(move || {
-            tts::desk_update_line(&prompt, &tts::AgentName::Chief, &context, "call", "")
+            tts::desk_update_line(&prompt, &tts::AgentName::Chief, &context, "call")
         })
         .await;
         update.unwrap_or_else(|_| {

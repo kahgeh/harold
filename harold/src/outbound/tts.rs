@@ -407,60 +407,43 @@ fn notify_with_fallback_from(
 }
 
 /// The turn-end update the desk says, shared by `notify_at_desk` and a call. `channel` is
-/// `desk` or `call`, and `pane_id` the agent's pane (empty when it is not known).
+/// `desk` or `call`.
 pub(crate) fn desk_update_line(
     last_user_prompt: &str,
     agent: &AgentName,
     project: &str,
     channel: &'static str,
-    pane_id: &str,
 ) -> String {
-    update_line_with(agent, channel, pane_id, || {
+    update_line_with(agent, channel, || {
         ask_model(last_user_prompt, agent, project)
     })
 }
 
-/// `desk_update_line` with the model's run given, inside `harold.turn_end_update`. The
-/// span, the counter and the `turn-end update fell back` line hold the outcome and the
-/// reason only, never the sentence or the model's text.
+/// `desk_update_line` with the model's run given. The counter and the `turn-end update
+/// fell back` line hold the outcome, the reason and the channel only, never the sentence
+/// or the model's text.
 pub(crate) fn update_line_with(
     agent: &AgentName,
     channel: &'static str,
-    pane_id: &str,
     run: impl FnOnce() -> ModelRun,
 ) -> String {
-    let span = tracing::info_span!(
-        target: TRACE_TARGET,
-        "harold.turn_end_update",
-        pane_id = %pane_id,
-        channel,
-        outcome = tracing::field::Empty,
-        reason = tracing::field::Empty
-    );
-    span.in_scope(|| {
-        let refused = match run() {
-            ModelRun::Answered(answer) => match clean_sentence(&answer, agent) {
-                Ok(sentence) => {
-                    record_update(&span, "model", None);
-                    return sentence;
-                }
-                Err(reason) => reason,
-            },
-            ModelRun::Failed(_) => FallbackReason::ModelFailed,
-            ModelRun::NoModel => FallbackReason::NoModel,
-        };
-        info!(reason = %refused.as_str(), "turn-end update fell back");
-        record_update(&span, "fallback", Some(refused));
-        fallback_sentence(agent)
-    })
+    let refused = match run() {
+        ModelRun::Answered(answer) => match clean_sentence(&answer, agent) {
+            Ok(sentence) => {
+                count_update("model", "none");
+                return sentence;
+            }
+            Err(reason) => reason,
+        },
+        ModelRun::Failed(_) => FallbackReason::ModelFailed,
+        ModelRun::NoModel => FallbackReason::NoModel,
+    };
+    info!(reason = %refused.as_str(), channel, "turn-end update fell back");
+    count_update("fallback", refused.as_str());
+    fallback_sentence(agent)
 }
 
-fn record_update(span: &tracing::Span, outcome: &'static str, reason: Option<FallbackReason>) {
-    span.record("outcome", outcome);
-    let reason = reason.map_or("none", FallbackReason::as_str);
-    if outcome == "fallback" {
-        span.record("reason", reason);
-    }
+fn count_update(outcome: &'static str, reason: &'static str) {
     instruments().turn_end_updates.add(
         1,
         &[
@@ -478,13 +461,7 @@ pub fn notify_at_desk_as(turn: &TurnCompleted, _trace_id: &str, is_chief: bool) 
     } else {
         AgentName::Named(turn.main_context.clone())
     };
-    let message = desk_update_line(
-        &turn.last_user_prompt,
-        &agent,
-        &turn.main_context,
-        "desk",
-        &turn.pane_id,
-    );
+    let message = desk_update_line(&turn.last_user_prompt, &agent, &turn.main_context, "desk");
     if let Some(said) = say_in_open_call(&message, Speaker::OtherAgent) {
         return said;
     }
@@ -768,16 +745,6 @@ mod tests {
         .unwrap_or(0)
     }
 
-    fn update_span(pane: &str) -> opentelemetry_sdk::trace::SpanData {
-        crate::telemetry::test_support::spans()
-            .into_iter()
-            .find(|s| {
-                s.name == "harold.turn_end_update"
-                    && s.attributes.iter().any(|kv| kv.value.as_str() == pane)
-            })
-            .expect("a turn-end update span")
-    }
-
     fn attribute(span: &opentelemetry_sdk::trace::SpanData, key: &str) -> Option<String> {
         span.attributes
             .iter()
@@ -790,19 +757,14 @@ mod tests {
         let _serial = COUNTER.lock().unwrap_or_else(|e| e.into_inner());
         let architect = AgentName::Named("architect".into());
         let before = updates_counted("model", "none");
-        let pane = format!("%kept-{}", uuid::Uuid::new_v4());
         let logs = crate::outbound::fake::CapturedLogs::start();
 
-        let line = update_line_with(&architect, "desk", &pane, || {
+        let line = update_line_with(&architect, "desk", || {
             ModelRun::Answered("MODEL-TEXT-1 The architect reviewed it. SECRET".into())
         });
 
         println!("evidence: kept: {line}");
         assert_eq!(line, "MODEL-TEXT-1 The architect reviewed it.");
-        let span = update_span(&pane);
-        assert_eq!(attribute(&span, "outcome").as_deref(), Some("model"));
-        assert_eq!(attribute(&span, "channel").as_deref(), Some("desk"));
-        assert_eq!(attribute(&span, "reason"), None);
         assert_eq!(updates_counted("model", "none"), before + 1);
         assert!(!logs.text().contains("fell back"));
         assert!(!logs.text().contains("MODEL-TEXT-1"));
@@ -823,10 +785,9 @@ mod tests {
         ];
         for (answer, reason) in cases {
             let before = updates_counted("fallback", reason);
-            let pane = format!("%refused-{}", uuid::Uuid::new_v4());
             let logs = crate::outbound::fake::CapturedLogs::start();
 
-            let line = update_line_with(&architect, "call", &pane, || {
+            let line = update_line_with(&architect, "call", || {
                 ModelRun::Answered(answer.to_string())
             });
 
@@ -841,10 +802,7 @@ mod tests {
                 !text.contains("CANARY-9") && !text.contains("wording"),
                 "{text}"
             );
-            let span = update_span(&pane);
-            assert_eq!(attribute(&span, "outcome").as_deref(), Some("fallback"));
-            assert_eq!(attribute(&span, "reason").as_deref(), Some(reason));
-            assert_eq!(attribute(&span, "channel").as_deref(), Some("call"));
+            assert!(text.contains("channel=call"), "{text}");
             assert_eq!(updates_counted("fallback", reason), before + 1);
         }
         assert!(!crate::telemetry::test_support::exported_text().contains("CANARY-9"));
@@ -859,14 +817,13 @@ mod tests {
         let logs = crate::outbound::fake::CapturedLogs::start();
 
         crate::settings::init_settings_for_test();
-        let no_model = desk_update_line("fix it", &chief, "chief-of-pods", "desk", "%nm");
+        let no_model = desk_update_line("fix it", &chief, "chief-of-pods", "desk");
         println!("evidence: no model: {no_model}");
         assert_eq!(no_model, "The chief has finished and is waiting.");
 
         let run = run_local_model_with(Some(("m", "/nonexistent-harold-test-dir")), "s", "p", 48);
         assert_eq!(run, ModelRun::Failed("spawn_failed"));
-        let pane = format!("%failed-{}", uuid::Uuid::new_v4());
-        let line = update_line_with(&chief, "desk", &pane, || run);
+        let line = update_line_with(&chief, "desk", || run);
         assert_eq!(line, "The chief has finished and is waiting.");
 
         let text = logs.text();
@@ -933,7 +890,7 @@ mod tests {
                 "The questions-typed-panic agent has finished and is waiting.",
             ),
         ] {
-            let line = desk_update_line("fix it", &agent, project, "desk", "%d");
+            let line = desk_update_line("fix it", &agent, project, "desk");
             assert_eq!(line, expected);
             assert!(!line.contains("waiting for further instructions"));
             assert!(!line.contains(&format!(" on {project}")));
@@ -945,7 +902,7 @@ mod tests {
         crate::settings::init_settings_for_test();
 
         assert_eq!(
-            desk_update_line("x", &AgentName::Chief, "chief-of-pods", "desk", "%1"),
+            desk_update_line("x", &AgentName::Chief, "chief-of-pods", "desk"),
             "The chief has finished and is waiting."
         );
     }

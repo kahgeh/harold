@@ -18,22 +18,14 @@ fn unique_pane() -> String {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn every_turn_end_update_outcome_is_counted_from_0_at_start() {
+fn the_model_failed_fallback_is_counted_from_0_at_start() {
     test_support::install();
     register_phone_counters();
-    for (outcome, reason) in [
-        ("model", "none"),
-        ("fallback", "no_model"),
-        ("fallback", "model_failed"),
-        ("fallback", "too_long"),
-        ("fallback", "no_name"),
-    ] {
-        let counted = test_support::exact_counter_value(
-            "harold.turn_end_updates",
-            &[("outcome", outcome), ("reason", reason)],
-        );
-        assert!(counted.is_some(), "{outcome} {reason}");
-    }
+    let counted = test_support::exact_counter_value(
+        "harold.turn_end_updates",
+        &[("outcome", "fallback"), ("reason", "model_failed")],
+    );
+    assert!(counted.is_some());
 }
 
 #[test]
@@ -1516,7 +1508,6 @@ const SPANS: &[&str] = &[
     "harold.turn_complete",
     "harold.delivery",
     "harold.voice_note",
-    "harold.turn_end_update",
     "harold.local_model",
 ];
 
@@ -1677,7 +1668,7 @@ const HISTOGRAM_RULE: [&str; 4] = [
 ];
 
 /// The spec's trends table, in order.
-const TREND_PANELS: [&str; 11] = [
+const TREND_PANELS: [&str; 9] = [
     "Slots",
     "Merges to main",
     "Phone requests reaching the right agent",
@@ -1687,8 +1678,6 @@ const TREND_PANELS: [&str; 11] = [
     "Specs by state",
     "Spec size",
     "Start to completion",
-    "Turn-end update, model time",
-    "Turn-end updates by reason",
 ];
 
 fn definitions() -> PathBuf {
@@ -2058,7 +2047,7 @@ fn every_tile_that_counts_a_running_total_uses_the_counter_rule() {
 }
 
 #[test]
-fn the_trends_dashboard_has_the_eleven_panels() {
+fn the_trends_dashboard_has_the_nine_panels() {
     let trends = definition("trends.json");
     assert_eq!(trends["name"], "Harold trends");
     assert_eq!(tile_names(&trends), TREND_PANELS);
