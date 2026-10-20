@@ -2,7 +2,7 @@
 //! matches. The web app's thread belongs to it.
 
 use crate::agent::domain::{AgentSnapshot, EffectiveAgentState};
-use crate::outbound::left_out::same_folder;
+use crate::outbound::left_out::{ChiefLookup, resolve_chief};
 use crate::timed_prompts::agents_view;
 
 /// The chief, as the latest snapshot sees it.
@@ -28,20 +28,22 @@ pub(crate) fn find_chief(snapshot: &AgentSnapshot, chief_folder: Option<&str>) -
     if view.listing_failed {
         return ChiefPane::ListingFailed;
     }
-    let mut in_folder = view
-        .panes
-        .iter()
-        .filter(|pane| same_folder(&pane.folder, folder));
-    match (in_folder.next(), in_folder.next()) {
-        (None, _) => ChiefPane::NoChief,
-        (Some(pane), None) => ChiefPane::One {
-            pane_id: pane.pane_id.clone(),
-            busy: pane.state == EffectiveAgentState::Busy,
-        },
-        (Some(_), Some(_)) => {
-            tracing::info!(count = 2 + in_folder.count(), "chief pane ambiguous");
-            ChiefPane::Several
+    let found = resolve_chief(
+        view.panes
+            .iter()
+            .map(|pane| (pane.pane_id.as_str(), pane.folder.as_str())),
+        Some(folder),
+    );
+    match found {
+        ChiefLookup::None => ChiefPane::NoChief,
+        ChiefLookup::Found(pane_id) => {
+            let busy = view
+                .panes
+                .iter()
+                .any(|pane| pane.pane_id == pane_id && pane.state == EffectiveAgentState::Busy);
+            ChiefPane::One { pane_id, busy }
         }
+        ChiefLookup::Ambiguous { .. } => ChiefPane::Several,
     }
 }
 

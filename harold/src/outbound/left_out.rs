@@ -6,6 +6,7 @@
 //! matches an entry on that channel's list. `chief` names the chief's pane by the same
 //! matching; the chief's own turn-end update is not spoken at the desk.
 
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use crate::agent::domain::AgentSnapshot;
@@ -124,25 +125,117 @@ impl TrackedAgents {
     }
 
     /// The chief's pane: the one pane whose folder matches `chief`. With several matching
-    /// panes there is no chief, and the count is logged, with no folder.
+    /// panes there is no chief here (see `resolve_chief`).
     pub(crate) fn chief_pane_id(&self, chief: Option<&str>) -> Option<&str> {
-        let chief = chief?;
-        let mut matching = self
-            .folder_by_pane
-            .iter()
-            .filter(|(_, folder)| same_folder(folder, chief));
-        let first = matching.next()?;
-        if matching.next().is_none() {
-            return Some(first.0.as_str());
+        let lookup = resolve_chief(
+            self.folder_by_pane
+                .iter()
+                .map(|(id, folder)| (id.as_str(), folder.as_str())),
+            chief,
+        );
+        match lookup {
+            ChiefLookup::Found(pane_id) => self
+                .folder_by_pane
+                .iter()
+                .find(|(id, _)| *id == pane_id)
+                .map(|(id, _)| id.as_str()),
+            ChiefLookup::Ambiguous { .. } | ChiefLookup::None => None,
         }
-        let count = self
-            .folder_by_pane
-            .iter()
-            .filter(|(_, folder)| same_folder(folder, chief))
-            .count();
-        tracing::info!(count, "chief pane ambiguous");
-        None
     }
+
+    /// Whether `pane_id`'s folder matches `chief`. Unlike `chief_pane_id` it holds while
+    /// several panes match, so a message from the chief's folder is still known as the
+    /// chief's.
+    pub(crate) fn is_in_chief_folder(&self, chief: Option<&str>, pane_id: &str) -> bool {
+        let (Some(chief), Some(folder)) = (chief, self.folder_of(pane_id)) else {
+            return false;
+        };
+        same_folder(folder, chief)
+    }
+}
+
+/// What looking for the chief's pane found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ChiefLookup {
+    /// One pane is in the chief's folder.
+    Found(String),
+    /// `count` panes are in it, so there is no chief.
+    Ambiguous { count: usize },
+    /// No chief folder is set, or no pane is in it.
+    None,
+}
+
+impl ChiefLookup {
+    fn state(&self) -> (&'static str, usize) {
+        match self {
+            Self::Found(_) => ("found", 1),
+            Self::Ambiguous { count } => ("ambiguous", *count),
+            Self::None => ("none", 0),
+        }
+    }
+}
+
+/// The panes (pane id and folder) whose folder matches `folder`, as a `ChiefLookup`. Logs
+/// nothing.
+pub(crate) fn lookup_in_folder<'a>(
+    panes: impl IntoIterator<Item = (&'a str, &'a str)>,
+    folder: &str,
+) -> ChiefLookup {
+    let mut matching = panes
+        .into_iter()
+        .filter(|(_, pane_folder)| same_folder(pane_folder, folder));
+    let Some((first, _)) = matching.next() else {
+        return ChiefLookup::None;
+    };
+    match matching.count() {
+        0 => ChiefLookup::Found(first.to_string()),
+        others => ChiefLookup::Ambiguous { count: others + 1 },
+    }
+}
+
+#[cfg(not(test))]
+static LAST_CHIEF_STATE: Mutex<&'static str> = Mutex::new("none");
+
+#[cfg(test)]
+thread_local! {
+    static LAST_CHIEF_STATE: std::cell::Cell<&'static str> = const { std::cell::Cell::new("none") };
+}
+
+/// Whether `state` differs from the last one logged, taking it as the last.
+fn state_changed(state: &'static str) -> bool {
+    #[cfg(not(test))]
+    {
+        let mut last = LAST_CHIEF_STATE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        return std::mem::replace(&mut *last, state) != state;
+    }
+    #[cfg(test)]
+    LAST_CHIEF_STATE.with(|last| last.replace(state) != state)
+}
+
+/// Logs `chief pane changed` (`state`, `count`, no folder) when `lookup`'s state differs
+/// from the last one logged. Harold starts with `none` as the last, so a start with no
+/// chief logs nothing.
+pub(crate) fn note_chief(lookup: &ChiefLookup) {
+    let (state, count) = lookup.state();
+    if state_changed(state) {
+        tracing::info!(state, count, "chief pane changed");
+    }
+}
+
+/// The one place that finds the chief's pane: the pane whose folder matches `chief`. With
+/// no chief folder set it is `None` and nothing is logged.
+pub(crate) fn resolve_chief<'a>(
+    panes: impl IntoIterator<Item = (&'a str, &'a str)>,
+    chief: Option<&str>,
+) -> ChiefLookup {
+    let Some(chief) = chief else {
+        return ChiefLookup::None;
+    };
+    let lookup = lookup_in_folder(panes, chief);
+    note_chief(&lookup);
+    lookup
 }
 
 /// The log line for a turn-end update held off the phone by the list under `key`.
@@ -250,9 +343,9 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::{
-        MARK_LIFETIME, MESSAGED_THIS_TURN, TrackedAgents, desk_line_dropped_reason,
+        ChiefLookup, MARK_LIFETIME, MESSAGED_THIS_TURN, TrackedAgents, desk_line_dropped_reason,
         desk_update_reason, entry_matches, left_out_reason, mark_is_fresh, message_dropped_reason,
-        phone_held_back, spoken_line_dropped_reason,
+        phone_held_back, resolve_chief, spoken_line_dropped_reason,
     };
     use crate::agent::domain::{
         AgentIncarnation, AgentPaneObservation, AgentPaneProjection, AgentSnapshot,
@@ -279,6 +372,59 @@ mod tests {
             marked_at,
             marked_at + Duration::from_secs(3_600)
         ));
+    }
+
+
+    const ONE: [(&str, &str); 2] = [("%1", "/w/chief-of-pods"), ("%2", "/w/harold")];
+    const TWO: [(&str, &str); 3] = [
+        ("%1", "/w/chief-of-pods"),
+        ("%2", "/w/harold"),
+        ("%3", "/other/chief-of-pods"),
+    ];
+
+    #[test]
+    fn resolver_returns_found_ambiguous_and_none() {
+        assert_eq!(
+            resolve_chief(ONE, Some("chief-of-pods")),
+            ChiefLookup::Found("%1".into())
+        );
+        assert_eq!(
+            resolve_chief(TWO, Some("chief-of-pods")),
+            ChiefLookup::Ambiguous { count: 2 }
+        );
+        assert_eq!(resolve_chief(ONE, Some("elsewhere")), ChiefLookup::None);
+        assert_eq!(resolve_chief(ONE, None), ChiefLookup::None);
+    }
+
+    #[test]
+    fn ambiguous_found_ambiguous_logs_each_change_once() {
+        let logs = crate::outbound::fake::CapturedLogs::start();
+        let chief = Some("chief-of-pods");
+
+        for panes in [&TWO[..], &TWO[..], &ONE[..], &ONE[..], &TWO[..], &TWO[..]] {
+            resolve_chief(panes.iter().copied(), chief);
+        }
+
+        let text = logs.text();
+        let lines: Vec<&str> = text
+            .lines()
+            .filter(|line| line.contains("chief pane changed"))
+            .collect();
+        assert_eq!(lines.len(), 3, "{text}");
+        assert!(lines[0].contains("state=\"ambiguous\"") && lines[0].contains("count=2"));
+        assert!(lines[1].contains("state=\"found\"") && lines[1].contains("count=1"));
+        assert!(lines[2].contains("state=\"ambiguous\""));
+        assert!(!text.contains("chief pane ambiguous"), "{text}");
+        assert!(!text.contains("/w/"), "no folder is logged: {text}");
+    }
+
+    #[test]
+    fn a_folder_in_the_chief_folder_is_known_while_it_is_ambiguous() {
+        let agents = TrackedAgents::in_folders(&TWO);
+        assert!(agents.is_in_chief_folder(Some("chief-of-pods"), "%3"));
+        assert!(!agents.is_in_chief_folder(Some("chief-of-pods"), "%2"));
+        assert!(!agents.is_in_chief_folder(None, "%1"));
+        assert!(!agents.is_in_chief_folder(Some("chief-of-pods"), "%9"));
     }
 
     const HOME: Option<&str> = Some("/Users/x");

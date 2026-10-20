@@ -21,7 +21,7 @@ use tracing::warn;
 
 use crate::agent::domain::EffectiveAgentState;
 use crate::agent::snapshot::AgentSnapshotHub;
-use crate::outbound::left_out::same_folder;
+use crate::outbound::left_out::{ChiefLookup, resolve_chief};
 use crate::pod_stats::{self, PodSnapshot};
 use crate::settings::{AgentProviderSettings, Settings, WatchSettings};
 use crate::timed_prompts::{self, InputBox, LineOutcome, Ports, TmuxPorts, Writer};
@@ -376,20 +376,17 @@ struct SnapshotChiefPane<P = TmuxPorts> {
 
 impl<P: Ports> ChiefPane for SnapshotChiefPane<P> {
     fn chief_pane(&self) -> Option<String> {
-        let folder = self.folder.as_deref()?;
-        let mut in_folder = self
-            .ports
-            .agents()
-            .panes
-            .into_iter()
-            .filter(|pane| same_folder(&pane.folder, folder));
-        let chief = in_folder.next()?;
-        let several = in_folder.next().is_some();
-        if several {
-            tracing::info!(count = 2 + in_folder.count(), "chief pane ambiguous");
-            return None;
+        let view = self.ports.agents();
+        let found = resolve_chief(
+            view.panes
+                .iter()
+                .map(|pane| (pane.pane_id.as_str(), pane.folder.as_str())),
+            self.folder.as_deref(),
+        );
+        match found {
+            ChiefLookup::Found(pane_id) => Some(pane_id),
+            ChiefLookup::Ambiguous { .. } | ChiefLookup::None => None,
         }
-        Some(chief.pane_id)
     }
 }
 

@@ -173,7 +173,7 @@ Each comparison ignores one trailing `/` on either side, keeps case and does not
 
 Harold takes a pane's folder, the working directory tmux reports for it, from its latest listing of tmux panes each time it decides. A failed listing keeps the last good one. A pane Harold has no folder for yet may use no channel (except through `*`), and a pane that `cd`s out of a listed folder is held back from the next listing. While no agent runs in a listed folder, such as while the chief restarts, nothing goes out on that channel.
 
-**The chief.** `chief` is one entry that names the chief's pane. It gets typed answers from the question tool, alerts, the Mac's calls and the web app's route; whether it may use a channel is up to that channel's list, like any pane. `"*"` is refused in `chief`. When more than one pane matches `chief`, Harold treats the chief as absent for all those uses and logs `chief pane ambiguous` with a `count` and no folder; those panes still use the channels their folders match.
+**The chief.** `chief` is one entry that names the chief's pane. It gets typed answers from the question tool, alerts, the Mac's calls and the web app's route; whether it may use a channel is up to that channel's list, like any pane. `"*"` is refused in `chief`. When more than one pane matches `chief`, Harold treats the chief as absent for all those uses and logs `chief pane changed` (`info`, with `state` as `found`, `ambiguous` or `none`, and a `count`, no folder) once each time the state changes, from the one resolver that every part of Harold uses to find the chief's pane; those panes still use the channels their folders match.
 
 **What each request meets.**
 

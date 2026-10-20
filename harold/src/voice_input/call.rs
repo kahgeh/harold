@@ -17,7 +17,7 @@ use super::{
 };
 use crate::agent::domain::EffectiveAgentState;
 use crate::away_message::one_line;
-use crate::outbound::left_out::same_folder;
+use crate::outbound::left_out::{ChiefLookup, resolve_chief, same_folder};
 use crate::telemetry::{self, StartedBy};
 use crate::timed_prompts::{AgentsView, Attempt, Ports, Reason, Writer, type_when_ready};
 use std::collections::VecDeque;
@@ -134,18 +134,17 @@ pub(super) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 /// matches there is no chief.
 pub(super) fn chief_pane<P: CallPorts>(ports: &P) -> Option<String> {
     let folder = ports.chief_folder()?;
-    let mut in_folder = ports
-        .panes()
-        .agents()
-        .panes
-        .into_iter()
-        .filter(|pane| same_folder(&pane.folder, &folder));
-    let chief = in_folder.next()?;
-    if in_folder.next().is_some() {
-        info!(count = 2 + in_folder.count(), "chief pane ambiguous");
-        return None;
+    let view = ports.panes().agents();
+    let found = resolve_chief(
+        view.panes
+            .iter()
+            .map(|pane| (pane.pane_id.as_str(), pane.folder.as_str())),
+        Some(&folder),
+    );
+    match found {
+        ChiefLookup::Found(pane_id) => Some(pane_id),
+        ChiefLookup::Ambiguous { .. } | ChiefLookup::None => None,
     }
-    Some(chief.pane_id)
 }
 
 /// Whether an agent runs in `folder`. A pane list that failed to read counts as yes, as it

@@ -16,7 +16,7 @@ use tracing::{error, info, warn};
 use crate::agent::domain::{AgentSnapshot, EffectiveAgentState};
 use crate::agent::snapshot::AgentSnapshotHub;
 use crate::inbound::tmux::{press_enter_in_tmux_pane, type_text_into_tmux_pane};
-use crate::outbound::left_out::same_folder;
+use crate::outbound::left_out::{ChiefLookup, lookup_in_folder, note_chief};
 use crate::settings::{
     AgentMonitorSettings, AgentProviderSettings, ScreenAdapter, Settings, TimedPromptSettings,
     minute_of_day,
@@ -281,17 +281,23 @@ pub(crate) fn pick_pane<'a>(
     if view.listing_failed {
         return Err(Reason::PaneListFailing);
     }
-    let mut in_folder = view
+    let pane_id = match lookup_in_folder(
+        view.panes
+            .iter()
+            .map(|pane| (pane.pane_id.as_str(), pane.folder.as_str())),
+        folder,
+    ) {
+        ChiefLookup::None => return Err(Reason::NoAgentInFolder),
+        ChiefLookup::Ambiguous { count } => {
+            return Err(Reason::SeveralAgentsInFolder { agents: count });
+        }
+        ChiefLookup::Found(pane_id) => pane_id,
+    };
+    let pane = view
         .panes
         .iter()
-        .filter(|pane| same_folder(&pane.folder, folder));
-    let Some(pane) = in_folder.next() else {
-        return Err(Reason::NoAgentInFolder);
-    };
-    let others = in_folder.count();
-    if others > 0 {
-        return Err(Reason::SeveralAgentsInFolder { agents: others + 1 });
-    }
+        .find(|pane| pane.pane_id == pane_id)
+        .ok_or(Reason::NoAgentInFolder)?;
     if !pane.reads_as_claude {
         return Err(Reason::InputBoxUnreadable);
     }
@@ -832,6 +838,15 @@ pub(crate) async fn type_when_ready<P: Ports>(
 ) -> Attempt {
     let locks = ports.pane_locks();
     locks.observe(view);
+    // A tool types into a pane's own folder, which is not necessarily the chief's.
+    if !matches!(writer, Writer::Tool(_)) && !view.listing_failed {
+        note_chief(&lookup_in_folder(
+            view.panes
+                .iter()
+                .map(|pane| (pane.pane_id.as_str(), pane.folder.as_str())),
+            folder,
+        ));
+    }
     let pane = match pick_pane(view, folder, typed_into) {
         Ok(pane) => pane.pane_id.clone(),
         Err(reason) => return Attempt::Wait(reason),

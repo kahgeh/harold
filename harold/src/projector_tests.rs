@@ -1871,7 +1871,6 @@ async fn paused_message_from_outside_the_folder_is_skipped_by_the_pause() {
         text.contains("away message skipped (messaging paused)"),
         "{text}"
     );
-    assert!(!text.contains("away message dropped"), "{text}");
 }
 
 #[tokio::test]
@@ -1896,7 +1895,6 @@ async fn agent_in_the_folder_that_sent_a_message_gets_no_update_for_that_turn() 
         text.contains("notification skipped (pane messaged the phone this turn) pane_id=%1"),
         "{text}"
     );
-    assert!(!text.contains("away message dropped"), "{text}");
 }
 
 // ---------------------------------------------------------------------------
@@ -4280,7 +4278,8 @@ async fn two_panes_matching_chief_are_no_chief_for_the_app_and_still_use_the_lis
     assert!(with.app.delivered().is_empty());
     assert_eq!(with.environment.away_messages(), ["hi", "hi"]);
     let text = logs.text();
-    assert!(text.contains("chief pane ambiguous"), "{text}");
+    assert!(text.contains("chief pane changed"), "{text}");
+    assert!(text.contains("state=\"ambiguous\""), "{text}");
     assert!(text.contains("count=2"), "{text}");
     assert!(!text.contains("/tmp/chief-of-pods"), "{text}");
 }
