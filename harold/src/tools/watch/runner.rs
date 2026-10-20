@@ -126,10 +126,11 @@ impl ClaudeRunner {
         let Ok(mut child) = spawned else {
             return ModelResult::FailedToStart;
         };
-        let group = child.id();
+        // Dropping this run (a `stop`, a replacement) kills the group too.
+        let mut guard = GroupGuard(child.id());
         let result = tokio::time::timeout(job.timeout, exchange(&mut child, &job.facts_json)).await;
         // Whatever the run started must not outlive it: end the whole group, then reap.
-        if let Some(group) = group {
+        if let Some(group) = guard.0.take() {
             kill_group(group).await;
         }
         let _ = child.wait().await;
@@ -147,6 +148,23 @@ impl ClaudeRunner {
 impl ModelRunner for ClaudeRunner {
     fn run<'a>(&'a self, job: &'a ModelJob) -> BoxFuture<'a, ModelResult> {
         Box::pin(self.run_job(job))
+    }
+}
+
+/// Ends the process group of a run that is dropped before it finished.
+struct GroupGuard(Option<u32>);
+
+impl Drop for GroupGuard {
+    fn drop(&mut self) {
+        let Some(pid) = self.0.take() else {
+            return;
+        };
+        let _ = std::process::Command::new("/bin/kill")
+            .args(["-KILL", "--", &format!("-{pid}")])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
     }
 }
 

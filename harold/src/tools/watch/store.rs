@@ -59,6 +59,17 @@ pub(super) struct WatchRow {
     pub ended_at_ms: Option<i64>,
 }
 
+/// What a finished run does to the count of runs failed in a row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Streak {
+    /// One more failure.
+    Failed,
+    /// A run that worked: back to 0.
+    Worked,
+    /// A skipped run says nothing about the watch.
+    Unchanged,
+}
+
 /// One finished run to record.
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct RunRecord {
@@ -67,7 +78,7 @@ pub(super) struct RunRecord {
     pub outcome: String,
     /// The run's reported cost, else its run budget, else `None`.
     pub cost_usd_micros: Option<i64>,
-    pub failed: bool,
+    pub streak: Streak,
     /// When the watch's next run is due.
     pub next_run_at_ms: i64,
 }
@@ -190,13 +201,18 @@ impl WatchStore {
             .await?;
             conn.execute(
                 "UPDATE watches SET runs = runs + 1, reports = reports + ?2, \
-                 failed_in_a_row = CASE WHEN ?3 = 1 THEN failed_in_a_row + 1 ELSE 0 END, \
+                 failed_in_a_row = CASE ?3 WHEN 1 THEN failed_in_a_row + 1 WHEN 0 THEN 0 \
+                 ELSE failed_in_a_row END, \
                  cost_usd_micros = cost_usd_micros + ?4, last_outcome = ?5, next_run_at_ms = ?6 \
                  WHERE name = ?1",
                 turso::params_from_iter(vec![
                     Value::from(name),
                     Value::from(i64::from(record.outcome == "report")),
-                    Value::from(i64::from(record.failed)),
+                    Value::from(match record.streak {
+                        Streak::Failed => 1_i64,
+                        Streak::Worked => 0,
+                        Streak::Unchanged => 2,
+                    }),
                     Value::from(record.cost_usd_micros.unwrap_or(0)),
                     Value::from(record.outcome.as_str()),
                     Value::from(record.next_run_at_ms),

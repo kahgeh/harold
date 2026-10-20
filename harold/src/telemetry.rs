@@ -85,6 +85,9 @@ pub(crate) const ALLOWED_FIELDS: &[&str] = &[
     "event_type",
     "event_version",
     "result",
+    "watch",
+    "run",
+    "cost_usd",
 ];
 
 /// How long shutting the exporters down may take in all.
@@ -173,6 +176,10 @@ pub(crate) struct Instruments {
     pub pod_merged_lines: Counter<u64>,
     /// `pod.spec.lead_time`, seconds.
     pub pod_spec_lead_time: Histogram<f64>,
+    /// `watch.runs`, `{run}`, by `folder` and `outcome`.
+    pub watch_runs: Counter<u64>,
+    /// `watch.cost_usd`, `USD`, by `folder`.
+    pub watch_cost_usd: Counter<f64>,
 }
 
 static INSTRUMENTS: OnceLock<Instruments> = OnceLock::new();
@@ -225,6 +232,8 @@ pub(crate) fn instruments() -> &'static Instruments {
                     600.0, 1800.0, 3600.0, 7200.0, 14400.0, 43200.0, 86400.0, 172800.0,
                 ],
             ),
+            watch_runs: counter("watch.runs", "{run}"),
+            watch_cost_usd: meter.f64_counter("watch.cost_usd").with_unit("USD").build(),
         }
     })
 }
@@ -284,6 +293,32 @@ pub(crate) fn register_merge_counters(product: &str) {
             .pod_merged_lines
             .add(0, &[product.clone(), KeyValue::new("change", change)]);
     }
+}
+
+/// Every `outcome` of `watch.runs` that is a failure or a skipped run, counted from 0 at a
+/// watch's start so HyperDX reads the first one as a rise.
+pub(crate) const WATCH_FAILURE_OUTCOMES: [&str; 6] = [
+    "timeout",
+    "process_failed",
+    "run_budget_reached",
+    "unreadable_answer",
+    "skill_missing",
+    "skipped",
+];
+
+/// Records 0 once for the failure and skipped outcomes of `watch.runs` and for
+/// `watch.cost_usd` of `folder`. The watch tool calls it when a watch starts or resumes.
+pub(crate) fn register_watch_counters(folder: &str) {
+    let instruments = instruments();
+    let folder = KeyValue::new("folder", folder.to_owned());
+    for outcome in WATCH_FAILURE_OUTCOMES {
+        instruments
+            .watch_runs
+            .add(0, &[folder.clone(), KeyValue::new("outcome", outcome)]);
+    }
+    instruments
+        .watch_cost_usd
+        .add(0.0, std::slice::from_ref(&folder));
 }
 
 // ---------------------------------------------------------------------------

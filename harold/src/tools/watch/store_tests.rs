@@ -32,11 +32,16 @@ fn new_watch(name: &str) -> NewWatch {
 }
 
 fn run(started: i64, outcome: &str, cost: Option<i64>, failed: bool, next: i64) -> RunRecord {
+    let streak = if failed {
+        Streak::Failed
+    } else {
+        Streak::Worked
+    };
     RunRecord {
         started_at_ms: started,
         outcome: outcome.into(),
         cost_usd_micros: cost,
-        failed,
+        streak,
         next_run_at_ms: next,
     }
 }
@@ -206,4 +211,23 @@ async fn a_run_recorded_for_a_stopped_watch_is_not_added_to_it_but_its_cost_is_s
         .unwrap();
     assert_eq!(store.spent_micros(0, 10_000).await.unwrap(), 9_000);
     assert_eq!(store.get("a").await.unwrap().unwrap().runs, 0);
+}
+
+#[tokio::test]
+async fn a_skipped_run_leaves_the_failed_in_a_row_count_alone() {
+    let temp = Temp::new();
+    let store = WatchStore::open(&temp.0).await.unwrap();
+    store.put_watch(&new_watch("a")).await.unwrap();
+    store
+        .record_run("a", 1_000, &run(1_000, "timeout", None, true, 2_000))
+        .await
+        .unwrap();
+    let mut skipped = run(2_000, "skipped", None, false, 3_000);
+    skipped.streak = Streak::Unchanged;
+    let row = store
+        .record_run("a", 1_000, &skipped)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!((row.runs, row.failed_in_a_row), (2, 1));
 }

@@ -40,6 +40,7 @@ pub(super) enum Failure {
 }
 
 impl Failure {
+    #[cfg(test)]
     pub(super) const ALL: [Failure; 5] = [
         Failure::Timeout,
         Failure::ProcessFailed,
@@ -56,12 +57,6 @@ impl Failure {
             Failure::UnreadableAnswer => "unreadable_answer",
             Failure::SkillMissing => "skill_missing",
         }
-    }
-
-    pub(super) fn parse(text: &str) -> Option<Failure> {
-        Self::ALL
-            .into_iter()
-            .find(|failure| failure.as_str() == text)
     }
 }
 

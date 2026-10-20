@@ -141,9 +141,16 @@ fn bad_outputs_map_to_their_failures() {
 }
 
 #[test]
-fn failure_names_round_trip() {
-    for failure in Failure::ALL {
-        assert_eq!(Failure::parse(failure.as_str()), Some(failure));
-    }
-    assert_eq!(Failure::parse("quiet"), None);
+fn failure_names_are_the_reasons_the_log_carries() {
+    let names: Vec<&str> = Failure::ALL.into_iter().map(Failure::as_str).collect();
+    assert_eq!(
+        names,
+        [
+            "timeout",
+            "process_failed",
+            "run_budget_reached",
+            "unreadable_answer",
+            "skill_missing"
+        ]
+    );
 }
