@@ -1481,6 +1481,7 @@ const METRICS: &[&str] = &[
     "pod.spec.lead_time",
     "watch.runs",
     "watch.cost_usd",
+    "harold.notifications",
 ];
 
 /// The Metrics table's attributes, plus the two resource attributes every export carries.
@@ -1503,6 +1504,7 @@ const ATTRIBUTES: &[&str] = &[
     "service.name",
     "folder",
     "cost_usd",
+    "agent",
 ];
 
 /// The spec's span table. The trends panel "One turn, end to end" lists `harold.turn`.
@@ -1861,6 +1863,7 @@ fn the_cards_dashboard_shows_each_card_beside_its_earlier_number_and_nothing_els
             };
             [card.to_string(), earlier]
         })
+        .chain([NOTIFICATIONS_CARD.to_string()])
         .collect();
     assert_eq!(tile_names(&dashboard), names);
 
@@ -1880,6 +1883,7 @@ fn the_cards_dashboard_shows_each_card_beside_its_earlier_number_and_nothing_els
     assert_eq!(
         groups,
         [
+            "Notifications (leave the product filter empty)",
             "Phone requests",
             "Pods",
             "Specs",
@@ -1960,9 +1964,60 @@ fn the_cards_dashboard_shows_each_card_beside_its_earlier_number_and_nothing_els
     }
 
     let filters = dashboard["filters"].as_array().unwrap();
-    assert_eq!(filters.len(), 1, "only the product filter");
-    assert_eq!(filters[0]["name"], "Product (pod and spec cards only)");
-    assert_eq!(filters[0]["expression"], "Attributes['pod.product']");
+    let filter_names: Vec<_> = filters
+        .iter()
+        .map(|filter| {
+            (
+                filter["name"].as_str().unwrap(),
+                filter["expression"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        filter_names,
+        [
+            (
+                "Product (pod and spec cards only)",
+                "Attributes['pod.product']"
+            ),
+            ("Agent (notifications card only)", "Attributes['agent']"),
+            ("Channel (notifications card only)", "Attributes['channel']"),
+        ]
+    );
+    assert_eq!(filters[1]["sourceMetricType"], "sum");
+    assert_eq!(filters[2]["sourceMetricType"], "sum");
+}
+
+const NOTIFICATIONS_CARD: &str = "Notifications by agent and channel";
+
+#[test]
+fn the_notifications_card_is_a_table_of_sent_and_kept_over_the_picked_range() {
+    let dashboard = definition("dashboard.json");
+    let card = tiles(&dashboard)
+        .iter()
+        .find(|tile| tile["name"] == NOTIFICATIONS_CARD)
+        .expect("the notifications card");
+    let config = &card["config"];
+    assert_eq!(config["displayType"], "table");
+    assert_eq!(config["sourceId"], "@METRICS_SOURCE_ID@");
+    let sql = config["sqlTemplate"].as_str().unwrap();
+    for piece in [
+        "Attributes['agent'] AS agent",
+        "Attributes['channel'] AS channel",
+        "AS sent",
+        "AS kept",
+        "Attributes['outcome'] = 'sent'",
+        "Attributes['outcome'] = 'kept'",
+        "MetricName IN ('harold.notifications')",
+        "$__timeFilter(TimeUnix)",
+        "$__fromTime - INTERVAL 1 DAY",
+        "$__filters",
+        "GROUP BY agent, channel",
+    ] {
+        assert!(sql.contains(piece), "{piece} in {sql}");
+    }
+    // The range is the dashboard's, not a fixed period.
+    assert!(!sql.contains("now() - INTERVAL"), "{sql}");
 }
 
 #[test]
@@ -1974,6 +2029,9 @@ fn the_product_filter_reaches_the_pod_and_spec_tiles_only() {
         ("phone", false),
         ("turns", false),
         ("turn-end", false),
+        // The card takes `$__filters`, so the product filter empties it: its container
+        // title says to leave that filter empty.
+        ("notifications", true),
     ]);
     for tile in tiles(&dashboard) {
         let name = tile["name"].as_str().unwrap();
@@ -2052,9 +2110,9 @@ fn every_tile_that_counts_a_running_total_uses_the_counter_rule() {
             }
         }
     }
-    // Eight counter cards and two lead-time cards, each with its earlier number, and
-    // three trends panels.
-    assert_eq!(counted, 23);
+    // Eight counter cards and two lead-time cards, each with its earlier number, the
+    // notifications card and three trends panels.
+    assert_eq!(counted, 24);
 }
 
 #[test]

@@ -28,6 +28,11 @@
       "id": "turn-end",
       "title": "Turn-end updates",
       "collapsed": false
+    },
+    {
+      "id": "notifications",
+      "title": "Notifications (leave the product filter empty)",
+      "collapsed": false
     }
   ],
   "filters": [
@@ -37,6 +42,26 @@
       "expression": "Attributes['pod.product']",
       "sourceId": "@METRICS_SOURCE_ID@",
       "sourceMetricType": "gauge",
+      "appliesToSourceIds": [
+        "@METRICS_SOURCE_ID@"
+      ]
+    },
+    {
+      "type": "QUERY_EXPRESSION",
+      "name": "Agent (notifications card only)",
+      "expression": "Attributes['agent']",
+      "sourceId": "@METRICS_SOURCE_ID@",
+      "sourceMetricType": "sum",
+      "appliesToSourceIds": [
+        "@METRICS_SOURCE_ID@"
+      ]
+    },
+    {
+      "type": "QUERY_EXPRESSION",
+      "name": "Channel (notifications card only)",
+      "expression": "Attributes['channel']",
+      "sourceId": "@METRICS_SOURCE_ID@",
+      "sourceMetricType": "sum",
       "appliesToSourceIds": [
         "@METRICS_SOURCE_ID@"
       ]
@@ -703,6 +728,22 @@
           "output": "percent",
           "mantissa": 1
         }
+      }
+    },
+    {
+      "id": "notifications-by-agent-and-channel",
+      "name": "Notifications by agent and channel",
+      "x": 0,
+      "y": 21,
+      "w": 12,
+      "h": 6,
+      "containerId": "notifications",
+      "config": {
+        "configType": "sql",
+        "displayType": "table",
+        "connectionId": "@CLICKHOUSE_CONNECTION_ID@",
+        "sourceId": "@METRICS_SOURCE_ID@",
+        "sqlTemplate": "SELECT Attributes['agent'] AS agent, Attributes['channel'] AS channel, sumIf(rise, Attributes['outcome'] = 'sent') AS sent, sumIf(rise, Attributes['outcome'] = 'kept') AS kept FROM (SELECT TimeUnix, MetricName, Attributes, if(Value >= before, Value - before, Value) AS rise FROM (SELECT TimeUnix, MetricName, Attributes, Value, lagInFrame(Value, 1, toFloat64(0)) OVER (PARTITION BY cityHash64(MetricName, ResourceAttributes, Attributes) ORDER BY TimeUnix ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS before FROM $__sourceTable(sum) WHERE MetricName IN ('harold.notifications') AND TimeUnix >= $__fromTime - INTERVAL 1 DAY AND TimeUnix < $__toTime AND $__filters)) WHERE $__timeFilter(TimeUnix) GROUP BY agent, channel ORDER BY agent, channel"
       }
     }
   ]

@@ -75,6 +75,7 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 | agent message | Text an agent asks Harold to send to the phone (`send-message-to-away-device`) | — |
 | spoken line | A line the chief asks Harold to say (`harold speak`) | — |
 | voice note | A spoken line sent to the phone as audio | — |
+| held back | An update or message a channel's rules keep from going out. A turn-end update held back is "left out", and an agent message or spoken line held back is "dropped". `outcome = held_back` covers both | "skipped" (except in the existing `notification skipped` log line, kept as written), "suppressed" |
 | left out | A turn-end update Harold chose not to say or send. It names the channel list that held the pane back | — |
 | dropped | An agent message or spoken line Harold chose not to send. It names the channel list that held the pane back | — |
 | channel | One of the four ways Harold reaches the user, each with its own list in `[notify]`: `imessage`, `telegram`, `web_app` and `machine_audio_output` | "away channel" for it (the away channel is only iMessage or Telegram, the one `away_channel` picks), "route", "output" alone |
