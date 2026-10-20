@@ -608,3 +608,137 @@ async fn listing_counts_waiting_without_instructions() {
     assert_eq!(listing.questions.len(), 2);
     assert_eq!(listing.waiting, 1);
 }
+
+async fn save_picks<S: QuestionStore>(
+    service: &QuestionToolService<S>,
+    id: &str,
+    version: u32,
+    picks: Vec<pb::Pick>,
+) -> Result<(), tonic::Status> {
+    service
+        .save_picks(Request::new(pb::SavePicksRequest {
+            id: id.into(),
+            version,
+            picks,
+        }))
+        .await
+        .map(|_| ())
+}
+
+async fn show<S: QuestionStore>(
+    service: &QuestionToolService<S>,
+    id: &str,
+) -> Result<pb::ShowQuestionResponse, tonic::Status> {
+    service
+        .show_question(Request::new(pb::ShowQuestionRequest { id: id.into() }))
+        .await
+        .map(|response| response.into_inner())
+}
+
+#[tokio::test]
+async fn save_picks_stores_picks_lists_them_and_wakes_nothing() {
+    let (logs, _guard) = capture_logs();
+    let folder = TempFolder::new();
+    let wake = Arc::new(Notify::new());
+    let service = QuestionToolService::new(open_store(&folder).await, Arc::clone(&wake));
+    put(&service, question("Q1", "spec", "abc")).await.unwrap();
+    // The put left a wake permit; take it so only a save could leave another.
+    wake.notified().await;
+    let free = pb::Pick {
+        decision: 0,
+        key: "z".into(),
+        text: "PICK-CANARY-91 typed".into(),
+    };
+    save_picks(&service, "Q1", 1, vec![free.clone()])
+        .await
+        .unwrap();
+    let woken = tokio::time::timeout(std::time::Duration::from_millis(100), wake.notified()).await;
+    assert!(woken.is_err(), "a save must not wake the answers sender");
+    let listing = list(&service).await;
+    assert_eq!(listing.questions[0].picks, [free]);
+    let lines = logs.with("picks saved");
+    assert_eq!(lines.len(), 1, "{lines:#?}");
+    assert_eq!(
+        field_names(&lines[0], "picks saved"),
+        ["tool", "question_id", "version"]
+    );
+    assert!(logs.lines().iter().all(|l| !l.contains("PICK-CANARY-91")));
+}
+
+#[tokio::test]
+async fn save_picks_refusals_have_exact_messages() {
+    let folder = TempFolder::new();
+    let service = service(open_store(&folder).await);
+    put(&service, question("Q1", "spec", "abc")).await.unwrap();
+    let stale = save_picks(&service, "Q1", 9, vec![]).await.unwrap_err();
+    assert_eq!(stale.code(), Code::FailedPrecondition);
+    assert_eq!(stale.message(), "version_changed");
+    let bad = save_picks(&service, "Q1", 1, vec![pick(0, "nope")])
+        .await
+        .unwrap_err();
+    assert_eq!(bad.code(), Code::InvalidArgument);
+    assert_eq!(bad.message(), "invalid picks");
+    answer(
+        &service,
+        "Q1",
+        1,
+        pb::AnswerKind::Answer,
+        vec![pick(0, "a")],
+        "",
+    )
+    .await
+    .unwrap();
+    let gone = save_picks(&service, "Q1", 1, vec![]).await.unwrap_err();
+    assert_eq!(gone.code(), Code::FailedPrecondition);
+    assert_eq!(gone.message(), "not_waiting");
+}
+
+#[tokio::test]
+async fn a_failed_store_on_save_picks_is_unavailable_and_logs_picks_not_saved() {
+    let (logs, _guard) = capture_logs();
+    let folder = TempFolder::new();
+    let failing = FailingStore::new(open_store(&folder).await);
+    failing.writes.store(false, Ordering::SeqCst);
+    let service = service(Arc::clone(&failing));
+    put(&service, question("Q1", "spec", "abc")).await.unwrap();
+    failing.writes.store(true, Ordering::SeqCst);
+    let refused = save_picks(&service, "Q1", 1, vec![pick(0, "a")])
+        .await
+        .unwrap_err();
+    assert_eq!(refused.code(), Code::Unavailable);
+    let lines = logs.with("picks not saved");
+    assert_eq!(lines.len(), 1, "{lines:#?}");
+    assert_eq!(
+        field_names(&lines[0], "picks not saved"),
+        ["tool", "question_id", "version", "reason"]
+    );
+    assert!(lines[0].contains("reason=\"store_failed\""), "{}", lines[0]);
+    assert!(lines[0].contains("WARN"), "{}", lines[0]);
+}
+
+#[tokio::test]
+async fn show_question_returns_a_dismissed_questions_picks() {
+    let folder = TempFolder::new();
+    let service = service(open_store(&folder).await);
+    put(&service, question("Q1", "spec", "abc")).await.unwrap();
+    save_picks(&service, "Q1", 1, vec![pick(0, "a")])
+        .await
+        .unwrap();
+    dismiss(&service, "Q1", "stale").await.unwrap();
+    let shown = show(&service, "Q1").await.unwrap();
+    assert_eq!(shown.question.unwrap().id, "Q1");
+    assert_eq!(
+        (shown.version, shown.state.as_str(), shown.reason.as_str()),
+        (1, "dismissed", "stale")
+    );
+    assert_eq!(shown.picks, [pick(0, "a")]);
+}
+
+#[tokio::test]
+async fn show_question_of_an_unknown_id_is_not_found() {
+    let folder = TempFolder::new();
+    let service = service(open_store(&folder).await);
+    let missing = show(&service, "nope").await.unwrap_err();
+    assert_eq!(missing.code(), Code::NotFound);
+    assert_eq!(missing.message(), "unknown_question");
+}

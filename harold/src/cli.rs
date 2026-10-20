@@ -2096,6 +2096,7 @@ mod tests {
             version: 2,
             deferred: false,
             ticked: vec![1, 3],
+            picks: vec![],
         };
         assert_eq!(list_line(&instructions), "I1 v2 harold steps 2/4");
         let question = questions::ListedQuestion {
@@ -2108,6 +2109,7 @@ mod tests {
             version: 1,
             deferred: true,
             ticked: vec![],
+            picks: vec![],
         };
         assert_eq!(list_line(&question), "Q1 v1 harold dash (deferred)");
     }

@@ -19,11 +19,20 @@
 //                    (DONE or IGNORE) at the version the dash saw.
 //   DeferQuestion    sets a question aside; it returns to waiting once a batch is typed and nothing else waits.
 //   TickStep         ticks or unticks one step of waiting instructions.
+//   SavePicks        replaces the saved picks of a waiting or deferred question
+//                    at the version the dash saw.
+//
+// The chief of pods and the CLI also call:
+//   ShowQuestion     a stored question in any state, with its saved picks.
 //
 // Refusals:
 //   InvalidArgument      message "invalid <field>" for a broken rule; nothing
 //                        is stored. `invalid step` is a step number that is 0
 //                        or past the last step, or a tick on a question.
+//                        `invalid picks` is a pick list that breaks the
+//                        revise rule (see SavePicks).
+//   NotFound             message "unknown_question" (ShowQuestion of an id
+//                        that was never stored).
 //   FailedPrecondition   message "version_changed" (the question or instructions
 //                        changed since the dash read it) or "not_waiting" (it is no longer
 //                        waiting for an answer).
@@ -42,6 +51,8 @@ service QuestionService {
   rpc AnswerQuestion(AnswerQuestionRequest) returns (AnswerQuestionResponse);
   rpc DeferQuestion(DeferQuestionRequest) returns (DeferQuestionResponse);
   rpc TickStep(TickStepRequest) returns (TickStepResponse);
+  rpc SavePicks(SavePicksRequest) returns (SavePicksResponse);
+  rpc ShowQuestion(ShowQuestionRequest) returns (ShowQuestionResponse);
 }
 
 message DecisionOption {
@@ -105,6 +116,8 @@ message ListedQuestion {
   bool deferred = 3;
   // Instructions only: the step numbers (from 1) that are ticked.
   repeated uint32 ticked = 4;
+  // A question only: the saved picks, one per picked decision.
+  repeated Pick picks = 5;
 }
 
 message Dismissed {
@@ -166,3 +179,28 @@ message TickStepRequest {
 }
 
 message TickStepResponse {}
+
+// Replaces the saved picks of a waiting or deferred question at the version the
+// dash saw. The picks follow the revise rule: any picks so far, in decision
+// order, keys valid, a free pick with `text`. An empty list clears them.
+message SavePicksRequest {
+  string id = 1;
+  uint32 version = 2;
+  repeated Pick picks = 3;
+}
+
+message SavePicksResponse {}
+
+message ShowQuestionRequest {
+  string id = 1;
+}
+
+// `state` is waiting, deferred, answered, sent or dismissed; `reason` is the
+// dismissal reason, empty otherwise.
+message ShowQuestionResponse {
+  Question question = 1;
+  uint32 version = 2;
+  string state = 3;
+  string reason = 4;
+  repeated Pick picks = 5;
+}

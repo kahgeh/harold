@@ -109,7 +109,7 @@ fn fields(expected: &[(&str, i32)]) -> Vec<(String, i32)> {
 }
 
 #[test]
-fn question_service_lists_its_seven_rpcs() {
+fn question_service_lists_its_nine_rpcs() {
     let descriptor = questions_file_descriptor()
         .service
         .into_iter()
@@ -131,6 +131,8 @@ fn question_service_lists_its_seven_rpcs() {
             "AnswerQuestion",
             "DeferQuestion",
             "TickStep",
+            "SavePicks",
+            "ShowQuestion",
         ]
     );
 }
@@ -198,7 +200,8 @@ fn question_fields_keep_their_numbers() {
             ("question", 1),
             ("version", 2),
             ("deferred", 3),
-            ("ticked", 4)
+            ("ticked", 4),
+            ("picks", 5)
         ])
     );
     assert_eq!(
@@ -228,6 +231,22 @@ fn question_fields_keep_their_numbers() {
         fields(&[("id", 1), ("version", 2), ("step", 3), ("ticked", 4)])
     );
     assert!(message_fields("TickStepResponse").is_empty());
+    assert_eq!(
+        message_fields("SavePicksRequest"),
+        fields(&[("id", 1), ("version", 2), ("picks", 3)])
+    );
+    assert!(message_fields("SavePicksResponse").is_empty());
+    assert_eq!(message_fields("ShowQuestionRequest"), fields(&[("id", 1)]));
+    assert_eq!(
+        message_fields("ShowQuestionResponse"),
+        fields(&[
+            ("question", 1),
+            ("version", 2),
+            ("state", 3),
+            ("reason", 4),
+            ("picks", 5)
+        ])
+    );
 }
 
 #[test]

@@ -6,10 +6,10 @@ use harold_api::tools::questions::v1 as pb;
 use harold_api::tools::questions::v1::question_service_server::QuestionService;
 use tokio::sync::Notify;
 use tonic::{Request, Response, Status};
-use tracing::info;
+use tracing::{info, warn};
 
 use super::schema::{self, Kind};
-use super::store::{QuestionStore, Refusal, StoreError, TickRefusal};
+use super::store::{QuestionStore, Refusal, SavedPick, StoreError, TickRefusal};
 use super::{NAME, now_ms};
 
 pub(super) struct QuestionToolService<S> {
@@ -43,6 +43,14 @@ fn refused(refusal: Refusal) -> Status {
 
 fn unavailable(_: StoreError) -> Status {
     Status::unavailable("the question database is unavailable")
+}
+
+fn pick_to_proto(pick: &SavedPick) -> pb::Pick {
+    pb::Pick {
+        decision: pick.decision,
+        key: pick.key.clone(),
+        text: pick.text.clone(),
+    }
 }
 
 fn kind_from_proto(kind: i32) -> Result<Kind, Status> {
@@ -121,6 +129,7 @@ impl<S: QuestionStore> QuestionService for QuestionToolService<S> {
                 version: listed.version,
                 deferred: listed.deferred,
                 ticked: listed.ticked.clone(),
+                picks: listed.picks.iter().map(pick_to_proto).collect(),
             })
             .collect();
         let waiting = listing
@@ -204,6 +213,51 @@ impl<S: QuestionStore> QuestionService for QuestionToolService<S> {
         let reason = if ticked { "ticked" } else { "unticked" };
         info!(tool = NAME, question_id = %id, version, reason, "step ticked");
         Ok(Response::new(pb::TickStepResponse {}))
+    }
+
+    async fn save_picks(
+        &self,
+        request: Request<pb::SavePicksRequest>,
+    ) -> Result<Response<pb::SavePicksResponse>, Status> {
+        let pb::SavePicksRequest { id, version, picks } = request.into_inner();
+        self.store
+            .save_picks(&id, version, &picks)
+            .await
+            .map_err(|error| {
+                warn!(
+                    tool = NAME,
+                    question_id = %id,
+                    version,
+                    reason = "store_failed",
+                    "picks not saved"
+                );
+                unavailable(error)
+            })?
+            .map_err(refused)?
+            .map_err(|field| invalid(&field))?;
+        // A pick is for the dash and the chief to read: it wakes nothing.
+        info!(tool = NAME, question_id = %id, version, "picks saved");
+        Ok(Response::new(pb::SavePicksResponse {}))
+    }
+
+    async fn show_question(
+        &self,
+        request: Request<pb::ShowQuestionRequest>,
+    ) -> Result<Response<pb::ShowQuestionResponse>, Status> {
+        let id = request.into_inner().id;
+        let shown = self
+            .store
+            .show(&id)
+            .await
+            .map_err(unavailable)?
+            .ok_or_else(|| Status::not_found("unknown_question"))?;
+        Ok(Response::new(pb::ShowQuestionResponse {
+            question: Some(schema::to_proto(&shown.question)),
+            version: shown.version,
+            state: shown.state,
+            reason: shown.reason,
+            picks: shown.picks.iter().map(pick_to_proto).collect(),
+        }))
     }
 }
 

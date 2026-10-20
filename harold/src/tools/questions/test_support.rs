@@ -222,7 +222,6 @@ impl QuestionStore for FailingStore {
     }
 
     async fn show(&self, id: &str) -> Result<Option<Shown>, StoreError> {
-        self.check()?;
         self.inner.show(id).await
     }
 
