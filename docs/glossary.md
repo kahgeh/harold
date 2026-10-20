@@ -90,6 +90,16 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 | voice worker | The process that turns lines into audio and speech into text | — |
 | timed prompt | Text Harold types into a pane at a set time each day | — |
 | alert | A HyperDX alert that Harold types to the chief as `harold alert: …` | "alert" for a push |
+| thread page | The web app's page that shows the thread and the reply box | "message page", "chat page" |
+| todo page | The web app's page that lists your todos and lets you answer them from the phone | "task page", "queue page" |
+| page dots | The two dots above the reply box that show which page is open | "pager", "swipe indicator" |
+| todo count | The orange number on the thread page's **Todos** button: the waiting questions and the instructions, questions set aside with **Later** left out | "badge", "unread count" |
+| new-message count | The number beside the speech-bubble icon in the todo page's header: the chief's messages that arrived while the todo page was open | "unread count", "notification count" |
+| sender label | The small word at the bottom right of each message, `chief` or `me` | "byline", "name tag" |
+| stored mark | The one ✓ before `me`: Harold has stored the reply but not typed it into the chief's pane | "tick" (a tick is a ticked step), "read receipt", "delivered" |
+| typed mark | The ✓✓ before `me`: Harold has typed the reply into the chief's pane. The chief may not have read it yet | "tick", "read receipt", "read" |
+| responding dots | The three grey dots on the chief's side while the chief works after your reply was typed | "typing indicator" (the chief does not type) |
+| New message button | The `New message ↓` button that appears when a message arrives while you read older messages | "toast", "banner" |
 
 ## The dash
 

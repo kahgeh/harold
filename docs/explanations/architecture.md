@@ -60,6 +60,7 @@ flowchart LR
   statedb --> publisher
   publisher --> dash
   toolhost <--> dash
+  webapp -->|"todos: ListQuestions, AnswerQuestion"| toolhost
   peers <--> channels
   voice --> webapp
   cli --> monitor
@@ -78,9 +79,9 @@ flowchart LR
 | reply routing | Decides which Mac owns a reply by its routing tag or the latest notifier, picks the pane by the tag or the other fallbacks, and types it there | `harold/src/inbound/` |
 | peers | Hub and member on two Macs, and the peer RPCs between them | `harold/src/peers.rs` |
 | snapshot publisher | Sends snapshots to clients over `WatchAgentStates` | `harold/src/agent/snapshot.rs`, `harold/src/main.rs` |
-| tool host, question tool, backlog tool, watch tool | Hosts tools with their own storage and gRPC services (ADR 0001) | `harold/src/tools.rs`, `harold/src/tools/` |
+| tool host, question tool, backlog tool, watch tool | Hosts tools with their own storage and gRPC services (ADR 0001). The dash and the web app are clients of the question tool | `harold/src/tools.rs`, `harold/src/tools/` |
 | calls and voice worker | Voice calls with the chief, and the process that turns lines into audio and speech into text | `harold/src/voice_input.rs`, `harold/src/voice_input/`, `harold/src/voice_worker.py` |
-| web app | The phone's web app: the thread, push and calls | `harold/src/web_app/`, `harold/static/web_app/`, `harold/templates/web_app/` |
+| web app | The phone's web app: the thread, push, calls and the todos, which it shows and answers through the question tool's service | `harold/src/web_app/`, `harold/static/web_app/`, `harold/templates/web_app/` |
 | activity summaries | Optional work summaries that Claude Code writes from an agent's evidence | `harold/src/activity_summary.rs` |
 | timed prompts | Text typed into a pane at a set time each day | `harold/src/timed_prompts.rs` |
 | alerts | HyperDX alerts typed to the chief | `harold/src/alerts.rs` |
@@ -124,6 +125,7 @@ One line per architectural decision, oldest first. Each date is the commit that 
 - 2026-10-20: ADR 0004, tools may read Harold's agent list and pod facts through two read-only ports, so the watch tool can hand a model what a pod check needs. [ADR 0004](../adr/0004-tools-may-read-agents-and-pods.md)
 - 2026-10-20: ADR 0005, a tool may run a hosted model with the tools a skill allows, unchecked, because the skill's author decides what a run may do. [ADR 0005](../adr/0005-a-tool-may-run-a-hosted-model-with-the-tools-a-skill-allows.md)
 - 2026-10-20: ADR 0006, answers go to the chief early, and a set-aside question returns after a line is typed, a `later` or a dismiss that leaves nothing waiting and no answer unsent, so "later" still means after everything else. [ADR 0006](../adr/0006-answers-go-to-the-chief-early.md)
+- 2026-10-21: ADR 0007, the web app reaches the todos through the question tool's gRPC service, as the dash does, so a phone on the tailnet can answer them. [ADR 0007](../adr/0007-the-web-app-reaches-todos-through-the-question-service.md)
 
 ## Departures from the standards
 

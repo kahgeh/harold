@@ -112,18 +112,40 @@ Harold creates its own key pair the first time it starts with `[web_app]` set ([
 
 ## The thread
 
-The thread is one page, with the oldest message at the top. It holds the last 30 days of messages; Harold deletes older ones at start and every hour. While the page is open, each new message appears as soon as Harold stores it.
+The app has two pages side by side: the thread page and the todo page. Swipe left from the thread page to reach the todo page and right to come back, or tap **Todos** in the thread page's header and **‹ <app name>** in the todo page's. Two page dots sit above the reply box (at the bottom of the todo page, which has no reply box); the dark one is the page you are on.
 
-A reply you type goes to the chief. It can be up to 1,000 characters; Harold refuses a blank one. **Send** is disabled while a reply is on its way, so a double tap sends it once. Harold stores the reply first, then types `📱 <reply>` and Enter into the chief's pane. Under each reply, the thread shows what became of it:
+The thread page's header holds the app's name, **Todos** with the todo count in orange (no number when nothing waits), the **Turn on alerts** button until push is on, and **Call**.
+
+The thread is the oldest message at the top. It holds the last 30 days of messages; Harold deletes older ones at start and every hour. While the page is open, each new message appears as soon as Harold stores it.
+
+- **Sender labels.** A small label at the bottom right of each message says who wrote it: `chief`, or for your reply the mark and `me`.
+- **New messages.** A new message scrolls into view when you are within 80 px of the bottom. Scrolled further up, the page stays put and a **New message ↓** button appears above the reply box; tapping it scrolls to the newest message, and it goes once you are at the bottom. Sending a reply scrolls to the bottom.
+- **Links.** An `http://` or `https://` address in a message is a link that opens in the phone's browser. A trailing `.`, `,`, `;`, `:`, `!`, `?`, `)`, `]`, `'` or `"` stays outside the link.
+- **Responding dots.** After your reply is typed, three grey dots show on the chief's side while the chief's pane is busy. They go when the chief's next message appears, or when its turn ends with no message.
+
+A reply you type goes to the chief. It can be up to 1,000 characters; Harold refuses a blank one. **Send** is disabled while a reply is on its way, so a double tap sends it once. Harold stores the reply first, then types `📱 <reply>` and Enter into the chief's pane. Next to `me`, the thread shows what became of the reply:
 
 | Under the reply | What happened |
 |---|---|
-| `typed` | Harold typed the reply into the chief's idle pane. |
-| `waiting: chief busy` | The chief was working. Harold typed the reply into its pane anyway, and the chief reads it when its turn ends. |
-| `not sent: no chief` | No agent runs in the chief's folder, or more than one does. Harold typed the reply nowhere. |
-| `not sent: messaging paused` | Messaging is paused. Harold typed the reply nowhere. |
+| ✓ `me` (the stored mark) | Harold has stored the reply and not yet typed it. |
+| ✓✓ `me` (the typed mark) | Harold typed the reply into the chief's idle pane. |
+| ✓✓ `me · waiting: chief busy` | The chief was working. Harold typed the reply into its pane anyway, and the chief reads it when its turn ends. |
+| ✓ `me · not sent: no chief` | No agent runs in the chief's folder, or more than one does. Harold typed the reply nowhere. |
+| ✓ `me · not sent: messaging paused` | Messaging is paused. Harold typed the reply nowhere. |
 
 While Harold cannot list the tmux panes, it does not know which pane is the chief's, so it holds the reply and tries again.
+
+## The todos
+
+The todo page lists the chief's todos as cards in the question tool's order: the waiting questions and instructions first, then the questions you set aside with **Later**. Its header shows a small speech-bubble icon and a number when chief messages arrived while you were on the todo page; the number goes when you return to the thread page.
+
+- **A question** shows its id, product and intro, a link to the spec when it has one, and each decision with its options. `suggested` marks the suggested option, and a decision starts on your saved pick, else the suggested option. A free option shows a text box while picked. **Send** is enabled once every decision has a pick and every free pick has text. **Later** sets the question aside.
+- **Instructions** show a title and numbered steps. Ticking a step stores the tick at once. **Done** and **Ignore** close them.
+- **Answers reach the chief at once**, as when you press `send` in the dash. **Revise** and **Reject** are not on the phone; they stay in the dash.
+- **When a post is refused**, the card shows a notice and is redrawn from the next list: `<id> changed. Look again before you send.`, `<id> was already answered or withdrawn.`, or `Harold can't send this right now. Try again.`
+- With no todo the page reads `No todos for you.`; when Harold cannot read them and has no list yet, it reads `Harold can't read the todos right now.` and the todo count is empty. A failed read later keeps the last list.
+
+The web app reads the todos through the question tool's gRPC service on Harold's own address (`[grpc]`), every 2 seconds while a page is open and at once after each post ([ADR 0007](../../adr/0007-the-web-app-reaches-todos-through-the-question-service.md)). The posts are `POST /todos/answer`, `/todos/later`, `/todos/tick`, `/todos/done` and `/todos/ignore`, each behind the login and same-origin checks like every route.
 
 ## What reaches the phone, and by which route
 
@@ -223,6 +245,9 @@ Harold logs no message text, no reply, no push address and no key. The app adds 
 | `app page disconnected` | `reason` (`page_gone`, `shutdown` or `store_stopped`) and `seconds`, how long the page was connected. Harold notices a closed page at the next patch or keep-alive, within about 15 seconds |
 | `app reply state` | `event_id` and `state` (`typed`, `waiting_chief_busy`, `not_sent_no_chief` or `not_sent_paused`), logged before the state is written |
 | `app reply stored` | `chars`, the reply's length in characters |
+| `app todo answered` | `kind` (`answer`, `free_text`, `later`, `tick`, `done` or `ignore`) and `result` (`sent`, `version_changed`, `not_waiting` or `unavailable`). The line never carries the todo's id; the question tool's own lines in `harold.log` do |
+| `app todos not read` | `reason` (`unavailable` or `timeout`), logged once when reads start failing |
+| `app todos read again` | none, logged once when reads recover |
 | `app call started` | none |
 | `app call ended` | `reason`, one of the desk's `call ended` reasons ([Log lines](../voice-input/README.md#log-lines)); `microphone_failed` when the phone stopped posting audio |
 
