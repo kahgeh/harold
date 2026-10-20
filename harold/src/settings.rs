@@ -178,6 +178,65 @@ impl ActivitySummarySettings {
     }
 }
 
+/// The `[watch]` table: the model every watch runs, and the user's optional budgets. A
+/// budget is enforced only when set; an absent one is never treated as 0.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(default)]
+pub(crate) struct WatchSettings {
+    pub model: String,
+    /// Every watch together, per local day.
+    pub daily_budget_usd: Option<f64>,
+    /// A run's limit when `start` gives no `--run-budget`.
+    pub run_budget_usd: Option<f64>,
+    /// The most `--run-budget` may ask.
+    pub max_run_budget_usd: Option<f64>,
+}
+
+impl Default for WatchSettings {
+    fn default() -> Self {
+        Self {
+            model: "haiku".into(),
+            daily_budget_usd: None,
+            run_budget_usd: None,
+            max_run_budget_usd: None,
+        }
+    }
+}
+
+impl WatchSettings {
+    pub(crate) fn validate(&self) -> Vec<String> {
+        let mut errors = Vec::new();
+        if self.model.is_empty()
+            || self.model.len() > 128
+            || !self.model.as_bytes()[0].is_ascii_alphanumeric()
+            || !self
+                .model
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"-._:/".contains(&byte))
+        {
+            errors.push(
+                "watch.model must be a model name of at most 128 ASCII token characters".into(),
+            );
+        }
+        for (name, value) in [
+            ("daily_budget_usd", self.daily_budget_usd),
+            ("run_budget_usd", self.run_budget_usd),
+            ("max_run_budget_usd", self.max_run_budget_usd),
+        ] {
+            if value.is_some_and(|value| !(value.is_finite() && value > 0.0)) {
+                errors.push(format!("watch.{name} must be above 0 when set"));
+            }
+        }
+        if let (Some(run), Some(max)) = (self.run_budget_usd, self.max_run_budget_usd)
+            && run > max
+        {
+            errors
+                .push("watch.run_budget_usd must be no more than watch.max_run_budget_usd".into());
+        }
+        errors
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum ScreenAdapter {
@@ -963,6 +1022,8 @@ pub struct Settings {
     #[serde(default)]
     pub(crate) activity_summary: ActivitySummarySettings,
     #[serde(default)]
+    pub(crate) watch: WatchSettings,
+    #[serde(default)]
     pub(crate) agents: AgentSettings,
     #[serde(default)]
     pub(crate) agent_monitor: AgentMonitorSettings,
@@ -1001,6 +1062,7 @@ impl Settings {
         ));
         errors.extend(self.agents.validate(&self.agent_monitor));
         errors.extend(self.activity_summary.validate());
+        errors.extend(self.watch.validate());
         errors.extend(away_messages_only_from_error(
             self.notify.away_messages_only_from.as_deref(),
         ));
@@ -1134,6 +1196,61 @@ mod tests {
         AgentMonitorSettings, AgentProviderSettings, AgentSettings, Settings,
         is_valid_machine_name, machine_name_error, machine_name_from_hostname,
     };
+
+    #[derive(Debug, Deserialize)]
+    struct WatchFixture {
+        #[serde(default)]
+        watch: super::WatchSettings,
+    }
+
+    fn parse_watch(source: &str) -> super::WatchSettings {
+        Config::builder()
+            .add_source(File::from_str(source, FileFormat::Toml))
+            .build()
+            .and_then(Config::try_deserialize::<WatchFixture>)
+            .expect("watch fixture should deserialize")
+            .watch
+    }
+
+    #[test]
+    fn watch_settings_ship_haiku_and_no_budget() {
+        let shipped = parse_watch(include_str!("../config/default.toml"));
+        assert_eq!(shipped.model, "haiku");
+        assert_eq!(shipped.daily_budget_usd, None);
+        assert_eq!(shipped.run_budget_usd, None);
+        assert_eq!(shipped.max_run_budget_usd, None);
+        assert!(shipped.validate().is_empty());
+        assert_eq!(super::WatchSettings::default(), shipped);
+    }
+
+    #[test]
+    fn watch_settings_name_the_key_that_is_out_of_range() {
+        for key in ["daily_budget_usd", "run_budget_usd", "max_run_budget_usd"] {
+            for bad in ["0", "-1.0"] {
+                let settings = parse_watch(&format!("[watch]\n{key} = {bad}\n"));
+                let errors = settings.validate();
+                assert_eq!(errors.len(), 1, "{key} = {bad}: {errors:?}");
+                assert!(errors[0].contains(&format!("watch.{key}")), "{errors:?}");
+            }
+            let ok = parse_watch(&format!("[watch]\n{key} = 0.5\n"));
+            assert!(ok.validate().is_empty(), "{key}");
+        }
+        let nan = super::WatchSettings {
+            daily_budget_usd: Some(f64::NAN),
+            ..Default::default()
+        };
+        assert_eq!(nan.validate().len(), 1);
+    }
+
+    #[test]
+    fn watch_run_budget_may_not_pass_the_maximum() {
+        let over = parse_watch("[watch]\nrun_budget_usd = 0.2\nmax_run_budget_usd = 0.1\n");
+        let errors = over.validate();
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains("watch.run_budget_usd"));
+        let equal = parse_watch("[watch]\nrun_budget_usd = 0.1\nmax_run_budget_usd = 0.1\n");
+        assert!(equal.validate().is_empty());
+    }
 
     #[derive(Debug, Deserialize)]
     struct AgentConfigFixture {

@@ -1,0 +1,73 @@
+// The watch tool: an agent asks Harold to run one of its skills with a model on a
+// schedule, and Harold types WATCH lines to the chief or to the agent.
+//
+//   StartWatch   starts a watch, or replaces a running one of the same name. The CLI
+//                fills `folder` with its working directory; the tool checks it.
+//                `report_to` is "chief" or "self"; empty means "self".
+//                `run_budget_usd` 0 means none given.
+//   StopWatch    ends a running watch at once.
+//   ListWatches  every watch running, and every watch that ended today.
+//
+// Refusals:
+//   InvalidArgument      message "invalid <field>" (including "invalid folder").
+//   NotFound             "unknown_skill" (StartWatch), "unknown_watch" (StopWatch).
+//   FailedPrecondition   "too_many_watches", "daily_budget_spent" (StartWatch),
+//                        "not_running" (StopWatch).
+//   Unavailable          the database write failed.
+//
+// The server trusts local callers: there is no token (ADR 0002).
+syntax = "proto3";
+
+package harold.tools.watch.v1;
+
+service WatchService {
+  rpc StartWatch(StartWatchRequest) returns (StartWatchResponse);
+  rpc StopWatch(StopWatchRequest) returns (StopWatchResponse);
+  rpc ListWatches(ListWatchesRequest) returns (ListWatchesResponse);
+}
+
+message StartWatchRequest {
+  string name = 1;
+  string folder = 2;
+  string skill = 3;
+  uint32 every_minutes = 4;
+  uint32 for_minutes = 5;
+  string report_to = 6;
+  double run_budget_usd = 7;
+  bool every_run = 8;
+}
+
+message StartWatchResponse {
+  string name = 1;
+  int64 ends_at_ms = 2;
+}
+
+message StopWatchRequest {
+  string name = 1;
+}
+
+message StopWatchResponse {}
+
+message ListWatchesRequest {}
+
+message Watch {
+  string name = 1;
+  string folder = 2;
+  string skill = 3;
+  string report_to = 4;
+  bool every_run = 5;
+  bool running = 6;
+  int64 ends_at_ms = 7;
+  uint32 every_minutes = 8;
+  uint32 runs = 9;
+  uint32 reports = 10;
+  double cost_usd = 11;
+  string last_outcome = 12;
+  string stop_reason = 13;
+}
+
+message ListWatchesResponse {
+  repeated Watch watches = 1;
+  // What every watch together has spent today, in US dollars.
+  double spent_usd = 2;
+}

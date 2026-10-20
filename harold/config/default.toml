@@ -28,6 +28,13 @@ max_instruction_chars = 4000
 max_reply_chars = 8000
 max_output_bytes = 65536
 
+[watch]
+model = "haiku"
+# No budget is shipped. Each of these is optional, and enforced only when set:
+# daily_budget_usd = 1.00
+# run_budget_usd = 0.05
+# max_run_budget_usd = 0.10
+
 [agent_monitor]
 inventory_interval_ms = 2000
 inventory_timeout_ms = 3000

@@ -25,6 +25,14 @@ cli_path = "/path/to/claude"
 model = "sonnet"
 effort = "low"
 
+# Watches (harold tool watch): the model every watch runs. The budgets below are yours
+# to keep; each one is enforced only when it is set, and none is set by default.
+# [watch]
+# model = "haiku"
+# daily_budget_usd = 1.00       # every watch together, per local day
+# run_budget_usd = 0.05         # a run's limit when start gives no --run-budget
+# max_run_budget_usd = 0.10     # the most --run-budget may ask
+
 # Override the named provider list only when custom process or visible-screen
 # markers are required. Overrides replace the complete [[agents]] list.
 # [[agents]]
