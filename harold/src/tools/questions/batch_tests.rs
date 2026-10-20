@@ -1753,3 +1753,123 @@ async fn an_answer_stamped_in_the_future_is_typed_within_one_settle() {
         sender.typing.texts()
     );
 }
+
+fn instructions_for_line(id: &str, product: &str, n: usize) -> pb::Question {
+    pb::Question {
+        id: id.into(),
+        product: product.into(),
+        title: "T".into(),
+        steps: (0..n)
+            .map(|i| pb::Step {
+                text: format!("s{i}"),
+                detail: String::new(),
+            })
+            .collect(),
+        ..Default::default()
+    }
+}
+
+fn marker(kind: Kind, ticked: u32) -> schema::Answer {
+    schema::Answer {
+        kind,
+        picks: vec![],
+        note: String::new(),
+        ticked,
+    }
+}
+
+#[test]
+fn done_part_all_ticked() {
+    let ready = ready_with(
+        vec![(
+            "I1",
+            instructions_for_line("I1", "harold", 4),
+            marker(Kind::Done, 4),
+        )],
+        &[],
+    );
+    assert_eq!(batch_line(&ready), "ANSWERS 1 | I1 harold: done");
+}
+
+#[test]
+fn done_part_names_ticked_of_n() {
+    let ready = ready_with(
+        vec![(
+            "I1",
+            instructions_for_line("I1", "harold", 4),
+            marker(Kind::Done, 3),
+        )],
+        &[],
+    );
+    assert_eq!(
+        batch_line(&ready),
+        "ANSWERS 1 | I1 harold: done, 3 of 4 ticked"
+    );
+}
+
+#[test]
+fn ignored_part() {
+    let ready = ready_with(
+        vec![(
+            "I1",
+            instructions_for_line("I1", "harold", 2),
+            marker(Kind::Ignore, 0),
+        )],
+        &[],
+    );
+    assert_eq!(batch_line(&ready), "ANSWERS 1 | I1 harold: ignored");
+}
+
+#[test]
+fn parts_are_cleaned() {
+    let ready = ready_with(
+        vec![(
+            "I\n1\x1b[2J",
+            instructions_for_line("I1", "har\x1b[2Jo\nld", 2),
+            marker(Kind::Done, 1),
+        )],
+        &[],
+    );
+    assert_eq!(
+        batch_line(&ready),
+        "ANSWERS 1 | I 1 haro ld: done, 1 of 2 ticked"
+    );
+}
+
+#[test]
+fn answers_count_includes_instructions() {
+    let ready = ready_with(
+        vec![
+            (
+                "I1",
+                instructions_for_line("I1", "harold", 1),
+                marker(Kind::Done, 1),
+            ),
+            (
+                "I2",
+                instructions_for_line("I2", "harold", 1),
+                marker(Kind::Ignore, 0),
+            ),
+        ],
+        &[],
+    );
+    assert!(batch_line(&ready).starts_with("ANSWERS 2 | "));
+}
+
+#[tokio::test(start_paused = true)]
+async fn instructions_waiting_do_not_hold_back_later_questions() {
+    let folder = TempFolder::new();
+    let store = open_store(&folder).await;
+    put(&*store, question("Q1", "s1", "abc")).await;
+    put(&*store, question("Q2", "s2", "abc")).await;
+    put(&*store, instructions_for_line("I9", "harold", 2)).await;
+    defer(&*store, "Q2").await;
+    answer_a(&*store, "Q1").await;
+    let sender = spawn_sender(&store, FakeTyping::typed_ok());
+    sender.wake.notify_one();
+    pass(4).await;
+    assert_eq!(
+        sender.typing.texts(),
+        vec!["ANSWERS 1 | Q1 s1 sha abc: Which? A | later: Q2".to_string()]
+    );
+}

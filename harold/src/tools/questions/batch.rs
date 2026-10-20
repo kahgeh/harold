@@ -1,7 +1,8 @@
 //! One batch back to the chief: the line, and the task that types it.
 //!
-//! Questions still waiting do not hold a line back. When some answers are
-//! unsent, the sender waits out the settle (3 s from the newest unsent answer's
+//! Questions still waiting do not hold a line back, and neither do waiting
+//! instructions; answered instructions go in the line as `done` or `ignored`.
+//! When some answers are unsent, the sender waits out the settle (3 s from the newest unsent answer's
 //! own stamp in the store), or does not wait when an unsent answer is marked
 //! "send now". Then it records a batch as started, with its text, and makes
 //! one try at typing it into the chief's pane. Typed, it is marked typed. Not
@@ -106,8 +107,16 @@ fn answer_part(id: &str, question: &Question, answer: &Answer) -> String {
     let id = clean(id);
     let spec = clean(&question.spec);
     match answer.kind {
-        // Task 3 words the instructions parts.
-        Kind::Done | Kind::Ignore => format!("{id} {spec}: {:?}", answer.kind),
+        Kind::Done => {
+            let product = clean(&question.product);
+            let steps = question.steps.len();
+            if (answer.ticked as usize) < steps {
+                format!("{id} {product}: done, {} of {steps} ticked", answer.ticked)
+            } else {
+                format!("{id} {product}: done")
+            }
+        }
+        Kind::Ignore => format!("{id} {}: ignored", clean(&question.product)),
         Kind::Revise => format!("{id} {spec}: revise \"{}\"", clean(&answer.note)),
         Kind::Reject => format!("{id} {spec}: reject \"{}\"", clean(&answer.note)),
         Kind::Answer | Kind::FreeText => {

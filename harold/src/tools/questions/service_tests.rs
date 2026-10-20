@@ -446,3 +446,165 @@ async fn an_old_client_omitting_send_now_records_unmarked() {
         .unwrap();
     assert!(!store.marked("Q1").await);
 }
+
+fn instructions_proto(id: &str, steps: &[&str]) -> pb::Question {
+    pb::Question {
+        id: id.into(),
+        product: "harold".into(),
+        title: "Do things".into(),
+        steps: steps
+            .iter()
+            .map(|text| pb::Step {
+                text: (*text).into(),
+                detail: String::new(),
+            })
+            .collect(),
+        ..Default::default()
+    }
+}
+
+async fn tick<S: QuestionStore>(
+    service: &QuestionToolService<S>,
+    id: &str,
+    version: u32,
+    step: u32,
+    ticked: bool,
+) -> Result<(), tonic::Status> {
+    service
+        .tick_step(Request::new(pb::TickStepRequest {
+            id: id.into(),
+            version,
+            step,
+            ticked,
+        }))
+        .await
+        .map(|_| ())
+}
+
+#[tokio::test]
+async fn put_instructions_then_list_carries_title_steps_and_ticked() {
+    let folder = TempFolder::new();
+    let service = service(open_store(&folder).await);
+    put(&service, instructions_proto("I1", &["a", "b", "c"]))
+        .await
+        .unwrap();
+    tick(&service, "I1", 1, 2, true).await.unwrap();
+    let listing = list(&service).await;
+    let item = &listing.questions[0];
+    let question = item.question.as_ref().unwrap();
+    assert_eq!(question.title, "Do things");
+    assert_eq!(question.steps.len(), 3);
+    assert_eq!(item.ticked, [2]);
+}
+
+#[tokio::test]
+async fn tick_step_ticks_and_logs_a_fixed_line_without_step_text() {
+    let (logs, _guard) = capture_logs();
+    let folder = TempFolder::new();
+    let wake = Arc::new(Notify::new());
+    let service = QuestionToolService::new(open_store(&folder).await, Arc::clone(&wake));
+    put(&service, instructions_proto("I1", &["TICK-CANARY-77 step"]))
+        .await
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(1), wake.notified())
+        .await
+        .unwrap();
+    tick(&service, "I1", 1, 1, true).await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(1), wake.notified())
+        .await
+        .expect("a tick wakes the sender");
+    tick(&service, "I1", 1, 1, false).await.unwrap();
+    let lines = logs.with("step ticked");
+    assert_eq!(lines.len(), 2, "{lines:#?}");
+    for line in &lines {
+        assert_eq!(
+            field_names(line, "step ticked"),
+            ["tool", "question_id", "version", "reason"],
+            "{line}"
+        );
+    }
+    assert!(lines[0].contains("reason=\"ticked\""), "{}", lines[0]);
+    assert!(lines[1].contains("reason=\"unticked\""), "{}", lines[1]);
+    assert!(logs.lines().iter().all(|l| !l.contains("TICK-CANARY-77")));
+}
+
+#[tokio::test]
+async fn tick_step_refusals_have_exact_messages() {
+    let folder = TempFolder::new();
+    let service = service(open_store(&folder).await);
+    put(&service, instructions_proto("I1", &["a", "b"]))
+        .await
+        .unwrap();
+    put(&service, question("Q1", "spec", "abc")).await.unwrap();
+
+    let stale = tick(&service, "I1", 9, 1, true).await.unwrap_err();
+    assert_eq!(stale.code(), Code::FailedPrecondition);
+    assert_eq!(stale.message(), "version_changed");
+
+    for step in [0, 3] {
+        let bad = tick(&service, "I1", 1, step, true).await.unwrap_err();
+        assert_eq!(bad.code(), Code::InvalidArgument);
+        assert_eq!(bad.message(), "invalid step");
+    }
+    let on_question = tick(&service, "Q1", 1, 1, true).await.unwrap_err();
+    assert_eq!(on_question.code(), Code::InvalidArgument);
+
+    answer(&service, "I1", 1, pb::AnswerKind::Done, vec![], "")
+        .await
+        .unwrap();
+    let gone = tick(&service, "I1", 1, 1, true).await.unwrap_err();
+    assert_eq!(gone.code(), Code::FailedPrecondition);
+    assert_eq!(gone.message(), "not_waiting");
+}
+
+#[tokio::test]
+async fn answer_done_and_ignore_for_instructions_and_refusals_for_questions() {
+    let folder = TempFolder::new();
+    let service = service(open_store(&folder).await);
+    put(&service, instructions_proto("I1", &["a"]))
+        .await
+        .unwrap();
+    put(&service, instructions_proto("I2", &["a"]))
+        .await
+        .unwrap();
+    put(&service, question("Q1", "spec", "abc")).await.unwrap();
+    answer(&service, "I1", 1, pb::AnswerKind::Done, vec![], "")
+        .await
+        .unwrap();
+    answer(&service, "I2", 1, pb::AnswerKind::Ignore, vec![], "")
+        .await
+        .unwrap();
+    for kind in [pb::AnswerKind::Done, pb::AnswerKind::Ignore] {
+        let err = answer(&service, "Q1", 1, kind, vec![], "")
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), Code::InvalidArgument);
+    }
+    put(&service, instructions_proto("I3", &["a"]))
+        .await
+        .unwrap();
+    let err = answer(
+        &service,
+        "I3",
+        1,
+        pb::AnswerKind::Answer,
+        vec![pick(0, "a")],
+        "",
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.code(), Code::InvalidArgument);
+}
+
+#[tokio::test]
+async fn listing_counts_waiting_without_instructions() {
+    let folder = TempFolder::new();
+    let service = service(open_store(&folder).await);
+    put(&service, instructions_proto("I1", &["a"]))
+        .await
+        .unwrap();
+    put(&service, question("Q1", "spec", "abc")).await.unwrap();
+    let listing = list(&service).await;
+    assert_eq!(listing.questions.len(), 2);
+    assert_eq!(listing.waiting, 1);
+}

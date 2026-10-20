@@ -717,26 +717,79 @@ fn decision_from_json(decision: &serde_json::Value) -> Result<questions::Decisio
     })
 }
 
-/// Turns the spec's JSON into a question. It only translates; the daemon checks the rules.
+fn step_from_json(step: &serde_json::Value) -> Result<questions::Step, String> {
+    if !step.is_object() {
+        return Err(json_error("step must be an object"));
+    }
+    Ok(questions::Step {
+        text: json_text(step, "text")?,
+        detail: json_optional_text(step, "detail")?,
+    })
+}
+
+/// Turns the spec's JSON into a question or instructions. It only translates;
+/// the daemon checks the rules. With a `steps` key, `decisions`, `spec`, `sha`,
+/// `link` and `intro` may be absent.
 fn question_from_json(text: &str) -> Result<questions::Question, String> {
     let value: serde_json::Value = serde_json::from_str(text).map_err(json_error)?;
     if !value.is_object() {
         return Err(json_error("question must be an object"));
     }
+    let has_steps = value.get("steps").is_some();
+    let optional = |field: &str| -> Result<String, String> {
+        if has_steps {
+            json_optional_text(&value, field)
+        } else {
+            json_text(&value, field)
+        }
+    };
+    let steps = if has_steps {
+        json_list(&value, "steps")?
+            .iter()
+            .map(step_from_json)
+            .collect::<Result<_, _>>()?
+    } else {
+        Vec::new()
+    };
+    let decisions = if has_steps && value.get("decisions").is_none() {
+        Vec::new()
+    } else {
+        json_list(&value, "decisions")?
+            .iter()
+            .map(decision_from_json)
+            .collect::<Result<_, _>>()?
+    };
     Ok(questions::Question {
         id: json_text(&value, "id")?,
         product: json_text(&value, "product")?,
-        spec: json_text(&value, "spec")?,
-        sha: json_text(&value, "sha")?,
-        link: json_text(&value, "link")?,
-        intro: json_text(&value, "intro")?,
-        decisions: json_list(&value, "decisions")?
-            .iter()
-            .map(decision_from_json)
-            .collect::<Result<_, _>>()?,
-        title: String::new(),
-        steps: Vec::new(),
+        spec: optional("spec")?,
+        sha: optional("sha")?,
+        link: optional("link")?,
+        intro: optional("intro")?,
+        decisions,
+        title: json_optional_text(&value, "title")?,
+        steps,
     })
+}
+
+/// One `list` line: instructions show their tick count, questions their spec.
+fn list_line(listed: &questions::ListedQuestion) -> String {
+    let question = listed.question.clone().unwrap_or_default();
+    if !question.steps.is_empty() {
+        return format!(
+            "{} v{} {} steps {}/{}",
+            question.id,
+            listed.version,
+            question.product,
+            listed.ticked.len(),
+            question.steps.len()
+        );
+    }
+    let deferred = if listed.deferred { " (deferred)" } else { "" };
+    format!(
+        "{} v{} {} {}{deferred}",
+        question.id, listed.version, question.product, question.spec
+    )
 }
 
 /// The line printed for a refusal from the question service: its status message.
@@ -824,18 +877,7 @@ pub(crate) async fn tool_within(
                     .await
                     .map_err(refused)?
                     .into_inner();
-                let mut lines: Vec<String> = listed
-                    .questions
-                    .iter()
-                    .map(|listed| {
-                        let question = listed.question.clone().unwrap_or_default();
-                        let deferred = if listed.deferred { " (deferred)" } else { "" };
-                        format!(
-                            "{} v{} {} {}{deferred}",
-                            question.id, listed.version, question.product, question.spec
-                        )
-                    })
-                    .collect();
+                let mut lines: Vec<String> = listed.questions.iter().map(list_line).collect();
                 lines.push(format!("{} waiting", listed.waiting));
                 Ok(lines.join("\n"))
             }
@@ -1776,6 +1818,67 @@ mod tests {
         );
         assert!(first.suggested && !first.free);
         assert!(!second.suggested && second.free);
+    }
+
+    const INSTRUCTIONS_JSON: &str = r#"{
+        "id": "I1", "product": "harold", "title": "Do things",
+        "steps": [{"text": "one", "detail": "more"}, {"text": "two"}]
+    }"#;
+
+    #[test]
+    fn put_json_for_instructions_translates_steps() {
+        let q = question_from_json(INSTRUCTIONS_JSON).unwrap();
+        assert_eq!(
+            (&*q.id, &*q.product, &*q.title),
+            ("I1", "harold", "Do things")
+        );
+        assert_eq!(q.steps.len(), 2);
+        assert_eq!((&*q.steps[0].text, &*q.steps[0].detail), ("one", "more"));
+        assert_eq!((&*q.steps[1].text, &*q.steps[1].detail), ("two", ""));
+        assert!(q.decisions.is_empty());
+        assert_eq!((&*q.spec, &*q.sha, &*q.link, &*q.intro), ("", "", "", ""));
+    }
+
+    #[test]
+    fn put_json_with_steps_and_decisions_is_translated_and_left_to_the_daemon_to_refuse() {
+        let text = r#"{"id":"I1","product":"p","title":"t","steps":[{"text":"a"}],
+            "decisions":[{"ask":"x","options":[]}]}"#;
+        let q = question_from_json(text).unwrap();
+        assert_eq!(q.steps.len(), 1);
+        assert_eq!(q.decisions.len(), 1);
+        // Plain questions stay strict.
+        let error = question_from_json(r#"{"id":"Q","product":"p"}"#).unwrap_err();
+        assert!(error.contains("decisions"), "{error}");
+        let error = question_from_json(r#"{"id":"I","product":"p","steps":[5]}"#).unwrap_err();
+        assert!(error.contains("step"), "{error}");
+    }
+
+    #[test]
+    fn list_prints_the_steps_line() {
+        let instructions = questions::ListedQuestion {
+            question: Some(questions::Question {
+                id: "I1".into(),
+                product: "harold".into(),
+                steps: vec![questions::Step::default(); 4],
+                ..Default::default()
+            }),
+            version: 2,
+            deferred: false,
+            ticked: vec![1, 3],
+        };
+        assert_eq!(list_line(&instructions), "I1 v2 harold steps 2/4");
+        let question = questions::ListedQuestion {
+            question: Some(questions::Question {
+                id: "Q1".into(),
+                product: "harold".into(),
+                spec: "dash".into(),
+                ..Default::default()
+            }),
+            version: 1,
+            deferred: true,
+            ticked: vec![],
+        };
+        assert_eq!(list_line(&question), "Q1 v1 harold dash (deferred)");
     }
 
     #[test]

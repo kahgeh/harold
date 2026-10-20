@@ -9,7 +9,7 @@ use tonic::{Request, Response, Status};
 use tracing::info;
 
 use super::schema::{self, Kind};
-use super::store::{QuestionStore, Refusal, StoreError};
+use super::store::{QuestionStore, Refusal, StoreError, TickRefusal};
 use super::{NAME, now_ms};
 
 pub(super) struct QuestionToolService<S> {
@@ -123,7 +123,12 @@ impl<S: QuestionStore> QuestionService for QuestionToolService<S> {
                 ticked: listed.ticked.clone(),
             })
             .collect();
-        let waiting = u32::try_from(questions.len()).unwrap_or(u32::MAX);
+        let waiting = listing
+            .questions
+            .iter()
+            .filter(|listed| !listed.question.is_instructions())
+            .count();
+        let waiting = u32::try_from(waiting).unwrap_or(u32::MAX);
         let dismissed = listing
             .dismissed
             .into_iter()
@@ -178,10 +183,27 @@ impl<S: QuestionStore> QuestionService for QuestionToolService<S> {
 
     async fn tick_step(
         &self,
-        _request: Request<pb::TickStepRequest>,
+        request: Request<pb::TickStepRequest>,
     ) -> Result<Response<pb::TickStepResponse>, Status> {
-        // Task 3 replaces this.
-        Err(Status::unimplemented("tick_step"))
+        let pb::TickStepRequest {
+            id,
+            version,
+            step,
+            ticked,
+        } = request.into_inner();
+        self.store
+            .tick(&id, version, step, ticked, now_ms())
+            .await
+            .map_err(unavailable)?
+            .map_err(|refusal| match refusal {
+                TickRefusal::VersionChanged => Status::failed_precondition("version_changed"),
+                TickRefusal::NotWaiting => Status::failed_precondition("not_waiting"),
+                TickRefusal::InvalidStep => invalid("step"),
+            })?;
+        self.written();
+        let reason = if ticked { "ticked" } else { "unticked" };
+        info!(tool = NAME, question_id = %id, version, reason, "step ticked");
+        Ok(Response::new(pb::TickStepResponse {}))
     }
 }
 
