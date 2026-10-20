@@ -45,7 +45,12 @@ fn send_script(text: &str, recipient: &str) -> String {
 }
 
 fn send_imessage_to(text: &str, recipient: &str) -> Result<(), String> {
-    let status = Command::new("osascript")
+    send_imessage_to_with("osascript", text, recipient)
+}
+
+/// Send `text` to `recipient` by running `program`, which is `osascript` outside tests.
+fn send_imessage_to_with(program: &str, text: &str, recipient: &str) -> Result<(), String> {
+    let status = Command::new(program)
         .args(["-e", &send_script(text, recipient)])
         .status()
         .map_err(|error| format!("failed to start osascript: {error}"))?;
@@ -55,29 +60,23 @@ fn send_imessage_to(text: &str, recipient: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Log that a notification send started. The line carries the text's length, never the
-/// text: `harold.log` holds no words of any message Harold sends.
-fn log_notification_send(text: &str) {
+/// Send an iMessage notification to `recipient`. The log line carries the text's length,
+/// never the text: `harold.log` holds no words of any message Harold sends.
+fn send_raw_imessage(text: &str, recipient: &str) -> Result<(), String> {
+    send_raw_imessage_with("osascript", text, recipient)
+}
+
+fn send_raw_imessage_with(program: &str, text: &str, recipient: &str) -> Result<(), String> {
     info!(
         chars = text.chars().count(),
         "sending iMessage notification"
     );
-}
-
-/// Log that a confirmation or error reply send started, by length only.
-fn log_send(msg: &str) {
-    info!(chars = msg.chars().count(), "sending iMessage");
-}
-
-/// Send an iMessage notification to `recipient`.
-fn send_raw_imessage(text: &str, recipient: &str) -> Result<(), String> {
-    log_notification_send(text);
-    send_imessage_to(text, recipient)
+    send_imessage_to_with(program, text, recipient)
 }
 
 /// Send a confirmation or error reply to the configured recipient.
 pub(crate) fn send_imessage(msg: &str) -> Result<(), String> {
-    log_send(msg);
+    info!(chars = msg.chars().count(), "sending iMessage");
     let cfg = get_settings();
     let Some(recipient) = cfg.imessage.recipient.as_deref() else {
         return Err("iMessage recipient is not configured".into());
