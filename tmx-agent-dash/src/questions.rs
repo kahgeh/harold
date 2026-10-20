@@ -528,6 +528,7 @@ impl QuestionBlock {
                     q.ticked.sort_unstable();
                 }
             }
+            self.clear_notice();
             return;
         }
         self.apply_result(id, result);
@@ -978,7 +979,14 @@ impl QuestionBlock {
     fn restart(&mut self) {
         self.mode = Mode::Choosing;
         self.free_target = None;
-        self.picks = self.question().map_or(vec![], starting_picks);
+        let Some(q) = self.question() else {
+            self.picks = vec![];
+            return;
+        };
+        // Instructions have no picks, and a changed version keeps their ticks.
+        if !q.is_instructions() {
+            self.picks = starting_picks(q);
+        }
     }
 
     /// Makes the queue's first question current, or none. With none the block closes, so
@@ -2055,6 +2063,15 @@ mod tests {
         b.ticked("I1", 2, false, SendResult::Recorded);
         assert_eq!(ticks(&b), vec![false, false, true]);
         assert_eq!(b.view().unwrap().ticked_count, 1);
+    }
+
+    #[test]
+    fn a_recorded_tick_clears_a_stale_notice() {
+        let mut b = open_block(vec![instructions("I1", 1, 2)]);
+        b.ticked("I1", 1, true, SendResult::Unavailable);
+        assert!(b.view().unwrap().notice.is_some());
+        b.ticked("I1", 1, true, SendResult::Recorded);
+        assert_eq!(b.view().unwrap().notice, None);
     }
 
     #[test]

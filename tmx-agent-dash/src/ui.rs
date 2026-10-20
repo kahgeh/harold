@@ -754,10 +754,10 @@ struct QLine {
     stop: Option<QStop>,
 }
 
-/// `1 question waiting` or `N questions waiting`.
+/// `2 questions waiting` or `N questions waiting`.
 fn waiting_label(waiting: u32) -> String {
     match waiting {
-        1 => "1 question waiting".into(),
+        1 => "2 questions waiting".into(),
         n => format!("{n} questions waiting"),
     }
 }
@@ -4195,7 +4195,15 @@ mod tests {
         let mut app = call_layout(chief_call(CallState::Off));
         app.selected = app.chief_row().map(|row| row.incarnation.clone());
         app.observe_questions(crate::questions::Queue {
-            questions: vec![t1(intro)],
+            questions: (1..=waiting)
+                .map(|n| {
+                    let mut q = t1(intro);
+                    if n > 1 {
+                        q.id = format!("T{n}");
+                    }
+                    q
+                })
+                .collect(),
             waiting,
             dismissed: Vec::new(),
         });
@@ -4229,14 +4237,14 @@ mod tests {
             .iter()
             .position(|l| l.contains("sre") && l.contains("IDLE"))
             .expect("the chief's row");
-        assert_eq!(inner(&lines[chief + 1]), "▸ 1 question waiting");
+        assert_eq!(inner(&lines[chief + 1]), "▸ 2 questions waiting");
         assert!(
             lines[12].contains("AGENT BLOCK OCCUPANCY"),
             "the list follows the filter at once:\n{}",
             lines.join("\n")
         );
         let one = chief_questions(1, "intro");
-        assert!(rendered(&one, 100, 60, 100_000).contains("▸ 1 question waiting"));
+        assert!(rendered(&one, 100, 60, 100_000).contains("▸ 2 questions waiting"));
     }
 
     #[test]
@@ -4250,7 +4258,7 @@ mod tests {
         };
         assert_eq!(
             inner(&lines[at("▾ T1")]),
-            "▶   ▾ T1 · 1 of 1 waiting · harold · durable-server"
+            "▶   ▾ T1 · 1 of 2 waiting · harold · durable-server"
         );
         assert_eq!(inner(&lines[at("The server needs") + 1]), "");
         assert_eq!(inner(&lines[at("Should the build") - 1]), "");
@@ -4401,7 +4409,7 @@ mod tests {
         let lines = text_lines(&app, 100, 60, 100_000);
         assert_eq!(
             inner(&lines[14]),
-            "▸ 1 question waiting · from the chief",
+            "▸ 2 questions waiting · from the chief",
             "{}",
             lines.join("\n")
         );
@@ -4411,14 +4419,18 @@ mod tests {
     fn no_chief_pane_same() {
         let mut app = user_layout();
         app.observe_questions(crate::questions::Queue {
-            questions: vec![t1("intro")],
+            questions: vec![t1("intro"), {
+                let mut q = t1("intro");
+                q.id = "T2".into();
+                q
+            }],
             waiting: 2,
             dismissed: Vec::new(),
         });
         let lines = text_lines(&app, 100, 60, 100_000);
         assert_eq!(
             inner(&lines[14]),
-            "▸ 1 question waiting · from the chief",
+            "▸ 2 questions waiting · from the chief",
             "{}",
             lines.join("\n")
         );
@@ -4428,12 +4440,13 @@ mod tests {
     fn header_scrolled_off_shows_edge_marker() {
         // Cursor at the end of an open question: the header is above the view.
         let mut app = open_chief_question();
-        keys(&mut app, "jjjjjjjjj");
+        // The second question's row follows `reject…`, so the cursor is walked there with fewer `j`.
+        keys(&mut app, "jjjjjjj");
         keys(&mut app, "jj");
         let buffer = rendered_buffer(&app, 100, 24, 100_000);
         let screen = text_lines(&app, 100, 24, 100_000).join("\n");
-        assert!(screen.contains("▲ 1 question waiting"), "{screen}");
-        assert_eq!(style_at(&buffer, "▲ 1 question").fg, Some(Color::Yellow));
+        assert!(screen.contains("▲ 2 questions waiting"), "{screen}");
+        assert_eq!(style_at(&buffer, "▲ 2 questions").fg, Some(Color::Yellow));
         assert!(
             screen
                 .lines()
@@ -4445,8 +4458,8 @@ mod tests {
         keys(&mut app, "jlk");
         let buffer = rendered_buffer(&app, 100, 24, 100_000);
         let screen = text_lines(&app, 100, 24, 100_000).join("\n");
-        assert!(screen.contains("▼ 1 question waiting"), "{screen}");
-        assert_eq!(style_at(&buffer, "▼ 1 question").fg, Some(Color::Yellow));
+        assert!(screen.contains("▼ 2 questions waiting"), "{screen}");
+        assert_eq!(style_at(&buffer, "▼ 2 questions").fg, Some(Color::Yellow));
         assert!(
             screen.lines().any(|l| l.contains('▶') && l.contains("sre")),
             "{screen}"
