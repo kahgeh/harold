@@ -1,4 +1,4 @@
-# 0006. Answers go to the chief early, and "later" keeps meaning after everything else
+# 6. Answers go to the chief early, and "later" keeps meaning after everything else
 
 Date: 2026-10-20
 Status: Accepted (answers-send-early, merged at e981c54)
