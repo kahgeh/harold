@@ -68,6 +68,8 @@ A watch skill is an ordinary Claude Code skill. Its frontmatter's `allowed-tools
 
 Harold passes `allowed-tools` to Claude Code as `--allowedTools`, exactly as written: no matching, narrowing or dropping. The skill's author decides what a run may do ([ADR 0005](../../adr/0005-a-tool-may-run-a-hosted-model-with-the-tools-a-skill-allows.md)), and a skill may let the model change things: write files, run any command it lists, or reach the network. A skill with no `allowed-tools` leaves the model only the tools Claude Code runs without asking. Under `--print` nothing can ask a person, so any other tool use is refused.
 
+A run may read only its own folder. The frontmatter's `add-dirs` names other folders it may reach: a comma list, each entry trimmed, empty entries dropped, a leading `~` or `~/` replaced by Harold's `HOME`, every other entry kept as written (Claude Code resolves a relative one from the watch's folder). Harold passes one `--add-dir <folder>` per entry and checks nothing else: it does not check that a folder exists and it refuses no entry. A skill with no `add-dirs` runs as before. This widens only what a run may read; where a skill may live is unchanged.
+
 A starting point for a skill:
 
 ```markdown
@@ -75,6 +77,7 @@ A starting point for a skill:
 name: pod-watch
 description: Checks the pods after a release and reports what the chief should know in one line
 allowed-tools: Bash(bin/pod slots:*), Bash(git worktree list:*), Bash(tmux capture-pane -p:*)
+add-dirs: ~/bin/harold
 ---
 Check every product in Harold's facts. Answer REPORT with the first problem found, when:
 - the chief's pane is missing, or any agent has been unknown for over 5 minutes;
@@ -90,7 +93,7 @@ Otherwise answer QUIET.
 At each run Harold does four things in order.
 
 1. **It gathers the facts**, as one JSON document: `now` (local time); `chief` (whether Harold finds the chief's pane); `agents` (for each agent pane its `folder`, `pane` as `session:window.pane`, `provider`, `state`, `seconds_in_state`, `work_summary` cut to 200 characters, and for a Claude Code pane its `input_box`: `empty`, `holds_text` or `not_found`, which is what a permission prompt or a menu looks like); `pods` (for each product its `slots` with `busy`, `free` and `total`, and each spec's `id`, `state` and `seconds_in_state`, from pod stats); and `watch` (`run`, `runs_left`, `previous_outcome`).
-2. **It runs the model.** Harold starts Claude Code in the watch's folder, in its own process group, with a cleared environment as activity summaries do (`HOME`, `PATH` and the other few variables the activity summaries keep), and these flags: `--print --safe-mode --no-session-persistence --model <[watch] model> --output-format json`; `--max-budget-usd <run budget>` when the run has a run budget; `--max-turns 8`; `--allowedTools` with the skill's `allowed-tools`, left out when it has none; and `--system-prompt` with a fixed text holding the answer rules, with the skill's text after its frontmatter appended. The facts go on stdin. `--safe-mode` keeps the folder's hooks, `CLAUDE.md`, MCP servers and plugins out, so the run fires no hook. A run that has not finished after 120 seconds is stopped: Harold kills its whole process group, so no command it started keeps running.
+2. **It runs the model.** Harold starts Claude Code in the watch's folder, in its own process group, with a cleared environment as activity summaries do (`HOME`, `PATH` and the other few variables the activity summaries keep), and these flags: `--print --safe-mode --no-session-persistence --model <[watch] model> --output-format json`; `--max-budget-usd <run budget>` when the run has a run budget; `--max-turns 8`; one `--add-dir <folder>` for each entry of the skill's `add-dirs`, none when it has none; `--allowedTools` with the skill's `allowed-tools`, left out when it has none; and `--system-prompt` with a fixed text holding the answer rules, with the skill's text after its frontmatter appended. The facts go on stdin. `--safe-mode` keeps the folder's hooks, `CLAUDE.md`, MCP servers and plugins out, so the run fires no hook. A run that has not finished after 120 seconds is stopped: Harold kills its whole process group, so no command it started keeps running.
 3. **It reads the answer.** The model must answer with one line: `QUIET`, or `REPORT ` followed by the line to pass on. Harold takes the `result` text and `total_cost_usd` from Claude Code's JSON, keeps the first line, removes control characters and escape sequences, and cuts it to 300 characters. An answer that starts with neither word, or a `REPORT` with nothing after it, is a failed run with reason `unreadable_answer`. The fixed system prompt states this format and nothing about what is worth reporting.
 4. **It reports.** A `REPORT` answer's line is typed to the report-to pane. A `QUIET` answer types nothing, unless the watch was started with `--every-run`, which types `quiet` in its place. Either way the outcome, `quiet` or `report`, is stored.
 
@@ -131,7 +134,7 @@ Three runs in a row that fail stop the watch: `process_failed` (Claude Code miss
 
 ## Risks
 
-- **A skill may let the model change things.** This is the user's choice. Harold does not check `allowed-tools`. A skill that lists `Bash`, `Write`, `Edit` or a network tool lets a watch run, every few minutes and without a person watching, any command or edit those allow, in the watch's folder and anywhere those tools reach. Any agent can start a watch for a skill in its own folder, and can change the skill while the watch runs. What stands between a watch and a harmful change is the skill's author, not Harold.
+- **A skill may let the model change things.** This is the user's choice. Harold does not check `allowed-tools` or `add-dirs`. A skill that lists `Bash`, `Write`, `Edit` or a network tool lets a watch run, every few minutes and without a person watching, any command or edit those allow, in the watch's folder and anywhere those tools reach. Any agent can start a watch for a skill in its own folder, and can change the skill while the watch runs. `add-dirs` widens what a run may read to any folder the skill names, and with `Write` or `Edit` in `allowed-tools` what it may change. What stands between a watch and a harmful change is the skill's author, not Harold.
 - **A watch skill folder is shared trust.** Any agent can link a skill from a listed folder into its own `.claude/skills/` and run it, and whoever can change the chief-of-pods repository or an organisation repository changes what every watch that links there does at its next run. List only folders whose authors you trust.
 - **Text from other agents can steer a run.** The facts hold every agent's work summary, and a run may read files and, with a command such as `tmux capture-pane -p`, any pane's screen. A steered run can do whatever its skill's `allowed-tools` allows. Its typed output is still one line of at most 300 characters, as a `WATCH` line into the chief's pane or the watch's own folder. The chief reads a `WATCH` line as a report, not as the user's request.
 - **What reaches a hosted model.** The facts, the skill's text, the files the run reads and the output of the commands it runs go to Anthropic's hosted model, as activity summaries' text does today.
@@ -140,13 +143,13 @@ Three runs in a row that fail stop the watch: `process_failed` (Claude Code miss
 
 ## What is logged
 
-No line carries any of the skill's text, its `allowed-tools`, the facts, the commands' output, the answer or the report.
+No line carries any of the skill's text, its `allowed-tools`, the paths in its `add-dirs`, the facts, the commands' output, the answer or the report.
 
 | Moment | Level | Line | Fields |
 |---|---|---|---|
 | A watch starts, is replaced or resumes | info | `watch started` | `watch`, `folder`, `skill`, `ends_at`, `every_minutes`, `every_run`, `how` (`started`, `replaced` or `resumed`) |
-| A run ends | info | `watch run finished` | `watch`, `run`, `outcome` (`quiet` or `report`), `cost_usd`, `duration_ms` |
-| A run fails | warn | `watch run failed` | `watch`, `run`, `reason` (`timeout`, `process_failed`, `run_budget_reached`, `unreadable_answer`, `skill_missing`), `cost_usd` |
+| A run ends | info | `watch run finished` | `watch`, `run`, `outcome` (`quiet` or `report`), `cost_usd`, `duration_ms`, `add_dirs` |
+| A run fails | warn | `watch run failed` | `watch`, `run`, `reason` (`timeout`, `process_failed`, `run_budget_reached`, `unreadable_answer`, `skill_missing`), `cost_usd`, `add_dirs` |
 | A run is skipped | warn | `watch run skipped` | `watch`, `run`, `reason` (`model_busy`) |
 | A report waits, logged when its reason changes | info | `watch report waiting` | `watch`, `run`, `reason` (the timed-prompt reasons, such as `agent_busy`) |
 | A waiting report is replaced or dropped | info | `watch report replaced` | `watch`, `run`, `why` (`newer_report` or `watch_ended`) |
@@ -162,6 +165,8 @@ No line carries any of the skill's text, its `allowed-tools`, the facts, the com
 `watch`, `run` and `cost_usd` are on the telemetry reference's allowed fields. The folder stays out of spans and log exports. The [telemetry reference](../telemetry/README.md) has the `watch-cost-high` alert (severity warn, rarely) and the panel "Watch runs: cost and duration per run".
 
 To find out why runs fail, filter `harold.watch.run` spans by a failure `outcome`: `watch` and `run` name the run, `reason` the failure, and the `harold.watch.model` child's `result` and duration tell a timeout (`killed` at 120 seconds) from a process that did not start (`failed_to_start`: Claude Code is missing or logged out). For `unreadable_answer` the answer is not logged, so run the skill by hand with the same facts.
+
+`add_dirs` is the number of `add-dirs` folders the run was given (0 when the skill names none, or could not be read), never the paths. It goes to `harold.log` only, not to the exported fields. Beside a report about a file the run could not read, `add_dirs=0` means the skill names no folder, and above 0 means it names a folder, but not the right one.
 
 ## Data
 
