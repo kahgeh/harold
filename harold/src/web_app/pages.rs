@@ -7,7 +7,7 @@ use axum::middleware::Next;
 use axum::response::{Html, IntoResponse, Response};
 
 use super::{AppState, DATASTAR_JS, WebAppIdentity, thread_start_ms};
-use crate::store::{AppMessage, AppSender};
+use crate::store::{AppMessage, AppReplyState, AppSender};
 use crate::voice_input::{CallState, PhoneView, Said, Speaker};
 
 /// The content security policy every response carries: Harold's own scripts, styles and
@@ -46,21 +46,97 @@ pub(crate) struct MessageView {
     pub event_id: String,
     /// `chief` or `user`, the row's class.
     pub sender: &'static str,
+    /// The text as plain parts and links.
+    pub parts: Vec<Part>,
+    /// Your reply's mark; `None` on the chief's rows.
+    pub mark: Option<Mark>,
+    /// For a reply that waits or was not sent, the words after `me`, such as
+    /// `waiting: chief busy`.
+    pub words: Option<&'static str>,
+}
+
+/// The mark before `me`: stored by Harold, or typed into the chief's pane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Mark {
+    Stored,
+    Typed,
+}
+
+/// One run of a message's text: plain, or an `http://` or `https://` address.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Part {
     pub text: String,
-    /// A reply's state label, such as `typed`.
-    pub state: Option<&'static str>,
+    pub link: bool,
+}
+
+/// Characters left outside a link when they end the address.
+const LINK_TRAILING: &[char] = &['.', ',', ';', ':', '!', '?', ')', ']', '\'', '"'];
+
+/// Splits `text` into plain parts and links. A link is a run starting `http://` or
+/// `https://` up to the next whitespace, without the trailing punctuation in
+/// `LINK_TRAILING`; a run that is only the scheme stays plain.
+pub(crate) fn split_links(text: &str) -> Vec<Part> {
+    let mut parts = Vec::new();
+    let mut plain_from = 0;
+    let mut at = 0;
+    while at < text.len() {
+        let rest = &text[at..];
+        let scheme = ["https://", "http://"]
+            .into_iter()
+            .find(|scheme| rest.starts_with(scheme));
+        let Some(scheme) = scheme else {
+            at += rest.chars().next().map_or(1, char::len_utf8);
+            continue;
+        };
+        let run = rest.find(char::is_whitespace).unwrap_or(rest.len());
+        let address = rest[..run].trim_end_matches(LINK_TRAILING);
+        if address.len() <= scheme.len() {
+            at += scheme.len();
+            continue;
+        }
+        if plain_from < at {
+            parts.push(Part {
+                text: text[plain_from..at].to_owned(),
+                link: false,
+            });
+        }
+        parts.push(Part {
+            text: address.to_owned(),
+            link: true,
+        });
+        at += address.len();
+        plain_from = at;
+    }
+    if plain_from < text.len() {
+        parts.push(Part {
+            text: text[plain_from..].to_owned(),
+            link: false,
+        });
+    }
+    parts
 }
 
 impl From<AppMessage> for MessageView {
     fn from(message: AppMessage) -> Self {
+        let user = message.sender == AppSender::User;
+        let mark = user.then(|| match message.state {
+            Some(AppReplyState::Typed | AppReplyState::WaitingChiefBusy) => Mark::Typed,
+            _ => Mark::Stored,
+        });
+        let words = match message.state {
+            Some(
+                state @ (AppReplyState::WaitingChiefBusy
+                | AppReplyState::NotSentNoChief
+                | AppReplyState::NotSentPaused),
+            ) => Some(state.label()),
+            _ => None,
+        };
         Self {
             event_id: message.event_id,
-            sender: match message.sender {
-                AppSender::Chief => "chief",
-                AppSender::User => "user",
-            },
-            text: message.text,
-            state: message.state.map(|state| state.label()),
+            sender: if user { "user" } else { "chief" },
+            parts: split_links(&message.text),
+            mark,
+            words,
         }
     }
 }

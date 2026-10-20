@@ -163,10 +163,23 @@ main {
   color: var(--on-brand);
 }
 
-.state {
+.who {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
   font-size: 12px;
   opacity: 0.85;
-  text-align: right;
+}
+
+.mark {
+  flex: none;
+}
+
+.message a {
+  color: inherit;
+  text-decoration: underline;
+  overflow-wrap: anywhere;
 }
 
 /* The call: the screen replaces the thread while a call lasts. */

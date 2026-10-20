@@ -10,6 +10,7 @@ use tokio::task::JoinHandle;
 
 use super::origin::loopback_hosts;
 use super::pages::CONTENT_SECURITY_POLICY;
+use super::pages::{Part, split_links};
 use super::push::vapid_key_path;
 use super::{AppState, DATASTAR_SHA256, THREAD_DAYS, WebAppIdentity, router, start, start_if_set};
 use crate::outbound::fake::CapturedLogs;
@@ -235,7 +236,7 @@ async fn the_thread_page_lists_the_last_30_days_oldest_first() {
         "{body}"
     );
     assert!(
-        body.contains(r#"<p class="state">waiting: chief busy</p>"#),
+        body.contains(r#"</svg> me · waiting: chief busy</p>"#),
         "{body}"
     );
     assert!(body.contains("Turn on alerts"));
@@ -498,4 +499,138 @@ async fn start_refuses_an_icon_that_cannot_be_read() {
     .err()
     .expect("start refuses");
     assert_eq!(error, "web_app.icon cannot be read: /no/such/icon.png");
+}
+
+/// The page's `.who` line under each of `texts`, stored as the chief's rows.
+async fn thread_body(store: Arc<HaroldStore>) -> String {
+    let server = TestServer::serve(store).await;
+    let response = get_with_login(&server.url("/")).await;
+    assert_eq!(response.status(), 200);
+    response.text().await.unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn each_row_ends_with_its_sender_label_and_a_reply_with_its_mark() {
+    let directory = TestDirectory::new();
+    let store = directory.store().await;
+    store
+        .add_chief_app_message("c1", now_ms() - 2000, "from the chief")
+        .await
+        .unwrap();
+    for text in ["plain", "typed", "busy", "nochief", "paused"] {
+        append_app_reply(&store, text).await.unwrap();
+    }
+    store.project_unhandled_events(100).await.unwrap();
+    let rows = store.app_messages_since(0).await.unwrap();
+    let id = |text: &str| {
+        rows.iter()
+            .find(|row| row.text == text)
+            .unwrap()
+            .event_id
+            .clone()
+    };
+    for (text, state) in [
+        ("typed", AppReplyState::Typed),
+        ("busy", AppReplyState::WaitingChiefBusy),
+        ("nochief", AppReplyState::NotSentNoChief),
+        ("paused", AppReplyState::NotSentPaused),
+    ] {
+        store.set_app_reply_state(&id(text), state).await.unwrap();
+    }
+
+    let body = thread_body(store).await;
+
+    let row = |text: &str| {
+        let start = body.find(&format!(">{text}</p>")).expect(text);
+        let end = body[start..].find("</div>").unwrap();
+        body[start..start + end].to_owned()
+    };
+    assert!(row("from the chief").ends_with(r#"<p class="who">chief</p>"#));
+    let stored = r#"aria-label="stored by Harold""#;
+    let typed = r#"aria-label="typed into the chief""#;
+    assert!(row("plain").contains(stored) && row("plain").ends_with("</svg> me</p>"));
+    assert!(row("typed").contains(typed) && row("typed").ends_with("</svg> me</p>"));
+    assert!(row("busy").contains(typed) && row("busy").ends_with(" me · waiting: chief busy</p>"));
+    assert!(
+        row("nochief").contains(stored) && row("nochief").ends_with(" me · not sent: no chief</p>")
+    );
+    assert!(
+        row("paused").contains(stored)
+            && row("paused").ends_with(" me · not sent: messaging paused</p>")
+    );
+}
+
+#[test]
+fn links_keep_trailing_punctuation_outside() {
+    let link = |text: &str| Part {
+        text: text.into(),
+        link: true,
+    };
+    let plain = |text: &str| Part {
+        text: text.into(),
+        link: false,
+    };
+    assert_eq!(
+        split_links("see https://example.com/x. ok"),
+        vec![plain("see "), link("https://example.com/x"), plain(". ok")]
+    );
+    assert_eq!(
+        split_links("(http://a.b/c)"),
+        vec![plain("("), link("http://a.b/c"), plain(")")]
+    );
+    assert_eq!(
+        split_links("\"http://a.b\""),
+        vec![plain("\""), link("http://a.b"), plain("\"")]
+    );
+    assert_eq!(split_links("http://"), vec![plain("http://")]);
+    assert_eq!(split_links("http://?"), vec![plain("http://?")]);
+    assert_eq!(
+        split_links("naïve ✓ https://é.example/ü"),
+        vec![plain("naïve ✓ "), link("https://é.example/ü")]
+    );
+    assert_eq!(
+        split_links("a https://x.y\nhttp://z.w"),
+        vec![
+            plain("a "),
+            link("https://x.y"),
+            plain("\n"),
+            link("http://z.w")
+        ]
+    );
+    assert_eq!(split_links(""), Vec::<Part>::new());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_link_renders_as_a_safe_anchor_and_markup_stays_text() {
+    let directory = TestDirectory::new();
+    let store = directory.store().await;
+    store
+        .add_chief_app_message("l1", now_ms() - 3000, "read https://example.com/x. now")
+        .await
+        .unwrap();
+    store
+        .add_chief_app_message(
+            "l2",
+            now_ms() - 2000,
+            "<script>alert(1)</script> javascript:alert(1)",
+        )
+        .await
+        .unwrap();
+    store
+        .add_chief_app_message("l3", now_ms() - 1000, "https://e.com/\"onmouseover=\"x")
+        .await
+        .unwrap();
+
+    let body = thread_body(store).await;
+
+    assert!(body.contains(
+        r#"read <a href="https://example.com/x" target="_blank" rel="noopener noreferrer">https://example.com/x</a>. now"#
+    ), "{body}");
+    assert!(!body.contains("<script>alert"), "{body}");
+    assert!(body.contains("&#60;script&#62;alert(1)"), "{body}");
+    assert!(!body.contains(r#"href="javascript"#), "{body}");
+    assert!(
+        !body.contains(r#"" onmouseover"#) && !body.contains(r#"onmouseover=""#),
+        "{body}"
+    );
 }
