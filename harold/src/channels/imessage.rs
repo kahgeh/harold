@@ -1,5 +1,6 @@
+use std::io::Write;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Mutex, OnceLock};
@@ -48,16 +49,41 @@ fn send_imessage_to(text: &str, recipient: &str) -> Result<(), String> {
     send_imessage_to_with("osascript", text, recipient)
 }
 
-/// Send `text` to `recipient` by running `program`, which is `osascript` outside tests.
-fn send_imessage_to_with(program: &str, text: &str, recipient: &str) -> Result<(), String> {
-    let status = Command::new(program)
-        .args(["-e", &send_script(text, recipient)])
-        .status()
+/// The command that runs `program` (`osascript` outside tests) on a script read from its
+/// standard input. The script holds the text and the recipient, so none of it is an argument.
+fn osascript_command(program: &str) -> Command {
+    let mut command = Command::new(program);
+    command.arg("-");
+    command
+}
+
+/// Run `command` with `script` on its standard input, then wait for it. The errors hold no
+/// part of the script.
+fn run_with_script(mut command: Command, script: &str) -> Result<(), String> {
+    let mut child = command
+        .stdin(Stdio::piped())
+        .spawn()
         .map_err(|error| format!("failed to start osascript: {error}"))?;
+    let written = match child.stdin.take() {
+        Some(mut stdin) => stdin.write_all(script.as_bytes()),
+        None => Err(std::io::ErrorKind::BrokenPipe.into()),
+    };
+    // The pipe is closed by now (`stdin` was dropped), so the child sees the end of the script.
+    let status = child
+        .wait()
+        .map_err(|error| format!("failed to wait for osascript: {error}"))?;
+    if written.is_err() {
+        return Err("failed to give osascript the script".to_string());
+    }
     if !status.success() {
         return Err(format!("osascript exited unsuccessfully: {status}"));
     }
     Ok(())
+}
+
+/// Send `text` to `recipient` by running `program`, which is `osascript` outside tests.
+fn send_imessage_to_with(program: &str, text: &str, recipient: &str) -> Result<(), String> {
+    run_with_script(osascript_command(program), &send_script(text, recipient))
 }
 
 /// Send an iMessage notification to `recipient`. The log line carries the text's length,

@@ -13,8 +13,9 @@ use crate::util::sanitise_for_applescript;
 use super::{
     ChatDb, Cursors, Direction, FetchedRow, MarkedRow, NotificationPlan, RecentRows, TWIN_WINDOW,
     apple_date_to_utc, attachment_args, is_marked_as_harold, max_rowid_of, notification_message,
-    notification_plan, parse_max_rowid, poll_chat_db, poll_db, read_start, record_row, send_script,
-    start_cursors, start_listener_cursors, start_listener_reading, wait_for_start_row,
+    notification_plan, osascript_command, parse_max_rowid, poll_chat_db, poll_db, read_start,
+    record_row, run_with_script, send_imessage_to_with, send_script, start_cursors,
+    start_listener_cursors, start_listener_reading, wait_for_start_row,
 };
 
 #[test]
@@ -170,6 +171,46 @@ fn send_script_escapes_quotes_and_backslashes_after_marking() {
         send_script("say \"hi\" \\ bye", "bud\"dy"),
         "tell application \"Messages\" to send \"🤖 say \\\"hi\\\" \\\\ bye\" to buddy \"bud\\\"dy\""
     );
+}
+
+#[test]
+fn osascript_is_run_with_the_single_argument_dash() {
+    let command = osascript_command("osascript");
+    let args: Vec<_> = command.get_args().collect();
+    assert_eq!(args, ["-"]);
+}
+
+#[test]
+fn the_script_reaches_the_program_on_stdin_and_is_not_an_argument() {
+    let directory = TestDirectory::new();
+    let file = directory.0.join("stdin.txt");
+    let mut command = std::process::Command::new("sh");
+    command.args(["-c", "cat > \"$1\"", "sh"]).arg(&file);
+    let script = send_script("say \"hi\" \\ bye", "bud\"dy");
+    run_with_script(command, &script).expect("script is written");
+    assert_eq!(std::fs::read_to_string(&file).expect("read stdin"), script);
+}
+
+#[test]
+fn a_send_through_cat_succeeds() {
+    assert_eq!(
+        send_imessage_to_with("cat", "hello", "+61400000000"),
+        Ok(())
+    );
+}
+
+#[test]
+fn a_program_that_fails_is_reported_without_the_text() {
+    let error = send_imessage_to_with("false", "secret words", "+61400000000").unwrap_err();
+    assert!(error.contains("osascript exited unsuccessfully"), "{error}");
+    assert!(!error.contains("secret"), "{error}");
+}
+
+#[test]
+fn a_program_that_exits_before_reading_is_a_failure_to_give_it_the_script() {
+    let text = "x".repeat(1 << 20);
+    let error = send_imessage_to_with("true", &text, "+61400000000").unwrap_err();
+    assert_eq!(error, "failed to give osascript the script");
 }
 
 #[test]
