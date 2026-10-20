@@ -217,12 +217,18 @@ Harold logs no message text, no reply, no push address and no key. The app adds 
 |---|---|
 | `app push sent` | `outcome` (`accepted`) |
 | `app push refused` | `outcome` (`gone`, `refused` or `unreachable`) and `reason` (`status_<code>`, `timeout`, `connect`, `send`, `build` or `client`) |
+| `app message not pushed` | `reason` (`no_subscriptions`, `subscriptions_unread` or `none_accepted`) and `outcome`: `away` with `channel` (`imessage` or `telegram`) when the away channel took the message as `(app unreachable)`, or `held` when the pane is not on the away channel's list |
+| `app page connected` | none |
+| `app page not connected` | `reason` (`store_unread` or `render_failed`) |
+| `app page disconnected` | `reason` (`page_gone`, `shutdown` or `store_stopped`) and `seconds`, how long the page was connected. Harold notices a closed page at the next patch or keep-alive, within about 15 seconds |
+| `app reply state` | `event_id` and `state` (`typed`, `waiting_chief_busy`, `not_sent_no_chief` or `not_sent_paused`), logged before the state is written |
 | `app reply stored` | `chars`, the reply's length in characters |
 | `app call started` | none |
 | `app call ended` | `reason`, one of the desk's `call ended` reasons ([Log lines](../voice-input/README.md#log-lines)); `microphone_failed` when the phone stopped posting audio |
 
-Four other lines report failures, and none carries content:
+Five other lines report failures, and none carries content:
 
+- `app push subscriptions not read` carries the store's error; the message is not pushed and `app message not pushed` follows with `subscriptions_unread`;
 - `web app unavailable` names the listen address or the key's path, never the login or the key;
 - `web app stopped` carries the server's error;
 - `web app thread not pruned` carries no field;

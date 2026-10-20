@@ -215,6 +215,7 @@ Metrics are sent every 30 seconds. Every metric also carries `harold.machine`.
 | `harold.phone_requests.wrong` | counter, `{request}` | `channel`, `resolved_by` |
 | `harold.phone_request.latency` | histogram, `s`, buckets 1, 2, 5, 10, 30, 60, 120, 300, 600 | `channel`, `resolved_by` |
 | `harold.turn_end_updates` | counter, `{update}` | `outcome` (`model`, `fallback`), `reason` (`none` for `model`, otherwise `no_model`, `model_failed`, `too_long` or `no_name`) |
+| `harold.web_app.pushes` | counter, `{push}` | `outcome` (`accepted`, `gone`, `refused`, `unreachable`) |
 | `harold.notifications` | counter, `{notification}` | `agent` (the pane's folder below the home folder, such as `Dev/p/harold/main`), `channel` (`imessage`, `telegram`, `web_app` or `machine_audio_output`), `outcome` (`sent`, or `kept` when the channel's list held it back). Counted only on a channel that is set up and turned on |
 | `harold.turns` | counter, `{turn}` | `session.id`, `pane_id`, `started_by` |
 | `harold.turn.duration` | histogram, `s`, buckets 10, 30, 60, 120, 300, 600, 1800, 3600 | `started_by` |
@@ -238,7 +239,7 @@ No exported item carries what the user or an agent wrote, a voice line, the AI m
 pane_id, pane, session.id, session.source, component, reason, outcome, channel,
 resolved_by, kind, started_by, turn.start, state, alert, pod.product, spec.id,
 spec.state_at, spec.words, spec.revisions, phase, change, event_type,
-event_version, result, watch, run, cost_usd, agent
+event_version, result, watch, run, cost_usd, agent, seconds, event_id
 ```
 
 Every other field is dropped before export, including `text`, `msg`, `raw_output`, `tag` and `error`. Span events and links are dropped too, and an error status loses its description.
@@ -351,6 +352,7 @@ Harold sends counters and histograms as running totals, the OpenTelemetry defaul
 
 - `harold.phone_requests`, for each `outcome` (`typed`, `unavailable`), `channel` and `resolved_by`;
 - `harold.phone_requests.wrong`, for each `channel` and `resolved_by`;
+- `harold.web_app.pushes`, for each `outcome` (`accepted`, `gone`, `refused`, `unreachable`);
 - `harold.turn_end_updates`, for `outcome = fallback` with `reason = model_failed`, which `local-model-failing` reads.
 
 The pod facts do the same for each product on its first poll: `pod.merges` with no `spec.id`, and `pod.merged_lines` for each `change`. Each series then has a first point of 0 before anything happens, and the first real request after a restart is a rise HyperDX can see.
