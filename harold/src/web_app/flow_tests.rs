@@ -937,9 +937,8 @@ async fn the_dots_go_when_the_chief_turns_idle_with_no_message() {
     ));
     let server = TestServer::serve_with(store, hub.subscribe(), Some(CHIEF_FOLDER)).await;
     let mut updates = server.updates().await;
-    updates.next().await.expect("the whole thread");
-    let on = next_responding(&mut updates).await;
-    assert!(on.contains("dots"), "{on}");
+    let whole = updates.next().await.expect("the whole thread");
+    assert!(whole.contains(r#"class="dots""#), "{whole}");
 
     publish_chief(&hub, 1, EffectiveAgentState::Idle);
 

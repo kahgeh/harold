@@ -794,3 +794,23 @@ async fn each_post_logs_its_kind_and_result_but_never_the_todo_id() {
     );
     assert!(lines.iter().all(|line| !line.contains("Q1")), "{text}");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_new_stream_starts_with_the_todos_as_they_are_now() {
+    let service = FakeServer::start().await;
+    let directory = TestDirectory::new();
+    let server = TestServer::serve(directory.store().await, service.questions()).await;
+    // The page was drawn with no todos; they change before the stream opens.
+    server.get("/").await;
+    service.fake.set_list(vec![question("Q1", 1, false)]);
+    let mut response = server.get("/updates").await;
+
+    let first = String::from_utf8_lossy(&response.chunk().await.unwrap().unwrap()).into_owned();
+
+    assert!(first.contains(r#"id="todo-Q1""#), "{first}");
+    assert!(first.contains(r#"id="responding""#), "{first}");
+    assert!(
+        first.contains(r#"<span id="todo-count" class="todo-count">1</span>"#),
+        "{first}"
+    );
+}

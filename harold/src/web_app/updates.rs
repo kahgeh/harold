@@ -50,7 +50,11 @@ pub(crate) async fn get_updates(State(state): State<AppState>) -> Response {
         warn!(reason = "store_unread", "app page not connected");
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
-    let Some(whole) = whole_thread(&messages) else {
+    let dots = Dots::of(&state, &messages);
+    let todos_shown = todos_html(&state.questions.refresh().await);
+    // The page may have been drawn, or the stream dropped while the phone was hidden, before
+    // the dots and the todos changed, so the first patch carries them too.
+    let Some(whole) = whole_thread(&messages, dots.shown, &todos_shown) else {
         warn!(reason = "render_failed", "app page not connected");
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     };
@@ -65,19 +69,9 @@ pub(crate) async fn get_updates(State(state): State<AppState>) -> Response {
         None => None,
     };
     let (patches, queued) = mpsc::channel(PATCHES_QUEUED);
-    let dots = Dots::of(&state, &messages);
-    // The page draws the todos itself, from the same read; the stream sends them when
-    // they change.
-    let todos_shown = todos_html(&state.questions.refresh().await);
-    // The channel has room for all of them, and nothing reads it yet: these sends cannot
-    // wait or fail.
+    // The channel has room for both, and nothing reads it yet: these sends cannot wait or
+    // fail.
     let _ = patches.try_send(Ok(whole));
-    // The page was drawn without the dots, so they are sent only when they are on.
-    if dots.shown
-        && let Some(patch) = responding_patch(true)
-    {
-        let _ = patches.try_send(Ok(patch));
-    }
     if let Some(section) = section {
         let _ = patches.try_send(Ok(section));
     }
@@ -302,12 +296,19 @@ fn call_screen(view: &PhoneView) -> Option<Event> {
     Some(PatchElements::new(section).into())
 }
 
-/// One patch replacing `#messages` with `messages`, morphed by its id.
-fn whole_thread(messages: &[AppMessage]) -> Option<Event> {
+/// One patch replacing `#messages`, `#responding`, `#todos` and `#todo-count`, each morphed
+/// by its id.
+fn whole_thread(messages: &[AppMessage], dots: bool, todos: &str) -> Option<Event> {
     let section = MessagesSection {
         messages: messages.iter().cloned().map(MessageView::from).collect(),
     };
-    Some(PatchElements::new(section.render().ok()?).into())
+    let responding = RespondingSection { on: dots };
+    let html = format!(
+        "{}{}{todos}",
+        section.render().ok()?,
+        responding.render().ok()?
+    );
+    Some(PatchElements::new(html).into())
 }
 
 fn shown(messages: &[AppMessage]) -> HashMap<String, Shown> {
