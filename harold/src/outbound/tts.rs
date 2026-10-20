@@ -872,6 +872,7 @@ mod tests {
 
     #[test]
     fn with_default_settings_every_agent_gets_the_fallback_sentence() {
+        let _serial = COUNTER.lock().unwrap_or_else(|e| e.into_inner());
         crate::settings::init_settings_for_test();
         for (agent, project, expected) in [
             (
@@ -899,6 +900,7 @@ mod tests {
 
     #[test]
     fn desk_update_line_reads_like_the_desk() {
+        let _serial = COUNTER.lock().unwrap_or_else(|e| e.into_inner());
         crate::settings::init_settings_for_test();
 
         assert_eq!(
