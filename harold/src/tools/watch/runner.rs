@@ -14,8 +14,10 @@ use crate::tools::BoxFuture;
 
 /// Whether the installed Claude Code accepts `--max-turns 8` with `--print`. Settled
 /// once, by the builder, from `claude --help` or one run (see the merge report); the
-/// flag is passed only if this is true.
-pub(super) const MAX_TURNS_ACCEPTED: bool = false;
+/// flag is passed only if this is true. Claude Code 2.1.304 does not list it in
+/// `--help`, but one run in an empty folder with `--max-turns 8 --max-budget-usd 0.01`
+/// was accepted and ended normally.
+pub(super) const MAX_TURNS_ACCEPTED: bool = true;
 
 pub(super) const MAX_TURNS: &str = "8";
 

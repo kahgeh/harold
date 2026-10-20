@@ -4,6 +4,7 @@
 
 mod answer;
 mod runner;
+mod store;
 mod validate;
 
 use crate::tools::{ToolContext, ToolError, ToolHandle};
