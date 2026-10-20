@@ -217,7 +217,7 @@ Ten fixed lines, with only the fields `tool`, `question_id`, `version`, `reason`
 | `picks not saved` | `tool`, `question_id`, `version`, `reason` | A warning; `reason` is `store_failed`. |
 | `answers batch typed` | `tool`, `reason` | `reason` is `typed`, or `enter_failed` when Enter failed after the text went in (a warning). |
 | `answers batch waiting` | `tool`, `reason` | `reason` is `no_chief`, `pane_busy`, `no_pane` or `store_failed`. |
-| `set-aside questions returned` | `tool`, `count`, `after` | Info, written once per return and only when `count` is above 0. `after` is `answers_line`, `later` or `dismiss`. No question id or text is logged. |
+| `set-aside questions returned` | `tool`, `count`, `after` | Info, written once per return and only when `count` is above 0. `after` is `answers_line`, `later` or `dismiss`. No question id or text is logged. It is written by the store as the questions move, so it comes just before the `question dismissed` or `answers batch typed` line that caused it, and in the rare case that the write then fails it may stand for a return that did not happen. |
 | `tool failed to start` | `tool`, `reason` | `reason` is `store_open_failed`. |
 
 ## Data folder and rollback

@@ -795,12 +795,28 @@ async fn returning_set_aside_questions_is_logged_once_for_each_trigger() {
     assert_eq!(lines.len(), 3, "{lines:#?}");
     assert!(lines[2].contains("count=1") && lines[2].contains("after=\"answers_line\""));
 
-    // count 0 writes nothing, and no line holds an id or any question text.
+    // count 0 writes nothing, after a dismiss and after a typed line, and no
+    // line holds an id or any question text.
     dismiss(&service, "Q3", "withdrawn").await.unwrap();
+    put(&service, question("Q4", "spec", "abc")).await.unwrap();
+    answer(&service, "Q4", 1, pb::AnswerKind::Revise, vec![], "fix it")
+        .await
+        .unwrap();
+    let batch = store
+        .start_batch(&[("Q4".to_string(), 1)], "ANSWERS 1", 20)
+        .await
+        .unwrap()
+        .expect("batch started");
+    store.batch_typed(batch.id, 21).await.unwrap();
     let lines = logs.with(RETURNED);
     assert_eq!(lines.len(), 3, "{lines:#?}");
     for line in &lines {
         assert_eq!(field_names(line, RETURNED), ["tool", "count", "after"]);
-        assert!(!line.contains("CANARY") && !line.contains("Q1") && !line.contains("Q2"));
+        assert!(
+            !line.contains("CANARY")
+                && !line.contains("Q1")
+                && !line.contains("Q2")
+                && !line.contains("Q3")
+        );
     }
 }
