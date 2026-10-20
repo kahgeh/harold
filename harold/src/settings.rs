@@ -2693,7 +2693,7 @@ mod tests {
                 "{WEB_APP_FOLDER}[web_app]\nlisten = \"127.0.0.1:4330\"\nallowed_login = \"a@b.c\"\nicon = \"{path}\""
             ));
             let message = format!("web_app.icon cannot be read: {path}");
-            assert!(errors.iter().any(|e| *e == message), "{path}: {errors:?}");
+            assert!(errors.contains(&message), "{path}: {errors:?}");
         }
     }
 
@@ -2704,7 +2704,7 @@ mod tests {
             "{WEB_APP_FOLDER}[web_app]\nlisten = \"127.0.0.1:4330\"\nallowed_login = \"a@b.c\"\nicon = \"~/no-such-icon.png\""
         ));
         let message = format!("web_app.icon cannot be read: {home}/no-such-icon.png");
-        assert!(errors.iter().any(|e| *e == message), "{errors:?}");
+        assert!(errors.contains(&message), "{errors:?}");
     }
 
     #[test]
