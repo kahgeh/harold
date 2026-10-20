@@ -1508,3 +1508,105 @@ async fn show_returns_a_dismissed_questions_picks_and_none_for_an_unknown_id() {
     assert_eq!(shown.picks, [saved(0, "a", "")]);
     assert!(store.show("nope").await.unwrap().is_none());
 }
+
+async fn dismiss_ok(store: &TursoQuestionStore, id: &str, now_ms: i64) {
+    store
+        .dismiss(id, "withdrawn", now_ms)
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+fn waiting(id: &str) -> (String, bool) {
+    (id.to_string(), false)
+}
+
+fn set_aside(id: &str) -> (String, bool) {
+    (id.to_string(), true)
+}
+
+#[tokio::test]
+async fn dismissing_the_last_waiting_question_returns_the_set_aside_ones() {
+    let temp = TempFolder::new();
+    let store = TursoQuestionStore::open(&temp.0).await.unwrap();
+    for id in ["Q1", "Q2", "Q3"] {
+        store.put(question(id), 1).await.unwrap();
+    }
+    store.defer("Q2", 2).await.unwrap().unwrap();
+    store.defer("Q3", 3).await.unwrap().unwrap();
+    assert_eq!(
+        listed_ids(&store).await,
+        [waiting("Q1"), set_aside("Q2"), set_aside("Q3")]
+    );
+
+    dismiss_ok(&store, "Q1", 4).await;
+    assert_eq!(listed_ids(&store).await, [waiting("Q2"), waiting("Q3")]);
+}
+
+#[tokio::test]
+async fn dismissing_one_of_two_waiting_questions_keeps_the_set_aside_ones_away() {
+    let temp = TempFolder::new();
+    let store = TursoQuestionStore::open(&temp.0).await.unwrap();
+    for id in ["Q1", "Q2", "Q3"] {
+        store.put(question(id), 1).await.unwrap();
+    }
+    store.defer("Q2", 2).await.unwrap().unwrap();
+    dismiss_ok(&store, "Q1", 3).await;
+    assert_eq!(listed_ids(&store).await, [waiting("Q3"), set_aside("Q2")]);
+}
+
+#[tokio::test]
+async fn an_unsent_answer_holds_set_aside_questions_back_until_the_line_is_typed() {
+    let temp = TempFolder::new();
+    let store = TursoQuestionStore::open(&temp.0).await.unwrap();
+    for id in ["Q1", "Q2", "Q3"] {
+        store.put(question(id), 1).await.unwrap();
+    }
+    answer_ok(&store, "Q1", 1).await;
+    store.defer("Q2", 2).await.unwrap().unwrap();
+    dismiss_ok(&store, "Q3", 3).await;
+    assert_eq!(listed_ids(&store).await, [set_aside("Q2")]);
+
+    let batch = store
+        .start_batch(&at_v1(&["Q1"]), "ANSWERS 1", 4)
+        .await
+        .unwrap()
+        .expect("batch started");
+    store.batch_typed(batch.id, 5).await.unwrap();
+    assert_eq!(listed_ids(&store).await, [waiting("Q2")]);
+}
+
+#[tokio::test]
+async fn dismissing_a_set_aside_question_follows_the_same_rule() {
+    let temp = TempFolder::new();
+    let store = TursoQuestionStore::open(&temp.0).await.unwrap();
+    for id in ["Q1", "Q2", "Q3"] {
+        store.put(question(id), 1).await.unwrap();
+    }
+    store.defer("Q2", 2).await.unwrap().unwrap();
+    store.defer("Q3", 3).await.unwrap().unwrap();
+    // Q1 still waits: dismissing a set-aside question returns nothing.
+    dismiss_ok(&store, "Q2", 4).await;
+    assert_eq!(listed_ids(&store).await, [waiting("Q1"), set_aside("Q3")]);
+
+    dismiss_ok(&store, "Q1", 5).await;
+    assert_eq!(listed_ids(&store).await, [waiting("Q3")]);
+}
+
+#[tokio::test]
+async fn dismissing_instructions_follows_the_same_rule() {
+    let temp = TempFolder::new();
+    let store = TursoQuestionStore::open(&temp.0).await.unwrap();
+    store.put(question("Q1"), 1).await.unwrap();
+    store.put(question("Q2"), 1).await.unwrap();
+    store.put(instructions("I1", &["a"]), 1).await.unwrap();
+    store.defer("Q2", 2).await.unwrap().unwrap();
+    // Q1 waits: dismissing the instructions returns nothing.
+    dismiss_ok(&store, "I1", 3).await;
+    assert_eq!(listed_ids(&store).await, [waiting("Q1"), set_aside("Q2")]);
+
+    // Waiting instructions never hold the set-aside questions back.
+    store.put(instructions("I2", &["a"]), 4).await.unwrap();
+    dismiss_ok(&store, "Q1", 5).await;
+    assert_eq!(listed_ids(&store).await, [waiting("I2"), waiting("Q2")]);
+}

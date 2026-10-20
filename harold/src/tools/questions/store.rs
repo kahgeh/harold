@@ -8,8 +8,10 @@ use harold_api::tools::questions::v1 as pb;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
+use tracing::info;
 use turso::Connection;
 
+use super::NAME;
 use super::schema::{Answer, Kind, Question, check_picks};
 
 const DATABASE: &str = "questions.db";
@@ -559,6 +561,7 @@ async fn dismiss_in(
         (id, reason, now_ms),
     )
     .await?;
+    return_deferred_when_idle(conn, now_ms, "dismiss").await?;
     Ok(Ok(existing.version))
 }
 
@@ -721,13 +724,7 @@ async fn defer_in(
         (id, position, now_ms),
     )
     .await?;
-    // Nothing waiting and no answer in the way of a line: the set-aside
-    // questions would never come back, so they come back now.
-    if waiting_question_ids(conn).await?.is_empty()
-        && ids_in_state(conn, "answered").await?.is_empty()
-    {
-        return_deferred(conn, now_ms).await?;
-    }
+    return_deferred_when_idle(conn, now_ms, "later").await?;
     Ok(Ok(existing.version))
 }
 
@@ -1017,21 +1014,47 @@ async fn batch_typed_in(conn: &Connection, batch_id: i64, now_ms: i64) -> Result
     .await?;
     // Deferred questions wait again, after everything else, once none is waiting.
     if waiting_question_ids(conn).await?.is_empty() {
-        return_deferred(conn, now_ms).await?;
+        return_deferred(conn, now_ms, "answers_line").await?;
     }
     Ok(())
 }
 
-/// Deferred questions wait again, after everything else.
-async fn return_deferred(conn: &Connection, now_ms: i64) -> Result<()> {
-    for id in ids_in_state(conn, "deferred").await? {
+/// Nothing waiting and no answer in the way of a line: the set-aside
+/// questions would never come back, so they come back now. A defer and a
+/// dismiss both end here.
+async fn return_deferred_when_idle(
+    conn: &Connection,
+    now_ms: i64,
+    after: &'static str,
+) -> Result<()> {
+    if waiting_question_ids(conn).await?.is_empty()
+        && ids_in_state(conn, "answered").await?.is_empty()
+    {
+        return_deferred(conn, now_ms, after).await?;
+    }
+    Ok(())
+}
+
+/// Deferred questions wait again, after everything else. Logs how many came
+/// back, when any did.
+async fn return_deferred(conn: &Connection, now_ms: i64, after: &'static str) -> Result<()> {
+    let ids = ids_in_state(conn, "deferred").await?;
+    for id in &ids {
         let position = next_position(conn).await?;
         conn.execute(
             "UPDATE questions SET state = 'waiting', position = ?2, updated_at_ms = ?3 \
              WHERE id = ?1",
-            (id, position, now_ms),
+            (id.as_str(), position, now_ms),
         )
         .await?;
+    }
+    if !ids.is_empty() {
+        info!(
+            tool = NAME,
+            count = ids.len(),
+            after,
+            "set-aside questions returned"
+        );
     }
     Ok(())
 }

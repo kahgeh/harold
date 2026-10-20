@@ -742,3 +742,65 @@ async fn show_question_of_an_unknown_id_is_not_found() {
     assert_eq!(missing.code(), Code::NotFound);
     assert_eq!(missing.message(), "unknown_question");
 }
+
+const RETURNED: &str = "set-aside questions returned";
+
+#[tokio::test]
+async fn returning_set_aside_questions_is_logged_once_for_each_trigger() {
+    let (logs, _guard) = capture_logs();
+    let folder = TempFolder::new();
+    let store = open_store(&folder).await;
+    let service = service(Arc::clone(&store));
+    for id in ["Q1", "Q2", "Q3"] {
+        put(&service, question(id, "spec-CANARY-77", "abc"))
+            .await
+            .unwrap();
+    }
+
+    // dismiss: Q2 and Q3 set aside, Q1 withdrawn.
+    defer(&service, "Q2").await.unwrap();
+    defer(&service, "Q3").await.unwrap();
+    assert!(logs.with(RETURNED).is_empty());
+    dismiss(&service, "Q1", "withdrawn").await.unwrap();
+    let lines = logs.with(RETURNED);
+    assert_eq!(lines.len(), 1, "{lines:#?}");
+    assert!(
+        lines[0].contains("count=2") && lines[0].contains("after=\"dismiss\""),
+        "{lines:#?}"
+    );
+    assert_eq!(field_names(&lines[0], RETURNED), ["tool", "count", "after"]);
+
+    // later: Q2 waits alone after Q3 is set aside, then Q2 itself is set aside.
+    defer(&service, "Q3").await.unwrap();
+    assert_eq!(logs.with(RETURNED).len(), 1, "Q2 still waits");
+    defer(&service, "Q2").await.unwrap();
+    let lines = logs.with(RETURNED);
+    assert_eq!(lines.len(), 2, "{lines:#?}");
+    assert!(lines[1].contains("count=2") && lines[1].contains("after=\"later\""));
+
+    // answers_line: Q2 answered and Q3 set aside; the typed line returns Q3.
+    // Deferring Q2 returned both, so both wait again.
+    answer(&service, "Q2", 1, pb::AnswerKind::Revise, vec![], "fix it")
+        .await
+        .unwrap();
+    defer(&service, "Q3").await.unwrap();
+    assert_eq!(logs.with(RETURNED).len(), 2, "an answer is still unsent");
+    let batch = store
+        .start_batch(&[("Q2".to_string(), 1)], "ANSWERS 1", 10)
+        .await
+        .unwrap()
+        .expect("batch started");
+    store.batch_typed(batch.id, 11).await.unwrap();
+    let lines = logs.with(RETURNED);
+    assert_eq!(lines.len(), 3, "{lines:#?}");
+    assert!(lines[2].contains("count=1") && lines[2].contains("after=\"answers_line\""));
+
+    // count 0 writes nothing, and no line holds an id or any question text.
+    dismiss(&service, "Q3", "withdrawn").await.unwrap();
+    let lines = logs.with(RETURNED);
+    assert_eq!(lines.len(), 3, "{lines:#?}");
+    for line in &lines {
+        assert_eq!(field_names(line, RETURNED), ["tool", "count", "after"]);
+        assert!(!line.contains("CANARY") && !line.contains("Q1") && !line.contains("Q2"));
+    }
+}
