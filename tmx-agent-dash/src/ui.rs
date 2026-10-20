@@ -5089,4 +5089,167 @@ mod tests {
             "\u{25b8} 2 todos waiting \u{b7} from the chief"
         );
     }
+
+    /// The list's rows at 60x18, from its title to its bottom border, as `inner` text.
+    fn list_60x18(app: &App) -> Vec<String> {
+        let lines = text_lines(app, 60, 18, 100_000);
+        lines[9..15]
+            .iter()
+            .map(|l| {
+                l.trim_start_matches('\u{2502}')
+                    .trim_end_matches('\u{2502}')
+                    .trim_end()
+                    .to_string()
+            })
+            .collect()
+    }
+
+    /// The whole header text the block draws at the 60x18 list width (58 columns).
+    fn header_text_58(app: &App) -> String {
+        let view = app.questions.view().unwrap();
+        let lines = super::question_row_lines(&view, 58, false, app.question_stop);
+        let end = lines
+            .iter()
+            .skip(1)
+            .position(|l| l.text.starts_with("        ") || l.text.is_empty())
+            .map_or(lines.len(), |n| n + 1);
+        lines[..end]
+            .iter()
+            .map(|l| l.text.trim_start_matches(['\u{25b6}', ' ']))
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    #[test]
+    fn mockup_states_at_60x18_show_their_rows_and_footer() {
+        // 1: closed, the cursor on the closed row.
+        let mut app = closed_todos();
+        keys(&mut app, "j");
+        assert_eq!(list_60x18(&app)[4], "\u{25b6}   \u{25b8} 2 todos waiting");
+        assert_eq!(
+            footer_inner(&app, 60, 18),
+            "TODO  l open  j/k move  n/N todo  ^L retry  ^Q quit"
+        );
+        // 2: I1 open, cursor on the header; the list shows the header's first line.
+        let app = open_i1(&[]);
+        assert_eq!(
+            list_60x18(&app)[4],
+            "\u{25b6}   \u{25be} I1 \u{b7} instructions \u{b7} 1 of 2 todos \u{b7} 0 of 4 ticked \u{b7}"
+        );
+        assert_eq!(
+            header_text_58(&app),
+            "\u{25be} I1 \u{b7} instructions \u{b7} 1 of 2 todos \u{b7} 0 of 4 ticked \u{b7} harold \u{b7} Install Harold 0.15.0 on PasM1Mac"
+        );
+        assert_eq!(
+            footer_inner(&app, 60, 18),
+            "TODO  h close  j/k move  n/N todo  o link  Esc close / ^L retry  ^Q quit"
+        );
+        // 3: partly ticked, cursor on step 3, the header off screen.
+        let mut app = open_i1(&[1, 2]);
+        keys(&mut app, "jjj");
+        assert_eq!(
+            list_60x18(&app)[1..4],
+            [
+                "\u{25b2} 2 todos waiting",
+                "          [\u{2713}] 2  Run make deploy in ~/Dev/p/harold/main",
+                "                 It asks for your password once.",
+            ]
+        );
+        assert_eq!(
+            list_60x18(&app)[4],
+            "\u{25b6}         [ ] 3  Turn on harold in System Settings \u{203a}"
+        );
+        assert_eq!(
+            footer_inner(&app, 60, 18),
+            "TODO  Space tick  h close  j/k move  n/N todo  o link / Esc close  ^L retry  ^Q quit"
+        );
+        // 4: all ticked, cursor on done, the notice just above it.
+        let mut app = open_i1(&[1, 2, 3, 4]);
+        keys(&mut app, "jjjjj");
+        let rows = list_60x18(&app);
+        assert_eq!(rows[1], "\u{25b2} 2 todos waiting");
+        assert_eq!(
+            rows[2],
+            "        \u{2713} All 4 ticked. Press done to tell the chief."
+        );
+        assert_eq!(rows[3], "");
+        assert_eq!(rows[4], "\u{25b6}         done");
+        assert_eq!(
+            footer_inner(&app, 60, 18),
+            "TODO  Enter done  h close  j/k move  n/N todo  o link / Esc close  ^L retry  ^Q quit"
+        );
+        // 5: Q1 after done, one of one.
+        let mut app = todo_app(vec![q1_single()]);
+        keys(&mut app, "jl");
+        assert_eq!(
+            header_text_58(&app),
+            "\u{25be} Q1 \u{b7} question \u{b7} 1 of 1 todo \u{b7} harold \u{b7} durable-server"
+        );
+        assert!(
+            list_60x18(&app)[4]
+                .starts_with("\u{25b6}   \u{25be} Q1 \u{b7} question \u{b7} 1 of 1 todo")
+        );
+        assert_eq!(
+            footer_inner(&app, 60, 18),
+            "TODO  h close  j/k move  n/N todo  o link  Esc close / ^L retry  ^Q quit"
+        );
+    }
+
+    /// Twelve steps, each with a detail.
+    fn long_i1() -> crate::questions::QuestionView {
+        let mut q = i1(&[]);
+        q.steps = (1..=12)
+            .map(|n| step(&format!("Do thing {n}"), &format!("Detail of thing {n}.")))
+            .collect();
+        q
+    }
+
+    #[test]
+    fn a_step_list_longer_than_the_window_scrolls_with_the_cursor() {
+        let mut app = todo_app(vec![long_i1(), q1_single()]);
+        keys(&mut app, "jl");
+        keys(&mut app, &"j".repeat(11));
+        assert_eq!(app.question_stop, Some(QStop::Step(10)));
+        let screen = text_lines(&app, 60, 18, 100_000).join("\n");
+        assert!(
+            screen
+                .lines()
+                .any(|l| l.contains('\u{25b6}') && l.contains("[ ] 11  Do thing 11")),
+            "{screen}"
+        );
+        assert!(screen.contains("\u{25b2} 2 todos waiting"), "{screen}");
+        assert!(!screen.contains("1 of 2 todos"), "header is off screen");
+        keys(&mut app, &"k".repeat(11));
+        assert_eq!(app.question_stop, Some(QStop::Header));
+        let screen = text_lines(&app, 60, 18, 100_000).join("\n");
+        assert!(
+            screen
+                .lines()
+                .any(|l| l.contains('\u{25b6}') && l.contains("\u{25be} I1")),
+            "{screen}"
+        );
+        assert!(!screen.contains("\u{25b2} 2 todos waiting"), "{screen}");
+    }
+
+    #[test]
+    fn step_details_shift_one_column_from_step_10() {
+        let mut app = todo_app(vec![long_i1(), q1_single()]);
+        keys(&mut app, "jl");
+        let lines = text_lines(&app, 107, 60, 100_000);
+        let col = |needle: &str| {
+            let l = lines
+                .iter()
+                .find(|l| l.contains(needle))
+                .unwrap_or_else(|| panic!("missing {needle}"));
+            l.chars()
+                .position(|c| c == needle.chars().next().unwrap())
+                .unwrap()
+        };
+        // Past the border, step 1's text and detail start together at column 18;
+        // step 10 has a wider number, so both shift to column 19.
+        assert_eq!(col("Do thing 1"), 18);
+        assert_eq!(col("Detail of thing 1."), 18);
+        assert_eq!(col("Do thing 10"), 19);
+        assert_eq!(col("Detail of thing 10."), 19);
+    }
 }
