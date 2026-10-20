@@ -292,9 +292,33 @@ fn render_monitor(frame: &mut Frame<'_>, area: Rect, app: &App, now_ms: i64) {
     );
 }
 
-fn render_summary(frame: &mut Frame<'_>, area: Rect, app: &App) {
-    let (busy, idle, unknown) = app.state_counts();
-    let summary = Line::from(vec![
+const NO_CLOCK: &str = "--:--:--";
+
+/// The server's clock as `HH:MM:SS` in `tz`; `--:--:--` before the first snapshot.
+fn clock_text<Tz>(server_time_ms: i64, tz: &Tz) -> String
+where
+    Tz: chrono::TimeZone,
+    Tz::Offset: std::fmt::Display,
+{
+    if server_time_ms <= 0 {
+        return NO_CLOCK.to_string();
+    }
+    match chrono::DateTime::from_timestamp_millis(server_time_ms) {
+        Some(time) => time.with_timezone(tz).format("%H:%M:%S").to_string(),
+        None => NO_CLOCK.to_string(),
+    }
+}
+
+fn summary_spans<Tz>(
+    (busy, idle, unknown): (usize, usize, usize),
+    server_time_ms: i64,
+    tz: &Tz,
+) -> Vec<Span<'static>>
+where
+    Tz: chrono::TimeZone,
+    Tz::Offset: std::fmt::Display,
+{
+    let mut spans = vec![
         Span::styled(
             format!(" BUSY {busy:02} "),
             Style::default().fg(AMBER).add_modifier(Modifier::BOLD),
@@ -303,15 +327,26 @@ fn render_summary(frame: &mut Frame<'_>, area: Rect, app: &App) {
             format!("    IDLE {idle:02} "),
             Style::default().fg(GREEN).add_modifier(Modifier::BOLD),
         ),
-        Span::styled(
-            format!("    UNKNOWN {unknown:02} "),
+    ];
+    if unknown > 0 {
+        spans.push(Span::styled(
+            format!("    UNKNOWN {unknown} "),
             Style::default().fg(MUTED).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            format!("    SERVER TIME {}", app.snapshot.server_time_ms),
-            Style::default().fg(MUTED),
-        ),
-    ]);
+        ));
+    }
+    spans.push(Span::styled(
+        format!("    SERVER TIME {}", clock_text(server_time_ms, tz)),
+        Style::default().fg(MUTED),
+    ));
+    spans
+}
+
+fn render_summary(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    let summary = Line::from(summary_spans(
+        app.state_counts(),
+        app.snapshot.server_time_ms,
+        &chrono::Local,
+    ));
     let borders = if area.height <= 2 {
         Borders::LEFT | Borders::RIGHT
     } else {
@@ -2017,6 +2052,60 @@ mod tests {
             assert!(content.contains(expected), "missing {expected:?}");
         }
         assert!(!content.contains("CURRENT WORK"));
+    }
+
+    fn plus_eleven() -> chrono::FixedOffset {
+        chrono::FixedOffset::east_opt(11 * 3600).unwrap()
+    }
+
+    // 2026-10-20 10:47:03 UTC
+    const SAMPLE_MS: i64 = 1_792_493_223_000;
+
+    fn strip_text(counts: (usize, usize, usize), ms: i64) -> String {
+        super::summary_spans(counts, ms, &plus_eleven())
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect()
+    }
+
+    #[test]
+    fn clock_text_formats_local_hh_mm_ss() {
+        assert_eq!(super::clock_text(SAMPLE_MS, &plus_eleven()), "21:47:03");
+    }
+
+    #[test]
+    fn clock_text_zero_is_placeholder() {
+        assert_eq!(super::clock_text(0, &plus_eleven()), "--:--:--");
+    }
+
+    #[test]
+    fn clock_text_truncates_milliseconds() {
+        assert_eq!(
+            super::clock_text(SAMPLE_MS + 999, &plus_eleven()),
+            "21:47:03"
+        );
+    }
+
+    #[test]
+    fn clock_text_out_of_range_is_placeholder() {
+        assert_eq!(super::clock_text(i64::MAX, &plus_eleven()), "--:--:--");
+        assert_eq!(super::clock_text(i64::MIN, &plus_eleven()), "--:--:--");
+    }
+
+    #[test]
+    fn summary_hides_unknown_at_zero() {
+        assert_eq!(
+            strip_text((3, 5, 0), SAMPLE_MS),
+            " BUSY 03     IDLE 05     SERVER TIME 21:47:03"
+        );
+    }
+
+    #[test]
+    fn summary_shows_unpadded_unknown() {
+        assert_eq!(
+            strip_text((3, 4, 2), SAMPLE_MS),
+            " BUSY 03     IDLE 04     UNKNOWN 2     SERVER TIME 21:47:03"
+        );
     }
 
     #[test]

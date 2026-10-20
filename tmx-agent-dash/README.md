@@ -256,6 +256,8 @@ Each row has Harold's latest classified agent state:
 - `IDLE` means Harold currently classifies the agent as idle.
 - `UNKNOWN` means Harold cannot yet classify the agent conclusively.
 
+The summary strip under the masthead shows the `BUSY` and `IDLE` counts, `UNKNOWN n` only when some agent is Unknown, and `SERVER TIME` as the server's clock in the Mac's local time, `HH:MM:SS` (`--:--:--` before the first snapshot).
+
 Transport and agent monitor health describe different system-level conditions:
 
 - `LIVE` means the Harold stream delivered the current accepted snapshot.

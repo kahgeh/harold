@@ -82,7 +82,7 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 | Term | Meaning | Not to use |
 | --- | --- | --- |
 | masthead | The dash's top line: version, transport, REV, voice and the messaging pause | "header" for it |
-| summary strip | The line of BUSY, IDLE and SERVER TIME counts under the masthead | "summary" alone |
+| summary strip | The line under the masthead with the BUSY and IDLE counts, the UNKNOWN count when above 0, and the server's clock | "summary" alone |
 | transport | The dash's connection to Harold: `LIVE`, `STALE` and the like | — |
 | filter | The dash's search, which hides agent rows that don't match | — |
 | agent row | A row of the agent list for one agent | — |
