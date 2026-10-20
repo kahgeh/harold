@@ -415,13 +415,14 @@ pub(crate) fn say_in_phone_call_over(
     phone?.say_blocking(line, by)
 }
 
-/// Says `line` in the open call, the desk's or else the phone's, from a blocking thread, and
-/// returns once it has ended. `None` when Harold has no calls or no call is open: then it
-/// neither blocks nor needs a runtime.
+/// Says `line` in the open call at the Mac (the desk's), from a blocking thread, and returns
+/// once it has ended. `None` when Harold has no desk call or none is open: then it neither
+/// blocks nor needs a runtime. The phone's call is not tried here: it belongs to the
+/// `web_app` list, which `say_in_phone_call` is asked under, so a pane held off that list is
+/// never heard in it.
 pub(crate) fn say_in_open_call(line: &str, by: Speaker) -> Option<bool> {
     let desk = daemon_calls().map(|calls| calls as &dyn LineTaker);
-    let phone = PHONE_CALLS.get().map(|calls| calls.as_ref());
-    let calls: Vec<&dyn LineTaker> = desk.into_iter().chain(phone).collect();
+    let calls: Vec<&dyn LineTaker> = desk.into_iter().collect();
     say_in_first_open(&calls, line, by)
 }
 

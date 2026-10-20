@@ -279,7 +279,7 @@ impl ProductionDispatcher {
                 // Whether the app could not push the message and the pane is not on the
                 // away channel's list, so it went nowhere.
                 let held = Cell::new(false);
-                dispatch_away_message(
+                let outcome = dispatch_away_message(
                     delivery,
                     messaging_paused,
                     |pane_id| {
@@ -326,7 +326,12 @@ impl ProductionDispatcher {
                             self.environment.record_reply_target(source);
                         }
                     },
-                )
+                );
+                // A message held back was dropped, not delivered.
+                match outcome {
+                    Ok(DeliveryOutcome::Delivered) if held.get() => Ok(DeliveryOutcome::Skipped),
+                    other => other,
+                }
             }
             "SpokenLineRequested" => dispatch_spoken_line_with_app(
                 delivery,

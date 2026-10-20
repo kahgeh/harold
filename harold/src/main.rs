@@ -907,6 +907,11 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
     if telemetry.exporting() {
         crate::telemetry::register_phone_counters();
     }
+    if settings.notify.old_key_applied {
+        tracing::warn!(
+            "notify.away_messages_only_from is replaced by notify.chief and the channel lists"
+        );
+    }
     init_settings(settings);
     let cfg = get_settings();
 

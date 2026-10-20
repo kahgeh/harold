@@ -521,6 +521,9 @@ pub struct NotifySettings {
     /// Read only so that `validate` can report it.
     #[serde(default)]
     away_updates_only_from: Option<String>,
+    /// Whether `apply_old_key` used `away_messages_only_from`; `main` warns once logging is up.
+    #[serde(skip)]
+    pub old_key_applied: bool,
 }
 
 /// One way Harold reaches the user. Each has a list in `[notify]` under its key.
@@ -1081,11 +1084,7 @@ impl Settings {
             .get_table("notify")
             .map(|table| table.into_keys().collect::<Vec<_>>())
             .unwrap_or_default();
-        if apply_old_key(&mut settings.notify, &local_keys) {
-            warn!(
-                "notify.away_messages_only_from is replaced by notify.chief and the channel lists"
-            );
-        }
+        settings.notify.old_key_applied = apply_old_key(&mut settings.notify, &local_keys);
         Ok(Arc::new(settings))
     }
 
@@ -1495,6 +1494,7 @@ mod tests {
             .map(|table| table.into_keys().collect())
             .unwrap_or_default();
         let warned = super::apply_old_key(&mut settings.notify, &local_keys);
+        settings.notify.old_key_applied = warned;
         (settings, warned)
     }
 

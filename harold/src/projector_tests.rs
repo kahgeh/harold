@@ -1375,7 +1375,7 @@ async fn update_waits_behind_a_message_whose_send_fails_and_is_then_left_out() {
 }
 
 // ---------------------------------------------------------------------------
-// Rule B: the dispatcher reads the tracked agent panes from the snapshot hub
+// The channel lists: the dispatcher reads the tracked agent panes from the snapshot hub
 // ---------------------------------------------------------------------------
 
 const ONLY_FROM_CHIEF: &str = "[notify]\nchief = \"/work/chief-of-pods\"\nimessage = [\"/work/chief-of-pods\"]\nmachine_audio_output = [\"/work/chief-of-pods\"]";
@@ -1596,7 +1596,7 @@ async fn agent_that_starts_in_the_update_folder_is_seen_by_the_next_update() {
 }
 
 // ---------------------------------------------------------------------------
-// Rule B for requested messages: a pane outside the folder has its message dropped
+// The channel lists for requested messages: a pane outside the folder has its message dropped
 // ---------------------------------------------------------------------------
 
 fn message_from(pane_id: &str, text: &str) -> AwayMessageRequested {
@@ -4173,7 +4173,7 @@ async fn chief_message_the_app_cannot_push_is_dropped_when_the_chief_is_not_on_i
         "All pods are green"
     ))));
 
-    assert!(matches!(outcome, Ok(DeliveryOutcome::Delivered)));
+    assert!(matches!(outcome, Ok(DeliveryOutcome::Skipped)));
     assert!(with.away.sends().is_empty());
     assert!(with.environment.away_messages().is_empty());
     assert!(with.environment.reply_targets().is_empty());
