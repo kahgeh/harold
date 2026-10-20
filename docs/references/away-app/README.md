@@ -89,12 +89,12 @@ Set both in each Mac's own `local.toml`, so the two Macs' apps differ on the hom
 The section also needs `[notify] chief` (the default `"chief-of-pods"` will do), because that entry decides which agent is the chief. The chief reaches the app only when its folder is on `[notify] web_app`.
 
 - **Absent:** Harold serves nothing, listens on no port, and every message reaches the phone as before.
-- **Invalid:** a `listen` that is not a loopback address and port, an empty `allowed_login`, no `notify.chief`, an `app_name` that is empty, over 30 characters or holds a line break, or an `icon` that cannot be read, is not a square PNG of 180 to 1024 pixels a side or is over 1 MB stops Harold at start with an error naming the key. `--check-config` fails too, but prints only `invalid configuration`; start Harold to see which key is wrong.
+- **Invalid:** a `listen` that is not a loopback address and port, an empty `allowed_login`, no `notify.chief`, an `app_name` that is empty, over 30 characters or holds a control character, or an `icon` that cannot be read, is not a square PNG of 180 to 1024 pixels a side or is over 1 MB stops Harold at start with an error naming the key. `--check-config` fails too, but prints only `invalid configuration`; start Harold to see which key is wrong.
 - **Cannot start:** when Harold cannot listen on the address or read its key, it logs `web app unavailable` with the address or the key's path, and runs without the app. Messages then reach the phone through iMessage.
 
 ### Adding the app to the home screen
 
-On the iPhone, open `https://pasm4mbp.<tailnet>.ts.net/` in Safari, tap the Share button, and choose **Add to Home Screen**. The icon is called by `app_name`, or **Chief** when none is set, and shows the `icon` file when one is set. iOS saves the name and icon when you add the app and does not read them again. To see a changed name or icon: delete the app from the home screen, add it again from Safari, and tap **Turn on alerts** again, because deleting the app also deletes its sign-up for pushes. Open the app from that icon from now on: iOS delivers pushes only to a web app opened from the home screen, so a Safari tab does not show **Turn on alerts** at all.
+On the iPhone, open `https://pasm4mbp.<tailnet>.ts.net/` in Safari, tap the Share button, and choose **Add to Home Screen**. The name under the icon is `app_name`, or **Chief** when none is set, and the icon shows the `icon` file when one is set. iOS saves the name and icon when you add the app and does not read them again. To see a changed name or icon: delete the app from the home screen, add it again from Safari, and tap **Turn on alerts** again, because deleting the app also deletes its sign-up for pushes. Open the app from that icon from now on: iOS delivers pushes only to a web app opened from the home screen, so a Safari tab does not show **Turn on alerts** at all.
 
 ### Turning on push
 
