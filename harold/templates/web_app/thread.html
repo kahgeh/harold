@@ -14,18 +14,32 @@
 <script type="module" src="/static/datastar-1.0.2.js"></script>
 <script src="/static/alerts.js" defer></script>
 <script src="/static/call.js" defer></script>
+<script src="/static/pages.js" defer></script>
 </head>
 <body>
 <header class="bar top">
+<div class="row thread-row">
 <h1>{{ app_name }}</h1>
+<a href="#todos" id="to-todos" class="todos-button">Todos<span id="todo-count" class="todo-count"></span></a>
 <button type="button" id="alerts">Turn on alerts</button>
-{% if call_set_up %}<button type="button" id="call-start">📞 Call</button>{% else %}<button type="button" id="call-start" disabled>Voice is not set up on the Mac</button>{% endif %}
+{% if call_set_up %}<button type="button" id="call-start"><svg class="phone" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M6.6 10.8a15 15 0 0 0 6.6 6.6l2.2-2.2a1 1 0 0 1 1-.25 11 11 0 0 0 3.6.6 1 1 0 0 1 1 1V20a1 1 0 0 1-1 1A17 17 0 0 1 3 4a1 1 0 0 1 1-1h3.5a1 1 0 0 1 1 1c0 1.25.2 2.45.6 3.6a1 1 0 0 1-.25 1z" fill="currentColor"/></svg> Call</button>{% else %}<button type="button" id="call-start" disabled>Voice is not set up on the Mac</button>{% endif %}
+</div>
+<div class="row todos-row">
+<a href="#thread" id="to-thread" class="back-button"><svg viewBox="0 0 12 20" width="12" height="20" aria-hidden="true"><path d="M10 2L2 10l8 8" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>{{ app_name }}</a>
+<span id="new-indicator" class="new-indicator" hidden><svg viewBox="0 0 20 18" width="16" height="14" aria-hidden="true"><path d="M3 2h14a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H8l-4 4v-4H3a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1z" fill="currentColor"/></svg><span id="new-count"></span></span>
+<h2>Todos</h2>
+</div>
 </header>
 <p id="call-notice" class="call-notice" role="status" hidden></p>
-<main>
+<div id="pages">
+<main id="thread" class="page">
 {% include "web_app/messages.html" %}
 {{ responding|safe }}
+<button type="button" id="new-message" class="new-message" hidden>New message ↓</button>
 </main>
+<section id="todos" class="page"></section>
+</div>
+<nav id="page-dots" aria-hidden="true"><i class="dot"></i><i class="dot"></i></nav>
 <form id="reply" class="bar bottom" data-indicator:sending data-on:submit="@post('/replies')">
 <input type="text" data-bind:reply maxlength="1000" placeholder="Reply to the chief" aria-label="Reply to the chief" autocomplete="off">
 <button type="submit" data-attr:disabled="$sending">Send</button>

@@ -634,3 +634,52 @@ async fn a_link_renders_as_a_safe_anchor_and_markup_stays_text() {
         "{body}"
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_thread_page_holds_both_pages_both_headers_and_the_page_dots() {
+    let directory = TestDirectory::new();
+    let identity = WebAppIdentity {
+        name: "Chief M4".into(),
+        icon: None,
+    };
+    let server = TestServer::serve_as(directory.store().await, identity).await;
+
+    let page = get_with_login(&server.url("/")).await.text().await.unwrap();
+
+    assert!(page.contains("<h1>Chief M4</h1>"), "{page}");
+    assert!(
+        page.contains("</svg>Chief M4</a>"),
+        "the back button: {page}"
+    );
+    for wanted in [
+        r##"href="#todos""##,
+        r##"href="#thread""##,
+        r#"id="todo-count""#,
+        r#"id="new-count""#,
+        r#"id="pages""#,
+        r#"<main id="thread""#,
+        r#"<section id="todos""#,
+        r#"id="page-dots""#,
+        r#"id="new-message""#,
+        r#"<script src="/static/pages.js" defer></script>"#,
+        "<h2>Todos</h2>",
+    ] {
+        assert!(page.contains(wanted), "{wanted}: {page}");
+    }
+    let pages = page.find(r#"id="pages""#).unwrap();
+    let dots = page.find(r#"id="page-dots""#).unwrap();
+    let reply = page.find(r#"id="reply""#).unwrap();
+    assert!(pages < dots && dots < reply, "dots sit above the reply box");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pages_js_is_served_as_javascript() {
+    let directory = TestDirectory::new();
+    let server = TestServer::serve(directory.store().await).await;
+
+    let response = get_with_login(&server.url("/static/pages.js")).await;
+
+    assert_eq!(response.status(), 200);
+    assert_eq!(response.headers()["content-type"], "text/javascript");
+    assert!(response.text().await.unwrap().contains("on-todos"));
+}

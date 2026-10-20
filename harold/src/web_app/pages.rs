@@ -18,6 +18,7 @@ pub(crate) const CONTENT_SECURITY_POLICY: &str = "default-src 'none'; script-src
 const APP_CSS: &[u8] = include_bytes!("../../static/web_app/app.css");
 const ALERTS_JS: &[u8] = include_bytes!("../../static/web_app/alerts.js");
 const SW_JS: &[u8] = include_bytes!("../../static/web_app/sw.js");
+const PAGES_JS: &[u8] = include_bytes!("../../static/web_app/pages.js");
 const CALL_JS: &[u8] = include_bytes!("../../static/web_app/call.js");
 const CALL_WORKLET_JS: &[u8] = include_bytes!("../../static/web_app/call-worklet.js");
 
@@ -322,6 +323,7 @@ pub(crate) async fn get_static(
         "app.css" => ("text/css", APP_CSS.to_vec()),
         "alerts.js" => (JAVASCRIPT, ALERTS_JS.to_vec()),
         "call.js" => (JAVASCRIPT, CALL_JS.to_vec()),
+        "pages.js" => (JAVASCRIPT, PAGES_JS.to_vec()),
         "call-worklet.js" => (JAVASCRIPT, CALL_WORKLET_JS.to_vec()),
         "sw.js" => (JAVASCRIPT, SW_JS.to_vec()),
         "datastar-1.0.2.js" => (JAVASCRIPT, DATASTAR_JS.to_vec()),

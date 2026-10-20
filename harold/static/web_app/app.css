@@ -92,16 +92,157 @@ button[hidden] {
 }
 
 .top {
-  justify-content: space-between;
   padding: max(8px, env(safe-area-inset-top)) 12px 8px 16px;
   border-bottom: 1px solid var(--surface-4);
 }
 
-.top h1 {
+.row {
+  display: flex;
   flex: 1;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.top h1,
+.top h2 {
   margin: 0;
   font-size: 17px;
   font-weight: 600;
+}
+
+.top h1 {
+  flex: 1;
+}
+
+.todos-row {
+  display: none;
+}
+
+body.on-todos .thread-row {
+  display: none;
+}
+
+body.on-todos .todos-row {
+  display: flex;
+}
+
+.todos-row h2 {
+  flex: 1;
+  text-align: center;
+}
+
+.todos-button,
+.back-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: var(--target);
+  padding: 0 4px;
+  color: var(--brand);
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.todo-count {
+  color: var(--brand);
+}
+
+.todo-count:not(:empty)::before {
+  content: " ";
+}
+
+.phone {
+  vertical-align: -2px;
+}
+
+.new-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.new-indicator[hidden] {
+  display: none;
+}
+
+/* The two pages side by side: the browser's own scrolling swipes between them. */
+
+#pages {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scroll-snap-type: x mandatory;
+  scrollbar-width: none;
+}
+
+#pages::-webkit-scrollbar {
+  display: none;
+}
+
+.page {
+  flex: 0 0 100%;
+  min-width: 0;
+  overflow-y: auto;
+  scroll-snap-align: start;
+  scroll-snap-stop: always;
+}
+
+#page-dots {
+  display: flex;
+  justify-content: center;
+  gap: 8px;
+  padding: 6px 0 4px;
+  background: var(--surface-1);
+}
+
+.dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--surface-4);
+}
+
+body:not(.on-todos) .dot:first-child,
+body.on-todos .dot:last-child {
+  background: var(--text-1);
+}
+
+body.on-todos > #reply {
+  display: none;
+}
+
+.new-message {
+  position: sticky;
+  bottom: 8px;
+  display: block;
+  margin: 0 auto 8px;
+  min-height: 36px;
+  box-shadow: 0 1px 4px rgb(0 0 0 / 0.3);
+}
+
+.responding {
+  min-height: 0;
+  padding: 0 12px;
+}
+
+.dots {
+  display: inline-flex;
+  gap: 4px;
+  padding: 10px 12px;
+  border-radius: 14px;
+  background: var(--surface-3);
+}
+
+.dots i {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--muted);
 }
 
 .bottom {
@@ -124,11 +265,6 @@ button[hidden] {
 }
 
 /* The thread, oldest at the top. */
-
-main {
-  flex: 1;
-  overflow-y: auto;
-}
 
 #messages {
   display: flex;
@@ -196,7 +332,8 @@ main {
 }
 
 body.in-call > .top,
-body.in-call > main,
+body.in-call > #pages,
+body.in-call > #page-dots,
 body.in-call > #reply {
   display: none;
 }
