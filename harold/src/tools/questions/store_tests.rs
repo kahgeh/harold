@@ -24,6 +24,8 @@ fn question(id: &str) -> Question {
         spec: "s".into(),
         sha: "abc".into(),
         link: "https://example.com".into(),
+        title: String::new(),
+        steps: vec![],
         intro: "intro".into(),
         decisions: vec![Decision {
             ask: "Which?".into(),
@@ -40,6 +42,7 @@ fn question(id: &str) -> Question {
 
 fn an_answer() -> Answer {
     Answer {
+        ticked: 0,
         kind: Kind::Answer,
         picks: vec![Picked {
             ask: "Which?".into(),

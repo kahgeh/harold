@@ -50,6 +50,8 @@ fn kind_from_proto(kind: i32) -> Result<Kind, Status> {
         Ok(pb::AnswerKind::Revise) => Ok(Kind::Revise),
         Ok(pb::AnswerKind::Reject) => Ok(Kind::Reject),
         Ok(pb::AnswerKind::FreeText) => Ok(Kind::FreeText),
+        Ok(pb::AnswerKind::Done) => Ok(Kind::Done),
+        Ok(pb::AnswerKind::Ignore) => Ok(Kind::Ignore),
         Ok(pb::AnswerKind::Unspecified) | Err(_) => Err(invalid("kind")),
     }
 }
@@ -117,6 +119,7 @@ impl<S: QuestionStore> QuestionService for QuestionToolService<S> {
                 question: Some(schema::to_proto(&listed.question)),
                 version: listed.version,
                 deferred: listed.deferred,
+                ticked: Vec::new(),
             })
             .collect();
         let waiting = u32::try_from(questions.len()).unwrap_or(u32::MAX);
@@ -146,7 +149,7 @@ impl<S: QuestionStore> QuestionService for QuestionToolService<S> {
         } = request.into_inner();
         let kind = kind_from_proto(kind)?;
         let resolve =
-            move |question: &schema::Question| schema::resolve_picks(question, kind, &picks, &note);
+            move |question: &schema::Question| schema::resolve(question, kind, &picks, &note);
         self.store
             .answer(&id, version, send_now, resolve, now_ms())
             .await
@@ -170,6 +173,14 @@ impl<S: QuestionStore> QuestionService for QuestionToolService<S> {
             .map_err(refused)?;
         self.written();
         Ok(Response::new(pb::DeferQuestionResponse {}))
+    }
+
+    async fn tick_step(
+        &self,
+        _request: Request<pb::TickStepRequest>,
+    ) -> Result<Response<pb::TickStepResponse>, Status> {
+        // Task 3 replaces this.
+        Err(Status::unimplemented("tick_step"))
     }
 }
 

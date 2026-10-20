@@ -1335,9 +1335,12 @@ mod question_tests {
                 link: "https://example.com/spec".into(),
                 intro: "We need a choice.".into(),
                 decisions,
+                title: String::new(),
+                steps: vec![],
             }),
             version,
             deferred,
+            ticked: vec![],
         }
     }
 
@@ -1389,6 +1392,7 @@ mod question_tests {
                     question: None,
                     version: 1,
                     deferred: false,
+                    ticked: vec![],
                 },
                 hostile,
             ],

@@ -734,6 +734,8 @@ fn question_from_json(text: &str) -> Result<questions::Question, String> {
             .iter()
             .map(decision_from_json)
             .collect::<Result<_, _>>()?,
+        title: String::new(),
+        steps: Vec::new(),
     })
 }
 

@@ -289,6 +289,8 @@ fn a_free_pick_on_an_early_decision_renders_in_place() {
         sha: "abc".into(),
         link: "https://x".into(),
         intro: "i".into(),
+        title: String::new(),
+        steps: vec![],
         decisions: ["First?", "Second?"]
             .map(|ask| pb::Decision {
                 ask: ask.into(),
@@ -309,6 +311,7 @@ fn a_free_pick_on_an_early_decision_renders_in_place() {
         free,
     };
     let answer = schema::Answer {
+        ticked: 0,
         kind: Kind::FreeText,
         picks: vec![
             picked("First?", "my\nwords", true),
@@ -458,11 +461,13 @@ async fn revise_reject_and_free_text_share_the_line_with_newlines_as_spaces() {
 fn a_note_with_a_pipe_or_quote_is_typed_as_is() {
     let note = "a | b \"quoted\"";
     let revise = schema::Answer {
+        ticked: 0,
         kind: Kind::Revise,
         picks: vec![],
         note: note.into(),
     };
     let plain = schema::Answer {
+        ticked: 0,
         kind: Kind::Answer,
         picks: vec![schema::Picked {
             ask: "Which?".into(),

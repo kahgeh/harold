@@ -32,6 +32,8 @@ fn proto() -> pb::Question {
         sha: "d84bf386a2a5".into(),
         link: "https://claude.ai/artifact/x".into(),
         intro: "intro".into(),
+        title: String::new(),
+        steps: vec![],
         decisions: vec![
             decision("First?", vec![option("a"), option("b"), free_option("z")]),
             decision("Second?", vec![option("a"), option("b")]),
@@ -204,4 +206,154 @@ fn picks_must_fit_the_question() {
         resolve_picks(&q, Kind::Revise, &[pick(5, "a", "")], "n").unwrap_err(),
         "picks"
     );
+}
+
+fn step(text: &str, detail: &str) -> pb::Step {
+    pb::Step {
+        text: text.into(),
+        detail: detail.into(),
+    }
+}
+
+fn instructions_proto() -> pb::Question {
+    pb::Question {
+        id: "I1".into(),
+        product: "harold".into(),
+        spec: String::new(),
+        sha: String::new(),
+        link: String::new(),
+        intro: "Do these".into(),
+        decisions: vec![],
+        title: "Set up the thing".into(),
+        steps: vec![step("First", "detail one"), step("Second", "")],
+    }
+}
+
+#[test]
+fn instructions_from_proto_keep_title_and_steps() {
+    let q = from_proto(instructions_proto()).unwrap();
+    assert!(q.is_instructions());
+    assert_eq!(q.title, "Set up the thing");
+    assert_eq!(q.steps.len(), 2);
+    assert_eq!(q.steps[0].text, "First");
+    assert_eq!(q.steps[0].detail, "detail one");
+    assert!(q.decisions.is_empty());
+    assert!(!from_proto(proto()).unwrap().is_instructions());
+}
+
+#[test]
+fn question_and_steps_together_are_refused() {
+    let mut p = proto();
+    p.steps = vec![step("First", "")];
+    assert_eq!(from_proto(p).unwrap_err(), "steps");
+    let mut p = instructions_proto();
+    p.decisions = proto().decisions;
+    assert_eq!(from_proto(p).unwrap_err(), "steps");
+}
+
+#[test]
+fn neither_decisions_nor_steps_is_refused() {
+    let mut p = instructions_proto();
+    p.steps.clear();
+    assert_eq!(from_proto(p).unwrap_err(), "decisions");
+}
+
+#[test]
+fn instructions_need_a_title() {
+    let mut p = instructions_proto();
+    p.title = "  ".into();
+    assert_eq!(from_proto(p).unwrap_err(), "title");
+    let mut p = instructions_proto();
+    p.title = "x".repeat(2000);
+    assert_eq!(from_proto(p).unwrap_err(), "title");
+}
+
+#[test]
+fn instructions_accept_empty_spec_sha_link_but_a_set_link_must_be_http() {
+    assert!(from_proto(instructions_proto()).is_ok());
+    let mut p = instructions_proto();
+    p.link = "https://claude.ai/x".into();
+    p.spec = "s".into();
+    p.sha = "abc".into();
+    assert!(from_proto(p).is_ok());
+    let mut p = instructions_proto();
+    p.link = "ftp://x".into();
+    assert_eq!(from_proto(p).unwrap_err(), "link");
+}
+
+#[test]
+fn step_rules() {
+    let mut p = instructions_proto();
+    p.steps = (0..20).map(|i| step(&format!("s{i}"), "")).collect();
+    assert!(from_proto(p).is_ok());
+    let mut p = instructions_proto();
+    p.steps = (0..21).map(|i| step(&format!("s{i}"), "")).collect();
+    assert_eq!(from_proto(p).unwrap_err(), "steps");
+    let mut p = instructions_proto();
+    p.steps[1].text = "  ".into();
+    assert_eq!(from_proto(p).unwrap_err(), "steps.2.text");
+    let mut p = instructions_proto();
+    p.steps[0].text = "x".repeat(2000);
+    assert_eq!(from_proto(p).unwrap_err(), "steps.1.text");
+    let mut p = instructions_proto();
+    p.steps[0].detail = "x".repeat(2000);
+    assert_eq!(from_proto(p).unwrap_err(), "steps.1.detail");
+    let mut p = instructions_proto();
+    p.intro = "x".repeat(2000);
+    assert_eq!(from_proto(p).unwrap_err(), "intro");
+}
+
+#[test]
+fn to_proto_round_trips_instructions() {
+    let q = from_proto(instructions_proto()).unwrap();
+    assert_eq!(to_proto(&q), instructions_proto());
+}
+
+#[test]
+fn a_stored_old_body_without_steps_loads() {
+    let body = r#"{"id":"Q1","product":"p","spec":"s","sha":"a","link":"https://x","intro":"","decisions":[{"ask":"A?","options":[{"key":"a","label":"A","impact":"","suggested":false,"free":false}]}]}"#;
+    let q: Question = serde_json::from_str(body).unwrap();
+    assert_eq!(q.title, "");
+    assert!(q.steps.is_empty());
+    assert!(!q.is_instructions());
+    let answer: Answer = serde_json::from_str(r#"{"kind":"Answer","picks":[],"note":""}"#).unwrap();
+    assert_eq!(answer.ticked, 0);
+}
+
+#[test]
+fn resolve_done_and_ignore_for_instructions() {
+    let q = from_proto(instructions_proto()).unwrap();
+    let done = resolve(&q, Kind::Done, &[], "").unwrap();
+    assert_eq!(done.kind, Kind::Done);
+    assert!(done.picks.is_empty());
+    assert_eq!(
+        resolve_instructions(&q, Kind::Ignore, &[], "")
+            .unwrap()
+            .kind,
+        Kind::Ignore
+    );
+}
+
+#[test]
+fn resolve_refuses_done_for_a_question_and_answer_for_instructions() {
+    let q = from_proto(proto()).unwrap();
+    assert_eq!(resolve(&q, Kind::Done, &[], "").unwrap_err(), "kind");
+    assert_eq!(resolve(&q, Kind::Ignore, &[], "").unwrap_err(), "kind");
+    assert_eq!(resolve_picks(&q, Kind::Done, &[], "").unwrap_err(), "kind");
+    let good = [pick(0, "a", ""), pick(1, "b", "")];
+    assert!(resolve(&q, Kind::Answer, &good, "").is_ok());
+    let i = from_proto(instructions_proto()).unwrap();
+    for kind in [Kind::Answer, Kind::Revise, Kind::Reject, Kind::FreeText] {
+        assert_eq!(resolve(&i, kind, &[], "n").unwrap_err(), "kind");
+    }
+}
+
+#[test]
+fn done_with_picks_or_note_is_refused() {
+    let i = from_proto(instructions_proto()).unwrap();
+    assert_eq!(
+        resolve(&i, Kind::Done, &[pick(0, "a", "")], "").unwrap_err(),
+        "picks"
+    );
+    assert_eq!(resolve(&i, Kind::Ignore, &[], "why").unwrap_err(), "note");
 }

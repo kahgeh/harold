@@ -106,6 +106,8 @@ fn answer_part(id: &str, question: &Question, answer: &Answer) -> String {
     let id = clean(id);
     let spec = clean(&question.spec);
     match answer.kind {
+        // Task 3 words the instructions parts.
+        Kind::Done | Kind::Ignore => format!("{id} {spec}: {:?}", answer.kind),
         Kind::Revise => format!("{id} {spec}: revise \"{}\"", clean(&answer.note)),
         Kind::Reject => format!("{id} {spec}: reject \"{}\"", clean(&answer.note)),
         Kind::Answer | Kind::FreeText => {

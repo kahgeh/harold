@@ -1,8 +1,11 @@
 // The question queue: Harold's first tool.
 //
+// The Question message holds a question or instructions: a question has
+// decisions, instructions have a title and numbered steps, never both.
+//
 // The chief of pods calls:
-//   PutQuestion      adds a question, or replaces one with the same id (the
-//                    version rises and the question is waiting again).
+//   PutQuestion      adds a question or instructions, or replaces one with the
+//                    same id (the version rises and it is waiting again).
 //   DismissQuestion  withdraws a question, with a reason the dash shows.
 //   ReorderQuestions puts the listed waiting or deferred ids first, in order.
 //
@@ -11,10 +14,12 @@
 //                    and recently dismissed ids with their reasons.
 //   AnswerQuestion   answers a question at the version the dash saw.
 //   DeferQuestion    sets a question aside; it returns to waiting once a batch is typed and nothing else waits.
+//   TickStep         ticks or unticks one step of waiting instructions.
 //
 // Refusals:
 //   InvalidArgument      message "invalid <field>" for a broken rule; nothing
-//                        is stored.
+//                        is stored. `invalid step` is a step number that is 0
+//                        or past the last step, or a tick on a question.
 //   FailedPrecondition   message "version_changed" (the question changed since
 //                        the dash read it) or "not_waiting" (it is no longer
 //                        waiting for an answer).
@@ -32,6 +37,7 @@ service QuestionService {
   rpc ListQuestions(ListQuestionsRequest) returns (ListQuestionsResponse);
   rpc AnswerQuestion(AnswerQuestionRequest) returns (AnswerQuestionResponse);
   rpc DeferQuestion(DeferQuestionRequest) returns (DeferQuestionResponse);
+  rpc TickStep(TickStepRequest) returns (TickStepResponse);
 }
 
 message DecisionOption {
@@ -47,6 +53,11 @@ message Decision {
   repeated DecisionOption options = 2;
 }
 
+message Step {
+  string text = 1;
+  string detail = 2;
+}
+
 message Question {
   string id = 1;
   string product = 2;
@@ -55,6 +66,9 @@ message Question {
   string link = 5;
   string intro = 6;
   repeated Decision decisions = 7;
+  // Instructions only: the title and the numbered steps.
+  string title = 8;
+  repeated Step steps = 9;
 }
 
 message PutQuestionRequest {
@@ -85,6 +99,8 @@ message ListedQuestion {
   Question question = 1;
   uint32 version = 2;
   bool deferred = 3;
+  // Instructions only: the step numbers (from 1) that are ticked.
+  repeated uint32 ticked = 4;
 }
 
 message Dismissed {
@@ -104,6 +120,9 @@ enum AnswerKind {
   ANSWER_KIND_REVISE = 2;
   ANSWER_KIND_REJECT = 3;
   ANSWER_KIND_FREE_TEXT = 4;
+  // Instructions only.
+  ANSWER_KIND_DONE = 5;
+  ANSWER_KIND_IGNORE = 6;
 }
 
 // One choice for one decision. `decision` counts from 0; `text` is set only
@@ -131,3 +150,14 @@ message DeferQuestionRequest {
 }
 
 message DeferQuestionResponse {}
+
+// Ticks (`ticked` true) or unticks one step, counted from 1, of waiting
+// instructions at the version the dash saw.
+message TickStepRequest {
+  string id = 1;
+  uint32 version = 2;
+  uint32 step = 3;
+  bool ticked = 4;
+}
+
+message TickStepResponse {}

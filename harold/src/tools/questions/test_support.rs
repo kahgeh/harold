@@ -434,6 +434,8 @@ pub(super) fn question_with(
         sha: sha.into(),
         link: "https://example.com/spec".into(),
         intro: "An intro.".into(),
+        title: String::new(),
+        steps: vec![],
         decisions,
     }
 }

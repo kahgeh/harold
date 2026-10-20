@@ -159,6 +159,8 @@ fn question(id: &str) -> pb::Question {
         sha: "abc123".into(),
         link: "https://example.com/spec".into(),
         intro: "An intro.".into(),
+        title: String::new(),
+        steps: vec![],
         decisions: vec![pb::Decision {
             ask: "Which?".into(),
             options: vec![pb::DecisionOption {
