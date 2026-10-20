@@ -775,6 +775,15 @@ fn print_help() {
     println!("                          Withdraw a question, with a reason the dash shows");
     println!("  harold tool questions order ID...   Put the listed questions first, in order");
     println!("  harold tool questions list          List the waiting questions");
+    println!("  harold tool watch start NAME --skill SKILL --every MINUTES --for MINUTES");
+    println!("                          [--report-to chief|self] [--run-budget USD] [--every-run]");
+    println!(
+        "                          Run a skill from ./.claude/skills on a schedule and report"
+    );
+    println!("  harold tool watch stop NAME   Stop a watch at once; types no closing line");
+    println!(
+        "  harold tool watch list        List the watches running or ended today, with the spend"
+    );
     println!("  harold tool backlog put PRODUCT");
     println!("                          Add or replace an item from JSON on stdin");
     println!("  harold tool backlog rank PRODUCT ID...  Put the listed items first, in order");

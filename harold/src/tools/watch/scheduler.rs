@@ -655,7 +655,7 @@ pub(super) async fn run(scheduler: Arc<Scheduler>, mut shutdown: signal::Receive
 
 #[cfg(test)]
 #[path = "scheduler_tests.rs"]
-mod tests;
+pub(super) mod tests;
 
 #[cfg(test)]
 #[path = "observability_tests.rs"]

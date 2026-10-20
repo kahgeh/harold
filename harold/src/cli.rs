@@ -13,6 +13,8 @@ use harold_api::tools::backlog::v1 as backlog_api;
 use harold_api::tools::backlog::v1::backlog_service_client::BacklogServiceClient;
 use harold_api::tools::questions::v1 as questions;
 use harold_api::tools::questions::v1::question_service_client::QuestionServiceClient;
+use harold_api::tools::watch::v1 as watch_api;
+use harold_api::tools::watch::v1::watch_service_client::WatchServiceClient;
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Mode {
@@ -201,6 +203,84 @@ pub(crate) enum ToolCommand {
     QuestionsOrder { ids: Vec<String> },
     QuestionsList,
     Backlog(BacklogCommand),
+    Watch(WatchCommand),
+}
+
+const WATCH_USAGE_LINE: &str = "invalid argument: usage is harold tool watch start NAME --skill SKILL --every MINUTES --for MINUTES [--report-to chief|self] [--run-budget USD] [--every-run] | stop NAME | list";
+
+/// A `harold tool watch` command. The numbers stay text here: the daemon checks the
+/// ranges, and the CLI only needs them to be numbers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum WatchCommand {
+    Start {
+        name: String,
+        skill: String,
+        every_minutes: u32,
+        for_minutes: u32,
+        report_to: Option<String>,
+        run_budget_usd: Option<String>,
+        every_run: bool,
+    },
+    Stop {
+        name: String,
+    },
+    List,
+}
+
+fn parse_watch(args: &[&str]) -> Result<WatchCommand, String> {
+    match args {
+        ["list"] => Ok(WatchCommand::List),
+        ["stop", name] => Ok(WatchCommand::Stop {
+            name: (*name).into(),
+        }),
+        ["start", name, flags @ ..] => parse_watch_start(name, flags),
+        _ => Err(WATCH_USAGE_LINE.into()),
+    }
+}
+
+fn parse_watch_start(name: &str, flags: &[&str]) -> Result<WatchCommand, String> {
+    let (mut skill, mut every, mut minutes) = (None, None, None);
+    let (mut report_to, mut budget) = (None, None);
+    let mut every_run = false;
+    let mut rest = flags.iter();
+    while let Some(flag) = rest.next() {
+        let slot = match *flag {
+            "--every-run" if !every_run => {
+                every_run = true;
+                continue;
+            }
+            "--skill" => &mut skill,
+            "--every" => &mut every,
+            "--for" => &mut minutes,
+            "--report-to" => &mut report_to,
+            "--run-budget" => &mut budget,
+            _ => return Err(WATCH_USAGE_LINE.into()),
+        };
+        let value = rest.next().ok_or_else(|| WATCH_USAGE_LINE.to_string())?;
+        if slot.replace((*value).to_string()).is_some() {
+            return Err(WATCH_USAGE_LINE.into());
+        }
+    }
+    let number = |value: Option<String>, field: &str| -> Result<u32, String> {
+        value
+            .ok_or_else(|| WATCH_USAGE_LINE.to_string())?
+            .parse::<u32>()
+            .map_err(|_| format!("invalid {field}"))
+    };
+    if let Some(text) = &budget
+        && !text.parse::<f64>().is_ok_and(f64::is_finite)
+    {
+        return Err("invalid run_budget_usd".into());
+    }
+    Ok(WatchCommand::Start {
+        name: name.into(),
+        skill: skill.ok_or_else(|| WATCH_USAGE_LINE.to_string())?,
+        every_minutes: number(every, "every_minutes")?,
+        for_minutes: number(minutes, "for_minutes")?,
+        report_to,
+        run_budget_usd: budget,
+        every_run,
+    })
 }
 
 const BACKLOG_USAGE_LINE: &str = "invalid argument: usage is harold tool backlog put|rank|remove|list|note|notes|queue|import|export";
@@ -457,6 +537,7 @@ fn parse_backlog(args: &[&str]) -> Result<BacklogCommand, String> {
 fn parse_tool(args: &[&str]) -> Result<ToolCommand, String> {
     match args {
         ["backlog", rest @ ..] => parse_backlog(rest).map(ToolCommand::Backlog),
+        ["watch", rest @ ..] => parse_watch(rest).map(ToolCommand::Watch),
         ["questions", "put"] => Ok(ToolCommand::QuestionsPut),
         ["questions", "list"] => Ok(ToolCommand::QuestionsList),
         ["questions", "dismiss", id, "--reason", reason] => Ok(ToolCommand::QuestionsDismiss {
@@ -822,7 +903,154 @@ pub(crate) async fn tool(
         )
         .await;
     }
+    if let ToolCommand::Watch(watch) = command {
+        let folder = std::env::current_dir().map_err(|_| "invalid folder".to_string())?;
+        return watch_within(
+            address,
+            watch,
+            &folder,
+            crate::telemetry::local_offset(),
+            CALL_DEADLINE,
+        )
+        .await;
+    }
     tool_within(address, command, stdin, CALL_DEADLINE).await
+}
+
+/// The line printed for a refusal from the watch service. `skill` and `name` are the
+/// caller's.
+fn watch_refusal_line(status: &tonic::Status, command: &WatchCommand) -> String {
+    let subject = match command {
+        WatchCommand::Start { name, .. } | WatchCommand::Stop { name } => name.as_str(),
+        WatchCommand::List => "",
+    };
+    match (status.code(), status.message()) {
+        (tonic::Code::Unimplemented, _) => "the Harold daemon does not serve watches".into(),
+        (tonic::Code::NotFound, "unknown_skill") => match command {
+            WatchCommand::Start { skill, .. } => format!("unknown skill {skill}"),
+            _ => "unknown skill".into(),
+        },
+        (tonic::Code::NotFound, "unknown_watch") => format!("unknown watch {subject}"),
+        (tonic::Code::FailedPrecondition, "not_running") => format!("{subject} is not running"),
+        (tonic::Code::FailedPrecondition, "too_many_watches") => "too many watches".into(),
+        (tonic::Code::FailedPrecondition, "daily_budget_spent") => "daily budget spent".into(),
+        _ if status.message().is_empty() => "the Harold daemon refused the call".into(),
+        _ => status.message().to_string(),
+    }
+}
+
+fn plural(count: u32, one: &str, many: &str) -> String {
+    format!("{count} {}", if count == 1 { one } else { many })
+}
+
+fn watch_time(ms: i64, offset: time::UtcOffset) -> String {
+    let moment = time::OffsetDateTime::from_unix_timestamp(ms / 1000)
+        .unwrap_or(time::OffsetDateTime::UNIX_EPOCH)
+        .to_offset(offset);
+    format!("{:02}:{:02}", moment.hour(), moment.minute())
+}
+
+fn watch_list_line(watch: &watch_api::Watch, offset: time::UtcOffset) -> String {
+    let counts = format!(
+        "{}, {}, ${:.2}",
+        plural(watch.runs, "run", "runs"),
+        plural(watch.reports, "report", "reports"),
+        watch.cost_usd
+    );
+    if watch.running {
+        return format!(
+            "{} running in {} until {}, {counts}",
+            watch.name,
+            watch.folder,
+            watch_time(watch.ends_at_ms, offset)
+        );
+    }
+    let why = match watch.stop_reason.as_str() {
+        "ended" => "time was up",
+        "stopped" => "stopped",
+        "daily_budget_spent" => "daily budget spent",
+        "runs_failing" => "3 runs in a row failed",
+        other => other,
+    };
+    format!("{} ended ({why}) in {}, {counts}", watch.name, watch.folder)
+}
+
+/// Runs a `harold tool watch` command from `folder`, the caller's working directory.
+/// `Ok` is the text to print; `Err` the one line.
+pub(crate) async fn watch_within(
+    address: &str,
+    command: &WatchCommand,
+    folder: &std::path::Path,
+    offset: time::UtcOffset,
+    wait: Duration,
+) -> Result<String, String> {
+    call_within(CALL_DEADLINE, wait, async {
+        let mut client = WatchServiceClient::connect(format!("http://{address}"))
+            .await
+            .map_err(|_| "the Harold daemon is not reachable".to_string())?;
+        let refused = |status: tonic::Status| watch_refusal_line(&status, command);
+        match command {
+            WatchCommand::Start {
+                name,
+                skill,
+                every_minutes,
+                for_minutes,
+                report_to,
+                run_budget_usd,
+                every_run,
+            } => {
+                let started = client
+                    .start_watch(watch_api::StartWatchRequest {
+                        name: name.clone(),
+                        folder: folder.to_string_lossy().into_owned(),
+                        skill: skill.clone(),
+                        every_minutes: *every_minutes,
+                        for_minutes: *for_minutes,
+                        report_to: report_to.clone().unwrap_or_default(),
+                        run_budget_usd: run_budget_usd
+                            .as_deref()
+                            .and_then(|text| text.parse().ok())
+                            .unwrap_or(0.0),
+                        every_run: *every_run,
+                    })
+                    .await
+                    .map_err(refused)?
+                    .into_inner();
+                Ok(format!(
+                    "started {} in {} until {}, every {every_minutes} minutes, reporting to {}",
+                    started.name,
+                    folder.display(),
+                    watch_time(started.ends_at_ms, offset),
+                    report_to
+                        .as_deref()
+                        .filter(|to| !to.is_empty())
+                        .unwrap_or("self")
+                ))
+            }
+            WatchCommand::Stop { name } => {
+                client
+                    .stop_watch(watch_api::StopWatchRequest { name: name.clone() })
+                    .await
+                    .map_err(refused)?;
+                Ok(format!("stopped {name}"))
+            }
+            WatchCommand::List => {
+                let listed = client
+                    .list_watches(watch_api::ListWatchesRequest {})
+                    .await
+                    .map_err(refused)?
+                    .into_inner();
+                let mut lines: Vec<String> = listed
+                    .watches
+                    .iter()
+                    .map(|watch| watch_list_line(watch, offset))
+                    .collect();
+                lines.push(format!("spent today ${:.2}", listed.spent_usd));
+                Ok(lines.join("\n"))
+            }
+        }
+    })
+    .await
 }
 
 /// Runs a `harold tool questions` command.
@@ -881,8 +1109,9 @@ pub(crate) async fn tool_within(
                 lines.push(format!("{} waiting", listed.waiting));
                 Ok(lines.join("\n"))
             }
-            // `tool` runs a backlog command through `backlog_within`.
-            ToolCommand::Backlog(_) => Err(TOOL_USAGE_LINE.into()),
+            // `tool` runs a backlog command through `backlog_within`, and a watch
+            // command through `watch_within`.
+            ToolCommand::Backlog(_) | ToolCommand::Watch(_) => Err(TOOL_USAGE_LINE.into()),
         }
     })
     .await
@@ -3057,5 +3286,296 @@ mod tests {
             assert!(line.starts_with("invalid JSON: "), "{input:?}: {line}");
             assert!(!line.contains('\n'), "{line}");
         }
+    }
+
+    // -- harold tool watch --------------------------------------------------------
+
+    fn watch(args: &[&str]) -> Result<Mode, String> {
+        let mut all = vec!["tool", "watch"];
+        all.extend(args);
+        parse(&all)
+    }
+
+    #[test]
+    fn tool_watch_start_parses_its_flags_in_any_order() {
+        let expected = WatchCommand::Start {
+            name: "after-release".into(),
+            skill: "pod-watch".into(),
+            every_minutes: 10,
+            for_minutes: 120,
+            report_to: None,
+            run_budget_usd: None,
+            every_run: false,
+        };
+        assert_eq!(
+            watch(&[
+                "start",
+                "after-release",
+                "--skill",
+                "pod-watch",
+                "--every",
+                "10",
+                "--for",
+                "120"
+            ]),
+            Ok(Mode::Tool(ToolCommand::Watch(expected.clone())))
+        );
+        assert_eq!(
+            watch(&[
+                "start",
+                "after-release",
+                "--for",
+                "120",
+                "--every",
+                "10",
+                "--skill",
+                "pod-watch"
+            ]),
+            Ok(Mode::Tool(ToolCommand::Watch(expected)))
+        );
+        assert_eq!(
+            watch(&[
+                "start",
+                "w",
+                "--skill",
+                "s",
+                "--every",
+                "5",
+                "--for",
+                "60",
+                "--report-to",
+                "chief",
+                "--run-budget",
+                "0.03",
+                "--every-run",
+            ]),
+            Ok(Mode::Tool(ToolCommand::Watch(WatchCommand::Start {
+                name: "w".into(),
+                skill: "s".into(),
+                every_minutes: 5,
+                for_minutes: 60,
+                report_to: Some("chief".into()),
+                run_budget_usd: Some("0.03".into()),
+                every_run: true,
+            })))
+        );
+        assert_eq!(
+            watch(&["stop", "after-release"]),
+            Ok(Mode::Tool(ToolCommand::Watch(WatchCommand::Stop {
+                name: "after-release".into()
+            })))
+        );
+        assert_eq!(
+            watch(&["list"]),
+            Ok(Mode::Tool(ToolCommand::Watch(WatchCommand::List)))
+        );
+    }
+
+    #[test]
+    fn tool_watch_refuses_a_malformed_command() {
+        for args in [
+            vec![],
+            vec!["start"],
+            vec!["start", "w"],
+            vec!["start", "w", "--skill", "s", "--every", "10"],
+            vec![
+                "start", "w", "--skill", "s", "--every", "10", "--for", "5", "--bogus",
+            ],
+            vec![
+                "start", "w", "--skill", "s", "--skill", "t", "--every", "10", "--for", "5",
+            ],
+            vec!["start", "w", "--skill", "s", "--every", "10", "--for"],
+            vec!["stop"],
+            vec!["list", "extra"],
+        ] {
+            assert_eq!(watch(&args), Err(WATCH_USAGE_LINE.into()), "{args:?}");
+        }
+        assert_eq!(
+            watch(&["start", "w", "--skill", "s", "--every", "ten", "--for", "5"]),
+            Err("invalid every_minutes".into())
+        );
+        assert_eq!(
+            watch(&["start", "w", "--skill", "s", "--every", "10", "--for", "-5"]),
+            Err("invalid for_minutes".into())
+        );
+        assert_eq!(
+            watch(&[
+                "start",
+                "w",
+                "--skill",
+                "s",
+                "--every",
+                "10",
+                "--for",
+                "5",
+                "--run-budget",
+                "x"
+            ]),
+            Err("invalid run_budget_usd".into())
+        );
+    }
+
+    #[test]
+    fn a_watch_refusal_names_what_was_refused() {
+        let start = WatchCommand::Start {
+            name: "w".into(),
+            skill: "nope".into(),
+            every_minutes: 10,
+            for_minutes: 5,
+            report_to: None,
+            run_budget_usd: None,
+            every_run: false,
+        };
+        let stop = WatchCommand::Stop { name: "w".into() };
+        for (status, command, line) in [
+            (
+                tonic::Status::not_found("unknown_skill"),
+                &start,
+                "unknown skill nope",
+            ),
+            (
+                tonic::Status::failed_precondition("too_many_watches"),
+                &start,
+                "too many watches",
+            ),
+            (
+                tonic::Status::failed_precondition("daily_budget_spent"),
+                &start,
+                "daily budget spent",
+            ),
+            (
+                tonic::Status::invalid_argument("invalid report_to"),
+                &start,
+                "invalid report_to",
+            ),
+            (
+                tonic::Status::not_found("unknown_watch"),
+                &stop,
+                "unknown watch w",
+            ),
+            (
+                tonic::Status::failed_precondition("not_running"),
+                &stop,
+                "w is not running",
+            ),
+            (
+                tonic::Status::unimplemented(""),
+                &stop,
+                "the Harold daemon does not serve watches",
+            ),
+        ] {
+            assert_eq!(watch_refusal_line(&status, command), line);
+        }
+    }
+
+    #[test]
+    fn a_watch_list_line_says_running_or_why_it_ended() {
+        let utc = time::UtcOffset::UTC;
+        let running = watch_api::Watch {
+            name: "after-release".into(),
+            folder: "/work/chief-of-pods".into(),
+            running: true,
+            ends_at_ms: 20 * 3_600_000 + 45 * 60_000,
+            runs: 3,
+            reports: 1,
+            cost_usd: 0.03,
+            ..Default::default()
+        };
+        assert_eq!(
+            watch_list_line(&running, utc),
+            "after-release running in /work/chief-of-pods until 20:45, 3 runs, 1 report, $0.03"
+        );
+        let ended = watch_api::Watch {
+            running: false,
+            stop_reason: "daily_budget_spent".into(),
+            runs: 1,
+            reports: 2,
+            ..running
+        };
+        assert_eq!(
+            watch_list_line(&ended, utc),
+            "after-release ended (daily budget spent) in /work/chief-of-pods, 1 run, 2 reports, $0.03"
+        );
+    }
+
+    /// The watch tool over a temp folder. Claude Code is `/usr/bin/true`, so a run that
+    /// starts fails without reaching a model.
+    async fn watch_server(folder: &TempFolder) -> (Serving, tokio::sync::watch::Sender<()>) {
+        let (stop, shutdown) = tokio::sync::watch::channel(());
+        let handle = crate::tools::watch::start(crate::tools::ToolContext {
+            data_folder: folder.0.join("data"),
+            typing: Some(std::sync::Arc::new(Typist)),
+            chief_pane: std::sync::Arc::new(NoChief),
+            pane_folder: std::sync::Arc::new(NoFolder),
+            products: std::sync::Arc::new(NoProducts),
+            agents: std::sync::Arc::new(crate::tools::tests::NoAgents),
+            pods: std::sync::Arc::new(crate::tools::tests::NoPods),
+            watch_settings: Default::default(),
+            model_environment: Vec::new(),
+            cli_path: "/usr/bin/true".into(),
+            shutdown,
+        })
+        .await
+        .unwrap_or_else(|e| panic!("start failed: {}", e.reason));
+        (serve(handle.routes).await, stop)
+    }
+
+    #[tokio::test]
+    async fn tool_watch_start_list_and_stop_run_against_the_daemon() {
+        let folder = TempFolder::new();
+        let work = std::fs::canonicalize(&folder.0).unwrap();
+        let skill = work.join(".claude/skills/pod-watch");
+        std::fs::create_dir_all(&skill).unwrap();
+        std::fs::write(skill.join("SKILL.md"), "Check.\n").unwrap();
+        let (serving, _stop) = watch_server(&folder).await;
+        let utc = time::UtcOffset::UTC;
+        let run = |command: WatchCommand| {
+            let (address, work) = (serving.address.clone(), work.clone());
+            async move { watch_within(&address, &command, &work, utc, CALL_DEADLINE).await }
+        };
+        let start = |skill: &str| WatchCommand::Start {
+            name: "after-release".into(),
+            skill: skill.into(),
+            every_minutes: 10,
+            for_minutes: 120,
+            report_to: Some("chief".into()),
+            run_budget_usd: None,
+            every_run: false,
+        };
+
+        let started = run(start("pod-watch")).await.unwrap();
+        assert!(
+            started.starts_with(&format!(
+                "started after-release in {} until ",
+                work.display()
+            )) && started.ends_with(", every 10 minutes, reporting to chief"),
+            "{started}"
+        );
+        assert_eq!(run(start("nope")).await, Err("unknown skill nope".into()));
+
+        let listed = run(WatchCommand::List).await.unwrap();
+        let lines: Vec<&str> = listed.lines().collect();
+        assert_eq!(lines.len(), 2, "{listed}");
+        assert!(
+            lines[0].starts_with(&format!(
+                "after-release running in {} until ",
+                work.display()
+            )),
+            "{listed}"
+        );
+        assert!(lines[1].starts_with("spent today $"), "{listed}");
+
+        let stop = WatchCommand::Stop {
+            name: "after-release".into(),
+        };
+        assert_eq!(run(stop.clone()).await, Ok("stopped after-release".into()));
+        assert_eq!(run(stop).await, Err("after-release is not running".into()));
+        assert_eq!(
+            run(WatchCommand::Stop {
+                name: "nope".into()
+            })
+            .await,
+            Err("unknown watch nope".into())
+        );
     }
 }

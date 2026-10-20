@@ -12,25 +12,25 @@ use crate::tools::watch::validate::Checked;
 const CHIEF_PANE: &str = "%1";
 const MINUTE: Duration = Duration::from_secs(60);
 
-pub(super) struct Harness {
-    pub(super) folder: TempFolder,
+pub(in crate::tools::watch) struct Harness {
+    pub(in crate::tools::watch) folder: TempFolder,
     /// The store's folder, removed when the harness drops.
-    pub(super) _data: TempFolder,
-    pub(super) store: Arc<WatchStore>,
-    pub(super) scheduler: Arc<Scheduler>,
-    pub(super) runner: Arc<FakeRunner>,
-    pub(super) typing: Arc<FakeTyping>,
-    pub(super) agents: Arc<FakeAgents>,
-    pub(super) chief: Arc<FakeChief>,
-    pub(super) pods: Arc<FakePods>,
-    pub(super) stop: signal::Sender<()>,
+    pub(in crate::tools::watch) _data: TempFolder,
+    pub(in crate::tools::watch) store: Arc<WatchStore>,
+    pub(in crate::tools::watch) scheduler: Arc<Scheduler>,
+    pub(in crate::tools::watch) runner: Arc<FakeRunner>,
+    pub(in crate::tools::watch) typing: Arc<FakeTyping>,
+    pub(in crate::tools::watch) agents: Arc<FakeAgents>,
+    pub(in crate::tools::watch) chief: Arc<FakeChief>,
+    pub(in crate::tools::watch) pods: Arc<FakePods>,
+    pub(in crate::tools::watch) stop: signal::Sender<()>,
 }
 
-pub(super) fn settings() -> WatchSettings {
+pub(in crate::tools::watch) fn settings() -> WatchSettings {
     WatchSettings::default()
 }
 
-pub(super) async fn harness(settings: WatchSettings, steps: Vec<Step>) -> Harness {
+pub(in crate::tools::watch) async fn harness(settings: WatchSettings, steps: Vec<Step>) -> Harness {
     let folder = TempFolder::with_skill(
         "pod-watch",
         "---\nname: pod-watch\nallowed-tools: Bash(bin/pod slots:*)\n---\nCheck.\n",
@@ -89,7 +89,7 @@ fn build(
 }
 
 impl Harness {
-    pub(super) fn checked(&self, name: &str, every: u32, minutes: u32) -> Checked {
+    pub(in crate::tools::watch) fn checked(&self, name: &str, every: u32, minutes: u32) -> Checked {
         Checked {
             name: name.into(),
             folder: self.folder.0.clone(),
@@ -102,20 +102,20 @@ impl Harness {
         }
     }
 
-    pub(super) async fn start(&self, name: &str, every: u32, minutes: u32) {
+    pub(in crate::tools::watch) async fn start(&self, name: &str, every: u32, minutes: u32) {
         self.scheduler
             .start(self.checked(name, every, minutes))
             .await
             .unwrap();
     }
 
-    pub(super) async fn row(&self, name: &str) -> WatchRow {
+    pub(in crate::tools::watch) async fn row(&self, name: &str) -> WatchRow {
         self.store.get(name).await.unwrap().unwrap()
     }
 }
 
 /// Lets `how_long` of paused time pass, so every timer inside it fires.
-pub(super) async fn pass(how_long: Duration) {
+pub(in crate::tools::watch) async fn pass(how_long: Duration) {
     tokio::time::sleep(how_long).await;
 }
 
