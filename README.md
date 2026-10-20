@@ -86,6 +86,19 @@ Every install, by these commands or by `./scripts/install.sh`, moves the previou
 
 See [docs/prerequisites.md](docs/prerequisites.md).
 
+## Dependency audits
+
+Always build with `--locked`. Any `Cargo.lock` change goes through the rust-supply-chain-auditor first.
+
+| # | Date | Scope | Crates and versions | Verdict |
+|---|------|-------|---------------------|---------|
+| 1 | 2025-09-19 | Two per-crate audits in crates-audit, written before Harold used the crates (first used in 4d94049) | askama =0.14.0, datastar =0.3.1. (Harold's pins add features the records do not mention.) | CLEAN, risk LOW. Record: `~/Dev/p/crates-audit/askama-0.14.0.md` and `datastar-0.3.1.md`. |
+| 2 | 2026-09-13 | The existing Harold `Cargo.lock` (sha256 `c398be3ae9226843c5bee6ba65c4a90840efcf7c64054f8477766e18505daa8a`) for the release build on the macOS ARM64 GitHub runner | 471 packages: 467 from crates.io and four local. No git dependencies. Direct turso =0.5.1 (resolved core 0.5.3). | CLEAN for building that exact lock with `--locked`. All 467 archive checksums match; cargo audit found no vulnerabilities; paste 1.0.15 is unmaintained (RUSTSEC-2024-0436). Full source review was not done, and any lock change needs a re-audit. Record: `~/Dev/p/crates-audit/harold-locked-release-2026-09-13.md`. |
+| 3 | 2026-09-20 | The standalone `examples/opendata-log` tutorial lock (sha256 `b91478108016d4cb0d1e34ac19e903f24b55b3b9d8299429c49b62e30589ca77`), then its dependency extension the same day | 351 crates.io packages. Direct opendata-log 1.0.0, opendata-common 0.1.17, bytes 1.11.1, tokio 1.49.0; the extension adds serde =1.0.229, serde_json =1.0.151 and tokio features `sync`, `time`. | SUSPICIOUS for unrestricted use, accepted for the bounded tutorial: in-memory storage and static data, plus local directories or genuine AWS S3 over verified HTTPS for the extension. quick-xml 0.38.4 has RUSTSEC-2026-0194 and RUSTSEC-2026-0195: unreachable with in-memory storage, but reachable in the S3 extension, where object_store parses AWS's XML replies. No S3-compatible endpoints, untrusted XML or production deployment. Records: `~/Dev/p/crates-audit/opendata-agent-progress-locked-2026-09-20.md` and `opendata-agent-progress-cloud-2026-09-20.md`. |
+| 4 | 2026-10-15 | The Harold daemon's store: turso and the OpenData log, resolved from harold-telemetry at 9da0330 (lock sha256 starts `1dc0119eb5dd7425`; 556 packages, 107 added, 25 removed) | turso =0.8.3 (`default-features = false`, `mimalloc`) with eight sibling crates, opendata-log =1.0.0, opendata-common =0.1.17, OpenTelemetry 0.31 line. | APPROVED WITH CONDITIONS: exact pins, no `sync` feature, no `TESTING=true`, `http-server` off, a Local-only store with absolute paths, rustls >= 0.23.46 and rustls-webpki >= 0.103.15, the resolved lock must match. Exceptions: RUSTSEC-2026-0194 and -0195, and unmaintained bincode, paste and unsafe-libyaml. Nothing was compiled. Record: `.superpowers/audits/opendata-store-2026-10-15/AUDIT.md` in the Harold base checkout (not committed). |
+| 5 | 2026-10-16 | Vendored OpenSSL for web-push | openssl-src 300.6.1+3.6.3 (bundles OpenSSL 3.6.3). | CLEAN, risk MEDIUM in general and LOW for Harold's use. OK with conditions: use only through web-push and ece, pin `MACOSX_DEPLOYMENT_TARGET`, check in CI that no libssl or libcrypto is linked dynamically, and track by hand the 24 upstream CVEs that 3.6.3 carries (none filed in RustSec). Record: `~/Dev/p/crates-audit/openssl-src-300.6.1+3.6.3.md`. |
+| 6 | 2026-10-20 | `tmx-agent-dash` (summary-strip-readable, a187a59) | chrono =0.4.44, `default-features = false`, feature `clock`. | APPROVE by the rust-supply-chain-auditor. The locked checksum matches the cached crate, there is no build.rs and no new package in `Cargo.lock`. Its RustSec check was from memory, not looked up. No record is written in crates-audit; this row is the record. |
+
 ## Status
 
 Early development.
