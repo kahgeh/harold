@@ -220,7 +220,7 @@ The other action rows:
 
 `n` and `N` move to the next or previous waiting question, wrapping over the listed order, set-aside questions included. With one question listed they do nothing. The picks of the question you leave stay, as do the picks of a question set aside with **later** and of a closed question. Every pick is saved in Harold as you make it (a `Space` on an option, or `Enter` on a free option's text; text half-typed is not saved until `Enter`), so a dash restart, a reconnect or a second dash shows the same saved picks. A question that opens at a question version the dash holds no picks for starts from its saved picks, and a decision with no saved pick starts from its suggested option. Saved picks belong to the question version they were made on, but the chief putting a question again keeps the picks on decisions whose ask and options did not change: the notice says so. The saved picks of a question that is answered or dismissed stay in Harold until the id is put again.
 
-Questions set aside come back after a line is typed with no question waiting, or when a **later** leaves none waiting and no answer unsent.
+Questions set aside come back after a line is typed with no question waiting, when a **later** leaves none waiting and no answer unsent, or when the chief dismisses the last waiting question and no answer is unsent.
 
 ### When the chief's row is hidden or scrolled off
 

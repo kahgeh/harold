@@ -74,7 +74,7 @@ Instructions are never a waiting question. They are left out of the `waiting` co
 | RPC | Who | What it does |
 | --- | --- | --- |
 | `PutQuestion` | chief | Adds a question or instructions. With an existing id it raises the question version and makes the question `waiting` again, with no answer, whatever its state. A waiting or deferred question keeps its place; any other goes last. Returns `id` and `version`. |
-| `DismissQuestion` | chief | Withdraws a waiting or deferred question or instructions, with a `reason` the dash shows. |
+| `DismissQuestion` | chief | Withdraws a waiting or deferred question or instructions, with a `reason` the dash shows. If that leaves no question waiting and no answer unsent, the deferred questions return to `waiting`, at the end. |
 | `ReorderQuestions` | chief | Puts the listed ids, of questions and instructions, that are waiting or deferred first, in that order, keeping their state. Other ids are ignored, so a race with a dismissal is harmless. |
 | `ListQuestions` | dash | Returns the waiting todos, then the deferred ones (flagged `deferred`), the count `waiting`, and `dismissed`: the id and reason of every question dismissed in the last hour. |
 | `AnswerQuestion` | dash | Answers a question at the question version the dash saw. |
@@ -146,7 +146,7 @@ The user answers in the dash, not through the CLI. See the [dash README](../../.
 A question, or a set of instructions, is in one state:
 
 - `waiting`: it needs an answer.
-- `deferred`: set aside with `DeferQuestion`. It can still be answered. It returns to `waiting`, at the end, after a line is typed with no question waiting, and at a `later` that leaves no question waiting and no answer unsent.
+- `deferred`: set aside with `DeferQuestion`. It can still be answered. It returns to `waiting`, at the end, after a line is typed with no question waiting, at a `later` that leaves no question waiting and no answer unsent, and when the chief dismisses the last waiting question and no answer is unsent.
 - `answered`: it has an answer that is not yet in a batch.
 - `sent`: its answer was typed to the chief.
 - `dismissed`: the chief withdrew it.
@@ -197,13 +197,15 @@ Once a batch is typed, it is marked typed:
 - Its answers become `sent`.
 - Every question set aside returns to `waiting`, at the end, if no question is `waiting`. Otherwise they stay set aside, so `later` keeps meaning "after everything else".
 
+The same rule applies when the chief dismisses a question: if no question is `waiting` and no answer is unsent, the questions set aside return at once.
+
 If Enter fails after the text went in, the batch counts as typed and is never typed again, since the text is already in the box.
 
 If Harold stops while a batch is being typed, or between typing and marking, the batch may have reached the pane, so it is still open at the next start. That leftover batch is kept: it waits for the chief and an idle pane like any batch, but it is never released, and it is typed again once, before any new batch, even if a question waits. Such a line is the only case that can repeat. A batch whose try typed nothing was released, so it is never typed twice. If Harold crashes during a release, the batch is still open at the next start, so it is typed as a leftover batch, even if a question waits.
 
 ## Log lines
 
-Nine fixed lines, with only the fields `tool`, `question_id`, `version` and `reason`. No question or answer text is ever logged.
+Ten fixed lines, with only the fields `tool`, `question_id`, `version`, `reason`, `count` and `after`. No question or answer text is ever logged.
 
 | Line | Fields | Notes |
 | --- | --- | --- |
@@ -215,6 +217,7 @@ Nine fixed lines, with only the fields `tool`, `question_id`, `version` and `rea
 | `picks not saved` | `tool`, `question_id`, `version`, `reason` | A warning; `reason` is `store_failed`. |
 | `answers batch typed` | `tool`, `reason` | `reason` is `typed`, or `enter_failed` when Enter failed after the text went in (a warning). |
 | `answers batch waiting` | `tool`, `reason` | `reason` is `no_chief`, `pane_busy`, `no_pane` or `store_failed`. |
+| `set-aside questions returned` | `tool`, `count`, `after` | Info, written once per return and only when `count` is above 0. `after` is `answers_line`, `later` or `dismiss`. No question id or text is logged. |
 | `tool failed to start` | `tool`, `reason` | `reason` is `store_open_failed`. |
 
 ## Data folder and rollback
