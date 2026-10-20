@@ -35,6 +35,8 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 | away channel | The one of iMessage and Telegram that `[notify] away_channel` picks. It is one of the channels: the one the phone gets by iMessage or Telegram. | — |
 | web app | The home-screen app on the phone that holds the chief's thread | "away app", "home-screen app" |
 | thread | The web app's one conversation with the chief | — |
+| app_name | The `[web_app]` setting for the name under the web app's icon on the home screen and in its title; "Chief" when left out | "app title", "display name" |
+| icon | The `[web_app]` setting for the PNG picture that marks the web app on the home screen | "favicon", "app icon" |
 | phone notification | Any message Harold sends to the phone, tagged with its machine and pane: a turn-end update, an agent message or a spoken line, sent by iMessage, Telegram or the web app | "notification" alone, "phone message" |
 | latest notifier | The Mac that sent the latest phone notification. A reply with no routing tag goes to it | — |
 | push | How the web app shows a phone notification on the phone's lock screen, through the phone's push service | "alert" for a push |

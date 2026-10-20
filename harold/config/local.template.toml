@@ -125,3 +125,5 @@ command = "say"
 # [web_app]
 # listen = "127.0.0.1:4330"        # loopback only
 # allowed_login = "you@example.com" # your Tailscale login
+# app_name = "Chief M4"            # this Mac's name under the icon, 1 to 30 characters; default "Chief"
+# icon = "~/Dev/p/personal-chief/machines/pasm4mbp/icon.png" # a square PNG, 180 to 1024 pixels a side, at most 1 MB; read at start

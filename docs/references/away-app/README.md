@@ -73,22 +73,28 @@ Add the section to Harold's configuration:
 [web_app]
 listen = "127.0.0.1:4330"
 allowed_login = "<your Tailscale login>"
+# app_name = "Chief M4"
+# icon = "~/Dev/p/personal-chief/machines/pasm4mbp/icon.png"
 ```
 
 | Key | Value |
 |---|---|
 | `listen` | The address and port Harold listens on. It must be a loopback address, such as `127.0.0.1:4330`. |
 | `allowed_login` | Your Tailscale login, exactly as Tailscale Serve sends it in `Tailscale-User-Login`. |
+| `app_name` | Optional. The name under the home-screen icon and in the app's title, 1 to 30 characters on one line. Left out, it is `Chief`. iOS shows about 12 characters, so a short name such as `Chief M4` reads best. |
+| `icon` | Optional. The path of a square PNG, 180 to 1024 pixels a side and at most 1 MB. A leading `~/` is the home folder; otherwise the path must be absolute. Left out, the app has no icon of its own. Harold reads the file once, at start, so a change needs a restart. It does not resize the image; iOS scales a larger square down itself. |
+
+Set both in each Mac's own `local.toml`, so the two Macs' apps differ on the home screen. The file is served at `/static/icon.png` behind the login check, and the manifest and thread page take the name and icon from these keys.
 
 The section also needs `[notify] chief` (the default `"chief-of-pods"` will do), because that entry decides which agent is the chief. The chief reaches the app only when its folder is on `[notify] web_app`.
 
 - **Absent:** Harold serves nothing, listens on no port, and every message reaches the phone as before.
-- **Invalid:** a `listen` that is not a loopback address and port, an empty `allowed_login`, or no `notify.chief` stops Harold at start with an error naming the key. `--check-config` fails too, but prints only `invalid configuration`; start Harold to see which key is wrong.
+- **Invalid:** a `listen` that is not a loopback address and port, an empty `allowed_login`, no `notify.chief`, an `app_name` that is empty, over 30 characters or holds a line break, or an `icon` that cannot be read, is not a square PNG of 180 to 1024 pixels a side or is over 1 MB stops Harold at start with an error naming the key. `--check-config` fails too, but prints only `invalid configuration`; start Harold to see which key is wrong.
 - **Cannot start:** when Harold cannot listen on the address or read its key, it logs `web app unavailable` with the address or the key's path, and runs without the app. Messages then reach the phone through iMessage.
 
 ### Adding the app to the home screen
 
-On the iPhone, open `https://pasm4mbp.<tailnet>.ts.net/` in Safari, tap the Share button, and choose **Add to Home Screen**. The icon is called **Chief**. Open the app from that icon from now on: iOS delivers pushes only to a web app opened from the home screen, so a Safari tab does not show **Turn on alerts** at all.
+On the iPhone, open `https://pasm4mbp.<tailnet>.ts.net/` in Safari, tap the Share button, and choose **Add to Home Screen**. The icon is called by `app_name`, or **Chief** when none is set, and shows the `icon` file when one is set. iOS saves the name and icon when you add the app and does not read them again. To see a changed name or icon: delete the app from the home screen, add it again from Safari, and tap **Turn on alerts** again, because deleting the app also deletes its sign-up for pushes. Open the app from that icon from now on: iOS delivers pushes only to a web app opened from the home screen, so a Safari tab does not show **Turn on alerts** at all.
 
 ### Turning on push
 
