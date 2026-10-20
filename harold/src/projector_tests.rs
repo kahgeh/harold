@@ -4109,6 +4109,7 @@ async fn run_the_app_path_with_a_canary() -> Vec<String> {
         loopback_hosts: Arc::from(loopback_hosts("127.0.0.1:0", addr)),
         shutdown: shutdown_rx,
         calls: None,
+        identity: Default::default(),
     };
     let server = tokio::spawn(async move {
         let _ = axum::serve(listener, router(state)).await;

@@ -11,7 +11,7 @@ use tokio::task::JoinHandle;
 use super::origin::loopback_hosts;
 use super::pages::CONTENT_SECURITY_POLICY;
 use super::push::vapid_key_path;
-use super::{AppState, DATASTAR_SHA256, THREAD_DAYS, router, start, start_if_set};
+use super::{AppState, DATASTAR_SHA256, THREAD_DAYS, WebAppIdentity, router, start, start_if_set};
 use crate::outbound::fake::CapturedLogs;
 use crate::settings::WebAppSettings;
 use crate::store::{AppReplyState, EventVersion, HaroldStore, append_app_reply};
@@ -59,6 +59,10 @@ struct TestServer {
 
 impl TestServer {
     async fn serve(store: Arc<HaroldStore>) -> Self {
+        Self::serve_as(store, WebAppIdentity::default()).await
+    }
+
+    async fn serve_as(store: Arc<HaroldStore>, identity: WebAppIdentity) -> Self {
         let (shutdown, shutdown_rx) = watch::channel(());
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -69,6 +73,7 @@ impl TestServer {
             loopback_hosts: Arc::from(loopback_hosts("127.0.0.1:0", addr)),
             shutdown: shutdown_rx,
             calls: None,
+            identity: Arc::new(identity),
         };
         let handle = tokio::spawn(async move {
             let _ = axum::serve(listener, router(state)).await;
@@ -136,6 +141,7 @@ async fn every_route_refuses_a_missing_or_wrong_login() {
         ("POST", "/replies"),
         ("POST", "/push/subscription"),
         ("GET", "/static/app.css"),
+        ("GET", "/static/icon.png"),
         ("GET", "/nope"),
     ];
 
@@ -379,4 +385,95 @@ async fn old_thread_rows_are_pruned_at_start() {
     assert_eq!(ids, ["new"]);
     drop(shutdown);
     let _ = tokio::time::timeout(Duration::from_secs(2), running.handle).await;
+}
+
+fn named(name: &str, icon: bool) -> WebAppIdentity {
+    WebAppIdentity {
+        name: name.into(),
+        icon: icon.then(|| crate::settings::WebAppIcon {
+            bytes: b"\x89PNG-bytes".to_vec(),
+            side: 512,
+        }),
+    }
+}
+
+async fn body_of(server: &TestServer, path: &str) -> String {
+    get_with_login(&server.url(path))
+        .await
+        .text()
+        .await
+        .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_icon_is_served_as_a_png_only_when_one_is_set() {
+    let directory = TestDirectory::new();
+    let other = TestDirectory::new();
+    let with = TestServer::serve_as(directory.store().await, named("Chief M4", true)).await;
+    let response = get_with_login(&with.url("/static/icon.png")).await;
+    assert_eq!(response.status(), 200);
+    assert_eq!(response.headers()["content-type"], "image/png");
+    assert_eq!(response.bytes().await.unwrap().as_ref(), b"\x89PNG-bytes");
+
+    let without = TestServer::serve(other.store().await).await;
+    let response = get_with_login(&without.url("/static/icon.png")).await;
+    assert_eq!(response.status(), 404);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_thread_page_carries_the_name_and_links_the_icon_only_when_set() {
+    let directory = TestDirectory::new();
+    let other = TestDirectory::new();
+    let with = TestServer::serve_as(directory.store().await, named("Chief M4", true)).await;
+    let page = body_of(&with, "/").await;
+    assert!(page.contains("<title>Chief M4</title>"), "{page}");
+    assert!(page.contains(r#"name="apple-mobile-web-app-title" content="Chief M4""#));
+    assert!(page.contains(r#"<link rel="apple-touch-icon" href="/static/icon.png">"#));
+
+    let without = TestServer::serve(other.store().await).await;
+    let page = body_of(&without, "/").await;
+    assert!(page.contains("<title>Chief</title>"));
+    assert!(page.contains(r#"name="apple-mobile-web-app-title" content="Chief""#));
+    assert!(!page.contains("apple-touch-icon"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_manifest_is_built_from_the_name_and_the_icon() {
+    let directory = TestDirectory::new();
+    let other = TestDirectory::new();
+    let with = TestServer::serve_as(directory.store().await, named("M4 \"<x>\"", true)).await;
+    let manifest: serde_json::Value =
+        serde_json::from_str(&body_of(&with, "/static/manifest.webmanifest").await).unwrap();
+    assert_eq!(manifest["name"], "M4 \"<x>\"");
+    assert_eq!(manifest["short_name"], "M4 \"<x>\"");
+    assert_eq!(manifest["start_url"], "/");
+    assert_eq!(manifest["icons"][0]["src"], "/static/icon.png");
+    assert_eq!(manifest["icons"][0]["sizes"], "512x512");
+    assert_eq!(manifest["icons"][0]["type"], "image/png");
+
+    let without = TestServer::serve(other.store().await).await;
+    let manifest: serde_json::Value =
+        serde_json::from_str(&body_of(&without, "/static/manifest.webmanifest").await).unwrap();
+    assert_eq!(manifest["name"], "Chief");
+    assert_eq!(manifest["short_name"], "Chief");
+    assert!(manifest.get("icons").is_none());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn start_refuses_an_icon_that_cannot_be_read() {
+    let directory = TestDirectory::new();
+    let mut settings = settings("127.0.0.1:0");
+    settings.icon = Some("/no/such/icon.png".into());
+    let (_shutdown, shutdown_rx) = watch::channel(());
+    let error = start(
+        &settings,
+        directory.store().await,
+        &directory.store_path(),
+        shutdown_rx,
+        None,
+    )
+    .await
+    .err()
+    .expect("start refuses");
+    assert_eq!(error, "web_app.icon cannot be read: /no/such/icon.png");
 }

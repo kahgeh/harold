@@ -6,7 +6,7 @@ use axum::http::{HeaderValue, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{Html, IntoResponse, Response};
 
-use super::{AppState, DATASTAR_JS, thread_start_ms};
+use super::{AppState, DATASTAR_JS, WebAppIdentity, thread_start_ms};
 use crate::store::{AppMessage, AppSender};
 use crate::voice_input::{CallState, PhoneView, Said, Speaker};
 
@@ -17,7 +17,6 @@ pub(crate) const CONTENT_SECURITY_POLICY: &str = "default-src 'none'; script-src
 const APP_CSS: &[u8] = include_bytes!("../../static/web_app/app.css");
 const ALERTS_JS: &[u8] = include_bytes!("../../static/web_app/alerts.js");
 const SW_JS: &[u8] = include_bytes!("../../static/web_app/sw.js");
-const MANIFEST: &[u8] = include_bytes!("../../static/web_app/manifest.webmanifest");
 const CALL_JS: &[u8] = include_bytes!("../../static/web_app/call.js");
 const CALL_WORKLET_JS: &[u8] = include_bytes!("../../static/web_app/call-worklet.js");
 
@@ -27,6 +26,10 @@ const JAVASCRIPT: &str = "text/javascript";
 #[derive(Template)]
 #[template(path = "web_app/thread.html")]
 pub(crate) struct ThreadPage {
+    /// The app's name: the title, the heading and the home-screen label.
+    pub app_name: String,
+    /// Whether the page links the app's icon.
+    pub has_icon: bool,
     pub messages: Vec<MessageView>,
     /// Harold's VAPID public key, base64url: the page's `applicationServerKey`.
     pub public_key: String,
@@ -161,6 +164,8 @@ pub(crate) async fn get_thread(State(state): State<AppState>) -> Response {
     };
     let calls = state.calls.as_ref();
     let page = ThreadPage {
+        app_name: state.identity.name.clone(),
+        has_icon: state.identity.icon.is_some(),
         messages: messages.into_iter().map(MessageView::from).collect(),
         public_key: state.public_key.to_string(),
         call_set_up: calls.is_some_and(|calls| calls.set_up()),
@@ -174,16 +179,47 @@ pub(crate) async fn get_thread(State(state): State<AppState>) -> Response {
     }
 }
 
-/// `GET /static/{name}`: one of the app's seven files, or `404`.
-pub(crate) async fn get_static(Path(name): Path<String>) -> Response {
-    let (content_type, bytes) = match name.as_str() {
-        "app.css" => ("text/css", APP_CSS),
-        "alerts.js" => (JAVASCRIPT, ALERTS_JS),
-        "call.js" => (JAVASCRIPT, CALL_JS),
-        "call-worklet.js" => (JAVASCRIPT, CALL_WORKLET_JS),
-        "sw.js" => (JAVASCRIPT, SW_JS),
-        "datastar-1.0.2.js" => (JAVASCRIPT, DATASTAR_JS),
-        "manifest.webmanifest" => ("application/manifest+json", MANIFEST),
+/// The web app manifest: the app's name, and its icon at the icon's real size when it has one.
+pub(crate) fn manifest_json(identity: &WebAppIdentity) -> String {
+    let mut manifest = serde_json::json!({
+        "name": identity.name,
+        "short_name": identity.name,
+        "start_url": "/",
+        "scope": "/",
+        "display": "standalone",
+        "background_color": "#f8f9fa",
+        "theme_color": "#f8f9fa",
+    });
+    if let Some(icon) = &identity.icon {
+        manifest["icons"] = serde_json::json!([{
+            "src": "/static/icon.png",
+            "sizes": format!("{0}x{0}", icon.side),
+            "type": "image/png",
+        }]);
+    }
+    manifest.to_string()
+}
+
+/// `GET /static/{name}`: one of the app's files, or `404`; `icon.png` only when an icon is set.
+pub(crate) async fn get_static(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> Response {
+    let (content_type, bytes): (&str, Vec<u8>) = match name.as_str() {
+        "app.css" => ("text/css", APP_CSS.to_vec()),
+        "alerts.js" => (JAVASCRIPT, ALERTS_JS.to_vec()),
+        "call.js" => (JAVASCRIPT, CALL_JS.to_vec()),
+        "call-worklet.js" => (JAVASCRIPT, CALL_WORKLET_JS.to_vec()),
+        "sw.js" => (JAVASCRIPT, SW_JS.to_vec()),
+        "datastar-1.0.2.js" => (JAVASCRIPT, DATASTAR_JS.to_vec()),
+        "manifest.webmanifest" => (
+            "application/manifest+json",
+            manifest_json(&state.identity).into_bytes(),
+        ),
+        "icon.png" => match &state.identity.icon {
+            Some(icon) => ("image/png", icon.bytes.clone()),
+            None => return StatusCode::NOT_FOUND.into_response(),
+        },
         _ => return StatusCode::NOT_FOUND.into_response(),
     };
     let mut response = ([(header::CONTENT_TYPE, content_type)], bytes).into_response();

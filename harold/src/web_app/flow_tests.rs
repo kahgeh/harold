@@ -61,6 +61,7 @@ impl TestServer {
             loopback_hosts: Arc::from(loopback_hosts("127.0.0.1:0", addr)),
             shutdown: shutdown_rx,
             calls: None,
+            identity: Default::default(),
         };
         let handle = tokio::spawn(async move {
             let _ = axum::serve(listener, router(state)).await;

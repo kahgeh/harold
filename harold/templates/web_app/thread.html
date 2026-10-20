@@ -4,10 +4,12 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-title" content="Chief">
+<meta name="apple-mobile-web-app-title" content="{{ app_name }}">
 <meta name="harold-vapid-key" content="{{ public_key }}">
-<title>Chief</title>
+<title>{{ app_name }}</title>
 <link rel="manifest" href="/static/manifest.webmanifest">
+{% if has_icon %}<link rel="apple-touch-icon" href="/static/icon.png">
+{% endif %}
 <link rel="stylesheet" href="/static/app.css">
 <script type="module" src="/static/datastar-1.0.2.js"></script>
 <script src="/static/alerts.js" defer></script>
@@ -15,7 +17,7 @@
 </head>
 <body>
 <header class="bar top">
-<h1>Chief</h1>
+<h1>{{ app_name }}</h1>
 <button type="button" id="alerts">Turn on alerts</button>
 {% if call_set_up %}<button type="button" id="call-start">📞 Call</button>{% else %}<button type="button" id="call-start" disabled>Voice is not set up on the Mac</button>{% endif %}
 </header>

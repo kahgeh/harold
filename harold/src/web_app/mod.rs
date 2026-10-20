@@ -14,7 +14,7 @@ use tokio::task::JoinHandle;
 use tracing::{error, warn};
 
 use crate::outbound::AppRoute;
-use crate::settings::WebAppSettings;
+use crate::settings::{WebAppIcon, WebAppSettings};
 use crate::store::HaroldStore;
 use call::PhoneCallApi;
 use push::{Pusher, VapidKey, vapid_key_path};
@@ -57,6 +57,22 @@ mod flow_tests;
 #[cfg(test)]
 pub(crate) mod fake_push;
 
+/// What the app is called and looks like on the phone, read once at start.
+#[derive(Debug, Clone)]
+pub(crate) struct WebAppIdentity {
+    pub name: String,
+    pub icon: Option<WebAppIcon>,
+}
+
+impl Default for WebAppIdentity {
+    fn default() -> Self {
+        Self {
+            name: "Chief".to_owned(),
+            icon: None,
+        }
+    }
+}
+
 /// What every route can reach.
 #[derive(Clone)]
 pub(crate) struct AppState {
@@ -72,6 +88,8 @@ pub(crate) struct AppState {
     pub shutdown: watch::Receiver<()>,
     /// The phone's calls; `None` when Harold has none, and every call route answers `409`.
     pub calls: Option<Arc<dyn PhoneCallApi>>,
+    /// The app's name and icon.
+    pub identity: Arc<WebAppIdentity>,
 }
 
 /// The app's routes, every one of them, the 404 fallback included, behind
@@ -114,7 +132,7 @@ pub(crate) struct Running {
 /// Binds `settings.listen_addr()`, makes or reads the key, serves until shutdown, and prunes
 /// the thread to 30 days at start and every hour. Err when it cannot, and Harold then runs
 /// without the app, every message reaching the phone through iMessage; the error names the
-/// address or the key's path, never the login or the key. At shutdown an open phone call
+/// address, the key's path or the icon's path, never the login, the key or the icon. At shutdown an open phone call
 /// ends, with reason `shutdown`, before the handle does.
 pub(crate) async fn start(
     settings: &WebAppSettings,
@@ -133,6 +151,11 @@ pub(crate) async fn start(
         .local_addr()
         .map_err(|error| format!("listen on {addr}: {error}"))?;
     let key = VapidKey::load_or_create(&vapid_key_path(store_path))?;
+    // The error names the key and the path only, never the file's bytes.
+    let identity = WebAppIdentity {
+        name: settings.name().to_owned(),
+        icon: settings.load_icon()?,
+    };
 
     prune(&store).await;
     let state = AppState {
@@ -142,6 +165,7 @@ pub(crate) async fn start(
         loopback_hosts: Arc::from(origin::loopback_hosts(&settings.listen, local_addr)),
         shutdown: shutdown.clone(),
         calls: calls.clone(),
+        identity: Arc::new(identity),
     };
     let pusher = Arc::new(Pusher::new(key, &settings.allowed_login));
     let route: Arc<dyn AppRoute> = Arc::new(WebAppRoute::new(Arc::clone(&store), pusher));
