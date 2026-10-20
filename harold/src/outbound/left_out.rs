@@ -6,6 +6,7 @@
 //! matches an entry on that channel's list. `chief` names the chief's pane by the same
 //! matching; the chief's own turn-end update is not spoken at the desk.
 
+#[cfg(not(test))]
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -96,6 +97,14 @@ impl TrackedAgents {
                 .map(|(pane_id, folder)| (pane_id.to_string(), folder.to_string()))
                 .collect(),
         }
+    }
+
+    /// The `agent` of a notification from `pane_id` (see `agent_label`).
+    pub(crate) fn agent_of(&self, pane_id: &str) -> String {
+        agent_label(
+            self.folder_of(pane_id),
+            std::env::var("HOME").ok().as_deref(),
+        )
     }
 
     fn folder_of(&self, pane_id: &str) -> Option<&str> {
@@ -202,15 +211,16 @@ thread_local! {
 }
 
 /// Whether `state` differs from the last one logged, taking it as the last.
+#[cfg(not(test))]
 fn state_changed(state: &'static str) -> bool {
-    #[cfg(not(test))]
-    {
-        let mut last = LAST_CHIEF_STATE
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        return std::mem::replace(&mut *last, state) != state;
-    }
-    #[cfg(test)]
+    let mut last = LAST_CHIEF_STATE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    std::mem::replace(&mut *last, state) != state
+}
+
+#[cfg(test)]
+fn state_changed(state: &'static str) -> bool {
     LAST_CHIEF_STATE.with(|last| last.replace(state) != state)
 }
 
@@ -253,89 +263,231 @@ pub(crate) fn spoken_line_dropped(key: &str) -> String {
     format!("spoken line dropped (not in notify.{key})")
 }
 
-/// The key of the list that holds `pane_id` off the phone, or `None` when the pane may use
-/// it. The phone's order: the app (`via_app`, the app route is open to this pane), then the
-/// list of the channel `away_channel` names. The key is the last list checked.
+/// What is held back: a turn-end update (left out), an agent message or a spoken line
+/// (dropped).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum UpdateKind {
+    TurnEndUpdate,
+    AgentMessage,
+    SpokenLine,
+}
+
+impl UpdateKind {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::TurnEndUpdate => "turn_end_update",
+            Self::AgentMessage => "agent_message",
+            Self::SpokenLine => "spoken_line",
+        }
+    }
+}
+
+/// `reason` of a hold that is the channel's list.
+pub(crate) const NOT_LISTED: &str = "not_listed";
+/// `reason` of the chief's turn-end update left out at the desk.
+pub(crate) const CHIEF_REASON: &str = "chief";
+/// `reason` of an update left out because its pane sent a message this turn.
+pub(crate) const MESSAGED_REASON: &str = "messaged_this_turn";
+
+/// Something a channel's rules keep from going out: the log line, the channel whose rule
+/// it was and why.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Held {
+    pub line: String,
+    pub channel: Channel,
+    pub reason: &'static str,
+    /// The pane's `agent` (see `agent_label`).
+    pub agent: String,
+}
+
+impl Held {
+    pub(crate) fn not_listed(line: String, channel: Channel, agent: String) -> Self {
+        Self {
+            line,
+            channel,
+            reason: NOT_LISTED,
+            agent,
+        }
+    }
+
+    /// Whether the channel's list kept it, as against the chief rule or the user's own
+    /// choice (a message sent this turn).
+    pub(crate) fn is_kept(&self) -> bool {
+        self.reason == NOT_LISTED
+    }
+
+    /// Whether it is held back for `outcome = held_back`: the list and the chief rule. A
+    /// pane that sent a message this turn is the user's choice, not a rule that held it.
+    pub(crate) fn is_held_back(&self) -> bool {
+        self.reason != MESSAGED_REASON
+    }
+
+    /// Writes the line, naming the pane and the agent and never the text.
+    pub(crate) fn log(&self, kind: UpdateKind, pane_id: &str) {
+        tracing::info!(
+            pane_id = %pane_id,
+            channel = self.channel.key(),
+            kind = kind.as_str(),
+            reason = self.reason,
+            agent = self.agent.as_str(),
+            "{}",
+            self.line
+        );
+    }
+}
+
+/// A pane's folder as the `agent` of a notification: below the home folder, so it holds
+/// no user name; `~` for the home folder itself; the folder as it is when it is outside
+/// home; `unknown` when Harold has no folder for the pane.
+pub(crate) fn agent_label(folder: Option<&str>, home: Option<&str>) -> String {
+    let Some(folder) = folder else {
+        return "unknown".to_string();
+    };
+    let folder = without_one_trailing_slash(folder);
+    let relative = home.and_then(|home| {
+        let home = without_one_trailing_slash(home);
+        if folder == home {
+            return Some("~");
+        }
+        folder.strip_prefix(home)?.strip_prefix('/')
+    });
+    relative.unwrap_or(folder).to_string()
+}
+
+/// Whether `channel` is set up (`set_up`) and turned on: `imessage` and `telegram` only
+/// when `away_channel` names them, `machine_audio_output` while the voice mute is off,
+/// and the phone channels (`imessage`, `telegram` and `web_app`) while messaging is not
+/// paused. `machine_audio_output` is always set up.
+pub(crate) fn channel_live(
+    settings: &NotifySettings,
+    set_up: bool,
+    channel: Channel,
+    voice_muted: bool,
+    messaging_paused: bool,
+) -> bool {
+    match channel {
+        Channel::MachineAudioOutput => !voice_muted,
+        Channel::WebApp => set_up && !messaging_paused,
+        Channel::Imessage | Channel::Telegram => {
+            set_up && !messaging_paused && settings.away() == channel
+        }
+    }
+}
+
+/// The channel that holds `pane_id` off the phone, or `None` when the pane may use it.
+/// The phone's order: the app (`via_app`, the app route is open to this pane), then the
+/// list of the channel `away_channel` names. The channel is the last list checked.
 pub(crate) fn phone_held_back(
     settings: &NotifySettings,
     agents: &TrackedAgents,
     via_app: bool,
     pane_id: &str,
-) -> Option<&'static str> {
+) -> Option<Channel> {
     let away = settings.away();
     if via_app || agents.may_use(settings, away, pane_id) {
         return None;
     }
-    Some(away.key())
+    Some(away)
 }
 
-/// The log line for leaving out the turn-end update of `pane_id` at the desk: the chief's
-/// own is not spoken, and nor is one from a pane that is not on `machine_audio_output`.
+/// The hold on the turn-end update of `pane_id` at the desk: the chief's own is not
+/// spoken, and nor is one from a pane that is not on `machine_audio_output`.
 pub(crate) fn desk_update_reason(
     settings: &NotifySettings,
     agents: &TrackedAgents,
     pane_id: &str,
-) -> Option<String> {
+) -> Option<Held> {
     if agents.chief_pane_id(settings.chief.as_deref()) == Some(pane_id) {
-        return Some("spoken update left out (chief)".to_string());
+        return Some(Held {
+            line: "spoken update left out (chief)".to_string(),
+            channel: Channel::MachineAudioOutput,
+            reason: CHIEF_REASON,
+            agent: agents.agent_of(pane_id),
+        });
     }
     if !agents.may_use(settings, Channel::MachineAudioOutput, pane_id) {
-        return Some(format!(
-            "spoken update left out (not in notify.{})",
-            Channel::MachineAudioOutput.key()
+        return Some(Held::not_listed(
+            format!(
+                "spoken update left out (not in notify.{})",
+                Channel::MachineAudioOutput.key()
+            ),
+            Channel::MachineAudioOutput,
+            agents.agent_of(pane_id),
         ));
     }
     None
 }
 
-/// The log line for leaving out the locked-screen turn-end update of `pane_id`, when either
-/// rule applies. Rule A is looked at first, so its line is the one written when both apply.
+/// The hold on the locked-screen turn-end update of `pane_id`, when either rule applies.
+/// Rule A is looked at first, so its line is the one written when both apply.
 pub(crate) fn left_out_reason(
     messaged_this_turn: bool,
     settings: &NotifySettings,
     agents: &TrackedAgents,
     via_app: bool,
     pane_id: &str,
-) -> Option<String> {
+) -> Option<Held> {
     if messaged_this_turn {
-        return Some(MESSAGED_THIS_TURN.to_string());
+        return Some(Held {
+            line: MESSAGED_THIS_TURN.to_string(),
+            channel: settings.away(),
+            reason: MESSAGED_REASON,
+            agent: agents.agent_of(pane_id),
+        });
     }
-    let key = phone_held_back(settings, agents, via_app, pane_id)?;
-    Some(notification_skipped(key))
+    let channel = phone_held_back(settings, agents, via_app, pane_id)?;
+    Some(Held::not_listed(
+        notification_skipped(channel.key()),
+        channel,
+        agents.agent_of(pane_id),
+    ))
 }
 
-/// The log line for dropping a message `pane_id` asked Harold to send. Never holds the text.
+/// The hold on a message `pane_id` asked Harold to send. Never holds the text.
 pub(crate) fn message_dropped_reason(
     settings: &NotifySettings,
     agents: &TrackedAgents,
     via_app: bool,
     pane_id: &str,
-) -> Option<String> {
-    let key = phone_held_back(settings, agents, via_app, pane_id)?;
-    Some(agent_message_dropped(key))
+) -> Option<Held> {
+    let channel = phone_held_back(settings, agents, via_app, pane_id)?;
+    Some(Held::not_listed(
+        agent_message_dropped(channel.key()),
+        channel,
+        agents.agent_of(pane_id),
+    ))
 }
 
-/// The log line for dropping a line `pane_id` asked Harold to speak on the phone. Never
-/// holds the spoken text.
+/// The hold on a line `pane_id` asked Harold to speak on the phone. Never holds the
+/// spoken text.
 pub(crate) fn spoken_line_dropped_reason(
     settings: &NotifySettings,
     agents: &TrackedAgents,
     via_app: bool,
     pane_id: &str,
-) -> Option<String> {
-    let key = phone_held_back(settings, agents, via_app, pane_id)?;
-    Some(spoken_line_dropped(key))
+) -> Option<Held> {
+    let channel = phone_held_back(settings, agents, via_app, pane_id)?;
+    Some(Held::not_listed(
+        spoken_line_dropped(channel.key()),
+        channel,
+        agents.agent_of(pane_id),
+    ))
 }
 
-/// The log line for dropping a line `pane_id` asked Harold to speak at the desk.
+/// The hold on a line `pane_id` asked Harold to speak at the desk.
 pub(crate) fn desk_line_dropped_reason(
     settings: &NotifySettings,
     agents: &TrackedAgents,
     pane_id: &str,
-) -> Option<String> {
-    let key = Channel::MachineAudioOutput.key();
-    (!agents.may_use(settings, Channel::MachineAudioOutput, pane_id))
-        .then(|| spoken_line_dropped(key))
+) -> Option<Held> {
+    let channel = Channel::MachineAudioOutput;
+    (!agents.may_use(settings, channel, pane_id)).then(|| {
+        Held::not_listed(
+            spoken_line_dropped(channel.key()),
+            channel,
+            agents.agent_of(pane_id),
+        )
+    })
 }
 
 #[cfg(test)]
@@ -343,9 +495,10 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::{
-        ChiefLookup, MARK_LIFETIME, MESSAGED_THIS_TURN, TrackedAgents, desk_line_dropped_reason,
-        desk_update_reason, entry_matches, left_out_reason, mark_is_fresh, message_dropped_reason,
-        phone_held_back, resolve_chief, spoken_line_dropped_reason,
+        ChiefLookup, MARK_LIFETIME, MESSAGED_THIS_TURN, TrackedAgents, agent_label, channel_live,
+        desk_line_dropped_reason, desk_update_reason, entry_matches, left_out_reason,
+        mark_is_fresh, message_dropped_reason, phone_held_back, resolve_chief,
+        spoken_line_dropped_reason,
     };
     use crate::agent::domain::{
         AgentIncarnation, AgentPaneObservation, AgentPaneProjection, AgentSnapshot,
@@ -373,7 +526,6 @@ mod tests {
             marked_at + Duration::from_secs(3_600)
         ));
     }
-
 
     const ONE: [(&str, &str); 2] = [("%1", "/w/chief-of-pods"), ("%2", "/w/harold")];
     const TWO: [(&str, &str); 3] = [
@@ -425,6 +577,83 @@ mod tests {
         assert!(!agents.is_in_chief_folder(Some("chief-of-pods"), "%2"));
         assert!(!agents.is_in_chief_folder(None, "%1"));
         assert!(!agents.is_in_chief_folder(Some("chief-of-pods"), "%9"));
+    }
+
+    #[test]
+    fn agent_is_the_folder_below_home() {
+        let home = Some("/Users/x");
+        assert_eq!(
+            agent_label(Some("/Users/x/Dev/p/harold/main"), home),
+            "Dev/p/harold/main"
+        );
+        assert_eq!(
+            agent_label(Some("/Users/x/Dev/p/harold/"), home),
+            "Dev/p/harold"
+        );
+        assert_eq!(agent_label(Some("/Users/x"), home), "~");
+        assert_eq!(agent_label(Some("/tmp/a"), home), "/tmp/a");
+        assert_eq!(
+            agent_label(Some("/Users/xavier/a"), home),
+            "/Users/xavier/a"
+        );
+        assert_eq!(agent_label(None, home), "unknown");
+    }
+
+    #[test]
+    fn a_channel_is_live_when_set_up_and_turned_on() {
+        let imessage_away = settings("[notify]\naway_channel = \"imessage\"");
+        let telegram_away = settings("[notify]\naway_channel = \"telegram\"");
+        // (settings, channel, set_up, voice_muted, paused, live)
+        let table = [
+            (&imessage_away, Channel::Imessage, true, false, false, true),
+            (
+                &imessage_away,
+                Channel::Imessage,
+                false,
+                false,
+                false,
+                false,
+            ),
+            (&imessage_away, Channel::Imessage, true, false, true, false),
+            (&imessage_away, Channel::Telegram, true, false, false, false),
+            (&telegram_away, Channel::Telegram, true, false, false, true),
+            (&telegram_away, Channel::Imessage, true, false, false, false),
+            (&imessage_away, Channel::WebApp, true, false, false, true),
+            (&imessage_away, Channel::WebApp, false, false, false, false),
+            (&imessage_away, Channel::WebApp, true, false, true, false),
+            (&imessage_away, Channel::WebApp, true, true, false, true),
+            (
+                &imessage_away,
+                Channel::MachineAudioOutput,
+                true,
+                false,
+                false,
+                true,
+            ),
+            (
+                &imessage_away,
+                Channel::MachineAudioOutput,
+                true,
+                true,
+                false,
+                false,
+            ),
+            (
+                &imessage_away,
+                Channel::MachineAudioOutput,
+                true,
+                false,
+                true,
+                true,
+            ),
+        ];
+        for (notify, channel, set_up, muted, paused, live) in table {
+            assert_eq!(
+                channel_live(notify, set_up, channel, muted, paused),
+                live,
+                "{channel:?} set_up={set_up} muted={muted} paused={paused}"
+            );
+        }
     }
 
     const HOME: Option<&str> = Some("/Users/x");
@@ -546,11 +775,15 @@ mod tests {
         assert!(!agents.may_use(&notify, Channel::MachineAudioOutput, "%2"));
         assert!(agents.may_use(&notify, Channel::Imessage, "%2"));
         assert_eq!(
-            message_dropped_reason(&notify, &agents, false, "%1").as_deref(),
+            message_dropped_reason(&notify, &agents, false, "%1")
+                .map(|held| held.line)
+                .as_deref(),
             Some("agent message dropped (not in notify.imessage)")
         );
         assert_eq!(
-            desk_update_reason(&notify, &agents, "%2").as_deref(),
+            desk_update_reason(&notify, &agents, "%2")
+                .map(|held| held.line)
+                .as_deref(),
             Some("spoken update left out (not in notify.machine_audio_output)")
         );
         assert_eq!(message_dropped_reason(&notify, &agents, false, "%2"), None);
@@ -565,7 +798,7 @@ mod tests {
         assert_eq!(phone_held_back(&notify, &agents, false, "%1"), None);
         assert_eq!(
             phone_held_back(&notify, &agents, false, "%2"),
-            Some("telegram")
+            Some(Channel::Telegram)
         );
     }
 
@@ -575,20 +808,28 @@ mod tests {
         let agents = TrackedAgents::in_folders(&[("%2", "/work/harold")]);
         assert_eq!(phone_held_back(&notify, &agents, true, "%2"), None);
         assert_eq!(
-            left_out_reason(true, &notify, &agents, false, "%2").as_deref(),
+            left_out_reason(true, &notify, &agents, false, "%2")
+                .map(|held| held.line)
+                .as_deref(),
             Some(MESSAGED_THIS_TURN)
         );
         assert_eq!(
-            left_out_reason(false, &notify, &agents, false, "%2").as_deref(),
+            left_out_reason(false, &notify, &agents, false, "%2")
+                .map(|held| held.line)
+                .as_deref(),
             Some("notification skipped (not in notify.imessage)")
         );
         assert_eq!(left_out_reason(false, &notify, &agents, true, "%2"), None);
         assert_eq!(
-            spoken_line_dropped_reason(&notify, &agents, false, "%2").as_deref(),
+            spoken_line_dropped_reason(&notify, &agents, false, "%2")
+                .map(|held| held.line)
+                .as_deref(),
             Some("spoken line dropped (not in notify.imessage)")
         );
         assert_eq!(
-            desk_line_dropped_reason(&notify, &agents, "%2").as_deref(),
+            desk_line_dropped_reason(&notify, &agents, "%2")
+                .map(|held| held.line)
+                .as_deref(),
             Some("spoken line dropped (not in notify.machine_audio_output)")
         );
     }
@@ -602,7 +843,9 @@ mod tests {
         ]);
         assert_eq!(one.chief_pane_id(notify.chief.as_deref()), Some("%1"));
         assert_eq!(
-            desk_update_reason(&notify, &one, "%1").as_deref(),
+            desk_update_reason(&notify, &one, "%1")
+                .map(|held| held.line)
+                .as_deref(),
             Some("spoken update left out (chief)")
         );
         let two = TrackedAgents::in_folders(&[

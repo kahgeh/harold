@@ -951,6 +951,7 @@ fn instruments_have_the_spec_names_units_and_buckets() {
 #[test]
 fn every_log_message_is_fixed_text() {
     const ALLOWED: &[(&str, &str)] = &[
+        ("harold/src/outbound/left_out.rs", "{}"),
         ("harold/src/outbound/mod.rs", "{reason}"),
         ("harold/src/projector.rs", "{reason}"),
         (

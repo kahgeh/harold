@@ -138,6 +138,7 @@ fn anything_else_is_refused() {
         b"not json",
         b"",
         br#"{"alert":"delivery-given-up","state":"firing"}"#,
+        br#"{"alert":"chief-message-held-back","state":"firing"}"#,
     ] {
         assert_eq!(alert_line(body), Err(()));
     }
@@ -978,4 +979,43 @@ fn first_refusal_is_true_once_per_line() {
 fn held_back_reasons_have_the_spec_names() {
     assert_eq!(HeldBack::Repeat.as_str(), "repeat");
     assert_eq!(HeldBack::NeverFired.as_str(), "never_fired");
+}
+
+#[tokio::test(start_paused = true)]
+async fn chief_message_held_back_is_typed_each_time_and_merged_while_busy() {
+    let fake = idle_chief();
+    let (queue, _shutdown_tx, _handle) = deliver_from_queue(&fake);
+    let line = "harold alert: chief-message-held-back firing";
+
+    queue.firing(CHIEF_MESSAGE_HELD_BACK);
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    queue.firing(CHIEF_MESSAGE_HELD_BACK);
+    tokio::time::sleep(Duration::from_secs(70)).await;
+    assert_eq!(texts(&fake), [line, line]);
+
+    set_chief_state(&fake, EffectiveAgentState::Busy);
+    tokio::time::sleep(Duration::from_secs(6)).await;
+    queue.firing(CHIEF_MESSAGE_HELD_BACK);
+    queue.firing(CHIEF_MESSAGE_HELD_BACK);
+    tokio::time::sleep(Duration::from_secs(60)).await;
+    set_chief_state(&fake, EffectiveAgentState::Idle);
+    tokio::time::sleep(Duration::from_secs(2 * 60)).await;
+
+    assert_eq!(texts(&fake), [line, line, line]);
+}
+
+#[tokio::test]
+async fn a_post_naming_chief_message_held_back_is_answered_400() {
+    let fake = idle_chief();
+    let (addr, _shutdown_tx, _handle) = serve_fake(&fake, Some(CHIEF)).await;
+
+    let status = post(
+        addr,
+        "/alert",
+        br#"{"alert":"chief-message-held-back","state":"firing"}"#,
+    )
+    .await;
+
+    assert_eq!(status, 400);
+    assert!(fake.keys().is_empty());
 }

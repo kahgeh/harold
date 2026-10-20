@@ -429,7 +429,12 @@ fn pane_off_the_list_sends_nothing_to_the_phone() {
 
     let outcome = notify_turn_among(&environment, &state, &chief_and_pod(), &finished);
 
-    assert_eq!(outcome, Ok(DeliveryOutcome::Skipped));
+    assert_eq!(
+        outcome,
+        Ok(DeliveryOutcome::HeldBack {
+            reason: "not_listed",
+        })
+    );
     assert!(environment.delivered().is_empty());
     assert!(environment.reply_targets().is_empty());
 
@@ -472,7 +477,12 @@ fn with_no_agent_in_a_listed_folder_every_pane_is_held_back_on_both_channels() {
             &turn("%2", "build it"),
         );
 
-        assert_eq!(outcome, Ok(DeliveryOutcome::Skipped));
+        assert_eq!(
+            outcome,
+            Ok(DeliveryOutcome::HeldBack {
+                reason: "not_listed",
+            })
+        );
         assert!(environment.delivered().is_empty());
     }
 }
@@ -590,7 +600,12 @@ fn an_empty_phone_list_holds_every_pane_back_naming_its_key() {
         &turn("%1", "x"),
     );
 
-    assert_eq!(outcome, Ok(DeliveryOutcome::Skipped));
+    assert_eq!(
+        outcome,
+        Ok(DeliveryOutcome::HeldBack {
+            reason: "not_listed",
+        })
+    );
     assert!(
         logs.text()
             .contains("notification skipped (not in notify.imessage) pane_id=%1")
@@ -688,7 +703,12 @@ fn update_left_out_by_a_list_is_logged_with_its_pane_and_key() {
         &turn("%2", "build it"),
     );
 
-    assert_eq!(outcome, Ok(DeliveryOutcome::Skipped));
+    assert_eq!(
+        outcome,
+        Ok(DeliveryOutcome::HeldBack {
+            reason: "not_listed",
+        })
+    );
     let text = logs.text();
     assert!(
         text.contains("notification skipped (not in notify.imessage) pane_id=%2"),
@@ -897,4 +917,184 @@ fn chief_turn_whose_thread_write_fails_is_an_error_and_sends_nothing() {
     assert!(away.sends().is_empty());
     assert!(environment.delivered().is_empty());
     assert!(environment.reply_targets().is_empty());
+}
+
+/// The `harold.notifications` count for an agent, channel and outcome.
+fn notified(agent: &str, channel: &str, outcome: &str) -> u64 {
+    crate::telemetry::test_support::exact_counter_value(
+        "harold.notifications",
+        &[("agent", agent), ("channel", channel), ("outcome", outcome)],
+    )
+    .unwrap_or(0)
+}
+
+/// A folder tree no other test uses, so this test's counts are its own.
+fn unique_tree() -> String {
+    format!("/work/obs-{}", uuid::Uuid::new_v4().simple())
+}
+
+fn pods_in(tree: &str) -> TrackedAgents {
+    TrackedAgents::in_folders(&[
+        ("%1", &format!("{tree}/chief-of-pods")),
+        ("%2", &format!("{tree}/harold")),
+    ])
+}
+
+fn only_chief_listed(tree: &str) -> String {
+    format!(
+        "[notify]\nchief = \"{tree}/chief-of-pods\"\nimessage = [\"{tree}/chief-of-pods\"]\nmachine_audio_output = [\"{tree}/chief-of-pods\"]"
+    )
+}
+
+#[test]
+fn an_update_a_list_holds_back_counts_kept_and_logs_the_fields() {
+    for (locked, channel, line) in [
+        (
+            true,
+            "imessage",
+            "notification skipped (not in notify.imessage) pane_id=%2",
+        ),
+        (
+            false,
+            "machine_audio_output",
+            "spoken update left out (not in notify.machine_audio_output) pane_id=%2",
+        ),
+    ] {
+        let tree = unique_tree();
+        let environment = if locked {
+            FakeEnvironment::locked(&only_chief_listed(&tree))
+        } else {
+            FakeEnvironment::new(&only_chief_listed(&tree))
+        };
+        let logs = CapturedLogs::start();
+
+        let outcome = notify_turn_among(
+            &environment,
+            &NotifyState::default(),
+            &pods_in(&tree),
+            &turn("%2", "SECRET-PROMPT"),
+        );
+
+        assert_eq!(
+            outcome,
+            Ok(DeliveryOutcome::HeldBack {
+                reason: "not_listed"
+            })
+        );
+        let text = logs.text();
+        assert!(text.contains(line), "{text}");
+        for field in [
+            format!("channel=\"{channel}\""),
+            "kind=\"turn_end_update\"".to_string(),
+            "reason=\"not_listed\"".to_string(),
+            format!("agent=\"{tree}/harold\""),
+        ] {
+            assert!(text.contains(&field), "{field} in {text}");
+        }
+        assert!(!text.contains("SECRET-PROMPT"), "{text}");
+        assert_eq!(notified(&format!("{tree}/harold"), channel, "kept"), 1);
+        assert_eq!(notified(&format!("{tree}/harold"), channel, "sent"), 0);
+    }
+}
+
+#[test]
+fn a_delivered_update_counts_sent_on_the_channel_that_took_it() {
+    let tree = unique_tree();
+    let chief = format!("{tree}/chief-of-pods");
+
+    let desk = FakeEnvironment::new(&format!("[notify]\nchief = \"{chief}\""));
+    // A pane that is not the chief, so the desk speaks it.
+    let others = TrackedAgents::in_folders(&[("%1", &chief), ("%2", &format!("{tree}/harold"))]);
+    notify_turn_among(&desk, &NotifyState::default(), &others, &turn("%2", "a")).unwrap();
+    assert_eq!(
+        notified(&format!("{tree}/harold"), "machine_audio_output", "sent"),
+        1
+    );
+
+    let phone = FakeEnvironment::locked(&format!("[notify]\nchief = \"{chief}\""));
+    notify_turn_among(&phone, &NotifyState::default(), &others, &turn("%2", "b")).unwrap();
+    assert_eq!(notified(&format!("{tree}/harold"), "imessage", "sent"), 1);
+
+    let app = FakeApp::new(AppDelivery::Pushed);
+    let away = FakeAwayText::default();
+    let chief_environment = FakeEnvironment::locked(&format!("[notify]\nchief = \"{chief}\""));
+    let chief_agents = TrackedAgents::in_folders(&[("%1", &chief)]);
+    notify_with_app(
+        &turn("%1", "c"),
+        "event-1",
+        "trace",
+        &NotifyState::default(),
+        &chief_agents,
+        &chief_environment,
+        Some(&ChiefApp {
+            app: &app,
+            away: &away,
+            away_allowed: true,
+        }),
+    )
+    .unwrap();
+    assert_eq!(notified(&chief, "web_app", "sent"), 1);
+}
+
+#[test]
+fn what_the_chief_rule_the_mute_the_pause_and_a_message_this_turn_hold_counts_neither() {
+    let tree = unique_tree();
+    let chief = format!("{tree}/chief-of-pods");
+    let overrides = format!("[notify]\nchief = \"{chief}\"");
+    let agents = TrackedAgents::in_folders(&[("%1", &chief)]);
+
+    // The chief's own update is not spoken at the desk.
+    let logs = CapturedLogs::start();
+    let desk = FakeEnvironment::new(&overrides);
+    let outcome = notify_turn_among(&desk, &NotifyState::default(), &agents, &turn("%1", "a"));
+    assert_eq!(outcome, Ok(DeliveryOutcome::HeldBack { reason: "chief" }));
+    let text = logs.text();
+    assert!(
+        text.contains("spoken update left out (chief) pane_id=%1"),
+        "{text}"
+    );
+    assert!(text.contains("reason=\"chief\""), "{text}");
+
+    // The voice mute and the pause.
+    super::set_tts_muted(true);
+    notify_turn_among(&desk, &NotifyState::default(), &agents, &turn("%1", "b")).unwrap();
+    super::set_tts_muted(false);
+    super::set_messaging_paused(true);
+    let phone = FakeEnvironment::locked(&overrides);
+    notify_turn_among(&phone, &NotifyState::default(), &agents, &turn("%1", "c")).unwrap();
+    super::set_messaging_paused(false);
+
+    // A message sent this turn.
+    let state = NotifyState::default();
+    state.mark_requested_message("%1", phone.now());
+    let outcome = notify_turn_among(&phone, &state, &agents, &turn("%1", "d"));
+    assert_eq!(outcome, Ok(DeliveryOutcome::Skipped));
+
+    for channel in ["imessage", "machine_audio_output", "web_app"] {
+        for outcome in ["sent", "kept"] {
+            assert_eq!(notified(&chief, channel, outcome), 0, "{channel} {outcome}");
+        }
+    }
+}
+
+#[test]
+fn an_update_held_back_on_a_channel_not_set_up_counts_nothing_but_is_still_logged() {
+    let tree = unique_tree();
+    let environment = FakeEnvironment::locked(&only_chief_listed(&tree));
+    environment.set_not_set_up(crate::settings::Channel::Imessage);
+    let logs = CapturedLogs::start();
+
+    notify_turn_among(
+        &environment,
+        &NotifyState::default(),
+        &pods_in(&tree),
+        &turn("%2", "x"),
+    )
+    .unwrap();
+
+    assert!(
+        logs.text()
+            .contains("notification skipped (not in notify.imessage)")
+    );
+    assert_eq!(notified(&format!("{tree}/harold"), "imessage", "kept"), 0);
 }

@@ -20,7 +20,7 @@ use tracing::info;
 use crate::channels;
 use crate::inbound::ownership::agent_message_text;
 use crate::inbound::{AgentAddress, set_last_away_notification_source_agent};
-use crate::settings::{NotifySettings, get_settings};
+use crate::settings::{Channel, NotifySettings, get_settings};
 use crate::store::{AppReplyState, AwayMessageRequested, TurnCompleted};
 use crate::tmux;
 
@@ -28,6 +28,11 @@ use crate::tmux;
 pub(crate) enum DeliveryOutcome {
     Delivered,
     Skipped,
+    /// A channel's list or the chief rule kept it from going out. `reason` is
+    /// `not_listed` or `chief`.
+    HeldBack {
+        reason: &'static str,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -203,6 +208,9 @@ pub(crate) trait NotifyEnvironment: Send + Sync {
     fn send_spoken_line(&self, line: &str) -> Result<(), String>;
     /// Make `agent` the one an untagged reply goes to.
     fn record_reply_target(&self, agent: AgentAddress);
+    /// Whether `channel` is set up: `imessage` has a recipient, `telegram` a bot token and
+    /// a chat id, `web_app` its table. `machine_audio_output` always is.
+    fn channel_set_up(&self, channel: Channel) -> bool;
 }
 
 pub(crate) struct SystemEnvironment;
@@ -256,6 +264,54 @@ impl NotifyEnvironment for SystemEnvironment {
 
     fn record_reply_target(&self, agent: AgentAddress) {
         set_last_away_notification_source_agent(agent);
+    }
+
+    fn channel_set_up(&self, channel: Channel) -> bool {
+        let settings = get_settings();
+        match channel {
+            Channel::Imessage => settings.imessage.recipient.is_some(),
+            Channel::Telegram => {
+                settings.telegram.bot_token.is_some() && settings.telegram.chat_id.is_some()
+            }
+            Channel::WebApp => settings.web_app.is_some(),
+            Channel::MachineAudioOutput => true,
+        }
+    }
+}
+
+/// Counts a notification from `pane_id` on `channel` (`sent` or `kept`), only when the
+/// channel is set up and turned on.
+pub(crate) fn count_notification(
+    environment: &dyn NotifyEnvironment,
+    agents: &left_out::TrackedAgents,
+    pane_id: &str,
+    channel: Channel,
+    outcome: &str,
+) {
+    let live = left_out::channel_live(
+        environment.notify_settings(),
+        environment.channel_set_up(channel),
+        channel,
+        is_tts_muted(),
+        is_messaging_paused(),
+    );
+    if live {
+        crate::telemetry::count_notification(&agents.agent_of(pane_id), channel.key(), outcome);
+    }
+}
+
+/// Writes the line of something held back, and counts it `kept` when the channel's list
+/// held it.
+pub(crate) fn report_held(
+    environment: &dyn NotifyEnvironment,
+    agents: &left_out::TrackedAgents,
+    held: &left_out::Held,
+    kind: left_out::UpdateKind,
+    pane_id: &str,
+) {
+    held.log(kind, pane_id);
+    if held.is_kept() {
+        count_notification(environment, agents, pane_id, held.channel, "kept");
     }
 }
 
@@ -441,19 +497,41 @@ fn is_chief_pane(cfg: &NotifySettings, agents: &left_out::TrackedAgents, pane_id
     agents.chief_pane_id(cfg.chief.as_deref()) == Some(pane_id)
 }
 
+/// What a hold makes of the delivery: held back by a rule, or skipped by the user's own
+/// choice.
+fn outcome_of(held: &left_out::Held) -> DeliveryOutcome {
+    if held.is_held_back() {
+        DeliveryOutcome::HeldBack {
+            reason: held.reason,
+        }
+    } else {
+        DeliveryOutcome::Skipped
+    }
+}
+
 /// Leave a turn-end update out: nothing is sent or said, no reply target is recorded,
 /// and the turn is recorded in the duplicate check so that a repeat of it is left
-/// out as well. The log line names the pane.
+/// out as well. The log line names the pane and the agent. The current span's `channel`
+/// is the channel whose rule held it.
 fn leave_out(
     state: &NotifyState,
+    environment: &dyn NotifyEnvironment,
+    agents: &left_out::TrackedAgents,
     dedup_key: String,
     now: Instant,
     pane_id: &str,
-    reason: &str,
+    held: &left_out::Held,
 ) -> Result<DeliveryOutcome, String> {
-    info!(pane_id = %pane_id, "{reason}");
+    report_held(
+        environment,
+        agents,
+        held,
+        left_out::UpdateKind::TurnEndUpdate,
+        pane_id,
+    );
+    tracing::Span::current().record("channel", held.channel.key());
     state.record_turn(dedup_key, now);
-    Ok(DeliveryOutcome::Skipped)
+    Ok(outcome_of(held))
 }
 
 /// The daemon sends through `notify_with_app`; this is its form without the app route.
@@ -555,53 +633,76 @@ fn notify_routed(
     } else {
         OutboundChannel::Tts
     };
-    // Recorded on `harold.delivery` when the update is delivered inside it. The app route
-    // records it on return, once the route that carried the update is known.
     let app_route = match (channel, app) {
         (OutboundChannel::Away, Some(chief_app)) => Some(chief_app),
         _ => None,
     };
     let name = channel_name(channel, &cfg.away_channel);
-    match app_route {
-        Some(_) => *app_route_channel = Some(name),
-        None => {
-            tracing::Span::current().record("channel", name);
-        }
-    }
 
     // The voice mute and the messaging pause skip as they always have, before any rule
     // below is looked at: a paused update would not go to the phone.
     if let Some(reason) = channel.skip_reason(is_tts_muted(), is_messaging_paused()) {
+        record_delivery_channel(app_route.is_some(), app_route_channel, name);
         info!("{reason}");
         return Ok(DeliveryOutcome::Skipped);
     }
 
-    if screen_locked
-        && let Some(reason) = left_out::left_out_reason(
+    // A held-back update records the channel whose rule held it, once, in `leave_out`.
+    let held = if screen_locked {
+        left_out::left_out_reason(
             messaged_this_turn,
             cfg,
             agents,
             app_route.is_some(),
             &turn.pane_id,
         )
-    {
-        return leave_out(state, dedup_key, now, &turn.pane_id, &reason);
+    } else {
+        left_out::desk_update_reason(cfg, agents, &turn.pane_id)
+    };
+    if let Some(held) = held {
+        return leave_out(
+            state,
+            environment,
+            agents,
+            dedup_key,
+            now,
+            &turn.pane_id,
+            &held,
+        );
     }
 
-    if !screen_locked && let Some(reason) = left_out::desk_update_reason(cfg, agents, &turn.pane_id)
-    {
-        return leave_out(state, dedup_key, now, &turn.pane_id, &reason);
-    }
+    // Recorded on `harold.delivery` when the update is delivered inside it. The app route
+    // records it on return, once the route that carried the update is known.
+    record_delivery_channel(app_route.is_some(), app_route_channel, name);
 
+    // The channel that took the update, for `harold.notifications`.
+    let mut sent_on = match channel {
+        OutboundChannel::Tts => Channel::MachineAudioOutput,
+        OutboundChannel::Away => cfg.away(),
+    };
     let delivered = match app_route {
         Some(chief_app) => {
             deliver_turn_from_chief(chief_app, turn, event_id).map(|(carried_by, source)| {
                 match carried_by {
-                    CarriedBy::App => *app_route_channel = Some(APP_CHANNEL),
+                    CarriedBy::App => {
+                        *app_route_channel = Some(APP_CHANNEL);
+                        sent_on = Channel::WebApp;
+                    }
                     CarriedBy::Held => {
-                        let reason = left_out::notification_skipped(cfg.away().key());
-                        info!(pane_id = %turn.pane_id, "{reason}");
-                        return (DeliveryOutcome::Skipped, source);
+                        let held = left_out::Held::not_listed(
+                            left_out::notification_skipped(cfg.away().key()),
+                            cfg.away(),
+                            agents.agent_of(&turn.pane_id),
+                        );
+                        report_held(
+                            environment,
+                            agents,
+                            &held,
+                            left_out::UpdateKind::TurnEndUpdate,
+                            &turn.pane_id,
+                        );
+                        *app_route_channel = Some(held.channel.key());
+                        return (outcome_of(&held), source);
                     }
                     CarriedBy::Away => {}
                 }
@@ -631,9 +732,24 @@ fn notify_routed(
     }
 
     if outcome == DeliveryOutcome::Delivered {
+        count_notification(environment, agents, &turn.pane_id, sent_on, "sent");
         state.record_turn(dedup_key, environment.now());
     }
     Ok(outcome)
+}
+
+/// Records the `channel` of the delivery span now, or leaves it to the app route to record
+/// on return.
+fn record_delivery_channel(
+    on_app_route: bool,
+    app_route_channel: &mut Option<&'static str>,
+    name: &'static str,
+) {
+    if on_app_route {
+        *app_route_channel = Some(name);
+    } else {
+        tracing::Span::current().record("channel", name);
+    }
 }
 
 // ---------------------------------------------------------------------------

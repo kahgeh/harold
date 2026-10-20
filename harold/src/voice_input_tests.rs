@@ -1730,5 +1730,8 @@ fn two_agents_in_the_chiefs_folder_are_no_chief() {
     assert_eq!(super::call::chief_pane(&h.ports), None);
     let text = logs.text();
     assert!(text.contains("chief pane changed"), "{text}");
-    assert!(text.contains("state=\"ambiguous\"") && text.contains("count=2"), "{text}");
+    assert!(
+        text.contains("state=\"ambiguous\"") && text.contains("count=2"),
+        "{text}"
+    );
 }

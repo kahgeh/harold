@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use super::{DeliveryOutcome, NotifyEnvironment, OutboundChannel};
 use crate::agent::domain::CompletionSummaryUpdate;
 use crate::inbound::AgentAddress;
-use crate::settings::NotifySettings;
+use crate::settings::{Channel, NotifySettings};
 use crate::store::{AwayMessageRequested, TurnCompleted};
 
 pub(crate) fn turn(pane_id: &str, prompt: &str) -> TurnCompleted {
@@ -43,6 +43,8 @@ pub(crate) struct FakeEnvironment {
     reply_targets: Mutex<Vec<String>>,
     spoken_lines: Mutex<Vec<String>>,
     voice_notes: Mutex<Vec<String>>,
+    /// The channels the test has marked not set up.
+    not_set_up: Mutex<Vec<Channel>>,
 }
 
 impl FakeEnvironment {
@@ -77,6 +79,7 @@ impl FakeEnvironment {
             reply_targets: Mutex::new(Vec::new()),
             spoken_lines: Mutex::new(Vec::new()),
             voice_notes: Mutex::new(Vec::new()),
+            not_set_up: Mutex::new(Vec::new()),
         }
     }
 
@@ -120,6 +123,11 @@ impl FakeEnvironment {
     /// Each turn-end update delivered: the channel and the pane.
     pub(crate) fn delivered(&self) -> Vec<(OutboundChannel, String)> {
         self.delivered.lock().unwrap().clone()
+    }
+
+    /// Marks `channel` as not set up (every channel starts set up).
+    pub(crate) fn set_not_set_up(&self, channel: Channel) {
+        self.not_set_up.lock().unwrap().push(channel);
     }
 
     /// The text of each requested message sent.
@@ -224,6 +232,10 @@ impl NotifyEnvironment for FakeEnvironment {
             .lock()
             .unwrap()
             .push(agent.pane_id().to_string());
+    }
+
+    fn channel_set_up(&self, channel: Channel) -> bool {
+        !self.not_set_up.lock().unwrap().contains(&channel)
     }
 }
 

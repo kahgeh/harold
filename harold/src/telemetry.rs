@@ -88,6 +88,7 @@ pub(crate) const ALLOWED_FIELDS: &[&str] = &[
     "watch",
     "run",
     "cost_usd",
+    "agent",
 ];
 
 /// How long shutting the exporters down may take in all.
@@ -180,6 +181,8 @@ pub(crate) struct Instruments {
     pub watch_runs: Counter<u64>,
     /// `watch.cost_usd`, `USD`, by `folder`.
     pub watch_cost_usd: Counter<f64>,
+    /// `harold.notifications`, `{notification}`, by `agent`, `channel` and `outcome`.
+    pub notifications: Counter<u64>,
 }
 
 static INSTRUMENTS: OnceLock<Instruments> = OnceLock::new();
@@ -234,6 +237,7 @@ pub(crate) fn instruments() -> &'static Instruments {
             ),
             watch_runs: counter("watch.runs", "{run}"),
             watch_cost_usd: meter.f64_counter("watch.cost_usd").with_unit("USD").build(),
+            notifications: counter("harold.notifications", "{notification}"),
         }
     })
 }
@@ -241,6 +245,20 @@ pub(crate) fn instruments() -> &'static Instruments {
 // ---------------------------------------------------------------------------
 // Counting from 0
 // ---------------------------------------------------------------------------
+
+/// Counts one notification an agent's pane sent (`outcome = sent`) or whose channel list
+/// kept back (`outcome = kept`). `agent` is the pane's folder below the home folder; it
+/// never holds message text.
+pub(crate) fn count_notification(agent: &str, channel: &str, outcome: &str) {
+    instruments().notifications.add(
+        1,
+        &[
+            KeyValue::new("agent", agent.to_string()),
+            KeyValue::new("channel", channel.to_string()),
+            KeyValue::new("outcome", outcome.to_string()),
+        ],
+    );
+}
 
 /// Every `channel` a phone request can carry.
 pub(crate) const PHONE_CHANNELS: [&str; 4] = ["imessage", "telegram", "forwarded", "unknown"];

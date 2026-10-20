@@ -3,8 +3,9 @@
 //! only the four alerts below and types `harold alert: <name> <state>` into the pane of
 //! the agent running in the chief's folder, with the same checks and typing as timed
 //! prompts. The chief decides what to do with the line. Harold also queues lines of its
-//! own through `AlertQueue`: `harold alert: delivery-given-up firing`, and
-//! `harold alert: store-failing firing` and `cleared`. The address refuses both names.
+//! own through `AlertQueue`: `harold alert: delivery-given-up firing`,
+//! `harold alert: chief-message-held-back firing`, and
+//! `harold alert: store-failing firing` and `cleared`. The address refuses all three names.
 //!
 //! A line is typed only when it changes what the chief was last told about its alert, so
 //! HyperDX's repeated `firing` posts reach the chief once. Every `delivery-given-up` is a
@@ -52,6 +53,16 @@ const LINE_PREFIX: &str = "harold alert: ";
 /// The alert Harold queues itself when it gives up a delivery. The address does not
 /// accept it: it is not in `ALERT_NAMES`.
 pub(crate) const DELIVERY_GIVEN_UP: &str = "delivery-given-up";
+
+/// The alert Harold queues itself when a message or spoken line from the chief is held
+/// back by a channel's list. The address does not accept it: it is not in `ALERT_NAMES`.
+pub(crate) const CHIEF_MESSAGE_HELD_BACK: &str = "chief-message-held-back";
+
+/// Whether every line of `alert` is typed, however many are queued: each is a different
+/// lost message, and none is cleared.
+fn typed_every_time(alert: &str) -> bool {
+    alert == DELIVERY_GIVEN_UP || alert == CHIEF_MESSAGE_HELD_BACK
+}
 
 /// The alert Harold queues itself when it marks its store failing, and clears when the
 /// store recovers. The address does not accept it: it is not in `ALERT_NAMES`.
@@ -224,7 +235,7 @@ impl Desk {
             .iter()
             .position(|waiting| alert_and_state(&waiting.line).0 == alert);
         if let Some(at) = waiting_at {
-            if alert == DELIVERY_GIVEN_UP || alert_and_state(&self.waiting[at].line).1 == state {
+            if typed_every_time(alert) || alert_and_state(&self.waiting[at].line).1 == state {
                 return Err(HeldBack::Repeat);
             }
             self.waiting.remove(at);
@@ -234,7 +245,7 @@ impl Desk {
                 HeldBack::Repeat
             });
         }
-        if alert != DELIVERY_GIVEN_UP {
+        if !typed_every_time(alert) {
             match self.told.get(alert).map(String::as_str) {
                 Some(told) if told == state => return Err(HeldBack::Repeat),
                 None if state == "cleared" => return Err(HeldBack::NeverFired),
@@ -259,7 +270,7 @@ impl Desk {
             return;
         };
         let (alert, state) = alert_and_state(&waiting.line);
-        if alert != DELIVERY_GIVEN_UP {
+        if !typed_every_time(alert) {
             self.told.insert(alert.to_string(), state.to_string());
         }
     }

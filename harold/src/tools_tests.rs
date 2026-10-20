@@ -391,7 +391,10 @@ fn the_chief_pane_is_the_agent_in_the_chief_folder() {
     assert_eq!(chief(Some(CHIEF)).chief_pane(), None);
     let text = logs.text();
     assert!(text.contains("chief pane changed"), "{text}");
-    assert!(text.contains("state=\"ambiguous\"") && text.contains("count=2"), "{text}");
+    assert!(
+        text.contains("state=\"ambiguous\"") && text.contains("count=2"),
+        "{text}"
+    );
     println!(
         "evidence: chief pane %2 in {CHIEF}/; none with no folder, no pane, or two panes there"
     );

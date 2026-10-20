@@ -4,6 +4,8 @@ use std::time::Duration;
 
 use serde_json::json;
 
+use crate::settings::Channel;
+
 use super::{
     ChiefTyper, DeliveryDispatcher, DispatchError, ProductionDispatcher, ReplyOrigin, Router,
     dispatch_away_message, dispatch_spoken_line, dispatch_spoken_line_with_app,
@@ -974,6 +976,11 @@ fn not_owned_report() -> RouteReport {
     }
 }
 
+/// A hold by a channel's list, as the dispatch functions are given one.
+fn listed_hold(line: &str, channel: Channel) -> crate::outbound::left_out::Held {
+    crate::outbound::left_out::Held::not_listed(line.to_string(), channel, "Dev/test".to_string())
+}
+
 fn away_delivery(payload: serde_json::Value) -> PendingDelivery {
     PendingDelivery {
         event_id: "event-1".into(),
@@ -1079,7 +1086,10 @@ fn away_message_the_drop_check_names_is_skipped_without_sending() {
         false,
         |pane_id| {
             checked = Some(pane_id.to_string());
-            Some("away message dropped (messages come from /work/chief-of-pods only)".to_string())
+            Some(listed_hold(
+                "agent message dropped (not in notify.imessage)",
+                Channel::Imessage,
+            ))
         },
         |_| panic!("a dropped message must not be sent"),
         |_| panic!("a dropped message must not record its pane"),
@@ -1423,8 +1433,12 @@ async fn dispatcher_over(
     let environment = Arc::new(FakeEnvironment::locked(overrides));
     // Built the way `run_event_handler` builds it, so these tests cover the daemon's wiring
     // of the hub into the dispatcher.
-    let dispatcher: Arc<dyn DeliveryDispatcher> =
-        Arc::new(production_dispatcher(environment.clone(), &snapshots, None));
+    let dispatcher: Arc<dyn DeliveryDispatcher> = Arc::new(production_dispatcher(
+        environment.clone(),
+        &snapshots,
+        None,
+        None,
+    ));
     (store, snapshots, environment, dispatcher)
 }
 
@@ -1837,7 +1851,12 @@ async fn update_after_a_dropped_message_is_left_out_by_the_folder_rule_not_the_m
     let update = dispatcher.dispatch(&turn_delivery("%2", "build it"));
 
     assert!(matches!(dropped, Ok(DeliveryOutcome::Skipped)));
-    assert!(matches!(update, Ok(DeliveryOutcome::Skipped)));
+    assert!(matches!(
+        update,
+        Ok(DeliveryOutcome::HeldBack {
+            reason: "not_listed"
+        })
+    ));
     assert!(environment.delivered().is_empty());
     assert!(environment.reply_targets().is_empty());
     let text = logs.text();
@@ -2088,7 +2107,12 @@ fn dropped_spoken_line_logs_the_reason_and_the_pane_only() {
         &spoken_delivery(json!(line)),
         false,
         false,
-        |_| Some("spoken line dropped (lines come from /work/chief-of-pods only)".into()),
+        |_| {
+            Some(listed_hold(
+                "spoken line dropped (not in notify.imessage)",
+                Channel::Imessage,
+            ))
+        },
         &environment,
     );
 
@@ -2096,7 +2120,7 @@ fn dropped_spoken_line_logs_the_reason_and_the_pane_only() {
     assert!(environment.voice_notes().is_empty());
     assert!(
         logs.text()
-            .contains("spoken line dropped (lines come from /work/chief-of-pods only) pane_id=%2")
+            .contains("spoken line dropped (not in notify.imessage) pane_id=%2")
     );
     assert!(!logs.text().contains("secret words"));
 }
@@ -2128,6 +2152,13 @@ fn dispatch_line_with_call(
             assert_eq!(text, "hi");
             asked.set(asked.get() + 1);
             in_call
+        },
+        |_, _| {},
+        |_| {
+            listed_hold(
+                "spoken line dropped (not in notify.imessage)",
+                Channel::Imessage,
+            )
         },
     );
     (outcome, asked.get())
@@ -2200,6 +2231,13 @@ fn a_spoken_line_with_no_phone_call_open_goes_by_the_lock_rules() {
                 })
             },
             |_, text| say_in_phone_call_over(None, text, Speaker::Chief),
+            |_, _| {},
+            |_| {
+                listed_hold(
+                    "spoken line dropped (not in notify.imessage)",
+                    Channel::Imessage,
+                )
+            },
         );
 
         if delivered {
@@ -3384,7 +3422,7 @@ async fn with_app_settings(
     let app = Arc::new(app);
     let away = Arc::new(FakeAwayText::default());
     let route: Arc<dyn AppRoute> = app.clone();
-    let dispatcher = production_dispatcher(environment.clone(), &snapshots, Some(route))
+    let dispatcher = production_dispatcher(environment.clone(), &snapshots, Some(route), None)
         .with_away_text(away.clone());
     WithApp {
         environment,
@@ -3929,7 +3967,8 @@ async fn a_to_chief_reply_with_no_app_is_still_typed() {
         .unwrap();
     let environment = Arc::new(FakeEnvironment::locked(ONLY_FROM_CHIEF));
     let (typed, typer) = recording_typer();
-    let dispatcher = production_dispatcher(environment, &snapshots, None).with_chief_typer(typer);
+    let dispatcher =
+        production_dispatcher(environment, &snapshots, None, None).with_chief_typer(typer);
 
     let outcome = dispatcher.dispatch_with_pause(
         &inbound_delivery(&unique_event_id(), app_reply("hello")),
@@ -4080,7 +4119,7 @@ async fn run_the_app_path_with_a_canary() -> Vec<String> {
     let away = Arc::new(FakeAwayText::default());
     let environment = Arc::new(FakeEnvironment::locked(ONLY_FROM_CHIEF));
     let dispatcher: Arc<dyn DeliveryDispatcher> = Arc::new(Unpaused(
-        production_dispatcher(environment.clone(), &snapshots, Some(route))
+        production_dispatcher(environment.clone(), &snapshots, Some(route), None)
             .with_router(chat_router)
             .with_chief_typer(typer)
             .with_away_text(away.clone()),
@@ -4282,4 +4321,326 @@ async fn two_panes_matching_chief_are_no_chief_for_the_app_and_still_use_the_lis
     assert!(text.contains("state=\"ambiguous\""), "{text}");
     assert!(text.contains("count=2"), "{text}");
     assert!(!text.contains("/tmp/chief-of-pods"), "{text}");
+}
+
+// ---------------------------------------------------------------------------
+// What each agent sent on each channel, and the chief's held-back message
+// ---------------------------------------------------------------------------
+
+/// The `harold.notifications` count for an agent, channel and outcome.
+fn notified(agent: &str, channel: &str, outcome: &str) -> u64 {
+    telemetry::test_support::exact_counter_value(
+        "harold.notifications",
+        &[("agent", agent), ("channel", channel), ("outcome", outcome)],
+    )
+    .unwrap_or(0)
+}
+
+/// A folder tree no other test uses, so this test's counts are its own.
+fn unique_tree() -> String {
+    format!("/work/obs-{}", uuid::Uuid::new_v4().simple())
+}
+
+/// Settings where only `listed` (a folder) is on the imessage and machine_audio_output
+/// lists and `tree/chief-of-pods` is the chief. The other lists let everyone through.
+fn lists_naming(tree: &str, listed: &str) -> String {
+    format!(
+        "[notify]\nchief = \"{tree}/chief-of-pods\"\nimessage = [\"{listed}\"]\nmachine_audio_output = [\"{listed}\"]"
+    )
+}
+
+/// The daemon's dispatcher over a published snapshot of `events`, queueing alerts into the
+/// returned receiver.
+async fn published_with_alerts(
+    directory: &TestDirectory,
+    overrides: &str,
+    events: Vec<AgentEvent>,
+) -> (
+    Arc<FakeEnvironment>,
+    ProductionDispatcher,
+    tokio::sync::mpsc::Receiver<crate::alerts::Queued>,
+) {
+    let store = HaroldStore::open(&directory.0).await.unwrap();
+    append_agent_events(&store, events).await.unwrap();
+    let snapshots = AgentSnapshotHub::new(store.load_agent_snapshot().await.unwrap());
+    project_and_publish_agent_snapshot(&store, &snapshots, 500)
+        .await
+        .unwrap();
+    let environment = Arc::new(FakeEnvironment::locked(overrides));
+    let (queue, receiver) = crate::alerts::AlertQueue::new();
+    let dispatcher = production_dispatcher(environment.clone(), &snapshots, None, Some(queue));
+    (environment, dispatcher, receiver)
+}
+
+fn queued_lines(receiver: &mut tokio::sync::mpsc::Receiver<crate::alerts::Queued>) -> Vec<String> {
+    let mut lines = Vec::new();
+    while let Ok((line, _)) = receiver.try_recv() {
+        lines.push(line);
+    }
+    lines
+}
+
+fn spoken_from(pane_id: &str) -> PendingDelivery {
+    spoken_delivery(json!(SpokenLineRequested {
+        pane_id: pane_id.into(),
+        text: "SECRET-WORDS".into(),
+    }))
+}
+
+const CHIEF_ALERT: &str = "harold alert: chief-message-held-back firing";
+
+#[tokio::test]
+async fn an_agent_message_a_list_holds_back_counts_kept_and_logs_the_fields() {
+    let directory = TestDirectory::new();
+    let tree = unique_tree();
+    let (environment, dispatcher, _alerts) = published_with_alerts(
+        &directory,
+        &lists_naming(&tree, &format!("{tree}/chief-of-pods")),
+        vec![
+            agent_observed("%1", 10, &format!("{tree}/chief-of-pods")),
+            agent_observed("%2", 20, &format!("{tree}/harold")),
+        ],
+    )
+    .await;
+    let logs = CapturedLogs::start();
+
+    let outcome = dispatcher.dispatch_with_pause(
+        &away_delivery(json!(message_from("%2", "SECRET-WORDS"))),
+        None,
+        false,
+    );
+
+    assert!(matches!(outcome, Ok(DeliveryOutcome::Skipped)));
+    assert!(environment.away_messages().is_empty());
+    let text = logs.text();
+    assert!(
+        text.contains("agent message dropped (not in notify.imessage) pane_id=%2"),
+        "{text}"
+    );
+    for field in [
+        "channel=\"imessage\"",
+        "kind=\"agent_message\"",
+        "reason=\"not_listed\"",
+        &format!("agent=\"{tree}/harold\""),
+    ] {
+        assert!(text.contains(field), "{field} in {text}");
+    }
+    assert!(!text.contains("SECRET-WORDS"), "{text}");
+    assert_eq!(notified(&format!("{tree}/harold"), "imessage", "kept"), 1);
+    assert_eq!(notified(&format!("{tree}/harold"), "imessage", "sent"), 0);
+}
+
+#[tokio::test]
+async fn a_message_and_a_line_a_channel_took_count_sent() {
+    let directory = TestDirectory::new();
+    let tree = unique_tree();
+    let chief = format!("{tree}/chief-of-pods");
+    let (environment, dispatcher, mut alerts) = published_with_alerts(
+        &directory,
+        &lists_naming(&tree, &chief),
+        vec![agent_observed("%1", 10, &chief)],
+    )
+    .await;
+
+    // Locked: the message and the line go to the away device (imessage).
+    for delivery in [
+        away_delivery(json!(message_from("%1", "hi"))),
+        spoken_from("%1"),
+    ] {
+        let outcome = dispatcher.dispatch_with_pause(&delivery, None, false);
+        assert!(matches!(outcome, Ok(DeliveryOutcome::Delivered)));
+    }
+    assert_eq!(notified(&chief, "imessage", "sent"), 2);
+
+    // Unlocked: the line is said at the desk.
+    environment.set_screen_locked(false);
+    let outcome = dispatcher.dispatch_with_pause(&spoken_from("%1"), None, false);
+    assert!(matches!(outcome, Ok(DeliveryOutcome::Delivered)));
+    assert_eq!(notified(&chief, "machine_audio_output", "sent"), 1);
+    assert_eq!(notified(&chief, "imessage", "kept"), 0);
+    assert!(queued_lines(&mut alerts).is_empty());
+}
+
+#[tokio::test]
+async fn a_spoken_line_a_list_holds_back_counts_kept_on_the_phone_and_at_the_desk() {
+    let directory = TestDirectory::new();
+    let tree = unique_tree();
+    let agent = format!("{tree}/harold");
+    let (environment, dispatcher, _alerts) = published_with_alerts(
+        &directory,
+        &lists_naming(&tree, &format!("{tree}/chief-of-pods")),
+        vec![agent_observed("%2", 20, &agent)],
+    )
+    .await;
+    let logs = CapturedLogs::start();
+
+    let locked = dispatcher.dispatch_with_pause(&spoken_from("%2"), None, false);
+    environment.set_screen_locked(false);
+    let desk = dispatcher.dispatch_with_pause(&spoken_from("%2"), None, false);
+
+    assert!(matches!(locked, Ok(DeliveryOutcome::Skipped)));
+    assert!(matches!(desk, Ok(DeliveryOutcome::Skipped)));
+    let text = logs.text();
+    assert!(text.contains("spoken line dropped (not in notify.imessage) pane_id=%2"));
+    assert!(text.contains("spoken line dropped (not in notify.machine_audio_output) pane_id=%2"));
+    assert!(text.contains("kind=\"spoken_line\""), "{text}");
+    assert!(!text.contains("SECRET-WORDS"), "{text}");
+    assert_eq!(notified(&agent, "imessage", "kept"), 1);
+    assert_eq!(notified(&agent, "machine_audio_output", "kept"), 1);
+}
+
+#[tokio::test]
+async fn nothing_is_counted_under_the_mute_the_pause_or_on_a_channel_not_set_up() {
+    let directory = TestDirectory::new();
+    let tree = unique_tree();
+    let agent = format!("{tree}/harold");
+    let (environment, dispatcher, mut alerts) = published_with_alerts(
+        &directory,
+        &lists_naming(&tree, &format!("{tree}/someone-else")),
+        vec![
+            agent_observed("%1", 10, &format!("{tree}/chief-of-pods")),
+            agent_observed("%2", 20, &agent),
+        ],
+    )
+    .await;
+
+    // The pause is looked at before the list.
+    let paused =
+        dispatcher.dispatch_with_pause(&away_delivery(json!(message_from("%1", "x"))), None, true);
+    assert!(matches!(paused, Ok(DeliveryOutcome::Skipped)));
+
+    // The voice mute is looked at before the desk list.
+    environment.set_screen_locked(false);
+    crate::outbound::set_tts_muted(true);
+    let muted = dispatcher.dispatch_with_pause(&spoken_from("%1"), None, false);
+    crate::outbound::set_tts_muted(false);
+    assert!(matches!(muted, Ok(DeliveryOutcome::Skipped)));
+
+    // A channel that is not set up counts nothing, though its line is still written.
+    environment.set_screen_locked(true);
+    environment.set_not_set_up(Channel::Imessage);
+    let logs = CapturedLogs::start();
+    let unset =
+        dispatcher.dispatch_with_pause(&away_delivery(json!(message_from("%2", "x"))), None, false);
+    assert!(matches!(unset, Ok(DeliveryOutcome::Skipped)));
+    assert!(
+        logs.text()
+            .contains("agent message dropped (not in notify.imessage)")
+    );
+
+    assert_eq!(notified(&agent, "imessage", "kept"), 0);
+    assert_eq!(
+        notified(&format!("{tree}/chief-of-pods"), "imessage", "kept"),
+        0
+    );
+    assert_eq!(
+        notified(
+            &format!("{tree}/chief-of-pods"),
+            "machine_audio_output",
+            "kept"
+        ),
+        0
+    );
+    assert!(
+        queued_lines(&mut alerts).is_empty(),
+        "no alert for choices or unset channels"
+    );
+}
+
+#[tokio::test]
+async fn a_chief_message_or_line_a_list_holds_back_queues_one_alert() {
+    let directory = TestDirectory::new();
+    let tree = unique_tree();
+    let (environment, dispatcher, mut alerts) = published_with_alerts(
+        &directory,
+        &lists_naming(&tree, &format!("{tree}/someone-else")),
+        vec![
+            agent_observed("%1", 10, &format!("{tree}/chief-of-pods")),
+            agent_observed("%2", 20, &format!("{tree}/harold")),
+        ],
+    )
+    .await;
+
+    // Phone: a message and a line. Desk: a line. Each queues its own alert line.
+    for delivery in [
+        away_delivery(json!(message_from("%1", "hi"))),
+        spoken_from("%1"),
+    ] {
+        dispatcher
+            .dispatch_with_pause(&delivery, None, false)
+            .unwrap();
+    }
+    environment.set_screen_locked(false);
+    dispatcher
+        .dispatch_with_pause(&spoken_from("%1"), None, false)
+        .unwrap();
+    assert_eq!(
+        queued_lines(&mut alerts),
+        [CHIEF_ALERT, CHIEF_ALERT, CHIEF_ALERT]
+    );
+
+    // Another agent's message, and a turn-end update of the chief, queue none.
+    environment.set_screen_locked(true);
+    dispatcher
+        .dispatch_with_pause(&away_delivery(json!(message_from("%2", "hi"))), None, false)
+        .unwrap();
+    dispatcher
+        .dispatch_with_pause(&turn_delivery("%1", "build it"), None, false)
+        .unwrap();
+    assert!(queued_lines(&mut alerts).is_empty());
+}
+
+#[tokio::test]
+async fn the_alert_is_queued_while_the_chief_pane_is_ambiguous() {
+    let directory = TestDirectory::new();
+    let tree = unique_tree();
+    let (_environment, dispatcher, mut alerts) = published_with_alerts(
+        &directory,
+        &lists_naming(&tree, &format!("{tree}/someone-else")),
+        vec![
+            agent_observed("%1", 10, &format!("{tree}/chief-of-pods")),
+            agent_observed("%3", 30, &format!("{tree}/chief-of-pods/")),
+        ],
+    )
+    .await;
+
+    dispatcher
+        .dispatch_with_pause(&away_delivery(json!(message_from("%1", "hi"))), None, false)
+        .unwrap();
+
+    assert_eq!(queued_lines(&mut alerts), [CHIEF_ALERT]);
+}
+
+#[tokio::test]
+async fn the_delivery_span_of_a_held_back_update_names_the_holding_channel_and_outcome() {
+    let directory = TestDirectory::new();
+    let tree = unique_tree();
+    let (_environment, dispatcher, _alerts) = published_with_alerts(
+        &directory,
+        &lists_naming(&tree, &format!("{tree}/chief-of-pods")),
+        vec![agent_observed("%2", 20, &format!("{tree}/harold"))],
+    )
+    .await;
+    let event_id = uuid::Uuid::new_v4();
+    let (_trace, parent) = keep_a_turn_for(event_id);
+
+    let outcome = dispatch_turn_end(&Unpaused(dispatcher), &event_id.to_string(), "%2");
+
+    assert!(matches!(
+        outcome,
+        Ok(DeliveryOutcome::HeldBack {
+            reason: "not_listed"
+        })
+    ));
+    let deliveries = deliveries_under(parent);
+    assert_eq!(deliveries.len(), 1);
+    assert_eq!(attr(&deliveries[0], "outcome"), "held_back");
+    assert_eq!(attr(&deliveries[0], "reason"), "not_listed");
+    let channels: Vec<_> = deliveries[0]
+        .attributes
+        .iter()
+        .filter(|kv| kv.key.as_str() == "channel")
+        .collect();
+    assert_eq!(channels.len(), 1, "recorded once: {channels:?}");
+    assert_eq!(attr(&deliveries[0], "channel"), "imessage");
 }
