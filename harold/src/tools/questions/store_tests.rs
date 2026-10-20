@@ -1145,6 +1145,40 @@ async fn ignore_answer_is_stored_and_leaves_the_list() {
 }
 
 #[tokio::test]
+async fn ticks_carry_over_when_ignored_instructions_are_put_again() {
+    let temp = TempFolder::new();
+    let store = TursoQuestionStore::open(&temp.0).await.unwrap();
+    store
+        .put(instructions("I1", &["a", "b", "c"]), 1)
+        .await
+        .unwrap();
+    tick_ok(&store, "I1", 1, true).await;
+    tick_ok(&store, "I1", 2, true).await;
+    let ignore = |_: &Question| {
+        Ok(Answer {
+            ticked: 0,
+            kind: Kind::Ignore,
+            picks: vec![],
+            note: String::new(),
+        })
+    };
+    store
+        .answer("I1", 1, false, ignore, 9)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(listed_ids(&store).await.is_empty());
+    // Step "a" is unchanged, "b" changed, "c" was never ticked.
+    store
+        .put(instructions("I1", &["a", "b2", "c"]), 10)
+        .await
+        .unwrap();
+    assert_eq!(listed_ids(&store).await.len(), 1);
+    assert_eq!(ticked_of(&store, "I1").await, [1]);
+}
+
+#[tokio::test]
 async fn reorder_mixes_questions_and_instructions() {
     let temp = TempFolder::new();
     let store = TursoQuestionStore::open(&temp.0).await.unwrap();

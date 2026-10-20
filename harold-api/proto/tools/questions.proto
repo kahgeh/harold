@@ -6,13 +6,17 @@
 // The chief of pods calls:
 //   PutQuestion      adds a question or instructions, or replaces one with the
 //                    same id (the version rises and it is waiting again).
-//   DismissQuestion  withdraws a question, with a reason the dash shows.
-//   ReorderQuestions puts the listed waiting or deferred ids first, in order.
+//   DismissQuestion  withdraws a question or instructions, with a reason the
+//                    dash shows.
+//   ReorderQuestions puts the listed waiting or deferred ids, of questions and
+//                    instructions, first, in order.
 //
 // The dash calls:
-//   ListQuestions    the waiting and deferred questions, the count waiting,
+//   ListQuestions    the waiting and deferred questions and instructions, the
+//                    count of questions waiting (instructions are not counted),
 //                    and recently dismissed ids with their reasons.
-//   AnswerQuestion   answers a question at the version the dash saw.
+//   AnswerQuestion   answers a question (picks or a note) or instructions
+//                    (DONE or IGNORE) at the version the dash saw.
 //   DeferQuestion    sets a question aside; it returns to waiting once a batch is typed and nothing else waits.
 //   TickStep         ticks or unticks one step of waiting instructions.
 //
@@ -110,6 +114,7 @@ message Dismissed {
 
 message ListQuestionsResponse {
   repeated ListedQuestion questions = 1;
+  // The questions waiting; instructions are left out.
   uint32 waiting = 2;
   repeated Dismissed dismissed = 3;
 }
@@ -120,7 +125,7 @@ enum AnswerKind {
   ANSWER_KIND_REVISE = 2;
   ANSWER_KIND_REJECT = 3;
   ANSWER_KIND_FREE_TEXT = 4;
-  // Instructions only.
+  // Instructions only, with no picks and no note.
   ANSWER_KIND_DONE = 5;
   ANSWER_KIND_IGNORE = 6;
 }

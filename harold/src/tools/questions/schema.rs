@@ -113,9 +113,6 @@ pub(super) fn from_proto(q: pb::Question) -> Result<Question, String> {
     if too_long(&q.intro) {
         return Err("intro".into());
     }
-    if q.decisions.is_empty() {
-        return Err("decisions".into());
-    }
     if !q.title.is_empty() {
         return Err("title".into());
     }

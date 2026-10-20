@@ -281,6 +281,9 @@ pub struct QuestionBlock {
     /// its question is no longer listed or is listed at a higher version.
     kept: BTreeMap<String, Kept>,
     notice: Option<String>,
+    /// Ids of instructions answered `done` or `ignore` here, so that the same id listed
+    /// again says its ticks were kept. Kept small.
+    answered_instructions: Vec<String>,
     /// The notice stood on a block with no question through one listing already; the next
     /// listing that still finds no question clears it, and the block hides.
     notice_listed: bool,
@@ -351,6 +354,26 @@ impl QuestionBlock {
         });
         self.follow_current();
         self.age_notice();
+        self.note_put_again();
+    }
+
+    /// Instructions answered here and listed again are the chief putting the same id
+    /// again: say that ticks were kept for unchanged steps, and forget the id.
+    fn note_put_again(&mut self) {
+        let again = self
+            .answered_instructions
+            .iter()
+            .find(|id| {
+                self.queue
+                    .questions
+                    .iter()
+                    .any(|q| &q.id == *id && q.is_instructions())
+            })
+            .cloned();
+        if let Some(id) = again {
+            self.answered_instructions.retain(|x| x != &id);
+            self.set_notice(instructions_changed_notice(&id));
+        }
     }
 
     fn follow_current(&mut self) {
@@ -539,6 +562,18 @@ impl QuestionBlock {
     fn apply_result(&mut self, id: &str, result: SendResult) {
         match result {
             SendResult::Recorded => {
+                if self
+                    .queue
+                    .questions
+                    .iter()
+                    .any(|q| q.id == id && q.is_instructions())
+                {
+                    self.answered_instructions.retain(|x| x != id);
+                    self.answered_instructions.push(id.to_string());
+                    if self.answered_instructions.len() > 16 {
+                        self.answered_instructions.remove(0);
+                    }
+                }
                 self.queue.questions.retain(|q| q.id != id);
                 self.queue.waiting = self.queue.waiting.saturating_sub(1);
                 self.clear_notice();
@@ -2232,6 +2267,43 @@ mod tests {
             b.view().unwrap().notice.as_deref(),
             Some("Q1 changed, your picks were cleared")
         );
+    }
+
+    #[test]
+    fn instructions_put_again_after_done_or_ignore_say_ticks_were_kept() {
+        {
+            // `sent` is the same for `done` and `ignore`: both are recorded answers.
+            let mut b = open_block(vec![instructions("I1", 1, 2), question("Q1", 1, 1)]);
+            b.sent("I1", SendResult::Recorded);
+            b.reconcile(queue(vec![question("Q1", 1, 1)]));
+            assert_eq!(b.view().unwrap().notice, None);
+            b.reconcile(queue(vec![
+                with_ticks(instructions("I1", 2, 2), &[1]),
+                question("Q1", 1, 1),
+            ]));
+            assert_eq!(
+                b.view().unwrap().notice.as_deref(),
+                Some("I1 changed, ticks kept for unchanged steps")
+            );
+            // The id is forgotten: a later new version of it follows the usual rules.
+            assert!(b.answered_instructions.is_empty());
+        }
+    }
+
+    #[test]
+    fn an_unrelated_new_instruction_shows_no_put_again_notice() {
+        let mut b = open_block(vec![instructions("I1", 1, 2), question("Q1", 1, 1)]);
+        b.sent("I1", SendResult::Recorded);
+        b.reconcile(queue(vec![question("Q1", 1, 1), instructions("I2", 1, 2)]));
+        assert_eq!(b.view().unwrap().notice, None);
+    }
+
+    #[test]
+    fn a_question_answered_and_put_again_gets_no_ticks_notice() {
+        let mut b = open_block(vec![question("Q1", 1, 1)]);
+        b.sent("Q1", SendResult::Recorded);
+        b.reconcile(queue(vec![question("Q1", 2, 1)]));
+        assert_eq!(b.view().and_then(|v| v.notice), None);
     }
 
     #[test]

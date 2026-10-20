@@ -110,6 +110,31 @@ cell says "Nothing", the key does nothing there, so a key never means two things
   key types into it, so the footer lists only `Enter` (`send` for a note, `keep` for a
   text field), `Esc` discard, `^L` and `^Q`.
 
+Search is a local, case-insensitive filter over provider, work summary, `session:window.pane`
+name, and working directory. It never sends a search request to Harold and it
+does not pause incoming snapshots. The search line reports visible and total
+row counts while a filter is active. Press `f` to start editing the search query.
+
+The masthead shows the confirmed voice state as `● VOICE ON` or `○ VOICE MUTED`,
+taken from the Harold snapshot rather than from local guesses. Voice commands are
+offered in the palette only while the connection is LIVE and a snapshot has
+arrived; otherwise the palette shows `Commands unavailable until connected`.
+Before the first snapshot the masthead shows `○ VOICE —`.
+
+`Messaging: pause` is the messaging pause for Harold's away channel: it stops all
+iMessage or Telegram traffic, in both directions, without stopping Harold.
+`Messaging: resume` turns it back on. Both are offered under the same conditions
+as the voice commands. While Harold reports messaging as paused, the masthead of
+every connected dash shows `■ MSG PAUSED` after the voice state; nothing is shown
+while messaging is running. The masthead title always shows the dash's own release version (`source` for a
+source build), whatever Harold reports and even before the first snapshot or after a
+disconnect. A dash left running through an install shows its old version until it is
+restarted. As the line gets tight `HAROLD / TMUX` shortens to `TMX DASH`, then `TMX DASH`
+goes, then `REV`, then the version, so transport, voice and the paused marker stay
+visible. A failed request is reported as `MESSAGING ERROR: …`. See Harold's
+[operation reference](../docs/references/operation/README.md#pausing-messaging)
+for what the switch does.
+
 ## Now line
 
 When the chief of pods has a Now item in its queue, the dash shows it on one dim line under the masthead: `NOW  ` and the item's first line, cut to the terminal's width. The dash reads it from Harold's backlog tool with the question tool, every 2 seconds; when that poll's question read timed out, the Now read is skipped and the line hides until the next poll. The line takes a row only when one is spare beside the agent list's six rows. It is hidden while the queue has no Now item, when Harold does not serve the backlog tool, the read fails or the stream to Harold is lost, and at the smallest height (18 rows), where the agent list keeps its six rows. The cursor never lands on it and it takes no keys. See the [backlog reference](../docs/references/tools/backlog.md) for how the queue is kept.
