@@ -380,3 +380,55 @@ fn a_link_moved_outside_every_listed_folder_makes_the_run_find_no_skill() {
         Err(SkillMissing)
     );
 }
+
+fn add_dirs(line: &str, home: Option<&str>) -> Vec<String> {
+    parse_skill(&format!("---\n{line}\n---\nB\n"), home).add_dirs
+}
+
+#[test]
+fn add_dirs_are_split_trimmed_and_tilde_expanded() {
+    let text = "---\nadd-dirs: ~/bin/harold, /tmp/x , ,rel\n---\nB\n";
+    let skill = parse_skill(text, Some("/h"));
+    assert_eq!(skill.add_dirs, ["/h/bin/harold", "/tmp/x", "rel"]);
+    assert_eq!(skill.body, "B\n");
+}
+
+#[test]
+fn a_bare_tilde_is_home_and_a_folder_with_spaces_stays_whole() {
+    assert_eq!(add_dirs("add-dirs: ~", Some("/h")), ["/h"]);
+    assert_eq!(add_dirs("add-dirs: /a b/c", Some("/h")), ["/a b/c"]);
+}
+
+#[test]
+fn no_key_or_an_empty_value_gives_no_add_dirs() {
+    assert!(add_dirs("name: x", Some("/h")).is_empty());
+    assert!(add_dirs("add-dirs:", Some("/h")).is_empty());
+    assert!(add_dirs("add-dirs:  , ,", Some("/h")).is_empty());
+    assert!(parse_skill("Just text\n", Some("/h")).add_dirs.is_empty());
+}
+
+#[test]
+fn only_a_leading_tilde_or_tilde_slash_expands() {
+    assert_eq!(
+        add_dirs("add-dirs: ~bob/x, a~/b, ~/c", Some("/h")),
+        ["~bob/x", "a~/b", "/h/c"]
+    );
+}
+
+#[test]
+fn tilde_entries_pass_as_written_without_home() {
+    assert_eq!(add_dirs("add-dirs: ~, ~/x, /y", None), ["~", "~/x", "/y"]);
+}
+
+#[test]
+fn add_dirs_in_frontmatter_that_never_closes_are_not_read() {
+    assert!(parse_skill("---\nadd-dirs: /x\nno end\n", Some("/h")).add_dirs.is_empty());
+}
+
+#[test]
+fn read_skill_reads_add_dirs() {
+    let temp = Temp::with_skill("pod-watch", "---\nadd-dirs: /x\nallowed-tools: Write\n---\nB\n");
+    let skill = read_skill(&temp.0, "pod-watch", &[]).unwrap();
+    assert_eq!(skill.add_dirs, ["/x"]);
+    assert_eq!(skill.allowed_tools.as_deref(), Some("Write"));
+}

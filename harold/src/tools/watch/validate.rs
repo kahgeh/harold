@@ -58,6 +58,8 @@ pub(super) enum Refusal {
 pub(super) struct Skill {
     /// The frontmatter's `allowed-tools`, exactly as written, or `None` when absent.
     pub allowed_tools: Option<String>,
+    /// The frontmatter's `add-dirs`: the extra folders a run may read, `~` expanded.
+    pub add_dirs: Vec<String>,
     /// The text after the frontmatter.
     pub body: String,
 }
@@ -182,10 +184,25 @@ pub(super) fn read_skill(
         return Err(SkillMissing);
     }
     let text = std::fs::read_to_string(&path).map_err(|_| SkillMissing)?;
-    Ok(parse_skill(&text))
+    Ok(parse_skill(&text, std::env::var("HOME").ok().as_deref()))
 }
 
-fn parse_skill(text: &str) -> Skill {
+/// A leading `~` or `~/` becomes `home`; every other entry, and any entry when `home` is
+/// not known, goes as written.
+fn expand_home(entry: &str, home: Option<&str>) -> String {
+    let Some(home) = home else {
+        return entry.to_owned();
+    };
+    if entry == "~" {
+        return home.to_owned();
+    }
+    match entry.strip_prefix("~/") {
+        Some(rest) => format!("{}/{rest}", home.trim_end_matches('/')),
+        None => entry.to_owned(),
+    }
+}
+
+fn parse_skill(text: &str, home: Option<&str>) -> Skill {
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let Some(rest) = text
         .strip_prefix("---\n")
@@ -193,10 +210,12 @@ fn parse_skill(text: &str) -> Skill {
     else {
         return Skill {
             allowed_tools: None,
+            add_dirs: Vec::new(),
             body: text.to_owned(),
         };
     };
     let mut allowed_tools = None;
+    let mut add_dirs = Vec::new();
     let mut consumed = 0;
     let mut closed = false;
     for line in rest.split_inclusive('\n') {
@@ -212,16 +231,26 @@ fn parse_skill(text: &str) -> Skill {
                 allowed_tools = Some(value.to_owned());
             }
         }
+        if let Some(value) = bare.strip_prefix("add-dirs:") {
+            add_dirs = value
+                .split(',')
+                .map(str::trim)
+                .filter(|entry| !entry.is_empty())
+                .map(|entry| expand_home(entry, home))
+                .collect();
+        }
     }
     if !closed {
         // Frontmatter that never closes is not frontmatter: the whole text is the body.
         return Skill {
             allowed_tools: None,
+            add_dirs: Vec::new(),
             body: text.to_owned(),
         };
     }
     Skill {
         allowed_tools,
+        add_dirs,
         body: rest[consumed..].to_owned(),
     }
 }
