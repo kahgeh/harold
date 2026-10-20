@@ -10,7 +10,7 @@ The chief writes a question as JSON and passes it to `harold tool questions put`
 
 ```json
 {
-  "id": "Q25",
+  "id": "Q1",
   "product": "durable-server",
   "spec": "durable-server",
   "sha": "d84bf386a2a5",
@@ -78,7 +78,7 @@ Instructions are never a waiting question. They are left out of the `waiting` co
 | `ReorderQuestions` | chief | Puts the listed ids, of questions and instructions, that are waiting or deferred first, in that order, keeping their state. Other ids are ignored, so a race with a dismissal is harmless. |
 | `ListQuestions` | dash | Returns the waiting todos, then the deferred ones (flagged `deferred`), the count `waiting`, and `dismissed`: the id and reason of every question dismissed in the last hour. |
 | `AnswerQuestion` | dash | Answers a question at the question version the dash saw. |
-| `DeferQuestion` | dash | Sets a question aside. It stays with the other questions and returns to `waiting` later (see [The answers line](#the-answers-line)). |
+| `DeferQuestion` | dash | Sets a question aside (`later`). Instructions cannot be set aside: it is refused as `invalid id`. It stays with the other questions and returns to `waiting` later (see [The answers line](#the-answers-line)). |
 | `TickStep` | dash | Ticks or unticks one step of waiting instructions (see [Ticking](#ticking)). |
 
 The `waiting` count in `ListQuestions` is the number of questions listed, deferred ones included. Instructions are listed but not counted. Each listed item carries `ticked`: the step numbers ticked, counting from 1, empty for a question.
@@ -108,6 +108,7 @@ The note is sent only with `REVISE` and `REJECT`. For `ANSWER` and `FREE_TEXT` i
 
 | Status | Message | When |
 | --- | --- | --- |
+| `InvalidArgument` | `invalid id` | `DeferQuestion` names instructions, which `later` does not apply to. |
 | `InvalidArgument` | `invalid <field>` | A rule is broken. The field is named, such as `invalid link`, `invalid decisions.1.options.2.key`, `invalid picks`, `invalid note`, `invalid kind`, `invalid steps` or `invalid step`. Nothing is stored. |
 | `FailedPrecondition` | `version_changed` | The question or instructions were put again since the dash read them. |
 | `FailedPrecondition` | `not_waiting` | The question or instructions are dismissed, already answered, or unknown. |
@@ -119,11 +120,11 @@ The note is sent only with `REVISE` and `REJECT`. For `ANSWER` and `FREE_TEXT` i
 The chief uses `harold tool questions`. Each command prints one line, or the refusal's message.
 
 ```sh
-harold tool questions put < question.json        # stored Q25 v1
+harold tool questions put < question.json        # stored Q1 v1
 harold tool questions list                       # one line per question, then "<n> waiting"
-harold tool questions order Q27 Q25              # ordered 2
+harold tool questions order Q3 Q1              # ordered 2
 harold tool questions put < instructions.json     # stored I1 v1
-harold tool questions dismiss Q25 --reason "spec withdrawn"   # dismissed Q25
+harold tool questions dismiss Q1 --reason "spec withdrawn"   # dismissed Q1
 ```
 
 `put` accepts the JSON for a question or for instructions. `order` and `dismiss` take ids of either. `list` prints `<id> v<version> <product> <spec>`, with ` (deferred)` after a deferred one, and `<id> v<version> <product> steps <ticked>/<n>` for instructions, such as `I1 v1 harold steps 2/4`. Any other use prints `invalid argument: usage is harold tool questions put|dismiss|order|list`. If the daemon is not running the CLI prints `the Harold daemon is not reachable`, and after 3 seconds without an answer, `the Harold daemon did not answer within 3 seconds`.
@@ -151,11 +152,11 @@ The settle is measured from the answer's own `updated_at_ms` in the store. It do
 The line is typed into the chief's pane with Enter:
 
 ```text
-ANSWERS 3 | Q25 durable-server sha d84bf386a2a5: protocol libSQL's Hrana; build yes | Q26 voice-x: revise "make the button bigger" | Q27 old-y: reject "not needed" | later: Q28
+ANSWERS 3 | Q1 durable-server sha d84bf386a2a5: protocol libSQL's Hrana; build yes | Q2 voice-x: revise "make the button bigger" | Q3 old-y: reject "not needed" | later: Q4
 ```
 
 - `ANSWERS <n>` counts answers, not the ids set aside.
-- An `answer` or `free_text` part is `<id> <spec> sha <sha>: <pick>; <pick>`. A pick is `<ask> <label>`. A free option's pick is `<ask> "<typed text>"`, for example `Q28 net-z sha 3333: Which? "use HTTP/3"`.
+- An `answer` or `free_text` part is `<id> <spec> sha <sha>: <pick>; <pick>`. A pick is `<ask> <label>`. A free option's pick is `<ask> "<typed text>"`, for example `Q4 net-z sha 3333: Which? "use HTTP/3"`.
 - A `revise` or `reject` part is `<id> <spec>: revise "<note>"` or `<id> <spec>: reject "<note>"`. It has no `sha`.
 - ` | later: <id>, <id>` is added only when some question is set aside. It lists the questions still set aside when the line is built, so an early line can repeat an id that stays set aside.
 - A part for instructions is `<id> <product>: done`, `<id> <product>: done, <ticked> of <n> ticked` when some steps are unticked, or `<id> <product>: ignored`. It has no `sha`, and counts in `ANSWERS <n>`. For example, `I1 harold: done, 3 of 4 ticked`.
