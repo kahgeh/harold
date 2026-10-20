@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 use std::convert::Infallible;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use askama::Template;
 use axum::extract::State;
@@ -19,9 +19,13 @@ use tracing::{info, warn};
 
 use super::chief::find_chief;
 use super::pages::{CallSection, MessageView, RespondingSection, awaiting_chief, dots_show};
+use super::todos::TodosSection;
 use super::{AppState, thread_start_ms};
 use crate::store::{AppMessage, AppReplyState};
 use crate::voice_input::PhoneView;
+
+/// How often an open page reads the todos again.
+const TODOS_EVERY: Duration = Duration::from_secs(2);
 
 /// How many patches may wait for a slow page before the stream stops reading the thread.
 const PATCHES_QUEUED: usize = 16;
@@ -62,6 +66,9 @@ pub(crate) async fn get_updates(State(state): State<AppState>) -> Response {
     };
     let (patches, queued) = mpsc::channel(PATCHES_QUEUED);
     let dots = Dots::of(&state, &messages);
+    // The page draws the todos itself, from the same read; the stream sends them when
+    // they change.
+    let todos_shown = todos_html(&state.questions.refresh().await);
     // The channel has room for all of them, and nothing reads it yet: these sends cannot
     // wait or fail.
     let _ = patches.try_send(Ok(whole));
@@ -81,6 +88,7 @@ pub(crate) async fn get_updates(State(state): State<AppState>) -> Response {
         call,
         shown(&messages),
         dots,
+        todos_shown,
         patches,
     ));
     Sse::new(ReceiverStream::<Result<Event, Infallible>>::new(queued))
@@ -96,10 +104,11 @@ async fn follow_thread(
     call: Option<watch::Receiver<PhoneView>>,
     known: HashMap<String, Shown>,
     dots: Dots,
+    todos_shown: String,
     patches: mpsc::Sender<Result<Event, Infallible>>,
 ) {
     let connected = Instant::now();
-    let reason = send_patches(state, changes, call, known, dots, patches).await;
+    let reason = send_patches(state, changes, call, known, dots, todos_shown, patches).await;
     info!(
         reason,
         seconds = connected.elapsed().as_secs(),
@@ -117,9 +126,14 @@ async fn send_patches(
     mut call: Option<watch::Receiver<PhoneView>>,
     mut known: HashMap<String, Shown>,
     mut dots: Dots,
+    mut todos_shown: String,
     patches: mpsc::Sender<Result<Event, Infallible>>,
 ) -> &'static str {
     let mut shutdown = state.shutdown.clone();
+    let mut todo_posts = state.todos_changed.subscribe();
+    let mut todo_ticks =
+        tokio::time::interval_at(tokio::time::Instant::now() + TODOS_EVERY, TODOS_EVERY);
+    todo_ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut agents = Some(state.snapshots.clone());
     loop {
         tokio::select! {
@@ -129,6 +143,22 @@ async fn send_patches(
                 if changed.is_err() {
                     return "store_stopped";
                 }
+            }
+            _ = todo_ticks.tick() => {
+                if let Some(patch) = todos_patch(&state, &mut todos_shown).await
+                    && patches.send(Ok(patch)).await.is_err()
+                {
+                    return "page_gone";
+                }
+                continue;
+            }
+            _ = todo_posts.changed() => {
+                if let Some(patch) = todos_patch(&state, &mut todos_shown).await
+                    && patches.send(Ok(patch)).await.is_err()
+                {
+                    return "page_gone";
+                }
+                continue;
             }
             () = agents_changed(&mut agents) => {
                 if let Some(patch) = dots.refresh(&state)
@@ -171,6 +201,25 @@ async fn send_patches(
             return "page_gone";
         }
     }
+}
+
+/// The todo page and the todo count as one string of HTML, to tell a changed page from an
+/// unchanged one.
+fn todos_html(section: &TodosSection) -> String {
+    let page = section.render().unwrap_or_default();
+    let count = section.count().render().unwrap_or_default();
+    format!("{page}{count}")
+}
+
+/// Reads the todos and returns the patch that brings the page to them, if they differ from
+/// what `shown` holds; `shown` then holds the new HTML.
+async fn todos_patch(state: &AppState, shown: &mut String) -> Option<Event> {
+    let html = todos_html(&state.questions.refresh().await);
+    if html.is_empty() || html == *shown {
+        return None;
+    }
+    shown.clone_from(&html);
+    Some(PatchElements::new(html).into())
 }
 
 /// Whether the responding dots show, and whether the newest row is a reply awaiting the

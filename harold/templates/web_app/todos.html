@@ -1,0 +1,44 @@
+<section id="todos" class="page" aria-label="Todos">
+{% if unreadable %}<p class="todos-empty">Harold can't read the todos right now.</p>
+{% else if cards.is_empty() %}<p class="todos-empty">No todos for you.</p>
+{% else %}{% for card in cards %}<article id="todo-{{ card.id }}" class="card{% if card.later %} later{% endif %}">
+<p class="card-top">{{ card.id }} · {{ card.kind }} · {{ card.product }}{% if card.later %} · later{% endif %}</p>
+<h3>{{ card.heading }}</h3>
+{% if let Some(under) = card.under %}<p class="card-intro">{{ under }}</p>
+{% endif %}{% if let Some(link) = card.link %}{% if let Some(href) = link.href %}<p class="card-link"><a href="{{ href }}" target="_blank" rel="noopener noreferrer">{{ link.text }}</a></p>
+{% else %}<p class="card-link">{{ link.text }}</p>
+{% endif %}{% endif %}{% if card.is_question %}<form class="todo-form" data-on:submit="@post('/todos/answer', {contentType: 'form'})">
+<input type="hidden" name="id" value="{{ card.id }}">
+<input type="hidden" name="version" value="{{ card.version }}">
+{% for decision in card.decisions %}<fieldset>
+<legend>{{ decision.ask }}</legend>
+{% for option in decision.options %}<label class="option">
+<input type="radio" name="pick.{{ decision.index }}" value="{{ option.key }}"{% if option.free %} data-free{% endif %}{% if option.picked %} checked{% endif %}>
+<span class="option-label">{{ option.label }}{% if option.suggested %} <em class="suggested">suggested</em>{% endif %}</span>
+{% if !option.impact.is_empty() %}<small class="impact">{{ option.impact }}</small>
+{% endif %}{% if option.free %}<input type="text" class="free-text" name="text.{{ decision.index }}" value="{{ option.text }}" maxlength="1000" aria-label="{{ option.label }}">
+{% endif %}</label>
+{% endfor %}</fieldset>
+{% endfor %}{% if let Some(notice) = card.notice %}<p class="notice" role="status">{{ notice }}</p>
+{% endif %}<div class="card-actions">
+<button type="submit" class="send"{% if !card.can_send %} disabled{% endif %}>Send</button>
+<button type="button" class="later-button" data-on:click="@post('/todos/later', {contentType: 'form'})">Later</button>
+</div>
+</form>
+{% else %}{% for step in card.steps %}<form class="step-form" data-on:change="@post('/todos/tick', {contentType: 'form'})">
+<input type="hidden" name="id" value="{{ card.id }}">
+<input type="hidden" name="version" value="{{ card.version }}">
+<input type="hidden" name="step" value="{{ step.n }}">
+<label class="step"><input type="checkbox" name="ticked" value="true"{% if step.ticked %} checked{% endif %}><span>{{ step.n }}. {{ step.text }}{% if !step.detail.is_empty() %}<small class="impact">{{ step.detail }}</small>{% endif %}</span></label>
+</form>
+{% endfor %}{% if let Some(notice) = card.notice %}<p class="notice" role="status">{{ notice }}</p>
+{% endif %}<form class="todo-form" data-on:submit="@post('/todos/done', {contentType: 'form'})">
+<input type="hidden" name="id" value="{{ card.id }}">
+<input type="hidden" name="version" value="{{ card.version }}">
+<div class="card-actions">
+<button type="submit" class="send">Done</button>
+<button type="button" class="later-button" data-on:click="@post('/todos/ignore', {contentType: 'form'})">Ignore</button>
+</div>
+</form>
+{% endif %}</article>
+{% endfor %}{% endif %}</section>

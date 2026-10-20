@@ -20,7 +20,7 @@
 <header class="bar top">
 <div class="row thread-row">
 <h1>{{ app_name }}</h1>
-<a href="#todos" id="to-todos" class="todos-button">Todos<span id="todo-count" class="todo-count"></span></a>
+<a href="#todos" id="to-todos" class="todos-button">Todos{{ todo_count|safe }}</a>
 <button type="button" id="alerts">Turn on alerts</button>
 {% if call_set_up %}<button type="button" id="call-start"><svg class="phone" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M6.6 10.8a15 15 0 0 0 6.6 6.6l2.2-2.2a1 1 0 0 1 1-.25 11 11 0 0 0 3.6.6 1 1 0 0 1 1 1V20a1 1 0 0 1-1 1A17 17 0 0 1 3 4a1 1 0 0 1 1-1h3.5a1 1 0 0 1 1 1c0 1.25.2 2.45.6 3.6a1 1 0 0 1-.25 1z" fill="currentColor"/></svg> Call</button>{% else %}<button type="button" id="call-start" disabled>Voice is not set up on the Mac</button>{% endif %}
 </div>
@@ -37,7 +37,7 @@
 {{ responding|safe }}
 <button type="button" id="new-message" class="new-message" hidden>New message ↓</button>
 </main>
-<section id="todos" class="page"></section>
+{{ todos|safe }}
 </div>
 <nav id="page-dots" aria-hidden="true"><i class="dot"></i><i class="dot"></i></nav>
 <form id="reply" class="bar bottom" data-indicator:sending data-on:submit="@post('/replies')">

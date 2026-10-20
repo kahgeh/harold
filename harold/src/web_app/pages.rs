@@ -7,6 +7,7 @@ use axum::middleware::Next;
 use axum::response::{Html, IntoResponse, Response};
 
 use super::chief::{ChiefPane, find_chief};
+use super::todos::{TodoCount, TodosSection};
 use super::{AppState, DATASTAR_JS, WebAppIdentity, thread_start_ms};
 use crate::store::{AppMessage, AppReplyState, AppSender};
 use crate::voice_input::{CallState, PhoneView, Said, Speaker};
@@ -41,6 +42,10 @@ pub(crate) struct ThreadPage {
     pub call: CallSection,
     /// The responding dots, under the thread.
     pub responding: RespondingSection,
+    /// The todo page.
+    pub todos: TodosSection,
+    /// The todo count on the **Todos** button.
+    pub todo_count: TodoCount,
 }
 
 /// One row of the thread, as `#messages` shows it.
@@ -276,7 +281,10 @@ pub(crate) async fn get_thread(State(state): State<AppState>) -> Response {
     let responding = RespondingSection {
         on: dots_show(awaiting_chief(&messages), &chief),
     };
+    let todos = state.questions.refresh().await;
     let page = ThreadPage {
+        todo_count: todos.count(),
+        todos,
         app_name: state.identity.name.clone(),
         has_icon: state.identity.icon.is_some(),
         messages: messages.into_iter().map(MessageView::from).collect(),

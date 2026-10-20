@@ -60,6 +60,10 @@ mod flow_tests;
 #[cfg(test)]
 pub(crate) mod fake_push;
 
+#[cfg(test)]
+#[path = "todos_tests.rs"]
+mod todos_tests;
+
 /// What the app is called and looks like on the phone, read once at start.
 #[derive(Debug, Clone)]
 pub(crate) struct WebAppIdentity {
