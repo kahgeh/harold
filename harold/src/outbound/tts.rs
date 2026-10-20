@@ -92,6 +92,102 @@ pub(crate) fn regex_strip_think(text: &str) -> String {
     result.trim().to_string()
 }
 
+/// Who a turn-end update is about: the chief, or the agent whose project is `main_context`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum AgentName {
+    Chief,
+    Named(String),
+}
+
+impl AgentName {
+    /// The name without an article, as the sentence must contain it.
+    pub(crate) fn bare(&self) -> &str {
+        match self {
+            AgentName::Chief => "chief",
+            AgentName::Named(name) => name,
+        }
+    }
+
+    /// The name as a sentence says it: `the chief`, `the architect`, `the harold agent`.
+    pub(crate) fn spoken(&self) -> String {
+        match self {
+            AgentName::Chief => "the chief".to_string(),
+            AgentName::Named(name) if name == "architect" => "the architect".to_string(),
+            AgentName::Named(name) => format!("the {name} agent"),
+        }
+    }
+}
+
+/// Why a turn-end update is the fallback sentence. `as_str` is the `reason` attribute.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FallbackReason {
+    NoModel,
+    ModelFailed,
+    TooLong,
+    NoName,
+}
+
+impl FallbackReason {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            FallbackReason::NoModel => "no_model",
+            FallbackReason::ModelFailed => "model_failed",
+            FallbackReason::TooLong => "too_long",
+            FallbackReason::NoName => "no_name",
+        }
+    }
+}
+
+/// The most words a turn-end update may have.
+const MAX_UPDATE_WORDS: usize = 25;
+
+/// `<Name> has finished and is waiting.`, the sentence said when the model gives none.
+pub(crate) fn fallback_sentence(agent: &AgentName) -> String {
+    format!(
+        "{} has finished and is waiting.",
+        capitalised(&agent.spoken())
+    )
+}
+
+fn capitalised(text: &str) -> String {
+    let mut chars = text.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => String::new(),
+    }
+}
+
+/// Makes the model's `answer` one sentence: the text up to the first `.`, `!` or `?` that
+/// is followed by a space or ends the text, with one full stop. An empty answer, one over
+/// 25 words and one that does not name `agent` are refused. Empty counts as `no_name`.
+pub(crate) fn clean_sentence(answer: &str, agent: &AgentName) -> Result<String, FallbackReason> {
+    let joined = regex_strip_think(answer)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let joined = joined.trim_matches(|c| c == '"' || c == '\'').trim();
+    let chars: Vec<(usize, char)> = joined.char_indices().collect();
+    let end = chars
+        .iter()
+        .enumerate()
+        .find(|(i, (_, c))| {
+            matches!(c, '.' | '!' | '?') && chars.get(i + 1).is_none_or(|(_, next)| *next == ' ')
+        })
+        .map_or(joined.len(), |(_, (at, _))| *at);
+    let body = joined[..end].trim();
+    if body.is_empty() {
+        return Err(FallbackReason::NoName);
+    }
+    if body.split_whitespace().count() > MAX_UPDATE_WORDS {
+        return Err(FallbackReason::TooLong);
+    }
+    let normal = |text: &str| text.to_lowercase().replace('-', " ");
+    if !normal(body).contains(&normal(agent.bare())) {
+        return Err(FallbackReason::NoName);
+    }
+    Ok(format!("{body}."))
+}
+
 fn build_short_summary(last_user_prompt: &str) -> String {
     let system_prompt = "You are a notification assistant. Given a user's last request, \
          write ONLY a brief 3-8 word summary of what was completed. \
@@ -439,6 +535,78 @@ mod tests {
         ));
         assert!(!primary_out.exists());
         assert!(!fallback_out.exists());
+    }
+
+    #[test]
+    fn clean_sentence_keeps_one_whole_sentence() {
+        let architect = AgentName::Named("architect".into());
+        let harold = AgentName::Named("harold".into());
+        assert_eq!(
+            clean_sentence(
+                "The architect reviewed and merged Harold's branch.",
+                &architect
+            ),
+            Ok("The architect reviewed and merged Harold's branch.".to_string())
+        );
+        assert_eq!(
+            clean_sentence("\"The architect reviewed it. Then it waited.\"", &architect),
+            Ok("The architect reviewed it.".to_string())
+        );
+        assert_eq!(
+            clean_sentence("The harold agent installed v0.11.0", &harold),
+            Ok("The harold agent installed v0.11.0.".to_string())
+        );
+        assert_eq!(
+            clean_sentence("<think>hm</think>The architect\nreviewed it", &architect),
+            Ok("The architect reviewed it.".to_string())
+        );
+    }
+
+    #[test]
+    fn clean_sentence_refuses_empty_long_and_nameless_answers() {
+        let architect = AgentName::Named("architect".into());
+        assert_eq!(clean_sentence("", &architect), Err(FallbackReason::NoName));
+        let long = format!("The architect {}.", "did a thing ".repeat(12));
+        assert_eq!(
+            clean_sentence(&long, &architect),
+            Err(FallbackReason::TooLong)
+        );
+        assert_eq!(
+            clean_sentence("The agent fixed the wording.", &architect),
+            Err(FallbackReason::NoName)
+        );
+    }
+
+    #[test]
+    fn the_name_check_ignores_case_and_hyphens() {
+        let architect = AgentName::Named("architect".into());
+        let typed = AgentName::Named("questions-typed-panic".into());
+        assert!(
+            clean_sentence(
+                "The Architect reviewed and merged Harold's branch.",
+                &architect
+            )
+            .is_ok()
+        );
+        assert!(
+            clean_sentence("The questions typed panic agent fixed the wording.", &typed).is_ok()
+        );
+    }
+
+    #[test]
+    fn the_fallback_sentence_names_the_agent() {
+        assert_eq!(
+            fallback_sentence(&AgentName::Chief),
+            "The chief has finished and is waiting."
+        );
+        assert_eq!(
+            fallback_sentence(&AgentName::Named("architect".into())),
+            "The architect has finished and is waiting."
+        );
+        assert_eq!(
+            fallback_sentence(&AgentName::Named("harold".into())),
+            "The harold agent has finished and is waiting."
+        );
     }
 
     #[test]
