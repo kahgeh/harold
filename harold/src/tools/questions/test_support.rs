@@ -11,7 +11,8 @@ use harold_api::tools::questions::v1 as pb;
 
 use super::schema::{Answer, Question};
 use super::store::{
-    Listing, QuestionStore, Readiness, Refusal, StartedBatch, StoreError, TursoQuestionStore,
+    Listing, QuestionStore, Readiness, Refusal, StartedBatch, StoreError, TickRefusal,
+    TursoQuestionStore,
 };
 use crate::tools::{BoxFuture, ChiefPane, PaneTyping, Typing};
 
@@ -198,6 +199,18 @@ impl QuestionStore for FailingStore {
         self.inner.defer(id, now_ms).await
     }
 
+    async fn tick(
+        &self,
+        id: &str,
+        version: u32,
+        step: u32,
+        ticked: bool,
+        now_ms: i64,
+    ) -> Result<Result<(), TickRefusal>, StoreError> {
+        self.check()?;
+        self.inner.tick(id, version, step, ticked, now_ms).await
+    }
+
     async fn ready(&self, now_ms: i64, settle_ms: i64) -> Result<Readiness, StoreError> {
         self.inner.ready(now_ms, settle_ms).await
     }
@@ -291,6 +304,17 @@ impl QuestionStore for MarkHook {
 
     async fn defer(&self, id: &str, now_ms: i64) -> Result<Result<u32, Refusal>, StoreError> {
         self.inner.defer(id, now_ms).await
+    }
+
+    async fn tick(
+        &self,
+        id: &str,
+        version: u32,
+        step: u32,
+        ticked: bool,
+        now_ms: i64,
+    ) -> Result<Result<(), TickRefusal>, StoreError> {
+        self.inner.tick(id, version, step, ticked, now_ms).await
     }
 
     async fn ready(&self, now_ms: i64, settle_ms: i64) -> Result<Readiness, StoreError> {

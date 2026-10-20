@@ -9,7 +9,7 @@ use tokio::task::JoinHandle;
 use super::*;
 use crate::tools::questions::schema::{self, Kind};
 use crate::tools::questions::store::{
-    Listing, QuestionStore, Refusal, StartedBatch, StoreError, TursoQuestionStore,
+    Listing, QuestionStore, Refusal, StartedBatch, StoreError, TickRefusal, TursoQuestionStore,
 };
 use crate::tools::questions::test_support::*;
 use crate::tools::{Typing, questions};
@@ -201,6 +201,17 @@ impl QuestionStore for RacingStore {
 
     async fn defer(&self, id: &str, now_ms: i64) -> Result<Result<u32, Refusal>, StoreError> {
         self.inner.defer(id, now_ms).await
+    }
+
+    async fn tick(
+        &self,
+        id: &str,
+        version: u32,
+        step: u32,
+        ticked: bool,
+        now_ms: i64,
+    ) -> Result<Result<(), TickRefusal>, StoreError> {
+        self.inner.tick(id, version, step, ticked, now_ms).await
     }
 
     async fn ready(&self, now_ms: i64, settle_ms: i64) -> Result<Readiness, StoreError> {

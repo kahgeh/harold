@@ -37,6 +37,7 @@ fn refused(refusal: Refusal) -> Status {
     Status::failed_precondition(match refusal {
         Refusal::VersionChanged => "version_changed",
         Refusal::NotWaiting => "not_waiting",
+        Refusal::NotAQuestion => return invalid("id"),
     })
 }
 
@@ -119,7 +120,7 @@ impl<S: QuestionStore> QuestionService for QuestionToolService<S> {
                 question: Some(schema::to_proto(&listed.question)),
                 version: listed.version,
                 deferred: listed.deferred,
-                ticked: Vec::new(),
+                ticked: listed.ticked.clone(),
             })
             .collect();
         let waiting = u32::try_from(questions.len()).unwrap_or(u32::MAX);

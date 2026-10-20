@@ -141,7 +141,7 @@ async fn open_creates_and_migrates_questions_db() {
     drop(store);
     assert_eq!(
         migration_rows(&folder).await,
-        ["001_questions", "002_answer_send_now"]
+        ["001_questions", "002_answer_send_now", "003_step_ticks"]
     );
 }
 
@@ -157,7 +157,7 @@ async fn reopening_keeps_the_rows_and_applies_nothing_twice() {
     drop(store);
     assert_eq!(
         migration_rows(&temp.0).await,
-        ["001_questions", "002_answer_send_now"]
+        ["001_questions", "002_answer_send_now", "003_step_ticks"]
     );
 }
 
@@ -612,13 +612,13 @@ async fn migration_002_adds_send_now_defaulting_to_zero_and_a_second_open_applie
     drop(store);
     assert_eq!(
         migration_rows(&temp.0).await,
-        ["001_questions", "002_answer_send_now"]
+        ["001_questions", "002_answer_send_now", "003_step_ticks"]
     );
 
     let store = TursoQuestionStore::open(&temp.0).await.unwrap();
     assert!(!marked(&store, "Q1").await);
     drop(store);
-    assert_eq!(migration_rows(&temp.0).await.len(), 2);
+    assert_eq!(migration_rows(&temp.0).await.len(), 3);
 }
 
 #[tokio::test]
@@ -869,4 +869,320 @@ async fn a_defer_with_an_answer_in_the_way_leaves_the_deferred_deferred() {
             ("Q4".to_string(), true)
         ]
     );
+}
+
+fn step(text: &str) -> crate::tools::questions::schema::Step {
+    crate::tools::questions::schema::Step {
+        text: text.into(),
+        detail: String::new(),
+    }
+}
+
+fn instructions(id: &str, steps: &[&str]) -> Question {
+    Question {
+        id: id.into(),
+        product: "p".into(),
+        spec: String::new(),
+        sha: String::new(),
+        link: String::new(),
+        title: "Do things".into(),
+        steps: steps.iter().map(|s| step(s)).collect(),
+        intro: String::new(),
+        decisions: vec![],
+    }
+}
+
+async fn ticked_of(store: &TursoQuestionStore, id: &str) -> Vec<u32> {
+    store
+        .list(0)
+        .await
+        .unwrap()
+        .questions
+        .into_iter()
+        .find(|l| l.question.id == id)
+        .expect("listed")
+        .ticked
+}
+
+async fn tick_ok(store: &TursoQuestionStore, id: &str, step: u32, ticked: bool) {
+    let result = store.tick(id, 1, step, ticked, 50).await.unwrap();
+    assert_eq!(result, Ok(()));
+}
+
+#[tokio::test]
+async fn migration_003_adds_ticks_to_a_database_with_rows() {
+    let temp = TempFolder::new();
+    std::fs::create_dir_all(&temp.0).unwrap();
+    let database = turso::Builder::new_local(temp.0.join(DATABASE).to_str().unwrap())
+        .build()
+        .await
+        .unwrap();
+    let conn = database.connect().unwrap();
+    conn.execute(
+        "CREATE TABLE _migrations (id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE, \
+         checksum TEXT NOT NULL, applied_at_ms INTEGER NOT NULL)",
+        (),
+    )
+    .await
+    .unwrap();
+    for (name, sql) in &MIGRATIONS[..2] {
+        conn.execute_batch(sql).await.unwrap();
+        conn.execute(
+            "INSERT INTO _migrations (name, checksum, applied_at_ms) VALUES (?1, ?2, 0)",
+            (*name, hex::encode(Sha256::digest(sql.as_bytes()))),
+        )
+        .await
+        .unwrap();
+    }
+    conn.execute(
+        "INSERT INTO questions (id, version, position, state, body, updated_at_ms) \
+         VALUES ('Q1', 1, 1, 'waiting', ?1, 0)",
+        [serde_json::to_string(&question("Q1")).unwrap()],
+    )
+    .await
+    .unwrap();
+    drop(conn);
+    drop(database);
+
+    let store = TursoQuestionStore::open(&temp.0).await.unwrap();
+    assert!(ticked_of(&store, "Q1").await.is_empty());
+    drop(store);
+    assert_eq!(
+        migration_rows(&temp.0).await,
+        ["001_questions", "002_answer_send_now", "003_step_ticks"]
+    );
+}
+
+#[tokio::test]
+async fn put_instructions_lists_with_no_ticks() {
+    let temp = TempFolder::new();
+    let store = TursoQuestionStore::open(&temp.0).await.unwrap();
+    assert_eq!(
+        store.put(instructions("I1", &["a", "b"]), 1).await.unwrap(),
+        1
+    );
+    let listing = store.list(2).await.unwrap();
+    assert_eq!(listing.questions.len(), 1);
+    assert_eq!(listing.questions[0].question.steps.len(), 2);
+    assert!(listing.questions[0].ticked.is_empty());
+}
+
+#[tokio::test]
+async fn tick_and_untick_are_stored_and_listed_sorted() {
+    let temp = TempFolder::new();
+    let store = TursoQuestionStore::open(&temp.0).await.unwrap();
+    store
+        .put(instructions("I1", &["a", "b", "c"]), 1)
+        .await
+        .unwrap();
+    tick_ok(&store, "I1", 3, true).await;
+    tick_ok(&store, "I1", 1, true).await;
+    tick_ok(&store, "I1", 1, true).await;
+    assert_eq!(ticked_of(&store, "I1").await, [1, 3]);
+    tick_ok(&store, "I1", 3, false).await;
+    tick_ok(&store, "I1", 2, false).await;
+    assert_eq!(ticked_of(&store, "I1").await, [1]);
+}
+
+#[tokio::test]
+async fn tick_refuses_step_zero_step_past_the_end_a_question_a_stale_version_and_an_answered_row() {
+    let temp = TempFolder::new();
+    let store = TursoQuestionStore::open(&temp.0).await.unwrap();
+    store.put(instructions("I1", &["a", "b"]), 1).await.unwrap();
+    store.put(question("Q1"), 1).await.unwrap();
+    assert_eq!(
+        store.tick("I1", 1, 0, true, 2).await.unwrap(),
+        Err(TickRefusal::InvalidStep)
+    );
+    assert_eq!(
+        store.tick("I1", 1, 3, true, 2).await.unwrap(),
+        Err(TickRefusal::InvalidStep)
+    );
+    assert_eq!(
+        store.tick("Q1", 1, 1, true, 2).await.unwrap(),
+        Err(TickRefusal::InvalidStep)
+    );
+    assert_eq!(
+        store.tick("I1", 2, 1, true, 2).await.unwrap(),
+        Err(TickRefusal::VersionChanged)
+    );
+    assert_eq!(
+        store.tick("nope", 1, 1, true, 2).await.unwrap(),
+        Err(TickRefusal::NotWaiting)
+    );
+    let done = |_: &Question| {
+        Ok(Answer {
+            ticked: 0,
+            kind: Kind::Ignore,
+            picks: vec![],
+            note: String::new(),
+        })
+    };
+    store
+        .answer("I1", 1, false, done, 3)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        store.tick("I1", 1, 1, true, 4).await.unwrap(),
+        Err(TickRefusal::NotWaiting)
+    );
+    assert!(ticked_of_all_empty(&store).await);
+}
+
+async fn ticked_of_all_empty(store: &TursoQuestionStore) -> bool {
+    store
+        .list(0)
+        .await
+        .unwrap()
+        .questions
+        .iter()
+        .all(|l| l.ticked.is_empty())
+}
+
+#[tokio::test]
+async fn a_new_version_keeps_ticks_for_unchanged_step_text() {
+    let temp = TempFolder::new();
+    let store = TursoQuestionStore::open(&temp.0).await.unwrap();
+    store
+        .put(instructions("I1", &["a", "b", "c"]), 1)
+        .await
+        .unwrap();
+    tick_ok(&store, "I1", 1, true).await;
+    tick_ok(&store, "I1", 2, true).await;
+    // New first step, step b changed: old "a" is now step 2; "c" was not ticked.
+    assert_eq!(
+        store
+            .put(instructions("I1", &["z", "a", "b2", "c"]), 5)
+            .await
+            .unwrap(),
+        2
+    );
+    assert_eq!(ticked_of(&store, "I1").await, [2]);
+}
+
+#[tokio::test]
+async fn a_repeated_step_text_uses_each_old_tick_once() {
+    let temp = TempFolder::new();
+    let store = TursoQuestionStore::open(&temp.0).await.unwrap();
+    store.put(instructions("I1", &["a", "a"]), 1).await.unwrap();
+    tick_ok(&store, "I1", 2, true).await;
+    store
+        .put(instructions("I1", &["a", "a", "a"]), 5)
+        .await
+        .unwrap();
+    assert_eq!(ticked_of(&store, "I1").await, [1]);
+}
+
+#[tokio::test]
+async fn a_new_version_with_fewer_steps_drops_ticks_past_the_end() {
+    let temp = TempFolder::new();
+    let store = TursoQuestionStore::open(&temp.0).await.unwrap();
+    store
+        .put(instructions("I1", &["a", "b", "c"]), 1)
+        .await
+        .unwrap();
+    for n in 1..=3 {
+        tick_ok(&store, "I1", n, true).await;
+    }
+    store.put(instructions("I1", &["a", "b"]), 5).await.unwrap();
+    assert_eq!(ticked_of(&store, "I1").await, [1, 2]);
+}
+
+#[tokio::test]
+async fn done_answer_records_the_ticked_count() {
+    let temp = TempFolder::new();
+    let store = TursoQuestionStore::open(&temp.0).await.unwrap();
+    store
+        .put(instructions("I1", &["a", "b", "c"]), 1)
+        .await
+        .unwrap();
+    tick_ok(&store, "I1", 1, true).await;
+    tick_ok(&store, "I1", 3, true).await;
+    let done = |_: &Question| {
+        Ok(Answer {
+            ticked: 0,
+            kind: Kind::Done,
+            picks: vec![],
+            note: String::new(),
+        })
+    };
+    store
+        .answer("I1", 1, false, done, 9)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let ready = ready_of(&store).await.expect("ready");
+    assert_eq!(ready.answers[0].3.kind, Kind::Done);
+    assert_eq!(ready.answers[0].3.ticked, 2);
+}
+
+#[tokio::test]
+async fn ignore_answer_is_stored_and_leaves_the_list() {
+    let temp = TempFolder::new();
+    let store = TursoQuestionStore::open(&temp.0).await.unwrap();
+    store.put(instructions("I1", &["a"]), 1).await.unwrap();
+    let ignore = |_: &Question| {
+        Ok(Answer {
+            ticked: 0,
+            kind: Kind::Ignore,
+            picks: vec![],
+            note: String::new(),
+        })
+    };
+    store
+        .answer("I1", 1, false, ignore, 9)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(listed_ids(&store).await.is_empty());
+    let ready = ready_of(&store).await.expect("ready");
+    assert_eq!(ready.answers[0].3.kind, Kind::Ignore);
+    assert_eq!(ready.answers[0].3.ticked, 0);
+}
+
+#[tokio::test]
+async fn reorder_mixes_questions_and_instructions() {
+    let temp = TempFolder::new();
+    let store = TursoQuestionStore::open(&temp.0).await.unwrap();
+    store.put(question("Q1"), 1).await.unwrap();
+    store.put(instructions("I1", &["a"]), 1).await.unwrap();
+    store.put(question("Q2"), 1).await.unwrap();
+    store.reorder(&ids(&["I1", "Q2", "Q1"]), 2).await.unwrap();
+    assert_eq!(
+        listed_ids(&store).await,
+        [
+            ("I1".to_string(), false),
+            ("Q2".to_string(), false),
+            ("Q1".to_string(), false)
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_waiting_instruction_does_not_hold_back_deferred_questions() {
+    let temp = TempFolder::new();
+    let store = TursoQuestionStore::open(&temp.0).await.unwrap();
+    store.put(question("Q1"), 1).await.unwrap();
+    store.put(instructions("I1", &["a"]), 1).await.unwrap();
+    store.defer("Q1", 2).await.unwrap().unwrap();
+    assert_eq!(
+        listed_ids(&store).await,
+        [("I1".to_string(), false), ("Q1".to_string(), false)]
+    );
+}
+
+#[tokio::test]
+async fn defer_refuses_instructions() {
+    let temp = TempFolder::new();
+    let store = TursoQuestionStore::open(&temp.0).await.unwrap();
+    store.put(instructions("I1", &["a"]), 1).await.unwrap();
+    assert_eq!(
+        store.defer("I1", 2).await.unwrap(),
+        Err(Refusal::NotAQuestion)
+    );
+    assert_eq!(listed_ids(&store).await, [("I1".to_string(), false)]);
 }

@@ -8,12 +8,12 @@ use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 use turso::Connection;
 
-use super::schema::{Answer, Question};
+use super::schema::{Answer, Kind, Question};
 
 const DATABASE: &str = "questions.db";
 const DISMISSAL_VISIBLE_MS: i64 = 3_600_000;
 
-const MIGRATIONS: [(&str, &str); 2] = [
+const MIGRATIONS: [(&str, &str); 3] = [
     (
         "001_questions",
         include_str!("migrations/001_questions.sql"),
@@ -21,6 +21,10 @@ const MIGRATIONS: [(&str, &str); 2] = [
     (
         "002_answer_send_now",
         include_str!("migrations/002_answer_send_now.sql"),
+    ),
+    (
+        "003_step_ticks",
+        include_str!("migrations/003_step_ticks.sql"),
     ),
 ];
 
@@ -44,6 +48,15 @@ type Result<T> = std::result::Result<T, StoreError>;
 pub(super) enum Refusal {
     VersionChanged,
     NotWaiting,
+    /// The id holds instructions, which the action does not apply to.
+    NotAQuestion,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum TickRefusal {
+    VersionChanged,
+    NotWaiting,
+    InvalidStep,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,6 +64,8 @@ pub(super) struct Listed {
     pub question: Question,
     pub version: u32,
     pub deferred: bool,
+    /// Ticked step numbers, from 1, ascending. Empty for a question.
+    pub ticked: Vec<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -113,6 +128,15 @@ pub(super) trait QuestionStore: Send + Sync + 'static {
         id: &str,
         now_ms: i64,
     ) -> impl Future<Output = Result<std::result::Result<u32, Refusal>>> + Send;
+    /// Ticks or unticks one step of waiting or deferred instructions.
+    fn tick(
+        &self,
+        id: &str,
+        version: u32,
+        step: u32,
+        ticked: bool,
+        now_ms: i64,
+    ) -> impl Future<Output = Result<std::result::Result<(), TickRefusal>>> + Send;
     /// The unsent answers are ready when one is marked send-now, or when the
     /// newest has settled for `settle_ms`. Waiting questions do not hold them.
     fn ready(&self, now_ms: i64, settle_ms: i64) -> impl Future<Output = Result<Readiness>> + Send;
@@ -339,6 +363,44 @@ async fn next_position(conn: &Connection) -> Result<i64> {
     }
 }
 
+fn parse_ticks(ticks: &str) -> Vec<u32> {
+    let mut parsed: Vec<u32> = ticks
+        .split(',')
+        .filter_map(|part| part.trim().parse().ok())
+        .collect();
+    parsed.sort_unstable();
+    parsed.dedup();
+    parsed
+}
+
+fn format_ticks(ticks: &[u32]) -> String {
+    ticks
+        .iter()
+        .map(u32::to_string)
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// The ticks of the new version: a step is ticked when an old ticked step has
+/// the same text, each old step used once, in order.
+fn carried_ticks(old: &Question, old_ticks: &[u32], new: &Question) -> Vec<u32> {
+    let mut available: Vec<(usize, &str)> = old
+        .steps
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| old_ticks.contains(&(*i as u32 + 1)))
+        .map(|(i, step)| (i, step.text.as_str()))
+        .collect();
+    let mut carried = Vec::new();
+    for (i, step) in new.steps.iter().enumerate() {
+        if let Some(at) = available.iter().position(|(_, text)| *text == step.text) {
+            available.remove(at);
+            carried.push(i as u32 + 1);
+        }
+    }
+    carried
+}
+
 async fn put_in(conn: &Connection, question: &Question, now_ms: i64) -> Result<u32> {
     let body = serde_json::to_string(question)?;
     let Some(existing) = stored(conn, &question.id).await? else {
@@ -352,29 +414,43 @@ async fn put_in(conn: &Connection, question: &Question, now_ms: i64) -> Result<u
         return Ok(1);
     };
     let version = existing.version + 1;
+    let ticks = format_ticks(&carried_ticks_of(conn, &question.id, question).await?);
     if open_state(&existing.state) {
         conn.execute(
             "UPDATE questions SET version = ?2, state = 'waiting', body = ?3, answer = NULL, \
-             reason = '', batch_id = NULL, send_now = 0, updated_at_ms = ?4 WHERE id = ?1",
-            (question.id.as_str(), i64::from(version), body, now_ms),
+             reason = '', batch_id = NULL, send_now = 0, updated_at_ms = ?4, ticks = ?5 WHERE id = ?1",
+            (question.id.as_str(), i64::from(version), body, now_ms, ticks),
         )
         .await?;
     } else {
         let position = next_position(conn).await?;
         conn.execute(
             "UPDATE questions SET version = ?2, position = ?5, state = 'waiting', body = ?3, \
-             answer = NULL, reason = '', batch_id = NULL, send_now = 0, updated_at_ms = ?4 WHERE id = ?1",
+             answer = NULL, reason = '', batch_id = NULL, send_now = 0, updated_at_ms = ?4, \
+             ticks = ?6 WHERE id = ?1",
             (
                 question.id.as_str(),
                 i64::from(version),
                 body,
                 now_ms,
                 position,
+                ticks,
             ),
         )
         .await?;
     }
     Ok(version)
+}
+
+async fn carried_ticks_of(conn: &Connection, id: &str, new: &Question) -> Result<Vec<u32>> {
+    let mut rows = conn
+        .query("SELECT body, ticks FROM questions WHERE id = ?1", [id])
+        .await?;
+    let Some(row) = rows.next().await? else {
+        return Ok(Vec::new());
+    };
+    let old: Question = serde_json::from_str(&text(&row, 0)?)?;
+    Ok(carried_ticks(&old, &parse_ticks(&text(&row, 1)?), new))
 }
 
 async fn dismiss_in(
@@ -439,7 +515,7 @@ async fn list_in(conn: &Connection, now_ms: i64) -> Result<Listing> {
     let mut questions = Vec::new();
     let mut rows = conn
         .query(
-            "SELECT body, version, state FROM questions WHERE state IN ('waiting','deferred') \
+            "SELECT body, version, state, ticks FROM questions WHERE state IN ('waiting','deferred') \
              ORDER BY CASE state WHEN 'waiting' THEN 0 ELSE 1 END, position, id",
             (),
         )
@@ -449,6 +525,7 @@ async fn list_in(conn: &Connection, now_ms: i64) -> Result<Listing> {
             question: serde_json::from_str(&text(&row, 0)?)?,
             version: version_of(&row, 1)?,
             deferred: text(&row, 2)? == "deferred",
+            ticked: parse_ticks(&text(&row, 3)?),
         });
     }
     drop(rows);
@@ -480,7 +557,7 @@ async fn answer_in(
 ) -> Result<std::result::Result<std::result::Result<(), String>, Refusal>> {
     let mut rows = conn
         .query(
-            "SELECT version, state, body FROM questions WHERE id = ?1",
+            "SELECT version, state, body, ticks FROM questions WHERE id = ?1",
             [id],
         )
         .await?;
@@ -490,6 +567,7 @@ async fn answer_in(
     let current = version_of(&row, 0)?;
     let state = text(&row, 1)?;
     let body = text(&row, 2)?;
+    let ticks = parse_ticks(&text(&row, 3)?);
     drop(rows);
     if !open_state(&state) {
         return Ok(Err(Refusal::NotWaiting));
@@ -498,10 +576,13 @@ async fn answer_in(
         return Ok(Err(Refusal::VersionChanged));
     }
     let question: Question = serde_json::from_str(&body)?;
-    let answer = match resolve(&question) {
+    let mut answer = match resolve(&question) {
         Ok(answer) => answer,
         Err(field) => return Ok(Ok(Err(field))),
     };
+    if answer.kind == Kind::Done {
+        answer.ticked = u32::try_from(ticks.len()).unwrap_or(u32::MAX);
+    }
     conn.execute(
         "UPDATE questions SET state = 'answered', answer = ?2, updated_at_ms = ?3, \
          send_now = ?4 WHERE id = ?1",
@@ -527,6 +608,9 @@ async fn defer_in(
     if !open_state(&existing.state) {
         return Ok(Err(Refusal::NotWaiting));
     }
+    if body_of(conn, id).await?.is_instructions() {
+        return Ok(Err(Refusal::NotAQuestion));
+    }
     let position = next_position(conn).await?;
     conn.execute(
         "UPDATE questions SET state = 'deferred', position = ?2, updated_at_ms = ?3 WHERE id = ?1",
@@ -535,12 +619,85 @@ async fn defer_in(
     .await?;
     // Nothing waiting and no answer in the way of a line: the set-aside
     // questions would never come back, so they come back now.
-    if ids_in_state(conn, "waiting").await?.is_empty()
+    if waiting_question_ids(conn).await?.is_empty()
         && ids_in_state(conn, "answered").await?.is_empty()
     {
         return_deferred(conn, now_ms).await?;
     }
     Ok(Ok(existing.version))
+}
+
+async fn body_of(conn: &Connection, id: &str) -> Result<Question> {
+    let mut rows = conn
+        .query("SELECT body FROM questions WHERE id = ?1", [id])
+        .await?;
+    let row = rows
+        .next()
+        .await?
+        .ok_or_else(|| StoreError::Data("question row is missing".into()))?;
+    Ok(serde_json::from_str(&text(&row, 0)?)?)
+}
+
+/// Ids of the waiting questions; waiting instructions are left out, so they
+/// never hold set-aside questions back.
+async fn waiting_question_ids(conn: &Connection) -> Result<Vec<String>> {
+    let mut ids = Vec::new();
+    let mut rows = conn
+        .query(
+            "SELECT id, body FROM questions WHERE state = 'waiting' ORDER BY position, id",
+            (),
+        )
+        .await?;
+    while let Some(row) = rows.next().await? {
+        let question: Question = serde_json::from_str(&text(&row, 1)?)?;
+        if !question.is_instructions() {
+            ids.push(text(&row, 0)?);
+        }
+    }
+    Ok(ids)
+}
+
+async fn tick_in(
+    conn: &Connection,
+    id: &str,
+    version: u32,
+    step: u32,
+    ticked: bool,
+) -> Result<std::result::Result<(), TickRefusal>> {
+    let mut rows = conn
+        .query(
+            "SELECT version, state, body, ticks FROM questions WHERE id = ?1",
+            [id],
+        )
+        .await?;
+    let Some(row) = rows.next().await? else {
+        return Ok(Err(TickRefusal::NotWaiting));
+    };
+    let current = version_of(&row, 0)?;
+    let state = text(&row, 1)?;
+    let question: Question = serde_json::from_str(&text(&row, 2)?)?;
+    let mut ticks = parse_ticks(&text(&row, 3)?);
+    drop(rows);
+    if !open_state(&state) {
+        return Ok(Err(TickRefusal::NotWaiting));
+    }
+    if current != version {
+        return Ok(Err(TickRefusal::VersionChanged));
+    }
+    if step == 0 || step as usize > question.steps.len() {
+        return Ok(Err(TickRefusal::InvalidStep));
+    }
+    ticks.retain(|held| *held != step);
+    if ticked {
+        ticks.push(step);
+        ticks.sort_unstable();
+    }
+    conn.execute(
+        "UPDATE questions SET ticks = ?2 WHERE id = ?1",
+        (id, format_ticks(&ticks)),
+    )
+    .await?;
+    Ok(Ok(()))
 }
 
 async fn ids_in_state(conn: &Connection, state: &str) -> Result<Vec<String>> {
@@ -680,7 +837,7 @@ async fn batch_typed_in(conn: &Connection, batch_id: i64, now_ms: i64) -> Result
     )
     .await?;
     // Deferred questions wait again, after everything else, once none is waiting.
-    if ids_in_state(conn, "waiting").await?.is_empty() {
+    if waiting_question_ids(conn).await?.is_empty() {
         return_deferred(conn, now_ms).await?;
     }
     Ok(())
@@ -773,6 +930,19 @@ impl QuestionStore for TursoQuestionStore {
         let conn = self.conn.lock().await;
         begin(&conn).await?;
         finish(&conn, defer_in(&conn, id, now_ms).await).await
+    }
+
+    async fn tick(
+        &self,
+        id: &str,
+        version: u32,
+        step: u32,
+        ticked: bool,
+        _now_ms: i64,
+    ) -> Result<std::result::Result<(), TickRefusal>> {
+        let conn = self.conn.lock().await;
+        begin(&conn).await?;
+        finish(&conn, tick_in(&conn, id, version, step, ticked).await).await
     }
 
     async fn ready(&self, now_ms: i64, settle_ms: i64) -> Result<Readiness> {
