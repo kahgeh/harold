@@ -154,7 +154,10 @@ fn fake_cli(name: &str, script: &str) -> String {
 fn summarise_returns_a_600_char_cli_text_uncut() {
     let cli = fake_cli(
         "cli-ok",
-        &format!("#!/bin/sh\nprintf '{}'\n", "a".repeat(600)),
+        &format!(
+            "#!/bin/sh\nprintf '{{\"subtype\":\"success\",\"is_error\":false,\"result\":\"{}\"}}'\n",
+            "a".repeat(600)
+        ),
     );
     let result = summarise_with(Some(&cli), "reply", "prompt");
     assert_eq!(result, "a".repeat(600));
@@ -168,6 +171,106 @@ fn summarise_returns_the_whole_reply_when_the_cli_fails() {
     let result = summarise_with(Some(&cli), &reply, "prompt");
     assert_eq!(result, format!("{} {}", "b".repeat(300), "c".repeat(300)));
     assert_eq!(summarise_with(None, &reply, "prompt"), result);
+}
+
+#[cfg(unix)]
+#[derive(Clone, Default)]
+struct LogBuf(std::sync::Arc<Mutex<Vec<u8>>>);
+
+#[cfg(unix)]
+impl std::io::Write for LogBuf {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Runs the summary with a fake CLI printing `stdout` and exiting `code`; returns the
+/// summary and the log text it wrote.
+#[cfg(unix)]
+fn summarise_logging(name: &str, stdout: &str, code: i32) -> (String, String) {
+    let cli = fake_cli(
+        name,
+        &format!("#!/bin/sh\nprintf '%s' '{stdout}'\nexit {code}\n"),
+    );
+    let buf = LogBuf::default();
+    let writer = buf.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(move || writer.clone())
+        .with_ansi(false)
+        .finish();
+    let result = tracing::subscriber::with_default(subscriber, || {
+        summarise_with(Some(&cli), "the reply", "prompt")
+    });
+    let logs = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
+    (result, logs)
+}
+
+#[cfg(unix)]
+#[test]
+fn summarise_returns_the_json_result() {
+    let (result, logs) = summarise_logging(
+        "cli-json-ok",
+        r#"{"type":"result","subtype":"success","is_error":false,"result":"Done."}"#,
+        0,
+    );
+    assert_eq!(result, "Done.");
+    assert!(logs.is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn summarise_logs_the_cause_without_the_result_text() {
+    let (result, logs) = summarise_logging(
+        "cli-max-turns",
+        r#"{"subtype":"error_max_turns","is_error":true,"result":"secret text"}"#,
+        1,
+    );
+    assert_eq!(result, "the reply");
+    assert!(logs.contains("exit_code=1"), "{logs}");
+    assert!(
+        logs.contains("subtype=\"error_max_turns\"") || logs.contains("subtype=error_max_turns"),
+        "{logs}"
+    );
+    assert!(logs.contains("is_error=true"), "{logs}");
+    assert!(!logs.contains("secret text"), "{logs}");
+}
+
+#[cfg(unix)]
+#[test]
+fn summarise_counts_an_error_reported_on_exit_0_as_a_failure() {
+    let (result, logs) = summarise_logging(
+        "cli-error-exit0",
+        r#"{"subtype":"success","is_error":true,"result":"API Error"}"#,
+        0,
+    );
+    assert_eq!(result, "the reply");
+    assert!(logs.contains("AI CLI failed"), "{logs}");
+    assert!(!logs.contains("API Error"), "{logs}");
+}
+
+#[cfg(unix)]
+#[test]
+fn summarise_names_plain_text_output_unreadable_json() {
+    let (result, logs) = summarise_logging("cli-plain", "oops plain text", 1);
+    assert_eq!(result, "the reply");
+    assert!(logs.contains("unreadable_json"), "{logs}");
+    assert!(!logs.contains("oops plain text"), "{logs}");
+}
+
+#[cfg(unix)]
+#[test]
+fn summarise_logs_an_odd_subtype_as_other() {
+    let (_, logs) = summarise_logging(
+        "cli-odd-subtype",
+        r#"{"subtype":"Weird Value!","is_error":true,"result":"x"}"#,
+        1,
+    );
+    assert!(logs.contains("other"), "{logs}");
+    assert!(!logs.contains("Weird Value"), "{logs}");
 }
 
 #[test]

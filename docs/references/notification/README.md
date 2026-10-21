@@ -95,7 +95,7 @@ The away channel is selected by `[notify] away_channel` (`"imessage"` or `"teleg
 
 ### Common steps (both channels)
 
-1. `summarise_for_notification()` — uses AI CLI to summarise `assistant_message` into 2–3 sentences under 280 chars; falls back to the whole reply (newlines flattened). Neither is cut here. The web app gets this whole text. iMessage and Telegram split the trailing question off first, then `fit_turn_end_text()` cuts the main text and the question each to 280 characters: after the last sentence that fits with ` …`, else after the last whole word with `…`, and inside a word only when one word is over the limit
+1. `summarise_for_notification()` — uses AI CLI to summarise `assistant_message` into 2–3 sentences under 280 chars; falls back to the whole reply (newlines flattened). The CLI runs with `--output-format json`; a non-zero exit, `is_error = true` or a `subtype` other than `success` counts as a failure, and the `AI CLI failed` warn line carries `exit_code`, `subtype` and `is_error`. Neither is cut here. The web app gets this whole text. iMessage and Telegram split the trailing question off first, then `fit_turn_end_text()` cuts the main text and the question each to 280 characters: after the last sentence that fits with ` …`, else after the last whole word with `…`, and inside a word only when one word is over the limit
 2. `split_body()` — splits the last sentence ending in `?` into a separate follow-up message
 3. Message assembled: `🤖 [<machine_name>/<pane_label>] <main body> (<main_context>)`. `machine_name` is this Mac's name, which defaults to the output of `hostname -s`.
 4. Trailing question (if present) sent as a second `🤖`-prefixed message, `🤖 <question>`, without a tag

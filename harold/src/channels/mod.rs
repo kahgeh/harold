@@ -121,6 +121,27 @@ pub(crate) fn summarise_for_notification(
     )
 }
 
+/// The fields of the AI CLI's `--output-format json` result that summarising reads.
+#[derive(serde::Deserialize)]
+struct CliReply {
+    subtype: Option<String>,
+    is_error: Option<bool>,
+    result: Option<String>,
+}
+
+const SUBTYPE_MAX_CHARS: usize = 40;
+
+/// A subtype is logged only when it is a short name of `a-z`, `0-9` and `_`, so the CLI
+/// cannot put message text on the line.
+fn clean_subtype(subtype: &str) -> &str {
+    let fits = !subtype.is_empty()
+        && subtype.len() <= SUBTYPE_MAX_CHARS
+        && subtype
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_');
+    if fits { subtype } else { "other" }
+}
+
 /// [`summarise_for_notification`] with the AI CLI path given.
 pub(crate) fn summarise_with(
     cli: Option<&str>,
@@ -155,6 +176,8 @@ pub(crate) fn summarise_with(
             "sonnet",
             "--max-turns",
             "1",
+            "--output-format",
+            "json",
             "--settings",
             r#"{"disableAllHooks":true}"#,
         ])
@@ -163,18 +186,30 @@ pub(crate) fn summarise_with(
         .output();
 
     match out {
-        Ok(o) if o.status.success() => {
-            let summary = String::from_utf8_lossy(&o.stdout).trim().to_string();
-            if summary.is_empty() {
-                whole_reply()
-            } else {
-                summary.replace('\n', " ")
-            }
-        }
         Ok(o) => {
+            let reply = serde_json::from_slice::<CliReply>(&o.stdout).ok();
+            if o.status.success()
+                && let Some(reply) = &reply
+                && reply.is_error == Some(false)
+                && reply.subtype.as_deref() == Some("success")
+            {
+                let summary = reply.result.as_deref().unwrap_or("").trim();
+                return if summary.is_empty() {
+                    whole_reply()
+                } else {
+                    summary.replace('\n', " ")
+                };
+            }
             let stderr = String::from_utf8_lossy(&o.stderr);
+            let subtype = match &reply {
+                Some(r) => r.subtype.as_deref().map_or("other", clean_subtype),
+                None => "unreadable_json",
+            };
             warn!(
                 status = %o.status,
+                exit_code = o.status.code(),
+                subtype,
+                is_error = reply.as_ref().and_then(|r| r.is_error),
                 stderr = %stderr.chars().take(200).collect::<String>(),
                 "summarise_for_notification: AI CLI failed, falling back to the whole reply"
             );
