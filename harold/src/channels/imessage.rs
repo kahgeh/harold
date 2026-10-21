@@ -30,7 +30,7 @@ use crate::util::sanitise_for_applescript;
 /// chat.db, so Harold never routes its own messages back in as replies.
 const HAROLD_MARKER: char = '🤖';
 
-pub(super) fn is_marked_as_harold(text: &str) -> bool {
+fn is_marked_as_harold(text: &str) -> bool {
     text.starts_with(HAROLD_MARKER)
 }
 

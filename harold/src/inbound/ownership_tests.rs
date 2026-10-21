@@ -76,7 +76,7 @@ fn listed(names: &[&str]) -> Vec<String> {
     names.iter().map(ToString::to_string).collect()
 }
 
-/// A record for a hub and two Macs, as the `machines` setting would list them.
+/// A record for two Macs, as the `machines` setting would list them.
 fn three_macs() -> NotifierRecord {
     NotifierRecord::for_machines(&listed(&["studio", "laptop", "mini"]))
 }
@@ -366,25 +366,25 @@ fn unclosed_bracket_is_an_untagged_reply() {
 
 #[test]
 fn reply_this_mac_does_not_own_names_the_mac_that_does() {
-    // A hub called "hub" with two members. The tag decides the owner when it names a
+    // Three Macs, this one called "home". The tag decides the owner when it names a
     // machine, whoever notified last.
     let known = vec![
-        "hub".to_string(),
+        "home".to_string(),
         "studio".to_string(),
         "laptop".to_string(),
     ];
-    let on_hub = |text, latest| decide_ownership(text, "hub", &known, latest);
+    let on_home = |text, latest| decide_ownership(text, "home", &known, latest);
 
     assert_eq!(
-        on_hub("[studio/alir] go", Some("laptop")),
+        on_home("[studio/alir] go", Some("laptop")),
         owned_by("studio")
     );
-    assert_eq!(on_hub("[studio] go", Some("laptop")), owned_by("studio"));
+    assert_eq!(on_home("[studio] go", Some("laptop")), owned_by("studio"));
     // Otherwise the latest notifier owns it, with or without a pane tag.
-    assert_eq!(on_hub("yes, merge it", Some("laptop")), owned_by("laptop"));
-    assert_eq!(on_hub("[alir] go", Some("laptop")), owned_by("laptop"));
+    assert_eq!(on_home("yes, merge it", Some("laptop")), owned_by("laptop"));
+    assert_eq!(on_home("[alir] go", Some("laptop")), owned_by("laptop"));
     assert_eq!(
-        on_hub("yes, merge it", Some("hub")),
+        on_home("yes, merge it", Some("home")),
         owned(None, "yes, merge it")
     );
 }
