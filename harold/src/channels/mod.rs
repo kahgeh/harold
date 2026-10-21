@@ -21,20 +21,25 @@ pub(crate) enum AwayNotification {
 // Shared utilities — used by the iMessage channel
 // ---------------------------------------------------------------------------
 
-/// Extract a trailing question sentence from the assistant message body.
+/// Split the trailing question off the assistant message body. The question is the last
+/// sentence, and only when the body ends with it and it ends in `?`. Any other body, such as
+/// one with text after its last question, comes back whole with no question.
 pub(crate) fn split_body(body: &str) -> (&str, Option<&str>) {
-    // byte-index arithmetic below is safe only because '?' and '.' are single-byte ASCII chars.
-    // rfind on char guarantees char-boundary alignment for q_pos.
-    // sentence_start is q_pos's preceding '.' position + 1 (one byte past ASCII '.'), also safe.
-    if let Some(q_pos) = body.rfind('?') {
-        let sentence_start = body[..q_pos].rfind('.').map_or(0, |i| i + 1);
-        let question = body[sentence_start..=q_pos].trim();
-        let main = body[..sentence_start].trim();
-        if !main.is_empty() && !question.is_empty() {
-            return (main, Some(question));
-        }
+    let body = body.trim();
+    if !body.ends_with('?') {
+        return (body, None);
     }
-    (body.trim(), None)
+    // Byte indices are safe: the sentence end is a single-byte ASCII char followed by a space.
+    let before_question = &body[..body.len() - 1];
+    let Some(end) = before_question
+        .char_indices()
+        .filter(|&(i, c)| matches!(c, '.' | '!' | '?') && before_question[i + 1..].starts_with(' '))
+        .map(|(i, _)| i)
+        .next_back()
+    else {
+        return (body, None);
+    };
+    (body[..=end].trim(), Some(body[end + 1..].trim()))
 }
 
 /// The most characters a turn-end update takes on iMessage.

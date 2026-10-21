@@ -94,8 +94,8 @@ The away channel is iMessage. Harold prefixes all outgoing messages with `🤖`.
 
 ### Common steps
 
-1. `summarise_for_notification()` — uses AI CLI to summarise `assistant_message` into 2–3 sentences under 280 chars; falls back to the whole reply (newlines flattened). The CLI runs with `--output-format json`; a non-zero exit, `is_error = true` or a `subtype` other than `success` counts as a failure, and the `AI CLI failed` warn line carries `exit_code`, `subtype` and `is_error`. Neither is cut here. The web app gets this whole text. iMessage splits the trailing question off first, then `fit_turn_end_text()` cuts the main text and the question each to 280 characters: after the last sentence that fits with ` …`, else after the last whole word with `…`, and inside a word only when one word is over the limit
-2. `split_body()` — splits the last sentence ending in `?` into a separate follow-up message
+1. `summarise_for_notification()` — uses AI CLI to summarise `assistant_message` into 2–3 sentences under 280 chars; falls back to the whole reply (newlines flattened). The CLI runs with `--output-format json`; a non-zero exit, `is_error = true` or a `subtype` other than `success` counts as a failure, and the `AI CLI failed` warn line carries `exit_code`, `subtype` and `is_error`. Neither is cut here. The web app gets this whole text. iMessage splits the trailing question off first (only when the text ends with it), then `fit_turn_end_text()` cuts the main text and the question each to 280 characters: after the last sentence that fits with ` …`, else after the last whole word with `…`, and inside a word only when one word is over the limit
+2. `split_body()` — the trailing question is the last sentence, and only when the text ends with it and it ends in `?`; it becomes a separate follow-up message. Text that follows the last question stays whole in the main message, with no trailing question
 3. Message assembled: `🤖 [<machine_name>/<pane_label>] <main body> (<main_context>)`. `machine_name` is this Mac's name, which defaults to the output of `hostname -s`.
 4. Trailing question (if present) sent as a second `🤖`-prefixed message, `🤖 <question>`, without a tag
 
@@ -332,7 +332,7 @@ sequenceDiagram
     Handler->>Handler: ioreg → IOConsoleLocked = true
     note over Handler: left out here if the pane messaged the phone this turn,<br/>or if the phone's lists do not name the pane
     Handler->>Handler: summarise_for_notification() via AI CLI (fallback: the whole reply; iMessage then cuts at a sentence end within 280)
-    Handler->>Handler: split_body() → main body + trailing question (if ends in ?)
+    Handler->>Handler: split_body() → main body + trailing question (only if the text ends with it)
     Handler->>Channel: send "🤖 [studio/harold:0.3] <body> (harold)"
     note over Channel: dedup check via chat.db then osascript
     Handler->>Handler: set last_away_notification_source_agent

@@ -72,6 +72,7 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 | Term | Meaning | Not to use |
 | --- | --- | --- |
 | turn-end update | What Harold says or sends when an agent's turn ends, as delivery work that the `TurnCompleted` event creates | "completion notification", "notification" alone |
+| trailing question | The last sentence of a turn-end update, when the update ends with it and it ends in `?`. iMessage sends it as a second message | "question" alone, which is a todo kind |
 | fallback sentence | The spoken turn-end update `<Name> has finished and is waiting.`, said when the local model gives no sentence that names the agent | "default message", "fixed tail" |
 | agent message | Text an agent asks Harold to send to the phone (`send-message-to-away-device`) | — |
 | spoken line | A line the chief asks Harold to say (`harold speak`) | — |

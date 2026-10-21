@@ -49,6 +49,41 @@ fn split_body_multiple_sentences_with_question() {
 }
 
 #[test]
+fn split_body_keeps_text_after_the_last_question() {
+    let body = "Build passed. Should I deploy? I'll wait for your answer.";
+    assert_eq!(split_body(body), (body, None));
+}
+
+#[test]
+fn split_body_does_not_take_a_question_mark_in_a_link_for_a_question() {
+    let body = "Opened https://example.com/?q=1 for you.";
+    assert_eq!(split_body(body), (body, None));
+}
+
+#[test]
+fn split_body_ends_the_sentence_before_the_question_at_an_exclamation_mark() {
+    let (main, q) = split_body("Great! Should I open a PR?");
+    assert_eq!(main, "Great!");
+    assert_eq!(q, Some("Should I open a PR?"));
+}
+
+#[test]
+fn split_body_ends_the_sentence_before_the_question_at_a_question_mark() {
+    let (main, q) = split_body("Ready? Should I open a PR?");
+    assert_eq!(main, "Ready?");
+    assert_eq!(q, Some("Should I open a PR?"));
+}
+
+#[test]
+fn split_and_fit_with_text_after_the_question_returns_the_whole_text() {
+    let body = "Build passed. Should I deploy? I'll wait for your answer.";
+    let (main, question, cut) = split_and_fit(body, "imessage", "%1");
+    assert_eq!(main, body);
+    assert_eq!(question, None);
+    assert!(!cut);
+}
+
+#[test]
 fn fit_leaves_text_within_the_limit_unchanged() {
     let exact = "x".repeat(280);
     assert_eq!(fit_turn_end_text(&exact, 280), exact);
