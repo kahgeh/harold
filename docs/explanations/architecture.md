@@ -74,7 +74,7 @@ flowchart LR
 | agent monitor | Finds agents with the process inventory, and works out their state from hooks, reports and screen adapters | `harold/src/agent/` |
 | event stream and state database | Stores accepted observations and messages in order, and the current agent view, the outbox and the checkpoint | `harold/src/store.rs`, `harold/src/store/` |
 | projector and reducer | Reads the event stream, works out each agent's state, and stages delivery work in the outbox | `harold/src/store.rs`, `harold/src/agent/reducer.rs` |
-| delivery handler | Reads the outbox, and leaves out, speaks or sends each turn-end update | `harold/src/outbound/`, `harold/src/projector.rs`, `harold/src/tmux.rs` |
+| delivery handler | Reads the outbox, and leaves out, speaks or sends each turn-end update. The local model makes the update (`harold/src/outbound/tts.rs`), in a delivery or in a call | `harold/src/outbound/`, `harold/src/projector.rs`, `harold/src/tmux.rs` |
 | channels and channel listener | Send to the phone by iMessage or Telegram, and record the user's replies in the event stream | `harold/src/channels/` |
 | reply routing | Decides which Mac owns a reply by its routing tag or the latest notifier, picks the pane by the tag or the other fallbacks, and types it there | `harold/src/inbound/` |
 | peers | Hub and member on two Macs, and the peer RPCs between them | `harold/src/peers.rs` |

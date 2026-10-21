@@ -186,6 +186,16 @@ A reply whose payload failed for good never finishes, and is dropped after an ho
 | `harold.delivery`, and `harold.voice_note` inside it | the turn-end update sent or said | `kind`, `channel`, `outcome`, `reason` for `held_back` |
 | `harold.local_model`, inside it | the local model's run | `result` (`answered`, `failed`, `no_model`) |
 
+**A turn you start by speaking in a call** is one trace, with these spans in order:
+
+| Span | From – to | Attributes |
+|---|---|---|
+| `harold.call_turn` | the prompt typed – the update line arriving, or the wait giving up or the call ending | `pane_id` |
+| `harold.turn`, and `harold.turn_complete` inside it | as above, with `started_by = voice` | as above |
+| `harold.call_update`, and `harold.local_model` inside it | the turn-end update made, as the caller waits for it | none; `harold.local_model` has `result` |
+
+`harold.call_turn` ends when the update line arrives, or when the wait gives up or the call ends. When the wait gives up, `harold.call_turn` ends before a late stop hook adds its `harold.turn`, so that child can outlive its parent. `harold.call_update`'s duration is how long the call makes the caller wait for the update. A `harold.local_model` span with no parent means a run escaped its turn.
+
 `turn-end update fell back` (INFO, `reason` and `channel`) is written when Harold says the fallback sentence. A model that fails writes the WARN line `local model failed` with `reason` `spawn_failed` (`uv` not found or not runnable), `exit_status` (the model crashed or is not installed) or `empty_output`; the exit status stays in `harold.log`, which errors do not leave for HyperDX. No span, line or counter holds the sentence, the prompt or the model's text.
 
 A watch run is a trace of its own: `harold.watch.run`, one run of a watch, with `harold.watch.model` (the Claude Code process, with `result`: `exited`, `killed` or `failed_to_start`) inside it. The run span has `watch`, `run`, `outcome` (`quiet`, `report`, `skipped` or a failure reason), `reason` and `cost_usd`, and the run's log lines carry its trace id.

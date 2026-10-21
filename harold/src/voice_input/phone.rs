@@ -618,8 +618,8 @@ impl<B: CallPorts> CallPorts for PhonePorts<B> {
         self.line.take_back_speech();
     }
 
-    async fn turn_end_update(&self, prompt: &str) -> String {
-        self.base.turn_end_update(prompt).await
+    async fn turn_end_update(&self, prompt: &str, turn: &tracing::Span) -> String {
+        self.base.turn_end_update(prompt, turn).await
     }
 
     fn calls_dir(&self) -> PathBuf {

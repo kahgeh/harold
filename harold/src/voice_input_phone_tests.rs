@@ -459,7 +459,12 @@ async fn the_phone_ports_speak_and_end_a_call_on_the_phone() {
     assert_eq!(ports.phrases_dir(), base.phrases_dir());
     assert_eq!(ports.voice_name(), base.voice_name());
     assert_eq!(ports.chief_folder(), base.chief_folder());
-    assert_eq!(ports.turn_end_update("fix it").await, UPDATE);
+    assert_eq!(
+        ports
+            .turn_end_update("fix it", &tracing::Span::none())
+            .await,
+        UPDATE
+    );
     assert_eq!(base.state().update_prompts, ["fix it"]);
 
     ports.call_ended("stopped");

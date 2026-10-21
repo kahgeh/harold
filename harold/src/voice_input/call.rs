@@ -29,6 +29,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, sleep_until};
 use tracing::{info, warn};
+use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 use uuid::Uuid;
 
 /// How long after a sound ends the microphone is still not heard.
@@ -173,15 +174,26 @@ async fn try_type<P: CallPorts>(ports: &P, text: &str) -> Typing {
     }
 }
 
-fn log_typed(pane: &str, text: &str) {
+/// Logs a typed turn and opens its `harold.call_turn` span, the root of the turn's trace.
+/// The stop hook's `harold.turn` joins it. The span ends when its last holder lets go.
+pub(super) fn log_typed(pane: &str, text: &str) -> tracing::Span {
     let words = text.split_whitespace().count();
-    info!(pane_id = %pane, words, "spoken prompt typed");
+    let turn = tracing::info_span!(
+        target: telemetry::TRACE_TARGET,
+        parent: None,
+        "harold.call_turn",
+        pane_id = %pane
+    );
+    // Fails only when no export layer is installed, and then there is no trace to join.
+    let cx = turn.context();
+    turn.in_scope(|| info!(pane_id = %pane, words, "spoken prompt typed"));
     telemetry::prompt_typed(
         pane,
         StartedBy::Voice,
-        None,
+        Some(cx),
         time::OffsetDateTime::now_utc(),
     );
+    turn
 }
 
 fn log_dropped(result: TurnResult) {
@@ -201,7 +213,8 @@ async fn pass_on_when_free<P: CallPorts>(
         sleep_until(next_try).await;
         let result = match try_type(&*ports, &text).await {
             Typing::Typed(pane) => {
-                log_typed(&pane, &text);
+                // The call is over: nothing waits on the turn, so its span ends here.
+                drop(log_typed(&pane, &text));
                 return;
             }
             Typing::Busy if Instant::now() < gives_up_at => {
@@ -376,6 +389,9 @@ struct Awaiting {
     /// A line answering the turn has arrived, or is coming from the turn-end update.
     answered: bool,
     update_asked: bool,
+    /// The turn's `harold.call_turn` span; it ends when the update line arrives or this is
+    /// dropped.
+    turn: Option<tracing::Span>,
 }
 
 /// A turn that waits for a busy chief.
@@ -920,7 +936,7 @@ impl<P: CallPorts> Call<P> {
     }
 
     fn typed(&mut self, pane: String, text: String) {
-        log_typed(&pane, &text);
+        let turn = log_typed(&pane, &text);
         self.hold_others_until = None;
         let prompt = format!("{MARK} {text}");
         {
@@ -941,6 +957,7 @@ impl<P: CallPorts> Call<P> {
             idle_since: None,
             answered: false,
             update_asked: false,
+            turn: Some(turn),
         });
     }
 
@@ -1134,8 +1151,10 @@ impl<P: CallPorts> Call<P> {
             let ports = Arc::clone(&self.ports);
             let events = self.events.clone();
             let prompt = awaiting.prompt.clone();
+            let turn = awaiting.turn.clone().unwrap_or_else(tracing::Span::none);
             self.updates.push(tokio::spawn(async move {
-                let line = ports.turn_end_update(&prompt).await;
+                let line = ports.turn_end_update(&prompt, &turn).await;
+                drop(turn);
                 let _ = events.send(Event::TurnEndUpdate(line));
             }));
         }
@@ -1202,6 +1221,8 @@ impl<P: CallPorts> Call<P> {
         if !awaiting.update_asked || awaiting.answered {
             return;
         }
+        // The line has arrived: the call turn ends (the update task let go of its copy).
+        awaiting.turn = None;
         self.line(line, Speaker::Chief, None);
     }
 

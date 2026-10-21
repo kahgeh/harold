@@ -315,11 +315,18 @@ impl CallPorts for MacPorts {
         tts::desk_line_stopper().stop();
     }
 
-    async fn turn_end_update(&self, prompt: &str) -> String {
+    async fn turn_end_update(&self, prompt: &str, turn: &tracing::Span) -> String {
         let prompt = prompt.to_string();
         let context = last_component(self.chief_folder.as_deref().unwrap_or_default());
+        let update_span = tracing::info_span!(
+            target: crate::telemetry::TRACE_TARGET,
+            parent: turn,
+            "harold.call_update"
+        );
         let update = tokio::task::spawn_blocking(move || {
-            tts::desk_update_line(&prompt, &tts::AgentName::Chief, &context, "call")
+            update_span.in_scope(|| {
+                tts::desk_update_line(&prompt, &tts::AgentName::Chief, &context, "call")
+            })
         })
         .await;
         update.unwrap_or_else(|_| {
@@ -494,6 +501,44 @@ mod tests {
         assert_eq!(last_component("/Users/me/chief-of-pods"), "chief-of-pods");
         assert_eq!(last_component("/Users/me/chief-of-pods/"), "chief-of-pods");
         assert_eq!(last_component(""), "");
+    }
+
+    #[tokio::test]
+    async fn the_turn_end_update_runs_the_local_model_inside_harold_call_update() {
+        use crate::telemetry::{TRACE_TARGET, test_support};
+        use opentelemetry::trace::TraceContextExt as _;
+        use tracing_opentelemetry::OpenTelemetrySpanExt as _;
+
+        test_support::install();
+        crate::settings::init_settings_for_test();
+        let snapshots = AgentSnapshotHub::new(crate::agent::domain::AgentSnapshot {
+            tts_muted: false,
+            messaging_paused: false,
+            through_event_version: crate::store::EventVersion::start(),
+            server_time_ms: 1_000,
+            monitor_health: Vec::new(),
+            panes: Vec::new(),
+        });
+        let ports = MacPorts::from_settings(crate::settings::get_settings(), snapshots);
+        let turn = tracing::info_span!(target: TRACE_TARGET, parent: None, "harold.call_turn");
+        let trace_id = turn.context().span().span_context().trace_id();
+
+        ports.turn_end_update("fix it", &turn).await;
+        drop(turn);
+
+        let spans: Vec<_> = test_support::spans()
+            .into_iter()
+            .filter(|span| span.span_context.trace_id() == trace_id)
+            .collect();
+        let find = |name: &str| spans.iter().find(|span| span.name == name).unwrap();
+        let (turn, update, model) = (
+            find("harold.call_turn"),
+            find("harold.call_update"),
+            find("harold.local_model"),
+        );
+        assert_eq!(update.parent_span_id, turn.span_context.span_id());
+        assert_eq!(model.parent_span_id, update.span_context.span_id());
+        assert!(update.attributes.is_empty());
     }
 
     #[test]

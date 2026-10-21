@@ -106,8 +106,13 @@ pub(crate) trait CallPorts: Send + Sync + 'static {
     fn speak_with_tts(&self, line: &str) -> impl Future<Output = ()> + Send;
     /// Stops a line the `[tts]` command is saying now.
     fn stop_desk_line(&self);
-    /// The desk's turn-end update for a turn started by `prompt` (Open point 1).
-    fn turn_end_update(&self, prompt: &str) -> impl Future<Output = String> + Send;
+    /// The desk's turn-end update for a turn started by `prompt` (Open point 1). `turn` is the
+    /// turn's `harold.call_turn` span, which the update's span joins.
+    fn turn_end_update(
+        &self,
+        prompt: &str,
+        turn: &tracing::Span,
+    ) -> impl Future<Output = String> + Send;
     /// Call folders are made under this: `$TMPDIR/harold-voice-input` in the daemon.
     fn calls_dir(&self) -> PathBuf;
     /// Phrases are kept here between calls: `$TMPDIR/harold-voice-phrases` in the daemon.

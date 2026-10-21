@@ -240,6 +240,8 @@ pub(crate) struct PortsState {
     pub(crate) tts: Vec<String>,
     pub(crate) desk_stops: usize,
     pub(crate) update_prompts: Vec<String>,
+    /// The trace of the span each turn-end update was asked with.
+    pub(crate) update_traces: Vec<opentelemetry::trace::TraceId>,
     pub(crate) muted: bool,
     pub(crate) fail_awake: bool,
     pub(crate) awake_taken: usize,
@@ -356,8 +358,14 @@ impl CallPorts for FakePorts {
         self.state().desk_stops += 1;
     }
 
-    async fn turn_end_update(&self, prompt: &str) -> String {
+    async fn turn_end_update(&self, prompt: &str, turn: &tracing::Span) -> String {
         self.state().update_prompts.push(prompt.to_string());
+        let trace = {
+            use opentelemetry::trace::TraceContextExt as _;
+            use tracing_opentelemetry::OpenTelemetrySpanExt as _;
+            turn.context().span().span_context().trace_id()
+        };
+        self.state().update_traces.push(trace);
         UPDATE.to_string()
     }
 
@@ -839,7 +847,7 @@ async fn the_turn_is_typed_as_voice_and_starts_a_voice_turn() {
     let (_, started_by, cx) =
         telemetry::take_prompt(pane, time::OffsetDateTime::now_utc()).expect("a prompt");
     assert_eq!(started_by, StartedBy::Voice);
-    assert!(cx.is_none());
+    assert!(cx.is_some(), "the turn joins the call turn's trace");
 }
 
 // ---------------------------------------------------------------------------
@@ -934,6 +942,89 @@ async fn a_turn_that_ends_without_harold_speak_gets_the_turn_end_update() {
     assert_eq!(h.ports.state().update_prompts, ["🎙 hello there"]);
     settle().await;
     assert_eq!(h.state(), CallState::Listening);
+}
+
+/// Makes the chief's pane one no other test uses, so its exported spans are this call's.
+fn own_chief_pane(h: &Harness) -> String {
+    let pane = format!("%call-turn-{}", uuid::Uuid::new_v4());
+    let id = pane.clone();
+    h.ports
+        .0
+        .panes
+        .set(move |s| s.view.panes[0].pane_id = id.clone());
+    pane
+}
+
+fn call_turns_on(pane: &str) -> Vec<opentelemetry_sdk::trace::SpanData> {
+    test_support::spans()
+        .into_iter()
+        .filter(|span| {
+            span.name == "harold.call_turn"
+                && test_support::span_attr(span, "pane_id").as_deref() == Some(pane)
+        })
+        .collect()
+}
+
+#[test]
+fn typing_a_spoken_prompt_records_it_with_a_trace_context() {
+    test_support::install();
+    let pane = format!("%call-turn-{}", uuid::Uuid::new_v4());
+    let turn = call::log_typed(&pane, "hello");
+    let (_, started_by, cx) =
+        telemetry::take_prompt(&pane, time::OffsetDateTime::now_utc()).expect("prompt kept");
+    assert_eq!(started_by, StartedBy::Voice);
+    let cx = cx.expect("a spoken prompt joins a trace");
+    use opentelemetry::trace::TraceContextExt as _;
+    use tracing_opentelemetry::OpenTelemetrySpanExt as _;
+    assert_eq!(
+        cx.span().span_context().trace_id(),
+        turn.context().span().span_context().trace_id()
+    );
+    drop(turn);
+    let spans = call_turns_on(&pane);
+    assert_eq!(spans.len(), 1);
+    assert_eq!(
+        spans[0].parent_span_id,
+        opentelemetry::trace::SpanId::INVALID
+    );
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn the_update_is_asked_with_the_turns_span_and_the_span_ends_when_the_line_arrives() {
+    test_support::install();
+    let h = Harness::new();
+    let pane = own_chief_pane(&h);
+    h.start().await;
+    h.speak().await;
+    assert!(call_turns_on(&pane).is_empty(), "the turn is still open");
+
+    h.set_chief(EffectiveAgentState::Busy);
+    sleep(Duration::from_millis(1000)).await;
+    h.set_chief(EffectiveAgentState::Idle);
+    sleep(Duration::from_millis(2600)).await;
+    settle().await;
+
+    let spans = call_turns_on(&pane);
+    assert_eq!(spans.len(), 1);
+    assert_eq!(
+        h.ports.state().update_traces,
+        [spans[0].span_context.trace_id()]
+    );
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn the_span_ends_when_the_wait_gives_up() {
+    test_support::install();
+    let h = Harness::new();
+    let pane = own_chief_pane(&h);
+    h.start().await;
+    h.speak().await;
+    assert!(call_turns_on(&pane).is_empty());
+
+    sleep(Duration::from_secs(95)).await;
+    settle().await;
+    assert_eq!(call_turns_on(&pane).len(), 1);
+    assert!(h.ports.state().update_traces.is_empty());
 }
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
