@@ -73,6 +73,8 @@ pub(crate) struct WorkerLog {
     /// What each say request answers in turn, with the health left as it is; once used
     /// up, each say request writes its file.
     pub(crate) say_script: VecDeque<WorkerError>,
+    /// How long each say request takes, in order; none left means at once.
+    pub(crate) say_delays: VecDeque<Duration>,
     pub(crate) closes: usize,
     /// Whether each worker starts `Loading` rather than `Ready`.
     pub(crate) starts_loading: bool,
@@ -127,11 +129,14 @@ impl VoiceWorker for FakeWorker {
     }
 
     async fn say(&mut self, text: &str, wav: &Path) -> Result<(), WorkerError> {
-        let scripted = {
+        let (scripted, delay) = {
             let mut log = self.0.lock().unwrap();
             log.said.push(text.to_string());
-            log.say_script.pop_front()
+            (log.say_script.pop_front(), log.say_delays.pop_front())
         };
+        if let Some(delay) = delay {
+            sleep(delay).await;
+        }
         if let Some(error) = scripted {
             return Err(error);
         }

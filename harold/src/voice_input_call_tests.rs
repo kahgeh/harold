@@ -883,3 +883,38 @@ async fn a_chief_line_after_its_turn_ended_is_no_answer_of_the_next_turn() {
     assert!(named(&spans, "harold.call_voice").is_empty());
     assert_eq!(attr(turn, "answer_ms"), None);
 }
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn an_earlier_turns_queued_line_playing_does_not_end_the_next_turn() {
+    test_support::install();
+    let h = Harness::new();
+    let pane = own_chief_pane(&h);
+    h.script([text("turn a"), text("turn b")]);
+    h.worker()
+        .say_delays
+        .extend([Duration::ZERO, Duration::from_secs(10)]);
+    h.start().await;
+    h.speak().await;
+
+    // Both lines answer turn A. The second is slow to make; turn B is spoken meanwhile.
+    let first = h.say("line one", Speaker::Chief);
+    let second = h.say("line two", Speaker::Chief);
+    settle().await;
+    past_the_tail().await;
+    h.feed(loud(1500));
+    h.feed(quiet(1200));
+    settle().await;
+    sleep(Duration::from_secs(11)).await;
+    settle().await;
+    assert_eq!(first.await.unwrap(), Some(true));
+    assert_eq!(second.await.unwrap(), Some(true));
+    past_the_tail().await;
+    h.answer("answer b").await;
+    h.calls.stop().await;
+    settle().await;
+
+    let spans = trace_of_clip(1500);
+    let turn = root(&spans);
+    assert_eq!(attr(turn, "pane_id").as_deref(), Some(pane.as_str()));
+    assert!(attr(turn, "answer_ms").is_some());
+}
