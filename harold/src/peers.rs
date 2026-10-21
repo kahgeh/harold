@@ -29,10 +29,7 @@ pub(crate) enum PeerEndpoint {
 }
 
 impl PeerEndpoint {
-    pub(crate) fn from_settings(away_channel: &str, peers: &PeersSettings) -> Self {
-        if away_channel != "telegram" {
-            return Self::Off;
-        }
+    pub(crate) fn from_settings(peers: &PeersSettings) -> Self {
         match (peers.role, &peers.hub) {
             (PeerRole::Hub, _) => Self::Hub {
                 members: peers.members.clone(),
@@ -115,10 +112,24 @@ pub(crate) fn authorize_forward(endpoint: &PeerEndpoint, secret: &str) -> Result
 // ---------------------------------------------------------------------------
 
 /// How long connecting to a peer may take, and how long the call may take after that.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "only the Telegram channel called it; Task 4 removes the peer calls"
+    )
+)]
 pub(crate) const PEER_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// A new connection to the Harold at `url`. Each call opens its own and drops it: calls are
 /// rare, and a peer that slept or restarted is found out at once.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "only the Telegram channel called it; Task 4 removes the peer calls"
+    )
+)]
 async fn connect(url: &str, timeout: Duration) -> Result<HaroldClient<Channel>, String> {
     let endpoint = Endpoint::from_shared(url.to_string())
         .map_err(|error| format!("invalid peer url: {error}"))?
@@ -132,10 +143,24 @@ async fn connect(url: &str, timeout: Duration) -> Result<HaroldClient<Channel>, 
 }
 
 /// A refused or failed call, without the request: the request holds the secret.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "only the Telegram channel called it; Task 4 removes the peer calls"
+    )
+)]
 fn status_error(status: tonic::Status) -> String {
     format!("{:?}: {}", status.code(), status.message())
 }
 
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "only the Telegram channel called it; Task 4 removes the peer calls"
+    )
+)]
 fn accepted(accepted: bool) -> Result<(), String> {
     if accepted {
         Ok(())
@@ -145,10 +170,24 @@ fn accepted(accepted: bool) -> Result<(), String> {
 }
 
 /// Tell the hub that `machine`, this member, is about to send a notification. One attempt.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "only the Telegram channel called it; Task 4 removes the peer calls"
+    )
+)]
 pub(crate) async fn report_notification(hub: &PeerHub, machine: &str) -> Result<(), String> {
     report_notification_within(hub, machine, PEER_TIMEOUT).await
 }
 
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "only the Telegram channel called it; Task 4 removes the peer calls"
+    )
+)]
 async fn report_notification_within(
     hub: &PeerHub,
     machine: &str,
@@ -167,6 +206,13 @@ async fn report_notification_within(
 
 /// `report_notification` for a blocking thread of the tokio runtime, which is where the
 /// event handler sends notifications. On any other thread it reports an error.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "only the Telegram channel called it; Task 4 removes the peer calls"
+    )
+)]
 pub(crate) fn report_notification_blocking(hub: &PeerHub, machine: &str) -> Result<(), String> {
     let runtime = tokio::runtime::Handle::try_current()
         .map_err(|_| "no async runtime on this thread".to_string())?;
@@ -174,6 +220,13 @@ pub(crate) fn report_notification_blocking(hub: &PeerHub, machine: &str) -> Resu
 }
 
 /// Hand `member` a reply it owns, as the user typed it. One attempt.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "only the Telegram channel called it; Task 4 removes the peer calls"
+    )
+)]
 pub(crate) async fn forward_reply(member: &PeerMember, text: &str) -> Result<(), String> {
     let mut client = connect(&member.url, PEER_TIMEOUT).await?;
     let response = client

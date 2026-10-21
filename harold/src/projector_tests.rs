@@ -2933,25 +2933,20 @@ fn a_turn_end_delivery_continues_the_trace_kept_for_its_event() {
 
 #[test]
 fn a_turn_end_sent_while_away_records_the_away_channel() {
-    for (overrides, channel) in [
-        ("", "imessage"),
-        ("[notify]\naway_channel = \"telegram\"", "telegram"),
-    ] {
-        let event_id = uuid::Uuid::new_v4();
-        let (_, parent) = keep_a_turn_for(event_id);
-        let environment = Arc::new(FakeEnvironment::locked(overrides));
+    let event_id = uuid::Uuid::new_v4();
+    let (_, parent) = keep_a_turn_for(event_id);
+    let environment = Arc::new(FakeEnvironment::locked(""));
 
-        let outcome = dispatch_turn_end(
-            &Unpaused(dispatcher_with(&environment)),
-            &event_id.to_string(),
-            &unique_pane(),
-        );
+    let outcome = dispatch_turn_end(
+        &Unpaused(dispatcher_with(&environment)),
+        &event_id.to_string(),
+        &unique_pane(),
+    );
 
-        assert!(matches!(outcome, Ok(DeliveryOutcome::Delivered)));
-        let deliveries = deliveries_under(parent);
-        assert_eq!(deliveries.len(), 1, "{channel}");
-        assert_eq!(attr(&deliveries[0], "channel"), channel);
-    }
+    assert!(matches!(outcome, Ok(DeliveryOutcome::Delivered)));
+    let deliveries = deliveries_under(parent);
+    assert_eq!(deliveries.len(), 1);
+    assert_eq!(attr(&deliveries[0], "channel"), "imessage");
 }
 
 #[test]

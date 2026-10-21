@@ -409,7 +409,7 @@ async fn member_stores_a_forwarded_reply_trimmed() {
     assert!(stored[0].forwarded);
 }
 
-/// A reply the Telegram listener would not store is accepted and ignored: the hub did its
+/// A reply the iMessage listener would not store is accepted and ignored: the hub did its
 /// job, and retrying cannot make the text routable.
 #[tokio::test]
 async fn member_accepts_and_ignores_a_forwarded_reply_the_listener_would_skip() {
@@ -1528,8 +1528,6 @@ async fn repeated_request_sets_the_switch_again_and_appends_nothing() {
 const WIRING_HUB: &str = r#"
     machine_name = "studio"
     machines = ["studio", "laptop"]
-    [notify]
-    away_channel = "telegram"
     [[peers.members]]
     name = "laptop"
     url = "http://laptop.tailnet:50060"
@@ -1539,8 +1537,6 @@ const WIRING_HUB: &str = r#"
 const WIRING_MEMBER: &str = r#"
     machine_name = "laptop"
     machines = ["studio", "laptop"]
-    [notify]
-    away_channel = "telegram"
     [peers]
     role = "member"
     [peers.hub]
@@ -1586,8 +1582,6 @@ async fn service_answers_the_peer_calls_its_settings_call_for() {
             }
         }
     );
-    let imessage = WIRING_MEMBER.replace("telegram", "imessage");
-    assert_eq!(served_peers(&imessage).await, PeerEndpoint::Off);
 }
 
 /// Every agent message stored in `store`, in order, and the count of all stored events.

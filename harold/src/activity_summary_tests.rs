@@ -315,8 +315,9 @@ fn activity_summary_is_disabled_when_configuration_is_omitted() {
         "imessage": {}, "chat_db": { "path": "chat.db" }, "ai": {},
         "tts": { "command": "say" }, "log": { "level": "info" },
         "store": { "path": "events" },
-        "notify": { "skip_if_session_active": true, "skip_if_pane_active": false, "away_channel": "imessage" }
-    })).unwrap();
+        "notify": { "skip_if_session_active": true, "skip_if_pane_active": false }
+    }))
+    .unwrap();
     assert!(!defaults.activity_summary.enabled);
     assert!(defaults.activity_summary.validate().is_empty());
     let settings: crate::settings::Settings = config::Config::builder()

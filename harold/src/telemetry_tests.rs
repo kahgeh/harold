@@ -2380,6 +2380,11 @@ fn each_alert_has_its_own_webhook_posting_what_the_alert_address_accepts() {
 // ---------------------------------------------------------------------------
 
 #[test]
+fn phone_requests_carry_imessage_or_unknown_as_their_channel() {
+    assert_eq!(PHONE_CHANNELS, ["imessage", "unknown"]);
+}
+
+#[test]
 fn every_phone_counter_set_the_alerts_read_is_exported_from_zero() {
     register_phone_counters();
     for channel in PHONE_CHANNELS {

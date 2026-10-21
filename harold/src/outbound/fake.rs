@@ -56,7 +56,6 @@ impl FakeEnvironment {
         let mut notify = crate::settings::settings_with(overrides).notify;
         for (key, list) in [
             ("imessage", &mut notify.imessage),
-            ("telegram", &mut notify.telegram),
             ("web_app", &mut notify.web_app),
             ("machine_audio_output", &mut notify.machine_audio_output),
         ] {

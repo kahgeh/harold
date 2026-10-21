@@ -66,17 +66,11 @@ command = "say"
 # command = "/Users/you/Dev/xn/mlx-audio/.venv/bin/python"
 # args = ["-m", "mlx_audio.stt.generate", "--model", "mlx-community/whisper-large-v3-turbo"]
 
-# [telegram]
-# bot_token = "123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11"
-# chat_id = 12345678
-
 # [notify]
 # skip_if_session_active = true  # skip if completing pane is in the active tmux session
 # skip_if_pane_active = false    # skip if completing pane is the active pane and screen is unlocked
-# away_channel = "telegram"      # "imessage" or "telegram"
 # chief = "/Users/you/Dev/chief-of-pods"                 # which pane is the chief, matched by folder
 # imessage = ["/Users/you/Dev/chief-of-pods"]            # whose agents may reach the phone by iMessage; [] is nobody, ["*"] is everyone
-# telegram = ["/Users/you/Dev/chief-of-pods"]            # the same for Telegram
 # web_app = ["/Users/you/Dev/chief-of-pods"]             # the same for the web app
 # machine_audio_output = ["/Users/you/Dev/chief-of-pods"]  # whose agents may be spoken aloud on the Mac; [] is nobody, ["*"] is everyone
 

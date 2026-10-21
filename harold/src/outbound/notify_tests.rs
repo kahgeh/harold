@@ -490,7 +490,7 @@ fn with_no_agent_in_a_listed_folder_every_pane_is_held_back_on_both_channels() {
 #[test]
 fn the_default_lists_speak_nobody_but_a_chief_of_pods_folder() {
     // The shipped defaults, not FakeEnvironment's open lists: lists named, all as shipped.
-    let defaults = "[notify]\nimessage = [\"chief-of-pods\"]\ntelegram = [\"chief-of-pods\"]\nweb_app = [\"chief-of-pods\"]\nmachine_audio_output = [\"chief-of-pods\"]";
+    let defaults = "[notify]\nimessage = [\"chief-of-pods\"]\nweb_app = [\"chief-of-pods\"]\nmachine_audio_output = [\"chief-of-pods\"]";
     let agents =
         TrackedAgents::in_folders(&[("%1", "/any/where/chief-of-pods"), ("%2", "/work/harold")]);
     let environment = FakeEnvironment::locked(defaults);
@@ -609,28 +609,6 @@ fn an_empty_phone_list_holds_every_pane_back_naming_its_key() {
     assert!(
         logs.text()
             .contains("notification skipped (not in notify.imessage) pane_id=%1")
-    );
-}
-
-#[test]
-fn telegram_list_decides_when_telegram_is_the_away_channel() {
-    let environment = FakeEnvironment::locked(
-        "[notify]\naway_channel = \"telegram\"\nimessage = [\"/work/harold\"]\ntelegram = [\"/work/chief-of-pods\"]",
-    );
-
-    for pane in ["%1", "%2"] {
-        notify_turn_among(
-            &environment,
-            &NotifyState::default(),
-            &chief_and_pod(),
-            &turn(pane, "x"),
-        )
-        .unwrap();
-    }
-
-    assert_eq!(
-        environment.delivered(),
-        [(OutboundChannel::Away, "%1".to_string())]
     );
 }
 
@@ -1228,8 +1206,7 @@ fn not_pushed_logs_app_message_not_pushed_with_reason_and_outcome() {
         NotPushedReason::SubscriptionsUnread,
         NotPushedReason::NoneAccepted,
     ] {
-        for (channel, away_allowed) in [("imessage", true), ("telegram", true), ("imessage", false)]
-        {
+        for (channel, away_allowed) in [("imessage", true), ("imessage", false)] {
             let app = FakeApp::new(AppDelivery::NotPushed(reason));
             let away = FakeAwayText::on_channel(channel);
             let chief_app = ChiefApp {

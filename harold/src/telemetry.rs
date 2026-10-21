@@ -282,7 +282,7 @@ pub(crate) fn count_notification(agent: &str, channel: &str, outcome: &str) {
 }
 
 /// Every `channel` a phone request can carry.
-pub(crate) const PHONE_CHANNELS: [&str; 4] = ["imessage", "telegram", "forwarded", "unknown"];
+pub(crate) const PHONE_CHANNELS: [&str; 2] = ["imessage", "unknown"];
 
 /// Records 0 once for every attribute set of the phone-request counters the alerts read.
 /// HyperDX reads the first point of a running total as 0, so without this the first

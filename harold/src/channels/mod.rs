@@ -1,7 +1,4 @@
 pub(crate) mod imessage;
-pub(crate) mod telegram;
-
-pub(crate) use telegram::reply_text;
 
 use std::process::Command;
 use std::sync::Arc;
@@ -11,7 +8,7 @@ use tracing::{info, warn};
 
 use crate::inbound::AgentAddress;
 use crate::inbound::ownership::agent_message_text;
-use crate::settings::{PeerRole, Settings, get_settings};
+use crate::settings::get_settings;
 use crate::store::{AwayMessageRequested, HaroldStore, TurnCompleted};
 use crate::util::ai_cli_env;
 
@@ -21,7 +18,7 @@ pub(crate) enum AwayNotification {
 }
 
 // ---------------------------------------------------------------------------
-// Shared utilities — used by both iMessage and Telegram channels
+// Shared utilities — used by the iMessage channel
 // ---------------------------------------------------------------------------
 
 /// Extract a trailing question sentence from the assistant message body.
@@ -40,7 +37,7 @@ pub(crate) fn split_body(body: &str) -> (&str, Option<&str>) {
     (body.trim(), None)
 }
 
-/// The most characters a turn-end update takes on iMessage and Telegram.
+/// The most characters a turn-end update takes on iMessage.
 pub(crate) const TURN_END_TEXT_LIMIT: usize = 280;
 
 /// Whether `chars[i]` ends a sentence: `.`, `!` or `?` followed by a space or the end.
@@ -76,7 +73,7 @@ pub(crate) fn fit_turn_end_text(text: &str, limit: usize) -> String {
     format!("{}…", kept.trim_end())
 }
 
-/// Fit `text` for iMessage or Telegram, and report a cut: `true` with an info line that
+/// Fit `text` for iMessage, and report a cut: `true` with an info line that
 /// holds the channel, the pane and the length before the cut, never the text.
 pub(crate) fn fit_and_report(text: &str, channel: &str, pane_id: &str) -> (String, bool) {
     let count = text.chars().count();
@@ -223,53 +220,31 @@ pub(crate) fn summarise_with(
 }
 
 // ---------------------------------------------------------------------------
-// Static dispatch — delegates to the configured away channel
+// Sending and listening — iMessage is the one away channel
 // ---------------------------------------------------------------------------
 
-/// Which listener reads replies on this Mac.
-#[derive(Debug, PartialEq, Eq)]
-enum InboundListener {
-    Imessage,
-    Telegram,
-    /// A member on Telegram. Telegram lets one process read a bot's updates, and a second
-    /// reader gets a conflict, so only the hub reads them. The hub forwards this Mac its
-    /// replies.
-    None,
-}
-
-fn inbound_listener(away_channel: &str, role: PeerRole) -> InboundListener {
-    match (away_channel, role) {
-        ("telegram", PeerRole::Member) => InboundListener::None,
-        ("telegram", PeerRole::Hub) => InboundListener::Telegram,
-        _ => InboundListener::Imessage,
+/// The text of a reply worth routing: trimmed, and neither empty nor a message Harold sent
+/// itself. A member storing a forwarded reply applies it.
+pub(crate) fn reply_text(text: &str) -> Option<String> {
+    let text = text.trim();
+    if text.is_empty() || imessage::is_marked_as_harold(text) {
+        return None;
     }
+    Some(text.to_string())
 }
 
-/// The listener `settings` call for.
-fn inbound_listener_for(settings: &Settings) -> InboundListener {
-    inbound_listener(&settings.notify.away_channel, settings.peers.role)
-}
-
-/// Start the inbound message listener for the configured away channel.
+/// Start the inbound message listener.
 pub async fn listen_for_inbound_messages(store: Arc<HaroldStore>, shutdown: watch::Receiver<()>) {
-    match inbound_listener_for(get_settings()) {
-        InboundListener::Telegram => telegram::listen(store, shutdown).await,
-        InboundListener::Imessage => imessage::listen(store, shutdown).await,
-        InboundListener::None => {
-            info!("Telegram listener not started: this Mac is a member and the hub reads replies");
-        }
-    }
+    imessage::listen(store, shutdown).await;
 }
 
-/// Send a plain message through the configured away channel.
+/// Send a plain message to the away device.
 pub fn send(msg: &str) -> Result<(), String> {
-    send_unless_paused(msg, crate::outbound::is_messaging_paused(), |msg| {
-        let cfg = get_settings();
-        match cfg.notify.away_channel.as_str() {
-            "telegram" => telegram::send_telegram(msg),
-            _ => imessage::send_imessage(msg),
-        }
-    })
+    send_unless_paused(
+        msg,
+        crate::outbound::is_messaging_paused(),
+        imessage::send_imessage,
+    )
 }
 
 /// Hand `msg` to `deliver` unless messaging is paused. A paused send reports success:
@@ -286,89 +261,46 @@ fn send_unless_paused(
     deliver(msg)
 }
 
-/// Send an away notification through the configured away channel.
+/// Send an away notification.
 pub fn notify_away(turn: &TurnCompleted, trace_id: &str) -> Result<AwayNotification, String> {
-    let cfg = get_settings();
-    match cfg.notify.away_channel.as_str() {
-        "telegram" => telegram::notify_away(turn, trace_id),
-        _ => imessage::notify_away(turn, trace_id),
-    }
+    imessage::notify_away(turn, trace_id)
 }
 
-/// Send a message an agent asked for through the configured away channel. The caller has
-/// already checked the messaging pause. Unlike a notification the text is not summarised or
-/// split, and no duplicate check applies: the agent chose to send it.
+/// Send a message an agent asked for. The caller has already checked the messaging pause.
+/// Unlike a notification the text is not summarised or split, and no duplicate check
+/// applies: the agent chose to send it.
 pub(crate) fn send_away_message(message: &AwayMessageRequested) -> Result<(), String> {
     let cfg = get_settings();
     let text = agent_message_text(&cfg.machine_name, &message.pane_label, &message.text);
-    match cfg.notify.away_channel.as_str() {
-        "telegram" => telegram::send_agent_message(
-            &cfg.peers,
-            &cfg.machine_name,
-            &text,
-            telegram::send_telegram,
-        ),
-        _ => imessage::send_imessage(&text),
-    }
+    imessage::send_imessage(&text)
 }
 
-/// Send a spoken line to the away device: a voice note with iMessage, the line as text
-/// with Telegram. The caller has already checked the messaging pause.
+/// Send a spoken line to the away device as a voice note. The caller has already checked
+/// the messaging pause.
 pub(crate) fn send_spoken_line(line: &str) -> Result<(), String> {
     let cfg = get_settings();
-    match cfg.notify.away_channel.as_str() {
-        "telegram" => telegram::send_spoken_line(line),
-        // Checked before the note is made, so a retry does not rerun the model for nothing.
-        _ if cfg.imessage.recipient.is_none() => Err("iMessage recipient is not configured".into()),
-        _ => crate::outbound::voice_note::send_voice_note_in(
-            &crate::outbound::voice_note::notes_parent(),
-            std::time::SystemTime::now(),
-            &cfg.tts,
-            line,
-            &crate::outbound::voice_note::SystemRunner,
-            imessage::send_attachment,
-        ),
+    // Checked before the note is made, so a retry does not rerun the model for nothing.
+    if cfg.imessage.recipient.is_none() {
+        return Err("iMessage recipient is not configured".into());
     }
+    crate::outbound::voice_note::send_voice_note_in(
+        &crate::outbound::voice_note::notes_parent(),
+        std::time::SystemTime::now(),
+        &cfg.tts,
+        line,
+        &crate::outbound::voice_note::SystemRunner,
+        imessage::send_attachment,
+    )
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{InboundListener, inbound_listener, inbound_listener_for, send_unless_paused};
-    use crate::settings::PeerRole;
-    use crate::settings::settings_with;
-
-    const MEMBER: &str = r#"
-        machine_name = "laptop"
-        machines = ["studio", "laptop"]
-        [peers]
-        role = "member"
-        [peers.hub]
-        url = "http://studio.tailnet:50060"
-        secret = "s3cret"
-    "#;
-
-    fn on(channel: &str, role_settings: &str) -> crate::settings::Settings {
-        settings_with(&format!(
-            "{role_settings}\n[notify]\naway_channel = \"{channel}\""
-        ))
-    }
-
-    #[test]
-    fn listener_follows_the_away_channel_and_role_of_the_settings_it_is_given() {
-        let hub = "machine_name = \"studio\"";
-        assert_eq!(
-            inbound_listener_for(&on("telegram", MEMBER)),
-            InboundListener::None
-        );
-        assert_eq!(
-            inbound_listener_for(&on("telegram", hub)),
-            InboundListener::Telegram
-        );
-        assert_eq!(
-            inbound_listener_for(&on("imessage", MEMBER)),
-            InboundListener::Imessage
-        );
-    }
+    use super::{
+        AwayMessageRequested, TurnCompleted, notify_away, reply_text, send, send_away_message,
+        send_spoken_line, send_unless_paused,
+    };
+    use crate::agent::domain::CompletionSummaryUpdate;
+    use crate::settings::init_settings_for_test;
 
     #[test]
     fn paused_send_reports_success_without_delivering() {
@@ -394,25 +326,61 @@ mod tests {
         assert_eq!(delivered, ["hello"]);
     }
 
+    const NOT_CONFIGURED: &str = "iMessage recipient is not configured";
+
+    fn turn() -> TurnCompleted {
+        TurnCompleted {
+            pane_id: "%1".into(),
+            pane_label: "pods:0.1".into(),
+            last_user_prompt: "do it".into(),
+            assistant_message: "done".into(),
+            main_context: String::new(),
+            agent_incarnation: None,
+            work_summary: CompletionSummaryUpdate::Unchanged,
+        }
+    }
+
+    // The default settings have no iMessage recipient, so a call that reaches iMessage
+    // answers that it is not configured, without sending anything.
     #[test]
-    fn telegram_member_starts_no_listener_because_the_hub_reads_the_bot() {
+    fn send_reaches_imessage() {
+        init_settings_for_test();
+        assert_eq!(send("hello"), Err(NOT_CONFIGURED.to_string()));
+    }
+
+    #[test]
+    fn notify_away_reaches_imessage() {
+        init_settings_for_test();
         assert_eq!(
-            inbound_listener("telegram", PeerRole::Member),
-            InboundListener::None
-        );
-        assert_eq!(
-            inbound_listener("telegram", PeerRole::Hub),
-            InboundListener::Telegram
+            notify_away(&turn(), "trace").err(),
+            Some(NOT_CONFIGURED.to_string())
         );
     }
 
     #[test]
-    fn imessage_listener_starts_whatever_the_role() {
-        for role in [PeerRole::Hub, PeerRole::Member] {
-            assert_eq!(
-                inbound_listener("imessage", role),
-                InboundListener::Imessage
-            );
-        }
+    fn send_away_message_reaches_imessage() {
+        init_settings_for_test();
+        let message = AwayMessageRequested {
+            pane_id: "%1".into(),
+            pane_label: "pods:0.1".into(),
+            text: "hi".into(),
+        };
+        assert_eq!(send_away_message(&message), Err(NOT_CONFIGURED.to_string()));
+    }
+
+    #[test]
+    fn send_spoken_line_reaches_imessage() {
+        init_settings_for_test();
+        assert_eq!(
+            send_spoken_line("good morning"),
+            Err(NOT_CONFIGURED.to_string())
+        );
+    }
+
+    #[test]
+    fn reply_text_trims_and_skips_empty_and_harold_marked_text() {
+        assert_eq!(reply_text("  yes  "), Some("yes".to_string()));
+        assert_eq!(reply_text("   "), None);
+        assert_eq!(reply_text("🤖 Delivered"), None);
     }
 }

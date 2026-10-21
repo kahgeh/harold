@@ -150,7 +150,6 @@ impl ProductionDispatcher {
         }
         let settings = self.environment.notify_settings();
         let live = left_out::channel_live(
-            settings,
             self.environment.channel_set_up(held.channel),
             held.channel,
             voice_muted,
@@ -227,7 +226,7 @@ impl ProductionDispatcher {
         on_app.then(|| ChiefApp {
             app,
             away: self.away_text.as_ref(),
-            away_allowed: agents.may_use(settings, settings.away(), pane_id),
+            away_allowed: agents.may_use(settings, Channel::Imessage, pane_id),
         })
     }
 
@@ -364,10 +363,9 @@ impl ProductionDispatcher {
                         Some(held)
                     },
                     |message| {
-                        let settings = self.environment.notify_settings();
                         let Some(chief_app) = self.chief_app(&message.pane_id) else {
                             self.environment.send_away_message(message)?;
-                            self.note_sent(&message.pane_id, settings.away());
+                            self.note_sent(&message.pane_id, Channel::Imessage);
                             return Ok(());
                         };
                         let away_text = agent_message_text(
@@ -384,13 +382,13 @@ impl ProductionDispatcher {
                         carried_by_app.set(carried_by == CarriedBy::App);
                         match carried_by {
                             CarriedBy::App => self.note_sent(&message.pane_id, Channel::WebApp),
-                            CarriedBy::Away => self.note_sent(&message.pane_id, settings.away()),
+                            CarriedBy::Away => self.note_sent(&message.pane_id, Channel::Imessage),
                             CarriedBy::Held => {
                                 held.set(true);
                                 let agents = self.tracked_agents();
                                 let dropped = left_out::Held::not_listed(
-                                    agent_message_dropped(settings.away().key()),
-                                    settings.away(),
+                                    agent_message_dropped(Channel::Imessage.key()),
+                                    Channel::Imessage,
                                     agents.agent_of(&message.pane_id),
                                 );
                                 dropped.log(left_out::UpdateKind::AgentMessage, &message.pane_id);
@@ -466,7 +464,7 @@ impl ProductionDispatcher {
                 |pane_id, channel| self.note_sent(pane_id, channel),
                 |pane_id| {
                     let agents = self.tracked_agents();
-                    let away = self.environment.notify_settings().away();
+                    let away = Channel::Imessage;
                     let held = left_out::Held::not_listed(
                         spoken_line_dropped(away.key()),
                         away,
@@ -684,7 +682,7 @@ fn dispatch_spoken_line_with_app<'a>(
                     return Ok(DeliveryOutcome::Skipped);
                 }
                 CarriedBy::App => sent(pane_id, Channel::WebApp),
-                CarriedBy::Away => sent(pane_id, environment.notify_settings().away()),
+                CarriedBy::Away => sent(pane_id, Channel::Imessage),
             }
             return Ok(DeliveryOutcome::Delivered);
         }
@@ -692,7 +690,7 @@ fn dispatch_spoken_line_with_app<'a>(
             .send_spoken_line(&line.text)
             .map_err(DispatchError::Retryable)?;
         info!(pane_id = %pane_id, "spoken line sent to the away device");
-        sent(pane_id, environment.notify_settings().away());
+        sent(pane_id, Channel::Imessage);
         return Ok(DeliveryOutcome::Delivered);
     }
     if voice_muted {

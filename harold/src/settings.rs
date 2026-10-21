@@ -645,7 +645,11 @@ impl StoreSettings {
 pub struct NotifySettings {
     pub skip_if_session_active: bool,
     pub skip_if_pane_active: bool,
-    pub away_channel: String,
+    /// `notify.away_channel`, read so that `away_channel = "imessage"` still loads. Harold
+    /// no longer reads it (`away_channel_still_set` warns), and any other value is refused
+    /// before this is read (`removed_setting_messages`).
+    #[serde(default, rename = "away_channel")]
+    _away_channel: Option<String>,
     /// Which pane is the chief, matched by folder as one entry (see `same_folder`).
     #[serde(default)]
     pub chief: Option<String>,
@@ -658,9 +662,6 @@ pub struct NotifySettings {
     /// `["*"]` means everyone.
     #[serde(default)]
     pub imessage: Vec<String>,
-    /// Who may reach the phone by Telegram.
-    #[serde(default)]
-    pub telegram: Vec<String>,
     /// Who may reach the phone through the web app.
     #[serde(default)]
     pub web_app: Vec<String>,
@@ -684,7 +685,6 @@ pub struct NotifySettings {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Channel {
     Imessage,
-    Telegram,
     WebApp,
     MachineAudioOutput,
 }
@@ -694,7 +694,6 @@ impl Channel {
     pub(crate) fn key(self) -> &'static str {
         match self {
             Self::Imessage => "imessage",
-            Self::Telegram => "telegram",
             Self::WebApp => "web_app",
             Self::MachineAudioOutput => "machine_audio_output",
         }
@@ -709,18 +708,8 @@ impl NotifySettings {
     pub(crate) fn list(&self, channel: Channel) -> &[String] {
         match channel {
             Channel::Imessage => &self.imessage,
-            Channel::Telegram => &self.telegram,
             Channel::WebApp => &self.web_app,
             Channel::MachineAudioOutput => &self.machine_audio_output,
-        }
-    }
-
-    /// The channel `away_channel` names: the one the phone gets by iMessage or Telegram.
-    pub(crate) fn away(&self) -> Channel {
-        if self.away_channel == "telegram" {
-            Channel::Telegram
-        } else {
-            Channel::Imessage
         }
     }
 }
@@ -738,7 +727,6 @@ pub(crate) fn apply_old_key(notify: &mut NotifySettings, local_keys: &[String]) 
     }
     for (key, list) in [
         ("imessage", &mut notify.imessage),
-        ("telegram", &mut notify.telegram),
         ("web_app", &mut notify.web_app),
         ("machine_audio_output", &mut notify.machine_audio_output),
     ] {
@@ -785,7 +773,6 @@ fn notify_entry_errors(notify: &NotifySettings) -> Vec<String> {
     }
     for channel in [
         Channel::Imessage,
-        Channel::Telegram,
         Channel::WebApp,
         Channel::MachineAudioOutput,
     ] {
@@ -797,12 +784,6 @@ fn notify_entry_errors(notify: &NotifySettings) -> Vec<String> {
         );
     }
     errors
-}
-
-#[derive(Debug, Default, Deserialize)]
-pub struct TelegramSettings {
-    pub bot_token: Option<String>,
-    pub chat_id: Option<i64>,
 }
 
 /// Which side this Mac is on when the away channel lets only one Mac read replies.
@@ -1134,8 +1115,6 @@ pub struct Settings {
     pub log: LogSettings,
     pub store: StoreSettings,
     pub notify: NotifySettings,
-    #[serde(default)]
-    pub telegram: TelegramSettings,
     /// The other Macs, for an away channel only one Mac can read.
     #[serde(default)]
     pub(crate) peers: PeersSettings,
@@ -1180,32 +1159,11 @@ impl Settings {
             self.web_app.as_ref(),
             self.notify.chief.as_deref(),
         ));
-        match self.notify.away_channel.as_str() {
-            "imessage" => {
-                if self.imessage.recipient.is_none() {
-                    errors.push("imessage.recipient is required".into());
-                }
-                if self.imessage.handle_ids.is_empty() {
-                    errors.push("imessage.handle_ids requires at least one handle ID".into());
-                }
-            }
-            "telegram" => {
-                if self.telegram.bot_token.is_none() {
-                    errors.push(
-                        "telegram.bot_token is required when away_channel = \"telegram\"".into(),
-                    );
-                }
-                if self.telegram.chat_id.is_none() {
-                    errors.push(
-                        "telegram.chat_id is required when away_channel = \"telegram\"".into(),
-                    );
-                }
-            }
-            other => {
-                errors.push(format!(
-                    "notify.away_channel must be \"imessage\" or \"telegram\", got \"{other}\""
-                ));
-            }
+        if self.imessage.recipient.is_none() {
+            errors.push("imessage.recipient is required".into());
+        }
+        if self.imessage.handle_ids.is_empty() {
+            errors.push("imessage.handle_ids requires at least one handle ID".into());
         }
         errors
     }
@@ -2056,7 +2014,7 @@ mod tests {
         );
     }
 
-    const LIST_KEYS: [&str; 4] = ["imessage", "telegram", "web_app", "machine_audio_output"];
+    const LIST_KEYS: [&str; 3] = ["imessage", "web_app", "machine_audio_output"];
 
     fn notify_errors(overrides: &str) -> Vec<String> {
         default_settings_with(overrides)
@@ -2067,12 +2025,11 @@ mod tests {
     }
 
     #[test]
-    fn defaults_carry_the_five_keys() {
+    fn defaults_carry_the_four_keys() {
         let settings = default_settings_with("");
         assert_eq!(settings.notify.chief.as_deref(), Some("chief-of-pods"));
         for channel in [
             super::Channel::Imessage,
-            super::Channel::Telegram,
             super::Channel::WebApp,
             super::Channel::MachineAudioOutput,
         ] {
@@ -2083,13 +2040,7 @@ mod tests {
 
     #[test]
     fn bad_entries_stop_the_start_naming_key_and_entry() {
-        for key in [
-            "chief",
-            "imessage",
-            "telegram",
-            "web_app",
-            "machine_audio_output",
-        ] {
+        for key in ["chief", "imessage", "web_app", "machine_audio_output"] {
             for entry in ["", "/", "//", "a/../b", "..", ".", "a/./b"] {
                 let value = if key == "chief" {
                     format!("\"{entry}\"")
@@ -2104,20 +2055,6 @@ mod tests {
                 );
             }
         }
-    }
-
-    #[test]
-    fn a_bad_entry_in_the_unused_channels_list_still_stops_the_start() {
-        let telegram = notify_errors("[notify]\naway_channel = \"imessage\"\ntelegram = [\"..\"]");
-        assert!(
-            telegram.iter().any(|e| e.contains("notify.telegram")),
-            "{telegram:?}"
-        );
-        let imessage = notify_errors("[notify]\naway_channel = \"telegram\"\nimessage = [\"..\"]");
-        assert!(
-            imessage.iter().any(|e| e.contains("notify.imessage")),
-            "{imessage:?}"
-        );
     }
 
     #[test]
@@ -2181,7 +2118,7 @@ mod tests {
         let error = result.expect_err("unknown key").to_string();
         assert!(error.contains("imesage"), "{error}");
 
-        let known = "[notify]\nskip_if_session_active = false\nskip_if_pane_active = true\naway_channel = \"imessage\"\naway_messages_only_from = \"/a\"\nchief = \"/a\"\nimessage = [\"/a\"]\ntelegram = [\"/a\"]\nweb_app = [\"/a\"]\nmachine_audio_output = [\"/a\"]";
+        let known = "[notify]\nskip_if_session_active = false\nskip_if_pane_active = true\naway_channel = \"imessage\"\naway_messages_only_from = \"/a\"\nchief = \"/a\"\nimessage = [\"/a\"]\nweb_app = [\"/a\"]\nmachine_audio_output = [\"/a\"]";
         default_settings_with(known);
     }
 
@@ -2193,7 +2130,6 @@ mod tests {
         assert_eq!(settings.notify.chief.as_deref(), Some("/old"));
         for key in [
             super::Channel::Imessage,
-            super::Channel::Telegram,
             super::Channel::WebApp,
             super::Channel::MachineAudioOutput,
         ] {
@@ -2204,13 +2140,12 @@ mod tests {
     #[test]
     fn new_keys_win_over_old_key_and_an_empty_list_is_not_refilled() {
         let (settings, warned) = default_settings_and_warning(
-            "[notify]\naway_messages_only_from = \"/old\"\nimessage = [\"b\"]\ntelegram = []\nchief = \"c\"",
+            "[notify]\naway_messages_only_from = \"/old\"\nimessage = [\"b\"]\nweb_app = []\nchief = \"c\"",
         );
         assert!(warned);
         assert_eq!(settings.notify.imessage, ["b"]);
-        assert!(settings.notify.telegram.is_empty());
+        assert!(settings.notify.web_app.is_empty());
         assert_eq!(settings.notify.chief.as_deref(), Some("c"));
-        assert_eq!(settings.notify.web_app, ["/old"]);
         assert_eq!(settings.notify.machine_audio_output, ["/old"]);
     }
 
@@ -2222,21 +2157,11 @@ mod tests {
     }
 
     #[test]
-    fn channel_keys_and_the_away_pick() {
+    fn channel_keys() {
         assert_eq!(super::Channel::WebApp.key(), "web_app");
         assert_eq!(
             super::Channel::MachineAudioOutput.key(),
             "machine_audio_output"
-        );
-        assert_eq!(
-            default_settings_with("").notify.away(),
-            super::Channel::Imessage
-        );
-        assert_eq!(
-            default_settings_with("[notify]\naway_channel = \"telegram\"")
-                .notify
-                .away(),
-            super::Channel::Telegram
         );
     }
 
@@ -2245,6 +2170,20 @@ mod tests {
         let settings =
             default_settings_with("[notify]\naway_updates_only_from = \"/work/chief-of-pods\"");
         assert_eq!(settings.notify.away_messages_only_from, None);
+    }
+
+    #[test]
+    fn validate_always_requires_the_imessage_recipient_and_handles() {
+        let errors = default_settings_with("").validate();
+        assert!(errors.contains(&"imessage.recipient is required".to_owned()));
+        assert!(errors.contains(&"imessage.handle_ids requires at least one handle ID".to_owned()));
+
+        let set = default_settings_with("[imessage]\nrecipient = \"a@b.c\"\nhandle_ids = [1]");
+        assert!(
+            !set.validate()
+                .iter()
+                .any(|error| error.starts_with("imessage."))
+        );
     }
 
     #[test]

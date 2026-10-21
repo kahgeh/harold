@@ -1,7 +1,7 @@
 //! The decisions behind what keeps a message off the user's channels. Rule A: the pane sent
 //! a message with `harold send-message-to-away-device` this turn, so its turn-end update is
 //! left out. The channel lists: `[notify]` has one list of folders for each of Harold's four
-//! channels (`imessage`, `telegram`, `web_app` and `machine_audio_output`), and a pane may
+//! channels (`imessage`, `web_app` and `machine_audio_output`), and a pane may
 //! use a channel only when its folder, as the latest good listing of tmux panes has it,
 //! matches an entry on that channel's list. `chief` names the chief's pane by the same
 //! matching; the chief's own turn-end update is not spoken at the desk.
@@ -487,12 +487,10 @@ pub(crate) fn agent_label(folder: Option<&str>, home: Option<&str>) -> String {
     relative.unwrap_or(folder).to_string()
 }
 
-/// Whether `channel` is set up (`set_up`) and turned on: `imessage` and `telegram` only
-/// when `away_channel` names them, `machine_audio_output` while the voice mute is off,
-/// and the phone channels (`imessage`, `telegram` and `web_app`) while messaging is not
-/// paused. `machine_audio_output` is always set up.
+/// Whether `channel` is set up (`set_up`) and turned on: `machine_audio_output` while the
+/// voice mute is off, and the phone channels (`imessage` and `web_app`) while messaging is
+/// not paused. `machine_audio_output` is always set up.
 pub(crate) fn channel_live(
-    settings: &NotifySettings,
     set_up: bool,
     channel: Channel,
     voice_muted: bool,
@@ -500,23 +498,20 @@ pub(crate) fn channel_live(
 ) -> bool {
     match channel {
         Channel::MachineAudioOutput => !voice_muted,
-        Channel::WebApp => set_up && !messaging_paused,
-        Channel::Imessage | Channel::Telegram => {
-            set_up && !messaging_paused && settings.away() == channel
-        }
+        Channel::Imessage | Channel::WebApp => set_up && !messaging_paused,
     }
 }
 
 /// The channel that holds `pane_id` off the phone, or `None` when the pane may use it.
 /// The phone's order: the app (`via_app`, the app route is open to this pane), then the
-/// list of the channel `away_channel` names. The channel is the last list checked.
+/// iMessage list. The channel is the last list checked.
 pub(crate) fn phone_held_back(
     settings: &NotifySettings,
     agents: &TrackedAgents,
     via_app: bool,
     pane_id: &str,
 ) -> Option<Channel> {
-    let away = settings.away();
+    let away = Channel::Imessage;
     if via_app || agents.may_use(settings, away, pane_id) {
         return None;
     }
@@ -565,7 +560,7 @@ pub(crate) fn left_out_reason(
     if messaged_this_turn {
         return Some(Held {
             line: MESSAGED_THIS_TURN.to_string(),
-            channel: settings.away(),
+            channel: Channel::Imessage,
             reason: MESSAGED_REASON,
             agent: agents.agent_of(pane_id),
         });
@@ -851,55 +846,22 @@ mod tests {
 
     #[test]
     fn a_channel_is_live_when_set_up_and_turned_on() {
-        let imessage_away = settings("[notify]\naway_channel = \"imessage\"");
-        let telegram_away = settings("[notify]\naway_channel = \"telegram\"");
-        // (settings, channel, set_up, voice_muted, paused, live)
+        // (channel, set_up, voice_muted, paused, live)
         let table = [
-            (&imessage_away, Channel::Imessage, true, false, false, true),
-            (
-                &imessage_away,
-                Channel::Imessage,
-                false,
-                false,
-                false,
-                false,
-            ),
-            (&imessage_away, Channel::Imessage, true, false, true, false),
-            (&imessage_away, Channel::Telegram, true, false, false, false),
-            (&telegram_away, Channel::Telegram, true, false, false, true),
-            (&telegram_away, Channel::Imessage, true, false, false, false),
-            (&imessage_away, Channel::WebApp, true, false, false, true),
-            (&imessage_away, Channel::WebApp, false, false, false, false),
-            (&imessage_away, Channel::WebApp, true, false, true, false),
-            (&imessage_away, Channel::WebApp, true, true, false, true),
-            (
-                &imessage_away,
-                Channel::MachineAudioOutput,
-                true,
-                false,
-                false,
-                true,
-            ),
-            (
-                &imessage_away,
-                Channel::MachineAudioOutput,
-                true,
-                true,
-                false,
-                false,
-            ),
-            (
-                &imessage_away,
-                Channel::MachineAudioOutput,
-                true,
-                false,
-                true,
-                true,
-            ),
+            (Channel::Imessage, true, false, false, true),
+            (Channel::Imessage, false, false, false, false),
+            (Channel::Imessage, true, false, true, false),
+            (Channel::WebApp, true, false, false, true),
+            (Channel::WebApp, false, false, false, false),
+            (Channel::WebApp, true, false, true, false),
+            (Channel::WebApp, true, true, false, true),
+            (Channel::MachineAudioOutput, true, false, false, true),
+            (Channel::MachineAudioOutput, true, true, false, false),
+            (Channel::MachineAudioOutput, true, false, true, true),
         ];
-        for (notify, channel, set_up, muted, paused, live) in table {
+        for (channel, set_up, muted, paused, live) in table {
             assert_eq!(
-                channel_live(notify, set_up, channel, muted, paused),
+                channel_live(set_up, channel, muted, paused),
                 live,
                 "{channel:?} set_up={set_up} muted={muted} paused={paused}"
             );
@@ -979,9 +941,8 @@ mod tests {
         all.notify
     }
 
-    const ALL_CHANNELS: [Channel; 4] = [
+    const ALL_CHANNELS: [Channel; 3] = [
         Channel::Imessage,
-        Channel::Telegram,
         Channel::WebApp,
         Channel::MachineAudioOutput,
     ];
@@ -1040,15 +1001,13 @@ mod tests {
     }
 
     #[test]
-    fn telegram_list_decides_when_away_channel_is_telegram() {
-        let notify = settings(
-            "[notify]\naway_channel = \"telegram\"\nimessage = [\"*\"]\ntelegram = [\"a\"]",
-        );
+    fn imessage_list_decides_who_reaches_the_phone() {
+        let notify = settings("[notify]\nimessage = [\"a\"]");
         let agents = TrackedAgents::in_folders(&[("%1", "/w/a"), ("%2", "/w/b")]);
         assert_eq!(phone_held_back(&notify, &agents, false, "%1"), None);
         assert_eq!(
             phone_held_back(&notify, &agents, false, "%2"),
-            Some(Channel::Telegram)
+            Some(Channel::Imessage)
         );
     }
 

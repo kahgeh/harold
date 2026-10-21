@@ -84,7 +84,7 @@ fn harold_service(
         messaging_switch: tokio::sync::Mutex::new(None),
         tts_switch: tokio::sync::Mutex::new(None),
         shutdown,
-        peers: peers::PeerEndpoint::from_settings(&settings.notify.away_channel, &settings.peers),
+        peers: peers::PeerEndpoint::from_settings(&settings.peers),
     }
 }
 
@@ -346,7 +346,7 @@ impl Harold for HaroldService {
         })?;
         // forwarded = true: the hub decided this Mac owns the reply, so routing does not
         // decide again and never forwards it.
-        // The same filter as the hub's Telegram listener. Text it would skip is accepted and
+        // The same filter as the iMessage listener. Text it would skip is accepted and
         // ignored: the hub did its job, and a retry could not make the text routable.
         let Some(text) = channels::reply_text(&req.text) else {
             info!("forwarded reply ignored (empty or sent by Harold)");
@@ -662,22 +662,10 @@ fn run_diagnostics(delay_secs: u64) {
     println!("screen_locked : {locked}");
 
     let cfg = get_settings();
-    println!("away_channel  : {}", cfg.notify.away_channel);
     println!(
         "iMessage      : recipient={} handle_ids={:?}",
         cfg.imessage.recipient.as_deref().unwrap_or("(not set)"),
         cfg.imessage.handle_ids,
-    );
-    println!(
-        "Telegram      : bot_token={} chat_id={}",
-        if cfg.telegram.bot_token.is_some() {
-            "(set)"
-        } else {
-            "(not set)"
-        },
-        cfg.telegram
-            .chat_id
-            .map_or("(not set)".to_string(), |id| id.to_string()),
     );
     println!(
         "TTS           : command={} voice={:?}",
@@ -717,10 +705,7 @@ fn run_diagnostics(delay_secs: u64) {
         return;
     }
 
-    println!(
-        "Sending away notification via {}...",
-        cfg.notify.away_channel
-    );
+    println!("Sending away notification via iMessage...");
     // Run in a separate thread so the blocking reqwest client
     // doesn't panic when dropped inside the async runtime.
     let diag_turn = turn.clone();

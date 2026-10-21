@@ -128,27 +128,17 @@ fn peers(role: PeerRole) -> PeersSettings {
 }
 
 #[test]
-fn endpoint_follows_the_role_on_telegram() {
+fn endpoint_follows_the_role() {
     assert_eq!(
-        PeerEndpoint::from_settings("telegram", &peers(PeerRole::Hub)),
+        PeerEndpoint::from_settings(&peers(PeerRole::Hub)),
         PeerEndpoint::Hub {
             members: vec![member("laptop", "s3cret")]
         }
     );
     assert_eq!(
-        PeerEndpoint::from_settings("telegram", &peers(PeerRole::Member)),
+        PeerEndpoint::from_settings(&peers(PeerRole::Member)),
         member_endpoint()
     );
-}
-
-#[test]
-fn endpoint_is_off_on_imessage_whatever_the_role() {
-    for role in [PeerRole::Hub, PeerRole::Member] {
-        assert_eq!(
-            PeerEndpoint::from_settings("imessage", &peers(role)),
-            PeerEndpoint::Off
-        );
-    }
 }
 
 #[test]
@@ -158,10 +148,7 @@ fn endpoint_is_off_for_a_member_without_a_hub() {
         ..PeersSettings::default()
     };
 
-    assert_eq!(
-        PeerEndpoint::from_settings("telegram", &peers),
-        PeerEndpoint::Off
-    );
+    assert_eq!(PeerEndpoint::from_settings(&peers), PeerEndpoint::Off);
 }
 
 #[test]

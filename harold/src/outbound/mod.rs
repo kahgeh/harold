@@ -203,13 +203,11 @@ pub(crate) trait NotifyEnvironment: Send + Sync {
     fn send_away_message(&self, message: &AwayMessageRequested) -> Result<(), String>;
     /// Say a spoken line at the desk with the `[tts]` command, adding nothing to it.
     fn speak_line(&self, line: &str) -> Result<(), String>;
-    /// Send a spoken line to the away device: a voice note with iMessage, text with
-    /// Telegram.
+    /// Send a spoken line to the away device as a voice note.
     fn send_spoken_line(&self, line: &str) -> Result<(), String>;
     /// Make `agent` the one an untagged reply goes to.
     fn record_reply_target(&self, agent: AgentAddress);
-    /// Whether `channel` is set up: `imessage` has a recipient, `telegram` a bot token and
-    /// a chat id, `web_app` its table. `machine_audio_output` always is.
+    /// Whether `channel` is set up: `imessage` has a recipient, `web_app` its table. `machine_audio_output` always is.
     fn channel_set_up(&self, channel: Channel) -> bool;
 }
 
@@ -270,9 +268,6 @@ impl NotifyEnvironment for SystemEnvironment {
         let settings = get_settings();
         match channel {
             Channel::Imessage => settings.imessage.recipient.is_some(),
-            Channel::Telegram => {
-                settings.telegram.bot_token.is_some() && settings.telegram.chat_id.is_some()
-            }
             Channel::WebApp => settings.web_app.is_some(),
             Channel::MachineAudioOutput => true,
         }
@@ -289,7 +284,6 @@ pub(crate) fn count_notification(
     outcome: &str,
 ) {
     let live = left_out::channel_live(
-        environment.notify_settings(),
         environment.channel_set_up(channel),
         channel,
         is_tts_muted(),
@@ -362,7 +356,7 @@ pub(crate) trait AppRoute: Send + Sync {
 /// `channels::send` and `channels::summarise_for_notification`; tests pass a fake.
 pub(crate) trait AwayText: Send + Sync {
     fn machine_name(&self) -> String;
-    /// The away channel's name: `imessage` or `telegram`.
+    /// The away channel's name: `imessage`.
     fn channel(&self) -> &'static str;
     fn summarise(&self, turn: &TurnCompleted) -> String;
     fn send(&self, text: &str) -> Result<(), String>;
@@ -376,7 +370,7 @@ impl AwayText for SystemAwayText {
     }
 
     fn channel(&self) -> &'static str {
-        get_settings().notify.away().key()
+        Channel::Imessage.key()
     }
 
     fn summarise(&self, turn: &TurnCompleted) -> String {
@@ -541,11 +535,10 @@ impl NotifyState {
 }
 
 /// The `channel` attribute of a turn-end update sent through `channel`, the `[notify]` key:
-/// `machine_audio_output`, or the configured away channel, `imessage` or `telegram`.
-fn channel_name(channel: OutboundChannel, away_channel: &str) -> &'static str {
+/// `machine_audio_output`, or the away channel, `imessage`.
+fn channel_name(channel: OutboundChannel) -> &'static str {
     match channel {
         OutboundChannel::Tts => "machine_audio_output",
-        OutboundChannel::Away if away_channel == "telegram" => "telegram",
         OutboundChannel::Away => "imessage",
     }
 }
@@ -672,7 +665,7 @@ fn notify_routed(
         (OutboundChannel::Away, Some(chief_app)) => Some(chief_app),
         _ => None,
     };
-    let name = channel_name(channel, &cfg.away_channel);
+    let name = channel_name(channel);
 
     // Dedup: skip if same pane+prompt was notified within the window.
     let dedup_key = format!("{}:{}", turn.pane_id, turn.last_user_prompt);
@@ -749,7 +742,7 @@ fn notify_routed(
     // The channel that took the update, for `harold.notifications`.
     let mut sent_on = match channel {
         OutboundChannel::Tts => Channel::MachineAudioOutput,
-        OutboundChannel::Away => cfg.away(),
+        OutboundChannel::Away => Channel::Imessage,
     };
     let delivered = match app_route {
         Some(chief_app) => {
@@ -761,8 +754,8 @@ fn notify_routed(
                     }
                     CarriedBy::Held => {
                         let held = left_out::Held::not_listed(
-                            left_out::notification_skipped(cfg.away().key()),
-                            cfg.away(),
+                            left_out::notification_skipped(Channel::Imessage.key()),
+                            Channel::Imessage,
                             agents.agent_of(&turn.pane_id),
                         );
                         report_held(
