@@ -145,7 +145,7 @@ The todo page lists the chief's todos as cards in the question tool's order: the
 - **When a post is refused**, the card shows a notice and is redrawn from the next list: `<id> changed. Look again before you send.`, `<id> was already answered or withdrawn.`, or `Harold can't send this right now. Try again.` A todo that is no longer listed has no card left to show its notice on.
 - With no todo the page reads `No todos for you.`; when Harold cannot read them and has no list yet, it reads `Harold can't read the todos right now.` and the todo count is empty. A failed read later keeps the last list.
 
-The web app reads the todos through the question tool's gRPC service on Harold's own address (`[grpc]`), every 2 seconds while a page is open and at once after each post ([ADR 0007](../../adr/0007-the-web-app-reaches-todos-through-the-question-service.md)). The posts are `POST /todos/answer`, `/todos/later`, `/todos/tick`, `/todos/done` and `/todos/ignore`, each behind the login and same-origin checks like every route.
+The web app reads the todos through the question tool's gRPC service on Harold's own address (`[grpc]`), every 2 seconds while a page is open and at once after each post ([ADR 0007](../../adr/0007-the-web-app-reaches-todos-through-the-question-service.md)). The posts are `POST /todos/answer`, `/todos/picks`, `/todos/later`, `/todos/tick`, `/todos/done` and `/todos/ignore`, each behind the login and same-origin checks like every route. The phone saves a question's picks with `/todos/picks` each time you select an option and after half a second of typing; a save the tool took answers `204` and does not redraw your page, and every open page shows the saved picks at its next todo read.
 
 ## What reaches the phone, and by which route
 
@@ -245,7 +245,7 @@ Harold logs no message text, no reply, no push address and no key. The app adds 
 | `app page disconnected` | `reason` (`page_gone`, `shutdown` or `store_stopped`) and `seconds`, how long the page was connected. Harold notices a closed page at the next patch or keep-alive, within about 15 seconds |
 | `app reply state` | `event_id` and `state` (`typed`, `waiting_chief_busy`, `not_sent_no_chief` or `not_sent_paused`), logged before the state is written |
 | `app reply stored` | `chars`, the reply's length in characters |
-| `app todo answered` | `kind` (`answer`, `free_text`, `later`, `tick`, `done` or `ignore`) and `result` (`sent`, `version_changed`, `not_waiting` or `unavailable`). The line never carries the todo's id; the question tool's own lines in `harold.log` do |
+| `app todo answered` | `kind` (`answer`, `free_text`, `picks`, `later`, `tick`, `done` or `ignore`) and `result` (`sent`, `version_changed`, `not_waiting` or `unavailable`). The line never carries the todo's id; the question tool's own lines in `harold.log` do |
 | `app todos not read` | `reason` (`unavailable` or `timeout`), logged once when reads start failing |
 | `app todos read again` | none, logged once when reads recover |
 | `app call started` | none |

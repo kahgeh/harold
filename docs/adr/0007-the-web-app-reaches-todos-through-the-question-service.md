@@ -18,6 +18,6 @@ The web app is a client of `harold.tools.questions.v1.QuestionService` on Harold
   - the login check (`allowed_login`, `login::require_login`);
   - then the same-origin check (`origin::require_same_origin`).
 
-  The router applies both as layers to every route, so all five `POST /todos/...` routes pass them before any call reaches the tool. Route tests cover each of the five.
+  The router applies both as layers to every route, so all six `POST /todos/...` routes pass them before any call reaches the tool. Route tests cover each of the six. `/todos/picks` is the post that calls `SavePicks`: the phone saves a card's picks as they are made.
 - **When the question tool did not start**, the todo page says it can't read the todos, and the thread works as before.
 - **Polling:** the web app polls every 2 seconds while a page is open, as the dash does.

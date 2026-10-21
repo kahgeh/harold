@@ -80,7 +80,7 @@ Instructions are never a waiting question. They are left out of the `waiting` co
 | `AnswerQuestion` | dash | Answers a question at the question version the dash saw. |
 | `DeferQuestion` | dash | Sets a question aside (`later`). Instructions cannot be set aside: it is refused as `invalid id`. It stays with the other questions and returns to `waiting` later (see [The answers line](#the-answers-line)). |
 | `TickStep` | dash | Ticks or unticks one step of waiting instructions (see [Ticking](#ticking)). |
-| `SavePicks` | dash | Replaces the saved picks of a waiting or deferred question (see [Saved picks](#saved-picks)). |
+| `SavePicks` | dash, web app | Replaces the saved picks of a waiting or deferred question (see [Saved picks](#saved-picks)). |
 | `ShowQuestion` | chief, CLI | Returns a stored question in any state with its question version, state, dismissal reason and saved picks. An id that was never stored is `NotFound` `unknown_question`. |
 
 The `waiting` count in `ListQuestions` is the number of questions listed, deferred ones included. Instructions are listed but not counted. Each listed item carries `ticked`: the step numbers ticked, counting from 1, empty for a question, and `picks`: the saved picks of a question, empty for instructions.
