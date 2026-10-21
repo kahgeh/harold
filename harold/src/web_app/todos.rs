@@ -62,6 +62,12 @@ struct Shared {
     notices: HashMap<String, String>,
 }
 
+/// The URL of Harold's own gRPC address; an IPv6 host gets its brackets.
+pub(super) fn client_url(grpc: &GrpcSettings) -> String {
+    let addr = grpc.addr().expect("grpc host is an address");
+    format!("http://{addr}")
+}
+
 /// The question tool's service on Harold's own gRPC address.
 #[derive(Clone)]
 pub(crate) struct Questions {
@@ -73,7 +79,7 @@ impl Questions {
     /// A client that connects at its first call, so a tool that did not start fails that
     /// call and not the web app's start.
     pub(crate) fn lazy(grpc: &GrpcSettings) -> Self {
-        let channel = Endpoint::from_shared(format!("http://{}:{}", grpc.host, grpc.port))
+        let channel = Endpoint::from_shared(client_url(grpc))
             .expect("host and port make a URI")
             .connect_lazy();
         Self {

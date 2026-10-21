@@ -1,4 +1,4 @@
-use std::net::SocketAddr;
+use std::net::{AddrParseError, IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::{Arc, OnceLock};
 
 use config::{Config, ConfigError, File, FileFormat};
@@ -27,9 +27,27 @@ pub struct GrpcSettings {
 }
 
 impl GrpcSettings {
-    pub fn addr(&self) -> Result<SocketAddr, std::net::AddrParseError> {
-        format!("{}:{}", self.host, self.port).parse()
+    pub fn addr(&self) -> Result<SocketAddr, AddrParseError> {
+        Ok(SocketAddr::new(parse_host(&self.host)?, self.port))
     }
+}
+
+/// A host as an address: `localhost` is `127.0.0.1`, anything else must be an IP address
+/// (IPv6 without brackets).
+fn parse_host(host: &str) -> Result<IpAddr, AddrParseError> {
+    if host == "localhost" {
+        return Ok(Ipv4Addr::LOCALHOST.into());
+    }
+    host.parse()
+}
+
+/// Whether `host` is an address on this machine only: `localhost` or any loopback IP.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the loopback-only check in a later task calls it")
+)]
+pub(crate) fn is_loopback_host(host: &str) -> bool {
+    parse_host(host).is_ok_and(|ip| ip.is_loopback())
 }
 
 #[derive(Debug, Deserialize)]
@@ -1299,6 +1317,36 @@ mod tests {
         AgentMonitorSettings, AgentProviderSettings, AgentSettings, Settings,
         is_valid_machine_name, machine_name_error, machine_name_from_hostname,
     };
+
+    fn grpc(host: &str) -> super::GrpcSettings {
+        super::GrpcSettings {
+            host: host.to_owned(),
+            port: 50051,
+        }
+    }
+
+    #[test]
+    fn grpc_addr_accepts_loopback_forms() {
+        for (host, expected) in [
+            ("127.0.0.1", "127.0.0.1:50051"),
+            ("127.0.0.2", "127.0.0.2:50051"),
+            ("::1", "[::1]:50051"),
+            ("localhost", "127.0.0.1:50051"),
+        ] {
+            assert_eq!(grpc(host).addr().unwrap().to_string(), expected, "{host}");
+        }
+        assert!(grpc("invalid host").addr().is_err());
+    }
+
+    #[test]
+    fn is_loopback_host_is_true_only_for_loopback_hosts() {
+        for host in ["127.0.0.1", "127.0.0.2", "::1", "localhost"] {
+            assert!(super::is_loopback_host(host), "{host}");
+        }
+        for host in ["0.0.0.0", "::", "100.64.0.1", "invalid host"] {
+            assert!(!super::is_loopback_host(host), "{host}");
+        }
+    }
 
     #[derive(Debug, Deserialize)]
     struct WatchFixture {

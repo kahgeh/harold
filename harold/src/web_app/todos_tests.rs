@@ -1051,3 +1051,12 @@ async fn the_question_form_saves_picks_on_change_and_debounced_input() {
     // Only the question form saves picks; the instructions' forms do not.
     assert_eq!(page.matches("/todos/picks").count(), 2, "{page}");
 }
+
+#[test]
+fn todos_client_url_brackets_an_ipv6_host() {
+    let grpc = GrpcSettings {
+        host: "::1".to_owned(),
+        port: 50051,
+    };
+    assert_eq!(super::todos::client_url(&grpc), "http://[::1]:50051");
+}
