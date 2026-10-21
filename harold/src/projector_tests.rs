@@ -2886,6 +2886,30 @@ fn a_given_up_turn_end_records_given_up_and_keeps_no_trace() {
 }
 
 #[test]
+fn a_turn_end_delivery_span_carries_text_cut() {
+    for cut in [true, false] {
+        let event_id = uuid::Uuid::new_v4();
+        let (_, parent) = keep_a_turn_for(event_id);
+        let environment = Arc::new(FakeEnvironment::new(""));
+        let dispatcher = Unpaused(dispatcher_with(&environment));
+        let event = tracing::info_span!("event", event_type = "TurnCompleted");
+        let (result, delivering) = super::dispatch_in_spans(
+            &dispatcher,
+            &turn_end_delivery(&event_id.to_string(), &unique_pane()),
+            None,
+            &event,
+            true,
+        );
+        assert!(result.is_ok());
+        // The channel records it inside the span; the span declares the field.
+        delivering.unwrap().record("text_cut", cut);
+
+        let deliveries = deliveries_under(parent);
+        assert_eq!(attr(&deliveries[0], "text_cut"), cut.to_string());
+    }
+}
+
+#[test]
 fn a_turn_end_delivery_continues_the_trace_kept_for_its_event() {
     let event_id = uuid::Uuid::new_v4();
     let (trace_id, parent) = keep_a_turn_for(event_id);

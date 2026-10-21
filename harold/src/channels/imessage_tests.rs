@@ -2,7 +2,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::{Duration, Instant};
 
-use crate::channels::{fit_turn_end_text, split_body, summarise_with};
+use crate::channels::{fit_and_report, fit_turn_end_text, split_and_fit, split_body, summarise_with};
 use crate::inbound::ownership::{
     NotifierRecord, Ownership, decide_ownership, delivered_text, error_text, fed_markers,
     notification_text, parse_marker,
@@ -103,6 +103,30 @@ fn fit_never_exceeds_the_limit() {
         let result = fit_turn_end_text(text, limit);
         assert!(result.chars().count() <= limit, "limit {limit}: {result:?}");
     }
+}
+
+#[test]
+fn fit_and_report_says_whether_it_cut() {
+    let (fitted, cut) = fit_and_report(&"word ".repeat(100), "imessage", "%1");
+    assert!(cut);
+    assert!(fitted.chars().count() <= 280);
+    assert_eq!(
+        fit_and_report("Short.", "imessage", "%1"),
+        ("Short.".to_string(), false)
+    );
+}
+
+#[test]
+fn a_long_text_keeps_its_question_past_character_280_as_its_own_message() {
+    let body = format!("{} Shall I deploy?", "Tests pass and it is fine. ".repeat(12));
+    assert!(body.chars().count() > 300);
+
+    let (main, question, cut) = split_and_fit(&body, "imessage", "%1");
+
+    assert!(cut);
+    assert!(main.chars().count() <= 280);
+    assert!(main.ends_with(" …"));
+    assert_eq!(question.as_deref(), Some("Shall I deploy?"));
 }
 
 #[cfg(unix)]

@@ -73,6 +73,38 @@ pub(crate) fn fit_turn_end_text(text: &str, limit: usize) -> String {
     format!("{}…", kept.trim_end())
 }
 
+/// Fit `text` for iMessage or Telegram, and report a cut: `true` with an info line that
+/// holds the channel, the pane and the length before the cut, never the text.
+pub(crate) fn fit_and_report(text: &str, channel: &str, pane_id: &str) -> (String, bool) {
+    let count = text.chars().count();
+    if count <= TURN_END_TEXT_LIMIT {
+        return (text.to_string(), false);
+    }
+    info!(channel, pane_id, count, "turn-end update cut");
+    (fit_turn_end_text(text, TURN_END_TEXT_LIMIT), true)
+}
+
+/// Record on the current `harold.delivery` span whether the update was cut.
+pub(crate) fn record_text_cut(cut: bool) {
+    tracing::Span::current().record("text_cut", cut);
+}
+
+/// Split the trailing question off the whole `body`, then fit the main text and the question
+/// each to the limit. Returns the main text, the question and whether either was cut.
+pub(crate) fn split_and_fit(
+    body: &str,
+    channel: &str,
+    pane_id: &str,
+) -> (String, Option<String>, bool) {
+    let (main, question) = split_body(body);
+    let (main, main_cut) = fit_and_report(main, channel, pane_id);
+    let Some(question) = question else {
+        return (main, None, main_cut);
+    };
+    let (question, question_cut) = fit_and_report(question, channel, pane_id);
+    (main, Some(question), main_cut || question_cut)
+}
+
 /// Summarise `assistant_message` for notification delivery using the AI CLI. The text is
 /// not cut: falls back to the whole reply if the CLI is not configured or fails.
 pub(crate) fn summarise_for_notification(

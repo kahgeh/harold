@@ -6,7 +6,7 @@ use serde::Deserialize;
 use tokio::sync::watch;
 use tracing::{Instrument, info, info_span, warn};
 
-use super::{AwayNotification, split_body, summarise_for_notification};
+use super::{AwayNotification, record_text_cut, split_and_fit, summarise_for_notification};
 use crate::inbound::AgentAddress;
 use crate::inbound::ownership::{
     Ownership, decide_ownership, error_text, latest_notifier, notification_text,
@@ -218,15 +218,16 @@ fn send_notification(
     body: &str,
     send: impl Fn(&str) -> Result<(), String>,
 ) -> Result<AwayNotification, String> {
-    let (main_body, question) = split_body(body);
-    let message = notification_message(machine, turn, main_body);
+    let (main_body, question, cut) = split_and_fit(body, "telegram", &turn.pane_id);
+    record_text_cut(cut);
+    let message = notification_message(machine, turn, &main_body);
 
     announce_notification(peers, machine);
     send(&message)?;
     info!("Telegram notification sent");
 
     if let Some(q) = question {
-        send(q)?;
+        send(&q)?;
         info!("Telegram question sent");
     }
 
@@ -764,6 +765,30 @@ mod tests {
 
     // Each test names its Mac differently: the log of recorded names is shared by every
     // test in the process.
+
+    #[test]
+    fn a_long_text_sends_the_fitted_main_text_and_the_question_on_its_own() {
+        crate::settings::init_settings_for_test();
+        let sent = Mutex::new(Vec::new());
+        let body = format!("{} Shall I deploy?", "Tests pass and it is fine. ".repeat(12));
+
+        let result = send_notification(
+            &turn(),
+            "laptop-notify-long",
+            &PeersSettings::default(),
+            &body,
+            |text| {
+                sent.lock().unwrap().push(text.to_string());
+                Ok(())
+            },
+        );
+
+        assert!(result.is_ok());
+        let sent = sent.lock().unwrap();
+        assert_eq!(sent.len(), 2);
+        assert!(sent[0].contains(" … ("), "{}", sent[0]);
+        assert_eq!(sent[1], "Shall I deploy?");
+    }
 
     #[test]
     fn hub_records_its_own_notification_before_sending_it() {

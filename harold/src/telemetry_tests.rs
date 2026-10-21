@@ -115,6 +115,22 @@ fn an_error_status_keeps_the_error_and_drops_its_description() {
 }
 
 #[test]
+fn text_cut_leaves_on_the_delivery_span() {
+    test_support::install();
+    let pane = unique_pane();
+    let span = tracing::info_span!(target: TRACE_TARGET, "harold.delivery",
+        pane_id = %pane, text_cut = tracing::field::Empty);
+    span.in_scope(|| crate::channels::record_text_cut(true));
+    drop(span);
+    let spans = test_support::spans();
+    let span = spans
+        .iter()
+        .find(|s| test_support::span_attr(s, "pane_id").as_deref() == Some(pane.as_str()))
+        .unwrap();
+    assert_eq!(test_support::span_attr(span, "text_cut").as_deref(), Some("true"));
+}
+
+#[test]
 fn only_allowed_fields_leave_a_log_record_and_its_body_stays() {
     test_support::install();
     let pane = unique_pane();

@@ -922,6 +922,7 @@ fn dispatch_in_spans(
         channel = tracing::field::Empty,
         outcome = tracing::field::Empty,
         reason = tracing::field::Empty,
+        text_cut = tracing::field::Empty,
     );
     let turn = telemetry::take_turn_delivery(&delivery.event_id).or_else(|| {
         delivery

@@ -11,7 +11,7 @@ use time::OffsetDateTime;
 use tokio::sync::{mpsc, watch};
 use tracing::{Instrument, info, info_span, warn};
 
-use super::{AwayNotification, split_body, summarise_for_notification};
+use super::{AwayNotification, record_text_cut, split_and_fit, summarise_for_notification};
 use crate::inbound::AgentAddress;
 use crate::inbound::ownership::{self, notification_text};
 use crate::outbound::is_messaging_paused;
@@ -231,8 +231,10 @@ pub(crate) fn notify_away(
     };
     let body = summarise_for_notification(&turn.assistant_message, &turn.last_user_prompt);
 
-    let (main_body, question) = split_body(&body);
-    let message = notification_message(&cfg.machine_name, turn, main_body);
+    let (main_body, question, cut) = split_and_fit(&body, "imessage", &turn.pane_id);
+    record_text_cut(cut);
+    let question = question.as_deref();
+    let message = notification_message(&cfg.machine_name, turn, &main_body);
 
     let recent_outgoing = cfg
         .imessage
