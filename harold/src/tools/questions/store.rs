@@ -44,6 +44,16 @@ pub(super) enum StoreError {
     Data(String),
 }
 
+impl StoreError {
+    /// Which side failed, for the log: the database or the stored data.
+    pub(super) fn kind(&self) -> &'static str {
+        match self {
+            Self::Turso(_) => "database",
+            Self::Data(_) => "data",
+        }
+    }
+}
+
 impl From<serde_json::Error> for StoreError {
     fn from(error: serde_json::Error) -> Self {
         Self::Data(error.to_string())

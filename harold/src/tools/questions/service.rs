@@ -229,6 +229,8 @@ impl<S: QuestionStore> QuestionService for QuestionToolService<S> {
                     question_id = %id,
                     version,
                     reason = "store_failed",
+                    kind = error.kind(),
+                    error = %error,
                     "picks not saved"
                 );
                 unavailable(error)

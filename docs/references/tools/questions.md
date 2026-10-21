@@ -214,7 +214,7 @@ Ten fixed lines, with only the fields `tool`, `question_id`, `version`, `reason`
 | `question answered` | `tool`, `question_id`, `version` | |
 | `step ticked` | `tool`, `question_id`, `version`, `reason` | `reason` is `ticked` or `unticked`. No step text is logged. |
 | `picks saved` | `tool`, `question_id`, `version` | Info. No pick, key or text is logged. |
-| `picks not saved` | `tool`, `question_id`, `version`, `reason` | A warning; `reason` is `store_failed`. |
+| `picks not saved` | `tool`, `question_id`, `version`, `reason`, `kind`, `error` | A warning; `reason` is `store_failed`; `kind` is `database` for a Turso error or `data` for stored data Harold could not read. `error` is the error's own message and stays in `harold.log`. |
 | `answers batch typed` | `tool`, `reason` | `reason` is `typed`, or `enter_failed` when Enter failed after the text went in (a warning). |
 | `answers batch waiting` | `tool`, `reason` | `reason` is `no_chief`, `pane_busy`, `no_pane` or `store_failed`. |
 | `set-aside questions returned` | `tool`, `count`, `after` | Info, written once per return and only when `count` is above 0. `after` is `answers_line`, `later` or `dismiss`. No question id or text is logged. It is written by the store as the questions move, so it comes just before the `question dismissed` or `answers batch typed` line that caused it, and in the rare case that the write then fails it may stand for a return that did not happen. |

@@ -1610,3 +1610,12 @@ async fn dismissing_instructions_follows_the_same_rule() {
     dismiss_ok(&store, "Q1", 5).await;
     assert_eq!(listed_ids(&store).await, [waiting("I2"), waiting("Q2")]);
 }
+
+#[test]
+fn store_error_kind_names_the_failing_side() {
+    assert_eq!(
+        StoreError::Turso(turso::Error::Busy("locked".into())).kind(),
+        "database"
+    );
+    assert_eq!(StoreError::Data("bad row".into()).kind(), "data");
+}

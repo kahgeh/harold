@@ -708,11 +708,16 @@ async fn a_failed_store_on_save_picks_is_unavailable_and_logs_picks_not_saved() 
     assert_eq!(refused.code(), Code::Unavailable);
     let lines = logs.with("picks not saved");
     assert_eq!(lines.len(), 1, "{lines:#?}");
+    // `error` holds the message, with spaces, so the names are read up to it.
+    let (before_error, _) = lines[0].split_once(" error=").expect("error field");
     assert_eq!(
-        field_names(&lines[0], "picks not saved"),
-        ["tool", "question_id", "version", "reason"]
+        field_names(before_error, "picks not saved"),
+        ["tool", "question_id", "version", "reason", "kind"]
     );
     assert!(lines[0].contains("reason=\"store_failed\""), "{}", lines[0]);
+    assert!(lines[0].contains("kind=\"data\""), "{}", lines[0]);
+    assert!(lines[0].contains("write failed"), "{}", lines[0]);
+    assert!(!lines[0].contains("\"a\""), "{}", lines[0]);
     assert!(lines[0].contains("WARN"), "{}", lines[0]);
 }
 
