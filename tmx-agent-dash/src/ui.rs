@@ -666,6 +666,13 @@ fn render_inventory(frame: &mut Frame<'_>, area: Rect, app: &App, now_ms: i64) {
     {
         selected_index = Some(at + cursor);
     }
+    // An open note or text field has no cursor stop. The table scrolls to its last row
+    // instead, which keeps the cursor's row (one or two rows above it) in view too.
+    if let Some(at) = question_at
+        && let Some(note) = question_lines.iter().rposition(|l| l.note)
+    {
+        selected_index = Some(at + note);
+    }
     let header = if wide {
         Row::new(["STATE", "WHERE", "", "", "WORK SUMMARY", "AGE"])
     } else {
@@ -793,6 +800,8 @@ struct QLine {
     style: Style,
     /// The stop the row is, on its first row only; set for cursor stops, never for text.
     stop: Option<QStop>,
+    /// Set on the rows of an open note or text field, which the list keeps in view.
+    note: bool,
 }
 
 /// `1 todo waiting` or `N todos waiting`.
@@ -888,6 +897,14 @@ fn question_row_lines(
         |out: &mut Vec<QLine>, indent: usize, text: &str, style: Style, stop: Option<QStop>| {
             put_hanging(out, indent, "", text, style, stop);
         };
+    // An open note's rows have no cursor stop; the list keeps them in view.
+    let put_note = |out: &mut Vec<QLine>, indent: usize, text: &str, style: Style| {
+        let first = out.len();
+        put(out, indent, text, style, None);
+        for line in &mut out[first..] {
+            line.note = true;
+        }
+    };
     let from = if fallback { " · from the chief" } else { "" };
     if !view.open {
         let text = format!("▸ {}{from}", waiting_label(view.waiting));
@@ -929,6 +946,7 @@ fn question_row_lines(
                 text: String::new(),
                 style: ink,
                 stop: None,
+                note: false,
             });
         };
         if !view.intro.is_empty() {
@@ -970,7 +988,7 @@ fn question_row_lines(
                     && let Some(note) = note_text(&view.mode, &[NoteKind::FreeText])
                 {
                     let under = QUESTION_OPTION_INDENT + 4 + Line::raw(&option.key).width();
-                    put(&mut out, under, &note, yellow, None);
+                    put_note(&mut out, under, &note, yellow);
                 }
             }
             blank(&mut out);
@@ -1033,7 +1051,7 @@ fn question_row_lines(
             if view.note_stop == Some(stop)
                 && let Some(note) = note_text(&view.mode, &[NoteKind::Revise, NoteKind::Reject])
             {
-                put(&mut out, QUESTION_OPTION_INDENT, &note, yellow, None);
+                put_note(&mut out, QUESTION_OPTION_INDENT, &note, yellow);
             }
         }
         for other in &view.others {
@@ -1102,6 +1120,7 @@ fn wrap_hanging(
             text: format!("{pad}{lead}{piece}"),
             style,
             stop: stop.filter(|_| n == 0),
+            note: false,
         });
     }
 }
@@ -4787,6 +4806,138 @@ mod tests {
         app.observe_questions(q25_queue());
         assert_eq!(app.question_stop, Some(QStop::Action(2)));
         row_with(&rendered_lines(&app, 140, 38, 100_000), "revise: xyz");
+    }
+
+    /// Q25 with `decisions` decisions, the last one's second option a free one.
+    fn tall_queue(decisions: usize, impact: &str) -> crate::questions::Queue {
+        use crate::questions::{DecisionView, OptionView};
+        let mut queue = q25_queue();
+        let option = |key: &str, label: &str, impact: &str, free: bool| OptionView {
+            key: key.into(),
+            label: label.into(),
+            impact: impact.into(),
+            suggested: false,
+            free,
+        };
+        queue.questions[0].decisions = (0..decisions)
+            .map(|d| DecisionView {
+                ask: format!("Decision {d}?"),
+                options: vec![
+                    option("a", "first", "", false),
+                    option("b", "other", impact, true),
+                ],
+            })
+            .collect();
+        queue
+    }
+
+    /// The app with the question open and the cursor moved onto `stop`.
+    fn app_at(queue: crate::questions::Queue, stop: QStop) -> App {
+        let mut app = question_app(true);
+        app.observe_questions(queue);
+        app.handle_key(KeyCode::Char('l'));
+        for _ in 0..40 {
+            if app.question_stop == Some(stop) {
+                return app;
+            }
+            app.handle_key(KeyCode::Char('j'));
+        }
+        panic!("cursor never reached {stop:?}");
+    }
+
+    /// Whether `needle` is on the list's last row, just above the bottom border.
+    fn on_last_list_row(lines: &str, needle: &str) -> bool {
+        let rows: Vec<&str> = lines.lines().collect();
+        rows.iter()
+            .position(|line| line.contains(needle))
+            .and_then(|at| rows.get(at + 1))
+            .is_some_and(|below| below.trim_start().starts_with('└'))
+    }
+
+    /// For each number of decisions, opens the note on `stop` at 120 by 24 and checks
+    /// the line shows, takes typing and leaves the cursor's row on screen. Returns how
+    /// many of the sizes had the cursor's row last in the list before Enter.
+    fn note_stays_in_view(
+        stop: impl Fn(usize) -> QStop,
+        impact: &str,
+        row: &str,
+        line: &str,
+    ) -> usize {
+        let mut last = 0;
+        for decisions in 1..=6 {
+            let mut app = app_at(tall_queue(decisions, impact), stop(decisions));
+            if on_last_list_row(&rendered_lines(&app, 120, 24, 100_000), row) {
+                last += 1;
+            }
+            app.handle_key(KeyCode::Enter);
+            assert!(app.questions.note_open());
+            let lines = rendered_lines(&app, 120, 24, 100_000);
+            assert!(lines.contains(&format!("{line}█")), "{decisions}:\n{lines}");
+            assert!(lines.contains(row), "{decisions}: cursor row:\n{lines}");
+            for character in "xyz".chars() {
+                app.handle_key(KeyCode::Char(character));
+            }
+            let lines = rendered_lines(&app, 120, 24, 100_000);
+            assert!(
+                lines.contains(&format!("{line}xyz█")),
+                "{decisions}:\n{lines}"
+            );
+            assert!(lines.contains(row), "{decisions}: cursor row:\n{lines}");
+        }
+        last
+    }
+
+    #[test]
+    fn an_open_revise_note_scrolls_into_view_at_120_by_24() {
+        let last = note_stays_in_view(|_| QStop::Action(2), "", "revise…", "revise: ");
+        assert!(last > 0, "no size had revise… on the list's last row");
+    }
+
+    #[test]
+    fn an_open_reject_note_scrolls_into_view_at_120_by_24() {
+        let last = note_stays_in_view(|_| QStop::Action(3), "", "reject…", "reject: ");
+        assert!(last > 0, "no size had reject… on the list's last row");
+    }
+
+    #[test]
+    fn an_open_text_field_scrolls_into_view_at_120_by_24() {
+        let free = |decisions: usize| QStop::Option {
+            decision: decisions - 1,
+            option: 1,
+        };
+        for impact in ["", "what it costs"] {
+            let mut last = 0;
+            for decisions in 1..=6 {
+                let mut app = app_at(tall_queue(decisions, impact), free(decisions));
+                let at_edge = on_last_list_row(&rendered_lines(&app, 120, 24, 100_000), "other")
+                    || on_last_list_row(&rendered_lines(&app, 120, 24, 100_000), impact);
+                last += usize::from(at_edge);
+                // Space on a free option opens its field.
+                app.handle_key(KeyCode::Char(' '));
+                assert!(app.questions.note_open());
+                let lines = rendered_lines(&app, 120, 24, 100_000);
+                assert!(lines.contains("answer: █"), "{decisions}:\n{lines}");
+                assert!(lines.contains("other"), "{decisions}: cursor row:\n{lines}");
+                app.handle_key(KeyCode::Char('x'));
+                let lines = rendered_lines(&app, 120, 24, 100_000);
+                assert!(lines.contains("answer: x█"), "{decisions}:\n{lines}");
+            }
+            assert!(last > 0, "no size had the free option last ({impact:?})");
+        }
+    }
+
+    #[test]
+    fn j_and_k_type_into_the_open_note_and_esc_closes_it() {
+        let mut app = app_at(tall_queue(3, ""), QStop::Action(2));
+        app.handle_key(KeyCode::Enter);
+        app.handle_key(KeyCode::Char('j'));
+        app.handle_key(KeyCode::Char('k'));
+        assert!(rendered_lines(&app, 120, 24, 100_000).contains("revise: jk█"));
+        app.handle_key(KeyCode::Esc);
+        assert!(!app.questions.note_open());
+        let lines = rendered_lines(&app, 120, 24, 100_000);
+        assert!(!lines.contains("revise:"), "{lines}");
+        assert!(lines.contains("revise…"), "{lines}");
     }
 
     #[test]
