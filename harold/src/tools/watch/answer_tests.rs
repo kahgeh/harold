@@ -138,6 +138,14 @@ fn bad_outputs_map_to_their_failures() {
     );
     assert_eq!(
         case(r#"{"subtype":"error_max_turns","is_error":true}"#, true).answer,
+        Err(Failure::MaxTurnsReached)
+    );
+    assert_eq!(
+        case(
+            r#"{"subtype":"error_during_execution","is_error":true}"#,
+            false
+        )
+        .answer,
         Err(Failure::ProcessFailed)
     );
     assert_eq!(
@@ -165,9 +173,50 @@ fn failure_names_are_the_reasons_the_log_carries() {
             "process_failed",
             "run_budget_reached",
             "unreadable_answer",
-            "skill_missing"
+            "skill_missing",
+            "max_turns_reached"
         ]
     );
+}
+
+#[test]
+fn a_turn_cap_run_exiting_non_zero_keeps_its_cause() {
+    let read = read_output(
+        br#"{"subtype":"error_max_turns","is_error":true,"num_turns":9}"#,
+        false,
+    );
+    assert_eq!(read.answer, Err(Failure::MaxTurnsReached));
+    assert_eq!(read.cause.unwrap().num_turns, Some(9));
+}
+
+#[test]
+fn num_turns_reads_whole_numbers_and_digit_strings_only() {
+    let turns = |value: &str| cause_of(&format!(r#"{{"num_turns":{value}}}"#)).num_turns;
+    assert_eq!(turns("8"), Some(8));
+    assert_eq!(turns("8.0"), Some(8));
+    assert_eq!(turns(r#""8""#), Some(8));
+    for odd in [
+        "8.5",
+        r#""x""#,
+        "-1",
+        "true",
+        "null",
+        r#""""#,
+        "1e20",
+        "99999999999",
+    ] {
+        assert_eq!(turns(odd), None, "{odd}");
+    }
+}
+
+#[test]
+fn an_odd_num_turns_does_not_spoil_a_good_run() {
+    let read = read_output(
+        br#"{"subtype":"success","is_error":false,"result":"QUIET","num_turns":"x"}"#,
+        true,
+    );
+    assert_eq!(read.answer, Ok(Answer::Quiet));
+    assert_eq!(read.cause.unwrap().num_turns, None);
 }
 
 fn cause_of(json: &str) -> Cause {
@@ -180,7 +229,7 @@ fn the_cause_is_read_from_the_json() {
         br#"{"subtype":"error_max_turns","is_error":true,"num_turns":8}"#,
         true,
     );
-    assert_eq!(read.answer, Err(Failure::ProcessFailed));
+    assert_eq!(read.answer, Err(Failure::MaxTurnsReached));
     assert_eq!(
         read.cause,
         Some(Cause {

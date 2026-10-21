@@ -389,6 +389,30 @@ async fn three_failed_runs_in_a_row_stop_the_watch_with_the_last_reason() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn three_turn_cap_runs_in_a_row_stop_the_watch() {
+    let cap = Step::Exit {
+        stdout: r#"{"subtype":"error_max_turns","is_error":true,"num_turns":9}"#.into(),
+        exit: Exit {
+            code: Some(1),
+            signal: None,
+        },
+    };
+    let h = harness(settings(), vec![cap]).await;
+    h.start("w", 10, 120).await;
+
+    pass(25 * MINUTE).await;
+
+    assert_eq!(h.runner.calls(), 3);
+    assert_eq!(
+        h.typing.typed(),
+        ["WATCH w stopped: 3 runs in a row failed (max_turns_reached)"]
+    );
+    let row = h.row("w").await;
+    assert_eq!(row.last_outcome.as_deref(), Some("max_turns_reached"));
+    assert_eq!(row.stop_reason.as_deref(), Some("runs_failing"));
+}
+
+#[tokio::test(start_paused = true)]
 async fn a_good_run_between_failures_resets_the_count() {
     let h = harness(
         settings(),

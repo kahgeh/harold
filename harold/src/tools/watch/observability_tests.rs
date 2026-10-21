@@ -202,6 +202,7 @@ async fn the_counters_carry_the_folder_and_the_outcome_and_never_the_watch_name(
         "run_budget_reached",
         "unreadable_answer",
         "skill_missing",
+        "max_turns_reached",
         "skipped",
     ] {
         assert_eq!(
@@ -494,6 +495,24 @@ async fn a_process_failed_run_logs_how_it_ended_and_what_claude_code_reported_wi
         assert!(failed[0].contains(field), "{field}: {}", failed[0]);
     }
     assert!(!failed[0].contains("signal="), "{}", failed[0]);
+    assert!(
+        failed[0].contains("reason=\"max_turns_reached\""),
+        "{}",
+        failed[0]
+    );
+    assert!(
+        failed[1].contains("reason=\"process_failed\""),
+        "{}",
+        failed[1]
+    );
+    let folder = h.folder.0.to_string_lossy().into_owned();
+    let runs = |outcome: &str| {
+        test_support::exact_counter_value(
+            "watch.runs",
+            &[("folder", &folder), ("outcome", outcome)],
+        )
+    };
+    assert_eq!(runs("max_turns_reached"), Some(1));
     assert!(failed[1].contains("signal=15") && failed[1].contains("subtype=\"unreadable_json\""));
     assert!(!failed[1].contains("exit_code="), "{}", failed[1]);
     assert!(failed[2].contains("subtype=\"other\"") && failed[2].contains("is_error=true"));

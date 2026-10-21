@@ -449,11 +449,9 @@ impl Scheduler {
         };
         match &answer {
             Ok(_) => obs.finished(&outcome, cost_usd, duration_ms),
-            Err(Failure::ProcessFailed) => match &why {
-                Some((exit, cause)) => {
-                    obs.failed(Failure::ProcessFailed, cost_usd, Some(*exit), Some(cause))
-                }
-                None => obs.failed(Failure::ProcessFailed, cost_usd, None, None),
+            Err(failure @ (Failure::ProcessFailed | Failure::MaxTurnsReached)) => match &why {
+                Some((exit, cause)) => obs.failed(*failure, cost_usd, Some(*exit), Some(cause)),
+                None => obs.failed(*failure, cost_usd, None, None),
             },
             Err(failure) => obs.failed(*failure, cost_usd, None, None),
         }

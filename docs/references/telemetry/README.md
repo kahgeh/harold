@@ -222,7 +222,7 @@ Metrics are sent every 30 seconds. Every metric also carries `harold.machine`.
 | `pod.specs` | gauge, `{spec}` | `pod.product`, `state` |
 | `pod.spec.words` | gauge, `{word}` | `pod.product`, `spec.id`, `state` |
 | `pod.spec.lead_time` | histogram, `s`, buckets 600, 1800, 3600, 7200, 14400, 43200, 86400, 172800 | `pod.product`, `phase` (`waiting_for_user`, `build`), `spec.revisions`, `spec.id`, `spec.stage` when the merge is a stage |
-| `watch.runs` | counter, `{run}` | `folder`, `outcome` (`quiet`, `report`, `skipped`, or a failure reason: `timeout`, `process_failed`, `run_budget_reached`, `unreadable_answer`, `skill_missing`) |
+| `watch.runs` | counter, `{run}` | `folder`, `outcome` (`quiet`, `report`, `skipped`, or a failure reason: `timeout`, `process_failed`, `run_budget_reached`, `unreadable_answer`, `skill_missing`, `max_turns_reached`) |
 | `watch.cost_usd` | counter, `USD` | `folder` |
 
 `pod.specs` reports every state of every product, 0 included, so a card can read 0.

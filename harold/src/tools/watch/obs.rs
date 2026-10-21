@@ -190,7 +190,7 @@ impl RunObs {
     }
 
     /// A failed run. `cost_usd` is what the run is counted at. `exit` and `cause` are
-    /// given for a `process_failed` run that exited; the fields not known are left out.
+    /// given for a `process_failed` or `max_turns_reached` run that exited; the fields not known are left out.
     pub(super) fn failed(
         &self,
         reason: Failure,

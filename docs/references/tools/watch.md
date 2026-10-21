@@ -130,7 +130,7 @@ Harold always records what each run cost, and limits spending only where the use
 
 As a guide, a Haiku run that reads the skill and the facts and runs two or three commands costs about 1 to 2 US cents.
 
-Three runs in a row that fail stop the watch: `process_failed` (Claude Code missing, logged out or exiting with an error; the `watch run failed` line then gives `exit_code` or `signal`, and `subtype`, `is_error` and `num_turns` from Claude Code's output), `timeout`, `run_budget_reached`, `unreadable_answer` and `skill_missing` (the skill is gone, or its real path left every allowed folder). A skipped run neither fails nor resets the count.
+Three runs in a row that fail stop the watch: `process_failed` (Claude Code missing, logged out or exiting with an error; the `watch run failed` line then gives `exit_code` or `signal`, and `subtype`, `is_error` and `num_turns` from Claude Code's output), `max_turns_reached` (Claude Code stopped at its 8-turn cap: the skill asks for too much, so trim it; the line gives the same cause fields), `timeout`, `run_budget_reached`, `unreadable_answer` and `skill_missing` (the skill is gone, or its real path left every allowed folder). A skipped run neither fails nor resets the count.
 
 ## Risks
 
@@ -149,7 +149,7 @@ No line carries any of the skill's text, its `allowed-tools`, the paths in its `
 |---|---|---|---|
 | A watch starts, is replaced or resumes | info | `watch started` | `watch`, `folder`, `skill`, `ends_at`, `every_minutes`, `every_run`, `how` (`started`, `replaced` or `resumed`) |
 | A run ends | info | `watch run finished` | `watch`, `run`, `outcome` (`quiet` or `report`), `cost_usd`, `duration_ms`, `add_dirs` |
-| A run fails | warn | `watch run failed` | `watch`, `run`, `reason` (`timeout`, `process_failed`, `run_budget_reached`, `unreadable_answer`, `skill_missing`), `cost_usd`, `add_dirs`; for a `process_failed` run that exited, also those of `exit_code`, `signal`, `subtype`, `is_error` and `num_turns` that are known (`subtype` is `unreadable_json` when the output was not JSON, and `other` when it was not a short name) |
+| A run fails | warn | `watch run failed` | `watch`, `run`, `reason` (`timeout`, `process_failed`, `run_budget_reached`, `unreadable_answer`, `skill_missing`, `max_turns_reached`), `cost_usd`, `add_dirs`; for a `process_failed` or `max_turns_reached` run that exited, also those of `exit_code`, `signal`, `subtype`, `is_error` and `num_turns` that are known (`subtype` is `unreadable_json` when the output was not JSON, and `other` when it was not a short name) |
 | A run is skipped | warn | `watch run skipped` | `watch`, `run`, `reason` (`model_busy`) |
 | A report waits, logged when its reason changes | info | `watch report waiting` | `watch`, `run`, `reason` (the timed-prompt reasons, such as `agent_busy`) |
 | A waiting report is replaced or dropped | info | `watch report replaced` | `watch`, `run`, `why` (`newer_report` or `watch_ended`) |

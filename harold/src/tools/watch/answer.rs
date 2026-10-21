@@ -2,7 +2,7 @@
 //! states the answer format and nothing about what is worth reporting: that is the
 //! skill's to say.
 
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 
 use crate::agent::summary::sanitize_bounded_metadata;
 
@@ -37,16 +37,18 @@ pub(super) enum Failure {
     RunBudgetReached,
     UnreadableAnswer,
     SkillMissing,
+    MaxTurnsReached,
 }
 
 impl Failure {
     #[cfg(test)]
-    pub(super) const ALL: [Failure; 5] = [
+    pub(super) const ALL: [Failure; 6] = [
         Failure::Timeout,
         Failure::ProcessFailed,
         Failure::RunBudgetReached,
         Failure::UnreadableAnswer,
         Failure::SkillMissing,
+        Failure::MaxTurnsReached,
     ];
 
     pub(super) fn as_str(self) -> &'static str {
@@ -56,6 +58,7 @@ impl Failure {
             Failure::RunBudgetReached => "run_budget_reached",
             Failure::UnreadableAnswer => "unreadable_answer",
             Failure::SkillMissing => "skill_missing",
+            Failure::MaxTurnsReached => "max_turns_reached",
         }
     }
 }
@@ -93,12 +96,31 @@ struct ClaudeJson {
     is_error: Option<bool>,
     #[serde(default)]
     subtype: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient_turns")]
     num_turns: Option<u32>,
     #[serde(default)]
     result: Option<String>,
     #[serde(default)]
     total_cost_usd: Option<f64>,
+}
+
+/// Reads `num_turns` as a count when it is an unsigned integer, a whole float within
+/// `u32`, or a string of digits; anything else is not known, and never fails the parse.
+fn lenient_turns<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<u32>, D::Error> {
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(match value {
+        serde_json::Value::Number(n) => {
+            n.as_u64().and_then(|n| u32::try_from(n).ok()).or_else(|| {
+                n.as_f64()
+                    .filter(|f| f.fract() == 0.0 && (0.0..=f64::from(u32::MAX)).contains(f))
+                    .map(|f| f as u32)
+            })
+        }
+        serde_json::Value::String(s) if !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()) => {
+            s.parse().ok()
+        }
+        _ => None,
+    })
 }
 
 /// What Claude Code reported about how a run went. Never holds text: the subtype is
@@ -155,6 +177,8 @@ pub(super) fn read_output(stdout: &[u8], exited_ok: bool) -> Read {
     };
     let answer = if json.subtype.as_deref() == Some("error_max_budget_usd") {
         Err(Failure::RunBudgetReached)
+    } else if json.subtype.as_deref() == Some("error_max_turns") {
+        Err(Failure::MaxTurnsReached)
     } else if !exited_ok
         || json.is_error == Some(true)
         || json.subtype.as_deref().is_some_and(|s| s != "success")

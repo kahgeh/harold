@@ -330,12 +330,13 @@ pub(crate) fn register_merge_counters(product: &str) {
 
 /// Every `outcome` of `watch.runs` that is a failure or a skipped run, counted from 0 at a
 /// watch's start so HyperDX reads the first one as a rise.
-pub(crate) const WATCH_FAILURE_OUTCOMES: [&str; 6] = [
+pub(crate) const WATCH_FAILURE_OUTCOMES: [&str; 7] = [
     "timeout",
     "process_failed",
     "run_budget_reached",
     "unreadable_answer",
     "skill_missing",
+    "max_turns_reached",
     "skipped",
 ];
 
