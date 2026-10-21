@@ -133,7 +133,7 @@ Each place Harold does not follow the organisation's `knowledge/standards.md`, w
 
 - **Other languages beside Rust.** The voice worker (`harold/src/voice_worker.py`), the installer (`scripts/*.py`) and the turn-complete hooks (`hooks/providers/`, `hooks/shared/`) are Python, `scripts/install.sh` and `scripts/bootstrap.sh` are shell, the Claude Code mod is TypeScript, and the OpenCode plugin and the web app's scripts (`harold/static/web_app/`) are JavaScript. Each fits the program it extends, and the standard raises another language as a question, not a breach. Until: not set.
 - **axum's version.** Harold uses axum `0.8.8` (`harold/Cargo.toml`), unpinned, where the standard names `=0.8.7`. No one has said why. Until: not set.
-- **Dependency audits** are not recorded in Harold's `README.md`, which the standard's practice suggests. Until: not set.
+- **Dependency audits** live in the table in `docs/references/dependency-audits.md`, linked from the README, to keep the front page short. Until: not set.
 
 ## How it works
 
