@@ -54,7 +54,7 @@ pub(crate) struct ReplyOrigin {
     pub created_at: OffsetDateTime,
 }
 
-/// Routes a stored reply's text, given whether ownership is already decided.
+/// Routes a stored reply's text and reports what routing did.
 pub(crate) type Router = Arc<dyn Fn(&str) -> Result<RouteReport, String> + Send + Sync>;
 
 /// Types a text into a pane, given the pane id and the text, and presses Enter.
@@ -478,8 +478,8 @@ impl ProductionDispatcher {
     }
 }
 
-/// Hand a stored reply to `route` inside `harold.route`, and finish its phone request with what routing did. A failed route is
-/// retried later, so its request stays open.
+/// Hand a stored reply to `route` inside `harold.route`, and finish its phone request with
+/// what routing did. A failed route is retried later, so its request stays open.
 fn route_message(
     message: &InboundMessage,
     event_id: &str,

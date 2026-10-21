@@ -205,6 +205,7 @@ fn config_probe_accepts_a_clean_config_and_the_imessage_away_channel() {
     ] {
         let output = Fixture::new(&overlay).run(&["--check-config"]);
         assert!(output.status.success(), "{output:?}");
+        assert!(!String::from_utf8_lossy(&output.stderr).contains("no longer read"));
     }
 }
 
@@ -892,6 +893,42 @@ fn under_launchd_an_invalid_config_exits_zero_and_says_why() {
     let fixture = Fixture::new("");
     assert_refused(&fixture.daemon(true), "invalid_config");
     assert_failed(&fixture.daemon(false));
+}
+
+#[test]
+fn under_launchd_a_config_naming_removed_settings_exits_zero_with_their_sentences() {
+    let fixture = Fixture::new(
+        "[telegram]\nbot_token = 'review-sentinel-secret'\n[peers]\nsecret = 'review-sentinel-secret'\n",
+    );
+    let output = fixture.daemon(true);
+    assert_refused(&output, "invalid_config");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.contains("review-sentinel-secret"));
+    assert!(
+        stderr.lines().any(|line| line
+            == format!("Error: invalid configuration: {TELEGRAM_SENTENCE}; {PEERS_SENTENCE}")),
+        "{stderr}"
+    );
+    assert_failed(&fixture.daemon(false));
+}
+
+#[test]
+fn a_daemon_warns_that_away_channel_is_no_longer_read_and_a_clean_config_does_not() {
+    const WARNING: &str =
+        "setting no longer read: notify.away_channel; remove it from config/local.toml";
+    let combined = |output: &Output| {
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+    };
+    let set = Fixture::new(&format!("{DAEMON}[notify]\naway_channel = 'imessage'\n"));
+    let text = combined(&set.daemon(false));
+    assert!(text.contains(WARNING), "{text}");
+    let clean = Fixture::new(DAEMON);
+    let text = combined(&clean.daemon(false));
+    assert!(!text.contains("no longer read"), "{text}");
 }
 
 #[test]
