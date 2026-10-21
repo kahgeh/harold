@@ -28,7 +28,7 @@ The host (`harold/src/tools.rs`) builds the `ToolContext` and calls `start`. The
 
 `PaneTyping::type_line` returns a `Typing` at once: `Typed`, `EnterFailed` (the text is in the input box but Enter failed, so typing it again would repeat it), `PaneBusy` (the pane is busy or its input box holds text; nothing was typed) or `NoPane`. It holds the pane against Harold's other writers as `Writer::Tool(name)`. The host builds a `TmuxTyping` with `Writer::Tool(questions::NAME)` for the question tool and another with `Writer::Tool(watch::NAME)` for the watch tool; the backlog tool types nothing and gets `None`. Two tools with different names would hold the pane against each other like any two writers, but only if the host gives each its own writer. It logs nothing; the tool logs its own lines.
 
-`ChiefPane` finds the one agent pane whose folder `[notify] chief` matches. With no folder set, no such pane, or more than one, there is no chief and the tool should wait.
+`ChiefPane` finds the first agent pane of the chief's tmux session among the panes whose folder `[notify] chief` matches. With no folder set or no such pane, there is no chief and the tool should wait.
 
 ## The boundary
 

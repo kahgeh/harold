@@ -4,7 +4,7 @@ The web app puts one conversation with the chief of pods on the iPhone's home sc
 
 Harold serves the app itself, from this Mac, on a loopback address (`127.0.0.1`, reachable only from the Mac). Tailscale, the private network that joins your Mac and your iPhone, carries it to the phone. iMessage keeps working alongside it, as the fallback.
 
-The chief is the one agent running in a folder `[notify] chief` matches.
+The chief is the first agent pane of the chief's tmux session among the agents running in a folder `[notify] chief` matches.
 
 ## Rolling back to an earlier Harold
 
@@ -130,7 +130,7 @@ A reply you type goes to the chief. It can be up to 1,000 characters; Harold ref
 | ✓ `me` (the stored mark) | Harold has stored the reply and not yet typed it. |
 | ✓✓ `me` (the typed mark) | Harold typed the reply into the chief's idle pane. |
 | ✓✓ `me · waiting: chief busy` | The chief was working. Harold typed the reply into its pane anyway, and the chief reads it when its turn ends. |
-| ✓ `me · not sent: no chief` | No agent runs in the chief's folder, or more than one does. Harold typed the reply nowhere. |
+| ✓ `me · not sent: no chief` | No agent runs in the chief's folder. Harold typed the reply nowhere. |
 | ✓ `me · not sent: messaging paused` | Messaging is paused. Harold typed the reply nowhere. |
 
 While Harold cannot list the tmux panes, it does not know which pane is the chief's, so it holds the reply and tries again.
