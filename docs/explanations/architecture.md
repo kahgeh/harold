@@ -24,7 +24,6 @@ flowchart LR
     channels["channels and channel listener"]
     routing["reply routing"]
     publisher["snapshot publisher"]
-    peers["peers"]
     toolhost["tool host: question tool, backlog tool, watch tool"]
     voice["calls and voice worker"]
     webapp["web app"]
@@ -61,7 +60,6 @@ flowchart LR
   publisher --> dash
   toolhost <--> dash
   webapp -->|"todos: ListQuestions, AnswerQuestion"| toolhost
-  peers <--> channels
   voice --> webapp
   cli --> monitor
   ctl -. installs and runs .-> harold
@@ -75,9 +73,8 @@ flowchart LR
 | event stream and state database | Stores accepted observations and messages in order, and the current agent view, the outbox and the checkpoint | `harold/src/store.rs`, `harold/src/store/` |
 | projector and reducer | Reads the event stream, works out each agent's state, and stages delivery work in the outbox | `harold/src/store.rs`, `harold/src/agent/reducer.rs` |
 | delivery handler | Reads the outbox, and leaves out, speaks or sends each turn-end update. The local model makes the update (`harold/src/outbound/tts.rs`), in a delivery or in a call | `harold/src/outbound/`, `harold/src/projector.rs`, `harold/src/tmux.rs` |
-| channels and channel listener | Send to the phone by iMessage or Telegram, and record the user's replies in the event stream | `harold/src/channels/` |
+| channels and channel listener | Send to the phone by iMessage, and record the user's replies in the event stream | `harold/src/channels/` |
 | reply routing | Decides which Mac owns a reply by its routing tag or the latest notifier, picks the pane by the tag or the other fallbacks, and types it there | `harold/src/inbound/` |
-| peers | Hub and member on two Macs, and the peer RPCs between them | `harold/src/peers.rs` |
 | snapshot publisher | Sends snapshots to clients over `WatchAgentStates` | `harold/src/agent/snapshot.rs`, `harold/src/main.rs` |
 | tool host, question tool, backlog tool, watch tool | Hosts tools with their own storage and gRPC services (ADR 0001). The dash and the web app are clients of the question tool | `harold/src/tools.rs`, `harold/src/tools/` |
 | calls and voice worker | Voice calls with the chief, and the process that turns lines into audio and speech into text | `harold/src/voice_input.rs`, `harold/src/voice_input/`, `harold/src/voice_worker.py` |
@@ -96,7 +93,7 @@ flowchart LR
 
 What other components or products depend on, each with where its contract is written:
 
-- **The Harold gRPC service** (`harold-api/proto/harold.proto`): `WatchAgentStates`, `TurnComplete`, `ReportAgentState`, `SpeakLine`, `SendMessageToAwayDevice`, `Call`, `SetTtsMuted`, `SetMessagingPaused`, and the peer RPCs `ReportNotification` and `ForwardReply`. Contracts: the proto and the [agent monitor reference](../references/agent-monitor/README.md#grpc-contract).
+- **The Harold gRPC service** (`harold-api/proto/harold.proto`): `WatchAgentStates`, `TurnComplete`, `ReportAgentState`, `SpeakLine`, `SendMessageToAwayDevice`, `Call`, `SetTtsMuted`, and `SetMessagingPaused`. Contracts: the proto and the [agent monitor reference](../references/agent-monitor/README.md#grpc-contract).
 - **The tool services** (`harold-api/proto/tools/questions.proto`, `harold-api/proto/tools/backlog.proto`, `harold-api/proto/tools/watch.proto`). Contracts: the [tools references](../references/tools/README.md).
 - **Commands:** `harold` and `haroldctl`. Contracts: the [operation reference](../references/operation/README.md) and the tools references.
 - **Hook payloads** from Claude Code, Codex and OpenCode. Contract: [Set up agent monitor hooks](../how-tos/setup-agent-monitor-hooks.md).
@@ -117,6 +114,7 @@ One line per architectural decision, oldest first. Each date is the commit that 
 - 2026-08-24: Hooks win during a grace period, then conclusive screen evidence decides, so a late repaint or a missed hook does not leave a wrong state. [Agent monitor reference](../references/agent-monitor/README.md#reconciliation-contract)
 - 2026-08-24: The projector stages the outbox in the same transaction as the state and the checkpoint, so a retryable delivery failure never undoes a recorded event. [Agent monitor reference](../references/agent-monitor/README.md#projection-and-storage)
 - 2026-10-11: Two Macs run as hub and member, with a shared secret on the peer RPCs, because Telegram lets only one process read a bot's replies. [Inbound routing reference](../references/inbound-message-routing/README.md)
+- 2026-10-21: The hub and member setup of 2026-10-11 is removed with Telegram. Two Macs share replies through iMessage, with no peer RPC, and the gRPC server listens on the Mac only. [ADR 0008](../adr/0008-harold-reaches-the-phone-by-imessage-only.md)
 - 2026-10-16: The event stream lives in an OpenData log and the state in Turso, both inside the Harold process, so no other service has to run. [Operation reference](../references/operation/README.md)
 - 2026-10-18: The web app is served on loopback and carried to the phone by `tailscale serve`, so nothing listens beyond the Mac. [Web app reference](../references/away-app/README.md)
 - 2026-10-18: ADR 0001, tools are modules Harold hosts, so a new tool needs no change to the core store or the Harold gRPC service. [ADR 0001](../adr/0001-tools-are-modules-hosted-by-harold.md)
@@ -126,6 +124,7 @@ One line per architectural decision, oldest first. Each date is the commit that 
 - 2026-10-20: ADR 0005, a tool may run a hosted model with the tools a skill allows, unchecked, because the skill's author decides what a run may do. [ADR 0005](../adr/0005-a-tool-may-run-a-hosted-model-with-the-tools-a-skill-allows.md)
 - 2026-10-20: ADR 0006, answers go to the chief early, and a set-aside question returns after a line is typed, a `later` or a dismiss that leaves nothing waiting and no answer unsent, so "later" still means after everything else. [ADR 0006](../adr/0006-answers-go-to-the-chief-early.md)
 - 2026-10-21: ADR 0007, the web app reaches the todos through the question tool's gRPC service, as the dash does, so a phone on the tailnet can answer them. [ADR 0007](../adr/0007-the-web-app-reaches-todos-through-the-question-service.md)
+- 2026-10-21: ADR 0008, Harold reaches the phone by iMessage only and its gRPC server stays on the Mac, so every Mac reads every reply from its own `chat.db` and nothing passes between Macs. [ADR 0008](../adr/0008-harold-reaches-the-phone-by-imessage-only.md)
 
 ## Departures from the standards
 
@@ -247,7 +246,7 @@ Raw terminal captures stay inside capture and parsing. Only eligible, sanitized,
 
 A turn-end update and an agent-state update serve different purposes. The dash needs an updated view even when you are already looking at the agent and no turn-end update is needed.
 
-A `TurnCompleted` event creates delivery work in the outbox. The delivery handler checks the `[notify]` settings and whether you are at the desk, then either leaves the update out, speaks it at the desk, or sends it through the away channel, iMessage or Telegram. Retryable delivery failures remain pending. Each channel has its own list of agents in `[notify]`, and one resolver finds the chief's pane for every part of Harold.
+A `TurnCompleted` event creates delivery work in the outbox. The delivery handler checks the `[notify]` settings and whether you are at the desk, then either leaves the update out, speaks it at the desk, or sends it through the away channel, iMessage. Retryable delivery failures remain pending. Each channel has its own list of agents in `[notify]`, and one resolver finds the chief's pane for every part of Harold.
 
 For a phone reply, the channel listener records an `InboundMessageReceived` event. The delivery handler resolves a live agent pane using the message's routing tag or the configured routing fallbacks, checks that an agent is still present, and submits the message to that pane through tmux.
 

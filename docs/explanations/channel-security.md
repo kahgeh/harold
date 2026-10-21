@@ -1,6 +1,6 @@
-# Away Channel Security: iMessage vs Telegram
+# Away Channel Security: iMessage
 
-Harold supports two away channels for phone notifications and inbound message routing when the screen is locked. Each has different security properties.
+Harold texts the phone and reads its replies by iMessage when the screen is locked. This page describes the security properties of that channel.
 
 ## iMessage
 
@@ -20,27 +20,6 @@ Harold supports two away channels for phone notifications and inbound message ro
 - Relies on `sqlite3` CLI queries against `~/Library/Messages/chat.db`, which Apple could change without notice.
 - Duplicate detection depends on reading outgoing message history from the same database.
 
-## Telegram
+## Handle filtering
 
-**Transport security:** Client-to-server encrypted (TLS), but **not end-to-end encrypted** by default. Telegram servers can read bot API message content. Secret chats (E2EE) are not available for bots.
-
-**Authentication:** Requires a bot token (long-lived API credential) and chat ID. The bot token grants full control over the bot — anyone with the token can send/receive messages.
-
-**Attack surface in Harold:**
-
-- The bot token is stored in config files. If leaked, an attacker can impersonate Harold or read all messages sent to the bot.
-- Inbound messages are filtered by `chat_id` — only messages from the configured chat are processed. Messages from other chats are ignored.
-- The same tmux relay protections (literal mode, control character stripping) apply.
-- Uses `reqwest::blocking::Client` with a 30s timeout. The `OnceLock` pattern prevents the client from being dropped inside an async context.
-
-**Limitations:**
-
-- Requires internet access for both sending and receiving (long-polling the Bot API).
-- Telegram's servers are a single point of trust — they see all message content.
-- Long-polling introduces latency compared to iMessage's filesystem-watch approach.
-
-## Recommendation
-
-Use **iMessage** when possible — it provides E2EE with no credentials to manage or leak. Choose **Telegram** when you need cross-platform access (e.g. phone notifications on a non-Apple device) and accept the trade-off that message content is visible to Telegram's servers and that a bot token must be protected.
-
-In either case, Harold's inbound message filtering (handle IDs for iMessage, chat ID for Telegram) ensures that only messages from the expected conversation are processed and relayed to agents.
+Harold's inbound message filtering (handle IDs) ensures that only messages from the expected conversation are processed and relayed to agents.

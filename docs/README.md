@@ -4,7 +4,6 @@
 
 - [Setup](how-tos/setup.md)
 - [Setup Agent Monitor Hooks](how-tos/setup-agent-monitor-hooks.md)
-- [Setup Telegram](how-tos/setup-telegram.md)
 - [Release](how-tos/release.md)
 
 ## Prerequisites
@@ -27,7 +26,7 @@
 ## Explanations
 
 - [Architecture](explanations/architecture.md)
-- [Channel Security: iMessage vs Telegram](explanations/channel-security.md)
+- [Channel Security: iMessage](explanations/channel-security.md)
 
 ## Decisions
 

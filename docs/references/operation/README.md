@@ -196,6 +196,8 @@ launchd starts Harold at login and after an exit other than 0. Some starts fail 
 
 The crash count lives in `<bundle>/data/crashes`, beside the store. Its first line is `running` while Harold runs, `clean` after a clean shutdown, or `gave-up`; later lines hold the times of recent starts that followed an unclean exit. A start that finds `running` counts one. At the third within 10 minutes Harold writes `gave-up`, and every later start, at login too, refuses with `crash_loop` until `haroldctl start` deletes the file. A clean shutdown resets the count.
 
+A configuration can still hold a setting Harold does not read: a `[telegram]` section, a `[peers]` section, `notify.telegram`, a `notify.away_channel` other than `"imessage"`, or a `grpc.host` that is not a loopback address (`127.0.0.0/8`, `::1` or `localhost`). Harold names each such setting in a fixed sentence, never with its value. Under launchd it prints `invalid configuration: ` followed by the sentences before the `startup refused` line. `harold --check-config` and `--check-ready` print the sentences to stderr and exit 1, and the installer prints them and keeps the running Harold. `notify.away_channel = "imessage"` is the one that does not stop Harold: it writes one warn line, `setting no longer read`, naming the key, and the key can be removed.
+
 Run any other way, from a terminal or as `--check-config`, Harold exits 1 on these errors. The `startup refused` line carries only fixed text and `reason`. It reaches telemetry only when the exporter has started, which is after the configuration loads; the chief cannot be alerted, because the alert address is not open yet.
 
 The first time the installer writes the LaunchAgents copy, macOS shows a "Background Items Added" notice naming `harold`, and lists Harold in System Settings > General > Login Items & Extensions > Allow in the Background. Three ways turn start at login off:
@@ -230,7 +232,7 @@ Use diagnostics only when intentionally testing turn-end update delivery. See [i
 
 ## Pausing messaging
 
-Harold has a messaging pause for the away channel. While messaging is paused the daemon keeps running, and so do the agent monitor, the dash stream and at-desk TTS, but nothing moves over iMessage or Telegram:
+Harold has a messaging pause for the away channel. While messaging is paused the daemon keeps running, and so do the agent monitor, the dash stream and at-desk TTS, but nothing moves over iMessage:
 
 - no away turn-end update, confirmation or error reply is sent;
 - no inbound message is routed to a pane, including messages already waiting in the delivery outbox;

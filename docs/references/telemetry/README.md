@@ -115,7 +115,7 @@ A merge whose spec has no approval file records no lead time, and neither does a
 
 **A phone request** is one reply from the user's phone that this Mac handles.
 
-- **Start:** the reply's own time, as stored in the Messages database or sent by Telegram.
+- **Start:** the reply's own time, as stored in the Messages database.
 - **End:** Harold has typed it into a pane and pressed Enter, before the confirmation is sent back.
 - **Latency:** end minus start.
 
@@ -153,8 +153,6 @@ These rules decide `wrong`:
 | Value | Meaning | Start |
 |---|---|---|
 | `imessage` | a reply read from the Messages database | the message's own time |
-| `telegram` | a reply from Telegram | Telegram's time for it |
-| `forwarded` | a reply another Mac forwarded to this one | when it was stored here |
 | `unknown` | a reply with no open request, for example one stored before a restart | when it was stored |
 
 **Not counted:** replies another Mac owns, which that Mac counts, and replies routed while messaging is paused. Their span is still exported, with outcome `not_owned` or `paused`. A reply Harold read but did not store carries `ignored`. These three outcomes appear on spans only, never on the metrics.
@@ -183,7 +181,7 @@ A reply whose payload failed for good never finishes, and is dropped after an ho
 | `harold.reply_stored` | storing the reply, so the stored event records the trace | |
 | `harold.turn` | the turn's start – the stop hook reached Harold | `pane_id`, `session.id`, `started_by`, and `session.source`, `turn.start` when they apply |
 | `harold.turn_complete` | the hook's call handled and its event stored | `pane_id` |
-| `harold.delivery`, and `harold.voice_note` inside it | the turn-end update sent or said | `kind`, `channel` (the `[notify]` key: `machine_audio_output`, `imessage`, `telegram` or `web_app`), `outcome`, `reason` for `skipped` and `held_back`, `text_cut` on `imessage`, `telegram` and `web_app` updates |
+| `harold.delivery`, and `harold.voice_note` inside it | the turn-end update sent or said | `kind`, `channel` (the `[notify]` key: `machine_audio_output`, `imessage` or `web_app`), `outcome`, `reason` for `skipped` and `held_back`, `text_cut` on `imessage` and `web_app` updates |
 | `harold.local_model`, inside it | the local model's run | `result` (`answered`, `failed`, `no_model`) |
 
 **A turn you start by speaking in a call** is one trace, with these spans in order:
@@ -206,9 +204,9 @@ A watch run is a trace of its own: `harold.watch.run`, one run of a watch, with 
 
 `harold.delivery`'s `channel` is the `[notify]` key of the channel that carried the update, or held it: a desk update is `machine_audio_output` whether delivered, skipped or held back, and one the app carried is `web_app`. Its `outcome` is `delivered`, `skipped` (with `reason` `duplicate_turn`, `session_active`, `pane_active`, `voice_mute`, `messaging_pause`, `messaged_this_turn` or `duplicate_message`), `held_back` (a list or the chief rule kept the update from going out, with `reason` `not_listed` or `chief`, and `channel` the key of the list that held it), `failed` (a send that failed before its 10th try, which is tried again, or a malformed payload, which is not) or `given_up` (its 10th failure; it is not tried again).
 
-`harold.delivery`'s `text_cut` is `true` when the update was cut to fit iMessage or Telegram, and `false` when it went whole. The app always gets the whole text, so `web_app` is always `false`. A cut also writes an info line, `turn-end update cut`, inside the span, with `channel`, `pane_id` and `count` (the characters before the cut). It never holds the text. An `AI CLI failed` or `failed to spawn AI CLI` warn line in the same trace says the whole reply was cut, not the AI CLI's text; with neither line, the AI CLI's text was cut, unless the AI CLI is not set or printed nothing, which write no line. The `AI CLI failed` line carries `exit_code`, `subtype` and `is_error` from the CLI's JSON result, never its text.
+`harold.delivery`'s `text_cut` is `true` when the update was cut to fit iMessage, and `false` when it went whole. The app always gets the whole text, so `web_app` is always `false`. A cut also writes an info line, `turn-end update cut`, inside the span, with `channel`, `pane_id` and `count` (the characters before the cut). It never holds the text. An `AI CLI failed` or `failed to spawn AI CLI` warn line in the same trace says the whole reply was cut, not the AI CLI's text; with neither line, the AI CLI's text was cut, unless the AI CLI is not set or printed nothing, which write no line. The `AI CLI failed` line carries `exit_code`, `subtype` and `is_error` from the CLI's JSON result, never its text.
 
-After a release, check by channel and day: `web_app` with `text_cut = true` must be 0, since more means the app path still cuts. For `imessage` or `telegram`, a day with at least 5 updates and more than 20% cut means the AI CLI is ignoring its 280-character rule or failing over to the whole reply, which is the cue to tighten the prompt. This is a check, not an alert.
+After a release, check by channel and day: `web_app` with `text_cut = true` must be 0, since more means the app path still cuts. For `imessage`, a day with at least 5 updates and more than 20% cut means the AI CLI is ignoring its 280-character rule or failing over to the whole reply, which is the cue to tighten the prompt. This is a check, not an alert.
 
 ```sql
 SELECT toDate(Timestamp) AS day, SpanAttributes['channel'] AS channel,
@@ -259,7 +257,7 @@ Metrics are sent every 30 seconds. Every metric also carries `harold.machine`.
 | `harold.phone_request.latency` | histogram, `s`, buckets 1, 2, 5, 10, 30, 60, 120, 300, 600 | `channel`, `resolved_by` |
 | `harold.turn_end_updates` | counter, `{update}` | `outcome` (`model`, `fallback`), `reason` (`none` for `model`, otherwise `no_model`, `model_failed`, `too_long` or `no_name`) |
 | `harold.web_app.pushes` | counter, `{push}` | `outcome` (`accepted`, `gone`, `refused`, `unreachable`) |
-| `harold.notifications` | counter, `{notification}` | `agent` (the pane's folder below the home folder, such as `Dev/p/harold/main`), `channel` (`imessage`, `telegram`, `web_app` or `machine_audio_output`), `outcome` (`sent`, or `kept` when the channel's list held it back). Counted only on a channel that is set up and turned on |
+| `harold.notifications` | counter, `{notification}` | `agent` (the pane's folder below the home folder, such as `Dev/p/harold/main`), `channel` (`imessage`, `web_app` or `machine_audio_output`), `outcome` (`sent`, or `kept` when the channel's list held it back). Counted only on a channel that is set up and turned on |
 | `harold.turns` | counter, `{turn}` | `session.id`, `pane_id`, `started_by` |
 | `harold.turn.duration` | histogram, `s`, buckets 10, 30, 60, 120, 300, 600, 1800, 3600 | `started_by` |
 | `pod.specs` | gauge, `{spec}` | `pod.product`, `state` |

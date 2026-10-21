@@ -113,3 +113,4 @@ Hardening recommendation 3 assumed a gRPC service bound to localhost. With a hub
 - The calls are plain gRPC over HTTP with no TLS of their own. Tailscale encrypts the traffic and limits who can reach the port.
 - The user accepted this on 2026-10-11 on the basis that the Macs bind to Tailscale addresses only. Binding `grpc.host` to `0.0.0.0` or a LAN address is not accepted.
 - `ForwardReply` text is routed like any reply, so the member's existing input handling applies to it. A holder of the member's secret can send text to that Mac's agents.
+- 2026-10-21: The gRPC server is back on loopback only. Harold refuses a `grpc.host` that is not a loopback address, and the two peer calls are removed ([ADR 0008](adr/0008-harold-reaches-the-phone-by-imessage-only.md)).

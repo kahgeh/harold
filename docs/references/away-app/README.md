@@ -156,7 +156,7 @@ With `[web_app]` set, the chief's messages always go into the app's thread. Once
 | From the chief's pane (turn-end updates, `send-message-to-away-device`, spoken lines), with push turned on and no call open | **The app only, as text.** Harold puts the message in the thread and sends a push. A spoken line arrives as its text. No voice note is made. |
 | A spoken line from the chief while the phone's call is open | **The phone's call.** It plays on the phone at once, and its text is added to the thread, with no push and no iMessage. |
 | From the chief, when no phone has turned push on, or the push service refuses the push or cannot be reached | **iMessage only, once.** It is sent as today, starting `(app unreachable)`. A push address the service reports gone (`404` or `410`) is deleted. |
-| From any other pane | **iMessage as today.** The away channel's list (`notify.imessage` or `notify.telegram`) decides what is left out. |
+| From any other pane | **iMessage as today.** The away channel's list (`notify.imessage`) decides what is left out. |
 | The user's iMessage replies | **As today**, routed by tag or the latest notifier. Nothing in iMessage changes. |
 
 - **Once and once only:** a push the service accepted counts as delivered, and the message does not go to iMessage too. A push it refused goes to iMessage, so nothing is lost.
@@ -239,7 +239,7 @@ Harold logs no message text, no reply, no push address and no key. The app adds 
 |---|---|
 | `app push sent` | `outcome` (`accepted`) |
 | `app push refused` | `outcome` (`gone`, `refused` or `unreachable`) and `reason` (`status_<code>`, `timeout`, `connect`, `send`, `build` or `client`) |
-| `app message not pushed` | `reason` (`no_subscriptions`, `subscriptions_unread` or `none_accepted`) and `outcome`: `away` with `channel` (`imessage` or `telegram`) when the away channel took the message as `(app unreachable)`, or `held` when the pane is not on the away channel's list |
+| `app message not pushed` | `reason` (`no_subscriptions`, `subscriptions_unread` or `none_accepted`) and `outcome`: `away` with `channel` (`imessage`) when the away channel took the message as `(app unreachable)`, or `held` when the pane is not on the away channel's list |
 | `app page connected` | none |
 | `app page not connected` | `reason` (`store_unread` or `render_failed`) |
 | `app page disconnected` | `reason` (`page_gone`, `shutdown` or `store_stopped`) and `seconds`, how long the page was connected. Harold notices a closed page at the next patch or keep-alive, within about 15 seconds |

@@ -223,7 +223,7 @@ The canonical schema is `harold-api/proto/harold.proto`. The service exposes exa
 | `monitor_health = 3` | repeated `AgentMonitorHealth` | Current component health |
 | `panes = 4` | repeated `AgentPaneState` | Current live agent incarnations |
 | `tts_muted = 5` | `bool` | Whether at-desk TTS is muted |
-| `messaging_paused = 6` | `bool` | Whether away-channel messaging (iMessage or Telegram, both directions) is paused |
+| `messaging_paused = 6` | `bool` | Whether away-channel messaging (iMessage, both directions) is paused |
 | `harold_version = 7` | `string` | Harold's release version (`source` for a source build); empty when unknown |
 
 `AgentMonitorHealth` contains `component = 1`, `state = 2`, `reason_code = 3`, and `observed_at_ms = 4`.

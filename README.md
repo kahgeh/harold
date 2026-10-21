@@ -7,7 +7,7 @@ Harold watches the coding agents you run in tmux and tells you when one finishes
 ## What it does for you
 
 - When an agent's turn ends, Harold says so at the desk.
-- When you are away, it sends the turn-end update to the phone by iMessage, Telegram or the web app.
+- When you are away, it sends the turn-end update to the phone by iMessage or the web app.
 - Your reply from the phone goes to the right pane.
 - The dash shows every agent's state and your todos.
 - The web app holds the chief's thread, the todo page and calls.

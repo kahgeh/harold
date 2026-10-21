@@ -27,10 +27,7 @@ The source installer uses the checked-in Cargo lockfile; `--offline` requires th
 
 ## Away channel
 
-Choose one channel during installation or supply a local configuration file.
-
-- **iMessage:** sign into Messages, provide the recipient and database handle IDs, and configure macOS database/automation permissions for the installed Harold process.
-- **Telegram:** provide a bot token and chat ID. See [Setup Telegram](how-tos/setup-telegram.md).
+The away channel is iMessage. During installation, or in a local configuration file: sign into Messages, provide the recipient and database handle IDs, and configure macOS database/automation permissions for the installed Harold process.
 
 The installer checks service readiness without sending messages. Channel permissions and delivery must be tested separately.
 

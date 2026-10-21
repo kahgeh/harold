@@ -8,7 +8,7 @@ The installer starts Harold to verify installation, and launchd starts it again 
 
 - An Apple Silicon Mac running macOS 15 or newer, with an active graphical login session. Run the installer as your normal user.
 - Python 3.9 or newer, tmux, and grpcurl.
-- A configured iMessage account or Telegram bot for the away channel.
+- A Messages account signed into iMessage, for the away channel.
 
 With Homebrew available, install the runtime tools:
 
@@ -30,7 +30,7 @@ This downloads the latest stable release and verifies its SHA-256 checksum befor
 
 ## 2. Configure
 
-On the first run, choose iMessage or Telegram and enter the requested channel settings. Telegram tokens are entered without echo. Alternatively, supply a complete local configuration file:
+On the first run, enter the iMessage recipient and handle IDs when asked. Alternatively, supply a complete local configuration file:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/kahgeh/harold/main/scripts/bootstrap.sh | sh -s -- --config /path/to/local.toml
@@ -38,7 +38,7 @@ curl -fsSL https://raw.githubusercontent.com/kahgeh/harold/main/scripts/bootstra
 
 Without a terminal, supply `--config PATH` for the first installation. Existing configuration is retained by default.
 
-The installer validates configuration before replacing the installed program. It signs Harold with the code-signing certificate you name once, and with no certificate (ad-hoc) until you name one; see [Keep permissions across installs](#keep-permissions-across-installs).
+The installer validates configuration before replacing the installed program. If `local.toml` holds a setting Harold does not read (`[telegram]`, `[peers]`, `notify.telegram`, a `notify.away_channel` other than `"imessage"`, or a `grpc.host` that is not a loopback address), the installer prints one sentence per setting, stops, and leaves the running Harold in place. Remove the named settings, then run the install again. It signs Harold with the code-signing certificate you name once, and with no certificate (ad-hoc) until you name one; see [Keep permissions across installs](#keep-permissions-across-installs).
 
 For iMessage, Harold needs two macOS permissions: Full Disk Access, to read your replies from the Messages database, and permission to control Messages, to send. After an install, the installer says whether both carried over from the previous install or prints the steps to grant them.
 
@@ -131,7 +131,6 @@ Harold gives each way it can reach you its own list of the folders whose agents 
 chief = "/Users/you/Dev/chief-of-pods"                    # which pane is the chief
 chief_session = "chief"                                   # the chief's tmux session
 imessage = ["/Users/you/Dev/chief-of-pods"]               # who may reach the phone by iMessage
-telegram = ["/Users/you/Dev/chief-of-pods"]               # who may reach the phone by Telegram
 web_app = ["/Users/you/Dev/chief-of-pods"]                # who may reach the phone through the web app
 machine_audio_output = ["/Users/you/Dev/chief-of-pods"]   # who may be spoken aloud on the Mac
 ```
@@ -162,7 +161,7 @@ If you run Harold on more than one Mac signed into the same Apple ID, each Mac n
 
 To check it, lock your screen on one Mac and trigger an agent turn completion. The turn-end update starts with `🤖 [<machine_name>/…]`. Reply without a tag: only the Mac that sent the latest phone notification answers. A reply that starts with `[<machine_name>]` or `[<machine_name>/<pane>]` goes to that Mac.
 
-The [inbound routing reference](../references/inbound-message-routing/README.md#several-macs) explains the rules and the failure modes. For Telegram, see [Several Macs: a hub and members](setup-telegram.md#several-macs-a-hub-and-members).
+The [inbound routing reference](../references/inbound-message-routing/README.md#several-macs) explains the rules and the failure modes.
 
 ## 3. Verify and control the service
 
@@ -299,8 +298,6 @@ The daemon also provides an explicit diagnostic command that can speak or send a
 ```sh
 ~/bin/harold/harold --diagnostics
 ```
-
-For Telegram configuration details, see [Setup Telegram](setup-telegram.md).
 
 ## Build from source
 

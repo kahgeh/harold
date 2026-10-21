@@ -122,7 +122,7 @@ arrived; otherwise the palette shows `Commands unavailable until connected`.
 Before the first snapshot the masthead shows `○ VOICE —`.
 
 `Messaging: pause` is the messaging pause for Harold's away channel: it stops all
-iMessage or Telegram traffic, in both directions, without stopping Harold.
+iMessage traffic, in both directions, without stopping Harold.
 `Messaging: resume` turns it back on. Both are offered under the same conditions
 as the voice commands. While Harold reports messaging as paused, the masthead of
 every connected dash shows `■ MSG PAUSED` after the voice state; nothing is shown

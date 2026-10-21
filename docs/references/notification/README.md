@@ -1,6 +1,6 @@
 # Notification
 
-This reference covers the turn-end update: how Harold tells the user a turn ended, by voice when at the desk or the configured away channel (iMessage or Telegram) when away.
+This reference covers the turn-end update: how Harold tells the user a turn ended, by voice when at the desk or the away channel, iMessage, when away.
 
 ## Problem
 
@@ -8,7 +8,7 @@ AI agents finish turns silently. Without active monitoring you won't know a task
 
 ## Architecture
 
-Harold's event handler stages `TurnCompleted` events in its durable outbox and calls `notify()` in stream-version order. Successful deliveries and intentional skips are marked complete. TTS command, Telegram HTTP/configuration, and iMessage process failures remain pending and are tried again, after 1 second, then 2, 4, 8, 16 and 32 seconds, then 60 seconds before each of the last three tries. Meanwhile no later delivery is tried, so deliveries keep their order. The failures are counted with the delivery in the outbox, so a restart does not start the count again, though the first try after a restart comes at once. At the 10th failure Harold gives the delivery up: it is recorded as a terminal failure with its last error, Harold logs `delivery given up` (`outcome = given_up`, `reason = too_many_tries`, never the message or the error), and moves on to the next delivery at once. With the alert address on, Harold also types `harold alert: delivery-given-up firing` into the chief's pane; see [How an alert reaches the chief](../telemetry/README.md#how-an-alert-reaches-the-chief). Malformed payloads and unknown event types are recorded as terminal failures so one poison event cannot block later work. The path of the turn-end update is chosen based on runtime checks: whether the completing pane's tmux session has an attached client, whether the completing pane is the one the user is looking at, and whether the screen is locked.
+Harold's event handler stages `TurnCompleted` events in its durable outbox and calls `notify()` in stream-version order. Successful deliveries and intentional skips are marked complete. TTS command and iMessage process failures remain pending and are tried again, after 1 second, then 2, 4, 8, 16 and 32 seconds, then 60 seconds before each of the last three tries. Meanwhile no later delivery is tried, so deliveries keep their order. The failures are counted with the delivery in the outbox, so a restart does not start the count again, though the first try after a restart comes at once. At the 10th failure Harold gives the delivery up: it is recorded as a terminal failure with its last error, Harold logs `delivery given up` (`outcome = given_up`, `reason = too_many_tries`, never the message or the error), and moves on to the next delivery at once. With the alert address on, Harold also types `harold alert: delivery-given-up firing` into the chief's pane; see [How an alert reaches the chief](../telemetry/README.md#how-an-alert-reaches-the-chief). Malformed payloads and unknown event types are recorded as terminal failures so one poison event cannot block later work. The path of the turn-end update is chosen based on runtime checks: whether the completing pane's tmux session has an attached client, whether the completing pane is the one the user is looking at, and whether the screen is locked.
 
 Summarisation uses different backends depending on the path:
 
@@ -16,7 +16,6 @@ Summarisation uses different backends depending on the path:
 | ----------------- | ------------------------------------ | ----------------------------- | ------------------------------------------------- |
 | At desk (TTS)     | Local model (`mlx_lm`)               | The agent's name, the project and 500 chars of last_user_prompt | one sentence of at most 25 words naming the agent, ≤48 tokens |
 | Away (iMessage)   | AI CLI or the whole reply, cut at a sentence end within 280 | Full assistant_message         | `🤖 [machine_name/pane_label] body (context)` + trailing question |
-| Away (Telegram)   | AI CLI or the whole reply, cut at a sentence end within 280 | Full assistant_message         | `🤖 [machine_name/pane_label] body (context)` + trailing question |
 
 If the local model is not configured, fails, or gives no sentence that names the agent, the turn-end update is the fallback sentence, `<Name> has finished and is waiting.`, such as `The chief has finished and is waiting.`
 
@@ -49,9 +48,9 @@ TurnCompleted event (pane_id from $TMUX_PANE in stop hook)
   │   └─ yes → messaging paused? → skip (return)
   │           mark was under 10 minutes old? → leave out (return)
   │           pane on neither notify.web_app (the chief, with the app)
-  │             nor the away channel's list (notify.imessage or notify.telegram)?
+  │             nor the away channel's list (notify.imessage)?
   │             → leave out (return)
-  │           channels::notify_away() (iMessage or Telegram per config)
+  │           channels::notify_away() (iMessage)
 ```
 
 `<session>` is resolved from the completing pane via `tmux display-message -t <pane_id> -p #{session_name}`.
@@ -78,34 +77,35 @@ Config keys (`[tts]`):
 
 `SetTtsMuted(muted)` turns the at-desk TTS channel off or on. The flag is stored as a `TtsMuteChanged` stream event and projected into the `settings` table, so it persists across daemon restarts until changed back. It is part of the agent-state snapshot (`tts_muted`), which is how `tmx-agent-dash` shows `VOICE ON` / `VOICE MUTED`.
 
-- Mute gates only the at-desk TTS channel. The delivery is recorded as an intentional skip. Turn-end updates to the away channel (iMessage, Telegram) are unaffected; they have their own switch, described below.
+- Mute gates only the at-desk TTS channel. The delivery is recorded as an intentional skip. Turn-end updates to the away channel (iMessage) are unaffected; they have their own switch, described below.
 - A `TurnCompleted` delivered in the same projection batch as a mute change observes the post-batch value.
 - Limitation: `SetTtsMuted` compares the requested value against the daemon's last published snapshot, so two opposite requests from a non-dash client within the projection window may drop the second. The dash always sends from confirmed state and is unaffected.
 
 ### Pausing messaging
 
-`SetMessagingPaused(paused)` is the counterpart for the away channel. While paused, a `TurnCompleted` that would go to iMessage or Telegram is recorded as an intentional skip before anything is summarised or sent, and it is not sent later. At-desk TTS is unaffected, just as the voice mute does not affect the away channel. The flag is stored as a `MessagingPausedChanged` stream event, projected into the `settings` table, and published in the snapshot as `messaging_paused`. It also stops inbound routing and replies; see [Operation](../operation/README.md#pausing-messaging).
+`SetMessagingPaused(paused)` is the counterpart for the away channel. While paused, a `TurnCompleted` that would go to iMessage is recorded as an intentional skip before anything is summarised or sent, and it is not sent later. At-desk TTS is unaffected, just as the voice mute does not affect the away channel. The flag is stored as a `MessagingPausedChanged` stream event, projected into the `settings` table, and published in the snapshot as `messaging_paused`. It also stops inbound routing and replies; see [Operation](../operation/README.md#pausing-messaging).
 
-## Away: iMessage or Telegram
+## Away: iMessage
 
-The away channel is selected by `[notify] away_channel` (`"imessage"` or `"telegram"`). Both channels share the same delivery flow and prefix all outgoing messages with `🤖`. This serves two purposes:
+The away channel is iMessage. Harold prefixes all outgoing messages with `🤖`. This serves two purposes:
 
 - **Inbound filtering** — the listener skips messages starting with `🤖` so Harold doesn't route its own messages back to agents as user replies
 - **Visual distinction** — on your phone you can immediately tell which messages are from Harold vs from you
 
-### Common steps (both channels)
+### Common steps
 
-1. `summarise_for_notification()` — uses AI CLI to summarise `assistant_message` into 2–3 sentences under 280 chars; falls back to the whole reply (newlines flattened). The CLI runs with `--output-format json`; a non-zero exit, `is_error = true` or a `subtype` other than `success` counts as a failure, and the `AI CLI failed` warn line carries `exit_code`, `subtype` and `is_error`. Neither is cut here. The web app gets this whole text. iMessage and Telegram split the trailing question off first, then `fit_turn_end_text()` cuts the main text and the question each to 280 characters: after the last sentence that fits with ` …`, else after the last whole word with `…`, and inside a word only when one word is over the limit
+1. `summarise_for_notification()` — uses AI CLI to summarise `assistant_message` into 2–3 sentences under 280 chars; falls back to the whole reply (newlines flattened). The CLI runs with `--output-format json`; a non-zero exit, `is_error = true` or a `subtype` other than `success` counts as a failure, and the `AI CLI failed` warn line carries `exit_code`, `subtype` and `is_error`. Neither is cut here. The web app gets this whole text. iMessage splits the trailing question off first, then `fit_turn_end_text()` cuts the main text and the question each to 280 characters: after the last sentence that fits with ` …`, else after the last whole word with `…`, and inside a word only when one word is over the limit
 2. `split_body()` — splits the last sentence ending in `?` into a separate follow-up message
 3. Message assembled: `🤖 [<machine_name>/<pane_label>] <main body> (<main_context>)`. `machine_name` is this Mac's name, which defaults to the output of `hostname -s`.
 4. Trailing question (if present) sent as a second `🤖`-prefixed message, `🤖 <question>`, without a tag
 
 Confirmations and error replies carry the machine name too: `🤖 ✓ Delivered to [<machine_name>/<pane_label>]` and `🤖 [<machine_name>] <detail>`. The machine name tells you which Mac a message came from and lets a reply reach that Mac. See [Several Macs](../inbound-message-routing/README.md#several-macs).
 
-### iMessage-specific
+### iMessage
 
 5. Duplicate check — queries `chat.db` for the most recent outgoing message to first configured handle ID; skips if identical (after stripping `🤖` prefix)
 6. Messages sent via AppleScript: `tell application "Messages" to send "🤖 ..." to buddy "..."`
+7. Nothing is reported to the other Macs about which Mac sent the latest message: they read the message's row in `chat.db`, which is how a reply with no tag is routed to it.
 
 Config keys (`[imessage]`):
 
@@ -113,18 +113,6 @@ Config keys (`[imessage]`):
 | ------------ | -------------------------------------------------------------------- |
 | `recipient`  | Phone number or email of the iMessage recipient                      |
 | `handle_ids` | All `chat.db` handle IDs for your Apple ID (dedup and inbound poll)  |
-
-### Telegram-specific
-
-5. Before a message is sent, the Mac records which Mac sent the latest message, so that a reply with no tag can be routed to it. The hub records itself as the latest notifier. A member calls `ReportNotification` on the hub with its machine name and the shared secret. A failed report is logged and the message is still sent. On iMessage nothing is reported: the other Macs read the message's row in `chat.db`.
-6. Messages sent via Telegram Bot API `sendMessage` to the configured chat ID
-
-Config keys (`[telegram]`):
-
-| Key         | Description                                |
-| ----------- | ------------------------------------------ |
-| `bot_token` | Telegram bot token from @BotFather         |
-| `chat_id`   | Numeric chat ID for the chat Harold sends to  |
 
 ## Updates Harold leaves out while you are away
 
@@ -138,13 +126,12 @@ When Harold sends an agent's message, it records the pane and the time. The pane
 
 ### Channels
 
-Harold has four ways to reach you. Each is a **channel** with its own list in `[notify]` of the folders whose agents may use it, and `chief` names the chief's pane:
+Harold has three ways to reach you. Each is a **channel** with its own list in `[notify]` of the folders whose agents may use it, and `chief` names the chief's pane:
 
 ```toml
 [notify]
 chief = "chief-of-pods"                   # which pane is the chief, matched by folder
 imessage = ["chief-of-pods"]              # who may reach the phone by iMessage
-telegram = ["chief-of-pods"]              # who may reach the phone by Telegram
 web_app = ["chief-of-pods"]               # who may reach the phone through the web app
 machine_audio_output = ["chief-of-pods"]  # who may be spoken aloud on the Mac
 ```
@@ -153,12 +140,9 @@ These are Harold's defaults (`default.toml`). With nothing in `local.toml`, only
 
 | Key | The channel | What goes out on it |
 | --- | --- | --- |
-| `imessage` | iMessage to the phone, when `away_channel = "imessage"` | Turn-end updates while the screen is locked, messages agents ask Harold to send, and spoken lines while away (as voice notes) |
-| `telegram` | Telegram to the phone, when `away_channel = "telegram"` | The same as iMessage |
+| `imessage` | iMessage to the phone | Turn-end updates while the screen is locked, messages agents ask Harold to send, and spoken lines while away (as voice notes) |
 | `web_app` | The web app on the phone (`[web_app]`): its thread, its push and its call | The same, as text in the thread with a push, or a spoken line played in the phone's call |
 | `machine_audio_output` | Speech on the Mac: the `[tts]` command, and the Mac's call | Turn-end updates at the desk, `harold speak` lines at the desk, and other agents' updates said into a call at the Mac |
-
-Only one of `imessage` and `telegram` is in use at a time, the one `away_channel` names. The other's list is read and checked, but not used.
 
 **What a list holds.** Each entry is a folder:
 
@@ -188,13 +172,13 @@ Harold takes a pane's folder, the working directory tmux reports for it, from it
 | An agent message it asks Harold to send | the phone, below | `agent message dropped (not in notify.<key>)` |
 | A line it asks Harold to speak, screen locked or in the phone's call | the phone, below | `spoken line dropped (not in notify.<key>)` |
 
-**The phone** checks, in order: with `[web_app]` set and the chief on `web_app`, the message goes to the app (its thread with a push, or played in the phone's call when it is open; the call also takes a spoken line from any pane on `web_app`). Otherwise, or when the app can't take it (no phone has push turned on, or the push is refused), it goes by `away_channel` if the pane is on that channel's list, and a message the app couldn't take starts `(app unreachable)`. Otherwise it is held back, and the line names the last list checked. The voice mute and the messaging pause are looked at before any list.
+**The phone** checks, in order: with `[web_app]` set and the chief on `web_app`, the message goes to the app (its thread with a push, or played in the phone's call when it is open; the call also takes a spoken line from any pane on `web_app`). Otherwise, or when the app can't take it (no phone has push turned on, or the push is refused), it goes by iMessage if the pane is on that list, and a message the app couldn't take starts `(app unreachable)`. Otherwise it is held back, and the line names the last list checked. The voice mute and the messaging pause are looked at before any list.
 
 Harold writes each of these lines at `INFO` with the pane in a `pane_id` field, and with `channel` (the key of the list that held the pane back), `kind` (`turn_end_update`, `agent_message` or `spoken_line`), `reason` (`not_listed`; `chief` for the chief's own turn-end update at the desk; `messaged_this_turn` for the line above) and `agent` (the pane's folder below the home folder, such as `Dev/p/harold/main`, so it holds no user name). None holds message or spoken text. `<key>` is the channel's key.
 
 **Held back.** An update or message a channel's rules keep from going out is held back: a turn-end update is "left out" and an agent message or spoken line is "dropped". The `harold.delivery` span of a held-back turn-end update has `outcome = held_back` and a `reason`, and its `channel` is the key of the list that held it, not `imessage` for every update. A pane that sent a message this turn is left out by its own choice and is `skipped`, not held back.
 
-**What is counted.** `harold.notifications` counts by `agent`, `channel` and `outcome`: `sent` when the channel took a turn-end update, agent message or spoken line, and `kept` when the channel's list held it back (`not_listed`). It counts only on a channel that is set up and turned on: `imessage` has `[imessage] recipient`, `telegram` has `bot_token` and `chat_id`, `web_app` has the `[web_app]` table, and `machine_audio_output` is always set up; `imessage` or `telegram` is on only when `away_channel` names it, `machine_audio_output` while the voice mute is off, and the phone channels while messaging is not paused. The chief rule, the mute, the pause and a message sent this turn count neither. See the [telemetry reference](../telemetry/README.md).
+**What is counted.** `harold.notifications` counts by `agent`, `channel` and `outcome`: `sent` when the channel took a turn-end update, agent message or spoken line, and `kept` when the channel's list held it back (`not_listed`). It counts only on a channel that is set up and turned on: `imessage` has `[imessage] recipient`, `web_app` has the `[web_app]` table, and `machine_audio_output` is always set up; `imessage` is on, `machine_audio_output` while the voice mute is off, and the phone channels while messaging is not paused. The chief rule, the mute, the pause and a message sent this turn count neither. See the [telemetry reference](../telemetry/README.md).
 
 **When the chief's message is held back.** An agent message or spoken line from a pane in the chief's folder (matched by folder, so it works while another pane is the chief) that a list holds back with reason `not_listed`, on a channel that is set up and turned on, makes Harold type `harold alert: chief-message-held-back firing` into the chief's pane. The voice mute, the messaging pause and a message sent this turn are the user's choice or by design, so they do not fire it.
 
@@ -204,7 +188,7 @@ The terms "left out" (a turn-end update Harold chose not to say or send) and "dr
 | --- | --- |
 | `chief` | An entry (above). Harold checks it at start: an empty entry, one of only slashes, or one holding `..` or `.` as a folder stops the daemon, naming the key and the entry. |
 | `chief_session` | The chief's tmux session name (optional). Harold checks it at start: an empty name, or one holding `:` or `.`, stops the daemon with `notify.chief_session must be a tmux session name, not empty and with no ':' or '.'`. |
-| `imessage`, `telegram`, `web_app`, `machine_audio_output` | Lists of entries. Harold checks every list at start, including the one `away_channel` does not use; `*` is allowed. |
+| `imessage`, `web_app`, `machine_audio_output` | Lists of entries. Harold checks every list at start; `*` is allowed. |
 
 A key inside `[notify]` that Harold does not know, such as `imesage`, stops the start. `away_updates_only_from` stops it with `notify.away_updates_only_from is now notify.away_messages_only_from; rename the key`. Harold reads the lists at start, so a change takes effect at the next restart.
 
@@ -245,7 +229,7 @@ It differs from a turn-end update in these ways:
 | | Turn-end update | Agent message |
 |---|---|---|
 | Started by | The agent's turn ending | The agent running the command |
-| Text | Harold's summary of the agent's final reply. The web app gets all of it; iMessage and Telegram get it cut at a sentence end within 280 characters | The agent's text as written, made one line, 1,000 characters at most |
+| Text | Harold's summary of the agent's final reply. The web app gets all of it; iMessage gets it cut at a sentence end within 280 characters | The agent's text as written, made one line, 1,000 characters at most |
 | Form | `🤖 [machine_name/pane_label] body (context)`, with a trailing question sent separately | `🤖 [machine_name/pane_label] text`, one message |
 | Presence checks | Sent to the phone only when the screen is locked; skipped when the session or pane is active; left out by the rules in "Updates Harold leaves out while you are away" | None: sent whether the screen is locked or not |
 | Channel lists | Left out for a pane the phone's lists do not name, while the screen is locked | Dropped for a pane the phone's lists do not name, whether the screen is locked or not; the command still exits 0 |
@@ -282,7 +266,7 @@ Harold stores the line and then handles it:
 | Situation | What Harold does |
 |---|---|
 | The pane is not on the list of the channel the line would use (`machine_audio_output` at the desk, the phone's lists while away) | Drops it and logs `spoken line dropped (not in notify.<key>) pane_id=…`. The voice mute and the messaging pause are looked at first. |
-| Screen locked (away), messaging not paused | Makes a voice note of the line (described below) and sends it to the configured iMessage recipient with Messages, as an attachment in the same chat. With Telegram, it sends the line as text. |
+| Screen locked (away), messaging not paused | Makes a voice note of the line (described below) and sends it to the configured iMessage recipient with Messages, as an attachment in the same chat. |
 | Screen locked, messaging paused | Dropped and logged, as other away messages are |
 | Screen unlocked (at the desk), voice on | Says the line with the configured `[tts]` command, as turn-end updates are said, without adding anything to it |
 | Screen unlocked, voice off | Dropped and logged |
@@ -337,7 +321,7 @@ sequenceDiagram
     participant gRPC as Harold (gRPC)
     participant Store as Event store
     participant Handler as Event handler
-    participant Channel as Away channel<br/>(iMessage or Telegram)
+    participant Channel as Away channel<br/>(iMessage)
 
     Hook->>gRPC: TurnComplete RPC (last_assistant_message from hook input)
     gRPC->>Store: append TurnCompleted event
@@ -347,10 +331,10 @@ sequenceDiagram
     Store-->>Handler: pending TurnCompleted delivery
     Handler->>Handler: ioreg → IOConsoleLocked = true
     note over Handler: left out here if the pane messaged the phone this turn,<br/>or if the phone's lists do not name the pane
-    Handler->>Handler: summarise_for_notification() via AI CLI (fallback: the whole reply; iMessage and Telegram then cut at a sentence end within 280)
+    Handler->>Handler: summarise_for_notification() via AI CLI (fallback: the whole reply; iMessage then cuts at a sentence end within 280)
     Handler->>Handler: split_body() → main body + trailing question (if ends in ?)
     Handler->>Channel: send "🤖 [studio/harold:0.3] <body> (harold)"
-    note over Channel: iMessage: dedup check via chat.db then osascript<br/>Telegram: Bot API sendMessage
+    note over Channel: dedup check via chat.db then osascript
     Handler->>Handler: set last_away_notification_source_agent
     Handler->>Channel: send "🤖 <trailing question>" (if present)
     Handler->>Store: mark delivery complete
