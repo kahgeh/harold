@@ -2899,7 +2899,7 @@ fn a_turn_end_delivery_continues_the_trace_kept_for_its_event() {
     assert_eq!(deliveries.len(), 1);
     assert_eq!(deliveries[0].span_context.trace_id(), trace_id);
     assert_eq!(attr(&deliveries[0], "kind"), "turn_end");
-    assert_eq!(attr(&deliveries[0], "channel"), "tts");
+    assert_eq!(attr(&deliveries[0], "channel"), "machine_audio_output");
     assert_eq!(attr(&deliveries[0], "outcome"), "delivered");
     assert!(
         telemetry::take_turn_delivery(&event_id.to_string()).is_none(),
@@ -2947,6 +2947,27 @@ fn a_skipped_turn_end_records_skipped() {
     let deliveries = deliveries_under(parent);
     assert_eq!(deliveries.len(), 1);
     assert_eq!(attr(&deliveries[0], "outcome"), "skipped");
+}
+
+#[test]
+fn a_muted_desk_turn_end_records_skipped_on_machine_audio_output() {
+    let event_id = uuid::Uuid::new_v4();
+    let (_, parent) = keep_a_turn_for(event_id);
+    let environment = Arc::new(FakeEnvironment::new(""));
+    crate::outbound::set_tts_muted(true);
+
+    let outcome = dispatch_turn_end(
+        &Unpaused(dispatcher_with(&environment)),
+        &event_id.to_string(),
+        &unique_pane(),
+    );
+    crate::outbound::set_tts_muted(false);
+
+    assert!(matches!(outcome, Ok(DeliveryOutcome::Skipped)));
+    let deliveries = deliveries_under(parent);
+    assert_eq!(deliveries.len(), 1);
+    assert_eq!(attr(&deliveries[0], "outcome"), "skipped");
+    assert_eq!(attr(&deliveries[0], "channel"), "machine_audio_output");
 }
 
 #[test]
@@ -3681,7 +3702,7 @@ async fn a_failed_thread_write_is_retryable_and_sends_nothing() {
 #[tokio::test]
 async fn a_chief_turn_end_records_the_app_as_its_channel_and_the_fallback_as_today() {
     for (delivery, channel) in [
-        (AppDelivery::Pushed, "app"),
+        (AppDelivery::Pushed, "web_app"),
         (
             AppDelivery::NotPushed(NotPushedReason::NoSubscriptions),
             "imessage",
@@ -4758,4 +4779,32 @@ async fn the_delivery_span_of_a_held_back_update_names_the_holding_channel_and_o
         .collect();
     assert_eq!(channels.len(), 1, "recorded once: {channels:?}");
     assert_eq!(attr(&deliveries[0], "channel"), "imessage");
+}
+
+#[tokio::test]
+async fn the_delivery_span_of_a_desk_update_a_list_holds_back_names_machine_audio_output() {
+    let directory = TestDirectory::new();
+    let tree = unique_tree();
+    let (environment, dispatcher, _alerts) = published_with_alerts(
+        &directory,
+        &lists_naming(&tree, &format!("{tree}/chief-of-pods")),
+        vec![agent_observed("%2", 20, &format!("{tree}/harold"))],
+    )
+    .await;
+    environment.set_screen_locked(false);
+    let event_id = uuid::Uuid::new_v4();
+    let (_trace, parent) = keep_a_turn_for(event_id);
+
+    let outcome = dispatch_turn_end(&Unpaused(dispatcher), &event_id.to_string(), "%2");
+
+    assert!(matches!(
+        outcome,
+        Ok(DeliveryOutcome::HeldBack {
+            reason: "not_listed"
+        })
+    ));
+    let deliveries = deliveries_under(parent);
+    assert_eq!(deliveries.len(), 1);
+    assert_eq!(attr(&deliveries[0], "outcome"), "held_back");
+    assert_eq!(attr(&deliveries[0], "channel"), "machine_audio_output");
 }

@@ -183,7 +183,7 @@ A reply whose payload failed for good never finishes, and is dropped after an ho
 | `harold.reply_stored` | storing the reply, so the stored event records the trace | |
 | `harold.turn` | the turn's start – the stop hook reached Harold | `pane_id`, `session.id`, `started_by`, and `session.source`, `turn.start` when they apply |
 | `harold.turn_complete` | the hook's call handled and its event stored | `pane_id` |
-| `harold.delivery`, and `harold.voice_note` inside it | the turn-end update sent or said | `kind`, `channel`, `outcome`, `reason` for `held_back` |
+| `harold.delivery`, and `harold.voice_note` inside it | the turn-end update sent or said | `kind`, `channel` (the `[notify]` key: `machine_audio_output`, `imessage`, `telegram` or `web_app`), `outcome`, `reason` for `held_back` |
 | `harold.local_model`, inside it | the local model's run | `result` (`answered`, `failed`, `no_model`) |
 
 **A turn you start by speaking in a call** is one trace, with these spans in order:
@@ -200,7 +200,7 @@ A reply whose payload failed for good never finishes, and is dropped after an ho
 
 A watch run is a trace of its own: `harold.watch.run`, one run of a watch, with `harold.watch.model` (the Claude Code process, with `result`: `exited`, `killed` or `failed_to_start`) inside it. The run span has `watch`, `run`, `outcome` (`quiet`, `report`, `skipped` or a failure reason), `reason` and `cost_usd`, and the run's log lines carry its trace id.
 
-`harold.delivery`'s `outcome` is `delivered`, `skipped`, `held_back` (a list or the chief rule kept the update from going out, with `reason` `not_listed` or `chief`, and `channel` the key of the list that held it), `failed` (a send that failed before its 10th try, which is tried again, or a malformed payload, which is not) or `given_up` (its 10th failure; it is not tried again).
+`harold.delivery`'s `channel` is the `[notify]` key of the channel that carried the update, or held it: a desk update is `machine_audio_output` whether delivered, skipped or held back, and one the app carried is `web_app`. Its `outcome` is `delivered`, `skipped`, `held_back` (a list or the chief rule kept the update from going out, with `reason` `not_listed` or `chief`, and `channel` the key of the list that held it), `failed` (a send that failed before its 10th try, which is tried again, or a malformed payload, which is not) or `given_up` (its 10th failure; it is not tried again).
 
 Every log record written inside one of these spans carries its trace id and span id, so HyperDX opens a turn's logs from its trace and finds the trace from any of its lines.
 
@@ -278,7 +278,7 @@ The definition files are in [`hyperdx/`](hyperdx/), in the shape HyperDX 2.40's 
 
 ### Harold: the cards
 
-`dashboard.json` is the "Harold" dashboard. It holds the cards in five groups, a product filter, and an agent and a channel filter for the notifications card. Each card is two number tiles side by side: the card's number over the last 24 hours, and beside it the same number over the 24 hours before, named "<card>, previous 24 h". The exception is "Merges to main, last 24 h", whose earlier tile is named "Merges to main, the 24 h before". "Lines merged, last hour" reads the last hour, and its "previous hour" tile reads the hour before.
+`dashboard.json` is the "Harold" dashboard. It holds the cards in six groups, a product filter, and an agent and a channel filter for the notifications card. Each card is two number tiles side by side: the card's number over the last 24 hours, and beside it the same number over the 24 hours before, named "<card>, previous 24 h". The exception is "Merges to main, last 24 h", whose earlier tile is named "Merges to main, the 24 h before". "Lines merged, last hour" reads the last hour, and its "previous hour" tile reads the hour before.
 
 Each tile's window is written into its query: `TimeUnix >= now() - INTERVAL 24 HOUR` for a current tile, and `TimeUnix >= now() - INTERVAL 48 HOUR AND TimeUnix < now() - INTERVAL 24 HOUR` for an earlier one. Open the dashboard with a time range of at least the last 48 hours. A shorter range cuts the tiles down to it.
 
@@ -301,8 +301,8 @@ Each tile's window is written into its query: `TimeUnix >= now() - INTERVAL 24 H
 | Specs | Waiting for you, p50 | the median `pod.spec.lead_time`, phase `waiting_for_user` | SQL: the counter rule over the histogram's count and sum |
 | Specs | Build, p50 | the median `pod.spec.lead_time`, phase `build` | SQL: the counter rule over the histogram's count and sum |
 | Turn-end updates | Turn-end update, model p95 | the 95th percentile of the duration of `harold.local_model` spans with `result = answered`: the delay the user hears after a turn ends | SQL: the 95th percentile of those spans. Info only: tuning, no alert |
-| Notifications | Notifications by agent and channel | a table with one row per `agent` and `channel`, and two columns, `sent` and `kept`: `harold.notifications` over the range you pick. A `kept` is something that channel's list held back; the chief rule, the voice mute, the pause and a message sent this turn are not `kept`. Only channels that are set up and turned on have rows. Severity info. You read it to see who is talking to you and to decide your lists: an agent with more than 20 `kept` in a day on the channel you use is one to consider adding, and an agent you expect to hear whose `sent` stops rising while it is working is one to look at. For a row, the `agent message dropped`, `spoken line dropped` and `notification skipped` lines with that `agent` and `channel` give `pane_id`, `kind`, `reason` and the times | SQL: the counter rule over the range, with the day before `$__fromTime` for the lag, `$__timeFilter` and `$__filters`. No fixed period, no earlier tile |
 | Turn-end updates | Turn-end updates in full sentences | `model` divided by all `harold.turn_end_updates` over the last 7 days (its earlier tile is "previous 7 days"). Below 70% means the prompt and the model no longer agree on one sentence naming the agent | SQL: the counter rule, `model` rises over all rises. Info only: no alert |
+| Notifications | Notifications by agent and channel | a table with one row per `agent` and `channel`, and two columns, `sent` and `kept`: `harold.notifications` over the range you pick. A `kept` is something that channel's list held back; the chief rule, the voice mute, the pause and a message sent this turn are not `kept`. Only channels that are set up and turned on have rows. Severity info. You read it to see who is talking to you and to decide your lists: an agent with more than 20 `kept` in a day on the channel you use is one to consider adding, and an agent you expect to hear whose `sent` stops rising while it is working is one to look at. For a row, the `agent message dropped`, `spoken line dropped` and `notification skipped` lines with that `agent` and `channel` give `pane_id`, `kind`, `reason` and the times; `spoken update left out (not in notify.machine_audio_output)` gives them for a desk update | SQL: the counter rule over the range, with the day before `$__fromTime` for the lag, `$__timeFilter` and `$__filters`. No fixed period, no earlier tile |
 
 The notifications card is the one card that is a table and has no earlier tile. Sixteen of the eighteen number cards are raw SQL tiles. Only the two slot cards use HyperDX's builder. The SQL tiles read ClickHouse through the connection, for three reasons:
 
@@ -460,7 +460,21 @@ Harold answers:
 
 Harold also types lines of its own the same way. The first is `harold alert: delivery-given-up firing`, when it gives up a delivery after 10 failed tries (see the [notification reference](../notification/README.md#architecture)). It carries no message text. It is typed only when `alert_listen` is set and the address opened, with the checks below, as a posted line is. A post naming `delivery-given-up` is answered `400`.
 
-The second is `harold alert: chief-message-held-back firing`, when a message or spoken line from the chief is held back by a channel's list (reason `not_listed`) on a channel that is set up and turned on. It is typed every time, a second one merges into one waiting, and a post naming it is answered `400`. Severity: warn. Action: the chief checks its folder against `[notify]` and the dash's agent list, then sends the message again or tells the user at the next chance. Expected rate: 0, because the default lists all name the chief's folder. The `agent message dropped` or `spoken line dropped` line at that time gives `channel`, `kind`, `agent` and `pane_id`; if the `chief pane changed` lines just before show a `count` above 1, a second pane in the chief's folder is the place to look as well.
+The second is `harold alert: chief-message-held-back firing`, when a message or spoken line from the chief is held back by a channel's list (reason `not_listed`) on a channel that is set up and turned on. It is typed every time, a second one merges into one waiting, and a post naming it is answered `400`. Severity: warn. Action: the chief checks its folder against `[notify]` and the dash's agent list, then sends the message again or tells the user at the next chance. Expected rate: 0, because the default lists all name the chief's folder. Two queries check it, each over the last 7 days, and both gave 0 on 2026-10-21; more than 0 is the cue to act as above. The first counts the alerts typed, the second the cause, including alerts still waiting (`agent` is the chief's folder below the home folder, as `harold.notifications`' `agent` is):
+
+```sql
+-- alerts typed
+SELECT count() FROM otel.otel_logs
+WHERE Body = 'alert typed' AND LogAttributes['alert'] = 'chief-message-held-back'
+  AND Timestamp > now() - INTERVAL 7 DAY;
+-- the cause, including alerts still waiting
+SELECT count() FROM otel.otel_logs
+WHERE Body IN ('agent message dropped', 'spoken line dropped')
+  AND LogAttributes['reason'] = 'not_listed' AND LogAttributes['agent'] = 'Dev/p/chief-of-pods'
+  AND Timestamp > now() - INTERVAL 7 DAY
+```
+
+The `agent message dropped` or `spoken line dropped` line at that time gives `channel`, `kind`, `agent` and `pane_id`; if the `chief pane changed` lines just before show a `count` above 1, a second pane in the chief's folder is the place to look as well.
 
 The last two are `harold alert: store-failing firing`, when Harold marks its store failing, and `harold alert: store-failing cleared`, when the store recovers (see the [operation reference](../operation/README.md)). The two are typed under the same conditions as the `delivery-given-up` line. `cleared` follows only a `firing` line: a spell that began before the alert address opened is not cleared. Harold also logs the two changes, as `store failing` and `store recovered`, with only the fields `component = "store"` and `reason`. A post naming `store-failing` is answered `400`.
 

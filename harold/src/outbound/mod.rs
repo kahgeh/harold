@@ -447,8 +447,9 @@ pub(crate) fn deliver_from_chief(
     }
 }
 
-/// The `channel` attribute of a turn-end update the web app carried.
-const APP_CHANNEL: &str = "app";
+/// The `channel` attribute of a turn-end update the web app carried: the `[notify]` key
+/// `web_app`.
+const APP_CHANNEL: &str = "web_app";
 
 /// Send a locked-screen turn-end update of a chief's pane by the app route. The update is
 /// the turn's summary; iMessage gets it with the pane's address, as a requested message.
@@ -521,11 +522,11 @@ impl NotifyState {
     }
 }
 
-/// The `channel` attribute of a turn-end update sent through `channel`: `tts`, or the
-/// configured away channel, `imessage` or `telegram`.
+/// The `channel` attribute of a turn-end update sent through `channel`, the `[notify]` key:
+/// `machine_audio_output`, or the configured away channel, `imessage` or `telegram`.
 fn channel_name(channel: OutboundChannel, away_channel: &str) -> &'static str {
     match channel {
-        OutboundChannel::Tts => "tts",
+        OutboundChannel::Tts => "machine_audio_output",
         OutboundChannel::Away if away_channel == "telegram" => "telegram",
         OutboundChannel::Away => "imessage",
     }
