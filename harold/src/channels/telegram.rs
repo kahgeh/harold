@@ -770,7 +770,10 @@ mod tests {
     fn a_long_text_sends_the_fitted_main_text_and_the_question_on_its_own() {
         crate::settings::init_settings_for_test();
         let sent = Mutex::new(Vec::new());
-        let body = format!("{} Shall I deploy?", "Tests pass and it is fine. ".repeat(12));
+        let body = format!(
+            "{} Shall I deploy?",
+            "Tests pass and it is fine. ".repeat(12)
+        );
 
         let result = send_notification(
             &turn(),

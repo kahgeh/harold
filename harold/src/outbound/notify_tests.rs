@@ -914,7 +914,10 @@ fn chief_turn_not_pushed_goes_to_imessage_once_with_the_prefix() {
 
 /// 600 characters of whole sentences.
 fn long_summary() -> String {
-    "The pods are green and merged. ".repeat(20).trim_end().to_string()
+    "The pods are green and merged. "
+        .repeat(20)
+        .trim_end()
+        .to_string()
 }
 
 #[test]

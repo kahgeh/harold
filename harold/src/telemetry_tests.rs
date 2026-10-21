@@ -127,7 +127,10 @@ fn text_cut_leaves_on_the_delivery_span() {
         .iter()
         .find(|s| test_support::span_attr(s, "pane_id").as_deref() == Some(pane.as_str()))
         .unwrap();
-    assert_eq!(test_support::span_attr(span, "text_cut").as_deref(), Some("true"));
+    assert_eq!(
+        test_support::span_attr(span, "text_cut").as_deref(),
+        Some("true")
+    );
 }
 
 #[test]

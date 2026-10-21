@@ -57,7 +57,10 @@ pub(crate) fn fit_turn_end_text(text: &str, limit: usize) -> String {
         return text.to_string();
     }
     let sentence_room = limit.saturating_sub(2);
-    if let Some(end) = (0..sentence_room).rev().find(|&i| is_sentence_end(&chars, i)) {
+    if let Some(end) = (0..sentence_room)
+        .rev()
+        .find(|&i| is_sentence_end(&chars, i))
+    {
         return format!("{} …", chars[..=end].iter().collect::<String>());
     }
     let word_room = limit.saturating_sub(1);

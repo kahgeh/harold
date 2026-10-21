@@ -2,7 +2,9 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::{Duration, Instant};
 
-use crate::channels::{fit_and_report, fit_turn_end_text, split_and_fit, split_body, summarise_with};
+use crate::channels::{
+    fit_and_report, fit_turn_end_text, split_and_fit, split_body, summarise_with,
+};
 use crate::inbound::ownership::{
     NotifierRecord, Ownership, decide_ownership, delivered_text, error_text, fed_markers,
     notification_text, parse_marker,
@@ -64,8 +66,14 @@ fn fit_cuts_after_the_last_sentence_that_fits() {
 
 #[test]
 fn fit_cuts_after_a_whole_word_when_no_sentence_end_fits() {
-    assert_eq!(fit_turn_end_text("alpha beta gamma delta", 13), "alpha beta…");
-    assert_eq!(fit_turn_end_text("alpha beta gamma delta", 12), "alpha beta…");
+    assert_eq!(
+        fit_turn_end_text("alpha beta gamma delta", 13),
+        "alpha beta…"
+    );
+    assert_eq!(
+        fit_turn_end_text("alpha beta gamma delta", 12),
+        "alpha beta…"
+    );
     assert_eq!(fit_turn_end_text("alpha beta gamma delta", 10), "alpha…");
 }
 
@@ -118,7 +126,10 @@ fn fit_and_report_says_whether_it_cut() {
 
 #[test]
 fn a_long_text_keeps_its_question_past_character_280_as_its_own_message() {
-    let body = format!("{} Shall I deploy?", "Tests pass and it is fine. ".repeat(12));
+    let body = format!(
+        "{} Shall I deploy?",
+        "Tests pass and it is fine. ".repeat(12)
+    );
     assert!(body.chars().count() > 300);
 
     let (main, question, cut) = split_and_fit(&body, "imessage", "%1");
@@ -141,7 +152,10 @@ fn fake_cli(name: &str, script: &str) -> String {
 #[cfg(unix)]
 #[test]
 fn summarise_returns_a_600_char_cli_text_uncut() {
-    let cli = fake_cli("cli-ok", &format!("#!/bin/sh\nprintf '{}'\n", "a".repeat(600)));
+    let cli = fake_cli(
+        "cli-ok",
+        &format!("#!/bin/sh\nprintf '{}'\n", "a".repeat(600)),
+    );
     let result = summarise_with(Some(&cli), "reply", "prompt");
     assert_eq!(result, "a".repeat(600));
 }
