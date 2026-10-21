@@ -640,10 +640,7 @@ async fn record_row(
         cursor.store(rowid, Ordering::Relaxed);
         return false;
     }
-    let message = InboundMessage {
-        text,
-        forwarded: false,
-    };
+    let message = InboundMessage { text };
     match append_inbound_message(store, &message).await {
         Ok(()) => {
             cursor.store(rowid, Ordering::Relaxed);

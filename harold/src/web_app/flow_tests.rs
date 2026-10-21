@@ -245,7 +245,7 @@ async fn a_reply_is_stored_as_to_chief_and_logged_by_length_only() {
     assert_eq!(stored[0].0, "InboundMessageReceived");
     assert_eq!(
         stored[0].1,
-        serde_json::json!({ "text": CANARY, "forwarded": false, "to_chief": true })
+        serde_json::json!({ "text": CANARY, "to_chief": true })
     );
     let captured = logs.text();
     assert!(captured.contains("app reply stored"), "{captured}");

@@ -816,20 +816,6 @@ impl hp::harold_server::Harold for CoreStub {
         Err(Status::not_found("core"))
     }
 
-    async fn report_notification(
-        &self,
-        _: Request<hp::ReportNotificationRequest>,
-    ) -> Result<Response<hp::ReportNotificationResponse>, Status> {
-        Err(Status::not_found("core"))
-    }
-
-    async fn forward_reply(
-        &self,
-        _: Request<hp::ForwardReplyRequest>,
-    ) -> Result<Response<hp::ForwardReplyResponse>, Status> {
-        Err(Status::not_found("core"))
-    }
-
     async fn send_message_to_away_device(
         &self,
         _: Request<hp::SendMessageToAwayDeviceRequest>,

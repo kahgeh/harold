@@ -67,9 +67,8 @@ pub(crate) struct NotifierRecord {
 #[derive(Debug)]
 struct Latest {
     machine: String,
-    /// The `date` of the row it was read from. `None` when it was recorded by name with
-    /// `record_notification`, which has no row.
-    date: Option<i64>,
+    /// The `date` of the row it was read from.
+    date: i64,
 }
 
 impl NotifierRecord {
@@ -93,8 +92,7 @@ impl NotifierRecord {
     ///
     /// The latest notifier is the one with the greatest `date`; two rows with the same
     /// `date` are ordered by machine name, ignoring case, and the greater name wins. So rows
-    /// can be fed in any order and give the same latest notifier. A row replaces a latest
-    /// notifier recorded by name (`record_notification`), which has no date.
+    /// can be fed in any order and give the same latest notifier.
     pub(crate) fn record_marker(&mut self, text: &str, date: i64) {
         let Some(marker) = parse_marker(text) else {
             return;
@@ -105,32 +103,16 @@ impl NotifierRecord {
         let is_later = match &self.latest {
             Some(Latest {
                 machine,
-                date: Some(latest_date),
+                date: latest_date,
             }) => (date, marker.machine.to_lowercase()) > (*latest_date, machine.to_lowercase()),
-            _ => true,
+            None => true,
         };
         if is_later {
             self.latest = Some(Latest {
                 machine: marker.machine.to_string(),
-                date: Some(date),
+                date,
             });
         }
-    }
-
-    /// Record that `machine` sent a notification just now. A name that is not listed or is
-    /// not a valid machine name changes nothing, and so does every name while `machines` is
-    /// empty.
-    ///
-    /// It has no row and so no `date`: it is ordered by arrival. It replaces any latest
-    /// notifier, from a row or by name, and the next row recorded replaces it.
-    pub(crate) fn record_notification(&mut self, machine: &str) {
-        if !is_valid_machine_name(machine) || !self.is_listed(machine) {
-            return;
-        }
-        self.latest = Some(Latest {
-            machine: machine.to_string(),
-            date: None,
-        });
     }
 
     pub(crate) fn latest_notifier(&self) -> Option<&str> {
@@ -166,22 +148,6 @@ pub(crate) fn record_marker(text: &str, date: i64) {
     NOTIFIERS.lock().unwrap().record_marker(text, date);
 }
 
-/// Every name passed to `record_notification`, so a test can see that a caller reaches the
-/// process-wide record while the test settings list no machines and the record keeps none.
-#[cfg(test)]
-static RECORDED_NOTIFICATIONS: Mutex<Vec<String>> = Mutex::new(Vec::new());
-
-/// Record a notification by the name of the Mac that sent it. Only for a channel one Mac
-/// reads: the hub calls it for its own notifications and for each member's report.
-pub(crate) fn record_notification(machine: &str) {
-    #[cfg(test)]
-    RECORDED_NOTIFICATIONS
-        .lock()
-        .unwrap()
-        .push(machine.to_string());
-    NOTIFIERS.lock().unwrap().record_notification(machine);
-}
-
 /// The Mac that sent the latest notification, if any has been recorded.
 pub(crate) fn latest_notifier() -> Option<String> {
     NOTIFIERS
@@ -200,12 +166,6 @@ pub(crate) fn known_machine_names() -> Vec<String> {
 #[cfg(test)]
 pub(crate) fn fed_markers() -> Vec<(String, i64)> {
     FED_MARKERS.lock().unwrap().clone()
-}
-
-/// The names passed to `record_notification` so far, in order.
-#[cfg(test)]
-pub(crate) fn recorded_notifications() -> Vec<String> {
-    RECORDED_NOTIFICATIONS.lock().unwrap().clone()
 }
 
 // ---------------------------------------------------------------------------
@@ -227,17 +187,16 @@ pub(crate) enum Ownership<'a> {
 ///
 /// A tag that names a machine (`[machine/pane]` or `[machine]`) settles it. Any other
 /// reply belongs to the Mac that sent the latest notification, and to every Mac when none
-/// is recorded. A forwarded reply is always owned: the hub decided before it forwarded.
+/// is recorded.
 pub(crate) fn decide_ownership<'a>(
     text: &'a str,
-    forwarded: bool,
     this_machine: &str,
     known_machines: &[String],
     latest_notifier: Option<&str>,
 ) -> Ownership<'a> {
     let (tag, body) = parse_tag(text);
     let follows_latest_notifier = |pane_tag: Option<&'a str>| match latest_notifier {
-        Some(latest) if !forwarded && !same_machine(latest, this_machine) => Ownership::NotOwned {
+        Some(latest) if !same_machine(latest, this_machine) => Ownership::NotOwned {
             owner: latest.to_string(),
         },
         _ => Ownership::Owned { pane_tag, body },
@@ -259,12 +218,8 @@ pub(crate) fn decide_ownership<'a>(
         .iter()
         .find(|known| same_machine(known, machine));
     if let Some(owner) = named {
-        return if forwarded {
-            Ownership::Owned { pane_tag, body }
-        } else {
-            Ownership::NotOwned {
-                owner: owner.clone(),
-            }
+        return Ownership::NotOwned {
+            owner: owner.clone(),
         };
     }
     // The tag names no machine: it is a pane tag, as before machine names.

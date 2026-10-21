@@ -872,7 +872,6 @@ async fn with_no_machines_listed_an_untagged_reply_after_notifications_is_owned(
     assert_eq!(
         decide_ownership(
             "yes",
-            false,
             "studio",
             record.known_machine_names(),
             record.latest_notifier()

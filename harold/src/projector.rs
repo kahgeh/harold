@@ -55,7 +55,7 @@ pub(crate) struct ReplyOrigin {
 }
 
 /// Routes a stored reply's text, given whether ownership is already decided.
-pub(crate) type Router = Arc<dyn Fn(&str, bool) -> Result<RouteReport, String> + Send + Sync>;
+pub(crate) type Router = Arc<dyn Fn(&str) -> Result<RouteReport, String> + Send + Sync>;
 
 /// Types a text into a pane, given the pane id and the text, and presses Enter.
 pub(crate) type ChiefTyper = Arc<dyn Fn(&str, &str) -> Result<(), String> + Send + Sync>;
@@ -283,12 +283,9 @@ impl ProductionDispatcher {
                 DispatchError::Permanent(format!("invalid InboundMessageReceived payload: {error}"))
             })?;
         if !reply.to_chief {
-            let message = InboundMessage {
-                text: reply.text,
-                forwarded: reply.forwarded,
-            };
-            return route_message(&message, &delivery.event_id, origin, |text, forwarded| {
-                (self.router)(text, forwarded)
+            let message = InboundMessage { text: reply.text };
+            return route_message(&message, &delivery.event_id, origin, |text| {
+                (self.router)(text)
             });
         }
         // The reply's text is never logged: an error names the listing or tmux only.
@@ -481,16 +478,15 @@ impl ProductionDispatcher {
     }
 }
 
-/// Hand a stored reply to `route` together with whether the hub forwarded it, inside
-/// `harold.route`, and finish its phone request with what routing did. A failed route is
+/// Hand a stored reply to `route` inside `harold.route`, and finish its phone request with what routing did. A failed route is
 /// retried later, so its request stays open.
 fn route_message(
     message: &InboundMessage,
     event_id: &str,
     origin: Option<&ReplyOrigin>,
-    route: impl FnOnce(&str, bool) -> Result<RouteReport, String>,
+    route: impl FnOnce(&str) -> Result<RouteReport, String>,
 ) -> Result<DeliveryOutcome, DispatchError> {
-    let reply = phone_request(message, event_id, origin);
+    let reply = phone_request(event_id, origin);
     let routing = info_span!(
         target: TRACE_TARGET,
         "harold.route",
@@ -499,7 +495,7 @@ fn route_message(
     // Fails only when no export layer is installed, and then there is no trace to join.
     let _ = routing.set_parent(reply.cx.clone());
     let report = routing
-        .in_scope(|| route(&message.text, message.forwarded))
+        .in_scope(|| route(&message.text))
         .map_err(DispatchError::Retryable)?;
     let resolved_by = match &report.routing {
         Routing::Typed { resolved_by, .. } => *resolved_by,
@@ -518,14 +514,9 @@ fn event_key(event_id: &str) -> String {
 
 /// The open phone request of a stored reply: the one its listener opened, found by the
 /// trace its event recorded, or one opened by an earlier try of this delivery. Otherwise a
-/// new request that starts when the event was stored, on the `forwarded` channel when
-/// another Mac's hub forwarded it, and `unknown` when it is not known where it came from
-/// (after a restart, say). The new request is kept for a retry.
-fn phone_request(
-    message: &InboundMessage,
-    event_id: &str,
-    origin: Option<&ReplyOrigin>,
-) -> OpenReply {
+/// new request that starts when the event was stored, on the `unknown` channel because it is
+/// not known where it came from (after a restart, say). The new request is kept for a retry.
+fn phone_request(event_id: &str, origin: Option<&ReplyOrigin>) -> OpenReply {
     let key = event_key(event_id);
     let open = origin
         .and_then(|origin| origin.trace_id.as_deref())
@@ -534,13 +525,8 @@ fn phone_request(
     if let Some(reply) = open {
         return reply;
     }
-    let channel = if message.forwarded {
-        "forwarded"
-    } else {
-        "unknown"
-    };
     let started = origin.map_or_else(OffsetDateTime::now_utc, |origin| origin.created_at);
-    let reply = telemetry::open_phone_request(channel, started);
+    let reply = telemetry::open_phone_request("unknown", started);
     telemetry::keep_open_reply_as(key, reply.clone());
     reply
 }

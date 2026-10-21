@@ -125,7 +125,6 @@ async fn a_turn_end_then_a_reply(store: &HaroldStore) {
         store,
         &InboundMessage {
             text: "continue".into(),
-            forwarded: false,
         },
     )
     .await
@@ -164,7 +163,6 @@ async fn handler_dispatches_staged_events_in_stream_version_order() {
         &store,
         &InboundMessage {
             text: "continue".into(),
-            forwarded: false,
         },
     )
     .await
@@ -389,7 +387,6 @@ async fn retryable_delivery_failure_remains_pending_for_a_later_attempt() {
         &store,
         &InboundMessage {
             text: "retry me".into(),
-            forwarded: false,
         },
     )
     .await
@@ -479,7 +476,6 @@ async fn a_delivery_that_fails_twice_then_succeeds_is_delivered_and_not_given_up
         &store,
         &InboundMessage {
             text: "third time".into(),
-            forwarded: false,
         },
     )
     .await
@@ -589,7 +585,6 @@ async fn permanently_invalid_event_does_not_block_later_deliveries() {
         &store,
         &InboundMessage {
             text: "still deliver me".into(),
-            forwarded: false,
         },
     )
     .await
@@ -619,7 +614,6 @@ async fn an_undecodable_record_does_not_block_later_events() {
         &store,
         &InboundMessage {
             text: "deliver after the undecodable record".into(),
-            forwarded: false,
         },
     )
     .await
@@ -666,7 +660,6 @@ async fn malformed_known_event_does_not_block_a_valid_later_delivery() {
         &store,
         &InboundMessage {
             text: "deliver after malformed event".into(),
-            forwarded: false,
         },
     )
     .await
@@ -848,7 +841,6 @@ async fn non_agent_batch_publishes_the_advanced_durable_checkpoint() {
         &store,
         &InboundMessage {
             text: "continue".into(),
-            forwarded: false,
         },
     )
     .await
@@ -938,32 +930,28 @@ fn production_dispatcher_reads_the_messaging_switch() {
 }
 
 #[test]
-fn stored_reply_reaches_routing_with_its_forwarded_flag() {
-    for forwarded in [false, true] {
-        let message = InboundMessage {
-            text: "[studio] carry on".into(),
-            forwarded,
-        };
-        let mut routed = None;
+fn stored_reply_reaches_routing_with_its_text() {
+    let message = InboundMessage {
+        text: "[studio] carry on".into(),
+    };
+    let mut routed = None;
 
-        let outcome = route_message(&message, &unique_event_id(), None, |text, flag| {
-            routed = Some((text.to_string(), flag));
-            Ok(not_owned_report())
-        });
+    let outcome = route_message(&message, &unique_event_id(), None, |text| {
+        routed = Some(text.to_string());
+        Ok(not_owned_report())
+    });
 
-        assert!(matches!(outcome, Ok(DeliveryOutcome::Skipped)));
-        assert_eq!(routed, Some(("[studio] carry on".to_string(), forwarded)));
-    }
+    assert!(matches!(outcome, Ok(DeliveryOutcome::Skipped)));
+    assert_eq!(routed, Some("[studio] carry on".to_string()));
 }
 
 #[test]
 fn routing_failure_of_a_stored_reply_is_retryable() {
     let message = InboundMessage {
         text: "carry on".into(),
-        forwarded: false,
     };
 
-    let outcome = route_message(&message, &unique_event_id(), None, |_, _| {
+    let outcome = route_message(&message, &unique_event_id(), None, |_| {
         Err("tmux failed".to_string())
     });
 
@@ -1182,7 +1170,6 @@ async fn away_message_is_staged_and_dispatched_in_stream_version_order() {
         &store,
         &InboundMessage {
             text: "second".into(),
-            forwarded: false,
         },
     )
     .await
@@ -1213,7 +1200,6 @@ async fn malformed_away_message_does_not_block_a_valid_later_delivery() {
         &store,
         &InboundMessage {
             text: "deliver after malformed message".into(),
-            forwarded: false,
         },
     )
     .await
@@ -2323,7 +2309,7 @@ fn typed_into(pane: &str) -> RouteReport {
 /// A router that types every reply into `pane`.
 fn typing_router(pane: &str) -> Router {
     let pane = pane.to_string();
-    Arc::new(move |_, _| Ok(typed_into(&pane)))
+    Arc::new(move |_| Ok(typed_into(&pane)))
 }
 
 /// Stores a reply as the listener does: the request opens at `reply_at`, and the reply is
@@ -2334,10 +2320,7 @@ async fn store_reply_as_listener(
     reply_at: time::OffsetDateTime,
     text: &str,
 ) {
-    let message = InboundMessage {
-        text: text.into(),
-        forwarded: false,
-    };
+    let message = InboundMessage { text: text.into() };
     let stored = telemetry::store_phone_reply(channel, reply_at, async {
         append_inbound_message(store, &message).await.is_ok()
     })
@@ -2386,7 +2369,7 @@ fn attr(span: &opentelemetry_sdk::trace::SpanData, key: &str) -> String {
 async fn a_given_up_reply_is_counted_unavailable() {
     telemetry::test_support::install();
     let channel = unique_channel();
-    let router: Router = Arc::new(|_, _| Err("tmux failed".into()));
+    let router: Router = Arc::new(|_| Err("tmux failed".into()));
     let (fixture, dispatcher) = fixture_with_router(router).await;
     store_reply_as_listener(
         &fixture.store,
@@ -2430,18 +2413,12 @@ async fn a_given_up_reply_is_counted_unavailable() {
 async fn a_given_up_reply_with_no_listener_request_is_counted_unavailable() {
     use opentelemetry::trace::TraceContextExt as _;
     telemetry::test_support::install();
-    let router: Router = Arc::new(|_, _| Err("tmux failed".into()));
+    let router: Router = Arc::new(|_| Err("tmux failed".into()));
     let (fixture, dispatcher) = fixture_with_router(router).await;
     // Stored as after a restart: no listener opened a request for it.
-    append_inbound_message(
-        &fixture.store,
-        &InboundMessage {
-            text: "hi".into(),
-            forwarded: true,
-        },
-    )
-    .await
-    .unwrap();
+    append_inbound_message(&fixture.store, &InboundMessage { text: "hi".into() })
+        .await
+        .unwrap();
     // Projected as the handler projects it, so its outbox row exists to read.
     fixture.store.project_unhandled_events(500).await.unwrap();
     let event_id = fixture
@@ -2471,7 +2448,7 @@ async fn a_given_up_reply_with_no_listener_request_is_counted_unavailable() {
     let requests = spans_in_trace("harold.phone_request", &trace_id);
     assert_eq!(requests.len(), 1);
     assert_eq!(attr(&requests[0], "outcome"), "unavailable");
-    assert_eq!(attr(&requests[0], "channel"), "forwarded");
+    assert_eq!(attr(&requests[0], "channel"), "unknown");
 }
 
 #[tokio::test]
@@ -2531,7 +2508,7 @@ async fn a_routed_reply_records_typed_with_latency_from_its_own_time() {
 async fn a_reply_with_no_pane_records_unavailable() {
     telemetry::test_support::install();
     let channel = unique_channel();
-    let router: Router = Arc::new(|_, _| {
+    let router: Router = Arc::new(|_| {
         Ok(RouteReport {
             outcome: DeliveryOutcome::Skipped,
             routing: Routing::NoPane,
@@ -2587,7 +2564,7 @@ async fn a_relay_that_fails_then_succeeds_is_one_request() {
     let router: Router = {
         let pane = pane.clone();
         let failed_once = Arc::clone(&failed_once);
-        Arc::new(move |_, _| {
+        Arc::new(move |_| {
             if !failed_once.swap(true, std::sync::atomic::Ordering::SeqCst) {
                 return Err("tmux failed".to_string());
             }
@@ -2643,12 +2620,11 @@ async fn a_reply_with_no_open_request_starts_at_its_event_time() {
     telemetry::test_support::install();
     let pane = unique_pane();
     let (fixture, dispatcher) = fixture_with_router(typing_router(&pane)).await;
-    // Stored outside any span, as a member stores a reply its hub forwarded.
+    // Stored outside any span, so no listener opened a request for it.
     append_inbound_message(
         &fixture.store,
         &InboundMessage {
             text: "carry on".into(),
-            forwarded: true,
         },
     )
     .await
@@ -2663,7 +2639,7 @@ async fn a_reply_with_no_open_request_starts_at_its_event_time() {
     );
 
     let span = phone_request_typed_into(&pane);
-    assert_eq!(attr(&span, "channel"), "forwarded");
+    assert_eq!(attr(&span, "channel"), "unknown");
     assert_eq!(attr(&span, "outcome"), "typed");
     assert_eq!(
         span.start_time,
@@ -2674,30 +2650,6 @@ async fn a_reply_with_no_open_request_starts_at_its_event_time() {
 }
 
 #[tokio::test]
-async fn a_reply_that_is_not_forwarded_and_has_no_open_request_is_on_the_unknown_channel() {
-    telemetry::test_support::install();
-    let pane = unique_pane();
-    let (fixture, dispatcher) = fixture_with_router(typing_router(&pane)).await;
-    append_inbound_message(
-        &fixture.store,
-        &InboundMessage {
-            text: "carry on".into(),
-            forwarded: false,
-        },
-    )
-    .await
-    .unwrap();
-
-    assert!(
-        handle_next_delivery(&fixture.store, dispatcher)
-            .await
-            .unwrap()
-    );
-
-    assert_eq!(attr(&phone_request_typed_into(&pane), "channel"), "unknown");
-}
-
-#[tokio::test]
 async fn a_failed_relay_of_a_reply_with_no_open_request_is_still_one_request() {
     telemetry::test_support::install();
     let pane = unique_pane();
@@ -2705,7 +2657,7 @@ async fn a_failed_relay_of_a_reply_with_no_open_request_is_still_one_request() {
     let router: Router = {
         let pane = pane.clone();
         let failed_once = Arc::clone(&failed_once);
-        Arc::new(move |_, _| {
+        Arc::new(move |_| {
             if !failed_once.swap(true, std::sync::atomic::Ordering::SeqCst) {
                 return Err("tmux failed".to_string());
             }
@@ -2717,7 +2669,6 @@ async fn a_failed_relay_of_a_reply_with_no_open_request_is_still_one_request() {
         &fixture.store,
         &InboundMessage {
             text: "carry on".into(),
-            forwarded: true,
         },
     )
     .await
@@ -3318,7 +3269,6 @@ async fn one_reply(store: &HaroldStore) -> String {
         store,
         &InboundMessage {
             text: "carry on".into(),
-            forwarded: false,
         },
     )
     .await
@@ -3831,8 +3781,8 @@ async fn a_chief_turn_end_records_the_app_as_its_channel_and_the_fallback_as_tod
 /// Each `(pane_id, text)` a recording typer was handed, oldest first.
 type TypedKeys = Arc<Mutex<Vec<(String, String)>>>;
 
-/// Each `(text, forwarded)` a recording router was handed, oldest first.
-type RoutedTexts = Arc<Mutex<Vec<(String, bool)>>>;
+/// Each text a recording router was handed, oldest first.
+type RoutedTexts = Arc<Mutex<Vec<String>>>;
 
 /// A typer that records each `(pane_id, text)` it is handed and types nothing.
 fn recording_typer() -> (TypedKeys, ChiefTyper) {
@@ -3847,13 +3797,13 @@ fn recording_typer() -> (TypedKeys, ChiefTyper) {
     (typed, typer)
 }
 
-/// A router that records each `(text, forwarded)` it is handed, and reports the reply as
+/// A router that records each text it is handed, and reports the reply as
 /// another Mac's so the process-wide phone book is left as it was.
 fn recording_router() -> (RoutedTexts, Router) {
     let routed = RoutedTexts::default();
     let calls = routed.clone();
-    let router: Router = Arc::new(move |text: &str, forwarded: bool| {
-        calls.lock().unwrap().push((text.to_string(), forwarded));
+    let router: Router = Arc::new(move |text: &str| {
+        calls.lock().unwrap().push(text.to_string());
         Ok(not_owned_report())
     });
     (routed, router)
@@ -3900,7 +3850,7 @@ fn inbound_delivery(event_id: &str, payload: serde_json::Value) -> PendingDelive
 }
 
 fn app_reply(text: &str) -> serde_json::Value {
-    json!({ "text": text, "forwarded": false, "to_chief": true })
+    json!({ "text": text, "to_chief": true })
 }
 
 #[tokio::test]
@@ -4006,10 +3956,7 @@ async fn a_stored_reply_without_to_chief_routes_as_before() {
     .await;
 
     let outcome = with.dispatcher.dispatch_with_pause(
-        &inbound_delivery(
-            &unique_event_id(),
-            json!({ "text": "[pane] hi", "forwarded": false }),
-        ),
+        &inbound_delivery(&unique_event_id(), json!({ "text": "[pane] hi" })),
         None,
         false,
     );
@@ -4018,10 +3965,7 @@ async fn a_stored_reply_without_to_chief_routes_as_before() {
         matches!(outcome, Ok(DeliveryOutcome::Skipped)),
         "{outcome:?}"
     );
-    assert_eq!(
-        *with.routed.lock().unwrap(),
-        [("[pane] hi".to_string(), false)]
-    );
+    assert_eq!(*with.routed.lock().unwrap(), ["[pane] hi".to_string()]);
     assert!(with.typed.lock().unwrap().is_empty());
     assert!(with.app.reply_states().is_empty());
 }

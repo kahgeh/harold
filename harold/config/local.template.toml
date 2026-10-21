@@ -90,30 +90,7 @@ command = "say"
 # text = "digest"                              # typed exactly, then Enter
 # give_up_after_minutes = 120                  # how long after `at` Harold keeps trying; 1 to 1439
 
-# Several Macs on Telegram. One Mac, the hub, reads the bot's replies; the others are
-# members. Not used when away_channel = "imessage". Set [grpc] host on every Mac to its
-# Tailscale address so the Macs can call each other. The calls are plain HTTP.
-#
-# On the hub (role defaults to "hub"), one [[peers.members]] block for each other Mac.
-# Each name must be in `machines`.
-# [grpc]
-# host = "100.64.0.1"   # Harold then stops listening on 127.0.0.1: use tmx-agent-dash --endpoint and HAROLD_ADDR (OpenCode) with this address
-#
-# [[peers.members]]
-# name = "laptop"
-# url = "http://laptop.tailnet:50060"
-# secret = "a long random string, the same on the hub and on this member"
-#
-# On each member:
-# [grpc]
-# host = "100.64.0.2"
-#
-# [peers]
-# role = "member"
-#
-# [peers.hub]
-# url = "http://studio.tailnet:50060"
-# secret = "the same string as in the hub's block for this Mac"
+# Two Macs need only `machines` and the same Apple ID.
 
 # The home-screen app, served to the phone through `tailscale serve`. Absent: off.
 # [web_app]

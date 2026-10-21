@@ -8,10 +8,6 @@ service Harold {
   rpc WatchAgentStates (WatchAgentStatesRequest) returns (stream AgentStateSnapshot);
   rpc SetTtsMuted (SetTtsMutedRequest) returns (SetTtsMutedResponse);
   rpc SetMessagingPaused (SetMessagingPausedRequest) returns (SetMessagingPausedResponse);
-  // A member tells the hub it is about to send a notification.
-  rpc ReportNotification (ReportNotificationRequest) returns (ReportNotificationResponse);
-  // The hub hands a member a reply that member owns.
-  rpc ForwardReply (ForwardReplyRequest) returns (ForwardReplyResponse);
   // An agent asks Harold to send text to the user's away device.
   rpc SendMessageToAwayDevice (SendMessageToAwayDeviceRequest) returns (SendMessageToAwayDeviceResponse);
   // The chief asks Harold to say a line at the desk or send it as a voice note when away.
@@ -110,26 +106,6 @@ message SetMessagingPausedRequest {
 
 message SetMessagingPausedResponse {
   bool paused = 1;
-}
-
-message ReportNotificationRequest {
-  // The member's machine_name.
-  string machine = 1;
-  string secret = 2;
-}
-
-message ReportNotificationResponse {
-  bool accepted = 1;
-}
-
-message ForwardReplyRequest {
-  // The reply as the user typed it, tag included.
-  string text = 1;
-  string secret = 2;
-}
-
-message ForwardReplyResponse {
-  bool accepted = 1;
 }
 
 message SendMessageToAwayDeviceRequest {

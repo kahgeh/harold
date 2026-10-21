@@ -228,12 +228,11 @@ impl RouteReport {
 /// **Must be called from `spawn_blocking`** — this function uses
 /// `Handle::block_on` internally and will deadlock if called from an
 /// async task on the tokio worker pool.
-pub(crate) fn route_inbound_message(text: &str, forwarded: bool) -> Result<RouteReport, String> {
-    info!(text, forwarded, "route_inbound_message entered");
+pub(crate) fn route_inbound_message(text: &str) -> Result<RouteReport, String> {
+    info!(text, "route_inbound_message entered");
     let machine = get_settings().machine_name.as_str();
     let ownership = decide_ownership(
         text,
-        forwarded,
         machine,
         &ownership::known_machine_names(),
         ownership::latest_notifier().as_deref(),

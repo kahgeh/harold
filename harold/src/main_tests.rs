@@ -13,16 +13,11 @@ use super::agent::inventory::{AgentInventoryPort, InventoryError};
 use super::agent::runtime::spawn_agent_monitor_for_test;
 use super::agent::screen::TmuxVisibleScreen;
 use super::agent::snapshot::AgentSnapshotHub;
-use super::harold::harold_client::HaroldClient;
-use super::harold::harold_server::{Harold, HaroldServer};
+use super::harold::harold_server::Harold;
 use super::harold::{
-    AgentState, ForwardReplyRequest, MonitorHealthState, ReportAgentStateRequest,
-    ReportNotificationRequest, SendMessageToAwayDeviceRequest, SetMessagingPausedRequest,
-    SetTtsMutedRequest, SpeakLineRequest, WatchAgentStatesRequest,
+    AgentState, MonitorHealthState, ReportAgentStateRequest, SendMessageToAwayDeviceRequest,
+    SetMessagingPausedRequest, SetTtsMutedRequest, SpeakLineRequest, WatchAgentStatesRequest,
 };
-use super::inbound::ownership::recorded_notifications;
-use super::peers::PeerEndpoint;
-use super::settings::{PeerHub, PeerMember};
 use super::{
     HAROLD_VERSION, HaroldService, Request, TurnCompleteRequest, apply_setting,
     load_startup_agent_snapshot, map_agent_snapshot, pane_id_for_log, restore_startup_state, store,
@@ -96,7 +91,6 @@ where
             messaging_switch: tokio::sync::Mutex::new(None),
             tts_switch: tokio::sync::Mutex::new(None),
             shutdown: shutdown_rx,
-            peers: super::peers::PeerEndpoint::Off,
         },
         shutdown,
         task,
@@ -223,244 +217,6 @@ impl TestDirectory {
 impl Drop for TestDirectory {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
-
-/// A Harold serving on an ephemeral 127.0.0.1 port, for tests of the calls between Macs.
-pub(crate) struct PeerServer {
-    pub(crate) url: String,
-    pub(crate) store: Arc<store::HaroldStore>,
-    _directory: TestDirectory,
-    _shutdown: watch::Sender<()>,
-    tasks: Vec<tokio::task::JoinHandle<()>>,
-}
-
-impl Drop for PeerServer {
-    fn drop(&mut self) {
-        for task in &self.tasks {
-            task.abort();
-        }
-    }
-}
-
-pub(crate) async fn start_peer_server(peers: PeerEndpoint) -> PeerServer {
-    let directory = TestDirectory::new();
-    let store = Arc::new(store::HaroldStore::open(&directory.0).await.unwrap());
-    let (mut service, shutdown, monitor_task) = test_service(Arc::clone(&store), empty_snapshot());
-    service.peers = peers;
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let url = format!("http://{}", listener.local_addr().unwrap());
-    let server_task = tokio::spawn(async move {
-        let _ = tonic::transport::Server::builder()
-            .add_service(HaroldServer::new(service))
-            .serve_with_incoming(tonic::transport::server::TcpIncoming::from(listener))
-            .await;
-    });
-    PeerServer {
-        url,
-        store,
-        _directory: directory,
-        _shutdown: shutdown,
-        tasks: vec![monitor_task, server_task],
-    }
-}
-
-/// Every reply stored in `store`, in order.
-pub(crate) async fn inbound_messages(store: &store::HaroldStore) -> Vec<store::InboundMessage> {
-    store
-        .stream()
-        .load_after_version(EventVersion::start(), 100)
-        .await
-        .unwrap()
-        .into_iter()
-        .filter(|event| event.r#type == "InboundMessageReceived")
-        .map(|event| serde_json::from_value(event.payload).unwrap())
-        .collect()
-}
-
-/// An address on this machine that nothing listens on.
-pub(crate) fn closed_port_url() -> String {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    format!("http://{}", listener.local_addr().unwrap())
-}
-
-fn hub_with(member: &str) -> PeerEndpoint {
-    PeerEndpoint::Hub {
-        members: vec![PeerMember {
-            name: member.into(),
-            url: "http://127.0.0.1:1".into(),
-            secret: "s3cret".into(),
-        }],
-    }
-}
-
-fn member_of_a_hub() -> PeerEndpoint {
-    PeerEndpoint::Member {
-        hub: PeerHub {
-            url: "http://127.0.0.1:1".into(),
-            secret: "s3cret".into(),
-        },
-    }
-}
-
-async fn report(server: &PeerServer, machine: &str, secret: &str) -> Result<bool, tonic::Status> {
-    let mut client = HaroldClient::connect(server.url.clone()).await.unwrap();
-    client
-        .report_notification(ReportNotificationRequest {
-            machine: machine.into(),
-            secret: secret.into(),
-        })
-        .await
-        .map(|response| response.into_inner().accepted)
-}
-
-async fn forward(server: &PeerServer, text: &str, secret: &str) -> Result<bool, tonic::Status> {
-    let mut client = HaroldClient::connect(server.url.clone()).await.unwrap();
-    client
-        .forward_reply(ForwardReplyRequest {
-            text: text.into(),
-            secret: secret.into(),
-        })
-        .await
-        .map(|response| response.into_inner().accepted)
-}
-
-// Each test below names its member differently: the log of recorded names is shared by
-// every test in the process.
-
-#[tokio::test]
-async fn hub_records_a_reported_notification_under_the_configured_name() {
-    super::settings::init_settings_for_test();
-    let server = start_peer_server(hub_with("laptop-rpc-ok")).await;
-
-    let accepted = report(&server, "LAPTOP-RPC-OK", "s3cret").await;
-
-    assert!(accepted.unwrap());
-    assert!(recorded_notifications().contains(&"laptop-rpc-ok".to_string()));
-}
-
-#[tokio::test]
-async fn hub_denies_a_report_with_a_wrong_secret_and_records_nothing() {
-    super::settings::init_settings_for_test();
-    let server = start_peer_server(hub_with("laptop-rpc-wrong")).await;
-
-    for secret in ["wrong", ""] {
-        let status = report(&server, "laptop-rpc-wrong", secret)
-            .await
-            .unwrap_err();
-
-        assert_eq!(status.code(), tonic::Code::PermissionDenied, "{secret:?}");
-        assert!(!status.message().contains("s3cret"));
-    }
-    assert!(!recorded_notifications().contains(&"laptop-rpc-wrong".to_string()));
-}
-
-#[tokio::test]
-async fn hub_denies_a_report_from_an_unknown_member() {
-    super::settings::init_settings_for_test();
-    let server = start_peer_server(hub_with("laptop-rpc-known")).await;
-
-    let status = report(&server, "laptop-rpc-stranger", "s3cret")
-        .await
-        .unwrap_err();
-
-    assert_eq!(status.code(), tonic::Code::PermissionDenied);
-    assert!(!recorded_notifications().contains(&"laptop-rpc-stranger".to_string()));
-}
-
-#[tokio::test]
-async fn a_harold_that_is_not_the_hub_denies_a_report() {
-    super::settings::init_settings_for_test();
-    for endpoint in [member_of_a_hub(), PeerEndpoint::Off] {
-        let server = start_peer_server(endpoint).await;
-
-        let status = report(&server, "laptop-rpc-role", "s3cret")
-            .await
-            .unwrap_err();
-
-        assert_eq!(status.code(), tonic::Code::PermissionDenied);
-    }
-    assert!(!recorded_notifications().contains(&"laptop-rpc-role".to_string()));
-}
-
-#[tokio::test]
-async fn member_stores_a_forwarded_reply_marked_forwarded() {
-    let server = start_peer_server(member_of_a_hub()).await;
-
-    let accepted = forward(&server, "[laptop/harold main:0.0] revert that", "s3cret").await;
-
-    assert!(accepted.unwrap());
-    let stored = inbound_messages(&server.store).await;
-    assert_eq!(stored.len(), 1);
-    assert_eq!(stored[0].text, "[laptop/harold main:0.0] revert that");
-    assert!(stored[0].forwarded);
-}
-
-#[tokio::test]
-async fn member_stores_a_forwarded_reply_trimmed() {
-    let server = start_peer_server(member_of_a_hub()).await;
-
-    let accepted = forward(&server, "  \n revert that \t", "s3cret").await;
-
-    assert!(accepted.unwrap());
-    let stored = inbound_messages(&server.store).await;
-    assert_eq!(stored.len(), 1);
-    assert_eq!(stored[0].text, "revert that");
-    assert!(stored[0].forwarded);
-}
-
-/// A reply the iMessage listener would not store is accepted and ignored: the hub did its
-/// job, and retrying cannot make the text routable.
-#[tokio::test]
-async fn member_accepts_and_ignores_a_forwarded_reply_the_listener_would_skip() {
-    let server = start_peer_server(member_of_a_hub()).await;
-
-    for text in [
-        "",
-        "   \n\t",
-        "\u{1F916} [laptop/harold main:0.0] Done.",
-        "  \u{1F916} hi",
-    ] {
-        let accepted = forward(&server, text, "s3cret").await;
-
-        assert!(accepted.unwrap(), "{text:?}");
-    }
-    assert!(inbound_messages(&server.store).await.is_empty());
-}
-
-#[tokio::test]
-async fn forwarded_reply_with_a_wrong_secret_is_denied_before_any_filtering() {
-    let server = start_peer_server(member_of_a_hub()).await;
-
-    for text in ["", "\u{1F916} hi", "carry on"] {
-        let status = forward(&server, text, "wrong").await.unwrap_err();
-
-        assert_eq!(status.code(), tonic::Code::PermissionDenied, "{text:?}");
-    }
-    assert!(inbound_messages(&server.store).await.is_empty());
-}
-
-#[tokio::test]
-async fn member_denies_a_forwarded_reply_with_a_wrong_secret_and_stores_nothing() {
-    let server = start_peer_server(member_of_a_hub()).await;
-
-    for secret in ["wrong", ""] {
-        let status = forward(&server, "carry on", secret).await.unwrap_err();
-
-        assert_eq!(status.code(), tonic::Code::PermissionDenied, "{secret:?}");
-    }
-    assert!(inbound_messages(&server.store).await.is_empty());
-}
-
-#[tokio::test]
-async fn a_harold_that_is_not_a_member_denies_a_forwarded_reply() {
-    for endpoint in [hub_with("laptop-rpc-fwd"), PeerEndpoint::Off] {
-        let server = start_peer_server(endpoint).await;
-
-        let status = forward(&server, "carry on", "s3cret").await.unwrap_err();
-
-        assert_eq!(status.code(), tonic::Code::PermissionDenied);
-        assert!(inbound_messages(&server.store).await.is_empty());
     }
 }
 
@@ -1023,7 +779,6 @@ async fn watch_reconnect_observes_a_non_agent_checkpoint_revision() {
         &store,
         &store::InboundMessage {
             text: "continue".into(),
-            forwarded: false,
         },
     )
     .await
@@ -1525,65 +1280,6 @@ async fn repeated_request_sets_the_switch_again_and_appends_nothing() {
     let _ = std::fs::remove_dir_all(&directory);
 }
 
-const WIRING_HUB: &str = r#"
-    machine_name = "studio"
-    machines = ["studio", "laptop"]
-    [[peers.members]]
-    name = "laptop"
-    url = "http://laptop.tailnet:50060"
-    secret = "s3cret"
-"#;
-
-const WIRING_MEMBER: &str = r#"
-    machine_name = "laptop"
-    machines = ["studio", "laptop"]
-    [peers]
-    role = "member"
-    [peers.hub]
-    url = "http://studio.tailnet:50060"
-    secret = "s3cret"
-"#;
-
-/// The peer endpoint of the service built from `toml` laid over the default settings.
-async fn served_peers(toml: &str) -> PeerEndpoint {
-    let settings = crate::settings::settings_with(toml);
-    let directory = TestDirectory::new();
-    let store = Arc::new(store::HaroldStore::open(&directory.0).await.unwrap());
-    let (base, _shutdown, task) = test_service(Arc::clone(&store), empty_snapshot());
-    let service = super::harold_service(
-        &settings,
-        base.monitor,
-        store,
-        base.snapshots,
-        base.shutdown,
-    );
-    task.abort();
-    service.peers
-}
-
-#[tokio::test]
-async fn service_answers_the_peer_calls_its_settings_call_for() {
-    assert_eq!(
-        served_peers(WIRING_HUB).await,
-        PeerEndpoint::Hub {
-            members: vec![PeerMember {
-                name: "laptop".into(),
-                url: "http://laptop.tailnet:50060".into(),
-                secret: "s3cret".into(),
-            }]
-        }
-    );
-    assert_eq!(
-        served_peers(WIRING_MEMBER).await,
-        PeerEndpoint::Member {
-            hub: PeerHub {
-                url: "http://studio.tailnet:50060".into(),
-                secret: "s3cret".into(),
-            }
-        }
-    );
-}
-
 /// Every agent message stored in `store`, in order, and the count of all stored events.
 async fn away_messages(store: &store::HaroldStore) -> (Vec<store::AwayMessageRequested>, usize) {
     let events = store
@@ -1917,7 +1613,7 @@ mod one_trace_per_turn {
     /// A router that types every reply into `pane`.
     fn typing_router(pane: &str) -> Router {
         let pane = pane.to_string();
-        Arc::new(move |_, _| {
+        Arc::new(move |_| {
             Ok(RouteReport {
                 outcome: DeliveryOutcome::Delivered,
                 routing: Routing::Typed {
@@ -1932,10 +1628,7 @@ mod one_trace_per_turn {
 
     /// Stores a reply as the listener does, sent at `reply_at`.
     async fn store_reply(store: &store::HaroldStore, text: &str, reply_at: OffsetDateTime) {
-        let message = store::InboundMessage {
-            text: text.into(),
-            forwarded: false,
-        };
+        let message = store::InboundMessage { text: text.into() };
         let stored = crate::telemetry::store_phone_reply("imessage", reply_at, async {
             store::append_inbound_message(store, &message).await.is_ok()
         })

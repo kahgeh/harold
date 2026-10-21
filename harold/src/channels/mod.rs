@@ -223,16 +223,6 @@ pub(crate) fn summarise_with(
 // Sending and listening — iMessage is the one away channel
 // ---------------------------------------------------------------------------
 
-/// The text of a reply worth routing: trimmed, and neither empty nor a message Harold sent
-/// itself. A member storing a forwarded reply applies it.
-pub(crate) fn reply_text(text: &str) -> Option<String> {
-    let text = text.trim();
-    if text.is_empty() || imessage::is_marked_as_harold(text) {
-        return None;
-    }
-    Some(text.to_string())
-}
-
 /// Start the inbound message listener.
 pub async fn listen_for_inbound_messages(store: Arc<HaroldStore>, shutdown: watch::Receiver<()>) {
     imessage::listen(store, shutdown).await;
@@ -296,7 +286,7 @@ pub(crate) fn send_spoken_line(line: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        AwayMessageRequested, TurnCompleted, notify_away, reply_text, send, send_away_message,
+        AwayMessageRequested, TurnCompleted, notify_away, send, send_away_message,
         send_spoken_line, send_unless_paused,
     };
     use crate::agent::domain::CompletionSummaryUpdate;
@@ -375,12 +365,5 @@ mod tests {
             send_spoken_line("good morning"),
             Err(NOT_CONFIGURED.to_string())
         );
-    }
-
-    #[test]
-    fn reply_text_trims_and_skips_empty_and_harold_marked_text() {
-        assert_eq!(reply_text("  yes  "), Some("yes".to_string()));
-        assert_eq!(reply_text("   "), None);
-        assert_eq!(reply_text("🤖 Delivered"), None);
     }
 }

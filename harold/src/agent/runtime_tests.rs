@@ -1436,7 +1436,6 @@ async fn real_screen_adapter_keeps_unrelated_capture_out_of_every_published_boun
         store: Arc::clone(&store),
         snapshots: snapshots.clone(),
         shutdown: shutdown_rx,
-        peers: crate::peers::PeerEndpoint::Off,
     };
     let captured_logs = Arc::new(Mutex::new(Vec::new()));
     let log_writer = Arc::clone(&captured_logs);
@@ -1571,7 +1570,6 @@ async fn grpc_fallback_explicit_clear_and_replacement_converge_in_projection_ord
         store: Arc::clone(&fixture.store),
         snapshots: AgentSnapshotHub::new(empty_snapshot()),
         shutdown: fixture._shutdown.subscribe(),
-        peers: crate::peers::PeerEndpoint::Off,
     };
 
     fixture.handle.inventory_tick().await.unwrap();
@@ -4980,7 +4978,6 @@ async fn away_message_and_spoken_line_during_a_slow_scan_are_answered_within_thr
         store: Arc::clone(&store),
         snapshots: AgentSnapshotHub::new(empty_snapshot()),
         shutdown: shutdown_rx,
-        peers: crate::peers::PeerEndpoint::Off,
     };
 
     // The first scan runs until its 1.5 s deadline stops it; both calls queue behind it.

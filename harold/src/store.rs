@@ -59,12 +59,6 @@ pub struct TurnCompleted {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InboundMessage {
     pub text: String,
-    /// True when ownership of this reply is already decided: the hub forwarded it from
-    /// another Mac, or the hub read it from Telegram and decided to keep it. Routing then
-    /// does not decide again, and the reply is never forwarded again. Events stored before
-    /// the field existed have none and read as false.
-    #[serde(default)]
-    pub forwarded: bool,
 }
 
 /// A message an agent asked Harold to send to the user's away device.
@@ -137,8 +131,6 @@ pub(crate) struct AppPushUnsubscribed {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub(crate) struct ReceivedReply {
     pub text: String,
-    #[serde(default)]
-    pub forwarded: bool,
     /// True when the user typed the reply in the web app, for the chief.
     #[serde(default)]
     pub to_chief: bool,
@@ -1883,7 +1875,7 @@ pub(crate) async fn append_app_reply(store: &HaroldStore, text: &str) -> Result<
     store
         .append([NewEvent::new(
             "InboundMessageReceived",
-            json!({ "text": text, "forwarded": false, "to_chief": true }),
+            json!({ "text": text, "to_chief": true }),
         )])
         .await?;
     Ok(())

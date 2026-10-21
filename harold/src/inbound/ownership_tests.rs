@@ -1,7 +1,7 @@
 use super::{
     Marker, NotifierRecord, Ownership, agent_message_text, decide_ownership, delivered_text,
     error_text, fed_markers, known_machine_names, latest_notifier, notification_text, pane_address,
-    parse_marker, record_marker, record_notification, recorded_notifications,
+    parse_marker, record_marker,
 };
 
 fn notification(machine: &str) -> Option<Marker<'_>> {
@@ -122,22 +122,6 @@ fn rows_fed_in_any_order_give_the_same_latest_notifier() {
 }
 
 #[test]
-fn notification_recorded_by_name_is_latest_until_the_next_row() {
-    let mut record = three_macs();
-
-    record.record_marker("🤖 [laptop/harold main:0.0] Build done (harold)", 200);
-    record.record_notification("studio");
-    assert_eq!(record.latest_notifier(), Some("studio"));
-
-    record.record_notification("mini");
-    assert_eq!(record.latest_notifier(), Some("mini"));
-
-    // It has no date, so any row read after it replaces it, even an older one.
-    record.record_marker("🤖 [laptop/harold main:0.0] Build done (harold)", 100);
-    assert_eq!(record.latest_notifier(), Some("laptop"));
-}
-
-#[test]
 fn error_reply_changes_nothing() {
     let mut record = three_macs();
 
@@ -155,8 +139,6 @@ fn unmarked_and_invalid_input_leaves_the_record_unchanged() {
     record.record_marker("yes, merge it", 100);
     record.record_marker("🤖 [harold:0.1] Work is done. (harold)", 100);
     record.record_marker("🤖 ✓ Delivered to [studio/alir-app main:0.1]", 100);
-    record.record_notification("");
-    record.record_notification("my mac");
 
     assert_eq!(record.latest_notifier(), None);
     assert_eq!(record.known_machine_names(), ["studio", "laptop", "mini"]);
@@ -180,7 +162,6 @@ fn marker_with_a_name_that_is_not_listed_changes_nothing() {
     record.record_marker("🤖 [1/2] Should I deploy?", 200);
     record.record_marker("🤖 [feature/x:0.0] done (x)", 200);
     record.record_marker("🤖 [mini/a:0.0] done (a)", 200);
-    record.record_notification("mini");
 
     assert_eq!(record.latest_notifier(), Some("laptop"));
     assert_eq!(record.known_machine_names(), ["studio", "laptop"]);
@@ -203,7 +184,6 @@ fn with_no_machines_listed_the_record_accepts_nothing() {
     record.record_marker("🤖 [mini/a:0.0] done (a)", 100);
     record.record_marker("🤖 [1/2] Should I deploy?", 200);
     record.record_marker("🤖 [mini] No active agent sessions found.", 300);
-    record.record_notification("mini");
 
     assert_eq!(record.latest_notifier(), None);
     assert!(record.known_machine_names().is_empty());
@@ -211,7 +191,6 @@ fn with_no_machines_listed_the_record_accepts_nothing() {
     assert_eq!(
         decide_ownership(
             "yes",
-            false,
             "studio",
             record.known_machine_names(),
             record.latest_notifier()
@@ -226,7 +205,6 @@ fn tag_for_a_listed_mac_that_has_not_notified_is_left_to_that_mac() {
 
     let ownership = decide_ownership(
         "[laptop/harold] go",
-        false,
         "studio",
         record.known_machine_names(),
         record.latest_notifier(),
@@ -243,7 +221,6 @@ fn process_wide_record_is_built_from_the_settings_and_keeps_nothing_with_no_mach
     assert!(crate::settings::get_settings().machines.is_empty());
     let text = "🤖 [ownership-test-a/x:0.0] done (x)";
     record_marker(text, 9_100);
-    record_notification("ownership-test-a");
 
     assert!(fed_markers().contains(&(text.to_string(), 9_100)));
     assert_eq!(latest_notifier(), None);
@@ -266,12 +243,7 @@ fn owned_by(owner: &str) -> Ownership<'static> {
 
 /// The decision on `studio` for a reply it read itself.
 fn on_studio<'a>(text: &'a str, latest: Option<&str>) -> Ownership<'a> {
-    decide_ownership(text, false, "studio", &known(), latest)
-}
-
-/// The decision on `laptop` for a reply the hub forwarded while `studio` notified last.
-fn forwarded_to_laptop(text: &str) -> Ownership<'_> {
-    decide_ownership(text, true, "laptop", &known(), Some("studio"))
+    decide_ownership(text, "studio", &known(), latest)
 }
 
 #[test]
@@ -293,7 +265,7 @@ fn untagged_reply_with_no_latest_notifier_is_owned_by_every_mac() {
         owned(None, "yes, merge it")
     );
     assert_eq!(
-        decide_ownership("yes, merge it", false, "laptop", &known(), None),
+        decide_ownership("yes, merge it", "laptop", &known(), None),
         owned(None, "yes, merge it")
     );
 }
@@ -307,7 +279,7 @@ fn machine_and_pane_tag_is_owned_by_the_named_machine_only() {
         owned(Some("alir-app main:0.1"), "revert that")
     );
     assert_eq!(
-        decide_ownership(text, false, "laptop", &known(), Some("laptop")),
+        decide_ownership(text, "laptop", &known(), Some("laptop")),
         owned_by("studio")
     );
 }
@@ -375,28 +347,7 @@ fn tag_with_a_slash_but_no_known_machine_is_a_pane_tag() {
 #[test]
 fn this_machine_is_recognised_before_any_marker_was_seen() {
     assert_eq!(
-        decide_ownership("[studio/alir] go", false, "studio", &[], None),
-        owned(Some("alir"), "go")
-    );
-}
-
-#[test]
-fn forwarded_reply_is_owned_without_consulting_the_latest_notifier() {
-    assert_eq!(
-        forwarded_to_laptop("yes, merge it"),
-        owned(None, "yes, merge it")
-    );
-    assert_eq!(
-        forwarded_to_laptop("[harold] go"),
-        owned(Some("harold"), "go")
-    );
-    assert_eq!(
-        forwarded_to_laptop("[laptop/harold] go"),
-        owned(Some("harold"), "go")
-    );
-    // The hub decided this Mac owns it, so a tag naming another Mac does not undo that.
-    assert_eq!(
-        forwarded_to_laptop("[studio/alir] go"),
+        decide_ownership("[studio/alir] go", "studio", &[], None),
         owned(Some("alir"), "go")
     );
 }
@@ -422,7 +373,7 @@ fn reply_this_mac_does_not_own_names_the_mac_that_does() {
         "studio".to_string(),
         "laptop".to_string(),
     ];
-    let on_hub = |text, latest| decide_ownership(text, false, "hub", &known, latest);
+    let on_hub = |text, latest| decide_ownership(text, "hub", &known, latest);
 
     assert_eq!(
         on_hub("[studio/alir] go", Some("laptop")),
@@ -502,22 +453,13 @@ fn address_copied_from_a_confirmation_reaches_the_same_pane() {
     );
 
     assert_eq!(
-        decide_ownership(&reply, false, "studio", &known(), Some("laptop")),
+        decide_ownership(&reply, "studio", &known(), Some("laptop")),
         owned(Some("alir-app main:0.1"), "revert that")
     );
     assert_eq!(
-        decide_ownership(&reply, false, "laptop", &known(), Some("laptop")),
+        decide_ownership(&reply, "laptop", &known(), Some("laptop")),
         owned_by("studio")
     );
-}
-
-#[test]
-fn process_wide_record_notification_logs_the_name_for_tests() {
-    crate::settings::init_settings_for_test();
-
-    record_notification("ownership-test-mac");
-
-    assert!(recorded_notifications().contains(&"ownership-test-mac".to_string()));
 }
 
 #[test]
