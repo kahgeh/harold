@@ -74,6 +74,8 @@ pub(crate) const ALLOWED_FIELDS: &[&str] = &[
     "started_by",
     "turn.start",
     "state",
+    "count",
+    "session_by",
     "alert",
     "pod.product",
     "spec.id",

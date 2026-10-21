@@ -635,6 +635,11 @@ pub struct NotifySettings {
     /// Which pane is the chief, matched by folder as one entry (see `same_folder`).
     #[serde(default)]
     pub chief: Option<String>,
+    /// The tmux session name of the chief. Among the agents in the chief's folder, the
+    /// chief is the first agent pane of the session with this exact name. Unset keeps
+    /// the longest-running agent's session.
+    #[serde(default)]
+    pub chief_session: Option<String>,
     /// Who may reach the phone by iMessage: folder entries. Empty means nobody and
     /// `["*"]` means everyone.
     #[serde(default)]
@@ -756,6 +761,14 @@ fn notify_entry_errors(notify: &NotifySettings) -> Vec<String> {
         .iter()
         .filter_map(|entry| entry_error("chief", entry, false))
         .collect();
+    if let Some(session) = &notify.chief_session
+        && (session.is_empty() || session.contains([':', '.']))
+    {
+        errors.push(
+            "notify.chief_session must be a tmux session name, not empty and with no ':' or '.'"
+                .into(),
+        );
+    }
     for channel in [
         Channel::Imessage,
         Channel::Telegram,
@@ -1857,6 +1870,32 @@ mod tests {
             imessage.iter().any(|e| e.contains("notify.imessage")),
             "{imessage:?}"
         );
+    }
+
+    #[test]
+    fn chief_session_accepts_chief_and_chief_of_pods() {
+        for name in ["chief", "chief-of-pods"] {
+            let errors = notify_errors(&format!("[notify]\nchief_session = \"{name}\""));
+            assert!(errors.is_empty(), "{name}: {errors:?}");
+        }
+    }
+
+    #[test]
+    fn chief_session_rejects_empty_colon_and_dot() {
+        for bad in ["", "a:b", "a.b"] {
+            let errors = notify_errors(&format!("[notify]\nchief_session = \"{bad}\""));
+            assert_eq!(
+                errors,
+                ["notify.chief_session must be a tmux session name, not empty and with no ':' or '.'"],
+                "{bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn chief_session_unset_is_none() {
+        let settings = default_settings_with("");
+        assert_eq!(settings.notify.chief_session, None);
     }
 
     #[test]
