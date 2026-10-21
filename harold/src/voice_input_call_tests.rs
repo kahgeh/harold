@@ -477,7 +477,9 @@ async fn a_call_whose_folder_went_before_it_ended_logs_no_warning() {
     let logs = CapturedLogs::start();
     let h = Harness::new();
     h.start().await;
-    for dir in h.call_dirs() {
+    let dirs = h.call_dirs();
+    assert_eq!(dirs.len(), 1);
+    for dir in dirs {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
