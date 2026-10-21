@@ -156,6 +156,17 @@ impl RunObs {
         )
     }
 
+    /// A skill whose `allowed-tools` is a YAML list: the run goes on with no listed tools.
+    pub(super) fn tools_not_read(&self) {
+        self.span.in_scope(|| {
+            warn!(
+                watch = self.watch.as_str(),
+                reason = "yaml_list",
+                "watch skill tools not read"
+            );
+        });
+    }
+
     /// A run that could not take the model within 60 seconds.
     pub(super) fn skipped(&self) {
         self.span.record("outcome", "skipped");

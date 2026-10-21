@@ -313,6 +313,39 @@ async fn every_log_line_of_the_table_is_written_with_its_fields() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_yaml_list_of_tools_is_logged_once_per_run_and_the_run_gets_no_tools() {
+    test_support::install();
+    let logs = CapturedLogs::start();
+    let h = harness(settings(), vec![answer("QUIET", 0.01)]).await;
+    h.folder.write_skill(
+        "pod-watch",
+        "---\nname: pod-watch\nallowed-tools:\n  - Bash(bin/pod slots:*)\n---\nCheck.\n",
+    );
+    let name = unique("yaml");
+    h.start(&name, 10, 120).await;
+
+    pass(Duration::from_secs(11 * 60)).await;
+
+    assert_eq!(h.runner.calls(), 2);
+    let text = logs.text();
+    let found = lines(&text, "watch skill tools not read", &name);
+    assert_eq!(found.len(), 2, "once per run");
+    assert!(
+        found
+            .iter()
+            .all(|line| line.contains("reason=\"yaml_list\""))
+    );
+    assert!(
+        h.runner
+            .jobs
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|job| job.allowed_tools.is_none())
+    );
+}
+
+#[tokio::test(start_paused = true)]
 async fn a_skipped_run_is_logged_with_its_reason() {
     test_support::install();
     let logs = CapturedLogs::start();

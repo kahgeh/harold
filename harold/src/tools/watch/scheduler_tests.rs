@@ -635,6 +635,116 @@ async fn a_set_daily_budget_stops_every_watch_before_a_run_that_could_pass_it() 
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_run_that_crosses_midnight_counts_toward_the_day_it_started() {
+    let h = harness(
+        settings(),
+        vec![Step::Answer {
+            result: "QUIET".into(),
+            cost: 0.02,
+            after: Duration::from_secs(40),
+        }],
+    )
+    .await;
+    // Move to 23:59:30 local (UTC here), so the run ends at 00:00:10.
+    let (_, next_midnight) = day_bounds(clock_ms(), UtcOffset::UTC);
+    let to_go = (next_midnight - clock_ms() - 30_000).rem_euclid(86_400_000);
+    pass(Duration::from_millis(to_go as u64)).await;
+    let (day_start, day_end) = day_bounds(clock_ms(), UtcOffset::UTC);
+    h.start("w", 10, 120).await;
+
+    pass(Duration::from_secs(60)).await;
+
+    assert_eq!(h.runner.calls(), 1);
+    assert!(clock_ms() >= day_end, "the run ended after midnight");
+    assert_eq!(
+        h.store.spent_micros(day_start, day_end).await.unwrap(),
+        20_000
+    );
+    assert_eq!(
+        h.store
+            .spent_micros(day_end, day_end + 86_400_000)
+            .await
+            .unwrap(),
+        0
+    );
+}
+
+#[tokio::test]
+async fn stopping_a_watch_kills_the_child_its_run_started() {
+    use std::os::unix::fs::PermissionsExt;
+    let folder = TempFolder::with_skill("pod-watch", "---\nname: pod-watch\n---\nCheck.\n");
+    let data = TempFolder::new();
+    let cli = data.0.join("fake-claude");
+    std::fs::write(
+        &cli,
+        "#!/bin/sh\nsleep 300 &\necho $! > child.pid\ncat > /dev/null\nsleep 300\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let store = Arc::new(WatchStore::open(&data.0).await.unwrap());
+    let (_stop, shutdown) = signal::channel(());
+    let scheduler = Scheduler::new(Deps {
+        store: Arc::clone(&store),
+        runner: Arc::new(crate::tools::watch::runner::ClaudeRunner::new(
+            cli.to_str().unwrap().to_owned(),
+            vec![("PATH".into(), std::env::var_os("PATH").unwrap())],
+        )),
+        typing: FakeTyping::new(),
+        agents: FakeAgents::with(Vec::new()),
+        pods: Arc::new(FakePods::default()),
+        chief_pane: FakeChief::at(Some(CHIEF_PANE)),
+        settings: settings(),
+        offset: UtcOffset::UTC,
+        shutdown,
+    });
+    let checked = Checked {
+        name: "w".into(),
+        folder: folder.0.clone(),
+        skill: "pod-watch".into(),
+        report_to: ReportTo::Chief,
+        every_minutes: 10,
+        for_minutes: 120,
+        every_run: false,
+        run_budget_usd_micros: None,
+    };
+    scheduler.start(checked).await.unwrap();
+
+    let pid_file = folder.0.join("child.pid");
+    let mut pid = None;
+    for _ in 0..100 {
+        if let Ok(text) = std::fs::read_to_string(&pid_file)
+            && !text.trim().is_empty()
+        {
+            pid = Some(text.trim().to_owned());
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let pid = pid.expect("the fake Claude Code started its child");
+    let alive = |pid: &str| {
+        std::process::Command::new("kill")
+            .args(["-0", pid])
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap()
+            .success()
+    };
+    assert!(alive(&pid), "the child runs before the stop");
+
+    scheduler.stop("w").await.unwrap();
+
+    let mut gone = false;
+    for _ in 0..60 {
+        if !alive(&pid) {
+            gone = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(gone, "the child {pid} outlived the stop");
+}
+
+#[tokio::test(start_paused = true)]
 async fn a_spent_day_refuses_start_even_when_nothing_was_projected() {
     let h = harness(
         WatchSettings {

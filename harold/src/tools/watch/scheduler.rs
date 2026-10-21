@@ -376,6 +376,7 @@ impl Scheduler {
         slot: &Arc<ReportSlot>,
     ) -> Flow {
         let began = Instant::now();
+        let began_at_ms = clock_ms();
         let budget = row
             .run_budget_usd_micros
             .or(self.deps.settings.run_budget_usd.map(to_micros));
@@ -457,7 +458,7 @@ impl Scheduler {
         }
         let now = clock_ms();
         let record = RunRecord {
-            started_at_ms: now,
+            started_at_ms: began_at_ms,
             outcome,
             cost_usd_micros: cost_micros,
             streak,
@@ -506,6 +507,9 @@ impl Scheduler {
             return Some((Err(Failure::SkillMissing), None, None));
         };
         obs.set_add_dirs(skill.add_dirs.len());
+        if skill.tools_unread {
+            obs.tools_not_read();
+        }
         let sources = Sources {
             agents: &self.deps.agents,
             pods: &self.deps.pods,

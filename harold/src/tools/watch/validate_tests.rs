@@ -229,6 +229,30 @@ fn allowed_tools_come_back_exactly_as_written() {
 }
 
 #[test]
+fn a_yaml_list_of_allowed_tools_sets_the_flag_and_no_value() {
+    let read = |frontmatter: &str| {
+        let text = format!("---\nname: pod-watch\n{frontmatter}---\nBody\n");
+        let temp = Temp::with_skill("pod-watch", &text);
+        let skill = read_skill(&temp.0, "pod-watch", &[]).unwrap();
+        (skill.allowed_tools, skill.tools_unread)
+    };
+    assert_eq!(
+        read("allowed-tools: Write\n"),
+        (Some("Write".into()), false)
+    );
+    assert_eq!(
+        read("allowed-tools:\n  - Bash(x)\n  - Read\n"),
+        (None, true)
+    );
+    assert_eq!(read("allowed-tools:\n- Read\n"), (None, true));
+    assert_eq!(read("allowed-tools:\nadd-dirs: ~/x\n"), (None, false));
+    assert_eq!(
+        read("allowed-tools: Write\n  - Read\n"),
+        (Some("Write".into()), false)
+    );
+}
+
+#[test]
 fn a_skill_without_allowed_tools_or_frontmatter_has_none() {
     let temp = Temp::with_skill("pod-watch", "---\nname: pod-watch\n---\nBody\n");
     let skill = read_skill(&temp.0, "pod-watch", &[]).unwrap();

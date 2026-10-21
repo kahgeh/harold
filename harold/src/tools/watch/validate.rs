@@ -58,6 +58,8 @@ pub(super) enum Refusal {
 pub(super) struct Skill {
     /// The frontmatter's `allowed-tools`, exactly as written, or `None` when absent.
     pub allowed_tools: Option<String>,
+    /// `allowed-tools:` written as a YAML list, which is not read: `allowed_tools` stays `None`.
+    pub tools_unread: bool,
     /// The frontmatter's `add-dirs`: the extra folders a run may read, `~` expanded.
     pub add_dirs: Vec<String>,
     /// The text after the frontmatter.
@@ -210,15 +212,18 @@ fn parse_skill(text: &str, home: Option<&str>) -> Skill {
     else {
         return Skill {
             allowed_tools: None,
+            tools_unread: false,
             add_dirs: Vec::new(),
             body: text.to_owned(),
         };
     };
     let mut allowed_tools = None;
+    let mut tools_unread = false;
     let mut add_dirs = Vec::new();
     let mut consumed = 0;
     let mut closed = false;
-    for line in rest.split_inclusive('\n') {
+    let mut lines = rest.split_inclusive('\n').peekable();
+    while let Some(line) = lines.next() {
         consumed += line.len();
         let bare = line.trim_end_matches(['\n', '\r']);
         if bare == "---" {
@@ -229,6 +234,11 @@ fn parse_skill(text: &str, home: Option<&str>) -> Skill {
             let value = value.trim();
             if !value.is_empty() {
                 allowed_tools = Some(value.to_owned());
+            } else if lines
+                .peek()
+                .is_some_and(|next| next.trim_start().starts_with('-'))
+            {
+                tools_unread = true;
             }
         }
         if let Some(value) = bare.strip_prefix("add-dirs:") {
@@ -244,12 +254,14 @@ fn parse_skill(text: &str, home: Option<&str>) -> Skill {
         // Frontmatter that never closes is not frontmatter: the whole text is the body.
         return Skill {
             allowed_tools: None,
+            tools_unread: false,
             add_dirs: Vec::new(),
             body: text.to_owned(),
         };
     }
     Skill {
         allowed_tools,
+        tools_unread,
         add_dirs,
         body: rest[consumed..].to_owned(),
     }

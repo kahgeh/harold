@@ -33,6 +33,7 @@ Each command prints one line (`list` prints one per watch, then `spent today $â€
 - **`start` refuses** with `unknown skill <skill>`, `too many watches` (5 are running), `daily budget spent`, and `invalid <flag>` for a value outside the table. At the service these are `InvalidArgument` `invalid <field>` (`invalid name`, `invalid folder`, `invalid skill`, `invalid every_minutes`, `invalid for_minutes`, `invalid report_to`, `invalid run_budget_usd`), `NotFound` `unknown_skill`, and `FailedPrecondition` `too_many_watches` or `daily_budget_spent`. `stop` refuses `NotFound` `unknown_watch` and `FailedPrecondition` `not_running`.
 - **`list`** shows every running watch, and every watch that ended today with why it ended, and the day's spend for every watch together.
 - **State is kept** in the tool's own database, so a Harold restart resumes a running watch with its end unchanged. Its next run comes at its stored time, or at once if that has passed, never twice for one slot of time.
+- **After the Mac sleeps, a run can start up to one `--every` late.** The wait for the next run is a timer of at most `--every`, and the timer does not count the time the Mac slept.
 
 ## Settings
 
@@ -65,6 +66,8 @@ ln -s /Users/kahgeh/Dev/p/chief-of-pods/skills/watches/pod-watch .claude/skills/
 ## What a skill lets the model do
 
 A watch skill is an ordinary Claude Code skill. Its frontmatter's `allowed-tools` lists what the model may use, and its text says what to check and what is worth reporting. Harold reads it afresh at each run, so an edit takes effect at the next run.
+
+`allowed-tools` is one line, comma-separated. A YAML list is not read: the run gets no listed tools, and `watch skill tools not read` is logged.
 
 Harold passes `allowed-tools` to Claude Code as `--allowedTools`, exactly as written: no matching, narrowing or dropping. The skill's author decides what a run may do ([ADR 0005](../../adr/0005-a-tool-may-run-a-hosted-model-with-the-tools-a-skill-allows.md)), and a skill may let the model change things: write files, run any command it lists, or reach the network. A skill with no `allowed-tools` leaves the model only the tools Claude Code runs without asking. Under `--print` nothing can ask a person, so any other tool use is refused.
 
@@ -151,6 +154,7 @@ No line carries any of the skill's text, its `allowed-tools`, the paths in its `
 | A run ends | info | `watch run finished` | `watch`, `run`, `outcome` (`quiet` or `report`), `cost_usd`, `duration_ms`, `add_dirs` |
 | A run fails | warn | `watch run failed` | `watch`, `run`, `reason` (`timeout`, `process_failed`, `run_budget_reached`, `unreadable_answer`, `skill_missing`, `max_turns_reached`), `cost_usd`, `add_dirs`; for a `process_failed` or `max_turns_reached` run that exited, also those of `exit_code`, `signal`, `subtype`, `is_error` and `num_turns` that are known (`subtype` is `unreadable_json` when the output was not JSON, and `other` when it was not a short name) |
 | A run is skipped | warn | `watch run skipped` | `watch`, `run`, `reason` (`model_busy`) |
+| A skill's `allowed-tools` is a YAML list, at each run | warn | `watch skill tools not read` | `watch`, `reason` (`yaml_list`) |
 | A report waits, logged when its reason changes | info | `watch report waiting` | `watch`, `run`, `reason` (the timed-prompt reasons, such as `agent_busy`) |
 | A waiting report is replaced or dropped | info | `watch report replaced` | `watch`, `run`, `why` (`newer_report` or `watch_ended`) |
 | A report or closing line is typed | info | `watch report typed` | `watch`, `run`, `pane` |
