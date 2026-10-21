@@ -27,6 +27,7 @@ pub(super) enum Call {
     Answer(pb::AnswerQuestionRequest),
     Defer(String),
     Tick(pb::TickStepRequest),
+    Save(pb::SavePicksRequest),
 }
 
 #[derive(Default)]
@@ -122,9 +123,18 @@ impl QuestionService for FakeQuestions {
     }
     async fn save_picks(
         &self,
-        _: Request<pb::SavePicksRequest>,
+        request: Request<pb::SavePicksRequest>,
     ) -> Result<Response<pb::SavePicksResponse>, Status> {
-        Err(Status::unimplemented("save"))
+        let request = request.into_inner();
+        self.write(Call::Save(request.clone()))?;
+        // The tool stores the picks with the question, so the next read shows them.
+        let mut state = self.lock();
+        for listed in &mut state.list {
+            if listed.question.as_ref().is_some_and(|q| q.id == request.id) {
+                listed.picks = request.picks.clone();
+            }
+        }
+        Ok(Response::new(pb::SavePicksResponse {}))
     }
     async fn show_question(
         &self,
@@ -202,6 +212,8 @@ impl Drop for TestDirectory {
 /// The router on a free local port, with `questions` as its question service.
 pub(super) struct TestServer {
     pub addr: SocketAddr,
+    /// Bumped by each todo post.
+    pub todos_changed: Arc<watch::Sender<u64>>,
     _shutdown: watch::Sender<()>,
     handle: JoinHandle<()>,
 }
@@ -221,11 +233,13 @@ impl TestServer {
             Default::default(),
         );
         state.questions = questions;
+        let todos_changed = state.todos_changed.clone();
         let handle = tokio::spawn(async move {
             let _ = axum::serve(listener, router(state)).await;
         });
         Self {
             addr,
+            todos_changed,
             _shutdown: shutdown,
             handle,
         }
@@ -725,6 +739,7 @@ async fn only_a_post_with_the_login_and_the_same_origin_reaches_the_tool() {
         ("/todos/tick", "id=I1&version=3&step=1&ticked=true"),
         ("/todos/done", "id=I1&version=3"),
         ("/todos/ignore", "id=I1&version=3"),
+        ("/todos/picks", "id=Q1&version=2&pick.0=a"),
     ];
     let client = reqwest::Client::new();
 
@@ -762,9 +777,10 @@ async fn only_a_post_with_the_login_and_the_same_origin_reaches_the_tool() {
     assert!(service.fake.calls().is_empty());
 
     for (path, body) in forms {
-        assert_eq!(server.post(path, body).await.status(), 200, "{path}");
+        let expected = if path == "/todos/picks" { 204 } else { 200 };
+        assert_eq!(server.post(path, body).await.status(), expected, "{path}");
     }
-    assert_eq!(service.fake.calls().len(), 5);
+    assert_eq!(service.fake.calls().len(), 6);
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -813,4 +829,206 @@ async fn a_new_stream_starts_with_the_todos_as_they_are_now() {
         first.contains(r#"<span id="todo-count" class="todo-count">1</span>"#),
         "{first}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Saved picks
+// ---------------------------------------------------------------------------
+
+fn save(picks: Vec<pb::Pick>) -> Call {
+    Call::Save(pb::SavePicksRequest {
+        id: "Q1".into(),
+        version: 2,
+        picks,
+    })
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_partial_form_saves_just_the_picks_made() {
+    let (service, server, _directory) = served_with_todos().await;
+
+    let response = server
+        .post("/todos/picks", "id=Q1&version=2&pick.0=a")
+        .await;
+
+    assert_eq!(response.status(), 204);
+    assert!(response.text().await.unwrap().is_empty());
+    assert_eq!(service.fake.calls(), vec![save(vec![pick(0, "a", "")])]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_free_option_saves_its_words_and_without_words_is_left_out() {
+    let (service, server, _directory) = served_with_todos().await;
+
+    for body in [
+        "id=Q1&version=2&pick.0=a&pick.1=y&text.1=my+words",
+        "id=Q1&version=2&pick.0=a&pick.1=y&text.1=+++",
+        "id=Q1&version=2&pick.0=a&pick.1=y",
+    ] {
+        assert_eq!(
+            server.post("/todos/picks", body).await.status(),
+            204,
+            "{body}"
+        );
+    }
+
+    assert_eq!(
+        service.fake.calls(),
+        vec![
+            save(vec![pick(0, "a", ""), pick(1, "y", "my words")]),
+            save(vec![pick(0, "a", "")]),
+            save(vec![pick(0, "a", "")]),
+        ]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_form_with_no_pick_saves_an_empty_list() {
+    let (service, server, _directory) = served_with_todos().await;
+
+    let response = server.post("/todos/picks", "id=Q1&version=2").await;
+
+    assert_eq!(response.status(), 204);
+    assert_eq!(service.fake.calls(), vec![save(Vec::new())]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_malformed_picks_form_gives_400_and_no_call() {
+    let (service, server, _directory) = served_with_todos().await;
+
+    for body in [
+        "",
+        "version=2&pick.0=a",
+        "id=Q1&pick.0=a",
+        "id=Q1&version=two&pick.0=a",
+        "id=Q1&version=2&pick.x=a",
+        "id=Q1&version=2&pick.0=a&pick.0=b",
+        "id=Q1&version=2&pick.0=",
+        "id=Q1&version=2&pick.5=a",
+        "id=Q1&version=2&pick.0=zzz",
+        "id=Q1&version=2&pick.0=a&pick.1=%ZZ",
+    ] {
+        let response = server.post("/todos/picks", body).await;
+        assert_eq!(response.status(), 400, "{body:?}");
+    }
+
+    assert!(service.fake.calls().is_empty());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_save_wakes_every_page_and_logs_picks_sent_without_the_words() {
+    let logs = CapturedLogs::start();
+    let (_service, server, _directory) = served_with_todos().await;
+    let before = *server.todos_changed.borrow();
+
+    server
+        .post(
+            "/todos/picks",
+            "id=Q1&version=2&pick.0=a&pick.1=y&text.1=my+words",
+        )
+        .await;
+
+    assert_eq!(*server.todos_changed.borrow(), before + 1);
+    let text = logs.text();
+    let lines: Vec<&str> = text
+        .lines()
+        .filter(|line| line.contains("app todo answered"))
+        .collect();
+    assert_eq!(lines.len(), 1, "{text}");
+    assert!(
+        lines[0].contains("kind=\"picks\"") && lines[0].contains("result=\"sent\""),
+        "{text}"
+    );
+    assert!(
+        !lines[0].contains("Q1") && !lines[0].contains("my words"),
+        "{text}"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_refused_save_sets_its_notice_redraws_the_page_and_logs_its_result() {
+    let logs = CapturedLogs::start();
+    let (service, server, _directory) = served_with_todos().await;
+    for (refusal, wanted, result) in [
+        (
+            Status::failed_precondition("version_changed"),
+            "Q1 changed. Look again before you send.",
+            "version_changed",
+        ),
+        (
+            Status::failed_precondition("not_waiting"),
+            "Q1 was already answered or withdrawn.",
+            "not_waiting",
+        ),
+        (
+            Status::unavailable("down"),
+            "Harold can&#39;t save your picks right now",
+            "unavailable",
+        ),
+    ] {
+        service.fake.0.lock().unwrap().write_refusal = Some(refusal);
+
+        let response = server
+            .post("/todos/picks", "id=Q1&version=2&pick.0=a")
+            .await;
+
+        assert_eq!(response.status(), 200, "{result}");
+        let redrawn = response.text().await.unwrap();
+        assert!(redrawn.contains(r#"<section id="todos""#), "{redrawn}");
+        assert!(
+            redrawn.contains(&format!(r#"<p class="notice" role="status">{wanted}</p>"#)),
+            "{wanted}: {redrawn}"
+        );
+        assert!(logs.text().contains(&format!("result=\"{result}\"")));
+    }
+    assert!(service.fake.calls().is_empty());
+
+    // The next good save takes the notice off.
+    service.fake.0.lock().unwrap().write_refusal = None;
+    server
+        .post("/todos/picks", "id=Q1&version=2&pick.0=a")
+        .await;
+    let page = server.get("/").await.text().await.unwrap();
+    assert!(!page.contains(r#"class="notice""#), "{page}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_saved_pick_and_its_words_draw_on_the_next_read() {
+    let (_service, server, _directory) = served_with_todos().await;
+
+    server
+        .post(
+            "/todos/picks",
+            "id=Q1&version=2&pick.0=a&pick.1=y&text.1=hello",
+        )
+        .await;
+    // The page's own read draws what the tool now holds.
+    let page = server.get("/").await.text().await.unwrap();
+
+    assert!(
+        page.contains(r#"name="pick.0" value="a" checked"#),
+        "{page}"
+    );
+    assert!(
+        page.contains(r#"name="pick.1" value="y" data-free checked"#),
+        "{page}"
+    );
+    assert!(page.contains(r#"name="text.1" value="hello""#), "{page}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn send_still_sends_the_forms_picks_after_a_failed_save() {
+    let (service, server, _directory) = served_with_todos().await;
+    service.fake.0.lock().unwrap().write_refusal = Some(Status::unavailable("down"));
+    server
+        .post("/todos/picks", "id=Q1&version=2&pick.0=a")
+        .await;
+    service.fake.0.lock().unwrap().write_refusal = None;
+
+    let response = server
+        .post("/todos/answer", "id=Q1&version=2&pick.0=a&pick.1=x")
+        .await;
+
+    assert_eq!(response.status(), 200);
+    assert!(matches!(&service.fake.calls()[..], [Call::Answer(_)]));
 }

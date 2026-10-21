@@ -197,6 +197,7 @@ pub(crate) fn router(state: AppState) -> Router {
         .route("/push/subscription", post(replies::post_subscription))
         .route("/updates", get(updates::get_updates))
         .route("/todos/answer", post(todos::post_answer))
+        .route("/todos/picks", post(todos::post_picks))
         .route("/todos/later", post(todos::post_later))
         .route("/todos/tick", post(todos::post_tick))
         .route("/todos/done", post(todos::post_done))

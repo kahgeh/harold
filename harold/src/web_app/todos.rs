@@ -2,7 +2,7 @@
 //! on Harold's own address, as the dash does. The web app never calls into the tool's
 //! module (ADR 0001).
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::convert::Infallible;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -17,7 +17,7 @@ use datastar::prelude::PatchElements;
 use harold_api::tools::questions::v1::question_service_client::QuestionServiceClient;
 use harold_api::tools::questions::v1::{
     AnswerKind, AnswerQuestionRequest, DeferQuestionRequest, ListQuestionsRequest, ListedQuestion,
-    Pick, TickStepRequest,
+    Pick, SavePicksRequest, TickStepRequest,
 };
 use tonic::transport::{Channel, Endpoint};
 use tonic::{Code, Status};
@@ -341,6 +341,7 @@ enum Kind {
     Answer,
     FreeText,
     Later,
+    Picks,
     Tick,
     Done,
     Ignore,
@@ -352,6 +353,7 @@ impl Kind {
             Self::Answer => "answer",
             Self::FreeText => "free_text",
             Self::Later => "later",
+            Self::Picks => "picks",
             Self::Tick => "tick",
             Self::Done => "done",
             Self::Ignore => "ignore",
@@ -393,11 +395,14 @@ impl Outcome {
     }
 
     /// The words on the card for a refusal.
-    fn notice(self, id: &str) -> Option<String> {
+    fn notice(self, id: &str, kind: Kind) -> Option<String> {
         match self {
             Self::Sent => None,
             Self::VersionChanged => Some(format!("{id} changed. Look again before you send.")),
             Self::NotWaiting => Some(format!("{id} was already answered or withdrawn.")),
+            Self::Unavailable if kind == Kind::Picks => {
+                Some("Harold can't save your picks right now".to_owned())
+            }
             Self::Unavailable => Some("Harold can't send this right now. Try again.".to_owned()),
         }
     }
@@ -474,15 +479,27 @@ impl Questions {
     /// key, a decision the todo does not have, a free pick without words, or a todo whose
     /// decisions are not all picked.
     fn picks(&self, id: &str, form: &Form) -> Option<(Vec<Pick>, bool)> {
+        self.read_picks(id, form, false)
+    }
+
+    /// The picks a form holds so far, as the tool saves them: as `picks`, but a decision may
+    /// be missing, a free pick without words yet is left out, and no pick at all is an empty
+    /// list.
+    fn partial_picks(&self, id: &str, form: &Form) -> Option<Vec<Pick>> {
+        self.read_picks(id, form, true).map(|(picks, _)| picks)
+    }
+
+    fn read_picks(&self, id: &str, form: &Form, partial: bool) -> Option<(Vec<Pick>, bool)> {
         let known = self.find(id).and_then(|listed| listed.question);
         let mut picks = BTreeMap::new();
+        let mut seen = BTreeSet::new();
         let mut any_free = false;
         for (name, key) in &form.0 {
             let Some(number) = name.strip_prefix("pick.") else {
                 continue;
             };
             let decision: u32 = number.parse().ok()?;
-            if key.is_empty() || picks.contains_key(&decision) {
+            if key.is_empty() || !seen.insert(decision) {
                 return None;
             }
             let text = form.get(&format!("text.{decision}")).unwrap_or("").trim();
@@ -494,6 +511,9 @@ impl Questions {
                 None => !text.is_empty(),
             };
             if free && text.is_empty() {
+                if partial {
+                    continue;
+                }
                 return None;
             }
             any_free |= free;
@@ -506,12 +526,13 @@ impl Questions {
                 },
             );
         }
-        if let Some(question) = &known
+        if !partial
+            && let Some(question) = &known
             && picks.len() != question.decisions.len()
         {
             return None;
         }
-        (!picks.is_empty()).then(|| (picks.into_values().collect(), any_free))
+        (partial || !picks.is_empty()).then(|| (picks.into_values().collect(), any_free))
     }
 
     async fn answer(&self, request: AnswerQuestionRequest) -> Outcome {
@@ -530,6 +551,12 @@ impl Questions {
         Outcome::of(result.map(|r| r.map(|_| ())))
     }
 
+    async fn save_picks(&self, request: SavePicksRequest) -> Outcome {
+        let mut client = self.client.clone();
+        let result = tokio::time::timeout(WRITE_LIMIT, client.save_picks(request)).await;
+        Outcome::of(result.map(|r| r.map(|_| ())))
+    }
+
     async fn tick(&self, request: TickStepRequest) -> Outcome {
         let mut client = self.client.clone();
         let result = tokio::time::timeout(WRITE_LIMIT, client.tick_step(request)).await;
@@ -540,12 +567,8 @@ impl Questions {
 /// Logs the post, sets or clears the card's notice, reads the todos again, wakes every open
 /// page, and answers with the redrawn page.
 async fn finish(state: &AppState, kind: Kind, id: &str, outcome: Outcome) -> Response {
-    info!(
-        kind = kind.word(),
-        result = outcome.word(),
-        "app todo answered"
-    );
-    match outcome.notice(id) {
+    log_post(kind, outcome);
+    match outcome.notice(id, kind) {
         Some(notice) => state.questions.set_notice(id, &notice),
         None => state.questions.clear_notice(id),
     }
@@ -555,6 +578,14 @@ async fn finish(state: &AppState, kind: Kind, id: &str, outcome: Outcome) -> Res
     let count = section.count().render().unwrap_or_default();
     let patch: Event = PatchElements::new(format!("{page}{count}")).into();
     Sse::new(tokio_stream::once(Ok::<Event, Infallible>(patch))).into_response()
+}
+
+fn log_post(kind: Kind, outcome: Outcome) {
+    info!(
+        kind = kind.word(),
+        result = outcome.word(),
+        "app todo answered"
+    );
 }
 
 fn malformed() -> Response {
@@ -593,6 +624,36 @@ pub(crate) async fn post_answer(State(state): State<AppState>, body: Bytes) -> R
         })
         .await;
     finish(&state, kind, &id, outcome).await
+}
+
+/// `POST /todos/picks`: saves the picks a card holds so far. A save the tool took answers
+/// `204` and no patch, so the page that made it is not redrawn under the user; every other
+/// page reads the todos again. A refusal redraws the page with the card's notice.
+pub(crate) async fn post_picks(State(state): State<AppState>, body: Bytes) -> Response {
+    let Some(form) = Form::parse(&body) else {
+        return malformed();
+    };
+    let (Some(id), Some(version)) = (form.id(), form.version()) else {
+        return malformed();
+    };
+    let Some(picks) = state.questions.partial_picks(&id, &form) else {
+        return malformed();
+    };
+    let outcome = state
+        .questions
+        .save_picks(SavePicksRequest {
+            id: id.clone(),
+            version,
+            picks,
+        })
+        .await;
+    if outcome != Outcome::Sent {
+        return finish(&state, Kind::Picks, &id, outcome).await;
+    }
+    log_post(Kind::Picks, outcome);
+    state.questions.clear_notice(&id);
+    state.todos_changed.send_modify(|posts| *posts += 1);
+    StatusCode::NO_CONTENT.into_response()
 }
 
 /// `POST /todos/later`: sets a question aside.
