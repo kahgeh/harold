@@ -2,7 +2,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::{Duration, Instant};
 
-use crate::channels::{split_body, truncate_body};
+use crate::channels::{fit_turn_end_text, split_body, summarise_with};
 use crate::inbound::ownership::{
     NotifierRecord, Ownership, decide_ownership, delivered_text, error_text, fed_markers,
     notification_text, parse_marker,
@@ -47,19 +47,89 @@ fn split_body_multiple_sentences_with_question() {
 }
 
 #[test]
-fn truncate_body_caps_at_280_chars_and_flattens_newlines() {
-    let short = "Hello world.\nDone.";
-    assert_eq!(truncate_body(short), "Hello world. Done.");
+fn fit_leaves_text_within_the_limit_unchanged() {
+    let exact = "x".repeat(280);
+    assert_eq!(fit_turn_end_text(&exact, 280), exact);
+    assert_ne!(fit_turn_end_text(&"x".repeat(281), 280), "x".repeat(281));
+}
 
-    let long: String = "x".repeat(300);
-    let result = truncate_body(&long);
-    assert_eq!(result.len(), 280);
+#[test]
+fn fit_cuts_after_the_last_sentence_that_fits() {
+    let text = "First one. Second one. Third one.";
+    let result = fit_turn_end_text(text, 25);
+    assert_eq!(result, "First one. Second one. …");
+    assert!(result.chars().count() <= 25);
+    assert_eq!(fit_turn_end_text(text, 20), "First one. …");
+}
 
-    // Multi-byte: caps at 280 *characters*, not bytes.
-    let emoji_long: String = "\u{1F600}".repeat(300);
-    let result = truncate_body(&emoji_long);
+#[test]
+fn fit_cuts_after_a_whole_word_when_no_sentence_end_fits() {
+    assert_eq!(fit_turn_end_text("alpha beta gamma delta", 13), "alpha beta…");
+    assert_eq!(fit_turn_end_text("alpha beta gamma delta", 12), "alpha beta…");
+    assert_eq!(fit_turn_end_text("alpha beta gamma delta", 11), "alpha…");
+}
+
+#[test]
+fn fit_cuts_inside_a_word_only_when_one_word_exceeds_the_limit() {
+    let result = fit_turn_end_text(&"x".repeat(300), 280);
+    assert_eq!(result, format!("{}…", "x".repeat(279)));
     assert_eq!(result.chars().count(), 280);
+}
+
+#[test]
+fn fit_counts_chars_not_bytes() {
+    let result = fit_turn_end_text(&"\u{1F600}".repeat(300), 280);
+    assert_eq!(result.chars().count(), 280);
+    assert!(result.ends_with('…'));
     assert!(result.len() > 280);
+}
+
+#[test]
+fn fit_treats_e_g_as_a_sentence_end() {
+    let text = "Use a tool, e.g. cargo, to build it everywhere";
+    assert_eq!(fit_turn_end_text(text, 20), "Use a tool, e.g. …");
+}
+
+#[test]
+fn fit_needs_a_space_after_the_sentence_end() {
+    // "v1.2" is not a sentence end, so the cut falls back to a word.
+    assert_eq!(fit_turn_end_text("see v1.2build now please", 14), "see…");
+}
+
+#[test]
+fn fit_never_exceeds_the_limit() {
+    let text = "Done. Tests pass! Ready? Yes. A_very_long_unbroken_token_here and more words follow \u{1F600}\u{1F600} end.";
+    for limit in 3..text.chars().count() {
+        let result = fit_turn_end_text(text, limit);
+        assert!(result.chars().count() <= limit, "limit {limit}: {result:?}");
+    }
+}
+
+#[cfg(unix)]
+fn fake_cli(name: &str, script: &str) -> String {
+    use std::os::unix::fs::PermissionsExt;
+    let path = std::env::temp_dir().join(format!("harold-{name}-{}", std::process::id()));
+    std::fs::write(&path, script).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    path.to_string_lossy().into_owned()
+}
+
+#[cfg(unix)]
+#[test]
+fn summarise_returns_a_600_char_cli_text_uncut() {
+    let cli = fake_cli("cli-ok", &format!("#!/bin/sh\nprintf '{}'\n", "a".repeat(600)));
+    let result = summarise_with(Some(&cli), "reply", "prompt");
+    assert_eq!(result, "a".repeat(600));
+}
+
+#[cfg(unix)]
+#[test]
+fn summarise_returns_the_whole_reply_when_the_cli_fails() {
+    let cli = fake_cli("cli-bad", "#!/bin/sh\nexit 1\n");
+    let reply = format!("{}\n{}", "b".repeat(300), "c".repeat(300));
+    let result = summarise_with(Some(&cli), &reply, "prompt");
+    assert_eq!(result, format!("{} {}", "b".repeat(300), "c".repeat(300)));
+    assert_eq!(summarise_with(None, &reply, "prompt"), result);
 }
 
 #[test]

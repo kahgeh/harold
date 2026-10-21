@@ -40,24 +40,61 @@ pub(crate) fn split_body(body: &str) -> (&str, Option<&str>) {
     (body.trim(), None)
 }
 
-/// Cap `assistant_message` to 280 chars and flatten newlines into spaces.
-pub(crate) fn truncate_body(assistant_message: &str) -> String {
-    assistant_message
-        .chars()
-        .take(280)
-        .collect::<String>()
-        .replace('\n', " ")
+/// The most characters a turn-end update takes on iMessage and Telegram.
+pub(crate) const TURN_END_TEXT_LIMIT: usize = 280;
+
+/// Whether `chars[i]` ends a sentence: `.`, `!` or `?` followed by a space or the end.
+fn is_sentence_end(chars: &[char], i: usize) -> bool {
+    matches!(chars[i], '.' | '!' | '?') && chars.get(i + 1).is_none_or(|c| *c == ' ')
 }
 
-/// Summarise `assistant_message` for notification delivery using the AI CLI.
-/// Falls back to [`truncate_body`] if the CLI is not configured or fails.
+/// Fit `text` into `limit` characters. Text that fits is returned as it is. Longer text is
+/// cut after the last sentence that fits, with " …" after it; else after the last whole
+/// word, with "…"; a single word longer than the limit is cut inside the word.
+pub(crate) fn fit_turn_end_text(text: &str, limit: usize) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    if chars.len() <= limit {
+        return text.to_string();
+    }
+    let sentence_room = limit.saturating_sub(2);
+    if let Some(end) = (0..sentence_room).rev().find(|&i| is_sentence_end(&chars, i)) {
+        return format!("{} …", chars[..=end].iter().collect::<String>());
+    }
+    let word_room = limit.saturating_sub(1);
+    let word_end = if chars[word_room].is_whitespace() {
+        word_room
+    } else {
+        chars[..word_room]
+            .iter()
+            .rposition(|c| c.is_whitespace())
+            .unwrap_or(word_room)
+    };
+    let kept: String = chars[..word_end].iter().collect();
+    format!("{}…", kept.trim_end())
+}
+
+/// Summarise `assistant_message` for notification delivery using the AI CLI. The text is
+/// not cut: falls back to the whole reply if the CLI is not configured or fails.
 pub(crate) fn summarise_for_notification(
     assistant_message: &str,
     last_user_prompt: &str,
 ) -> String {
-    let cfg = get_settings();
-    let Some(cli) = cfg.ai.cli_path.as_deref() else {
-        return truncate_body(assistant_message);
+    summarise_with(
+        get_settings().ai.cli_path.as_deref(),
+        assistant_message,
+        last_user_prompt,
+    )
+}
+
+/// [`summarise_for_notification`] with the AI CLI path given.
+pub(crate) fn summarise_with(
+    cli: Option<&str>,
+    assistant_message: &str,
+    last_user_prompt: &str,
+) -> String {
+    let whole_reply = || assistant_message.replace('\n', " ");
+    let Some(cli) = cli else {
+        return whole_reply();
     };
 
     let safe_msg = assistant_message
@@ -94,9 +131,9 @@ pub(crate) fn summarise_for_notification(
         Ok(o) if o.status.success() => {
             let summary = String::from_utf8_lossy(&o.stdout).trim().to_string();
             if summary.is_empty() {
-                truncate_body(assistant_message)
+                whole_reply()
             } else {
-                truncate_body(&summary)
+                summary.replace('\n', " ")
             }
         }
         Ok(o) => {
@@ -104,13 +141,13 @@ pub(crate) fn summarise_for_notification(
             warn!(
                 status = %o.status,
                 stderr = %stderr.chars().take(200).collect::<String>(),
-                "summarise_for_notification: AI CLI failed, falling back to truncation"
+                "summarise_for_notification: AI CLI failed, falling back to the whole reply"
             );
-            truncate_body(assistant_message)
+            whole_reply()
         }
         Err(e) => {
-            warn!(error = %e, "summarise_for_notification: failed to spawn AI CLI, falling back to truncation");
-            truncate_body(assistant_message)
+            warn!(error = %e, "summarise_for_notification: failed to spawn AI CLI, falling back to the whole reply");
+            whole_reply()
         }
     }
 }
