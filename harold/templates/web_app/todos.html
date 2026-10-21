@@ -1,6 +1,6 @@
-<section id="todos" class="page" aria-label="Todos">
-{% if let Some(line) = sent %}<p class="sent-line" role="status">{{ line }}</p>
-{% endif %}{% if unreadable %}<p class="todos-empty">Harold can't read the todos right now.</p>
+<section id="todos" class="page" aria-label="Todos" data-signals__ifmissing="{sent: ''}">
+<p class="sent-line" role="status" data-attr:hidden="!(!!$sent)" data-text="$sent" hidden></p>
+{% if unreadable %}<p class="todos-empty">Harold can't read the todos right now.</p>
 {% else if cards.is_empty() %}<p class="todos-empty">No todos for you.</p>
 {% else %}{% for card in cards %}<article id="todo-{{ card.id }}" class="card{% if card.later %} later{% endif %}">
 <p class="card-top">{{ card.id }} · {{ card.kind }} · {{ card.product }}{% if card.later %} · later{% endif %}</p>
@@ -8,7 +8,7 @@
 {% if let Some(under) = card.under %}<p class="card-intro">{{ under }}</p>
 {% endif %}{% if let Some(link) = card.link %}{% if let Some(href) = link.href %}<p class="card-link"><a href="{{ href }}" target="_blank" rel="noopener noreferrer">{{ link.text }}</a></p>
 {% else %}<p class="card-link">{{ link.text }}</p>
-{% endif %}{% endif %}{% if card.is_question %}<form class="todo-form" data-signals__ifmissing="{t: { {{ card.sig }}: {mode: '{{ card.open_mode }}', len: {{ card.note.chars().count() }}} } }" data-attr:data-mode="$t.{{ card.sig }}.mode" data-on:submit="@post($t.{{ card.sig }}.mode === 'revise' ? '/todos/revise' : $t.{{ card.sig }}.mode === 'reject' ? '/todos/reject' : '/todos/answer', {contentType: 'form'})" data-on:change="@post('/todos/picks', {contentType: 'form'})" data-on:input__debounce.500ms="evt.target.type === 'text' && @post('/todos/picks', {contentType: 'form'})">
+{% endif %}{% endif %}{% if card.is_question %}<form class="todo-form" data-signals__ifmissing="{t: { {{ card.sig }}: {mode: '{{ card.open_mode }}', len: {{ card.note.chars().count() }}} } }" data-attr:data-mode="$t.{{ card.sig }}.mode" data-on:submit="@post($t.{{ card.sig }}.mode === 'revise' ? '/todos/revise' : $t.{{ card.sig }}.mode === 'reject' ? '/todos/reject' : '/todos/answer', {contentType: 'form'})" data-on:change="evt.target.name !== 'note' && ($sent = '', @post('/todos/picks', {contentType: 'form'}))" data-on:input__debounce.500ms="evt.target.type === 'text' && @post('/todos/picks', {contentType: 'form'})">
 <input type="hidden" name="id" value="{{ card.id }}">
 <input type="hidden" name="version" value="{{ card.version }}">
 {% for decision in card.decisions %}<fieldset>
@@ -21,17 +21,17 @@
 {% endif %}</label>
 {% endfor %}</fieldset>
 {% endfor %}{% if let Some(notice) = card.notice %}<p class="notice" role="status">{{ notice }}</p>
-{% endif %}<div class="note-box" data-show="!!$t.{{ card.sig }}.mode"{% if card.open_mode.is_empty() %} style="display: none"{% endif %}>
+{% endif %}<div class="note-box" data-attr:hidden="!(!!$t.{{ card.sig }}.mode)"{% if card.open_mode.is_empty() %} hidden{% endif %}>
 <label for="note-{{ card.id }}" data-text="$t.{{ card.sig }}.mode === 'reject' ? 'Why reject it?' : 'What should change?'">{% if card.open_mode == "reject" %}Why reject it?{% else %}What should change?{% endif %}</label>
 <textarea id="note-{{ card.id }}" name="note" maxlength="1999" rows="3" data-on:input="$t.{{ card.sig }}.len = evt.target.value.length">{{ card.note }}</textarea>
-<small class="note-count" data-show="$t.{{ card.sig }}.len >= 1800" data-text="$t.{{ card.sig }}.len + ' / 1999'" style="display: none"></small>
+<small class="note-count" data-attr:hidden="!($t.{{ card.sig }}.len >= 1800)" data-text="$t.{{ card.sig }}.len + ' / 1999'" hidden></small>
 </div>
 <div class="card-actions">
 <button type="submit" data-text="$t.{{ card.sig }}.mode === 'revise' ? 'Send revise' : $t.{{ card.sig }}.mode === 'reject' ? 'Send reject' : 'Send'" class="send"{% if card.send_disabled %} disabled{% endif %}>{% if card.open_mode == "revise" %}Send revise{% else if card.open_mode == "reject" %}Send reject{% else %}Send{% endif %}</button>
-<button type="button" class="later-button" data-show="!$t.{{ card.sig }}.mode"{% if !card.open_mode.is_empty() %} style="display: none"{% endif %} data-on:click="@post('/todos/later', {contentType: 'form'})">Later</button>
-<button type="button" class="later-button" data-show="!!$t.{{ card.sig }}.mode"{% if card.open_mode.is_empty() %} style="display: none"{% endif %} data-on:click="$t.{{ card.sig }}.mode = ''; $t.{{ card.sig }}.len = 0; evt.target.form.elements.note.value = ''; evt.target.form.elements.note.dispatchEvent(new Event('input', {bubbles: true}))">Cancel</button>
+<button type="button" class="later-button" data-attr:hidden="!(!$t.{{ card.sig }}.mode)"{% if !card.open_mode.is_empty() %} hidden{% endif %} data-on:click="@post('/todos/later', {contentType: 'form'})">Later</button>
+<button type="button" class="later-button" data-attr:hidden="!(!!$t.{{ card.sig }}.mode)"{% if card.open_mode.is_empty() %} hidden{% endif %} data-on:click="$t.{{ card.sig }}.mode = ''; $t.{{ card.sig }}.len = 0; evt.target.form.elements.note.value = ''; evt.target.form.elements.note.dispatchEvent(new Event('input', {bubbles: true}))">Cancel</button>
 </div>
-<div class="card-more" data-show="!$t.{{ card.sig }}.mode"{% if !card.open_mode.is_empty() %} style="display: none"{% endif %}>
+<div class="card-more" data-attr:hidden="!(!$t.{{ card.sig }}.mode)"{% if !card.open_mode.is_empty() %} hidden{% endif %}>
 <button type="button" class="later-button" data-on:click="$t.{{ card.sig }}.mode = 'revise'">Revise…</button>
 <button type="button" class="later-button" data-on:click="$t.{{ card.sig }}.mode = 'reject'">Reject…</button>
 </div>

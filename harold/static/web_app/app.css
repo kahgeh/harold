@@ -630,8 +630,7 @@ body.in-call > .call-screen {
   margin-top: 8px;
 }
 
-.card-more button,
-.card-actions .later-button {
+.card-more button {
   flex: 1;
 }
 
@@ -675,4 +674,12 @@ body.in-call > .call-screen {
   background: var(--surface-3);
   color: var(--text-1);
   font-size: 14px;
+}
+
+.card-more[hidden],
+.note-box[hidden],
+.note-count[hidden],
+.sent-line[hidden],
+.card-actions .later-button[hidden] {
+  display: none;
 }

@@ -65,8 +65,6 @@ struct Shared {
     /// The note box a refusal leaves open per todo id (`revise` or `reject`) and the note
     /// posted, kept until the todo is gone or next posted.
     open_notes: HashMap<String, (&'static str, String)>,
-    /// The sent line: kept until the next post.
-    sent: Option<String>,
 }
 
 /// The URL of Harold's own gRPC address; an IPv6 host gets its brackets.
@@ -155,12 +153,6 @@ impl Questions {
         shared.open_notes.remove(id);
     }
 
-    /// Sets the sent line, or takes it off with None.
-    fn set_sent(&self, line: Option<String>) {
-        let mut shared = self.shared.lock().unwrap_or_else(|e| e.into_inner());
-        shared.sent = line;
-    }
-
     /// Takes the notice off the card of todo `id`.
     pub(super) fn clear_notice(&self, id: &str) {
         let mut shared = self.shared.lock().unwrap_or_else(|e| e.into_inner());
@@ -173,7 +165,6 @@ impl Questions {
                 unreadable: true,
                 cards: Vec::new(),
                 waiting: 0,
-                sent: shared.sent.clone(),
             },
             Some(list) => TodosSection {
                 unreadable: false,
@@ -184,7 +175,6 @@ impl Questions {
                     })
                     .collect(),
                 waiting: list.iter().filter(|listed| !listed.deferred).count(),
-                sent: shared.sent.clone(),
             },
         }
     }
@@ -199,8 +189,6 @@ pub(crate) struct TodosSection {
     cards: Vec<Card>,
     /// The todo count: the waiting questions and the instructions.
     waiting: usize,
-    /// The sent line, such as `Q53: revise sent to the chief.`
-    sent: Option<String>,
 }
 
 impl TodosSection {
@@ -669,24 +657,29 @@ async fn finish_with_note(
     if let Some(mode) = mode {
         state.questions.open_note(id, mode, note);
     }
-    state.questions.set_sent(
-        kind.sent_word()
-            .filter(|_| outcome == Outcome::Sent)
-            .map(|word| format!("{id}: {word} sent to the chief.")),
-    );
+    // The sent line lives in the posting page's signals: set by an answer the tool took,
+    // emptied by every other post.
+    let sent = kind
+        .sent_word()
+        .filter(|_| outcome == Outcome::Sent)
+        .map(|word| format!("{id}: {word} sent to the chief."))
+        .unwrap_or_default();
     let section = state.questions.refresh().await;
     state.todos_changed.send_modify(|posts| *posts += 1);
     let page = section.render().unwrap_or_default();
     let count = section.count().render().unwrap_or_default();
     let patch: Event = PatchElements::new(format!("{page}{count}")).into();
-    let mut events = vec![Ok::<Event, Infallible>(patch)];
+    let mut signals = serde_json::json!({ "sent": sent });
     if let Some(mode) = mode {
         // The page that posted keeps its note box open on the words it posted.
-        let signals = serde_json::json!({
-            "t": { signal_name(id): { "mode": mode, "len": note.chars().count() } }
+        signals["t"] = serde_json::json!({
+            signal_name(id): { "mode": mode, "len": note.chars().count() }
         });
-        events.push(Ok(PatchSignals::new(signals.to_string()).into()));
     }
+    let events = vec![
+        Ok::<Event, Infallible>(patch),
+        Ok(PatchSignals::new(signals.to_string()).into()),
+    ];
     Sse::new(tokio_stream::iter(events)).into_response()
 }
 
@@ -762,7 +755,6 @@ pub(crate) async fn post_picks(State(state): State<AppState>, body: Bytes) -> Re
     }
     log_post(Kind::Picks, outcome);
     state.questions.clear_notice(&id);
-    state.questions.set_sent(None);
     state.todos_changed.send_modify(|posts| *posts += 1);
     StatusCode::NO_CONTENT.into_response()
 }

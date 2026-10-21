@@ -1045,7 +1045,7 @@ async fn the_question_form_saves_picks_on_change_and_debounced_input() {
         "'/todos/answer'",
         "'/todos/revise'",
         "'/todos/reject'",
-        r#"data-on:change="@post('/todos/picks', {contentType: 'form'})""#,
+        r#"data-on:change="evt.target.name !== 'note' && ($sent = '', @post('/todos/picks', {contentType: 'form'}))""#,
         r#"data-on:input__debounce.500ms="evt.target.type === 'text' && @post('/todos/picks', {contentType: 'form'})""#,
         r#"data-on:click="@post('/todos/later', {contentType: 'form'})""#,
         r#"data-on:change="@post('/todos/tick', {contentType: 'form'})""#,
@@ -1164,39 +1164,34 @@ async fn a_refused_revise_redraws_the_card_with_its_notice_and_the_note_open() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn the_sent_line_shows_the_last_answer_until_the_next_post() {
+async fn the_sent_line_is_the_posting_pages_and_the_next_post_empties_it() {
     let (service, server, _directory) = served_with_todos().await;
     service
         .fake
         .set_list(vec![question("Q7", 2, false), instructions("I1", 3)]);
     server.get("/").await;
 
-    let line = |word: &str| {
-        format!(r#"<p class="sent-line" role="status">Q7: {word} sent to the chief.</p>"#)
-    };
+    let line = |id: &str, word: &str| format!(r#""sent":"{id}: {word} sent to the chief.""#);
     let redrawn = server
         .post("/todos/revise", "id=Q7&version=2&pick.0=a&note=n")
         .await
         .text()
         .await
         .unwrap();
-    assert!(redrawn.contains(&line("revise")), "{redrawn}");
+    assert!(redrawn.contains(&line("Q7", "revise")), "{redrawn}");
 
-    // A new stream and a new page read show it too, until a post.
+    // The line is the posting page's: a page read draws none.
     let page = server.get("/").await.text().await.unwrap();
-    assert!(page.contains(&line("revise")), "{page}");
+    assert!(page.contains(r#"class="sent-line""#), "{page}");
+    assert!(!page.contains("sent to the chief"), "{page}");
 
+    // Every other post empties it.
     for (path, body) in [
         ("/todos/later", "id=Q7"),
         ("/todos/tick", "id=I1&version=3&step=1&ticked=true"),
-        ("/todos/picks", "id=Q7&version=2&pick.0=a"),
     ] {
-        server
-            .post("/todos/reject", "id=Q7&version=2&pick.0=a&note=n")
-            .await;
-        server.post(path, body).await;
-        let page = server.get("/").await.text().await.unwrap();
-        assert!(!page.contains("sent-line"), "{path}: {page}");
+        let redrawn = server.post(path, body).await.text().await.unwrap();
+        assert!(redrawn.contains(r#""sent":"""#), "{path}: {redrawn}");
     }
 
     // Every answer from the page says what it did.
@@ -1217,12 +1212,7 @@ async fn the_sent_line_shows_the_last_answer_until_the_next_post() {
         ("/todos/ignore", "id=I1&version=3", "ignore", "I1"),
     ] {
         let redrawn = server.post(path, body).await.text().await.unwrap();
-        assert!(
-            redrawn.contains(&format!(
-                r#"<p class="sent-line" role="status">{id}: {word} sent to the chief.</p>"#
-            )),
-            "{path}: {redrawn}"
-        );
+        assert!(redrawn.contains(&line(id, word)), "{path}: {redrawn}");
     }
 
     // A refusal is no line.
@@ -1233,7 +1223,7 @@ async fn the_sent_line_shows_the_last_answer_until_the_next_post() {
         .text()
         .await
         .unwrap();
-    assert!(!redrawn.contains("sent-line"), "{redrawn}");
+    assert!(redrawn.contains(r#""sent":"""#), "{redrawn}");
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -1290,7 +1280,10 @@ async fn a_question_card_has_the_revise_and_reject_parts_and_instructions_do_not
     assert_eq!(question_card.matches(r#"class="note-box""#).count(), 1);
     assert_eq!(question_card.matches(r#"name="note""#).count(), 1);
     assert!(question_card.contains(r#"maxlength="1999""#));
-    assert!(question_card.contains(r#"style="display: none""#));
+    assert!(
+        question_card.contains(r#"class="note-box" data-attr:hidden="!(!!$t.Q1.mode)" hidden>"#)
+    );
+    assert!(question_card.contains(r#"data-attr:hidden="!($t.Q1.len >= 1800)""#));
     assert_eq!(question_card.matches(r#"class="send""#).count(), 1);
     assert!(question_card.contains("Cancel"));
     for absent in ["card-more", "note-box", "Revise", "Reject", "Cancel"] {
