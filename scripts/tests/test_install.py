@@ -95,6 +95,22 @@ class InstallTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, '--config'):
                 self.install.choose_config(None, self.prefix / 'harold')
 
+    def test_no_channel_question_is_asked_and_imessage_is_written(self):
+        answers = iter(['me@example.com', '1,36'])
+        prompts = []
+
+        def answer(prompt):
+            prompts.append(prompt)
+            return next(answers)
+
+        with patch('sys.stdin.isatty', return_value=True), patch('builtins.input', side_effect=answer):
+            config = self.install.choose_config(None, self.prefix / 'harold').decode()
+        self.assertEqual(len(prompts), 2)
+        self.assertFalse(any('channel' in prompt.lower() or 'telegram' in prompt.lower() for prompt in prompts))
+        self.assertIn('[imessage]\nrecipient = "me@example.com"\nhandle_ids = [1, 36]\n', config)
+        self.assertNotIn('telegram', config.lower())
+        self.assertNotIn('away_channel', config)
+
     def test_failed_bundle_swap_restores_original_data(self):
         bundle = self.prefix / 'harold'
         (bundle / 'data/events').mkdir(parents=True)
@@ -472,7 +488,7 @@ class InstalledServiceTests(unittest.TestCase):
             path.write_text('release ' + name)
         for name in ('harold', 'tmx-agent-dash'):
             (self.release / name).chmod(0o755)
-        (self.release / 'config/default.toml').write_text('[notify]\naway_channel = "imessage"\n')
+        (self.release / 'config/default.toml').write_text('[notify]\nmachines = []\n')
         self.config = root / 'import.toml'
         self.config.write_text('[imessage]\nrecipient = "me@example.com"\nhandle_ids = [1]\n')
         self.requirements = {}
@@ -780,13 +796,53 @@ class InstalledServiceTests(unittest.TestCase):
         steps = self.install.GRANT_STEPS.format(binary=self.bundle / 'harold')
         self.assert_after_ready(output, steps + '\n' + self.install.AD_HOC_NOTE + '\n')
 
-    @unittest.skipUnless(importlib.util.find_spec('tomllib'), 'tomllib needs Python 3.11 or later')
-    def test_telegram_prints_neither(self):
-        self.config.write_text('[telegram]\nbot_token = "t"\nchat_id = 5\n\n[notify]\naway_channel = "telegram"\n')
+    SENTENCES = tuple(__import__('install').REFUSAL_SENTENCES)
+
+    def refusing_probe(self, stderr):
+        def process(argv, **kwargs):
+            if '--check-config' in argv:
+                return subprocess.CompletedProcess(argv, 1, '', stderr)
+            return self.process_without_probe(argv, **kwargs)
+        self.process_without_probe = type(self).process.__get__(self)
+        return process
+
+    def run_refused(self, stderr):
+        self.install_existing(saved='-')
         self.requirements = {'new': 'cdhash H"9a9a"'}
-        output = self.run_install('-')
-        self.assertIn('Harold ready at', output)
-        self.assertNotIn('macOS permissions', output)
+        process = self.refusing_probe(stderr)
+        with patch.object(self, 'process', process):
+            with self.assertRaises(RuntimeError) as raised:
+                self.run_install(None)
+        return str(raised.exception)
+
+    def test_the_five_refusal_sentences_match_the_spec(self):
+        self.assertEqual(len(self.SENTENCES), 5)
+        self.assertEqual(self.SENTENCES[0], '[telegram] is no longer read: Harold reaches the phone by iMessage only. Remove it from config/local.toml or the HAROLD__ environment variables.')
+        self.assertEqual(self.SENTENCES[1], '[peers] is no longer read: two Macs share replies through iMessage, with no hub or member. Remove it from config/local.toml or the HAROLD__ environment variables.')
+        self.assertEqual(self.SENTENCES[2], 'notify.telegram is no longer read: the lists are imessage, web_app and machine_audio_output. Remove it from config/local.toml or the HAROLD__ environment variables.')
+        self.assertEqual(self.SENTENCES[3], 'notify.away_channel is no longer read: Harold reaches the phone by iMessage only. Remove it from config/local.toml or the HAROLD__ environment variables.')
+        self.assertEqual(self.SENTENCES[4], 'grpc.host must be a loopback address (127.0.0.0/8, ::1 or localhost): Harold no longer serves other Macs.')
+
+    def test_a_refused_config_relays_only_the_fixed_sentences_and_leaves_the_old_harold(self):
+        stderr = '\n'.join(['Error: "invalid configuration"', '  ' + self.SENTENCES[0] + '  ',
+                            'review-sentinel-secret', self.SENTENCES[0] + ' review-sentinel-secret',
+                            self.SENTENCES[4], ''])
+        message = self.run_refused(stderr)
+        self.assertEqual(message, 'Configuration validation failed. Remove these settings, then run the install again:\n'
+                         + self.SENTENCES[0] + '\n' + self.SENTENCES[4])
+        self.assertNotIn('sentinel', message)
+        self.assertNotIn('sentinel', self.printed.getvalue())
+        self.unload.assert_not_called()
+        self.start.assert_not_called()
+        self.assertEqual((self.bundle / 'harold').read_text(), 'old harold')
+        self.assertFalse(list(self.prefix.glob('harold.backup-*')))
+
+    def test_a_failed_probe_without_a_fixed_sentence_gives_the_generic_failure(self):
+        message = self.run_refused('Error: "invalid configuration"\nreview-sentinel-secret\n')
+        self.assertEqual(message, 'Configuration validation failed; check the supplied TOML and required channel fields')
+        self.assertNotIn('sentinel', message)
+        self.unload.assert_not_called()
+        self.assertEqual((self.bundle / 'harold').read_text(), 'old harold')
 
     def test_a_failed_install_prints_neither(self):
         self.install_existing(saved='Kah Geh Tan')
@@ -997,33 +1053,8 @@ class PermissionsTests(unittest.TestCase):
             self.assertIsNone(self.install.designated_requirement(self.root / 'missing'))
         run.assert_not_called()
 
-    def config(self, default, local=None):
-        folder = self.root / 'config'
-        folder.mkdir(exist_ok=True)
-        (folder / 'default.toml').write_text(default)
-        if local is None:
-            (folder / 'local.toml').unlink(missing_ok=True)
-        else:
-            (folder / 'local.toml').write_text(local)
-        return self.install.away_channel(folder)
-
-    @unittest.skipUnless(importlib.util.find_spec('tomllib'), 'tomllib needs Python 3.11 or later')
-    def test_the_channel_is_local_over_default(self):
-        imessage = '[notify]\naway_channel = "imessage"\n'
-        self.assertEqual(self.config(imessage, '[notify]\naway_channel = "telegram"\n'), 'telegram')
-        self.assertEqual(self.config(imessage, '[imessage]\nrecipient = "me"\n'), 'imessage')
-        self.assertEqual(self.config('[notify]\naway_channel = "telegram"\n'), 'telegram')
-
-    def test_without_tomllib_the_channel_counts_as_imessage(self):
-        with patch.dict(sys.modules, {'tomllib': None}):
-            self.assertEqual(self.config('[notify]\naway_channel = "telegram"\n'), 'imessage')
-
-    def test_a_config_that_cannot_be_read_counts_as_imessage(self):
-        self.assertEqual(self.config('not = [toml'), 'imessage')
-        self.assertEqual(self.install.away_channel(self.root / 'absent'), 'imessage')
-
-    def message(self, channel='imessage', old='same', new='same', identity='Kah Geh Tan'):
-        return self.install.permissions_message(channel, old, new, identity, Path('/Users/u/my bin/harold/harold'))
+    def message(self, old='same', new='same', identity='Kah Geh Tan'):
+        return self.install.permissions_message(old, new, identity, Path('/Users/u/my bin/harold/harold'))
 
     def test_matching_requirements_carry_over(self):
         self.assertEqual(self.message(), self.install.CARRY_OVER)
@@ -1038,10 +1069,6 @@ class PermissionsTests(unittest.TestCase):
     def test_ad_hoc_steps_end_with_the_note(self):
         steps = self.install.GRANT_STEPS.format(binary='/Users/u/my bin/harold/harold')
         self.assertEqual(self.message(new='other', identity='-'), steps + '\n' + self.install.AD_HOC_NOTE)
-
-    def test_telegram_needs_no_permissions(self):
-        self.assertIsNone(self.message(channel='telegram'))
-        self.assertIsNone(self.message(channel='telegram', new='other', identity='-'))
 
     def test_the_printed_text_matches_the_spec(self):
         self.assertEqual(self.install.CARRY_OVER,

@@ -3,7 +3,6 @@
 
 import argparse
 from datetime import datetime, timezone
-import getpass
 import hashlib
 import json
 import os
@@ -24,6 +23,16 @@ PLUGIN_DIRS = 'CLAUDE_CODE_PLUGIN_DIRS'
 # What the mod loads at runtime; a release or checkout missing any of these loads nothing.
 CLAUDE_MOD_FILES = tuple('hooks/claude-mod/' + name for name in (
     '.claude-plugin/plugin.json', 'hooks/hooks.json', 'hooks/register.ts', 'hooks/accept.ts'))
+# The five sentences `harold --check-config` writes to stderr for a setting Harold no longer reads.
+# Keep them identical to the constants in harold/src/settings.rs (TELEGRAM_REMOVED, PEERS_REMOVED,
+# NOTIFY_TELEGRAM_REMOVED, AWAY_CHANNEL_REMOVED, GRPC_HOST_NOT_LOOPBACK).
+REFUSAL_SENTENCES = (
+    '[telegram] is no longer read: Harold reaches the phone by iMessage only. Remove it from config/local.toml or the HAROLD__ environment variables.',
+    '[peers] is no longer read: two Macs share replies through iMessage, with no hub or member. Remove it from config/local.toml or the HAROLD__ environment variables.',
+    'notify.telegram is no longer read: the lists are imessage, web_app and machine_audio_output. Remove it from config/local.toml or the HAROLD__ environment variables.',
+    'notify.away_channel is no longer read: Harold reaches the phone by iMessage only. Remove it from config/local.toml or the HAROLD__ environment variables.',
+    'grpc.host must be a loopback address (127.0.0.0/8, ::1 or localhost): Harold no longer serves other Macs.',
+)
 SKILL_NAME = 'send-message-to-away-device'
 SKILL_FILE = 'skills/{}/SKILL.md'.format(SKILL_NAME)
 # What the skill source writes where the installed harold binary's path goes.
@@ -217,31 +226,17 @@ def choose_config(supplied, bundle):
         return source.read_bytes()
     if not sys.stdin.isatty():
         raise RuntimeError('No existing configuration and no input terminal. Supply --config PATH')
-    channel = input('Notification channel [imessage/telegram] (imessage): ').strip().lower() or 'imessage'
-    if channel == 'imessage':
-        recipient = input('iMessage recipient (phone number or email): ').strip()
-        values = input('Messages handle IDs (comma separated, e.g. 1,36): ').strip()
-        try:
-            handles = [int(value.strip()) for value in values.split(',')]
-        except ValueError:
-            raise RuntimeError('Handle IDs must be comma-separated integers') from None
-        if not recipient or not handles or any(value <= 0 for value in handles):
-            raise RuntimeError('A recipient and positive handle IDs are required')
-        config = '[imessage]\nrecipient = {}\nhandle_ids = {}\n'.format(
-            json.dumps(recipient, ensure_ascii=False), json.dumps(handles))
-    elif channel == 'telegram':
-        token = getpass.getpass('Telegram bot token (hidden): ').strip()
-        try:
-            chat_id = int(input('Telegram chat ID: ').strip())
-        except ValueError:
-            raise RuntimeError('Telegram chat ID must be an integer') from None
-        if not token or not chat_id:
-            raise RuntimeError('Telegram bot token and nonzero chat ID are required')
-        config = '[telegram]\nbot_token = {}\nchat_id = {}\n'.format(
-            json.dumps(token, ensure_ascii=False), chat_id)
-    else:
-        raise RuntimeError('Choose imessage or telegram')
-    return (config + '\n[notify]\naway_channel = "{}"\n\n[activity_summary]\nenabled = false\n'.format(channel)).encode()
+    recipient = input('iMessage recipient (phone number or email): ').strip()
+    values = input('Messages handle IDs (comma separated, e.g. 1,36): ').strip()
+    try:
+        handles = [int(value.strip()) for value in values.split(',')]
+    except ValueError:
+        raise RuntimeError('Handle IDs must be comma-separated integers') from None
+    if not recipient or not handles or any(value <= 0 for value in handles):
+        raise RuntimeError('A recipient and positive handle IDs are required')
+    config = '[imessage]\nrecipient = {}\nhandle_ids = {}\n'.format(
+        json.dumps(recipient, ensure_ascii=False), json.dumps(handles))
+    return (config + '\n[activity_summary]\nenabled = false\n').encode()
 
 
 def checked(args, **kwargs):
@@ -307,31 +302,8 @@ def designated_requirement(binary):
     return None
 
 
-def away_channel(config_dir):
-    """`notify.away_channel` as Harold resolves it: local.toml over default.toml.
-
-    iMessage when it cannot be read, so the permission steps are printed rather than missed.
-    """
-    try:
-        import tomllib
-    except ImportError:  # Python before 3.11
-        return 'imessage'
-    channel = 'imessage'
-    for name in ('default.toml', 'local.toml'):
-        try:
-            with open(config_dir / name, 'rb') as handle:
-                notify = tomllib.load(handle).get('notify')
-        except (OSError, tomllib.TOMLDecodeError):
-            continue
-        if isinstance(notify, dict) and isinstance(notify.get('away_channel'), str):
-            channel = notify['away_channel']
-    return channel
-
-
-def permissions_message(channel, old, new, identity, binary):
-    """What to tell the person about macOS permissions after an install, or None for Telegram."""
-    if channel == 'telegram':
-        return None
+def permissions_message(old, new, identity, binary):
+    """What to tell the person about macOS permissions after an install."""
     if old is not None and old == new:
         return CARRY_OVER
     steps = GRANT_STEPS.format(binary=binary)
@@ -594,7 +566,11 @@ def install(args, repo):
             probe = subprocess.run([str(stage / 'harold'), '--check-config'], cwd=stage, env=env,
                                    capture_output=True, text=True, timeout=10)
             if probe.returncode:
-                # Typed config errors can contain credential values; never relay them.
+                # Typed config errors can contain credential values; relay only the fixed sentences.
+                relayed = [line.strip() for line in probe.stderr.splitlines() if line.strip() in REFUSAL_SENTENCES]
+                if relayed:
+                    raise RuntimeError('Configuration validation failed. Remove these settings, then run the install again:\n'
+                                       + '\n'.join(relayed))
                 raise RuntimeError('Configuration validation failed; check the supplied TOML and required channel fields')
             config = json.loads(probe.stdout)
             metadata['grpc_addr'] = config['grpc_addr']
@@ -636,7 +612,7 @@ def install(args, repo):
             pid = service.start(metadata)
             print('Harold ready at {} (LaunchAgent PID {}).\nControl: {}\nConfig: {}\nLog: {}'.format(
                 metadata['grpc_addr'], pid, prefix / 'haroldctl', bundle / 'config/local.toml', bundle / 'harold.log'))
-            message = permissions_message(away_channel(bundle / 'config'), old_requirement,
+            message = permissions_message(old_requirement,
                                           new_requirement, identity, bundle / 'harold')
             if message:
                 print(message, flush=True)
