@@ -202,6 +202,21 @@ A watch run is a trace of its own: `harold.watch.run`, one run of a watch, with 
 
 `harold.delivery`'s `channel` is the `[notify]` key of the channel that carried the update, or held it: a desk update is `machine_audio_output` whether delivered, skipped or held back, and one the app carried is `web_app`. Its `outcome` is `delivered`, `skipped` (with `reason` `duplicate_turn`, `session_active`, `pane_active`, `voice_mute`, `messaging_pause`, `messaged_this_turn` or `duplicate_message`), `held_back` (a list or the chief rule kept the update from going out, with `reason` `not_listed` or `chief`, and `channel` the key of the list that held it), `failed` (a send that failed before its 10th try, which is tried again, or a malformed payload, which is not) or `given_up` (its 10th failure; it is not tried again).
 
+Two queries check `outcome = skipped` after a release, each over the last 7 days. No alert reads them. Both should give 0. The first gives more than 0 when a skip path records no `channel` or `reason`. The second gives more than 0 when the lock check failed while the user was away: `pane_active` and `session_active` fire only with the screen unlocked, so their channel is always `machine_audio_output`, and the trace shows which turn.
+
+```sql
+SELECT count() FROM otel.otel_traces
+WHERE SpanName = 'harold.delivery' AND SpanAttributes['outcome'] = 'skipped'
+  AND (SpanAttributes['channel'] = '' OR SpanAttributes['reason'] = '')
+  AND Timestamp > now() - INTERVAL 7 DAY;
+
+SELECT count() FROM otel.otel_traces
+WHERE SpanName = 'harold.delivery' AND SpanAttributes['outcome'] = 'skipped'
+  AND SpanAttributes['reason'] IN ('pane_active', 'session_active')
+  AND SpanAttributes['channel'] != 'machine_audio_output'
+  AND Timestamp > now() - INTERVAL 7 DAY
+```
+
 Every log record written inside one of these spans carries its trace id and span id, so HyperDX opens a turn's logs from its trace and finds the trace from any of its lines.
 
 Harold keeps the trace across its steps in memory:
