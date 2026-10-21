@@ -424,7 +424,7 @@ async fn the_list_draws_question_and_instruction_cards_and_counts_the_waiting_on
     );
     // Send is on only where every decision has a pick: Q1's second decision has none.
     assert!(
-        page.contains(r#"<button type="submit" class="send" disabled>Send</button>"#),
+        page.contains(r#"class="send" disabled>Send</button>"#),
         "{page}"
     );
 }
@@ -740,6 +740,8 @@ async fn only_a_post_with_the_login_and_the_same_origin_reaches_the_tool() {
         ("/todos/done", "id=I1&version=3"),
         ("/todos/ignore", "id=I1&version=3"),
         ("/todos/picks", "id=Q1&version=2&pick.0=a"),
+        ("/todos/revise", "id=Q1&version=2&pick.0=a&note=change+it"),
+        ("/todos/reject", "id=Q1&version=2&pick.0=a&note=no"),
     ];
     let client = reqwest::Client::new();
 
@@ -780,7 +782,7 @@ async fn only_a_post_with_the_login_and_the_same_origin_reaches_the_tool() {
         let expected = if path == "/todos/picks" { 204 } else { 200 };
         assert_eq!(server.post(path, body).await.status(), expected, "{path}");
     }
-    assert_eq!(service.fake.calls().len(), 6);
+    assert_eq!(service.fake.calls().len(), 8);
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -1040,7 +1042,9 @@ async fn the_question_form_saves_picks_on_change_and_debounced_input() {
     let page = server.get("/").await.text().await.unwrap();
 
     for wanted in [
-        r#"data-on:submit="@post('/todos/answer', {contentType: 'form'})""#,
+        "'/todos/answer'",
+        "'/todos/revise'",
+        "'/todos/reject'",
         r#"data-on:change="@post('/todos/picks', {contentType: 'form'})""#,
         r#"data-on:input__debounce.500ms="evt.target.type === 'text' && @post('/todos/picks', {contentType: 'form'})""#,
         r#"data-on:click="@post('/todos/later', {contentType: 'form'})""#,
@@ -1050,6 +1054,248 @@ async fn the_question_form_saves_picks_on_change_and_debounced_input() {
     }
     // Only the question form saves picks; the instructions' forms do not.
     assert_eq!(page.matches("/todos/picks").count(), 2, "{page}");
+}
+
+fn answer_call(kind: pb::AnswerKind, picks: Vec<pb::Pick>, note: &str) -> Call {
+    Call::Answer(pb::AnswerQuestionRequest {
+        id: "Q1".into(),
+        version: 2,
+        kind: kind as i32,
+        picks,
+        note: note.into(),
+        send_now: true,
+    })
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn revise_and_reject_send_the_picks_so_far_and_the_note() {
+    let (service, server, _directory) = served_with_todos().await;
+
+    for path in ["/todos/revise", "/todos/reject"] {
+        let response = server
+            .post(path, "id=Q1&version=2&pick.0=a&note=Change+this%21")
+            .await;
+        assert_eq!(response.status(), 200, "{path}");
+    }
+    // A free pick with blank text is left out.
+    server
+        .post(
+            "/todos/revise",
+            "id=Q1&version=2&pick.0=a&pick.1=y&text.1=+&note=n",
+        )
+        .await;
+
+    assert_eq!(
+        service.fake.calls(),
+        vec![
+            answer_call(
+                pb::AnswerKind::Revise,
+                vec![pick(0, "a", "")],
+                "Change this!"
+            ),
+            answer_call(
+                pb::AnswerKind::Reject,
+                vec![pick(0, "a", "")],
+                "Change this!"
+            ),
+            answer_call(pb::AnswerKind::Revise, vec![pick(0, "a", "")], "n"),
+        ]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_blank_or_too_long_note_gives_400_and_no_call() {
+    let (service, server, _directory) = served_with_todos().await;
+    let long = format!("id=Q1&version=2&pick.0=a&note={}", "x".repeat(2000));
+
+    for path in ["/todos/revise", "/todos/reject"] {
+        for body in [
+            "id=Q1&version=2&pick.0=a",
+            "id=Q1&version=2&pick.0=a&note=",
+            "id=Q1&version=2&pick.0=a&note=+++%0A",
+            long.as_str(),
+        ] {
+            let response = server.post(path, body).await;
+            assert_eq!(response.status(), 400, "{path} {body:.40}");
+        }
+    }
+    assert!(service.fake.calls().is_empty());
+
+    let at_limit = format!("id=Q1&version=2&pick.0=a&note={}", "x".repeat(1999));
+    assert_eq!(server.post("/todos/revise", &at_limit).await.status(), 200);
+    assert_eq!(service.fake.calls().len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refused_revise_redraws_the_card_with_its_notice_and_the_note_open() {
+    let (service, server, _directory) = served_with_todos().await;
+    service.fake.0.lock().unwrap().write_refusal =
+        Some(Status::failed_precondition("version_changed"));
+
+    let response = server
+        .post(
+            "/todos/reject",
+            "id=Q1&version=2&pick.0=a&note=my+%3Cnote%3E",
+        )
+        .await;
+
+    assert_eq!(response.status(), 200);
+    let redrawn = response.text().await.unwrap();
+    assert!(
+        redrawn.contains("Q1 changed. Look again before you send."),
+        "{redrawn}"
+    );
+    assert!(
+        redrawn.contains("my &#60;note&#62;</textarea>"),
+        "{redrawn}"
+    );
+    assert!(redrawn.contains(r#""mode":"reject""#), "{redrawn}");
+    assert!(!redrawn.contains("sent to the chief"), "{redrawn}");
+
+    // The next good post forgets the open note.
+    service.fake.0.lock().unwrap().write_refusal = None;
+    let redrawn = server
+        .post("/todos/answer", "id=Q1&version=2&pick.0=a&pick.1=x")
+        .await
+        .text()
+        .await
+        .unwrap();
+    assert!(!redrawn.contains("my &#60;note&#62;"), "{redrawn}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_sent_line_shows_the_last_answer_until_the_next_post() {
+    let (service, server, _directory) = served_with_todos().await;
+    service
+        .fake
+        .set_list(vec![question("Q7", 2, false), instructions("I1", 3)]);
+    server.get("/").await;
+
+    let line = |word: &str| {
+        format!(r#"<p class="sent-line" role="status">Q7: {word} sent to the chief.</p>"#)
+    };
+    let redrawn = server
+        .post("/todos/revise", "id=Q7&version=2&pick.0=a&note=n")
+        .await
+        .text()
+        .await
+        .unwrap();
+    assert!(redrawn.contains(&line("revise")), "{redrawn}");
+
+    // A new stream and a new page read show it too, until a post.
+    let page = server.get("/").await.text().await.unwrap();
+    assert!(page.contains(&line("revise")), "{page}");
+
+    for (path, body) in [
+        ("/todos/later", "id=Q7"),
+        ("/todos/tick", "id=I1&version=3&step=1&ticked=true"),
+        ("/todos/picks", "id=Q7&version=2&pick.0=a"),
+    ] {
+        server
+            .post("/todos/reject", "id=Q7&version=2&pick.0=a&note=n")
+            .await;
+        server.post(path, body).await;
+        let page = server.get("/").await.text().await.unwrap();
+        assert!(!page.contains("sent-line"), "{path}: {page}");
+    }
+
+    // Every answer from the page says what it did.
+    for (path, body, word, id) in [
+        (
+            "/todos/answer",
+            "id=Q7&version=2&pick.0=a&pick.1=x",
+            "answer",
+            "Q7",
+        ),
+        (
+            "/todos/reject",
+            "id=Q7&version=2&pick.0=a&note=n",
+            "reject",
+            "Q7",
+        ),
+        ("/todos/done", "id=I1&version=3", "done", "I1"),
+        ("/todos/ignore", "id=I1&version=3", "ignore", "I1"),
+    ] {
+        let redrawn = server.post(path, body).await.text().await.unwrap();
+        assert!(
+            redrawn.contains(&format!(
+                r#"<p class="sent-line" role="status">{id}: {word} sent to the chief.</p>"#
+            )),
+            "{path}: {redrawn}"
+        );
+    }
+
+    // A refusal is no line.
+    service.fake.0.lock().unwrap().write_refusal = Some(Status::unavailable("down"));
+    let redrawn = server
+        .post("/todos/revise", "id=Q7&version=2&pick.0=a&note=n")
+        .await
+        .text()
+        .await
+        .unwrap();
+    assert!(!redrawn.contains("sent-line"), "{redrawn}");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn revise_and_reject_log_their_kind_and_result() {
+    let logs = CapturedLogs::start();
+    let (service, server, _directory) = served_with_todos().await;
+
+    server
+        .post("/todos/revise", "id=Q1&version=2&pick.0=a&note=n")
+        .await;
+    service.fake.0.lock().unwrap().write_refusal = Some(Status::failed_precondition("not_waiting"));
+    server
+        .post(
+            "/todos/reject",
+            "id=Q1&version=2&pick.0=a&note=secret+words",
+        )
+        .await;
+
+    let text = logs.text();
+    let lines: Vec<&str> = text
+        .lines()
+        .filter(|line| line.contains("app todo answered"))
+        .collect();
+    assert_eq!(lines.len(), 2, "{text}");
+    assert!(
+        lines[0].contains("kind=\"revise\"") && lines[0].contains("result=\"sent\""),
+        "{text}"
+    );
+    assert!(
+        lines[1].contains("kind=\"reject\"") && lines[1].contains("result=\"not_waiting\""),
+        "{text}"
+    );
+    assert!(
+        lines
+            .iter()
+            .all(|l| !l.contains("secret") && !l.contains("Q1")),
+        "{text}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_question_card_has_the_revise_and_reject_parts_and_instructions_do_not() {
+    let (_service, server, _directory) = served_with_todos().await;
+
+    let page = server.get("/").await.text().await.unwrap();
+    let (question_card, instructions_card) = page.split_once(r#"id="todo-I1""#).unwrap();
+
+    assert!(
+        question_card.contains(r#"class="card-more""#),
+        "{question_card}"
+    );
+    assert!(question_card.contains("Revise…</button>"));
+    assert!(question_card.contains("Reject…</button>"));
+    assert_eq!(question_card.matches(r#"class="note-box""#).count(), 1);
+    assert_eq!(question_card.matches(r#"name="note""#).count(), 1);
+    assert!(question_card.contains(r#"maxlength="1999""#));
+    assert!(question_card.contains(r#"style="display: none""#));
+    assert_eq!(question_card.matches(r#"class="send""#).count(), 1);
+    assert!(question_card.contains("Cancel"));
+    for absent in ["card-more", "note-box", "Revise", "Reject", "Cancel"] {
+        assert!(!instructions_card.contains(absent), "{absent}");
+    }
 }
 
 #[test]

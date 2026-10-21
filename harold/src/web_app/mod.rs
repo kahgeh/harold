@@ -208,6 +208,8 @@ pub(crate) fn router(state: AppState) -> Router {
         .route("/todos/tick", post(todos::post_tick))
         .route("/todos/done", post(todos::post_done))
         .route("/todos/ignore", post(todos::post_ignore))
+        .route("/todos/revise", post(todos::post_revise))
+        .route("/todos/reject", post(todos::post_reject))
         .route("/call", post(call::post_call).delete(call::delete_call))
         .route("/call/audio", post(call::post_audio))
         .route("/call/played", post(call::post_played))

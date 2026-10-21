@@ -621,3 +621,58 @@ body.in-call > .call-screen {
   background: var(--surface-3);
   color: var(--text-1);
 }
+
+/* Revise and Reject on a question card, and the line that says what was sent. */
+
+.card-more {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.card-more button,
+.card-actions .later-button {
+  flex: 1;
+}
+
+.note-box {
+  margin-top: 12px;
+}
+
+.note-box label {
+  display: block;
+  font-weight: 600;
+}
+
+.note-box textarea {
+  display: block;
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 84px;
+  margin-top: 6px;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface-1);
+  color: var(--text-1);
+  font: inherit;
+  resize: vertical;
+}
+
+.note-count {
+  display: block;
+  margin-top: 4px;
+  color: var(--text-2);
+  font-size: 12px;
+  text-align: right;
+}
+
+.sent-line {
+  margin: 0;
+  padding: 8px 12px;
+  border: 1px solid var(--surface-4);
+  border-radius: 10px;
+  background: var(--surface-3);
+  color: var(--text-1);
+  font-size: 14px;
+}

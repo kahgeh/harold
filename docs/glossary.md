@@ -97,6 +97,7 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 | todo page | The web app's page that lists your todos and lets you answer them from the phone | "task page", "queue page" |
 | page dots | The two dots above the reply box that show which page is open | "pager", "swipe indicator" |
 | todo count | The orange number on the thread page's **Todos** button: the waiting questions and the instructions, questions set aside with **Later** left out | "badge", "unread count" |
+| sent line | The line at the top of the web app's todo page that says which answer was sent to the chief, such as `Q53: revise sent to the chief.` It stays until the next answer from that page or until the page is left | "toast", "banner" |
 | new-message count | The number beside the speech-bubble icon in the todo page's header: the chief's messages that arrived while the todo page was open | "unread count", "notification count" |
 | sender label | The small word at the bottom right of each message, `chief` or `me` | "byline", "name tag" |
 | stored mark | The one ✓ before `me`: Harold has stored the reply but not typed it into the chief's pane | "tick" (a tick is a ticked step), "read receipt", "delivered" |

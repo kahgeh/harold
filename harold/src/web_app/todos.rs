@@ -13,7 +13,7 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::sse::{Event, Sse};
 use axum::response::{IntoResponse, Response};
-use datastar::prelude::PatchElements;
+use datastar::prelude::{PatchElements, PatchSignals};
 use harold_api::tools::questions::v1::question_service_client::QuestionServiceClient;
 use harold_api::tools::questions::v1::{
     AnswerKind, AnswerQuestionRequest, DeferQuestionRequest, ListQuestionsRequest, ListedQuestion,
@@ -29,7 +29,9 @@ use crate::settings::GrpcSettings;
 /// How long a write to the question tool may take.
 const WRITE_LIMIT: Duration = Duration::from_secs(5);
 /// The largest todo form read, in bytes.
-const FORM_MAX_BYTES: usize = 16 * 1024;
+const FORM_MAX_BYTES: usize = 32 * 1024;
+/// The longest note for a revise or reject, in characters, as in the dash.
+const NOTE_MAX_CHARS: usize = 1999;
 
 /// How long one read of the todos may take, as the dash allows.
 const READ_LIMIT: Duration = Duration::from_secs(2);
@@ -60,6 +62,11 @@ struct Shared {
     failing: bool,
     /// A refusal's words per todo id, kept until the todo is gone or next answered.
     notices: HashMap<String, String>,
+    /// The note box a refusal leaves open per todo id (`revise` or `reject`) and the note
+    /// posted, kept until the todo is gone or next posted.
+    open_notes: HashMap<String, (&'static str, String)>,
+    /// The sent line: kept until the next post.
+    sent: Option<String>,
 }
 
 /// The URL of Harold's own gRPC address; an IPv6 host gets its brackets.
@@ -115,6 +122,7 @@ impl Questions {
                     .filter_map(|l| l.question.as_ref().map(|q| q.id.as_str()))
                     .collect();
                 shared.notices.retain(|id, _| ids.contains(&id.as_str()));
+                shared.open_notes.retain(|id, _| ids.contains(&id.as_str()));
                 shared.last = Some(list);
             }
             Err(failure) => {
@@ -133,6 +141,26 @@ impl Questions {
         shared.notices.insert(id.to_owned(), text.to_owned());
     }
 
+    /// Leaves the note box of todo `id` open on `mode` (`revise` or `reject`), holding `note`.
+    fn open_note(&self, id: &str, mode: &'static str, note: &str) {
+        let mut shared = self.shared.lock().unwrap_or_else(|e| e.into_inner());
+        shared
+            .open_notes
+            .insert(id.to_owned(), (mode, note.to_owned()));
+    }
+
+    /// Closes the note box of todo `id`.
+    fn close_note(&self, id: &str) {
+        let mut shared = self.shared.lock().unwrap_or_else(|e| e.into_inner());
+        shared.open_notes.remove(id);
+    }
+
+    /// Sets the sent line, or takes it off with None.
+    fn set_sent(&self, line: Option<String>) {
+        let mut shared = self.shared.lock().unwrap_or_else(|e| e.into_inner());
+        shared.sent = line;
+    }
+
     /// Takes the notice off the card of todo `id`.
     pub(super) fn clear_notice(&self, id: &str) {
         let mut shared = self.shared.lock().unwrap_or_else(|e| e.into_inner());
@@ -145,14 +173,18 @@ impl Questions {
                 unreadable: true,
                 cards: Vec::new(),
                 waiting: 0,
+                sent: shared.sent.clone(),
             },
             Some(list) => TodosSection {
                 unreadable: false,
                 cards: list
                     .iter()
-                    .filter_map(|listed| Card::from_listed(listed, &shared.notices))
+                    .filter_map(|listed| {
+                        Card::from_listed(listed, &shared.notices, &shared.open_notes)
+                    })
                     .collect(),
                 waiting: list.iter().filter(|listed| !listed.deferred).count(),
+                sent: shared.sent.clone(),
             },
         }
     }
@@ -167,6 +199,8 @@ pub(crate) struct TodosSection {
     cards: Vec<Card>,
     /// The todo count: the waiting questions and the instructions.
     waiting: usize,
+    /// The sent line, such as `Q53: revise sent to the chief.`
+    sent: Option<String>,
 }
 
 impl TodosSection {
@@ -200,7 +234,14 @@ struct Card {
     decisions: Vec<DecisionView>,
     steps: Vec<StepView>,
     notice: Option<String>,
-    can_send: bool,
+    /// Send is off: with a note open, until it has words; otherwise until every decision has a pick.
+    send_disabled: bool,
+    /// The card's name in the page's signals: the id's letters and digits.
+    sig: String,
+    /// `revise` or `reject` while a refusal leaves the note box open, else empty.
+    open_mode: &'static str,
+    /// The note a refusal left in the box.
+    note: String,
 }
 
 struct CardLink {
@@ -233,7 +274,11 @@ struct StepView {
 }
 
 impl Card {
-    fn from_listed(listed: &ListedQuestion, notices: &HashMap<String, String>) -> Option<Self> {
+    fn from_listed(
+        listed: &ListedQuestion,
+        notices: &HashMap<String, String>,
+        open_notes: &HashMap<String, (&'static str, String)>,
+    ) -> Option<Self> {
         let question = listed.question.as_ref()?;
         let is_question = question.steps.is_empty();
         let link = (!question.link.is_empty()).then(|| {
@@ -316,7 +361,6 @@ impl Card {
             )
         };
         Some(Self {
-            id: question.id.clone(),
             version: listed.version,
             is_question,
             kind: if is_question {
@@ -332,9 +376,24 @@ impl Card {
             decisions,
             steps,
             notice: notices.get(&question.id).cloned(),
-            can_send,
+            send_disabled: match open_notes.get(&question.id) {
+                Some((_, note)) => note.trim().is_empty(),
+                None => !can_send,
+            },
+            sig: signal_name(&question.id),
+            open_mode: open_notes.get(&question.id).map_or("", |(mode, _)| mode),
+            note: open_notes
+                .get(&question.id)
+                .map(|(_, note)| note.clone())
+                .unwrap_or_default(),
+            id: question.id.clone(),
         })
     }
+}
+
+/// A todo id as a signal name: its ASCII letters and digits.
+fn signal_name(id: &str) -> String {
+    id.chars().filter(char::is_ascii_alphanumeric).collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -351,6 +410,8 @@ enum Kind {
     Tick,
     Done,
     Ignore,
+    Revise,
+    Reject,
 }
 
 impl Kind {
@@ -363,6 +424,17 @@ impl Kind {
             Self::Tick => "tick",
             Self::Done => "done",
             Self::Ignore => "ignore",
+            Self::Revise => "revise",
+            Self::Reject => "reject",
+        }
+    }
+
+    /// The word in the sent line, for a kind that answers a todo.
+    fn sent_word(self) -> Option<&'static str> {
+        match self {
+            Self::Answer | Self::FreeText => Some("answer"),
+            Self::Done | Self::Ignore | Self::Revise | Self::Reject => Some(self.word()),
+            Self::Later | Self::Picks | Self::Tick => None,
         }
     }
 }
@@ -573,17 +645,49 @@ impl Questions {
 /// Logs the post, sets or clears the card's notice, reads the todos again, wakes every open
 /// page, and answers with the redrawn page.
 async fn finish(state: &AppState, kind: Kind, id: &str, outcome: Outcome) -> Response {
+    finish_with_note(state, kind, id, outcome, "").await
+}
+
+/// As `finish`, and a refused revise or reject leaves the note box open holding `note`.
+async fn finish_with_note(
+    state: &AppState,
+    kind: Kind,
+    id: &str,
+    outcome: Outcome,
+    note: &str,
+) -> Response {
     log_post(kind, outcome);
     match outcome.notice(id, kind) {
         Some(notice) => state.questions.set_notice(id, &notice),
         None => state.questions.clear_notice(id),
     }
+    state.questions.close_note(id);
+    let mode = match kind {
+        Kind::Revise | Kind::Reject if outcome != Outcome::Sent => Some(kind.word()),
+        _ => None,
+    };
+    if let Some(mode) = mode {
+        state.questions.open_note(id, mode, note);
+    }
+    state.questions.set_sent(
+        kind.sent_word()
+            .filter(|_| outcome == Outcome::Sent)
+            .map(|word| format!("{id}: {word} sent to the chief.")),
+    );
     let section = state.questions.refresh().await;
     state.todos_changed.send_modify(|posts| *posts += 1);
     let page = section.render().unwrap_or_default();
     let count = section.count().render().unwrap_or_default();
     let patch: Event = PatchElements::new(format!("{page}{count}")).into();
-    Sse::new(tokio_stream::once(Ok::<Event, Infallible>(patch))).into_response()
+    let mut events = vec![Ok::<Event, Infallible>(patch)];
+    if let Some(mode) = mode {
+        // The page that posted keeps its note box open on the words it posted.
+        let signals = serde_json::json!({
+            "t": { signal_name(id): { "mode": mode, "len": note.chars().count() } }
+        });
+        events.push(Ok(PatchSignals::new(signals.to_string()).into()));
+    }
+    Sse::new(tokio_stream::iter(events)).into_response()
 }
 
 fn log_post(kind: Kind, outcome: Outcome) {
@@ -658,6 +762,7 @@ pub(crate) async fn post_picks(State(state): State<AppState>, body: Bytes) -> Re
     }
     log_post(Kind::Picks, outcome);
     state.questions.clear_notice(&id);
+    state.questions.set_sent(None);
     state.todos_changed.send_modify(|posts| *posts += 1);
     StatusCode::NO_CONTENT.into_response()
 }
@@ -727,4 +832,47 @@ pub(crate) async fn post_done(State(state): State<AppState>, body: Bytes) -> Res
 
 pub(crate) async fn post_ignore(State(state): State<AppState>, body: Bytes) -> Response {
     close(state, body, Kind::Ignore, AnswerKind::Ignore).await
+}
+
+/// `POST /todos/revise` and `POST /todos/reject`: the picks so far and a note, sent to the
+/// chief at once. A note that is blank or over `NOTE_MAX_CHARS` gives `400`.
+async fn answer_with_note(
+    state: AppState,
+    body: Bytes,
+    kind: Kind,
+    answer: AnswerKind,
+) -> Response {
+    let Some(form) = Form::parse(&body) else {
+        return malformed();
+    };
+    let (Some(id), Some(version)) = (form.id(), form.version()) else {
+        return malformed();
+    };
+    let note = form.get("note").unwrap_or("").trim();
+    if note.is_empty() || note.chars().count() > NOTE_MAX_CHARS {
+        return malformed();
+    }
+    let Some(picks) = state.questions.partial_picks(&id, &form) else {
+        return malformed();
+    };
+    let outcome = state
+        .questions
+        .answer(AnswerQuestionRequest {
+            id: id.clone(),
+            version,
+            kind: answer as i32,
+            picks,
+            note: note.to_owned(),
+            send_now: true,
+        })
+        .await;
+    finish_with_note(&state, kind, &id, outcome, note).await
+}
+
+pub(crate) async fn post_revise(State(state): State<AppState>, body: Bytes) -> Response {
+    answer_with_note(state, body, Kind::Revise, AnswerKind::Revise).await
+}
+
+pub(crate) async fn post_reject(State(state): State<AppState>, body: Bytes) -> Response {
+    answer_with_note(state, body, Kind::Reject, AnswerKind::Reject).await
 }

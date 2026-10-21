@@ -118,6 +118,12 @@
     if (!send || decisions.length === 0) {
       return;
     }
+    // While a note is open (Revise or Reject), Send waits only for the note.
+    if (form.getAttribute("data-mode")) {
+      const words = form.querySelector("textarea");
+      send.disabled = !words || words.value.trim() === "";
+      return;
+    }
     let ready = true;
     decisions.forEach((decision) => {
       const picked = decision.querySelector("input[type=radio]:checked");
@@ -170,16 +176,20 @@
       radios[radio.name] = radio.value;
     });
     const texts = {};
-    card.querySelectorAll("input.free-text").forEach((text) => {
+    card.querySelectorAll("input.free-text, textarea").forEach((text) => {
       texts[text.name] = text.value;
     });
     const active = document.activeElement;
     const focus =
-      active instanceof HTMLInputElement && card.contains(active)
+      (active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement) &&
+      card.contains(active)
         ? {
             name: active.name,
             value: active.type === "radio" ? active.value : null,
-            caret: active.type === "text" ? [active.selectionStart, active.selectionEnd] : null,
+            caret:
+              active.type === "text" || active.type === "textarea"
+                ? [active.selectionStart, active.selectionEnd]
+                : null,
           }
         : null;
     note = {
@@ -218,7 +228,7 @@
       }
     });
     let rewritten = false;
-    card.querySelectorAll("input.free-text").forEach((text) => {
+    card.querySelectorAll("input.free-text, textarea").forEach((text) => {
       if (text.name in note.texts && text.value !== note.texts[text.name]) {
         text.value = note.texts[text.name];
         rewritten = true;
@@ -228,7 +238,7 @@
     if (!focus) {
       return;
     }
-    const target = Array.from(card.querySelectorAll("input")).find(
+    const target = Array.from(card.querySelectorAll("input, textarea")).find(
       (input) =>
         input.name === focus.name && (focus.value === null || input.value === focus.value),
     );
@@ -267,7 +277,8 @@
     }, 0);
   });
   // A redraw that only changes a field's value or checked attribute (the morph of the
-  // phone's own save coming back) adds no node, so those are watched too. restore() writes
+  // phone's own save coming back) adds no node, so those are watched too, and so is the
+  // card's note mode, which Datastar sets. restore() writes
   // properties only, so it cannot retrigger this.
   new MutationObserver(() => {
     restore();
@@ -276,7 +287,7 @@
     childList: true,
     subtree: true,
     attributes: true,
-    attributeFilter: ["value", "checked"],
+    attributeFilter: ["value", "checked", "data-mode"],
   });
 
   scrollToBottom();
