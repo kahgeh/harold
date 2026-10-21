@@ -265,6 +265,7 @@ HF_HUB_OFFLINE=1 <[voice_input] command> -I voice_worker.py \
 - **Phrases kept.** The phrase folder holds only Harold's own fixed phrases, never your words.
 - **Transcripts.** Harold does not store the transcript as an event, and never writes it to `harold.log`. It is shown in tmx-agent-dash while the call lasts, through the `Call` answer's `last_transcript`, and cleared when the call ends.
 - **Telemetry.** harold-telemetry never exports text. The typed line becomes a turn's prompt like any typed prompt.
+- **A call turn's trace.** One trace per turn, from the start of speech to the answer's first sound, with spans for the speech, Whisper, Kokoro and the playback: see [the call turn's span table](../telemetry/README.md#turns).
 - **The chief's session.** The prompt typed into the chief's pane is in the chief's own session. That is how the chief hears it.
 
 ### Log lines

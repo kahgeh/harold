@@ -1562,6 +1562,9 @@ const ATTRIBUTES: &[&str] = &[
     "folder",
     "cost_usd",
     "agent",
+    "call_from",
+    "first_sound_ms",
+    "answer_ms",
 ];
 
 /// The spec's span table. The trends panel "One turn, end to end" lists `harold.turn`.
@@ -1575,6 +1578,7 @@ const SPANS: &[&str] = &[
     "harold.local_model",
     "harold.watch.run",
     "harold.watch.model",
+    "harold.call_turn",
 ];
 
 /// The spec's cards table: group, card, the metrics or spans its tile reads, and how it
@@ -1920,7 +1924,7 @@ fn the_cards_dashboard_shows_each_card_beside_its_earlier_number_and_nothing_els
             };
             [card.to_string(), earlier]
         })
-        .chain([NOTIFICATIONS_CARD.to_string()])
+        .chain([NOTIFICATIONS_CARD.to_string(), CALL_TURN_CARD.to_string()])
         .collect();
     assert_eq!(tile_names(&dashboard), names);
 
@@ -2046,6 +2050,7 @@ fn the_cards_dashboard_shows_each_card_beside_its_earlier_number_and_nothing_els
 }
 
 const NOTIFICATIONS_CARD: &str = "Notifications by agent and channel";
+const CALL_TURN_CARD: &str = "Call turn, time to first sound and to the answer, last 7 days";
 
 #[test]
 fn the_notifications_card_is_a_table_of_sent_and_kept_over_the_picked_range() {
@@ -2075,6 +2080,31 @@ fn the_notifications_card_is_a_table_of_sent_and_kept_over_the_picked_range() {
     }
     // The range is the dashboard's, not a fixed period.
     assert!(!sql.contains("now() - INTERVAL"), "{sql}");
+}
+
+#[test]
+fn the_call_turn_card_is_a_table_of_the_two_sound_times_by_where_the_call_is() {
+    let dashboard = definition("dashboard.json");
+    let card = tiles(&dashboard)
+        .iter()
+        .find(|tile| tile["name"] == CALL_TURN_CARD)
+        .expect("the call turn card");
+    let config = &card["config"];
+    assert_eq!(config["displayType"], "table");
+    assert_eq!(config["sourceId"], "@TRACES_SOURCE_ID@");
+    let sql = config["sqlTemplate"].as_str().unwrap();
+    for piece in [
+        "SpanName = 'harold.call_turn'",
+        "SpanAttributes['call_from']",
+        "SpanAttributes['first_sound_ms']",
+        "SpanAttributes['answer_ms']",
+        "quantileIf(0.5)",
+        "quantileIf(0.95)",
+        "INTERVAL 7 DAY",
+        "GROUP BY call_from",
+    ] {
+        assert!(sql.contains(piece), "{piece} in {sql}");
+    }
 }
 
 #[test]

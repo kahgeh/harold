@@ -977,7 +977,8 @@ fn call_turns_on(pane: &str) -> Vec<opentelemetry_sdk::trace::SpanData> {
 fn typing_a_spoken_prompt_records_it_with_a_trace_context() {
     test_support::install();
     let pane = format!("%call-turn-{}", uuid::Uuid::new_v4());
-    let turn = call::log_typed(&pane, "hello");
+    let turn = call::open_turn("desk");
+    call::log_typed(&turn, &pane, "hello");
     let (_, started_by, cx) =
         telemetry::take_prompt(&pane, time::OffsetDateTime::now_utc()).expect("prompt kept");
     assert_eq!(started_by, StartedBy::Voice);

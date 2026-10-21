@@ -233,14 +233,20 @@
     }
   }
 
-  function reportPlayed(id) {
-    send("POST", "/call/played?id=" + encodeURIComponent(id)).catch(() => {});
+  // `startMs`, when the sound started: how long after it was offered, in whole milliseconds.
+  function reportPlayed(id, startMs) {
+    const gap = Number.isFinite(startMs)
+      ? "&start_ms=" + Math.min(60000, Math.max(0, Math.round(startMs)))
+      : "";
+    send("POST", "/call/played?id=" + encodeURIComponent(id) + gap).catch(() => {});
   }
 
   // 4. A sound Harold offers: fetched, decoded and played through the call's context, with
   // an analyser for the bars, and reported once it has played to its end. The microphone
   // is muted from the moment it is offered.
   async function playSound(current, id) {
+    const offeredAt = performance.now();
+    let startedAt = null;
     stopPlayback();
     let source = null;
     playback = {
@@ -275,10 +281,11 @@
       analyser.connect(current.ctx.destination);
       source.onended = () => {
         if (letGo(id)) {
-          reportPlayed(id);
+          reportPlayed(id, startedAt === null ? undefined : startedAt - offeredAt);
         }
       };
       source.start();
+      startedAt = performance.now();
       followLevel(analyser, id);
     } catch {
       // Not fetched or not decoded: Harold gives up on it after a while.

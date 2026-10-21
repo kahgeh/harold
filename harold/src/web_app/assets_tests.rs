@@ -18,6 +18,7 @@ fn the_call_script_keeps_its_contract() {
         "echoCancellation: true",
         "wakeLock",
         "/call/played?id=",
+        "start_ms=",
         "/call/talk-now",
         "keepalive: true",
         "Call ended: the app was closed or the phone locked",

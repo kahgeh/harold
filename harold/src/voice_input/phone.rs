@@ -120,6 +120,8 @@ struct Pieces {
 
 struct Offer {
     wav: PathBuf,
+    /// The `harold.call_play` span the sound was offered in, which learns when it started.
+    span: tracing::Span,
     /// Whether the phone has fetched the file.
     fetched: bool,
     /// Dropped when the offer is taken back, which ends its play.
@@ -215,7 +217,23 @@ impl PhoneLine {
     }
 
     /// The phone has played the sound, or said the line, `id`.
+    #[cfg(test)]
     pub(crate) fn played(&self, id: &str) {
+        self.played_at(id, None);
+    }
+
+    /// The same, with how many milliseconds after it was offered the sound started on the
+    /// phone, which goes on the sound's `harold.call_play` span.
+    pub(crate) fn played_at(&self, id: &str, start_ms: Option<u64>) {
+        if let Some(start_ms) = start_ms {
+            let span = lock(&self.inner)
+                .sounds
+                .get(id)
+                .map(|offer| offer.span.clone());
+            if let Some(span) = span {
+                span.record("start_ms", start_ms);
+            }
+        }
         self.take_back(id);
     }
 
@@ -292,6 +310,7 @@ impl PhoneLine {
         let mut inner = lock(&self.inner);
         let offer = Offer {
             wav: wav.to_path_buf(),
+            span: tracing::Span::current(),
             fetched: false,
             _ended: ended,
         };
@@ -403,7 +422,7 @@ fn new_id() -> String {
 
 /// How long the WAV at `wav` lasts: its `data` chunk's size over the byte rate in its
 /// header. A file that cannot be read lasts no time.
-fn sound_length(wav: &Path) -> Duration {
+pub(super) fn sound_length(wav: &Path) -> Duration {
     read_length(wav).unwrap_or(Duration::ZERO)
 }
 
@@ -622,6 +641,10 @@ impl<B: CallPorts> CallPorts for PhonePorts<B> {
         self.line.take_back_speech();
     }
 
+    fn call_from(&self) -> &'static str {
+        "phone"
+    }
+
     async fn turn_end_update(&self, prompt: &str, turn: &tracing::Span) -> String {
         self.base.turn_end_update(prompt, turn).await
     }
@@ -826,8 +849,13 @@ impl<B: CallPorts> PhoneCalls<B> {
         self.line.audio(call, at_ms, bytes)
     }
 
+    #[cfg(test)]
     pub(crate) fn played(&self, id: &str) {
         self.line.played(id);
+    }
+
+    pub(crate) fn played_at(&self, id: &str, start_ms: Option<u64>) {
+        self.line.played_at(id, start_ms);
     }
 
     pub(crate) fn answer(&self, id: &str) -> Option<Vec<u8>> {

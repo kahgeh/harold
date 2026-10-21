@@ -14,7 +14,7 @@ use tokio::time::{Instant, sleep, timeout};
 
 use askama::Template;
 
-use super::{AppCalls, EndDeskCall, PhoneCallApi, refusal_status};
+use super::{AppCalls, EndDeskCall, PhoneCallApi, read_start_ms, refusal_status};
 use crate::outbound::fake::CapturedLogs;
 use crate::outbound::{AppDelivery, AppRoute};
 use crate::settings::WebAppSettings;
@@ -464,6 +464,49 @@ async fn a_phone_turn_is_typed_and_the_chiefs_line_is_offered_and_not_pushed() {
         push.requests().is_empty(),
         "a line played on the phone is not pushed"
     );
+}
+
+#[test]
+fn a_reported_start_is_a_whole_number_of_milliseconds_held_to_a_minute() {
+    assert_eq!(read_start_ms("350"), Some(350));
+    assert_eq!(read_start_ms("0"), Some(0));
+    assert_eq!(read_start_ms("-1"), Some(0));
+    assert_eq!(read_start_ms("999999"), Some(60_000));
+    assert_eq!(read_start_ms("abc"), None);
+    assert_eq!(read_start_ms("1.5"), None);
+    assert_eq!(read_start_ms(""), None);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_phones_start_gap_reaches_the_play_span_and_a_bad_one_still_ends_the_sound() {
+    test_support::install();
+    let phone = Phone::new(true).await;
+    phone.start().await;
+    phone.speak().await;
+    phone.wait_for_typed("hello there").await;
+
+    for (start_ms, kept) in [("357", Some("357")), ("abc", None)] {
+        let said = phone.say("A line.");
+        let id = phone.offered_line("A line.").await;
+        let played = format!("/call/played?id={id}&start_ms={start_ms}");
+        let response = phone.server.send(Method::POST, &played, Vec::new()).await;
+        assert_eq!(response.status(), 204);
+        assert_eq!(finished(said).await, Some(true));
+        if let Some(kept) = kept {
+            let plays: Vec<_> = test_support::spans()
+                .into_iter()
+                .filter(|span| {
+                    span.name == "harold.call_play"
+                        && test_support::span_attr(span, "start_ms").as_deref() == Some(kept)
+                })
+                .collect();
+            assert_eq!(plays.len(), 1);
+            assert_eq!(
+                test_support::span_attr(&plays[0], "call_from").as_deref(),
+                Some("phone")
+            );
+        }
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]

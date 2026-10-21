@@ -38,7 +38,9 @@ pub(crate) trait PhoneCallApi: Send + Sync {
     fn talk_now(&self);
     /// A piece for the call `call`; one for any other call is refused as `NoCall`.
     fn audio(&self, call: &str, at_ms: u64, bytes: &[u8]) -> Result<(), AudioRefused>;
-    fn played(&self, id: &str);
+    /// The phone has played the sound, or said the line, `id`; `start_ms` is the milliseconds
+    /// from the sound being offered to it starting on the phone.
+    fn played_at(&self, id: &str, start_ms: Option<u64>);
     fn answer(&self, id: &str) -> Option<Vec<u8>>;
     /// What the phone shows and plays, now and as it changes.
     fn view(&self) -> watch::Receiver<PhoneView>;
@@ -107,8 +109,8 @@ impl<B: CallPorts> PhoneCallApi for AppCalls<B> {
         self.phone.audio(call, at_ms, bytes)
     }
 
-    fn played(&self, id: &str) {
-        self.phone.played(id);
+    fn played_at(&self, id: &str, start_ms: Option<u64>) {
+        self.phone.played_at(id, start_ms);
     }
 
     fn answer(&self, id: &str) -> Option<Vec<u8>> {
@@ -154,6 +156,17 @@ pub(crate) struct AudioAt {
 #[derive(Deserialize)]
 pub(crate) struct PlayedId {
     id: Option<String>,
+    /// Read as text, so a value that is no number leaves it out instead of refusing the report.
+    start_ms: Option<String>,
+}
+
+/// The longest gap the phone can report: a minute.
+const START_MS_LIMIT: i64 = 60_000;
+
+/// A reported `start_ms`, held to 0 to 60,000; `None` when it is no whole number.
+fn read_start_ms(raw: &str) -> Option<u64> {
+    let ms = raw.parse::<i64>().ok()?;
+    Some(ms.clamp(0, START_MS_LIMIT).unsigned_abs())
 }
 
 /// `POST /call`: `200` once the call listens, with a `text/plain` body holding the call's
@@ -220,8 +233,12 @@ pub(crate) async fn post_played(
     let Some(calls) = &state.calls else {
         return StatusCode::CONFLICT.into_response();
     };
-    if let Ok(Query(PlayedId { id: Some(id) })) = id {
-        calls.played(&id);
+    if let Ok(Query(PlayedId {
+        id: Some(id),
+        start_ms,
+    })) = id
+    {
+        calls.played_at(&id, start_ms.as_deref().and_then(read_start_ms));
     }
     StatusCode::NO_CONTENT.into_response()
 }

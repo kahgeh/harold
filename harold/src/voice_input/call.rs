@@ -5,10 +5,11 @@
 //! status.
 
 use super::hang_up::{Spoken, hang_up};
+use super::phone::sound_length;
 use super::phrases::{
     BYE, CHIEF_BUSY, NO_CHIEF, NOTHING_HEARD, VOICE_FAILED, VOICE_STOPPED, phrase_file,
 };
-use super::speech::SpeechDetector;
+use super::speech::{FRAME, MAX_TURN_FRAMES, START_FRAMES, SpeechDetector};
 use super::wav::{tick_wav, wav_bytes};
 use super::worker::{Health, Transcript, VoiceWorker, WorkerError};
 use super::{
@@ -30,7 +31,7 @@ use std::time::Duration;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, sleep_until};
-use tracing::{info, warn};
+use tracing::{Instrument as _, info, warn};
 use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 use uuid::Uuid;
 
@@ -176,16 +177,26 @@ async fn try_type<P: CallPorts>(ports: &P, text: &str) -> Typing {
     }
 }
 
-/// Logs a typed turn and opens its `harold.call_turn` span, the root of the turn's trace.
-/// The stop hook's `harold.turn` joins it. The span ends when its last holder lets go.
-pub(super) fn log_typed(pane: &str, text: &str) -> tracing::Span {
-    let words = text.split_whitespace().count();
-    let turn = tracing::info_span!(
+/// Opens a turn's `harold.call_turn` span, the root of the turn's trace. The stop hook's
+/// `harold.turn` joins it. The span ends when its last holder lets go.
+pub(super) fn open_turn(call_from: &'static str) -> tracing::Span {
+    tracing::info_span!(
         target: telemetry::TRACE_TARGET,
         parent: None,
         "harold.call_turn",
-        pane_id = %pane
-    );
+        pane_id = tracing::field::Empty,
+        call_from,
+        result = tracing::field::Empty,
+        first_sound_ms = tracing::field::Empty,
+        answer_ms = tracing::field::Empty,
+    )
+}
+
+/// Logs a typed turn on its open `harold.call_turn` span.
+pub(super) fn log_typed(turn: &tracing::Span, pane: &str, text: &str) {
+    let words = text.split_whitespace().count();
+    turn.record("pane_id", pane);
+    turn.record("result", TurnResult::Typed.reason());
     // Fails only when no export layer is installed, and then there is no trace to join.
     let cx = turn.context();
     turn.in_scope(|| info!(pane_id = %pane, words, "spoken prompt typed"));
@@ -195,7 +206,11 @@ pub(super) fn log_typed(pane: &str, text: &str) -> tracing::Span {
         Some(cx),
         time::OffsetDateTime::now_utc(),
     );
-    turn
+}
+
+/// Whether the worker heard words in the turn.
+fn has_speech(transcript: &Transcript) -> bool {
+    !one_line(&transcript.text).is_empty() && transcript.no_speech_prob <= NO_SPEECH_LIMIT
 }
 
 fn log_dropped(result: TurnResult) {
@@ -216,7 +231,7 @@ async fn pass_on_when_free<P: CallPorts>(
         let result = match try_type(&*ports, &text).await {
             Typing::Typed(pane) => {
                 // The call is over: nothing waits on the turn, so its span ends here.
-                drop(log_typed(&pane, &text));
+                log_typed(&open_turn(ports.call_from()), &pane, &text);
                 return;
             }
             Typing::Busy if Instant::now() < gives_up_at => {
@@ -301,8 +316,86 @@ enum Mode {
 
 /// One piece of work for the worker.
 enum Job {
-    Transcribe { dir: PathBuf },
+    Transcribe { dir: PathBuf, queued_at: Instant },
     Make { id: u64, text: String, wav: PathBuf },
+}
+
+/// What a sound is, as the voice and play spans name it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Source {
+    ChiefLine,
+    /// The desk's turn-end update, said for a chief turn that ended with no line.
+    Update,
+    Phrase,
+    OtherAgent,
+    Tick,
+}
+
+impl Source {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::ChiefLine => "chief_line",
+            Self::Update => "update",
+            Self::Phrase => "phrase",
+            Self::OtherAgent => "other_agent",
+            Self::Tick => "tick",
+        }
+    }
+}
+
+/// The `harold.call_turn` span of the turn being spoken, typed or answered.
+struct TurnTrace {
+    span: tracing::Span,
+    /// When the speech was cut: the clock of `first_sound_ms` and `answer_ms`.
+    cut_at: Option<Instant>,
+    first_sound_noted: bool,
+    answer_noted: bool,
+}
+
+impl TurnTrace {
+    fn open(call_from: &'static str) -> Self {
+        Self {
+            span: open_turn(call_from),
+            cut_at: None,
+            first_sound_noted: false,
+            answer_noted: false,
+        }
+    }
+
+    /// Notes, once each, the first sound of the turn other than the tick, and the first
+    /// that answers it, as milliseconds after the cut.
+    fn sound_started(&mut self, source: Source, now: Instant) {
+        let Some(cut_at) = self.cut_at else {
+            return;
+        };
+        let ms = millis(now.saturating_duration_since(cut_at));
+        if source != Source::Tick && !self.first_sound_noted {
+            self.first_sound_noted = true;
+            self.span.record("first_sound_ms", ms);
+        }
+        if matches!(source, Source::ChiefLine | Source::Update) && !self.answer_noted {
+            self.answer_noted = true;
+            self.span.record("answer_ms", ms);
+        }
+    }
+}
+
+/// The `harold.call_speech` span of the speech now heard.
+struct SpeechTrace {
+    span: tracing::Span,
+    /// Samples fed since the block that showed the speech began.
+    fed: usize,
+}
+
+/// The `harold.call_voice` span of a sound the worker makes.
+struct VoiceTrace {
+    span: tracing::Span,
+    /// Until the worker takes the job.
+    queued_at: Option<Instant>,
+}
+
+fn millis(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
 /// Where a sound's audio comes from.
@@ -340,6 +433,10 @@ struct Sound {
     waits_after_talk_now: bool,
     after: After,
     reply: Option<oneshot::Sender<bool>>,
+    source: Source,
+    /// The `harold.call_turn` span of the turn it belongs to, which its spans join.
+    turn: Option<tracing::Span>,
+    voice: Option<VoiceTrace>,
 }
 
 impl Sound {
@@ -399,9 +496,6 @@ struct Awaiting {
     /// A line answering the turn has arrived, or is coming from the turn-end update.
     answered: bool,
     update_asked: bool,
-    /// The turn's `harold.call_turn` span; it ends when the update line arrives or this is
-    /// dropped.
-    turn: Option<tracing::Span>,
 }
 
 /// A turn that waits for a busy chief.
@@ -443,6 +537,12 @@ struct Call<P: CallPorts> {
     unmuted_at: Instant,
     awaiting: Option<Awaiting>,
     held: Option<HeldTurn>,
+    /// The turn from its speech to its answer played: it ends when the answer has played or
+    /// been stopped, or the turn is dropped, forgotten, given up or the call ends.
+    turn: Option<TurnTrace>,
+    speech: Option<SpeechTrace>,
+    /// The `harold.call_transcribe` span of the turn at the worker.
+    transcribing: Option<tracing::Span>,
     /// Set by talk now: the chief's lines are taken as said until the next turn is typed.
     skip_chief_lines: bool,
     /// Set by talk now: sounds that wait after talk now do so until the next turn is cut
@@ -547,6 +647,9 @@ impl<P: CallPorts> Call<P> {
             unmuted_at: Instant::now(),
             awaiting: None,
             held: None,
+            turn: None,
+            speech: None,
+            transcribing: None,
             skip_chief_lines: false,
             hold_others_until: None,
             active_at: Instant::now(),
@@ -596,7 +699,7 @@ impl<P: CallPorts> Call<P> {
             Event::Stop(why) => self.end(why, None).await,
             Event::TalkNow => self.talk_now(),
             Event::ForgetTurn => self.forget_turn(),
-            Event::Say { line, by, reply } => self.line(line, by, Some(reply)),
+            Event::Say { line, by, reply } => self.line(line, by, Some(reply), false),
             Event::Transcribed {
                 generation,
                 dir,
@@ -628,10 +731,38 @@ impl<P: CallPorts> Call<P> {
             return;
         }
         let muted = self.playing.is_some() || captured_at < self.unmuted_at;
-        let Some(turn) = self.detector.push(block, muted).into_iter().next() else {
-            return;
-        };
-        self.turn_ended(&turn);
+        let cut = self.detector.push(block, muted).into_iter().next();
+        if let Some(speech) = self.speech.as_mut() {
+            speech.fed += block.len();
+        } else if cut.is_some() || self.detector.in_turn() {
+            self.speech_started(block.len());
+        }
+        if let Some(turn) = cut {
+            self.turn_ended(&turn);
+        }
+    }
+
+    /// Opens the turn's `harold.call_turn` span, or goes on with the one a busy chief holds,
+    /// and the `harold.call_speech` span in it.
+    fn speech_started(&mut self, fed: usize) {
+        let ports = &self.ports;
+        let turn = self
+            .turn
+            .get_or_insert_with(|| TurnTrace::open(ports.call_from()));
+        let span = tracing::info_span!(
+            target: telemetry::TRACE_TARGET,
+            parent: &turn.span,
+            "harold.call_speech",
+            cut = tracing::field::Empty
+        );
+        self.speech = Some(SpeechTrace { span, fed });
+    }
+
+    /// Ends the turn's `harold.call_turn` span, with `result` unless it has one.
+    fn end_turn(&mut self, result: Option<&str>) {
+        if let (Some(turn), Some(result)) = (self.turn.take(), result) {
+            turn.span.record("result", result);
+        }
     }
 
     /// Forgets the speech of a turn not yet ended, keeping the background level. A newer
@@ -641,6 +772,9 @@ impl<P: CallPorts> Call<P> {
     fn forget_turn(&mut self) {
         if self.mode == Mode::Listening {
             self.detector.reset();
+            if self.speech.take().is_some() && self.held.is_none() {
+                self.end_turn(Some("forgotten"));
+            }
         }
     }
 
@@ -650,6 +784,15 @@ impl<P: CallPorts> Call<P> {
         self.detector.reset();
         self.hold_others_until = None;
         self.active_at = Instant::now();
+        if let Some(speech) = self.speech.take() {
+            let long = speech.fed >= (MAX_TURN_FRAMES - START_FRAMES) * FRAME;
+            speech
+                .span
+                .record("cut", if long { "max_length" } else { "quiet" });
+        }
+        if let Some(turn) = self.turn.as_mut() {
+            turn.cut_at = Some(Instant::now());
+        }
         let dir = self.dir.join(format!("turn-{}", Uuid::new_v4()));
         let written = private_dir(&dir)
             .and_then(|()| std::fs::write(dir.join(TURN_WAV), wav_bytes(samples, SAMPLE_RATE)));
@@ -660,7 +803,19 @@ impl<P: CallPorts> Call<P> {
             self.mode = Mode::Listening;
             return;
         }
-        self.jobs.push_back(Job::Transcribe { dir });
+        let audio_ms = samples.len() as u64 * 1000 / u64::from(SAMPLE_RATE);
+        self.transcribing = Some(tracing::info_span!(
+            target: telemetry::TRACE_TARGET,
+            parent: self.turn.as_ref().and_then(|turn| turn.span.id()),
+            "harold.call_transcribe",
+            audio_ms,
+            waited_ms = tracing::field::Empty,
+            result = tracing::field::Empty
+        ));
+        self.jobs.push_back(Job::Transcribe {
+            dir,
+            queued_at: Instant::now(),
+        });
     }
 
     // --- the worker ---
@@ -678,11 +833,12 @@ impl<P: CallPorts> Call<P> {
             self.worker = Some(worker);
             return;
         };
+        self.note_wait(&job);
         let events = self.events.clone();
         let generation = self.generation;
         self.request = Some(tokio::spawn(async move {
             let event = match job {
-                Job::Transcribe { dir } => {
+                Job::Transcribe { dir, .. } => {
                     let result = worker.transcribe(&dir.join(TURN_WAV)).await;
                     Event::Transcribed {
                         generation,
@@ -706,6 +862,34 @@ impl<P: CallPorts> Call<P> {
         }));
     }
 
+    /// Notes on the job's span how long the job waited for the worker.
+    fn note_wait(&mut self, job: &Job) {
+        let now = Instant::now();
+        match job {
+            Job::Transcribe { queued_at, .. } => {
+                if let Some(span) = &self.transcribing {
+                    span.record(
+                        "waited_ms",
+                        millis(now.saturating_duration_since(*queued_at)),
+                    );
+                }
+            }
+            Job::Make { id, .. } => {
+                let voice = self
+                    .sounds
+                    .iter_mut()
+                    .find(|sound| sound.id == *id)
+                    .and_then(|sound| sound.voice.as_mut());
+                if let Some(voice) = voice
+                    && let Some(queued_at) = voice.queued_at.take()
+                {
+                    let waited = millis(now.saturating_duration_since(queued_at));
+                    voice.span.record("waited_ms", waited);
+                }
+            }
+        }
+    }
+
     async fn transcribed(
         &mut self,
         generation: u64,
@@ -713,14 +897,26 @@ impl<P: CallPorts> Call<P> {
         worker: P::Worker,
     ) {
         self.request = None;
+        let span = self.transcribing.take();
         let error = match result {
             Ok(transcript) => {
+                if let Some(span) = span {
+                    let result = if has_speech(&transcript) {
+                        "text"
+                    } else {
+                        "no_speech"
+                    };
+                    span.record("result", result);
+                }
                 self.worker_back(generation, worker).await;
                 self.heard(transcript).await;
                 return;
             }
             Err(error) => error,
         };
+        if let Some(span) = span {
+            span.record("result", "failed");
+        }
         self.dropped(TurnResult::Failed);
         self.mode = Mode::Listening;
         if error.exit_reason().is_some() {
@@ -743,6 +939,10 @@ impl<P: CallPorts> Call<P> {
         let at = self.sounds.iter().position(|sound| sound.id == id);
         match result {
             Ok(()) => {
+                if let Some(voice) = at.and_then(|at| self.sounds[at].voice.take()) {
+                    voice.span.record("audio_ms", millis(sound_length(&wav)));
+                    voice.span.record("result", "made");
+                }
                 self.worker_back(generation, worker).await;
                 match at {
                     Some(at) => self.keep_made(at),
@@ -753,6 +953,9 @@ impl<P: CallPorts> Call<P> {
             }
             // The worker could not make it: the `[tts]` command says it instead.
             Err(WorkerError::Failed) => {
+                if let Some(voice) = at.and_then(|at| self.sounds[at].voice.take()) {
+                    voice.span.record("result", "failed");
+                }
                 self.worker_back(generation, worker).await;
                 let _ = std::fs::remove_file(&wav);
                 if let Some(at) = at {
@@ -874,6 +1077,9 @@ impl<P: CallPorts> Call<P> {
             waits_after_talk_now: true,
             after: After::Nothing,
             reply: None,
+            source: Source::Phrase,
+            turn: None,
+            voice: None,
         });
     }
 
@@ -881,7 +1087,7 @@ impl<P: CallPorts> Call<P> {
 
     async fn heard(&mut self, transcript: Transcript) {
         let text = one_line(&transcript.text);
-        if text.is_empty() || transcript.no_speech_prob > NO_SPEECH_LIMIT {
+        if !has_speech(&transcript) {
             self.dropped(TurnResult::NothingHeard);
             self.mode = Mode::Listening;
             self.phrase(NOTHING_HEARD, After::Nothing);
@@ -946,7 +1152,11 @@ impl<P: CallPorts> Call<P> {
     }
 
     fn typed(&mut self, pane: String, text: String) {
-        let turn = log_typed(&pane, &text);
+        let ports = &self.ports;
+        let turn = self
+            .turn
+            .get_or_insert_with(|| TurnTrace::open(ports.call_from()));
+        log_typed(&turn.span, &pane, &text);
         self.hold_others_until = None;
         let prompt = format!("{MARK} {text}");
         {
@@ -967,13 +1177,16 @@ impl<P: CallPorts> Call<P> {
             idle_since: None,
             answered: false,
             update_asked: false,
-            turn: Some(turn),
         });
     }
 
-    fn dropped(&self, result: TurnResult) {
+    /// A turn that came to nothing. A turn waiting for a busy chief goes on.
+    fn dropped(&mut self, result: TurnResult) {
         log_dropped(result);
         lock(&self.status).last_result = Some(result);
+        if self.held.is_none() {
+            self.end_turn(Some(result.reason()));
+        }
     }
 
     /// Drops a turn still waiting for a busy chief.
@@ -1127,6 +1340,7 @@ impl<P: CallPorts> Call<P> {
             self.mode = Mode::Listening;
             let phrase = self.ports.no_answer_phrase();
             self.phrase(phrase, After::Nothing);
+            self.end_turn(None);
             return;
         }
         let tick = now >= awaiting.next_tick;
@@ -1161,7 +1375,10 @@ impl<P: CallPorts> Call<P> {
             let ports = Arc::clone(&self.ports);
             let events = self.events.clone();
             let prompt = awaiting.prompt.clone();
-            let turn = awaiting.turn.clone().unwrap_or_else(tracing::Span::none);
+            let turn = self
+                .turn
+                .as_ref()
+                .map_or_else(tracing::Span::none, |turn| turn.span.clone());
             self.updates.push(tokio::spawn(async move {
                 let line = ports.turn_end_update(&prompt, &turn).await;
                 drop(turn);
@@ -1181,7 +1398,13 @@ impl<P: CallPorts> Call<P> {
     }
 
     /// A line said into the call: made into audio by the worker, then played in turn.
-    fn line(&mut self, line: String, by: Speaker, reply: Option<oneshot::Sender<bool>>) {
+    fn line(
+        &mut self,
+        line: String,
+        by: Speaker,
+        reply: Option<oneshot::Sender<bool>>,
+        update: bool,
+    ) {
         if self.mode == Mode::Ending {
             if let Some(reply) = reply {
                 let _ = reply.send(false);
@@ -1201,6 +1424,13 @@ impl<P: CallPorts> Call<P> {
             });
         let id = self.new_id();
         let wav = self.dir.join(format!("answer-{}.wav", Uuid::new_v4()));
+        let source = match (by, update) {
+            (Speaker::OtherAgent, _) => Source::OtherAgent,
+            (Speaker::Chief, true) => Source::Update,
+            (Speaker::Chief, false) => Source::ChiefLine,
+        };
+        let voice = self.voice_trace(source);
+        let turn = self.turn_span(source);
         self.jobs.push_back(Job::Make {
             id,
             text: line.clone(),
@@ -1220,7 +1450,36 @@ impl<P: CallPorts> Call<P> {
             waits_after_talk_now: by == Speaker::OtherAgent,
             after: After::Nothing,
             reply,
+            source,
+            turn,
+            voice: Some(voice),
         });
+    }
+
+    /// The span of the turn a sound belongs to: a line another agent says is not part of it.
+    fn turn_span(&self, source: Source) -> Option<tracing::Span> {
+        if source == Source::OtherAgent {
+            return None;
+        }
+        self.turn.as_ref().map(|turn| turn.span.clone())
+    }
+
+    /// Opens the `harold.call_voice` span of a sound queued for the worker.
+    fn voice_trace(&self, source: Source) -> VoiceTrace {
+        let parent = self.turn_span(source).and_then(|turn| turn.id());
+        let span = tracing::info_span!(
+            target: telemetry::TRACE_TARGET,
+            parent: parent,
+            "harold.call_voice",
+            source = source.as_str(),
+            waited_ms = tracing::field::Empty,
+            audio_ms = tracing::field::Empty,
+            result = tracing::field::Empty
+        );
+        VoiceTrace {
+            span,
+            queued_at: Some(Instant::now()),
+        }
     }
 
     /// The chief's turn ended with no line: the desk's turn-end update answers it.
@@ -1231,9 +1490,7 @@ impl<P: CallPorts> Call<P> {
         if !awaiting.update_asked || awaiting.answered {
             return;
         }
-        // The line has arrived: the call turn ends (the update task let go of its copy).
-        awaiting.turn = None;
-        self.line(line, Speaker::Chief, None);
+        self.line(line, Speaker::Chief, None, true);
     }
 
     /// One of Harold's phrases, from the phrase folder, or made by the worker and kept
@@ -1241,6 +1498,8 @@ impl<P: CallPorts> Call<P> {
     fn phrase(&mut self, text: &'static str, after: After) {
         let kept = phrase_file(&self.ports.phrases_dir(), &self.ports.voice_name(), text);
         let id = self.new_id();
+        let mut voice = None;
+        let turn = self.turn_span(Source::Phrase);
         let audio = if kept.is_file() {
             Audio::Wav {
                 path: kept,
@@ -1250,6 +1509,7 @@ impl<P: CallPorts> Call<P> {
             }
         } else {
             let wav = self.dir.join(format!("phrase-{}.wav", Uuid::new_v4()));
+            voice = Some(self.voice_trace(Source::Phrase));
             let job = Job::Make {
                 id,
                 text: text.to_string(),
@@ -1276,6 +1536,9 @@ impl<P: CallPorts> Call<P> {
             waits_after_talk_now: false,
             after,
             reply: None,
+            source: Source::Phrase,
+            turn,
+            voice,
         });
     }
 
@@ -1303,9 +1566,11 @@ impl<P: CallPorts> Call<P> {
             self.mode = Mode::Listening;
         }
         let by_tts = matches!(sound.audio, Audio::Tts);
+        let span = self.play_span(sound.source, sound.turn.as_ref());
+        self.note_started(&sound);
         let task = match &sound.audio {
-            Audio::Wav { path, .. } => self.spawn_play(sound.id, path.clone(), sound.said()),
-            Audio::Tts => self.spawn_tts(sound.id, sound.text.clone()),
+            Audio::Wav { path, .. } => self.spawn_play(sound.id, path.clone(), sound.said(), span),
+            Audio::Tts => self.spawn_tts(sound.id, sound.text.clone(), span),
         };
         self.playing = Some(Playing {
             id: sound.id,
@@ -1321,7 +1586,9 @@ impl<P: CallPorts> Call<P> {
             return;
         }
         let id = self.new_id();
-        let task = self.spawn_play(id, self.dir.join(TICK_WAV), Said::Tick);
+        let turn = self.turn.as_ref().map(|turn| turn.span.clone());
+        let span = self.play_span(Source::Tick, turn.as_ref());
+        let task = self.spawn_play(id, self.dir.join(TICK_WAV), Said::Tick, span);
         self.playing = Some(Playing {
             id,
             task,
@@ -1331,28 +1598,60 @@ impl<P: CallPorts> Call<P> {
         });
     }
 
-    fn spawn_play(&self, id: u64, wav: PathBuf, said: Said) -> JoinHandle<()> {
-        let sink = Arc::clone(&self.sink);
-        let events = self.events.clone();
-        tokio::spawn(async move {
-            let played = match sink.play_said(&wav, &said).await {
-                Ok(()) => true,
-                Err(error) => {
-                    warn!(error = %error, "call sound not played");
-                    false
-                }
-            };
-            let _ = events.send(Event::Played { id, played });
-        })
+    /// Opens the `harold.call_play` span of a sound, which the task playing it runs in.
+    fn play_span(&self, source: Source, turn: Option<&tracing::Span>) -> tracing::Span {
+        tracing::info_span!(
+            target: telemetry::TRACE_TARGET,
+            parent: turn.and_then(tracing::Span::id),
+            "harold.call_play",
+            source = source.as_str(),
+            call_from = self.ports.call_from(),
+            start_ms = tracing::field::Empty
+        )
     }
 
-    fn spawn_tts(&self, id: u64, text: String) -> JoinHandle<()> {
+    /// Notes on the turn the sound belongs to when its sound started.
+    fn note_started(&mut self, sound: &Sound) {
+        let Some(own) = sound.turn.as_ref().and_then(tracing::Span::id) else {
+            return;
+        };
+        if let Some(turn) = self
+            .turn
+            .as_mut()
+            .filter(|turn| turn.span.id() == Some(own))
+        {
+            turn.sound_started(sound.source, Instant::now());
+        }
+    }
+
+    fn spawn_play(&self, id: u64, wav: PathBuf, said: Said, span: tracing::Span) -> JoinHandle<()> {
+        let sink = Arc::clone(&self.sink);
+        let events = self.events.clone();
+        tokio::spawn(
+            async move {
+                let played = match sink.play_said(&wav, &said).await {
+                    Ok(()) => true,
+                    Err(error) => {
+                        warn!(error = %error, "call sound not played");
+                        false
+                    }
+                };
+                let _ = events.send(Event::Played { id, played });
+            }
+            .instrument(span),
+        )
+    }
+
+    fn spawn_tts(&self, id: u64, text: String, span: tracing::Span) -> JoinHandle<()> {
         let ports = Arc::clone(&self.ports);
         let events = self.events.clone();
-        tokio::spawn(async move {
-            ports.speak_with_tts(&text).await;
-            let _ = events.send(Event::Played { id, played: true });
-        })
+        tokio::spawn(
+            async move {
+                ports.speak_with_tts(&text).await;
+                let _ = events.send(Event::Played { id, played: true });
+            }
+            .instrument(span),
+        )
     }
 
     /// A sound ended. One the sink could not play is said through the `[tts]` command
@@ -1379,6 +1678,9 @@ impl<P: CallPorts> Call<P> {
             sound.audio = Audio::Tts;
             self.sounds.push_front(sound);
             return;
+        }
+        if sound.answers {
+            self.end_turn(None);
         }
         if let After::End(why) = sound.finish(true) {
             self.end(why, None).await;
@@ -1409,7 +1711,9 @@ impl<P: CallPorts> Call<P> {
                 .retain(|job| !matches!(job, Job::Make { id: made, .. } if *made == id));
             sound.finish(true);
         }
-        self.awaiting = None;
+        if self.awaiting.take().is_some() {
+            self.end_turn(None);
+        }
         if self.mode == Mode::Waiting {
             self.mode = Mode::Listening;
         }
@@ -1445,6 +1749,9 @@ impl<P: CallPorts> Call<P> {
         }
         self.done = true;
         self.mode = Mode::Ending;
+        self.speech = None;
+        self.transcribing = None;
+        self.end_turn(None);
         // The status reads as the call is while it says its last words and cleans up. The
         // transcript goes the moment the status reads off.
         {

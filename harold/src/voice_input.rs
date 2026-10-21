@@ -115,6 +115,10 @@ pub(crate) trait CallPorts: Send + Sync + 'static {
         prompt: &str,
         turn: &tracing::Span,
     ) -> impl Future<Output = String> + Send;
+    /// Where the call's sound goes, as `harold.call_turn` names it: `desk` or `phone`.
+    fn call_from(&self) -> &'static str {
+        "desk"
+    }
     /// Call folders are made under this: `$TMPDIR/harold-voice-input` in the daemon.
     fn calls_dir(&self) -> PathBuf;
     /// Phrases are kept here between calls: `$TMPDIR/harold-voice-phrases` in the daemon.
