@@ -702,9 +702,14 @@ async fn a_failed_store_on_save_picks_is_unavailable_and_logs_picks_not_saved() 
     let service = service(Arc::clone(&failing));
     put(&service, question("Q1", "spec", "abc")).await.unwrap();
     failing.writes.store(true, Ordering::SeqCst);
-    let refused = save_picks(&service, "Q1", 1, vec![pick(0, "a")])
-        .await
-        .unwrap_err();
+    let refused = save_picks(
+        &service,
+        "Q1",
+        1,
+        vec![free_pick(0, "KEY-CANARY", "TEXT-CANARY")],
+    )
+    .await
+    .unwrap_err();
     assert_eq!(refused.code(), Code::Unavailable);
     let lines = logs.with("picks not saved");
     assert_eq!(lines.len(), 1, "{lines:#?}");
@@ -717,7 +722,8 @@ async fn a_failed_store_on_save_picks_is_unavailable_and_logs_picks_not_saved() 
     assert!(lines[0].contains("reason=\"store_failed\""), "{}", lines[0]);
     assert!(lines[0].contains("kind=\"data\""), "{}", lines[0]);
     assert!(lines[0].contains("write failed"), "{}", lines[0]);
-    assert!(!lines[0].contains("\"a\""), "{}", lines[0]);
+    assert!(!lines[0].contains("KEY-CANARY"), "{}", lines[0]);
+    assert!(!lines[0].contains("TEXT-CANARY"), "{}", lines[0]);
     assert!(lines[0].contains("WARN"), "{}", lines[0]);
 }
 
