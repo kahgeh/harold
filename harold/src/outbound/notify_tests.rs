@@ -802,9 +802,18 @@ impl AppRoute for FakeApp {
 pub(crate) struct FakeAwayText {
     sends: Mutex<Vec<String>>,
     channel: Option<&'static str>,
+    summary: Option<String>,
 }
 
 impl FakeAwayText {
+    /// The fake, with `summary` as the text it summarises every turn to.
+    fn summarising(summary: &str) -> Self {
+        Self {
+            summary: Some(summary.to_string()),
+            ..Self::default()
+        }
+    }
+
     /// The away channel this fake names; `imessage` unless set.
     fn on_channel(channel: &'static str) -> Self {
         Self {
@@ -829,7 +838,9 @@ impl AwayText for FakeAwayText {
     }
 
     fn summarise(&self, _turn: &TurnCompleted) -> String {
-        FAKE_SUMMARY.to_string()
+        self.summary
+            .clone()
+            .unwrap_or_else(|| FAKE_SUMMARY.to_string())
     }
 
     fn send(&self, text: &str) -> Result<(), String> {
@@ -899,6 +910,91 @@ fn chief_turn_not_pushed_goes_to_imessage_once_with_the_prefix() {
         )
     );
     assert_eq!(environment.reply_targets(), ["%1"]);
+}
+
+/// 600 characters of whole sentences.
+fn long_summary() -> String {
+    "The pods are green and merged. ".repeat(20).trim_end().to_string()
+}
+
+#[test]
+fn the_app_gets_the_whole_text_and_the_unreachable_message_is_fitted() {
+    let long = long_summary();
+    assert!(long.chars().count() > 590);
+
+    let environment = FakeEnvironment::locked("");
+    let app = FakeApp::new(AppDelivery::NotPushed(NotPushedReason::NoSubscriptions));
+    let away = FakeAwayText::summarising(&long);
+    let outcome = notify_chief_turn(&environment, &app, &away, &turn("%1", "report"));
+
+    assert_eq!(outcome, Ok(DeliveryOutcome::Delivered));
+    assert_eq!(app.delivered(), [("event-1".to_string(), long.clone())]);
+    let fitted = crate::channels::fit_turn_end_text(&long, 280);
+    assert!(fitted.ends_with(" …") && fitted.chars().count() <= 280);
+    assert_eq!(
+        away.sends(),
+        [format!(
+            "(app unreachable) {}",
+            agent_message_text(FAKE_MACHINE, "label-%1", &fitted)
+        )]
+    );
+}
+
+#[test]
+fn the_app_gets_a_long_text_whole_when_it_pushes() {
+    let long = long_summary();
+    let environment = FakeEnvironment::locked("");
+    let app = FakeApp::new(AppDelivery::Pushed);
+    let away = FakeAwayText::summarising(&long);
+
+    notify_chief_turn(&environment, &app, &away, &turn("%1", "report")).unwrap();
+
+    assert_eq!(app.delivered()[0].1.chars().count(), long.chars().count());
+    assert!(away.sends().is_empty());
+}
+
+#[test]
+fn the_delivery_span_carries_text_cut_for_a_cut_and_an_uncut_update() {
+    use crate::telemetry::test_support;
+    test_support::install();
+    for (pushed, summary, cut) in [
+        (true, long_summary(), "false"),
+        (false, long_summary(), "true"),
+        (false, FAKE_SUMMARY.to_string(), "false"),
+    ] {
+        let marker = uuid::Uuid::new_v4().to_string();
+        let delivery = if pushed {
+            AppDelivery::Pushed
+        } else {
+            AppDelivery::NotPushed(NotPushedReason::NoSubscriptions)
+        };
+        let span = tracing::info_span!(
+            target: crate::telemetry::TRACE_TARGET,
+            "harold.delivery",
+            pane_id = %marker,
+            text_cut = tracing::field::Empty,
+        );
+        span.in_scope(|| {
+            notify_chief_turn(
+                &FakeEnvironment::locked(""),
+                &FakeApp::new(delivery),
+                &FakeAwayText::summarising(&summary),
+                &turn("%1", "report"),
+            )
+            .unwrap();
+        });
+        drop(span);
+
+        let spans = test_support::spans();
+        let exported = spans
+            .iter()
+            .find(|s| test_support::span_attr(s, "pane_id").as_deref() == Some(marker.as_str()))
+            .unwrap();
+        assert_eq!(
+            test_support::span_attr(exported, "text_cut").as_deref(),
+            Some(cut)
+        );
+    }
 }
 
 #[test]

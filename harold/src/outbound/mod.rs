@@ -460,8 +460,26 @@ fn deliver_turn_from_chief(
     event_id: &str,
 ) -> Result<(CarriedBy, Option<AgentAddress>), String> {
     let text = chief_app.away.summarise(turn);
-    let away_text = agent_message_text(&chief_app.away.machine_name(), &turn.pane_label, &text);
+    // The app gets the whole text; the away channel gets it cut at a sentence end.
+    let fitted = channels::fit_turn_end_text(&text, channels::TURN_END_TEXT_LIMIT);
+    let away_text = agent_message_text(&chief_app.away.machine_name(), &turn.pane_label, &fitted);
     let carried_by = deliver_from_chief(chief_app, event_id, &text, &away_text)?;
+    match carried_by {
+        CarriedBy::App => channels::record_text_cut(false),
+        CarriedBy::Away => {
+            let cut = fitted != text;
+            if cut {
+                info!(
+                    channel = chief_app.away.channel(),
+                    pane_id = turn.pane_id.as_str(),
+                    count = text.chars().count(),
+                    "turn-end update cut"
+                );
+            }
+            channels::record_text_cut(cut);
+        }
+        CarriedBy::Held => {}
+    }
     let source = match carried_by {
         CarriedBy::App | CarriedBy::Held => None,
         CarriedBy::Away => Some(AgentAddress::TmuxPane {
