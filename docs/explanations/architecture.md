@@ -137,6 +137,10 @@ Each place Harold does not follow the organisation's `knowledge/standards.md`, w
 
 ## How it works
 
+Harold inventories configured agent processes in tmux, combines explicit lifecycle hooks with provider-specific visible-screen evidence, and stores the resulting current state durably. Existing stop hooks also report completed turns for turn-end updates and non-destructive work-summary updates.
+
+The public agent-state stream starts with a complete current snapshot, then sends later revisions. Raw pane captures remain inside the screen adapter; only classified state and a normalized work summary can cross the acquisition boundary. The [agent-monitor reference](../references/agent-monitor/README.md) and the [hook setup guide](../how-tos/setup-agent-monitor-hooks.md) give the detail.
+
 ### Follow one task
 
 Suppose an agent is idle and you submit “Fix the login error.” With lifecycle hooks configured, the update reaches the dash like this:
