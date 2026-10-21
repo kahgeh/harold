@@ -2947,6 +2947,84 @@ fn a_skipped_turn_end_records_skipped() {
     let deliveries = deliveries_under(parent);
     assert_eq!(deliveries.len(), 1);
     assert_eq!(attr(&deliveries[0], "outcome"), "skipped");
+    assert_eq!(attr(&deliveries[0], "channel"), "machine_audio_output");
+    assert_eq!(attr(&deliveries[0], "reason"), "session_active");
+}
+
+/// Dispatches a turn end on `pane` through `dispatcher` under a fresh live turn, and
+/// returns the `channel` and `reason` of the one skipped `harold.delivery` span.
+fn skipped_span_of(dispatcher: &dyn DeliveryDispatcher, pane: &str) -> (String, String) {
+    let event_id = uuid::Uuid::new_v4();
+    let (_, parent) = keep_a_turn_for(event_id);
+    let outcome = dispatch_turn_end(dispatcher, &event_id.to_string(), pane);
+    assert!(matches!(outcome, Ok(DeliveryOutcome::Skipped)));
+    let deliveries = deliveries_under(parent);
+    assert_eq!(deliveries.len(), 1);
+    assert_eq!(attr(&deliveries[0], "outcome"), "skipped");
+    (
+        attr(&deliveries[0], "channel"),
+        attr(&deliveries[0], "reason"),
+    )
+}
+
+#[test]
+fn a_turn_end_from_the_active_pane_records_its_channel_and_reason() {
+    let environment = Arc::new(FakeEnvironment::new(
+        "[notify]\nskip_if_session_active = false\nskip_if_pane_active = true",
+    ));
+    let pane = unique_pane();
+    environment.set_active_pane(Some(&pane));
+
+    let span = skipped_span_of(&Unpaused(dispatcher_with(&environment)), &pane);
+
+    assert_eq!(span, ("machine_audio_output".into(), "pane_active".into()));
+}
+
+#[test]
+fn a_repeated_turn_end_records_its_channel_and_reason() {
+    for (locked, channel) in [(false, "machine_audio_output"), (true, "imessage")] {
+        let environment = Arc::new(FakeEnvironment::new(""));
+        environment.set_screen_locked(locked);
+        let dispatcher = Unpaused(dispatcher_with(&environment));
+        let pane = unique_pane();
+        let first = uuid::Uuid::new_v4();
+        let outcome = dispatch_turn_end(&dispatcher, &first.to_string(), &pane);
+        assert!(matches!(outcome, Ok(DeliveryOutcome::Delivered)));
+
+        let span = skipped_span_of(&dispatcher, &pane);
+
+        assert_eq!(span, (channel.into(), "duplicate_turn".into()));
+    }
+}
+
+#[test]
+fn a_turn_end_after_the_pane_messaged_the_phone_records_its_channel_and_reason() {
+    let environment = Arc::new(FakeEnvironment::locked(""));
+    let dispatcher = Unpaused(dispatcher_with(&environment));
+    let pane = unique_pane();
+    dispatcher
+        .0
+        .dispatch_with_pause(
+            &away_delivery(json!(message_from(&pane, "hi"))),
+            None,
+            false,
+        )
+        .unwrap();
+
+    let span = skipped_span_of(&dispatcher, &pane);
+
+    assert_eq!(span, ("imessage".into(), "messaged_this_turn".into()));
+}
+
+#[test]
+fn a_paused_away_turn_end_records_skipped_on_the_away_channel() {
+    let environment = Arc::new(FakeEnvironment::locked(""));
+    crate::outbound::set_messaging_paused(true);
+
+    let span = skipped_span_of(&Unpaused(dispatcher_with(&environment)), &unique_pane());
+    crate::outbound::set_messaging_paused(false);
+
+    assert_eq!(span, ("imessage".into(), "messaging_pause".into()));
 }
 
 #[test]
@@ -2968,6 +3046,7 @@ fn a_muted_desk_turn_end_records_skipped_on_machine_audio_output() {
     assert_eq!(deliveries.len(), 1);
     assert_eq!(attr(&deliveries[0], "outcome"), "skipped");
     assert_eq!(attr(&deliveries[0], "channel"), "machine_audio_output");
+    assert_eq!(attr(&deliveries[0], "reason"), "voice_mute");
 }
 
 #[test]

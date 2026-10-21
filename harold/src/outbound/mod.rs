@@ -571,6 +571,9 @@ fn leave_out(
         pane_id,
     );
     tracing::Span::current().record("channel", held.channel.key());
+    if !held.is_held_back() {
+        record_skip_reason(held.reason);
+    }
     state.record_turn(dedup_key, now);
     Ok(outcome_of(held))
 }
@@ -593,7 +596,7 @@ pub(crate) fn notify(
 /// send the update on `OutboundChannel::Away`, the update goes by `deliver_from_chief`
 /// under `event_id`. Every check before the send is as in `notify`.
 ///
-/// The current span's `channel` is `app` when the app carried the update, and the away
+/// The current span's `channel` is `web_app` when the app carried the update, and the away
 /// channel's name otherwise. A span keeps every value recorded for a field, so on the app
 /// route the channel is recorded once, on return, when it is known.
 pub(crate) fn notify_with_app(
@@ -640,35 +643,8 @@ fn notify_routed(
     let mark = state.take_requested_message_mark(&turn.pane_id);
     let messaged_this_turn = mark.is_some_and(|marked_at| left_out::mark_is_fresh(marked_at, now));
 
-    // Dedup: skip if same pane+prompt was notified within the window.
-    let dedup_key = format!("{}:{}", turn.pane_id, turn.last_user_prompt);
-    if state.is_duplicate(&dedup_key, now) {
-        info!("notification skipped (duplicate within dedup window)");
-        return Ok(DeliveryOutcome::Skipped);
-    }
-
     let cfg = environment.notify_settings();
     let screen_locked = environment.screen_locked();
-
-    // Session-level skip: if completing pane's session has an attached client AND the
-    // screen is not locked, skip entirely.  When the screen is locked the user is away
-    // from the desk, so we must still notify even though tmux is attached.
-    if cfg.skip_if_session_active && !screen_locked && environment.session_attached(&turn.pane_id) {
-        info!("notification skipped (session is active, screen unlocked)");
-        return Ok(DeliveryOutcome::Skipped);
-    }
-
-    // Pane-level skip: skip only when the completing pane is the active pane
-    // AND the screen is not locked (user is at desk looking at it).
-    // If screen is locked, always notify even if pane matches.
-    if cfg.skip_if_pane_active
-        && !screen_locked
-        && environment.active_pane(&turn.pane_id).as_deref() == Some(turn.pane_id.as_str())
-    {
-        info!("notification skipped (pane is active and screen unlocked)");
-        return Ok(DeliveryOutcome::Skipped);
-    }
-
     let channel = if screen_locked {
         OutboundChannel::Away
     } else {
@@ -680,10 +656,46 @@ fn notify_routed(
     };
     let name = channel_name(channel, &cfg.away_channel);
 
+    // Dedup: skip if same pane+prompt was notified within the window.
+    let dedup_key = format!("{}:{}", turn.pane_id, turn.last_user_prompt);
+    if state.is_duplicate(&dedup_key, now) {
+        record_delivery_channel(app_route.is_some(), app_route_channel, name);
+        record_skip_reason("duplicate_turn");
+        info!("notification skipped (duplicate within dedup window)");
+        return Ok(DeliveryOutcome::Skipped);
+    }
+
+    // Session-level skip: if completing pane's session has an attached client AND the
+    // screen is not locked, skip entirely.  When the screen is locked the user is away
+    // from the desk, so we must still notify even though tmux is attached.
+    if cfg.skip_if_session_active && !screen_locked && environment.session_attached(&turn.pane_id) {
+        record_delivery_channel(app_route.is_some(), app_route_channel, name);
+        record_skip_reason("session_active");
+        info!("notification skipped (session is active, screen unlocked)");
+        return Ok(DeliveryOutcome::Skipped);
+    }
+
+    // Pane-level skip: skip only when the completing pane is the active pane
+    // AND the screen is not locked (user is at desk looking at it).
+    // If screen is locked, always notify even if pane matches.
+    if cfg.skip_if_pane_active
+        && !screen_locked
+        && environment.active_pane(&turn.pane_id).as_deref() == Some(turn.pane_id.as_str())
+    {
+        record_delivery_channel(app_route.is_some(), app_route_channel, name);
+        record_skip_reason("pane_active");
+        info!("notification skipped (pane is active and screen unlocked)");
+        return Ok(DeliveryOutcome::Skipped);
+    }
+
     // The voice mute and the messaging pause skip as they always have, before any rule
     // below is looked at: a paused update would not go to the phone.
     if let Some(reason) = channel.skip_reason(is_tts_muted(), is_messaging_paused()) {
         record_delivery_channel(app_route.is_some(), app_route_channel, name);
+        record_skip_reason(match channel {
+            OutboundChannel::Tts => "voice_mute",
+            OutboundChannel::Away => "messaging_pause",
+        });
         info!("{reason}");
         return Ok(DeliveryOutcome::Skipped);
     }
@@ -775,8 +787,16 @@ fn notify_routed(
     if outcome == DeliveryOutcome::Delivered {
         count_notification(environment, agents, &turn.pane_id, sent_on, "sent");
         state.record_turn(dedup_key, environment.now());
+    } else if outcome == DeliveryOutcome::Skipped {
+        // The away channel sent the same text a moment ago.
+        record_skip_reason("duplicate_message");
     }
     Ok(outcome)
+}
+
+/// Records why the current `harold.delivery` span's update was skipped.
+fn record_skip_reason(reason: &'static str) {
+    tracing::Span::current().record("reason", reason);
 }
 
 /// Records the `channel` of the delivery span now, or leaves it to the app route to record
