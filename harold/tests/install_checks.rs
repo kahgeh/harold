@@ -136,12 +136,30 @@ fn config_probe_rejects_invalid_typed_config_and_address_without_opening_storage
     }
 }
 
+const TELEGRAM_SENTENCE: &str = "[telegram] is no longer read: Harold reaches the phone by iMessage only. Remove it from config/local.toml or the HAROLD__ environment variables.";
+const PEERS_SENTENCE: &str = "[peers] is no longer read: two Macs share replies through iMessage, with no hub or member. Remove it from config/local.toml or the HAROLD__ environment variables.";
+const AWAY_CHANNEL_SENTENCE: &str = "notify.away_channel is no longer read: Harold reaches the phone by iMessage only. Remove it from config/local.toml or the HAROLD__ environment variables.";
+const GRPC_SENTENCE: &str = "grpc.host must be a loopback address (127.0.0.0/8, ::1 or localhost): Harold no longer serves other Macs.";
+
 #[test]
 fn probes_do_not_disclose_configuration_values_in_load_or_validation_errors() {
-    for overlay in [
-        "[telegram]\nchat_id = 'review-sentinel-secret'\n",
-        "[telegram]\nbot_token = 'review-sentinel-secret' invalid-toml\n",
-        "[notify]\naway_channel = 'review-sentinel-secret'\n",
+    for (overlay, sentence) in [
+        (
+            "[telegram]\nbot_token = 'review-sentinel-secret'\n",
+            TELEGRAM_SENTENCE,
+        ),
+        (
+            "[peers.hub]\nsecret = 'review-sentinel-secret'\n",
+            PEERS_SENTENCE,
+        ),
+        (
+            "[peers]\nsecret = 'review-sentinel-secret'\n",
+            PEERS_SENTENCE,
+        ),
+        (
+            "[notify]\naway_channel = 'review-sentinel-secret'\n",
+            AWAY_CHANNEL_SENTENCE,
+        ),
     ] {
         for mode in ["--check-config", "--check-ready"] {
             let output = Fixture::new(overlay).run(&[mode]);
@@ -149,8 +167,45 @@ fn probes_do_not_disclose_configuration_values_in_load_or_validation_errors() {
             assert!(output.stdout.is_empty());
             let stderr = String::from_utf8_lossy(&output.stderr);
             assert!(!stderr.contains("review-sentinel-secret"));
-            assert!(stderr.contains("invalid configuration"));
+            assert!(stderr.lines().any(|line| line == sentence), "{stderr}");
         }
+    }
+}
+
+#[test]
+fn probes_still_refuse_a_value_that_breaks_the_toml_without_disclosing_it() {
+    let output = Fixture::new("[telegram]\nbot_token = 'review-sentinel-secret' invalid-toml\n")
+        .run(&["--check-config"]);
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.contains("review-sentinel-secret"));
+    assert!(stderr.contains("invalid configuration"));
+}
+
+#[test]
+fn probes_refuse_a_grpc_host_beyond_loopback() {
+    for host in ["0.0.0.0", "100.64.0.1"] {
+        for mode in ["--check-config", "--check-ready"] {
+            let overlay = format!("{VALID}\n[grpc]\nhost = '{host}'\n");
+            let output = Fixture::new(&overlay).run(&[mode]);
+            assert!(!output.status.success());
+            assert!(output.stdout.is_empty());
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(stderr.lines().any(|line| line == GRPC_SENTENCE), "{stderr}");
+            assert!(!stderr.contains(host));
+        }
+    }
+}
+
+#[test]
+fn config_probe_accepts_a_clean_config_and_the_imessage_away_channel() {
+    for overlay in [
+        VALID.to_owned(),
+        format!("{VALID}\n[notify]\naway_channel = 'imessage'\n"),
+    ] {
+        let output = Fixture::new(&overlay).run(&["--check-config"]);
+        assert!(output.status.success(), "{output:?}");
     }
 }
 

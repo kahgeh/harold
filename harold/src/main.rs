@@ -863,6 +863,21 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
             | cli::Mode::Tool(_)
     );
     let launchd = started_by_launchd(&mode);
+    // Before `load`, which would deserialise (or reject) the settings this names.
+    let removed = settings::removed_setting_messages();
+    if !removed.is_empty() {
+        if is_probe {
+            for sentence in &removed {
+                eprintln!("{sentence}");
+            }
+            return Err("invalid configuration".into());
+        }
+        let message = format!("invalid configuration: {}", removed.join("; "));
+        if launchd {
+            refuse_invalid_config(&message);
+        }
+        return Err(message.into());
+    }
     let settings = match settings::Settings::load() {
         Ok(settings) => settings,
         Err(_) if is_probe => return Err("invalid configuration".into()),
@@ -920,6 +935,11 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
     if settings.notify.old_key_applied {
         tracing::warn!(
             "notify.away_messages_only_from is replaced by notify.chief and the channel lists"
+        );
+    }
+    if settings::away_channel_still_set() {
+        tracing::warn!(
+            "setting no longer read: notify.away_channel; remove it from config/local.toml"
         );
     }
     init_settings(settings);

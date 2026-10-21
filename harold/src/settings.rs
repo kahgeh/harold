@@ -42,10 +42,6 @@ fn parse_host(host: &str) -> Result<IpAddr, AddrParseError> {
 }
 
 /// Whether `host` is an address on this machine only: `localhost` or any loopback IP.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the loopback-only check in a later task calls it")
-)]
 pub(crate) fn is_loopback_host(host: &str) -> bool {
     parse_host(host).is_ok_and(|ip| ip.is_loopback())
 }
@@ -1215,40 +1211,9 @@ impl Settings {
     }
 
     pub fn load() -> Result<Arc<Self>, ConfigError> {
-        let env = std::env::var("HAROLD_ENV").unwrap_or_else(|_| "local".into());
-        let config_dir = std::env::var("HAROLD_CONFIG_DIR").unwrap_or_else(|_| {
-            // Default to a config/ directory next to the running binary.
-            std::env::current_exe()
-                .ok()
-                .and_then(|p| {
-                    p.parent()
-                        .map(|d| d.join("config").to_string_lossy().into_owned())
-                })
-                .unwrap_or_else(|| "config".into())
-        });
-
-        let config = Config::builder()
-            .add_source(File::new(
-                &format!("{config_dir}/default"),
-                FileFormat::Toml,
-            ))
-            .add_source(File::new(&format!("{config_dir}/{env}"), FileFormat::Toml).required(false))
-            .add_source(
-                config::Environment::with_prefix("HAROLD")
-                    .separator("__")
-                    .try_parsing(true),
-            )
-            .build()?;
-
+        let config = merged_config()?;
         let mut settings = config.try_deserialize::<Settings>()?;
-        let local = Config::builder()
-            .add_source(File::new(&format!("{config_dir}/{env}"), FileFormat::Toml).required(false))
-            .add_source(
-                config::Environment::with_prefix("HAROLD")
-                    .separator("__")
-                    .try_parsing(true),
-            )
-            .build()?;
+        let local = local_config()?;
         let local_keys = local
             .get_table("notify")
             .map(|table| table.into_keys().collect::<Vec<_>>())
@@ -1271,6 +1236,107 @@ impl Settings {
         let settings = config.try_deserialize::<Settings>()?;
         Ok(Arc::new(settings))
     }
+}
+
+const TELEGRAM_REMOVED: &str = "[telegram] is no longer read: Harold reaches the phone by iMessage only. Remove it from config/local.toml or the HAROLD__ environment variables.";
+const PEERS_REMOVED: &str = "[peers] is no longer read: two Macs share replies through iMessage, with no hub or member. Remove it from config/local.toml or the HAROLD__ environment variables.";
+const NOTIFY_TELEGRAM_REMOVED: &str = "notify.telegram is no longer read: the lists are imessage, web_app and machine_audio_output. Remove it from config/local.toml or the HAROLD__ environment variables.";
+const AWAY_CHANNEL_REMOVED: &str = "notify.away_channel is no longer read: Harold reaches the phone by iMessage only. Remove it from config/local.toml or the HAROLD__ environment variables.";
+const GRPC_HOST_NOT_LOOPBACK: &str = "grpc.host must be a loopback address (127.0.0.0/8, ::1 or localhost): Harold no longer serves other Macs.";
+
+/// The config directory and environment name `load` reads from.
+fn config_location() -> (String, String) {
+    let env = std::env::var("HAROLD_ENV").unwrap_or_else(|_| "local".into());
+    let config_dir = std::env::var("HAROLD_CONFIG_DIR").unwrap_or_else(|_| {
+        // Default to a config/ directory next to the running binary.
+        std::env::current_exe()
+            .ok()
+            .and_then(|p| {
+                p.parent()
+                    .map(|d| d.join("config").to_string_lossy().into_owned())
+            })
+            .unwrap_or_else(|| "config".into())
+    });
+    (config_dir, env)
+}
+
+/// The `default` file, the local file and the `HAROLD__` environment, laid over each other.
+fn merged_config() -> Result<Config, ConfigError> {
+    let (config_dir, env) = config_location();
+    Config::builder()
+        .add_source(File::new(
+            &format!("{config_dir}/default"),
+            FileFormat::Toml,
+        ))
+        .add_source(File::new(&format!("{config_dir}/{env}"), FileFormat::Toml).required(false))
+        .add_source(
+            config::Environment::with_prefix("HAROLD")
+                .separator("__")
+                .try_parsing(true),
+        )
+        .build()
+}
+
+/// The local file and the `HAROLD__` environment alone: what the operator set.
+fn local_config() -> Result<Config, ConfigError> {
+    let (config_dir, env) = config_location();
+    Config::builder()
+        .add_source(File::new(&format!("{config_dir}/{env}"), FileFormat::Toml).required(false))
+        .add_source(
+            config::Environment::with_prefix("HAROLD")
+                .separator("__")
+                .try_parsing(true),
+        )
+        .build()
+}
+
+fn has_key(config: &Config, key: &str) -> bool {
+    config.get::<config::Value>(key).is_ok()
+}
+
+/// The fixed sentences for each setting the config names that Harold no longer reads. Key
+/// presence only: the one value read is `grpc.host`, for the loopback test, and no sentence
+/// holds a value. A config that cannot be built returns nothing; `Settings::load` refuses it.
+pub(crate) fn removed_setting_messages() -> Vec<String> {
+    match (local_config(), merged_config()) {
+        (Ok(local), Ok(merged)) => removed_setting_messages_from(&local, &merged),
+        _ => Vec::new(),
+    }
+}
+
+/// Whether the local config still sets `notify.away_channel = "imessage"`, which is ignored.
+pub(crate) fn away_channel_still_set() -> bool {
+    local_config().is_ok_and(|local| away_channel_is_imessage(&local))
+}
+
+fn away_channel_is_imessage(local: &Config) -> bool {
+    local
+        .get_string("notify.away_channel")
+        .is_ok_and(|value| value == "imessage")
+}
+
+fn removed_setting_messages_from(local: &Config, merged: &Config) -> Vec<String> {
+    let mut messages = Vec::new();
+    if has_key(local, "telegram") {
+        messages.push(TELEGRAM_REMOVED.to_owned());
+    }
+    if has_key(local, "peers") {
+        messages.push(PEERS_REMOVED.to_owned());
+    }
+    if has_key(local, "notify.telegram") {
+        messages.push(NOTIFY_TELEGRAM_REMOVED.to_owned());
+    }
+    if has_key(local, "notify.away_channel") && !away_channel_is_imessage(local) {
+        messages.push(AWAY_CHANNEL_REMOVED.to_owned());
+    }
+    // An unparseable host is left to the validation that refuses it today.
+    if let Ok(host) = merged.get_string("grpc.host")
+        && parse_host(&host).is_ok()
+        && !is_loopback_host(&host)
+    {
+        messages.push(GRPC_HOST_NOT_LOOPBACK.to_owned());
+    }
+    messages
 }
 
 pub fn get_settings() -> &'static Arc<Settings> {
@@ -1336,6 +1402,126 @@ mod tests {
             assert_eq!(grpc(host).addr().unwrap().to_string(), expected, "{host}");
         }
         assert!(grpc("invalid host").addr().is_err());
+    }
+
+    fn built(text: &str) -> Config {
+        Config::builder()
+            .add_source(File::from_str(text, FileFormat::Toml))
+            .build()
+            .unwrap()
+    }
+
+    fn removed(local: &str) -> Vec<String> {
+        let default = include_str!("../config/default.toml");
+        let merged = Config::builder()
+            .add_source(File::from_str(default, FileFormat::Toml))
+            .add_source(File::from_str(local, FileFormat::Toml))
+            .build()
+            .unwrap();
+        super::removed_setting_messages_from(&built(local), &merged)
+    }
+
+    #[test]
+    fn removed_setting_messages_are_the_spec_sentences() {
+        assert_eq!(
+            removed("[telegram]\nbot_token = 'x'\n"),
+            [super::TELEGRAM_REMOVED]
+        );
+        assert_eq!(
+            super::TELEGRAM_REMOVED,
+            "[telegram] is no longer read: Harold reaches the phone by iMessage only. Remove it from config/local.toml or the HAROLD__ environment variables."
+        );
+        assert_eq!(
+            removed("[peers.hub]\nsecret = 'x'\n"),
+            [
+                "[peers] is no longer read: two Macs share replies through iMessage, with no hub or member. Remove it from config/local.toml or the HAROLD__ environment variables."
+            ]
+        );
+        assert_eq!(
+            removed("[notify]\ntelegram = ['x']\n"),
+            [
+                "notify.telegram is no longer read: the lists are imessage, web_app and machine_audio_output. Remove it from config/local.toml or the HAROLD__ environment variables."
+            ]
+        );
+        assert_eq!(
+            removed("[notify]\naway_channel = 'telegram'\n"),
+            [
+                "notify.away_channel is no longer read: Harold reaches the phone by iMessage only. Remove it from config/local.toml or the HAROLD__ environment variables."
+            ]
+        );
+        assert_eq!(
+            removed("[grpc]\nhost = '0.0.0.0'\n"),
+            [
+                "grpc.host must be a loopback address (127.0.0.0/8, ::1 or localhost): Harold no longer serves other Macs."
+            ]
+        );
+    }
+
+    #[test]
+    fn removed_setting_messages_cover_the_edge_cases() {
+        assert!(removed("").is_empty());
+        assert_eq!(removed("[telegram]\n").len(), 1);
+        assert_eq!(removed("[peers]\n").len(), 1);
+        for host in ["127.0.0.1", "127.0.0.2", "::1", "localhost"] {
+            assert!(
+                removed(&format!("[grpc]\nhost = '{host}'\n")).is_empty(),
+                "{host}"
+            );
+        }
+        for host in ["::", "100.64.0.1"] {
+            assert_eq!(
+                removed(&format!("[grpc]\nhost = '{host}'\n")).len(),
+                1,
+                "{host}"
+            );
+        }
+        assert!(removed("[grpc]\nhost = 'invalid host'\n").is_empty());
+        assert!(removed("[notify]\naway_channel = 'imessage'\n").is_empty());
+        assert!(super::away_channel_is_imessage(&built(
+            "[notify]\naway_channel = 'imessage'\n"
+        )));
+        assert!(!super::away_channel_is_imessage(&built("")));
+        assert_eq!(
+            removed("[telegram]\n[peers]\n[grpc]\nhost = '0.0.0.0'\n"),
+            [
+                super::TELEGRAM_REMOVED,
+                super::PEERS_REMOVED,
+                super::GRPC_HOST_NOT_LOOPBACK
+            ]
+        );
+    }
+
+    #[test]
+    fn removed_setting_messages_see_the_environment() {
+        let env = std::collections::HashMap::from([(
+            "HAROLD__TELEGRAM__BOT_TOKEN".to_owned(),
+            "x".to_owned(),
+        )]);
+        let local = Config::builder()
+            .add_source(
+                config::Environment::with_prefix("HAROLD")
+                    .separator("__")
+                    .source(Some(env)),
+            )
+            .build()
+            .unwrap();
+        assert_eq!(
+            super::removed_setting_messages_from(&local, &local),
+            [super::TELEGRAM_REMOVED]
+        );
+    }
+
+    #[test]
+    fn removed_setting_messages_never_hold_a_value() {
+        let secret = "review-sentinel-secret";
+        let local = format!(
+            "[telegram]\nbot_token = '{secret}'\n[peers.hub]\nsecret = '{secret}'\n[notify]\ntelegram = ['{secret}']\naway_channel = '{secret}'\n[grpc]\nhost = '{secret}'\n"
+        );
+        let messages = removed(&local);
+        assert_eq!(messages.len(), 4);
+        assert!(messages.iter().all(|m| !m.contains(secret)));
+        let host = removed("[grpc]\nhost = '100.64.0.1'\n");
+        assert!(host.iter().all(|m| !m.contains("100.64.0.1")));
     }
 
     #[test]
