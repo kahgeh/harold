@@ -236,7 +236,7 @@
       return;
     }
     // A morph that rewrote the focused field's value also moved its caret to the end.
-    const moved = document.activeElement !== target || rewritten || focus.valueChanged;
+    const moved = document.activeElement !== target || rewritten;
     if (document.activeElement !== target) {
       target.focus({ preventScroll: true });
     }
