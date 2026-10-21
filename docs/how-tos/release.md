@@ -11,7 +11,7 @@ Re-running a release workflow replaces its matching assets.
 
 These builds target Apple Silicon Macs running macOS 15 or newer. Binaries are
 ad-hoc signed, not notarized. From v0.1.1, the archive includes the installer, service controller, Claude and Codex completion scripts, and shared notifier. The
-bootstrap above installs these together without Rust or a source checkout. Linux
+bootstrap ([install or reinstall Harold](setup.md)) installs these together without Rust or a source checkout. Linux
 builds are not provided. A published release containing the installer is required.
 
 ### Cut a release
