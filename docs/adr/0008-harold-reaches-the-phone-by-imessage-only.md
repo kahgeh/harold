@@ -1,7 +1,7 @@
 # 8. Harold reaches the phone by iMessage only, and its gRPC server stays on the Mac
 
-Date: 2026-10-21
-Status: Proposed (remove-telegram). Amends 0002.
+Date: 2026-10-22
+Status: Accepted (remove-telegram, merged at 69039bc). Amends 0002.
 
 ## Context
 

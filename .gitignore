@@ -3,3 +3,4 @@ target/
 **/config/local.toml
 .env
 .superpowers/
+__pycache__/
