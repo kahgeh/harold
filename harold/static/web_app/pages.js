@@ -148,6 +148,8 @@
   // version, the checked options, the text fields, and the focus and caret. A card whose
   // question version changed takes the redrawn state.
   let note = null;
+  // How long a note with no focus is kept, in milliseconds.
+  const NOTE_WITHOUT_FOCUS_MS = 3000;
 
   function questionCard(target) {
     if (!(target instanceof Element)) {
@@ -181,6 +183,7 @@
           }
         : null;
     note = {
+      at: Date.now(),
       card,
       id: field(card, "id"),
       version: field(card, "version"),
@@ -191,6 +194,11 @@
   }
 
   function restore() {
+    // A note with no focus (a tap that took none) is kept only long enough for the redraw
+    // of its own save, so picks made in the dash show afterwards.
+    if (note && !note.focus && Date.now() - note.at > NOTE_WITHOUT_FOCUS_MS) {
+      note = null;
+    }
     if (!note) {
       return;
     }
@@ -209,9 +217,11 @@
         radio.checked = checked;
       }
     });
+    let rewritten = false;
     card.querySelectorAll("input.free-text").forEach((text) => {
       if (text.name in note.texts && text.value !== note.texts[text.name]) {
         text.value = note.texts[text.name];
+        rewritten = true;
       }
     });
     const focus = note.focus;
@@ -222,11 +232,16 @@
       (input) =>
         input.name === focus.name && (focus.value === null || input.value === focus.value),
     );
-    if (target && document.activeElement !== target) {
+    if (!target) {
+      return;
+    }
+    // A morph that rewrote the focused field's value also moved its caret to the end.
+    const moved = document.activeElement !== target || rewritten || focus.valueChanged;
+    if (document.activeElement !== target) {
       target.focus({ preventScroll: true });
-      if (focus.caret && focus.caret[0] !== null) {
-        target.setSelectionRange(focus.caret[0], focus.caret[1]);
-      }
+    }
+    if (moved && focus.caret && focus.caret[0] !== null) {
+      target.setSelectionRange(focus.caret[0], focus.caret[1]);
     }
   }
 
@@ -251,10 +266,18 @@
       }
     }, 0);
   });
+  // A redraw that only changes a field's value or checked attribute (the morph of the
+  // phone's own save coming back) adds no node, so those are watched too. restore() writes
+  // properties only, so it cannot retrigger this.
   new MutationObserver(() => {
     restore();
     syncSends();
-  }).observe(pages, { childList: true, subtree: true });
+  }).observe(pages, {
+    childList: true,
+    subtree: true,
+    attributes: true,
+    attributeFilter: ["value", "checked"],
+  });
 
   scrollToBottom();
   syncPage();

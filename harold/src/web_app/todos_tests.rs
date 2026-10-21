@@ -1042,7 +1042,7 @@ async fn the_question_form_saves_picks_on_change_and_debounced_input() {
     for wanted in [
         r#"data-on:submit="@post('/todos/answer', {contentType: 'form'})""#,
         r#"data-on:change="@post('/todos/picks', {contentType: 'form'})""#,
-        r#"data-on:input__debounce.500ms="@post('/todos/picks', {contentType: 'form'})""#,
+        r#"data-on:input__debounce.500ms="evt.target.type === 'text' && @post('/todos/picks', {contentType: 'form'})""#,
         r#"data-on:click="@post('/todos/later', {contentType: 'form'})""#,
         r#"data-on:change="@post('/todos/tick', {contentType: 'form'})""#,
     ] {
