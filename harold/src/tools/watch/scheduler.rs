@@ -424,7 +424,7 @@ impl Scheduler {
                 None => {
                     obs.cancelled(budget.map(|m| m as f64 / 1e6));
                     let record = RunRecord {
-                        started_at_ms: clock_ms(),
+                        started_at_ms: began_at_ms,
                         outcome: "stopped".into(),
                         cost_usd_micros: budget,
                         streak: Streak::Unchanged,

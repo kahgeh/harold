@@ -204,6 +204,13 @@ fn expand_home(entry: &str, home: Option<&str>) -> String {
     }
 }
 
+/// A YAML list item: `-` then a space or the end of the line, so the closing `---` is not one.
+fn is_list_item(line: &str) -> bool {
+    line.trim()
+        .strip_prefix('-')
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
+}
+
 fn parse_skill(text: &str, home: Option<&str>) -> Skill {
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let Some(rest) = text
@@ -234,10 +241,7 @@ fn parse_skill(text: &str, home: Option<&str>) -> Skill {
             let value = value.trim();
             if !value.is_empty() {
                 allowed_tools = Some(value.to_owned());
-            } else if lines
-                .peek()
-                .is_some_and(|next| next.trim_start().starts_with('-'))
-            {
+            } else if lines.peek().is_some_and(|next| is_list_item(next)) {
                 tools_unread = true;
             }
         }

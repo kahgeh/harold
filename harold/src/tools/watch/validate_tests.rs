@@ -247,6 +247,11 @@ fn a_yaml_list_of_allowed_tools_sets_the_flag_and_no_value() {
     assert_eq!(read("allowed-tools:\n- Read\n"), (None, true));
     assert_eq!(read("allowed-tools:\nadd-dirs: ~/x\n"), (None, false));
     assert_eq!(
+        read("allowed-tools:\n"),
+        (None, false),
+        "the closing --- is no item"
+    );
+    assert_eq!(
         read("allowed-tools: Write\n  - Read\n"),
         (Some("Write".into()), false)
     );

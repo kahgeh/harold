@@ -669,6 +669,36 @@ async fn a_run_that_crosses_midnight_counts_toward_the_day_it_started() {
     );
 }
 
+#[tokio::test(start_paused = true)]
+async fn a_run_stopped_after_midnight_counts_toward_the_day_it_started() {
+    let h = harness(
+        settings(),
+        vec![Step::Answer {
+            result: "QUIET".into(),
+            cost: 0.02,
+            after: Duration::from_secs(600),
+        }],
+    )
+    .await;
+    let (_, next_midnight) = day_bounds(clock_ms(), UtcOffset::UTC);
+    let to_go = (next_midnight - clock_ms() - 30_000).rem_euclid(86_400_000);
+    pass(Duration::from_millis(to_go as u64)).await;
+    let (day_start, day_end) = day_bounds(clock_ms(), UtcOffset::UTC);
+    let mut checked = h.checked("w", 10, 120);
+    checked.run_budget_usd_micros = Some(30_000);
+    h.scheduler.start(checked).await.unwrap();
+
+    pass(Duration::from_secs(40)).await;
+    h.scheduler.stop("w").await.unwrap();
+    pass(Duration::from_secs(1)).await;
+
+    assert!(clock_ms() >= day_end, "the stop came after midnight");
+    assert_eq!(
+        h.store.spent_micros(day_start, day_end).await.unwrap(),
+        30_000
+    );
+}
+
 #[tokio::test]
 async fn stopping_a_watch_kills_the_child_its_run_started() {
     use std::os::unix::fs::PermissionsExt;
