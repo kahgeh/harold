@@ -199,6 +199,8 @@ struct TrackedPane {
     screen_busy_since_ms: Option<i64>,
     screen_summary: Option<String>,
     summary_basis_version: EventVersion,
+    /// Whether `agent monitor pane gone` has been logged for this incarnation.
+    pane_gone_logged: bool,
 }
 
 impl TrackedPane {
@@ -215,6 +217,7 @@ impl TrackedPane {
             screen_busy_since_ms: None,
             screen_summary: None,
             summary_basis_version: EventVersion::start(),
+            pane_gone_logged: false,
         }
     }
 }
@@ -236,6 +239,11 @@ struct AgentMonitorRuntime {
     /// When a failed inventory scan started, and why it failed: the next tick's scan is its
     /// retry.
     held_inventory_failure: Option<(tokio::time::Instant, &'static str)>,
+    /// How long a successful inventory scan stays good enough for a turn-complete: two
+    /// inventory intervals. Zero means a turn-complete always scans.
+    scan_freshness: Duration,
+    /// When the last successful inventory scan finished.
+    last_scan_finished: Option<Instant>,
 }
 
 pub(crate) struct AgentMonitorRuntimeConfig {
@@ -258,6 +266,8 @@ struct RuntimeInputs {
     acquisition_timeout: Duration,
     inventory_timeout: Duration,
     intervals: Option<(Duration, Duration)>,
+    /// The inventory interval, which tests without ticks still set for the turn-complete window.
+    inventory_interval: Duration,
     activity_summary: Option<(Arc<dyn ActivitySummarizer>, ActivitySummarySettings)>,
 }
 
@@ -339,6 +349,7 @@ pub(crate) fn spawn_agent_monitor(
             acquisition_timeout: config.acquisition_timeout,
             inventory_timeout: config.inventory_timeout,
             intervals: Some((config.inventory_interval, config.screen_interval)),
+            inventory_interval: config.inventory_interval,
             activity_summary: config.activity_summary,
         },
         shutdown,
@@ -392,6 +403,40 @@ where
             acquisition_timeout: Duration::from_millis(100),
             inventory_timeout: Duration::from_millis(100),
             intervals: None,
+            inventory_interval: Duration::ZERO,
+            activity_summary: None,
+        },
+        shutdown,
+    )
+}
+
+/// Like the graces spawner, with the inventory interval a turn-complete's scan window comes from.
+#[cfg(test)]
+pub(crate) fn spawn_agent_monitor_with_inventory_interval_for_test<I, S>(
+    store: Arc<HaroldStore>,
+    inventory: Arc<I>,
+    screen: Arc<S>,
+    providers: Vec<AgentProviderSettings>,
+    graces: GraceWindows,
+    inventory_interval: Duration,
+    shutdown: watch::Receiver<()>,
+) -> (AgentMonitorHandle, tokio::task::JoinHandle<()>)
+where
+    I: AgentInventoryPort + 'static,
+    S: VisibleScreenPort + 'static,
+{
+    spawn_runtime(
+        RuntimeInputs {
+            store,
+            inventory,
+            screen,
+            providers,
+            initial_snapshot: empty_snapshot(),
+            graces,
+            acquisition_timeout: Duration::from_millis(100),
+            inventory_timeout: Duration::from_millis(100),
+            intervals: None,
+            inventory_interval,
             activity_summary: None,
         },
         shutdown,
@@ -422,6 +467,7 @@ where
             acquisition_timeout: seed.acquisition_timeout,
             inventory_timeout: seed.acquisition_timeout,
             intervals: None,
+            inventory_interval: Duration::ZERO,
             activity_summary: None,
         },
         shutdown,
@@ -442,6 +488,7 @@ fn spawn_runtime(
         acquisition_timeout,
         inventory_timeout,
         intervals,
+        inventory_interval,
         activity_summary,
     } = inputs;
     let (sender, mut receiver) = mpsc::channel(COMMAND_CAPACITY);
@@ -485,6 +532,8 @@ fn spawn_runtime(
             summaries: activity_summary
                 .map(|(provider, settings)| ActivityScheduler::new(provider, settings)),
             held_inventory_failure: None,
+            scan_freshness: inventory_interval.saturating_mul(2),
+            last_scan_finished: None,
         };
         let seeded_panes: Vec<_> = runtime.panes.keys().cloned().collect();
         for pane_id in seeded_panes {
@@ -557,6 +606,7 @@ fn panes_from_snapshot(
                 screen_busy_since_ms: None,
                 screen_summary: projection.screen_work_summary.clone(),
                 summary_basis_version: projection.summary_basis_version,
+                pane_gone_logged: false,
             };
             (projection.pane.incarnation.pane_id.clone(), tracked)
         })
@@ -792,28 +842,50 @@ impl AgentMonitorRuntime {
         Ok(())
     }
 
+    /// The tracked pane, as of `observed_at_ms`, when the last successful inventory scan found
+    /// it and finished at most two inventory intervals ago: no scan of its own is needed.
+    fn recently_scanned_pane(
+        &self,
+        pane_id: &str,
+        observed_at_ms: i64,
+    ) -> Option<AgentPaneObservation> {
+        let scanned = self.last_scan_finished?;
+        if scanned.elapsed() > self.scan_freshness {
+            return None;
+        }
+        let tracked = self.panes.get(pane_id)?;
+        (tracked.consecutive_absences == 0).then(|| AgentPaneObservation {
+            observed_at_ms,
+            ..tracked.pane.clone()
+        })
+    }
+
     async fn turn_completed(
         &mut self,
         mut turn: TurnCompleted,
     ) -> store::Result<store::AppendResult> {
-        let pane = match resolve(
-            Arc::clone(&self.inventory),
-            turn.pane_id.clone(),
-            self.inventory_timeout,
-            Arc::clone(&self.inventory_gate),
-        )
-        .await
-        {
-            Ok(pane) => {
-                let _ = self.set_health("inventory", true, "ok").await;
-                pane
-            }
-            Err(failure) => {
-                let _ = self
-                    .set_health("inventory", false, failure.reason_code)
-                    .await;
-                None
-            }
+        let reached_at_ms = now_ms();
+        let pane = match self.recently_scanned_pane(&turn.pane_id, reached_at_ms) {
+            Some(pane) => Some(pane),
+            None => match resolve(
+                Arc::clone(&self.inventory),
+                turn.pane_id.clone(),
+                self.inventory_timeout,
+                Arc::clone(&self.inventory_gate),
+            )
+            .await
+            {
+                Ok(pane) => {
+                    let _ = self.set_health("inventory", true, "ok").await;
+                    pane
+                }
+                Err(failure) => {
+                    let _ = self
+                        .set_health("inventory", false, failure.reason_code)
+                        .await;
+                    None
+                }
+            },
         };
         turn.work_summary = completion_summary_update(&turn.last_user_prompt);
         turn.agent_incarnation = pane.as_ref().map(|pane| pane.incarnation.clone());
@@ -916,6 +988,7 @@ impl AgentMonitorRuntime {
                 return Err(MonitorCommandError::InventoryUnavailable);
             }
         };
+        self.last_scan_finished = Some(Instant::now());
         self.set_health("inventory", true, "ok").await?;
         let seen: HashSet<String> = observed
             .iter()
@@ -1073,7 +1146,12 @@ impl AgentMonitorRuntime {
                 scan
             }
             Err(failure) => {
-                tracked.recovery_failure = Some(failure.reason_code);
+                // A closed pane is no degradation: the inventory departs it in time.
+                tracked.recovery_failure =
+                    (failure.reason_code != "pane_departed").then_some(failure.reason_code);
+                if failure.reason_code == "pane_departed" {
+                    log_pane_gone(tracked);
+                }
                 tracked.prompt_checkpoint.capture_failed(state);
                 return None;
             }
@@ -1134,12 +1212,23 @@ impl AgentMonitorRuntime {
             };
             // A first try that failed spent the retry, even when the wait for the gate gave out
             // before the retry ran. A busy gate means no read ran at all.
+            // A pane that departed costs no retry either: it isn't coming back.
             retried |= reads > 1
                 || result
                     .as_ref()
-                    .is_err_and(|failure| failure.reason_code != "busy");
+                    .is_err_and(|failure| !matches!(failure.reason_code, "busy" | "pane_departed"));
             let observation = match result {
                 Ok(observation) => observation,
+                Err(failure) if failure.reason_code == "pane_departed" => {
+                    if let Some(tracked) = self
+                        .panes
+                        .get_mut(&pane.incarnation.pane_id)
+                        .filter(|tracked| tracked.pane.incarnation == pane.incarnation)
+                    {
+                        log_pane_gone(tracked);
+                    }
+                    continue;
+                }
                 Err(failure) => {
                     failure_reason.get_or_insert(failure.reason_code);
                     continue;
@@ -1587,6 +1676,8 @@ where
         Ok(value) => return Ok(value),
         // An earlier timed-out worker still owns the gate: there is no new read to retry.
         Err(failure) if failure.reason_code == "busy" => return Err(failure),
+        // A closed pane has nothing to retry.
+        Err(failure) if failure.reason_code == "pane_departed" => return Err(failure),
         Err(_) => first_try.request(),
     }
     let retry_started = tokio::time::Instant::now();
@@ -1606,6 +1697,17 @@ where
     let value = result?;
     log_read_retried("screen", Some(pane_id), started);
     Ok(value)
+}
+
+/// The first read of an incarnation to find its pane closed. The inventory departs the pane
+/// after two scans miss it.
+fn log_pane_gone(tracked: &mut TrackedPane) {
+    if !std::mem::replace(&mut tracked.pane_gone_logged, true) {
+        tracing::info!(
+            pane_id = tracked.pane.incarnation.pane_id.as_str(),
+            "agent monitor pane gone"
+        );
+    }
 }
 
 /// A retried read that worked, `started` being when its first try began.

@@ -54,6 +54,7 @@ struct FakeInventory {
     resolutions: Mutex<VecDeque<Result<Option<AgentPaneObservation>, InventoryError>>>,
     current: Mutex<VecDeque<Result<bool, InventoryError>>>,
     revalidated: Mutex<Vec<AgentIncarnation>>,
+    resolve_calls: AtomicUsize,
 }
 
 impl FakeInventory {
@@ -83,6 +84,7 @@ impl AgentInventoryPort for FakeInventory {
     }
 
     fn resolve(&self, _pane_id: &str) -> Result<Option<AgentPaneObservation>, InventoryError> {
+        self.resolve_calls.fetch_add(1, Ordering::SeqCst);
         self.resolutions
             .lock()
             .unwrap()
@@ -231,6 +233,38 @@ impl Fixture {
             screen.clone(),
             vec![provider()],
             graces,
+            shutdown_rx,
+        );
+        Self {
+            _directory: directory,
+            store,
+            inventory,
+            screen,
+            handle,
+            _shutdown: shutdown,
+            task,
+        }
+    }
+
+    /// The monitor's turn-complete window comes from this inventory interval.
+    async fn with_inventory_interval(inventory: FakeInventory, interval: Duration) -> Self {
+        let graces = GraceWindows::same(2_000);
+        let directory = TestDirectory::new();
+        let store = Arc::new(
+            HaroldStore::open_with_graces(&directory.0, graces)
+                .await
+                .unwrap(),
+        );
+        let inventory = Arc::new(inventory);
+        let screen = Arc::new(FakeScreen::default());
+        let (shutdown, shutdown_rx) = watch::channel(());
+        let (handle, task) = super::runtime::spawn_agent_monitor_with_inventory_interval_for_test(
+            Arc::clone(&store),
+            inventory.clone(),
+            screen.clone(),
+            vec![provider()],
+            graces,
+            interval,
             shutdown_rx,
         );
         Self {
@@ -1405,13 +1439,22 @@ async fn real_screen_adapter_keeps_unrelated_capture_out_of_every_published_boun
                         success: true,
                         stdout: raw_capture.as_bytes().to_vec(),
                     },
+                    // Each failed read is followed by the check that tmux still lists the pane.
                     CommandOutput {
                         success: false,
                         stdout: raw_capture.as_bytes().to_vec(),
                     },
                     CommandOutput {
+                        success: true,
+                        stdout: b"%8\n".to_vec(),
+                    },
+                    CommandOutput {
                         success: false,
                         stdout: raw_capture.into_bytes(),
+                    },
+                    CommandOutput {
+                        success: true,
+                        stdout: b"%8\n".to_vec(),
                     },
                 ]
                 .into(),
@@ -4340,6 +4383,191 @@ fn health_events(events: &[EventEnvelope]) -> Vec<super::domain::AgentMonitorHea
 }
 
 #[tokio::test]
+async fn pane_departed_read_neither_degrades_screen_nor_spends_the_passes_retry() {
+    let directory = TestDirectory::new();
+    let store = Arc::new(HaroldStore::open(&directory.0).await.unwrap());
+    let closed = pane("%8", 80, 800, 1_000, 100);
+    let flaky = pane("%9", 90, 900, 1_000, 100);
+    let screen = Arc::new(PaneScriptedScreen::default());
+    screen.departed.lock().unwrap().insert("%8".into());
+    screen
+        .observations
+        .lock()
+        .unwrap()
+        .insert("%9".into(), [screen_observation(&flaky)].into());
+    screen.failures.lock().unwrap().insert("%9".into(), 1);
+    let (shutdown, shutdown_rx) = watch::channel(());
+    let (handle, task) = spawn_agent_monitor_for_test(
+        Arc::clone(&store),
+        Arc::new(FakeInventory::scans(vec![Ok(vec![
+            closed.clone(),
+            flaky.clone(),
+        ])])),
+        screen.clone(),
+        vec![provider()],
+        2_000,
+        shutdown_rx,
+    );
+    handle.inventory_tick().await.unwrap();
+    let (captured, _guard) = capture_logs();
+
+    handle.screen_tick().await.unwrap();
+
+    let logs = logged(&captured);
+    println!("{}", logs.trim_end());
+    assert!(!logs.contains("agent monitor degraded"), "{logs}");
+    // One read for the closed pane, a failed read and its retry for the other.
+    assert_eq!(screen.observe_calls.load(Ordering::SeqCst), 3);
+    assert_eq!(
+        logs.matches("agent monitor read retried").count(),
+        1,
+        "{logs}"
+    );
+    let events = store
+        .stream()
+        .load_after_version(EventVersion::start(), 100)
+        .await
+        .unwrap();
+    assert!(health_events(&events).is_empty());
+    drop(shutdown);
+    task.await.unwrap();
+}
+
+#[tokio::test]
+async fn pane_gone_is_logged_once_per_incarnation_and_the_inventory_still_departs_it() {
+    let original = pane("%8", 80, 800, 1_000, 100);
+    let inventory = FakeInventory::scans(vec![
+        Ok(vec![original.clone()]),
+        Ok(Vec::new()),
+        Ok(Vec::new()),
+    ]);
+    inventory.push_current(Ok(false));
+    let fixture = Fixture::new(inventory).await;
+    fixture.handle.inventory_tick().await.unwrap();
+    let (captured, _guard) = capture_logs();
+
+    for _ in 0..3 {
+        fixture.screen.push(Err(ScreenError::PaneDeparted));
+        fixture.handle.screen_tick().await.unwrap();
+    }
+    let logs = logged(&captured);
+    println!("{}", logs.trim_end());
+    assert_eq!(logs.matches("agent monitor pane gone").count(), 1, "{logs}");
+    assert!(logs.contains("pane_id=\"%8\""), "{logs}");
+    assert!(!logs.contains("agent monitor degraded"), "{logs}");
+    assert!(!logs.contains("agent monitor recovered"), "{logs}");
+
+    fixture.handle.inventory_tick().await.unwrap();
+    fixture.handle.inventory_tick().await.unwrap();
+    let events = fixture.events().await;
+    assert_eq!(
+        event_types(&events),
+        ["AgentPaneObserved", "AgentPaneDeparted"]
+    );
+}
+
+#[tokio::test]
+async fn pane_departed_in_prompt_recovery_does_not_degrade_screen() {
+    let fixture = Fixture::new(FakeInventory::scans(vec![Ok(vec![pane(
+        "%8", 80, 800, 1_000, 100,
+    )])]))
+    .await;
+    fixture
+        .screen
+        .scans
+        .lock()
+        .unwrap()
+        .push_back(Err(ScreenError::PaneDeparted));
+    let (captured, _guard) = capture_logs();
+
+    fixture.handle.inventory_tick().await.unwrap();
+
+    assert_eq!(fixture.screen.scan_count.load(Ordering::SeqCst), 1);
+    let logs = logged(&captured);
+    println!("{}", logs.trim_end());
+    assert!(!logs.contains("agent monitor degraded"), "{logs}");
+    assert_eq!(logs.matches("agent monitor pane gone").count(), 1, "{logs}");
+    assert!(health_events(&fixture.events().await).is_empty());
+}
+
+#[tokio::test]
+async fn turn_complete_for_a_recently_scanned_pane_stores_without_a_scan() {
+    let observed = pane("%8", 80, 800, 1_000, 100);
+    let fixture = Fixture::with_inventory_interval(
+        FakeInventory::scans(vec![Ok(vec![observed.clone()])]),
+        Duration::from_secs(60),
+    )
+    .await;
+    fixture.handle.inventory_tick().await.unwrap();
+
+    fixture.handle.turn_completed(turn("task")).await.unwrap();
+
+    assert_eq!(fixture.inventory.resolve_calls.load(Ordering::SeqCst), 0);
+    let events = fixture.events().await;
+    assert_eq!(
+        event_types(&events),
+        ["AgentPaneObserved", "AgentPaneObserved", "TurnCompleted"]
+    );
+    let stored: AgentPaneObserved = serde_json::from_value(events[1].payload.clone()).unwrap();
+    assert_eq!(stored.pane.incarnation, observed.incarnation);
+    assert!(stored.pane.observed_at_ms > observed.observed_at_ms);
+    let completed: TurnCompleted = serde_json::from_value(events[2].payload.clone()).unwrap();
+    assert_eq!(completed.agent_incarnation, Some(observed.incarnation));
+    assert!(health_events(&events).is_empty());
+}
+
+#[tokio::test]
+async fn turn_complete_scans_for_an_untracked_pane() {
+    let fixture = Fixture::with_inventory_interval(
+        FakeInventory::scans(vec![Ok(Vec::new())]),
+        Duration::from_secs(60),
+    )
+    .await;
+    fixture.handle.inventory_tick().await.unwrap();
+    fixture
+        .inventory
+        .push_resolution(Ok(Some(pane("%8", 80, 800, 1_000, 100))));
+
+    fixture.handle.turn_completed(turn("task")).await.unwrap();
+
+    assert_eq!(fixture.inventory.resolve_calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn turn_complete_scans_for_a_pane_the_last_scan_missed() {
+    let observed = pane("%8", 80, 800, 1_000, 100);
+    let fixture = Fixture::with_inventory_interval(
+        FakeInventory::scans(vec![Ok(vec![observed.clone()]), Ok(Vec::new())]),
+        Duration::from_secs(60),
+    )
+    .await;
+    fixture.handle.inventory_tick().await.unwrap();
+    fixture.handle.inventory_tick().await.unwrap();
+    fixture.inventory.push_resolution(Ok(Some(observed)));
+
+    fixture.handle.turn_completed(turn("task")).await.unwrap();
+
+    assert_eq!(fixture.inventory.resolve_calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn turn_complete_scans_once_the_last_scan_is_older_than_two_intervals() {
+    let observed = pane("%8", 80, 800, 1_000, 100);
+    let fixture = Fixture::with_inventory_interval(
+        FakeInventory::scans(vec![Ok(vec![observed.clone()])]),
+        Duration::from_millis(20),
+    )
+    .await;
+    fixture.handle.inventory_tick().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(60)).await;
+    fixture.inventory.push_resolution(Ok(Some(observed)));
+
+    fixture.handle.turn_completed(turn("task")).await.unwrap();
+
+    assert_eq!(fixture.inventory.resolve_calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
 async fn screen_read_that_fails_once_logs_retried_and_stays_healthy() {
     let observed = pane("%8", 80, 800, 1_000, 100);
     let fixture = Fixture::new(FakeInventory::scans(vec![Ok(vec![observed.clone()])])).await;
@@ -4464,6 +4692,7 @@ struct PaneScriptedScreen {
     observations: Mutex<std::collections::HashMap<String, VecDeque<ScreenObservation>>>,
     failures: Mutex<std::collections::HashMap<String, usize>>,
     observe_calls: AtomicUsize,
+    departed: Mutex<std::collections::HashSet<String>>,
 }
 
 impl VisibleScreenPort for PaneScriptedScreen {
@@ -4474,6 +4703,9 @@ impl VisibleScreenPort for PaneScriptedScreen {
     ) -> Result<ScreenObservation, ScreenError> {
         self.observe_calls.fetch_add(1, Ordering::SeqCst);
         let pane_id = &pane.incarnation.pane_id;
+        if self.departed.lock().unwrap().contains(pane_id) {
+            return Err(ScreenError::PaneDeparted);
+        }
         if let Some(failures) = self.failures.lock().unwrap().get_mut(pane_id)
             && *failures > 0
         {

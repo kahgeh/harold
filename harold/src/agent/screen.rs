@@ -30,6 +30,7 @@ const CLASSIFIER_ID: &str = "tmux-visible-v1";
 pub(crate) enum ScreenError {
     CaptureUnavailable,
     CaptureFailed,
+    /// A read failed and tmux no longer lists the pane.
     PaneDeparted,
 }
 

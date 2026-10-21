@@ -4,6 +4,8 @@ use std::os::unix::net::UnixStream;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+use crate::agent::runtime::valid_pane_id;
+
 use super::{CommandOutput, CommandRunner, ScreenError, stop_requested};
 
 pub(super) const MAX_CAPTURE_BYTES: usize = 4 * 1024 * 1024;
@@ -38,6 +40,21 @@ pub(super) struct TmuxPaneCapture<R> {
     pub(super) runner: R,
 }
 
+impl<R: CommandRunner> TmuxPaneCapture<R> {
+    /// A failed read is `PaneDeparted` only when tmux answers that it no longer lists the pane.
+    fn failure(&self, pane_id: &str) -> ScreenError {
+        if !valid_pane_id(pane_id) {
+            return ScreenError::CaptureFailed;
+        }
+        let filter = format!("#{{==:#{{pane_id}},{pane_id}}}");
+        let args = ["list-panes", "-a", "-F", "#{pane_id}", "-f", &filter];
+        match self.runner.output("tmux", &args) {
+            Ok(output) if output.success && output.stdout.is_empty() => ScreenError::PaneDeparted,
+            _ => ScreenError::CaptureFailed,
+        }
+    }
+}
+
 impl<R: CommandRunner> PaneCapturePort for TmuxPaneCapture<R> {
     fn capture(
         &self,
@@ -63,7 +80,10 @@ impl<R: CommandRunner> PaneCapturePort for TmuxPaneCapture<R> {
                 ScreenError::CaptureFailed
             }
         })?;
-        if !output.success || output.stdout.len() > MAX_CAPTURE_BYTES {
+        if !output.success {
+            return Err(self.failure(pane_id));
+        }
+        if output.stdout.len() > MAX_CAPTURE_BYTES {
             return Err(ScreenError::CaptureFailed);
         }
         let text = String::from_utf8(output.stdout).map_err(|_| ScreenError::CaptureFailed)?;

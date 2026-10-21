@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::io;
 use std::process::Command;
 use std::sync::{Arc, Mutex};
@@ -181,24 +182,40 @@ type CommandCall = (String, Vec<String>);
 type RecordedCalls = Arc<Mutex<Vec<CommandCall>>>;
 
 struct FakeRunner {
-    result: Mutex<Option<FakeResult>>,
+    result: Mutex<VecDeque<FakeResult>>,
     calls: RecordedCalls,
 }
 
 impl FakeRunner {
     fn output(success: bool, stdout: &str) -> Self {
         Self {
-            result: Mutex::new(Some(FakeResult::Output {
+            result: Mutex::new(VecDeque::from([FakeResult::Output {
                 success,
                 stdout: stdout.as_bytes().to_vec(),
-            })),
+            }])),
             calls: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
+    fn then_output(self, success: bool, stdout: &str) -> Self {
+        self.result.lock().unwrap().push_back(FakeResult::Output {
+            success,
+            stdout: stdout.as_bytes().to_vec(),
+        });
+        self
+    }
+
+    fn then_error(self, kind: io::ErrorKind) -> Self {
+        self.result
+            .lock()
+            .unwrap()
+            .push_back(FakeResult::Error(kind));
+        self
+    }
+
     fn error(kind: io::ErrorKind) -> Self {
         Self {
-            result: Mutex::new(Some(FakeResult::Error(kind))),
+            result: Mutex::new(VecDeque::from([FakeResult::Error(kind)])),
             calls: Arc::new(Mutex::new(Vec::new())),
         }
     }
@@ -210,9 +227,11 @@ impl CommandRunner for FakeRunner {
             program.to_string(),
             args.iter().map(|arg| (*arg).to_string()).collect(),
         ));
-        match self.result.lock().unwrap().take().unwrap() {
-            FakeResult::Output { success, stdout } => Ok(CommandOutput { success, stdout }),
-            FakeResult::Error(kind) => Err(io::Error::from(kind)),
+        // A call past the queued results fails, as a tmux that can't answer would.
+        match self.result.lock().unwrap().pop_front() {
+            Some(FakeResult::Output { success, stdout }) => Ok(CommandOutput { success, stdout }),
+            Some(FakeResult::Error(kind)) => Err(io::Error::from(kind)),
+            None => Err(io::Error::from(io::ErrorKind::Other)),
         }
     }
 }
@@ -261,6 +280,72 @@ fn capture_errors_are_bounded_units_without_command_output() {
     let error = failed.observe(&pane("%7"), &provider()).unwrap_err();
     assert_eq!(error, ScreenError::CaptureFailed);
     assert!(!format!("{error:?}").contains("TOP_SECRET_COMMAND_OUTPUT"));
+}
+
+#[test]
+fn failed_capture_of_a_pane_tmux_no_longer_lists_is_pane_departed() {
+    let runner = FakeRunner::output(false, "").then_output(true, "");
+    let calls = Arc::clone(&runner.calls);
+    let screen = TmuxVisibleScreen::with_runner(runner, || 99);
+
+    assert_eq!(
+        screen.observe(&pane("%7"), &provider()),
+        Err(ScreenError::PaneDeparted)
+    );
+    assert_eq!(
+        calls.lock().unwrap().last().unwrap(),
+        &(
+            "tmux".to_string(),
+            [
+                "list-panes",
+                "-a",
+                "-F",
+                "#{pane_id}",
+                "-f",
+                "#{==:#{pane_id},%7}"
+            ]
+            .map(str::to_string)
+            .to_vec()
+        )
+    );
+}
+
+#[test]
+fn failed_capture_of_a_pane_tmux_still_lists_is_capture_failed() {
+    let runner = FakeRunner::output(false, "").then_output(true, "%7\n");
+    let screen = TmuxVisibleScreen::with_runner(runner, || 99);
+
+    assert_eq!(
+        screen.observe(&pane("%7"), &provider()),
+        Err(ScreenError::CaptureFailed)
+    );
+}
+
+#[test]
+fn failed_pane_check_is_capture_failed() {
+    let unsuccessful = FakeRunner::output(false, "").then_output(false, "");
+    assert_eq!(
+        TmuxVisibleScreen::with_runner(unsuccessful, || 99).observe(&pane("%7"), &provider()),
+        Err(ScreenError::CaptureFailed)
+    );
+    let errored = FakeRunner::output(false, "").then_error(io::ErrorKind::TimedOut);
+    assert_eq!(
+        TmuxVisibleScreen::with_runner(errored, || 99).observe(&pane("%7"), &provider()),
+        Err(ScreenError::CaptureFailed)
+    );
+}
+
+#[test]
+fn failed_capture_of_an_invalid_pane_id_skips_the_check() {
+    let runner = FakeRunner::output(false, "").then_output(true, "");
+    let calls = Arc::clone(&runner.calls);
+    let screen = TmuxVisibleScreen::with_runner(runner, || 99);
+
+    assert_eq!(
+        screen.observe(&pane("%7; x"), &provider()),
+        Err(ScreenError::CaptureFailed)
+    );
+    assert_eq!(calls.lock().unwrap().len(), 1);
 }
 
 #[test]
