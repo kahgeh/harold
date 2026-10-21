@@ -901,7 +901,7 @@ async fn an_earlier_turns_queued_line_playing_does_not_end_the_next_turn() {
     let second = h.say("line two", Speaker::Chief);
     settle().await;
     past_the_tail().await;
-    h.feed(loud(1500));
+    h.feed(loud(1520));
     h.feed(quiet(1200));
     settle().await;
     sleep(Duration::from_secs(11)).await;
@@ -913,7 +913,7 @@ async fn an_earlier_turns_queued_line_playing_does_not_end_the_next_turn() {
     h.calls.stop().await;
     settle().await;
 
-    let spans = trace_of_clip(1500);
+    let spans = trace_of_clip(1520);
     let turn = root(&spans);
     assert_eq!(attr(turn, "pane_id").as_deref(), Some(pane.as_str()));
     assert!(attr(turn, "answer_ms").is_some());
