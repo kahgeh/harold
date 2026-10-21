@@ -843,8 +843,14 @@ async fn a_git_that_hangs_is_given_up_after_five_seconds() {
     assert_eq!(started.elapsed(), Duration::from_secs(5));
 }
 
+/// `start` polls into the one process-wide `gauge_snapshot()`, and each poll replaces the
+/// whole snapshot with its own registry's products. The tests that start the poller hold this
+/// from before `start` until the task has stopped, so neither clears the other's product.
+static GAUGE_SNAPSHOT_TESTS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 #[tokio::test]
 async fn the_task_polls_at_start_reports_the_gauges_and_stops_at_shutdown() {
+    let _gauge_snapshot = GAUGE_SNAPSHOT_TESTS.lock().await;
     let pod = Pod::new();
     let repo = pod.repo("main");
     pod.worktree(&repo, "a", true);
@@ -1676,6 +1682,7 @@ async fn a_reflog_that_cannot_be_read_keeps_the_slots() {
 
 #[tokio::test]
 async fn the_spec_gauges_report_every_state_and_each_specs_words() {
+    let _gauge_snapshot = GAUGE_SNAPSHOT_TESTS.lock().await;
     let pod = Pod::new();
     let repo = pod.repo("main");
     write(

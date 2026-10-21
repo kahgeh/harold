@@ -4727,7 +4727,7 @@ async fn a_chief_message_or_line_a_list_holds_back_queues_one_alert() {
 }
 
 #[tokio::test]
-async fn the_alert_is_queued_while_the_chief_pane_is_ambiguous() {
+async fn the_held_back_alert_is_queued_with_two_agents_in_the_chief_folder() {
     let directory = TestDirectory::new();
     let tree = unique_tree();
     let (_environment, dispatcher, mut alerts) = published_with_alerts(
