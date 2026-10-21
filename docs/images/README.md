@@ -24,5 +24,15 @@ Pictures used by the front page [README](../../README.md). They show a demo Haro
 5. From the chief's folder, put the questions and instructions with `harold tool questions put < file.json`.
 6. Dash: run `target/debug/tmx-agent-dash --endpoint http://127.0.0.1:50160` in a 120 by 24 window, capture it with `tmux capture-pane -e -p`, turn the capture into HTML and shoot that page with headless Chrome at 1060 by 470.
 7. Web app: send `http://127.0.0.1:4430/#todos` through a loopback proxy that adds the `Tailscale-User-Login: demo@example.com` header, and capture it from Chrome over the DevTools protocol with a 390 by 844 phone screen at scale 3.
-8. Before committing, search the capture and page HTML for your login name, home folder, Mac names, tailnet name, phone number and email, check Harold's log for any send by iMessage, Telegram or `say`, and keep each PNG under 400 KB.
-9. Stop the demo Harold and tmux server and remove the temporary folders.
+8. Before committing, get each search term at search time and write them, one per line, to a file in the temporary folder (never into the repo):
+
+   | Term | Command |
+   |---|---|
+   | Login name | `id -un` |
+   | Home folder | `echo "$HOME"` |
+   | This Mac's names | `scutil --get ComputerName`, `scutil --get LocalHostName` |
+   | The other Macs and the tailnet name | `tailscale status --json`: the `HostName` of `Self` and of each `Peer`, and `MagicDNSSuffix` |
+   | Phone number and email | `[imessage] recipient` in `~/bin/harold/config/local.toml`, and `git config user.email` |
+
+   Then run `grep -F -i -f <that file>` over the capture and the page HTML; it must find nothing. Also check Harold's log for any send by iMessage, Telegram or `say`, and keep each PNG under 400 KB.
+9. Stop the demo Harold and tmux server and remove the temporary folders, including the search-terms file.

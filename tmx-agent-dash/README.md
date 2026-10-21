@@ -374,4 +374,5 @@ claimed because its isolated test process requires interactive login, and the
 three-provider concurrent gate therefore remains open. These claims come from
 real provider processes and an isolated durable event store, not fixture data.
 The exact evidence and limitations are in the
-[screen-testing ledger](../tasks/tmux-agent-dashboard/screen-testing.md).
+[screen-testing ledger](https://github.com/kahgeh/harold/blob/a373e28/tasks/tmux-agent-dashboard/screen-testing.md),
+as of that commit.
