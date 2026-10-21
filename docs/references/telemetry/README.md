@@ -247,7 +247,7 @@ No exported item carries what the user or an agent wrote, a voice line, the AI m
 
 ```
 pane_id, pane, session.id, session.source, component, reason, outcome, channel,
-resolved_by, kind, started_by, turn.start, state, alert, pod.product, spec.id,
+resolved_by, kind, started_by, turn.start, state, count, session_by, alert, pod.product, spec.id,
 spec.state_at, spec.words, spec.revisions, phase, change, event_type,
 event_version, result, watch, run, cost_usd, agent, seconds, event_id,
 exit_code, signal, subtype, is_error, num_turns
@@ -256,6 +256,8 @@ exit_code, signal, subtype, is_error, num_turns
 Every other field is dropped before export, including `text`, `msg`, `raw_output`, `tag` and `error`. Span events and links are dropped too, and an error status loses its description.
 
 **Which log records are exported.** Only records whose target is `harold`, starts with `harold::`, is `events` or starts with `events::`. Other crates' lines, such as Turso's and reqwest's, interpolate errors and paths into their text, so they stay in `harold.log` only. The collector-health lines also stay in `harold.log` only.
+
+**The chief's pane.** `chief pane changed` (`info`) carries `state` (`found` or `none`), `count` (the agents in the chief's folder), `pane_id` and `session_by` (`setting` when `chief_session` picked the session, `longest` when the longest-running agent did). More than one move of the chief to another pane with `count > 1` in 7 days means an extra session or pane in the chief's folder to close. With `chief_session` set, a `session_by = longest` row means no agent ran in the named session; check that `chief_session` names the session `bin/pod` starts and that the chief runs in it. With it unset, a chief that restarts while a second session holds an older agent in the folder is replaced by that session's first pane, with `count = 2`, until the second session closes.
 
 **Log bodies** are fixed text. A test scans every log call in `harold/src` and `events/src` and fails on one that puts a value into its message, apart from a short list of fixed reasons, migration names and a path.
 
@@ -453,7 +455,7 @@ When the port is taken at start, Harold logs `alert address unavailable` (`reaso
 
 Harold answers:
 
-- `204` for a post naming one of the six alerts with state `firing` or `cleared`. It then types exactly `harold alert: <name> <state>` into the pane of the agent running in the chief's folder, the one `[notify] chief` matches.
+- `204` for a post naming one of the six alerts with state `firing` or `cleared`. It then types exactly `harold alert: <name> <state>` into the chief's pane: the first agent pane of the chief's tmux session in the folder `[notify] chief` matches.
 - `400` for anything else, including another path or method. It logs `alert ignored (unknown alert)` and types nothing.
 
 Harold also types lines of its own the same way. The first is `harold alert: delivery-given-up firing`, when it gives up a delivery after 10 failed tries (see the [notification reference](../notification/README.md#architecture)). It carries no message text. It is typed only when `alert_listen` is set and the address opened, with the checks below, as a posted line is. A post naming `delivery-given-up` is answered `400`.

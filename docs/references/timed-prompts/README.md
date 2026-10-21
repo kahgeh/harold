@@ -61,7 +61,7 @@ For each due prompt, in the order of the list, Harold checks these in order and 
 |---|---|---|
 | 1 | Harold's last listing of tmux panes worked | `pane_list_failing` |
 | 2 | At least one agent pane has `folder` as its working directory | `no_agent_in_folder` |
-| 3 | Exactly one does | `several_agents_in_folder` |
+| 3 | Exactly one does, except in the chief's folder, where the chief's pane is the one (the first agent pane of the chief's tmux session) | `several_agents_in_folder` |
 | 4 | That agent is Claude Code (its provider uses the `claude-v1` screen adapter) | `input_box_unreadable` |
 | 5 | Harold's current state for that agent is idle | `agent_busy` or `agent_state_unknown` |
 | 6 | A fresh read of the pane's screen finds the input box | `input_box_not_found` |

@@ -13,7 +13,7 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 | provider | Which kind an agent is: `claude`, `codex` or `opencode` | — |
 | pane, pane id | The tmux pane an agent runs in, and its id, such as `%47` | "pane address", "target" |
 | incarnation | One run of an agent in a pane, told apart by pane, process, start time and provider. A new one starts at Unknown | — |
-| the chief, chief of pods | The agent in the chief's folder, which talks to the user and asks them questions | "coordinator", "main agent" |
+| the chief, chief of pods | The first agent pane in the chief's tmux session among the agents in the chief's folder, which talks to the user and asks them questions | "coordinator", "main agent" |
 | the chief's row | The chief's row in the dash's agent list | — |
 | pod | One product's sessions: its PnEM, its pod coordination and its build workers | — |
 | pod session | A pod-coordination or PnEM pane | — |
@@ -82,6 +82,9 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 | dropped | An agent message or spoken line Harold chose not to send. It names the channel list that held the pane back | — |
 | channel | One of the four ways Harold reaches the user, each with its own list in `[notify]`: `imessage`, `telegram`, `web_app` and `machine_audio_output` | "away channel" for it (the away channel is only iMessage or Telegram, the one `away_channel` picks), "route", "output" alone |
 | channel list | A channel's list in `[notify]` of the folders whose agents may use that channel | "allowlist", "whitelist", "only_from" |
+| the chief's tmux session | The tmux session the chief runs in: the one `notify.chief_session` names, or else the session of the longest-running agent in the chief's folder | "chief window" |
+| `notify.chief_session` | The `[notify] chief_session` entry that names the chief's tmux session exactly. It picks the session among the agents in the chief's folder, not which folder is the chief's | "chief session setting", "session prefix" |
+| the chief's folder | The folder `[notify] chief` names. The channel lists count every pane in it as the chief's, while only the chief's pane gets the chief's typing | "chief directory" |
 | `notify.chief` | The `[notify] chief` entry that names the chief's pane by its folder. It decides which pane is the chief, not what the chief may use | "chief folder setting", "away_messages_only_from" for it |
 | voice, voice mute | Harold's speech at the desk, and the switch that silences it (`Voice: mute`) | — |
 | messaging pause | The switch that stops all phone traffic in both directions (`Messaging: pause`) | "kill switch" as its name |

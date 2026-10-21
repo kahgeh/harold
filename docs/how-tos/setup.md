@@ -129,6 +129,7 @@ Harold gives each way it can reach you its own list of the folders whose agents 
 ```toml
 [notify]
 chief = "/Users/you/Dev/chief-of-pods"                    # which pane is the chief
+chief_session = "chief"                                   # the chief's tmux session
 imessage = ["/Users/you/Dev/chief-of-pods"]               # who may reach the phone by iMessage
 telegram = ["/Users/you/Dev/chief-of-pods"]               # who may reach the phone by Telegram
 web_app = ["/Users/you/Dev/chief-of-pods"]                # who may reach the phone through the web app

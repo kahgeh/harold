@@ -2,7 +2,7 @@
 
 A call lets you talk to the chief of pods at the Mac instead of typing. You press one key in tmx-agent-dash. Harold listens through the microphone, turns what you say into text, types the text into the chief's pane, and plays the chief's spoken answer. Harold then listens again, until you end the call.
 
-The chief is the one agent running in a folder `[notify] chief` matches. With several, there is no chief.
+The chief is the first agent pane of the chief's tmux session among the agents running in a folder `[notify] chief` matches. Other agents in that folder do not hide it.
 
 ## Problem
 
