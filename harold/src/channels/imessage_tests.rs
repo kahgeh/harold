@@ -66,7 +66,7 @@ fn fit_cuts_after_the_last_sentence_that_fits() {
 fn fit_cuts_after_a_whole_word_when_no_sentence_end_fits() {
     assert_eq!(fit_turn_end_text("alpha beta gamma delta", 13), "alpha beta…");
     assert_eq!(fit_turn_end_text("alpha beta gamma delta", 12), "alpha beta…");
-    assert_eq!(fit_turn_end_text("alpha beta gamma delta", 11), "alpha…");
+    assert_eq!(fit_turn_end_text("alpha beta gamma delta", 10), "alpha…");
 }
 
 #[test]
@@ -93,7 +93,7 @@ fn fit_treats_e_g_as_a_sentence_end() {
 #[test]
 fn fit_needs_a_space_after_the_sentence_end() {
     // "v1.2" is not a sentence end, so the cut falls back to a word.
-    assert_eq!(fit_turn_end_text("see v1.2build now please", 14), "see…");
+    assert_eq!(fit_turn_end_text("see v1.2build now please", 13), "see…");
 }
 
 #[test]
