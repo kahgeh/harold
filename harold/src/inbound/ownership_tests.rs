@@ -76,7 +76,7 @@ fn listed(names: &[&str]) -> Vec<String> {
     names.iter().map(ToString::to_string).collect()
 }
 
-/// A record for two Macs, as the `machines` setting would list them.
+/// A record for three Macs, as the `machines` setting would list them.
 fn three_macs() -> NotifierRecord {
     NotifierRecord::for_machines(&listed(&["studio", "laptop", "mini"]))
 }
