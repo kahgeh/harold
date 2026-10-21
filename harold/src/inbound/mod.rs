@@ -380,13 +380,13 @@ pub(crate) enum ChiefRouting {
         busy: bool,
         typed_at: OffsetDateTime,
     },
-    /// No agent, or more than one, runs in the chief's folder: nothing was typed.
+    /// No agent runs in the chief's folder: nothing was typed.
     NoChief,
 }
 
-/// Types "📱 <text>" into the chief's pane: no tag, AI or latest-notifier decision. Several
-/// agents or none → NoChief, nothing typed, since guessing which one is the chief could type
-/// the reply into the wrong pane, as the timed prompts' rule also refuses to guess. A failing
+/// Types "📱 <text>" into the chief's pane: no tag, AI or latest-notifier decision. No
+/// agent → NoChief, nothing typed. With several agents in the folder the chief is the first
+/// agent pane of the chief's tmux session. A failing
 /// listing → Err. On typing, records telemetry::prompt_typed(pane, StartedBy::Phone, None,
 /// typed_at), so the chief's turn counts as started from the phone; a typed app reply opens
 /// no phone request, because the phone-request counters keep a fixed channel list. Logs

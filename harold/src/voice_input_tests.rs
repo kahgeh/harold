@@ -1823,6 +1823,7 @@ fn two_agents_in_the_chiefs_folder_leave_the_first_as_the_chief() {
     h.ports.0.panes.set(|s| {
         let mut second = s.view.panes[0].clone();
         second.pane_id = "%9".into();
+        second.pane_index += 1;
         s.view.panes.push(second);
     });
 

@@ -203,6 +203,7 @@ The terms "left out" (a turn-end update Harold chose not to say or send) and "dr
 | Key | Description |
 | --- | --- |
 | `chief` | An entry (above). Harold checks it at start: an empty entry, one of only slashes, or one holding `..` or `.` as a folder stops the daemon, naming the key and the entry. |
+| `chief_session` | The chief's tmux session name (optional). Harold checks it at start: an empty name, or one holding `:` or `.`, stops the daemon with `notify.chief_session must be a tmux session name, not empty and with no ':' or '.'`. |
 | `imessage`, `telegram`, `web_app`, `machine_audio_output` | Lists of entries. Harold checks every list at start, including the one `away_channel` does not use; `*` is allowed. |
 
 A key inside `[notify]` that Harold does not know, such as `imesage`, stops the start. `away_updates_only_from` stops it with `notify.away_updates_only_from is now notify.away_messages_only_from; rename the key`. Harold reads the lists at start, so a change takes effect at the next restart.

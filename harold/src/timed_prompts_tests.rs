@@ -1990,3 +1990,35 @@ async fn another_folder_with_two_agents_still_waits_and_a_second_chief_pane_is_n
         LineOutcome::Typed
     );
 }
+
+#[tokio::test]
+async fn a_home_relative_chief_entry_still_finds_the_first_pane_with_two_agents() {
+    let Ok(home) = std::env::var("HOME") else {
+        return;
+    };
+    let fake = Fake::at(DAY, "09:00:00").with_chief("~/Dev/chief-of-pods", None);
+    let panes = view(vec![
+        AgentPane {
+            folder: format!("{home}/Dev/chief-of-pods"),
+            ..chief("%2")
+        },
+        AgentPane {
+            folder: format!("{home}/Dev/chief-of-pods"),
+            pane_index: 2,
+            ..chief("%3")
+        },
+    ]);
+    fake.set(|state| state.view = panes.clone());
+
+    let alert = type_when_ready(
+        &fake,
+        Writer::Alert,
+        "~/Dev/chief-of-pods",
+        "a",
+        &panes,
+        &[],
+    )
+    .await;
+
+    assert!(matches!(alert, Attempt::Typed { ref pane } if pane == "%2"));
+}

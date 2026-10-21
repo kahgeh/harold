@@ -301,9 +301,9 @@ fn target_pane<'a>(
     folder: &str,
     chief: Chief<'_>,
 ) -> Result<&'a AgentPane, Reason> {
-    let is_chief_folder = chief
-        .folder
-        .is_some_and(|entry| same_folder(folder, entry) || same_folder(entry, folder));
+    let is_chief_folder = chief.folder.is_some_and(|entry| {
+        folder == entry || same_folder(folder, entry) || same_folder(entry, folder)
+    });
     let lookup = if is_chief_folder {
         resolve_chief(
             view.panes.iter().map(AgentPane::position),
