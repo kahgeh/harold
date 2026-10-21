@@ -1,5 +1,5 @@
-//! Which agent pane is the chief's: the one agent pane whose folder `[notify] chief`
-//! matches. The web app's thread belongs to it.
+//! Which agent pane is the chief's: the first agent pane of the chief's tmux session among
+//! the panes whose folder `[notify] chief` matches. The web app's thread belongs to it.
 
 use crate::agent::domain::{AgentSnapshot, EffectiveAgentState};
 use crate::outbound::left_out::{ChiefLookup, resolve_chief};
@@ -8,7 +8,7 @@ use crate::timed_prompts::{AgentPane, agents_view};
 /// The chief, as the latest snapshot sees it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ChiefPane {
-    /// One agent runs in the folder. `busy` is true only while its state is busy, so an
+    /// The chief's pane is found. `busy` is true only while its state is busy, so an
     /// unknown state reads as not busy.
     One { pane_id: String, busy: bool },
     /// No folder is set, or no agent runs in it.
