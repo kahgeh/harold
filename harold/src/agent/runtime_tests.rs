@@ -4382,27 +4382,36 @@ fn health_events(events: &[EventEnvelope]) -> Vec<super::domain::AgentMonitorHea
         .collect()
 }
 
-#[tokio::test]
-async fn pane_departed_read_neither_degrades_screen_nor_spends_the_passes_retry() {
+/// Panes are read in no fixed order, so the closed ones outnumber the flaky one: it is read
+/// after at least one closed pane almost every run.
+async fn screen_pass_with_closed_panes(closed: usize, flaky: bool) -> (usize, String, bool) {
     let directory = TestDirectory::new();
     let store = Arc::new(HaroldStore::open(&directory.0).await.unwrap());
-    let closed = pane("%8", 80, 800, 1_000, 100);
-    let flaky = pane("%9", 90, 900, 1_000, 100);
     let screen = Arc::new(PaneScriptedScreen::default());
-    screen.departed.lock().unwrap().insert("%8".into());
-    screen
-        .observations
-        .lock()
-        .unwrap()
-        .insert("%9".into(), [screen_observation(&flaky)].into());
-    screen.failures.lock().unwrap().insert("%9".into(), 1);
+    let mut panes = Vec::new();
+    for index in 0..closed {
+        let observed = pane(&format!("%{}", 10 + index), 80, 800, 1_000, 100);
+        screen
+            .departed
+            .lock()
+            .unwrap()
+            .insert(observed.incarnation.pane_id.clone());
+        panes.push(observed);
+    }
+    if flaky {
+        let observed = pane("%9", 90, 900, 1_000, 100);
+        screen
+            .observations
+            .lock()
+            .unwrap()
+            .insert("%9".into(), [screen_observation(&observed)].into());
+        screen.failures.lock().unwrap().insert("%9".into(), 1);
+        panes.push(observed);
+    }
     let (shutdown, shutdown_rx) = watch::channel(());
     let (handle, task) = spawn_agent_monitor_for_test(
         Arc::clone(&store),
-        Arc::new(FakeInventory::scans(vec![Ok(vec![
-            closed.clone(),
-            flaky.clone(),
-        ])])),
+        Arc::new(FakeInventory::scans(vec![Ok(panes)])),
         screen.clone(),
         vec![provider()],
         2_000,
@@ -4415,22 +4424,40 @@ async fn pane_departed_read_neither_degrades_screen_nor_spends_the_passes_retry(
 
     let logs = logged(&captured);
     println!("{}", logs.trim_end());
-    assert!(!logs.contains("agent monitor degraded"), "{logs}");
-    // One read for the closed pane, a failed read and its retry for the other.
-    assert_eq!(screen.observe_calls.load(Ordering::SeqCst), 3);
-    assert_eq!(
-        logs.matches("agent monitor read retried").count(),
-        1,
-        "{logs}"
-    );
     let events = store
         .stream()
         .load_after_version(EventVersion::start(), 100)
         .await
         .unwrap();
-    assert!(health_events(&events).is_empty());
+    let healthy = health_events(&events).is_empty();
+    let reads = screen.observe_calls.load(Ordering::SeqCst);
     drop(shutdown);
     task.await.unwrap();
+    (reads, logs, healthy)
+}
+
+#[tokio::test]
+async fn pane_departed_read_is_not_retried_and_does_not_degrade_screen() {
+    let (reads, logs, no_health_events) = screen_pass_with_closed_panes(1, false).await;
+
+    assert_eq!(reads, 1);
+    assert!(!logs.contains("agent monitor degraded"), "{logs}");
+    assert!(no_health_events);
+}
+
+#[tokio::test]
+async fn pane_departed_read_leaves_the_passes_retry_for_another_pane() {
+    let (reads, logs, no_health_events) = screen_pass_with_closed_panes(8, true).await;
+
+    // One read per closed pane, a failed read and its retry for the other.
+    assert_eq!(reads, 10);
+    assert_eq!(
+        logs.matches("agent monitor read retried").count(),
+        1,
+        "{logs}"
+    );
+    assert!(!logs.contains("agent monitor degraded"), "{logs}");
+    assert!(no_health_events);
 }
 
 #[tokio::test]

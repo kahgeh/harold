@@ -850,7 +850,7 @@ impl AgentMonitorRuntime {
         observed_at_ms: i64,
     ) -> Option<AgentPaneObservation> {
         let scanned = self.last_scan_finished?;
-        if scanned.elapsed() > self.scan_freshness {
+        if self.scan_freshness.is_zero() || scanned.elapsed() > self.scan_freshness {
             return None;
         }
         let tracked = self.panes.get(pane_id)?;
@@ -988,7 +988,6 @@ impl AgentMonitorRuntime {
                 return Err(MonitorCommandError::InventoryUnavailable);
             }
         };
-        self.last_scan_finished = Some(Instant::now());
         self.set_health("inventory", true, "ok").await?;
         let seen: HashSet<String> = observed
             .iter()
@@ -1088,6 +1087,8 @@ impl AgentMonitorRuntime {
                 }
             }
         }
+        // Only now do the tracked panes and their absence counts reflect this scan.
+        self.last_scan_finished = Some(Instant::now());
         Ok(())
     }
 
