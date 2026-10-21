@@ -34,3 +34,17 @@ fn the_call_script_keeps_its_contract() {
         assert!(!script.contains(absent), "call.js holds {absent}");
     }
 }
+
+#[test]
+fn the_responding_dots_pulse_unless_motion_is_reduced() {
+    let css = include_str!("../../static/web_app/app.css");
+    for wanted in [
+        "@keyframes dot-rise",
+        "animation: dot-rise 1.2s ease-in-out infinite;",
+        ".dots i:nth-child(2) {\n  animation-delay: 0.2s;",
+        ".dots i:nth-child(3) {\n  animation-delay: 0.4s;",
+        "@media (prefers-reduced-motion: reduce) {\n  .dots i {\n    animation: none;",
+    ] {
+        assert!(css.contains(wanted), "app.css lacks {wanted}");
+    }
+}

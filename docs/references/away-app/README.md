@@ -121,7 +121,7 @@ The thread is the oldest message at the top. It holds the last 30 days of messag
 - **Sender labels.** A small label at the bottom right of each message says who wrote it: `chief`, or for your reply the mark and `me`.
 - **New messages.** A new message scrolls into view when you are within 80 px of the bottom. Scrolled further up, the page stays put and a **New message ↓** button appears above the reply box; tapping it scrolls to the newest message, and it goes once you are at the bottom. Sending a reply scrolls to the bottom.
 - **Links.** An `http://` or `https://` address in a message is a link that opens in the phone's browser. A trailing `.`, `,`, `;`, `:`, `!`, `?`, `)`, `]`, `'` or `"` stays outside the link.
-- **Responding dots.** After your reply is typed, three grey dots show on the chief's side while the chief's pane is busy. They go when the chief's next message appears, or when its turn ends with no message.
+- **Responding dots.** After your reply is typed, three grey dots show on the chief's side while the chief's pane is busy. They pulse in turn, and stay still when the phone asks for reduced motion. They go when the chief's next message appears, or when its turn ends with no message.
 
 A reply you type goes to the chief. It can be up to 1,000 characters; Harold refuses a blank one. **Send** is disabled while a reply is on its way, so a double tap sends it once. Harold stores the reply first, then types `📱 <reply>` and Enter into the chief's pane. Next to `me`, the thread shows what became of the reply:
 
