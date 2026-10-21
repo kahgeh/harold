@@ -348,6 +348,8 @@ struct TurnTrace {
     span: tracing::Span,
     /// When the speech was cut: the clock of `first_sound_ms` and `answer_ms`.
     cut_at: Option<Instant>,
+    /// Whether the turn has been typed: only then is a line from the chief its answer.
+    typed: bool,
     first_sound_noted: bool,
     answer_noted: bool,
 }
@@ -357,6 +359,7 @@ impl TurnTrace {
         Self {
             span: open_turn(call_from),
             cut_at: None,
+            typed: false,
             first_sound_noted: false,
             answer_noted: false,
         }
@@ -1156,6 +1159,7 @@ impl<P: CallPorts> Call<P> {
         let turn = self
             .turn
             .get_or_insert_with(|| TurnTrace::open(ports.call_from()));
+        turn.typed = true;
         log_typed(&turn.span, &pane, &text);
         self.hold_others_until = None;
         let prompt = format!("{MARK} {text}");
@@ -1291,6 +1295,7 @@ impl<P: CallPorts> Call<P> {
 
     /// Harold's voice was muted during the call: it ends at once, with no last words.
     async fn voice_muted(&mut self) {
+        self.end_turn(Some("voice_muted"));
         self.end(Ended::VoiceMuted, None).await;
         lock(&self.status).last_result = Some(TurnResult::VoiceMuted);
     }
@@ -1458,10 +1463,12 @@ impl<P: CallPorts> Call<P> {
 
     /// The span of the turn a sound belongs to: a line another agent says is not part of it.
     fn turn_span(&self, source: Source) -> Option<tracing::Span> {
-        if source == Source::OtherAgent {
-            return None;
-        }
-        self.turn.as_ref().map(|turn| turn.span.clone())
+        let answer = matches!(source, Source::ChiefLine | Source::Update);
+        self.turn
+            .as_ref()
+            .filter(|turn| turn.typed || !answer)
+            .filter(|_| source != Source::OtherAgent)
+            .map(|turn| turn.span.clone())
     }
 
     /// Opens the `harold.call_voice` span of a sound queued for the worker.
@@ -1679,7 +1686,9 @@ impl<P: CallPorts> Call<P> {
             self.sounds.push_front(sound);
             return;
         }
-        if sound.answers {
+        // Only the turn the sound belongs to ends: a newer turn may have started since.
+        let own = sound.turn.as_ref().and_then(tracing::Span::id);
+        if sound.answers && own.is_some() && self.turn.as_ref().and_then(|t| t.span.id()) == own {
             self.end_turn(None);
         }
         if let After::End(why) = sound.finish(true) {

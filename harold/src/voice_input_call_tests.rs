@@ -857,3 +857,29 @@ async fn a_phone_sound_offered_in_a_play_span_learns_when_it_started() {
     assert_eq!(attr(&plays[0], "start_ms").as_deref(), Some("350"));
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn a_chief_line_after_its_turn_ended_is_no_answer_of_the_next_turn() {
+    test_support::install();
+    let h = Harness::new();
+    h.start().await;
+    h.speak().await;
+    h.answer("first line").await;
+
+    // The next turn is spoken, and the chief's late line arrives while it is.
+    h.feed(loud(1500));
+    settle().await;
+    let late = h.say("late line", Speaker::Chief);
+    settle().await;
+    h.feed(quiet(1200));
+    settle().await;
+    past_the_tail().await;
+    assert_eq!(late.await.unwrap(), Some(true));
+    h.calls.stop().await;
+    settle().await;
+
+    let spans = trace_of_clip(1500);
+    let turn = root(&spans);
+    assert!(named(&spans, "harold.call_voice").is_empty());
+    assert_eq!(attr(turn, "answer_ms"), None);
+}
