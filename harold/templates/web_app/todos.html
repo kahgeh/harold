@@ -7,7 +7,7 @@
 {% if let Some(under) = card.under %}<p class="card-intro">{{ under }}</p>
 {% endif %}{% if let Some(link) = card.link %}{% if let Some(href) = link.href %}<p class="card-link"><a href="{{ href }}" target="_blank" rel="noopener noreferrer">{{ link.text }}</a></p>
 {% else %}<p class="card-link">{{ link.text }}</p>
-{% endif %}{% endif %}{% if card.is_question %}<form class="todo-form" data-on:submit="@post('/todos/answer', {contentType: 'form'})">
+{% endif %}{% endif %}{% if card.is_question %}<form class="todo-form" data-on:submit="@post('/todos/answer', {contentType: 'form'})" data-on:change="@post('/todos/picks', {contentType: 'form'})" data-on:input__debounce.500ms="@post('/todos/picks', {contentType: 'form'})">
 <input type="hidden" name="id" value="{{ card.id }}">
 <input type="hidden" name="version" value="{{ card.version }}">
 {% for decision in card.decisions %}<fieldset>

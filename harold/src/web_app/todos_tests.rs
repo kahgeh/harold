@@ -1032,3 +1032,22 @@ async fn send_still_sends_the_forms_picks_after_a_failed_save() {
     assert_eq!(response.status(), 200);
     assert!(matches!(&service.fake.calls()[..], [Call::Answer(_)]));
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_question_form_saves_picks_on_change_and_debounced_input() {
+    let (_service, server, _directory) = served_with_todos().await;
+
+    let page = server.get("/").await.text().await.unwrap();
+
+    for wanted in [
+        r#"data-on:submit="@post('/todos/answer', {contentType: 'form'})""#,
+        r#"data-on:change="@post('/todos/picks', {contentType: 'form'})""#,
+        r#"data-on:input__debounce.500ms="@post('/todos/picks', {contentType: 'form'})""#,
+        r#"data-on:click="@post('/todos/later', {contentType: 'form'})""#,
+        r#"data-on:change="@post('/todos/tick', {contentType: 'form'})""#,
+    ] {
+        assert!(page.contains(wanted), "page lacks {wanted}");
+    }
+    // Only the question form saves picks; the instructions' forms do not.
+    assert_eq!(page.matches("/todos/picks").count(), 2, "{page}");
+}

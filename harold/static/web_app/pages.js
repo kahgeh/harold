@@ -144,9 +144,117 @@
     }
   }
 
+  // The card being edited, kept so a redraw of #todos puts it back: its id and question
+  // version, the checked options, the text fields, and the focus and caret. A card whose
+  // question version changed takes the redrawn state.
+  let note = null;
+
+  function questionCard(target) {
+    if (!(target instanceof Element)) {
+      return null;
+    }
+    const card = target.closest("#todos article.card");
+    return card && card.querySelector("form.todo-form fieldset") ? card : null;
+  }
+
+  function field(card, name) {
+    const input = card.querySelector('input[type=hidden][name="' + name + '"]');
+    return input ? input.value : "";
+  }
+
+  function capture(card) {
+    const radios = {};
+    card.querySelectorAll("input[type=radio]:checked").forEach((radio) => {
+      radios[radio.name] = radio.value;
+    });
+    const texts = {};
+    card.querySelectorAll("input.free-text").forEach((text) => {
+      texts[text.name] = text.value;
+    });
+    const active = document.activeElement;
+    const focus =
+      active instanceof HTMLInputElement && card.contains(active)
+        ? {
+            name: active.name,
+            value: active.type === "radio" ? active.value : null,
+            caret: active.type === "text" ? [active.selectionStart, active.selectionEnd] : null,
+          }
+        : null;
+    note = {
+      card,
+      id: field(card, "id"),
+      version: field(card, "version"),
+      radios,
+      texts,
+      focus,
+    };
+  }
+
+  function restore() {
+    if (!note) {
+      return;
+    }
+    const card = Array.from(document.querySelectorAll("#todos article.card")).find(
+      (candidate) =>
+        field(candidate, "id") === note.id && field(candidate, "version") === note.version,
+    );
+    if (!card) {
+      note = null;
+      return;
+    }
+    note.card = card;
+    card.querySelectorAll("input[type=radio]").forEach((radio) => {
+      const checked = note.radios[radio.name] === radio.value;
+      if (radio.checked !== checked) {
+        radio.checked = checked;
+      }
+    });
+    card.querySelectorAll("input.free-text").forEach((text) => {
+      if (text.name in note.texts && text.value !== note.texts[text.name]) {
+        text.value = note.texts[text.name];
+      }
+    });
+    const focus = note.focus;
+    if (!focus) {
+      return;
+    }
+    const target = Array.from(card.querySelectorAll("input")).find(
+      (input) =>
+        input.name === focus.name && (focus.value === null || input.value === focus.value),
+    );
+    if (target && document.activeElement !== target) {
+      target.focus({ preventScroll: true });
+      if (focus.caret && focus.caret[0] !== null) {
+        target.setSelectionRange(focus.caret[0], focus.caret[1]);
+      }
+    }
+  }
+
+  function noteEdit(event) {
+    const card = questionCard(event.target);
+    if (card) {
+      capture(card);
+    }
+  }
+
   document.addEventListener("input", syncOne);
   document.addEventListener("change", syncOne);
-  new MutationObserver(syncSends).observe(pages, { childList: true, subtree: true });
+  document.addEventListener("input", noteEdit);
+  document.addEventListener("change", noteEdit);
+  document.addEventListener("focusin", noteEdit);
+  // Leaving the card for good drops the note, so picks made elsewhere show. A card a redraw
+  // removed is not connected, so its note stays for the redrawn card.
+  document.addEventListener("focusout", () => {
+    setTimeout(() => {
+      if (note && note.card.isConnected && !note.card.contains(document.activeElement)) {
+        note = null;
+      }
+    }, 0);
+  });
+  new MutationObserver(() => {
+    restore();
+    syncSends();
+  }).observe(pages, { childList: true, subtree: true });
 
   scrollToBottom();
   syncPage();
