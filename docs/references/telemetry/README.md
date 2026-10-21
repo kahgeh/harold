@@ -183,7 +183,7 @@ A reply whose payload failed for good never finishes, and is dropped after an ho
 | `harold.reply_stored` | storing the reply, so the stored event records the trace | |
 | `harold.turn` | the turn's start – the stop hook reached Harold | `pane_id`, `session.id`, `started_by`, and `session.source`, `turn.start` when they apply |
 | `harold.turn_complete` | the hook's call handled and its event stored | `pane_id` |
-| `harold.delivery`, and `harold.voice_note` inside it | the turn-end update sent or said | `kind`, `channel` (the `[notify]` key: `machine_audio_output`, `imessage`, `telegram` or `web_app`), `outcome`, `reason` for `skipped` and `held_back` |
+| `harold.delivery`, and `harold.voice_note` inside it | the turn-end update sent or said | `kind`, `channel` (the `[notify]` key: `machine_audio_output`, `imessage`, `telegram` or `web_app`), `outcome`, `reason` for `skipped` and `held_back`, `text_cut` for `delivered` |
 | `harold.local_model`, inside it | the local model's run | `result` (`answered`, `failed`, `no_model`) |
 
 **A turn you start by speaking in a call** is one trace, with these spans in order:
@@ -201,6 +201,20 @@ A reply whose payload failed for good never finishes, and is dropped after an ho
 A watch run is a trace of its own: `harold.watch.run`, one run of a watch, with `harold.watch.model` (the Claude Code process, with `result`: `exited`, `killed` or `failed_to_start`) inside it. The run span has `watch`, `run`, `outcome` (`quiet`, `report`, `skipped` or a failure reason), `reason` and `cost_usd`, and the run's log lines carry its trace id.
 
 `harold.delivery`'s `channel` is the `[notify]` key of the channel that carried the update, or held it: a desk update is `machine_audio_output` whether delivered, skipped or held back, and one the app carried is `web_app`. Its `outcome` is `delivered`, `skipped` (with `reason` `duplicate_turn`, `session_active`, `pane_active`, `voice_mute`, `messaging_pause`, `messaged_this_turn` or `duplicate_message`), `held_back` (a list or the chief rule kept the update from going out, with `reason` `not_listed` or `chief`, and `channel` the key of the list that held it), `failed` (a send that failed before its 10th try, which is tried again, or a malformed payload, which is not) or `given_up` (its 10th failure; it is not tried again).
+
+`harold.delivery`'s `text_cut` is `true` when the update was cut to fit iMessage or Telegram, and `false` when it went whole. The app always gets the whole text, so `web_app` is always `false`. A cut also writes an info line, `turn-end update cut`, inside the span, with `channel`, `pane_id` and `count` (the characters before the cut). It never holds the text. An `AI CLI failed` warn line in the same trace says the whole reply was cut, not the AI CLI's text.
+
+After a release, check by channel and day: `web_app` with `text_cut = true` must be 0, since more means the app path still cuts. For `imessage` or `telegram`, a day with at least 5 updates and more than 20% cut means the AI CLI is ignoring its 280-character rule or failing over to the whole reply, which is the cue to tighten the prompt. This is a check, not an alert.
+
+```sql
+SELECT toDate(Timestamp) AS day, SpanAttributes['channel'] AS channel,
+       count() AS updates, countIf(SpanAttributes['text_cut'] = 'true') AS cut
+FROM otel.otel_traces
+WHERE SpanName = 'harold.delivery' AND SpanAttributes['outcome'] = 'delivered'
+  AND SpanAttributes['kind'] = 'turn_end'
+  AND Timestamp > now() - INTERVAL 7 DAY
+GROUP BY day, channel ORDER BY day
+```
 
 Two queries check `outcome = skipped` after a release, each over the last 7 days. No alert reads them. Both should give 0. The first gives more than 0 when a skip path records no `channel` or `reason`. The second gives more than 0 when the lock check failed while the user was away: `pane_active` and `session_active` fire only with the screen unlocked, so their channel is always `machine_audio_output`, and the trace shows which turn.
 

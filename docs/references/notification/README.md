@@ -15,8 +15,8 @@ Summarisation uses different backends depending on the path:
 | Path              | Summary backend                      | Max input                     | Output                                            |
 | ----------------- | ------------------------------------ | ----------------------------- | ------------------------------------------------- |
 | At desk (TTS)     | Local model (`mlx_lm`)               | The agent's name, the project and 500 chars of last_user_prompt | one sentence of at most 25 words naming the agent, ≤48 tokens |
-| Away (iMessage)   | AI CLI or 280-char truncation        | Full assistant_message         | `🤖 [machine_name/pane_label] body (context)` + trailing question |
-| Away (Telegram)   | AI CLI or 280-char truncation        | Full assistant_message         | `🤖 [machine_name/pane_label] body (context)` + trailing question |
+| Away (iMessage)   | AI CLI or the whole reply, cut at a sentence end within 280 | Full assistant_message         | `🤖 [machine_name/pane_label] body (context)` + trailing question |
+| Away (Telegram)   | AI CLI or the whole reply, cut at a sentence end within 280 | Full assistant_message         | `🤖 [machine_name/pane_label] body (context)` + trailing question |
 
 If the local model is not configured, fails, or gives no sentence that names the agent, the turn-end update is the fallback sentence, `<Name> has finished and is waiting.`, such as `The chief has finished and is waiting.`
 
@@ -95,7 +95,7 @@ The away channel is selected by `[notify] away_channel` (`"imessage"` or `"teleg
 
 ### Common steps (both channels)
 
-1. `summarise_for_notification()` — uses AI CLI to summarise `assistant_message` into 2–3 sentences under 280 chars; falls back to `truncate_body()` (first 280 chars, newlines flattened)
+1. `summarise_for_notification()` — uses AI CLI to summarise `assistant_message` into 2–3 sentences under 280 chars; falls back to the whole reply (newlines flattened). Neither is cut here. The web app gets this whole text. iMessage and Telegram split the trailing question off first, then `fit_turn_end_text()` cuts the main text and the question each to 280 characters: after the last sentence that fits with ` …`, else after the last whole word with `…`, and inside a word only when one word is over the limit
 2. `split_body()` — splits the last sentence ending in `?` into a separate follow-up message
 3. Message assembled: `🤖 [<machine_name>/<pane_label>] <main body> (<main_context>)`. `machine_name` is this Mac's name, which defaults to the output of `hostname -s`.
 4. Trailing question (if present) sent as a second `🤖`-prefixed message, `🤖 <question>`, without a tag
@@ -245,7 +245,7 @@ It differs from a turn-end update in these ways:
 | | Turn-end update | Agent message |
 |---|---|---|
 | Started by | The agent's turn ending | The agent running the command |
-| Text | Harold's summary of the agent's final reply, 280 characters at most | The agent's text as written, made one line, 1,000 characters at most |
+| Text | Harold's summary of the agent's final reply. The web app gets all of it; iMessage and Telegram get it cut at a sentence end within 280 characters | The agent's text as written, made one line, 1,000 characters at most |
 | Form | `🤖 [machine_name/pane_label] body (context)`, with a trailing question sent separately | `🤖 [machine_name/pane_label] text`, one message |
 | Presence checks | Sent to the phone only when the screen is locked; skipped when the session or pane is active; left out by the rules in "Updates Harold leaves out while you are away" | None: sent whether the screen is locked or not |
 | Channel lists | Left out for a pane the phone's lists do not name, while the screen is locked | Dropped for a pane the phone's lists do not name, whether the screen is locked or not; the command still exits 0 |
@@ -347,7 +347,7 @@ sequenceDiagram
     Store-->>Handler: pending TurnCompleted delivery
     Handler->>Handler: ioreg → IOConsoleLocked = true
     note over Handler: left out here if the pane messaged the phone this turn,<br/>or if the phone's lists do not name the pane
-    Handler->>Handler: summarise_for_notification() via AI CLI (fallback: truncate to 280 chars)
+    Handler->>Handler: summarise_for_notification() via AI CLI (fallback: the whole reply; iMessage and Telegram then cut at a sentence end within 280)
     Handler->>Handler: split_body() → main body + trailing question (if ends in ?)
     Handler->>Channel: send "🤖 [studio/harold:0.3] <body> (harold)"
     note over Channel: iMessage: dedup check via chat.db then osascript<br/>Telegram: Bot API sendMessage
