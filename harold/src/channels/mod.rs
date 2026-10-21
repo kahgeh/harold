@@ -334,8 +334,8 @@ pub(crate) fn send_spoken_line(line: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::{InboundListener, inbound_listener, inbound_listener_for, send_unless_paused};
-    use crate::peers::settings_with;
     use crate::settings::PeerRole;
+    use crate::settings::settings_with;
 
     const MEMBER: &str = r#"
         machine_name = "laptop"

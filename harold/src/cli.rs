@@ -2442,7 +2442,7 @@ mod tests {
 
     fn settings_for(address: &str) -> Settings {
         let (host, port) = address.rsplit_once(':').unwrap();
-        crate::peers::settings_with(&format!("[grpc]\nhost = \"{host}\"\nport = {port}"))
+        crate::settings::settings_with(&format!("[grpc]\nhost = \"{host}\"\nport = {port}"))
     }
 
     fn accept_args() -> AcceptArgs {

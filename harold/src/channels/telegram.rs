@@ -993,7 +993,7 @@ mod tests {
         assert_eq!(result, Err("telegram down".to_string()));
     }
 
-    use crate::peers::settings_with;
+    use crate::settings::settings_with;
 
     #[tokio::test(flavor = "multi_thread")]
     async fn notify_reports_to_the_hub_the_settings_name() {

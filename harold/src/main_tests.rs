@@ -1550,7 +1550,7 @@ const WIRING_MEMBER: &str = r#"
 
 /// The peer endpoint of the service built from `toml` laid over the default settings.
 async fn served_peers(toml: &str) -> PeerEndpoint {
-    let settings = super::peers::settings_with(toml);
+    let settings = crate::settings::settings_with(toml);
     let directory = TestDirectory::new();
     let store = Arc::new(store::HaroldStore::open(&directory.0).await.unwrap());
     let (base, _shutdown, task) = test_service(Arc::clone(&store), empty_snapshot());
@@ -2289,7 +2289,7 @@ mod one_trace_per_turn {
 
 #[tokio::test]
 async fn with_export_off_nothing_is_opened_or_run() {
-    let cfg = crate::peers::settings_with("[telemetry]\nexport = false\n");
+    let cfg = crate::settings::settings_with("[telemetry]\nexport = false\n");
     assert!(cfg.telemetry.otlp_endpoint.is_some());
     assert!(!cfg.telemetry.export);
 
@@ -2312,7 +2312,8 @@ async fn with_export_off_nothing_is_opened_or_run() {
 async fn a_taken_alert_address_logs_a_warning_and_harold_runs_without_it() {
     let taken = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let address = taken.local_addr().unwrap();
-    let cfg = crate::peers::settings_with(&format!("[telemetry]\nalert_listen = \"{address}\"\n"));
+    let cfg =
+        crate::settings::settings_with(&format!("[telemetry]\nalert_listen = \"{address}\"\n"));
     let logs = crate::outbound::fake::CapturedLogs::start();
 
     let (_shutdown_tx, shutdown_rx) = watch::channel(());
@@ -2335,7 +2336,7 @@ async fn a_taken_alert_address_logs_a_warning_and_harold_runs_without_it() {
 #[tokio::test]
 async fn each_telemetry_key_starts_its_own_task() {
     let missing = std::env::temp_dir().join(format!("no-registry-{}.toml", uuid::Uuid::new_v4()));
-    let cfg = crate::peers::settings_with(&format!(
+    let cfg = crate::settings::settings_with(&format!(
         "[telemetry]\nalert_listen = \"127.0.0.1:0\"\npod_registry = {:?}\n",
         missing.display().to_string()
     ));

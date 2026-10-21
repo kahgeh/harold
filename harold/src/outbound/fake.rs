@@ -53,7 +53,7 @@ impl FakeEnvironment {
     /// that is not about the lists need not name a folder. The screen starts unlocked, no
     /// tmux client is attached, and sends succeed.
     pub(crate) fn new(overrides: &str) -> Self {
-        let mut notify = crate::peers::settings_with(overrides).notify;
+        let mut notify = crate::settings::settings_with(overrides).notify;
         for (key, list) in [
             ("imessage", &mut notify.imessage),
             ("telegram", &mut notify.telegram),

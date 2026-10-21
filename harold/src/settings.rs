@@ -1276,6 +1276,20 @@ pub fn init_settings(settings: Arc<Settings>) {
         .expect("init_settings called more than once");
 }
 
+/// The shipped default configuration with `overrides` (TOML) laid over it: a `Settings` a
+/// test builds itself, so code that takes `&Settings` is tested without the process-wide one.
+#[cfg(test)]
+pub(crate) fn settings_with(overrides: &str) -> Settings {
+    use config::{Config, File, FileFormat};
+    let default = format!("{}/config/default", env!("CARGO_MANIFEST_DIR"));
+    Config::builder()
+        .add_source(File::new(&default, FileFormat::Toml))
+        .add_source(File::from_str(overrides, FileFormat::Toml))
+        .build()
+        .and_then(Config::try_deserialize)
+        .expect("default configuration with overrides should deserialize")
+}
+
 #[cfg(test)]
 mod tests {
     use config::{Config, File, FileFormat};
@@ -2607,14 +2621,14 @@ mod tests {
     }
 
     fn web_app_validate_errors(overrides: &str) -> Vec<String> {
-        crate::peers::settings_with(overrides).validate()
+        crate::settings::settings_with(overrides).validate()
     }
 
     const WEB_APP_FOLDER: &str = "[notify]\nchief = \"/work/chief-of-pods\"\n";
 
     #[test]
     fn web_app_is_off_when_the_section_is_absent() {
-        let settings = crate::peers::settings_with("");
+        let settings = crate::settings::settings_with("");
         assert!(settings.web_app.is_none());
         assert!(
             !settings
@@ -2655,7 +2669,7 @@ mod tests {
     #[test]
     fn validate_reports_web_app_without_the_chiefs_folder() {
         let message = "web_app needs notify.chief, the chief's folder";
-        let mut settings = crate::peers::settings_with(
+        let mut settings = crate::settings::settings_with(
             "[web_app]\nlisten = \"127.0.0.1:4330\"\nallowed_login = \"a@b.c\"",
         );
         settings.notify.chief = None;
@@ -2772,7 +2786,7 @@ mod tests {
 
     #[test]
     fn without_the_keys_the_app_is_called_chief_and_has_no_icon() {
-        let settings = crate::peers::settings_with(
+        let settings = crate::settings::settings_with(
             "[web_app]\nlisten = \"127.0.0.1:4330\"\nallowed_login = \"a@b.c\"",
         );
         let web_app = settings.web_app.unwrap();
