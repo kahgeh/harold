@@ -1,6 +1,5 @@
 import contextlib
 import hashlib
-import importlib.util
 import io
 import json
 import os
@@ -796,8 +795,6 @@ class InstalledServiceTests(unittest.TestCase):
         steps = self.install.GRANT_STEPS.format(binary=self.bundle / 'harold')
         self.assert_after_ready(output, steps + '\n' + self.install.AD_HOC_NOTE + '\n')
 
-    SENTENCES = tuple(__import__('install').REFUSAL_SENTENCES)
-
     def refusing_probe(self, stderr):
         def process(argv, **kwargs):
             if '--check-config' in argv:
@@ -816,20 +813,20 @@ class InstalledServiceTests(unittest.TestCase):
         return str(raised.exception)
 
     def test_the_five_refusal_sentences_match_the_spec(self):
-        self.assertEqual(len(self.SENTENCES), 5)
-        self.assertEqual(self.SENTENCES[0], '[telegram] is no longer read: Harold reaches the phone by iMessage only. Remove it from config/local.toml or the HAROLD__ environment variables.')
-        self.assertEqual(self.SENTENCES[1], '[peers] is no longer read: two Macs share replies through iMessage, with no hub or member. Remove it from config/local.toml or the HAROLD__ environment variables.')
-        self.assertEqual(self.SENTENCES[2], 'notify.telegram is no longer read: the lists are imessage, web_app and machine_audio_output. Remove it from config/local.toml or the HAROLD__ environment variables.')
-        self.assertEqual(self.SENTENCES[3], 'notify.away_channel is no longer read: Harold reaches the phone by iMessage only. Remove it from config/local.toml or the HAROLD__ environment variables.')
-        self.assertEqual(self.SENTENCES[4], 'grpc.host must be a loopback address (127.0.0.0/8, ::1 or localhost): Harold no longer serves other Macs.')
+        self.assertEqual(len(self.install.REFUSAL_SENTENCES), 5)
+        self.assertEqual(self.install.REFUSAL_SENTENCES[0], '[telegram] is no longer read: Harold reaches the phone by iMessage only. Remove it from config/local.toml or the HAROLD__ environment variables.')
+        self.assertEqual(self.install.REFUSAL_SENTENCES[1], '[peers] is no longer read: two Macs share replies through iMessage, with no hub or member. Remove it from config/local.toml or the HAROLD__ environment variables.')
+        self.assertEqual(self.install.REFUSAL_SENTENCES[2], 'notify.telegram is no longer read: the lists are imessage, web_app and machine_audio_output. Remove it from config/local.toml or the HAROLD__ environment variables.')
+        self.assertEqual(self.install.REFUSAL_SENTENCES[3], 'notify.away_channel is no longer read: Harold reaches the phone by iMessage only. Remove it from config/local.toml or the HAROLD__ environment variables.')
+        self.assertEqual(self.install.REFUSAL_SENTENCES[4], 'grpc.host must be a loopback address (127.0.0.0/8, ::1 or localhost): Harold no longer serves other Macs.')
 
     def test_a_refused_config_relays_only_the_fixed_sentences_and_leaves_the_old_harold(self):
-        stderr = '\n'.join(['Error: "invalid configuration"', '  ' + self.SENTENCES[0] + '  ',
-                            'review-sentinel-secret', self.SENTENCES[0] + ' review-sentinel-secret',
-                            self.SENTENCES[4], ''])
+        stderr = '\n'.join(['Error: "invalid configuration"', '  ' + self.install.REFUSAL_SENTENCES[0] + '  ',
+                            'review-sentinel-secret', self.install.REFUSAL_SENTENCES[0] + ' review-sentinel-secret',
+                            self.install.REFUSAL_SENTENCES[4], ''])
         message = self.run_refused(stderr)
         self.assertEqual(message, 'Configuration validation failed. Remove these settings, then run the install again:\n'
-                         + self.SENTENCES[0] + '\n' + self.SENTENCES[4])
+                         + self.install.REFUSAL_SENTENCES[0] + '\n' + self.install.REFUSAL_SENTENCES[4])
         self.assertNotIn('sentinel', message)
         self.assertNotIn('sentinel', self.printed.getvalue())
         self.unload.assert_not_called()
@@ -839,7 +836,7 @@ class InstalledServiceTests(unittest.TestCase):
 
     def test_a_failed_probe_without_a_fixed_sentence_gives_the_generic_failure(self):
         message = self.run_refused('Error: "invalid configuration"\nreview-sentinel-secret\n')
-        self.assertEqual(message, 'Configuration validation failed; check the supplied TOML and required channel fields')
+        self.assertEqual(message, 'Configuration validation failed; check the supplied TOML and required iMessage fields')
         self.assertNotIn('sentinel', message)
         self.unload.assert_not_called()
         self.assertEqual((self.bundle / 'harold').read_text(), 'old harold')

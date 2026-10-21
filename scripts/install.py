@@ -571,7 +571,7 @@ def install(args, repo):
                 if relayed:
                     raise RuntimeError('Configuration validation failed. Remove these settings, then run the install again:\n'
                                        + '\n'.join(relayed))
-                raise RuntimeError('Configuration validation failed; check the supplied TOML and required channel fields')
+                raise RuntimeError('Configuration validation failed; check the supplied TOML and required iMessage fields')
             config = json.loads(probe.stdout)
             metadata['grpc_addr'] = config['grpc_addr']
             if config['store_path'] != str(bundle / 'data/store'):
