@@ -534,7 +534,7 @@ fn channel_name(channel: OutboundChannel, away_channel: &str) -> &'static str {
 /// Whether `pane_id` is the chief's pane, found as `notify.chief` finds it, so the update
 /// names `the chief` and not `the <project> agent`.
 fn is_chief_pane(cfg: &NotifySettings, agents: &left_out::TrackedAgents, pane_id: &str) -> bool {
-    agents.chief_pane_id(cfg.chief.as_deref()) == Some(pane_id)
+    agents.chief_pane_id(cfg.chief.as_deref(), cfg.chief_session.as_deref()) == Some(pane_id)
 }
 
 /// What a hold makes of the delivery: held back by a rule, or skipped by the user's own

@@ -343,6 +343,10 @@ impl CallPorts for FakePorts {
         Some(CHIEF.to_string())
     }
 
+    fn chief_session(&self) -> Option<String> {
+        None
+    }
+
     async fn speak_with_tts(&self, line: &str) {
         let hold = {
             let mut state = self.state();
@@ -432,6 +436,10 @@ fn chief_pane(pane_id: &str, state: EffectiveAgentState) -> AgentPane {
         folder: CHIEF.to_string(),
         reads_as_claude: true,
         state,
+        session: "pods".to_string(),
+        window_index: 0,
+        pane_index: 1,
+        started_at_ms: 1_000,
     }
 }
 
@@ -1808,8 +1816,9 @@ async fn shutdown_ends_the_call_and_cleans_up() {
 mod call_tests;
 
 #[test]
-fn two_agents_in_the_chiefs_folder_are_no_chief() {
+fn two_agents_in_the_chiefs_folder_leave_the_first_as_the_chief() {
     let h = Harness::new();
+    let logs = crate::outbound::fake::CapturedLogs::start();
     assert_eq!(super::call::chief_pane(&h.ports).as_deref(), Some("%2"));
     h.ports.0.panes.set(|s| {
         let mut second = s.view.panes[0].clone();
@@ -1817,12 +1826,9 @@ fn two_agents_in_the_chiefs_folder_are_no_chief() {
         s.view.panes.push(second);
     });
 
-    let logs = crate::outbound::fake::CapturedLogs::start();
-    assert_eq!(super::call::chief_pane(&h.ports), None);
+    assert_eq!(super::call::chief_pane(&h.ports).as_deref(), Some("%2"));
+    // The chief did not move, so only the first lookup was logged.
     let text = logs.text();
-    assert!(text.contains("chief pane changed"), "{text}");
-    assert!(
-        text.contains("state=\"ambiguous\"") && text.contains("count=2"),
-        "{text}"
-    );
+    assert_eq!(text.matches("chief pane changed").count(), 1, "{text}");
+    assert!(text.contains("state=\"found\""), "{text}");
 }

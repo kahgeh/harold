@@ -19,7 +19,9 @@ use crate::agent::domain::EffectiveAgentState;
 use crate::away_message::one_line;
 use crate::outbound::left_out::{ChiefLookup, resolve_chief, same_folder};
 use crate::telemetry::{self, StartedBy};
-use crate::timed_prompts::{AgentsView, Attempt, Ports, Reason, Writer, type_when_ready};
+use crate::timed_prompts::{
+    AgentPane, AgentsView, Attempt, Ports, Reason, Writer, type_when_ready,
+};
 use std::collections::VecDeque;
 use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
@@ -131,16 +133,16 @@ pub(super) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// The pane of the agent in the chief's folder. With several agents in a folder `chief`
-/// matches there is no chief.
+/// The chief's pane: the first agent pane of the chief's tmux session in the chief's
+/// folder.
 pub(super) fn chief_pane<P: CallPorts>(ports: &P) -> Option<String> {
     let folder = ports.chief_folder()?;
     let view = ports.panes().agents();
+    let session = ports.chief_session();
     let found = resolve_chief(
-        view.panes
-            .iter()
-            .map(|pane| (pane.pane_id.as_str(), pane.folder.as_str())),
+        view.panes.iter().map(AgentPane::position),
         Some(&folder),
+        session.as_deref(),
     );
     match found {
         ChiefLookup::Found(pane_id) => Some(pane_id),

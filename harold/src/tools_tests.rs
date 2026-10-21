@@ -95,6 +95,10 @@ fn pane(pane_id: &str, folder: &str) -> AgentPane {
         folder: folder.into(),
         reads_as_claude: true,
         state: EffectiveAgentState::Idle,
+        session: "pods".into(),
+        window_index: 0,
+        pane_index: 1,
+        started_at_ms: 1_000,
     }
 }
 
@@ -144,6 +148,7 @@ fn host_ports(fake: &Fake) -> HostPorts {
     let chief = SnapshotChiefPane {
         ports,
         folder: Some(CHIEF.to_string()),
+        session: None,
     };
     (
         Arc::new(typing),
@@ -368,11 +373,12 @@ async fn a_busy_pane_is_pane_busy_at_once() {
 }
 
 #[test]
-fn the_chief_pane_is_the_agent_in_the_chief_folder() {
+fn the_chief_pane_is_the_first_agent_in_the_chief_folder() {
     let fake = Fake::at(DAY, "09:00:00");
     let chief = |folder: Option<&str>| SnapshotChiefPane {
         ports: Arc::new(fake.clone()),
         folder: folder.map(str::to_string),
+        session: None,
     };
     fake.set(|state| {
         state.view = panes(vec![
@@ -385,18 +391,18 @@ fn the_chief_pane_is_the_agent_in_the_chief_folder() {
     assert_eq!(chief(None).chief_pane(), None);
     assert_eq!(chief(Some("/work/elsewhere")).chief_pane(), None);
 
-    // Two agents in the chief's folder: which one is the chief is not known.
+    // Two agents in the chief's folder: the first pane stays the chief.
     let logs = crate::outbound::fake::CapturedLogs::start();
     fake.set(|state| state.view.panes.push(pane("%4", CHIEF)));
-    assert_eq!(chief(Some(CHIEF)).chief_pane(), None);
+    assert_eq!(chief(Some(CHIEF)).chief_pane().as_deref(), Some("%2"));
     let text = logs.text();
     assert!(text.contains("chief pane changed"), "{text}");
     assert!(
-        text.contains("state=\"ambiguous\"") && text.contains("count=2"),
+        text.contains("state=\"found\"") && text.contains("count=2"),
         "{text}"
     );
     println!(
-        "evidence: chief pane %2 in {CHIEF}/; none with no folder, no pane, or two panes there"
+        "evidence: chief pane %2 in {CHIEF}/, also with a second pane there; none with no folder or no pane"
     );
 }
 

@@ -601,6 +601,10 @@ impl<B: CallPorts> CallPorts for PhonePorts<B> {
         self.base.chief_folder()
     }
 
+    fn chief_session(&self) -> Option<String> {
+        self.base.chief_session()
+    }
+
     /// Says `line` in the phone's own voice: resolves when the phone reports it said, or
     /// after `SPEECH_BASE` and `SPEECH_PER_CHAR` for each character. Before the call opens,
     /// offers nothing and resolves at once, as the sink does.

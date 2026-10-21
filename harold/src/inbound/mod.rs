@@ -398,7 +398,7 @@ pub(crate) fn route_to_chief(
 ) -> Result<ChiefRouting, String> {
     let (pane_id, busy) = match chief {
         ChiefPane::One { pane_id, busy } => (pane_id, *busy),
-        ChiefPane::NoChief | ChiefPane::Several => return Ok(ChiefRouting::NoChief),
+        ChiefPane::NoChief => return Ok(ChiefRouting::NoChief),
         ChiefPane::ListingFailed => {
             return Err(
                 "the tmux pane listing is failing, so the chief's pane is not known".into(),

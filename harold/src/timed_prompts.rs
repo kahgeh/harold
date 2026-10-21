@@ -16,7 +16,9 @@ use tracing::{error, info, warn};
 use crate::agent::domain::{AgentSnapshot, EffectiveAgentState};
 use crate::agent::snapshot::AgentSnapshotHub;
 use crate::inbound::tmux::{press_enter_in_tmux_pane, type_text_into_tmux_pane};
-use crate::outbound::left_out::{ChiefLookup, lookup_in_folder, note_chief};
+use crate::outbound::left_out::{
+    Chief, ChiefLookup, PanePosition, lookup_in_folder, resolve_chief, same_folder,
+};
 use crate::settings::{
     AgentMonitorSettings, AgentProviderSettings, ScreenAdapter, Settings, TimedPromptSettings,
     minute_of_day,
@@ -232,6 +234,25 @@ pub(crate) struct AgentPane {
     /// Whether the pane's provider uses the `claude-v1` screen adapter.
     pub reads_as_claude: bool,
     pub state: EffectiveAgentState,
+    /// The tmux session the pane is in.
+    pub session: String,
+    pub window_index: u32,
+    pub pane_index: u32,
+    /// When the agent process started.
+    pub started_at_ms: i64,
+}
+
+impl AgentPane {
+    pub(crate) fn position(&self) -> PanePosition<'_> {
+        PanePosition {
+            pane_id: &self.pane_id,
+            folder: &self.folder,
+            session: &self.session,
+            window_index: self.window_index,
+            pane_index: self.pane_index,
+            started_at_ms: self.started_at_ms,
+        }
+    }
 }
 
 /// The agent panes Harold tracks, and whether its last listing of tmux panes failed.
@@ -263,41 +284,70 @@ pub(crate) fn agents_view(
                 folder: projection.pane.working_directory.clone(),
                 reads_as_claude: reads_as_claude(&projection.pane.incarnation.provider_id),
                 state: projection.effective_state,
+                session: projection.pane.session_name.clone(),
+                window_index: projection.pane.window_index,
+                pane_index: projection.pane.pane_index,
+                started_at_ms: projection.pane.incarnation.agent_started_at_ms,
             })
             .collect(),
     }
 }
 
-/// Checks 1 to 5: the pane a prompt for `folder` is typed into, or the reason of the
-/// first check that fails. A pane in `typed_into` counts as busy: Harold typed into it
-/// earlier in this round or in an earlier round, and the snapshot still says idle for a
-/// moment after Harold types. The round keeps a pane in `typed_into` until a round has
-/// seen it not idle, for at most a minute.
-pub(crate) fn pick_pane<'a>(
+/// The agent pane the writers type into for `folder`: for the chief's folder the chief
+/// (`resolve_chief`), for any other folder its only agent (`lookup_in_folder`), or the
+/// reason there is none.
+fn target_pane<'a>(
     view: &'a AgentsView,
     folder: &str,
-    typed_into: &[String],
+    chief: Chief<'_>,
 ) -> Result<&'a AgentPane, Reason> {
-    if view.listing_failed {
-        return Err(Reason::PaneListFailing);
-    }
-    let pane_id = match lookup_in_folder(
-        view.panes
-            .iter()
-            .map(|pane| (pane.pane_id.as_str(), pane.folder.as_str())),
-        folder,
-    ) {
+    let is_chief_folder = chief
+        .folder
+        .is_some_and(|entry| same_folder(folder, entry) || same_folder(entry, folder));
+    let lookup = if is_chief_folder {
+        resolve_chief(
+            view.panes.iter().map(AgentPane::position),
+            chief.folder,
+            chief.session,
+        )
+    } else {
+        lookup_in_folder(
+            view.panes
+                .iter()
+                .map(|pane| (pane.pane_id.as_str(), pane.folder.as_str())),
+            folder,
+        )
+    };
+    let pane_id = match lookup {
         ChiefLookup::None => return Err(Reason::NoAgentInFolder),
         ChiefLookup::Ambiguous { count } => {
             return Err(Reason::SeveralAgentsInFolder { agents: count });
         }
         ChiefLookup::Found(pane_id) => pane_id,
     };
-    let pane = view
-        .panes
+    view.panes
         .iter()
         .find(|pane| pane.pane_id == pane_id)
-        .ok_or(Reason::NoAgentInFolder)?;
+        .ok_or(Reason::NoAgentInFolder)
+}
+
+/// Checks 1 to 5: the pane a prompt for `folder` is typed into, or the reason of the
+/// first check that fails. In the chief's folder (`chief`) several agents are fine: the
+/// pane is the chief's. In any other folder several agents fail check 3. A pane in
+/// `typed_into` counts as busy: Harold typed into it
+/// earlier in this round or in an earlier round, and the snapshot still says idle for a
+/// moment after Harold types. The round keeps a pane in `typed_into` until a round has
+/// seen it not idle, for at most a minute.
+pub(crate) fn pick_pane<'a>(
+    view: &'a AgentsView,
+    folder: &str,
+    chief: Chief<'_>,
+    typed_into: &[String],
+) -> Result<&'a AgentPane, Reason> {
+    if view.listing_failed {
+        return Err(Reason::PaneListFailing);
+    }
+    let pane = target_pane(view, folder, chief)?;
     if !pane.reads_as_claude {
         return Err(Reason::InputBoxUnreadable);
     }
@@ -451,6 +501,12 @@ pub(crate) trait Ports: Send + Sync + 'static {
 
     /// The pane locks every writer through these ports shares.
     fn pane_locks(&self) -> &PaneLocks;
+
+    /// `[notify] chief` and `chief_session`: which folder holds the chief and, among its
+    /// agents, which tmux session. Unset by default.
+    fn chief(&self) -> Chief<'_> {
+        Chief::default()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -838,18 +894,10 @@ pub(crate) async fn type_when_ready<P: Ports>(
 ) -> Attempt {
     let locks = ports.pane_locks();
     locks.observe(view);
-    // Only the alert and the call always type into the chief's folder. A timed prompt's
-    // folder is any folder, and a tool types into a pane's own, so neither says anything
-    // about the chief's state.
-    if matches!(writer, Writer::Alert | Writer::Voice) && !view.listing_failed {
-        note_chief(&lookup_in_folder(
-            view.panes
-                .iter()
-                .map(|pane| (pane.pane_id.as_str(), pane.folder.as_str())),
-            folder,
-        ));
-    }
-    let pane = match pick_pane(view, folder, typed_into) {
+    // For the chief's folder `pick_pane` finds the chief with `resolve_chief`, which logs
+    // each change of the chief's pane.
+    let chief = ports.chief();
+    let pane = match pick_pane(view, folder, chief, typed_into) {
         Ok(pane) => pane.pane_id.clone(),
         Err(reason) => return Attempt::Wait(reason),
     };
@@ -859,7 +907,7 @@ pub(crate) async fn type_when_ready<P: Ports>(
     if !view.listing_failed && !reads_idle(&view, &pane) {
         record.typed = None;
     }
-    match pick_pane(&view, folder, typed_into) {
+    match pick_pane(&view, folder, chief, typed_into) {
         Ok(picked) if picked.pane_id == pane => {}
         // The folder's pane changed while this writer waited; the next try looks again.
         Ok(_) => return Attempt::Wait(Reason::AgentStateUnknown),
@@ -918,6 +966,13 @@ pub(crate) async fn type_line_once<P: Ports>(
     let Some(pane) = view.panes.iter().find(|pane| pane.pane_id == pane_id) else {
         return LineOutcome::NoPane;
     };
+    // Only the pane the writers type into for the folder may be typed into: a second pane
+    // in the chief's folder waits.
+    if let Ok(target) = target_pane(&view, &pane.folder, ports.chief())
+        && target.pane_id != pane_id
+    {
+        return LineOutcome::PaneBusy;
+    }
     match type_when_ready(ports, writer, &pane.folder, text, &view, &[]).await {
         Attempt::Typed { .. } => LineOutcome::Typed,
         Attempt::EnterFailed { .. } => LineOutcome::Failed,
@@ -978,6 +1033,8 @@ async fn typing_step(
 pub(crate) struct TmuxPorts {
     snapshots: AgentSnapshotHub,
     providers: Vec<AgentProviderSettings>,
+    chief_folder: Option<String>,
+    chief_session: Option<String>,
 }
 
 impl TmuxPorts {
@@ -987,7 +1044,16 @@ impl TmuxPorts {
         Self {
             snapshots,
             providers,
+            chief_folder: None,
+            chief_session: None,
         }
+    }
+
+    /// Sets the chief's folder and tmux session (`[notify] chief`, `chief_session`).
+    pub(crate) fn with_chief(mut self, notify: &crate::settings::NotifySettings) -> Self {
+        self.chief_folder = notify.chief.clone();
+        self.chief_session = notify.chief_session.clone();
+        self
     }
 }
 
@@ -999,6 +1065,13 @@ impl Ports for TmuxPorts {
 
     fn agents(&self) -> AgentsView {
         agents_view(&self.snapshots.current(), &self.providers)
+    }
+
+    fn chief(&self) -> Chief<'_> {
+        Chief {
+            folder: self.chief_folder.as_deref(),
+            session: self.chief_session.as_deref(),
+        }
     }
 
     async fn read_screen(&self, pane_id: &str) -> Option<String> {
@@ -1091,7 +1164,7 @@ pub(crate) async fn start(
     } else {
         store.timed_prompt_last_days().await?
     };
-    let ports = TmuxPorts::new(snapshots, settings.agents.0.clone());
+    let ports = TmuxPorts::new(snapshots, settings.agents.0.clone()).with_chief(&settings.notify);
     let is_new = store.is_new();
     let mut prompts = TimedPrompts::new(&settings.timed_prompts, &last_days, ports, store);
     for report in mark_passed_if_new_store(&mut prompts, is_new).await {

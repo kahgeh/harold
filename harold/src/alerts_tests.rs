@@ -15,7 +15,7 @@ const SLOT_IDLE_FIRING: &str = "harold alert: slot-idle firing";
 
 /// The fake's chief, idle in pane `%2` with an empty input box.
 fn idle_chief() -> Fake {
-    Fake::at(DAY, "09:00:00")
+    Fake::at(DAY, "09:00:00").with_chief(CHIEF, None)
 }
 
 fn typed(line: &str) -> Vec<Key> {
@@ -414,6 +414,26 @@ async fn a_firing_with_no_chief_is_typed_once_a_chief_starts() {
     fake.set(|fake| fake.view.panes = chief);
     tokio::time::sleep(Duration::from_secs(6)).await;
     assert_eq!(fake.keys(), typed(SLOT_IDLE_FIRING));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_second_agent_in_the_chiefs_folder_does_not_hold_the_alert() {
+    let logs = CapturedLogs::start();
+    let fake = idle_chief();
+    fake.set(|fake| {
+        let mut second = fake.view.panes[0].clone();
+        second.pane_id = "%9".into();
+        second.pane_index = 2;
+        fake.view.panes.push(second);
+    });
+    let (queue, _shutdown_tx, _handle) = deliver_to(&fake, Some(CHIEF));
+
+    queue.send(SLOT_IDLE_FIRING.into()).await.unwrap();
+    tokio::time::sleep(Duration::from_secs(6)).await;
+
+    assert_eq!(fake.keys(), typed(SLOT_IDLE_FIRING));
+    let text = logs.text();
+    assert!(!text.contains("several_agents_in_folder"), "{text}");
 }
 
 #[tokio::test(start_paused = true)]

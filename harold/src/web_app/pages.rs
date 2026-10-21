@@ -278,7 +278,11 @@ pub(crate) async fn get_thread(State(state): State<AppState>) -> Response {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
     let calls = state.calls.as_ref();
-    let chief = find_chief(&state.snapshots.borrow(), state.chief_folder.as_deref());
+    let chief = find_chief(
+        &state.snapshots.borrow(),
+        state.chief_folder.as_deref(),
+        state.chief_session.as_deref(),
+    );
     let responding = RespondingSection {
         on: dots_show(awaiting_chief(&messages), &chief),
     };

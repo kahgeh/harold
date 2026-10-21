@@ -3823,11 +3823,7 @@ async fn a_to_chief_reply_is_typed_into_the_chief_and_nowhere_else() {
 
 #[tokio::test]
 async fn a_to_chief_reply_with_no_chief_types_nothing_and_says_so() {
-    let two_chiefs = vec![
-        agent_observed("%app-chief-a", 10, "/work/chief-of-pods"),
-        agent_observed("%app-chief-b", 11, "/work/chief-of-pods"),
-    ];
-    for events in [vec![agent_observed("%2", 20, "/work/harold")], two_chiefs] {
+    for events in [vec![agent_observed("%2", 20, "/work/harold")]] {
         let directory = TestDirectory::new();
         let with = to_chief(&directory, events, FakeApp::new(AppDelivery::Pushed)).await;
         let event_id = unique_event_id();
@@ -3849,6 +3845,35 @@ async fn a_to_chief_reply_with_no_chief_types_nothing_and_says_so() {
             [(event_id, crate::store::AppReplyState::NotSentNoChief)]
         );
     }
+}
+
+#[tokio::test]
+async fn a_to_chief_reply_with_two_agents_in_the_chiefs_folder_is_typed_into_the_first() {
+    let directory = TestDirectory::new();
+    let with = to_chief(
+        &directory,
+        vec![
+            agent_observed("%app-chief-a", 10, "/work/chief-of-pods"),
+            agent_observed("%app-chief-b", 11, "/work/chief-of-pods"),
+        ],
+        FakeApp::new(AppDelivery::Pushed),
+    )
+    .await;
+
+    let outcome = with.dispatcher.dispatch_with_pause(
+        &inbound_delivery(&unique_event_id(), app_reply("hello")),
+        None,
+        false,
+    );
+
+    assert!(
+        matches!(outcome, Ok(DeliveryOutcome::Delivered)),
+        "{outcome:?}"
+    );
+    assert_eq!(
+        *with.typed.lock().unwrap(),
+        [("%app-chief-a".to_string(), "📱 hello".to_string())]
+    );
 }
 
 #[tokio::test]
@@ -4378,7 +4403,8 @@ async fn spoken_lines_from_unlisted_panes_are_dropped_on_each_channel_naming_its
 }
 
 #[tokio::test]
-async fn two_panes_matching_chief_are_no_chief_for_the_app_and_still_use_the_lists() {
+async fn two_panes_matching_chief_make_the_first_the_chief_for_the_app_and_the_second_uses_the_lists()
+ {
     let directory = TestDirectory::new();
     let overrides = "[notify]\nchief = \"chief-of-pods\"\nimessage = [\"chief-of-pods\"]\nweb_app = [\"chief-of-pods\"]";
     let events = vec![
@@ -4401,11 +4427,13 @@ async fn two_panes_matching_chief_are_no_chief_for_the_app_and_still_use_the_lis
         assert!(matches!(outcome, Ok(DeliveryOutcome::Delivered)));
     }
 
-    assert!(with.app.delivered().is_empty());
-    assert_eq!(with.environment.away_messages(), ["hi", "hi"]);
+    // The first pane is the chief and goes to the app; the second, still in the chief's
+    // folder, takes the lists.
+    assert_eq!(with.app.delivered().len(), 1);
+    assert_eq!(with.environment.away_messages(), ["hi"]);
     let text = logs.text();
     assert!(text.contains("chief pane changed"), "{text}");
-    assert!(text.contains("state=\"ambiguous\""), "{text}");
+    assert!(text.contains("state=\"found\""), "{text}");
     assert!(text.contains("count=2"), "{text}");
     assert!(!text.contains("/tmp/chief-of-pods"), "{text}");
 }

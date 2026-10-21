@@ -87,6 +87,8 @@ pub(crate) struct Agents<'a> {
     pub snapshots: &'a AgentSnapshotHub,
     /// `[notify] chief`, the chief's folder.
     pub chief_folder: Option<&'a str>,
+    /// `[notify] chief_session`, the chief's tmux session.
+    pub chief_session: Option<&'a str>,
     /// Harold's own gRPC address, where the question tool's service listens.
     pub grpc: &'a GrpcSettings,
 }
@@ -113,6 +115,8 @@ pub(crate) struct AppState {
     pub snapshots: watch::Receiver<AgentSnapshot>,
     /// `[notify] chief`, the folder the chief runs in.
     pub chief_folder: Option<Arc<str>>,
+    /// `[notify] chief_session`, the chief's tmux session.
+    pub chief_session: Option<Arc<str>>,
     /// The question tool's service, reached through Harold's own gRPC address.
     pub questions: todos::Questions,
     /// Bumped by each todo post, so every open page reads the todos again at once.
@@ -142,6 +146,7 @@ impl AppState {
             identity: Arc::new(identity),
             snapshots: idle_snapshots(),
             chief_folder: None,
+            chief_session: None,
             questions: todos::Questions::lazy(&idle_grpc()),
             todos_changed: Arc::new(watch::channel(0).0),
         }
@@ -173,6 +178,7 @@ pub(crate) fn idle_agents(grpc: &GrpcSettings) -> Agents<'_> {
     Agents {
         snapshots: idle_hub(),
         chief_folder: None,
+        chief_session: None,
         grpc,
     }
 }
@@ -269,6 +275,7 @@ pub(crate) async fn start(
         identity: Arc::new(identity),
         snapshots: agents.snapshots.subscribe(),
         chief_folder: agents.chief_folder.map(Arc::from),
+        chief_session: agents.chief_session.map(Arc::from),
         questions: todos::Questions::lazy(agents.grpc),
         todos_changed: Arc::new(watch::channel(0).0),
     };

@@ -464,17 +464,15 @@ fn a_busy_chief_is_typed_into_and_reported_busy() {
 }
 
 #[test]
-fn no_chief_or_several_types_nothing() {
-    for chief in [ChiefPane::NoChief, ChiefPane::Several] {
-        let typer = RecordingTyper::default();
+fn no_chief_types_nothing() {
+    let typer = RecordingTyper::default();
 
-        let routing = route_to_chief("hello", &chief, &|pane_id, text| {
-            typer.type_into(pane_id, text)
-        });
+    let routing = route_to_chief("hello", &ChiefPane::NoChief, &|pane_id, text| {
+        typer.type_into(pane_id, text)
+    });
 
-        assert_eq!(routing, Ok(ChiefRouting::NoChief), "{chief:?}");
-        assert!(typer.typed().is_empty(), "{chief:?}");
-    }
+    assert_eq!(routing, Ok(ChiefRouting::NoChief));
+    assert!(typer.typed().is_empty());
 }
 
 #[test]
@@ -509,7 +507,6 @@ fn a_reply_to_the_chief_is_never_logged() {
     for chief in [
         one_chief("%app-reply-log", false),
         ChiefPane::NoChief,
-        ChiefPane::Several,
         ChiefPane::ListingFailed,
     ] {
         let _ = route_to_chief("APP-CANARY-7731", &chief, &|pane_id, text| {

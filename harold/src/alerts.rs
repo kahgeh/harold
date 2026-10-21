@@ -429,6 +429,8 @@ fn log_waiting(alert: &str, state: &str, reason: &Reason) {
             reason = name,
             "alert waiting (pane_list_failing)"
         ),
+        // Not reached for the chief's folder, which is the only folder an alert types into:
+        // the chief is that folder's first agent pane. The variant stays for other folders.
         Reason::SeveralAgentsInFolder { .. } => info!(
             alert,
             state,

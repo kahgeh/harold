@@ -102,6 +102,8 @@ pub(crate) trait CallPorts: Send + Sync + 'static {
     fn panes(&self) -> &Self::Panes;
     /// `[notify] chief`.
     fn chief_folder(&self) -> Option<String>;
+    /// `[notify] chief_session`.
+    fn chief_session(&self) -> Option<String>;
     /// Says `line` with the `[tts]` command; resolves when it has ended.
     fn speak_with_tts(&self, line: &str) -> impl Future<Output = ()> + Send;
     /// Stops a line the `[tts]` command is saying now.

@@ -233,6 +233,7 @@ pub(crate) struct MacPorts {
     /// `None` without `[voice_input]` or its Whisper model; no call starts then.
     worker: Option<WorkerCommand>,
     chief_folder: Option<String>,
+    chief_session: Option<String>,
     tts: Arc<TtsSettings>,
     sink: Arc<MacSink>,
 }
@@ -241,12 +242,14 @@ impl MacPorts {
     pub(crate) fn from_settings(settings: &Settings, snapshots: AgentSnapshotHub) -> Self {
         let tts = &settings.tts;
         Self {
-            panes: TmuxPorts::new(snapshots, settings.agents.0.clone()),
+            panes: TmuxPorts::new(snapshots, settings.agents.0.clone())
+                .with_chief(&settings.notify),
             worker: settings
                 .voice_input
                 .as_ref()
                 .and_then(|voice_input| WorkerCommand::from_settings(voice_input, tts)),
             chief_folder: settings.notify.chief.clone(),
+            chief_session: settings.notify.chief_session.clone(),
             tts: Arc::new(TtsSettings {
                 command: tts.command.clone(),
                 voice: tts.voice.clone(),
@@ -299,6 +302,10 @@ impl CallPorts for MacPorts {
 
     fn chief_folder(&self) -> Option<String> {
         self.chief_folder.clone()
+    }
+
+    fn chief_session(&self) -> Option<String> {
+        self.chief_session.clone()
     }
 
     async fn speak_with_tts(&self, line: &str) {

@@ -218,8 +218,12 @@ impl ProductionDispatcher {
         let settings = self.environment.notify_settings();
         let current = snapshots.current();
         let agents = TrackedAgents::from_snapshot(&current);
-        let on_app = is_chief_pane(&current, settings.chief.as_deref(), pane_id)
-            && agents.may_use(settings, Channel::WebApp, pane_id);
+        let on_app = is_chief_pane(
+            &current,
+            settings.chief.as_deref(),
+            settings.chief_session.as_deref(),
+            pane_id,
+        ) && agents.may_use(settings, Channel::WebApp, pane_id);
         on_app.then(|| ChiefApp {
             app,
             away: self.away_text.as_ref(),
@@ -233,8 +237,12 @@ impl ProductionDispatcher {
         let Some(snapshots) = self.snapshots.as_ref() else {
             return ChiefPane::NoChief;
         };
-        let chief_folder = self.environment.notify_settings().chief.as_deref();
-        find_chief(&snapshots.current(), chief_folder)
+        let notify = self.environment.notify_settings();
+        find_chief(
+            &snapshots.current(),
+            notify.chief.as_deref(),
+            notify.chief_session.as_deref(),
+        )
     }
 
     /// Shows `state` on the app's row for the reply `event_id` stored, when a web app is

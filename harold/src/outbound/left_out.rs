@@ -68,33 +68,76 @@ pub(crate) fn entry_matches(folder: &str, entry: &str, home: Option<&str>) -> bo
 /// latest good listing: while a listing fails the snapshot keeps the last good one's panes.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(crate) struct TrackedAgents {
-    /// Pane id and working directory.
-    folder_by_pane: Vec<(String, String)>,
+    panes: Vec<TrackedPane>,
+}
+
+/// One tracked agent pane: where it runs and where it sits in tmux.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TrackedPane {
+    pane_id: String,
+    /// The working directory tmux reports for the pane.
+    folder: String,
+    session: String,
+    window_index: u32,
+    pane_index: u32,
+    started_at_ms: i64,
 }
 
 impl TrackedAgents {
     /// The panes in `snapshot`.
     pub(crate) fn from_snapshot(snapshot: &AgentSnapshot) -> Self {
         Self {
-            folder_by_pane: snapshot
+            panes: snapshot
                 .panes
                 .iter()
-                .map(|projection| {
-                    (
-                        projection.pane.incarnation.pane_id.clone(),
-                        projection.pane.working_directory.clone(),
-                    )
+                .map(|projection| TrackedPane {
+                    pane_id: projection.pane.incarnation.pane_id.clone(),
+                    folder: projection.pane.working_directory.clone(),
+                    session: projection.pane.session_name.clone(),
+                    window_index: projection.pane.window_index,
+                    pane_index: projection.pane.pane_index,
+                    started_at_ms: projection.pane.incarnation.agent_started_at_ms,
+                })
+                .collect(),
+        }
+    }
+
+    /// Panes in one session, in listing order, all started at the same time.
+    #[cfg(test)]
+    pub(crate) fn in_folders(panes: &[(&str, &str)]) -> Self {
+        Self {
+            panes: panes
+                .iter()
+                .enumerate()
+                .map(|(index, (pane_id, folder))| TrackedPane {
+                    pane_id: pane_id.to_string(),
+                    folder: folder.to_string(),
+                    session: String::new(),
+                    window_index: 0,
+                    pane_index: index as u32,
+                    started_at_ms: 0,
                 })
                 .collect(),
         }
     }
 
     #[cfg(test)]
-    pub(crate) fn in_folders(panes: &[(&str, &str)]) -> Self {
+    fn with_positions(panes: &[(&str, &str, &str, u32, u32, i64)]) -> Self {
         Self {
-            folder_by_pane: panes
+            panes: panes
                 .iter()
-                .map(|(pane_id, folder)| (pane_id.to_string(), folder.to_string()))
+                .map(
+                    |&(pane_id, folder, session, window_index, pane_index, started_at_ms)| {
+                        TrackedPane {
+                            pane_id: pane_id.into(),
+                            folder: folder.into(),
+                            session: session.into(),
+                            window_index,
+                            pane_index,
+                            started_at_ms,
+                        }
+                    },
+                )
                 .collect(),
         }
     }
@@ -108,10 +151,10 @@ impl TrackedAgents {
     }
 
     fn folder_of(&self, pane_id: &str) -> Option<&str> {
-        self.folder_by_pane
+        self.panes
             .iter()
-            .find(|(id, _)| id == pane_id)
-            .map(|(_, folder)| folder.as_str())
+            .find(|pane| pane.pane_id == pane_id)
+            .map(|pane| pane.folder.as_str())
     }
 
     /// Whether `pane_id` may use `channel`: its folder matches an entry on the channel's
@@ -133,28 +176,37 @@ impl TrackedAgents {
         list.iter().any(|entry| same_folder(folder, entry))
     }
 
-    /// The chief's pane: the one pane whose folder matches `chief`. With several matching
-    /// panes there is no chief here (see `resolve_chief`).
-    pub(crate) fn chief_pane_id(&self, chief: Option<&str>) -> Option<&str> {
+    /// The chief's pane (see `resolve_chief`).
+    pub(crate) fn chief_pane_id(
+        &self,
+        chief: Option<&str>,
+        chief_session: Option<&str>,
+    ) -> Option<&str> {
         let lookup = resolve_chief(
-            self.folder_by_pane
-                .iter()
-                .map(|(id, folder)| (id.as_str(), folder.as_str())),
+            self.panes.iter().map(|pane| PanePosition {
+                pane_id: &pane.pane_id,
+                folder: &pane.folder,
+                session: &pane.session,
+                window_index: pane.window_index,
+                pane_index: pane.pane_index,
+                started_at_ms: pane.started_at_ms,
+            }),
             chief,
+            chief_session,
         );
         match lookup {
             ChiefLookup::Found(pane_id) => self
-                .folder_by_pane
+                .panes
                 .iter()
-                .find(|(id, _)| *id == pane_id)
-                .map(|(id, _)| id.as_str()),
+                .find(|pane| pane.pane_id == pane_id)
+                .map(|pane| pane.pane_id.as_str()),
             ChiefLookup::Ambiguous { .. } | ChiefLookup::None => None,
         }
     }
 
-    /// Whether `pane_id`'s folder matches `chief`. Unlike `chief_pane_id` it holds while
-    /// several panes match, so a message from the chief's folder is still known as the
-    /// chief's.
+    /// Whether `pane_id`'s folder matches `chief`. Unlike `chief_pane_id` it holds for
+    /// every pane in the folder, so a message from the chief's folder is still known as
+    /// the chief's while another pane is the chief.
     pub(crate) fn is_in_chief_folder(&self, chief: Option<&str>, pane_id: &str) -> bool {
         let (Some(chief), Some(folder)) = (chief, self.folder_of(pane_id)) else {
             return false;
@@ -166,22 +218,87 @@ impl TrackedAgents {
 /// What looking for the chief's pane found.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ChiefLookup {
-    /// One pane is in the chief's folder.
+    /// The pane found.
     Found(String),
-    /// `count` panes are in it, so there is no chief.
+    /// `count` panes are in the folder, and the rule for it picks none (`lookup_in_folder`
+    /// only; `resolve_chief` never returns this).
     Ambiguous { count: usize },
     /// No chief folder is set, or no pane is in it.
     None,
 }
 
-impl ChiefLookup {
-    fn state(&self) -> (&'static str, usize) {
+/// Where the chief is: `[notify] chief` and `chief_session`.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct Chief<'a> {
+    pub folder: Option<&'a str>,
+    pub session: Option<&'a str>,
+}
+
+/// One agent pane with where it runs and where it sits in tmux, for `resolve_chief`.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct PanePosition<'a> {
+    pub pane_id: &'a str,
+    pub folder: &'a str,
+    pub session: &'a str,
+    pub window_index: u32,
+    pub pane_index: u32,
+    pub started_at_ms: i64,
+}
+
+/// How the chief's tmux session was picked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SessionBy {
+    /// `[notify] chief_session` named a session with an agent in the folder.
+    Setting,
+    /// The session of the longest-running agent in the folder.
+    Longest,
+}
+
+impl SessionBy {
+    fn as_str(self) -> &'static str {
         match self {
-            Self::Found(_) => ("found", 1),
-            Self::Ambiguous { count } => ("ambiguous", *count),
-            Self::None => ("none", 0),
+            Self::Setting => "setting",
+            Self::Longest => "longest",
         }
     }
+}
+
+struct ChiefPick<'a> {
+    pane_id: &'a str,
+    /// The agents in the chief's folder.
+    count: usize,
+    session_by: SessionBy,
+}
+
+/// The chief among `panes`: see the rule in `resolve_chief`.
+fn pick_chief<'a>(
+    panes: impl IntoIterator<Item = PanePosition<'a>>,
+    chief: &str,
+    chief_session: Option<&str>,
+) -> Option<ChiefPick<'a>> {
+    let in_folder: Vec<PanePosition<'a>> = panes
+        .into_iter()
+        .filter(|pane| same_folder(pane.folder, chief))
+        .collect();
+    let named = chief_session.filter(|name| in_folder.iter().any(|pane| pane.session == *name));
+    let (session, session_by) = match named {
+        Some(name) => (name, SessionBy::Setting),
+        None => {
+            let oldest = in_folder
+                .iter()
+                .min_by_key(|pane| (pane.started_at_ms, pane.session))?;
+            (oldest.session, SessionBy::Longest)
+        }
+    };
+    let first = in_folder
+        .iter()
+        .filter(|pane| pane.session == session)
+        .min_by_key(|pane| (pane.window_index, pane.pane_index))?;
+    Some(ChiefPick {
+        pane_id: first.pane_id,
+        count: in_folder.len(),
+        session_by,
+    })
 }
 
 /// The panes (pane id and folder) whose folder matches `folder`, as a `ChiefLookup`. Logs
@@ -202,50 +319,66 @@ pub(crate) fn lookup_in_folder<'a>(
     }
 }
 
+/// What `note_chief` last saw: the pane picked and how its session was picked, both empty
+/// for no chief.
+type LastChief = (String, &'static str);
+
 #[cfg(not(test))]
-static LAST_CHIEF_STATE: Mutex<&'static str> = Mutex::new("none");
+static LAST_CHIEF: Mutex<Option<LastChief>> = Mutex::new(None);
 
 #[cfg(test)]
 thread_local! {
-    static LAST_CHIEF_STATE: std::cell::Cell<&'static str> = const { std::cell::Cell::new("none") };
+    static LAST_CHIEF: std::cell::RefCell<Option<LastChief>> = const { std::cell::RefCell::new(None) };
 }
 
-/// Whether `state` differs from the last one logged, taking it as the last.
+/// Whether `now` differs from the last one noted (no chief, at the start), taking it as
+/// the last.
 #[cfg(not(test))]
-fn state_changed(state: &'static str) -> bool {
-    let mut last = LAST_CHIEF_STATE
+fn chief_changed(now: LastChief) -> bool {
+    let mut last = LAST_CHIEF
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    std::mem::replace(&mut *last, state) != state
+    last.replace(now.clone()).unwrap_or_default() != now
 }
 
 #[cfg(test)]
-fn state_changed(state: &'static str) -> bool {
-    LAST_CHIEF_STATE.with(|last| last.replace(state) != state)
+fn chief_changed(now: LastChief) -> bool {
+    LAST_CHIEF.with(|last| last.borrow_mut().replace(now.clone()).unwrap_or_default() != now)
 }
 
-/// Logs `chief pane changed` (`state`, `count`, no folder) when `lookup`'s state differs
-/// from the last one logged. Harold starts with `none` as the last, so a start with no
-/// chief logs nothing.
-pub(crate) fn note_chief(lookup: &ChiefLookup) {
-    let (state, count) = lookup.state();
-    if state_changed(state) {
-        tracing::info!(state, count, "chief pane changed");
+/// Logs `chief pane changed` (`state`, `count`, `pane_id`, `session_by`, no folder) when
+/// the pane picked or how its session was picked differs from the last one logged. Harold
+/// starts with no chief as the last, so a start with none logs nothing.
+fn note_chief(pick: Option<&ChiefPick<'_>>) {
+    let (state, pane_id, session_by, count) = match pick {
+        Some(pick) => ("found", pick.pane_id, pick.session_by.as_str(), pick.count),
+        None => ("none", "", "", 0),
+    };
+    if chief_changed((pane_id.to_string(), session_by)) {
+        tracing::info!(state, count, pane_id, session_by, "chief pane changed");
     }
 }
 
-/// The one place that finds the chief's pane: the pane whose folder matches `chief`. With
-/// no chief folder set it is `None` and nothing is logged.
+/// The one place that finds the chief's pane. Among the agent panes whose folder matches
+/// `chief`, the chief's tmux session is the one `chief_session` names when an agent there
+/// runs in a session with exactly that name, else the session of the longest-running
+/// agent (earliest start). The chief is that session's first pane in the folder, by window
+/// index, then pane index. It is `None` and nothing is logged with no chief folder set,
+/// and never `Ambiguous`.
 pub(crate) fn resolve_chief<'a>(
-    panes: impl IntoIterator<Item = (&'a str, &'a str)>,
+    panes: impl IntoIterator<Item = PanePosition<'a>>,
     chief: Option<&str>,
+    chief_session: Option<&str>,
 ) -> ChiefLookup {
     let Some(chief) = chief else {
         return ChiefLookup::None;
     };
-    let lookup = lookup_in_folder(panes, chief);
-    note_chief(&lookup);
-    lookup
+    let pick = pick_chief(panes, chief, chief_session);
+    note_chief(pick.as_ref());
+    match pick {
+        Some(pick) => ChiefLookup::Found(pick.pane_id.to_string()),
+        None => ChiefLookup::None,
+    }
 }
 
 /// The log line for a turn-end update held off the phone by the list under `key`.
@@ -397,7 +530,9 @@ pub(crate) fn desk_update_reason(
     agents: &TrackedAgents,
     pane_id: &str,
 ) -> Option<Held> {
-    if agents.chief_pane_id(settings.chief.as_deref()) == Some(pane_id) {
+    if agents.chief_pane_id(settings.chief.as_deref(), settings.chief_session.as_deref())
+        == Some(pane_id)
+    {
         return Some(Held {
             line: "spoken update left out (chief)".to_string(),
             channel: Channel::MachineAudioOutput,
@@ -495,8 +630,8 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::{
-        ChiefLookup, MARK_LIFETIME, MESSAGED_THIS_TURN, TrackedAgents, agent_label, channel_live,
-        desk_line_dropped_reason, desk_update_reason, entry_matches, left_out_reason,
+        ChiefLookup, MARK_LIFETIME, MESSAGED_THIS_TURN, PanePosition, TrackedAgents, agent_label,
+        channel_live, desk_line_dropped_reason, desk_update_reason, entry_matches, left_out_reason,
         mark_is_fresh, message_dropped_reason, phone_held_back, resolve_chief,
         spoken_line_dropped_reason,
     };
@@ -527,56 +662,171 @@ mod tests {
         ));
     }
 
-    const ONE: [(&str, &str); 2] = [("%1", "/w/chief-of-pods"), ("%2", "/w/harold")];
-    const TWO: [(&str, &str); 3] = [
-        ("%1", "/w/chief-of-pods"),
-        ("%2", "/w/harold"),
-        ("%3", "/other/chief-of-pods"),
-    ];
+    const CHIEF_SET: Option<&str> = Some("chief-of-pods");
 
-    #[test]
-    fn resolver_returns_found_ambiguous_and_none() {
-        assert_eq!(
-            resolve_chief(ONE, Some("chief-of-pods")),
-            ChiefLookup::Found("%1".into())
-        );
-        assert_eq!(
-            resolve_chief(TWO, Some("chief-of-pods")),
-            ChiefLookup::Ambiguous { count: 2 }
-        );
-        assert_eq!(resolve_chief(ONE, Some("elsewhere")), ChiefLookup::None);
-        assert_eq!(resolve_chief(ONE, None), ChiefLookup::None);
+    fn at<'a>(
+        pane_id: &'a str,
+        folder: &'a str,
+        session: &'a str,
+        window_index: u32,
+        pane_index: u32,
+        started_at_ms: i64,
+    ) -> PanePosition<'a> {
+        PanePosition {
+            pane_id,
+            folder,
+            session,
+            window_index,
+            pane_index,
+            started_at_ms,
+        }
+    }
+
+    fn found(pane: &str) -> ChiefLookup {
+        ChiefLookup::Found(pane.into())
     }
 
     #[test]
-    fn ambiguous_found_ambiguous_logs_each_change_once() {
-        let logs = crate::outbound::fake::CapturedLogs::start();
-        let chief = Some("chief-of-pods");
+    fn one_agent_gives_that_pane() {
+        let panes = [
+            at("%1", "/w/chief-of-pods", "chief", 0, 0, 10),
+            at("%2", "/w/harold", "pod", 0, 0, 5),
+        ];
+        assert_eq!(resolve_chief(panes, CHIEF_SET, None), found("%1"));
+    }
 
-        for panes in [&TWO[..], &TWO[..], &ONE[..], &ONE[..], &TWO[..], &TWO[..]] {
-            resolve_chief(panes.iter().copied(), chief);
-        }
+    #[test]
+    fn a_second_pane_in_the_session_with_a_higher_index_leaves_the_first() {
+        let panes = [
+            at("%2", "/w/chief-of-pods", "chief", 0, 1, 20),
+            at("%1", "/w/chief-of-pods", "chief", 0, 0, 10),
+        ];
+        assert_eq!(resolve_chief(panes, CHIEF_SET, None), found("%1"));
+    }
 
-        let text = logs.text();
-        let lines: Vec<&str> = text
+    #[test]
+    fn a_lower_window_index_in_the_session_becomes_the_chief() {
+        let panes = [
+            at("%1", "/w/chief-of-pods", "chief", 1, 0, 10),
+            at("%2", "/w/chief-of-pods", "chief", 0, 3, 20),
+        ];
+        assert_eq!(resolve_chief(panes, CHIEF_SET, None), found("%2"));
+    }
+
+    #[test]
+    fn no_agent_or_no_chief_setting_gives_no_chief() {
+        let panes = [at("%1", "/w/chief-of-pods", "chief", 0, 0, 10)];
+        assert_eq!(
+            resolve_chief(panes, Some("elsewhere"), None),
+            ChiefLookup::None
+        );
+        assert_eq!(resolve_chief(panes, None, None), ChiefLookup::None);
+        assert_eq!(resolve_chief([], CHIEF_SET, None), ChiefLookup::None);
+    }
+
+    #[test]
+    fn the_named_session_wins_over_an_older_agent_elsewhere() {
+        let panes = [
+            at("%1", "/w/chief-of-pods", "other", 0, 0, 1),
+            at("%2", "/w/chief-of-pods", "chief", 0, 0, 99),
+        ];
+        assert_eq!(resolve_chief(panes, CHIEF_SET, Some("chief")), found("%2"));
+    }
+
+    #[test]
+    fn unset_picks_the_session_of_the_longest_running_agent() {
+        let panes = [
+            at("%1", "/w/chief-of-pods", "newer", 0, 0, 50),
+            at("%2", "/w/chief-of-pods", "older", 0, 4, 10),
+            at("%3", "/w/chief-of-pods", "older", 0, 2, 70),
+        ];
+        assert_eq!(resolve_chief(panes, CHIEF_SET, None), found("%3"));
+    }
+
+    #[test]
+    fn the_session_match_is_exact() {
+        let panes = [
+            at("%1", "/w/chief-of-pods", "chief-2", 0, 0, 5),
+            at("%2", "/w/chief-of-pods", "chie", 0, 0, 6),
+            at("%3", "/w/chief-of-pods", "x", 0, 0, 7),
+        ];
+        assert_eq!(resolve_chief(panes, CHIEF_SET, Some("chief")), found("%1"));
+    }
+
+    #[test]
+    fn equal_start_times_pick_the_lower_session_name() {
+        let panes = [
+            at("%1", "/w/chief-of-pods", "b", 0, 0, 5),
+            at("%2", "/w/chief-of-pods", "a", 0, 0, 5),
+        ];
+        assert_eq!(resolve_chief(panes, CHIEF_SET, None), found("%2"));
+    }
+
+    fn change_lines(logs: &crate::outbound::fake::CapturedLogs) -> Vec<String> {
+        logs.text()
             .lines()
             .filter(|line| line.contains("chief pane changed"))
-            .collect();
-        assert_eq!(lines.len(), 3, "{text}");
-        assert!(lines[0].contains("state=\"ambiguous\"") && lines[0].contains("count=2"));
-        assert!(lines[1].contains("state=\"found\"") && lines[1].contains("count=1"));
-        assert!(lines[2].contains("state=\"ambiguous\""));
-        assert!(!text.contains("chief pane ambiguous"), "{text}");
-        assert!(!text.contains("/w/"), "no folder is logged: {text}");
+            .map(str::to_string)
+            .collect()
     }
 
     #[test]
-    fn a_folder_in_the_chief_folder_is_known_while_it_is_ambiguous() {
-        let agents = TrackedAgents::in_folders(&TWO);
+    fn a_pane_change_logs_one_found_line_and_no_change_logs_nothing() {
+        let logs = crate::outbound::fake::CapturedLogs::start();
+        let first = [
+            at("%1", "/w/chief-of-pods", "chief", 0, 0, 10),
+            at("%2", "/w/chief-of-pods", "chief", 0, 1, 20),
+        ];
+        let moved = [at("%2", "/w/chief-of-pods", "chief", 0, 1, 20)];
+
+        for panes in [&first[..], &first[..], &moved[..], &moved[..]] {
+            resolve_chief(panes.iter().copied(), CHIEF_SET, Some("chief"));
+        }
+
+        let lines = change_lines(&logs);
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert!(lines[0].contains("state=\"found\"") && lines[0].contains("count=2"));
+        assert!(lines[0].contains("pane_id=%1") || lines[0].contains("pane_id=\"%1\""));
+        assert!(lines[0].contains("session_by=\"setting\""));
+        assert!(lines[1].contains("count=1") && lines[1].contains("%2"));
+        assert!(!logs.text().contains("/w/"), "no folder is logged");
+    }
+
+    #[test]
+    fn a_fallback_logs_session_by_longest_and_a_vanished_chief_logs_none() {
+        let logs = crate::outbound::fake::CapturedLogs::start();
+        let panes = [at("%1", "/w/chief-of-pods", "other", 0, 0, 10)];
+
+        resolve_chief(panes, CHIEF_SET, Some("chief"));
+        resolve_chief([], CHIEF_SET, Some("chief"));
+
+        let lines = change_lines(&logs);
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert!(lines[0].contains("session_by=\"longest\""));
+        assert!(lines[1].contains("state=\"none\"") && lines[1].contains("count=0"));
+    }
+
+    #[test]
+    fn a_folder_in_the_chief_folder_is_known_while_another_pane_is_the_chief() {
+        let agents = TrackedAgents::in_folders(&[
+            ("%1", "/w/chief-of-pods"),
+            ("%2", "/w/harold"),
+            ("%3", "/other/chief-of-pods"),
+        ]);
         assert!(agents.is_in_chief_folder(Some("chief-of-pods"), "%3"));
         assert!(!agents.is_in_chief_folder(Some("chief-of-pods"), "%2"));
         assert!(!agents.is_in_chief_folder(None, "%1"));
         assert!(!agents.is_in_chief_folder(Some("chief-of-pods"), "%9"));
+    }
+
+    #[test]
+    fn tracked_agents_use_the_session_setting() {
+        let agents = TrackedAgents::with_positions(&[
+            ("%1", "/w/chief-of-pods", "old", 0, 0, 1),
+            ("%2", "/w/chief-of-pods", "chief", 0, 0, 9),
+        ]);
+        assert_eq!(agents.chief_pane_id(CHIEF_SET, None), Some("%1"));
+        assert_eq!(agents.chief_pane_id(CHIEF_SET, Some("chief")), Some("%2"));
     }
 
     #[test]
@@ -835,13 +1085,13 @@ mod tests {
     }
 
     #[test]
-    fn chief_is_quiet_at_the_desk_and_two_matching_panes_are_no_chief() {
+    fn chief_is_quiet_at_the_desk_and_the_first_of_two_matching_panes_is_the_chief() {
         let notify = settings("");
         let one = TrackedAgents::in_folders(&[
             ("%1", "/Users/x/Dev/p/chief-of-pods"),
             ("%2", "/work/harold"),
         ]);
-        assert_eq!(one.chief_pane_id(notify.chief.as_deref()), Some("%1"));
+        assert_eq!(one.chief_pane_id(notify.chief.as_deref(), None), Some("%1"));
         assert_eq!(
             desk_update_reason(&notify, &one, "%1")
                 .map(|held| held.line)
@@ -852,14 +1102,23 @@ mod tests {
             ("%1", "/Users/x/Dev/p/chief-of-pods"),
             ("%2", "/tmp/chief-of-pods"),
         ]);
-        assert_eq!(two.chief_pane_id(notify.chief.as_deref()), None);
+        assert_eq!(two.chief_pane_id(notify.chief.as_deref(), None), Some("%1"));
         for channel in ALL_CHANNELS {
             assert!(two.may_use(&notify, channel, "%1"));
             assert!(two.may_use(&notify, channel, "%2"));
         }
-        assert_eq!(desk_update_reason(&notify, &two, "%1"), None);
+        assert_eq!(
+            desk_update_reason(&notify, &two, "%1")
+                .map(|held| held.line)
+                .as_deref(),
+            Some("spoken update left out (chief)")
+        );
+        assert_eq!(desk_update_reason(&notify, &two, "%2"), None);
         let gone = TrackedAgents::in_folders(&[("%2", "/tmp/chief-of-pods")]);
-        assert_eq!(gone.chief_pane_id(notify.chief.as_deref()), Some("%2"));
+        assert_eq!(
+            gone.chief_pane_id(notify.chief.as_deref(), None),
+            Some("%2")
+        );
     }
 
     #[test]

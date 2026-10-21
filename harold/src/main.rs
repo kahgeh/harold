@@ -1038,6 +1038,7 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
         web_app::Agents {
             snapshots: &snapshots,
             chief_folder: cfg.notify.chief.as_deref(),
+            chief_session: cfg.notify.chief_session.as_deref(),
             grpc: &cfg.grpc,
         },
     )
@@ -1197,7 +1198,8 @@ async fn start_telemetry_tasks(
         Some(alert_addr) => alerts::start(
             alert_addr,
             cfg.notify.chief.clone(),
-            timed_prompts::TmuxPorts::new(snapshots.clone(), cfg.agents.0.clone()),
+            timed_prompts::TmuxPorts::new(snapshots.clone(), cfg.agents.0.clone())
+                .with_chief(&cfg.notify),
             shutdown_rx.clone(),
         )
         .await

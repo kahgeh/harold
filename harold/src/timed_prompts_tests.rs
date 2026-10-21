@@ -245,6 +245,10 @@ fn chief(pane_id: &str) -> AgentPane {
         folder: CHIEF.into(),
         reads_as_claude: true,
         state: EffectiveAgentState::Idle,
+        session: "pods".into(),
+        window_index: 0,
+        pane_index: 1,
+        started_at_ms: 1_000,
     }
 }
 
@@ -267,10 +271,15 @@ fn the_one_idle_claude_pane_in_the_folder_is_picked() {
     };
     let agents = view(vec![elsewhere, chief("%2"), subfolder]);
 
-    assert_eq!(pick_pane(&agents, CHIEF, &[]).unwrap().pane_id, "%2");
+    assert_eq!(
+        pick_pane(&agents, CHIEF, Chief::default(), &[])
+            .unwrap()
+            .pane_id,
+        "%2"
+    );
     // One trailing slash on either side names the same folder.
     assert_eq!(
-        pick_pane(&agents, "/work/chief-of-pods/", &[])
+        pick_pane(&agents, "/work/chief-of-pods/", Chief::default(), &[])
             .unwrap()
             .pane_id,
         "%2"
@@ -298,36 +307,42 @@ fn each_of_checks_1_to_5_gives_its_reason_in_order() {
     };
 
     assert_eq!(
-        pick_pane(&failing, CHIEF, &[]),
+        pick_pane(&failing, CHIEF, Chief::default(), &[]),
         Err(Reason::PaneListFailing)
     );
     assert_eq!(
-        pick_pane(&view(vec![]), CHIEF, &[]),
+        pick_pane(&view(vec![]), CHIEF, Chief::default(), &[]),
         Err(Reason::NoAgentInFolder)
     );
     assert_eq!(
-        pick_pane(&view(vec![chief("%5")]), "/work/harold", &[]),
+        pick_pane(
+            &view(vec![chief("%5")]),
+            "/work/harold",
+            Chief::default(),
+            &[]
+        ),
         Err(Reason::NoAgentInFolder)
     );
     assert_eq!(
         pick_pane(
             &view(vec![chief("%2"), chief("%3"), codex.clone()]),
             CHIEF,
+            Chief::default(),
             &[]
         ),
         Err(Reason::SeveralAgentsInFolder { agents: 3 })
     );
     // A busy Codex pane fails check 4 before check 5.
     assert_eq!(
-        pick_pane(&view(vec![codex]), CHIEF, &[]),
+        pick_pane(&view(vec![codex]), CHIEF, Chief::default(), &[]),
         Err(Reason::InputBoxUnreadable)
     );
     assert_eq!(
-        pick_pane(&view(vec![busy]), CHIEF, &[]),
+        pick_pane(&view(vec![busy]), CHIEF, Chief::default(), &[]),
         Err(Reason::AgentBusy)
     );
     assert_eq!(
-        pick_pane(&view(vec![unknown]), CHIEF, &[]),
+        pick_pane(&view(vec![unknown]), CHIEF, Chief::default(), &[]),
         Err(Reason::AgentStateUnknown)
     );
 }
@@ -337,10 +352,10 @@ fn pane_typed_into_this_round_counts_as_busy() {
     let agents = view(vec![chief("%2")]);
 
     assert_eq!(
-        pick_pane(&agents, CHIEF, &["%2".to_string()]),
+        pick_pane(&agents, CHIEF, Chief::default(), &["%2".to_string()]),
         Err(Reason::AgentBusy)
     );
-    assert!(pick_pane(&agents, CHIEF, &["%9".to_string()]).is_ok());
+    assert!(pick_pane(&agents, CHIEF, Chief::default(), &["%9".to_string()]).is_ok());
 }
 
 pub(crate) fn projection(
@@ -452,6 +467,10 @@ fn agents_view_gives_each_pane_its_folder_state_and_whether_it_is_claude() {
             folder: "/work/harold".into(),
             reads_as_claude: false,
             state: EffectiveAgentState::Busy,
+            session: "pods".into(),
+            window_index: 0,
+            pane_index: 1,
+            started_at_ms: 1_000,
         }
     );
     assert!(!agents.panes[2].reads_as_claude);
@@ -498,7 +517,7 @@ pub(crate) struct FakeState {
 
 /// Every port, faked. It starts with the chief idle in pane `%2` with an empty box.
 #[derive(Clone)]
-pub(crate) struct Fake(Arc<Mutex<FakeState>>, Arc<PaneLocks>);
+pub(crate) struct Fake(Arc<Mutex<FakeState>>, Arc<PaneLocks>, Chief<'static>);
 
 impl Fake {
     pub(crate) fn at(day: &str, time: &str) -> Self {
@@ -514,9 +533,23 @@ impl Fake {
                 screen_reads: 0,
             })),
             Arc::default(),
+            Chief::default(),
         );
         fake.clock(day, time);
         fake
+    }
+
+    /// The same fake, with `[notify] chief` and `chief_session` set.
+    pub(crate) fn with_chief(
+        mut self,
+        folder: &'static str,
+        session: Option<&'static str>,
+    ) -> Self {
+        self.2 = Chief {
+            folder: Some(folder),
+            session,
+        };
+        self
     }
 
     pub(crate) fn set(&self, change: impl FnOnce(&mut FakeState)) {
@@ -582,6 +615,10 @@ impl Ports for Fake {
 
     fn pane_locks(&self) -> &PaneLocks {
         &self.1
+    }
+
+    fn chief(&self) -> Chief<'_> {
+        self.2
     }
 }
 
@@ -1366,6 +1403,8 @@ async fn daemon_ports_read_the_panes_from_the_published_snapshot() {
     let ports = TmuxPorts {
         snapshots: hub,
         providers: vec![provider("claude", ScreenAdapter::ClaudeV1)],
+        chief_folder: None,
+        chief_session: None,
     };
 
     let agents = ports.agents();
@@ -1888,31 +1927,66 @@ async fn a_panicking_typing_step_is_an_error_not_a_panic() {
 }
 
 #[tokio::test]
-async fn only_the_alert_and_the_call_note_the_chief_state() {
-    let fake = Fake::at(DAY, "09:00:00");
-    let two = view(vec![chief("%2"), chief("%3")]);
-
-    // A timed prompt's folder is any folder: a wait there says nothing of the chief.
+async fn two_agents_in_the_chiefs_folder_report_once_and_type_into_the_first_pane() {
+    let fake = Fake::at(DAY, "09:00:00").with_chief(CHIEF, None);
+    let two = view(vec![
+        AgentPane {
+            pane_index: 1,
+            ..chief("%3")
+        },
+        AgentPane {
+            pane_index: 0,
+            ..chief("%2")
+        },
+    ]);
+    fake.set(|state| state.view = two.clone());
     let logs = crate::outbound::fake::CapturedLogs::start();
-    let timed = type_when_ready(&fake, Writer::TimedPrompt, CHIEF, "p", &two, &[]).await;
-    assert!(matches!(
-        timed,
-        Attempt::Wait(Reason::SeveralAgentsInFolder { agents: 2 })
-    ));
-    assert!(!logs.text().contains("chief pane changed"));
 
-    // The alert always types into the chief's folder, so it reports the change once.
-    for _ in 0..2 {
-        let alert = type_when_ready(&fake, Writer::Alert, CHIEF, "a", &two, &[]).await;
-        assert!(matches!(
-            alert,
-            Attempt::Wait(Reason::SeveralAgentsInFolder { agents: 2 })
-        ));
-    }
+    let alert = type_when_ready(&fake, Writer::Alert, CHIEF, "a", &two, &[]).await;
+    let again = type_when_ready(&fake, Writer::Alert, CHIEF, "b", &two, &["%2".into()]).await;
+
+    assert!(matches!(alert, Attempt::Typed { ref pane } if pane == "%2"));
+    assert!(matches!(again, Attempt::Wait(Reason::AgentBusy)));
     let text = logs.text();
     assert_eq!(text.matches("chief pane changed").count(), 1, "{text}");
     assert!(
-        text.contains("state=\"ambiguous\"") && text.contains("count=2"),
+        text.contains("state=\"found\"")
+            && text.contains("count=2")
+            && text.contains("session_by=\"longest\""),
         "{text}"
+    );
+}
+
+#[tokio::test]
+async fn another_folder_with_two_agents_still_waits_and_a_second_chief_pane_is_not_typed_into() {
+    let fake = Fake::at(DAY, "09:00:00").with_chief(CHIEF, None);
+    let other = |pane_id: &str| AgentPane {
+        folder: "/work/harold".into(),
+        ..chief(pane_id)
+    };
+    let panes = view(vec![
+        chief("%2"),
+        AgentPane {
+            pane_index: 2,
+            ..chief("%3")
+        },
+        other("%5"),
+        other("%6"),
+    ]);
+    fake.set(|state| state.view = panes.clone());
+
+    let waits = type_when_ready(&fake, Writer::TimedPrompt, "/work/harold", "p", &panes, &[]).await;
+    assert!(matches!(
+        waits,
+        Attempt::Wait(Reason::SeveralAgentsInFolder { agents: 2 })
+    ));
+    assert_eq!(
+        type_line_once(&fake, Writer::Tool("t"), "%3", "line").await,
+        LineOutcome::PaneBusy
+    );
+    assert!(fake.keys().is_empty());
+    assert_eq!(
+        type_line_once(&fake, Writer::Tool("t"), "%2", "line").await,
+        LineOutcome::Typed
     );
 }

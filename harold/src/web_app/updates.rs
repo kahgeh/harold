@@ -226,7 +226,11 @@ struct Dots {
 impl Dots {
     fn of(state: &AppState, messages: &[AppMessage]) -> Self {
         let awaiting = awaiting_chief(messages);
-        let chief = find_chief(&state.snapshots.borrow(), state.chief_folder.as_deref());
+        let chief = find_chief(
+            &state.snapshots.borrow(),
+            state.chief_folder.as_deref(),
+            state.chief_session.as_deref(),
+        );
         Self {
             awaiting,
             shown: dots_show(awaiting, &chief),
@@ -235,7 +239,11 @@ impl Dots {
 
     /// The patch that brings the page to the dots as they now are, if they changed.
     fn refresh(&mut self, state: &AppState) -> Option<Event> {
-        let chief = find_chief(&state.snapshots.borrow(), state.chief_folder.as_deref());
+        let chief = find_chief(
+            &state.snapshots.borrow(),
+            state.chief_folder.as_deref(),
+            state.chief_session.as_deref(),
+        );
         let on = dots_show(self.awaiting, &chief);
         if on == self.shown {
             return None;

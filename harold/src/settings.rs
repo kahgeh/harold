@@ -1886,7 +1886,9 @@ mod tests {
             let errors = notify_errors(&format!("[notify]\nchief_session = \"{bad}\""));
             assert_eq!(
                 errors,
-                ["notify.chief_session must be a tmux session name, not empty and with no ':' or '.'"],
+                [
+                    "notify.chief_session must be a tmux session name, not empty and with no ':' or '.'"
+                ],
                 "{bad:?}"
             );
         }

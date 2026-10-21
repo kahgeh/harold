@@ -24,7 +24,7 @@ use crate::agent::snapshot::AgentSnapshotHub;
 use crate::outbound::left_out::{ChiefLookup, resolve_chief};
 use crate::pod_stats::{self, PodSnapshot};
 use crate::settings::{AgentProviderSettings, Settings, WatchSettings};
-use crate::timed_prompts::{self, InputBox, LineOutcome, Ports, TmuxPorts, Writer};
+use crate::timed_prompts::{self, AgentPane, InputBox, LineOutcome, Ports, TmuxPorts, Writer};
 
 pub(crate) mod backlog;
 pub(crate) mod questions;
@@ -189,7 +189,8 @@ pub(crate) async fn start(
     snapshots: AgentSnapshotHub,
     shutdown: tokio::sync::watch::Receiver<()>,
 ) -> Tools {
-    let ports = Arc::new(TmuxPorts::new(snapshots.clone(), cfg.agents.0.clone()));
+    let ports =
+        Arc::new(TmuxPorts::new(snapshots.clone(), cfg.agents.0.clone()).with_chief(&cfg.notify));
     let typing = TmuxTyping {
         ports: Arc::clone(&ports),
         writer: Writer::Tool(questions::NAME),
@@ -197,6 +198,7 @@ pub(crate) async fn start(
     let chief_pane = SnapshotChiefPane {
         ports: Arc::clone(&ports),
         folder: cfg.notify.chief.clone(),
+        session: cfg.notify.chief_session.clone(),
     };
     let agents = SnapshotAgents {
         ports: Arc::clone(&ports),
@@ -366,22 +368,22 @@ impl<P: Ports> PaneTyping for TmuxTyping<P> {
     }
 }
 
-/// Finds the chief's pane in the agent snapshot: the one agent pane whose folder
-/// `[notify] chief` matches. With no entry set, no such pane, or more than one, there is no
-/// chief.
+/// Finds the chief's pane in the agent snapshot: the first agent pane of the chief's tmux
+/// session among the panes whose folder `[notify] chief` matches. With no entry set or no
+/// such pane there is no chief.
 struct SnapshotChiefPane<P = TmuxPorts> {
     ports: Arc<P>,
     folder: Option<String>,
+    session: Option<String>,
 }
 
 impl<P: Ports> ChiefPane for SnapshotChiefPane<P> {
     fn chief_pane(&self) -> Option<String> {
         let view = self.ports.agents();
         let found = resolve_chief(
-            view.panes
-                .iter()
-                .map(|pane| (pane.pane_id.as_str(), pane.folder.as_str())),
+            view.panes.iter().map(AgentPane::position),
             self.folder.as_deref(),
+            self.session.as_deref(),
         );
         match found {
             ChiefLookup::Found(pane_id) => Some(pane_id),
