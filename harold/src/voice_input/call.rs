@@ -257,9 +257,17 @@ pub(super) fn sweep_call_folders(calls: &Path) {
         if !is_dir || !entry.file_name().to_string_lossy().starts_with("call-") {
             continue;
         }
-        if let Err(error) = std::fs::remove_dir_all(entry.path()) {
+        remove_call_folder(&entry.path());
+    }
+}
+
+/// Removes a call folder. One that is already gone needs no warning; any other failure does.
+pub(super) fn remove_call_folder(dir: &Path) {
+    match std::fs::remove_dir_all(dir) {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
             warn!(error = %error, "call folder not removed");
         }
+        _ => {}
     }
 }
 
@@ -1485,9 +1493,7 @@ impl<P: CallPorts> Call<P> {
         if let Some(worker) = self.worker.take() {
             worker.close().await;
         }
-        if let Err(error) = std::fs::remove_dir_all(&self.dir) {
-            warn!(error = %error, "call folder not removed");
-        }
+        remove_call_folder(&self.dir);
         self.awake = None;
         info!(reason = why.as_str(), "call ended");
         self.ports.call_ended(why.as_str());

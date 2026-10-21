@@ -447,3 +447,43 @@ fn the_sweep_removes_only_call_folders() {
     crate::voice_input::call::sweep_call_folders(&calls);
     assert!(!calls.exists());
 }
+
+#[test]
+fn a_call_folder_already_gone_is_removed_quietly_and_a_failed_removal_warns() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let logs = CapturedLogs::start();
+    let base = std::env::temp_dir().join(format!("harold-remove-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&base).unwrap();
+
+    crate::voice_input::call::remove_call_folder(&base.join("call-gone"));
+    assert!(
+        !logs.text().contains("call folder not removed"),
+        "{}",
+        logs.text()
+    );
+
+    std::fs::create_dir_all(base.join("call-stuck")).unwrap();
+    std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o500)).unwrap();
+    crate::voice_input::call::remove_call_folder(&base.join("call-stuck"));
+    std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let text = logs.text();
+    assert!(text.contains("call folder not removed error="), "{text}");
+    std::fs::remove_dir_all(&base).unwrap();
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn a_call_whose_folder_went_before_it_ended_logs_no_warning() {
+    let logs = CapturedLogs::start();
+    let h = Harness::new();
+    h.start().await;
+    for dir in h.call_dirs() {
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    h.calls.stop().await;
+
+    let text = logs.text();
+    assert!(text.contains("call ended reason=\"stopped\""), "{text}");
+    assert!(!text.contains("call folder not removed"), "{text}");
+}

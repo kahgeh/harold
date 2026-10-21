@@ -282,7 +282,7 @@ Messages are fixed text, with values in fields, as harold-telemetry's test `ever
 | warn | `display not kept awake` | `error` |
 | warn | `microphone not opened` | `error` |
 | warn | `call folder not made` | `error` |
-| warn | `call folder not removed` | `error`; at the end of a call, or for a leftover folder at start-up |
+| warn | `call folder not removed` | `error`; at the end of a call, or for a leftover folder at start-up; not logged when the folder is already gone |
 | warn | `turn not written` | `error` |
 | warn | `phrase not kept` | `error` |
 | warn | `call sound not played` | `error` |
