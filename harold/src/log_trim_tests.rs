@@ -198,13 +198,7 @@ fn a_file_that_cannot_be_written_keeps_its_contents() {
 #[test]
 fn a_missing_file_is_not_the_log() {
     let directory = TestDirectory::new();
-    let failure = trim(
-        &directory.log(),
-        &handle(&directory.0),
-        now(),
-        without_lock,
-    )
-    .unwrap_err();
+    let failure = trim(&directory.log(), &handle(&directory.0), now(), without_lock).unwrap_err();
     assert_eq!(failure.reason, "not_the_log");
 }
 
