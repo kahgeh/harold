@@ -1,10 +1,17 @@
 //! The thread page and the app's own files, all compiled into the binary.
 
+use std::convert::Infallible;
+use std::time::Instant;
+
 use askama::Template;
-use axum::extract::{Path, Request, State};
+use axum::extract::{Path, Query, Request, State};
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::middleware::Next;
+use axum::response::sse::{Event, Sse};
 use axum::response::{Html, IntoResponse, Response};
+use datastar::prelude::{ElementPatchMode, PatchElements, PatchSignals};
+use serde::Deserialize;
+use tracing::{info, warn};
 
 use super::chief::{ChiefPane, find_chief};
 use super::todos::{TodoCount, TodosSection};
@@ -34,6 +41,11 @@ pub(crate) struct ThreadPage {
     /// Whether the page links the app's icon.
     pub has_icon: bool,
     pub messages: Vec<MessageView>,
+    /// For the `#older` line: the query value naming the oldest row shown, when older rows
+    /// remain.
+    pub older: Option<String>,
+    /// The oldest row shown, as the page's `oldest` signal holds it; empty without rows.
+    pub oldest: String,
     /// Harold's VAPID public key, base64url: the page's `applicationServerKey`.
     pub public_key: String,
     /// Whether a call can start: the header offers one, or says voice is not set up.
@@ -46,6 +58,88 @@ pub(crate) struct ThreadPage {
     pub todos: TodosSection,
     /// The todo count on the **Todos** button.
     pub todo_count: TodoCount,
+}
+
+/// How many rows the thread page opens with, and each older load adds.
+pub(crate) const WINDOW_ROWS: usize = 50;
+
+/// A run of the thread's rows, oldest first, and whether older rows remain before it.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Window<'a> {
+    pub rows: &'a [AppMessage],
+    pub more: bool,
+}
+
+impl Window<'_> {
+    /// The `event_id` of the oldest row in the window.
+    pub(crate) fn oldest(&self) -> Option<&str> {
+        self.rows.first().map(|row| row.event_id.as_str())
+    }
+}
+
+/// The rows a page shows, cut from the thread `rows` (oldest first). When `from` is found,
+/// the rows from it on, with older rows remaining when it is not the first. Otherwise,
+/// whether `from` is none, unknown, pruned or malformed, the newest `WINDOW_ROWS`.
+pub(crate) fn thread_window<'a>(rows: &'a [AppMessage], from: Option<&str>) -> Window<'a> {
+    let start = from
+        .and_then(|from| rows.iter().position(|row| row.event_id == from))
+        .unwrap_or_else(|| rows.len().saturating_sub(WINDOW_ROWS));
+    Window {
+        rows: &rows[start..],
+        more: start > 0,
+    }
+}
+
+/// The up to `WINDOW_ROWS` rows before `before`, with older rows remaining when more come
+/// before them. A `before` that is not found gives no rows and none remain.
+pub(crate) fn older_rows<'a>(rows: &'a [AppMessage], before: &str) -> Window<'a> {
+    let Some(at) = rows.iter().position(|row| row.event_id == before) else {
+        return Window {
+            rows: &[],
+            more: false,
+        };
+    };
+    let start = at.saturating_sub(WINDOW_ROWS);
+    Window {
+        rows: &rows[start..at],
+        more: start > 0,
+    }
+}
+
+/// `text` percent-encoded for a query value.
+pub(crate) fn query_value(text: &str) -> String {
+    let mut encoded = String::with_capacity(text.len());
+    for byte in text.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                encoded.push(char::from(byte));
+            }
+            _ => encoded.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    encoded
+}
+
+/// The query value for `#older`: the oldest row shown, when older rows remain.
+pub(crate) fn older_line(window: &Window<'_>) -> Option<String> {
+    window.oldest().filter(|_| window.more).map(query_value)
+}
+
+/// `text` as a single-quoted JavaScript string, for a Datastar expression.
+fn js_string(text: &str) -> String {
+    let mut quoted = String::with_capacity(text.len() + 2);
+    quoted.push('\'');
+    for c in text.chars() {
+        match c {
+            '\\' => quoted.push_str("\\\\"),
+            '\'' => quoted.push_str("\\'"),
+            '\n' => quoted.push_str("\\n"),
+            '\r' => quoted.push_str("\\r"),
+            c => quoted.push(c),
+        }
+    }
+    quoted.push('\'');
+    quoted
 }
 
 /// One row of the thread, as `#messages` shows it.
@@ -272,8 +366,10 @@ pub(crate) async fn add_policy(request: Request, next: Next) -> Response {
     response
 }
 
-/// `GET /`: the thread page. A store that cannot be read gives `503`.
+/// `GET /`: the thread page, with the newest `WINDOW_ROWS` rows. A store that cannot be
+/// read gives `503`.
 pub(crate) async fn get_thread(State(state): State<AppState>) -> Response {
+    let started = Instant::now();
     let Ok(messages) = state.store.app_messages_since(thread_start_ms()).await else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
@@ -287,12 +383,16 @@ pub(crate) async fn get_thread(State(state): State<AppState>) -> Response {
         on: dots_show(awaiting_chief(&messages), &chief),
     };
     let todos = state.questions.refresh().await;
+    let window = thread_window(&messages, None);
+    let rows = window.rows.len();
     let page = ThreadPage {
         todo_count: todos.count(),
         todos,
         app_name: state.identity.name.clone(),
         has_icon: state.identity.icon.is_some(),
-        messages: messages.into_iter().map(MessageView::from).collect(),
+        older: older_line(&window),
+        oldest: js_string(window.oldest().unwrap_or_default()),
+        messages: window.rows.iter().cloned().map(MessageView::from).collect(),
         public_key: state.public_key.to_string(),
         call_set_up: calls.is_some_and(|calls| calls.set_up()),
         call: calls.map_or_else(CallSection::off, |calls| {
@@ -300,10 +400,94 @@ pub(crate) async fn get_thread(State(state): State<AppState>) -> Response {
         }),
         responding,
     };
-    match page.render() {
-        Ok(html) => Html(html).into_response(),
-        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    let Ok(html) = page.render() else {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    };
+    info!(
+        rows,
+        bytes = html.len(),
+        ms = started.elapsed().as_millis() as u64,
+        "app page served"
+    );
+    Html(html).into_response()
+}
+
+/// The query of `GET /thread/older`.
+#[derive(Deserialize)]
+pub(crate) struct OlderQuery {
+    before: Option<String>,
+}
+
+/// `GET /thread/older?before=<event_id>`: the up to `WINDOW_ROWS` rows before `before`,
+/// as three patches, then the response ends: the rows after `#older`, `#older` with its new
+/// `before` or removed when none remain, and the `oldest` signal. A `before` that is not
+/// found removes `#older` and adds no rows. A store that cannot be read gives `503`.
+pub(crate) async fn get_thread_older(
+    State(state): State<AppState>,
+    Query(query): Query<OlderQuery>,
+) -> Response {
+    let started = Instant::now();
+    let Ok(messages) = state.store.app_messages_since(thread_start_ms()).await else {
+        warn!(reason = "store_unread", "app thread older not read");
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    let window = older_rows(&messages, query.before.as_deref().unwrap_or_default());
+    let mut rows = String::new();
+    for message in window.rows {
+        let Ok(html) = MessageView::from(message.clone()).render() else {
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        };
+        rows.push_str(&html);
+        rows.push('\n');
     }
+    let line = match older_line(&window) {
+        Some(before) => OlderLine { before: &before }.render(),
+        None => Ok(String::new()),
+    };
+    let Ok(line) = line else {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    };
+    let mut events: Vec<Event> = Vec::with_capacity(3);
+    let mut bytes = rows.len() + line.len();
+    if !window.rows.is_empty() {
+        events.push(
+            PatchElements::new(rows)
+                .selector("#older")
+                .mode(ElementPatchMode::After)
+                .into(),
+        );
+    }
+    if window.more {
+        events.push(PatchElements::new(line).into());
+    } else {
+        events.push(PatchElements::new_remove("#older").into());
+    }
+    if let Some(oldest) = window.oldest() {
+        let signal = serde_json::json!({ "oldest": oldest }).to_string();
+        bytes += signal.len();
+        events.push(PatchSignals::new(signal).into());
+    }
+    info!(
+        rows = window.rows.len(),
+        bytes,
+        ms = started.elapsed().as_millis() as u64,
+        "app thread older served"
+    );
+    Sse::new(tokio_stream::iter(
+        events.into_iter().map(Ok::<Event, Infallible>),
+    ))
+    .into_response()
+}
+
+/// `#older`, the line that loads the rows before `before` when it comes into view.
+#[derive(Template)]
+#[template(
+    source = r#"<p id="older" class="older" data-on-intersect="@get('/thread/older?before={{ before }}')">Loading earlier messages…</p>"#,
+    ext = "html"
+)]
+pub(crate) struct OlderLine<'a> {
+    /// The percent-encoded `event_id` of the oldest row shown.
+    pub before: &'a str,
 }
 
 /// The web app manifest: the app's name, and its icon at the icon's real size when it has one.

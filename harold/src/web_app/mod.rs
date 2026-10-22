@@ -202,6 +202,7 @@ pub(crate) fn router(state: AppState) -> Router {
         .route("/replies", post(replies::post_reply))
         .route("/push/subscription", post(replies::post_subscription))
         .route("/updates", get(updates::get_updates))
+        .route("/thread/older", get(pages::get_thread_older))
         .route("/todos/answer", post(todos::post_answer))
         .route("/todos/picks", post(todos::post_picks))
         .route("/todos/later", post(todos::post_later))

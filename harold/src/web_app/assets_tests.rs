@@ -70,3 +70,47 @@ fn revise_and_reject_read_as_plain_words_beside_send() {
         ".card-more button sets min-height"
     );
 }
+
+#[test]
+fn pages_js_keeps_older_rows_out_of_the_count_and_keeps_the_place() {
+    let script = include_str!("../../static/web_app/pages.js");
+    for wanted in [
+        // A record that adds message rows ahead of a message row is older rows.
+        "function olderRecord(record)",
+        "record.nextSibling",
+        r#"classList.contains("message")"#,
+        // The place is kept by the height the older rows add, before the next paint.
+        "thread.scrollHeight - previousHeight",
+        "thread.scrollTop += added",
+        // Only a row at the end is counted and followed.
+        "unseen += 1",
+    ] {
+        assert!(script.contains(wanted), "pages.js lacks {wanted}");
+    }
+    // An older record is set aside before any row is counted or followed.
+    let observer = &script[script
+        .find("new MutationObserver((records)")
+        .expect("observer")..];
+    let older = observer
+        .find("olderRecord(record)")
+        .expect("the observer checks it");
+    assert!(
+        older < observer.find("onNewRow").unwrap(),
+        "the check comes first"
+    );
+    assert!(observer.contains("keepPlace()"));
+}
+
+#[test]
+fn the_older_line_is_centred_in_the_second_text_colour() {
+    let css = include_str!("../../static/web_app/app.css");
+    let start = css.find(".older {").expect("app.css lacks the .older rule");
+    let rule = &css[start..start + css[start..].find('}').expect("rule is closed")];
+    for wanted in [
+        "text-align: center;",
+        "color: var(--text-2);",
+        "font-size: 14px;",
+    ] {
+        assert!(rule.contains(wanted), ".older lacks {wanted}");
+    }
+}

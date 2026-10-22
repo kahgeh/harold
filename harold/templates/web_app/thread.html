@@ -32,7 +32,7 @@
 </header>
 <p id="call-notice" class="call-notice" role="status" hidden></p>
 <div id="pages">
-<main id="thread" class="page">
+<main id="thread" class="page" data-signals:oldest="{{ oldest }}">
 {% include "web_app/messages.html" %}
 {{ responding|safe }}
 <button type="button" id="new-message" class="new-message" hidden>New message ↓</button>

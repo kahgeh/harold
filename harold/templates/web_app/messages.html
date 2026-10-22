@@ -1,3 +1,4 @@
 <section id="messages" data-init="@get('/updates')">
-{% for message in messages %}{{ message|safe }}
+{% if let Some(before) = older %}<p id="older" class="older" data-on-intersect="@get('/thread/older?before={{ before }}')">Loading earlier messages…</p>
+{% endif %}{% for message in messages %}{{ message|safe }}
 {% endfor %}</section>

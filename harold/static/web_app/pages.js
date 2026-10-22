@@ -1,6 +1,7 @@
 // The thread page and the todo page, side by side. Swiping is the browser's own scrolling
 // of #pages; this script follows which page is in view, keeps the newest message in view,
-// and counts the chief's messages that arrive while the todo page is open.
+// counts the chief's messages that arrive while the todo page is open, and keeps your place
+// when older messages load above what you are reading.
 "use strict";
 
 (function () {
@@ -19,6 +20,8 @@
 
   let following = true;
   let unseen = 0;
+  // The thread's scroll height as of the last change, to tell how much older rows add.
+  let previousHeight = 0;
 
   function distanceFromBottom() {
     return thread.scrollHeight - thread.scrollTop - thread.clientHeight;
@@ -51,6 +54,31 @@
 
   function show(page) {
     pages.scrollTo({ left: page.offsetLeft, behavior: "smooth" });
+  }
+
+  // Whether a record added message rows ahead of a message row: older rows, loaded above
+  // the ones already shown, not new ones at the end.
+  function olderRecord(record) {
+    let after = record.nextSibling;
+    while (after && after.nodeType === Node.TEXT_NODE) {
+      after = after.nextSibling;
+    }
+    if (!(after instanceof Element) || !after.classList.contains("message")) {
+      return false;
+    }
+    return Array.from(record.addedNodes).some(
+      (node) => node instanceof Element && node.classList.contains("message"),
+    );
+  }
+
+  // Older rows push what you read down; Safari does not keep the position by itself, so the
+  // scroll position grows by the height they add, before the next paint.
+  function keepPlace() {
+    const added = thread.scrollHeight - previousHeight;
+    if (added > 0) {
+      thread.scrollTop += added;
+    }
+    previousHeight = thread.scrollHeight;
   }
 
   function onNewRow(row) {
@@ -95,10 +123,24 @@
 
   // A row added to the thread: followed if the reader was at the bottom, else offered.
   new MutationObserver((records) => {
+    let older = false;
     for (const record of records) {
+      if (olderRecord(record)) {
+        older = true;
+        continue;
+      }
       record.addedNodes.forEach(onNewRow);
     }
+    if (older) {
+      keepPlace();
+    }
   }).observe(messages, { childList: true });
+
+  // Any other change of height (a new row, the dots) moves the baseline older rows are
+  // measured from.
+  new ResizeObserver(() => {
+    previousHeight = thread.scrollHeight;
+  }).observe(messages);
 
   // The responding dots take room under the newest message.
   const responding = document.getElementById("responding");
@@ -291,6 +333,7 @@
   });
 
   scrollToBottom();
+  previousHeight = thread.scrollHeight;
   syncPage();
   syncSends();
 })();

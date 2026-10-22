@@ -302,6 +302,13 @@ body.on-todos > #reply {
   padding: 12px;
 }
 
+.older {
+  margin: 0;
+  text-align: center;
+  color: var(--text-2);
+  font-size: 14px;
+}
+
 .message {
   max-width: 85%;
   padding: 10px 12px;

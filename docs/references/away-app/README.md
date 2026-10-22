@@ -116,9 +116,10 @@ The app has two pages side by side: the thread page and the todo page. Swipe lef
 
 The thread page's header holds the app's name, **Todos** with the todo count in orange (no number when nothing waits), the **Turn on alerts** button until push is on, and **Call**.
 
-The thread is the oldest message at the top. It holds the last 30 days of messages; Harold deletes older ones at start and every hour. While the page is open, each new message appears as soon as Harold stores it.
+The thread is the oldest message at the top. It holds the last 30 days of messages; Harold deletes older ones at start and every hour. The page opens with the newest 50 messages and loads older ones, 50 at a time, as you scroll up; "Loading earlier messages…" shows at the top while more remain. While the page is open, each new message appears as soon as Harold stores it.
 
 - **Sender labels.** A small label at the bottom right of each message says who wrote it: `chief`, or for your reply the mark and `me`.
+- **Older messages.** Older messages don't count as new: they don't move you to the bottom, show **New message ↓** or add to the todo count. The message you were reading stays where it was. When the phone comes back from the background, the page keeps the older messages it loaded.
 - **New messages.** A new message scrolls into view when you are within 80 px of the bottom. Scrolled further up, the page stays put and a **New message ↓** button appears above the reply box; tapping it scrolls to the newest message, and it goes once you are at the bottom. Sending a reply scrolls to the bottom.
 - **Links.** An `http://` or `https://` address in a message is a link that opens in the phone's browser. A trailing `.`, `,`, `;`, `:`, `!`, `?`, `)`, `]`, `'` or `"` stays outside the link.
 - **Responding dots.** After your reply is typed, three grey dots show on the chief's side while the chief's pane is busy. They pulse in turn, and stay still when the phone asks for reduced motion. They go when the chief's next message appears, or when its turn ends with no message.
@@ -240,7 +241,10 @@ Harold logs no message text, no reply, no push address and no key. The app adds 
 | `app push sent` | `outcome` (`accepted`) |
 | `app push refused` | `outcome` (`gone`, `refused` or `unreachable`) and `reason` (`status_<code>`, `timeout`, `connect`, `send`, `build` or `client`) |
 | `app message not pushed` | `reason` (`no_subscriptions`, `subscriptions_unread` or `none_accepted`) and `outcome`: `away` with `channel` (`imessage`) when the away channel took the message as `(app unreachable)`, or `held` when the pane is not on the away channel's list |
-| `app page connected` | none |
+| `app page served` | `rows`, `bytes` and `ms` of the thread page |
+| `app page connected` | `rows` and `bytes` of its first patch |
+| `app thread older served` | `rows`, `bytes` and `ms` of one load of older messages |
+| `app thread older not read` | `reason` (`store_unread`), logged as a warning; the `#older` line stays and asks again |
 | `app page not connected` | `reason` (`store_unread` or `render_failed`) |
 | `app page disconnected` | `reason` (`page_gone`, `shutdown` or `store_stopped`) and `seconds`, how long the page was connected. Harold notices a closed page at the next patch or keep-alive, within about 15 seconds |
 | `app reply state` | `event_id` and `state` (`typed`, `waiting_chief_busy`, `not_sent_no_chief` or `not_sent_paused`), logged before the state is written |

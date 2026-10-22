@@ -10,12 +10,14 @@ use tokio::task::JoinHandle;
 
 use super::origin::loopback_hosts;
 use super::pages::CONTENT_SECURITY_POLICY;
-use super::pages::{Part, split_links};
+use super::pages::{Part, older_rows, split_links, thread_window};
 use super::push::vapid_key_path;
 use super::{AppState, DATASTAR_SHA256, THREAD_DAYS, WebAppIdentity, router, start, start_if_set};
 use crate::outbound::fake::CapturedLogs;
 use crate::settings::WebAppSettings;
-use crate::store::{AppReplyState, EventVersion, HaroldStore, append_app_reply};
+use crate::store::{
+    AppMessage, AppReplyState, AppSender, EventVersion, HaroldStore, append_app_reply,
+};
 
 const LOGIN: &str = "chief@example.com";
 const PUBLIC_KEY: &str = "BPublicKeyForTheTestPage";
@@ -139,6 +141,7 @@ async fn every_route_refuses_a_missing_or_wrong_login() {
     let routes = [
         ("GET", "/"),
         ("GET", "/updates"),
+        ("GET", "/thread/older?before=x"),
         ("POST", "/replies"),
         ("POST", "/push/subscription"),
         ("GET", "/static/app.css"),
@@ -672,4 +675,510 @@ async fn pages_js_is_served_as_javascript() {
     assert_eq!(response.status(), 200);
     assert_eq!(response.headers()["content-type"], "text/javascript");
     assert!(response.text().await.unwrap().contains("on-todos"));
+}
+
+/// `count` chief rows `r001`, `r002`, ... in that order, one second apart, ending now.
+async fn add_rows(store: &HaroldStore, count: usize) {
+    let end = now_ms();
+    for n in 1..=count {
+        let at = end - ((count - n) as i64) * 1000;
+        store
+            .add_chief_app_message(&format!("r{n:03}"), at, &format!("row {n:03}"))
+            .await
+            .unwrap();
+    }
+}
+
+fn row(n: usize, at_ms: i64) -> AppMessage {
+    AppMessage {
+        event_id: format!("r{n:03}"),
+        at_ms,
+        sender: AppSender::Chief,
+        text: format!("row {n:03}"),
+        state: None,
+    }
+}
+
+fn rows(count: usize) -> Vec<AppMessage> {
+    (1..=count).map(|n| row(n, n as i64)).collect()
+}
+
+fn ids(rows: &[AppMessage]) -> Vec<&str> {
+    rows.iter().map(|row| row.event_id.as_str()).collect()
+}
+
+#[test]
+fn thread_window_starts_at_a_found_from_and_says_when_older_rows_remain() {
+    let all = rows(120);
+
+    let window = thread_window(&all, Some("r021"));
+    assert_eq!(window.rows.len(), 100);
+    assert_eq!(window.rows[0].event_id, "r021");
+    assert_eq!(window.rows.last().unwrap().event_id, "r120");
+    assert!(window.more);
+
+    let window = thread_window(&all, Some("r001"));
+    assert_eq!(window.rows.len(), 120);
+    assert!(!window.more, "nothing comes before the first row");
+}
+
+#[test]
+fn thread_window_gives_the_newest_50_for_a_none_unknown_or_pruned_from() {
+    let all = rows(51);
+    for from in [None, Some("nope"), Some(""), Some("r000")] {
+        let window = thread_window(&all, from);
+        assert_eq!(window.rows.len(), 50, "{from:?}");
+        assert_eq!(window.rows[0].event_id, "r002", "{from:?}");
+        assert!(window.more, "51 rows leave one older: {from:?}");
+    }
+    let fifty = rows(50);
+    let window = thread_window(&fifty, None);
+    assert_eq!(window.rows.len(), 50);
+    assert!(!window.more, "50 rows leave none older");
+    let window = thread_window(&[], None);
+    assert!(window.rows.is_empty() && !window.more);
+}
+
+#[test]
+fn rows_with_the_same_time_keep_the_order_they_were_added() {
+    let all: Vec<AppMessage> = (1..=60).map(|n| row(n, 7)).collect();
+
+    let window = thread_window(&all, None);
+    assert_eq!(ids(window.rows)[0], "r011");
+    assert_eq!(ids(window.rows)[49], "r060");
+
+    let older = older_rows(&all, "r011");
+    assert_eq!(ids(older.rows), ids(&all)[..10]);
+    assert!(!older.more);
+}
+
+#[test]
+fn older_rows_gives_up_to_50_rows_before_and_says_when_more_come_before_them() {
+    let all = rows(120);
+
+    let older = older_rows(&all, "r071");
+    assert_eq!(older.rows.len(), 50);
+    assert_eq!(older.rows[0].event_id, "r021");
+    assert_eq!(older.rows[49].event_id, "r070");
+    assert!(older.more);
+
+    let older = older_rows(&all, "r051");
+    assert_eq!(older.rows.len(), 50);
+    assert_eq!(older.rows[0].event_id, "r001");
+    assert!(!older.more, "exactly 50 before leaves none");
+
+    let older = older_rows(&all, "r052");
+    assert_eq!(older.rows.len(), 50);
+    assert!(older.more, "51 before leaves one");
+
+    let older = older_rows(&all, "r011");
+    assert_eq!(older.rows.len(), 10);
+    assert!(!older.more);
+
+    let older = older_rows(&all, "r001");
+    assert!(older.rows.is_empty() && !older.more);
+}
+
+#[test]
+fn older_rows_gives_none_for_an_unknown_before() {
+    let all = rows(120);
+    let older = older_rows(&all, "gone");
+    assert!(older.rows.is_empty() && !older.more);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_thread_page_shows_the_newest_50_and_an_older_line_naming_the_oldest_shown() {
+    let directory = TestDirectory::new();
+    let store = directory.store().await;
+    add_rows(&store, 120).await;
+
+    let body = thread_body(store).await;
+
+    assert_eq!(
+        body.matches(r#"class="message chief""#).count(),
+        50,
+        "{body}"
+    );
+    assert!(body.contains(r#"id="m-r071""#) && body.contains(r#"id="m-r120""#));
+    assert!(!body.contains(r#"id="m-r070""#));
+    assert!(
+        body.contains(
+            r#"<p id="older" class="older" data-on-intersect="@get('/thread/older?before=r071')">Loading earlier messages…</p>"#
+        ),
+        "{body}"
+    );
+    let messages = body.find(r#"<section id="messages""#).unwrap();
+    let older = body.find(r#"id="older""#).unwrap();
+    let first = body.find(r#"id="m-r071""#).unwrap();
+    assert!(messages < older && older < first, "the first child");
+    assert!(
+        body.contains(r#"data-signals:oldest="&#39;r071&#39;""#),
+        "the page holds the oldest signal: {body}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_thread_page_has_no_older_line_with_50_rows() {
+    let directory = TestDirectory::new();
+    let store = directory.store().await;
+    add_rows(&store, 50).await;
+
+    let body = thread_body(store).await;
+
+    assert_eq!(body.matches(r#"class="message chief""#).count(), 50);
+    assert!(!body.contains(r#"id="older""#), "{body}");
+    assert!(!body.contains("Loading earlier messages"), "{body}");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn the_thread_page_logs_rows_bytes_and_ms_and_no_message_text() {
+    let directory = TestDirectory::new();
+    let store = directory.store().await;
+    add_rows(&store, 60).await;
+    let server = TestServer::serve(store).await;
+    let logs = CapturedLogs::start();
+
+    let body = get_with_login(&server.url("/")).await.text().await.unwrap();
+
+    let text = logs.text();
+    let line = text
+        .lines()
+        .find(|line| line.contains("app page served"))
+        .unwrap_or_else(|| panic!("no served line: {text}"));
+    assert!(line.contains("INFO"), "{line}");
+    assert!(line.contains("rows=50"), "{line}");
+    assert!(line.contains(&format!("bytes={}", body.len())), "{line}");
+    assert!(line.contains("ms="), "{line}");
+    assert!(!text.contains("row 060"), "{text}");
+}
+
+/// The events of an SSE response that closes, each as its lines.
+async fn all_events(response: reqwest::Response) -> Vec<String> {
+    response
+        .text()
+        .await
+        .unwrap()
+        .split("\n\n")
+        .filter(|event| !event.trim().is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn thread_older_gives_the_rows_before_then_a_new_older_line_and_oldest() {
+    let directory = TestDirectory::new();
+    let store = directory.store().await;
+    add_rows(&store, 120).await;
+    let server = TestServer::serve(store).await;
+
+    let response = get_with_login(&server.url("/thread/older?before=r071")).await;
+    assert_eq!(response.status(), 200);
+    assert_eq!(response.headers()["content-type"], "text/event-stream");
+    assert_eq!(
+        response.headers()["content-security-policy"],
+        CONTENT_SECURITY_POLICY
+    );
+    let events = all_events(response).await;
+
+    assert_eq!(events.len(), 3, "{events:?}");
+    let rows = &events[0];
+    assert!(
+        rows.starts_with("event: datastar-patch-elements\n"),
+        "{rows}"
+    );
+    assert!(rows.contains("data: selector #older"), "{rows}");
+    assert!(rows.contains("data: mode after"), "{rows}");
+    assert_eq!(
+        rows.matches(r#"class="message chief""#).count(),
+        50,
+        "{rows}"
+    );
+    assert!(rows.contains(r#"id="m-r021""#) && rows.contains(r#"id="m-r070""#));
+    assert!(rows.find(r#"id="m-r021""#) < rows.find(r#"id="m-r070""#));
+    let older = &events[1];
+    assert!(
+        older.starts_with("event: datastar-patch-elements\n"),
+        "{older}"
+    );
+    assert!(older.contains(r#"id="older""#), "{older}");
+    assert!(older.contains("/thread/older?before=r021"), "{older}");
+    assert!(older.contains("Loading earlier messages"), "{older}");
+    let oldest = &events[2];
+    assert!(
+        oldest.starts_with("event: datastar-patch-signals\n"),
+        "{oldest}"
+    );
+    assert!(oldest.contains(r#"{"oldest":"r021"}"#), "{oldest}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn thread_older_removes_the_older_line_at_the_end() {
+    let directory = TestDirectory::new();
+    let store = directory.store().await;
+    add_rows(&store, 120).await;
+    let server = TestServer::serve(store).await;
+
+    let response = get_with_login(&server.url("/thread/older?before=r021")).await;
+    let events = all_events(response).await;
+
+    assert_eq!(events.len(), 3, "{events:?}");
+    assert_eq!(events[0].matches(r#"class="message chief""#).count(), 20);
+    assert!(events[0].contains(r#"id="m-r001""#));
+    assert!(events[1].contains("data: selector #older"), "{}", events[1]);
+    assert!(events[1].contains("data: mode remove"), "{}", events[1]);
+    assert!(events[2].contains(r#"{"oldest":"r001"}"#), "{}", events[2]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn thread_older_for_an_unknown_before_removes_the_line_and_adds_no_rows() {
+    let directory = TestDirectory::new();
+    let store = directory.store().await;
+    add_rows(&store, 120).await;
+    let server = TestServer::serve(store).await;
+
+    for path in [
+        "/thread/older?before=gone",
+        "/thread/older?before=",
+        "/thread/older",
+    ] {
+        let response = get_with_login(&server.url(path)).await;
+        assert_eq!(response.status(), 200, "{path}");
+        let text = response.text().await.unwrap();
+        assert!(!text.contains(r#"class="message"#), "{path}: {text}");
+        assert!(text.contains("data: mode remove"), "{path}: {text}");
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn thread_older_logs_rows_bytes_and_ms_and_no_message_text() {
+    let directory = TestDirectory::new();
+    let store = directory.store().await;
+    add_rows(&store, 120).await;
+    let server = TestServer::serve(store).await;
+    let logs = CapturedLogs::start();
+
+    let response = get_with_login(&server.url("/thread/older?before=r071")).await;
+    let body = response.text().await.unwrap();
+
+    let text = logs.text();
+    let line = text
+        .lines()
+        .find(|line| line.contains("app thread older served"))
+        .unwrap_or_else(|| panic!("no older served line: {text}"));
+    assert!(line.contains("INFO"), "{line}");
+    assert!(line.contains("rows=50"), "{line}");
+    let bytes: usize = line
+        .split("bytes=")
+        .nth(1)
+        .and_then(|rest| rest.split_whitespace().next())
+        .and_then(|bytes| bytes.parse().ok())
+        .unwrap_or_else(|| panic!("no bytes in {line}"));
+    assert!(bytes > 0 && bytes <= body.len(), "{line}");
+    assert!(line.contains("ms="), "{line}");
+    assert!(!text.contains("row 0"), "{text}");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn thread_older_with_an_unreadable_store_gives_503_and_logs_a_warning() {
+    let directory = TestDirectory::new();
+    let store = directory.store().await;
+    let state = turso::Builder::new_local(
+        directory
+            .store_path()
+            .join("harold-state.db")
+            .to_str()
+            .unwrap(),
+    )
+    .build()
+    .await
+    .unwrap();
+    state
+        .connect()
+        .unwrap()
+        .execute("DROP TABLE app_messages", ())
+        .await
+        .unwrap();
+    let server = TestServer::serve(store).await;
+    let logs = CapturedLogs::start();
+
+    let response = get_with_login(&server.url("/thread/older?before=r071")).await;
+
+    assert_eq!(response.status(), 503);
+    let text = logs.text();
+    let line = text
+        .lines()
+        .find(|line| line.contains("app thread older not read"))
+        .unwrap_or_else(|| panic!("no not-read line: {text}"));
+    assert!(line.contains("WARN"), "{line}");
+    assert!(line.contains(r#"reason="store_unread""#), "{line}");
+}
+
+/// The first event of `GET /updates` with the page's signals, and how many bytes it took.
+async fn first_patch(server: &TestServer, signals: Option<&str>) -> String {
+    let mut request = reqwest::Client::new()
+        .get(server.url("/updates"))
+        .header("Tailscale-User-Login", LOGIN);
+    if let Some(signals) = signals {
+        request = request.query(&[("datastar", signals)]);
+    }
+    let mut response = request.send().await.unwrap();
+    assert_eq!(response.status(), 200);
+    let mut buffer = String::new();
+    loop {
+        if let Some(end) = buffer.find("\n\n") {
+            buffer.truncate(end);
+            return buffer;
+        }
+        let chunk = tokio::time::timeout(Duration::from_secs(5), response.chunk())
+            .await
+            .expect("an event within five seconds")
+            .unwrap()
+            .expect("the stream stays open");
+        buffer.push_str(std::str::from_utf8(&chunk).unwrap());
+    }
+}
+
+fn row_count(patch: &str) -> usize {
+    patch.matches(r#"class="message chief""#).count()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn updates_redraws_from_the_oldest_signal_with_the_older_line_and_data_init() {
+    let directory = TestDirectory::new();
+    let store = directory.store().await;
+    add_rows(&store, 120).await;
+    let server = TestServer::serve(store).await;
+
+    let first = first_patch(&server, Some(r#"{"oldest":"r020"}"#)).await;
+
+    assert_eq!(row_count(&first), 101, "rows 20 to 120");
+    assert!(first.contains(r#"id="m-r020""#) && !first.contains(r#"id="m-r019""#));
+    assert!(first.contains(r#"id="m-r120""#));
+    assert!(first.contains("/thread/older?before=r020"), "{first}");
+    assert!(first.contains(r#"data-init="@get('/updates')""#), "{first}");
+
+    let first = first_patch(&server, Some(r#"{"oldest":"r001"}"#)).await;
+
+    assert_eq!(row_count(&first), 120, "every row");
+    assert!(!first.contains(r#"id="older""#), "{first}");
+    assert!(first.contains(r#"data-init="@get('/updates')""#), "{first}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn updates_draws_the_newest_50_for_a_missing_unknown_pruned_or_malformed_signal() {
+    let directory = TestDirectory::new();
+    let store = directory.store().await;
+    add_rows(&store, 120).await;
+    let server = TestServer::serve(store).await;
+
+    for signals in [
+        None,
+        Some(r#"{"reply":""}"#),
+        Some(r#"{"oldest":"unknown"}"#),
+        Some(r#"{"oldest":"r000"}"#),
+        Some(r#"{"oldest":""}"#),
+        Some(r#"{"oldest":7}"#),
+        Some("not json"),
+    ] {
+        let first = first_patch(&server, signals).await;
+        assert_eq!(row_count(&first), 50, "{signals:?}");
+        assert!(first.contains(r#"id="m-r071""#), "{signals:?}");
+        assert!(!first.contains(r#"id="m-r070""#), "{signals:?}");
+        assert!(first.contains("/thread/older?before=r071"), "{signals:?}");
+        assert!(first.contains(r#"data-init="@get('/updates')""#));
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn updates_logs_the_rows_and_bytes_of_its_first_patch() {
+    let directory = TestDirectory::new();
+    let store = directory.store().await;
+    add_rows(&store, 120).await;
+    let server = TestServer::serve(store).await;
+    let logs = CapturedLogs::start();
+
+    let first = first_patch(&server, None).await;
+
+    let text = logs.text();
+    let line = text
+        .lines()
+        .find(|line| line.contains("app page connected"))
+        .unwrap_or_else(|| panic!("no connected line: {text}"));
+    assert!(line.contains("rows=50"), "{line}");
+    assert!(line.contains("bytes="), "{line}");
+    assert!(!text.contains("row 120"), "{text}");
+    drop(first);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn updates_sets_the_oldest_signal_when_the_page_held_another() {
+    let directory = TestDirectory::new();
+    let store = directory.store().await;
+    add_rows(&store, 120).await;
+    let server = TestServer::serve(store).await;
+
+    let mut response = reqwest::Client::new()
+        .get(server.url("/updates"))
+        .query(&[("datastar", r#"{"oldest":"pruned"}"#)])
+        .header("Tailscale-User-Login", LOGIN)
+        .send()
+        .await
+        .unwrap();
+    let mut buffer = String::new();
+    while !buffer.contains(r#"{"oldest":"r071"}"#) {
+        let chunk = tokio::time::timeout(Duration::from_secs(5), response.chunk())
+            .await
+            .expect("the oldest signal within five seconds")
+            .unwrap()
+            .expect("the stream stays open");
+        buffer.push_str(std::str::from_utf8(&chunk).unwrap());
+    }
+    assert!(buffer.contains("event: datastar-patch-signals"), "{buffer}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_change_to_a_row_older_than_the_window_sends_no_patch() {
+    let directory = TestDirectory::new();
+    let store = directory.store().await;
+    append_app_reply(&store, "an old reply").await.unwrap();
+    store.project_unhandled_events(100).await.unwrap();
+    let reply = store.app_messages_since(0).await.unwrap().pop().unwrap();
+    // 60 newer rows push the reply out of the newest 50.
+    let end = now_ms() + 1000;
+    for n in 1..=60 {
+        store
+            .add_chief_app_message(&format!("n{n:03}"), end + n, "newer")
+            .await
+            .unwrap();
+    }
+    let server = TestServer::serve(store.clone()).await;
+    let mut response = reqwest::Client::new()
+        .get(server.url("/updates"))
+        .header("Tailscale-User-Login", LOGIN)
+        .send()
+        .await
+        .unwrap();
+    // The first patch and the dots/todos state; read until the stream goes quiet.
+    let mut seen = String::new();
+    while let Ok(Ok(Some(chunk))) =
+        tokio::time::timeout(Duration::from_millis(500), response.chunk()).await
+    {
+        seen.push_str(std::str::from_utf8(&chunk).unwrap());
+    }
+    assert!(!seen.contains(&format!("m-{}", reply.event_id)), "{seen}");
+
+    store
+        .set_app_reply_state(&reply.event_id, AppReplyState::WaitingChiefBusy)
+        .await
+        .unwrap();
+
+    let after = tokio::time::timeout(Duration::from_millis(500), response.chunk()).await;
+    if let Ok(Ok(Some(chunk))) = after {
+        let text = String::from_utf8_lossy(&chunk).into_owned();
+        assert!(
+            text.lines()
+                .all(|line| line.starts_with(':') || line.is_empty()),
+            "a patch for a row older than the window: {text}"
+        );
+    }
 }

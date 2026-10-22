@@ -1,24 +1,29 @@
-//! `GET /updates`: the thread and the call screen, live. A new stream starts with the whole
-//! thread and, when Harold has calls, the call screen; then it sends each new row, each row
-//! whose state changed, and the call screen each time the call changes, until shutdown or
-//! the page goes away.
+//! `GET /updates`: the thread and the call screen, live. A new stream starts with the
+//! thread from the page's `oldest` signal on (the newest 50 rows when the page names none
+//! it can find) and, when Harold has calls, the call screen; then it sends each new row,
+//! each row in that window whose state changed, and the call screen each time the call
+//! changes, until shutdown or the page goes away.
 
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::time::{Duration, Instant};
 
 use askama::Template;
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
-use datastar::prelude::{ElementPatchMode, PatchElements};
+use datastar::prelude::{ElementPatchMode, PatchElements, PatchSignals};
+use serde::Deserialize;
 use tokio::sync::{mpsc, watch};
 use tokio_stream::wrappers::ReceiverStream;
 use tracing::{info, warn};
 
 use super::chief::find_chief;
-use super::pages::{CallSection, MessageView, RespondingSection, awaiting_chief, dots_show};
+use super::pages::{
+    CallSection, MessageView, RespondingSection, Window, awaiting_chief, dots_show, older_line,
+    thread_window,
+};
 use super::todos::TodosSection;
 use super::{AppState, thread_start_ms};
 use crate::store::{AppMessage, AppReplyState};
@@ -35,6 +40,36 @@ const PATCHES_QUEUED: usize = 16;
 #[template(path = "web_app/messages.html")]
 struct MessagesSection {
     messages: Vec<MessageView>,
+    /// For `#older`: the query value naming the oldest row shown, when older rows remain.
+    older: Option<String>,
+}
+
+/// The query Datastar adds to `GET /updates`: the page's signals as JSON.
+#[derive(Deserialize)]
+pub(crate) struct UpdatesQuery {
+    datastar: Option<String>,
+}
+
+/// What the page's signals say of the oldest row it shows: `None` without signals,
+/// `Some(None)` when they name none, and the id otherwise. Malformed signals are none.
+fn oldest_signal(query: &UpdatesQuery) -> Option<Option<String>> {
+    let signals = serde_json::from_str::<serde_json::Value>(query.datastar.as_deref()?).ok();
+    Some(
+        signals
+            .as_ref()
+            .and_then(|signals| signals.get("oldest"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned),
+    )
+}
+
+/// The window the stream follows and what the page shows of its rows.
+struct Seen {
+    /// The window's oldest row; the newest 50 rows once it is pruned.
+    from: Option<String>,
+    /// Every row the page was sent, so a row that comes back into the window when `from`
+    /// is pruned is not appended twice.
+    known: HashMap<String, Shown>,
 }
 
 /// What the page shows of one row, to tell a changed row from an unchanged one.
@@ -42,7 +77,12 @@ type Shown = (String, Option<AppReplyState>);
 
 /// `GET /updates`: an SSE stream of Datastar patches. A store that cannot be read at the
 /// start gives `503`.
-pub(crate) async fn get_updates(State(state): State<AppState>) -> Response {
+pub(crate) async fn get_updates(
+    State(state): State<AppState>,
+    query: Result<Query<UpdatesQuery>, axum::extract::rejection::QueryRejection>,
+) -> Response {
+    let said = query.ok().and_then(|Query(query)| oldest_signal(&query));
+    let from = said.as_ref().and_then(Option::as_deref);
     // Watch before the first read, so a change made during it is not missed.
     let changes = state.store.watch_app_thread();
     let mut call = state.calls.as_ref().map(|calls| calls.view());
@@ -54,7 +94,8 @@ pub(crate) async fn get_updates(State(state): State<AppState>) -> Response {
     let todos_shown = todos_html(&state.questions.refresh().await);
     // The page may have been drawn, or the stream dropped while the phone was hidden, before
     // the dots and the todos changed, so the first patch carries them too.
-    let Some(whole) = whole_thread(&messages, dots.shown, &todos_shown) else {
+    let window = thread_window(&messages, from);
+    let Some((whole, bytes)) = whole_thread(window, dots.shown, &todos_shown) else {
         warn!(reason = "render_failed", "app page not connected");
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     };
@@ -68,19 +109,32 @@ pub(crate) async fn get_updates(State(state): State<AppState>) -> Response {
         },
         None => None,
     };
+    // A page that sent its signals but holds another oldest row than the window starts at
+    // is told the new one. A request with no signals at all is not a page.
+    let oldest_patch = match (said, window.oldest()) {
+        (Some(said), Some(oldest)) if said.as_deref() != Some(oldest) => Some(oldest_event(oldest)),
+        _ => None,
+    };
     let (patches, queued) = mpsc::channel(PATCHES_QUEUED);
-    // The channel has room for both, and nothing reads it yet: these sends cannot wait or
-    // fail.
+    // The channel has room for all three, and nothing reads it yet: these sends cannot wait
+    // or fail.
     let _ = patches.try_send(Ok(whole));
     if let Some(section) = section {
         let _ = patches.try_send(Ok(section));
     }
-    info!("app page connected");
+    if let Some(patch) = oldest_patch {
+        let _ = patches.try_send(Ok(patch));
+    }
+    info!(rows = window.rows.len(), bytes, "app page connected");
+    let seen = Seen {
+        from: window.oldest().map(str::to_owned),
+        known: shown(window.rows),
+    };
     tokio::spawn(follow_thread(
         state,
         changes,
         call,
-        shown(&messages),
+        seen,
         dots,
         todos_shown,
         patches,
@@ -96,13 +150,13 @@ async fn follow_thread(
     state: AppState,
     changes: watch::Receiver<u64>,
     call: Option<watch::Receiver<PhoneView>>,
-    known: HashMap<String, Shown>,
+    seen: Seen,
     dots: Dots,
     todos_shown: String,
     patches: mpsc::Sender<Result<Event, Infallible>>,
 ) {
     let connected = Instant::now();
-    let reason = send_patches(state, changes, call, known, dots, todos_shown, patches).await;
+    let reason = send_patches(state, changes, call, seen, dots, todos_shown, patches).await;
     info!(
         reason,
         seconds = connected.elapsed().as_secs(),
@@ -110,15 +164,16 @@ async fn follow_thread(
     );
 }
 
-/// Sends a patch for each new or changed row on every change of the thread, and the call
-/// screen on every change of the call. Returns why it stopped: `shutdown`, `page_gone`
+/// Sends a patch for each new or changed row of the window that starts at `from` on every
+/// change of the thread (the newest 50 rows once `from` is pruned), and the call screen on
+/// every change of the call. Returns why it stopped: `shutdown`, `page_gone`
 /// (the page has gone: a send fails) or `store_stopped` (the store stops telling of
 /// changes).
 async fn send_patches(
     state: AppState,
     mut changes: watch::Receiver<u64>,
     mut call: Option<watch::Receiver<PhoneView>>,
-    mut known: HashMap<String, Shown>,
+    mut seen: Seen,
     mut dots: Dots,
     mut todos_shown: String,
     patches: mpsc::Sender<Result<Event, Infallible>>,
@@ -176,14 +231,17 @@ async fn send_patches(
         let Ok(messages) = state.store.app_messages_since(thread_start_ms()).await else {
             continue;
         };
-        // Rows pruned from the thread drop out of `known` here.
-        let before = std::mem::replace(&mut known, shown(&messages));
         dots.awaiting = awaiting_chief(&messages);
         let dots_patch = dots.refresh(&state);
-        for message in messages {
-            let Some(patch) = patch_for(before.get(&message.event_id), message) else {
+        let window = thread_window(&messages, seen.from.as_deref());
+        for message in window.rows {
+            let Some(patch) = patch_for(seen.known.get(&message.event_id), message.clone()) else {
                 continue;
             };
+            seen.known.insert(
+                message.event_id.clone(),
+                (message.text.clone(), message.state),
+            );
             if patches.send(Ok(patch)).await.is_err() {
                 return "page_gone";
             }
@@ -304,11 +362,17 @@ fn call_screen(view: &PhoneView) -> Option<Event> {
     Some(PatchElements::new(section).into())
 }
 
-/// One patch replacing `#messages`, `#responding`, `#todos` and `#todo-count`, each morphed
-/// by its id.
-fn whole_thread(messages: &[AppMessage], dots: bool, todos: &str) -> Option<Event> {
+/// One patch setting the page's `oldest` signal.
+fn oldest_event(oldest: &str) -> Event {
+    PatchSignals::new(serde_json::json!({ "oldest": oldest }).to_string()).into()
+}
+
+/// One patch replacing `#messages` with the rows of `window`, and `#responding`, `#todos`
+/// and `#todo-count`, each morphed by its id; and the patch's size in bytes.
+fn whole_thread(window: Window<'_>, dots: bool, todos: &str) -> Option<(Event, usize)> {
     let section = MessagesSection {
-        messages: messages.iter().cloned().map(MessageView::from).collect(),
+        messages: window.rows.iter().cloned().map(MessageView::from).collect(),
+        older: older_line(&window),
     };
     let responding = RespondingSection { on: dots };
     let html = format!(
@@ -316,7 +380,8 @@ fn whole_thread(messages: &[AppMessage], dots: bool, todos: &str) -> Option<Even
         section.render().ok()?,
         responding.render().ok()?
     );
-    Some(PatchElements::new(html).into())
+    let bytes = html.len();
+    Some((PatchElements::new(html).into(), bytes))
 }
 
 fn shown(messages: &[AppMessage]) -> HashMap<String, Shown> {
