@@ -374,3 +374,35 @@ The web app's call (its stage 1b) runs on this core. [The web app reference](../
 **A newer screen.** A `POST /call` while the phone's call is open takes it over: the call and its worker go on, the call gets a new id, and its pieces are stamped from that request's arrival. The older screen's pieces are refused, and those it posted that still wait are not read. The call forgets the turn being spoken (`CallControl::forget_turn`, which resets the speech detector and keeps the background level), and the source forgets it again just before the newer screen's first piece, so whatever the older screen was saying is dropped, not typed.
 
 **Logs.** A phone's call writes `app call started` and `app call ended` with `reason`, and its turns write the lines above. No transcript, audio or line text is in any of them.
+
+## Testing a call end to end
+
+`scripts/call_test.py` plays the phone through a whole call and prints one line per step with its time in milliseconds. It exits 0 when every step passes. Otherwise it names the failing step and exits 1.
+
+```
+python3 scripts/call_test.py [--keep] [--log-level debug]
+```
+
+It needs the installed Harold (`~/bin/harold`), `tmux`, `say` and `claude`, and it uses nothing else outside the Python standard library. It touches neither the chief's pane, nor the installed Harold's calls, nor your thread.
+
+**What it starts.** All of it lives in a scratch folder, which the script removes at the end. A failed run keeps it and prints it; `--keep` keeps it after a pass. `harold.log` in it is the test Harold's log.
+
+- **A test Harold**, `~/bin/harold/harold` with `HAROLD_CONFIG_DIR` set to the scratch config. The config copies `[voice_input]` and `[tts]` from the installed `local.toml` and sets free loopback ports, `allowed_login = "call-test"`, a scratch store and `[telemetry] export = false`. `[notify]` names the scratch chief folder, the session `harold-call-test` and `web_app` for that folder, and empties `imessage` and `machine_audio_output`. It sets no timed prompts, and `[chat_db]` points at an empty scratch file, so the test Harold never reads your Messages. Harold refuses to start without an iMessage recipient, so `[imessage]` holds a placeholder that names nobody (`call-test@harold.invalid`). The test Harold also gets its own `TMPDIR`, since a starting Harold sweeps leftover `call-*` folders.
+- **A scratch tmux server** (`TMUX_TMPDIR` in the scratch folder, `TMUX` unset), so the test Harold sees no other pane. It holds one session, `harold-call-test`, whose pane runs `claude --model haiku` in the scratch chief folder, with `HAROLD_CONFIG_DIR` in its environment. The folder's `CLAUDE.md` tells it to answer each line starting with 🎙 by running `harold speak --src-id <its pane> "Call test answer."`, and `.claude/settings.json` allows only that command. It also sets `disableAllHooks`: a Stop hook set up for the installed Harold reports to that Harold's address, not to `HAROLD_CONFIG_DIR`'s, so a turn here would reach the installed Harold otherwise. Claude Code asks once whether it trusts the scratch folder and the script says yes; that is recorded in your `~/.claude.json`, as it is for any folder. The pane gets one first turn (`Hello`), because a fresh Claude Code shows a suggestion in its input box, which Harold reads as text and then holds the call's turn.
+
+**The phone.** Every request carries `Tailscale-User-Login: call-test`, the loopback Host and, on posts, `Origin`. The script follows `GET /updates` and reads `#call`'s `data-harold-state`, `data-harold-sound` and the "You said" line. It makes the question with `say` (16 kHz mono) and posts it to `/call/audio` as `call.js` does: pieces of 4,000 samples stamped with `at`, sent in real time, with 1 s of silence before and 2 s after.
+
+**The steps.** Each has a time limit. The times of the steps after the question count from the end of the spoken question.
+
+1. `POST /call` answers 200.
+2. The question is posted.
+3. The turn is cut (`#call` leaves `listening`).
+4. The "You said" line holds at least 80% of the question's words.
+5. The log has `spoken prompt typed` and the stand-in's pane shows the 🎙 line.
+6. `data-harold-sound` names an answer.
+7. `GET /call/answer/<id>` returns WAV audio; the line gives its length.
+8. `POST /call/played`, then `DELETE /call`, and the log's `call ended reason="stopped"`.
+
+A last check reads the test Harold's log: no `iMessage listener started`, and every `spoken prompt typed` names the stand-in's pane.
+
+**Teardown, always:** the call ends, the tmux server is killed and the test Harold stops.
