@@ -79,6 +79,8 @@ pub(crate) struct WorkerLog {
     /// How long each say request takes, in order; none left means at once.
     pub(crate) say_delays: VecDeque<Duration>,
     pub(crate) closes: usize,
+    /// How long each close takes.
+    pub(crate) close_delay: Duration,
     /// Whether each worker starts `Loading` rather than `Ready`.
     pub(crate) starts_loading: bool,
     /// The health of the worker started last.
@@ -147,7 +149,12 @@ impl VoiceWorker for FakeWorker {
     }
 
     async fn close(self) {
-        self.0.lock().unwrap().closes += 1;
+        let delay = {
+            let mut log = self.0.lock().unwrap();
+            log.closes += 1;
+            log.close_delay
+        };
+        sleep(delay).await;
     }
 }
 

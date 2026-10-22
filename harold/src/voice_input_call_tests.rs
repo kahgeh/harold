@@ -1546,3 +1546,47 @@ async fn a_bye_while_a_run_goes_still_hands_over_but_says_nothing_more() {
     // The hand-over still reached the chief, though the call ended before the run did.
     assert_eq!(h.keys().len(), 2, "{:?}", h.keys());
 }
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn a_run_that_ends_while_the_call_is_closing_down_still_hands_over() {
+    let (h, answerer, _) = answering_harness();
+    script_runs(
+        &answerer,
+        [run_after(3, handed_over("Passed.", "rerun it"))],
+    );
+    h.worker().close_delay = Duration::from_secs(5);
+    h.script([text("ask the chief to rerun it"), text("bye")]);
+    h.start().await;
+    h.speak().await;
+
+    h.speak().await;
+    sleep(Duration::from_secs(10)).await;
+    settle().await;
+
+    assert_eq!(h.state(), CallState::Off);
+    assert_eq!(h.keys().len(), 2, "{:?}", h.keys());
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn hand_overs_after_the_call_ends_keep_counting_on() {
+    let (h, answerer, _) = answering_harness();
+    script_runs(
+        &answerer,
+        [
+            run_now(handed_over("Passed.", "first request")),
+            run_after(3, handed_over("Passed.", "second request")),
+        ],
+    );
+    h.script([text("one"), text("two")]);
+    h.start().await;
+    h.speak().await;
+    past_the_tail().await;
+    h.speak().await;
+    h.calls.stop().await;
+    sleep(Duration::from_secs(5)).await;
+    settle().await;
+
+    let keys = format!("{:?}", h.keys());
+    assert!(keys.contains("hand-over H1: first request"), "{keys}");
+    assert!(keys.contains("hand-over H2: second request"), "{keys}");
+}

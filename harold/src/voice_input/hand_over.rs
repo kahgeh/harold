@@ -14,6 +14,7 @@ use super::call::{MARK, chief_pane};
 use crate::agent::domain::EffectiveAgentState;
 use crate::away_message::one_line;
 use crate::timed_prompts::{Attempt, Ports, Reason, Writer, type_when_ready};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 use tokio::time::{Instant, sleep};
@@ -52,10 +53,11 @@ pub(crate) struct HandOverFact {
 }
 
 /// The hand-overs of one call, numbered `H1`, `H2`, … within it.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub(super) struct HandOvers {
     shared: Arc<Mutex<Vec<HandOverFact>>>,
-    count: u32,
+    /// Shared with the clones a run that outlives its call holds, so numbers do not repeat.
+    count: Arc<AtomicU32>,
 }
 
 impl HandOvers {
@@ -68,9 +70,8 @@ impl HandOvers {
 
     /// Numbers the hand-over and starts typing it, in a task that outlives the call.
     /// Returns the number, such as `H1`.
-    pub(super) fn start<P: CallPorts>(&mut self, ports: Arc<P>, request: &str) -> String {
-        self.count += 1;
-        let id = format!("H{}", self.count);
+    pub(super) fn start<P: CallPorts>(&self, ports: Arc<P>, request: &str) -> String {
+        let id = format!("H{}", self.count.fetch_add(1, Ordering::SeqCst) + 1);
         let request: String = one_line(request).chars().take(REQUEST_CHARS).collect();
         self.shared
             .lock()

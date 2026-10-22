@@ -281,13 +281,18 @@ async fn pass_on_when_free<P: CallPorts>(
 
 /// What a run that ended after its call did: a hand-over goes to the chief, and the words of
 /// a turn whose run failed are typed into its pane when it is free.
-fn pass_on_after_call<P: CallPorts>(ports: Arc<P>, words: String, answer: Answer) {
+fn pass_on_after_call<P: CallPorts>(
+    ports: Arc<P>,
+    hand_overs: &HandOvers,
+    words: String,
+    answer: Answer,
+) {
     match answer {
         Answer::Said {
             hand_over: Some(request),
             ..
         } => {
-            HandOvers::default().start(ports, &request);
+            hand_overs.start(ports, &request);
         }
         Answer::Said { .. } => {}
         Answer::Failed(_) => {
@@ -643,6 +648,8 @@ struct Call<P: CallPorts> {
     updates: Vec<JoinHandle<()>>,
     awake: Option<P::Awake>,
     next_id: u64,
+    /// The run going when the call ended, with the words it answers.
+    detached: Option<(u64, String)>,
     /// The call answerer, when the daemon has one.
     answering: Option<Arc<CallAnswering>>,
     /// Set when the answerer's program could not be started: the call stops trying it.
@@ -761,6 +768,7 @@ impl<P: CallPorts> Call<P> {
             updates: Vec::new(),
             awake,
             next_id: 0,
+            detached: None,
             answerer_gone: false,
             run: None,
             queued: VecDeque::new(),
@@ -791,6 +799,18 @@ impl<P: CallPorts> Call<P> {
                 health = health_change(&mut self.health), if self.health.is_some() => {
                     self.health_changed(health).await;
                 }
+            }
+        }
+        // A run that ended while the call closed down sent its answer to an inbox no one
+        // reads: from here on a send fails and the run passes its answer on itself, and
+        // what already arrived is passed on now.
+        inbox.close();
+        while let Ok(event) = inbox.try_recv() {
+            if let (Event::Answered { id, answer }, Some((run, words))) =
+                (event, self.detached.take_if(|_| true))
+                && id == run
+            {
+                pass_on_after_call(Arc::clone(&self.ports), &self.hand_overs, words, answer);
             }
         }
     }
@@ -1313,6 +1333,7 @@ impl<P: CallPorts> Call<P> {
         let span = queued.trace.span.clone();
         let events = self.events.clone();
         let ports = Arc::clone(&self.ports);
+        let hand_overs = self.hand_overs.clone();
         let task = tokio::spawn(async move {
             let ask = Ask {
                 words: &words,
@@ -1325,7 +1346,7 @@ impl<P: CallPorts> Call<P> {
             if let Err(mpsc::error::SendError(Event::Answered { answer, .. })) =
                 events.send(Event::Answered { id, answer })
             {
-                pass_on_after_call(ports, words, answer);
+                pass_on_after_call(ports, &hand_overs, words, answer);
             }
         });
         let now = Instant::now();
@@ -1373,7 +1394,12 @@ impl<P: CallPorts> Call<P> {
                 }
                 if self.mode == Mode::Ending {
                     // A bye was said: the words go to the chief in the background.
-                    pass_on_after_call(Arc::clone(&self.ports), run.text, Answer::Failed(failure));
+                    pass_on_after_call(
+                        Arc::clone(&self.ports),
+                        &self.hand_overs,
+                        run.text,
+                        Answer::Failed(failure),
+                    );
                 } else {
                     self.fall_back(run.text, run.trace).await;
                 }
@@ -2238,10 +2264,12 @@ impl<P: CallPorts> Call<P> {
         }
         // A run going when the call ends is let finish: its hand-over, or its turn if it
         // fails, still goes to the chief. Harold stopping drops it with the rest.
-        if let Some(run) = self.run.take()
-            && why == Ended::Shutdown
-        {
-            run.task.abort();
+        if let Some(run) = self.run.take() {
+            if why == Ended::Shutdown {
+                run.task.abort();
+            } else {
+                self.detached = Some((run.id, run.text));
+            }
         }
         if why == Ended::Shutdown {
             self.queued.clear();
