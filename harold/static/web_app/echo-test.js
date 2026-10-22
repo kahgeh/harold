@@ -69,12 +69,12 @@
   }
 
   function showResult(setup, kind, text, failed) {
-    const item = document.createElement("li");
-    item.textContent = text;
-    if (failed) {
-      item.className = "fail";
-    }
-    results.appendChild(item);
+    results.replaceChildren(
+      Object.assign(document.createElement("li"), {
+        textContent: text,
+        className: failed ? "fail" : "",
+      }),
+    );
     done.push({ text, failed });
     summaryList.replaceChildren(
       ...done.map((run) => {

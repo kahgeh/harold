@@ -50,7 +50,7 @@ const USER_AGENT_LIMIT: usize = 300;
 /// The words `say` reads for the sample: about 15 seconds at its usual pace.
 const SAMPLE_TEXT: &str = "Good morning. This is Harold, checking that your phone can tell \
     my voice from yours. While I talk, please keep still and say nothing, then talk over me \
-    in the second run. Nothing you hear is recorded, and nothing leaves your Mac except \
+    in the second run. Nothing you hear is recorded, and nothing leaves your phone except \
     a few loudness numbers. Thank you for your patience.";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -474,14 +474,7 @@ pub(crate) async fn post_run(State(state): State<AppState>, body: Body) -> Respo
         run: &run,
         verdict: &verdict,
     };
-    let folder = echo.folder.clone();
-    let written = {
-        let json_run = serde_json::to_vec(&saved).map(|_| ());
-        match json_run {
-            Ok(()) => write_run(&folder, at_ms, &saved),
-            Err(error) => Err(std::io::Error::other(error)),
-        }
-    };
+    let written = write_run(&echo.folder, at_ms, &saved);
     if written.is_err() {
         return not_saved(StatusCode::INTERNAL_SERVER_ERROR, "write_failed");
     }
@@ -497,7 +490,6 @@ pub(crate) async fn post_run(State(state): State<AppState>, body: Body) -> Respo
 /// The `echo test run` line: fixed words, a share or a yes or no, never sound or text.
 fn log_run(run: &RunBody, verdict: &Verdict) {
     let (setup, kind) = (run.setup.word(), run.kind.word());
-    let echo_cancellation = run.echo_cancellation.unwrap_or(false);
     let standalone = run.standalone;
     let verdict_word = verdict.outcome.word();
     if let Some(share) = verdict.share_over_bar {
@@ -507,7 +499,7 @@ fn log_run(run: &RunBody, verdict: &Verdict) {
             kind,
             verdict = verdict_word,
             share_over_bar,
-            echo_cancellation,
+            echo_cancellation = run.echo_cancellation,
             standalone,
             "echo test run"
         );
@@ -517,7 +509,7 @@ fn log_run(run: &RunBody, verdict: &Verdict) {
             kind,
             verdict = verdict_word,
             voice_found,
-            echo_cancellation,
+            echo_cancellation = run.echo_cancellation,
             standalone,
             "echo test run"
         );
@@ -526,7 +518,7 @@ fn log_run(run: &RunBody, verdict: &Verdict) {
             setup,
             kind,
             verdict = verdict_word,
-            echo_cancellation,
+            echo_cancellation = run.echo_cancellation,
             standalone,
             "echo test run"
         );
