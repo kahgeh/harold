@@ -758,6 +758,30 @@ impl AgentMonitorRuntime {
         }
     }
 
+    /// The first time Harold tracks this incarnation, whichever of the inventory or a hook sees it.
+    fn log_pane_found_if_new(&self, pane: &AgentPaneObservation) {
+        let known = self
+            .panes
+            .get(&pane.incarnation.pane_id)
+            .is_some_and(|tracked| tracked.pane.incarnation == pane.incarnation);
+        if !known {
+            self.log_pane_found(pane);
+        }
+    }
+
+    fn log_pane_found(&self, pane: &AgentPaneObservation) {
+        tracing::info!(
+            pane_id = pane.incarnation.pane_id.as_str(),
+            provider_id = pane.incarnation.provider_id.as_str(),
+            program = self
+                .inventory
+                .program(&pane.incarnation)
+                .as_deref()
+                .unwrap_or(""),
+            "agent monitor pane found"
+        );
+    }
+
     async fn report_lifecycle(
         &mut self,
         pane_id: String,
@@ -811,6 +835,7 @@ impl AgentMonitorRuntime {
             .await
             .map_err(MonitorCommandError::EventAppend)?;
 
+        self.log_pane_found_if_new(&pane);
         let tracked = self
             .panes
             .entry(pane.incarnation.pane_id.clone())
@@ -916,6 +941,7 @@ impl AgentMonitorRuntime {
         let result = store::append_monitor_turn_completed(&self.store, pane.clone(), &turn).await?;
         if let Some(pane) = pane {
             let observed_at_ms = pane.observed_at_ms;
+            self.log_pane_found_if_new(&pane);
             let tracked = self
                 .panes
                 .entry(pane.incarnation.pane_id.clone())
@@ -1017,16 +1043,7 @@ impl AgentMonitorRuntime {
                     tracked.pane = pane;
                     tracked.consecutive_absences = 0;
                 } else {
-                    tracing::info!(
-                        pane_id = pane_id.as_str(),
-                        provider_id = pane.incarnation.provider_id.as_str(),
-                        program = self
-                            .inventory
-                            .program(&pane.incarnation)
-                            .as_deref()
-                            .unwrap_or(""),
-                        "agent monitor pane found"
-                    );
+                    self.log_pane_found(&pane);
                     let mut tracked = TrackedPane::new(pane);
                     if let Some(basis) = source_version(&appended, &["AgentPaneObserved"]) {
                         tracked.summary_basis_version = basis;

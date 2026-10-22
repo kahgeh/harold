@@ -292,7 +292,7 @@ Every other field is dropped before export, including `text`, `msg`, `raw_output
 
 **Log bodies** are fixed text. A test scans every log call in `harold/src` and `events/src` and fails on one that puts a value into its message, apart from a short list of fixed reasons, migration names and a path.
 
-**A pane found.** `agent monitor pane found` (`info`) is logged when the inventory first sees a new agent incarnation in a pane, with `pane_id`, `provider_id` and `program`: the file name of the matched agent program, never its arguments. Its counterpart is `agent monitor pane gone`, with `pane_id`; the two give how long the pane was listed. A `program` that is not an agent's name means a false match. This query should list only `claude`, `codex` and `opencode`:
+**A pane found.** `agent monitor pane found` (`info`) is logged when Harold first tracks a new agent incarnation in a pane, whether the inventory or a hook saw it first, with `pane_id`, `provider_id` and `program`: the file name of the matched agent program, never its arguments. Its counterpart is `agent monitor pane gone`, with `pane_id`; the two give how long the pane was listed. A `program` that is not an agent's name means a false match. This query should list only `claude`, `codex` and `opencode`:
 
 ```
 SELECT LogAttributes['program'] AS program, LogAttributes['provider_id'] AS provider, count()

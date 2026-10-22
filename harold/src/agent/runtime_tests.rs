@@ -4524,6 +4524,38 @@ async fn a_new_incarnation_logs_pane_found_once_with_its_program_only() {
 }
 
 #[tokio::test]
+async fn a_hook_that_tracks_the_incarnation_first_logs_pane_found_once() {
+    let mut inventory = FakeInventory::scans(vec![Ok(vec![pane("%8", 80, 800, 1_000, 100)])]);
+    inventory.program = Some("claude");
+    let fixture = Fixture::new(inventory).await;
+    fixture
+        .inventory
+        .push_resolution(Ok(Some(pane("%8", 80, 800, 1_000, 100))));
+    let (captured, _guard) = capture_logs();
+
+    fixture
+        .handle
+        .report_lifecycle(
+            "%8".into(),
+            ObservedAgentState::Busy,
+            "claude-hook".into(),
+            WorkSummaryUpdate::Unchanged,
+        )
+        .await
+        .unwrap();
+    fixture.handle.inventory_tick().await.unwrap();
+
+    let logs = logged(&captured);
+    println!("{}", logs.trim_end());
+    assert_eq!(
+        logs.matches("agent monitor pane found").count(),
+        1,
+        "{logs}"
+    );
+    assert!(logs.contains("program=\"claude\""), "{logs}");
+}
+
+#[tokio::test]
 async fn pane_departed_in_prompt_recovery_does_not_degrade_screen() {
     let fixture = Fixture::new(FakeInventory::scans(vec![Ok(vec![pane(
         "%8", 80, 800, 1_000, 100,
