@@ -85,6 +85,13 @@ impl AppRoute for WebAppRoute {
             .block_on(self.store.set_app_reply_state(event_id, state))
             .map_err(|error| format!("app reply state write failed: {error}"))
     }
+
+    /// Blocking: call from `spawn_blocking`.
+    fn settle_waiting_replies(&self, before_ms: i64) -> Result<Vec<String>, String> {
+        self.runtime
+            .block_on(self.store.settle_waiting_app_replies(before_ms))
+            .map_err(|error| format!("app reply settle write failed: {error}"))
+    }
 }
 
 #[cfg(test)]

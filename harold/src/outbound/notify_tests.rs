@@ -710,6 +710,11 @@ pub(crate) struct FakeApp {
     delivered: Mutex<Vec<(String, String)>>,
     reply_states: Mutex<Vec<(String, AppReplyState)>>,
     reply_state_fails: bool,
+    /// The ids `settle_waiting_replies` answers with, once.
+    waiting: Mutex<Vec<String>>,
+    /// Each `before_ms` `settle_waiting_replies` was asked about, oldest first.
+    settles: Mutex<Vec<i64>>,
+    settle_fails: bool,
 }
 
 impl FakeApp {
@@ -728,7 +733,30 @@ impl FakeApp {
             delivered: Mutex::new(Vec::new()),
             reply_states: Mutex::new(Vec::new()),
             reply_state_fails: false,
+            waiting: Mutex::new(Vec::new()),
+            settles: Mutex::new(Vec::new()),
+            settle_fails: false,
         }
+    }
+
+    /// The app, with `ids` as the replies the next `settle_waiting_replies` settles.
+    pub(crate) fn with_waiting(self, ids: &[&str]) -> Self {
+        *self.waiting.lock().unwrap() = ids.iter().map(ToString::to_string).collect();
+        self
+    }
+
+    /// The app, with every `settle_waiting_replies` failing.
+    pub(crate) fn failing_settles(self) -> Self {
+        Self {
+            settle_fails: true,
+            ..self
+        }
+    }
+
+    /// Each `before_ms` `settle_waiting_replies` was asked about, oldest first, including
+    /// the calls that failed.
+    pub(crate) fn settles(&self) -> Vec<i64> {
+        self.settles.lock().unwrap().clone()
     }
 
     /// The app, with every `set_reply_state` failing, as when the thread cannot be written.
@@ -772,6 +800,14 @@ impl AppRoute for FakeApp {
             return Err("app reply state write failed: store is failing".into());
         }
         Ok(())
+    }
+
+    fn settle_waiting_replies(&self, before_ms: i64) -> Result<Vec<String>, String> {
+        self.settles.lock().unwrap().push(before_ms);
+        if self.settle_fails {
+            return Err("app reply settle failed: store is failing".into());
+        }
+        Ok(std::mem::take(&mut *self.waiting.lock().unwrap()))
     }
 }
 

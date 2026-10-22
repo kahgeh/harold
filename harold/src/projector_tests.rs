@@ -4850,3 +4850,100 @@ async fn the_delivery_span_of_a_desk_update_a_list_holds_back_names_machine_audi
     assert_eq!(attr(&deliveries[0], "outcome"), "held_back");
     assert_eq!(attr(&deliveries[0], "channel"), "machine_audio_output");
 }
+
+// ---------------------------------------------------------------------------
+// A waiting reply settles at the chief's turn end
+// ---------------------------------------------------------------------------
+
+/// The line `app reply state` logged for `event_id`, if any.
+fn reply_state_line(text: &str, event_id: &str) -> Option<String> {
+    text.lines()
+        .find(|line| line.contains("app reply state ") && line.contains(event_id))
+        .map(ToString::to_string)
+}
+
+#[tokio::test]
+async fn the_chiefs_turn_end_settles_a_waiting_reply_and_logs_it() {
+    let directory = TestDirectory::new();
+    let with = with_app(
+        &directory,
+        chief_and_pod(),
+        FakeApp::new(AppDelivery::Pushed).with_waiting(&["reply-1"]),
+    )
+    .await;
+    let logs = CapturedLogs::start();
+
+    let before = time::OffsetDateTime::now_utc().unix_timestamp() * 1000;
+    let outcome = with.dispatcher.dispatch(&turn_delivery("%1", "report"));
+    let after = time::OffsetDateTime::now_utc().unix_timestamp() * 1000 + 1000;
+
+    assert!(matches!(outcome, Ok(DeliveryOutcome::Delivered)));
+    let asked = with.app.settles();
+    assert_eq!(asked.len(), 1);
+    assert!((before - 1000..=after).contains(&asked[0]), "{asked:?}");
+    let text = logs.text();
+    let line = reply_state_line(&text, "reply-1").unwrap_or_else(|| panic!("{text}"));
+    assert!(line.contains("INFO"), "{line}");
+    assert!(line.contains("state=\"typed\""), "{line}");
+}
+
+#[tokio::test]
+async fn the_reply_settles_also_when_the_turn_end_update_is_skipped() {
+    let directory = TestDirectory::new();
+    let with = with_app(
+        &directory,
+        chief_and_pod(),
+        FakeApp::new(AppDelivery::Pushed).with_waiting(&["reply-2"]),
+    )
+    .await;
+    // The chief messaged this turn, so its turn-end update is left out.
+    with.dispatcher
+        .dispatch(&away_delivery(json!(message_from("%1", "done"))))
+        .unwrap();
+    let logs = CapturedLogs::start();
+
+    let update = with.dispatcher.dispatch(&turn_delivery("%1", "report"));
+
+    assert!(matches!(update, Ok(DeliveryOutcome::Skipped)));
+    assert_eq!(with.app.settles().len(), 1);
+    let text = logs.text();
+    let line = reply_state_line(&text, "reply-2").unwrap_or_else(|| panic!("{text}"));
+    assert!(line.contains("state=\"typed\""), "{line}");
+}
+
+#[tokio::test]
+async fn another_panes_turn_end_leaves_a_waiting_reply() {
+    let directory = TestDirectory::new();
+    let with = with_app(
+        &directory,
+        chief_and_pod(),
+        FakeApp::new(AppDelivery::Pushed).with_waiting(&["reply-3"]),
+    )
+    .await;
+    let logs = CapturedLogs::start();
+
+    let _ = with.dispatcher.dispatch(&turn_delivery("%2", "report"));
+
+    assert!(with.app.settles().is_empty());
+    assert!(reply_state_line(&logs.text(), "reply-3").is_none());
+}
+
+#[tokio::test]
+async fn a_failed_settle_is_logged_and_the_turn_end_goes_on() {
+    let directory = TestDirectory::new();
+    let with = with_app(
+        &directory,
+        chief_and_pod(),
+        FakeApp::new(AppDelivery::Pushed).failing_settles(),
+    )
+    .await;
+    let logs = CapturedLogs::start();
+
+    let outcome = with.dispatcher.dispatch(&turn_delivery("%1", "report"));
+
+    assert!(matches!(outcome, Ok(DeliveryOutcome::Delivered)));
+    assert_eq!(with.app.settles().len(), 1);
+    let text = logs.text();
+    assert!(text.contains("app reply state not recorded"), "{text}");
+    assert_eq!(with.app.delivered().len(), 1);
+}

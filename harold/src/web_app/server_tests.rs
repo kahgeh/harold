@@ -575,6 +575,34 @@ async fn each_row_ends_with_its_sender_label_and_a_reply_with_its_mark() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn a_settled_waiting_row_reads_me_with_no_words() {
+    let directory = TestDirectory::new();
+    let store = directory.store().await;
+    append_app_reply(&store, "settled").await.unwrap();
+    store.project_unhandled_events(100).await.unwrap();
+    let id = store.app_messages_since(0).await.unwrap()[0]
+        .event_id
+        .clone();
+    store
+        .set_app_reply_state(&id, AppReplyState::WaitingChiefBusy)
+        .await
+        .unwrap();
+    store.settle_waiting_app_replies(i64::MAX).await.unwrap();
+
+    let body = thread_body(store).await;
+
+    let start = body.find(">settled</p>").expect("the row");
+    let end = body[start..].find("</div>").unwrap();
+    let row = &body[start..start + end];
+    assert!(
+        row.contains(r#"aria-label="typed into the chief""#),
+        "{row}"
+    );
+    assert!(row.ends_with("</svg> me</p>"), "{row}");
+    assert!(!row.contains("waiting"), "{row}");
+}
+
 #[test]
 fn links_keep_trailing_punctuation_outside() {
     let link = |text: &str| Part {

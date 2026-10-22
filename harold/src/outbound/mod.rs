@@ -350,6 +350,9 @@ pub(crate) trait AppRoute: Send + Sync {
     /// and pushes its alert body to every subscription. Err only when the thread write fails.
     fn deliver(&self, event_id: &str, text: &str) -> Result<AppDelivery, String>;
     fn set_reply_state(&self, event_id: &str, state: AppReplyState) -> Result<(), String>;
+    /// Shows `typed` on every reply still waiting for the busy chief that was stored at or
+    /// before `before_ms`, and returns their event ids.
+    fn settle_waiting_replies(&self, before_ms: i64) -> Result<Vec<String>, String>;
 }
 
 /// The away channel's plain-text send and the turn-end summary. `SystemAwayText` uses

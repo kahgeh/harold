@@ -257,6 +257,27 @@ impl ProductionDispatcher {
         }
     }
 
+    /// At the chief's turn end, shows `typed` on the replies that waited for it. The turn
+    /// end is now: a reply stored later has not been dispatched yet, so none is missed.
+    /// A failed write is logged and the delivery goes on.
+    fn settle_waiting_replies(&self, app: &ChiefApp<'_>) {
+        let before_ms = (OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000)
+            .try_into()
+            .unwrap_or(i64::MAX);
+        match app.app.settle_waiting_replies(before_ms) {
+            Ok(settled) => {
+                for event_id in settled {
+                    info!(
+                        event_id,
+                        state = reply_state_word(AppReplyState::Typed),
+                        "app reply state"
+                    );
+                }
+            }
+            Err(error) => warn!(error, "app reply state not recorded"),
+        }
+    }
+
     /// A stored reply. One the user typed in the web app (`to_chief`) is typed into the
     /// chief's pane, and its row in the app shows what became of it; any other reply is
     /// routed as an iMessage reply is.
@@ -326,6 +347,10 @@ impl ProductionDispatcher {
                     .map_err(|error| {
                         DispatchError::Permanent(format!("invalid TurnCompleted payload: {error}"))
                     })?;
+                let chief_app = self.chief_app(&turn.pane_id);
+                if let Some(chief_app) = &chief_app {
+                    self.settle_waiting_replies(chief_app);
+                }
                 notify_with_app(
                     &turn,
                     &delivery.event_id,
@@ -333,7 +358,7 @@ impl ProductionDispatcher {
                     &self.notify_state,
                     &self.tracked_agents(),
                     self.environment.as_ref(),
-                    self.chief_app(&turn.pane_id).as_ref(),
+                    chief_app.as_ref(),
                 )
                 .map_err(DispatchError::Retryable)
             }

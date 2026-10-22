@@ -998,6 +998,36 @@ impl HaroldStore {
         .await
     }
 
+    /// Moves every reply whose row says `waiting: chief busy` and whose time is at or
+    /// before `before_ms` to `typed`, as the chief's turn end has come since. The ids of
+    /// the rows it changed.
+    pub(crate) async fn settle_waiting_app_replies(&self, before_ms: i64) -> Result<Vec<String>> {
+        let conn = self.state.connect()?;
+        let mut rows = conn
+            .query(
+                "SELECT event_id FROM app_messages WHERE state = ?1 AND at_ms <= ?2 ORDER BY at_ms, rowid",
+                (AppReplyState::WaitingChiefBusy.label(), before_ms),
+            )
+            .await?;
+        let mut settled = Vec::new();
+        while let Some(row) = rows.next().await? {
+            settled.push(required_text(&row, 0)?);
+        }
+        if settled.is_empty() {
+            return Ok(settled);
+        }
+        self.app_thread_write(
+            "UPDATE app_messages SET state = ?1 WHERE state = ?2 AND at_ms <= ?3",
+            (
+                AppReplyState::Typed.label(),
+                AppReplyState::WaitingChiefBusy.label(),
+                before_ms,
+            ),
+        )
+        .await?;
+        Ok(settled)
+    }
+
     /// Deletes the web app's thread rows older than `before_ms`.
     pub(crate) async fn delete_app_messages_before(&self, before_ms: i64) -> Result<()> {
         self.app_thread_write("DELETE FROM app_messages WHERE at_ms < ?1", (before_ms,))

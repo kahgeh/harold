@@ -2445,3 +2445,74 @@ async fn an_existing_store_gains_002_and_keeps_its_data() {
     assert!(has_table(&conn, "app_push_subscriptions").await);
     assert!(reopened.app_messages_since(0).await.unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn settling_changes_only_waiting_rows_at_or_before_the_time() {
+    let directory = TestDirectory::new();
+    let store = HaroldStore::open(directory.path()).await.unwrap();
+    let mut thread = store.watch_app_thread();
+
+    // Four replies, a few milliseconds apart: two waiting before the cut-off, one
+    // waiting after it, one already typed.
+    for text in ["early", "typed", "cut-off", "late"] {
+        append_app_reply(&store, text).await.unwrap();
+        store.project_unhandled_events(10).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    let rows = store.app_messages_since(0).await.unwrap();
+    let row = |text: &str| rows.iter().find(|row| row.text == text).unwrap().clone();
+    for (text, state) in [
+        ("early", AppReplyState::WaitingChiefBusy),
+        ("typed", AppReplyState::Typed),
+        ("cut-off", AppReplyState::WaitingChiefBusy),
+        ("late", AppReplyState::WaitingChiefBusy),
+    ] {
+        store
+            .set_app_reply_state(&row(text).event_id, state)
+            .await
+            .unwrap();
+    }
+    thread.borrow_and_update();
+
+    let mut settled = store
+        .settle_waiting_app_replies(row("cut-off").at_ms)
+        .await
+        .unwrap();
+
+    settled.sort();
+    let mut expected = vec![row("early").event_id, row("cut-off").event_id];
+    expected.sort();
+    assert_eq!(settled, expected);
+    assert!(thread.has_changed().unwrap(), "the thread's version moved");
+    let states: Vec<_> = store
+        .app_messages_since(0)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|message| (message.text, message.state))
+        .collect();
+    assert_eq!(
+        states,
+        [
+            ("early".to_string(), Some(AppReplyState::Typed)),
+            ("typed".to_string(), Some(AppReplyState::Typed)),
+            ("cut-off".to_string(), Some(AppReplyState::Typed)),
+            ("late".to_string(), Some(AppReplyState::WaitingChiefBusy)),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn settling_with_nothing_waiting_returns_nothing_and_leaves_the_version() {
+    let directory = TestDirectory::new();
+    let store = HaroldStore::open(directory.path()).await.unwrap();
+    append_app_reply(&store, "hi").await.unwrap();
+    store.project_unhandled_events(10).await.unwrap();
+    let mut thread = store.watch_app_thread();
+    thread.borrow_and_update();
+
+    let settled = store.settle_waiting_app_replies(i64::MAX).await.unwrap();
+
+    assert!(settled.is_empty());
+    assert!(!thread.has_changed().unwrap());
+}

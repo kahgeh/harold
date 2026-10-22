@@ -229,3 +229,30 @@ async fn set_reply_state_relabels_the_user_row() {
         assert_eq!(messages[0].state, Some(state));
     }
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn settle_waiting_replies_types_the_waiting_rows() {
+    let directory = TestDirectory::new();
+    let (store, route) = route_with(&directory, &[]).await;
+    append_app_reply(&store, "on it?").await.unwrap();
+    store.project_unhandled_events(100).await.unwrap();
+    let reply_id = store.app_messages_since(0).await.unwrap()[0]
+        .event_id
+        .clone();
+    store
+        .set_app_reply_state(&reply_id, AppReplyState::WaitingChiefBusy)
+        .await
+        .unwrap();
+
+    let settled = tokio::task::spawn_blocking({
+        let route = route.clone();
+        move || route.settle_waiting_replies(i64::MAX)
+    })
+    .await
+    .expect("settle thread")
+    .expect("settle write");
+
+    assert_eq!(settled, [reply_id]);
+    let messages = store.app_messages_since(0).await.unwrap();
+    assert_eq!(messages[0].state, Some(AppReplyState::Typed));
+}

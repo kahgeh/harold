@@ -130,7 +130,7 @@ A reply you type goes to the chief. It can be up to 1,000 characters; Harold ref
 |---|---|
 | ✓ `me` (the stored mark) | Harold has stored the reply and not yet typed it. |
 | ✓✓ `me` (the typed mark) | Harold typed the reply into the chief's idle pane. |
-| ✓✓ `me · waiting: chief busy` | The chief was working. Harold typed the reply into its pane anyway, and the chief reads it when its turn ends. |
+| ✓✓ `me · waiting: chief busy` | The chief was working. Harold typed the reply into its pane anyway. The label goes when the chief's turn ends, and the row then reads ✓✓ `me`. |
 | ✓ `me · not sent: no chief` | No agent runs in the chief's folder. Harold typed the reply nowhere. |
 | ✓ `me · not sent: messaging paused` | Messaging is paused. Harold typed the reply nowhere. |
 
