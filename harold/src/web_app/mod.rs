@@ -70,6 +70,10 @@ mod flow_tests;
 mod echo_test_tests;
 
 #[cfg(test)]
+#[path = "dictation_tests.rs"]
+mod dictation_tests;
+
+#[cfg(test)]
 #[path = "photo_tests.rs"]
 mod photo_tests;
 
@@ -345,6 +349,7 @@ pub(crate) fn router(state: AppState) -> Router {
             post(replies::post_photo).layer(DefaultBodyLimit::max(replies::PHOTO_BODY_LIMIT)),
         )
         .route("/replies/photo/{id}", get(replies::get_photo))
+        .route("/dictation/check", post(replies::post_dictation_check))
         .route("/push/subscription", post(replies::post_subscription))
         .route("/updates", get(updates::get_updates))
         .route("/page/hidden", post(post_page_hidden))

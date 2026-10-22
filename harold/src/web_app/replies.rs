@@ -1,6 +1,7 @@
 //! The page's posts and its photo route: a typed reply for the chief, a photo to go with
-//! it, and the phone's push subscription. Neither the reply's words, the photo, its path
-//! nor the subscription's address or keys reach a log line.
+//! it, the phone's push subscription, and the one word the page says about dictation.
+//! Neither the reply's words, the photo, its path nor the subscription's address or keys
+//! reach a log line.
 
 use std::convert::Infallible;
 use std::path::Path as FsPath;
@@ -34,6 +35,18 @@ const PHOTO_NOT_SHRUNK_BYTES: usize = 3 * 1024 * 1024;
 pub(crate) const REPLY_MAX_CHARS: usize = 1000;
 /// The largest reply body read, in bytes.
 const REPLY_BODY_MAX_BYTES: usize = 16 * 1024;
+/// The largest dictation check body read, in bytes.
+const DICTATION_BODY_MAX_BYTES: usize = 64;
+/// What the page may say about dictation: `dictation.js` reports one of these, once per page.
+const DICTATION_RESULTS: [&str; 7] = [
+    "missing",
+    "ok",
+    "not_allowed",
+    "service_not_allowed",
+    "network",
+    "no_speech",
+    "audio_capture",
+];
 /// The largest subscription body read, in bytes.
 const SUBSCRIPTION_BODY_MAX_BYTES: usize = 4 * 1024;
 /// The longest push endpoint taken, in characters.
@@ -48,6 +61,12 @@ struct ReplySignals {
     /// The id `POST /replies/photo` answered; empty or missing when no photo is attached.
     #[serde(default)]
     photo: String,
+}
+
+/// The check as `dictation.js` posts it.
+#[derive(Deserialize)]
+struct DictationCheck {
+    result: String,
 }
 
 /// The subscription as the page's `alerts.js` posts it.
@@ -226,6 +245,26 @@ pub(crate) async fn get_photo(State(state): State<AppState>, Path(id): Path<Stri
         HeaderValue::from_static("nosniff"),
     );
     response
+}
+
+/// `POST /dictation/check`: logs the one word the page says about dictation here and
+/// answers `204`. A word that is not one of `DICTATION_RESULTS`, a body over 64 bytes, or
+/// a body that is not `{"result": "<word>"}` gives `400`, and nothing is logged.
+pub(crate) async fn post_dictation_check(body: Bytes) -> Response {
+    if body.len() > DICTATION_BODY_MAX_BYTES {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    let Ok(check) = serde_json::from_slice::<DictationCheck>(&body) else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    let Some(result) = DICTATION_RESULTS
+        .into_iter()
+        .find(|known| *known == check.result)
+    else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    info!(result, "app dictation check");
+    StatusCode::NO_CONTENT.into_response()
 }
 
 /// `POST /push/subscription`: stores the phone's push subscription and answers `204`.

@@ -15,6 +15,7 @@
 <script src="/static/alerts.js" defer></script>
 <script src="/static/call.js" defer></script>
 <script src="/static/photo.js" defer></script>
+<script src="/static/dictation.js" defer></script>
 <script src="/static/pages.js" defer></script>
 </head>
 <body>
@@ -46,12 +47,17 @@
 <span id="photo-label"></span>
 <button type="button" id="photo-remove" class="icon-button quiet-button" aria-label="Remove the photo"><svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
 </div>
+<p id="listening-note" class="listening-note" role="status" hidden><span class="listen-dot"></span><span id="listening-text">Listening</span></p>
 <form id="reply" class="bar bottom" data-indicator:sending data-on:submit="@post('/replies')">
 <input type="text" data-bind:reply maxlength="1000" placeholder="Reply to the chief" aria-label="Reply to the chief" autocomplete="off">
 <input type="hidden" id="photo-id" data-bind:photo>
 <input type="file" id="photo-file" accept="image/*" hidden>
 <button type="button" id="photo-button" class="icon-button photo-button" aria-label="Add a photo"><svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path d="M4 7h3l1.6-2.2A1 1 0 0 1 9.4 4.4h5.2a1 1 0 0 1 .8.4L17 7h3a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V8a1 1 0 0 1 1-1z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><circle cx="12" cy="12.5" r="3.6" fill="none" stroke="currentColor" stroke-width="1.8"/></svg></button>
-<button type="submit" class="icon-button" data-attr:disabled="$sending" aria-label="Send"><svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path d="M12 19V5M5.5 11.5L12 5l6.5 6.5" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+<input type="hidden" id="dictation-on" data-bind:dictation>
+<input type="hidden" id="dictation-listening" data-bind:listening>
+<button type="button" id="dictation-mic" class="icon-button" hidden data-attr:hidden="!($dictation && !$listening && $reply.trim() === '' && $photo === '')" aria-label="Dictate a reply"><svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path d="M12 3a3 3 0 0 1 3 3v6a3 3 0 0 1-6 0V6a3 3 0 0 1 3-3zM5.5 11.5a6.5 6.5 0 0 0 13 0M12 18v3" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+<button type="button" id="dictation-stop" class="icon-button" hidden data-attr:hidden="!$listening" aria-label="Stop listening"><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><rect x="5" y="5" width="14" height="14" rx="2.5" fill="currentColor"/></svg></button>
+<button type="submit" class="icon-button" data-attr:disabled="$sending" data-attr:hidden="!!($listening || ($dictation && $reply.trim() === '' && $photo === ''))" aria-label="Send"><svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path d="M12 19V5M5.5 11.5L12 5l6.5 6.5" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
 </form>
 <div id="call-screen" class="call-screen">
 <p id="call-timer" class="call-timer">Call with the chief · 0:00</p>

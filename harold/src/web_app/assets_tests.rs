@@ -300,3 +300,82 @@ fn the_photo_rules_are_in_the_stylesheet() {
         assert!(css.contains(wanted), "app.css lacks {wanted}");
     }
 }
+
+#[test]
+fn dictation_js_listens_into_the_box_and_tells_harold_once() {
+    let script = include_str!("../../static/web_app/dictation.js");
+    for wanted in [
+        // The mic hides when neither API exists, and when a failure is remembered.
+        "window.SpeechRecognition || window.webkitSpeechRecognition",
+        r#"report("missing");"#,
+        r#"const STORAGE_KEY = "harold-dictation";"#,
+        "const REMEMBER_MS = 7 * 24 * 60 * 60 * 1000;",
+        "age >= 0 && age < REMEMBER_MS",
+        "localStorage.getItem(STORAGE_KEY)",
+        "localStorage.setItem(STORAGE_KEY, String(Date.now()))",
+        // The recognition starts with the phone's language, interim results and no end.
+        "r.lang = navigator.language;",
+        "r.interimResults = true;",
+        "r.continuous = true;",
+        // Each result goes into the box and fires its input event, grey until it ends.
+        "box.value = words;",
+        r#"box.dispatchEvent(new Event("input", { bubbles: true }))"#,
+        r#"box.classList.toggle("interim", interim)"#,
+        r#"box.classList.remove("interim")"#,
+        // It stops by itself after 4 s without a result.
+        "const QUIET_MS = 4000;",
+        "quietTimer = setTimeout(",
+        "r.stop();",
+        // It aborts on hiding, on a call, and on a submit.
+        r#"document.visibilityState === "hidden""#,
+        "r.abort();",
+        r#"call.addEventListener("click", abort);"#,
+        r#"form.addEventListener("submit", abort);"#,
+        // The errors, and what the strip says for them.
+        r#""not-allowed": "not_allowed""#,
+        r#""service-not-allowed": "service_not_allowed""#,
+        r#""audio-capture": "audio_capture""#,
+        "Dictation isn't available in this app.",
+        "Dictation needs a connection.",
+        "The microphone gave no sound.",
+        "const NOTICE_MS = 3000;",
+        // One check per page load, as JSON, to the one route.
+        r#"fetch("/dictation/check""#,
+        "JSON.stringify({ result })",
+        "if (reported) {",
+        r#"report("ok");"#,
+        // The signals are set through hidden inputs Datastar binds.
+        r#"input.dispatchEvent(new Event("input", { bubbles: true }))"#,
+    ] {
+        assert!(script.contains(wanted), "dictation.js lacks {wanted}");
+    }
+    for absent in [
+        "eval(",
+        "new Function",
+        "innerHTML",
+        "http://",
+        "https://",
+        "getUserMedia",
+        "MediaRecorder",
+        "transcript:",
+    ] {
+        assert!(!script.contains(absent), "dictation.js holds {absent}");
+    }
+    // The words are never sent: the only post is the check, with the result word alone.
+    assert_eq!(script.matches("fetch(").count(), 1);
+}
+
+#[test]
+fn the_dictation_rules_are_in_the_stylesheet() {
+    let css = include_str!("../../static/web_app/app.css");
+    for wanted in [
+        ".bottom input.interim {\n  color: var(--text-2);\n  border-color: var(--brand);",
+        ".listening-note {",
+        ".listening-note[hidden] {\n  display: none;",
+        ".listening-note + .bottom {\n  border-top: 0;",
+        ".listening-note .listen-dot {",
+        "background: var(--end);",
+    ] {
+        assert!(css.contains(wanted), "app.css lacks {wanted}");
+    }
+}

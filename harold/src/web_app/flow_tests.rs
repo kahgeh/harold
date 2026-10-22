@@ -833,7 +833,7 @@ async fn the_send_button_is_disabled_while_a_reply_is_posting() {
         "{page}"
     );
     assert!(
-        page.contains(r#"<button type="submit" class="icon-button" data-attr:disabled="$sending" aria-label="Send">"#),
+        page.contains(r#"<button type="submit" class="icon-button" data-attr:disabled="$sending""#),
         "{page}"
     );
 }

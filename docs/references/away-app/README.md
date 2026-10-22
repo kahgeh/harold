@@ -154,6 +154,30 @@ The reply bar reads: text box, photo button, **Send**, which is an up-arrow icon
 
 Both routes pass the login check and the checks on posts ([What the app refuses](#what-the-app-refuses)). The photo's content, its path and your words are in no log line.
 
+### Dictating a reply
+
+With nothing typed and no photo chosen, the reply bar's last button is a mic. Typing a letter or choosing a photo turns it back into **Send**. Tap the mic and a red dot with "Listening" shows above the bar; your words appear in the box as you speak, in grey until you stop. Tap the stop button, or leave 4 seconds of quiet, and the words stay in the box in the normal colour. Check them, fix them with the keyboard, and tap **Send**: the chief gets an ordinary reply, `📱 <the words>`.
+
+- **The phone does the listening.** `dictation.js` uses Safari's speech recognition (`webkitSpeechRecognition`). Safari gives the microphone's sound to Apple's speech recognition, the service behind the keyboard's dictation key; Apple runs it on the phone or on its servers, depending on the phone and the language, and the page cannot see which. The sound never goes to Harold, and Harold transcribes nothing. The words reach Harold, then the chief and the model, only when you tap **Send**. iOS asks once for the microphone and for speech recognition, the first time you tap the mic.
+- **It may not work in the installed app.** Earlier iOS versions failed in an app added to the home screen with `service-not-allowed`. The mic shows only when the API exists and no failure is remembered; on `not-allowed` or `service-not-allowed` it hides, the page remembers that for 7 days in `localStorage` (`harold-dictation`), and the strip says `Dictation isn't available in this app.` for 3 seconds. The keyboard's own dictation key is still there. `no-speech` and `aborted` go back to the mic quietly; `network` says `Dictation needs a connection.` and `audio-capture` says `The microphone gave no sound.`, each for 3 seconds.
+- **It stops when you leave.** Hiding the app or starting a call aborts it; the words so far stay in the box.
+- **A dictated reply is a typed reply.** `POST /replies`, `app reply stored`, the same row and states. No mark is added, because you checked the words before sending.
+
+| Route | Does |
+|---|---|
+| `POST /dictation/check` | The page reports once per page load the first thing it knows: `missing` (neither API exists), `ok` (the first result), or the first error: `not_allowed`, `service_not_allowed`, `network`, `no_speech` or `audio_capture`. The body is `{"result": "<word>"}`, at most 64 bytes. `204`; an unknown word, a longer body or bad JSON gets `400`. It passes the login check and the checks on posts ([What the app refuses](#what-the-app-refuses)). |
+
+Whether dictation works in the installed app is answered from the log, over 30 days:
+
+```
+SELECT LogAttributes['result'] AS result, count() AS pages
+FROM otel.otel_logs
+WHERE ServiceName = 'harold' AND Body = 'app dictation check' AND Timestamp > now() - INTERVAL 30 DAY
+GROUP BY result
+```
+
+Any `service_not_allowed` means the installed app cannot dictate, and the mic stays hidden there. No log line holds the words.
+
 ## The todos
 
 The todo page lists the chief's todos as cards in the question tool's order: the waiting questions and instructions first, then the questions you set aside with **Later**. Its header shows a small speech-bubble icon and a number when chief messages arrived while you were on the todo page; the number goes when you return to the thread page.
@@ -294,6 +318,7 @@ Harold logs no message text, no reply, no push address and no key. The app adds 
 | `app page disconnected` | `reason` (`page_gone`, `shutdown` or `store_stopped`) and `seconds`, how long the page was connected. Harold notices a closed page at the next patch or keep-alive, within about 15 seconds |
 | `app reply state` | `event_id` and `state` (`typed`, `waiting_chief_busy`, `not_sent_no_chief` or `not_sent_paused`), logged before the state is written |
 | `app reply stored` | `chars`, the reply's length in characters, and `photo_bytes`, the photo's size, when the reply carries one |
+| `app dictation check` | `result` (`missing`, `ok`, `not_allowed`, `service_not_allowed`, `network`, `no_speech` or `audio_capture`), once per page load |
 | `app photo stored` | `photo_bytes` and `kind` (`jpeg` or `png`) |
 | `app photo not shrunk` | A warning, `photo_bytes`, logged beside `app photo stored` for an upload over 3 MB: the phone shrinks to about 0.3 to 1 MB, so it did not, for example a HEIC photo it could not decode |
 | `app photo refused` | A warning with `reason` (`too_large`, `not_an_image`, `store_failed` or `unknown_photo`), and `photo_bytes` when known |

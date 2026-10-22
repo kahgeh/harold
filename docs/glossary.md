@@ -97,6 +97,7 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 | voice worker | The process that turns lines into audio and speech into text | — |
 | timed prompt | Text Harold types into a pane at a set time each day | — |
 | alert | A HyperDX alert that Harold types to the chief as `harold alert: …` | "alert" for a push |
+| dictation | Turning your speech into text in the web app's reply box, on the phone, for you to check and send | "transcription", which is Whisper on the Mac in a call; "voice message", since nothing recorded is sent |
 | photo | An image you attach to a web app reply, kept by Harold in `app-photos/` and named in the line typed to the chief | "attachment" alone, "image upload", "media" |
 | thread page | The web app's page that shows the thread and the reply box | "message page", "chat page" |
 | todo page | The web app's page that lists your todos and lets you answer them from the phone | "task page", "queue page" |

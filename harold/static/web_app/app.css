@@ -347,6 +347,45 @@ body.on-todos > #reply {
   font-size: 14px;
 }
 
+/* Dictation: the words as they come, and the strip above the bar while it listens. */
+
+.bottom input.interim {
+  color: var(--text-2);
+  border-color: var(--brand);
+}
+
+.listening-note {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  padding: 6px 16px 0;
+  background: var(--surface-1);
+  border-top: 1px solid var(--surface-4);
+  color: var(--text-2);
+  font-size: 13px;
+}
+
+.listening-note[hidden] {
+  display: none;
+}
+
+.listening-note + .bottom {
+  border-top: 0;
+}
+
+.listening-note .listen-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--end);
+}
+
+.listening-note.notice .listen-dot {
+  display: none;
+}
+
 /* The thread, oldest at the top. */
 
 #messages {
