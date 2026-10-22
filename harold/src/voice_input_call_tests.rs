@@ -1563,7 +1563,7 @@ async fn a_run_that_ends_while_the_call_is_closing_down_still_hands_over() {
     // Other events wait in the inbox ahead of the run's answer while the worker closes.
     sleep(Duration::from_secs(1)).await;
     h.calls.talk_now();
-    let _ = h.say("a late chief line", Speaker::Chief);
+    drop(h.say("a late chief line", Speaker::Chief));
     sleep(Duration::from_secs(10)).await;
     settle().await;
 
