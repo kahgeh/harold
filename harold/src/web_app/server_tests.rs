@@ -746,6 +746,7 @@ fn row(n: usize, at_ms: i64) -> AppMessage {
         sender: AppSender::Chief,
         text: format!("row {n:03}"),
         state: None,
+        photo: None,
     }
 }
 

@@ -13,11 +13,12 @@ use crate::agent::domain::{
 };
 
 use super::{
-    AppMessage, AppPushSubscribed, AppPushUnsubscribed, AppReplyState, AppSender, HaroldStore,
-    InboundMessage, ReceivedReply, TimedPromptHandled, TimedPromptOutcome, TurnCompleted,
-    append_agent_events, append_app_push_subscribed, append_app_push_unsubscribed,
-    append_app_reply, append_inbound_message, append_messaging_paused_changed,
-    append_timed_prompt_handled, append_tts_mute_changed, append_turn_completed,
+    AppMessage, AppPhoto, AppPushSubscribed, AppPushUnsubscribed, AppReplyState, AppSender,
+    HaroldStore, InboundMessage, ReceivedReply, TimedPromptHandled, TimedPromptOutcome,
+    TurnCompleted, append_agent_events, append_app_push_subscribed, append_app_push_unsubscribed,
+    append_app_reply, append_app_reply_with_photo, append_inbound_message,
+    append_messaging_paused_changed, append_timed_prompt_handled, append_tts_mute_changed,
+    append_turn_completed,
 };
 use super::{FailedWrite, StoreError, WriteFault};
 
@@ -483,7 +484,7 @@ async fn fresh_schema_has_one_initial_record_across_reopen() {
     while let Some(row) = rows.next().await.unwrap() {
         names.push(row.get_value(0).unwrap().as_text().unwrap().to_string());
     }
-    assert_eq!(names, ["001_initial", "002_web_app"]);
+    assert_eq!(names, ["001_initial", "002_web_app", "003_app_photo"]);
 }
 
 #[tokio::test]
@@ -620,7 +621,7 @@ async fn unknown_schema_record_is_rejected_without_modifying_pending_delivery() 
             .get_value(0)
             .unwrap()
             .as_integer(),
-        Some(&3)
+        Some(&4)
     );
 }
 
@@ -2194,6 +2195,7 @@ async fn an_app_reply_is_stored_with_to_chief_and_projected_as_a_user_row() {
             sender: AppSender::User,
             text: "hi".into(),
             state: None,
+            photo: None,
         }]
     );
 
@@ -2270,6 +2272,7 @@ async fn a_chief_message_is_added_once_and_a_reply_state_is_shown() {
             sender: AppSender::Chief,
             text: "m".into(),
             state: None,
+            photo: None,
         }]
     );
 
@@ -2426,9 +2429,10 @@ async fn an_existing_store_gains_002_and_keeps_its_data() {
     // Take the store back to what the base build left: no 002 record and no new tables.
     let conn = store.state.connect().unwrap();
     conn.execute_batch(
-        "DELETE FROM _migrations WHERE name = '002_web_app';
+        "DELETE FROM _migrations WHERE name IN ('002_web_app', '003_app_photo');
          DROP TABLE app_messages;
-         DROP TABLE app_push_subscriptions;",
+         DROP TABLE app_push_subscriptions;
+         DROP TABLE app_photo_uploads;",
     )
     .await
     .unwrap();
@@ -2515,4 +2519,128 @@ async fn settling_with_nothing_waiting_returns_nothing_and_leaves_the_version() 
 
     assert!(settled.is_empty());
     assert!(!thread.has_changed().unwrap());
+}
+
+#[tokio::test]
+async fn migration_003_adds_the_photo_column_and_the_upload_table_keeping_the_rows() {
+    let directory = TestDirectory::new();
+    let store = HaroldStore::open(directory.path()).await.unwrap();
+    store.add_chief_app_message("e1", 10, "m").await.unwrap();
+    // Take the store back to what the build before 003 left.
+    let conn = store.state.connect().unwrap();
+    conn.execute_batch(
+        "DELETE FROM _migrations WHERE name = '003_app_photo';
+         DROP TABLE app_photo_uploads;
+         ALTER TABLE app_messages DROP COLUMN photo;",
+    )
+    .await
+    .unwrap();
+    assert!(!has_table(&conn, "app_photo_uploads").await);
+    drop(conn);
+    drop(store);
+
+    let reopened = HaroldStore::open(directory.path()).await.unwrap();
+    let conn = reopened.state.connect().unwrap();
+    assert!(has_table(&conn, "app_photo_uploads").await);
+    let rows = reopened.app_messages_since(0).await.unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].text, "m");
+    assert_eq!(rows[0].photo, None, "a row from before has no photo");
+}
+
+#[tokio::test]
+async fn a_reply_with_a_photo_stores_its_file_name_and_the_row_says_whether_it_is_kept() {
+    let directory = TestDirectory::new();
+    let store = HaroldStore::open(directory.path()).await.unwrap();
+    store.add_app_photo_upload("p1", "p1.jpg", 5).await.unwrap();
+    append_app_reply_with_photo(&store, "", Some("p1.jpg"))
+        .await
+        .unwrap();
+    store.project_unhandled_events(10).await.unwrap();
+
+    let rows = store.app_messages_since(0).await.unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].text, "");
+    assert_eq!(
+        rows[0].photo,
+        Some(AppPhoto {
+            id: "p1".into(),
+            kept: true
+        })
+    );
+    let payload = store
+        .stream()
+        .load_after_version(EventVersion::start(), 10)
+        .await
+        .unwrap()
+        .remove(0)
+        .payload;
+    assert_eq!(payload["photo"], "p1.jpg");
+
+    store.delete_app_photo_upload("p1.jpg").await.unwrap();
+    let rows = store.app_messages_since(0).await.unwrap();
+    assert_eq!(
+        rows[0].photo,
+        Some(AppPhoto {
+            id: "p1".into(),
+            kept: false
+        })
+    );
+}
+
+#[tokio::test]
+async fn an_upload_is_taken_by_one_reply_only_until_it_is_given_back() {
+    let directory = TestDirectory::new();
+    let store = HaroldStore::open(directory.path()).await.unwrap();
+    store.add_app_photo_upload("p1", "p1.png", 5).await.unwrap();
+
+    assert_eq!(store.claim_app_photo_upload("nope").await.unwrap(), None);
+    assert_eq!(
+        store.claim_app_photo_upload("p1").await.unwrap().as_deref(),
+        Some("p1.png")
+    );
+    assert_eq!(store.claim_app_photo_upload("p1").await.unwrap(), None);
+    store.release_app_photo_upload("p1").await.unwrap();
+    assert_eq!(
+        store.claim_app_photo_upload("p1").await.unwrap().as_deref(),
+        Some("p1.png")
+    );
+}
+
+#[tokio::test]
+async fn the_prune_lists_expired_photo_rows_and_unused_uploads_only() {
+    let directory = TestDirectory::new();
+    let store = HaroldStore::open(directory.path()).await.unwrap();
+    store
+        .add_app_photo_upload("old", "old.jpg", 10)
+        .await
+        .unwrap();
+    store
+        .add_app_photo_upload("new", "new.jpg", 100)
+        .await
+        .unwrap();
+    store
+        .add_app_photo_upload("used", "used.jpg", 10)
+        .await
+        .unwrap();
+    store.claim_app_photo_upload("used").await.unwrap();
+    for (file, at_ms) in [("used.jpg", 10), ("new.jpg", 100)] {
+        store
+            .delivery_write(
+                "INSERT INTO app_messages (event_id, at_ms, sender, text, photo) VALUES (?1, ?2, 'user', '', ?3)",
+                (file, at_ms, file),
+            )
+            .await
+            .unwrap();
+    }
+
+    assert_eq!(
+        store.expired_app_photo_files(50).await.unwrap(),
+        ["used.jpg"]
+    );
+    assert_eq!(store.unused_app_photo_files(50).await.unwrap(), ["old.jpg"]);
+    assert_eq!(
+        store.app_photo_file("old").await.unwrap().as_deref(),
+        Some("old.jpg")
+    );
 }

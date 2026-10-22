@@ -8,14 +8,14 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use axum::Router;
-use axum::extract::State;
+use axum::extract::{DefaultBodyLimit, State};
 use axum::http::StatusCode;
 use axum::middleware::{from_fn, from_fn_with_state};
 use axum::routing::{get, post};
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
-use tracing::{error, warn};
+use tracing::{error, info, warn};
 
 use crate::agent::domain::AgentSnapshot;
 use crate::agent::snapshot::AgentSnapshotHub;
@@ -37,6 +37,8 @@ pub(crate) const DATASTAR_SHA256: &str =
 pub(crate) const THREAD_DAYS: i64 = 30;
 
 const DAY_MS: i64 = 24 * 60 * 60 * 1000;
+/// How long an uploaded photo waits for a reply to name it before the prune deletes it.
+const UNUSED_PHOTO_MS: i64 = 60 * 60 * 1000;
 /// How often the thread is cut back to `THREAD_DAYS`, after the cut at start.
 const PRUNE_EVERY: Duration = Duration::from_secs(60 * 60);
 /// How long the server gets to stop after shutdown. A client that holds its connection
@@ -66,6 +68,10 @@ mod flow_tests;
 #[cfg(test)]
 #[path = "echo_test_tests.rs"]
 mod echo_test_tests;
+
+#[cfg(test)]
+#[path = "photo_tests.rs"]
+mod photo_tests;
 
 #[cfg(test)]
 pub(crate) mod fake_push;
@@ -334,6 +340,11 @@ pub(crate) fn router(state: AppState) -> Router {
         .route("/", get(pages::get_thread))
         .route("/static/{name}", get(pages::get_static))
         .route("/replies", post(replies::post_reply))
+        .route(
+            "/replies/photo",
+            post(replies::post_photo).layer(DefaultBodyLimit::max(replies::PHOTO_BODY_LIMIT)),
+        )
+        .route("/replies/photo/{id}", get(replies::get_photo))
         .route("/push/subscription", post(replies::post_subscription))
         .route("/updates", get(updates::get_updates))
         .route("/page/hidden", post(post_page_hidden))
@@ -480,15 +491,55 @@ pub(crate) fn thread_start_ms() -> i64 {
     now_ms().saturating_sub(THREAD_DAYS * DAY_MS)
 }
 
-/// Deletes the thread's rows older than `THREAD_DAYS`. A failure logs a line without
-/// the store's words, and the next hour tries again.
+/// Deletes the thread's rows older than `THREAD_DAYS`, with the photos on them, and the
+/// photos no reply named within an hour. A failure logs a line without the store's words,
+/// and the next hour tries again.
 async fn prune(store: &HaroldStore) {
+    let photos = store.app_photos_dir();
+    match store.expired_app_photo_files(thread_start_ms()).await {
+        Ok(files) => log_pruned_photos("expired", delete_photos(store, &photos, files).await),
+        Err(_) => warn!("web app photos not pruned"),
+    }
     if store
         .delete_app_messages_before(thread_start_ms())
         .await
         .is_err()
     {
         warn!("web app thread not pruned");
+    }
+    match store
+        .unused_app_photo_files(now_ms().saturating_sub(UNUSED_PHOTO_MS))
+        .await
+    {
+        Ok(files) => log_pruned_photos("unused", delete_photos(store, &photos, files).await),
+        Err(_) => warn!("web app photos not pruned"),
+    }
+}
+
+/// Deletes the photo `files` in `directory` and forgets their uploads. How many were
+/// deleted; a file that cannot be deleted stays recorded, for the next hour.
+async fn delete_photos(store: &HaroldStore, directory: &Path, files: Vec<String>) -> usize {
+    let mut deleted = 0;
+    for file in files {
+        // Only a bare file name: the name is read from the store, never made a path.
+        if file.contains('/') || file.contains("..") {
+            continue;
+        }
+        match tokio::fs::remove_file(directory.join(&file)).await {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => continue,
+        }
+        if store.delete_app_photo_upload(&file).await.is_ok() {
+            deleted += 1;
+        }
+    }
+    deleted
+}
+
+fn log_pruned_photos(kind: &str, count: usize) {
+    if count > 0 {
+        info!(kind, count, "app photos pruned");
     }
 }
 

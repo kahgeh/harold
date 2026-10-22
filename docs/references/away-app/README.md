@@ -8,7 +8,7 @@ The chief is the first agent pane of the chief's tmux session among the agents r
 
 ## Rolling back to an earlier Harold
 
-This build adds a migration, `002_web_app`, to Harold's state database: two tables, one for the thread and one for the phones that turned on push. A Harold built before this one finds a migration it does not know, refuses the store, and stops at start with `incompatible state schema`.
+This build adds migrations to Harold's state database: `002_web_app` (two tables, one for the thread and one for the phones that turned on push) and `003_app_photo` (a `photo` column on the thread's rows and a table of the photos uploaded). A Harold built before this one finds a migration it does not know, refuses the store, and stops at start with `incompatible state schema`.
 
 To roll back, move the store aside first:
 
@@ -135,6 +135,24 @@ A reply you type goes to the chief. It can be up to 1,000 characters; Harold ref
 | ✓ `me · not sent: messaging paused` | Messaging is paused. Harold typed the reply nowhere. |
 
 While Harold cannot list the tmux panes, it does not know which pane is the chief's, so it holds the reply and tries again.
+
+### Replies with a photo
+
+The reply bar reads: text box, photo button, **Send**, which is an up-arrow icon in a round button. Tap the photo button and the phone's own chooser opens (Photo Library, Take Photo, Choose File). The chosen photo shows above the bar with its size and **✕** to take it off. **Send** works with a photo and no text.
+
+- **The phone shrinks the photo first.** It draws it to a canvas no longer than 2,048 px on its longer side and sends JPEG at quality 0.85, which makes a photo or screenshot about 0.3 to 1 MB and turns an iPhone HEIC photo into JPEG. Every upload is JPEG, a photo no wider than 2,048 px included.
+- **It uploads at once.** `photo.js` posts the shrunk photo to `POST /replies/photo` as soon as it is chosen, so **Send** has nothing to wait for; **Send** is disabled while the upload runs. A failed upload clears the strip and shows `The photo didn't reach Harold.` in it for 3 seconds. The route answers with the photo's id as plain text, the one route that does not answer through Datastar, because Datastar cannot send a raw image.
+- **The reply names the photo.** The page's `photo` signal holds the id, and `POST /replies` sends it with the words. A reply may have no words when it names an upload no reply has used; an id that names none gets `400`.
+- **The chief gets a path.** The line typed into the chief's pane is `📱 <your words> 📷 <absolute path>`, or `📱 📷 <absolute path>` with no words, for example `/Users/<you>/bin/harold/data/app-photos/<id>.jpg`. Claude Code reads the file with its Read tool. iMessage replies are unchanged.
+- **Your row shows it.** The photo sits above your words; tapping it opens it full size. A row whose photo Harold has deleted shows `photo removed`.
+- **How long photos are kept.** As long as their thread row: 30 days. The hourly prune deletes the files with the rows, and deletes an upload no reply named after 1 hour (you tapped ✕ or left the reply).
+
+| Route | Does |
+|---|---|
+| `POST /replies/photo` | The body is the photo, at most 5 MB (the limit Claude has for one image), starting like a JPEG (`FF D8 FF`) or a PNG (`89 50 4E 47`); Harold never decodes it. It is written to `app-photos/<uuid>.jpg` (or `.png`) beside the store's folder, the folder at mode 0700 and the file at 0600. `200`, `text/plain`, the id. `413` when too large, `400` when not a JPEG or PNG, `503` when it cannot be written. |
+| `GET /replies/photo/<id>` | The photo of upload `id`, with `Cache-Control: private, max-age=86400`. `404` for an id that is not a UUID, or whose photo was deleted. |
+
+Both routes pass the login check and the checks on posts ([What the app refuses](#what-the-app-refuses)). The photo's content, its path and your words are in no log line.
 
 ## The todos
 
@@ -275,7 +293,11 @@ Harold logs no message text, no reply, no push address and no key. The app adds 
 | `app page not connected` | `reason` (`store_unread` or `render_failed`) |
 | `app page disconnected` | `reason` (`page_gone`, `shutdown` or `store_stopped`) and `seconds`, how long the page was connected. Harold notices a closed page at the next patch or keep-alive, within about 15 seconds |
 | `app reply state` | `event_id` and `state` (`typed`, `waiting_chief_busy`, `not_sent_no_chief` or `not_sent_paused`), logged before the state is written |
-| `app reply stored` | `chars`, the reply's length in characters |
+| `app reply stored` | `chars`, the reply's length in characters, and `photo_bytes`, the photo's size, when the reply carries one |
+| `app photo stored` | `photo_bytes` and `kind` (`jpeg` or `png`) |
+| `app photo not shrunk` | A warning, `photo_bytes`, logged beside `app photo stored` for an upload over 3 MB: the phone shrinks to about 0.3 to 1 MB, so it did not, for example a HEIC photo it could not decode |
+| `app photo refused` | A warning with `reason` (`too_large`, `not_an_image`, `store_failed` or `unknown_photo`), and `photo_bytes` when known |
+| `app photos pruned` | `kind` (`expired` for photos past their keep time, `unused` for uploads no reply named) and `count`, logged by the hourly prune when it deletes any. A row showing `photo removed` has an `expired` count at the hour it went; an upload that never arrived has no `app photo stored` line |
 | `app todo answered` | `kind` (`answer`, `free_text`, `picks`, `later`, `tick`, `done`, `ignore`, `revise` or `reject`) and `result` (`sent`, `version_changed`, `not_waiting` or `unavailable`). The line never carries the todo's id; the question tool's own lines in `harold.log` do |
 | `app todos not read` | `reason` (`unavailable` or `timeout`), logged once when reads start failing |
 | `app todos read again` | none, logged once when reads recover |
@@ -288,12 +310,12 @@ Harold logs no message text, no reply, no push address and no key. The app adds 
 | `echo test sample not made` | `reason` (`say_failed`), logged as a warning |
 | `app call ended` | `reason`, one of the desk's `call ended` reasons ([Log lines](../voice-input/README.md#log-lines)); `microphone_failed` when the phone stopped posting audio |
 
-Five other lines report failures, and none carries content:
+Six other lines report failures, and none carries content:
 
 - `app push subscriptions not read` carries the store's error; the message is not pushed and `app message not pushed` follows with `subscriptions_unread`;
 - `web app unavailable` names the listen address or the key's path, never the login or the key;
 - `web app stopped` carries the server's error;
-- `web app thread not pruned` carries no field;
+- `web app thread not pruned` and `web app photos not pruned` carry no field;
 - `app reply state not recorded` carries the reply's event id and the store's error.
 
 A request refused by the login check, or by the checks on posts and the Host, writes no line at all.

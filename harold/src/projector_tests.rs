@@ -4160,6 +4160,56 @@ async fn a_to_chief_reply_with_no_app_is_still_typed() {
     );
 }
 
+#[tokio::test]
+async fn a_to_chief_reply_with_a_photo_types_the_absolute_path_of_the_named_file() {
+    let directory = TestDirectory::new();
+    let pane = "%app-chief-photo";
+    let store = HaroldStore::open(&directory.0).await.unwrap();
+    append_agent_events(&store, chief_in(pane)).await.unwrap();
+    let snapshots = AgentSnapshotHub::new(store.load_agent_snapshot().await.unwrap());
+    project_and_publish_agent_snapshot(&store, &snapshots, 500)
+        .await
+        .unwrap();
+    let environment = Arc::new(FakeEnvironment::locked(ONLY_FROM_CHIEF));
+    let (typed, typer) = recording_typer();
+    let dispatcher = production_dispatcher(environment, &snapshots, None, None)
+        .with_chief_typer(typer)
+        .with_photos_dir(std::path::PathBuf::from("/data/app-photos"));
+    let reply = |text: &str, photo: &str| json!({ "text": text, "to_chief": true, "photo": photo });
+
+    for payload in [
+        reply("look", "abc.jpg"),
+        reply("", "def.png"),
+        // A name that is not a bare file name is not followed.
+        reply("sneaky", "../../etc/passwd"),
+    ] {
+        let outcome = dispatcher.dispatch_with_pause(
+            &inbound_delivery(&unique_event_id(), payload),
+            None,
+            false,
+        );
+        assert!(
+            matches!(outcome, Ok(DeliveryOutcome::Delivered)),
+            "{outcome:?}"
+        );
+    }
+
+    let lines: Vec<String> = typed
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(_, line)| line.clone())
+        .collect();
+    assert_eq!(
+        lines,
+        [
+            "📱 look 📷 /data/app-photos/abc.jpg",
+            "📱 📷 /data/app-photos/def.png",
+            "📱 sneaky"
+        ]
+    );
+}
+
 // ---------------------------------------------------------------------------
 // End to end: no app content reaches a log line or an export
 // ---------------------------------------------------------------------------

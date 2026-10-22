@@ -7,7 +7,7 @@ pub(crate) use event_log::WriteFault;
 pub use event_log::{AppendResult, EventEnvelope, EventLog, EventVersion, NewEvent};
 
 use std::future::Future;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -34,7 +34,7 @@ const NAMESPACE: &str = "harold";
 const PARTITION_KEY: &str = "main";
 const STATE_DATABASE: &str = "harold-state.db";
 const LOCK_FILE: &str = "harold.lock";
-const MIGRATIONS: [(&str, &str); 2] = [
+const MIGRATIONS: [(&str, &str); 3] = [
     (
         "001_initial",
         include_str!("store/migrations/001_initial.sql"),
@@ -43,7 +43,14 @@ const MIGRATIONS: [(&str, &str); 2] = [
         "002_web_app",
         include_str!("store/migrations/002_web_app.sql"),
     ),
+    (
+        "003_app_photo",
+        include_str!("store/migrations/003_app_photo.sql"),
+    ),
 ];
+
+/// The folder of the web app's photos, beside the store's folder.
+const APP_PHOTOS_DIRECTORY: &str = "app-photos";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TurnCompleted {
@@ -134,6 +141,9 @@ pub(crate) struct ReceivedReply {
     /// True when the user typed the reply in the web app, for the chief.
     #[serde(default)]
     pub to_chief: bool,
+    /// The file name, in `app-photos/`, of the photo the reply carries.
+    #[serde(default)]
+    pub photo: Option<String>,
 }
 
 /// Who wrote a row of the web app's thread.
@@ -204,6 +214,17 @@ pub(crate) struct AppMessage {
     pub text: String,
     /// A reply's state; none for a chief message and for a reply not yet handled.
     pub state: Option<AppReplyState>,
+    /// The photo a reply carries; none for a chief message and a reply without one.
+    pub photo: Option<AppPhoto>,
+}
+
+/// The photo on a row of the thread.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AppPhoto {
+    /// The upload's id: the file's name without its extension.
+    pub id: String,
+    /// False once the prune has deleted the file.
+    pub kept: bool,
 }
 
 const TIMED_PROMPT_KEY_PREFIX: &str = "timed_prompt.";
@@ -457,6 +478,8 @@ pub struct HaroldStore {
     state: Database,
     graces: GraceWindows,
     is_new: bool,
+    /// The store's folder.
+    root: PathBuf,
     #[cfg(test)]
     fail_projection_before_checkpoint: std::sync::atomic::AtomicBool,
     #[cfg(test)]
@@ -545,6 +568,7 @@ impl HaroldStore {
             state,
             graces,
             is_new,
+            root: root.to_path_buf(),
             #[cfg(test)]
             fail_projection_before_checkpoint: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)]
@@ -558,6 +582,14 @@ impl HaroldStore {
             app_thread: tokio::sync::watch::Sender::new(0),
             _lock: lock,
         })
+    }
+
+    /// Where the web app keeps its photos: `app-photos/` beside the store's folder.
+    pub(crate) fn app_photos_dir(&self) -> PathBuf {
+        self.root
+            .parent()
+            .unwrap_or_else(|| Path::new(""))
+            .join(APP_PHOTOS_DIRECTORY)
     }
 
     /// Whether this open created the store's state database: a fresh start.
@@ -943,16 +975,18 @@ impl HaroldStore {
         let mut rows = conn
             .query(
                 r#"
-                SELECT event_id, at_ms, sender, text, state
-                FROM app_messages
-                WHERE at_ms >= ?1
-                ORDER BY at_ms, rowid
+                SELECT m.event_id, m.at_ms, m.sender, m.text, m.state, m.photo, u.id
+                FROM app_messages m
+                LEFT JOIN app_photo_uploads u ON u.file = m.photo
+                WHERE m.at_ms >= ?1
+                ORDER BY m.at_ms, m.rowid
                 "#,
                 (since_ms,),
             )
             .await?;
         let mut messages = Vec::new();
         while let Some(row) = rows.next().await? {
+            let kept = optional_text(&row, 6)?.is_some();
             messages.push(AppMessage {
                 event_id: required_text(&row, 0)?,
                 at_ms: required_integer(&row, 1)?,
@@ -961,6 +995,13 @@ impl HaroldStore {
                 state: optional_text(&row, 4)?
                     .map(|label| AppReplyState::parse(&label))
                     .transpose()?,
+                photo: optional_text(&row, 5)?.map(|file| AppPhoto {
+                    id: file
+                        .rsplit_once('.')
+                        .map_or(file.as_str(), |(stem, _)| stem)
+                        .to_owned(),
+                    kept,
+                }),
             });
         }
         Ok(messages)
@@ -1031,6 +1072,120 @@ impl HaroldStore {
     /// Deletes the web app's thread rows older than `before_ms`.
     pub(crate) async fn delete_app_messages_before(&self, before_ms: i64) -> Result<()> {
         self.app_thread_write("DELETE FROM app_messages WHERE at_ms < ?1", (before_ms,))
+            .await
+    }
+
+    /// Records a photo file written to `app-photos/`: `id` is its name without the
+    /// extension, `file` its name.
+    pub(crate) async fn add_app_photo_upload(
+        &self,
+        id: &str,
+        file: &str,
+        at_ms: i64,
+    ) -> Result<()> {
+        self.delivery_write(
+            "INSERT INTO app_photo_uploads (id, file, at_ms, used) VALUES (?1, ?2, ?3, 0)",
+            (id, file, at_ms),
+        )
+        .await
+    }
+
+    /// Takes the upload `id` for a reply: its file name when the upload exists and no
+    /// reply has taken it, none otherwise. Two replies naming one upload cannot both
+    /// take it.
+    pub(crate) async fn claim_app_photo_upload(&self, id: &str) -> Result<Option<String>> {
+        let conn = self.state.connect()?;
+        let mut rows = conn
+            .query(
+                "SELECT file FROM app_photo_uploads WHERE id = ?1 AND used = 0",
+                (id,),
+            )
+            .await?;
+        let file = match rows.next().await? {
+            Some(row) => required_text(&row, 0)?,
+            None => return Ok(None),
+        };
+        drop(rows);
+        let claimed = self
+            .health
+            .write(WriteKind::State, async {
+                Ok(conn
+                    .execute(
+                        "UPDATE app_photo_uploads SET used = 1 WHERE id = ?1 AND used = 0",
+                        (id,),
+                    )
+                    .await?)
+            })
+            .await?;
+        Ok((claimed > 0).then_some(file))
+    }
+
+    /// Gives an upload taken by `claim_app_photo_upload` back, as its reply was not stored.
+    pub(crate) async fn release_app_photo_upload(&self, id: &str) -> Result<()> {
+        self.delivery_write("UPDATE app_photo_uploads SET used = 0 WHERE id = ?1", (id,))
+            .await
+    }
+
+    /// The file name of upload `id`, when its file is kept.
+    pub(crate) async fn app_photo_file(&self, id: &str) -> Result<Option<String>> {
+        let conn = self.state.connect()?;
+        let mut rows = conn
+            .query("SELECT file FROM app_photo_uploads WHERE id = ?1", (id,))
+            .await?;
+        rows.next()
+            .await?
+            .map(|row| required_text(&row, 0))
+            .transpose()
+    }
+
+    /// The files of photos on rows older than `before_ms`, which the thread's prune is
+    /// about to delete.
+    pub(crate) async fn expired_app_photo_files(&self, before_ms: i64) -> Result<Vec<String>> {
+        self.photo_files(
+            "SELECT photo FROM app_messages WHERE photo IS NOT NULL AND at_ms < ?1",
+            before_ms,
+        )
+        .await
+    }
+
+    /// The files of uploads no reply has taken, recorded before `before_ms`.
+    pub(crate) async fn unused_app_photo_files(&self, before_ms: i64) -> Result<Vec<String>> {
+        self.photo_files(
+            "SELECT file FROM app_photo_uploads WHERE used = 0 AND at_ms < ?1",
+            before_ms,
+        )
+        .await
+    }
+
+    async fn photo_files(&self, sql: &str, before_ms: i64) -> Result<Vec<String>> {
+        let conn = self.state.connect()?;
+        let mut rows = conn.query(sql, (before_ms,)).await?;
+        let mut files = Vec::new();
+        while let Some(row) = rows.next().await? {
+            files.push(required_text(&row, 0)?);
+        }
+        Ok(files)
+    }
+
+    /// Adds a reply row as if projected at `at_ms`, with `photo` its file name.
+    #[cfg(test)]
+    pub(crate) async fn add_user_app_row_for_test(
+        &self,
+        event_id: &str,
+        at_ms: i64,
+        text: &str,
+        photo: Option<&str>,
+    ) -> Result<()> {
+        self.app_thread_write(
+            "INSERT INTO app_messages (event_id, at_ms, sender, text, photo) VALUES (?1, ?2, 'user', ?3, ?4)",
+            (event_id, at_ms, text, photo),
+        )
+        .await
+    }
+
+    /// Forgets the upload of `file`, as its file was deleted.
+    pub(crate) async fn delete_app_photo_upload(&self, file: &str) -> Result<()> {
+        self.delivery_write("DELETE FROM app_photo_uploads WHERE file = ?1", (file,))
             .await
     }
 
@@ -1249,8 +1404,8 @@ async fn project_app_reply(conn: &turso::Connection, event: &EventEnvelope) -> R
     let added = conn
         .execute(
             r#"
-            INSERT INTO app_messages (event_id, at_ms, sender, text)
-            VALUES (?1, ?2, ?3, ?4)
+            INSERT INTO app_messages (event_id, at_ms, sender, text, photo)
+            VALUES (?1, ?2, ?3, ?4, ?5)
             ON CONFLICT(event_id) DO NOTHING
             "#,
             (
@@ -1258,6 +1413,7 @@ async fn project_app_reply(conn: &turso::Connection, event: &EventEnvelope) -> R
                 at_ms,
                 AppSender::User.text(),
                 reply.text,
+                reply.photo,
             ),
         )
         .await?;
@@ -1901,12 +2057,24 @@ pub async fn append_inbound_message(store: &HaroldStore, event: &InboundMessage)
 }
 
 /// Stores a reply the user typed in the web app for the chief.
+#[cfg(test)]
 pub(crate) async fn append_app_reply(store: &HaroldStore, text: &str) -> Result<()> {
+    append_app_reply_with_photo(store, text, None).await
+}
+
+/// Stores a reply for the chief that may carry a photo: `photo` is its file name in
+/// `app-photos/`, which the payload then names.
+pub(crate) async fn append_app_reply_with_photo(
+    store: &HaroldStore,
+    text: &str,
+    photo: Option<&str>,
+) -> Result<()> {
+    let mut payload = json!({ "text": text, "to_chief": true });
+    if let Some(photo) = photo {
+        payload["photo"] = json!(photo);
+    }
     store
-        .append([NewEvent::new(
-            "InboundMessageReceived",
-            json!({ "text": text, "to_chief": true }),
-        )])
+        .append([NewEvent::new("InboundMessageReceived", payload)])
         .await?;
     Ok(())
 }

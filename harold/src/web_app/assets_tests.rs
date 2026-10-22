@@ -243,3 +243,60 @@ fn pages_js_beats_seen_while_the_page_is_visible() {
         assert!(script.contains(wanted), "pages.js lacks {wanted}");
     }
 }
+
+#[test]
+fn photo_js_shrinks_to_2048_as_jpeg_uploads_before_send_and_clears_with_the_x() {
+    let script = include_str!("../../static/web_app/photo.js");
+    for wanted in [
+        // The photo is drawn to a canvas no longer than 2,048 px, and sent as JPEG at 0.85.
+        "const LONGEST_SIDE = 2048;",
+        "const QUALITY = 0.85;",
+        "Math.min(1, LONGEST_SIDE / longest)",
+        // Decoded without a blob: address, which `img-src 'self'` would refuse.
+        "createImageBitmap(file",
+        r#"canvas.toBlob(resolve, "image/jpeg", QUALITY)"#,
+        // It uploads at once, with fetch, and reads the id back as text.
+        r#"fetch("/replies/photo""#,
+        r#""Content-Type": "application/octet-stream""#,
+        "(await response.text()).trim()",
+        // The id goes to the hidden input bound to the `photo` signal, with its input event.
+        r#"idInput.dispatchEvent(new Event("input", { bubbles: true }))"#,
+        // Send is disabled while the upload runs, and a submit then is stopped.
+        "send.disabled = on;",
+        "event.stopImmediatePropagation();",
+        // The X clears the id and the strip.
+        r#"remove.addEventListener("click", clear);"#,
+        "setId(\"\");",
+        // A failed upload says so in the strip for 3 s.
+        "The photo didn't reach Harold.",
+        "const FAILED_FOR_MS = 3000;",
+    ] {
+        assert!(script.contains(wanted), "photo.js lacks {wanted}");
+    }
+    for absent in [
+        "eval(",
+        "new Function",
+        "innerHTML",
+        "http://",
+        "https://",
+        "createObjectURL",
+    ] {
+        assert!(!script.contains(absent), "photo.js holds {absent}");
+    }
+}
+
+#[test]
+fn the_photo_rules_are_in_the_stylesheet() {
+    let css = include_str!("../../static/web_app/app.css");
+    for wanted in [
+        ".icon-button {",
+        ".photo-button {",
+        ".quiet-button {",
+        ".photo-chosen {",
+        ".photo-chosen[hidden] {\n  display: none;",
+        ".message .photo img {",
+        "max-width: min(220px, 100%);",
+    ] {
+        assert!(css.contains(wanted), "app.css lacks {wanted}");
+    }
+}

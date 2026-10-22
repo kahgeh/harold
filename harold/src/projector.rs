@@ -1,4 +1,5 @@
 use std::cell::Cell;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -86,6 +87,8 @@ struct ProductionDispatcher {
     chief_typer: ChiefTyper,
     /// Where Harold queues its own alert lines, when the alert address is on.
     alerts: Option<AlertQueue>,
+    /// The web app's `app-photos/` folder, where a reply's photo is read from.
+    photos_dir: Option<PathBuf>,
 }
 
 /// The word `app reply state` logs for `state`.
@@ -127,6 +130,7 @@ impl ProductionDispatcher {
             away_text: Arc::new(SystemAwayText),
             chief_typer: Arc::new(type_into_pane_quietly),
             alerts: None,
+            photos_dir: None,
         }
     }
 
@@ -190,6 +194,27 @@ impl ProductionDispatcher {
     #[cfg(test)]
     fn with_router(self, router: Router) -> Self {
         Self { router, ..self }
+    }
+
+    /// The dispatcher reading a reply's photo from `photos_dir`.
+    fn with_photos_dir(self, photos_dir: PathBuf) -> Self {
+        Self {
+            photos_dir: Some(photos_dir),
+            ..self
+        }
+    }
+
+    /// The absolute path of the photo `reply` carries, none when it carries none or
+    /// names a file that is not a bare name in `photos_dir`.
+    fn photo_path(&self, reply: &ReceivedReply) -> Option<PathBuf> {
+        let file = reply.photo.as_deref()?;
+        let bare = !file.is_empty() && !file.contains(['/', '\\']) && file != "..";
+        let dir = self.photos_dir.as_ref().filter(|_| bare)?;
+        Some(
+            std::path::absolute(dir)
+                .unwrap_or_else(|_| dir.clone())
+                .join(file),
+        )
     }
 
     /// The dispatcher with the web app as the chief's route to the phone.
@@ -310,8 +335,14 @@ impl ProductionDispatcher {
             });
         }
         // The reply's text is never logged: an error names the listing or tmux only.
-        let routing = route_to_chief(&reply.text, &self.chief_pane(), self.chief_typer.as_ref())
-            .map_err(DispatchError::Retryable)?;
+        let photo = self.photo_path(&reply);
+        let routing = route_to_chief(
+            &reply.text,
+            photo.as_deref(),
+            &self.chief_pane(),
+            self.chief_typer.as_ref(),
+        )
+        .map_err(DispatchError::Retryable)?;
         let (state, outcome) = match routing {
             ChiefRouting::Typed { busy: false, .. } => {
                 (AppReplyState::Typed, DeliveryOutcome::Delivered)
@@ -1054,12 +1085,10 @@ pub async fn run_event_handler_with_app(
     app: Option<Arc<dyn AppRoute>>,
     shutdown: watch::Receiver<()>,
 ) {
-    let dispatcher: Arc<dyn DeliveryDispatcher> = Arc::new(production_dispatcher(
-        Arc::new(SystemEnvironment),
-        &snapshots,
-        app,
-        alerts.clone(),
-    ));
+    let dispatcher: Arc<dyn DeliveryDispatcher> = Arc::new(
+        production_dispatcher(Arc::new(SystemEnvironment), &snapshots, app, alerts.clone())
+            .with_photos_dir(store.app_photos_dir()),
+    );
     // Voice notes sent before a restart are kept for Messages to read; remove the old ones.
     crate::outbound::voice_note::remove_old_notes(
         &crate::outbound::voice_note::notes_parent(),

@@ -242,7 +242,10 @@ async fn a_reply_is_stored_as_to_chief_and_logged_by_length_only() {
     );
     let body = response.text().await.unwrap();
     assert!(body.contains("event: datastar-patch-signals"), "{body}");
-    assert!(body.contains(r#"data: signals {"reply":""}"#), "{body}");
+    assert!(
+        body.contains(r#"data: signals {"reply":"","photo":""}"#),
+        "{body}"
+    );
 
     let stored = events(&store).await;
     assert_eq!(stored.len(), 1, "{stored:?}");
@@ -830,7 +833,7 @@ async fn the_send_button_is_disabled_while_a_reply_is_posting() {
         "{page}"
     );
     assert!(
-        page.contains(r#"<button type="submit" data-attr:disabled="$sending">Send</button>"#),
+        page.contains(r#"<button type="submit" class="icon-button" data-attr:disabled="$sending" aria-label="Send">"#),
         "{page}"
     );
 }

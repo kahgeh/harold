@@ -293,6 +293,60 @@ body.on-todos > #reply {
   color: var(--muted);
 }
 
+/* Icon buttons: Send, the photo button and the chosen photo's remove button. */
+
+.icon-button {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--target);
+  padding: 0;
+}
+
+.photo-button {
+  background: var(--surface-3);
+  color: var(--text-2);
+}
+
+.quiet-button {
+  background: transparent;
+  color: var(--text-2);
+}
+
+/* The photo chosen for the reply, above the reply bar. */
+
+.photo-chosen {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px 0 12px;
+  background: var(--surface-1);
+  border-top: 1px solid var(--surface-4);
+}
+
+.photo-chosen[hidden] {
+  display: none;
+}
+
+.photo-chosen + .bottom {
+  border-top: 0;
+}
+
+.photo-chosen canvas {
+  flex: none;
+  width: 56px;
+  height: 56px;
+  border-radius: 10px;
+}
+
+.photo-chosen span {
+  flex: 1;
+  min-width: 0;
+  color: var(--text-2);
+  font-size: 14px;
+}
+
 /* The thread, oldest at the top. */
 
 #messages {
@@ -322,6 +376,27 @@ body.on-todos > #reply {
 .message .text {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+
+.message .photo {
+  display: block;
+  margin-bottom: 6px;
+}
+
+.message .photo img {
+  display: block;
+  width: auto;
+  height: auto;
+  max-width: min(220px, 100%);
+  max-height: 260px;
+  border-radius: 10px;
+}
+
+.message .photo-removed {
+  margin-bottom: 6px;
+  font-size: 14px;
+  font-style: italic;
+  opacity: 0.85;
 }
 
 .chief {

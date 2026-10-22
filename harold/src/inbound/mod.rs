@@ -2,6 +2,7 @@ pub mod directory;
 pub(crate) mod ownership;
 pub(crate) mod tmux;
 
+use std::path::Path;
 use std::process::Command;
 use std::sync::Mutex;
 
@@ -392,6 +393,7 @@ pub(crate) enum ChiefRouting {
 /// nothing that holds the text.
 pub(crate) fn route_to_chief(
     text: &str,
+    photo: Option<&Path>,
     chief: &ChiefPane,
     type_into: &dyn Fn(&str, &str) -> Result<(), String>,
 ) -> Result<ChiefRouting, String> {
@@ -404,7 +406,12 @@ pub(crate) fn route_to_chief(
             );
         }
     };
-    type_into(pane_id, &format!("📱 {text}"))?;
+    let line = match photo {
+        Some(path) if text.is_empty() => format!("📱 📷 {}", path.display()),
+        Some(path) => format!("📱 {text} 📷 {}", path.display()),
+        None => format!("📱 {text}"),
+    };
+    type_into(pane_id, &line)?;
     let typed_at = OffsetDateTime::now_utc();
     // No phone request is opened: the turn counts as started by the phone all the same.
     telemetry::prompt_typed(pane_id, StartedBy::Phone, None, typed_at);

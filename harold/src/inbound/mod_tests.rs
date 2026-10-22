@@ -419,7 +419,7 @@ fn a_reply_to_the_chief_is_typed_into_its_pane_with_the_phone_mark() {
     let pane = "%app-reply-7";
     let before = time::OffsetDateTime::now_utc();
 
-    let routing = route_to_chief("hello", &one_chief(pane, false), &|pane_id, text| {
+    let routing = route_to_chief("hello", None, &one_chief(pane, false), &|pane_id, text| {
         typer.type_into(pane_id, text)
     })
     .unwrap();
@@ -444,11 +444,57 @@ fn a_reply_to_the_chief_is_typed_into_its_pane_with_the_phone_mark() {
 }
 
 #[test]
+fn a_reply_with_a_photo_ends_with_the_camera_mark_and_the_absolute_path() {
+    let typer = RecordingTyper::default();
+    let pane = "%app-reply-photo";
+    let photo = std::path::Path::new("/Users/me/bin/harold/data/app-photos/abc.jpg");
+
+    route_to_chief(
+        "look",
+        Some(photo),
+        &one_chief(pane, false),
+        &|pane_id, text| typer.type_into(pane_id, text),
+    )
+    .unwrap();
+
+    assert_eq!(
+        typer.typed(),
+        [(
+            pane.to_string(),
+            "📱 look 📷 /Users/me/bin/harold/data/app-photos/abc.jpg".to_string()
+        )]
+    );
+}
+
+#[test]
+fn a_reply_with_a_photo_and_no_words_types_the_mark_then_the_path() {
+    let typer = RecordingTyper::default();
+    let pane = "%app-reply-photo-only";
+    let photo = std::path::Path::new("/data/app-photos/abc.png");
+
+    route_to_chief(
+        "",
+        Some(photo),
+        &one_chief(pane, false),
+        &|pane_id, text| typer.type_into(pane_id, text),
+    )
+    .unwrap();
+
+    assert_eq!(
+        typer.typed(),
+        [(
+            pane.to_string(),
+            "📱 📷 /data/app-photos/abc.png".to_string()
+        )]
+    );
+}
+
+#[test]
 fn a_busy_chief_is_typed_into_and_reported_busy() {
     let typer = RecordingTyper::default();
     let pane = "%app-reply-busy";
 
-    let routing = route_to_chief("hello", &one_chief(pane, true), &|pane_id, text| {
+    let routing = route_to_chief("hello", None, &one_chief(pane, true), &|pane_id, text| {
         typer.type_into(pane_id, text)
     })
     .unwrap();
@@ -467,7 +513,7 @@ fn a_busy_chief_is_typed_into_and_reported_busy() {
 fn no_chief_types_nothing() {
     let typer = RecordingTyper::default();
 
-    let routing = route_to_chief("hello", &ChiefPane::NoChief, &|pane_id, text| {
+    let routing = route_to_chief("hello", None, &ChiefPane::NoChief, &|pane_id, text| {
         typer.type_into(pane_id, text)
     });
 
@@ -479,9 +525,12 @@ fn no_chief_types_nothing() {
 fn a_failing_listing_is_an_error_and_types_nothing() {
     let typer = RecordingTyper::default();
 
-    let routing = route_to_chief("hello", &ChiefPane::ListingFailed, &|pane_id, text| {
-        typer.type_into(pane_id, text)
-    });
+    let routing = route_to_chief(
+        "hello",
+        None,
+        &ChiefPane::ListingFailed,
+        &|pane_id, text| typer.type_into(pane_id, text),
+    );
 
     assert!(routing.is_err(), "{routing:?}");
     assert!(typer.typed().is_empty());
@@ -491,7 +540,7 @@ fn a_failing_listing_is_an_error_and_types_nothing() {
 fn a_failed_typing_is_an_error_and_records_no_prompt() {
     let pane = "%app-reply-fails";
 
-    let routing = route_to_chief("hello", &one_chief(pane, false), &|_, _| {
+    let routing = route_to_chief("hello", None, &one_chief(pane, false), &|_, _| {
         Err("tmux send-keys text failed".to_string())
     });
 
@@ -509,7 +558,7 @@ fn a_reply_to_the_chief_is_never_logged() {
         ChiefPane::NoChief,
         ChiefPane::ListingFailed,
     ] {
-        let _ = route_to_chief("APP-CANARY-7731", &chief, &|pane_id, text| {
+        let _ = route_to_chief("APP-CANARY-7731", None, &chief, &|pane_id, text| {
             typer.type_into(pane_id, text)
         });
     }

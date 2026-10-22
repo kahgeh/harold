@@ -1,19 +1,34 @@
-//! The page's two posts: a typed reply for the chief, and the phone's push subscription.
-//! Neither the reply's words nor the subscription's address or keys reach a log line.
+//! The page's posts and its photo route: a typed reply for the chief, a photo to go with
+//! it, and the phone's push subscription. Neither the reply's words, the photo, its path
+//! nor the subscription's address or keys reach a log line.
 
 use std::convert::Infallible;
+use std::path::Path as FsPath;
 
 use axum::body::Bytes;
-use axum::extract::State;
-use axum::http::StatusCode;
+use axum::extract::{Path, State};
+use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::sse::{Event, Sse};
 use axum::response::{IntoResponse, Response};
 use datastar::prelude::PatchSignals;
 use serde::Deserialize;
-use tracing::info;
+use tokio::io::AsyncWriteExt;
+use tracing::{info, warn};
+use uuid::Uuid;
 
 use super::AppState;
-use crate::store::{AppPushSubscribed, append_app_push_subscribed, append_app_reply};
+use super::route::now_ms;
+use crate::store::{
+    AppPushSubscribed, HaroldStore, append_app_push_subscribed, append_app_reply_with_photo,
+};
+
+/// The largest photo taken, in bytes: the limit Claude has for one image.
+pub(crate) const PHOTO_MAX_BYTES: usize = 5 * 1024 * 1024;
+/// The body limit of the photo route: just over `PHOTO_MAX_BYTES`, so the handler, not
+/// axum's own refusal, answers a photo that is too large.
+pub(crate) const PHOTO_BODY_LIMIT: usize = PHOTO_MAX_BYTES + 1024;
+/// A photo over this size was not shrunk by the phone, which makes one of about 1 MB.
+const PHOTO_NOT_SHRUNK_BYTES: usize = 3 * 1024 * 1024;
 
 /// The most characters a reply may hold, after trimming.
 pub(crate) const REPLY_MAX_CHARS: usize = 1000;
@@ -30,6 +45,9 @@ const KEY_MAX_CHARS: usize = 256;
 #[derive(Deserialize)]
 struct ReplySignals {
     reply: String,
+    /// The id `POST /replies/photo` answered; empty or missing when no photo is attached.
+    #[serde(default)]
+    photo: String,
 }
 
 /// The subscription as the page's `alerts.js` posts it.
@@ -46,8 +64,9 @@ struct SubscriptionKeys {
 }
 
 /// `POST /replies`: stores the trimmed reply for the chief and clears the page's input.
-/// A blank reply, one over `REPLY_MAX_CHARS`, or a body that is not the signals gives
-/// `400`; a store that cannot take it gives `503`. Both have empty bodies.
+/// A blank reply with no photo, one over `REPLY_MAX_CHARS`, a `photo` that names no unused
+/// upload, or a body that is not the signals gives `400`; a store that cannot take it gives
+/// `503`. Both have empty bodies.
 pub(crate) async fn post_reply(State(state): State<AppState>, body: Bytes) -> Response {
     if body.len() > REPLY_BODY_MAX_BYTES {
         return StatusCode::BAD_REQUEST.into_response();
@@ -57,15 +76,156 @@ pub(crate) async fn post_reply(State(state): State<AppState>, body: Bytes) -> Re
     };
     let text = signals.reply.trim();
     let chars = text.chars().count();
-    if chars == 0 || chars > REPLY_MAX_CHARS {
+    let photo_id = signals.photo.trim();
+    if chars > REPLY_MAX_CHARS || (chars == 0 && photo_id.is_empty()) {
         return StatusCode::BAD_REQUEST.into_response();
     }
-    if append_app_reply(&state.store, text).await.is_err() {
+    let mut photo = None;
+    if !photo_id.is_empty() {
+        match take_photo(&state.store, photo_id).await {
+            Ok(Some(file)) => photo = Some((photo_id, file)),
+            Ok(None) => {
+                warn!(reason = "unknown_photo", "app photo refused");
+                return StatusCode::BAD_REQUEST.into_response();
+            }
+            Err(()) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+        }
+    }
+    let file = photo.as_ref().map(|(_, file)| file.as_str());
+    if append_app_reply_with_photo(&state.store, text, file)
+        .await
+        .is_err()
+    {
+        if let Some((id, _)) = &photo {
+            // Not stored, so the photo can go with the next try.
+            let _ = state.store.release_app_photo_upload(id).await;
+        }
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     }
-    info!(chars, "app reply stored");
-    let cleared = PatchSignals::new(r#"{"reply":""}"#);
+    match file.and_then(|file| photo_bytes(&state.store.app_photos_dir(), file)) {
+        Some(photo_bytes) => info!(chars, photo_bytes, "app reply stored"),
+        None => info!(chars, "app reply stored"),
+    }
+    let cleared = PatchSignals::new(r#"{"reply":"","photo":""}"#);
     Sse::new(tokio_stream::once(Ok::<Event, Infallible>(cleared.into()))).into_response()
+}
+
+/// The file name of the unused upload `id`, taken for a reply; none when `id` names no
+/// such upload. Err when the store cannot say.
+async fn take_photo(store: &HaroldStore, id: &str) -> Result<Option<String>, ()> {
+    if Uuid::parse_str(id).is_err() || id.len() != 36 {
+        return Ok(None);
+    }
+    store.claim_app_photo_upload(id).await.map_err(|_| ())
+}
+
+/// The size of the photo `file` in `directory`, when it can be read.
+fn photo_bytes(directory: &FsPath, file: &str) -> Option<u64> {
+    std::fs::metadata(directory.join(file))
+        .ok()
+        .map(|metadata| metadata.len())
+}
+
+/// How a photo starts: the file's kind and extension.
+fn photo_kind(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        Some("jpeg")
+    } else if bytes.starts_with(&[0x89, 0x50, 0x4E, 0x47]) {
+        Some("png")
+    } else {
+        None
+    }
+}
+
+/// `POST /replies/photo`: the body is the photo, shrunk by the page. Answers `200` with the
+/// photo's id as plain text once it is written to `app-photos/` and recorded; `413` when it
+/// is over `PHOTO_MAX_BYTES`, `400` when it does not start like a JPEG or a PNG, `503` when
+/// it cannot be written or recorded.
+pub(crate) async fn post_photo(State(state): State<AppState>, body: Bytes) -> Response {
+    let photo_bytes = body.len();
+    if photo_bytes > PHOTO_MAX_BYTES {
+        warn!(reason = "too_large", photo_bytes, "app photo refused");
+        return StatusCode::PAYLOAD_TOO_LARGE.into_response();
+    }
+    let Some(kind) = photo_kind(&body) else {
+        warn!(reason = "not_an_image", photo_bytes, "app photo refused");
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    let id = Uuid::new_v4().to_string();
+    let extension = if kind == "png" { "png" } else { "jpg" };
+    let file = format!("{id}.{extension}");
+    let directory = state.store.app_photos_dir();
+    if write_photo(&directory, &file, &body).await.is_err() {
+        warn!(reason = "store_failed", photo_bytes, "app photo refused");
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    }
+    if state
+        .store
+        .add_app_photo_upload(&id, &file, now_ms())
+        .await
+        .is_err()
+    {
+        let _ = tokio::fs::remove_file(directory.join(&file)).await;
+        warn!(reason = "store_failed", photo_bytes, "app photo refused");
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    }
+    info!(photo_bytes, kind, "app photo stored");
+    if photo_bytes > PHOTO_NOT_SHRUNK_BYTES {
+        warn!(photo_bytes, "app photo not shrunk");
+    }
+    ([(header::CONTENT_TYPE, "text/plain")], id).into_response()
+}
+
+/// Writes `bytes` to `file` in `directory`: the folder at mode 0700 and the file at 0600.
+async fn write_photo(directory: &FsPath, file: &str, bytes: &[u8]) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    tokio::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(directory)
+        .await?;
+    tokio::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700)).await?;
+    let mut photo = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(directory.join(file))
+        .await?;
+    if let Err(error) = photo.write_all(bytes).await {
+        let _ = tokio::fs::remove_file(directory.join(file)).await;
+        return Err(error);
+    }
+    photo.flush().await
+}
+
+/// `GET /replies/photo/{id}`: the photo of upload `id`, as the row shows it. `404` for an id
+/// that is not a UUID, names no kept photo, or whose file cannot be read.
+pub(crate) async fn get_photo(State(state): State<AppState>, Path(id): Path<String>) -> Response {
+    if Uuid::parse_str(&id).is_err() || id.len() != 36 {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let Ok(Some(file)) = state.store.app_photo_file(&id).await else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let Ok(bytes) = tokio::fs::read(state.store.app_photos_dir().join(&file)).await else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let content_type = if file.ends_with(".png") {
+        "image/png"
+    } else {
+        "image/jpeg"
+    };
+    let mut response = ([(header::CONTENT_TYPE, content_type)], bytes).into_response();
+    let headers = response.headers_mut();
+    headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("private, max-age=86400"),
+    );
+    headers.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    response
 }
 
 /// `POST /push/subscription`: stores the phone's push subscription and answers `204`.

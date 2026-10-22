@@ -14,6 +14,7 @@
 <script type="module" src="/static/datastar-1.0.2.js"></script>
 <script src="/static/alerts.js" defer></script>
 <script src="/static/call.js" defer></script>
+<script src="/static/photo.js" defer></script>
 <script src="/static/pages.js" defer></script>
 </head>
 <body>
@@ -40,9 +41,17 @@
 {{ todos|safe }}
 </div>
 <nav id="page-dots" aria-hidden="true"><i class="dot"></i><i class="dot"></i></nav>
+<div id="photo-chosen" class="photo-chosen" role="status" hidden>
+<canvas id="photo-preview" class="photo-preview" width="112" height="112" role="img" aria-label="The chosen photo"></canvas>
+<span id="photo-label"></span>
+<button type="button" id="photo-remove" class="icon-button quiet-button" aria-label="Remove the photo"><svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+</div>
 <form id="reply" class="bar bottom" data-indicator:sending data-on:submit="@post('/replies')">
 <input type="text" data-bind:reply maxlength="1000" placeholder="Reply to the chief" aria-label="Reply to the chief" autocomplete="off">
-<button type="submit" data-attr:disabled="$sending">Send</button>
+<input type="hidden" id="photo-id" data-bind:photo>
+<input type="file" id="photo-file" accept="image/*" hidden>
+<button type="button" id="photo-button" class="icon-button photo-button" aria-label="Add a photo"><svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path d="M4 7h3l1.6-2.2A1 1 0 0 1 9.4 4.4h5.2a1 1 0 0 1 .8.4L17 7h3a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V8a1 1 0 0 1 1-1z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><circle cx="12" cy="12.5" r="3.6" fill="none" stroke="currentColor" stroke-width="1.8"/></svg></button>
+<button type="submit" class="icon-button" data-attr:disabled="$sending" aria-label="Send"><svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path d="M12 19V5M5.5 11.5L12 5l6.5 6.5" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
 </form>
 <div id="call-screen" class="call-screen">
 <p id="call-timer" class="call-timer">Call with the chief · 0:00</p>

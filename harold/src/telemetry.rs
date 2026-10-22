@@ -95,6 +95,7 @@ pub(crate) const ALLOWED_FIELDS: &[&str] = &[
     "output_tokens",
     "hand_over_id",
     "typed_while_busy",
+    "photo_bytes",
     "wait_ms",
     "session_by",
     "alert",

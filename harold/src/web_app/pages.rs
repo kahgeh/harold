@@ -17,7 +17,7 @@ use super::chief::{ChiefPane, find_chief};
 use super::todos::{TodoCount, TodosSection};
 use super::updates::{UpdatesQuery, oldest_signal};
 use super::{AppState, DATASTAR_JS, WebAppIdentity, thread_start_ms};
-use crate::store::{AppMessage, AppReplyState, AppSender};
+use crate::store::{AppMessage, AppPhoto, AppReplyState, AppSender};
 use crate::voice_input::{CallState, PhoneView, Said, Speaker};
 
 /// The content security policy every response carries: Harold's own scripts, styles and
@@ -28,6 +28,7 @@ const APP_CSS: &[u8] = include_bytes!("../../static/web_app/app.css");
 const ALERTS_JS: &[u8] = include_bytes!("../../static/web_app/alerts.js");
 const SW_JS: &[u8] = include_bytes!("../../static/web_app/sw.js");
 const PAGES_JS: &[u8] = include_bytes!("../../static/web_app/pages.js");
+const PHOTO_JS: &[u8] = include_bytes!("../../static/web_app/photo.js");
 const ECHO_TEST_JS: &[u8] = include_bytes!("../../static/web_app/echo-test.js");
 const CALL_JS: &[u8] = include_bytes!("../../static/web_app/call.js");
 const CALL_WORKLET_JS: &[u8] = include_bytes!("../../static/web_app/call-worklet.js");
@@ -143,6 +144,8 @@ pub(crate) struct MessageView {
     /// For a reply that waits or was not sent, the words after `me`, such as
     /// `waiting: chief busy`.
     pub words: Option<&'static str>,
+    /// The photo your reply carries, shown above the words.
+    pub photo: Option<AppPhoto>,
 }
 
 /// The mark before `me`: stored by Harold, or typed into the chief's pane.
@@ -228,6 +231,7 @@ impl From<AppMessage> for MessageView {
             parts: split_links(&message.text),
             mark,
             words,
+            photo: message.photo,
         }
     }
 }
@@ -488,6 +492,7 @@ pub(crate) async fn get_static(
         "call.js" => (JAVASCRIPT, CALL_JS.to_vec()),
         "echo-test.js" => (JAVASCRIPT, ECHO_TEST_JS.to_vec()),
         "pages.js" => (JAVASCRIPT, PAGES_JS.to_vec()),
+        "photo.js" => (JAVASCRIPT, PHOTO_JS.to_vec()),
         "call-worklet.js" => (JAVASCRIPT, CALL_WORKLET_JS.to_vec()),
         "sw.js" => (JAVASCRIPT, SW_JS.to_vec()),
         "datastar-1.0.2.js" => (JAVASCRIPT, DATASTAR_JS.to_vec()),
