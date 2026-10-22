@@ -806,9 +806,11 @@ impl<P: CallPorts> Call<P> {
         // what already arrived is passed on now.
         inbox.close();
         while let Ok(event) = inbox.try_recv() {
-            if let (Event::Answered { id, answer }, Some((run, words))) =
-                (event, self.detached.take_if(|_| true))
-                && id == run
+            let Event::Answered { id, answer } = event else {
+                continue;
+            };
+            if self.detached.as_ref().is_some_and(|(run, _)| *run == id)
+                && let Some((_, words)) = self.detached.take()
             {
                 pass_on_after_call(Arc::clone(&self.ports), &self.hand_overs, words, answer);
             }
