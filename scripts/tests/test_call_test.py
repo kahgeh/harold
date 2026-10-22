@@ -198,6 +198,19 @@ class CallScreenTests(unittest.TestCase):
         self.assertFalse(ct.call_ended('INFO app call ended reason="bye"', 'stopped'))
 
 
+class AnswerTests(unittest.TestCase):
+    def test_a_tick_or_a_phrase_is_not_the_answer(self):
+        tick = {'state': 'thinking', 'sound': 'abc', 'heard': '', 'line': ''}
+        phrase = {'state': 'speaking', 'sound': 'abc', 'heard': '', 'line': "The chief is busy."}
+        self.assertFalse(ct.is_answer(tick))
+        self.assertFalse(ct.is_answer(phrase))
+
+    def test_the_chiefs_line_with_a_sound_is_the_answer(self):
+        answer = {'state': 'speaking', 'sound': 'abc', 'heard': '', 'line': ct.ANSWER_LINE}
+        self.assertTrue(ct.is_answer(answer))
+        self.assertFalse(ct.is_answer(dict(answer, sound='')))
+
+
 class PaneTests(unittest.TestCase):
     def test_spoken_prompt_lines_name_the_pane(self):
         log = (

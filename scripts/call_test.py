@@ -220,6 +220,11 @@ def call_ended(log, reason):
 CALL_SECTION = re.compile(r'<section id="call"[^>]*>', re.S)
 
 
+def is_answer(shown):
+    """Whether `shown` is the chief's answer sound, not a tick or one of Harold's phrases."""
+    return bool(shown['sound']) and shown['line'] == ANSWER_LINE
+
+
 def parse_call(patch):
     """What the `#call` section in an event-stream patch shows, or None when it has none."""
     opening = CALL_SECTION.search(patch)
@@ -325,7 +330,7 @@ def free_port():
 
 
 def tmux(env, *args, check=True):
-    return subprocess.run(['tmux', *args], env=env, text=True, capture_output=True, check=check, timeout=15)
+    return subprocess.run(['tmux', '-f', '/dev/null', *args], env=env, text=True, capture_output=True, check=check, timeout=15)
 
 
 class Run:
@@ -400,6 +405,7 @@ class Run:
             self.env, 'new-session', '-d', '-s', SESSION, '-c', str(self.chief_dir),
             '-x', '160', '-y', '50', '-P', '-F', '#{pane_id}', 'cat')
         self.pane = created.stdout.strip()
+        # harold speak takes a tmux pane id as --src-id, so the stand-in's own pane id goes in.
         speak = '{} speak --src-id {}'.format(self.install_dir / 'harold', self.pane)
         (self.chief_dir / 'CLAUDE.md').write_text(
             'Each line that starts with 🎙 is a spoken question. Answer it by running exactly\n'
@@ -440,16 +446,22 @@ class Run:
     # teardown
 
     def tear_down(self):
-        if self.pane is not None:
-            self.pane_snapshot = self.pane_text().rstrip()
+        try:
+            if self.pane is not None:
+                self.pane_snapshot = self.pane_text().rstrip()
+        except subprocess.SubprocessError:
+            pass
         if self.phone is not None:
             try:
                 self.phone.request('DELETE', '/call', timeout=10)
             except (OSError, http.client.HTTPException):
                 pass
             self.phone.close()
-        tmux(self.env, 'kill-session', '-t', SESSION, check=False)
-        tmux(self.env, 'kill-server', check=False)
+        for kill in (('kill-session', '-t', SESSION), ('kill-server',)):
+            try:
+                tmux(self.env, *kill, check=False)
+            except subprocess.SubprocessError:
+                pass
         if self.harold is not None and self.harold.poll() is None:
             self.harold.send_signal(signal.SIGTERM)
             try:
@@ -506,7 +518,8 @@ def play(run):
     def post_question():
         first = None
         for at_ms, piece in pieces(audio):
-            due = call_sent + at_ms / 1000 + 0.0
+            # The phone sends a piece once it has recorded it.
+            due = call_sent + at_ms / 1000 + PIECE_SAMPLES / SAMPLE_RATE
             time.sleep(max(0.0, due - time.monotonic()))
             if first is None:
                 first = time.monotonic()
@@ -559,16 +572,35 @@ def play(run):
     if not add(run_step('typed into the stand-in\'s pane', LIMIT_TYPED, typed, since=spoke_until)):
         return results
 
-    # 6. The answer's sound.
-    def sound():
-        found = wait_until(
-            lambda: phone.since(mark, lambda s: s['sound']),
-            LIMIT_SOUND, '#call\'s data-harold-sound', since=spoke_until)
-        return 'sound {}'.format(found[2]['sound'][:8])
+    # 6. The answer's sound. Harold also offers a tick every 3 s while the chief thinks; like the
+    # phone, the script fetches and reports each of those, and waits for the one that carries
+    # the chief's line.
+    ticks = set()
 
-    if not add(run_step('#call names an answer sound', LIMIT_SOUND, sound, since=spoke_until)):
+    def answered():
+        with phone.changed:
+            offered = [shown for _, shown in phone.events[mark:] if shown['sound']]
+        for shown in offered:
+            if is_answer(shown):
+                return shown
+            if shown['sound'] not in ticks:
+                ticks.add(shown['sound'])
+                try:
+                    phone.request('GET', '/call/answer/' + shown['sound'])
+                    phone.request('POST', '/call/played?id={}&start_ms=0'.format(shown['sound']))
+                except (OSError, http.client.HTTPException):
+                    pass
+        return None
+
+    def sound():
+        found = wait_until(answered, LIMIT_SOUND, "the chief's answer in #call", since=spoke_until)
+        answer_id.append(found['sound'])
+        return 'sound {}'.format(found['sound'][:8])
+
+    answer_id = []
+    if not add(run_step("#call names the chief's answer", LIMIT_SOUND, sound, since=spoke_until)):
         return results
-    sound_id = phone.since(mark, lambda s: s['sound'])[2]['sound']
+    sound_id = answer_id[0]
 
     # 7. The answer's audio.
     def answer():
@@ -629,6 +661,9 @@ def main(argv=None):
         return 1
 
     run = Run(args.install_dir, args.keep, args.log_level)
+    # A signal ends the run through the teardown below, which leaves nothing running.
+    for name in (signal.SIGTERM, signal.SIGHUP):
+        signal.signal(name, lambda number, frame: sys.exit(128 + number))
     results = []
     try:
         run.write_config()
