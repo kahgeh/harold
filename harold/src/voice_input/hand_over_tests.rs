@@ -33,7 +33,7 @@ async fn a_hand_over_is_typed_at_once_into_a_busy_chief_and_numbered() {
     ports
         .fake_panes()
         .set(|s| s.view.panes[0].state = EffectiveAgentState::Busy);
-    let mut hand_overs = HandOvers::default();
+    let hand_overs = HandOvers::default();
 
     let first = hand_overs.start(Arc::clone(&ports), "rerun the\nharold build");
     settle().await;
@@ -71,7 +71,7 @@ async fn a_hand_over_waits_while_the_box_holds_text_and_is_typed_once_it_is_empt
     ports
         .fake_panes()
         .set(|s| s.screen = Some(HOLDS_TEXT.to_string()));
-    let mut hand_overs = HandOvers::default();
+    let hand_overs = HandOvers::default();
 
     hand_overs.start(Arc::clone(&ports), "rerun the build");
     sleep(Duration::from_secs(12)).await;
@@ -108,7 +108,7 @@ async fn a_hand_over_not_typed_in_30_minutes_is_given_up_and_the_thread_is_told(
     ports
         .fake_panes()
         .set(|s| s.screen = Some(HOLDS_TEXT.to_string()));
-    let mut hand_overs = HandOvers::default();
+    let hand_overs = HandOvers::default();
 
     hand_overs.start(Arc::clone(&ports), "rerun the build");
     sleep(GIVE_UP - Duration::from_secs(10)).await;
@@ -145,7 +145,7 @@ async fn a_hand_over_not_typed_in_30_minutes_is_given_up_and_the_thread_is_told(
 async fn with_no_chief_running_a_hand_over_waits_and_the_give_up_has_no_pane_to_say_it_from() {
     let (ports, thread) = ports_with_thread();
     ports.fake_panes().set(|s| s.view.panes.clear());
-    let mut hand_overs = HandOvers::default();
+    let hand_overs = HandOvers::default();
 
     hand_overs.start(Arc::clone(&ports), "rerun the build");
     sleep(GIVE_UP + Duration::from_secs(10)).await;
@@ -166,7 +166,7 @@ async fn a_hand_over_waits_for_a_chief_whose_state_is_unknown_and_for_a_pane_lis
     ports
         .fake_panes()
         .set(|s| s.view.panes[0].state = EffectiveAgentState::Unknown);
-    let mut hand_overs = HandOvers::default();
+    let hand_overs = HandOvers::default();
     hand_overs.start(Arc::clone(&ports), "one");
     sleep(Duration::from_secs(11)).await;
     assert!(keys_of(&ports).is_empty());
