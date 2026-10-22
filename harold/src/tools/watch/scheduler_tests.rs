@@ -119,6 +119,16 @@ pub(in crate::tools::watch) async fn pass(how_long: Duration) {
     tokio::time::sleep(how_long).await;
 }
 
+/// Moves the test clock to 00:01 UTC, the harness's offset, of the next day, so a test that
+/// lets minutes or hours pass reads one day's spend, budget and endings.
+async fn start_just_after_midnight() {
+    let (_, next_midnight) = day_bounds(clock_ms(), UtcOffset::UTC);
+    pass(Duration::from_millis(
+        (next_midnight + 60_000 - clock_ms()) as u64,
+    ))
+    .await;
+}
+
 #[test]
 fn the_grid_never_runs_one_slot_twice() {
     let started = 1_000;
@@ -436,6 +446,7 @@ async fn a_good_run_between_failures_resets_the_count() {
 #[tokio::test(start_paused = true)]
 async fn a_timeout_counts_at_the_run_budget_when_there_is_one_else_its_cost_is_unknown() {
     let h = harness(settings(), vec![Step::Hang]).await;
+    start_just_after_midnight().await;
     let mut with_budget = h.checked("budgeted", 10, 120);
     with_budget.run_budget_usd_micros = Some(30_000);
     h.scheduler.start(with_budget).await.unwrap();
@@ -600,6 +611,7 @@ async fn a_set_daily_budget_stops_every_watch_before_a_run_that_could_pass_it() 
         vec![answer("QUIET", 0.03)],
     )
     .await;
+    start_just_after_midnight().await;
     let mut first = h.checked("a", 10, 120);
     first.run_budget_usd_micros = Some(30_000);
     h.scheduler.start(first).await.unwrap();
@@ -784,6 +796,7 @@ async fn a_spent_day_refuses_start_even_when_nothing_was_projected() {
         vec![answer("QUIET", 0.06)],
     )
     .await;
+    start_just_after_midnight().await;
     h.start("a", 10, 10).await;
     pass(Duration::from_secs(5)).await;
     assert_eq!(
@@ -795,6 +808,7 @@ async fn a_spent_day_refuses_start_even_when_nothing_was_projected() {
 #[tokio::test(start_paused = true)]
 async fn without_a_daily_budget_nothing_stops_for_cost_and_list_shows_the_spend() {
     let h = harness(settings(), vec![answer("QUIET", 5.0)]).await;
+    start_just_after_midnight().await;
     h.start("a", 10, 60).await;
     h.start("b", 10, 60).await;
 
@@ -810,6 +824,7 @@ async fn without_a_daily_budget_nothing_stops_for_cost_and_list_shows_the_spend(
 #[tokio::test(start_paused = true)]
 async fn list_shows_running_watches_and_those_that_ended_today() {
     let h = harness(settings(), vec![answer("QUIET", 0.01)]).await;
+    start_just_after_midnight().await;
     h.start("long", 10, 120).await;
     h.start("short", 10, 5).await;
     h.start("gone", 10, 120).await;
@@ -1009,6 +1024,7 @@ async fn a_budget_stop_survives_a_restart_for_that_day_only() {
         vec![answer("QUIET", 0.03)],
     )
     .await;
+    start_just_after_midnight().await;
     let mut first = h.checked("a", 10, 120);
     first.run_budget_usd_micros = Some(60_000);
     h.scheduler.start(first).await.unwrap();
