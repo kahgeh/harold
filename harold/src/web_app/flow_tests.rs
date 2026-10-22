@@ -1028,6 +1028,7 @@ async fn an_open_stream_is_a_visible_page_until_it_ends() {
     let server = TestServer::serve(directory.store().await).await;
     assert_eq!(server.pages.visible(), 0);
 
+    server.pages.report_seen();
     let mut first = server.updates().await;
     first.next().await.expect("the whole thread");
     visible_pages_reach(&server, 1).await;
@@ -1042,10 +1043,11 @@ async fn an_open_stream_is_a_visible_page_until_it_ends() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn a_closed_stream_counts_down_and_a_new_one_clears_the_hidden_report() {
+async fn a_closed_stream_counts_down_and_a_new_one_waits_for_the_page_to_be_seen() {
     let directory = TestDirectory::new();
     let store = directory.store().await;
     let server = TestServer::serve(store.clone()).await;
+    server.pages.report_seen();
     let mut page = server.updates().await;
     page.next().await.expect("the whole thread");
     visible_pages_reach(&server, 1).await;
@@ -1067,7 +1069,9 @@ async fn a_closed_stream_counts_down_and_a_new_one_clears_the_hidden_report() {
 
     let mut again = server.updates().await;
     again.next().await.expect("the whole thread");
-    visible_pages_reach(&server, 2).await;
+    assert_eq!(server.pages.visible(), 0, "not heard from since the report");
+    server.pages.report_seen();
+    visible_pages_reach(&server, 1).await;
 
     // The page goes: the next change finds the send failing and the stream counts down.
     drop(page);
@@ -1091,6 +1095,7 @@ async fn the_hidden_report_has_the_login_host_and_origin_checks() {
     let server = TestServer::serve(directory.store().await).await;
     let own_origin = format!("http://{}", server.addr);
     let _page = server.pages.open();
+    server.pages.report_seen();
     let client = reqwest::Client::new();
 
     let missing_login = client
@@ -1144,4 +1149,76 @@ async fn the_hidden_report_has_the_login_host_and_origin_checks() {
     let allowed = server.post("/page/hidden", String::new()).await;
     assert_eq!(allowed.status(), 204);
     assert_eq!(server.pages.visible(), 0);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn the_seen_report_answers_204_with_the_login_host_and_origin_checks() {
+    let directory = TestDirectory::new();
+    let server = TestServer::serve(directory.store().await).await;
+    let own_origin = format!("http://{}", server.addr);
+    let _page = server.pages.open();
+    let client = reqwest::Client::new();
+
+    let missing_login = client
+        .post(server.url("/page/seen"))
+        .header("sec-fetch-site", "same-origin")
+        .header("origin", &own_origin)
+        .header("content-type", "application/json")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(missing_login.status(), 403);
+    let wrong_login = client
+        .post(server.url("/page/seen"))
+        .header("Tailscale-User-Login", "someone@else")
+        .header("sec-fetch-site", "same-origin")
+        .header("origin", &own_origin)
+        .header("content-type", "application/json")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(wrong_login.status(), 403);
+    let cross_site = server
+        .send_with(
+            reqwest::Method::POST,
+            "/page/seen",
+            &[
+                ("sec-fetch-site", "cross-site"),
+                ("origin", "http://evil.example"),
+                ("content-type", "application/json"),
+            ],
+            String::new(),
+        )
+        .await;
+    assert_eq!(cross_site.status(), 403);
+    let wrong_host = server
+        .send_with(
+            reqwest::Method::POST,
+            "/page/seen",
+            &[
+                ("host", "evil.example"),
+                ("sec-fetch-site", "same-origin"),
+                ("origin", "http://evil.example"),
+                ("content-type", "application/json"),
+            ],
+            String::new(),
+        )
+        .await;
+    assert_eq!(wrong_host.status(), 403);
+    assert_eq!(server.pages.visible(), 0, "a refusal marks nothing seen");
+
+    let allowed = server
+        .send_with(
+            reqwest::Method::POST,
+            "/page/seen",
+            &[
+                ("sec-fetch-site", "same-origin"),
+                ("origin", &own_origin),
+                ("content-type", "application/json"),
+            ],
+            String::new(),
+        )
+        .await;
+    assert_eq!(allowed.status(), 204);
+    assert_eq!(server.pages.visible(), 1);
 }

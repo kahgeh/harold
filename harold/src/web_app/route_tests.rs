@@ -10,6 +10,7 @@ use crate::store::{
 use crate::web_app::OpenPages;
 use crate::web_app::fake_push::FakePushService;
 use crate::web_app::push::{Pusher, VapidKey, vapid_key_path};
+use std::time::Duration;
 
 const LOGIN: &str = "chief@example.com";
 
@@ -282,6 +283,7 @@ async fn a_visible_page_shows_the_message_and_no_push_goes_out() {
     let (store, route) = route_over(&directory, &service, &pages).await;
     // Three streams: no other test reports three pages, so its record is this one's.
     let _open = [pages.open(), pages.open(), pages.open()];
+    pages.report_seen();
     crate::telemetry::test_support::install();
 
     let delivery = deliver(&route, "event-1", "hello").await;
@@ -325,17 +327,89 @@ async fn no_page_or_a_hidden_page_pushes_as_before() {
     assert_eq!(deliver(&route, "event-3", "c").await, AppDelivery::Pushed);
 }
 
+/// A clock the test moves by hand.
+struct TestClock(Arc<std::sync::Mutex<std::time::Instant>>);
+
+impl TestClock {
+    fn new() -> Self {
+        Self(Arc::new(std::sync::Mutex::new(std::time::Instant::now())))
+    }
+
+    fn pages(&self) -> Arc<OpenPages> {
+        let now = self.0.clone();
+        Arc::new(OpenPages::with_clock(Arc::new(move || {
+            *now.lock().unwrap()
+        })))
+    }
+
+    fn pass(&self, seconds: u64) {
+        *self.0.lock().unwrap() += Duration::from_secs(seconds);
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
-async fn a_new_stream_after_the_hidden_report_is_visible_again() {
+async fn a_stream_opened_after_the_hidden_report_waits_to_hear_from_the_page() {
     let service = FakePushService::start(201).await;
     let directory = TestDirectory::new();
-    let pages = Arc::new(OpenPages::default());
+    let clock = TestClock::new();
+    let pages = clock.pages();
     let (_store, route) = route_over(&directory, &service, &pages).await;
-    let first = pages.open();
+    let _first = pages.open();
+    pages.report_seen();
     pages.report_hidden();
-    drop(first);
     let _second = pages.open();
 
-    assert_eq!(deliver(&route, "event-1", "a").await, AppDelivery::Shown);
-    assert!(service.requests().is_empty());
+    assert_eq!(pages.visible(), 0);
+    assert_eq!(deliver(&route, "event-1", "a").await, AppDelivery::Pushed);
+    assert_eq!(service.requests().len(), 1);
+
+    pages.report_seen();
+    assert_eq!(
+        pages.visible(),
+        1,
+        "only the stream opened after the report"
+    );
+    assert_eq!(deliver(&route, "event-2", "b").await, AppDelivery::Shown);
+    assert_eq!(service.requests().len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stale_stream_stops_holding_pushes_back_after_75_seconds() {
+    let service = FakePushService::start(201).await;
+    let directory = TestDirectory::new();
+    let clock = TestClock::new();
+    let pages = clock.pages();
+    let (_store, route) = route_over(&directory, &service, &pages).await;
+    let _stale = pages.open();
+    pages.report_seen();
+
+    clock.pass(75);
+    assert_eq!(pages.visible(), 1, "75 s is still within the limit");
+    clock.pass(1);
+    assert_eq!(pages.visible(), 0);
+    assert_eq!(deliver(&route, "event-1", "a").await, AppDelivery::Pushed);
+
+    pages.report_seen();
+    assert_eq!(pages.visible(), 1, "a beat brings it back");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_brief_stream_elsewhere_leaves_the_stale_stream_not_visible() {
+    let clock = TestClock::new();
+    let pages = clock.pages();
+    // The locked phone's stream: reported hidden, but its connection stays open.
+    let _stale = pages.open();
+    pages.report_seen();
+    pages.report_hidden();
+
+    // A page opened briefly elsewhere is on screen while it lasts, the stale stream not.
+    let brief = pages.open();
+    pages.report_seen();
+    assert_eq!(pages.visible(), 1);
+    drop(brief);
+    assert_eq!(
+        pages.visible(),
+        0,
+        "the stale stream does not take its place"
+    );
 }

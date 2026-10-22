@@ -56,23 +56,41 @@ document.addEventListener("click", (event) => {
   });
 })();
 
-// A page that leaves the screen says so with a request that outlives it, so a stream the
-// phone leaves open does not hold back the chief's pushes. A page shown again opens a new
-// stream, which counts it visible once more.
+// A page that leaves the screen says so with a request that outlives it, and a page on
+// screen says so every 30 s, so a stream the phone leaves open does not hold back the
+// chief's pushes: the server counts a page visible only for 75 s after it last heard from it.
 (function () {
-  const reportHidden = () => {
-    fetch("/page/hidden", {
+  const PAGE_SEEN_EVERY = 30000;
+  let beat = null;
+  const post = (path) => {
+    fetch(path, {
       method: "POST",
       keepalive: true,
       headers: { "Content-Type": "application/json" },
     }).catch(() => {});
   };
+  const reportSeen = () => post("/page/seen");
+  const reportHidden = () => {
+    clearInterval(beat);
+    beat = null;
+    post("/page/hidden");
+  };
+  const startBeat = () => {
+    reportSeen();
+    clearInterval(beat);
+    beat = setInterval(reportSeen, PAGE_SEEN_EVERY);
+  };
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "hidden") {
       reportHidden();
+    } else if (document.visibilityState === "visible") {
+      startBeat();
     }
   });
   window.addEventListener("pagehide", reportHidden);
+  if (document.visibilityState === "visible") {
+    startBeat();
+  }
 })();
 
 (function () {

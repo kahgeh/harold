@@ -1,10 +1,11 @@
 //! The home-screen web app Harold serves to the phone through `tailscale serve`: one
 //! thread with the chief, on a loopback address, behind the Tailscale login check.
 
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::time::Duration;
+use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::time::{Duration, Instant};
 
 use axum::Router;
 use axum::extract::State;
@@ -102,49 +103,112 @@ pub(crate) struct Agents<'a> {
     pub grpc: &'a GrpcSettings,
 }
 
-/// The open page streams and whether the page last reported itself hidden. The push route
-/// asks it whether a page is on screen.
+/// How long a page may go unheard before it stops counting as on screen. The page beats
+/// every 30 s, so one beat can go missing.
+const PAGE_SEEN_LIMIT: Duration = Duration::from_secs(75);
+
+/// The time `OpenPages` reads; tests swap in their own.
+type Clock = Arc<dyn Fn() -> Instant + Send + Sync>;
+
 #[derive(Default)]
+struct PageState {
+    /// The number the next stream gets.
+    next: u64,
+    /// The open streams, by number.
+    open: BTreeSet<u64>,
+    /// Streams numbered up to this one were open when the page last reported itself hidden.
+    hidden_through: u64,
+    /// When the page last said it is on screen; `None` after a hidden report.
+    last_seen: Option<Instant>,
+}
+
+/// The open page streams, which of them the page has since reported hidden, and when the
+/// page was last heard from. The push route asks it whether a page is on screen.
 pub(crate) struct OpenPages {
-    streams: AtomicUsize,
-    hidden: AtomicBool,
+    state: Mutex<PageState>,
+    clock: Clock,
+}
+
+impl Default for OpenPages {
+    fn default() -> Self {
+        Self::with_clock(Arc::new(Instant::now))
+    }
 }
 
 impl OpenPages {
-    /// Counts a stream up and clears the hidden mark; the stream counts down when the
-    /// guard drops, for any reason.
+    pub(crate) fn with_clock(clock: Clock) -> Self {
+        Self {
+            state: Mutex::default(),
+            clock,
+        }
+    }
+
+    fn state(&self) -> MutexGuard<'_, PageState> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Gives a stream the next number; it leaves the open set when the guard drops, for any
+    /// reason. Opening a stream does not count as hearing from the page.
     pub(crate) fn open(self: &Arc<Self>) -> OpenPage {
-        self.streams.fetch_add(1, Ordering::SeqCst);
-        self.hidden.store(false, Ordering::SeqCst);
-        OpenPage(Arc::clone(self))
+        let mut state = self.state();
+        state.next += 1;
+        let number = state.next;
+        state.open.insert(number);
+        OpenPage {
+            pages: Arc::clone(self),
+            number,
+        }
     }
 
-    /// The page said it is hidden.
+    /// The page said it is hidden: the streams open now stop counting, later ones don't.
     pub(crate) fn report_hidden(&self) {
-        self.hidden.store(true, Ordering::SeqCst);
+        let mut state = self.state();
+        state.hidden_through = state.next;
+        state.last_seen = None;
     }
 
-    /// The open streams of pages that are on screen: none while the mark is set.
+    /// The page said it is on screen.
+    pub(crate) fn report_seen(&self) {
+        let now = (self.clock)();
+        self.state().last_seen = Some(now);
+    }
+
+    /// The open streams of pages that are on screen: those opened since the last hidden
+    /// report, and none unless the page was heard from within `PAGE_SEEN_LIMIT`.
     pub(crate) fn visible(&self) -> usize {
-        if self.hidden.load(Ordering::SeqCst) {
+        let now = (self.clock)();
+        let state = self.state();
+        let heard = state
+            .last_seen
+            .is_some_and(|seen| now.saturating_duration_since(seen) <= PAGE_SEEN_LIMIT);
+        if !heard {
             return 0;
         }
-        self.streams.load(Ordering::SeqCst)
+        state.open.range(state.hidden_through + 1..).count()
     }
 }
 
-/// One open page stream, counted until this drops.
-pub(crate) struct OpenPage(Arc<OpenPages>);
+/// One open page stream, held until this drops.
+pub(crate) struct OpenPage {
+    pages: Arc<OpenPages>,
+    number: u64,
+}
 
 impl Drop for OpenPage {
     fn drop(&mut self) {
-        self.0.streams.fetch_sub(1, Ordering::SeqCst);
+        self.pages.state().open.remove(&self.number);
     }
 }
 
 /// `POST /page/hidden`: the page left the screen, so a push is wanted again.
 async fn post_page_hidden(State(state): State<AppState>) -> StatusCode {
     state.pages.report_hidden();
+    StatusCode::NO_CONTENT
+}
+
+/// `POST /page/seen`: the page is on screen, which holds pushes back for another 75 s.
+async fn post_page_seen(State(state): State<AppState>) -> StatusCode {
+    state.pages.report_seen();
     StatusCode::NO_CONTENT
 }
 
@@ -273,6 +337,7 @@ pub(crate) fn router(state: AppState) -> Router {
         .route("/push/subscription", post(replies::post_subscription))
         .route("/updates", get(updates::get_updates))
         .route("/page/hidden", post(post_page_hidden))
+        .route("/page/seen", post(post_page_seen))
         .route("/thread/older", get(pages::get_thread_older))
         .route("/todos/answer", post(todos::post_answer))
         .route("/todos/picks", post(todos::post_picks))
