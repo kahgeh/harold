@@ -626,12 +626,18 @@ body.in-call > .call-screen {
 
 .card-more {
   display: flex;
-  gap: 8px;
-  margin-top: 8px;
+  gap: 4px;
+  margin-top: 4px;
+  margin-inline-start: -12px;
 }
 
 .card-more button {
-  flex: 1;
+  flex: 0 0 auto;
+  padding: 0 12px;
+  border: 0;
+  background: transparent;
+  color: var(--text-2);
+  font-weight: 500;
 }
 
 .note-box {

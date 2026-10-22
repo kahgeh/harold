@@ -49,3 +49,24 @@ fn the_responding_dots_pulse_unless_motion_is_reduced() {
         assert!(css.contains(wanted), "app.css lacks {wanted}");
     }
 }
+
+#[test]
+fn revise_and_reject_read_as_plain_words_beside_send() {
+    let css = include_str!("../../static/web_app/app.css");
+    let start = css
+        .find(".card-more button {")
+        .expect("app.css lacks the .card-more button rule");
+    let rule = &css[start..start + css[start..].find('}').expect("rule is closed")];
+    for wanted in [
+        "background: transparent;",
+        "border: 0;",
+        "color: var(--text-2);",
+    ] {
+        assert!(rule.contains(wanted), ".card-more button lacks {wanted}");
+    }
+    // The tap height stays the shared 48px.
+    assert!(
+        !rule.contains("min-height"),
+        ".card-more button sets min-height"
+    );
+}
