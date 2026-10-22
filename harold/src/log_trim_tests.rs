@@ -1,4 +1,4 @@
-use std::fs::OpenOptions;
+use std::fs::{File, OpenOptions};
 use std::io::Write as _;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -69,6 +69,10 @@ fn colored(hours: u64, text: &str) -> String {
     )
 }
 
+fn handle(path: &std::path::Path) -> File {
+    File::open(path).expect("open handle")
+}
+
 fn without_lock(run: &mut dyn FnMut() -> Outcome) -> Outcome {
     run()
 }
@@ -84,7 +88,12 @@ fn keeps_only_the_lines_from_the_first_one_under_24_hours_old() {
     );
     std::fs::write(directory.log(), &log).unwrap();
 
-    let result = trim(&directory.log(), &directory.log(), now(), without_lock);
+    let result = trim(
+        &directory.log(),
+        &handle(&directory.log()),
+        now(),
+        without_lock,
+    );
 
     let kept = format!(
         "{}child says new\n  and more\n",
@@ -110,7 +119,12 @@ fn a_file_with_nothing_old_is_not_written() {
         .modified()
         .unwrap();
 
-    let result = trim(&directory.log(), &directory.log(), now(), without_lock);
+    let result = trim(
+        &directory.log(),
+        &handle(&directory.log()),
+        now(),
+        without_lock,
+    );
 
     assert_eq!(result.unwrap(), Trimmed::Nothing);
     let after = std::fs::metadata(directory.log()).unwrap();
@@ -129,7 +143,13 @@ fn a_line_appended_after_the_trim_lands_at_the_new_end() {
     writer.write_all(colored(30, "old").as_bytes()).unwrap();
     writer.write_all(colored(2, "new").as_bytes()).unwrap();
 
-    trim(&directory.log(), &directory.log(), now(), without_lock).unwrap();
+    trim(
+        &directory.log(),
+        &handle(&directory.log()),
+        now(),
+        without_lock,
+    )
+    .unwrap();
     writer.write_all(b"after\n").unwrap();
 
     let contents = std::fs::read(directory.log()).unwrap();
@@ -148,7 +168,7 @@ fn a_path_that_is_not_the_given_file_is_refused() {
     std::fs::write(directory.log(), &log).unwrap();
     std::fs::write(&other, "x\n").unwrap();
 
-    let failure = trim(&directory.log(), &other, now(), without_lock).unwrap_err();
+    let failure = trim(&directory.log(), &handle(&other), now(), without_lock).unwrap_err();
 
     assert_eq!(failure.reason, "not_the_log");
     assert_eq!(std::fs::read_to_string(directory.log()).unwrap(), log);
@@ -163,7 +183,13 @@ fn a_file_that_cannot_be_written_keeps_its_contents() {
     permissions.set_readonly(true);
     std::fs::set_permissions(directory.log(), permissions).unwrap();
 
-    let failure = trim(&directory.log(), &directory.log(), now(), without_lock).unwrap_err();
+    let failure = trim(
+        &directory.log(),
+        &handle(&directory.log()),
+        now(),
+        without_lock,
+    )
+    .unwrap_err();
 
     assert_eq!(failure.reason, "write_failed");
     assert_eq!(std::fs::read_to_string(directory.log()).unwrap(), log);
@@ -172,6 +198,32 @@ fn a_file_that_cannot_be_written_keeps_its_contents() {
 #[test]
 fn a_missing_file_is_not_the_log() {
     let directory = TestDirectory::new();
-    let failure = trim(&directory.log(), &directory.log(), now(), without_lock).unwrap_err();
+    let failure = trim(
+        &directory.log(),
+        &handle(&directory.0),
+        now(),
+        without_lock,
+    )
+    .unwrap_err();
     assert_eq!(failure.reason, "not_the_log");
+}
+
+#[test]
+fn the_read_to_set_length_step_runs_inside_the_hold() {
+    let directory = TestDirectory::new();
+    let log = format!("{}{}", colored(30, "old"), colored(2, "new"));
+    std::fs::write(directory.log(), &log).unwrap();
+    let path = directory.log();
+    let mut seen = (String::new(), String::new());
+
+    let result = trim(&directory.log(), &handle(&path), now(), |run| {
+        seen.0 = std::fs::read_to_string(&path).unwrap();
+        let outcome = run();
+        seen.1 = std::fs::read_to_string(&path).unwrap();
+        outcome
+    });
+
+    result.unwrap();
+    assert_eq!(seen.0, log);
+    assert_eq!(seen.1, colored(2, "new"));
 }

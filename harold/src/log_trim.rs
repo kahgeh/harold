@@ -6,8 +6,9 @@
 //! stays, so `tail -F` keeps following. Harold's own writers are held from the read to the
 //! set-length; nothing may be logged while they are held.
 
-use std::fs::OpenOptions;
+use std::fs::{File, OpenOptions};
 use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
+use std::os::fd::AsFd as _;
 use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -18,7 +19,6 @@ use tokio::task::JoinHandle;
 const KEEP: Duration = Duration::from_secs(24 * 3600);
 const EVERY: Duration = Duration::from_secs(3600);
 const LOG_NAME: &str = "harold.log";
-const STANDARD_OUTPUT: &str = "/dev/fd/1";
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Trimmed {
@@ -81,32 +81,33 @@ fn trim_own_log() -> Outcome {
         .parent()
         .ok_or_else(|| Failure::new("not_the_log", "the program has no folder"))?
         .join(LOG_NAME);
-    trim(
-        &path,
-        Path::new(STANDARD_OUTPUT),
-        SystemTime::now(),
-        |run| {
-            let _stdout = std::io::stdout().lock();
-            let _stderr = std::io::stderr().lock();
-            run()
-        },
-    )
+    // The open handle, not `/dev/fd/1`: by path, macOS reports another device number.
+    let standard_output = File::from(
+        std::io::stdout()
+            .as_fd()
+            .try_clone_to_owned()
+            .map_err(|error| Failure::new("not_the_log", error))?,
+    );
+    trim(&path, &standard_output, SystemTime::now(), |run| {
+        let _stdout = std::io::stdout().lock();
+        let _stderr = std::io::stderr().lock();
+        run()
+    })
 }
 
 /// Drops the lines of `path` older than 24 hours before `now`, when `path` is the same
-/// file as `same_as`. `hold` runs the trim's read-to-set-length step with the writers held.
+/// file as the open handle `same_as`. `hold` runs the trim's read-to-set-length step with the writers held.
 pub(crate) fn trim(
     path: &Path,
-    same_as: &Path,
+    same_as: &File,
     now: SystemTime,
     hold: impl FnOnce(&mut dyn FnMut() -> Outcome) -> Outcome,
 ) -> Outcome {
-    let identity = |path: &Path| {
-        std::fs::metadata(path)
-            .map(|metadata| (metadata.dev(), metadata.ino()))
-            .map_err(|error| Failure::new("not_the_log", error))
-    };
-    if identity(path)? != identity(same_as)? {
+    let on_disk = std::fs::metadata(path).map_err(|error| Failure::new("not_the_log", error))?;
+    let open = same_as
+        .metadata()
+        .map_err(|error| Failure::new("not_the_log", error))?;
+    if (on_disk.dev(), on_disk.ino()) != (open.dev(), open.ino()) {
         return Err(Failure::new(
             "not_the_log",
             "the path is not standard output's file",
