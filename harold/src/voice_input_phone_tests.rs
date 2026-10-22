@@ -1007,7 +1007,7 @@ async fn the_view_follows_the_call() {
     after_a_poll().await;
     assert_eq!(phone.view().state, CallState::Listening);
 
-    phone.calls.stop().await;
+    phone.calls.stop(false).await;
     let ended = PhoneView {
         state: CallState::Off,
         transcript: None,
@@ -1129,7 +1129,7 @@ async fn a_calls_pieces_are_stamped_from_when_it_was_asked_for() {
     assert_eq!(phone.calls.source_base(), Some(taken_over));
 
     // The next call, started with no time, is stamped from when its source opens.
-    phone.calls.stop().await;
+    phone.calls.stop(false).await;
     sleep(Duration::from_secs(1)).await;
     let restarted = Instant::now();
     phone.calls.start().await;
@@ -1243,7 +1243,7 @@ async fn a_piece_from_the_last_call_never_reaches_the_next() {
     let phone = Phone::new();
     phone.start().await;
     let last = phone.calls.call_id().unwrap();
-    phone.calls.stop().await;
+    phone.calls.stop(false).await;
     phone.start().await;
 
     let mut speech = loud(1000);

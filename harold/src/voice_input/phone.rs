@@ -2,7 +2,7 @@
 //! plays, and lines it says in its own voice. The ports share one `PhoneLine` with the app's
 //! call routes, which hand it what the phone posts and show the phone what waits for it.
 
-use super::call::lock;
+use super::call::{Ended, lock};
 use super::phrases::NO_ANSWER_IN_THREAD;
 use super::worker::WorkerError;
 use super::{
@@ -840,8 +840,14 @@ impl<B: CallPorts> PhoneCalls<B> {
             .send_if_modified(|view| view.ended.take().is_some());
     }
 
-    pub(crate) async fn stop(&self) -> CallStatus {
-        self.calls.stop().await
+    /// Ends the call. With `no_sound` the page found no sound from the microphone, and the
+    /// call ends as `microphone_failed`; otherwise as `stopped`.
+    pub(crate) async fn stop(&self, no_sound: bool) -> CallStatus {
+        if !no_sound {
+            return self.calls.stop().await;
+        }
+        self.calls.end(Ended::MicrophoneFailed).await;
+        self.calls.status()
     }
 
     pub(crate) fn talk_now(&self) -> CallStatus {

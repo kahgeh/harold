@@ -6,15 +6,16 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
+use axum::Json;
 use axum::body::Bytes;
-use axum::extract::rejection::QueryRejection;
+use axum::extract::rejection::{JsonRejection, QueryRejection};
 use axum::extract::{Path, Query, State};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 use tokio::sync::watch;
 use tokio::time::Instant;
-use tracing::warn;
+use tracing::{info, warn};
 use uuid::Uuid;
 
 use super::AppState;
@@ -33,8 +34,9 @@ pub(crate) trait PhoneCallApi: Send + Sync {
     fn set_up(&self) -> bool;
     /// Starts a call, or takes the open one over, and answers its status and its new id.
     fn start(&self) -> BoxFuture<'_, PhoneStarted>;
-    /// Ends the call, and answers once it has ended and cleaned up.
-    fn stop(&self) -> BoxFuture<'_, CallStatus>;
+    /// Ends the call, and answers once it has ended and cleaned up. With `no_sound` the page
+    /// found no sound from the microphone: the call ends as `microphone_failed`, not `stopped`.
+    fn stop(&self, no_sound: bool) -> BoxFuture<'_, CallStatus>;
     fn talk_now(&self);
     /// A piece for the call `call`; one for any other call is refused as `NoCall`.
     fn audio(&self, call: &str, at_ms: u64, bytes: &[u8]) -> Result<(), AudioRefused>;
@@ -97,8 +99,8 @@ impl<B: CallPorts> PhoneCallApi for AppCalls<B> {
         })
     }
 
-    fn stop(&self) -> BoxFuture<'_, CallStatus> {
-        Box::pin(self.phone.stop())
+    fn stop(&self, no_sound: bool) -> BoxFuture<'_, CallStatus> {
+        Box::pin(self.phone.stop(no_sound))
     }
 
     fn talk_now(&self) {
@@ -252,13 +254,158 @@ pub(crate) async fn post_talk_now(State(state): State<AppState>) -> Response {
     StatusCode::NO_CONTENT.into_response()
 }
 
-/// `DELETE /call`: ends the call, and answers `204` once it has ended and cleaned up.
-pub(crate) async fn delete_call(State(state): State<AppState>) -> Response {
+/// `?why=` on `DELETE /call`. Only `no_sound` means anything; any other value is a plain stop.
+#[derive(Deserialize)]
+pub(crate) struct StopWhy {
+    why: Option<String>,
+}
+
+/// `DELETE /call`: ends the call, and answers `204` once it has ended and cleaned up. With
+/// `?why=no_sound` the call ends as `microphone_failed`, else as `stopped`.
+pub(crate) async fn delete_call(
+    State(state): State<AppState>,
+    why: Result<Query<StopWhy>, QueryRejection>,
+) -> Response {
     let Some(calls) = &state.calls else {
         return StatusCode::CONFLICT.into_response();
     };
-    calls.stop().await;
+    let no_sound = matches!(why, Ok(Query(StopWhy { why: Some(why) })) if why == "no_sound");
+    calls.stop(no_sound).await;
     StatusCode::NO_CONTENT.into_response()
+}
+
+/// The facts the page keeps about a call's microphone, posted once 3 seconds in, or when
+/// `start()` threw. Nothing here is free text: `check_words` and `check_counts` hold each
+/// value to its known words or numbers before anything is logged.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CallCheck {
+    problem: Option<String>,
+    step: Option<String>,
+    error_name: Option<String>,
+    context_state: Option<String>,
+    track_state: Option<String>,
+    track_muted: Option<bool>,
+    pieces_made: Option<u32>,
+    pieces_posted: Option<u32>,
+    pieces_dropped: Option<DroppedPieces>,
+    posts_failed: Option<u32>,
+    empty_blocks: Option<u32>,
+}
+
+/// The pieces call.js dropped before posting, by reason.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct DroppedPieces {
+    playing: u32,
+    echo_tail: u32,
+    before_start: u32,
+    not_open: u32,
+}
+
+const CHECK_PROBLEMS: &[&str] = &["no_sound"];
+const CHECK_STEPS: &[&str] = &["microphone", "context", "worklet", "call"];
+const CONTEXT_STATES: &[&str] = &["running", "suspended", "closed", "interrupted"];
+const TRACK_STATES: &[&str] = &["live", "ended", "none"];
+/// The most any one count may be.
+const CHECK_COUNT_LIMIT: u32 = 100_000;
+/// The longest browser error name accepted.
+const ERROR_NAME_LIMIT: usize = 40;
+
+impl CallCheck {
+    /// Whether every word is one of its known values, `error_name` is 1 to 40 ASCII letters
+    /// and every count is 0 to 100,000.
+    fn valid(&self) -> bool {
+        let word = |value: &Option<String>, known: &[&str]| {
+            value.as_deref().is_none_or(|value| known.contains(&value))
+        };
+        let name = self.error_name.as_deref().is_none_or(|name| {
+            (1..=ERROR_NAME_LIMIT).contains(&name.len())
+                && name.chars().all(|c| c.is_ascii_alphabetic())
+        });
+        let dropped = self
+            .pieces_dropped
+            .as_ref()
+            .map(|d| [d.playing, d.echo_tail, d.before_start, d.not_open]);
+        let counts = [
+            self.pieces_made,
+            self.pieces_posted,
+            self.posts_failed,
+            self.empty_blocks,
+        ]
+        .into_iter()
+        .flatten()
+        .chain(dropped.into_iter().flatten());
+        word(&self.problem, CHECK_PROBLEMS)
+            && word(&self.step, CHECK_STEPS)
+            && word(&self.context_state, CONTEXT_STATES)
+            && word(&self.track_state, TRACK_STATES)
+            && name
+            && counts.into_iter().all(|count| count <= CHECK_COUNT_LIMIT)
+    }
+
+    /// The dropped counts as one fixed-shape line, such as `playing=0 echo_tail=2
+    /// before_start=0 not_open=0`, built from the validated numbers only.
+    fn dropped_line(&self) -> Option<String> {
+        let d = self.pieces_dropped.as_ref()?;
+        Some(format!(
+            "playing={} echo_tail={} before_start={} not_open={}",
+            d.playing, d.echo_tail, d.before_start, d.not_open
+        ))
+    }
+
+    fn log(&self) {
+        let dropped = self.dropped_line();
+        let dropped = dropped.as_deref();
+        if self.problem.is_some() || self.step.is_some() {
+            warn!(
+                problem = self.problem.as_deref(),
+                step = self.step.as_deref(),
+                error_name = self.error_name.as_deref(),
+                context_state = self.context_state.as_deref(),
+                track_state = self.track_state.as_deref(),
+                track_muted = self.track_muted,
+                pieces_made = self.pieces_made,
+                pieces_posted = self.pieces_posted,
+                pieces_dropped = dropped,
+                posts_failed = self.posts_failed,
+                empty_blocks = self.empty_blocks,
+                "app call microphone failed"
+            );
+        } else {
+            info!(
+                error_name = self.error_name.as_deref(),
+                context_state = self.context_state.as_deref(),
+                track_state = self.track_state.as_deref(),
+                track_muted = self.track_muted,
+                pieces_made = self.pieces_made,
+                pieces_posted = self.pieces_posted,
+                pieces_dropped = dropped,
+                posts_failed = self.posts_failed,
+                empty_blocks = self.empty_blocks,
+                "app call check"
+            );
+        }
+    }
+}
+
+/// `POST /call/check`: the page's facts about the call's microphone. `204` once logged;
+/// `400`, and nothing logged, for a body that is not the known JSON or holds a value out of
+/// range.
+pub(crate) async fn post_check(
+    State(state): State<AppState>,
+    check: Result<Json<CallCheck>, JsonRejection>,
+) -> Response {
+    if state.calls.is_none() {
+        return StatusCode::CONFLICT.into_response();
+    }
+    match check {
+        Ok(Json(check)) if check.valid() => {
+            check.log();
+            StatusCode::NO_CONTENT.into_response()
+        }
+        _ => StatusCode::BAD_REQUEST.into_response(),
+    }
 }
 
 /// `GET /call/answer/{id}`: the offered sound's WAV, which counts as fetched from now on;

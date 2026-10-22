@@ -183,7 +183,8 @@ Every call route passes the login check and the checks on posts ([What the app r
 | `POST /call` | Starts the call, or takes over the open one. `200` once it listens, with a `text/plain` body holding the call's id; a takeover answers a new id, and the older id is refused from then on. Otherwise `409` with a line saying why. |
 | `POST /call/audio?call=<id>&at=<ms>` | A quarter-second piece of audio for the call `id`, as `POST /call` answered it: 16 kHz mono, little-endian `i16`, 4,000 samples (8,000 bytes), recorded `at` milliseconds from the call's start: on the phone, just before it sent `POST /call`; on the Mac, when that request arrived. `204` once taken. `409` when no call is open, or the piece carries no id or another call's id; `400` for an odd number of bytes or a missing `at`, `413` for more than one second of audio, `503` when too many pieces wait. A refused piece does not end the call. The app posts the pieces one after another, in the order they were recorded, since Harold hears them in the order they arrive. A `409` for a piece of the open call means the call ended on the Mac without the phone hearing of it, or a newer screen took it over, so the app ends the call on the phone too. |
 | `POST /call/talk-now` | Stops what plays and listens at once. |
-| `DELETE /call` | Ends the call, and answers `204` once it has ended and cleaned up. |
+| `DELETE /call` | Ends the call, and answers `204` once it has ended and cleaned up. With `?why=no_sound` the call ends as `microphone_failed` instead of `stopped`. |
+| `POST /call/check` | The page's facts about the call's microphone, sent 3 seconds after the call opens, or when starting the call threw. JSON of known words and counts: `problem`, `step`, `error_name` (1 to 40 letters), `context_state`, `track_state`, `track_muted`, `pieces_made`, `pieces_posted`, `pieces_dropped` (`playing`, `echo_tail`, `before_start`, `not_open`), `posts_failed` and `empty_blocks` (counts 0 to 100,000). `204` once logged; `400`, with nothing logged, for any other word, field or count. |
 | `GET /call/answer/<id>` | The WAV of an answer or phrase Harold offers. `404` once it is no longer offered. |
 | `POST /call/played?id=<id>` | The phone reports that it has played the sound, or said the line, `id`. |
 
@@ -206,6 +207,7 @@ iOS limits what a home-screen web app can do during a call. Stage 0 checks each 
 |---|---|
 | A home-screen web app records only while it is open and in front, so the screen must stay on. | The app keeps the screen on for the length of a call, and lets it sleep again when the call ends. |
 | The microphone stops when the phone locks or the app leaves the front. | The app ends the call, and on return shows `Call ended: the app was closed or the phone locked`. |
+| The microphone gives no sound: no audio piece has been made 3 seconds after the call opened. | The app ends the call and shows `The microphone gave no sound. Tap Call to try again.`; Harold logs `app call microphone failed` with what the page saw. |
 | Sound pauses while the app is in the background. | The call ends the same way. The chief's answer still reaches the thread as text, with a push. |
 
 Nothing records or plays while the phone is locked or the app is in the background. If the phone vanishes without ending the call, Harold ends it 15 seconds after the last piece of audio, while nothing plays.
@@ -278,6 +280,8 @@ Harold logs no message text, no reply, no push address and no key. The app adds 
 | `app todos not read` | `reason` (`unavailable` or `timeout`), logged once when reads start failing |
 | `app todos read again` | none, logged once when reads recover |
 | `app call started` | none |
+| `app call check` | One per call, 3 seconds in, from the page's `POST /call/check`: `context_state`, `track_state`, `track_muted`, `pieces_made`, `pieces_posted`, `pieces_dropped` (`playing=n echo_tail=n before_start=n not_open=n`), `posts_failed` and `empty_blocks`. No free text. |
+| `app call microphone failed` | A warning with the same fields plus `problem` (`no_sound`) or `step` (`microphone`, `context`, `worklet` or `call`) and `error_name`, the browser's error name |
 | `call audio refused` | `reason` (`full`, `malformed` or `too_large`), a warning logged once per reason per call for a piece of audio the open call refused |
 | `echo test run` | `setup` (`ear`, `speaker` or `headphones`), `kind` (`silent` or `talk`), `verdict` (`pass`, `fail` or `run_silent_first`), `share_over_bar` (silent runs: the share of playback frames over the bar) or `voice_found` (talk runs with a bar), `echo_cancellation` and `standalone` (yes or no) |
 | `echo test run not saved` | `reason` (`write_failed` or `bad_request`), logged as a warning |

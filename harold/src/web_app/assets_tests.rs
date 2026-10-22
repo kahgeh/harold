@@ -28,11 +28,38 @@ fn the_call_script_keeps_its_contract() {
         "answer.status === 409",
         // Pieces are posted one after another, in the order they were recorded.
         "current.posts = current.posts.then(",
+        // The context is resumed after the microphone starts, and on each state change.
+        "await ctx.resume()",
+        "ctx.onstatechange",
+        // The check is posted 3 s after the call opens; no piece made ends the call.
+        "const CHECK_MS = 3000;",
+        "setTimeout(() => check(current), CHECK_MS)",
+        "/call/check",
+        r#"problem: "no_sound""#,
+        "/call?why=no_sound",
+        "The microphone gave no sound. Tap Call to try again.",
+        // A thrown error is reported with the step and the error's name.
+        "step,",
+        "error_name: name",
+        "processorOptions: { report: true }",
     ] {
         assert!(script.contains(wanted), "call.js lacks {wanted}");
     }
     for absent in ["eval(", "new Function", "innerHTML", "http://", "https://"] {
         assert!(!script.contains(absent), "call.js holds {absent}");
+    }
+}
+
+#[test]
+fn the_worklet_posts_its_empty_block_count_once_a_second_when_asked() {
+    let worklet = include_str!("../../static/web_app/call-worklet.js");
+    for wanted in [
+        "this.port.postMessage({ empty: this.emptyBlocks });",
+        "const REPORT_EVERY_S = 1;",
+        "this.emptyBlocks += 1;",
+        "options.processorOptions.report",
+    ] {
+        assert!(worklet.contains(wanted), "call-worklet.js lacks {wanted}");
     }
 }
 

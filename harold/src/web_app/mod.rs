@@ -287,6 +287,7 @@ pub(crate) fn router(state: AppState) -> Router {
         .route("/echo-test/runs", post(echo_test::post_run))
         .route("/call", post(call::post_call).delete(call::delete_call))
         .route("/call/audio", post(call::post_audio))
+        .route("/call/check", post(call::post_check))
         .route("/call/played", post(call::post_played))
         .route("/call/talk-now", post(call::post_talk_now))
         .route("/call/answer/{id}", get(call::get_answer))

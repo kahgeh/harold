@@ -817,6 +817,7 @@ async fn post_call_says_why_no_call_started() {
     assert_eq!(body, NOT_SET_UP);
     for (method, path) in [
         (Method::POST, "/call/audio?at=0"),
+        (Method::POST, "/call/check"),
         (Method::POST, "/call/played?id=x"),
         (Method::POST, "/call/talk-now"),
         (Method::DELETE, "/call"),
@@ -1230,4 +1231,193 @@ fn the_call_section_shows_each_state_in_the_specs_words() {
     let html = render(&heard);
     assert!(html.contains(ESCAPED), "{html}");
     assert!(!html.contains("<script>alert"), "{html}");
+}
+
+// ---------------------------------------------------------------------------
+// The page's check of the microphone, and ending a call that heard nothing
+// ---------------------------------------------------------------------------
+
+impl TestServer {
+    /// `POST /call/check` as the page sends it, with `body` as the JSON text.
+    async fn check(&self, body: &str) -> reqwest::Response {
+        let origin = format!("http://{}", self.addr);
+        let headers = [
+            ("tailscale-user-login", LOGIN),
+            ("sec-fetch-site", "same-origin"),
+            ("origin", origin.as_str()),
+            ("content-type", "application/json"),
+        ];
+        self.send_with(
+            Method::POST,
+            "/call/check",
+            &headers,
+            body.as_bytes().to_vec(),
+        )
+        .await
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_check_is_logged_as_info_and_a_problem_or_step_as_a_warning() {
+    test_support::install();
+    let logs = CapturedLogs::start();
+    let phone = Phone::new(true).await;
+
+    let fine = phone
+        .server
+        .check(
+            r#"{"context_state":"running","track_state":"live","track_muted":false,
+            "pieces_made":11,"pieces_posted":9,"posts_failed":0,"empty_blocks":0,
+            "pieces_dropped":{"playing":1,"echo_tail":1,"before_start":0,"not_open":0}}"#,
+        )
+        .await;
+    assert_eq!(fine.status(), 204);
+    let captured = logs.text();
+    assert!(captured.contains("app call check"), "{captured}");
+    assert!(
+        !captured.contains("app call microphone failed"),
+        "{captured}"
+    );
+    for wanted in [
+        r#"context_state="running""#,
+        r#"track_state="live""#,
+        "track_muted=false",
+        "pieces_made=11",
+        "pieces_posted=9",
+        "posts_failed=0",
+        "empty_blocks=0",
+        "playing=1 echo_tail=1 before_start=0 not_open=0",
+    ] {
+        assert!(captured.contains(wanted), "{wanted} in {captured}");
+    }
+
+    let silent = phone
+        .server
+        .check(
+            r#"{"problem":"no_sound","context_state":"suspended","track_state":"live",
+            "track_muted":true,"pieces_made":0,"empty_blocks":12}"#,
+        )
+        .await;
+    assert_eq!(silent.status(), 204);
+    let thrown = phone
+        .server
+        .check(r#"{"step":"microphone","error_name":"NotAllowedError"}"#)
+        .await;
+    assert_eq!(thrown.status(), 204);
+    let captured = logs.text();
+    assert_eq!(
+        captured.matches("app call microphone failed").count(),
+        2,
+        "{captured}"
+    );
+    for wanted in [
+        r#"problem="no_sound""#,
+        r#"context_state="suspended""#,
+        "track_muted=true",
+        "empty_blocks=12",
+        r#"step="microphone""#,
+        r#"error_name="NotAllowedError""#,
+    ] {
+        assert!(captured.contains(wanted), "{wanted} in {captured}");
+    }
+    assert_eq!(captured.matches("app call check").count(), 1, "{captured}");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_check_with_an_unknown_word_a_bad_name_or_a_count_out_of_range_is_refused_and_logs_nothing()
+ {
+    test_support::install();
+    let logs = CapturedLogs::start();
+    let phone = Phone::new(true).await;
+    let long_name = format!(r#"{{"error_name":"{}"}}"#, "A".repeat(41));
+    let refused = [
+        r#"{"problem":"my microphone is broken"}"#,
+        r#"{"step":"audio"}"#,
+        r#"{"context_state":"asleep"}"#,
+        r#"{"track_state":"live; DROP"}"#,
+        r#"{"error_name":""}"#,
+        r#"{"error_name":"Not Allowed"}"#,
+        r#"{"error_name":"Error1"}"#,
+        r#"{"error_name":"NotAllowedÉ"}"#,
+        long_name.as_str(),
+        r#"{"pieces_made":100001}"#,
+        r#"{"pieces_made":-1}"#,
+        r#"{"empty_blocks":"3"}"#,
+        r#"{"pieces_dropped":{"playing":100001,"echo_tail":0,"before_start":0,"not_open":0}}"#,
+        r#"{"pieces_dropped":{"playing":1}}"#,
+        r#"{"transcript":"free text"}"#,
+        r#"{"track_muted":"yes"}"#,
+        "not json",
+        "",
+    ];
+    for body in refused {
+        let response = phone.server.check(body).await;
+        assert_eq!(response.status(), 400, "{body}");
+    }
+    let captured = logs.text();
+    assert!(!captured.contains("app call check"), "{captured}");
+    assert!(
+        !captured.contains("app call microphone failed"),
+        "{captured}"
+    );
+
+    let edge = format!(
+        r#"{{"error_name":"{}","pieces_made":100000}}"#,
+        "A".repeat(40)
+    );
+    assert_eq!(phone.server.check(&edge).await.status(), 204);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_check_with_no_phone_calls_is_refused_as_the_other_call_routes_are() {
+    let directory = TestDirectory::new();
+    let store = Arc::new(HaroldStore::open(directory.store_path()).await.unwrap());
+    let server = TestServer::serve(store, None).await;
+    assert_eq!(server.check("{}").await.status(), 409);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn delete_with_why_no_sound_ends_the_call_as_microphone_failed_and_without_as_stopped() {
+    test_support::install();
+    let logs = CapturedLogs::start();
+    let phone = Phone::new(true).await;
+
+    phone.start().await;
+    let response = phone
+        .server
+        .send(Method::DELETE, "/call?why=no_sound", Vec::new())
+        .await;
+    assert_eq!(response.status(), 204);
+    assert_eq!(phone.calls.view().borrow().state, CallState::Off);
+    let captured = logs.text();
+    assert!(
+        captured.contains("app call ended reason=\"microphone_failed\""),
+        "{captured}"
+    );
+
+    phone.start().await;
+    let response = phone.server.send(Method::DELETE, "/call", Vec::new()).await;
+    assert_eq!(response.status(), 204);
+    let captured = logs.text();
+    assert!(
+        captured.contains("app call ended reason=\"stopped\""),
+        "{captured}"
+    );
+    assert_eq!(captured.matches("app call ended").count(), 2, "{captured}");
+
+    // An unknown `why` is a plain stop.
+    phone.start().await;
+    let response = phone
+        .server
+        .send(Method::DELETE, "/call?why=whatever", Vec::new())
+        .await;
+    assert_eq!(response.status(), 204);
+    let captured = logs.text();
+    assert_eq!(
+        captured
+            .matches("app call ended reason=\"stopped\"")
+            .count(),
+        2,
+        "{captured}"
+    );
 }
