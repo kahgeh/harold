@@ -69,6 +69,7 @@ pub(crate) const ALLOWED_FIELDS: &[&str] = &[
     "session.source",
     "component",
     "reason",
+    "pages",
     "outcome",
     "channel",
     "resolved_by",

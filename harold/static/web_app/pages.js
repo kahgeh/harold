@@ -56,6 +56,25 @@ document.addEventListener("click", (event) => {
   });
 })();
 
+// A page that leaves the screen says so with a request that outlives it, so a stream the
+// phone leaves open does not hold back the chief's pushes. A page shown again opens a new
+// stream, which counts it visible once more.
+(function () {
+  const reportHidden = () => {
+    fetch("/page/hidden", {
+      method: "POST",
+      keepalive: true,
+      headers: { "Content-Type": "application/json" },
+    }).catch(() => {});
+  };
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "hidden") {
+      reportHidden();
+    }
+  });
+  window.addEventListener("pagehide", reportHidden);
+})();
+
 (function () {
   const pages = document.getElementById("pages");
   const thread = document.getElementById("thread");

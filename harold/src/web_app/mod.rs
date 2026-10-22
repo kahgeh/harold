@@ -3,9 +3,12 @@
 
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use axum::Router;
+use axum::extract::State;
+use axum::http::StatusCode;
 use axum::middleware::{from_fn, from_fn_with_state};
 use axum::routing::{get, post};
 use tokio::net::TcpListener;
@@ -99,6 +102,52 @@ pub(crate) struct Agents<'a> {
     pub grpc: &'a GrpcSettings,
 }
 
+/// The open page streams and whether the page last reported itself hidden. The push route
+/// asks it whether a page is on screen.
+#[derive(Default)]
+pub(crate) struct OpenPages {
+    streams: AtomicUsize,
+    hidden: AtomicBool,
+}
+
+impl OpenPages {
+    /// Counts a stream up and clears the hidden mark; the stream counts down when the
+    /// guard drops, for any reason.
+    pub(crate) fn open(self: &Arc<Self>) -> OpenPage {
+        self.streams.fetch_add(1, Ordering::SeqCst);
+        self.hidden.store(false, Ordering::SeqCst);
+        OpenPage(Arc::clone(self))
+    }
+
+    /// The page said it is hidden.
+    pub(crate) fn report_hidden(&self) {
+        self.hidden.store(true, Ordering::SeqCst);
+    }
+
+    /// The open streams of pages that are on screen: none while the mark is set.
+    pub(crate) fn visible(&self) -> usize {
+        if self.hidden.load(Ordering::SeqCst) {
+            return 0;
+        }
+        self.streams.load(Ordering::SeqCst)
+    }
+}
+
+/// One open page stream, counted until this drops.
+pub(crate) struct OpenPage(Arc<OpenPages>);
+
+impl Drop for OpenPage {
+    fn drop(&mut self) {
+        self.0.streams.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// `POST /page/hidden`: the page left the screen, so a push is wanted again.
+async fn post_page_hidden(State(state): State<AppState>) -> StatusCode {
+    state.pages.report_hidden();
+    StatusCode::NO_CONTENT
+}
+
 /// What every route can reach.
 #[derive(Clone)]
 pub(crate) struct AppState {
@@ -129,6 +178,8 @@ pub(crate) struct AppState {
     pub todos_changed: Arc<watch::Sender<u64>>,
     /// The echo test's runs, sample and recent silent runs.
     pub echo_test: Arc<echo_test::EchoTest>,
+    /// The open page streams, which the route reads before it pushes.
+    pub pages: Arc<OpenPages>,
 }
 
 #[cfg(test)]
@@ -167,6 +218,7 @@ impl AppState {
                 std::env::temp_dir().join("harold-echo-test-unused"),
                 Arc::new(echo_test::NeverRuns),
             )),
+            pages: Arc::default(),
         }
     }
 }
@@ -220,6 +272,7 @@ pub(crate) fn router(state: AppState) -> Router {
         .route("/replies", post(replies::post_reply))
         .route("/push/subscription", post(replies::post_subscription))
         .route("/updates", get(updates::get_updates))
+        .route("/page/hidden", post(post_page_hidden))
         .route("/thread/older", get(pages::get_thread_older))
         .route("/todos/answer", post(todos::post_answer))
         .route("/todos/picks", post(todos::post_picks))
@@ -306,9 +359,11 @@ pub(crate) async fn start(
             echo_test::echo_test_path(store_path),
             Arc::new(SystemRunner),
         )),
+        pages: Arc::default(),
     };
     let pusher = Arc::new(Pusher::new(key, &settings.allowed_login));
-    let route: Arc<dyn AppRoute> = Arc::new(WebAppRoute::new(Arc::clone(&store), pusher));
+    let route: Arc<dyn AppRoute> =
+        Arc::new(WebAppRoute::new(Arc::clone(&store), pusher).with_pages(Arc::clone(&state.pages)));
 
     let pruning = tokio::spawn(prune_every_hour(store, shutdown.clone()));
     let mut server_shutdown = shutdown;

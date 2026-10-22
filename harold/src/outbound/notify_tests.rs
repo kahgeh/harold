@@ -5,8 +5,8 @@ use super::NotifyEnvironment;
 use super::fake::{CapturedLogs, FakeEnvironment, turn};
 use super::left_out::TrackedAgents;
 use super::{
-    AppDelivery, AppRoute, AwayText, ChiefApp, DeliveryOutcome, NotPushedReason, NotifyState,
-    OutboundChannel, deliver_from_chief, is_chief_pane, notify, notify_with_app,
+    AppDelivery, AppRoute, AwayText, CarriedBy, ChiefApp, DeliveryOutcome, NotPushedReason,
+    NotifyState, OutboundChannel, deliver_from_chief, is_chief_pane, notify, notify_with_app,
 };
 use crate::inbound::ownership::agent_message_text;
 use crate::store::{AppReplyState, TurnCompleted};
@@ -1290,4 +1290,35 @@ fn a_pushed_message_logs_no_app_message_not_pushed() {
     deliver_from_chief(&chief_app, "event-1", "text", "text").unwrap();
 
     assert!(!logs.text().contains("app message not pushed"));
+}
+
+#[test]
+fn a_shown_message_is_carried_by_the_app_and_goes_nowhere_else() {
+    let app = FakeApp::new(AppDelivery::Shown);
+    let away = FakeAwayText::default();
+    let chief_app = ChiefApp {
+        app: &app,
+        away: &away,
+        away_allowed: true,
+    };
+    let logs = CapturedLogs::start();
+
+    let carried = deliver_from_chief(&chief_app, "event-1", "text", "text").unwrap();
+
+    assert_eq!(carried, CarriedBy::App);
+    assert!(away.sends().is_empty());
+    assert!(!logs.text().contains("app message not pushed"));
+}
+
+#[test]
+fn a_shown_turn_end_update_counts_as_delivered_on_the_app() {
+    let environment = FakeEnvironment::locked("");
+    let app = FakeApp::new(AppDelivery::Shown);
+    let away = FakeAwayText::default();
+
+    let outcome = notify_chief_turn(&environment, &app, &away, &turn("%1", "report"));
+
+    assert_eq!(outcome, Ok(DeliveryOutcome::Delivered));
+    assert!(environment.delivered().is_empty());
+    assert!(away.sends().is_empty());
 }

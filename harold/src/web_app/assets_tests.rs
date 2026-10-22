@@ -186,3 +186,18 @@ fn pages_js_reopens_updates_only_when_the_stream_really_ended() {
         assert!(script.contains(wanted), "pages.js lacks {wanted}");
     }
 }
+
+#[test]
+fn pages_js_reports_hiding_with_a_request_that_outlives_the_page() {
+    let script = include_str!("../../static/web_app/pages.js");
+    for wanted in [
+        r#"fetch("/page/hidden""#,
+        r#"method: "POST""#,
+        "keepalive: true",
+        r#"document.addEventListener("visibilitychange""#,
+        r#"document.visibilityState === "hidden""#,
+        r#"window.addEventListener("pagehide", reportHidden)"#,
+    ] {
+        assert!(script.contains(wanted), "pages.js lacks {wanted}");
+    }
+}

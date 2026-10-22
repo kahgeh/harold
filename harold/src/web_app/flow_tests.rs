@@ -10,7 +10,7 @@ use tokio::task::JoinHandle;
 use super::origin::loopback_hosts;
 use super::pages::CONTENT_SECURITY_POLICY;
 use super::replies::REPLY_MAX_CHARS;
-use super::{AppState, router};
+use super::{AppState, OpenPages, router};
 use crate::agent::domain::{
     AgentIncarnation, AgentPaneObservation, AgentPaneProjection, AgentSnapshot, EffectiveAgentState,
 };
@@ -50,6 +50,8 @@ impl Drop for TestDirectory {
 /// The router on a free local port; it stops when this is dropped.
 struct TestServer {
     addr: SocketAddr,
+    /// The open streams the server counts.
+    pages: Arc<OpenPages>,
     shutdown: Option<watch::Sender<()>>,
     handle: JoinHandle<()>,
 }
@@ -79,11 +81,13 @@ impl TestServer {
         );
         state.snapshots = snapshots;
         state.chief_folder = chief_folder.map(Arc::from);
+        let pages = Arc::clone(&state.pages);
         let handle = tokio::spawn(async move {
             let _ = axum::serve(listener, router(state)).await;
         });
         Self {
             addr,
+            pages,
             shutdown: Some(shutdown),
             handle,
         }
@@ -1005,4 +1009,139 @@ async fn the_page_draws_the_dots_when_it_loads_into_a_typed_reply_and_a_busy_chi
         page.contains(r#"<div id="responding""#) && page.contains(r#"class="dots""#),
         "{page}"
     );
+}
+
+/// Waits up to 2 s for the server to count `wanted` visible pages.
+async fn visible_pages_reach(server: &TestServer, wanted: usize) {
+    for _ in 0..40 {
+        if server.pages.visible() == wanted {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("{} visible pages, wanted {wanted}", server.pages.visible());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn an_open_stream_is_a_visible_page_until_it_ends() {
+    let directory = TestDirectory::new();
+    let server = TestServer::serve(directory.store().await).await;
+    assert_eq!(server.pages.visible(), 0);
+
+    let mut first = server.updates().await;
+    first.next().await.expect("the whole thread");
+    visible_pages_reach(&server, 1).await;
+    let mut second = server.updates().await;
+    second.next().await.expect("the whole thread");
+    visible_pages_reach(&server, 2).await;
+
+    // A hidden report leaves the streams open but stops them counting as visible.
+    server.pages.report_hidden();
+    assert_eq!(server.pages.visible(), 0);
+    drop((first, second));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_closed_stream_counts_down_and_a_new_one_clears_the_hidden_report() {
+    let directory = TestDirectory::new();
+    let store = directory.store().await;
+    let server = TestServer::serve(store.clone()).await;
+    let mut page = server.updates().await;
+    page.next().await.expect("the whole thread");
+    visible_pages_reach(&server, 1).await;
+
+    let hidden = server
+        .send_with(
+            reqwest::Method::POST,
+            "/page/hidden",
+            &[
+                ("sec-fetch-site", "same-origin"),
+                ("origin", &format!("http://{}", server.addr)),
+                ("content-type", "application/json"),
+            ],
+            String::new(),
+        )
+        .await;
+    assert_eq!(hidden.status(), 204);
+    assert_eq!(server.pages.visible(), 0);
+
+    let mut again = server.updates().await;
+    again.next().await.expect("the whole thread");
+    visible_pages_reach(&server, 2).await;
+
+    // The page goes: the next change finds the send failing and the stream counts down.
+    drop(page);
+    drop(again);
+    for n in 0..40 {
+        store
+            .add_chief_app_message(&format!("wake-{n}"), now_ms(), "x")
+            .await
+            .unwrap();
+        if server.pages.visible() == 0 {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("{} pages still counted", server.pages.visible());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn the_hidden_report_has_the_login_host_and_origin_checks() {
+    let directory = TestDirectory::new();
+    let server = TestServer::serve(directory.store().await).await;
+    let own_origin = format!("http://{}", server.addr);
+    let _page = server.pages.open();
+    let client = reqwest::Client::new();
+
+    let missing_login = client
+        .post(server.url("/page/hidden"))
+        .header("sec-fetch-site", "same-origin")
+        .header("origin", &own_origin)
+        .header("content-type", "application/json")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(missing_login.status(), 403);
+    let wrong_login = client
+        .post(server.url("/page/hidden"))
+        .header("Tailscale-User-Login", "someone@else")
+        .header("sec-fetch-site", "same-origin")
+        .header("origin", &own_origin)
+        .header("content-type", "application/json")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(wrong_login.status(), 403);
+    let cross_site = server
+        .send_with(
+            reqwest::Method::POST,
+            "/page/hidden",
+            &[
+                ("sec-fetch-site", "cross-site"),
+                ("origin", "http://evil.example"),
+                ("content-type", "application/json"),
+            ],
+            String::new(),
+        )
+        .await;
+    assert_eq!(cross_site.status(), 403);
+    let wrong_host = server
+        .send_with(
+            reqwest::Method::POST,
+            "/page/hidden",
+            &[
+                ("host", "evil.example"),
+                ("sec-fetch-site", "same-origin"),
+                ("origin", "http://evil.example"),
+                ("content-type", "application/json"),
+            ],
+            String::new(),
+        )
+        .await;
+    assert_eq!(wrong_host.status(), 403);
+    assert_eq!(server.pages.visible(), 1, "a refusal sets no mark");
+
+    let allowed = server.post("/page/hidden", String::new()).await;
+    assert_eq!(allowed.status(), 204);
+    assert_eq!(server.pages.visible(), 0);
 }

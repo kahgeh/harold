@@ -130,15 +130,12 @@ pub(crate) async fn get_updates(
         from: window.oldest().map(str::to_owned),
         known: shown(window.rows),
     };
-    tokio::spawn(follow_thread(
-        state,
-        changes,
-        call,
-        seen,
-        dots,
-        todos_shown,
-        patches,
-    ));
+    let open = state.pages.open();
+    tokio::spawn(async move {
+        // Counted until the stream ends, however it ends.
+        let _open = open;
+        follow_thread(state, changes, call, seen, dots, todos_shown, patches).await;
+    });
     Sse::new(ReceiverStream::<Result<Event, Infallible>>::new(queued))
         .keep_alive(KeepAlive::default())
         .into_response()

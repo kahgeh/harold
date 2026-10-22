@@ -318,6 +318,8 @@ pub(crate) fn report_held(
 pub(crate) enum AppDelivery {
     /// At least one push service accepted the alert.
     Pushed,
+    /// A page of the app is open and visible and showed the message, so nothing was pushed.
+    Shown,
     /// No push was accepted, for the reason given.
     NotPushed(NotPushedReason),
 }
@@ -420,7 +422,7 @@ pub(crate) fn deliver_from_chief(
     away_text: &str,
 ) -> Result<CarriedBy, String> {
     match chief_app.app.deliver(event_id, text)? {
-        AppDelivery::Pushed => Ok(CarriedBy::App),
+        AppDelivery::Pushed | AppDelivery::Shown => Ok(CarriedBy::App),
         AppDelivery::NotPushed(reason) if !chief_app.away_allowed => {
             warn!(
                 reason = reason.as_str(),

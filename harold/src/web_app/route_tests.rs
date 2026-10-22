@@ -7,6 +7,7 @@ use crate::store::{
     AppPushSubscribed, AppReplyState, AppSender, HaroldStore, append_app_push_subscribed,
     append_app_reply,
 };
+use crate::web_app::OpenPages;
 use crate::web_app::fake_push::FakePushService;
 use crate::web_app::push::{Pusher, VapidKey, vapid_key_path};
 
@@ -255,4 +256,86 @@ async fn settle_waiting_replies_types_the_waiting_rows() {
     assert_eq!(settled, [reply_id]);
     let messages = store.app_messages_since(0).await.unwrap();
     assert_eq!(messages[0].state, Some(AppReplyState::Typed));
+}
+
+/// The route reading `pages`, with one subscription at `service`.
+async fn route_over(
+    directory: &TestDirectory,
+    service: &FakePushService,
+    pages: &Arc<OpenPages>,
+) -> (Arc<HaroldStore>, Arc<WebAppRoute>) {
+    let (store, route) = route_with(directory, &[service.subscription(1)]).await;
+    let route = Arc::new(
+        Arc::try_unwrap(route)
+            .ok()
+            .unwrap()
+            .with_pages(pages.clone()),
+    );
+    (store, route)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_visible_page_shows_the_message_and_no_push_goes_out() {
+    let service = FakePushService::start(201).await;
+    let directory = TestDirectory::new();
+    let pages = Arc::new(OpenPages::default());
+    let (store, route) = route_over(&directory, &service, &pages).await;
+    // Three streams: no other test reports three pages, so its record is this one's.
+    let _open = [pages.open(), pages.open(), pages.open()];
+    crate::telemetry::test_support::install();
+
+    let delivery = deliver(&route, "event-1", "hello").await;
+
+    assert_eq!(delivery, AppDelivery::Shown);
+    assert_eq!(store.app_messages_since(0).await.unwrap().len(), 1);
+    assert!(service.requests().is_empty());
+    let skipped: Vec<_> = crate::telemetry::test_support::logs()
+        .into_iter()
+        .filter(|log| {
+            let record = format!("{:?}", log.record);
+            record.contains("app push skipped")
+                && record.contains("page_visible")
+                && record.contains("pages")
+                && record.contains("Int(3)")
+        })
+        .collect();
+    assert_eq!(
+        skipped.len(),
+        1,
+        "one exported skip line with reason and pages"
+    );
+    assert!(!format!("{:?}", skipped[0].record).contains("hello"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn no_page_or_a_hidden_page_pushes_as_before() {
+    let service = FakePushService::start(201).await;
+    let directory = TestDirectory::new();
+    let pages = Arc::new(OpenPages::default());
+    let (_store, route) = route_over(&directory, &service, &pages).await;
+
+    assert_eq!(deliver(&route, "event-1", "a").await, AppDelivery::Pushed);
+
+    let page = pages.open();
+    pages.report_hidden();
+    assert_eq!(deliver(&route, "event-2", "b").await, AppDelivery::Pushed);
+    assert_eq!(service.requests().len(), 2);
+
+    drop(page);
+    assert_eq!(deliver(&route, "event-3", "c").await, AppDelivery::Pushed);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_new_stream_after_the_hidden_report_is_visible_again() {
+    let service = FakePushService::start(201).await;
+    let directory = TestDirectory::new();
+    let pages = Arc::new(OpenPages::default());
+    let (_store, route) = route_over(&directory, &service, &pages).await;
+    let first = pages.open();
+    pages.report_hidden();
+    drop(first);
+    let _second = pages.open();
+
+    assert_eq!(deliver(&route, "event-1", "a").await, AppDelivery::Shown);
+    assert!(service.requests().is_empty());
 }

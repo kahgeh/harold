@@ -4,8 +4,9 @@
 use std::sync::Arc;
 
 use time::OffsetDateTime;
-use tracing::warn;
+use tracing::{info, warn};
 
+use super::OpenPages;
 use super::push::{PushOutcome, Pusher, alert_body};
 use crate::outbound::{AppDelivery, AppRoute, NotPushedReason};
 use crate::store::{AppPushUnsubscribed, AppReplyState, HaroldStore, append_app_push_unsubscribed};
@@ -16,6 +17,8 @@ pub(crate) struct WebAppRoute {
     /// The daemon's runtime. The delivery loop calls the route from `spawn_blocking`, so
     /// store calls run on it with `block_on`.
     runtime: tokio::runtime::Handle,
+    /// The open page streams: a push waits while one is on screen.
+    pages: Arc<OpenPages>,
 }
 
 impl WebAppRoute {
@@ -25,7 +28,14 @@ impl WebAppRoute {
             store,
             pusher,
             runtime: tokio::runtime::Handle::current(),
+            pages: Arc::default(),
         }
+    }
+
+    /// This route reading `pages`, the ones the app's server counts.
+    pub(crate) fn with_pages(mut self, pages: Arc<OpenPages>) -> Self {
+        self.pages = pages;
+        self
     }
 }
 
@@ -42,6 +52,14 @@ impl AppRoute for WebAppRoute {
         self.runtime
             .block_on(self.store.add_chief_app_message(event_id, now_ms(), text))
             .map_err(|error| format!("app thread write failed: {error}"))?;
+
+        // A page on screen shows the message; every subscription is skipped, as Safari and the
+        // home-screen app hold separate ones on one phone.
+        let pages = self.pages.visible();
+        if pages > 0 {
+            info!(reason = "page_visible", pages, "app push skipped");
+            return Ok(AppDelivery::Shown);
+        }
 
         // A listing that fails pushes nothing: the message goes to the away channel instead.
         let subscriptions = match self.runtime.block_on(self.store.app_push_subscriptions()) {
