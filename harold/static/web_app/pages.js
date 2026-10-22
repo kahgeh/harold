@@ -20,6 +20,42 @@ document.addEventListener("click", (event) => {
   location.assign(link.href);
 });
 
+// The thread's /updates stream is reopened here, 1 s after one really ended. Datastar cancels
+// a @get when a newer one to the same address starts, and the cancelled request still
+// announces "finished" in the same task as the newer one's "started"; answering that
+// "finished" would cancel the live request in turn and loop. So a "finished" that shares a
+// task with a "started" is left alone, and a "started" cancels a reopen still waiting.
+// A counter of open requests is not used: Datastar can start the first request before this
+// script listens, and the counter would miss that "started".
+(function () {
+  const REOPEN_AFTER_MS = 1000;
+  let pending = null;
+  let startedInThisTask = false;
+  document.addEventListener("datastar-fetch", (event) => {
+    const detail = event.detail;
+    if (!detail || !detail.el || detail.el.id !== "messages") {
+      return;
+    }
+    if (detail.type === "started") {
+      clearTimeout(pending);
+      pending = null;
+      startedInThisTask = true;
+      setTimeout(() => {
+        startedInThisTask = false;
+      }, 0);
+      return;
+    }
+    if (detail.type === "finished" && !startedInThisTask) {
+      const target = detail.el;
+      clearTimeout(pending);
+      pending = setTimeout(() => {
+        pending = null;
+        target.dispatchEvent(new CustomEvent("harold-reopen"));
+      }, REOPEN_AFTER_MS);
+    }
+  });
+})();
+
 (function () {
   const pages = document.getElementById("pages");
   const thread = document.getElementById("thread");

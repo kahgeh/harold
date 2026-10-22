@@ -170,3 +170,19 @@ fn pages_js_keeps_a_same_origin_link_in_the_app() {
             < script.find(r#"document.getElementById("pages")"#).unwrap()
     );
 }
+
+#[test]
+fn pages_js_reopens_updates_only_when_the_stream_really_ended() {
+    let script = include_str!("../../static/web_app/pages.js");
+    for wanted in [
+        r#"document.addEventListener("datastar-fetch""#,
+        r#"detail.el.id !== "messages""#,
+        r#"detail.type === "started""#,
+        r#"detail.type === "finished""#,
+        "setTimeout(",
+        "harold-reopen",
+        "REOPEN_AFTER_MS = 1000",
+    ] {
+        assert!(script.contains(wanted), "pages.js lacks {wanted}");
+    }
+}

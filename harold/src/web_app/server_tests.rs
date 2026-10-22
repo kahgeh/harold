@@ -1100,7 +1100,8 @@ async fn updates_redraws_from_the_oldest_signal_with_the_older_line_and_data_ini
     );
 }
 
-const REOPEN_ATTRIBUTE: &str = r#"data-on:datastar-fetch__delay.1s="evt.detail.type === 'finished' && evt.detail.el === el && @get('/updates', {retry: 'error', retryMaxCount: 1000})""#;
+const REOPEN_ATTRIBUTE: &str =
+    r#"data-on:harold-reopen="@get('/updates', {retry: 'error', retryMaxCount: 1000})""#;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn the_thread_page_and_the_first_updates_patch_reopen_updates_when_the_stream_ends() {
@@ -1114,6 +1115,7 @@ async fn the_thread_page_and_the_first_updates_patch_reopen_updates_when_the_str
 
     for html in [&page, &patch] {
         assert!(html.contains(REOPEN_ATTRIBUTE), "{html}");
+        assert!(!html.contains("data-on:datastar-fetch"), "{html}");
     }
 }
 
