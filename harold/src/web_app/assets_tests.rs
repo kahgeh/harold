@@ -325,6 +325,7 @@ fn dictation_js_listens_into_the_box_and_tells_harold_once() {
         // It stops by itself after 4 s without a result.
         "const QUIET_MS = 4000;",
         "quietTimer = setTimeout(",
+        "r.onstart = () => {",
         "r.stop();",
         // It aborts on hiding, on a call, and on a submit.
         r#"document.visibilityState === "hidden""#,

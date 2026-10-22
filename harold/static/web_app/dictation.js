@@ -182,6 +182,15 @@
       } else if (error === "audio-capture") {
         notice("The microphone gave no sound.");
       }
+      // Some builds give no `end` after an error.
+      finish();
+    };
+    // The quiet timer waits for the service to listen, so the first-use prompts for the
+    // microphone and speech recognition do not count against it.
+    r.onstart = () => {
+      if (recognition === r) {
+        armQuiet(r);
+      }
     };
     r.onend = () => {
       if (recognition === r) {
@@ -189,17 +198,16 @@
       }
     };
     recognition = r;
-    clearTimeout(noticeTimer);
-    noticeTimer = null;
     try {
       r.start();
     } catch (error) {
       recognition = null;
       return;
     }
+    clearTimeout(noticeTimer);
+    noticeTimer = null;
     showNote("Listening", false);
     setFlag(listeningInput, true);
-    armQuiet(r);
   }
 
   const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
