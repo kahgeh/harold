@@ -1543,4 +1543,6 @@ async fn a_bye_while_a_run_goes_still_hands_over_but_says_nothing_more() {
         "{:?}",
         h.played()
     );
+    // The hand-over still reached the chief, though the call ended before the run did.
+    assert_eq!(h.keys().len(), 2, "{:?}", h.keys());
 }

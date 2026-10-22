@@ -296,8 +296,8 @@ impl CallAnswererSettings {
                     .into(),
             );
         }
-        if !(1..=120).contains(&self.timeout_seconds) {
-            errors.push("call_answerer.timeout_seconds must be from 1 to 120".into());
+        if !(1..=25).contains(&self.timeout_seconds) {
+            errors.push("call_answerer.timeout_seconds must be from 1 to 25, under the 30 seconds the call waits for a run".into());
         }
         if !(self.run_budget_usd.is_finite() && self.run_budget_usd > 0.0) {
             errors.push("call_answerer.run_budget_usd must be above 0".into());
@@ -1515,7 +1515,7 @@ mod tests {
     fn call_answerer_settings_name_the_key_that_is_out_of_range() {
         for (key, bad) in [
             ("timeout_seconds", "0"),
-            ("timeout_seconds", "121"),
+            ("timeout_seconds", "26"),
             ("run_budget_usd", "0"),
             ("run_budget_usd", "-0.5"),
             ("model", "\"\""),

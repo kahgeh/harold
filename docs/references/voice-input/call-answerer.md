@@ -76,7 +76,7 @@ When `say` is empty and `hand_over` is set, Harold says "I've passed that to the
 
 1. Harold numbers the hand-over within the call (`H1`, `H2`, …).
 2. Harold types `🎙 hand-over H1: <your request>` and Enter into the chief's pane, even while the chief is working. Claude Code reads a line typed while it works after its current step.
-3. The typing goes through `Writer::HandOver` in `harold/src/timed_prompts.rs`. Like a spoken turn it is not held back by another writer's one-minute hold. It is the only writer that may type into a Claude Code pane that is `Busy`. It still waits when the pane list cannot be read, when the chief's folder has no agent or several, when the agent is not Claude Code, when its state is `Unknown`, when the input box is not showing or holds text, and for the pane lock. Once it has typed, it sets the usual one-minute hold.
+3. The typing goes through `Writer::HandOver` in `harold/src/timed_prompts.rs`. Like a spoken turn it is not held back by another writer's one-minute hold. It is the only writer that may type into a Claude Code pane that is `Busy`. It still waits when the pane list cannot be read, when the chief's folder has no agent, when the agent is not Claude Code, when its state is `Unknown`, when the input box is not showing or holds text, and for the pane lock. Once it has typed, it sets the usual one-minute hold.
 4. When a check refuses, Harold tries again every 5 s, for 30 minutes, also after the call ends. If the line is still not typed, Harold sends an away message from the chief's pane, `Harold couldn't pass hand-over H1 to the chief.`, which the web app's thread shows. With no chief running there is no pane to send it from, and only the log line records it. A restart of Harold drops a hand-over not yet typed.
 
 "Typed" is all Harold knows: tmux accepted the keys, not that the chief read the line. This is a stopgap until agent-message-tool carries hand-overs.
@@ -87,7 +87,7 @@ A `🎙 hand-over Hn:` line is your request from a call. The chief does it, or h
 
 ## When the answerer fails
 
-A run that cannot start, exits with an error, gives no `say`, or takes more than `timeout_seconds` ends the answerer's part in that turn. Harold kills a run still going, and the turn goes to the chief as every turn did before: typed as `🎙 <your words>`, held for a busy chief with "The chief is busy. I'll pass it on when it's free.", answered by the chief's `harold speak` or the turn-end update. The next turn tries the answerer again. When the program cannot be started (`not_started`), the call stops trying the answerer until it ends. If you spoke another turn while the failed run went, the failed turn is passed on in the background instead.
+A run that cannot start, exits with an error, gives no `say`, or takes more than `timeout_seconds` ends the answerer's part in that turn. Harold kills a run still going, and the turn goes to the chief as every turn did before: typed as `🎙 <your words>`, held for a busy chief with "The chief is busy. I'll pass it on when it's free.", answered by the chief's `harold speak` or the turn-end update. The next turn tries the answerer again. When the program cannot be started (`not_started`), the call stops trying the answerer until it ends. If you spoke another turn while the failed run went, the failed turn is passed on in the background instead. When the call ends while a run goes, the run is let finish: its hand-over is typed, or, if it fails, your words are typed into the chief's pane when it is free.
 
 ## Telemetry and logs
 

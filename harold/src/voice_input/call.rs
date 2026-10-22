@@ -279,6 +279,24 @@ async fn pass_on_when_free<P: CallPorts>(
     }
 }
 
+/// What a run that ended after its call did: a hand-over goes to the chief, and the words of
+/// a turn whose run failed are typed into its pane when it is free.
+fn pass_on_after_call<P: CallPorts>(ports: Arc<P>, words: String, answer: Answer) {
+    match answer {
+        Answer::Said {
+            hand_over: Some(request),
+            ..
+        } => {
+            HandOvers::default().start(ports, &request);
+        }
+        Answer::Said { .. } => {}
+        Answer::Failed(_) => {
+            let now = Instant::now();
+            tokio::spawn(pass_on_when_free(ports, words, now, now + BUSY_LIMIT));
+        }
+    }
+}
+
 fn private_dir(dir: &Path) -> std::io::Result<()> {
     std::fs::DirBuilder::new().mode(0o700).create(dir)
 }
@@ -1294,6 +1312,7 @@ impl<P: CallPorts> Call<P> {
         let words = queued.text.clone();
         let span = queued.trace.span.clone();
         let events = self.events.clone();
+        let ports = Arc::clone(&self.ports);
         let task = tokio::spawn(async move {
             let ask = Ask {
                 words: &words,
@@ -1301,7 +1320,13 @@ impl<P: CallPorts> Call<P> {
                 turn: &span,
             };
             let answer = answering.answerer.answer(ask).await;
-            let _ = events.send(Event::Answered { id, answer });
+            // The call has ended: the request still goes to the chief, as a turn said
+            // before a bye does.
+            if let Err(mpsc::error::SendError(Event::Answered { answer, .. })) =
+                events.send(Event::Answered { id, answer })
+            {
+                pass_on_after_call(ports, words, answer);
+            }
         });
         let now = Instant::now();
         self.active_at = now;
@@ -1314,6 +1339,19 @@ impl<P: CallPorts> Call<P> {
             task,
             silenced: false,
         });
+    }
+
+    /// Hands the turns waiting for the answerer to the chief in the background, as a turn
+    /// said before a bye is.
+    fn pass_on_queued(&mut self) {
+        for queued in std::mem::take(&mut self.queued) {
+            tokio::spawn(pass_on_when_free(
+                Arc::clone(&self.ports),
+                queued.text,
+                Instant::now(),
+                Instant::now() + BUSY_LIMIT,
+            ));
+        }
     }
 
     /// A run ended. Its line is spoken and its hand-over started, or the turn goes to the
@@ -1333,7 +1371,10 @@ impl<P: CallPorts> Call<P> {
                 if failure == Failure::NotStarted {
                     self.answerer_gone = true;
                 }
-                if self.mode != Mode::Ending {
+                if self.mode == Mode::Ending {
+                    // A bye was said: the words go to the chief in the background.
+                    pass_on_after_call(Arc::clone(&self.ports), run.text, Answer::Failed(failure));
+                } else {
                     self.fall_back(run.text, run.trace).await;
                 }
             }
@@ -1350,7 +1391,9 @@ impl<P: CallPorts> Call<P> {
         } else {
             one_line(&say)
         };
-        self.remark(Who::Answerer, &say);
+        if !run.silenced {
+            self.remark(Who::Answerer, &say);
+        }
         let result = if handed_over {
             TurnResult::HandedOver
         } else {
@@ -1534,7 +1577,7 @@ impl<P: CallPorts> Call<P> {
     fn ending_phrase(&mut self, text: &'static str, why: Ended) {
         self.mode = Mode::Ending;
         self.awaiting = None;
-        self.queued.clear();
+        self.pass_on_queued();
         self.phrase(text, After::End(why));
         if let Some(sound) = self.sounds.pop_back() {
             self.sounds.push_front(sound);
@@ -2193,10 +2236,18 @@ impl<P: CallPorts> Call<P> {
         for update in self.updates.drain(..) {
             update.abort();
         }
-        if let Some(run) = self.run.take() {
+        // A run going when the call ends is let finish: its hand-over, or its turn if it
+        // fails, still goes to the chief. Harold stopping drops it with the rest.
+        if let Some(run) = self.run.take()
+            && why == Ended::Shutdown
+        {
             run.task.abort();
         }
-        self.queued.clear();
+        if why == Ended::Shutdown {
+            self.queued.clear();
+        } else {
+            self.pass_on_queued();
+        }
         if let Some(words) = last_words {
             self.ports.speak_with_tts(words).await;
         }
