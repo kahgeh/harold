@@ -496,41 +496,53 @@ pub(crate) fn thread_start_ms() -> i64 {
 /// and the next hour tries again.
 async fn prune(store: &HaroldStore) {
     let photos = store.app_photos_dir();
-    match store.expired_app_photo_files(thread_start_ms()).await {
-        Ok(files) => log_pruned_photos("expired", delete_photos(store, &photos, files).await),
+    let cutoff = thread_start_ms();
+    // The rows stay when their photos could not be listed, so the next hour finds them.
+    match store.expired_app_photo_files(cutoff).await {
+        Ok(files) => {
+            log_pruned_photos("expired", delete_photos(store, &photos, files, false).await);
+            if store.delete_app_messages_before(cutoff).await.is_err() {
+                warn!("web app thread not pruned");
+            }
+        }
         Err(_) => warn!("web app photos not pruned"),
-    }
-    if store
-        .delete_app_messages_before(thread_start_ms())
-        .await
-        .is_err()
-    {
-        warn!("web app thread not pruned");
     }
     match store
         .unused_app_photo_files(now_ms().saturating_sub(UNUSED_PHOTO_MS))
         .await
     {
-        Ok(files) => log_pruned_photos("unused", delete_photos(store, &photos, files).await),
+        Ok(files) => log_pruned_photos("unused", delete_photos(store, &photos, files, true).await),
         Err(_) => warn!("web app photos not pruned"),
     }
 }
 
 /// Deletes the photo `files` in `directory` and forgets their uploads. How many were
-/// deleted; a file that cannot be deleted stays recorded, for the next hour.
-async fn delete_photos(store: &HaroldStore, directory: &Path, files: Vec<String>) -> usize {
+/// deleted; a file that cannot be deleted stays recorded, for the next hour. With
+/// `unused_only`, an upload a reply has taken since the listing is left alone.
+async fn delete_photos(
+    store: &HaroldStore,
+    directory: &Path,
+    files: Vec<String>,
+    unused_only: bool,
+) -> usize {
     let mut deleted = 0;
     for file in files {
         // Only a bare file name: the name is read from the store, never made a path.
         if file.contains('/') || file.contains("..") {
             continue;
         }
+        if unused_only {
+            match store.delete_unused_app_photo_upload(&file).await {
+                Ok(true) => {}
+                _ => continue,
+            }
+        }
         match tokio::fs::remove_file(directory.join(&file)).await {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(_) => continue,
         }
-        if store.delete_app_photo_upload(&file).await.is_ok() {
+        if unused_only || store.delete_app_photo_upload(&file).await.is_ok() {
             deleted += 1;
         }
     }

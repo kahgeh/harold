@@ -2644,3 +2644,27 @@ async fn the_prune_lists_expired_photo_rows_and_unused_uploads_only() {
         Some("old.jpg")
     );
 }
+
+#[tokio::test]
+async fn an_upload_a_reply_took_is_not_deleted_as_unused() {
+    let directory = TestDirectory::new();
+    let store = HaroldStore::open(directory.path()).await.unwrap();
+    store.add_app_photo_upload("p1", "p1.jpg", 5).await.unwrap();
+    store.add_app_photo_upload("p2", "p2.jpg", 5).await.unwrap();
+    store.claim_app_photo_upload("p1").await.unwrap();
+
+    assert!(
+        !store
+            .delete_unused_app_photo_upload("p1.jpg")
+            .await
+            .unwrap()
+    );
+    assert!(
+        store
+            .delete_unused_app_photo_upload("p2.jpg")
+            .await
+            .unwrap()
+    );
+    assert!(store.app_photo_file("p1").await.unwrap().is_some());
+    assert!(store.app_photo_file("p2").await.unwrap().is_none());
+}

@@ -613,6 +613,13 @@ async fn the_prune_deletes_expired_photos_and_unused_uploads_and_nothing_else() 
         ("stale.jpg", now - 2 * 60 * 60 * 1000, None),
         ("fresh.jpg", now - 60 * 1000, None),
     ];
+    // A reply took this one, but its row is gone: it leaves with the old rows.
+    std::fs::write(photos.join("orphan.jpg"), jpeg(10)).unwrap();
+    store
+        .add_app_photo_upload("orphan", "orphan.jpg", now - 31 * DAY_MS)
+        .await
+        .unwrap();
+    store.claim_app_photo_upload("orphan").await.unwrap();
     for (file, at_ms, row) in uploads {
         let id = file.trim_end_matches(".jpg");
         std::fs::write(photos.join(file), jpeg(10)).unwrap();
@@ -636,7 +643,7 @@ async fn the_prune_deletes_expired_photos_and_unused_uploads_and_nothing_else() 
     assert_eq!(rows[0].photo.as_ref().map(|photo| photo.kept), Some(true));
     let captured = logs.text();
     assert!(captured.contains("app photos pruned"), "{captured}");
-    assert!(captured.contains(r#"kind="expired" count=1"#), "{captured}");
+    assert!(captured.contains(r#"kind="expired" count=2"#), "{captured}");
     assert!(captured.contains(r#"kind="unused" count=1"#), "{captured}");
     for named in ["expired", "stale", "stray"] {
         assert!(

@@ -1138,11 +1138,17 @@ impl HaroldStore {
             .transpose()
     }
 
-    /// The files of photos on rows older than `before_ms`, which the thread's prune is
-    /// about to delete.
+    /// The files of photos past their keep time: those on rows older than `before_ms`, which
+    /// the thread's prune is about to delete, and those a reply took whose row is gone.
     pub(crate) async fn expired_app_photo_files(&self, before_ms: i64) -> Result<Vec<String>> {
         self.photo_files(
-            "SELECT photo FROM app_messages WHERE photo IS NOT NULL AND at_ms < ?1",
+            r#"
+            SELECT photo FROM app_messages WHERE photo IS NOT NULL AND at_ms < ?1
+            UNION
+            SELECT file FROM app_photo_uploads
+            WHERE used = 1 AND at_ms < ?1
+              AND NOT EXISTS (SELECT 1 FROM app_messages WHERE photo = app_photo_uploads.file)
+            "#,
             before_ms,
         )
         .await
@@ -1181,6 +1187,24 @@ impl HaroldStore {
             (event_id, at_ms, text, photo),
         )
         .await
+    }
+
+    /// Forgets the upload of `file` when no reply has taken it. False when a reply took it
+    /// first, and its file must stay.
+    pub(crate) async fn delete_unused_app_photo_upload(&self, file: &str) -> Result<bool> {
+        let conn = self.state.connect()?;
+        let deleted = self
+            .health
+            .write(WriteKind::State, async {
+                Ok(conn
+                    .execute(
+                        "DELETE FROM app_photo_uploads WHERE file = ?1 AND used = 0",
+                        (file,),
+                    )
+                    .await?)
+            })
+            .await?;
+        Ok(deleted > 0)
     }
 
     /// Forgets the upload of `file`, as its file was deleted.
