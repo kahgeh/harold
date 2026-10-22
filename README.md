@@ -1,6 +1,6 @@
 # Harold
 
-Stop letting your agents nap.
+Talk to your coding agents: at the desk, on your phone with text or voice.
 
 Harold watches the coding agents you run in tmux and tells you when one finishes its turn. At your desk it speaks up; when you are away it sends the turn-end update to your phone, and your reply goes back to the right agent. The work keeps moving while you make coffee.
 
