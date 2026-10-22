@@ -1351,3 +1351,55 @@ async fn a_phone_with_no_voice_set_up_starts_nothing() {
     assert!(!calls.is_following());
     assert_eq!(base.worker_log().starts, 0);
 }
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn a_refused_piece_for_the_open_call_is_logged_once_per_reason() {
+    let logs = CapturedLogs::start();
+    let line = PhoneLine::new(true);
+    let _source = line.open_source();
+    let call = line.call_id().unwrap();
+
+    for _ in 0..3 {
+        assert_eq!(line.audio(&call, 0, &[0; 3]), Err(AudioRefused::Malformed));
+    }
+    assert_eq!(
+        line.audio(&call, 0, &vec![0; PIECE_LIMIT_BYTES + 2]),
+        Err(AudioRefused::TooLarge)
+    );
+    // Late pieces for a call that is not open are normal, and not logged.
+    assert_eq!(line.audio("no-call", 0, &[0; 3]), Err(AudioRefused::NoCall));
+
+    let text = logs.text();
+    assert_eq!(
+        text.matches("call audio refused reason=\"malformed\"")
+            .count(),
+        1,
+        "{text}"
+    );
+    assert_eq!(
+        text.matches("call audio refused reason=\"too_large\"")
+            .count(),
+        1,
+        "{text}"
+    );
+    assert_eq!(text.matches("call audio refused").count(), 2, "{text}");
+    assert!(text.contains("WARN"), "{text}");
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn a_new_call_logs_a_refusal_again() {
+    let logs = CapturedLogs::start();
+    let line = PhoneLine::new(true);
+    for _ in 0..2 {
+        let _source = line.open_source();
+        let call = line.call_id().unwrap();
+        assert_eq!(line.audio(&call, 0, &[0; 3]), Err(AudioRefused::Malformed));
+    }
+
+    assert_eq!(
+        logs.text()
+            .matches("call audio refused reason=\"malformed\"")
+            .count(),
+        2
+    );
+}

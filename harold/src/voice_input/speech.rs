@@ -15,8 +15,19 @@ pub(crate) const LOUDNESS_FACTOR: f64 = 3.0;
 /// The lowest background level taken, so a silent room does not give a threshold of 0.
 pub(crate) const BACKGROUND_FLOOR: f64 = 30.0;
 
+/// What a detector has been fed, kept across `reset`: only frames that were not muted.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub(crate) struct Tally {
+    pub(crate) frames: usize,
+    /// The loudest frame, root mean square, on the scale of `BACKGROUND_FLOOR`.
+    pub(crate) loudest: f64,
+    /// Frames over `LOUDNESS_FACTOR` times the background, counted once it is calibrated.
+    pub(crate) loud_frames: usize,
+}
+
 /// Splits a stream of 16 kHz samples into the turns spoken in it.
 pub(crate) struct SpeechDetector {
+    tally: Tally,
     background: Option<f64>,
     calibration_sum: f64,
     calibration_count: usize,
@@ -33,6 +44,7 @@ pub(crate) struct SpeechDetector {
 impl SpeechDetector {
     pub(crate) fn new() -> Self {
         Self {
+            tally: Tally::default(),
             background: None,
             calibration_sum: 0.0,
             calibration_count: 0,
@@ -71,6 +83,16 @@ impl SpeechDetector {
         self.clear_speech();
     }
 
+    /// The unmuted frames fed so far, the loudest, and those over the bar.
+    pub(crate) fn tally(&self) -> Tally {
+        self.tally
+    }
+
+    /// The background level, once calibrated.
+    pub(crate) fn background(&self) -> Option<f64> {
+        self.background
+    }
+
     /// Whether speech has started and the turn has not yet ended.
     pub(crate) fn in_turn(&self) -> bool {
         self.in_turn
@@ -87,6 +109,10 @@ impl SpeechDetector {
     }
 
     fn frame(&mut self, frame: &[i16], muted: bool) -> Option<Vec<i16>> {
+        if !muted {
+            self.tally.frames += 1;
+            self.tally.loudest = self.tally.loudest.max(rms(frame));
+        }
         let Some(background) = self.background else {
             if !muted {
                 self.calibration_sum += rms(frame);
@@ -99,6 +125,9 @@ impl SpeechDetector {
             return None;
         };
         let loud = !muted && rms(frame) > LOUDNESS_FACTOR * background;
+        if loud {
+            self.tally.loud_frames += 1;
+        }
         if !self.in_turn {
             if !loud {
                 self.loud_run = 0;
@@ -244,5 +273,47 @@ mod tests {
         assert!(!detector.in_turn());
         detector.push(&loud(200), false);
         assert!(detector.in_turn());
+    }
+
+    #[test]
+    fn the_tally_counts_unmuted_frames_only_and_keeps_the_loudest() {
+        let mut detector = SpeechDetector::new();
+        detector.push(&quiet(500), false);
+        detector.push(&loud(400), true);
+        let tally = detector.tally();
+        assert_eq!(tally.frames, 25);
+        assert_eq!(tally.loudest, 0.0);
+        detector.push(&loud(1000), false);
+        let tally = detector.tally();
+        assert_eq!(tally.frames, 75);
+        assert!(tally.loudest > 5000.0, "{}", tally.loudest);
+    }
+
+    #[test]
+    fn the_tally_counts_frames_over_the_bar_only_after_calibration() {
+        let mut detector = SpeechDetector::new();
+        assert_eq!(detector.background(), None);
+        detector.push(&loud(200), false);
+        assert_eq!(detector.tally().loud_frames, 0);
+        assert_eq!(detector.background(), None);
+
+        let mut detector = SpeechDetector::new();
+        detector.push(&quiet(500), false);
+        assert_eq!(detector.background(), Some(BACKGROUND_FLOOR));
+        detector.push(&quiet(200), false);
+        assert_eq!(detector.tally().loud_frames, 0);
+        detector.push(&loud(200), false);
+        assert_eq!(detector.tally().loud_frames, 10);
+    }
+
+    #[test]
+    fn reset_keeps_the_tally() {
+        let mut detector = SpeechDetector::new();
+        detector.push(&quiet(500), false);
+        detector.push(&loud(400), false);
+        let before = detector.tally();
+        detector.reset();
+        assert_eq!(detector.tally(), before);
+        assert_eq!(before.loud_frames, 20);
     }
 }

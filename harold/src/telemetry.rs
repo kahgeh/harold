@@ -107,6 +107,13 @@ pub(crate) const ALLOWED_FIELDS: &[&str] = &[
     "subtype",
     "is_error",
     "num_turns",
+    "busy_reason",
+    "heard_ms",
+    "first_heard_ms",
+    "background",
+    "loudest",
+    "loud_frames",
+    "speech_cut",
 ];
 
 /// How long shutting the exporters down may take in all.

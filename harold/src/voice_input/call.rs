@@ -172,7 +172,7 @@ async fn try_type<P: CallPorts>(ports: &P, text: &str) -> Typing {
     match type_when_ready(panes, Writer::Voice, &folder, &line, &view, &[]).await {
         Attempt::Typed { pane } => Typing::Typed(pane),
         Attempt::Wait(Reason::NoAgentInFolder) => Typing::NoChief,
-        Attempt::Wait(_) => Typing::Busy,
+        Attempt::Wait(reason) => Typing::Busy(reason),
         Attempt::EnterFailed { .. } => Typing::Failed,
     }
 }
@@ -189,6 +189,7 @@ pub(super) fn open_turn(call_from: &'static str) -> tracing::Span {
         result = tracing::field::Empty,
         first_sound_ms = tracing::field::Empty,
         answer_ms = tracing::field::Empty,
+        busy_reason = tracing::field::Empty,
     )
 }
 
@@ -213,8 +214,22 @@ fn has_speech(transcript: &Transcript) -> bool {
     !one_line(&transcript.text).is_empty() && transcript.no_speech_prob <= NO_SPEECH_LIMIT
 }
 
-fn log_dropped(result: TurnResult) {
-    info!(reason = result.reason(), "spoken prompt dropped");
+/// Logs a dropped turn. A turn dropped for a busy chief carries the last reason it was busy.
+fn log_dropped(result: TurnResult, busy: Option<&Reason>) {
+    match busy {
+        Some(busy) => info!(
+            reason = result.reason(),
+            busy_reason = busy.as_str(),
+            "spoken prompt dropped"
+        ),
+        None => info!(reason = result.reason(), "spoken prompt dropped"),
+    }
+}
+
+/// Logs that a turn is held for a busy chief, and why, on the turn's span.
+fn log_held(turn: &tracing::Span, busy: &Reason) {
+    turn.record("busy_reason", busy.as_str());
+    turn.in_scope(|| info!(reason = busy.as_str(), "spoken prompt held"));
 }
 
 /// Types a turn into a busy chief's pane once it is free, after the call has ended: tried
@@ -234,15 +249,18 @@ async fn pass_on_when_free<P: CallPorts>(
                 log_typed(&open_turn(ports.call_from()), &pane, &text);
                 return;
             }
-            Typing::Busy if Instant::now() < gives_up_at => {
+            Typing::Busy(_) if Instant::now() < gives_up_at => {
                 next_try = Instant::now() + BUSY_RETRY;
                 continue;
             }
-            Typing::Busy => TurnResult::ChiefBusy,
+            Typing::Busy(reason) => {
+                log_dropped(TurnResult::ChiefBusy, Some(&reason));
+                return;
+            }
             Typing::NoChief => TurnResult::NoChief,
             Typing::Failed => TurnResult::Failed,
         };
-        log_dropped(result);
+        log_dropped(result, None);
         return;
     }
 }
@@ -504,6 +522,8 @@ struct Awaiting {
 /// A turn that waits for a busy chief.
 struct HeldTurn {
     text: String,
+    /// Why the chief was busy at the newest try.
+    busy: Reason,
     next_try: Instant,
     gives_up_at: Instant,
 }
@@ -512,7 +532,7 @@ struct HeldTurn {
 enum Typing {
     Typed(String),
     NoChief,
-    Busy,
+    Busy(Reason),
     Failed,
 }
 
@@ -554,6 +574,14 @@ struct Call<P: CallPorts> {
     /// When the last turn was cut or the last sound played; the call ends `IDLE_LIMIT` after.
     active_at: Instant,
     done: bool,
+    /// When the call started, the clock of `first_heard_ms`.
+    started_at: Instant,
+    /// What the source gave, in samples, in every mode, muted or not.
+    heard_samples: u64,
+    /// How long after the start the first block came.
+    first_heard: Option<Duration>,
+    /// Turns cut.
+    speech_cut: u64,
     reader: Option<JoinHandle<()>>,
     updates: Vec<JoinHandle<()>>,
     awake: Option<P::Awake>,
@@ -657,6 +685,10 @@ impl<P: CallPorts> Call<P> {
             hold_others_until: None,
             active_at: Instant::now(),
             done: false,
+            started_at: Instant::now(),
+            heard_samples: 0,
+            first_heard: None,
+            speech_cut: 0,
             reader: Some(reader),
             updates: Vec::new(),
             awake,
@@ -729,6 +761,10 @@ impl<P: CallPorts> Call<P> {
     /// A block recorded while a sound played, or within the tail after, is not heard, even
     /// when it is read later.
     fn heard_block(&mut self, block: &[i16], captured_at: Instant) {
+        self.heard_samples += block.len() as u64;
+        if self.first_heard.is_none() {
+            self.first_heard = Some(self.started_at.elapsed());
+        }
         if self.mode != Mode::Listening {
             self.detector.reset();
             return;
@@ -783,6 +819,7 @@ impl<P: CallPorts> Call<P> {
 
     /// Writes the turn to `<call dir>/turn-<uuid>/turn.wav` for the worker to transcribe.
     fn turn_ended(&mut self, samples: &[i16]) {
+        self.speech_cut += 1;
         self.mode = Mode::Transcribing;
         self.detector.reset();
         self.hold_others_until = None;
@@ -1120,10 +1157,12 @@ impl<P: CallPorts> Call<P> {
         match try_type(&*self.ports, &text).await {
             Typing::Typed(pane) => self.typed(pane, text),
             Typing::NoChief => self.no_chief(),
-            Typing::Busy => {
+            Typing::Busy(busy) => {
+                self.log_held(&busy);
                 let now = Instant::now();
                 self.held = Some(HeldTurn {
                     text,
+                    busy,
                     next_try: now + BUSY_RETRY,
                     gives_up_at: now + BUSY_LIMIT,
                 });
@@ -1140,7 +1179,8 @@ impl<P: CallPorts> Call<P> {
         match try_type(&*self.ports, &text).await {
             Typing::Typed(pane) => self.typed(pane, text),
             Typing::NoChief => self.dropped(TurnResult::NoChief),
-            Typing::Busy => {
+            Typing::Busy(busy) => {
+                self.log_held(&busy);
                 let next_try = Instant::now() + BUSY_RETRY;
                 tokio::spawn(pass_on_when_free(
                     Arc::clone(&self.ports),
@@ -1152,6 +1192,15 @@ impl<P: CallPorts> Call<P> {
             Typing::Failed => self.dropped(TurnResult::Failed),
         }
         self.say_bye();
+    }
+
+    /// Logs that the turn is held for a busy chief, on the turn's span.
+    fn log_held(&mut self, busy: &Reason) {
+        let ports = &self.ports;
+        let turn = self
+            .turn
+            .get_or_insert_with(|| TurnTrace::open(ports.call_from()));
+        log_held(&turn.span, busy);
     }
 
     fn typed(&mut self, pane: String, text: String) {
@@ -1186,7 +1235,12 @@ impl<P: CallPorts> Call<P> {
 
     /// A turn that came to nothing. A turn waiting for a busy chief goes on.
     fn dropped(&mut self, result: TurnResult) {
-        log_dropped(result);
+        self.dropped_busy(result, None);
+    }
+
+    /// The same, for a turn dropped for a busy chief with the reason it was last busy.
+    fn dropped_busy(&mut self, result: TurnResult, busy: Option<&Reason>) {
+        log_dropped(result, busy);
         lock(&self.status).last_result = Some(result);
         if self.held.is_none() {
             self.end_turn(Some(result.reason()));
@@ -1195,8 +1249,8 @@ impl<P: CallPorts> Call<P> {
 
     /// Drops a turn still waiting for a busy chief.
     fn drop_held(&mut self) {
-        if self.held.take().is_some() {
-            self.dropped(TurnResult::ChiefBusy);
+        if let Some(held) = self.held.take() {
+            self.dropped_busy(TurnResult::ChiefBusy, Some(&held.busy));
         }
     }
 
@@ -1263,8 +1317,9 @@ impl<P: CallPorts> Call<P> {
         let now = Instant::now();
         if let Some(held) = &self.held {
             if now >= held.gives_up_at {
+                let busy = held.busy.clone();
                 self.held = None;
-                self.dropped(TurnResult::ChiefBusy);
+                self.dropped_busy(TurnResult::ChiefBusy, Some(&busy));
             } else if now >= held.next_try {
                 self.try_held(now).await;
             }
@@ -1320,9 +1375,13 @@ impl<P: CallPorts> Call<P> {
                 self.held = None;
                 self.no_chief();
             }
-            Typing::Busy => {
+            Typing::Busy(busy) => {
                 if let Some(held) = self.held.as_mut() {
                     held.next_try = Instant::now() + BUSY_RETRY;
+                    if let Some(turn) = self.turn.as_ref() {
+                        turn.span.record("busy_reason", busy.as_str());
+                    }
+                    held.busy = busy;
                 }
             }
             Typing::Failed => {
@@ -1748,6 +1807,32 @@ impl<P: CallPorts> Call<P> {
         lock(&self.status).state = state;
     }
 
+    /// Logs the end of a call that listened, with how much sound it read and how loud.
+    fn log_ended(&self, why: Ended) {
+        let tally = self.detector.tally();
+        let heard_ms = self.heard_samples * 1000 / u64::from(SAMPLE_RATE);
+        let first_heard_ms = self.first_heard.map_or(0, millis);
+        let loudest = tally.loudest.round() as u64;
+        let (reason, loud_frames, speech_cut) =
+            (why.as_str(), tally.loud_frames as u64, self.speech_cut);
+        match self.detector.background() {
+            Some(background) => info!(
+                reason,
+                heard_ms,
+                first_heard_ms,
+                background = background.round() as u64,
+                loudest,
+                loud_frames,
+                speech_cut,
+                "call ended"
+            ),
+            None => info!(
+                reason,
+                heard_ms, first_heard_ms, loudest, loud_frames, speech_cut, "call ended"
+            ),
+        }
+    }
+
     /// Ends the call: a turn waiting for a busy chief is passed on once the chief is free,
     /// or dropped when Harold shuts down, lines not yet played go back to their senders, `last_words` are said through the `[tts]` command, the source, the
     /// worker, the call's folder and the display's wake are let go, and the transcript is
@@ -1811,7 +1896,7 @@ impl<P: CallPorts> Call<P> {
         }
         remove_call_folder(&self.dir);
         self.awake = None;
-        info!(reason = why.as_str(), "call ended");
+        self.log_ended(why);
         self.ports.call_ended(why.as_str());
         let mut status = lock(&self.status);
         status.state = CallState::Off;

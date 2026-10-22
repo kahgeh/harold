@@ -918,3 +918,151 @@ async fn an_earlier_turns_queued_line_playing_does_not_end_the_next_turn() {
     assert_eq!(attr(turn, "pane_id").as_deref(), Some(pane.as_str()));
     assert!(attr(turn, "answer_ms").is_some());
 }
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn a_busy_chief_logs_why_the_turn_is_held() {
+    let logs = CapturedLogs::start();
+    let h = Harness::new();
+    h.start().await;
+    h.set_chief(EffectiveAgentState::Busy);
+
+    h.speak().await;
+
+    let text = logs.text();
+    assert!(
+        text.contains("spoken prompt held reason=\"agent_busy\""),
+        "{text}"
+    );
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn an_input_box_holding_text_logs_why_the_turn_is_held() {
+    let logs = CapturedLogs::start();
+    let h = Harness::new();
+    h.start().await;
+    let rule = "─".repeat(56);
+    let screen = format!("⏺ Done.\n\n{rule}\n❯ half a sentence\n{rule}\n  -- INSERT --\n");
+    h.ports.0.panes.set(|s| s.screen = Some(screen));
+
+    h.speak().await;
+
+    let text = logs.text();
+    assert!(
+        text.contains("spoken prompt held reason=\"input_box_holds_text\""),
+        "{text}"
+    );
+    assert!(h.keys().is_empty());
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn a_turn_before_bye_held_for_a_busy_chief_logs_why() {
+    let logs = CapturedLogs::start();
+    let h = Harness::new();
+    h.script([text("approve q19, bye")]);
+    h.start().await;
+    h.set_chief(EffectiveAgentState::Busy);
+
+    h.speak().await;
+
+    let text = logs.text();
+    assert!(
+        text.contains("spoken prompt held reason=\"agent_busy\""),
+        "{text}"
+    );
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn a_turn_dropped_after_2_minutes_logs_the_last_busy_reason() {
+    let logs = CapturedLogs::start();
+    let h = Harness::new();
+    h.start().await;
+    h.set_chief(EffectiveAgentState::Busy);
+    h.speak().await;
+    // The reason changes while the turn waits: the newest one is the one logged.
+    sleep(Duration::from_secs(30)).await;
+    h.set_chief(EffectiveAgentState::Unknown);
+
+    sleep(Duration::from_secs(100)).await;
+
+    let text = logs.text();
+    assert!(
+        text.contains(
+            "spoken prompt dropped reason=\"chief_busy\" busy_reason=\"agent_state_unknown\""
+        ),
+        "{text}"
+    );
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn a_turn_passed_on_after_the_call_and_dropped_logs_the_busy_reason() {
+    let logs = CapturedLogs::start();
+    let h = Harness::new();
+    h.script([text("approve q19, bye")]);
+    h.start().await;
+    h.set_chief(EffectiveAgentState::Busy);
+    h.speak().await;
+
+    sleep(Duration::from_secs(125)).await;
+
+    let text = logs.text();
+    assert!(
+        text.contains("spoken prompt dropped reason=\"chief_busy\" busy_reason=\"agent_busy\""),
+        "{text}"
+    );
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn a_call_with_only_quiet_blocks_ends_with_no_turn_cut_and_the_sound_it_read() {
+    let logs = CapturedLogs::start();
+    let h = Harness::new();
+    h.start().await;
+    h.feed(quiet(1500));
+    settle().await;
+
+    h.calls.stop().await;
+
+    let text = logs.text();
+    assert!(text.contains("call ended reason=\"stopped\""), "{text}");
+    assert!(text.contains("heard_ms=2000"), "{text}");
+    assert!(text.contains("first_heard_ms=0"), "{text}");
+    assert!(text.contains("background=30"), "{text}");
+    assert!(text.contains("loudest=0"), "{text}");
+    assert!(text.contains("loud_frames=0"), "{text}");
+    assert!(text.contains("speech_cut=0"), "{text}");
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn a_call_with_speech_ends_with_a_turn_cut_and_loud_frames() {
+    let logs = CapturedLogs::start();
+    let h = Harness::new();
+    h.start().await;
+    h.speak().await;
+
+    h.calls.stop().await;
+
+    let text = logs.text();
+    assert!(text.contains("speech_cut=1"), "{text}");
+    assert!(text.contains("heard_ms=2700"), "{text}");
+    let loud_frames: usize = text
+        .split("loud_frames=")
+        .nth(1)
+        .and_then(|rest| rest.split_whitespace().next())
+        .and_then(|n| n.parse().ok())
+        .unwrap_or(0);
+    assert!(loud_frames >= 10, "{text}");
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn the_first_block_after_a_slow_start_is_timed_from_the_call_start() {
+    let logs = CapturedLogs::start();
+    let h = Harness::new();
+    h.calls.start().await;
+    sleep(Duration::from_millis(3000)).await;
+    h.feed(quiet(500));
+    settle().await;
+
+    h.calls.stop().await;
+
+    let text = logs.text();
+    assert!(text.contains("first_heard_ms=3000"), "{text}");
+}

@@ -275,10 +275,12 @@ Messages are fixed text, with values in fields, as harold-telemetry's test `ever
 | Level | Message | Fields |
 |---|---|---|
 | info | `call started` | none |
-| info | `call ended` | `reason`: `stopped`, `bye`, `no_chief`, `voice_failed`, `microphone_failed`, `shutdown`, `idle` or `voice_muted` |
+| info | `call ended` | `reason`: `stopped`, `bye`, `no_chief`, `voice_failed`, `microphone_failed`, `shutdown`, `idle` or `voice_muted`. A call that listened also carries whole numbers: `heard_ms` (sound read, in ms), `first_heard_ms` (ms from the start to the first block), `background` (the calibrated level, left out when calibration did not finish), `loudest` (the loudest unmuted frame), `loud_frames` (unmuted frames over 3 times the background) and `speech_cut` (turns cut) |
 | info | `call not started` | `reason`: `voice_muted` |
 | info | `spoken prompt typed` | `pane_id`, `words` (a count) |
-| info | `spoken prompt dropped` | `reason`: `nothing_heard`, `no_chief`, `chief_busy` or `failed` |
+| info | `spoken prompt held` | `reason`: why the chief was busy, one of `agent_busy`, `agent_state_unknown`, `input_box_holds_text`, `input_box_not_found`, `input_box_unreadable`, `several_agents_in_folder` or `pane_list_failing`; logged when a call first holds a turn |
+| info | `spoken prompt dropped` | `reason`: `nothing_heard`, `no_chief`, `chief_busy` or `failed`; `busy_reason` (the last reason the chief was busy) with `chief_busy` |
+| warn | `call audio refused` | `reason`: `full`, `malformed` or `too_large`; once per reason per call, for the phone's open call only |
 | warn | `voice worker exited` | `reason`: `exited`, `timed_out` or `failed_to_load` |
 | warn | `display not kept awake` | `error` |
 | warn | `microphone not opened` | `error` |
@@ -291,7 +293,7 @@ Messages are fixed text, with values in fields, as harold-telemetry's test `ever
 
 `call ended` is also logged for a call that ended before it started listening, without a `call started`.
 
-harold-telemetry exports only fields on its allowed list. `pane_id` and `reason` go out. `words` and `error` are not on the list, so they stay in `harold.log` only. No transcript and no spoken line is in any log line, event or exported record; a test with a canary transcript checks this.
+harold-telemetry exports only fields on its allowed list. `pane_id`, `reason`, `busy_reason`, `heard_ms`, `first_heard_ms`, `background`, `loudest`, `loud_frames` and `speech_cut` go out; each is a count, a level or a fixed word. `words` and `error` are not on the list, so they stay in `harold.log` only. No transcript and no spoken line is in any log line, event or exported record; a test with a canary transcript checks this.
 
 ## Latency of one turn
 

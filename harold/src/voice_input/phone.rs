@@ -19,7 +19,7 @@ use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, sleep, sleep_until, timeout};
-use tracing::info;
+use tracing::{info, warn};
 use uuid::Uuid;
 
 /// The most one posted piece may hold: one second of 16 kHz `i16` samples.
@@ -103,6 +103,8 @@ struct Inner {
     /// Counts the screens that have had the call: one more for each source opened and for
     /// each takeover.
     screen: u64,
+    /// The reasons already logged for the open call, so each is logged once.
+    refused_logged: Vec<AudioRefused>,
 }
 
 /// A piece of samples and when it was recorded.
@@ -186,6 +188,38 @@ impl PhoneLine {
     /// call. A piece carrying any id but the open call's is refused as if no call were open.
     pub(crate) fn audio(&self, call: &str, at_ms: u64, bytes: &[u8]) -> Result<(), AudioRefused> {
         let mut inner = lock(&self.inner);
+        let refused = Self::take_audio(&mut inner, call, at_ms, bytes);
+        if let Err(reason) = refused {
+            Self::note_refused(&mut inner, reason);
+        }
+        if refused.is_ok() {
+            self.quiet.send_modify(|quiet| quiet.since = Instant::now());
+        }
+        refused
+    }
+
+    /// Logs a refusal of the open call's piece, once per reason per call. A piece for a call
+    /// that is not open is not logged: late pieces after a hang-up are normal.
+    fn note_refused(inner: &mut Inner, reason: AudioRefused) {
+        let name = match reason {
+            AudioRefused::NoCall => return,
+            AudioRefused::Malformed => "malformed",
+            AudioRefused::TooLarge => "too_large",
+            AudioRefused::Full => "full",
+        };
+        if inner.refused_logged.contains(&reason) {
+            return;
+        }
+        inner.refused_logged.push(reason);
+        warn!(reason = name, "call audio refused");
+    }
+
+    fn take_audio(
+        inner: &mut Inner,
+        call: &str,
+        at_ms: u64,
+        bytes: &[u8],
+    ) -> Result<(), AudioRefused> {
         if inner.call.as_deref() != Some(call) {
             return Err(AudioRefused::NoCall);
         }
@@ -212,7 +246,6 @@ impl PhoneLine {
                 return Err(AudioRefused::NoCall);
             }
         }
-        self.quiet.send_modify(|quiet| quiet.since = Instant::now());
         Ok(())
     }
 
@@ -277,6 +310,7 @@ impl PhoneLine {
         inner.screen += 1;
         let call = new_id();
         inner.call = Some(call.clone());
+        inner.refused_logged.clear();
         Some(call)
     }
 
@@ -290,6 +324,7 @@ impl PhoneLine {
         inner.source = Some(Pieces { sender, base });
         inner.screen += 1;
         inner.call = Some(new_id());
+        inner.refused_logged.clear();
         let screen = inner.screen;
         drop(inner);
         self.quiet.send_modify(|quiet| quiet.since = opened);

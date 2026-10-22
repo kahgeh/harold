@@ -253,6 +253,7 @@ Harold logs no message text, no reply, no push address and no key. The app adds 
 | `app todos not read` | `reason` (`unavailable` or `timeout`), logged once when reads start failing |
 | `app todos read again` | none, logged once when reads recover |
 | `app call started` | none |
+| `call audio refused` | `reason` (`full`, `malformed` or `too_large`), a warning logged once per reason per call for a piece of audio the open call refused |
 | `app call ended` | `reason`, one of the desk's `call ended` reasons ([Log lines](../voice-input/README.md#log-lines)); `microphone_failed` when the phone stopped posting audio |
 
 Five other lines report failures, and none carries content:
