@@ -1094,6 +1094,8 @@ async fn updates_redraws_from_the_oldest_signal_with_the_older_line_and_data_ini
     assert!(first.contains(r#"data-init="@get('/updates')""#), "{first}");
 }
 
+const REOPEN_ATTRIBUTE: &str = r#"data-on:datastar-fetch__delay.1s="evt.detail.type === 'finished' && evt.detail.el === el && @get('/updates')""#;
+
 #[tokio::test(flavor = "multi_thread")]
 async fn the_thread_page_and_the_first_updates_patch_reopen_updates_when_the_stream_ends() {
     let directory = TestDirectory::new();
@@ -1105,13 +1107,7 @@ async fn the_thread_page_and_the_first_updates_patch_reopen_updates_when_the_str
     let patch = first_patch(&server, None).await;
 
     for html in [&page, &patch] {
-        assert!(
-            html.contains("data-on:datastar-fetch__delay.1s=")
-                && html.contains("evt.detail.type === ")
-                && html.contains("finished")
-                && html.contains("evt.detail.el === el"),
-            "{html}"
-        );
+        assert!(html.contains(REOPEN_ATTRIBUTE), "{html}");
     }
 }
 
