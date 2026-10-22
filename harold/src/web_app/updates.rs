@@ -40,8 +40,8 @@ const PATCHES_QUEUED: usize = 16;
 #[template(path = "web_app/messages.html")]
 struct MessagesSection {
     messages: Vec<MessageView>,
-    /// For `#older`: the query value naming the oldest row shown, when older rows remain.
-    older: Option<String>,
+    /// Whether `#older` shows: older rows remain.
+    older: bool,
 }
 
 /// The query Datastar adds to `GET /updates`: the page's signals as JSON.
@@ -52,7 +52,7 @@ pub(crate) struct UpdatesQuery {
 
 /// What the page's signals say of the oldest row it shows: `None` without signals,
 /// `Some(None)` when they name none, and the id otherwise. Malformed signals are none.
-fn oldest_signal(query: &UpdatesQuery) -> Option<Option<String>> {
+pub(super) fn oldest_signal(query: &UpdatesQuery) -> Option<Option<String>> {
     let signals = serde_json::from_str::<serde_json::Value>(query.datastar.as_deref()?).ok();
     Some(
         signals

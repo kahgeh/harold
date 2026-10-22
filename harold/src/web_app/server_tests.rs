@@ -141,7 +141,7 @@ async fn every_route_refuses_a_missing_or_wrong_login() {
     let routes = [
         ("GET", "/"),
         ("GET", "/updates"),
-        ("GET", "/thread/older?before=x"),
+        ("GET", "/thread/older"),
         ("POST", "/replies"),
         ("POST", "/push/subscription"),
         ("GET", "/static/app.css"),
@@ -803,7 +803,7 @@ async fn the_thread_page_shows_the_newest_50_and_an_older_line_naming_the_oldest
     assert!(!body.contains(r#"id="m-r070""#));
     assert!(
         body.contains(
-            r#"<p id="older" class="older" data-on-intersect="@get('/thread/older?before=r071')">Loading earlier messages…</p>"#
+            r#"<p id="older" class="older" data-on-intersect="@get('/thread/older')">Loading earlier messages…</p>"#
         ),
         "{body}"
     );
@@ -852,6 +852,20 @@ async fn the_thread_page_logs_rows_bytes_and_ms_and_no_message_text() {
     assert!(!text.contains("row 060"), "{text}");
 }
 
+/// The same text on every page and patch, so Datastar never sets up a new watcher.
+const OLDER_ATTRIBUTE: &str = r#"data-on-intersect="@get('/thread/older')""#;
+
+/// `GET /thread/older` with the page's signals, as Datastar sends them.
+async fn get_older(server: &TestServer, signals: Option<&str>) -> reqwest::Response {
+    let mut request = reqwest::Client::new()
+        .get(server.url("/thread/older"))
+        .header("Tailscale-User-Login", LOGIN);
+    if let Some(signals) = signals {
+        request = request.query(&[("datastar", signals)]);
+    }
+    request.send().await.unwrap()
+}
+
 /// The events of an SSE response that closes, each as its lines.
 async fn all_events(response: reqwest::Response) -> Vec<String> {
     response
@@ -865,13 +879,13 @@ async fn all_events(response: reqwest::Response) -> Vec<String> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn thread_older_gives_the_rows_before_then_a_new_older_line_and_oldest() {
+async fn thread_older_gives_the_rows_before_then_oldest_and_leaves_the_older_line() {
     let directory = TestDirectory::new();
     let store = directory.store().await;
     add_rows(&store, 120).await;
     let server = TestServer::serve(store).await;
 
-    let response = get_with_login(&server.url("/thread/older?before=r071")).await;
+    let response = get_older(&server, Some(r#"{"oldest":"r071"}"#)).await;
     assert_eq!(response.status(), 200);
     assert_eq!(response.headers()["content-type"], "text/event-stream");
     assert_eq!(
@@ -880,7 +894,7 @@ async fn thread_older_gives_the_rows_before_then_a_new_older_line_and_oldest() {
     );
     let events = all_events(response).await;
 
-    assert_eq!(events.len(), 3, "{events:?}");
+    assert_eq!(events.len(), 2, "{events:?}");
     let rows = &events[0];
     assert!(
         rows.starts_with("event: datastar-patch-elements\n"),
@@ -895,15 +909,7 @@ async fn thread_older_gives_the_rows_before_then_a_new_older_line_and_oldest() {
     );
     assert!(rows.contains(r#"id="m-r021""#) && rows.contains(r#"id="m-r070""#));
     assert!(rows.find(r#"id="m-r021""#) < rows.find(r#"id="m-r070""#));
-    let older = &events[1];
-    assert!(
-        older.starts_with("event: datastar-patch-elements\n"),
-        "{older}"
-    );
-    assert!(older.contains(r#"id="older""#), "{older}");
-    assert!(older.contains("/thread/older?before=r021"), "{older}");
-    assert!(older.contains("Loading earlier messages"), "{older}");
-    let oldest = &events[2];
+    let oldest = &events[1];
     assert!(
         oldest.starts_with("event: datastar-patch-signals\n"),
         "{oldest}"
@@ -918,7 +924,7 @@ async fn thread_older_removes_the_older_line_at_the_end() {
     add_rows(&store, 120).await;
     let server = TestServer::serve(store).await;
 
-    let response = get_with_login(&server.url("/thread/older?before=r021")).await;
+    let response = get_older(&server, Some(r#"{"oldest":"r021"}"#)).await;
     let events = all_events(response).await;
 
     assert_eq!(events.len(), 3, "{events:?}");
@@ -930,22 +936,24 @@ async fn thread_older_removes_the_older_line_at_the_end() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn thread_older_for_an_unknown_before_removes_the_line_and_adds_no_rows() {
+async fn thread_older_for_a_missing_or_unknown_oldest_removes_the_line_and_adds_no_rows() {
     let directory = TestDirectory::new();
     let store = directory.store().await;
     add_rows(&store, 120).await;
     let server = TestServer::serve(store).await;
 
-    for path in [
-        "/thread/older?before=gone",
-        "/thread/older?before=",
-        "/thread/older",
+    for signals in [
+        Some(r#"{"oldest":"gone"}"#),
+        Some(r#"{"oldest":""}"#),
+        Some(r#"{"reply":""}"#),
+        Some("not json"),
+        None,
     ] {
-        let response = get_with_login(&server.url(path)).await;
-        assert_eq!(response.status(), 200, "{path}");
+        let response = get_older(&server, signals).await;
+        assert_eq!(response.status(), 200, "{signals:?}");
         let text = response.text().await.unwrap();
-        assert!(!text.contains(r#"class="message"#), "{path}: {text}");
-        assert!(text.contains("data: mode remove"), "{path}: {text}");
+        assert!(!text.contains(r#"class="message"#), "{signals:?}: {text}");
+        assert!(text.contains("data: mode remove"), "{signals:?}: {text}");
     }
 }
 
@@ -957,7 +965,7 @@ async fn thread_older_logs_rows_bytes_and_ms_and_no_message_text() {
     let server = TestServer::serve(store).await;
     let logs = CapturedLogs::start();
 
-    let response = get_with_login(&server.url("/thread/older?before=r071")).await;
+    let response = get_older(&server, Some(r#"{"oldest":"r071"}"#)).await;
     let body = response.text().await.unwrap();
 
     let text = logs.text();
@@ -1001,7 +1009,7 @@ async fn thread_older_with_an_unreadable_store_gives_503_and_logs_a_warning() {
     let server = TestServer::serve(store).await;
     let logs = CapturedLogs::start();
 
-    let response = get_with_login(&server.url("/thread/older?before=r071")).await;
+    let response = get_older(&server, Some(r#"{"oldest":"r071"}"#)).await;
 
     assert_eq!(response.status(), 503);
     let text = logs.text();
@@ -1054,7 +1062,7 @@ async fn updates_redraws_from_the_oldest_signal_with_the_older_line_and_data_ini
     assert_eq!(row_count(&first), 101, "rows 20 to 120");
     assert!(first.contains(r#"id="m-r020""#) && !first.contains(r#"id="m-r019""#));
     assert!(first.contains(r#"id="m-r120""#));
-    assert!(first.contains("/thread/older?before=r020"), "{first}");
+    assert!(first.contains(OLDER_ATTRIBUTE), "{first}");
     assert!(first.contains(r#"data-init="@get('/updates')""#), "{first}");
 
     let first = first_patch(&server, Some(r#"{"oldest":"r001"}"#)).await;
@@ -1084,7 +1092,7 @@ async fn updates_draws_the_newest_50_for_a_missing_unknown_pruned_or_malformed_s
         assert_eq!(row_count(&first), 50, "{signals:?}");
         assert!(first.contains(r#"id="m-r071""#), "{signals:?}");
         assert!(!first.contains(r#"id="m-r070""#), "{signals:?}");
-        assert!(first.contains("/thread/older?before=r071"), "{signals:?}");
+        assert!(first.contains(OLDER_ATTRIBUTE), "{signals:?}");
         assert!(first.contains(r#"data-init="@get('/updates')""#));
     }
 }
