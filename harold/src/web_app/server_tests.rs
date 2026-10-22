@@ -1095,6 +1095,27 @@ async fn updates_redraws_from_the_oldest_signal_with_the_older_line_and_data_ini
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn the_thread_page_and_the_first_updates_patch_reopen_updates_when_the_stream_ends() {
+    let directory = TestDirectory::new();
+    let store = directory.store().await;
+    add_rows(&store, 3).await;
+    let server = TestServer::serve(store).await;
+
+    let page = get_with_login(&server.url("/")).await.text().await.unwrap();
+    let patch = first_patch(&server, None).await;
+
+    for html in [&page, &patch] {
+        assert!(
+            html.contains("data-on:datastar-fetch__delay.1s=")
+                && html.contains("evt.detail.type === ")
+                && html.contains("finished")
+                && html.contains("evt.detail.el === el"),
+            "{html}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn updates_draws_the_newest_50_for_a_missing_unknown_pruned_or_malformed_signal() {
     let directory = TestDirectory::new();
     let store = directory.store().await;

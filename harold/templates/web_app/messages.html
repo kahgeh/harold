@@ -1,4 +1,4 @@
-<section id="messages" data-init="@get('/updates')">
+<section id="messages" data-init="@get('/updates')" data-on:datastar-fetch__delay.1s="evt.detail.type === 'finished' && evt.detail.el === el && @get('/updates')">
 {% if older %}<p id="older" class="older" data-on-intersect="@get('/thread/older')">Loading earlier messages…</p>
 {% endif %}{% for message in messages %}{{ message|safe }}
 {% endfor %}</section>

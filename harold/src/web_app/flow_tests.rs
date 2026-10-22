@@ -458,7 +458,7 @@ async fn markup_in_a_reply_is_escaped_in_the_page_and_the_stream() {
         "{page}"
     );
     assert!(
-        page.contains(r#"<section id="messages" data-init="@get('/updates')">"#),
+        page.contains(r#"<section id="messages" data-init="@get('/updates')" "#),
         "{page}"
     );
 

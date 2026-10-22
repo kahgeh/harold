@@ -116,7 +116,7 @@ The app has two pages side by side: the thread page and the todo page. Swipe lef
 
 The thread page's header holds the app's name, **Todos** with the todo count in orange (no number when nothing waits), the **Turn on alerts** button until push is on, and **Call**.
 
-The thread is the oldest message at the top. It holds the last 30 days of messages; Harold deletes older ones at start and every hour. The page opens with the newest 50 messages and loads older ones, 50 at a time, as you scroll up; "Loading earlier messages…" shows at the top while more remain. While the page is open, each new message appears as soon as Harold stores it.
+The thread is the oldest message at the top. It holds the last 30 days of messages; Harold deletes older ones at start and every hour. The page opens with the newest 50 messages and loads older ones, 50 at a time, as you scroll up; "Loading earlier messages…" shows at the top while more remain. While the page is open, each new message appears as soon as Harold stores it. After Harold restarts, the page picks the thread up again by itself within seconds, and keeps the older messages it had loaded.
 
 - **Sender labels.** A small label at the bottom right of each message says who wrote it: `chief`, or for your reply the mark and `me`.
 - **Older messages.** Older messages don't count as new: they don't move you to the bottom, show **New message ↓** or add to the todo count. The message you were reading stays where it was. Each time "Loading earlier messages…" comes into view, 50 more load. When the phone comes back from the background, the page keeps the older messages it loaded.
