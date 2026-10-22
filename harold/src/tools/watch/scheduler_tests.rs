@@ -967,3 +967,76 @@ async fn a_linked_skill_runs_from_a_listed_folder_and_fails_when_its_link_leaves
         ["WATCH w stopped: 3 runs in a row failed (skill_missing)"]
     );
 }
+
+#[tokio::test(start_paused = true)]
+async fn the_closing_line_leaves_skipped_runs_out_of_the_run_count() {
+    let h = harness(settings(), vec![answer("QUIET", 0.01)]).await;
+    h.start("w", 10, 120).await;
+    let began = h.row("w").await.started_at_ms;
+    for run in 1..=12 {
+        let outcome = if run <= 2 { "skipped" } else { "quiet" };
+        h.store
+            .record_run(
+                "w",
+                began,
+                &RunRecord {
+                    started_at_ms: began + run,
+                    outcome: outcome.into(),
+                    cost_usd_micros: Some(10_000),
+                    streak: Streak::Unchanged,
+                    next_run_at_ms: began + 1_000 * MINUTE_MS,
+                },
+            )
+            .await
+            .unwrap();
+    }
+    pass(125 * MINUTE).await;
+    let typed = h.typing.typed();
+    assert_eq!(typed.len(), 1);
+    assert_eq!(
+        typed[0],
+        "WATCH w ended: 10 runs, 2 skipped, 0 reports, $0.12"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_budget_stop_survives_a_restart_for_that_day_only() {
+    let h = harness(
+        WatchSettings {
+            daily_budget_usd: Some(0.05),
+            ..settings()
+        },
+        vec![answer("QUIET", 0.03)],
+    )
+    .await;
+    let mut first = h.checked("a", 10, 120);
+    first.run_budget_usd_micros = Some(60_000);
+    h.scheduler.start(first).await.unwrap();
+    pass(Duration::from_secs(30)).await;
+    assert_eq!(
+        h.row("a").await.stop_reason.as_deref(),
+        Some("daily_budget_spent")
+    );
+
+    let runner = FakeRunner::new(vec![answer("QUIET", 0.01)]);
+    let (_stop, shutdown) = signal::channel(());
+    let again = build(
+        &h.store,
+        &runner,
+        &h.typing,
+        &h.agents,
+        &h.chief,
+        &h.pods,
+        WatchSettings {
+            daily_budget_usd: Some(0.05),
+            ..settings()
+        },
+        shutdown,
+    );
+    assert_eq!(
+        again.start(h.checked("c", 10, 120)).await,
+        Err(StartRefusal::DailyBudgetSpent)
+    );
+    pass(Duration::from_secs(25 * 3600)).await;
+    assert!(again.start(h.checked("c", 10, 120)).await.is_ok());
+}

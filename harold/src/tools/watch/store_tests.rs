@@ -231,3 +231,61 @@ async fn a_skipped_run_leaves_the_failed_in_a_row_count_alone() {
         .unwrap();
     assert_eq!((row.runs, row.failed_in_a_row), (2, 1));
 }
+
+#[tokio::test]
+async fn skipped_runs_counts_only_this_watchs_skipped_rows() {
+    let temp = Temp::new();
+    let store = WatchStore::open(&temp.0).await.unwrap();
+    store.put_watch(&new_watch("a")).await.unwrap();
+    store
+        .record_run("a", 1_000, &run(1_000, "skipped", None, false, 2_000))
+        .await
+        .unwrap();
+    store
+        .record_run("a", 1_000, &run(2_000, "quiet", Some(1_000), false, 3_000))
+        .await
+        .unwrap();
+
+    let mut again = new_watch("a");
+    again.started_at_ms = 5_000;
+    store.put_watch(&again).await.unwrap();
+    store
+        .record_run("a", 5_000, &run(5_000, "skipped", None, false, 6_000))
+        .await
+        .unwrap();
+    store
+        .record_run("a", 5_000, &run(6_000, "skipped", None, false, 7_000))
+        .await
+        .unwrap();
+    store.put_watch(&new_watch("b")).await.unwrap();
+    store
+        .record_run("b", 1_000, &run(6_000, "skipped", None, false, 7_000))
+        .await
+        .unwrap();
+
+    assert_eq!(store.skipped_runs("a", 5_000).await.unwrap(), 2);
+    assert_eq!(store.skipped_runs("a", 1_000).await.unwrap(), 3);
+}
+
+#[tokio::test]
+async fn budget_stopped_since_is_true_for_a_budget_stop_today_only() {
+    let temp = Temp::new();
+    let store = WatchStore::open(&temp.0).await.unwrap();
+    assert!(!store.budget_stopped_since(10_000).await.unwrap());
+
+    store.put_watch(&new_watch("old")).await.unwrap();
+    store
+        .end("old", 1_000, "daily_budget_spent", 9_000)
+        .await
+        .unwrap();
+    store.put_watch(&new_watch("other")).await.unwrap();
+    store.end("other", 1_000, "ended", 20_000).await.unwrap();
+    assert!(!store.budget_stopped_since(10_000).await.unwrap());
+
+    store.put_watch(&new_watch("today")).await.unwrap();
+    store
+        .end("today", 1_000, "daily_budget_spent", 10_000)
+        .await
+        .unwrap();
+    assert!(store.budget_stopped_since(10_000).await.unwrap());
+}

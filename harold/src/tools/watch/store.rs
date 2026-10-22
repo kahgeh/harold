@@ -289,6 +289,41 @@ impl WatchStore {
         finish(&conn, work).await
     }
 
+    /// How many of the watch's runs since `started_at_ms` were skipped. The start keeps an
+    /// earlier watch of the same name out of the count.
+    pub(super) async fn skipped_runs(&self, name: &str, started_at_ms: i64) -> Result<u32> {
+        let conn = self.conn.lock().await;
+        roll_back_abandoned(&conn).await?;
+        let mut rows = conn
+            .query(
+                "SELECT COUNT(*) FROM runs \
+                 WHERE watch = ?1 AND outcome = 'skipped' AND started_at_ms >= ?2",
+                turso::params_from_iter(vec![Value::from(name), Value::from(started_at_ms)]),
+            )
+            .await?;
+        let Some(row) = rows.next().await? else {
+            return Ok(0);
+        };
+        Ok(integer(&row, 0)? as u32)
+    }
+
+    /// Whether a daily budget stopped any watch at or after `day_start_ms`.
+    pub(super) async fn budget_stopped_since(&self, day_start_ms: i64) -> Result<bool> {
+        let conn = self.conn.lock().await;
+        roll_back_abandoned(&conn).await?;
+        let mut rows = conn
+            .query(
+                "SELECT COUNT(*) FROM watches \
+                 WHERE stop_reason = 'daily_budget_spent' AND ended_at_ms >= ?1",
+                [day_start_ms],
+            )
+            .await?;
+        let Some(row) = rows.next().await? else {
+            return Ok(false);
+        };
+        Ok(integer(&row, 0)? > 0)
+    }
+
     /// What the runs started in `[from_ms, to_ms)` cost, in millionths of a dollar.
     /// A run whose cost is unknown counts as nothing.
     pub(super) async fn spent_micros(&self, from_ms: i64, to_ms: i64) -> Result<i64> {

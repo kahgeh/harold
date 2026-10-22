@@ -85,8 +85,6 @@ struct Live {
 #[derive(Default)]
 struct State {
     live: HashMap<String, Live>,
-    /// The start of the local day on which a daily budget stopped every watch.
-    budget_stopped_on: Option<i64>,
 }
 
 pub(super) struct Scheduler {
@@ -188,7 +186,11 @@ impl Scheduler {
                 .spent_micros(day_start, day_end)
                 .await
                 .map_err(|_| StartRefusal::Unavailable)?;
-            if spent >= daily || self.state().budget_stopped_on == Some(day_start) {
+            let stopped = store
+                .budget_stopped_since(day_start)
+                .await
+                .map_err(|_| StartRefusal::Unavailable)?;
+            if spent >= daily || stopped {
                 return Err(StartRefusal::DailyBudgetSpent);
             }
         }
@@ -409,7 +411,6 @@ impl Scheduler {
                 .await
                 .unwrap_or(0);
             if spent + budget.unwrap_or(0) > daily {
-                self.state().budget_stopped_on = Some(day_start);
                 self.stop_all_for_budget().await;
                 return Flow::Over;
             }
@@ -626,13 +627,27 @@ impl Scheduler {
         };
         let closing = match reason {
             EndReason::Stopped => None,
-            EndReason::Ended => Some(format!(
-                "WATCH {} ended: {}, {}, {}",
-                ended.name,
-                counted(ended.runs, "run", "runs"),
-                counted(ended.reports, "report", "reports"),
-                dollars(ended.cost_usd_micros)
-            )),
+            EndReason::Ended => {
+                let skipped = self
+                    .deps
+                    .store
+                    .skipped_runs(&ended.name, ended.started_at_ms)
+                    .await
+                    .unwrap_or(0)
+                    .min(ended.runs);
+                let skipped_note = if skipped > 0 {
+                    format!("{skipped} skipped, ")
+                } else {
+                    String::new()
+                };
+                Some(format!(
+                    "WATCH {} ended: {}, {skipped_note}{}, {}",
+                    ended.name,
+                    counted(ended.runs - skipped, "run", "runs"),
+                    counted(ended.reports, "report", "reports"),
+                    dollars(ended.cost_usd_micros)
+                ))
+            }
             EndReason::RunsFailing => Some(format!(
                 "WATCH {} stopped: {} runs in a row failed ({})",
                 ended.name,

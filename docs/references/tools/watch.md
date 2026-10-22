@@ -114,6 +114,7 @@ Harold types through `PaneTyping` as `Writer::Tool("watch")`, one line, and only
 WATCH after-release 3/12: harold: 2 of 2 slots free for 25m while watch-jobs is approved
 WATCH after-release 5/12: quiet
 WATCH after-release ended: 12 runs, 1 report, $0.11
+WATCH after-release ended: 10 runs, 2 skipped, 1 report, $0.11
 WATCH after-release stopped: daily budget of $1.00 spent
 WATCH after-release stopped: 3 runs in a row failed (timeout)
 ```
@@ -122,7 +123,7 @@ The typing makes the same checks as timed prompts: the pane listing works, exact
 
 ## Ending and cost
 
-When a watch ends by time, by a spent daily budget, or after 3 failed runs in a row, Harold types one closing line. When a daily budget is set and spent, every running watch stops with its own closing line, and `start` refuses until the next local day.
+When a watch ends by time, by a spent daily budget, or after 3 failed runs in a row, Harold types one closing line. The closing line of a watch that ended by time counts only the runs that ran, and adds `<n> skipped` only when some were skipped (the second example above); a skipped run still holds its run number, so report lines such as `3/12` are unchanged, and the `watch stopped` log line's `runs` stays the number of run slots used. When a daily budget is set and spent, every running watch stops with its own closing line, and `start` refuses until the next local day, even if Harold restarts meanwhile.
 
 Harold always records what each run cost, and limits spending only where the user or the agent set a budget:
 
