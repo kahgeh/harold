@@ -10,6 +10,7 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 | haroldctl | The command that starts, stops and checks the installed Harold service | — |
 | tmx-agent-dash, the dash | The terminal dashboard that lists agents and holds the chief's questions | "dashboard" for the dash (HyperDX has dashboards), "TUI" |
 | agent | A coding agent running in a tmux pane: Claude Code, Codex or OpenCode | "session" for the agent, "process" for the agent |
+| echo test | The hidden web app page that measures how much of Harold's voice the phone's mic picks up while the phone plays it | "loopback test", "AEC test" |
 | provider | Which kind an agent is: `claude`, `codex` or `opencode` | — |
 | pane, pane id | The tmux pane an agent runs in, and its id, such as `%47` | "pane address", "target" |
 | incarnation | One run of an agent in a pane, told apart by pane, process, start time and provider. A new one starts at Unknown | — |

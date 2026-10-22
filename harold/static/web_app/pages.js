@@ -4,6 +4,22 @@
 // when older messages load above what you are reading.
 "use strict";
 
+// A link to the app's own address, in the thread or on a todo card, opens in the app instead
+// of Safari. One listener on the document covers the rows and cards the stream draws later.
+document.addEventListener("click", (event) => {
+  const link = event.target instanceof Element ? event.target.closest("a[href]") : null;
+  const own = link !== null && link.origin === location.origin;
+  if (!own || event.defaultPrevented) {
+    return;
+  }
+  // A link to a place on this page is left to the page.
+  if (link.pathname === location.pathname && link.search === location.search && link.hash) {
+    return;
+  }
+  event.preventDefault();
+  location.assign(link.href);
+});
+
 (function () {
   const pages = document.getElementById("pages");
   const thread = document.getElementById("thread");

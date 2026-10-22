@@ -16,6 +16,7 @@ use tracing::{error, warn};
 use crate::agent::domain::AgentSnapshot;
 use crate::agent::snapshot::AgentSnapshotHub;
 use crate::outbound::AppRoute;
+use crate::outbound::voice_note::SystemRunner;
 use crate::settings::{GrpcSettings, WebAppIcon, WebAppSettings};
 use crate::store::HaroldStore;
 use call::PhoneCallApi;
@@ -44,6 +45,7 @@ mod assets_tests;
 
 pub(crate) mod call;
 pub(crate) mod chief;
+pub(crate) mod echo_test;
 pub(crate) mod login;
 pub(crate) mod origin;
 pub(crate) mod pages;
@@ -56,6 +58,10 @@ pub(crate) mod updates;
 #[cfg(test)]
 #[path = "flow_tests.rs"]
 mod flow_tests;
+
+#[cfg(test)]
+#[path = "echo_test_tests.rs"]
+mod echo_test_tests;
 
 #[cfg(test)]
 pub(crate) mod fake_push;
@@ -121,10 +127,18 @@ pub(crate) struct AppState {
     pub questions: todos::Questions,
     /// Bumped by each todo post, so every open page reads the todos again at once.
     pub todos_changed: Arc<watch::Sender<u64>>,
+    /// The echo test's runs, sample and recent silent runs.
+    pub echo_test: Arc<echo_test::EchoTest>,
 }
 
 #[cfg(test)]
 impl AppState {
+    /// This state with `echo_test` in place of the one that makes no sample.
+    pub(crate) fn with_echo_test(mut self, echo_test: echo_test::EchoTest) -> Self {
+        self.echo_test = Arc::new(echo_test);
+        self
+    }
+
     /// A state for tests, with an idle agent snapshot, no chief folder and no question
     /// service reachable.
     pub(crate) fn for_tests(
@@ -149,6 +163,10 @@ impl AppState {
             chief_session: None,
             questions: todos::Questions::lazy(&idle_grpc()),
             todos_changed: Arc::new(watch::channel(0).0),
+            echo_test: Arc::new(echo_test::EchoTest::new(
+                std::env::temp_dir().join("harold-echo-test-unused"),
+                Arc::new(echo_test::NeverRuns),
+            )),
         }
     }
 }
@@ -211,6 +229,9 @@ pub(crate) fn router(state: AppState) -> Router {
         .route("/todos/ignore", post(todos::post_ignore))
         .route("/todos/revise", post(todos::post_revise))
         .route("/todos/reject", post(todos::post_reject))
+        .route("/echo-test", get(echo_test::get_page))
+        .route("/echo-test/sample", get(echo_test::get_sample))
+        .route("/echo-test/runs", post(echo_test::post_run))
         .route("/call", post(call::post_call).delete(call::delete_call))
         .route("/call/audio", post(call::post_audio))
         .route("/call/played", post(call::post_played))
@@ -281,6 +302,10 @@ pub(crate) async fn start(
         chief_session: agents.chief_session.map(Arc::from),
         questions: todos::Questions::lazy(agents.grpc),
         todos_changed: Arc::new(watch::channel(0).0),
+        echo_test: Arc::new(echo_test::EchoTest::new(
+            echo_test::echo_test_path(store_path),
+            Arc::new(SystemRunner),
+        )),
     };
     let pusher = Arc::new(Pusher::new(key, &settings.allowed_login));
     let route: Arc<dyn AppRoute> = Arc::new(WebAppRoute::new(Arc::clone(&store), pusher));

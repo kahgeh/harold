@@ -194,6 +194,39 @@ fn the_call_sound_and_busy_fields_leave_a_log_record_and_text_still_does_not() {
 }
 
 #[test]
+fn the_echo_test_fields_leave_a_log_record_and_text_still_does_not() {
+    test_support::install();
+    let pane = unique_pane();
+    tracing::info!(pane_id = %pane, setup = "speaker", kind = "silent", verdict = "pass",
+        share_over_bar = 0.02_f64, voice_found = false, echo_cancellation = true,
+        standalone = true, user_agent = "TELEMETRY-CANARY-3318", "echo test run");
+    let logs = test_support::logs();
+    let record = logs
+        .iter()
+        .find(|l| format!("{:?}", l.record).contains(&pane))
+        .unwrap();
+    let keys: Vec<&str> = record
+        .record
+        .attributes_iter()
+        .map(|(key, _)| key.as_str())
+        .collect();
+    assert_eq!(
+        keys,
+        vec![
+            "pane_id",
+            "setup",
+            "kind",
+            "verdict",
+            "share_over_bar",
+            "voice_found",
+            "echo_cancellation",
+            "standalone"
+        ]
+    );
+    assert!(!test_support::exported_text().contains("TELEMETRY-CANARY-3318"));
+}
+
+#[test]
 fn an_exported_log_record_carries_the_time_it_was_logged() {
     test_support::install();
     let pane = unique_pane();

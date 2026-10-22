@@ -114,3 +114,59 @@ fn the_older_line_is_centred_in_the_second_text_colour() {
         assert!(rule.contains(wanted), ".older lacks {wanted}");
     }
 }
+
+#[test]
+fn the_echo_test_script_asks_for_the_calls_microphone_and_plays_the_way_the_call_does() {
+    let call = include_str!("../../static/web_app/call.js");
+    let script = include_str!("../../static/web_app/echo-test.js");
+    // The same constraints, written the same way, in both.
+    let constraints = "audio: { echoCancellation: true, channelCount: 1 }";
+    assert!(
+        call.contains(constraints),
+        "call.js changed its constraints"
+    );
+    for wanted in [
+        constraints,
+        r#"audioWorklet.addModule("/static/call-worklet.js")"#,
+        "decodeAudioData",
+        "createBufferSource",
+        "createAnalyser",
+        "/echo-test/sample",
+        "/echo-test/runs",
+        "getSettings()",
+        "display-mode: standalone",
+        "application/json",
+        "harold-call-recorder",
+    ] {
+        assert!(script.contains(wanted), "echo-test.js lacks {wanted}");
+    }
+    for absent in [
+        "eval(",
+        "new Function",
+        "innerHTML",
+        "http://",
+        "https://",
+        "MediaRecorder",
+    ] {
+        assert!(!script.contains(absent), "echo-test.js holds {absent}");
+    }
+}
+
+#[test]
+fn pages_js_keeps_a_same_origin_link_in_the_app() {
+    let script = include_str!("../../static/web_app/pages.js");
+    for wanted in [
+        r#"document.addEventListener("click""#,
+        r#"closest("a[href]")"#,
+        "link.origin === location.origin",
+        "location.assign(link.href)",
+        "event.preventDefault()",
+    ] {
+        assert!(script.contains(wanted), "pages.js lacks {wanted}");
+    }
+    // The rule sits ahead of the thread's own setup, so any page that loads the script has it.
+    assert!(
+        script.find("link.origin === location.origin").unwrap()
+            < script.find(r#"document.getElementById("pages")"#).unwrap()
+    );
+}

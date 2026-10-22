@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="{{ app_name }}">
+<title>Echo test</title>
+<link rel="stylesheet" href="/static/app.css">
+<script src="/static/echo-test.js" defer></script>
+</head>
+<body class="echo-test">
+<main>
+<h1>Echo test</h1>
+<p>This measures how much of Harold's voice your phone's microphone picks up while the phone plays it. Run it twice for each setup: once silent while Harold speaks for 15 seconds, and once talking over him.</p>
+<p class="echo-note">Start sends loudness numbers to your Mac, one for every 20 milliseconds, and no sound. Nothing is recorded or kept as sound.</p>
+<fieldset>
+<legend>Setup</legend>
+<label><input type="radio" name="setup" value="ear" checked> Held to your ear</label>
+<label><input type="radio" name="setup" value="speaker"> On the table, on speaker</label>
+<label><input type="radio" name="setup" value="headphones"> Headphones</label>
+</fieldset>
+<fieldset>
+<legend>Run</legend>
+<label><input type="radio" name="kind" value="silent" checked> Silent: say nothing while Harold speaks</label>
+<label><input type="radio" name="kind" value="talk"> Talking: talk over Harold</label>
+</fieldset>
+<button type="button" id="echo-start">Start</button>
+<p id="echo-status" role="status"></p>
+<ul id="echo-results"></ul>
+<section id="echo-summary" hidden>
+<h2>Summary</h2>
+<ul id="echo-summary-list"></ul>
+</section>
+</main>
+</body>
+</html>

@@ -230,6 +230,29 @@ Harold's own phrases are made into audio on the Mac. A line that has no audio, s
 - **Logs:** a call writes `app call started` and `app call ended` with a `reason`, and the turns write the desk's lines. No line holds a transcript, audio or the text of a line.
 - **The chief's lines:** a spoken line played in a call is added to the thread as text, so you can read it after. It sends no push and no iMessage.
 
+## Echo test
+
+A hidden page that measures how much of Harold's voice the phone's mic picks up while the phone plays it, with the call's own mic settings (`echoCancellation: true`, one channel) and the call's own recorder and player. Its result decides whether Harold can let you cut in on a call.
+
+**Opening it.** Nothing in the app links to `/echo-test`. The chief sends its address in the thread or on an instructions todo; a tap on a link to the app's own address opens inside the installed app (`pages.js`), where every other link opens in Safari.
+
+**Running it.** Pick a setup (held to your ear, on the table on speaker, or headphones) and a run, then tap **Start**. A run is 1 s quiet, 15 s of Harold's voice, then 1 s quiet. Run each setup twice: once **silent** (say nothing) and once **talking** over Harold. The page shows each run's verdict and ends with a summary of every run done.
+
+**What it sends.** One number for every 20 ms of what the mic heard (the root mean square of 320 samples, as the speech detector computes it), at most 1,000 of them, and no sound. The page says so before **Start**.
+
+| Route | What it does |
+|---|---|
+| `GET /echo-test` | The page. |
+| `GET /echo-test/sample` | 15 s of speech as `audio/wav`, made at the first request with macOS `say` (`--file-format=WAVE --data-format=LEI16@24000`) and kept in memory. `503` when `say` fails. |
+| `POST /echo-test/runs` | One run as JSON: `setup`, `kind`, `frames`, `playing_from` and `playing_to` (frame numbers), `echo_cancellation`, `standalone`, `user_agent`. Answers `{ saved, verdict, line, ... }`. `400` for a body over 64 KB, an unknown `setup` or `kind`, more than 1,000 frames or a playback window outside them; `500` when the file cannot be written. Same-origin only, like every post. |
+
+**Where the runs go.** Each run, with its verdict, is written to `echo-test/<UTC time>-<setup>-<kind>.json` beside the store's folder, where `web-push/` lives. Harold logs one `echo test run` line for it.
+
+**Reading a verdict.** The background is the mean of the first 25 frames, at least 30.
+
+- **Silent run:** passes when at most 5% of the frames during playback are louder than 3 times the background, the bar at which the speech detector hears speech. The line gives that share; the file gives the median and 95th-percentile echo level.
+- **Talk run:** its bar is 2 times the 95th-percentile echo level of the newest silent run with the same setup in the last hour. It passes when 10 of 15 frames in a row (0.3 s) during playback are over that bar, which means your voice stood out from the echo. With no such silent run the verdict is `run_silent_first`. Harold keeps the silent runs in memory, so a restart asks for a silent run again.
+
 ## Logs and privacy
 
 ### What `harold.log` holds
@@ -254,6 +277,9 @@ Harold logs no message text, no reply, no push address and no key. The app adds 
 | `app todos read again` | none, logged once when reads recover |
 | `app call started` | none |
 | `call audio refused` | `reason` (`full`, `malformed` or `too_large`), a warning logged once per reason per call for a piece of audio the open call refused |
+| `echo test run` | `setup` (`ear`, `speaker` or `headphones`), `kind` (`silent` or `talk`), `verdict` (`pass`, `fail` or `run_silent_first`), `share_over_bar` (silent runs: the share of playback frames over the bar) or `voice_found` (talk runs with a bar), `echo_cancellation` and `standalone` (yes or no) |
+| `echo test run not saved` | `reason` (`write_failed` or `bad_request`), logged as a warning |
+| `echo test sample not made` | `reason` (`say_failed`), logged as a warning |
 | `app call ended` | `reason`, one of the desk's `call ended` reasons ([Log lines](../voice-input/README.md#log-lines)); `microphone_failed` when the phone stopped posting audio |
 
 Five other lines report failures, and none carries content:

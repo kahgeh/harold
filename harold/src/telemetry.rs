@@ -114,6 +114,12 @@ pub(crate) const ALLOWED_FIELDS: &[&str] = &[
     "loudest",
     "loud_frames",
     "speech_cut",
+    "setup",
+    "verdict",
+    "share_over_bar",
+    "voice_found",
+    "echo_cancellation",
+    "standalone",
 ];
 
 /// How long shutting the exporters down may take in all.

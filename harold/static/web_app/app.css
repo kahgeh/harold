@@ -696,3 +696,73 @@ body.in-call > .call-screen {
 .card-actions .later-button[hidden] {
   display: none;
 }
+
+/* The echo test page: /echo-test, reached from a link the chief sends. */
+
+.echo-test main {
+  flex: 1;
+  overflow-y: auto;
+  padding: max(16px, env(safe-area-inset-top)) 16px max(16px, env(safe-area-inset-bottom));
+}
+
+.echo-test h1 {
+  margin: 0 0 8px;
+  font-size: 24px;
+}
+
+.echo-test h2 {
+  margin: 24px 0 8px;
+  font-size: 19px;
+}
+
+.echo-test fieldset {
+  margin: 16px 0;
+  padding: 8px 12px;
+  border: 1px solid var(--surface-4);
+  border-radius: 12px;
+}
+
+.echo-test legend {
+  padding: 0 4px;
+  color: var(--text-2);
+}
+
+.echo-test label {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: var(--target);
+}
+
+.echo-test input[type="radio"] {
+  width: 22px;
+  height: 22px;
+  accent-color: var(--brand);
+}
+
+.echo-test .echo-note {
+  color: var(--text-2);
+  font-size: 15px;
+}
+
+.echo-test #echo-start {
+  width: 100%;
+}
+
+.echo-test #echo-status {
+  min-height: 1.4em;
+  margin: 12px 0;
+}
+
+.echo-test ul {
+  margin: 0;
+  padding-left: 20px;
+}
+
+.echo-test li {
+  margin: 4px 0;
+}
+
+.echo-test li.fail {
+  color: var(--end);
+}
