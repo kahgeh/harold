@@ -136,11 +136,20 @@
     }
   }).observe(messages, { childList: true });
 
-  // Any other change of height (a new row, the dots) moves the baseline older rows are
-  // measured from.
-  new ResizeObserver(() => {
+  // Any other change of height (a new row, the dots, the New message button) moves the
+  // baseline older rows are measured from. The dots and the button sit in #thread beside
+  // #messages, so they are watched too.
+  const heightWatch = new ResizeObserver(() => {
     previousHeight = thread.scrollHeight;
-  }).observe(messages);
+  });
+  heightWatch.observe(messages);
+  heightWatch.observe(newMessage);
+  const dotsBox = document.getElementById("responding");
+  if (dotsBox) {
+    heightWatch.observe(dotsBox);
+  }
+  // The script keeps the place itself; the browser's own scroll anchoring would move it twice.
+  thread.style.overflowAnchor = "none";
 
   // The responding dots take room under the newest message.
   const responding = document.getElementById("responding");
