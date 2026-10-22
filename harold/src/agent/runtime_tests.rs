@@ -1485,6 +1485,7 @@ async fn real_screen_adapter_keeps_unrelated_capture_out_of_every_published_boun
         snapshots: snapshots.clone(),
         shutdown: shutdown_rx,
     };
+    crate::test_logs::keep_second_dispatcher();
     let captured_logs = Arc::new(Mutex::new(Vec::new()));
     let log_writer = Arc::clone(&captured_logs);
     let subscriber = tracing_subscriber::fmt()
@@ -4365,6 +4366,7 @@ async fn a_busy_report_from_the_hook_reports_the_pane_busy() {
 }
 
 fn capture_logs() -> (Arc<Mutex<Vec<u8>>>, tracing::subscriber::DefaultGuard) {
+    crate::test_logs::keep_second_dispatcher();
     let captured = Arc::new(Mutex::new(Vec::new()));
     let writer = Arc::clone(&captured);
     let subscriber = tracing_subscriber::fmt()

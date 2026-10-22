@@ -408,6 +408,7 @@ impl Logs {
 /// Captures this thread's log lines; use it from a current-thread runtime so
 /// spawned tasks log on the same thread.
 pub(super) fn capture_logs() -> (Logs, tracing::subscriber::DefaultGuard) {
+    crate::test_logs::keep_second_dispatcher();
     let logs = Logs::default();
     let writer = logs.clone();
     let subscriber = tracing_subscriber::fmt()

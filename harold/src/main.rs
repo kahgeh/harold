@@ -1236,5 +1236,8 @@ async fn load_startup_agent_snapshot(
 }
 
 #[cfg(test)]
+mod test_logs;
+
+#[cfg(test)]
 #[path = "main_tests.rs"]
 mod tests;

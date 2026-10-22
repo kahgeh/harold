@@ -1783,6 +1783,7 @@ async fn an_event_appended_inside_a_span_stores_its_trace_and_span_ids() {
     use tracing_opentelemetry::OpenTelemetrySpanExt;
     use tracing_subscriber::layer::SubscriberExt;
 
+    crate::test_logs::keep_second_dispatcher();
     let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder().build();
     let subscriber = tracing_subscriber::registry()
         .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("store-test")));
