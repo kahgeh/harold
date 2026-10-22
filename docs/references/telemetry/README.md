@@ -277,7 +277,7 @@ No exported item carries what the user or an agent wrote, a voice line, the AI m
 **Allowed fields.** Exported spans and log records keep only the attributes on this list, `ALLOWED_FIELDS` in `harold/src/telemetry.rs`:
 
 ```
-pane_id, pane, session.id, session.source, component, reason, outcome, channel,
+pane_id, provider_id, program, pane, session.id, session.source, component, reason, outcome, channel,
 resolved_by, kind, started_by, turn.start, state, count, session_by, alert, pod.product, spec.id,
 spec.state_at, spec.words, spec.revisions, phase, change, event_type,
 event_version, result, watch, run, cost_usd, agent, seconds, event_id,
@@ -291,6 +291,15 @@ Every other field is dropped before export, including `text`, `msg`, `raw_output
 **The chief's pane.** `chief pane changed` (`info`) carries `state` (`found` or `none`), `count` (the agents in the chief's folder), `pane_id` and `session_by` (`setting` when `chief_session` picked the session, `longest` when the longest-running agent did). More than one move of the chief to another pane with `count > 1` in 7 days means an extra session or pane in the chief's folder to close. With `chief_session` set, a `session_by = longest` row means no agent ran in the named session; check that `chief_session` names the session `bin/pod` starts and that the chief runs in it. With it unset, a chief that restarts while a second session holds an older agent in the folder is replaced by that session's first pane, with `count = 2`, until the second session closes.
 
 **Log bodies** are fixed text. A test scans every log call in `harold/src` and `events/src` and fails on one that puts a value into its message, apart from a short list of fixed reasons, migration names and a path.
+
+**A pane found.** `agent monitor pane found` (`info`) is logged when the inventory first sees a new agent incarnation in a pane, with `pane_id`, `provider_id` and `program`: the file name of the matched agent program, never its arguments. Its counterpart is `agent monitor pane gone`, with `pane_id`; the two give how long the pane was listed. A `program` that is not an agent's name means a false match. This query should list only `claude`, `codex` and `opencode`:
+
+```
+SELECT LogAttributes['program'] AS program, LogAttributes['provider_id'] AS provider, count()
+FROM otel.otel_logs
+WHERE ServiceName = 'harold' AND Body = 'agent monitor pane found' AND Timestamp > now() - INTERVAL 7 DAY
+GROUP BY program, provider
+```
 
 ## When the collector is down
 

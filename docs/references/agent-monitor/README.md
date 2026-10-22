@@ -292,7 +292,7 @@ screen_history_lines = 2000
 | `agent_monitor.report_grace_ms` | Non-negative, default 30000; how old a lifecycle adapter's `Busy` report can be before the screen decides, and how long the screen must read `Busy` without a break to replace an `Idle` report |
 | `agents[].id` | Unique bounded identifier; `unknown` is reserved |
 | `agents[].display_name` | Non-empty display label |
-| `agents[].command_contains` | At least one non-empty fragment; any fragment matches case-insensitively |
+| `agents[].command_contains` | At least one non-empty fragment; any fragment matches case-insensitively against the process's program, not its whole command line. The program is the file name of the `ps` command's first word; when that is `node`, `bun`, `deno`, `python` or `python3`, it is the file name of the second word instead |
 | `agents[].busy_all` | Optional conjunctive, case-sensitive visible-grid fragments |
 | `agents[].idle_all` | Optional conjunctive, case-sensitive visible-grid fragments and idle-placeholder rejection clauses |
 | `agents[].summary_line_prefixes` | Optional exact, case-sensitive safe submitted-input prefixes for `generic-v1`; `codex-v1` recognizes its own styled `>` and `›` blocks |
@@ -303,7 +303,7 @@ The defaults above are the ones in `harold/config/default.toml`, and that file d
 
 Tmux pane inventory uses tab-separated fields and explicitly requests UTF-8 output (`tmux -u`), so output framing does not depend on the daemon’s locale. Rows must contain exactly seven fields; embedded tabs are rejected as malformed rather than guessing their meaning.
 
-Process selection prefers a matching process in the pane TTY's foreground process group. Otherwise it selects the shallowest matching descendant of the pane root, with PID as a deterministic tie-breaker. Multiple named provider matches produce provider `unknown` rather than choosing configuration order. Missing trustworthy process start time degrades inventory and does not create an incarnation.
+Process selection looks only at processes whose program matches a fragment, so `nvim CLAUDE.md` or a script under `~/.claude/` is not an agent, and a provider comes from the program alone. A pane with no agent program is never in the snapshot: `Unknown` is only an agent's state. Among matching processes, it prefers a matching process in the pane TTY's foreground process group. Otherwise it selects the shallowest matching descendant of the pane root, with PID as a deterministic tie-breaker. Multiple named provider matches produce provider `unknown` rather than choosing configuration order. Missing trustworthy process start time degrades inventory and does not create an incarnation.
 
 The shipped named defaults cover Codex, Claude, and OpenCode state markers. Codex explicitly selects `codex-v1`. Claude explicitly selects `claude-v1`, which recognizes its running status row and otherwise behaves as `generic-v1` with its configured work summary prefix; it has no Claude-specific styled prompt parser. OpenCode uses `generic-v1` without `summary_line_prefixes`, so screen acquisition supplies state but no fallback work summary. Its opt-in lifecycle plugin can still send explicit work summaries. The `screen_adapter` setting defaults to `generic-v1`; selecting a provider ID alone does not select a parser.
 

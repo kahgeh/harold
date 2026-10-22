@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::io;
 use std::process::Command;
+use std::sync::{Mutex, PoisonError};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use time::{Date, Month, PrimitiveDateTime, Time};
@@ -78,15 +79,24 @@ pub(crate) trait AgentInventoryPort: Send + Sync {
         reason = "exact-incarnation revalidation is consumed by the monitor runtime slice"
     )]
     fn is_current(&self, incarnation: &AgentIncarnation) -> Result<bool, InventoryError>;
+    /// The file name of the program the last scan matched for this incarnation, if it knows it.
+    fn program(&self, _incarnation: &AgentIncarnation) -> Option<String> {
+        None
+    }
 }
 
 pub(crate) struct TmuxAgentInventory {
     settings: AgentSettings,
+    /// Each observed agent process's program, from the last scan, by pane id and agent pid.
+    programs: Mutex<HashMap<(String, u32), String>>,
 }
 
 impl TmuxAgentInventory {
     pub(crate) fn new(settings: AgentSettings) -> Self {
-        Self { settings }
+        Self {
+            settings,
+            programs: Mutex::new(HashMap::new()),
+        }
     }
 }
 
@@ -95,12 +105,35 @@ impl AgentInventoryPort for TmuxAgentInventory {
         let processes = read_process_table()?;
         let panes = read_tmux_panes()?;
         let observed_at_ms = now_ms()?;
-        panes
+        let observed: Vec<AgentPaneObservation> = panes
             .iter()
             .filter_map(|pane| {
                 observe_pane(pane, &processes, &self.settings, observed_at_ms).transpose()
             })
-            .collect()
+            .collect::<Result<_, _>>()?;
+        let programs = observed
+            .iter()
+            .filter_map(|pane| {
+                let incarnation = &pane.incarnation;
+                let process = processes
+                    .iter()
+                    .find(|process| process.pid == incarnation.agent_pid)?;
+                Some((
+                    (incarnation.pane_id.clone(), incarnation.agent_pid),
+                    command_program(&process.command).to_string(),
+                ))
+            })
+            .collect();
+        *self.programs.lock().unwrap_or_else(PoisonError::into_inner) = programs;
+        Ok(observed)
+    }
+
+    fn program(&self, incarnation: &AgentIncarnation) -> Option<String> {
+        self.programs
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&(incarnation.pane_id.clone(), incarnation.agent_pid))
+            .cloned()
     }
 
     fn resolve(&self, pane_id: &str) -> Result<Option<AgentPaneObservation>, InventoryError> {
@@ -134,7 +167,7 @@ pub(super) fn observe_pane(
 
     let selected = processes
         .iter()
-        .filter(|process| settings.matches_command(&process.command))
+        .filter(|process| settings.matches_command(command_program(&process.command)))
         .filter_map(|process| {
             descendant_depth(process.pid, pane.pane_pid, &by_pid).map(|depth| {
                 let foreground = foreground_pgid.is_some_and(|pgid| {
@@ -213,7 +246,9 @@ pub(super) fn resolve_provider(settings: &AgentSettings, command: &str) -> Provi
     let AgentSettings(providers) = settings;
     let matching: Vec<&AgentProviderSettings> = providers
         .iter()
-        .filter(|provider| command_matches_any(command, &provider.command_contains))
+        .filter(|provider| {
+            command_matches_any(command_program(command), &provider.command_contains)
+        })
         .collect();
     match matching.as_slice() {
         [provider] => ProviderResolution::Matched {
@@ -232,6 +267,25 @@ fn unknown_provider() -> (String, String) {
         UNKNOWN_PROVIDER_ID.to_string(),
         UNKNOWN_PROVIDER_DISPLAY_NAME.to_string(),
     )
+}
+
+/// The interpreters whose script, not their own name, says which program runs.
+const INTERPRETERS: &[&str] = &["node", "bun", "deno", "python", "python3"];
+
+/// The program a `ps` command runs: the file name of its first word, or of its second when the
+/// first is an interpreter, so `node …/codex` is `codex`. Arguments never take part.
+pub(super) fn command_program(command: &str) -> &str {
+    fn file_name(word: &str) -> &str {
+        word.rsplit('/').next().unwrap_or(word)
+    }
+    let mut words = command.split_whitespace();
+    let Some(first) = words.next().map(file_name) else {
+        return "";
+    };
+    if !INTERPRETERS.contains(&first) {
+        return first;
+    }
+    words.next().map_or(first, file_name)
 }
 
 fn command_matches_any(command: &str, fragments: &[String]) -> bool {

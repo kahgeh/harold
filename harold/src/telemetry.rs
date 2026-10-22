@@ -62,6 +62,8 @@ pub(crate) const HEALTH_TARGET: &str = "harold::telemetry_health";
 /// such as `text`, `msg`, `raw_output`, `tag` and `error`, is dropped before export.
 pub(crate) const ALLOWED_FIELDS: &[&str] = &[
     "pane_id",
+    "provider_id",
+    "program",
     "pane",
     "session.id",
     "session.source",

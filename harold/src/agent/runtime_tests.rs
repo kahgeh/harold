@@ -55,6 +55,7 @@ struct FakeInventory {
     current: Mutex<VecDeque<Result<bool, InventoryError>>>,
     revalidated: Mutex<Vec<AgentIncarnation>>,
     resolve_calls: AtomicUsize,
+    program: Option<&'static str>,
 }
 
 impl FakeInventory {
@@ -90,6 +91,10 @@ impl AgentInventoryPort for FakeInventory {
             .unwrap()
             .pop_front()
             .unwrap_or(Ok(None))
+    }
+
+    fn program(&self, _incarnation: &AgentIncarnation) -> Option<String> {
+        self.program.map(str::to_string)
     }
 
     fn is_current(&self, incarnation: &AgentIncarnation) -> Result<bool, InventoryError> {
@@ -4494,6 +4499,31 @@ async fn pane_gone_is_logged_once_per_incarnation_and_the_inventory_still_depart
 }
 
 #[tokio::test]
+async fn a_new_incarnation_logs_pane_found_once_with_its_program_only() {
+    let mut inventory = FakeInventory::scans(vec![
+        Ok(vec![pane("%8", 80, 800, 1_000, 100)]),
+        Ok(vec![pane("%8", 80, 800, 1_000, 200)]),
+    ]);
+    inventory.program = Some("claude");
+    let fixture = Fixture::new(inventory).await;
+    let (captured, _guard) = capture_logs();
+
+    fixture.handle.inventory_tick().await.unwrap();
+    fixture.handle.inventory_tick().await.unwrap();
+
+    let logs = logged(&captured);
+    println!("{}", logs.trim_end());
+    assert_eq!(
+        logs.matches("agent monitor pane found").count(),
+        1,
+        "{logs}"
+    );
+    assert!(logs.contains("pane_id=\"%8\""), "{logs}");
+    assert!(logs.contains("program=\"claude\""), "{logs}");
+    assert!(!logs.contains("--"), "{logs}");
+}
+
+#[tokio::test]
 async fn pane_departed_in_prompt_recovery_does_not_degrade_screen() {
     let fixture = Fixture::new(FakeInventory::scans(vec![Ok(vec![pane(
         "%8", 80, 800, 1_000, 100,
@@ -4648,7 +4678,11 @@ async fn inventory_scan_that_fails_once_is_retried_on_the_next_tick() {
     assert_eq!(logs.matches("agent monitor read retried").count(), 1);
     assert!(logs.contains("component=\"inventory\""), "{logs}");
     assert!(logs.contains("elapsed_ms="), "{logs}");
-    assert!(!logs.contains("pane_id"), "{logs}");
+    let retried = logs
+        .lines()
+        .find(|line| line.contains("agent monitor read retried"))
+        .unwrap();
+    assert!(!retried.contains("pane_id"), "{logs}");
     assert!(!logs.contains("WARN"), "{logs}");
     let events = fixture.events().await;
     assert_eq!(event_types(&events), ["AgentPaneObserved"]);

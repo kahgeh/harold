@@ -60,7 +60,7 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 | screen adapter | The per-provider reader of an agent's visible screen, such as `claude-v1` | — |
 | hook | A small script a provider runs to tell Harold what an agent did | — |
 | Claude Code mod | The Claude Code plugin in `hooks/claude-mod` that reports a working pane | "plugin" for it. OpenCode's is an OpenCode plugin |
-| Busy, Idle, Unknown | An agent's state | — |
+| Busy, Idle, Unknown | An agent's state. Unknown: an agent runs in the pane, and neither its hooks nor its screen say Busy or Idle yet. A pane with no agent program has no state and is not listed | "unknown" for a pane with no agent |
 | turn | One request to an agent and its work until it stops | — |
 | task | The work the user asks an agent to do. Its short text is the agent's work summary | "task" for a thread of Harold's own, say "background job" |
 | work summary | Short text saying what an agent is working on | "task description", "current work", "dashboard description", "summary" alone |

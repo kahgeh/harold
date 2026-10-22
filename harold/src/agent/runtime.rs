@@ -1017,6 +1017,16 @@ impl AgentMonitorRuntime {
                     tracked.pane = pane;
                     tracked.consecutive_absences = 0;
                 } else {
+                    tracing::info!(
+                        pane_id = pane_id.as_str(),
+                        provider_id = pane.incarnation.provider_id.as_str(),
+                        program = self
+                            .inventory
+                            .program(&pane.incarnation)
+                            .as_deref()
+                            .unwrap_or(""),
+                        "agent monitor pane found"
+                    );
                     let mut tracked = TrackedPane::new(pane);
                     if let Some(basis) = source_version(&appended, &["AgentPaneObserved"]) {
                         tracked.summary_basis_version = basis;

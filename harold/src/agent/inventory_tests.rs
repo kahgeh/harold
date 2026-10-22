@@ -2,8 +2,8 @@ use crate::settings::{AgentProviderSettings, AgentSettings};
 
 use super::domain::{AgentIncarnation, UNKNOWN_PROVIDER_ID};
 use super::inventory::{
-    InventoryError, ProcessInfo, ProviderResolution, TmuxPaneInfo, command_stdout, observe_pane,
-    parse_process_table, parse_tmux_panes, resolve_provider,
+    InventoryError, ProcessInfo, ProviderResolution, TmuxPaneInfo, command_program, command_stdout,
+    observe_pane, parse_process_table, parse_tmux_panes, resolve_provider,
 };
 use super::screen::{StopSignal, run_stoppable};
 
@@ -334,4 +334,114 @@ fn stopped_inventory_command_is_killed_and_fails() {
     });
     assert_eq!(stdout, Err(InventoryError::CommandFailed));
     assert!(started.elapsed() < std::time::Duration::from_secs(1));
+}
+
+fn agent_settings() -> AgentSettings {
+    AgentSettings(vec![
+        provider("claude", &["claude"]),
+        provider("codex", &["codex"]),
+        provider("opencode", &["opencode"]),
+    ])
+}
+
+fn observed_provider(commands: &[&str]) -> Option<(u32, String)> {
+    let mut processes = vec![process(10, 1, 10, "/bin/zsh")];
+    processes.extend(
+        commands
+            .iter()
+            .zip(11..)
+            .map(|(command, pid)| process(pid, 10, 50, command)),
+    );
+    observe_pane(&pane(), &processes, &agent_settings(), 99)
+        .unwrap()
+        .map(|observation| {
+            (
+                observation.incarnation.agent_pid,
+                observation.incarnation.provider_id,
+            )
+        })
+}
+
+#[test]
+fn a_program_that_only_mentions_an_agent_in_its_arguments_is_not_an_agent() {
+    for command in [
+        "nvim /Users/u/Dev/p/harold/main/CLAUDE.md",
+        "tail -f /Users/u/.claude/history.jsonl",
+        "python3 /Users/u/.claude/skills/x/run.py",
+        "/bin/zsh -c source /Users/u/.claude/shell-snapshots/s.sh",
+    ] {
+        assert_eq!(observed_provider(&[command]), None, "{command}");
+    }
+}
+
+#[test]
+fn claude_with_arguments_and_shell_children_is_observed_as_claude() {
+    let observed = observed_provider(&[
+        "/Users/u/.local/bin/claude --dangerously-skip-permissions --model opus",
+        "/bin/zsh -c source /Users/u/.claude/shell-snapshots/s.sh",
+        "tail -f /Users/u/.claude/history.jsonl",
+    ]);
+
+    assert_eq!(observed, Some((11, "claude".to_string())));
+}
+
+#[test]
+fn native_and_interpreted_agents_resolve_to_their_providers() {
+    for (command, provider_id) in [
+        ("/opt/homebrew/bin/codex", "codex"),
+        (
+            "/opt/homebrew/Cellar/opencode/2.0.25/bin/opencode",
+            "opencode",
+        ),
+        (
+            "node /opt/homebrew/lib/node_modules/@openai/codex/bin/codex",
+            "codex",
+        ),
+    ] {
+        assert_eq!(
+            observed_provider(&[command]),
+            Some((11, provider_id.to_string())),
+            "{command}"
+        );
+    }
+}
+
+#[test]
+fn an_interpreter_running_a_script_that_is_not_an_agent_is_not_one() {
+    for command in [
+        "node /Users/u/.claude/plugins/x/server.js",
+        "python /Users/u/.codex/run.py",
+        "bun run /Users/u/Dev/opencode-notes/index.ts",
+    ] {
+        assert_eq!(observed_provider(&[command]), None, "{command}");
+    }
+}
+
+#[test]
+fn a_claude_process_whose_arguments_name_codex_resolves_to_claude() {
+    assert_eq!(
+        resolve_provider(&agent_settings(), "claude --append-system-prompt use codex"),
+        ProviderResolution::Matched {
+            provider_id: "claude".to_string(),
+            provider_display_name: "CLAUDE".to_string(),
+        }
+    );
+}
+
+#[test]
+fn the_program_is_the_file_name_of_the_command_or_of_an_interpreters_script() {
+    for (command, program) in [
+        ("claude --model opus", "claude"),
+        ("/Users/u/.local/bin/claude --model opus", "claude"),
+        ("/bin/zsh -c source x", "zsh"),
+        (
+            "node /opt/homebrew/lib/node_modules/@openai/codex/bin/codex",
+            "codex",
+        ),
+        ("python3 /Users/u/.claude/skills/x/run.py --codex", "run.py"),
+        ("node", "node"),
+        ("", ""),
+    ] {
+        assert_eq!(command_program(command), program, "{command}");
+    }
 }
