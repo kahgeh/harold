@@ -365,7 +365,10 @@ async fn a_new_stream_starts_with_the_whole_thread() {
         "{first}"
     );
     assert!(first.contains(r#"id="messages""#), "{first}");
-    assert!(first.contains(r#"data-init="@get('/updates')""#), "{first}");
+    assert!(
+        first.contains(r#"data-init="@get('/updates', {retry: 'error', retryMaxCount: 1000})""#),
+        "{first}"
+    );
     assert!(
         !first.contains("data: mode"),
         "the default outer mode: {first}"
@@ -458,7 +461,7 @@ async fn markup_in_a_reply_is_escaped_in_the_page_and_the_stream() {
         "{page}"
     );
     assert!(
-        page.contains(r#"<section id="messages" data-init="@get('/updates')" "#),
+        page.contains(r#"<section id="messages" data-init="@get('/updates', {retry: 'error', retryMaxCount: 1000})" "#),
         "{page}"
     );
 

@@ -1085,16 +1085,22 @@ async fn updates_redraws_from_the_oldest_signal_with_the_older_line_and_data_ini
     assert!(first.contains(r#"id="m-r020""#) && !first.contains(r#"id="m-r019""#));
     assert!(first.contains(r#"id="m-r120""#));
     assert!(first.contains(OLDER_ATTRIBUTE), "{first}");
-    assert!(first.contains(r#"data-init="@get('/updates')""#), "{first}");
+    assert!(
+        first.contains(r#"data-init="@get('/updates', {retry: 'error', retryMaxCount: 1000})""#),
+        "{first}"
+    );
 
     let first = first_patch(&server, Some(r#"{"oldest":"r001"}"#)).await;
 
     assert_eq!(row_count(&first), 120, "every row");
     assert!(!first.contains(r#"id="older""#), "{first}");
-    assert!(first.contains(r#"data-init="@get('/updates')""#), "{first}");
+    assert!(
+        first.contains(r#"data-init="@get('/updates', {retry: 'error', retryMaxCount: 1000})""#),
+        "{first}"
+    );
 }
 
-const REOPEN_ATTRIBUTE: &str = r#"data-on:datastar-fetch__delay.1s="evt.detail.type === 'finished' && evt.detail.el === el && @get('/updates')""#;
+const REOPEN_ATTRIBUTE: &str = r#"data-on:datastar-fetch__delay.1s="evt.detail.type === 'finished' && evt.detail.el === el && @get('/updates', {retry: 'error', retryMaxCount: 1000})""#;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn the_thread_page_and_the_first_updates_patch_reopen_updates_when_the_stream_ends() {
@@ -1132,7 +1138,10 @@ async fn updates_draws_the_newest_50_for_a_missing_unknown_pruned_or_malformed_s
         assert!(first.contains(r#"id="m-r071""#), "{signals:?}");
         assert!(!first.contains(r#"id="m-r070""#), "{signals:?}");
         assert!(first.contains(OLDER_ATTRIBUTE), "{signals:?}");
-        assert!(first.contains(r#"data-init="@get('/updates')""#));
+        assert!(
+            first
+                .contains(r#"data-init="@get('/updates', {retry: 'error', retryMaxCount: 1000})""#)
+        );
     }
 }
 
