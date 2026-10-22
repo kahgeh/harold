@@ -2167,3 +2167,14 @@ fn call_response_maps_every_state_and_result() {
     assert_eq!(empty.chief_pane_id, "");
     assert_eq!(empty.last_transcript, "");
 }
+
+#[tokio::test]
+async fn the_log_trim_starts_only_when_launchd_started_harold() {
+    let (shutdown_tx, shutdown_rx) = watch::channel(());
+    // The signal is already sent, so a started trim ends without touching any file.
+    drop(shutdown_tx);
+
+    assert!(super::start_log_trim(false, &shutdown_rx).is_none());
+    let started = super::start_log_trim(true, &shutdown_rx).expect("trim starts under launchd");
+    started.await.expect("trim stops with the shutdown signal");
+}

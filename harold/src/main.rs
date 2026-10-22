@@ -6,6 +6,7 @@ mod channels;
 mod cli;
 mod crash_guard;
 mod inbound;
+mod log_trim;
 mod outbound;
 mod pod_stats;
 mod projector;
@@ -916,6 +917,7 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
 
     // Shutdown channel: sender closes on signal, receivers see the channel close.
     let (shutdown_tx, shutdown_rx) = watch::channel(());
+    let log_trim = start_log_trim(launchd, &shutdown_rx);
 
     let inventory: Arc<dyn agent::inventory::AgentInventoryPort> = Arc::new(
         agent::inventory::TmuxAgentInventory::new(cfg.agents.clone()),
@@ -1041,6 +1043,9 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
     let _ = event_handler_handle.await;
     let _ = listener_handle.await;
     let _ = timed_prompts_handle.await;
+    if let Some(handle) = log_trim {
+        let _ = handle.await;
+    }
     tools.stopped().await;
     if let Some(running) = web_app {
         let _ = running.handle.await;
@@ -1062,6 +1067,15 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
 fn started_by_launchd(mode: &cli::Mode) -> bool {
     *mode == cli::Mode::Daemon
         && std::env::var_os("HAROLD_LAUNCHD").is_some_and(|value| value == "1")
+}
+
+/// Starts the hourly trim of `harold.log` to its last 24 hours, only when launchd started
+/// Harold: run any other way, standard output is not that file.
+fn start_log_trim(
+    launchd: bool,
+    shutdown: &watch::Receiver<()>,
+) -> Option<tokio::task::JoinHandle<()>> {
+    launchd.then(|| log_trim::start(shutdown.clone()))
 }
 
 /// The reason a store that cannot be opened refuses a start under launchd, or `None` when

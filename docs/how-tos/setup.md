@@ -60,7 +60,7 @@ The default layout is:
   skills/send-message-to-away-device/SKILL.md
   data/store/
   data/events/     kept from an earlier install, if present
-  harold.log
+  harold.log (the last 24 hours)
 ~/bin/haroldctl
 ~/bin/tmx-agent-dash
 ```
@@ -187,7 +187,7 @@ Service commands are:
 ~/bin/haroldctl restart
 ```
 
-After changing `~/bin/harold/config/local.toml`, restart Harold. For a startup failure, inspect `~/bin/harold/harold.log`; configuration errors and an incompatible existing database require correction before readiness can succeed.
+After changing `~/bin/harold/config/local.toml`, restart Harold. For a startup failure, inspect `~/bin/harold/harold.log`, which holds the last 24 hours (older lines are in ClickHouse, `otel.otel_logs`, when export is on); configuration errors and an incompatible existing database require correction before readiness can succeed.
 
 ## 4. Reinstall or update
 
