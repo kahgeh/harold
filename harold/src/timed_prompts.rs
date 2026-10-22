@@ -390,7 +390,7 @@ pub(crate) enum Writer {
     Voice,
     /// A hand-over: the call answerer's request for the chief. Like a spoken turn it is not
     /// held back by another writer's hold, and it is the one writer that may type into a
-    /// Claude Code pane that is `Busy`. Removed once agent-message-tool carries hand-overs.
+    /// Claude Code pane that is `Busy`.
     HandOver,
     /// A tool typing a line, by the tool's name: the question tool types its batch of
     /// answers into the chief's pane as `Tool("questions")`.

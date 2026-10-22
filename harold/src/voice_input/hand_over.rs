@@ -3,8 +3,8 @@
 //! tries again every 5 seconds for 30 minutes, also after the call ends, and then tells the
 //! user in the web app's thread that it could not.
 //!
-//! This is a stopgap: once agent-message-tool lands, hand-overs go through the message tool
-//! with its receipt check, and `Writer::HandOver` and the retry loop here are removed.
+//! Hand-overs stay typed: agent-message-tool, which would have carried them with a receipt
+//! check, was set aside (ADR 0009, note of 2026-10-23).
 //! "Typed" is all Harold knows: tmux took the keys, not that the chief read the line.
 //!
 //! No log line holds the request: the lines carry `hand_over_id`.

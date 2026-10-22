@@ -23,3 +23,7 @@ The chief is a large model, often in the middle of a turn, so a call's answer to
 - The chief reports back with `harold speak`.
 - Your spoken words and the call facts go to Anthropic's hosted model on every turn of every call: agent and pod facts, this call's hand-overs and chief lines, todo ids, titles and progress, and the first sentence of each queue note (the user's choice, C(b)). Note bodies and todo question text and options are never sent.
 - Harold gains a second path that types into a busy pane, until the message tool replaces it.
+
+## Notes
+
+- 2026-10-23: agent-message-tool was set aside by the user, so the stopgap in the Decision is how hand-overs work, with no replacement planned. Harold keeps typing hand-overs into the chief's pane, and `Writer::HandOver` and the retry loop stay. The last Consequence, "until the message tool replaces it", no longer holds: hand-overs remain the one path that may type into a Busy pane. The answerer still says a hand-over was typed, never that the chief read it.
