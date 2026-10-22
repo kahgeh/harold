@@ -759,7 +759,39 @@
         "displayType": "table",
         "connectionId": "@CLICKHOUSE_CONNECTION_ID@",
         "sourceId": "@TRACES_SOURCE_ID@",
-        "sqlTemplate": "SELECT SpanAttributes['call_from'] AS call_from, count() AS turns, quantileIf(0.5)(toFloat64(SpanAttributes['first_sound_ms']) / 1000, SpanAttributes['first_sound_ms'] != '') AS first_sound_p50_s, quantileIf(0.95)(toFloat64(SpanAttributes['first_sound_ms']) / 1000, SpanAttributes['first_sound_ms'] != '') AS first_sound_p95_s, quantileIf(0.5)(toFloat64(SpanAttributes['answer_ms']) / 1000, SpanAttributes['answer_ms'] != '') AS answer_p50_s, quantileIf(0.95)(toFloat64(SpanAttributes['answer_ms']) / 1000, SpanAttributes['answer_ms'] != '') AS answer_p95_s FROM $__sourceTable WHERE ServiceName = 'harold' AND SpanName = 'harold.call_turn' AND SpanAttributes['call_from'] != '' AND Timestamp >= now() - INTERVAL 7 DAY AND Timestamp < now() GROUP BY call_from ORDER BY call_from"
+        "sqlTemplate": "SELECT SpanAttributes['call_from'] AS call_from, SpanAttributes['answered_by'] AS answered_by, count() AS turns, quantileIf(0.5)(toFloat64(SpanAttributes['first_sound_ms']) / 1000, SpanAttributes['first_sound_ms'] != '') AS first_sound_p50_s, quantileIf(0.95)(toFloat64(SpanAttributes['first_sound_ms']) / 1000, SpanAttributes['first_sound_ms'] != '') AS first_sound_p95_s, quantileIf(0.5)(toFloat64(SpanAttributes['answer_ms']) / 1000, SpanAttributes['answer_ms'] != '') AS answer_p50_s, quantileIf(0.95)(toFloat64(SpanAttributes['answer_ms']) / 1000, SpanAttributes['answer_ms'] != '') AS answer_p95_s FROM $__sourceTable WHERE ServiceName = 'harold' AND SpanName = 'harold.call_turn' AND SpanAttributes['call_from'] != '' AND Timestamp >= now() - INTERVAL 7 DAY AND Timestamp < now() GROUP BY call_from, answered_by ORDER BY call_from, answered_by"
+      }
+    },
+    {
+      "id": "call-answers-failed-by-day",
+      "name": "Call answers failed, by day",
+      "x": 0,
+      "y": 27,
+      "w": 6,
+      "h": 3,
+      "containerId": "turns",
+      "config": {
+        "configType": "sql",
+        "displayType": "table",
+        "connectionId": "@CLICKHOUSE_CONNECTION_ID@",
+        "sourceId": "@TRACES_SOURCE_ID@",
+        "sqlTemplate": "SELECT toDate(Timestamp) AS day, count() AS failed FROM $__sourceTable WHERE ServiceName = 'harold' AND SpanName = 'harold.call_answer' AND SpanAttributes['result'] = 'failed' AND Timestamp >= now() - INTERVAL 7 DAY AND Timestamp < now() GROUP BY day ORDER BY day"
+      }
+    },
+    {
+      "id": "call-answerer-spend-by-day",
+      "name": "Call answerer spend, by day",
+      "x": 6,
+      "y": 27,
+      "w": 6,
+      "h": 3,
+      "containerId": "turns",
+      "config": {
+        "configType": "sql",
+        "displayType": "table",
+        "connectionId": "@CLICKHOUSE_CONNECTION_ID@",
+        "sourceId": "@TRACES_SOURCE_ID@",
+        "sqlTemplate": "SELECT toDate(Timestamp) AS day, sum(toUInt64OrZero(SpanAttributes['cost_micros'])) / 1000000 AS spend_usd FROM $__sourceTable WHERE ServiceName = 'harold' AND SpanName = 'harold.call_answer' AND Timestamp >= now() - INTERVAL 7 DAY AND Timestamp < now() GROUP BY day ORDER BY day"
       }
     }
   ]

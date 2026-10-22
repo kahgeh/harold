@@ -38,6 +38,14 @@ model = "haiku"
 # .claude/skills/ (absolute paths; a skill is linked into .claude/skills/ from one of them):
 # skill_folders = ["/Users/kahgeh/Dev/p/chief-of-pods/skills/watches", "/Users/kahgeh/Dev/p/personal-chief/skills/watches"]
 
+# The small model that answers each turn of a call; real work goes to the chief. It runs
+# Claude Code with [activity_summary] cli_path, whether or not activity summaries are on.
+[call_answerer]
+enabled = true
+model = "haiku"
+timeout_seconds = 15
+run_budget_usd = 0.02 # --max-budget-usd for each run
+
 [agent_monitor]
 inventory_interval_ms = 2000
 inventory_timeout_ms = 3000

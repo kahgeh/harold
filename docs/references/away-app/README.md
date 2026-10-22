@@ -167,7 +167,7 @@ The route applies only to messages that would reach the phone today. At the desk
 
 ## Calls (stage 1b)
 
-You tap **📞 Call**, and talk with the chief as in a phone call. Harold hears when you stop talking, types what you said into the chief's pane, marked `🎙`, plays the chief's spoken answer on the phone, and listens again. The desk's calls work the same way; the [voice input reference](../voice-input/README.md) describes them. Call mode uses the `[voice_input]` section for transcription. Without it, the **Call** button is disabled and reads `Voice is not set up on the Mac`, and `POST /call` answers `409` with the same line.
+You tap **📞 Call**, and talk with the chief as in a phone call. Harold hears when you stop talking, has the [call answerer](../voice-input/call-answerer.md) answer at once and pass real work to the chief, plays the answer on the phone, and listens again. When the call answerer fails, Harold types what you said into the chief's pane, marked `🎙`, and plays the chief's spoken answer. The desk's calls work the same way; the [voice input reference](../voice-input/README.md) describes them. Call mode uses the `[voice_input]` section for transcription. Without it, the **Call** button is disabled and reads `Voice is not set up on the Mac`, and `POST /call` answers `409` with the same line.
 
 Starting a call on the phone ends a call open at the desk first, so the chief does not get turns from the desk's microphone too. Nothing stops the dash from starting a desk call while the phone's call is open.
 

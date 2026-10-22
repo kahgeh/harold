@@ -450,7 +450,11 @@ fn call_response(status: &voice_input::CallStatus) -> CallResponse {
         CallState::Speaking => harold::CallState::Speaking,
     };
     let last_result = match status.last_result {
-        None => harold::CallResult::Unspecified,
+        // The `Call` RPC has no value for a turn the call answerer answered: the contract
+        // does not change, so it reads as no turn typed.
+        None | Some(TurnResult::Answered | TurnResult::HandedOver) => {
+            harold::CallResult::Unspecified
+        }
         Some(TurnResult::Typed) => harold::CallResult::Typed,
         Some(TurnResult::NothingHeard) => harold::CallResult::NothingHeard,
         Some(TurnResult::NoChief) => harold::CallResult::NoChief,
@@ -956,6 +960,12 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
     let telemetry_tasks = start_telemetry_tasks(cfg, &snapshots, &shutdown_rx).await;
     if let Some(queue) = &telemetry_tasks.alert_queue {
         store.set_alert_queue(queue.clone());
+    }
+    // The call answerer, before any call can start.
+    if let Some(answering) =
+        voice_input::daemon_call_answering(cfg, Arc::clone(&store), snapshots.clone())
+    {
+        voice_input::init_call_answering(answering);
     }
     // The desk's calls come first: they sweep leftover `call-*` folders before either
     // control can start a call.

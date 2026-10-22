@@ -1,7 +1,9 @@
 //! The conversation core shared by the desk and, later, away-web-app's phone call:
 //! it hears the chief speak, finds where each turn ends, and writes it down as audio.
 
+mod answerer;
 mod call;
+mod hand_over;
 mod hang_up;
 mod mac;
 mod phone;
@@ -10,6 +12,7 @@ mod speech;
 mod wav;
 mod worker;
 
+pub(crate) use answerer::{CallAnswering, daemon_call_answering};
 use call::{Ended, Event, chief_pane, lock, run_call, sweep_call_folders};
 pub(crate) use mac::MacPorts;
 #[cfg_attr(not(test), allow(unused_imports))]
@@ -136,6 +139,12 @@ pub(crate) trait CallPorts: Send + Sync + 'static {
     fn no_answer_phrase(&self) -> &'static str {
         phrases::NO_ANSWER
     }
+    /// The call answerer that answers each turn, and the thread line for a hand-over given
+    /// up on. The daemon's is set at start-up (`init_call_answering`); none means every turn
+    /// goes to the chief.
+    fn answering(&self) -> Option<Arc<CallAnswering>> {
+        daemon_answering()
+    }
 }
 
 /// What a call is doing, as the dashboard's button shows it.
@@ -161,6 +170,10 @@ pub(crate) enum TurnResult {
     ChiefBusy,
     Failed,
     VoiceMuted,
+    /// The call answerer's line played, and nothing was handed over.
+    Answered,
+    /// The call answerer's line played, with a hand-over to the chief.
+    HandedOver,
 }
 
 impl TurnResult {
@@ -173,6 +186,8 @@ impl TurnResult {
             Self::ChiefBusy => "chief_busy",
             Self::Failed => "failed",
             Self::VoiceMuted => "voice_muted",
+            Self::Answered => "answered",
+            Self::HandedOver => "handed_over",
         }
     }
 }
@@ -373,6 +388,23 @@ pub(crate) fn init_daemon_calls(calls: DaemonCalls) {
         DAEMON_CALLS.set(calls).is_ok(),
         "init_daemon_calls called more than once"
     );
+}
+
+static CALL_ANSWERING: OnceLock<Arc<CallAnswering>> = OnceLock::new();
+
+/// Sets the daemon's call answerer, once, at start-up, when `[call_answerer]` is on. The
+/// desk's calls and the phone's both read it.
+pub(crate) fn init_call_answering(answering: CallAnswering) {
+    assert!(
+        CALL_ANSWERING.set(Arc::new(answering)).is_ok(),
+        "init_call_answering called more than once"
+    );
+}
+
+/// The daemon's call answerer; `None` before start-up sets it, when `[call_answerer]` is
+/// off, in `--diagnostics` and in tests.
+pub(crate) fn daemon_answering() -> Option<Arc<CallAnswering>> {
+    CALL_ANSWERING.get().cloned()
 }
 
 /// The daemon's calls; `None` before start-up sets them, and in `--diagnostics` and tests.

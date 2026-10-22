@@ -9,6 +9,10 @@ pub(crate) const NO_ANSWER: &str = "No answer yet.";
 /// The phone's version, which knows the answer will be in the thread.
 pub(crate) const NO_ANSWER_IN_THREAD: &str = "No answer yet. It will be in the thread.";
 pub(crate) const NO_CHIEF: &str = "There's no chief running.";
+/// Said before a line the chief speaks between turns of a call.
+pub(crate) const FROM_THE_CHIEF: &str = "From the chief.";
+/// Said when the answerer handed a request over and gave no line of its own.
+pub(crate) const PASSED_ON: &str = "I've passed that to the chief.";
 pub(crate) const BYE: &str = "Bye.";
 /// Said through the `[tts]` command, never by the worker.
 pub(crate) const VOICE_STOPPED: &str = "The voice stopped. One moment.";

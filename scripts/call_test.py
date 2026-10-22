@@ -26,7 +26,12 @@ import wave
 
 SESSION = 'harold-call-test'
 LOGIN = 'call-test'
-QUESTION = 'What is the status of the build today'
+# The call answerer answers the first question from the todo seeded in the scratch store; the
+# second is a request for work, which it hands over to the stand-in chief.
+QUESTION = 'How many todos are waiting'
+REQUEST = 'Ask the chief to rerun the harold build'
+FROM_THE_CHIEF = 'From the chief.'
+TODO_ID = 'QCALLTEST'
 NO_RECIPIENT = 'call-test@harold.invalid'
 ANSWER_LINE = 'Call test answer.'
 SAMPLE_RATE = 16000
@@ -43,6 +48,7 @@ LIMIT_CUT = 8
 LIMIT_HEARD = 30
 LIMIT_TYPED = 45
 LIMIT_SOUND = 60
+LIMIT_ANSWER = 25
 LIMIT_FETCH = 5
 LIMIT_HANGUP = 10
 LIMIT_READY = 90
@@ -182,10 +188,10 @@ def heard_enough(heard, question, share=WORD_SHARE):
     return word_match(heard, question) >= share - 1e-9
 
 
-def speak_question(path):
-    """Makes the question as 16 kHz mono i16 samples with `say`."""
+def speak_question(path, text=QUESTION):
+    """Makes `text` as 16 kHz mono i16 samples with `say`."""
     subprocess.run(
-        ['say', '-o', str(path), '--data-format=LEI16@16000', QUESTION], check=True, timeout=60)
+        ['say', '-o', str(path), '--data-format=LEI16@16000', text], check=True, timeout=60)
     with wave.open(str(path), 'rb') as wav:
         if (wav.getframerate(), wav.getnchannels(), wav.getsampwidth()) != (SAMPLE_RATE, 1, 2):
             raise StepFailed('say did not write 16 kHz mono 16-bit audio')
@@ -207,6 +213,16 @@ def typed_panes(log):
     for line in clean_log(log).splitlines():
         found = re.search(r'pane_id=(%\d+)', line)
         if 'spoken prompt typed' in line and found:
+            panes.append(found.group(1))
+    return panes
+
+
+def hand_over_panes(log):
+    """The pane id of each `hand-over typed` line."""
+    panes = []
+    for line in clean_log(log).splitlines():
+        found = re.search(r'pane_id=(%\d+)', line)
+        if 'hand-over typed' in line and found:
             panes.append(found.group(1))
     return panes
 
@@ -408,7 +424,7 @@ class Run:
         # harold speak takes a tmux pane id as --src-id, so the stand-in's own pane id goes in.
         speak = '{} speak --src-id {}'.format(self.install_dir / 'harold', self.pane)
         (self.chief_dir / 'CLAUDE.md').write_text(
-            'Each line that starts with 🎙 is a spoken question. Answer it by running exactly\n'
+            'Each line that starts with 🎙 is a spoken request or question. Answer it by running exactly\n'
             '`{} "{}"` and do nothing else: no other command, no other text.\n'
             'Answer any other line with the one word: ok.\n'.format(speak, ANSWER_LINE))
         # No hooks: the user's own Stop hook reports to the installed Harold's address, not to
@@ -436,6 +452,21 @@ class Run:
         wait_until(idle, LIMIT_READY, 'the stand-in chief shows its input box', every=0.5)
         # Harold reads the panes every 1.2 s.
         time.sleep(3)
+
+    def seed_todo(self):
+        """One todo in the scratch store, through the test Harold's question tool."""
+        todo = (
+            '{{"id": "{}", "product": "harold", "spec": "call-test", "sha": "abc123", '
+            '"link": "https://example.com/call-test.md", "intro": "Which way?", "decisions": '
+            '[{{"ask": "way", "options": [{{"key": "a", "label": "left", "impact": "", '
+            '"suggested": true}}, {{"key": "b", "label": "right", "impact": ""}}]}}]}}'
+        ).format(TODO_ID)
+        put = subprocess.run(
+            [str(self.install_dir / 'harold'), 'tool', 'questions', 'put'], input=todo, text=True,
+            env=self.env, capture_output=True, timeout=30)
+        if put.returncode != 0:
+            raise StepFailed('seeding the todo failed: ' + (put.stdout + put.stderr).strip())
+        return 'todo ' + TODO_ID
 
     def log(self):
         try:
@@ -479,147 +510,198 @@ class Run:
         print('scratch folder kept: {} (the test Harold\'s log is harold.log)'.format(self.scratch))
 
 
+class Call:
+    """The phone's side of one call: it posts spoken questions, follows what #call shows, and
+    fetches and reports every sound Harold offers, as the phone does."""
+
+    def __init__(self, run):
+        self.run = run
+        self.phone = run.phone
+        self.mark = 0
+        self.call_id = None
+        self.call_sent = 0.0
+        self.handled = set()
+        self.wavs = {}
+        self.last_heard = ''
+
+    def serve(self, shown):
+        """Fetches and reports a sound once; keeps what it fetched."""
+        sound = shown['sound']
+        if not sound or sound in self.handled:
+            return
+        self.handled.add(sound)
+        try:
+            status, kind, body = self.phone.request('GET', '/call/answer/' + sound)
+            if status == 200:
+                self.wavs[sound] = (kind, body)
+            self.phone.request('POST', '/call/played?id={}&start_ms=0'.format(sound))
+        except (OSError, http.client.HTTPException):
+            pass
+
+    def sounds_since(self, mark):
+        with self.phone.changed:
+            return [shown for _, shown in self.phone.events[mark:] if shown['sound']]
+
+    def wait_for_line(self, test, limit, what, since):
+        """Waits for a sound whose line `test` accepts, serving every sound meanwhile."""
+        def found():
+            for shown in self.sounds_since(self.mark):
+                self.serve(shown)
+                if shown['line'] and test(shown['line']):
+                    return shown
+            return None
+
+        return wait_until(found, limit, what, since=since)
+
+    def post_question(self, audio):
+        """Posts `audio` in pieces stamped from the call's start, in real time. Answers when
+        the speech has ended, as a monotonic time."""
+        base_ms = int((time.monotonic() - self.call_sent) * 1000)
+        for at_ms, piece in pieces(audio, first_at_ms=base_ms):
+            due = self.call_sent + at_ms / 1000 + PIECE_SAMPLES / SAMPLE_RATE
+            time.sleep(max(0.0, due - time.monotonic()))
+            status, _, _ = self.phone.request(
+                'POST', '/call/audio?call={}&at={}'.format(self.call_id, at_ms), piece,
+                'application/octet-stream')
+            if status != 204:
+                raise StepFailed('POST /call/audio answered {}'.format(status))
+        return time.monotonic()
+
+
 def play(run):
     """The call itself: every step, in order. Answers the results."""
     results = []
     phone = run.phone
+    call = Call(run)
 
     def add(result):
         results.append(result)
         return result.ok
 
     question = speak_question(run.scratch / 'q.wav')
-    audio = phone_audio(question)
+    request = speak_question(run.scratch / 'r.wav', REQUEST)
     phone.follow_updates()
     wait_until(lambda: phone.events, 10, 'the call screen on /updates')
-    mark = len(phone.events)
+    call.mark = len(phone.events)
 
     # 1. POST /call, retried while the test Harold has not yet seen the stand-in chief.
-    call_id = []
-
     def post_call():
         started = time.monotonic()
         while True:
             status, _, body = phone.request('POST', '/call')
             if status == 200:
-                call_id.append(body.decode().strip())
-                return 'call {}'.format(call_id[0][:8])
+                call.call_id = body.decode().strip()
+                return 'call {}'.format(call.call_id[:8])
             if status != 409 or time.monotonic() - started > LIMIT_CALL:
                 raise StepFailed('POST /call answered {} {}'.format(status, body.decode(errors='replace')))
             time.sleep(1)
 
-    call_sent = time.monotonic()
+    call.call_sent = time.monotonic()
     if not add(run_step('POST /call answers 200', LIMIT_CALL, post_call)):
         return results
 
-    # 2. The question, in pieces stamped from the moment POST /call was sent, in real time.
-    posted_at = {}
+    def leg(label, text, audio_pcm):
+        """Posts one spoken turn and checks it is cut and heard. Answers (ok, spoke_until, mark)."""
+        mark = len(phone.events)
+        audio = phone_audio(audio_pcm)
+        spoke = {}
 
-    def post_question():
-        first = None
-        for at_ms, piece in pieces(audio):
-            # The phone sends a piece once it has recorded it.
-            due = call_sent + at_ms / 1000 + PIECE_SAMPLES / SAMPLE_RATE
-            time.sleep(max(0.0, due - time.monotonic()))
-            if first is None:
-                first = time.monotonic()
-            status, _, _ = phone.request(
-                'POST', '/call/audio?call={}&at={}'.format(call_id[0], at_ms), piece,
-                'application/octet-stream')
-            if status != 204:
-                raise StepFailed('POST /call/audio answered {}'.format(status))
-        posted_at['end'] = call_sent + (LEAD_S + len(question) / 2 / SAMPLE_RATE)
-        return '{} pieces'.format(len(pieces(audio)))
+        def post():
+            spoke['end'] = call.post_question(audio) - TAIL_S
+            return '{} pieces'.format(len(pieces(audio)))
 
-    audio_s = len(audio) / 2 / SAMPLE_RATE
-    if not add(run_step('post the question', audio_s + 5, post_question, since=call_sent)):
+        if not add(run_step(label + ': post the question', len(audio) / 2 / SAMPLE_RATE + 5, post)):
+            return False, None, mark
+        until = spoke['end']
+
+        def cut():
+            found = wait_until(
+                lambda: phone.since(
+                    mark, lambda s: s['state'] not in ('listening', 'off', '') or s['sound']
+                    or (s['heard'] and s['heard'] != call.last_heard)),
+                LIMIT_CUT, 'the turn is cut (#call leaves listening, or shows a sound or the words)', since=until)
+            return 'state {}'.format(found[2]['state'])
+
+        if not add(run_step(label + ': the turn is cut', LIMIT_CUT, cut, since=until)):
+            return False, until, mark
+
+        def heard():
+            # #call keeps showing the last turn's words until the next turn replaces them.
+            found = wait_until(
+                lambda: phone.since(mark, lambda s: s['heard'] and s['heard'] != call.last_heard),
+                LIMIT_HEARD, '"You said" line', since=until)
+            said = found[2]['heard']
+            call.last_heard = said
+            share = word_match(said, text)
+            if not heard_enough(said, text):
+                raise StepFailed('"You said" holds {:.0%} of the question, under {:.0%}: "{}"'.format(
+                    share, WORD_SHARE, said))
+            return '{:.0%} of the words'.format(share)
+
+        ok = add(run_step(label + ': "You said" holds the question', LIMIT_HEARD, heard, since=until))
+        return ok, until, mark
+
+    # 2. The question the call answerer answers from the todo, with nothing typed.
+    ok, until, leg_mark = leg('todos', QUESTION, question)
+    if not ok:
         return results
-    spoke_until = posted_at['end']
+    answer_marks = {}
 
-    # 3. The turn is cut.
-    def cut():
-        found = wait_until(
-            lambda: phone.since(mark, lambda s: s['state'] not in ('listening', 'off', '')),
-            LIMIT_CUT, 'the turn is cut (#call leaves listening)', since=spoke_until)
-        return 'state {}'.format(found[2]['state'])
+    def todos_answer():
+        shown = call.wait_for_line(
+            lambda line: bool(re.search(r'\b(1|one)\b', line.lower())), LIMIT_ANSWER,
+            "the call answerer's answer naming one todo", until)
+        answer_marks['todos'] = shown['sound']
+        log = run.log()
+        if 'spoken prompt typed' in log or 'hand-over typed' in log:
+            raise StepFailed('a line was typed into a pane for a question the facts answer')
+        return '"{}"'.format(shown['line'])
 
-    if not add(run_step('the turn is cut', LIMIT_CUT, cut, since=spoke_until)):
+    if not add(run_step("the call answerer answers 'how many todos'", LIMIT_ANSWER, todos_answer, since=until)):
+        return results
+    wav = call.wavs.get(answer_marks['todos'])
+    if not add(run_step('the answerer\'s answer is a WAV', LIMIT_FETCH,
+                        lambda: wav_check(wav))):
         return results
 
-    # 4. "You said".
-    def heard():
-        found = wait_until(
-            lambda: phone.since(mark, lambda s: s['heard']),
-            LIMIT_HEARD, '"You said" line', since=spoke_until)
-        said = found[2]['heard']
-        share = word_match(said, QUESTION)
-        if not heard_enough(said, QUESTION):
-            raise StepFailed('"You said" holds {:.0%} of the question, under {:.0%}: "{}"'.format(
-                share, WORD_SHARE, said))
-        return '{:.0%} of the words'.format(share)
-
-    if not add(run_step('"You said" holds the question', LIMIT_HEARD, heard, since=spoke_until)):
+    # 3. A request for work: the call answerer says it was passed on, and Harold types the
+    # hand-over into the stand-in chief's pane, which answers with `harold speak`.
+    time.sleep(1)
+    ok, until, leg_mark = leg('hand-over', REQUEST, request)
+    if not ok:
         return results
 
-    # 5. The line typed into the stand-in's pane.
-    def typed():
-        wait_until(lambda: 'spoken prompt typed' in run.log(), LIMIT_TYPED,
-                   'the log line "spoken prompt typed"', since=spoke_until)
-        wait_until(lambda: '🎙' in run.pane_text(), LIMIT_TYPED,
-                   'the 🎙 line in the stand-in\'s pane', since=spoke_until)
+    def passed_on():
+        shown = call.wait_for_line(lambda line: 'chief' in line.lower() and line != FROM_THE_CHIEF,
+                                   LIMIT_ANSWER, 'the answerer says it passed the request on', until)
+        return '"{}"'.format(shown['line'])
+
+    if not add(run_step("the answerer says it passed the request on", LIMIT_ANSWER, passed_on, since=until)):
+        return results
+
+    def handed_over():
+        wait_until(lambda: 'hand-over typed' in run.log(), LIMIT_TYPED,
+                   'the log line "hand-over typed"', since=until)
+        wait_until(lambda: 'hand-over H1' in run.pane_text(), LIMIT_TYPED,
+                   "the 🎙 hand-over H1 line in the stand-in's pane", since=until)
         return 'pane {}'.format(run.pane)
 
-    if not add(run_step('typed into the stand-in\'s pane', LIMIT_TYPED, typed, since=spoke_until)):
+    if not add(run_step("the hand-over is typed into the stand-in's pane", LIMIT_TYPED, handed_over, since=until)):
         return results
 
-    # 6. The answer's sound. Harold also offers a tick every 3 s while the chief thinks; like the
-    # phone, the script fetches and reports each of those, and waits for the one that carries
-    # the chief's line.
-    ticks = set()
+    # 4. The chief's report, after "From the chief.".
+    def chief_line():
+        call.wait_for_line(lambda line: line == ANSWER_LINE, LIMIT_SOUND, "the chief's answer in #call", until)
+        lines = [shown['line'] for shown in call.sounds_since(leg_mark) if shown['line']]
+        if FROM_THE_CHIEF not in lines or lines.index(FROM_THE_CHIEF) > lines.index(ANSWER_LINE):
+            raise StepFailed('"From the chief." did not come before the answer: {}'.format(lines))
+        return 'after "From the chief."'
 
-    def answered():
-        with phone.changed:
-            offered = [shown for _, shown in phone.events[mark:] if shown['sound']]
-        for shown in offered:
-            if is_answer(shown):
-                return shown
-            if shown['sound'] not in ticks:
-                ticks.add(shown['sound'])
-                try:
-                    phone.request('GET', '/call/answer/' + shown['sound'])
-                    phone.request('POST', '/call/played?id={}&start_ms=0'.format(shown['sound']))
-                except (OSError, http.client.HTTPException):
-                    pass
-        return None
-
-    def sound():
-        found = wait_until(answered, LIMIT_SOUND, "the chief's answer in #call", since=spoke_until)
-        answer_id.append(found['sound'])
-        return 'sound {}'.format(found['sound'][:8])
-
-    answer_id = []
-    if not add(run_step("#call names the chief's answer", LIMIT_SOUND, sound, since=spoke_until)):
-        return results
-    sound_id = answer_id[0]
-
-    # 7. The answer's audio.
-    def answer():
-        status, kind, body = phone.request('GET', '/call/answer/' + sound_id)
-        if status != 200 or not kind.startswith('audio/wav') or body[:4] != b'RIFF' or body[8:12] != b'WAVE':
-            raise StepFailed('GET /call/answer answered {} {} ({} bytes)'.format(status, kind, len(body)))
-        scratch_wav = run.scratch / 'answer.wav'
-        scratch_wav.write_bytes(body)
-        with wave.open(str(scratch_wav), 'rb') as wav:
-            return 'WAV of {:.2f} s'.format(wav.getnframes() / wav.getframerate())
-
-    if not add(run_step('GET /call/answer returns WAV', LIMIT_FETCH, answer)):
+    if not add(run_step("the chief's answer plays after 'From the chief.'", LIMIT_SOUND, chief_line, since=until)):
         return results
 
-    # 8. Played, then hang up.
+    # 5. Hang up.
     def hang_up():
-        status, _, _ = phone.request('POST', '/call/played?id={}&start_ms=0'.format(sound_id))
-        if status != 204:
-            raise StepFailed('POST /call/played answered {}'.format(status))
         status, _, _ = phone.request('DELETE', '/call')
         if status != 204:
             raise StepFailed('DELETE /call answered {}'.format(status))
@@ -627,8 +709,17 @@ def play(run):
                    'the log line call ended reason="stopped"')
         return 'call ended, reason stopped'
 
-    add(run_step('played, DELETE /call, call ended', LIMIT_HANGUP, hang_up))
+    add(run_step('DELETE /call, call ended', LIMIT_HANGUP, hang_up))
     return results
+
+
+def wav_check(wav):
+    if wav is None:
+        raise StepFailed('the answer was not fetched')
+    kind, body = wav
+    if not kind.startswith('audio/wav') or body[:4] != b'RIFF' or body[8:12] != b'WAVE':
+        raise StepFailed('GET /call/answer answered {} ({} bytes)'.format(kind, len(body)))
+    return '{} bytes'.format(len(body))
 
 
 def isolation(run):
@@ -637,7 +728,7 @@ def isolation(run):
     log = run.log()
     problems = []
     problems.extend(line.strip() for line in log.splitlines() if 'iMessage listener started' in line)
-    outside = [pane for pane in typed_panes(log) if pane != run.pane]
+    outside = [pane for pane in typed_panes(log) + hand_over_panes(log) if pane != run.pane]
     if outside:
         problems.append('typed into {}'.format(', '.join(outside)))
     if problems:
@@ -678,7 +769,10 @@ def main(argv=None):
                                  lambda: (run.start_chief(), run.wait_for_chief_idle()) and '')
                 results.append(chief)
                 if chief.ok:
-                    results.extend(play(run))
+                    seeded = run_step('a todo is seeded in the scratch store', 30, run.seed_todo)
+                    results.append(seeded)
+                    if seeded.ok:
+                        results.extend(play(run))
                     results.append(run_step('log shows nothing beyond the scratch pane', 5,
                                             lambda: isolation(run)))
     except Exception as error:  # a crash is a failed run, and the teardown still happens

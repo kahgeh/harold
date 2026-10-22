@@ -1631,6 +1631,8 @@ const ATTRIBUTES: &[&str] = &[
     "call_from",
     "first_sound_ms",
     "answer_ms",
+    "answered_by",
+    "cost_micros",
 ];
 
 /// The spec's span table. The trends panel "One turn, end to end" lists `harold.turn`.
@@ -1645,6 +1647,7 @@ const SPANS: &[&str] = &[
     "harold.watch.run",
     "harold.watch.model",
     "harold.call_turn",
+    "harold.call_answer",
 ];
 
 /// The spec's cards table: group, card, the metrics or spans its tile reads, and how it
@@ -1990,7 +1993,12 @@ fn the_cards_dashboard_shows_each_card_beside_its_earlier_number_and_nothing_els
             };
             [card.to_string(), earlier]
         })
-        .chain([NOTIFICATIONS_CARD.to_string(), CALL_TURN_CARD.to_string()])
+        .chain([
+            NOTIFICATIONS_CARD.to_string(),
+            CALL_TURN_CARD.to_string(),
+            CALL_ANSWERS_FAILED_CARD.to_string(),
+            CALL_ANSWERER_SPEND_CARD.to_string(),
+        ])
         .collect();
     assert_eq!(tile_names(&dashboard), names);
 
@@ -2117,6 +2125,8 @@ fn the_cards_dashboard_shows_each_card_beside_its_earlier_number_and_nothing_els
 
 const NOTIFICATIONS_CARD: &str = "Notifications by agent and channel";
 const CALL_TURN_CARD: &str = "Call turn, time to first sound and to the answer, last 7 days";
+const CALL_ANSWERS_FAILED_CARD: &str = "Call answers failed, by day";
+const CALL_ANSWERER_SPEND_CARD: &str = "Call answerer spend, by day";
 
 #[test]
 fn the_notifications_card_is_a_table_of_sent_and_kept_over_the_picked_range() {
@@ -2164,12 +2174,44 @@ fn the_call_turn_card_is_a_table_of_the_two_sound_times_by_where_the_call_is() {
         "SpanAttributes['call_from']",
         "SpanAttributes['first_sound_ms']",
         "SpanAttributes['answer_ms']",
+        "SpanAttributes['answered_by'] AS answered_by",
         "quantileIf(0.5)",
         "quantileIf(0.95)",
         "INTERVAL 7 DAY",
-        "GROUP BY call_from",
+        "GROUP BY call_from, answered_by",
     ] {
         assert!(sql.contains(piece), "{piece} in {sql}");
+    }
+}
+
+#[test]
+fn the_call_answer_cards_count_failed_runs_and_sum_their_cost_for_each_day() {
+    let dashboard = definition("dashboard.json");
+    let sql_of = |name: &str| {
+        let card = tiles(&dashboard)
+            .iter()
+            .find(|tile| tile["name"] == name)
+            .expect("the call answer card");
+        assert_eq!(card["config"]["displayType"], "table");
+        assert_eq!(card["config"]["sourceId"], "@TRACES_SOURCE_ID@");
+        card["config"]["sqlTemplate"].as_str().unwrap().to_owned()
+    };
+    let failed = sql_of(CALL_ANSWERS_FAILED_CARD);
+    for piece in [
+        "SpanName = 'harold.call_answer'",
+        "SpanAttributes['result'] = 'failed'",
+        "INTERVAL 7 DAY",
+        "GROUP BY day",
+    ] {
+        assert!(failed.contains(piece), "{piece} in {failed}");
+    }
+    let spend = sql_of(CALL_ANSWERER_SPEND_CARD);
+    for piece in [
+        "SpanName = 'harold.call_answer'",
+        "sum(toUInt64OrZero(SpanAttributes['cost_micros']))",
+        "GROUP BY day",
+    ] {
+        assert!(spend.contains(piece), "{piece} in {spend}");
     }
 }
 

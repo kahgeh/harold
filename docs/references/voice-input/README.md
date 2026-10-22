@@ -43,7 +43,7 @@ The button then shows `listening`.
 
 1. You speak. Harold finds the end of your speech ([The end-of-speech rule](#the-end-of-speech-rule)) and writes the turn's audio to a WAV file in a new folder under `$TMPDIR/harold-voice-input/`.
 2. The voice worker transcribes the file with Whisper large-v3-turbo. Harold deletes the turn's folder as soon as the answer returns, also when transcription fails.
-3. Harold drops the turn or types it:
+3. With the call answerer on (`[call_answerer] enabled`, the default), a small model answers the turn, and only a request for work reaches the chief, as a hand-over. [The call answerer](call-answerer.md) describes it. The steps below are what happens when it is off or cannot answer, and every turn went this way before it existed. Harold drops the turn or types it:
    - **Dropped** when the transcript is empty, or when Whisper's no-speech probability is above 0.6. Harold says `Sorry, I didn't catch that.` and listens again. The probability is the lowest over Whisper's segments, and 1.0 when there are none.
    - **Typed** otherwise. Harold types `🎙 <transcript>` and Enter into the chief's pane, with the rules timed prompts use: the pane must be idle and its input box empty. It takes the same per-pane lock as other writers, so a spoken line never interleaves with an alert or a timed prompt. Like a phone reply, it is not held back by the one-minute "typed recently" hold, because you are speaking now. The turn is recorded in harold-telemetry with `started_by = voice`.
 4. If the chief's answer has not started 3 seconds after the turn is typed, Harold plays a soft tick every 3 seconds, so the call is not silent. The button shows `chief thinking`.
@@ -55,7 +55,7 @@ The chief treats `🎙` lines as possibly misheard, and confirms anything conseq
 
 | Case | What happens |
 |---|---|
-| The chief's pane is busy | Harold says `The chief is busy. I'll pass it on when it's free.` It tries to type the turn every second, for up to 2 minutes, and listens meanwhile. A second turn spoken meanwhile is joined to the waiting one with a space, so the chief gets one `🎙` line. After 2 minutes the turn is dropped, with no phrase. When the call ends before the turn is typed, the turn keeps waiting ([A turn waiting for a busy chief](#a-turn-waiting-for-a-busy-chief)). |
+| The chief's pane is busy | With the call answerer on, an answered turn needs no idle pane, and a hand-over is typed into a busy chief ([hand-overs](call-answerer.md#hand-overs)). A turn that falls back to the chief: Harold says `The chief is busy. I'll pass it on when it's free.` It tries to type the turn every second, for up to 2 minutes, and listens meanwhile. A second turn spoken meanwhile is joined to the waiting one with a space, so the chief gets one `🎙` line. After 2 minutes the turn is dropped, with no phrase. When the call ends before the turn is typed, the turn keeps waiting ([A turn waiting for a busy chief](#a-turn-waiting-for-a-busy-chief)). |
 | The chief takes longer than 3 seconds | The tick, every 3 seconds. At 90 seconds Harold says `No answer yet.` and listens again. |
 | The chief's turn ends without `harold speak` | Harold reads the chief's pane every 500 ms. When it sees the pane busy and then idle, and no line arrives within 2 seconds, it says the desk's turn-end update for that prompt, so every turn gets an answer. |
 | Nothing was heard, or the transcript is empty | `Sorry, I didn't catch that.`, and listening again. |

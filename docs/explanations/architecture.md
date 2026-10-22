@@ -77,7 +77,7 @@ flowchart LR
 | reply routing | Decides which Mac owns a reply by its routing tag or the latest notifier, picks the pane by the tag or the other fallbacks, and types it there | `harold/src/inbound/` |
 | snapshot publisher | Sends snapshots to clients over `WatchAgentStates` | `harold/src/agent/snapshot.rs`, `harold/src/main.rs` |
 | tool host, question tool, backlog tool, watch tool | Hosts tools with their own storage and gRPC services (ADR 0001). The dash and the web app are clients of the question tool | `harold/src/tools.rs`, `harold/src/tools/` |
-| calls and voice worker | Voice calls with the chief, and the process that turns lines into audio and speech into text | `harold/src/voice_input.rs`, `harold/src/voice_input/`, `harold/src/voice_worker.py` |
+| calls, call answerer and voice worker | Voice calls with the chief, the call answerer (the small model that answers each turn and hands real work to the chief), and the process that turns lines into audio and speech into text | `harold/src/voice_input.rs`, `harold/src/voice_input/` (`answerer.rs`, `hand_over.rs`), `harold/src/voice_worker.py` |
 | web app | The phone's web app: the thread, push, calls and the todos, which it shows and answers through the question tool's service | `harold/src/web_app/`, `harold/static/web_app/`, `harold/templates/web_app/` |
 | activity summaries | Optional work summaries that Claude Code writes from an agent's evidence | `harold/src/activity_summary.rs` |
 | timed prompts | Text typed into a pane at a set time each day | `harold/src/timed_prompts.rs` |
@@ -99,7 +99,7 @@ What other components or products depend on, each with where its contract is wri
 - **Hook payloads** from Claude Code, Codex and OpenCode. Contract: [Set up agent monitor hooks](../how-tos/setup-agent-monitor-hooks.md).
 - **Settings:** `default.toml` and `local.toml`, read in that order, with `local.toml` laid over `default.toml`. Contract: `harold/config/local.template.toml` and each feature's reference page.
 - **The web app's HTTP routes.** Contract: the [web app reference](../references/away-app/README.md).
-- **Lines Harold types into panes:** the answers line, alerts, timed prompts, phone replies and `WATCH` lines. Contracts: the [questions reference](../references/tools/questions.md), the [watch reference](../references/tools/watch.md), the [telemetry reference](../references/telemetry/README.md), the [timed prompts reference](../references/timed-prompts/README.md) and the [inbound routing reference](../references/inbound-message-routing/README.md).
+- **Lines Harold types into panes:** the answers line, alerts, timed prompts, phone replies, `WATCH` lines and hand-overs from a call. A hand-over is the one writer that may type into a `Busy` Claude Code pane (ADR 0009). Contracts: the [questions reference](../references/tools/questions.md), the [call answerer reference](../references/voice-input/call-answerer.md), the [watch reference](../references/tools/watch.md), the [telemetry reference](../references/telemetry/README.md), the [timed prompts reference](../references/timed-prompts/README.md) and the [inbound routing reference](../references/inbound-message-routing/README.md).
 - **The alert address:** `POST /alert` on `[telemetry] alert_listen`, where HyperDX's webhooks post. Contract: the [telemetry reference](../references/telemetry/README.md).
 - **The pod registry:** Harold reads the vault's `products.toml` for pod stats. Contract: the [telemetry reference](../references/telemetry/README.md).
 - **The routing tag** on replies. Contract: the [inbound routing reference](../references/inbound-message-routing/README.md).
@@ -125,6 +125,7 @@ One line per architectural decision, oldest first. Each date is the commit that 
 - 2026-10-20: ADR 0006, answers go to the chief early, and a set-aside question returns after a line is typed, a `later` or a dismiss that leaves nothing waiting and no answer unsent, so "later" still means after everything else. [ADR 0006](../adr/0006-answers-go-to-the-chief-early.md)
 - 2026-10-21: ADR 0007, the web app reaches the todos through the question tool's gRPC service, as the dash does, so a phone on the tailnet can answer them. [ADR 0007](../adr/0007-the-web-app-reaches-todos-through-the-question-service.md)
 - 2026-10-21: ADR 0008, Harold reaches the phone by iMessage only and its gRPC server stays on the Mac, so every Mac reads every reply from its own `chat.db` and nothing passes between Macs. [ADR 0008](../adr/0008-harold-reaches-the-phone-by-imessage-only.md)
+- 2026-10-23: ADR 0009, a call is answered by a small model and real work goes to the chief as a hand-over, typed into the chief's pane even while it is busy, so a call no longer waits for a large model. [ADR 0009](../adr/0009-a-call-is-answered-by-a-small-model.md)
 
 ## Departures from the standards
 

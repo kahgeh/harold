@@ -4,10 +4,13 @@
 //! worker, a sound, a turn-end update). `CallControl` starts it, talks to it and reads its
 //! status.
 
+use super::answerer::{Answer, Ask, CallAnswering, CallSoFar, Failure, Remark, Who};
+use super::hand_over::HandOvers;
 use super::hang_up::{Spoken, hang_up};
 use super::phone::sound_length;
 use super::phrases::{
-    BYE, CHIEF_BUSY, NO_CHIEF, NOTHING_HEARD, VOICE_FAILED, VOICE_STOPPED, phrase_file,
+    BYE, CHIEF_BUSY, FROM_THE_CHIEF, NO_CHIEF, NOTHING_HEARD, PASSED_ON, VOICE_FAILED,
+    VOICE_STOPPED, phrase_file,
 };
 use super::speech::{FRAME, MAX_TURN_FRAMES, START_FRAMES, SpeechDetector};
 use super::wav::{tick_wav, wav_bytes};
@@ -55,8 +58,13 @@ const IDLE_LIMIT: Duration = Duration::from_secs(10 * 60);
 const HOLD_LIMIT: Duration = Duration::from_secs(10);
 /// Whisper's no-speech probability above which a turn counts as nothing heard.
 const NO_SPEECH_LIMIT: f32 = 0.6;
+/// How long a run of the call answerer may take in all, the facts and the model, before the
+/// call gives up on it whatever the answerer says. The answerer's own limit is shorter.
+const RUN_LIMIT: Duration = Duration::from_secs(30);
+/// The most remarks of this call kept for the answerer's next turn.
+const REMARKS_KEPT: usize = 40;
 /// The mark in front of each turn typed into the chief's pane.
-const MARK: &str = "🎙";
+pub(super) const MARK: &str = "🎙";
 const TICK_WAV: &str = "tick.wav";
 const TURN_WAV: &str = "turn.wav";
 
@@ -128,6 +136,11 @@ pub(super) enum Event<W> {
         played: bool,
     },
     TurnEndUpdate(String),
+    /// The call answerer's run `id` ended.
+    Answered {
+        id: u64,
+        answer: Answer,
+    },
 }
 
 pub(super) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -190,6 +203,7 @@ pub(super) fn open_turn(call_from: &'static str) -> tracing::Span {
         first_sound_ms = tracing::field::Empty,
         answer_ms = tracing::field::Empty,
         busy_reason = tracing::field::Empty,
+        answered_by = tracing::field::Empty,
     )
 }
 
@@ -347,6 +361,8 @@ enum Source {
     Phrase,
     OtherAgent,
     Tick,
+    /// The call answerer's `say`.
+    Answer,
 }
 
 impl Source {
@@ -357,6 +373,7 @@ impl Source {
             Self::Phrase => "phrase",
             Self::OtherAgent => "other_agent",
             Self::Tick => "tick",
+            Self::Answer => "answer",
         }
     }
 }
@@ -394,7 +411,9 @@ impl TurnTrace {
             self.first_sound_noted = true;
             self.span.record("first_sound_ms", ms);
         }
-        if matches!(source, Source::ChiefLine | Source::Update) && !self.answer_noted {
+        if matches!(source, Source::ChiefLine | Source::Update | Source::Answer)
+            && !self.answer_noted
+        {
             self.answer_noted = true;
             self.span.record("answer_ms", ms);
         }
@@ -458,6 +477,8 @@ struct Sound {
     /// The `harold.call_turn` span of the turn it belongs to, which its spans join.
     turn: Option<tracing::Span>,
     voice: Option<VoiceTrace>,
+    /// The call answerer's turn that this sound answers: it ends when the sound is let go.
+    owned: Option<TurnTrace>,
 }
 
 impl Sound {
@@ -517,6 +538,24 @@ struct Awaiting {
     /// A line answering the turn has arrived, or is coming from the turn-end update.
     answered: bool,
     update_asked: bool,
+}
+
+/// A turn that waits for the call answerer, with its trace.
+struct QueuedTurn {
+    text: String,
+    trace: TurnTrace,
+}
+
+/// The call answerer's run now going.
+struct AnswerRun {
+    id: u64,
+    text: String,
+    trace: TurnTrace,
+    next_tick: Instant,
+    gives_up_at: Instant,
+    task: JoinHandle<()>,
+    /// Set by talk now: the line is not spoken, but a hand-over still goes.
+    silenced: bool,
 }
 
 /// A turn that waits for a busy chief.
@@ -586,6 +625,16 @@ struct Call<P: CallPorts> {
     updates: Vec<JoinHandle<()>>,
     awake: Option<P::Awake>,
     next_id: u64,
+    /// The call answerer, when the daemon has one.
+    answering: Option<Arc<CallAnswering>>,
+    /// Set when the answerer's program could not be started: the call stops trying it.
+    answerer_gone: bool,
+    run: Option<AnswerRun>,
+    /// Turns heard while a run goes, or while a turn for the chief is awaited.
+    queued: VecDeque<QueuedTurn>,
+    /// What was said in this call, for the answerer's next turn.
+    remarks: Vec<Remark>,
+    hand_overs: HandOvers,
 }
 
 impl<P: CallPorts> Call<P> {
@@ -660,6 +709,7 @@ impl<P: CallPorts> Call<P> {
         info!("call started");
         let mut call = Self {
             sink: ports.sink(),
+            answering: ports.answering(),
             ports,
             status,
             events,
@@ -693,6 +743,11 @@ impl<P: CallPorts> Call<P> {
             updates: Vec::new(),
             awake,
             next_id: 0,
+            answerer_gone: false,
+            run: None,
+            queued: VecDeque::new(),
+            remarks: Vec::new(),
+            hand_overs: HandOvers::default(),
         };
         call.watch_worker(&worker);
         call.worker = Some(worker);
@@ -703,6 +758,7 @@ impl<P: CallPorts> Call<P> {
 
     async fn run(&mut self, inbox: &mut mpsc::UnboundedReceiver<Event<P::Worker>>) {
         while !self.done {
+            self.next_answer().await;
             self.next_request();
             self.next_sound();
             self.publish();
@@ -753,6 +809,7 @@ impl<P: CallPorts> Call<P> {
             } => self.made(generation, id, wav, result, worker).await,
             Event::Played { id, played } => self.played(id, played).await,
             Event::TurnEndUpdate(line) => self.turn_end_update(line),
+            Event::Answered { id, answer } => self.answered(id, answer).await,
         }
     }
 
@@ -801,6 +858,7 @@ impl<P: CallPorts> Call<P> {
     fn end_turn(&mut self, result: Option<&str>) {
         if let (Some(turn), Some(result)) = (self.turn.take(), result) {
             turn.span.record("result", result);
+            turn.span.record("answered_by", "none");
         }
     }
 
@@ -1120,6 +1178,7 @@ impl<P: CallPorts> Call<P> {
             source: Source::Phrase,
             turn: None,
             voice: None,
+            owned: None,
         });
     }
 
@@ -1146,7 +1205,8 @@ impl<P: CallPorts> Call<P> {
         }
     }
 
-    /// Types the turn, or joins it to the turn waiting for a busy chief (Decision 9).
+    /// Gives the turn to the call answerer, or types it, or joins it to the turn waiting for
+    /// a busy chief (Decision 9).
     async fn turn(&mut self, text: String) {
         self.mode = Mode::Listening;
         if let Some(held) = self.held.as_mut() {
@@ -1154,6 +1214,20 @@ impl<P: CallPorts> Call<P> {
             held.text.push_str(&text);
             return;
         }
+        if self.answerer_usable() {
+            let ports = &self.ports;
+            let trace = self
+                .turn
+                .take()
+                .unwrap_or_else(|| TurnTrace::open(ports.call_from()));
+            self.queued.push_back(QueuedTurn { text, trace });
+            return;
+        }
+        self.turn_to_chief(text).await;
+    }
+
+    /// Types the turn into the chief's pane, as every turn was before the call answerer.
+    async fn turn_to_chief(&mut self, text: String) {
         match try_type(&*self.ports, &text).await {
             Typing::Typed(pane) => self.typed(pane, text),
             Typing::NoChief => self.no_chief(),
@@ -1170,6 +1244,184 @@ impl<P: CallPorts> Call<P> {
             }
             Typing::Failed => self.dropped(TurnResult::Failed),
         }
+    }
+
+    // --- the call answerer ---
+
+    fn answerer_usable(&self) -> bool {
+        self.answering.is_some() && !self.answerer_gone
+    }
+
+    /// Notes what was said in this call, for the answerer's next turn.
+    fn remark(&mut self, who: Who, text: &str) {
+        if self.answering.is_none() {
+            return;
+        }
+        if self.remarks.len() >= REMARKS_KEPT {
+            self.remarks.remove(0);
+        }
+        self.remarks.push(Remark {
+            who,
+            text: text.to_string(),
+        });
+    }
+
+    /// Starts a run for the first turn waiting, when none goes, the user is not speaking
+    /// and no turn waits for a busy chief. Turns waiting when the answerer is gone go to the
+    /// chief.
+    async fn next_answer(&mut self) {
+        if self.done || self.run.is_some() || self.mode != Mode::Listening || self.held.is_some() {
+            return;
+        }
+        if self.answerer_gone && !self.queued.is_empty() {
+            if let Some(queued) = self.queued.pop_front() {
+                self.fall_back(queued.text, queued.trace).await;
+            }
+            return;
+        }
+        let Some(answering) = self.answering.clone().filter(|_| !self.answerer_gone) else {
+            return;
+        };
+        let Some(queued) = self.queued.pop_front() else {
+            return;
+        };
+        let id = self.new_id();
+        let call = CallSoFar {
+            remarks: self.remarks.clone(),
+            hand_overs: self.hand_overs.facts(),
+        };
+        self.remark(Who::You, &queued.text);
+        let words = queued.text.clone();
+        let span = queued.trace.span.clone();
+        let events = self.events.clone();
+        let task = tokio::spawn(async move {
+            let ask = Ask {
+                words: &words,
+                call: &call,
+                turn: &span,
+            };
+            let answer = answering.answerer.answer(ask).await;
+            let _ = events.send(Event::Answered { id, answer });
+        });
+        let now = Instant::now();
+        self.active_at = now;
+        self.run = Some(AnswerRun {
+            id,
+            text: queued.text,
+            trace: queued.trace,
+            next_tick: now + TICK_EVERY,
+            gives_up_at: now + RUN_LIMIT,
+            task,
+            silenced: false,
+        });
+    }
+
+    /// A run ended. Its line is spoken and its hand-over started, or the turn goes to the
+    /// chief.
+    async fn answered(&mut self, id: u64, answer: Answer) {
+        let Some(mut run) = self.run.take_if(|run| run.id == id) else {
+            return;
+        };
+        if self.done {
+            return;
+        }
+        // A bye was said while the run went: its hand-over still goes, its line does not.
+        run.silenced |= self.mode == Mode::Ending;
+        match answer {
+            Answer::Said { say, hand_over } => self.run_said(run, say, hand_over),
+            Answer::Failed(failure) => {
+                if failure == Failure::NotStarted {
+                    self.answerer_gone = true;
+                }
+                if self.mode != Mode::Ending {
+                    self.fall_back(run.text, run.trace).await;
+                }
+            }
+        }
+    }
+
+    fn run_said(&mut self, run: AnswerRun, say: String, hand_over: Option<String>) {
+        let handed_over = hand_over.is_some();
+        if let Some(request) = &hand_over {
+            self.hand_overs.start(Arc::clone(&self.ports), request);
+        }
+        let say = if say.trim().is_empty() {
+            PASSED_ON.to_string()
+        } else {
+            one_line(&say)
+        };
+        self.remark(Who::Answerer, &say);
+        let result = if handed_over {
+            TurnResult::HandedOver
+        } else {
+            TurnResult::Answered
+        };
+        run.trace.span.record("result", result.reason());
+        run.trace.span.record("answered_by", "answerer");
+        {
+            let mut status = lock(&self.status);
+            status.last_result = Some(result);
+            status.last_transcript = Some(run.text);
+        }
+        self.active_at = Instant::now();
+        if !run.silenced {
+            self.say_answer(say, run.trace);
+        }
+    }
+
+    /// A run that gave no answer: the turn goes to the chief as it would without the
+    /// answerer. When the user has moved on to another turn, it is passed on in the
+    /// background instead, as a turn said before a bye is.
+    async fn fall_back(&mut self, text: String, trace: TurnTrace) {
+        let moved_on = self.turn.is_some()
+            || !self.queued.is_empty()
+            || self.held.is_some()
+            || self.mode != Mode::Listening;
+        if moved_on {
+            let gives_up_at = Instant::now() + BUSY_LIMIT;
+            tokio::spawn(pass_on_when_free(
+                Arc::clone(&self.ports),
+                text,
+                Instant::now(),
+                gives_up_at,
+            ));
+            return;
+        }
+        self.turn = Some(trace);
+        self.turn_to_chief(text).await;
+    }
+
+    /// Queues the answerer's `say` to be made into audio and played. The turn ends when the
+    /// sound is let go.
+    fn say_answer(&mut self, text: String, trace: TurnTrace) {
+        let id = self.new_id();
+        let wav = self.dir.join(format!("answer-{}.wav", Uuid::new_v4()));
+        let span = trace.span.clone();
+        let voice = self.voice_trace_in(span.id(), Source::Answer);
+        self.jobs.push_back(Job::Make {
+            id,
+            text: text.clone(),
+            wav: wav.clone(),
+        });
+        self.sounds.push_back(Sound {
+            id,
+            text,
+            audio: Audio::Wav {
+                path: wav,
+                ready: false,
+                keep_as: None,
+                remove: true,
+            },
+            by: None,
+            answers: false,
+            waits_after_talk_now: false,
+            after: After::Nothing,
+            reply: None,
+            source: Source::Answer,
+            turn: Some(span),
+            voice: Some(voice),
+            owned: Some(trace),
+        });
     }
 
     /// The turn said before a bye, and then the call ends. A busy chief gets the turn as
@@ -1209,6 +1461,7 @@ impl<P: CallPorts> Call<P> {
             .turn
             .get_or_insert_with(|| TurnTrace::open(ports.call_from()));
         turn.typed = true;
+        turn.span.record("answered_by", "chief");
         log_typed(&turn.span, &pane, &text);
         self.hold_others_until = None;
         let prompt = format!("{MARK} {text}");
@@ -1281,6 +1534,7 @@ impl<P: CallPorts> Call<P> {
     fn ending_phrase(&mut self, text: &'static str, why: Ended) {
         self.mode = Mode::Ending;
         self.awaiting = None;
+        self.queued.clear();
         self.phrase(text, After::End(why));
         if let Some(sound) = self.sounds.pop_back() {
             self.sounds.push_front(sound);
@@ -1306,8 +1560,13 @@ impl<P: CallPorts> Call<P> {
                 }
                 times
             });
+        let running = self
+            .run
+            .iter()
+            .flat_map(|run| [run.next_tick, run.gives_up_at]);
         let idle = std::iter::once(self.active_at + IDLE_LIMIT);
         held.chain(awaiting)
+            .chain(running)
             .chain(self.hold_others_until)
             .chain(idle)
             .min()
@@ -1325,6 +1584,7 @@ impl<P: CallPorts> Call<P> {
             }
         }
         self.await_answer(now);
+        self.await_run(now).await;
         if self.hold_others_until.is_some_and(|until| now >= until) {
             self.hold_others_until = None;
         }
@@ -1337,6 +1597,8 @@ impl<P: CallPorts> Call<P> {
     /// keep the display awake for good. A call doing something then starts its clock again.
     fn idle(&mut self, now: Instant) {
         let quiet = self.mode == Mode::Listening
+            && self.run.is_none()
+            && self.queued.is_empty()
             && !self.detector.in_turn()
             && self.playing.is_none()
             && self.sounds.is_empty()
@@ -1387,6 +1649,28 @@ impl<P: CallPorts> Call<P> {
             Typing::Failed => {
                 self.held = None;
                 self.dropped(TurnResult::Failed);
+            }
+        }
+    }
+
+    /// The tick while a run of the call answerer goes, and the end of a run that never
+    /// reports.
+    async fn await_run(&mut self, now: Instant) {
+        let Some(run) = self.run.as_mut() else {
+            return;
+        };
+        if now >= run.gives_up_at {
+            run.task.abort();
+            let id = run.id;
+            warn!(reason = Failure::TimedOut.as_str(), "call answer failed");
+            self.answered(id, Answer::Failed(Failure::TimedOut)).await;
+            return;
+        }
+        if now >= run.next_tick {
+            run.next_tick += TICK_EVERY;
+            // The user speaking is not talked over.
+            if self.mode == Mode::Listening && !self.detector.in_turn() {
+                self.play_tick();
             }
         }
     }
@@ -1475,6 +1759,9 @@ impl<P: CallPorts> Call<P> {
             }
             return;
         }
+        if by == Speaker::Chief {
+            self.remark(Who::Chief, &line);
+        }
         if by == Speaker::Chief && self.skip_chief_lines {
             if let Some(reply) = reply {
                 let _ = reply.send(true);
@@ -1486,6 +1773,14 @@ impl<P: CallPorts> Call<P> {
                 awaiting.answered = true;
                 true
             });
+        // A line the chief says between turns of a call the call answerer answers, such as
+        // a hand-over's report, is told apart from the answerer's own by a phrase first.
+        if by == Speaker::Chief && !answers && self.answering.is_some() {
+            self.phrase(FROM_THE_CHIEF, After::Nothing);
+            if let Some(preface) = self.sounds.back_mut() {
+                preface.by = Some(Speaker::Chief);
+            }
+        }
         let id = self.new_id();
         let wav = self.dir.join(format!("answer-{}.wav", Uuid::new_v4()));
         let source = match (by, update) {
@@ -1517,6 +1812,7 @@ impl<P: CallPorts> Call<P> {
             source,
             turn,
             voice: Some(voice),
+            owned: None,
         });
     }
 
@@ -1533,6 +1829,11 @@ impl<P: CallPorts> Call<P> {
     /// Opens the `harold.call_voice` span of a sound queued for the worker.
     fn voice_trace(&self, source: Source) -> VoiceTrace {
         let parent = self.turn_span(source).and_then(|turn| turn.id());
+        self.voice_trace_in(parent, source)
+    }
+
+    /// The same, joining the span `parent`.
+    fn voice_trace_in(&self, parent: Option<tracing::span::Id>, source: Source) -> VoiceTrace {
         let span = tracing::info_span!(
             target: telemetry::TRACE_TARGET,
             parent: parent,
@@ -1605,6 +1906,7 @@ impl<P: CallPorts> Call<P> {
             source: Source::Phrase,
             turn,
             voice,
+            owned: None,
         });
     }
 
@@ -1625,7 +1927,7 @@ impl<P: CallPorts> Call<P> {
         if self.hold_others_until.is_some() && first.waits_after_talk_now {
             return;
         }
-        let Some(sound) = self.sounds.pop_front() else {
+        let Some(mut sound) = self.sounds.pop_front() else {
             return;
         };
         if sound.answers && self.awaiting.take().is_some() && self.mode == Mode::Waiting {
@@ -1633,7 +1935,10 @@ impl<P: CallPorts> Call<P> {
         }
         let by_tts = matches!(sound.audio, Audio::Tts);
         let span = self.play_span(sound.source, sound.turn.as_ref());
-        self.note_started(&sound);
+        match sound.owned.as_mut() {
+            Some(trace) => trace.sound_started(sound.source, Instant::now()),
+            None => self.note_started(&sound),
+        }
         let task = match &sound.audio {
             Audio::Wav { path, .. } => self.spawn_play(sound.id, path.clone(), sound.said(), span),
             Audio::Tts => self.spawn_tts(sound.id, sound.text.clone(), span),
@@ -1652,7 +1957,11 @@ impl<P: CallPorts> Call<P> {
             return;
         }
         let id = self.new_id();
-        let turn = self.turn.as_ref().map(|turn| turn.span.clone());
+        let turn = self
+            .turn
+            .as_ref()
+            .map(|turn| turn.span.clone())
+            .or_else(|| self.run.as_ref().map(|run| run.trace.span.clone()));
         let span = self.play_span(Source::Tick, turn.as_ref());
         let task = self.spawn_play(id, self.dir.join(TICK_WAV), Said::Tick, span);
         self.playing = Some(Playing {
@@ -1785,6 +2094,11 @@ impl<P: CallPorts> Call<P> {
         if self.mode == Mode::Waiting {
             self.mode = Mode::Listening;
         }
+        // The user is starting again: a run going still hands over its request, but its
+        // line is not spoken.
+        if let Some(run) = self.run.as_mut() {
+            run.silenced = true;
+        }
     }
 
     // --- the status and the end ---
@@ -1879,6 +2193,10 @@ impl<P: CallPorts> Call<P> {
         for update in self.updates.drain(..) {
             update.abort();
         }
+        if let Some(run) = self.run.take() {
+            run.task.abort();
+        }
+        self.queued.clear();
         if let Some(words) = last_words {
             self.ports.speak_with_tts(words).await;
         }

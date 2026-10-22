@@ -272,16 +272,22 @@ fn the_one_idle_claude_pane_in_the_folder_is_picked() {
     let agents = view(vec![elsewhere, chief("%2"), subfolder]);
 
     assert_eq!(
-        pick_pane(&agents, CHIEF, Chief::default(), &[])
+        pick_pane(&agents, CHIEF, Chief::default(), &[], false)
             .unwrap()
             .pane_id,
         "%2"
     );
     // One trailing slash on either side names the same folder.
     assert_eq!(
-        pick_pane(&agents, "/work/chief-of-pods/", Chief::default(), &[])
-            .unwrap()
-            .pane_id,
+        pick_pane(
+            &agents,
+            "/work/chief-of-pods/",
+            Chief::default(),
+            &[],
+            false
+        )
+        .unwrap()
+        .pane_id,
         "%2"
     );
 }
@@ -307,11 +313,11 @@ fn each_of_checks_1_to_5_gives_its_reason_in_order() {
     };
 
     assert_eq!(
-        pick_pane(&failing, CHIEF, Chief::default(), &[]),
+        pick_pane(&failing, CHIEF, Chief::default(), &[], false),
         Err(Reason::PaneListFailing)
     );
     assert_eq!(
-        pick_pane(&view(vec![]), CHIEF, Chief::default(), &[]),
+        pick_pane(&view(vec![]), CHIEF, Chief::default(), &[], false),
         Err(Reason::NoAgentInFolder)
     );
     assert_eq!(
@@ -319,7 +325,8 @@ fn each_of_checks_1_to_5_gives_its_reason_in_order() {
             &view(vec![chief("%5")]),
             "/work/harold",
             Chief::default(),
-            &[]
+            &[],
+            false,
         ),
         Err(Reason::NoAgentInFolder)
     );
@@ -328,21 +335,22 @@ fn each_of_checks_1_to_5_gives_its_reason_in_order() {
             &view(vec![chief("%2"), chief("%3"), codex.clone()]),
             CHIEF,
             Chief::default(),
-            &[]
+            &[],
+            false,
         ),
         Err(Reason::SeveralAgentsInFolder { agents: 3 })
     );
     // A busy Codex pane fails check 4 before check 5.
     assert_eq!(
-        pick_pane(&view(vec![codex]), CHIEF, Chief::default(), &[]),
+        pick_pane(&view(vec![codex]), CHIEF, Chief::default(), &[], false),
         Err(Reason::InputBoxUnreadable)
     );
     assert_eq!(
-        pick_pane(&view(vec![busy]), CHIEF, Chief::default(), &[]),
+        pick_pane(&view(vec![busy]), CHIEF, Chief::default(), &[], false),
         Err(Reason::AgentBusy)
     );
     assert_eq!(
-        pick_pane(&view(vec![unknown]), CHIEF, Chief::default(), &[]),
+        pick_pane(&view(vec![unknown]), CHIEF, Chief::default(), &[], false),
         Err(Reason::AgentStateUnknown)
     );
 }
@@ -352,10 +360,10 @@ fn pane_typed_into_this_round_counts_as_busy() {
     let agents = view(vec![chief("%2")]);
 
     assert_eq!(
-        pick_pane(&agents, CHIEF, Chief::default(), &["%2".to_string()]),
+        pick_pane(&agents, CHIEF, Chief::default(), &["%2".to_string()], false),
         Err(Reason::AgentBusy)
     );
-    assert!(pick_pane(&agents, CHIEF, Chief::default(), &["%9".to_string()]).is_ok());
+    assert!(pick_pane(&agents, CHIEF, Chief::default(), &["%9".to_string()], false).is_ok());
 }
 
 pub(crate) fn projection(
@@ -1664,6 +1672,161 @@ async fn voice_is_not_held_by_another_writers_typing() {
             Key::Enter("%2".into()),
         ]
     );
+}
+
+fn busy_view() -> AgentsView {
+    view(vec![AgentPane {
+        state: EffectiveAgentState::Busy,
+        ..chief("%2")
+    }])
+}
+
+#[tokio::test]
+async fn a_hand_over_types_into_a_busy_claude_code_pane_and_no_other_writer_does() {
+    let fake = Fake::at(DAY, "09:00:00");
+    fake.set(|state| state.view = busy_view());
+    let agents = fake.agents();
+
+    for writer in [
+        Writer::TimedPrompt,
+        Writer::Alert,
+        Writer::PhoneReply,
+        Writer::Voice,
+        Writer::Tool("questions"),
+    ] {
+        let waited = type_when_ready(&fake, writer, CHIEF, "line", &agents, &[]).await;
+        assert!(
+            matches!(waited, Attempt::Wait(Reason::AgentBusy)),
+            "{writer:?}"
+        );
+    }
+    assert!(fake.keys().is_empty());
+
+    let typed = type_when_ready(
+        &fake,
+        Writer::HandOver,
+        CHIEF,
+        "🎙 hand-over H1: x",
+        &agents,
+        &[],
+    )
+    .await;
+
+    assert!(matches!(typed, Attempt::Typed { ref pane } if pane == "%2"));
+    assert_eq!(
+        fake.keys(),
+        vec![
+            Key::Text("%2".into(), "🎙 hand-over H1: x".into()),
+            Key::Enter("%2".into()),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_hand_over_still_waits_for_what_every_writer_waits_for() {
+    let hand_over = |fake: &Fake| {
+        let agents = fake.agents();
+        let fake = fake.clone();
+        async move {
+            type_when_ready(
+                &fake,
+                Writer::HandOver,
+                CHIEF,
+                "🎙 hand-over H1: x",
+                &agents,
+                &[],
+            )
+            .await
+        }
+    };
+    let waits = |attempt: Attempt, want: Reason| match attempt {
+        Attempt::Wait(reason) => assert_eq!(reason, want),
+        _ => panic!("expected a wait for {want:?}"),
+    };
+
+    let fake = Fake::at(DAY, "09:00:00");
+    fake.set(|state| {
+        state.view = AgentsView {
+            listing_failed: true,
+            ..busy_view()
+        }
+    });
+    waits(hand_over(&fake).await, Reason::PaneListFailing);
+
+    let fake = Fake::at(DAY, "09:00:00");
+    fake.set(|state| state.view = view(vec![]));
+    waits(hand_over(&fake).await, Reason::NoAgentInFolder);
+
+    let fake = Fake::at(DAY, "09:00:00");
+    fake.set(|state| {
+        state.view = view(vec![AgentPane {
+            state: EffectiveAgentState::Unknown,
+            ..chief("%2")
+        }])
+    });
+    waits(hand_over(&fake).await, Reason::AgentStateUnknown);
+
+    let fake = Fake::at(DAY, "09:00:00");
+    fake.set(|state| {
+        state.view = view(vec![AgentPane {
+            reads_as_claude: false,
+            state: EffectiveAgentState::Busy,
+            ..chief("%2")
+        }])
+    });
+    waits(hand_over(&fake).await, Reason::InputBoxUnreadable);
+
+    let fake = Fake::at(DAY, "09:00:00");
+    fake.set(|state| {
+        state.view = busy_view();
+        state.screen = Some(screen_with_box(&["❯ half a sentence"]));
+    });
+    waits(hand_over(&fake).await, Reason::InputBoxHoldsText);
+
+    let fake = Fake::at(DAY, "09:00:00");
+    fake.set(|state| {
+        state.view = busy_view();
+        state.screen = Some("no box here".to_string());
+    });
+    waits(hand_over(&fake).await, Reason::InputBoxNotFound);
+    assert!(fake.keys().is_empty());
+}
+
+#[tokio::test]
+async fn a_hand_over_is_not_held_by_another_writer_and_holds_the_pane_once_typed() {
+    let fake = Fake::at(DAY, "09:00:00");
+    let agents = fake.agents();
+
+    let alert = type_when_ready(&fake, Writer::Alert, CHIEF, "alert line", &agents, &[]).await;
+    assert!(matches!(alert, Attempt::Typed { .. }));
+    let hand_over = type_when_ready(
+        &fake,
+        Writer::HandOver,
+        CHIEF,
+        "🎙 hand-over H1: x",
+        &agents,
+        &[],
+    )
+    .await;
+    assert!(matches!(hand_over, Attempt::Typed { .. }));
+
+    // The pane still reads idle, so the hand-over's hold is on for the other writers.
+    let timed = type_when_ready(&fake, Writer::TimedPrompt, CHIEF, "prompt", &agents, &[]).await;
+    assert!(matches!(timed, Attempt::Wait(Reason::AgentBusy)));
+
+    // While it reads busy they wait anyway.
+    fake.set(|state| state.view = busy_view());
+    let alert = type_when_ready(
+        &fake,
+        Writer::Alert,
+        CHIEF,
+        "alert line",
+        &fake.agents(),
+        &[],
+    )
+    .await;
+    assert!(matches!(alert, Attempt::Wait(Reason::AgentBusy)));
+    assert_eq!(fake.keys().len(), 4);
 }
 
 #[tokio::test]

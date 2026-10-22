@@ -2,8 +2,10 @@
 //! a sound the sink cannot play, a turn said before a bye, a second START, and the fixes of
 //! the final review: the idle end, the mid-call mute end and the talk-now hold's limit.
 
-use super::super::phrases::phrase_file;
+use super::super::hand_over::{HandOverFact, HandOverState};
+use super::super::phrases::{FROM_THE_CHIEF, PASSED_ON, phrase_file};
 use super::super::wav::wav_bytes;
+use super::answerer::{Failure, Remark, Who};
 use super::*;
 use tokio::time::sleep_until;
 
@@ -1065,4 +1067,480 @@ async fn the_first_block_after_a_slow_start_is_timed_from_the_call_start() {
 
     let text = logs.text();
     assert!(text.contains("first_heard_ms=3000"), "{text}");
+}
+
+// ---------------------------------------------------------------------------
+// The call answerer
+// ---------------------------------------------------------------------------
+
+fn answering_harness() -> (Harness, FakeAnswerer, FakeThread) {
+    let h = Harness::new();
+    let (answerer, thread) = (FakeAnswerer::default(), FakeThread::default());
+    h.ports.with_answering(answerer.clone(), thread.clone());
+    (h, answerer, thread)
+}
+
+fn script_runs(answerer: &FakeAnswerer, runs: impl IntoIterator<Item = Run>) {
+    answerer.log().script.extend(runs);
+}
+
+fn run_now(answer: Answer) -> Run {
+    Run {
+        answer,
+        after: Duration::ZERO,
+    }
+}
+
+fn run_after(seconds: u64, answer: Answer) -> Run {
+    Run {
+        answer,
+        after: Duration::from_secs(seconds),
+    }
+}
+
+fn turn_spans(trace: opentelemetry::trace::TraceId) -> Vec<opentelemetry_sdk::trace::SpanData> {
+    test_support::spans()
+        .into_iter()
+        .filter(|span| span.name == "harold.call_turn" && span.span_context.trace_id() == trace)
+        .collect()
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn the_answerer_answers_a_turn_and_nothing_is_typed_into_the_chief() {
+    let (h, answerer, _) = answering_harness();
+    script_runs(&answerer, [run_now(said("Nothing is building."))]);
+    h.script([text("is anything building")]);
+    h.start().await;
+
+    h.speak().await;
+
+    assert_eq!(h.played(), ["Nothing is building."]);
+    assert!(h.keys().is_empty());
+    assert_eq!(answerer.log().asked.len(), 1);
+    assert_eq!(answerer.log().asked[0].words, "is anything building");
+    assert!(answerer.log().asked[0].call.remarks.is_empty());
+    let status = h.status();
+    assert_eq!(status.last_result, Some(TurnResult::Answered));
+    assert_eq!(
+        status.last_transcript.as_deref(),
+        Some("is anything building")
+    );
+    assert_eq!(status.state, CallState::Listening);
+    // No chief turn to wait for: no update line and no local model.
+    assert!(h.ports.state().update_prompts.is_empty());
+    sleep(Duration::from_secs(120)).await;
+    assert_eq!(h.played(), ["Nothing is building."]);
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn an_answerer_turn_is_recorded_with_who_answered_how_and_how_fast() {
+    test_support::install();
+    let (h, answerer, _) = answering_harness();
+    script_runs(
+        &answerer,
+        [
+            run_after(4, said("Nothing is building.")),
+            run_now(handed_over("Passed to the chief.", "rerun the build")),
+        ],
+    );
+    h.script([text("is anything building"), text("rerun the build")]);
+    h.start().await;
+
+    h.speak().await;
+    sleep(Duration::from_secs(5)).await;
+    settle().await;
+    past_the_tail().await;
+    h.speak().await;
+
+    let asked = answerer.log().asked.clone();
+    assert_eq!(asked.len(), 2);
+    let first = turn_spans(asked[0].trace);
+    assert_eq!(first.len(), 1);
+    let attr = |span, key: &str| test_support::span_attr(span, key);
+    assert_eq!(attr(&first[0], "answered_by").as_deref(), Some("answerer"));
+    assert_eq!(attr(&first[0], "result").as_deref(), Some("answered"));
+    assert_eq!(attr(&first[0], "call_from").as_deref(), Some("desk"));
+    let answer_ms: u64 = attr(&first[0], "answer_ms").unwrap().parse().unwrap();
+    assert!((4000..4200).contains(&answer_ms), "{answer_ms}");
+    assert_eq!(
+        attr(&first[0], "first_sound_ms"),
+        attr(&first[0], "answer_ms")
+    );
+    let second = turn_spans(asked[1].trace);
+    assert_eq!(attr(&second[0], "result").as_deref(), Some("handed_over"));
+    assert_eq!(attr(&second[0], "answered_by").as_deref(), Some("answerer"));
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn a_request_for_work_is_passed_on_typed_into_a_busy_chief_and_the_next_turn_hears_so() {
+    let logs = CapturedLogs::start();
+    let (h, answerer, _) = answering_harness();
+    script_runs(
+        &answerer,
+        [
+            run_now(handed_over(
+                "I've passed that to the chief.",
+                "rerun the harold build",
+            )),
+            run_now(said("It was typed into the chief's pane.")),
+        ],
+    );
+    h.script([
+        text("ask the chief to rerun the harold build"),
+        text("did the chief get it"),
+    ]);
+    h.set_chief(EffectiveAgentState::Busy);
+    h.start().await;
+
+    h.speak().await;
+    sleep(Duration::from_secs(1)).await;
+
+    assert_eq!(h.played(), ["I've passed that to the chief."]);
+    assert_eq!(
+        h.keys(),
+        [
+            Key::Text("%2".into(), "🎙 hand-over H1: rerun the harold build".into()),
+            Key::Enter("%2".into()),
+        ]
+    );
+    assert_eq!(h.status().last_result, Some(TurnResult::HandedOver));
+    past_the_tail().await;
+    h.speak().await;
+
+    let second = answerer.log().asked[1].clone();
+    assert_eq!(second.words, "did the chief get it");
+    assert_eq!(
+        second.call.hand_overs,
+        [HandOverFact {
+            id: "H1".into(),
+            request: "rerun the harold build".into(),
+            state: HandOverState::Typed,
+        }]
+    );
+    assert_eq!(
+        second.call.remarks,
+        [
+            Remark {
+                who: Who::You,
+                text: "ask the chief to rerun the harold build".into()
+            },
+            Remark {
+                who: Who::Answerer,
+                text: "I've passed that to the chief.".into()
+            },
+        ]
+    );
+    let text = logs.text();
+    assert!(text.contains("hand-over typed hand_over_id=H1 pane_id=%2 typed_while_busy=true"));
+    assert!(!text.contains("rerun the harold build"), "{text}");
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn a_hand_over_with_no_line_of_the_answerers_own_is_said_by_harold() {
+    let (h, answerer, _) = answering_harness();
+    script_runs(&answerer, [run_now(handed_over("", "rerun it"))]);
+    h.start().await;
+
+    h.speak().await;
+
+    assert_eq!(h.played(), [PASSED_ON]);
+    assert_eq!(h.keys().len(), 2);
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn a_hand_over_goes_on_trying_after_the_call_ends() {
+    let logs = CapturedLogs::start();
+    let (h, answerer, _) = answering_harness();
+    script_runs(&answerer, [run_now(handed_over("Passed.", "rerun it"))]);
+    let held = "────\n❯ half a sentence\n────\n  -- INSERT --\n";
+    h.ports.0.panes.set(|s| s.screen = Some(held.to_string()));
+    h.start().await;
+    h.speak().await;
+    assert!(h.keys().is_empty());
+
+    h.calls.stop().await;
+    settle().await;
+    assert_eq!(h.state(), CallState::Off);
+    h.ports
+        .0
+        .panes
+        .set(|s| s.screen = Some("────\n❯ \n────\n  -- INSERT --\n".to_string()));
+    sleep(Duration::from_secs(6)).await;
+    settle().await;
+
+    assert_eq!(h.keys().len(), 2);
+    assert!(logs.text().contains("hand-over typed hand_over_id=H1"));
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn a_run_over_three_seconds_plays_the_tick_every_three_seconds() {
+    let (h, answerer, _) = answering_harness();
+    script_runs(&answerer, [run_after(7, said("Done."))]);
+    h.start().await;
+
+    h.speak().await;
+    assert!(h.played().is_empty());
+    sleep(Duration::from_millis(3100)).await;
+    settle().await;
+    assert_eq!(h.played(), ["tick"]);
+    sleep(Duration::from_secs(3)).await;
+    settle().await;
+    assert_eq!(h.played(), ["tick", "tick"]);
+    sleep(Duration::from_secs(2)).await;
+    settle().await;
+
+    assert_eq!(h.played(), ["tick", "tick", "Done."]);
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn a_failed_run_sends_the_turn_to_the_chief_and_the_next_turn_tries_the_answerer_again() {
+    let (h, answerer, _) = answering_harness();
+    script_runs(
+        &answerer,
+        [
+            run_now(Answer::Failed(Failure::TimedOut)),
+            run_now(said("Fine.")),
+        ],
+    );
+    h.script([text("first words"), text("second words")]);
+    h.start().await;
+
+    h.speak().await;
+
+    assert_eq!(h.keys(), typed("%2", "first words"));
+    assert_eq!(h.status().last_result, Some(TurnResult::Typed));
+    assert_eq!(h.state(), CallState::Waiting);
+    // The chief answers, as today; its line is the answer, so nothing comes before it.
+    h.answer("the chief's answer").await;
+    assert_eq!(h.played(), ["the chief's answer"]);
+    h.speak().await;
+
+    assert_eq!(answerer.log().asked.len(), 2);
+    assert_eq!(answerer.log().asked[1].words, "second words");
+    assert_eq!(h.keys().len(), 2);
+    assert_eq!(h.played(), ["the chief's answer", "Fine."]);
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn a_failed_turn_for_a_busy_chief_is_held_as_before() {
+    let (h, answerer, _) = answering_harness();
+    script_runs(&answerer, [run_now(Answer::Failed(Failure::Exited))]);
+    h.set_chief(EffectiveAgentState::Busy);
+    h.start().await;
+
+    h.speak().await;
+
+    assert_eq!(h.played(), [CHIEF_BUSY]);
+    assert!(h.keys().is_empty());
+    h.set_chief(EffectiveAgentState::Idle);
+    sleep(Duration::from_secs(2)).await;
+    assert_eq!(h.keys(), typed("%2", "hello there"));
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn an_answerer_that_cannot_start_is_not_tried_again_in_the_call() {
+    let (h, answerer, _) = answering_harness();
+    script_runs(&answerer, [run_now(Answer::Failed(Failure::NotStarted))]);
+    h.script([text("first words"), text("second words")]);
+    h.start().await;
+
+    h.speak().await;
+    h.answer("answer").await;
+    h.speak().await;
+
+    assert_eq!(answerer.log().asked.len(), 1);
+    let mut want = typed("%2", "first words");
+    want.extend(typed("%2", "second words"));
+    assert_eq!(h.keys(), want);
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn a_turn_said_while_a_run_goes_waits_for_it_and_is_asked_with_the_first_in_the_history() {
+    let (h, answerer, _) = answering_harness();
+    script_runs(
+        &answerer,
+        [
+            run_after(5, said("First answer.")),
+            run_now(said("Second answer.")),
+        ],
+    );
+    h.script([text("first words"), text("second words")]);
+    h.start().await;
+
+    h.speak().await;
+    h.speak().await;
+    settle().await;
+    assert_eq!(answerer.log().asked.len(), 1);
+    sleep(Duration::from_secs(6)).await;
+    settle().await;
+    past_the_tail().await;
+    settle().await;
+
+    let log = answerer.log();
+    assert_eq!(log.most_going, 1, "two runs never overlap");
+    assert_eq!(log.asked.len(), 2);
+    assert_eq!(log.asked[1].words, "second words");
+    assert_eq!(
+        log.asked[1].call.remarks,
+        [
+            Remark {
+                who: Who::You,
+                text: "first words".into()
+            },
+            Remark {
+                who: Who::Answerer,
+                text: "First answer.".into()
+            },
+        ]
+    );
+    drop(log);
+    let played = h.played();
+    assert_eq!(played.last().map(String::as_str), Some("Second answer."));
+    assert!(played.contains(&"First answer.".to_string()), "{played:?}");
+    assert!(h.keys().is_empty());
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn talk_now_while_a_run_goes_drops_its_line_but_not_its_hand_over() {
+    let (h, answerer, _) = answering_harness();
+    script_runs(
+        &answerer,
+        [run_after(5, handed_over("Passed.", "rerun it"))],
+    );
+    h.start().await;
+    h.speak().await;
+
+    h.calls.talk_now();
+    sleep(Duration::from_secs(6)).await;
+    settle().await;
+
+    assert!(
+        !h.played().contains(&"Passed.".to_string()),
+        "{:?}",
+        h.played()
+    );
+    assert_eq!(h.keys().len(), 2);
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn the_chiefs_line_between_turns_plays_after_from_the_chief_and_is_in_the_next_turns_history()
+{
+    let (h, answerer, _) = answering_harness();
+    h.script([text("first words"), text("second words")]);
+    h.start().await;
+    h.speak().await;
+    past_the_tail().await;
+
+    let said_by_chief = h.say("H1: the build passed.", Speaker::Chief);
+    settle().await;
+    assert_eq!(said_by_chief.await.unwrap(), Some(true));
+    settle().await;
+    past_the_tail().await;
+    h.speak().await;
+
+    assert_eq!(
+        h.played(),
+        ["Fine.", FROM_THE_CHIEF, "H1: the build passed.", "Fine."]
+    );
+    let asked = answerer.log().asked.clone();
+    assert!(asked[1].call.remarks.contains(&Remark {
+        who: Who::Chief,
+        text: "H1: the build passed.".into()
+    }));
+    assert_eq!(
+        h.sink().said.lock().unwrap()[1],
+        Said::Line {
+            text: FROM_THE_CHIEF.into(),
+            by: Speaker::Chief
+        }
+    );
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn talk_now_drops_a_chief_line_waiting_behind_the_answerers_with_its_preface() {
+    let (h, _, _) = answering_harness();
+    h.start().await;
+    h.sink().hold.store(true, Ordering::SeqCst);
+    h.speak().await;
+    settle().await;
+    // The answerer's line is playing; the chief's line waits behind it.
+    let said_by_chief = h.say("H1: done.", Speaker::Chief);
+    settle().await;
+
+    h.calls.talk_now();
+    settle().await;
+
+    assert_eq!(said_by_chief.await.unwrap(), Some(true));
+    assert_eq!(h.played(), ["Fine."]);
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn without_the_answerer_a_chief_line_has_no_preface_and_turns_go_to_the_chief() {
+    let h = Harness::new();
+    h.start().await;
+    h.speak().await;
+    assert_eq!(h.keys(), typed("%2", "hello there"));
+
+    h.answer("the chief's answer").await;
+    let later = h.say("another line", Speaker::Chief);
+    settle().await;
+    later.await.unwrap();
+
+    assert_eq!(h.played(), ["the chief's answer", "another line"]);
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn the_users_words_the_answerers_line_and_the_request_reach_no_log_and_no_export() {
+    let logs = CapturedLogs::start();
+    test_support::install();
+    let (h, answerer, _) = answering_harness();
+    script_runs(
+        &answerer,
+        [run_now(handed_over(
+            "SAY-CANARY-5521 passed.",
+            "REQUEST-CANARY-5522",
+        ))],
+    );
+    h.script([text("WORDS-CANARY-5520")]);
+    h.start().await;
+
+    h.speak().await;
+    h.calls.stop().await;
+
+    assert_eq!(
+        h.keys()[0],
+        Key::Text("%2".into(), "🎙 hand-over H1: REQUEST-CANARY-5522".into())
+    );
+    let text = logs.text();
+    for canary in [
+        "WORDS-CANARY-5520",
+        "SAY-CANARY-5521",
+        "REQUEST-CANARY-5522",
+    ] {
+        assert!(!text.contains(canary), "{canary}: {text}");
+        assert!(!test_support::exported_text().contains(canary), "{canary}");
+    }
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn a_bye_while_a_run_goes_still_hands_over_but_says_nothing_more() {
+    let (h, answerer, _) = answering_harness();
+    script_runs(
+        &answerer,
+        [run_after(2, handed_over("Passed.", "rerun it"))],
+    );
+    h.script([text("ask the chief to rerun it"), text("bye")]);
+    h.start().await;
+    h.speak().await;
+
+    h.speak().await;
+    sleep(Duration::from_secs(3)).await;
+    settle().await;
+
+    assert_eq!(h.state(), CallState::Off);
+    assert!(
+        !h.played().contains(&"Passed.".to_string()),
+        "{:?}",
+        h.played()
+    );
 }

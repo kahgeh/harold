@@ -337,12 +337,14 @@ fn target_pane<'a>(
 /// `typed_into` counts as busy: Harold typed into it
 /// earlier in this round or in an earlier round, and the snapshot still says idle for a
 /// moment after Harold types. The round keeps a pane in `typed_into` until a round has
-/// seen it not idle, for at most a minute.
+/// seen it not idle, for at most a minute. A Claude Code pane that is `Busy` is picked only
+/// when `busy_ok`, which only a hand-over from a call sets (`Writer::HandOver`).
 pub(crate) fn pick_pane<'a>(
     view: &'a AgentsView,
     folder: &str,
     chief: Chief<'_>,
     typed_into: &[String],
+    busy_ok: bool,
 ) -> Result<&'a AgentPane, Reason> {
     if view.listing_failed {
         return Err(Reason::PaneListFailing);
@@ -352,6 +354,7 @@ pub(crate) fn pick_pane<'a>(
         return Err(Reason::InputBoxUnreadable);
     }
     match pane.state {
+        EffectiveAgentState::Busy if busy_ok => Ok(pane),
         EffectiveAgentState::Busy => Err(Reason::AgentBusy),
         EffectiveAgentState::Unknown => Err(Reason::AgentStateUnknown),
         EffectiveAgentState::Idle if typed_into.contains(&pane.pane_id) => Err(Reason::AgentBusy),
@@ -376,7 +379,8 @@ pub(crate) fn box_reason(screen: Option<&str>) -> Option<Reason> {
 
 /// Who types into a pane: timed prompts and alerts through `type_when_ready`, phone
 /// replies through `inbound::tmux::relay_to_tmux_pane`, and a spoken turn of a call
-/// with the chief through `type_when_ready`, and a tool (named, such as the question tool)
+/// with the chief through `type_when_ready`, a hand-over from such a call through
+/// `type_when_ready`, and a tool (named, such as the question tool)
 /// through `type_line_once`, which calls `type_when_ready`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Writer {
@@ -384,6 +388,10 @@ pub(crate) enum Writer {
     Alert,
     PhoneReply,
     Voice,
+    /// A hand-over: the call answerer's request for the chief. Like a spoken turn it is not
+    /// held back by another writer's hold, and it is the one writer that may type into a
+    /// Claude Code pane that is `Busy`. Removed once agent-message-tool carries hand-overs.
+    HandOver,
     /// A tool typing a line, by the tool's name: the question tool types its batch of
     /// answers into the chief's pane as `Tool("questions")`.
     Tool(&'static str),
@@ -402,9 +410,10 @@ pub(crate) struct PaneRecord {
 impl PaneRecord {
     /// Whether the pane counts as busy for `writer` because another writer typed into it
     /// a moment ago. Each writer keeps its own hold on the panes it typed into. A spoken
-    /// turn is never held back, as a phone reply is not: the caller is waiting on the line.
+    /// turn and a hand-over are never held back, as a phone reply is not: the caller is
+    /// waiting on the line.
     fn held_against(&self, writer: Writer, now: Instant) -> bool {
-        writer != Writer::Voice
+        !matches!(writer, Writer::Voice | Writer::HandOver)
             && self
                 .typed
                 .is_some_and(|(by, until)| by != writer && now < until)
@@ -897,7 +906,8 @@ pub(crate) async fn type_when_ready<P: Ports>(
     // For the chief's folder `pick_pane` finds the chief with `resolve_chief`, which logs
     // each change of the chief's pane.
     let chief = ports.chief();
-    let pane = match pick_pane(view, folder, chief, typed_into) {
+    let busy_ok = writer == Writer::HandOver;
+    let pane = match pick_pane(view, folder, chief, typed_into, busy_ok) {
         Ok(pane) => pane.pane_id.clone(),
         Err(reason) => return Attempt::Wait(reason),
     };
@@ -907,7 +917,7 @@ pub(crate) async fn type_when_ready<P: Ports>(
     if !view.listing_failed && !reads_idle(&view, &pane) {
         record.typed = None;
     }
-    match pick_pane(&view, folder, chief, typed_into) {
+    match pick_pane(&view, folder, chief, typed_into, busy_ok) {
         Ok(picked) if picked.pane_id == pane => {}
         // The folder's pane changed while this writer waited; the next try looks again.
         Ok(_) => return Attempt::Wait(Reason::AgentStateUnknown),

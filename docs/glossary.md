@@ -49,7 +49,7 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 | watch run | One run of a watch's model, with its facts and its answer | "tick", "job run" |
 | watch report | A `WATCH <name> …` line Harold types for a watch: a run's `REPORT` line, a `quiet` line under `--every-run`, or a closing line. What is worth reporting is the watch skill's to decide | "alert" (an alert is HyperDX's), "problem" for every report |
 | watch tool | The tool that holds the watches, runs them and types their reports | — |
-| facts | What Harold hands the model on each watch run: agents, pods, the chief's pane and the run numbers | "context", "evidence" |
+| facts | What Harold hands the model on each watch run: agents, pods, the chief's pane and the run numbers; and, for a call, the call facts | "context", "evidence" |
 
 ## Watching agents
 
@@ -89,7 +89,10 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 | `notify.chief` | The `[notify] chief` entry that names the chief's pane by its folder. It decides which pane is the chief, not what the chief may use | "chief folder setting", "away_messages_only_from" for it |
 | voice, voice mute | Harold's speech at the desk, and the switch that silences it (`Voice: mute`) | — |
 | messaging pause | The switch that stops all phone traffic in both directions (`Messaging: pause`) | "kill switch" as its name |
-| call | A voice conversation with the chief, at the Mac or in the web app | "call" for an RPC or a function |
+| call | A voice conversation through Harold, answered by the call answerer, which hands real work to the chief. At the Mac or in the web app | "call" for an RPC or a function |
+| call answerer | The small model, one `claude -p` run on Haiku for each turn, that answers your turns in a call from the call facts and hands real work to the chief. You asked for it as the fast call voice | "call voice" (voice is Harold's speech), "assistant", "bot", "fast model" |
+| call facts | The facts for a call: what Harold gives the call answerer on each turn, as it gives a watch run its facts. The agents, the pods, and this call's hand-overs and chief lines, and with Choice C(b) your todos and the chief's queue | "brief", "context" |
+| hand-over | A request the call answerer passes to the chief, typed into its pane as `🎙 hand-over H<n>: <request>` | "handoff" (the PnEM's context note), "delegation", "escalation" |
 | talk now | The key, `t`, that cuts the chief's answer short in a call | — |
 | voice worker | The process that turns lines into audio and speech into text | — |
 | timed prompt | Text Harold types into a pane at a set time each day | — |
@@ -200,7 +203,6 @@ Each of these words has one sense in Harold. Anything else is named another way:
 | Word | Harold's sense | For the other sense, say |
 | --- | --- | --- |
 | alert | A HyperDX alert typed to the chief | push (the phone) |
-| call | A voice call with the chief | RPC, or the function's name |
 | summary | Never alone | work summary, activity summary, summary strip |
 | note | The dash's revise or reject text | backlog note |
 | dash | tmx-agent-dash | HyperDX dashboard |

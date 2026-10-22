@@ -264,6 +264,58 @@ impl WatchSettings {
     }
 }
 
+/// The `[call_answerer]` table: the small model that answers each turn of a call. Its
+/// program and environment are the activity summary's (`cli_path`, `environment`).
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(default)]
+pub(crate) struct CallAnswererSettings {
+    pub enabled: bool,
+    pub model: String,
+    pub timeout_seconds: u64,
+    /// `--max-budget-usd` for each run.
+    pub run_budget_usd: f64,
+}
+
+impl Default for CallAnswererSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            model: "haiku".into(),
+            timeout_seconds: 15,
+            run_budget_usd: 0.02,
+        }
+    }
+}
+
+impl CallAnswererSettings {
+    pub(crate) fn validate(&self) -> Vec<String> {
+        let mut errors = Vec::new();
+        if !valid_model_name(&self.model) {
+            errors.push(
+                "call_answerer.model must be a model name of at most 128 ASCII token characters"
+                    .into(),
+            );
+        }
+        if !(1..=120).contains(&self.timeout_seconds) {
+            errors.push("call_answerer.timeout_seconds must be from 1 to 120".into());
+        }
+        if !(self.run_budget_usd.is_finite() && self.run_budget_usd > 0.0) {
+            errors.push("call_answerer.run_budget_usd must be above 0".into());
+        }
+        errors
+    }
+}
+
+/// Whether `model` is a model name: at most 128 ASCII token characters.
+fn valid_model_name(model: &str) -> bool {
+    !model.is_empty()
+        && model.len() <= 128
+        && model.as_bytes()[0].is_ascii_alphanumeric()
+        && model
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"-._:/".contains(&byte))
+}
+
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum ScreenAdapter {
@@ -979,6 +1031,8 @@ pub struct Settings {
     #[serde(default)]
     pub(crate) watch: WatchSettings,
     #[serde(default)]
+    pub(crate) call_answerer: CallAnswererSettings,
+    #[serde(default)]
     pub(crate) agents: AgentSettings,
     #[serde(default)]
     pub(crate) agent_monitor: AgentMonitorSettings,
@@ -1008,6 +1062,7 @@ impl Settings {
         errors.extend(self.agents.validate(&self.agent_monitor));
         errors.extend(self.activity_summary.validate());
         errors.extend(self.watch.validate());
+        errors.extend(self.call_answerer.validate());
         errors.extend(away_messages_only_from_error(
             self.notify.away_messages_only_from.as_deref(),
         ));
@@ -1427,6 +1482,62 @@ mod tests {
         assert!(errors[0].contains("watch.run_budget_usd"));
         let equal = parse_watch("[watch]\nrun_budget_usd = 0.1\nmax_run_budget_usd = 0.1\n");
         assert!(equal.validate().is_empty());
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct CallAnswererFixture {
+        #[serde(default)]
+        call_answerer: super::CallAnswererSettings,
+    }
+
+    fn parse_call_answerer(source: &str) -> super::CallAnswererSettings {
+        Config::builder()
+            .add_source(File::from_str(source, FileFormat::Toml))
+            .build()
+            .and_then(Config::try_deserialize::<CallAnswererFixture>)
+            .expect("call answerer fixture should deserialize")
+            .call_answerer
+    }
+
+    #[test]
+    fn call_answerer_settings_ship_haiku_on_with_a_two_cent_budget() {
+        let shipped = parse_call_answerer(include_str!("../config/default.toml"));
+        assert!(shipped.enabled);
+        assert_eq!(shipped.model, "haiku");
+        assert_eq!(shipped.timeout_seconds, 15);
+        assert_eq!(shipped.run_budget_usd, 0.02);
+        assert!(shipped.validate().is_empty());
+        assert_eq!(super::CallAnswererSettings::default(), shipped);
+        assert_eq!(parse_call_answerer(""), shipped);
+    }
+
+    #[test]
+    fn call_answerer_settings_name_the_key_that_is_out_of_range() {
+        for (key, bad) in [
+            ("timeout_seconds", "0"),
+            ("timeout_seconds", "121"),
+            ("run_budget_usd", "0"),
+            ("run_budget_usd", "-0.5"),
+            ("model", "\"\""),
+            ("model", "\"-haiku\""),
+            ("model", "\"hai ku\""),
+        ] {
+            let settings = parse_call_answerer(&format!("[call_answerer]\n{key} = {bad}\n"));
+            let errors = settings.validate();
+            assert_eq!(errors.len(), 1, "{key} = {bad}: {errors:?}");
+            assert!(
+                errors[0].contains(&format!("call_answerer.{key}")),
+                "{errors:?}"
+            );
+        }
+        let nan = super::CallAnswererSettings {
+            run_budget_usd: f64::NAN,
+            ..Default::default()
+        };
+        assert_eq!(nan.validate().len(), 1);
+        let off = parse_call_answerer("[call_answerer]\nenabled = false\n");
+        assert!(!off.enabled);
+        assert!(off.validate().is_empty());
     }
 
     #[derive(Debug, Deserialize)]

@@ -1,6 +1,7 @@
 //! A call with the chief, on fake ports and paused time: a fake microphone fed by the
 //! test, a fake sink that records what it plays, a fake voice worker and a fake chief pane.
 
+use super::answerer::{Answer, Ask, CallAnswerer, CallSoFar, ThreadLine};
 use super::phrases::{
     BYE, CHIEF_BUSY, NO_ANSWER, NO_ANSWER_IN_THREAD, NO_CHIEF, NOTHING_HEARD, VOICE_FAILED,
     VOICE_STOPPED,
@@ -23,6 +24,8 @@ use std::time::Duration;
 use tokio::sync::{Notify, mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, sleep};
+
+use crate::tools::BoxFuture;
 
 // ---------------------------------------------------------------------------
 // Samples
@@ -256,6 +259,8 @@ pub(crate) struct PortsState {
     pub(crate) ended: Vec<&'static str>,
     /// What `no_answer_phrase` returns, when set.
     pub(crate) no_answer: Option<&'static str>,
+    /// The daemon's call answering, when a test turns it on.
+    pub(crate) answering: Option<Arc<CallAnswering>>,
 }
 
 struct PortsInner {
@@ -402,6 +407,10 @@ impl CallPorts for FakePorts {
         self.state().no_answer.unwrap_or(NO_ANSWER)
     }
 
+    fn answering(&self) -> Option<Arc<CallAnswering>> {
+        self.state().answering.clone()
+    }
+
     fn keep_awake(&self) -> Result<FakeAwake, String> {
         let mut state = self.state();
         if state.fail_awake {
@@ -409,6 +418,116 @@ impl CallPorts for FakePorts {
         }
         state.awake_taken += 1;
         Ok(FakeAwake(Arc::clone(&self.0.awake_dropped)))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The fake call answerer
+// ---------------------------------------------------------------------------
+
+/// One scripted run: what it gives, after how long.
+pub(crate) struct Run {
+    pub(crate) answer: Answer,
+    pub(crate) after: Duration,
+}
+
+/// What the answerer was asked.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Asked {
+    pub(crate) words: String,
+    pub(crate) call: CallSoFar,
+    pub(crate) trace: opentelemetry::trace::TraceId,
+}
+
+#[derive(Default)]
+pub(crate) struct AnswererLog {
+    pub(crate) script: VecDeque<Run>,
+    pub(crate) asked: Vec<Asked>,
+    /// Runs going now, and the most at once.
+    pub(crate) going: usize,
+    pub(crate) most_going: usize,
+}
+
+/// A call answerer that gives what the test scripted, `said` with no hand-over when the
+/// script is used up.
+#[derive(Clone, Default)]
+pub(crate) struct FakeAnswerer(pub(crate) Arc<Mutex<AnswererLog>>);
+
+impl FakeAnswerer {
+    pub(crate) fn log(&self) -> MutexGuard<'_, AnswererLog> {
+        self.0.lock().unwrap()
+    }
+}
+
+pub(crate) fn said(say: &str) -> Answer {
+    Answer::Said {
+        say: say.to_string(),
+        hand_over: None,
+    }
+}
+
+pub(crate) fn handed_over(say: &str, request: &str) -> Answer {
+    Answer::Said {
+        say: say.to_string(),
+        hand_over: Some(request.to_string()),
+    }
+}
+
+impl CallAnswerer for FakeAnswerer {
+    fn answer<'a>(&'a self, ask: Ask<'a>) -> BoxFuture<'a, Answer> {
+        Box::pin(async move {
+            let trace = {
+                use opentelemetry::trace::TraceContextExt as _;
+                use tracing_opentelemetry::OpenTelemetrySpanExt as _;
+                ask.turn.context().span().span_context().trace_id()
+            };
+            let run = {
+                let mut log = self.log();
+                log.asked.push(Asked {
+                    words: ask.words.to_string(),
+                    call: ask.call.clone(),
+                    trace,
+                });
+                log.going += 1;
+                log.most_going = log.most_going.max(log.going);
+                log.script.pop_front()
+            };
+            let run = run.unwrap_or(Run {
+                answer: said("Fine."),
+                after: Duration::ZERO,
+            });
+            sleep(run.after).await;
+            self.log().going -= 1;
+            run.answer
+        })
+    }
+}
+
+/// What the user was told in the thread: the chief's pane id, if any, and the line.
+pub(crate) type Told = Vec<(Option<String>, String)>;
+
+/// Records what the user is told in the thread.
+#[derive(Clone, Default)]
+pub(crate) struct FakeThread(pub(crate) Arc<Mutex<Told>>);
+
+impl ThreadLine for FakeThread {
+    fn tell<'a>(&'a self, pane_id: Option<&'a str>, text: &'a str) -> BoxFuture<'a, ()> {
+        Box::pin(async move {
+            self.0
+                .lock()
+                .unwrap()
+                .push((pane_id.map(str::to_string), text.to_string()));
+        })
+    }
+}
+
+impl FakePorts {
+    /// Turns the call answerer on, with `answerer` and `thread`.
+    pub(crate) fn with_answering(&self, answerer: FakeAnswerer, thread: FakeThread) {
+        self.state().answering = Some(Arc::new(CallAnswering {
+            answerer: Arc::new(answerer),
+            thread: Arc::new(thread),
+        }));
     }
 }
 
