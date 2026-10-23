@@ -477,12 +477,14 @@ async fn the_skill_its_tools_the_facts_the_answer_and_the_report_reach_no_log_or
     }
 }
 
-const CAUSE_FIELDS: [&str; 5] = [
+const CAUSE_FIELDS: [&str; 7] = [
     "exit_code=",
     "signal=",
     "subtype=",
     "is_error=",
     "num_turns=",
+    "terminal_reason=",
+    "api_error_status=",
 ];
 
 #[tokio::test(start_paused = true)]
@@ -561,7 +563,7 @@ async fn a_process_failed_run_logs_how_it_ended_and_what_claude_code_reported_wi
         assert!(!text.contains(canary), "{canary} in harold.log");
         assert!(!exported.contains(canary), "{canary} in an export");
     }
-    // The export filter keeps all five.
+    // The export filter keeps all seven.
     for field in CAUSE_FIELDS {
         let key = field.trim_end_matches('=');
         assert!(crate::telemetry::ALLOWED_FIELDS.contains(&key), "{key}");
@@ -573,7 +575,14 @@ async fn a_process_failed_run_logs_how_it_ended_and_what_claude_code_reported_wi
         .find(|record| record.contains("watch run failed") && record.contains("error_max_turns"))
         .expect("the failed line is exported");
     assert!(
-        logged.contains("exit_code") && logged.contains("num_turns"),
+        [
+            "exit_code",
+            "num_turns",
+            "terminal_reason",
+            "api_error_status"
+        ]
+        .iter()
+        .all(|field| logged.contains(field)),
         "{logged}"
     );
 }

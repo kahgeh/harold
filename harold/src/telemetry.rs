@@ -122,6 +122,8 @@ pub(crate) const ALLOWED_FIELDS: &[&str] = &[
     "signal",
     "subtype",
     "is_error",
+    "terminal_reason",
+    "api_error_status",
     "num_turns",
     "busy_reason",
     "heard_ms",
