@@ -669,6 +669,8 @@ async fn only_the_exact_open_paths_pass_without_a_cookie() {
     );
     for path in [
         "/static/telemetry.js",
+        "/static/speech-check.js",
+        "/speech-check",
         "/static/otel-2.12.0-8513c042.js",
         "/static/nope.js",
         "/static/app.css/",
