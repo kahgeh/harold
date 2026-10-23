@@ -1225,3 +1225,43 @@ async fn the_seen_report_answers_204_with_the_login_host_and_origin_checks() {
     assert_eq!(allowed.status(), 204);
     assert_eq!(server.pages.visible(), 1);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_row_stored_in_a_trace_is_sent_in_its_own_span_and_the_page_gets_that_span() {
+    crate::telemetry::test_support::install();
+    let directory = TestDirectory::new();
+    let store = directory.store().await;
+    store
+        .add_chief_app_message("old", now_ms() - 1000, "from before")
+        .await
+        .unwrap();
+    let server = TestServer::serve(store.clone()).await;
+    let mut updates = server.updates().await;
+    let first = updates.next().await.expect("the whole thread");
+    assert!(
+        !first.contains("data-trace"),
+        "a row with no trace: {first}"
+    );
+
+    let stored = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
+    store
+        .add_chief_app_message_traced("e9", now_ms(), "hello", Some(stored))
+        .await
+        .unwrap();
+
+    let added = updates.next().await.expect("the new row");
+    let sent: Vec<_> = crate::telemetry::test_support::spans()
+        .into_iter()
+        .filter(|span| {
+            span.name == "harold.app_row_sent"
+                && span.span_context.trace_id().to_string() == "4bf92f3577b34da6a3ce929d0e0e4736"
+        })
+        .collect();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].parent_span_id.to_string(), "00f067aa0ba902b7");
+    let carried = format!(
+        r#"data-trace="00-4bf92f3577b34da6a3ce929d0e0e4736-{}-01""#,
+        sent[0].span_context.span_id()
+    );
+    assert!(added.contains(&carried), "{added}");
+}

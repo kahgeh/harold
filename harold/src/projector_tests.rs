@@ -4997,3 +4997,237 @@ async fn a_failed_settle_is_logged_and_the_turn_end_goes_on() {
     assert!(text.contains("app reply state not recorded"), "{text}");
     assert_eq!(with.app.delivered().len(), 1);
 }
+
+// ---------------------------------------------------------------------------
+// One trace from the phone's tap to the answer row
+// ---------------------------------------------------------------------------
+
+/// The app's router and the daemon's dispatcher over one store, with the chief in `pane`
+/// and a typer that types nothing.
+struct AppPath {
+    store: Arc<HaroldStore>,
+    addr: std::net::SocketAddr,
+    dispatcher: Arc<dyn DeliveryDispatcher>,
+    typed: TypedKeys,
+    _server: tokio::task::JoinHandle<()>,
+    _directory: TestDirectory,
+}
+
+async fn app_path(pane: &str) -> AppPath {
+    use crate::web_app::origin::loopback_hosts;
+    use crate::web_app::push::{Pusher, VapidKey, vapid_key_path};
+    use crate::web_app::route::WebAppRoute;
+    use crate::web_app::{AppState, router};
+
+    telemetry::test_support::install();
+    crate::settings::init_settings_for_test();
+    let directory = TestDirectory::new();
+    let store = Arc::new(HaroldStore::open(&directory.0).await.unwrap());
+    append_agent_events(&store, chief_in(pane)).await.unwrap();
+    let snapshots = AgentSnapshotHub::new(store.load_agent_snapshot().await.unwrap());
+    project_and_publish_agent_snapshot(&store, &snapshots, 500)
+        .await
+        .unwrap();
+    let key = VapidKey::load_or_create(&vapid_key_path(&directory.0.join("harold.db"))).unwrap();
+    let pusher = Arc::new(Pusher::new(key, APP_LOGIN));
+    let route: Arc<dyn AppRoute> = Arc::new(WebAppRoute::new(Arc::clone(&store), pusher));
+    let (_shutdown, shutdown_rx) = tokio::sync::watch::channel(());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let state = AppState::for_tests(
+        Arc::clone(&store),
+        APP_LOGIN,
+        "BPublicKey",
+        Arc::from(loopback_hosts("127.0.0.1:0", addr)),
+        shutdown_rx,
+        None,
+        Default::default(),
+    );
+    let server = tokio::spawn(async move {
+        let _shutdown = _shutdown;
+        let _ = axum::serve(listener, router(state)).await;
+    });
+    let (typed, typer) = recording_typer();
+    let environment = Arc::new(FakeEnvironment::locked(ONLY_FROM_CHIEF));
+    let dispatcher: Arc<dyn DeliveryDispatcher> = Arc::new(Unpaused(
+        production_dispatcher(environment, &snapshots, Some(route), None)
+            .with_chief_typer(typer)
+            .with_away_text(Arc::new(FakeAwayText::default())),
+    ));
+    AppPath {
+        store,
+        addr,
+        dispatcher,
+        typed,
+        _server: server,
+        _directory: directory,
+    }
+}
+
+impl AppPath {
+    /// Posts a reply as the page does, with `traceparent` when given.
+    async fn post_reply(&self, text: &str, traceparent: Option<&str>) {
+        let mut request = reqwest::Client::new()
+            .post(format!("http://{}/replies", self.addr))
+            .header("Tailscale-User-Login", APP_LOGIN)
+            .header("sec-fetch-site", "same-origin")
+            .header("datastar-request", "true")
+            .header("content-type", "application/json")
+            .body(json!({ "reply": text }).to_string());
+        if let Some(traceparent) = traceparent {
+            request = request.header("traceparent", traceparent);
+        }
+        let response = request.send().await.unwrap();
+        assert_eq!(response.status(), 200);
+        response.text().await.unwrap();
+        self.drain().await;
+    }
+
+    async fn drain(&self) {
+        while handle_next_delivery(&self.store, Arc::clone(&self.dispatcher))
+            .await
+            .unwrap()
+        {}
+    }
+}
+
+const PHONE_TRACE: &str = "0af7651916cd43dd8448eb211c80319c";
+const PHONE_SPAN: &str = "00f067aa0ba902b7";
+
+fn span_named_in(trace: &str, name: &str) -> Vec<opentelemetry_sdk::trace::SpanData> {
+    spans_in_trace(name, trace)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reply_with_a_traceparent_joins_the_phones_trace_through_the_chiefs_turn_and_answer() {
+    use tracing_opentelemetry::OpenTelemetrySpanExt as _;
+    let pane = unique_pane();
+    let path = app_path(&pane).await;
+
+    path.post_reply("hello", Some(&format!("00-{PHONE_TRACE}-{PHONE_SPAN}-01")))
+        .await;
+
+    let requests = span_named_in(PHONE_TRACE, "harold.phone_request");
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].parent_span_id.to_string(), PHONE_SPAN);
+    assert_eq!(attr(&requests[0], "channel"), "web_app");
+    assert_eq!(attr(&requests[0], "outcome"), "typed");
+    assert_eq!(span_named_in(PHONE_TRACE, "harold.reply_stored").len(), 1);
+    assert_eq!(span_named_in(PHONE_TRACE, "harold.route").len(), 1);
+    assert_eq!(
+        *path.typed.lock().unwrap(),
+        [(pane.clone(), "📱 hello".into())]
+    );
+
+    // The chief's turn ends.
+    let trace = telemetry::begin_turn_complete(&pane, None, None, time::OffsetDateTime::now_utc());
+    let turn_cx = trace.turn_complete.context();
+    telemetry::keep_pending_turn(&pane, turn_cx);
+    drop(trace);
+    append_turn_completed(&path.store, &crate::outbound::fake::turn(&pane, "hello"))
+        .await
+        .unwrap();
+    path.drain().await;
+
+    let turns = span_named_in(PHONE_TRACE, "harold.turn");
+    assert_eq!(turns.len(), 1);
+    assert_eq!(turns[0].parent_span_id, requests[0].span_context.span_id());
+    assert_eq!(attr(&turns[0], "started_by"), "phone");
+    assert_eq!(span_named_in(PHONE_TRACE, "harold.turn_complete").len(), 1);
+    let deliveries = span_named_in(PHONE_TRACE, "harold.delivery");
+    assert_eq!(deliveries.len(), 1);
+    // The answer's row names the delivery span, and the reply's own row the reply_stored.
+    let rows = path.store.app_messages_since(0).await.unwrap();
+    let chief = rows
+        .iter()
+        .find(|row| row.sender == crate::store::AppSender::Chief)
+        .expect("the answer row");
+    assert_eq!(
+        chief.trace.as_deref(),
+        Some(
+            format!(
+                "00-{PHONE_TRACE}-{}-01",
+                deliveries[0].span_context.span_id()
+            )
+            .as_str()
+        )
+    );
+    let stored = span_named_in(PHONE_TRACE, "harold.reply_stored");
+    let mine = rows
+        .iter()
+        .find(|row| row.sender == crate::store::AppSender::User)
+        .expect("the reply row");
+    assert_eq!(
+        mine.trace.as_deref(),
+        Some(format!("00-{PHONE_TRACE}-{}-01", stored[0].span_context.span_id()).as_str())
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_missing_or_malformed_traceparent_gives_a_new_root_and_the_chain_still_follows() {
+    for header in [None, Some("not-a-traceparent"), Some("00-zz-yy-01")] {
+        let pane = unique_pane();
+        let path = app_path(&pane).await;
+
+        path.post_reply("hello", header).await;
+
+        path.store.project_unhandled_events(100).await.unwrap();
+        let rows = path.store.app_messages_since(0).await.unwrap();
+        let stored = rows[0].trace.as_deref().expect("the reply row has a trace");
+        let trace = stored.split('-').nth(1).unwrap().to_owned();
+        assert_ne!(trace, PHONE_TRACE);
+        let requests = span_named_in(&trace, "harold.phone_request");
+        assert_eq!(requests.len(), 1, "{header:?}");
+        assert_eq!(
+            requests[0].parent_span_id,
+            opentelemetry::trace::SpanId::INVALID
+        );
+        let (_, _, cx) = telemetry::take_prompt(&pane, time::OffsetDateTime::now_utc())
+            .expect("the prompt is kept");
+        let cx = cx.expect("with the request's context");
+        use opentelemetry::trace::TraceContextExt as _;
+        assert_eq!(cx.span().span_context().trace_id().to_string(), trace);
+    }
+}
+
+#[test]
+fn an_away_message_joins_the_trace_of_the_last_typed_prompt_until_it_is_too_old() {
+    use opentelemetry::trace::TraceContextExt as _;
+    use tracing_opentelemetry::OpenTelemetrySpanExt as _;
+    telemetry::test_support::install();
+    let (trace_id, span_id, cx) = a_live_turn();
+    let fresh = unique_pane();
+    let old = unique_pane();
+    let now = time::OffsetDateTime::now_utc();
+    telemetry::prompt_typed(&fresh, telemetry::StartedBy::Phone, Some(cx.clone()), now);
+    // `prompt_typed` drops prompts older than `PROMPT_KEPT` as it goes, so this one is
+    // stored first and then left to age.
+    let aged = now - telemetry::PROMPT_KEPT - Duration::from_secs(5);
+    telemetry::prompt_typed(&old, telemetry::StartedBy::Phone, Some(cx), aged);
+
+    let joined = telemetry::away_message_span(&fresh);
+    let root = telemetry::away_message_span(&old);
+
+    let joined_cx = joined.context();
+    assert_eq!(joined_cx.span().span_context().trace_id(), trace_id);
+    drop(joined);
+    let root_cx = root.context();
+    assert_ne!(root_cx.span().span_context().trace_id(), trace_id);
+    drop(root);
+    let spans: Vec<_> = telemetry::test_support::spans()
+        .into_iter()
+        .filter(|span| span.name == "harold.away_message")
+        .collect();
+    assert!(
+        spans
+            .iter()
+            .any(|span| span.span_context.trace_id() == trace_id && span.parent_span_id == span_id)
+    );
+    assert!(
+        spans
+            .iter()
+            .any(|span| span.parent_span_id == opentelemetry::trace::SpanId::INVALID)
+    );
+    // The prompt is read without being taken: the turn's own end still finds it.
+    assert!(telemetry::take_prompt(&fresh, now).is_some());
+}
