@@ -55,6 +55,22 @@ fn the_call_script_keeps_its_contract() {
 }
 
 #[test]
+fn the_call_script_checks_for_an_open_call_before_it_records_what_the_screen_names() {
+    let script = include_str!("../../static/web_app/call.js");
+    let sync = &script[script.find("function sync() {").expect("call.js has sync")..];
+    let open_check = sync
+        .find("if (!current || !current.open) {")
+        .expect("sync checks for an open call");
+    let recorded = sync
+        .find("seen.sound = sound;")
+        .expect("sync records the sound");
+    assert!(
+        open_check < recorded,
+        "sync records the sound before it checks that the call is open"
+    );
+}
+
+#[test]
 fn the_worklet_posts_its_empty_block_count_once_a_second_when_asked() {
     let worklet = include_str!("../../static/web_app/call-worklet.js");
     for wanted in [

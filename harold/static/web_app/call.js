@@ -491,13 +491,15 @@
     const state = screen.getAttribute("data-harold-state") || "off";
     const sound = screen.getAttribute("data-harold-sound") || "";
     const speech = screen.getAttribute("data-harold-speech") || "";
+    const current = call;
+    if (!current || !current.open) {
+      // Nothing is recorded as seen yet: what the screen names before the call opens
+      // plays once start() opens it and syncs again.
+      return;
+    }
     const before = { sound: seen.sound, speech: seen.speech };
     seen.sound = sound;
     seen.speech = speech;
-    const current = call;
-    if (!current || !current.open) {
-      return;
-    }
     // 8. The call ended on the Mac, by a bye or for any other reason: back to the thread.
     // A call that ended because a speech model is not on the Mac says why, until the next
     // Call tap or End; one that ended before the screen showed it live ends the same way.
