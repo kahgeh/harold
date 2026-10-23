@@ -452,3 +452,86 @@ fn the_dictation_rules_are_in_the_stylesheet() {
         assert!(css.contains(wanted), "app.css lacks {wanted}");
     }
 }
+
+#[test]
+fn the_otel_bundle_is_named_after_its_bytes_and_built_from_the_locked_packages() {
+    let hash = hex::encode(Sha256::digest(super::pages::OTEL_JS));
+    assert_eq!(
+        super::pages::OTEL_JS_NAME,
+        format!("otel-2.12.0-{}.js", &hash[..8])
+    );
+    let bundle = std::str::from_utf8(super::pages::OTEL_JS).unwrap();
+    assert!(
+        bundle.starts_with("/* OpenTelemetry JS for the Harold web app"),
+        "the bundle lacks its header"
+    );
+    let lock = include_bytes!("../../../web-otel/package-lock.json");
+    let lock_sha = hex::encode(Sha256::digest(lock));
+    assert!(
+        bundle.contains(&format!("package-lock.json sha256 {lock_sha}")),
+        "the lockfile changed since the bundle was built: run scripts/build_web_otel.sh"
+    );
+    for hook in ["require-in-the-middle", "import-in-the-middle"] {
+        assert!(!bundle.contains(hook), "the bundle holds {hook}");
+    }
+    let folder = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("static/web_app");
+    let bundles: Vec<String> = std::fs::read_dir(folder)
+        .unwrap()
+        .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
+        .filter(|name| name.starts_with("otel-") && name.ends_with(".js"))
+        .collect();
+    assert_eq!(bundles, [super::pages::OTEL_JS_NAME]);
+}
+
+#[test]
+fn the_telemetry_script_imports_the_bundle_skips_five_paths_and_cuts_urls_to_paths() {
+    let script = include_str!("../../static/web_app/telemetry.js");
+    assert!(
+        script.contains(&format!(r#"from "/static/{}""#, super::pages::OTEL_JS_NAME)),
+        "telemetry.js does not import the bundle by its name"
+    );
+    for path in [
+        r"\/updates",
+        r"\/call\/audio",
+        r"\/page\/seen",
+        r"\/page\/hidden",
+        r"\/telemetry\/traces",
+    ] {
+        assert!(script.contains(path), "telemetry.js does not skip {path}");
+    }
+    for wanted in [
+        "new URL(address, location.href).pathname",
+        r#""harold-version""#,
+        r#""browser.error""#,
+        r#""browser.message_shown""#,
+        r#"getAttribute("data-trace")"#,
+        "requestAnimationFrame",
+        "forceFlush",
+        "visibilitychange",
+    ] {
+        assert!(script.contains(wanted), "telemetry.js lacks {wanted}");
+    }
+    for absent in ["eval(", "new Function", "innerHTML", "http://", "https://"] {
+        assert!(!script.contains(absent), "telemetry.js holds {absent}");
+    }
+}
+
+#[test]
+fn the_thread_page_loads_the_telemetry_script_before_datastar_and_the_deferred_scripts() {
+    let page = include_str!("../../templates/web_app/thread.html");
+    let at = |needle: &str| {
+        page.find(needle)
+            .unwrap_or_else(|| panic!("thread.html lacks {needle}"))
+    };
+    let telemetry = at(r#"<script type="module" src="/static/telemetry.js">"#);
+    for later in [
+        "/static/datastar-1.0.2.js",
+        "/static/alerts.js",
+        "/static/call.js",
+        "/static/photo.js",
+        "/static/dictation.js",
+        "/static/pages.js",
+    ] {
+        assert!(telemetry < at(later), "telemetry.js loads after {later}");
+    }
+}

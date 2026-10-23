@@ -24,6 +24,16 @@ use crate::voice_input::{CallState, Missing, PhoneView, Said, Speaker};
 /// files only, nothing inline and nothing from another site.
 pub(crate) const CONTENT_SECURITY_POLICY: &str = "default-src 'none'; script-src 'self' 'unsafe-eval'; style-src 'self'; img-src 'self'; connect-src 'self'; manifest-src 'self'; worker-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'";
 
+/// The name of the vendored OpenTelemetry bundle, which `scripts/build_web_otel.sh` prints
+/// and `telemetry.js` imports. It changes whenever the bundle's bytes do.
+pub(crate) const OTEL_JS_NAME: &str = "otel-2.12.0-8513c042.js";
+pub(crate) const OTEL_JS: &[u8] = include_bytes!("../../static/web_app/otel-2.12.0-8513c042.js");
+const TELEMETRY_JS: &[u8] = include_bytes!("../../static/web_app/telemetry.js");
+
+/// What the two versioned scripts are sent with: their names change with their bytes, so
+/// the phone keeps each until the name changes. Harold's own scripts carry no such header.
+const IMMUTABLE: &str = "public, max-age=31536000, immutable";
+
 const APP_CSS: &[u8] = include_bytes!("../../static/web_app/app.css");
 const ALERTS_JS: &[u8] = include_bytes!("../../static/web_app/alerts.js");
 const SW_JS: &[u8] = include_bytes!("../../static/web_app/sw.js");
@@ -61,6 +71,10 @@ pub(crate) struct ThreadPage {
     pub todos: TodosSection,
     /// The todo count on the **Todos** button.
     pub todo_count: TodoCount,
+    /// Whether the page records and sends browser spans: Harold exports to a collector.
+    pub browser_traces: bool,
+    /// Harold's version: the `service.version` of the page's spans.
+    pub version: &'static str,
 }
 
 /// How many rows the thread page opens with, and each older load adds.
@@ -424,6 +438,8 @@ pub(crate) async fn get_thread(State(state): State<AppState>) -> Response {
             CallSection::from(&*calls.view().borrow())
         }),
         responding,
+        browser_traces: state.browser_traces.on(),
+        version: env!("CARGO_PKG_VERSION"),
     };
     let Ok(html) = page.render() else {
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
@@ -531,6 +547,9 @@ pub(crate) async fn get_static(
         "call-worklet.js" => (JAVASCRIPT, CALL_WORKLET_JS.to_vec()),
         "sw.js" => (JAVASCRIPT, SW_JS.to_vec()),
         "datastar-1.0.2.js" => (JAVASCRIPT, DATASTAR_JS.to_vec()),
+        // With export off the page does not record, and these are not served.
+        "telemetry.js" if state.browser_traces.on() => (JAVASCRIPT, TELEMETRY_JS.to_vec()),
+        OTEL_JS_NAME if state.browser_traces.on() => (JAVASCRIPT, OTEL_JS.to_vec()),
         "manifest.webmanifest" => (
             "application/manifest+json",
             manifest_json(&state.identity).into_bytes(),
@@ -542,6 +561,11 @@ pub(crate) async fn get_static(
         _ => return StatusCode::NOT_FOUND.into_response(),
     };
     let mut response = ([(header::CONTENT_TYPE, content_type)], bytes).into_response();
+    if name == OTEL_JS_NAME || name == "datastar-1.0.2.js" {
+        response
+            .headers_mut()
+            .insert(header::CACHE_CONTROL, HeaderValue::from_static(IMMUTABLE));
+    }
     if name == "sw.js" {
         // Lets the worker, served under /static/, control the whole app.
         response

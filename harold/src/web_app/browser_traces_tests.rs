@@ -569,3 +569,60 @@ fn a_path_is_cut_at_the_query_and_the_fragment_and_loses_scheme_and_host() {
     assert_eq!(path_only("/static/call.js?v=2"), "/static/call.js");
     assert_eq!(path_only("https://host"), "");
 }
+
+impl App {
+    async fn get(&self, path: &str) -> reqwest::Response {
+        reqwest::Client::new()
+            .get(format!("http://{}{path}", self.addr))
+            .header("Tailscale-User-Login", LOGIN)
+            .send()
+            .await
+            .unwrap()
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn the_page_and_the_two_scripts_are_served_only_while_export_is_on() {
+    let collector = Collector::start().await;
+    let on = App::start(Some(&collector.address())).await;
+    let off = App::start(None).await;
+    let bundle = format!("/static/{}", super::pages::OTEL_JS_NAME);
+
+    let page = on.get("/").await.text().await.unwrap();
+    let telemetry = page
+        .find(r#"src="/static/telemetry.js""#)
+        .expect("telemetry tag");
+    assert!(telemetry < page.find("/static/datastar-1.0.2.js").unwrap());
+    assert!(page.contains(&format!(
+        r#"<meta name="harold-version" content="{}">"#,
+        env!("CARGO_PKG_VERSION")
+    )));
+    assert_eq!(on.get("/static/telemetry.js").await.status(), 200);
+    assert_eq!(on.get(&bundle).await.status(), 200);
+
+    let page = off.get("/").await.text().await.unwrap();
+    assert!(!page.contains("telemetry.js"), "{page}");
+    assert!(!page.contains("harold-version"), "{page}");
+    assert_eq!(off.get("/static/telemetry.js").await.status(), 404);
+    assert_eq!(off.get(&bundle).await.status(), 404);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn only_the_two_versioned_scripts_are_cached_for_a_year() {
+    let collector = Collector::start().await;
+    let app = App::start(Some(&collector.address())).await;
+    let immutable = "public, max-age=31536000, immutable";
+
+    for path in [
+        format!("/static/{}", super::pages::OTEL_JS_NAME),
+        "/static/datastar-1.0.2.js".to_owned(),
+    ] {
+        let response = app.get(&path).await;
+        assert_eq!(response.headers()["cache-control"], immutable, "{path}");
+    }
+    for path in ["telemetry.js", "pages.js", "call.js", "app.css", "sw.js"] {
+        let response = app.get(&format!("/static/{path}")).await;
+        assert_eq!(response.status(), 200, "{path}");
+        assert!(response.headers().get("cache-control").is_none(), "{path}");
+    }
+}
