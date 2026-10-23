@@ -129,6 +129,10 @@ impl ActivityScheduler {
 }
 
 #[cfg(test)]
+#[path = "activity_scheduler_tests.rs"]
+mod activity_scheduler_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::activity_summary::SummaryError;
@@ -213,35 +217,6 @@ mod tests {
         scheduler.invalidate("%1");
         assert!(scheduler.pending.is_empty());
     }
-    struct PanicOnce(std::sync::atomic::AtomicBool);
-    #[tonic::async_trait]
-    impl ActivitySummarizer for PanicOnce {
-        async fn summarize(&self, _: ActivitySummaryInput) -> Result<String, SummaryError> {
-            assert!(
-                !self.0.swap(false, std::sync::atomic::Ordering::SeqCst),
-                "provider panic fixture"
-            );
-            Ok("Recovered provider".into())
-        }
-    }
-    #[tokio::test]
-    async fn provider_panic_releases_pane_slot_and_runs_latest_pending() {
-        let mut scheduler = ActivityScheduler::new(
-            Arc::new(PanicOnce(std::sync::atomic::AtomicBool::new(true))),
-            ActivitySummarySettings {
-                max_concurrent: 1,
-                ..Default::default()
-            },
-        );
-        scheduler.enqueue(job("%1", 1, "panic"));
-        scheduler.enqueue(job("%1", 2, "recover"));
-        let result = tokio::time::timeout(std::time::Duration::from_millis(100), scheduler.next())
-            .await
-            .expect("panic must release pane slot");
-        assert_eq!(result.basis_version.get(), 2);
-        assert_eq!(result.description.as_deref(), Some("Recovered provider"));
-    }
-
     #[tokio::test]
     async fn enforces_pending_capacity_while_using_configured_parallel_slots() {
         let (started, mut calls) = mpsc::unbounded_channel();
