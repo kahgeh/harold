@@ -169,6 +169,7 @@ fn the_header_is_a_translucent_blurred_bar_the_pages_scroll_under() {
         (".page", "\n  padding-top: var(--header-height);"),
         (".page", "\n  scroll-padding-top: var(--header-height);"),
         (".call-notice", "var(--header-height)"),
+        ("#todos", "var(--header-height)"),
     ] {
         assert!(
             rule(selector).contains(wanted),
