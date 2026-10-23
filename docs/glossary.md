@@ -11,6 +11,11 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 | tmx-agent-dash, the dash | The terminal dashboard that lists agents and holds the chief's questions | "dashboard" for the dash (HyperDX has dashboards), "TUI" |
 | agent | A coding agent running in a tmux pane: Claude Code, Codex or OpenCode | "session" for the agent, "process" for the agent |
 | echo test | The hidden web app page that measures how much of Harold's voice the phone's mic picks up while the phone plays it | "loopback test", "AEC test" |
+| paired device | A phone or browser that typed the pairing code and holds a device secret, listed by `harold app devices` | "trusted device", "registered" |
+| pairing code | The code you choose and keep as `HAROLD_PAIRING_CODE` in the pairing file; you type it into the pair screen. It is fixed and does not expire | "PIN", "password", "one-time code" |
+| pairing file | `config/pairing.env`, mode 0600, outside the repository, which holds the pairing code | "secret file", ".env" |
+| device secret | The random secret a paired device keeps as the cookie `harold_device`; Harold keeps only its fingerprint | "token", "API key" |
+| pairing lock | What stops pairing for good after 5 wrong tries in all, until the code changes or `harold app pair --unlock` | "ban", "rate limit" |
 | provider | Which kind an agent is: `claude`, `codex` or `opencode` | — |
 | pane, pane id | The tmux pane an agent runs in, and its id, such as `%47` | "pane address", "target" |
 | incarnation | One run of an agent in a pane, told apart by pane, process, start time and provider. A new one starts at Unknown | — |

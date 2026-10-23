@@ -65,7 +65,37 @@ The login header comes from the device, not from the page, so every page open in
 
 **What each request sends.** Datastar's `@get` puts every signal on the page in the URL, and `@post` puts them in the body, unless the call names the ones to send. Each call in the app's templates sets `filterSignals` to the signals its handler reads: `/updates` and `/thread/older` send `oldest`, and `POST /replies` sends `reply` and `photo`. The todo posts send their own form fields. A reply still being typed therefore leaves the phone only when you tap **Send**, and never lands in a URL that a proxy, a log or the browser might record. A test fails if a template adds a request without the filter.
 
+**Devices that are not paired.** After the login check, Harold looks for the cookie `harold_device` and finds the device by the SHA-256 of its value in `web-app/devices.json`. A request without a known cookie gets `401` and nothing else, and `GET /` gets the pair screen instead of the thread. Only these files are served without the cookie, by exact path: `/static/app.css`, the scripts `datastar-1.0.2.js`, `alerts.js`, `call.js`, `call-worklet.js`, `dictation.js`, `echo-test.js`, `pages.js`, `photo.js` and `pair.js`, `/static/sw.js`, `/static/manifest.webmanifest` and `/static/icon.png`. Photos, the live stream, the todos, calls, pushes, the browser spans and every other route need the cookie. Harold logs `app device refused` (INFO) with a `reason` of `no_cookie` or `unknown_device`, once per reason per hour, never the cookie. See [Pairing a phone](#pairing-a-phone).
+
 These checks protect against web pages and other devices, not against software on the Mac. Any program on the Mac can still reach `127.0.0.1:4330` and send a correct Host, Origin and login. The Mac's own processes are trusted, as they already are with tmux, where any of them can type into the chief's pane.
+
+### Pairing a phone
+
+A phone is paired once, inside the installed app. The pair screen has one field and a **Pair** button. You type the pairing code, which is a line `HAROLD_PAIRING_CODE=<your code>` in the pairing file, `~/bin/harold/config/pairing.env` (mode 0600, at least 6 letters or digits, outside the repository; the installer carries it across installs). Harold reads the file at each attempt, so a changed code takes effect at once.
+
+`POST /pair` takes JSON `{"code": "..."}` behind the same login, Host and origin checks as every route, and compares the code ignoring spaces, hyphens and letter case, in constant time:
+
+| Answer | When |
+|---|---|
+| `204` and the cookie | The code is right. The cookie is `harold_device=<32 random bytes, hex>; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=34560000` (400 days). Harold stores its SHA-256 with a name such as `iPhone, paired 23 Oct`. |
+| `400` "That code didn't work" | The code is wrong, or the body is not `{"code": "..."}` (only a wrong code counts as a try). |
+| `423` "Pairing is locked on the Mac" | Five wrong tries in all have locked pairing, even for the right code. |
+| `503` "Pairing isn't set up on the Mac" | The pairing file is missing, has no code, has a code under 6 characters, or can be read by others (mode other than 0600). Harold logs one WARN `app pairing not set up` with `reason` `missing`, `no_code`, `too_short` or `mode`. |
+
+**The lock.** The count of wrong tries is kept in `web-app/pairing-lock.json` (mode 0600) with a salted fingerprint of the code, so a restart does not reset it, and under a lock, so ten posts at once get at most five tries. The fifth wrong try locks pairing for good (WARN `app pairing locked`, once); each wrong try logs WARN `app pairing code failed` with `tries`. Two things unlock it: changing the code in the file, or `harold app pair --unlock`. A successful pairing sets the count back to 0.
+
+**Commands.**
+
+| Command | What it does |
+|---|---|
+| `harold app pair` | Says whether pairing is set up and locked, and the wrong tries so far. It never shows the code. |
+| `harold app pair --unlock` | Clears the lock and the count. |
+| `harold app devices` | Lists the paired devices with when each was paired and last seen. |
+| `harold app unpair <name>` | Removes a device. Its next request gets `401`, and the app reloads to the pair screen. |
+
+**Last seen** is kept in memory and written to `devices.json` at most once an hour. When a request gets `401`, the app reloads (`pages.js` for the live stream, replies and todos; `call.js`, `photo.js`, `alerts.js` and `dictation.js` for their own requests).
+
+Nothing in the page, the log, the commands' output or any message ever holds the code or a line of the pairing file.
 
 ### The `[web_app]` section
 
@@ -77,6 +107,8 @@ listen = "127.0.0.1:4330"
 allowed_login = "<your Tailscale login>"
 # app_name = "Chief M4"
 # icon = "~/code/your-organisation/machines/<this Mac>/icon.png"
+# pairing_file = "~/bin/harold/config/pairing.env"
+# require_pairing = true
 ```
 
 | Key | Value |
@@ -86,7 +118,10 @@ allowed_login = "<your Tailscale login>"
 | `app_name` | Optional. The name under the home-screen icon and in the app's title, 1 to 30 characters on one line. Left out, it is `Chief`. iOS shows about 12 characters, so a short name such as `Chief M4` reads best. |
 | `icon` | Optional. The path of a square PNG, 180 to 1024 pixels a side and at most 1 MB. A leading `~/` is the home folder; otherwise the path must be absolute. Left out, the app has no icon of its own. Harold reads the file once, at start, so a change needs a restart. It does not resize the image; iOS scales a larger square down itself. |
 
-Set both in each Mac's own `local.toml`, so the two Macs' apps differ on the home screen. The file is served at `/static/icon.png` behind the login check, and the manifest and thread page take the name and icon from these keys.
+| `pairing_file` | Optional. The file holding `HAROLD_PAIRING_CODE=<code>`. A leading `~/` is the home folder. Left out, it is `~/bin/harold/config/pairing.env`. |
+| `require_pairing` | Optional. `true` when left out: only a paired device may use the app. `false` switches the device check off, for a test Harold or for recovery, and Harold logs the WARN `web app allows any device` at every start-up. |
+
+Set `allowed_login` and `app_name` in each Mac's own `local.toml`, so the two Macs' apps differ on the home screen. The file is served at `/static/icon.png` behind the login check, and the manifest and thread page take the name and icon from these keys.
 
 The section also needs `[notify] chief` (the default `"chief-of-pods"` will do), because that entry decides which agent is the chief. The chief reaches the app only when its folder is on `[notify] web_app`.
 

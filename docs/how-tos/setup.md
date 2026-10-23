@@ -163,6 +163,24 @@ To check it, lock your screen on one Mac and trigger an agent turn completion. T
 
 The [inbound routing reference](../references/inbound-message-routing/README.md#several-macs) explains the rules and the failure modes.
 
+### Pair your phone
+
+The web app answers only a phone you have paired. Pairing is a code you choose, kept in a file on the Mac, and typed once into the app. If the app is off (no `[web_app]` section), skip this.
+
+1. **The chief writes the file** on the Mac, with the code you give it, and only the chief or you ever sees the code. It is a line in `~/bin/harold/config/pairing.env`, at mode 0600 and never in the repository:
+
+   ```sh
+   umask 077
+   printf 'HAROLD_PAIRING_CODE=%s\n' '<your code, at least 6 letters or digits>' > ~/bin/harold/config/pairing.env
+   chmod 600 ~/bin/harold/config/pairing.env
+   ```
+
+   The installer carries this file across installs, as it carries `local.toml`. Harold reads it at each attempt, so a changed code needs no restart.
+2. **Open the app on the phone.** It shows **Pair this phone**. Type the code and tap **Pair**; the app opens as before and stays paired for 400 days, across restarts and installs.
+3. **Check** with `harold app pair` (is pairing set up, is it locked, how many wrong tries) and `harold app devices` (the paired phones).
+
+Five wrong codes in all lock pairing for good. Unlock it by changing the code in the file, or run `harold app pair --unlock`. To cut a phone off, run `harold app unpair "<name from harold app devices>"`. For a test Harold, set `require_pairing = false` under `[web_app]`; Harold then warns at every start-up that it allows any device.
+
 ## 3. Verify and control the service
 
 ```sh
