@@ -7,7 +7,9 @@ GET /updates, posts a spoken question to /call/audio, fetches the answer, report
 and hangs up. The real chief's pane, the installed Harold's calls and the user's thread are
 never touched. Python 3 standard library only.
 
-For each call it reports the time from POST /call to the screen showing "listening", and for
+For each call it reports the time from POST /call to the screen showing "listening", the
+sounds the phone was offered before then in order (ringback cycles, then the pick-up; a main
+that rings nothing offers none), whether any "One moment." line appeared in #call, and for
 each turn `first_sound_ms` and `answer_ms` as the phone sees them, from the end of the speech
 (Harold cuts the turn about 1.2 s later). Run it with `--harold` on a build of main and on a
 build of a branch to compare them. Like the phone, it tells Harold a web app page is on
@@ -21,6 +23,7 @@ is given a record of the models already in the cache, so it has nothing to check
 import argparse
 import html
 import http.client
+import io
 import json
 import os
 from pathlib import Path
@@ -317,6 +320,48 @@ CALL_SECTION = re.compile(r'<section id="call"[^>]*>', re.S)
 def is_answer(shown):
     """Whether `shown` is the chief's answer sound, not a tick or one of Harold's phrases."""
     return bool(shown['sound']) and shown['line'] == ANSWER_LINE
+
+
+def sound_name(body):
+    """What a sound Harold offered is, from the length of its WAV: the ringback is one 3 s
+    cycle, the pick-up 0.15 s, main's connecting tone 0.6 s and the tick 0.04 s."""
+    try:
+        with wave.open(io.BytesIO(body)) as sound:
+            seconds = sound.getnframes() / sound.getframerate()
+    except (wave.Error, EOFError, ZeroDivisionError):
+        return 'sound'
+    if seconds >= 2.5:
+        return 'ringback'
+    if abs(seconds - 0.6) < 0.05:
+        return 'connecting'
+    if abs(seconds - 0.15) < 0.03:
+        return 'pickup'
+    if seconds < 0.1:
+        return 'tick'
+    return 'sound'
+
+
+def sound_summary(names):
+    """The sounds in order, a run of the same one counted: ["ringback", "ringback", "pickup"]
+    is "ringback x2, pickup"; none is "none"."""
+    parts = []
+    for name in names:
+        if parts and parts[-1][0] == name:
+            parts[-1][1] += 1
+        else:
+            parts.append([name, 1])
+    if not parts:
+        return 'none'
+    return ', '.join(name if count == 1 else '{} x{}'.format(name, count) for name, count in parts)
+
+
+def one_moment_sounds(events):
+    """How many sounds in #call's events said "One moment."."""
+    ids = set()
+    for _, shown in events:
+        if shown['sound'] and shown['line'] == ONE_MOMENT:
+            ids.add(shown['sound'])
+    return len(ids)
 
 
 def parse_call(patch):
@@ -626,6 +671,7 @@ class Call:
         self.call_sent = 0.0
         self.handled = set()
         self.wavs = {}
+        self.sound_names = []
         self.last_heard = ''
 
     def serve(self, shown):
@@ -638,6 +684,7 @@ class Call:
             status, kind, body = self.phone.request('GET', '/call/answer/' + sound)
             if status == 200:
                 self.wavs[sound] = (kind, body)
+                self.sound_names.append(sound_name(body))
             self.phone.request('POST', '/call/played?id={}&start_ms=0'.format(sound))
         except (OSError, http.client.HTTPException):
             pass
@@ -717,15 +764,22 @@ def play(run):
         return results
 
     def listening():
-        found = wait_until(
-            lambda: phone.since(call.mark, lambda s: s['state'] == 'listening'),
-            LIMIT_LISTENING, 'the call screen shows listening', since=call.call_sent)
+        def shown_listening():
+            # The phone fetches and reports each sound of the ringing as it is offered.
+            for shown in call.sounds_since(call.mark):
+                call.serve(shown)
+            return phone.since(call.mark, lambda s: s['state'] == 'listening')
+
+        found = wait_until(shown_listening, LIMIT_LISTENING, 'the call screen shows listening',
+                           since=call.call_sent)
         connecting = phone.since(call.mark, lambda s: s['state'] == 'connecting')
         return 'connecting first' if connecting and connecting[1] < found[1] else 'listening at once'
 
     if not add(run_step('tap_to_listening: POST /call to listening', LIMIT_LISTENING, listening,
                         since=call.call_sent)):
         return results
+
+    add(StepResult('the sounds before listening, in order', True, 0, sound_summary(call.sound_names)))
 
     def leg(label, text, audio_pcm):
         """Posts one spoken turn and checks it is cut and heard. Answers (ok, spoke_until, mark)."""
@@ -791,6 +845,10 @@ def play(run):
     if not add(run_step("the call answerer answers 'how many todos'", LIMIT_ANSWER, todos_answer, since=until)):
         return results
     results.extend(turn_times('todos', phone, leg_mark, until, lambda line: line != ONE_MOMENT and bool(re.search(r'\b(1|one)\b', line.lower()))))
+    with phone.changed:
+        one_moments = one_moment_sounds(phone.events)
+    results.append(StepResult('"One moment." in #call', True, 0,
+                              '{} sound{}'.format(one_moments, '' if one_moments == 1 else 's') if one_moments else 'none'))
     wav = call.wavs.get(answer_marks['todos'])
     if not add(run_step('the answerer\'s answer is a WAV', LIMIT_FETCH,
                         lambda: wav_check(wav))):
@@ -864,7 +922,7 @@ def worker_ready_line(log):
 def turn_times(label, phone, mark, until, is_answer_line):
     """`first_sound_ms` and `answer_ms` of the turn whose speech ended at `until` (monotonic
     seconds), as the phone saw them: the first sound with words (a phrase such as "One
-    moment." counts; a tick or the connecting tone has none), and the first sound whose words
+    moment." on main counts; a tick, the ringback or the pick-up has none), and the first sound whose words
     `is_answer_line` accepts. Both count from the end of the speech; Harold cuts the turn
     about 1.2 s later."""
     def first(test):

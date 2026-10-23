@@ -6,7 +6,7 @@ use super::phrases::{
     BYE, CHIEF_BUSY, NO_ANSWER, NO_ANSWER_IN_THREAD, NO_CHIEF, NOTHING_HEARD, VOICE_FAILED,
     VOICE_STOPPED,
 };
-use super::wav::{connecting_wav, tick_wav};
+use super::wav::{pickup_wav, ringback_wav, tick_wav};
 use super::worker::{
     Health, ProcessWorker, REQUEST_LIMIT, Transcript, VoiceWorker, WorkerCommand, WorkerError,
 };
@@ -219,8 +219,10 @@ impl AudioSink for FakeSink {
         let bytes = std::fs::read(wav).map_err(|error| error.to_string())?;
         let what = if bytes == tick_wav() {
             "tick".to_string()
-        } else if bytes == connecting_wav() {
-            "connecting".to_string()
+        } else if bytes == ringback_wav() {
+            "ringback".to_string()
+        } else if bytes == pickup_wav() {
+            "pickup".to_string()
         } else {
             String::from_utf8_lossy(&bytes).into_owned()
         };
@@ -494,6 +496,8 @@ pub(crate) struct Asked {
     pub(crate) words: String,
     pub(crate) call: CallSoFar,
     pub(crate) trace: opentelemetry::trace::TraceId,
+    /// The facts the warm-up read, when the call gave them.
+    pub(crate) facts: Option<serde_json::Value>,
 }
 
 #[derive(Default)]
@@ -503,6 +507,11 @@ pub(crate) struct AnswererLog {
     /// Runs going now, and the most at once.
     pub(crate) going: usize,
     pub(crate) most_going: usize,
+    /// How many warm-ups started.
+    pub(crate) warms: usize,
+    /// How long each warm-up takes, and whether it never ends.
+    pub(crate) warm_takes: Duration,
+    pub(crate) warm_hangs: bool,
 }
 
 /// A call answerer that gives what the test scripted, `said` with no hand-over when the
@@ -544,6 +553,7 @@ impl CallAnswerer for FakeAnswerer {
                     words: ask.words.to_string(),
                     call: ask.call.clone(),
                     trace,
+                    facts: ask.facts.clone(),
                 });
                 log.going += 1;
                 log.most_going = log.most_going.max(log.going);
@@ -556,6 +566,21 @@ impl CallAnswerer for FakeAnswerer {
             sleep(run.after).await;
             self.log().going -= 1;
             run.answer
+        })
+    }
+
+    fn warm(&self) -> BoxFuture<'_, Option<serde_json::Value>> {
+        Box::pin(async move {
+            let (n, takes, hangs) = {
+                let mut log = self.log();
+                log.warms += 1;
+                (log.warms, log.warm_takes, log.warm_hangs)
+            };
+            sleep(takes).await;
+            if hangs {
+                std::future::pending::<()>().await;
+            }
+            Some(serde_json::json!({"warm": n}))
         })
     }
 }
@@ -640,12 +665,21 @@ impl Harness {
         self.worker().script.extend(heard);
     }
 
-    /// Starts a call and gives it half a second of background.
+    /// Starts a call and lets it ring one cycle and pick up, then gives it half a second of
+    /// background. The call is listening when this returns, if its worker is ready.
     async fn start(&self) -> CallStatus {
-        let status = self.calls.start().await;
+        self.start_ringing().await;
+        // 3 s of ringing, the pick-up, and the 0.3 s after it in which the microphone is not heard.
+        sleep(Duration::from_millis(3_500)).await;
+        settle().await;
         self.feed(quiet(500));
         settle().await;
-        status
+        self.status()
+    }
+
+    /// Starts a call, which is ringing when this returns.
+    async fn start_ringing(&self) -> CallStatus {
+        self.calls.start().await
     }
 
     fn feed(&self, samples: Vec<i16>) {
@@ -708,13 +742,24 @@ impl Harness {
         &self.ports.0.sink
     }
 
+    /// What played, without the ringing: the ringback and the pick-up.
     fn played(&self) -> Vec<String> {
+        self.played_at().into_iter().map(|(_, what)| what).collect()
+    }
+
+    /// Everything that played, the ringing too.
+    fn played_all(&self) -> Vec<String> {
         let played = self.sink().played.lock().unwrap();
         played.iter().map(|(_, what)| what.clone()).collect()
     }
 
     fn played_at(&self) -> Vec<(Instant, String)> {
-        self.sink().played.lock().unwrap().clone()
+        let played = self.sink().played.lock().unwrap();
+        played
+            .iter()
+            .filter(|(_, what)| what != "ringback" && what != "pickup")
+            .cloned()
+            .collect()
     }
 
     fn tts(&self) -> Vec<String> {
@@ -942,6 +987,9 @@ async fn the_sink_is_told_what_each_sound_says() {
     assert_eq!(
         said,
         [
+            // The ringback and the pick-up, then the tick while the chief took its time.
+            Said::Tick,
+            Said::Tick,
             Said::Tick,
             Said::Line {
                 text: "All green.".into(),

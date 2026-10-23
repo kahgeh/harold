@@ -116,6 +116,8 @@ pub(crate) struct Ask<'a> {
     pub call: &'a CallSoFar,
     /// The turn's `harold.call_turn` span, which the run's span joins.
     pub turn: &'a tracing::Span,
+    /// The facts the call's warm-up read, for the call's first turn; `None` reads them now.
+    pub facts: Option<Value>,
 }
 
 /// Why a run gave no answer: the `reason` of `harold.call_answer` and of `call answer failed`.
@@ -152,6 +154,13 @@ pub(crate) enum Answer {
 /// Answers a turn. The daemon's is `Answerer`; the tests use a fake.
 pub(crate) trait CallAnswerer: Send + Sync {
     fn answer<'a>(&'a self, ask: Ask<'a>) -> BoxFuture<'a, Answer>;
+
+    /// Gets ready for the call's first answer while the phone rings: reads the facts once,
+    /// for that answer to use, and has the model program's files read into memory. `None`
+    /// when there is nothing to keep.
+    fn warm(&self) -> BoxFuture<'_, Option<Value>> {
+        Box::pin(async { None })
+    }
 }
 
 /// Tells the user something in the web app's thread, for a hand-over given up on.
@@ -563,6 +572,12 @@ pub(crate) enum RunResult {
 /// Runs the model once. The daemon's is `ClaudeRunner`; the tests use a fake.
 pub(crate) trait ModelRunner: Send + Sync {
     fn run<'a>(&'a self, run: &'a Run) -> BoxFuture<'a, RunResult>;
+
+    /// Starts the model program once with no model call, so its files are in memory for the
+    /// first run.
+    fn warm(&self) -> BoxFuture<'_, ()> {
+        Box::pin(async {})
+    }
 }
 
 /// A dollar amount for `--max-budget-usd`, with no trailing zeros: 0.02 is `0.02`.
@@ -645,6 +660,25 @@ impl ClaudeRunner {
 impl ModelRunner for ClaudeRunner {
     fn run<'a>(&'a self, run: &'a Run) -> BoxFuture<'a, RunResult> {
         Box::pin(self.run_once(run))
+    }
+
+    fn warm(&self) -> BoxFuture<'_, ()> {
+        Box::pin(async move {
+            // `--version` makes no model call and costs nothing.
+            let spawned = Command::new(&self.cli_path)
+                .arg("--version")
+                .env_clear()
+                .envs(self.environment.iter().cloned())
+                .current_dir(std::env::temp_dir())
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .kill_on_drop(true)
+                .spawn();
+            if let Ok(mut child) = spawned {
+                let _ = child.wait().await;
+            }
+        })
     }
 }
 
@@ -827,7 +861,10 @@ impl Answerer {
 
     async fn answer_turn(&self, ask: Ask<'_>, span: &tracing::Span) -> Answer {
         let started = Instant::now();
-        let facts = self.facts().await;
+        let facts = match ask.facts {
+            Some(facts) => facts,
+            None => self.facts().await,
+        };
         span.record("facts_ms", started.elapsed().as_millis() as u64);
         let run = Run {
             model: self.settings.model.clone(),
@@ -906,6 +943,13 @@ impl CallAnswerer for Answerer {
                 output_tokens = tracing::field::Empty,
             );
             self.answer_turn(ask, &span).await
+        })
+    }
+
+    fn warm(&self) -> BoxFuture<'_, Option<Value>> {
+        Box::pin(async move {
+            let (facts, ()) = tokio::join!(self.facts(), self.runner.warm());
+            Some(facts)
         })
     }
 }

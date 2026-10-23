@@ -17,7 +17,7 @@ use super::{
 use crate::agent::domain::EffectiveAgentState;
 use crate::outbound::fake::CapturedLogs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::task::JoinHandle;
@@ -519,6 +519,11 @@ struct Phone {
     /// Sounds offered that the phone could not fetch.
     unfetched: Arc<Mutex<Vec<Said>>>,
     spoken: Arc<Mutex<Vec<String>>>,
+    /// The sounds of the ringing, which the phone fetched and played: the ringback and the
+    /// pick-up.
+    rang: Arc<Mutex<Vec<Said>>>,
+    /// Whether `auto_play` is going.
+    auto: Arc<AtomicBool>,
 }
 
 impl Phone {
@@ -531,6 +536,8 @@ impl Phone {
             said: Arc::default(),
             unfetched: Arc::default(),
             spoken: Arc::default(),
+            rang: Arc::default(),
+            auto: Arc::default(),
         }
     }
 
@@ -556,7 +563,9 @@ impl Phone {
     /// From now on, fetches each sound the phone is offered, plays it for `length` and
     /// reports it played; and says each line for its own voice for `length`.
     fn auto_play(&self, length: Duration) {
+        self.auto.store(true, Ordering::SeqCst);
         let calls = Arc::clone(&self.calls);
+        let rang = Arc::clone(&self.rang);
         let said = Arc::clone(&self.said);
         let unfetched = Arc::clone(&self.unfetched);
         let spoken = Arc::clone(&self.spoken);
@@ -576,7 +585,12 @@ impl Phone {
                         unfetched.lock().unwrap().push(sound.said);
                         continue;
                     }
-                    said.lock().unwrap().push(sound.said);
+                    // The ringing plays while the call connects.
+                    if calls.status().state == CallState::Connecting {
+                        rang.lock().unwrap().push(sound.said);
+                    } else {
+                        said.lock().unwrap().push(sound.said);
+                    }
                     sleep(length).await;
                     calls.played(&sound.id);
                     continue;
@@ -609,6 +623,11 @@ impl Phone {
         self.said.lock().unwrap().clone()
     }
 
+    /// The sounds of the ringing the phone fetched and played.
+    fn rang(&self) -> Vec<Said> {
+        self.rang.lock().unwrap().clone()
+    }
+
     /// The lines the phone said in its own voice.
     fn spoken(&self) -> Vec<String> {
         self.spoken.lock().unwrap().clone()
@@ -616,10 +635,33 @@ impl Phone {
 
     /// Starts a call and gives it half a second of background.
     async fn start(&self) -> CallStatus {
-        let status = self.calls.start().await;
+        self.calls.start().await;
+        // The call rings, picks up, and is not heard for 0.3 s after. With no `auto_play`
+        // the phone plays the ringing here, each sound at once.
+        let mut played = None;
+        for _ in 0..200 {
+            let view = self.calls.view().borrow().clone();
+            if view.state == CallState::Listening {
+                break;
+            }
+            if let Some(sound) = view
+                .sound
+                .filter(|sound| played.as_ref() != Some(&sound.id))
+                && !self.auto.load(Ordering::SeqCst)
+            {
+                played = Some(sound.id.clone());
+                if self.calls.answer(&sound.id).is_some() {
+                    self.rang.lock().unwrap().push(sound.said);
+                }
+                self.calls.played(&sound.id);
+            }
+            sleep(Duration::from_millis(100)).await;
+            settle().await;
+        }
+        sleep(Duration::from_millis(400)).await;
         self.post(Instant::now(), quiet(500));
         settle().await;
-        status
+        self.calls.status()
     }
 
     /// One second of speech and the 1.2 s of silence that ends it, recorded now.
@@ -1047,8 +1089,9 @@ async fn the_view_shows_connecting_a_downloads_progress_and_the_model_a_call_end
     after_a_poll().await;
     assert_eq!(phone.view().state, CallState::Connecting);
     assert_eq!(phone.view().model_percent, None);
-    // The connecting tone is a sound the phone fetches and plays, with no words.
-    assert_eq!(phone.said(), [Said::Tick]);
+    // The ringback is a sound the phone fetches and plays, with no words.
+    assert_eq!(phone.rang().first(), Some(&Said::Tick));
+    assert!(phone.rang().iter().all(|said| *said == Said::Tick));
 
     models.set_status(ModelsStatus::Downloading {
         model: "mlx-community/whisper-large-v3-turbo".into(),
@@ -1182,7 +1225,7 @@ async fn a_calls_pieces_are_stamped_from_when_it_was_asked_for() {
     sleep(Duration::from_secs(1)).await;
     let taken_over = Instant::now();
     let joined = phone.calls.start_at(taken_over).await;
-    assert_eq!(joined.status.state, CallState::Listening);
+    assert_eq!(joined.status.state, CallState::Connecting, "still ringing");
     assert_eq!(phone.calls.source_base(), Some(taken_over));
 
     // The next call, started with no time, is stamped from when its source opens.
@@ -1476,6 +1519,8 @@ fn watched(keep: Duration) -> (Phone, Arc<AtomicUsize>) {
         said: Arc::default(),
         unfetched: Arc::default(),
         spoken: Arc::default(),
+        rang: Arc::default(),
+        auto: Arc::default(),
     };
     let pages = Arc::new(AtomicUsize::new(0));
     let seen = Arc::clone(&pages);

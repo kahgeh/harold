@@ -12,7 +12,7 @@ You ask "Is anything building?" and stop talking. Harold hears the stop 1.2 s la
 4. Harold makes `say` into audio with the voice worker and plays it. The line does not pass through the delivery queue, so another agent's update cannot hold it up.
 5. Harold listens again.
 
-From your last word to the first sound takes about 5 to 6 s. The first turn of a call can take a few seconds more while the voice worker loads. While a run takes longer than 3 s, the call plays its soft tick every 3 s.
+From your last word to the first sound takes about 5 to 6 s. No phrase comes before the answer; while a run takes longer than 3 s, the call plays its soft tick every 3 s. The ringing at the start of a call warms the answerer: Harold reads the call facts once and keeps them for the call's first turn if that turn comes within 30 s (the run then skips the read, and `facts_ms` is 0), and runs `<claude cli> --version` once, which makes no model call, so the CLI's files are in memory for the first answer. The warm-up has a 5 s limit, and the call picks up without it past that ([the voice input reference](README.md)).
 
 You can speak again while a run goes. The new turn waits for the run, then runs with the first turn in this call's history. Two runs never overlap.
 

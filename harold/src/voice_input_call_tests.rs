@@ -3,7 +3,7 @@
 //! the final review: the idle end, the mid-call mute end and the talk-now hold's limit.
 
 use super::super::hand_over::{HandOverFact, HandOverState};
-use super::super::phrases::{FROM_THE_CHIEF, ONE_MOMENT, PASSED_ON, phrase_file};
+use super::super::phrases::{FROM_THE_CHIEF, PASSED_ON, phrase_file};
 use super::super::wav::wav_bytes;
 use super::answerer::{Failure, Remark, Who};
 use super::*;
@@ -33,17 +33,17 @@ async fn a_worker_that_fails_to_load_mid_turn_ends_the_call_at_once() {
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn a_turn_in_hand_when_the_load_fails_is_dropped() {
     let h = Harness::new();
-    h.worker().starts_loading = true;
     h.script([Heard::TimeOut]);
     h.start().await;
-    // The connecting tone has played, and the microphone is not heard in its tail: the
-    // background level is read after it.
+    // The worker is started again and is loading when the user speaks.
+    h.worker().starts_loading = true;
+    h.set_health(Health::Gone(WorkerError::Exited));
+    settle().await;
     past_the_tail().await;
     h.feed(quiet(500));
     settle().await;
     h.speak().await;
-    // The worker is still loading, so the screen says the call is connecting.
-    assert_eq!(h.state(), CallState::Connecting);
+    assert_eq!(h.state(), CallState::Transcribing);
 
     h.set_health(Health::Gone(WorkerError::FailedToLoad));
     settle().await;
@@ -234,8 +234,8 @@ async fn a_second_start_while_the_first_opens_answers_the_call_it_opens() {
 
     let (first, second) = tokio::join!(h.calls.start(), h.calls.start());
 
-    assert_eq!(first.state, CallState::Listening);
-    assert_eq!(second.state, CallState::Listening);
+    assert_eq!(first.state, CallState::Connecting);
+    assert_eq!(second.state, CallState::Connecting);
     assert_eq!(h.ports.state().sources, 1);
     assert_eq!(h.worker().starts, 1);
 }
@@ -1035,7 +1035,8 @@ async fn a_call_with_only_quiet_blocks_ends_with_no_turn_cut_and_the_sound_it_re
     let text = logs.text();
     assert!(text.contains("call ended reason=\"stopped\""), "{text}");
     assert!(text.contains("heard_ms=2000"), "{text}");
-    assert!(text.contains("first_heard_ms=0"), "{text}");
+    // The test feeds the microphone after the ringing.
+    assert!(text.contains("first_heard_ms=3500"), "{text}");
     assert!(text.contains("background=30"), "{text}");
     assert!(text.contains("loudest=0"), "{text}");
     assert!(text.contains("loud_frames=0"), "{text}");
@@ -1123,7 +1124,7 @@ async fn the_answerer_answers_a_turn_and_nothing_is_typed_into_the_chief() {
 
     h.speak().await;
 
-    assert_eq!(h.played(), [ONE_MOMENT, "Nothing is building."]);
+    assert_eq!(h.played(), ["Nothing is building."]);
     assert!(h.keys().is_empty());
     assert_eq!(answerer.log().asked.len(), 1);
     assert_eq!(answerer.log().asked[0].words, "is anything building");
@@ -1138,7 +1139,7 @@ async fn the_answerer_answers_a_turn_and_nothing_is_typed_into_the_chief() {
     // No chief turn to wait for: no update line and no local model.
     assert!(h.ports.state().update_prompts.is_empty());
     sleep(Duration::from_secs(120)).await;
-    assert_eq!(h.played(), [ONE_MOMENT, "Nothing is building."]);
+    assert_eq!(h.played(), ["Nothing is building."]);
 }
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
@@ -1171,10 +1172,9 @@ async fn an_answerer_turn_is_recorded_with_who_answered_how_and_how_fast() {
     assert_eq!(attr(&first[0], "call_from").as_deref(), Some("desk"));
     let answer_ms: u64 = attr(&first[0], "answer_ms").unwrap().parse().unwrap();
     assert!((4000..4200).contains(&answer_ms), "{answer_ms}");
-    // "One moment." is the turn's first sound, long before the answer.
+    // No phrase comes before the answer: it is the turn's first sound.
     let first_sound_ms: u64 = attr(&first[0], "first_sound_ms").unwrap().parse().unwrap();
-    assert!(first_sound_ms < 2000, "{first_sound_ms}");
-    assert!(first_sound_ms < answer_ms, "{first_sound_ms} {answer_ms}");
+    assert_eq!(first_sound_ms, answer_ms);
     let second = turn_spans(asked[1].trace);
     assert_eq!(attr(&second[0], "result").as_deref(), Some("handed_over"));
     assert_eq!(attr(&second[0], "answered_by").as_deref(), Some("answerer"));
@@ -1204,7 +1204,7 @@ async fn a_request_for_work_is_passed_on_typed_into_a_busy_chief_and_the_next_tu
     h.speak().await;
     sleep(Duration::from_secs(1)).await;
 
-    assert_eq!(h.played(), [ONE_MOMENT, "I've passed that to the chief."]);
+    assert_eq!(h.played(), ["I've passed that to the chief."]);
     assert_eq!(
         h.keys(),
         [
@@ -1252,7 +1252,7 @@ async fn a_hand_over_with_no_line_of_the_answerers_own_is_said_by_harold() {
 
     h.speak().await;
 
-    assert_eq!(h.played(), [ONE_MOMENT, PASSED_ON]);
+    assert_eq!(h.played(), [PASSED_ON]);
     assert_eq!(h.keys().len(), 2);
 }
 
@@ -1288,17 +1288,17 @@ async fn a_run_over_three_seconds_plays_the_tick_every_three_seconds() {
     h.start().await;
 
     h.speak().await;
-    assert_eq!(h.played(), [ONE_MOMENT]);
+    assert_eq!(h.played(), [] as [&str; 0]);
     sleep(Duration::from_millis(3100)).await;
     settle().await;
-    assert_eq!(h.played(), [ONE_MOMENT, "tick"]);
+    assert_eq!(h.played(), ["tick"]);
     sleep(Duration::from_secs(3)).await;
     settle().await;
-    assert_eq!(h.played(), [ONE_MOMENT, "tick", "tick"]);
+    assert_eq!(h.played(), ["tick", "tick"]);
     sleep(Duration::from_secs(2)).await;
     settle().await;
 
-    assert_eq!(h.played(), [ONE_MOMENT, "tick", "tick", "Done."]);
+    assert_eq!(h.played(), ["tick", "tick", "Done."]);
 }
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
@@ -1321,17 +1321,14 @@ async fn a_failed_run_sends_the_turn_to_the_chief_and_the_next_turn_tries_the_an
     assert_eq!(h.state(), CallState::Waiting);
     // The chief answers, as today; its line is the answer, so nothing comes before it.
     h.answer("the chief's answer").await;
-    assert_eq!(h.played(), [ONE_MOMENT, "the chief's answer"]);
+    assert_eq!(h.played(), ["the chief's answer"]);
     past_the_tail().await;
     h.speak().await;
 
     assert_eq!(answerer.log().asked.len(), 2);
     assert_eq!(answerer.log().asked[1].words, "second words");
     assert_eq!(h.keys().len(), 2);
-    assert_eq!(
-        h.played(),
-        [ONE_MOMENT, "the chief's answer", ONE_MOMENT, "Fine."]
-    );
+    assert_eq!(h.played(), ["the chief's answer", "Fine."]);
 }
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
@@ -1343,7 +1340,7 @@ async fn a_failed_turn_for_a_busy_chief_is_held_as_before() {
 
     h.speak().await;
 
-    assert_eq!(h.played(), [ONE_MOMENT, CHIEF_BUSY]);
+    assert_eq!(h.played(), [CHIEF_BUSY]);
     assert!(h.keys().is_empty());
     h.set_chief(EffectiveAgentState::Idle);
     sleep(Duration::from_secs(2)).await;
@@ -1454,14 +1451,7 @@ async fn the_chiefs_line_between_turns_plays_after_from_the_chief_and_is_in_the_
 
     assert_eq!(
         h.played(),
-        [
-            ONE_MOMENT,
-            "Fine.",
-            FROM_THE_CHIEF,
-            "H1: the build passed.",
-            ONE_MOMENT,
-            "Fine."
-        ]
+        ["Fine.", FROM_THE_CHIEF, "H1: the build passed.", "Fine."]
     );
     let asked = answerer.log().asked.clone();
     assert!(asked[1].call.remarks.contains(&Remark {
@@ -1469,7 +1459,8 @@ async fn the_chiefs_line_between_turns_plays_after_from_the_chief_and_is_in_the_
         text: "H1: the build passed.".into()
     }));
     assert_eq!(
-        h.sink().said.lock().unwrap()[2],
+        // After the ringback and the pick-up, and the answerer's first answer.
+        h.sink().said.lock().unwrap()[3],
         Said::Line {
             text: FROM_THE_CHIEF.into(),
             by: Speaker::Chief
@@ -1492,7 +1483,7 @@ async fn talk_now_drops_a_chief_line_waiting_behind_the_answerers_with_its_prefa
     settle().await;
 
     assert_eq!(said_by_chief.await.unwrap(), Some(true));
-    assert_eq!(h.played(), [ONE_MOMENT, "Fine."]);
+    assert_eq!(h.played(), ["Fine."]);
 }
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
@@ -1619,7 +1610,7 @@ async fn hand_overs_after_the_call_ends_keep_counting_on() {
 }
 
 // ---------------------------------------------------------------------------
-// Connecting, One moment., and the speech models
+// The ringing, the warm-up, and the speech models
 // ---------------------------------------------------------------------------
 
 use super::super::models::{Missing, Status as ModelsStatus};
@@ -1642,29 +1633,33 @@ fn load_refused(cause: LoadCause, model: Option<&'static str>) -> Health {
     Health::Gone(WorkerError::LoadRefused(LoadFailure { cause, model }))
 }
 
+/// Lets the clock run `seconds` more and the call's tasks with it.
+async fn run_for(seconds: f64) {
+    sleep(Duration::from_secs_f64(seconds)).await;
+    settle().await;
+}
+
 #[tokio::test(flavor = "current_thread", start_paused = true)]
-async fn a_call_whose_worker_is_loading_is_connecting_and_plays_the_tone_every_1_5_s() {
+async fn a_call_whose_worker_is_loading_rings_a_whole_cycle_every_3_s() {
     let h = Harness::new();
     h.worker().starts_loading = true;
 
-    let status = h.start().await;
+    let status = h.start_ringing().await;
+    settle().await;
 
     assert_eq!(status.state, CallState::Connecting);
-    assert_eq!(h.played(), ["connecting"]);
-    sleep(Duration::from_millis(1400)).await;
-    settle().await;
-    assert_eq!(h.played().len(), 1);
-    sleep(Duration::from_millis(200)).await;
-    settle().await;
-    assert_eq!(h.played(), ["connecting", "connecting"]);
-    sleep(Duration::from_millis(1500)).await;
-    settle().await;
-    let at = h.played_at();
+    assert_eq!(h.played_all(), ["ringback"]);
+    run_for(2.9).await;
+    assert_eq!(h.played_all(), ["ringback"]);
+    run_for(0.2).await;
+    assert_eq!(h.played_all(), ["ringback", "ringback"]);
+    run_for(3.0).await;
+    let at = h.sink().played.lock().unwrap().clone();
     assert_eq!(at.len(), 3);
-    assert_eq!(at[1].0 - at[0].0, Duration::from_millis(1500));
-    assert_eq!(at[2].0 - at[1].0, Duration::from_millis(1500));
+    assert_eq!(at[1].0 - at[0].0, Duration::from_secs(3));
+    assert_eq!(at[2].0 - at[1].0, Duration::from_secs(3));
     assert_eq!(h.state(), CallState::Connecting);
-    // The sound path names the tone as it names the tick: a sound with no words.
+    // The sound path names the ringback as it names the tick: a sound with no words.
     assert!(
         h.sink()
             .said
@@ -1676,90 +1671,137 @@ async fn a_call_whose_worker_is_loading_is_connecting_and_plays_the_tone_every_1
 }
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
-async fn when_the_worker_is_ready_the_tone_stops_and_the_call_listens() {
+async fn a_worker_ready_mid_cycle_waits_for_the_cycle_to_end_then_the_call_picks_up_and_listens() {
     let h = Harness::new();
     h.worker().starts_loading = true;
-    h.start().await;
-    sleep(Duration::from_millis(1600)).await;
-    settle().await;
-    assert_eq!(h.played().len(), 2);
+    h.start_ringing().await;
+    run_for(1.6).await;
 
     h.set_health(Health::Ready);
     settle().await;
 
+    // The ring is never cut short.
+    assert_eq!(h.state(), CallState::Connecting);
+    assert_eq!(h.played_all(), ["ringback"]);
+    run_for(1.5).await;
+    assert_eq!(h.played_all(), ["ringback", "pickup"]);
     assert_eq!(h.state(), CallState::Listening);
-    sleep(Duration::from_secs(10)).await;
-    settle().await;
-    assert_eq!(h.played().len(), 2, "no tone follows");
+    run_for(10.0).await;
+    assert_eq!(h.played_all(), ["ringback", "pickup"], "no ring follows");
     assert_eq!(h.state(), CallState::Listening);
 }
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
-async fn a_loaded_worker_skips_connecting_and_plays_no_tone() {
+async fn a_loaded_worker_rings_exactly_one_cycle_plays_the_pick_up_and_then_listens() {
     let h = Harness::new();
+    h.sink().hold.store(true, Ordering::SeqCst);
 
-    let status = h.start().await;
-
-    assert_eq!(status.state, CallState::Listening);
-    sleep(Duration::from_secs(10)).await;
+    let status = h.start_ringing().await;
     settle().await;
-    assert!(h.played().is_empty());
+
+    assert_eq!(status.state, CallState::Connecting);
+    assert_eq!(h.played_all(), ["ringback"]);
+    // The ringback plays for its 3 s.
+    run_for(3.0).await;
+    h.sink().release();
+    run_for(0.05).await;
+    assert_eq!(h.played_all(), ["ringback", "pickup"]);
+    assert_eq!(h.state(), CallState::Connecting, "until the pick-up ends");
+    run_for(0.15).await;
+    h.sink().release();
+    settle().await;
+    assert_eq!(h.state(), CallState::Listening);
+    run_for(10.0).await;
+    assert_eq!(h.played_all(), ["ringback", "pickup"]);
     assert_eq!(h.ports.state().opened, 1);
 }
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
-async fn the_tone_waits_for_the_user_speaking_and_a_connecting_call_is_not_idle() {
+async fn a_worker_that_becomes_ready_4_s_in_rings_two_cycles() {
+    test_support::install();
     let h = Harness::new();
     h.worker().starts_loading = true;
-    h.start().await;
-    past_the_tail().await;
-    h.feed(quiet(500));
-    settle().await;
-    let played = h.played().len();
-    // Speech is in progress when the next tone falls due.
-    h.feed(loud(1200));
-    settle().await;
-    sleep(Duration::from_millis(1100)).await;
-    settle().await;
-    assert_eq!(h.played().len(), played, "the user is not talked over");
+    h.start_ringing().await;
+    run_for(4.0).await;
 
-    // A call left connecting for longer than the idle limit is not ended as idle.
-    h.feed(quiet(1200));
-    sleep(Duration::from_secs(11 * 60)).await;
-    settle().await;
-    assert_eq!(h.state(), CallState::Connecting);
+    h.set_health(Health::Ready);
+    run_for(2.1).await;
+
+    assert_eq!(h.played_all(), ["ringback", "ringback", "pickup"]);
+    assert_eq!(h.state(), CallState::Listening);
+    // Spans of calls in other tests are in the same list: find this call's by what it holds.
+    let spans = test_support::spans();
+    assert!(
+        spans.iter().any(|span| {
+            let attr = |key| test_support::span_attr(span, key);
+            span.name == "harold.call_ring"
+                && attr("cycles").as_deref() == Some("2")
+                && attr("worker").as_deref() == Some("loaded_now")
+        }),
+        "a call that loaded its worker rang two cycles"
+    );
 }
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
-async fn speech_while_connecting_is_transcribed_once_the_worker_is_ready_and_says_how_long_it_waited()
- {
+async fn a_call_whose_worker_is_ready_logs_one_cycle_and_the_warm_up() {
     test_support::install();
     let (h, answerer, _) = answering_harness();
+    answerer.log().warm_takes = Duration::from_millis(1200);
+
+    h.start().await;
+
+    // Spans of calls in other tests are in the same list: find this call's by its warm-up.
+    let spans = test_support::spans();
+    assert!(
+        spans.iter().any(|span| {
+            let attr = |key| test_support::span_attr(span, key);
+            span.name == "harold.call_ring"
+                && attr("cycles").as_deref() == Some("1")
+                && attr("worker").as_deref() == Some("ready")
+                && attr("warm_ms").as_deref() == Some("1200")
+        }),
+        "a call whose worker was ready rang one cycle"
+    );
+    let sources: Vec<String> = spans
+        .iter()
+        .filter(|span| span.name == "harold.call_play")
+        .filter_map(|span| test_support::span_attr(span, "source"))
+        .collect();
+    assert!(sources.contains(&"ringback".to_string()));
+    assert!(sources.contains(&"pickup".to_string()));
+    assert!(!sources.contains(&"connecting".to_string()));
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn a_cold_worker_is_started_during_the_ringing() {
+    let h = Harness::new();
+    h.worker().starts_loading = true;
+
+    h.start_ringing().await;
+    settle().await;
+
+    assert_eq!(h.worker().starts, 1);
+    assert_eq!(h.state(), CallState::Connecting);
+    assert_eq!(h.played_all(), ["ringback"]);
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn speech_during_the_ringing_starts_no_turn_and_a_ringing_call_is_not_idle() {
+    let h = Harness::new();
     h.worker().starts_loading = true;
     h.script([text("hello")]);
-    h.start().await;
-    past_the_tail().await;
-    h.feed(quiet(500));
+    h.start_ringing().await;
     settle().await;
 
     h.speak().await;
-    assert!(h.worker().transcribed.is_empty());
-    sleep(Duration::from_secs(2)).await;
-    h.set_health(Health::Ready);
     settle().await;
+    assert!(h.worker().transcribed.is_empty());
+    assert_eq!(h.status().last_result, None);
 
-    assert_eq!(h.worker().transcribed.len(), 1);
-    let trace = answerer.log().asked[0].trace;
-    let spans = test_support::spans();
-    let transcribe = spans
-        .iter()
-        .find(|span| span.name == "harold.call_transcribe" && span.span_context.trace_id() == trace)
-        .expect("the turn was transcribed");
-    let waited: u64 = test_support::span_attr(transcribe, "load_waited_ms")
-        .unwrap()
-        .parse()
-        .unwrap();
-    assert!((2000..2500).contains(&waited), "{waited}");
+    // A call left ringing for longer than the idle limit is not ended as idle.
+    run_for(11.0 * 60.0).await;
+    assert_eq!(h.state(), CallState::Connecting);
+    assert!(h.worker().transcribed.is_empty());
 }
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
@@ -1784,27 +1826,24 @@ async fn a_loaded_worker_records_no_load_wait() {
 }
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
-async fn one_moment_plays_before_the_answer_and_the_answer_never_plays_over_it() {
+async fn an_answered_turn_plays_no_phrase_before_the_answer() {
     let (h, answerer, _) = answering_harness();
     script_runs(&answerer, [run_now(said("Fine."))]);
-    h.sink().hold.store(true, Ordering::SeqCst);
     h.start().await;
+    h.sink().hold.store(true, Ordering::SeqCst);
 
     h.speak().await;
 
-    // The answer is ready, but "One moment." is still playing.
-    assert_eq!(h.played(), [ONE_MOMENT]);
+    assert_eq!(h.played(), ["Fine."]);
     assert_eq!(h.state(), CallState::Speaking);
     h.sink().release();
     settle().await;
-    assert_eq!(h.played(), [ONE_MOMENT, "Fine."]);
-    h.sink().release();
-    settle().await;
     assert_eq!(h.state(), CallState::Listening);
+    assert_eq!(h.worker().said, ["Fine."], "nothing else was made");
 }
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
-async fn a_turn_that_ends_the_call_or_is_not_heard_gets_no_one_moment() {
+async fn a_turn_that_ends_the_call_or_is_not_heard_plays_only_its_own_phrase() {
     let (h, _, _) = answering_harness();
     h.script([Heard::Unlikely("mumble".into()), text("bye")]);
     h.start().await;
@@ -1818,34 +1857,64 @@ async fn a_turn_that_ends_the_call_or_is_not_heard_gets_no_one_moment() {
 }
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
-async fn the_worker_makes_one_moment_first_and_it_is_kept_for_the_next_call() {
+async fn no_phrase_is_made_at_the_start_of_a_call() {
     let (h, _, _) = answering_harness();
-    let kept = phrase_file(&h.ports.phrases_dir(), "af_heart", ONE_MOMENT);
-    assert!(!kept.exists());
-
-    h.start().await;
-    settle().await;
-
-    assert_eq!(h.worker().said, [ONE_MOMENT]);
-    assert!(kept.is_file());
-    assert!(h.played().is_empty(), "making the phrase plays nothing");
-    // A turn now finds it kept, and the worker does not make it again.
-    h.speak().await;
-    assert_eq!(h.worker().said, [ONE_MOMENT, "Fine."]);
-    assert_eq!(h.played()[0], ONE_MOMENT);
-}
-
-#[tokio::test(flavor = "current_thread", start_paused = true)]
-async fn a_phrase_already_kept_is_not_made_again_at_the_start_of_a_call() {
-    let (h, _, _) = answering_harness();
-    let kept = phrase_file(&h.ports.phrases_dir(), "af_heart", ONE_MOMENT);
-    std::fs::create_dir_all(kept.parent().unwrap()).unwrap();
-    std::fs::write(&kept, wav_bytes(&[0; 10], 24_000)).unwrap();
 
     h.start().await;
     settle().await;
 
     assert!(h.worker().said.is_empty());
+    assert!(h.played().is_empty(), "the ringing is not a phrase");
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn the_warm_up_runs_once_and_the_first_turn_within_30_s_uses_its_facts() {
+    let (h, answerer, _) = answering_harness();
+    script_runs(&answerer, [run_now(said("One.")), run_now(said("Two."))]);
+    h.script([text("first"), text("second")]);
+    h.start_ringing().await;
+    run_for(3.5).await;
+    h.feed(quiet(500));
+    settle().await;
+
+    h.speak().await;
+    past_the_tail().await;
+    h.speak().await;
+
+    let log = answerer.log();
+    assert_eq!(log.warms, 1);
+    assert_eq!(log.asked.len(), 2);
+    assert_eq!(log.asked[0].facts, Some(serde_json::json!({"warm": 1})));
+    assert_eq!(log.asked[1].facts, None);
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn facts_older_than_30_s_are_read_again() {
+    let (h, answerer, _) = answering_harness();
+    h.script([text("late")]);
+    h.start().await;
+
+    run_for(31.0).await;
+    h.speak().await;
+
+    assert_eq!(answerer.log().asked[0].facts, None);
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn a_warm_up_that_hangs_is_cut_at_5_s_and_the_call_picks_up() {
+    let (h, answerer, _) = answering_harness();
+    answerer.log().warm_hangs = true;
+    h.start_ringing().await;
+
+    // At 3 s the call is not ready: another whole cycle plays.
+    run_for(3.1).await;
+    assert_eq!(h.played_all(), ["ringback", "ringback"]);
+    assert_eq!(h.state(), CallState::Connecting);
+    // The warm-up is cut at 5 s, and the cycle that ends at 6 s picks up.
+    run_for(3.0).await;
+
+    assert_eq!(h.played_all(), ["ringback", "ringback", "pickup"]);
+    assert_eq!(h.state(), CallState::Listening);
 }
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
@@ -1855,7 +1924,8 @@ async fn the_worker_starts_when_the_speech_models_are_on_the_mac_and_the_screen_
     let models = SpeechModels::stubbed(ModelsStatus::Checking);
     h.ports.state().models = Some(Arc::clone(&models));
 
-    let status = h.start().await;
+    let status = h.start_ringing().await;
+    settle().await;
 
     assert_eq!(status.state, CallState::Connecting);
     assert_eq!(models.asked(), ["for_call"]);
@@ -1864,7 +1934,7 @@ async fn the_worker_starts_when_the_speech_models_are_on_the_mac_and_the_screen_
         0,
         "no worker before the models are there"
     );
-    assert_eq!(h.played(), ["connecting"]);
+    assert_eq!(h.played_all(), ["ringback"]);
     assert_eq!(h.status().model_percent, None);
     models.set_status(ModelsStatus::Downloading {
         model: super::super::models::WHISPER.into(),
@@ -1873,19 +1943,24 @@ async fn the_worker_starts_when_the_speech_models_are_on_the_mac_and_the_screen_
     });
     settle().await;
     assert_eq!(h.status().model_percent, Some(45));
-    sleep(Duration::from_millis(1600)).await;
-    settle().await;
-    assert_eq!(h.played().len(), 2, "the tone goes on during the download");
+    run_for(3.2).await;
+    assert_eq!(
+        h.played_all(),
+        ["ringback", "ringback"],
+        "the ring goes on during the download"
+    );
 
     models.set_status(ModelsStatus::Ready);
     settle().await;
 
     assert_eq!(h.worker().starts, 1);
+    // The ring ends with its cycle.
+    assert_eq!(h.state(), CallState::Connecting);
+    run_for(3.0).await;
     assert_eq!(h.state(), CallState::Listening);
     assert_eq!(h.status().model_percent, None);
-    sleep(Duration::from_secs(5)).await;
-    settle().await;
-    assert_eq!(h.played().len(), 2);
+    run_for(5.0).await;
+    assert_eq!(h.played_all(), ["ringback", "ringback", "pickup"]);
 }
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
@@ -1906,8 +1981,9 @@ async fn a_failed_download_stops_the_tone_says_the_model_is_missing_and_ends_the
     let h = Harness::new();
     let models = SpeechModels::stubbed(ModelsStatus::Checking);
     h.ports.state().models = Some(Arc::clone(&models));
-    h.start().await;
-    assert_eq!(h.played(), ["connecting"]);
+    h.start_ringing().await;
+    settle().await;
+    assert_eq!(h.played_all(), ["ringback"]);
 
     models.set_status(ModelsStatus::Failed(missing_model("network")));
     settle().await;
@@ -1920,7 +1996,7 @@ async fn a_failed_download_stops_the_tone_says_the_model_is_missing_and_ends_the
     assert_eq!(h.worker().starts, 0);
     sleep(Duration::from_secs(10)).await;
     settle().await;
-    assert_eq!(h.played(), ["connecting"], "the tone stopped");
+    assert_eq!(h.played_all(), ["ringback"], "the ring stopped");
     assert!(logs.text().contains("call ended reason=\"voice_failed\""));
     assert!(h.call_dirs().is_empty());
 }
@@ -1972,7 +2048,8 @@ async fn a_worker_that_cannot_find_a_model_has_the_models_look_again_and_starts_
     settle().await;
     assert_eq!(h.worker().starts, 2);
     h.set_health(Health::Ready);
-    settle().await;
+    // The call rings a whole cycle again before it listens.
+    run_for(3.2).await;
     assert_eq!(h.state(), CallState::Listening);
 
     // Not again: a second time ends the call with the notice.

@@ -154,6 +154,9 @@ pub(crate) const ALLOWED_FIELDS: &[&str] = &[
     "ms",
     "load_ms",
     "load_waited_ms",
+    "cycles",
+    "worker",
+    "warm_ms",
 ];
 
 /// How long shutting the exporters down may take in all.

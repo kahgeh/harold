@@ -1,9 +1,11 @@
 import importlib.util
+import io
 from pathlib import Path
 import sys
 import time
 import tomllib
 import unittest
+import wave
 
 SCRIPTS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SCRIPTS))
@@ -305,3 +307,43 @@ class WorkerReadyTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+def wav_of(seconds, rate=24000):
+    out = io.BytesIO()
+    with wave.open(out, 'wb') as sound:
+        sound.setnchannels(1)
+        sound.setsampwidth(2)
+        sound.setframerate(rate)
+        sound.writeframes(b'\0\0' * round(seconds * rate))
+    return out.getvalue()
+
+
+class SoundNameTests(unittest.TestCase):
+    def test_a_sound_is_named_by_its_length(self):
+        self.assertEqual('ringback', ct.sound_name(wav_of(3.0)))
+        self.assertEqual('pickup', ct.sound_name(wav_of(0.15)))
+        self.assertEqual('connecting', ct.sound_name(wav_of(0.6)))
+        self.assertEqual('tick', ct.sound_name(wav_of(0.04)))
+        self.assertEqual('sound', ct.sound_name(wav_of(1.7)))
+
+    def test_bytes_that_are_not_a_wav_are_a_sound(self):
+        self.assertEqual('sound', ct.sound_name(b'not a wav'))
+
+    def test_a_run_of_the_same_sound_is_counted(self):
+        self.assertEqual('ringback x2, pickup', ct.sound_summary(['ringback', 'ringback', 'pickup']))
+        self.assertEqual('ringback, pickup', ct.sound_summary(['ringback', 'pickup']))
+        self.assertEqual('none', ct.sound_summary([]))
+
+
+class OneMomentTests(unittest.TestCase):
+    def shown(self, sound, line):
+        return {'state': 'speaking', 'sound': sound, 'line': line, 'heard': ''}
+
+    def test_counts_the_sounds_that_said_it(self):
+        events = [(0.0, self.shown('a', ct.ONE_MOMENT)), (0.1, self.shown('a', ct.ONE_MOMENT)),
+                  (0.2, self.shown('b', 'Fine.')), (0.3, self.shown('c', ct.ONE_MOMENT))]
+        self.assertEqual(2, ct.one_moment_sounds(events))
+
+    def test_none_when_the_answer_is_the_first_sound(self):
+        self.assertEqual(0, ct.one_moment_sounds([(0.0, self.shown('a', 'Fine.'))]))

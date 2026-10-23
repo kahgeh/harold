@@ -288,17 +288,52 @@ impl Phone {
         }
     }
 
-    /// `POST /call`, which must start the call or take it over, and half a second of
-    /// background. Answers the call's id.
+    /// `POST /call`, which must start the call or take it over, then the ringing, and half
+    /// a second of background. Answers the call's id.
     async fn start(&self) -> String {
+        let call = self.start_ringing().await;
+        self.ring().await;
+        self.post(quiet(500)).await;
+        call
+    }
+
+    /// `POST /call`, which must start the call or take it over. The call is ringing.
+    async fn start_ringing(&self) -> String {
         let sent = Instant::now();
         let call = self.server.post_call().await;
         // The call's clock starts as the request arrives, after `sent`, so a piece stamped
         // with the time since `sent` was recorded after the call opened, and is heard.
         *self.clock.lock().unwrap() = (sent, 0);
         *self.call.lock().unwrap() = Some(call.clone());
-        self.post(quiet(500)).await;
         call
+    }
+
+    /// Plays each sound of the ringing, as the phone does when it is offered, until the call
+    /// listens and the microphone is heard again. Answers how long that took.
+    async fn ring(&self) -> Duration {
+        let began = Instant::now();
+        let mut view = self.calls.view();
+        let mut played = None;
+        loop {
+            let now = view.borrow_and_update().clone();
+            if now.state == CallState::Listening {
+                break;
+            }
+            if let Some(sound) = now
+                .sound
+                .clone()
+                .filter(|sound| played.as_ref() != Some(&sound.id))
+            {
+                played = Some(sound.id.clone());
+                self.calls.phone.played(&sound.id);
+            }
+            assert!(began.elapsed() < LIMIT, "the call never listened: {now:?}");
+            sleep(Duration::from_millis(10)).await;
+        }
+        let rang = began.elapsed();
+        // Not heard for 0.3 s after the last sound.
+        sleep(Duration::from_millis(350)).await;
+        rang
     }
 
     /// The id the last `POST /call` answered.
@@ -676,7 +711,7 @@ async fn a_phone_calls_pieces_are_stamped_from_when_post_call_arrived() {
     let calls = AppCalls::new(PhoneCalls::new(FakePorts::new(), true), store, end_desk);
 
     let arrived = Instant::now();
-    assert_eq!(calls.start().await.status.state, CallState::Listening);
+    assert_eq!(calls.start().await.status.state, CallState::Connecting);
 
     assert!(arrived.elapsed() >= Duration::from_secs(3));
     assert_eq!(calls.phone.source_base(), Some(arrived));
@@ -970,7 +1005,7 @@ async fn shutdown_ends_an_open_phone_call() {
     .await
     .expect("the app starts");
     let started = calls.start().await;
-    assert_eq!(started.status.state, CallState::Listening);
+    assert_eq!(started.status.state, CallState::Connecting);
 
     drop(shutdown);
 
@@ -1477,4 +1512,17 @@ async fn delete_with_why_no_sound_ends_the_call_as_microphone_failed_and_without
         2,
         "{captured}"
     );
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn the_phones_screen_shows_connecting_for_at_least_3_s_and_then_listening() {
+    let phone = Phone::new(true).await;
+
+    phone.start_ringing().await;
+    assert_eq!(phone.calls.view().borrow().state, CallState::Connecting);
+    let rang = phone.ring().await;
+
+    assert!(rang >= Duration::from_secs(3), "{rang:?}");
+    assert!(rang < Duration::from_millis(3_500), "{rang:?}");
+    assert_eq!(phone.calls.view().borrow().state, CallState::Listening);
 }

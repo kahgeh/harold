@@ -25,3 +25,7 @@ The voice worker runs with `HF_HUB_OFFLINE=1`, so a speech model missing from th
 - A call tapped on the hotspot downloads the missing model there, 1.6 to 2 GB of phone data, by the user's choice.
 - The metered test only recognises the iPhone Personal Hotspot's range; other metered networks are not noticed.
 - `huggingface_hub` 0.34.3 and `hf_xet` 1.1.5 are audited for this use only (`docs/references/dependency-audits.md`).
+
+## Notes
+
+- 2026-10-23: the connecting tone became a ringback that plays at every call, for at least one whole 3 s cycle, whatever the worker's state, and the ringing is when the call starts what it needs: the voice worker, and the call answerer's warm-up. A call during a download still stays in `Connecting`, but it now rings whole cycles until the models are there and the worker is ready (call-tone-no-filler).

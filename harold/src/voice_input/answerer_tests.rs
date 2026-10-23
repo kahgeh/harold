@@ -53,6 +53,8 @@ impl FactSources for FakeSources {
 struct FakeRunner {
     results: Mutex<VecDeque<RunResult>>,
     runs: Mutex<Vec<Run>>,
+    /// How many times the program was started with no model call.
+    warmed: Mutex<usize>,
 }
 
 impl FakeRunner {
@@ -81,6 +83,12 @@ impl ModelRunner for FakeRunner {
                 .unwrap()
                 .pop_front()
                 .unwrap_or(RunResult::FailedToStart)
+        })
+    }
+
+    fn warm(&self) -> BoxFuture<'_, ()> {
+        Box::pin(async move {
+            *self.warmed.lock().unwrap() += 1;
         })
     }
 }
@@ -179,6 +187,7 @@ async fn ask(answerer: &Answerer, words: &str, call: &CallSoFar) -> Answer {
             words,
             call,
             turn: &turn,
+            facts: None,
         })
         .await
 }
@@ -771,6 +780,7 @@ async fn the_run_span_carries_the_result_the_times_the_cost_and_the_tokens_and_n
                 words,
                 call: &CallSoFar::default(),
                 turn: &turn,
+                facts: None,
             })
             .await;
     }
@@ -884,4 +894,35 @@ fn the_rules_say_to_answer_in_english() {
         "7. Answer in English, even when the person's words look like another language. \
          Misheard speech can come out in another language."
     ));
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_warm_up_reads_the_facts_and_starts_the_program_once_and_the_answer_uses_them() {
+    let runner = FakeRunner::giving([ok(SAMPLE)]);
+    let answerer = answerer(sources(), &runner);
+
+    let facts = CallAnswerer::warm(&answerer)
+        .await
+        .expect("facts were read");
+
+    assert_eq!(*runner.warmed.lock().unwrap(), 1);
+    assert!(
+        runner.prompts().is_empty(),
+        "the warm-up makes no model run"
+    );
+    assert!(facts["todos"].is_array(), "{facts}");
+
+    // An answer given the kept facts does not read them again.
+    let turn = tracing::Span::none();
+    let call = CallSoFar::default();
+    let kept = json!({"kept": true});
+    answerer
+        .answer(Ask {
+            words: "hello",
+            call: &call,
+            turn: &turn,
+            facts: Some(kept.clone()),
+        })
+        .await;
+    assert_eq!(prompt_json(&runner)["facts"], kept);
 }

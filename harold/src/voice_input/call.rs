@@ -10,11 +10,11 @@ use super::hang_up::{Spoken, hang_up};
 use super::models::Status as ModelsStatus;
 use super::phone::sound_length;
 use super::phrases::{
-    BYE, CHIEF_BUSY, FROM_THE_CHIEF, MODEL_MISSING, NO_CHIEF, NOTHING_HEARD, ONE_MOMENT, PASSED_ON,
+    BYE, CHIEF_BUSY, FROM_THE_CHIEF, MODEL_MISSING, NO_CHIEF, NOTHING_HEARD, PASSED_ON,
     VOICE_FAILED, VOICE_STOPPED, phrase_file,
 };
 use super::speech::{FRAME, MAX_TURN_FRAMES, START_FRAMES, SpeechDetector};
-use super::wav::{connecting_wav, tick_wav, wav_bytes};
+use super::wav::{pickup_wav, ringback_wav, tick_wav, wav_bytes};
 use super::worker::{Health, LoadCause, Transcript, VoiceWorker, WorkerError, log_exited};
 use super::{
     AudioSink, AudioSource, CallPorts, CallState, CallStatus, SAMPLE_RATE, Said, Speaker,
@@ -27,7 +27,8 @@ use crate::telemetry::{self, StartedBy};
 use crate::timed_prompts::{
     AgentPane, AgentsView, Attempt, Ports, Reason, Writer, type_when_ready,
 };
-use std::collections::{HashMap, VecDeque};
+use serde_json::Value;
+use std::collections::VecDeque;
 use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -66,10 +67,15 @@ const RUN_LIMIT: Duration = Duration::from_secs(30);
 const REMARKS_KEPT: usize = 40;
 /// The mark in front of each turn typed into the chief's pane.
 pub(super) const MARK: &str = "🎙";
-/// How often the connecting tone plays while the call connects.
-const TONE_EVERY: Duration = Duration::from_millis(1500);
+/// How long one cycle of the ringback lasts: the ring is whole or not played.
+const RING_CYCLE: Duration = Duration::from_secs(3);
+/// How long the call answerer's warm-up has before the call picks up without it.
+const WARM_LIMIT: Duration = Duration::from_secs(5);
+/// How long the facts the warm-up read are kept for the call's first turn.
+const WARM_KEPT: Duration = Duration::from_secs(30);
 const TICK_WAV: &str = "tick.wav";
-const CONNECTING_WAV: &str = "connecting.wav";
+const RINGBACK_WAV: &str = "ringback.wav";
+const PICKUP_WAV: &str = "pickup.wav";
 const TURN_WAV: &str = "turn.wav";
 
 /// Why a call ended: the `reason` of `call ended` (Decision 15).
@@ -145,6 +151,8 @@ pub(super) enum Event<W> {
         id: u64,
         answer: Answer,
     },
+    /// The call answerer's warm-up ended, with the facts it read, or was cut at its limit.
+    Warmed(Option<Value>),
 }
 
 pub(super) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -310,8 +318,8 @@ fn private_dir(dir: &Path) -> std::io::Result<()> {
     std::fs::DirBuilder::new().mode(0o700).create(dir)
 }
 
-/// Makes `<calls>/call-<uuid>/` for the user only, and writes the tick and the connecting
-/// tone into it.
+/// Makes `<calls>/call-<uuid>/` for the user only, and writes the tick, the ringback and
+/// the pick-up into it.
 fn make_call_dir(calls: &Path, dir: &Path) -> std::io::Result<()> {
     std::fs::DirBuilder::new()
         .recursive(true)
@@ -319,7 +327,8 @@ fn make_call_dir(calls: &Path, dir: &Path) -> std::io::Result<()> {
         .create(calls)?;
     private_dir(dir)?;
     std::fs::write(dir.join(TICK_WAV), tick_wav())?;
-    std::fs::write(dir.join(CONNECTING_WAV), connecting_wav())
+    std::fs::write(dir.join(RINGBACK_WAV), ringback_wav())?;
+    std::fs::write(dir.join(PICKUP_WAV), pickup_wav())
 }
 
 /// Removes the `call-*` folders under `calls` that a Harold which did not end its calls
@@ -390,8 +399,10 @@ enum Source {
     Phrase,
     OtherAgent,
     Tick,
-    /// The tone that plays while the call connects.
-    Connecting,
+    /// One cycle of the phone-call ring, from the tap until Harold picks up.
+    Ringback,
+    /// The short sound that ends the ringing.
+    Pickup,
     /// The call answerer's `say`.
     Answer,
 }
@@ -404,7 +415,8 @@ impl Source {
             Self::Phrase => "phrase",
             Self::OtherAgent => "other_agent",
             Self::Tick => "tick",
-            Self::Connecting => "connecting",
+            Self::Ringback => "ringback",
+            Self::Pickup => "pickup",
             Self::Answer => "answer",
         }
     }
@@ -457,6 +469,32 @@ struct SpeechTrace {
     span: tracing::Span,
     /// Samples fed since the block that showed the speech began.
     fed: usize,
+}
+
+/// The call answerer's warm-up while the phone rings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WarmUp {
+    /// The call has no answerer, or it is not warmed again.
+    Off,
+    Running,
+    /// Ended, this long after the ringing began.
+    Done(Duration),
+}
+
+/// The ringing: whole cycles of the ringback until the call is ready, then the pick-up.
+struct Ring {
+    /// The `harold.call_ring` span, from the tap to the pick-up.
+    span: tracing::Span,
+    started: Instant,
+    /// Cycles played.
+    cycles: u32,
+    /// When the cycle now playing ends, or when to try again; `None` once the pick-up plays.
+    next: Option<Instant>,
+    /// The pick-up sound now playing.
+    pickup: Option<u64>,
+    /// Whether the worker was ready at the tap: `ready`, or `loaded_now`.
+    worker: &'static str,
+    warm: WarmUp,
 }
 
 /// The `harold.call_voice` span of a sound the worker makes.
@@ -622,11 +660,10 @@ struct Call<P: CallPorts> {
     /// The health of the call's worker, while it is followed.
     health: Option<watch::Receiver<Health>>,
     worker_ready: bool,
-    /// The call has not heard its worker ready yet: the screen says so, and the connecting
-    /// tone plays.
-    connecting: bool,
-    /// When the next connecting tone is due, while the call connects.
-    next_tone: Option<Instant>,
+    /// The ringing, from the tap until the pick-up has played: the screen says connecting.
+    ring: Option<Ring>,
+    /// The facts the answerer's warm-up read, and when, for the call's first turn.
+    warm_facts: Option<(Value, Instant)>,
     /// When the worker became ready.
     ready_at: Option<Instant>,
     /// When the turn at the worker was queued.
@@ -637,8 +674,6 @@ struct Call<P: CallPorts> {
     models: Option<Arc<SpeechModels>>,
     /// Whether the worker has already been started again for a model it could not find.
     models_retried: bool,
-    /// Phrases the worker makes only to keep: the job's id and where the phrase is kept.
-    warm: HashMap<u64, PathBuf>,
     request: Option<JoinHandle<()>>,
     jobs: VecDeque<Job>,
     worker_exits: u32,
@@ -784,14 +819,13 @@ impl<P: CallPorts> Call<P> {
             generation: 0,
             health: None,
             worker_ready: false,
-            connecting: true,
-            next_tone: None,
+            ring: None,
+            warm_facts: None,
             ready_at: None,
             transcribe_queued_at: None,
             models_rx: None,
             models,
             models_retried: false,
-            warm: HashMap::new(),
             request: None,
             jobs: VecDeque::new(),
             worker_exits: 0,
@@ -838,10 +872,11 @@ impl<P: CallPorts> Call<P> {
         }
         if call.worker_ready {
             call.became_ready();
-        } else {
-            call.next_tone = Some(Instant::now());
         }
-        call.warm_phrase();
+        // The ringing is when the call starts what it needs: the worker is started above,
+        // and the answerer warms up now.
+        let warm = call.start_warm_up();
+        call.begin_ring(warm);
         call.publish();
         call.ports.call_opened();
         started.send_replace(true);
@@ -917,6 +952,7 @@ impl<P: CallPorts> Call<P> {
                 worker,
             } => self.made(generation, id, wav, result, worker).await,
             Event::Played { id, played } => self.played(id, played).await,
+            Event::Warmed(facts) => self.warmed(facts),
             Event::TurnEndUpdate(line) => self.turn_end_update(line),
             Event::Answered { id, answer } => self.answered(id, answer).await,
         }
@@ -935,7 +971,8 @@ impl<P: CallPorts> Call<P> {
             self.detector.reset();
             return;
         }
-        let muted = self.playing.is_some() || captured_at < self.unmuted_at;
+        // The ringing is sound like any other: the user is not heard before the pick-up.
+        let muted = self.playing.is_some() || self.ring.is_some() || captured_at < self.unmuted_at;
         let cut = self.detector.push(block, muted).into_iter().next();
         if let Some(speech) = self.speech.as_mut() {
             speech.fed += block.len();
@@ -1155,17 +1192,6 @@ impl<P: CallPorts> Call<P> {
         worker: P::Worker,
     ) {
         self.request = None;
-        if let Some(keep_as) = self.warm.remove(&id) {
-            self.keep_warm(result.is_ok(), &wav, &keep_as);
-            match result {
-                Ok(()) | Err(WorkerError::Failed) => self.worker_back(generation, worker).await,
-                Err(error) => {
-                    worker.close().await;
-                    self.worker_died(generation, error).await;
-                }
-            }
-            return;
-        }
         let at = self.sounds.iter().position(|sound| sound.id == id);
         match result {
             Ok(()) => {
@@ -1259,12 +1285,11 @@ impl<P: CallPorts> Call<P> {
         }
     }
 
-    /// The worker is ready: the call connects, and the connecting tone stops.
+    /// The worker is ready. The ringing ends at the end of its cycle, once the warm-up has
+    /// too.
     fn became_ready(&mut self) {
         self.worker_ready = true;
         self.ready_at.get_or_insert_with(Instant::now);
-        self.connecting = false;
-        self.next_tone = None;
         let Some(worker) = self.worker.as_ref() else {
             return;
         };
@@ -1320,9 +1345,8 @@ impl<P: CallPorts> Call<P> {
         let mut status = models.status();
         status.mark_changed();
         self.models_rx = Some(status);
-        self.connecting = true;
         self.ready_at = None;
-        self.next_tone = Some(Instant::now());
+        self.begin_ring(WarmUp::Off);
     }
 
     /// The worker of `generation` has gone, seen through its health or a request; each
@@ -1434,34 +1458,14 @@ impl<P: CallPorts> Call<P> {
         }
         if self.answerer_usable() {
             let ports = &self.ports;
-            let mut trace = self
+            let trace = self
                 .turn
                 .take()
                 .unwrap_or_else(|| TurnTrace::open(ports.call_from()));
-            self.one_moment(&mut trace);
             self.queued.push_back(QueuedTurn { text, trace });
             return;
         }
         self.turn_to_chief(text).await;
-    }
-
-    /// Says `One moment.` for a turn that goes to the call answerer. It is the first sound of
-    /// the turn, and the answer is queued behind it, so it never plays over the phrase.
-    fn one_moment(&mut self, trace: &mut TurnTrace) {
-        self.phrase(ONE_MOMENT, After::Nothing);
-        let Some(sound) = self.sounds.back_mut() else {
-            return;
-        };
-        // The phrase notes the turn's first sound on the turn's span; the turn itself notes
-        // only its answer.
-        sound.owned = Some(TurnTrace {
-            span: trace.span.clone(),
-            cut_at: trace.cut_at,
-            typed: false,
-            first_sound_noted: trace.first_sound_noted,
-            answer_noted: true,
-        });
-        trace.first_sound_noted = true;
     }
 
     /// Types the turn into the chief's pane, as every turn was before the call answerer.
@@ -1531,6 +1535,12 @@ impl<P: CallPorts> Call<P> {
         self.remark(Who::You, &queued.text);
         let words = queued.text.clone();
         let span = queued.trace.span.clone();
+        // The first turn within `WARM_KEPT` of the warm-up uses the facts it read.
+        let facts = self
+            .warm_facts
+            .take()
+            .filter(|(_, at)| at.elapsed() <= WARM_KEPT)
+            .map(|(facts, _)| facts);
         let events = self.events.clone();
         let ports = Arc::clone(&self.ports);
         let hand_overs = self.hand_overs.clone();
@@ -1539,6 +1549,7 @@ impl<P: CallPorts> Call<P> {
                 words: &words,
                 call: &call,
                 turn: &span,
+                facts,
             };
             let answer = answering.answerer.answer(ask).await;
             // The call has ended: the request still goes to the chief, as a turn said
@@ -1836,7 +1847,7 @@ impl<P: CallPorts> Call<P> {
         let idle = std::iter::once(self.active_at + IDLE_LIMIT);
         held.chain(awaiting)
             .chain(running)
-            .chain(self.next_tone)
+            .chain(self.ring.iter().filter_map(|ring| ring.next))
             .chain(self.hold_others_until)
             .chain(idle)
             .min()
@@ -1855,16 +1866,13 @@ impl<P: CallPorts> Call<P> {
         }
         self.await_answer(now);
         self.await_run(now).await;
-        if self.connecting
-            && let Some(due) = self.next_tone
-            && now >= due
+        if self
+            .ring
+            .as_ref()
+            .and_then(|ring| ring.next)
+            .is_some_and(|due| now >= due)
         {
-            let mut next = due;
-            while next <= now {
-                next += TONE_EVERY;
-            }
-            self.next_tone = Some(next);
-            self.play_connecting();
+            self.ring_cycle_ended(now);
         }
         if self.hold_others_until.is_some_and(|until| now >= until) {
             self.hold_others_until = None;
@@ -1877,7 +1885,7 @@ impl<P: CallPorts> Call<P> {
     /// Ends a call that nothing happened in for `IDLE_LIMIT`, so a call left open does not
     /// keep the display awake for good. A call doing something then starts its clock again.
     fn idle(&mut self, now: Instant) {
-        let quiet = !self.connecting
+        let quiet = self.ring.is_none()
             && self.mode == Mode::Listening
             && self.run.is_none()
             && self.queued.is_empty()
@@ -2255,17 +2263,86 @@ impl<P: CallPorts> Call<P> {
         });
     }
 
-    /// The connecting tone, when nothing else plays and the user is not speaking.
-    fn play_connecting(&mut self) {
-        if self.playing.is_some()
-            || !self.sounds.is_empty()
-            || (self.mode == Mode::Listening && self.detector.in_turn())
+    /// Starts the ringing: the ringback plays from the next turn of the loop.
+    fn begin_ring(&mut self, warm: WarmUp) {
+        let now = Instant::now();
+        let span = tracing::info_span!(
+            target: telemetry::TRACE_TARGET,
+            parent: None,
+            "harold.call_ring",
+            cycles = tracing::field::Empty,
+            worker = tracing::field::Empty,
+            warm_ms = tracing::field::Empty,
+        );
+        self.ring = Some(Ring {
+            span,
+            started: now,
+            cycles: 0,
+            next: Some(now),
+            pickup: None,
+            worker: if self.worker_ready {
+                "ready"
+            } else {
+                "loaded_now"
+            },
+            warm,
+        });
+    }
+
+    /// Has the call answerer read the call facts and start its program, which takes no
+    /// model call, while the phone rings; the limit cuts it. Gives its state.
+    fn start_warm_up(&self) -> WarmUp {
+        let Some(answering) = self.answering.clone().filter(|_| !self.answerer_gone) else {
+            return WarmUp::Off;
+        };
+        let events = self.events.clone();
+        tokio::spawn(async move {
+            let facts = tokio::time::timeout(WARM_LIMIT, answering.answerer.warm())
+                .await
+                .ok()
+                .flatten();
+            let _ = events.send(Event::Warmed(facts));
+        });
+        WarmUp::Running
+    }
+
+    /// The warm-up ended: its facts are kept for the first turn.
+    fn warmed(&mut self, facts: Option<Value>) {
+        let now = Instant::now();
+        if let Some(ring) = self.ring.as_mut()
+            && ring.warm == WarmUp::Running
         {
+            ring.warm = WarmUp::Done(now.saturating_duration_since(ring.started));
+        }
+        self.warm_facts = facts.map(|facts| (facts, now));
+    }
+
+    /// A cycle of the ringback ended, or the call was to try again: if the call is ready,
+    /// the pick-up plays; if not, another whole cycle does. The first cycle always plays.
+    fn ring_cycle_ended(&mut self, now: Instant) {
+        let Some(ring) = self.ring.as_ref() else {
+            return;
+        };
+        let cycles = ring.cycles;
+        // The ring waits for a sound still playing or in line, and the user mid-turn.
+        let busy = self.playing.is_some()
+            || !self.sounds.is_empty()
+            || (self.mode == Mode::Listening && self.detector.in_turn());
+        let ready = self.worker_ready && ring.warm != WarmUp::Running;
+        let (wav, said_source) = if cycles > 0 && ready {
+            (PICKUP_WAV, Source::Pickup)
+        } else {
+            (RINGBACK_WAV, Source::Ringback)
+        };
+        if busy {
+            if let Some(ring) = self.ring.as_mut() {
+                ring.next = Some(now + Duration::from_millis(20));
+            }
             return;
         }
         let id = self.new_id();
-        let span = self.play_span(Source::Connecting, None);
-        let task = self.spawn_play(id, self.dir.join(CONNECTING_WAV), Said::Tick, span);
+        let span = self.play_span(said_source, None);
+        let task = self.spawn_play(id, self.dir.join(wav), Said::Tick, span);
         self.playing = Some(Playing {
             id,
             task,
@@ -2273,47 +2350,29 @@ impl<P: CallPorts> Call<P> {
             stopped: false,
             sound: None,
         });
+        let Some(ring) = self.ring.as_mut() else {
+            return;
+        };
+        if said_source == Source::Pickup {
+            ring.pickup = Some(id);
+            ring.next = None;
+        } else {
+            ring.cycles += 1;
+            ring.next = Some(now + RING_CYCLE);
+        }
     }
 
-    /// Has the worker make `One moment.` as its first job, and keep it, when this voice has
-    /// none kept yet: the first answered turn then finds it ready.
-    fn warm_phrase(&mut self) {
-        if !self.answerer_usable() {
+    /// The pick-up has played: the ringing ends and the call listens.
+    fn pickup_played(&mut self) {
+        let Some(ring) = self.ring.take() else {
             return;
+        };
+        ring.span.record("cycles", u64::from(ring.cycles));
+        ring.span.record("worker", ring.worker);
+        if let WarmUp::Done(took) = ring.warm {
+            ring.span.record("warm_ms", millis(took));
         }
-        let kept = phrase_file(
-            &self.ports.phrases_dir(),
-            &self.ports.voice_name(),
-            ONE_MOMENT,
-        );
-        if kept.is_file() {
-            return;
-        }
-        let id = self.new_id();
-        let wav = self.dir.join(format!("phrase-{}.wav", Uuid::new_v4()));
-        self.warm.insert(id, kept);
-        self.jobs.push_front(Job::Make {
-            id,
-            text: ONE_MOMENT.to_string(),
-            wav,
-        });
-    }
-
-    /// Moves a phrase the worker made to keep into the phrase folder, or removes the file.
-    fn keep_warm(&self, made: bool, wav: &Path, keep_as: &Path) {
-        if !made {
-            let _ = std::fs::remove_file(wav);
-            return;
-        }
-        let kept = std::fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(self.ports.phrases_dir())
-            .and_then(|()| std::fs::rename(wav, keep_as));
-        if let Err(error) = kept {
-            warn!(error = %error, "phrase not kept");
-            let _ = std::fs::remove_file(wav);
-        }
+        self.active_at = Instant::now();
     }
 
     /// Opens the `harold.call_play` span of a sound, which the task playing it runs in.
@@ -2383,6 +2442,9 @@ impl<P: CallPorts> Call<P> {
         };
         self.unmuted_at = Instant::now() + MUTE_TAIL;
         self.active_at = Instant::now();
+        if self.ring.as_ref().and_then(|ring| ring.pickup) == Some(id) {
+            self.pickup_played();
+        }
         let Some(mut sound) = playing.sound else {
             return;
         };
@@ -2456,7 +2518,7 @@ impl<P: CallPorts> Call<P> {
             .is_some_and(|playing| playing.sound.is_some() && !playing.stopped);
         let state = match self.mode {
             _ if speaking => CallState::Speaking,
-            Mode::Listening | Mode::Transcribing if self.connecting => CallState::Connecting,
+            Mode::Listening | Mode::Transcribing if self.ring.is_some() => CallState::Connecting,
             Mode::Listening => CallState::Listening,
             Mode::Transcribing => CallState::Transcribing,
             Mode::Waiting => CallState::Waiting,
@@ -2468,7 +2530,7 @@ impl<P: CallPorts> Call<P> {
             .and_then(|status| status.borrow().percent());
         let mut status = lock(&self.status);
         status.state = state;
-        status.model_percent = percent.filter(|_| self.connecting);
+        status.model_percent = percent.filter(|_| self.ring.is_some());
     }
 
     /// Logs the end of a call that listened, with how much sound it read and how loud.

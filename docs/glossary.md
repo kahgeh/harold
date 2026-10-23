@@ -96,8 +96,9 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 | talk now | The key, `t`, that cuts the chief's answer short in a call | — |
 | voice worker | The process that turns lines into audio and speech into text. It loads the pinned speech models, never downloads them, and waits until Harold has them | — |
 | speech model | Either of the two models the voice worker loads: Whisper, which turns speech into text, and Kokoro, which turns text into speech. The same words in the log lines (`speech model downloaded`) and on the phone | "voice model", "weights", "Whisper" for both |
-| connecting | The call state from tapping Call until the voice worker can listen, shown as "Connecting…" | "ringing", "dialling", "loading" for the state |
-| connecting tone | The soft two-note sound Harold plays every 1.5 s while a call is connecting | "ringtone", "ringback", "tick" (the tick is the chief-thinking sound) |
+| connecting | The call state from tapping Call until Harold picks up, shown as "Connecting…". It lasts at least one ring cycle, 3 s, and more cycles until the voice worker is ready | "dialling", "loading" for the state |
+| ringback | The phone-call ring, "ring-ring", Harold plays from the tap until it picks up, one whole 3 s cycle after another | "ringtone", "connecting tone", "tick" (the tick is the chief-thinking sound) |
+| pick-up | The short rising two-note sound that ends the ringback; the call is listening when it ends | "answer", "beep" |
 | metered | Harold's guess that the Mac is on the iPhone's Personal Hotspot, from the default gateway, which holds back a speech model download | "cellular", "expensive", "offline" |
 | timed prompt | Text Harold types into a pane at a set time each day | — |
 | alert | A HyperDX alert that Harold types to the chief as `harold alert: …` | "alert" for a push |
