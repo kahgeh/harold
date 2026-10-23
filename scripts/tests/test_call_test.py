@@ -222,5 +222,86 @@ class PaneTests(unittest.TestCase):
         self.assertEqual([], ct.typed_panes('nothing'))
 
 
+
+class SpeechModelRecordTests(unittest.TestCase):
+    def make_cache(self, root, model, commit, files):
+        snapshot = Path(root) / ('models--' + model.replace('/', '--')) / 'snapshots' / commit
+        blobs = Path(root) / ('models--' + model.replace('/', '--')) / 'blobs'
+        snapshot.mkdir(parents=True)
+        blobs.mkdir()
+        for name, size in files.items():
+            blob = blobs / ('b-' + name)
+            blob.write_bytes(b'x' * size)
+            (snapshot / name).symlink_to(blob)
+        return snapshot
+
+    def test_the_cache_is_hub_cache_then_hf_home_then_the_home_cache(self):
+        self.assertEqual(Path('/c'), ct.hub_cache({'HF_HUB_CACHE': '/c', 'HF_HOME': '/h', 'HOME': '/u'}))
+        self.assertEqual(Path('/h/hub'), ct.hub_cache({'HF_HOME': '/h', 'HOME': '/u'}))
+        self.assertEqual(Path('/u/.cache/huggingface/hub'), ct.hub_cache({'HOME': '/u'}))
+
+    def test_the_models_are_the_installed_whisper_and_the_default_kokoro_at_the_pinned_commits(self):
+        self.assertEqual(
+            [(ct.WHISPER_MODEL, ct.WHISPER_REVISION), (ct.KOKORO_MODEL, ct.KOKORO_REVISION)],
+            ct.configured_models(INSTALLED))
+        other = INSTALLED.replace('whisper-large-v3-turbo', 'whisper-small') + '\n'
+        self.assertEqual('mlx-community/whisper-small', ct.configured_models(other)[0][0])
+
+    def test_a_record_lists_each_cached_file_with_its_size_and_changes_nothing(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as root:
+            snapshot = self.make_cache(root, ct.WHISPER_MODEL, ct.WHISPER_REVISION,
+                                       {'weights.safetensors': 100, 'config.json': 7})
+            before = sorted(str(p) for p in Path(root).rglob('*'))
+            records = ct.speech_model_records(INSTALLED, Path(root))
+            self.assertEqual(before, sorted(str(p) for p in Path(root).rglob('*')))
+        name = 'mlx-community--whisper-large-v3-turbo@{}.json'.format(ct.WHISPER_REVISION)
+        self.assertEqual([name], list(records))
+        record = __import__('json').loads(records[name])
+        self.assertEqual(ct.WHISPER_MODEL, record['model'])
+        self.assertEqual(ct.WHISPER_REVISION, record['commit'])
+        self.assertEqual(
+            {('config.json', 7), ('weights.safetensors', 100)},
+            {(f['path'], f['size']) for f in record['files']})
+        self.assertTrue(snapshot.name)
+
+    def test_a_model_the_cache_lacks_gets_no_record(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as root:
+            self.assertEqual({}, ct.speech_model_records(INSTALLED, Path(root)))
+
+
+class TurnTimeTests(unittest.TestCase):
+    def phone(self, events):
+        phone = ct.Phone(1)
+        phone.events = events
+        return phone
+
+    def test_first_sound_and_answer_count_from_the_end_of_the_speech(self):
+        shown = lambda sound, line: {'state': 'speaking', 'sound': sound, 'heard': '', 'line': line}
+        phone = self.phone([
+            (9.0, shown('t0', '')),
+            (11.0, shown('c1', 'Wait.')),
+            (12.0, shown('t1', '')),
+            (14.5, shown('a1', 'One todo is waiting.')),
+        ])
+        results = ct.turn_times('todos', phone, 0, 10.0, lambda line: 'todo' in line)
+        self.assertEqual(
+            [('todos: first_sound_ms', True, 1000), ('todos: answer_ms', True, 4500)],
+            [(r.name, r.ok, r.ms) for r in results])
+
+    def test_a_sound_with_no_words_is_no_first_sound(self):
+        shown = {'state': 'speaking', 'sound': 't', 'heard': '', 'line': ''}
+        results = ct.turn_times('x', self.phone([(11.0, shown)]), 0, 10.0, lambda line: True)
+        self.assertFalse(any(r.ok for r in results))
+
+
+class WorkerReadyTests(unittest.TestCase):
+    def test_reads_the_load_time_and_who_started_the_worker(self):
+        log = '2026 INFO harold: voice worker ready load_ms=3100 started_by="page"\n'
+        self.assertEqual('load_ms=3100 started_by=page', ct.worker_ready_line(log))
+        self.assertEqual('', ct.worker_ready_line('nothing'))
+
+
 if __name__ == '__main__':
     unittest.main()

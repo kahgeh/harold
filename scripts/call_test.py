@@ -6,11 +6,22 @@ tmux session `harold-call-test` as the chief, and then does what the phone does:
 GET /updates, posts a spoken question to /call/audio, fetches the answer, reports it played
 and hangs up. The real chief's pane, the installed Harold's calls and the user's thread are
 never touched. Python 3 standard library only.
+
+For each call it reports the time from POST /call to the screen showing "listening", and for
+each turn `first_sound_ms` and `answer_ms` as the phone sees them, from the end of the speech
+(Harold cuts the turn about 1.2 s later). Run it with `--harold` on a build of main and on a
+build of a branch to compare them. Like the phone, it tells Harold a web app page is on
+screen (POST /page/seen) from the start, so a Harold that loads its voice worker for an open
+page does so before the call; `--wait-for-page-load` waits for that.
+
+The test Harold never downloads a speech model and never changes the Hugging Face cache: it
+is given a record of the models already in the cache, so it has nothing to check or fetch.
 """
 
 import argparse
 import html
 import http.client
+import json
 import os
 from pathlib import Path
 import re
@@ -22,6 +33,7 @@ import sys
 import tempfile
 import threading
 import time
+import tomllib
 import wave
 
 SESSION = 'harold-call-test'
@@ -40,6 +52,13 @@ LEAD_S = 1
 TAIL_S = 2
 WORD_SHARE = 0.8
 INSTALL_DIR = Path.home() / 'bin' / 'harold'
+# The speech models Harold pins, as `docs/references/voice-input/README.md` lists them.
+WHISPER_MODEL = 'mlx-community/whisper-large-v3-turbo'
+WHISPER_REVISION = 'a4aaeec0636e6fef84abdcbe3544cb2bf7e9f6fb'
+KOKORO_MODEL = 'mlx-community/Kokoro-82M-bf16'
+KOKORO_REVISION = 'a71e4d38b236d968966a2002c4c895dbd12b1c3c'
+# How often the phone says a page is on screen (Harold counts a page for 75 s).
+SEEN_EVERY = 20
 
 # The time limit of each step, in seconds. The ones after the question is posted count from
 # when the question ended.
@@ -52,6 +71,8 @@ LIMIT_ANSWER = 25
 LIMIT_FETCH = 5
 LIMIT_HANGUP = 10
 LIMIT_READY = 90
+LIMIT_PAGE_LOAD = 90
+LIMIT_LISTENING = 90
 
 
 class StepFailed(Exception):
@@ -147,6 +168,62 @@ def scratch_config(installed, chief_dir, grpc_port, web_port, store_path, chat_d
         '[log]\nlevel = "{}"\n'.format(log_level) if log_level else '',
     ]
     return '\n'.join(part for part in parts if part)
+
+
+# --- the speech models already on the Mac ----------------------------------------------
+
+def hub_cache(env):
+    """The Hugging Face cache a program with `env` reads: HF_HUB_CACHE, else HF_HOME/hub,
+    else ~/.cache/huggingface/hub."""
+    if env.get('HF_HUB_CACHE'):
+        return Path(env['HF_HUB_CACHE'])
+    if env.get('HF_HOME'):
+        return Path(env['HF_HOME']) / 'hub'
+    return Path(env.get('HOME', str(Path.home()))) / '.cache' / 'huggingface' / 'hub'
+
+
+def configured_models(installed):
+    """The (model, commit) of Whisper and Kokoro that the installed config names, with the
+    commits Harold pins by default."""
+    config = tomllib.loads(installed)
+    args = config.get('voice_input', {}).get('args', [])
+    whisper = args[args.index('--model') + 1] if '--model' in args else WHISPER_MODEL
+    tts_args = config.get('tts', {}).get('args') or []
+    kokoro = tts_args[tts_args.index('--model') + 1] if '--model' in tts_args else KOKORO_MODEL
+    return [
+        (whisper, config.get('voice_input', {}).get('model_revision', WHISPER_REVISION)),
+        (kokoro, config.get('tts', {}).get('model_revision', KOKORO_REVISION)),
+    ]
+
+
+def snapshot_files(snapshot):
+    """Each file in a cached snapshot as {path, size}, read from the folder alone."""
+    files = []
+    for folder, _, names in os.walk(snapshot, followlinks=True):
+        for name in sorted(names):
+            path = Path(folder) / name
+            if path.is_file():
+                files.append({
+                    'path': str(path.relative_to(snapshot)),
+                    'size': path.stat().st_size,
+                    'sha256': '',
+                })
+    return files
+
+
+def speech_model_records(installed, cache):
+    """The records of the last check, by file name, for the models the installed config names
+    that the cache holds, so Harold finds nothing to check or fetch. Nothing is read from the
+    network and nothing in the cache is changed."""
+    records = {}
+    for model, commit in configured_models(installed):
+        snapshot = cache / ('models--' + model.replace('/', '--')) / 'snapshots' / commit
+        if not snapshot.is_dir():
+            continue
+        name = '{}@{}.json'.format(model.replace('/', '--'), commit)
+        records[name] = json.dumps(
+            {'model': model, 'commit': commit, 'files': snapshot_files(snapshot)})
+    return records
 
 
 # --- the question ---------------------------------------------------------------------
@@ -328,6 +405,20 @@ class Phone:
                     return index, at, shown
         return None
 
+    def keep_seen(self, stop):
+        """Says a page is on screen now and every `SEEN_EVERY` s, as the app does while it is
+        in front, until `stop` is set."""
+        def beat():
+            while True:
+                try:
+                    self.request('POST', '/page/seen', timeout=10)
+                except (OSError, http.client.HTTPException):
+                    pass
+                if stop.wait(SEEN_EVERY):
+                    return
+
+        threading.Thread(target=beat, daemon=True).start()
+
     def close(self):
         self.closing = True
         if self.stream is not None:
@@ -352,8 +443,13 @@ def tmux(env, *args, check=True):
 class Run:
     """One call test: the scratch folder, the test Harold and the stand-in chief."""
 
-    def __init__(self, install_dir, keep, log_level=None):
+    def __init__(self, install_dir, keep, log_level=None, binary=None, default_toml=None,
+                 wait_for_page_load=False):
         self.install_dir = install_dir
+        self.binary = binary or install_dir / 'harold'
+        self.default_toml = default_toml or install_dir / 'config' / 'default.toml'
+        self.wait_for_page_load = wait_for_page_load
+        self.seen_stop = threading.Event()
         self.log_level = log_level
         self.keep = keep
         self.scratch = Path(os.path.realpath(tempfile.mkdtemp(prefix='hct-')))
@@ -379,7 +475,13 @@ class Run:
         installed = (self.install_dir / 'config' / 'local.toml').read_text()
         for folder in (self.config_dir, self.chief_dir / '.claude', self.scratch / 't'):
             folder.mkdir(parents=True)
-        shutil.copy(self.install_dir / 'config' / 'default.toml', self.config_dir / 'default.toml')
+        shutil.copy(self.default_toml, self.config_dir / 'default.toml')
+        # The speech models are in the cache already: a record of them in the test Harold's own
+        # data folder (beside its store) leaves it nothing to check or download.
+        records = self.scratch / 'speech-models'
+        records.mkdir(mode=0o700)
+        for name, record in speech_model_records(installed, hub_cache(os.environ)).items():
+            (records / name).write_text(record)
         self.grpc_port = free_port()
         self.web_port = free_port()
         (self.config_dir / 'local.toml').write_text(scratch_config(
@@ -399,7 +501,7 @@ class Run:
         (self.scratch / 'tmp').mkdir()
         harold_env = dict(self.env, TMPDIR=str(self.scratch / 'tmp'))
         self.harold = subprocess.Popen(
-            [str(self.install_dir / 'harold')], env=harold_env, stdout=self.log_file,
+            [str(self.binary)], env=harold_env, stdout=self.log_file,
             stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True)
         self.phone = Phone(self.web_port)
 
@@ -422,7 +524,7 @@ class Run:
             '-x', '160', '-y', '50', '-P', '-F', '#{pane_id}', 'cat')
         self.pane = created.stdout.strip()
         # harold speak takes a tmux pane id as --src-id, so the stand-in's own pane id goes in.
-        speak = '{} speak --src-id {}'.format(self.install_dir / 'harold', self.pane)
+        speak = '{} speak --src-id {}'.format(self.binary, self.pane)
         (self.chief_dir / 'CLAUDE.md').write_text(
             'Each line that starts with 🎙 is a spoken request or question. Answer it by running exactly\n'
             '`{} "{}"` and do nothing else: no other command, no other text.\n'
@@ -462,7 +564,7 @@ class Run:
             '"suggested": true}}, {{"key": "b", "label": "right", "impact": ""}}]}}]}}'
         ).format(TODO_ID)
         put = subprocess.run(
-            [str(self.install_dir / 'harold'), 'tool', 'questions', 'put'], input=todo, text=True,
+            [str(self.binary), 'tool', 'questions', 'put'], input=todo, text=True,
             env=self.env, capture_output=True, timeout=30)
         if put.returncode != 0:
             raise StepFailed('seeding the todo failed: ' + (put.stdout + put.stderr).strip())
@@ -477,6 +579,7 @@ class Run:
     # teardown
 
     def tear_down(self):
+        self.seen_stop.set()
         try:
             if self.pane is not None:
                 self.pane_snapshot = self.pane_text().rstrip()
@@ -584,6 +687,18 @@ def play(run):
     wait_until(lambda: phone.events, 10, 'the call screen on /updates')
     call.mark = len(phone.events)
 
+    # 0. The page is on screen, as it is when the user taps Call. A Harold that loads its voice
+    # worker for an open page does so now.
+    phone.keep_seen(run.seen_stop)
+    if run.wait_for_page_load:
+        def page_load():
+            wait_until(lambda: 'voice worker ready' in run.log(), LIMIT_PAGE_LOAD,
+                       'the log line "voice worker ready" for the open page')
+            return worker_ready_line(run.log())
+
+        if not add(run_step('the voice worker loads for the open page', LIMIT_PAGE_LOAD, page_load)):
+            return results
+
     # 1. POST /call, retried while the test Harold has not yet seen the stand-in chief.
     def post_call():
         started = time.monotonic()
@@ -598,6 +713,17 @@ def play(run):
 
     call.call_sent = time.monotonic()
     if not add(run_step('POST /call answers 200', LIMIT_CALL, post_call)):
+        return results
+
+    def listening():
+        found = wait_until(
+            lambda: phone.since(call.mark, lambda s: s['state'] == 'listening'),
+            LIMIT_LISTENING, 'the call screen shows listening', since=call.call_sent)
+        connecting = phone.since(call.mark, lambda s: s['state'] == 'connecting')
+        return 'connecting first' if connecting and connecting[1] < found[1] else 'listening at once'
+
+    if not add(run_step('tap_to_listening: POST /call to listening', LIMIT_LISTENING, listening,
+                        since=call.call_sent)):
         return results
 
     def leg(label, text, audio_pcm):
@@ -617,7 +743,7 @@ def play(run):
         def cut():
             found = wait_until(
                 lambda: phone.since(
-                    mark, lambda s: s['state'] not in ('listening', 'off', '') or s['sound']
+                    mark, lambda s: s['state'] not in ('listening', 'connecting', 'off', '') or s['sound']
                     or (s['heard'] and s['heard'] != call.last_heard)),
                 LIMIT_CUT, 'the turn is cut (#call leaves listening, or shows a sound or the words)', since=until)
             return 'state {}'.format(found[2]['state'])
@@ -659,6 +785,7 @@ def play(run):
 
     if not add(run_step("the call answerer answers 'how many todos'", LIMIT_ANSWER, todos_answer, since=until)):
         return results
+    results.extend(turn_times('todos', phone, leg_mark, until, lambda line: bool(re.search(r'\b(1|one)\b', line.lower()))))
     wav = call.wavs.get(answer_marks['todos'])
     if not add(run_step('the answerer\'s answer is a WAV', LIMIT_FETCH,
                         lambda: wav_check(wav))):
@@ -678,6 +805,9 @@ def play(run):
 
     if not add(run_step("the answerer says it passed the request on", LIMIT_ANSWER, passed_on, since=until)):
         return results
+    results.extend(turn_times(
+        'hand-over', phone, leg_mark, until,
+        lambda line: 'chief' in line.lower() and line != FROM_THE_CHIEF))
 
     def handed_over():
         wait_until(lambda: 'hand-over typed' in run.log(), LIMIT_TYPED,
@@ -710,6 +840,41 @@ def play(run):
         return 'call ended, reason stopped'
 
     add(run_step('DELETE /call, call ended', LIMIT_HANGUP, hang_up))
+    ready = worker_ready_line(run.log())
+    if ready:
+        results.append(StepResult('the log says how the voice worker loaded', True, 0, ready))
+    return results
+
+
+def worker_ready_line(log):
+    """The detail of the last `voice worker ready` line: its load time and who started it."""
+    ready = [line for line in clean_log(log).splitlines() if 'voice worker ready' in line]
+    if not ready:
+        return ''
+    load = re.search(r'load_ms=(\d+)', ready[-1])
+    by = re.search(r'started_by="?(\w+)', ready[-1])
+    return 'load_ms={} started_by={}'.format(load.group(1) if load else '?', by.group(1) if by else '?')
+
+
+def turn_times(label, phone, mark, until, is_answer_line):
+    """`first_sound_ms` and `answer_ms` of the turn whose speech ended at `until` (monotonic
+    seconds), as the phone saw them: the first sound with words (a phrase such as "One
+    moment." counts; a tick or the connecting tone has none), and the first sound whose words
+    `is_answer_line` accepts. Both count from the end of the speech; Harold cuts the turn
+    about 1.2 s later."""
+    def first(test):
+        with phone.changed:
+            for at, shown in phone.events[mark:]:
+                if at >= until and shown['sound'] and shown['line'] and test(shown['line']):
+                    return at, shown['line']
+        return None
+
+    results = []
+    for name, found in (('first_sound_ms', first(lambda line: True)), ('answer_ms', first(is_answer_line))):
+        if found is None:
+            results.append(StepResult('{}: {}'.format(label, name), False, 0, 'no such sound'))
+        else:
+            results.append(StepResult('{}: {}'.format(label, name), True, int((found[0] - until) * 1000), '"{}"'.format(found[1])))
     return results
 
 
@@ -740,18 +905,27 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--keep', action='store_true', help='keep the scratch folder')
     parser.add_argument('--log-level', help="the test Harold's log level, such as debug")
-    parser.add_argument('--install-dir', type=Path, default=INSTALL_DIR)
+    parser.add_argument('--install-dir', type=Path, default=INSTALL_DIR,
+                        help="where the installed Harold's config is read from")
+    parser.add_argument('--harold', type=Path,
+                        help='the Harold to test (default: harold in --install-dir)')
+    parser.add_argument('--default-config', type=Path,
+                        help="the default.toml that goes with --harold (default: the installed one)")
+    parser.add_argument('--wait-for-page-load', action='store_true',
+                        help='wait for the voice worker to load for the open page before the call')
     args = parser.parse_args(argv)
 
     for tool in ('tmux', 'say', 'claude'):
         if not shutil.which(tool):
             print('FAIL {} is not on PATH'.format(tool))
             return 1
-    if not (args.install_dir / 'harold').exists():
-        print('FAIL no Harold at {}'.format(args.install_dir / 'harold'))
+    binary = args.harold or args.install_dir / 'harold'
+    if not binary.exists():
+        print('FAIL no Harold at {}'.format(binary))
         return 1
 
-    run = Run(args.install_dir, args.keep, args.log_level)
+    run = Run(args.install_dir, args.keep, args.log_level, binary=binary,
+              default_toml=args.default_config, wait_for_page_load=args.wait_for_page_load)
     # A signal ends the run through the teardown below, which leaves nothing running.
     for name in (signal.SIGTERM, signal.SIGHUP):
         signal.signal(name, lambda number, frame: sys.exit(128 + number))
