@@ -160,7 +160,8 @@ def scratch_config(installed, chief_dir, grpc_port, web_port, store_path, chat_d
     and the Messages database is a scratch file that has no messages."""
     parts = [
         '[grpc]\nport = {}\n'.format(grpc_port),
-        '[web_app]\nlisten = "127.0.0.1:{}"\nallowed_login = "{}"\n'.format(web_port, LOGIN),
+        # The test Harold's phone is a script, not a paired device.
+        '[web_app]\nlisten = "127.0.0.1:{}"\nallowed_login = "{}"\nrequire_pairing = false\n'.format(web_port, LOGIN),
         '[store]\npath = "{}"\n'.format(store_path),
         '[imessage]\nrecipient = "{}"\nhandle_ids = [0]\n'.format(NO_RECIPIENT),
         '[chat_db]\npath = "{}"\n'.format(chat_db_path),

@@ -65,6 +65,7 @@ class ScratchConfigTests(unittest.TestCase):
         self.assertEqual(50111, config['grpc']['port'])
         self.assertEqual('127.0.0.1:4411', config['web_app']['listen'])
         self.assertEqual('call-test', config['web_app']['allowed_login'])
+        self.assertIs(False, config['web_app']['require_pairing'])
         self.assertEqual('/scratch/store', config['store']['path'])
         self.assertIs(False, config['telemetry']['export'])
 

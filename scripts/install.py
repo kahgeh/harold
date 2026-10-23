@@ -334,6 +334,16 @@ def choose_config(supplied, bundle):
     return (config + '\n[activity_summary]\nenabled = false\n').encode()
 
 
+def carried_pairing(bundle):
+    """The installed config/pairing.env's bytes, which hold the web app's pairing code, or None
+    when there is none. Like local.toml it is carried across installs; a link or a folder is
+    not carried."""
+    source = bundle / 'config/pairing.env'
+    if source.is_symlink() or not source.is_file():
+        return None
+    return source.read_bytes()
+
+
 def checked(args, **kwargs):
     subprocess.run(args, check=True, **kwargs)
 
@@ -619,6 +629,7 @@ def install(args, repo):
     prefix = raw_prefix
     bundle = prefix / 'harold'
     local = choose_config(args.config, bundle)
+    pairing = carried_pairing(bundle)
     if artifacts is None:
         artifacts = build_binaries(repo, args.offline)
     prefix.mkdir(parents=True, exist_ok=True)
@@ -648,6 +659,12 @@ def install(args, repo):
             record_version(stage, prebuilt, repo)
             (stage / 'config/local.toml').write_bytes(local)
             (stage / 'config/local.toml').chmod(0o600)
+            if pairing is not None:
+                # Written at 0600 from the start: Harold refuses a pairing file others can read.
+                descriptor = os.open(stage / 'config/pairing.env', os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                with os.fdopen(descriptor, 'wb') as handle:
+                    handle.write(pairing)
+                (stage / 'config/pairing.env').chmod(0o600)
             metadata = make_metadata(prefix, '')
             reject_symlinks(Path(metadata['plist']))
             identity = args.signing_identity if args.signing_identity is not None else saved_signing_identity(bundle)

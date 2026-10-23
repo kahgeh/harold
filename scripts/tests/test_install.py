@@ -89,6 +89,18 @@ class InstallTests(unittest.TestCase):
         self.assertFalse((bundle / 'data/events/marker').exists())
         self.assertEqual((backup / 'data/events/marker').read_text(), 'history')
 
+    def test_the_pairing_file_is_carried_only_when_it_is_a_file(self):
+        bundle = self.prefix / 'harold'
+        (bundle / 'config').mkdir(parents=True)
+        self.assertIsNone(self.install.carried_pairing(bundle))
+        target = Path(self.temp.name) / 'elsewhere.env'
+        target.write_text('HAROLD_PAIRING_CODE=linked-code\n')
+        (bundle / 'config/pairing.env').symlink_to(target)
+        self.assertIsNone(self.install.carried_pairing(bundle))
+        (bundle / 'config/pairing.env').unlink()
+        (bundle / 'config/pairing.env').write_bytes(b'HAROLD_PAIRING_CODE=abc123\n')
+        self.assertEqual(self.install.carried_pairing(bundle), b'HAROLD_PAIRING_CODE=abc123\n')
+
     def test_no_terminal_requires_config(self):
         with patch('sys.stdin.isatty', return_value=False):
             with self.assertRaisesRegex(RuntimeError, '--config'):
@@ -292,6 +304,10 @@ class InstallTests(unittest.TestCase):
                 path.chmod(0o755)
         config = self.prefix / 'import.toml'
         config.write_text('agents = []')
+        (self.prefix / 'harold/config').mkdir(parents=True)
+        old_pairing = self.prefix / 'harold/config/pairing.env'
+        old_pairing.write_text('HAROLD_PAIRING_CODE=test-code-0000\n')
+        old_pairing.chmod(0o644)
         args = argparse.Namespace(prefix=str(self.prefix), config=str(config), reinstall=False,
                                   offline=False, signing_identity='-', prebuilt_dir=str(release))
 
@@ -325,6 +341,9 @@ class InstallTests(unittest.TestCase):
         self.assertEqual((self.prefix / 'harold/config/default.toml').read_text(),
                          'release config/default.toml')
         self.assertEqual((self.prefix / 'harold/config/local.toml').read_text(), 'agents = []')
+        carried = self.prefix / 'harold/config/pairing.env'
+        self.assertEqual(carried.read_text(), 'HAROLD_PAIRING_CODE=test-code-0000\n')
+        self.assertEqual(carried.stat().st_mode & 0o777, 0o600)
         for name in ('claude_turn_complete.py', 'codex_turn_complete.py'):
             self.assertEqual((self.prefix / 'harold/hooks' / name).read_text(),
                              'release hooks/' + name)
