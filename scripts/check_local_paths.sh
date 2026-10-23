@@ -9,7 +9,7 @@ home="/Users/""kahgeh"
 layout="Dev""/p/"
 scratch="claude""-502"
 
-if git grep -n -F -e "$home" -e "$layout" -e "$scratch" -- . ':!Cargo.lock'; then
+if git grep -n -F -e "$home" -e "$layout" -e "$scratch" -- .; then
     echo "check_local_paths: tracked files above show this machine's paths; use /Users/you, ~/code or a placeholder" >&2
     exit 1
 fi
