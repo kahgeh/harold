@@ -909,6 +909,13 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
         }
         cli::Mode::App(ref command) => {
             let address = settings.grpc.addr()?.to_string();
+            // Unlocking is the command's own act on the data folder, never a call to the daemon.
+            if matches!(command, cli::AppCommand::Pair { unlock: true })
+                && let Err(line) =
+                    web_app::pair::unlock(std::path::Path::new(&settings.store.resolved_path()))
+            {
+                exit_with_line(&line);
+            }
             match cli::app(&address, command, telemetry::local_offset()).await {
                 Ok(text) => println!("{text}"),
                 Err(line) => exit_with_line(&line),

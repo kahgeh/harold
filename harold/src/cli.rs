@@ -33,7 +33,7 @@ pub(crate) enum Mode {
 /// A `harold app` command: the web app's pairing and its paired devices.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum AppCommand {
-    /// Report whether pairing is set up and locked; with `unlock`, clear the lock first.
+    /// Report whether pairing is set up and locked; `unlock` is done by `main` before the report.
     Pair {
         unlock: bool,
     },
@@ -1733,7 +1733,7 @@ pub(crate) async fn app(
         match command {
             AppCommand::Pair { unlock } => {
                 let status = client
-                    .pairing_status(crate::harold::PairingStatusRequest { unlock: *unlock })
+                    .pairing_status(crate::harold::PairingStatusRequest {})
                     .await
                     .map_err(refused)?
                     .into_inner();

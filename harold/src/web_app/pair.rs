@@ -405,30 +405,6 @@ impl Pairing {
         }
     }
 
-    /// Clears the lock and the count. Err when the lock file cannot be written.
-    pub(crate) fn unlock(&self) -> Result<(), String> {
-        let _attempts = self.attempts.lock().unwrap_or_else(PoisonError::into_inner);
-        // Without a usable code there is nothing to count; the next attempt starts afresh.
-        let Ok(code) = read_code(&self.code_file) else {
-            let _ = std::fs::remove_file(&self.lock_path);
-            return Ok(());
-        };
-        // An unreadable lock file is replaced.
-        let mut lock = match self.lock_for(&code) {
-            Ok(lock) => lock,
-            Err(()) => {
-                let _ = std::fs::remove_file(&self.lock_path);
-                self.lock_for(&code)
-                    .map_err(|()| format!("{} cannot be made", self.lock_path.display()))?
-            }
-        };
-        lock.tries = 0;
-        lock.locked = false;
-        write_json(&self.lock_path, &lock)?;
-        info!("app pairing unlocked");
-        Ok(())
-    }
-
     /// Whether `secret` is a paired device's. Notes the time it was seen, and writes the
     /// list at most once an hour for it.
     fn admit(&self, secret: &str) -> bool {
@@ -677,6 +653,18 @@ pub(crate) const WRONG: &str = "That code didn't work";
 pub(crate) const LOCKED: &str = "Pairing is locked on the Mac";
 pub(crate) const NOT_SET_UP: &str = "Pairing isn't set up on the Mac";
 
+/// Clears the pairing lock and the count of the Harold whose store is at `store_path`, by
+/// removing `web-app/pairing-lock.json`; the next attempt starts a fresh count. The command
+/// does this itself, as the user, in the data folder: no call to the daemon can reset it.
+pub(crate) fn unlock(store_path: &Path) -> Result<(), String> {
+    let path = devices_path(store_path).with_file_name("pairing-lock.json");
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(_) => Err(format!("{} cannot be removed", path.display())),
+    }
+}
+
 /// The WARN at start-up when the check is off.
 pub(crate) fn warn_when_off(pairing: &Pairing) {
     if !pairing.required() {
@@ -709,13 +697,8 @@ impl harold_api::harold::harold_app_server::HaroldApp for AppService {
         &self,
         request: tonic::Request<harold_api::harold::PairingStatusRequest>,
     ) -> Result<tonic::Response<harold_api::harold::PairingStatusResponse>, tonic::Status> {
-        let pairing = self.pairing()?;
-        if request.into_inner().unlock {
-            pairing
-                .unlock()
-                .map_err(|_| tonic::Status::internal("pairing lock not written"))?;
-        }
-        let status = pairing.status();
+        let _ = request;
+        let status = self.pairing()?.status();
         Ok(tonic::Response::new(
             harold_api::harold::PairingStatusResponse {
                 set_up: status.not_set_up.is_none(),

@@ -67,7 +67,7 @@ The login header comes from the device, not from the page, so every page open in
 
 **Devices that are not paired.** After the login check, Harold looks for the cookie `harold_device` and finds the device by the SHA-256 of its value in `web-app/devices.json`. A request without a known cookie gets `401` and nothing else, and `GET /` gets the pair screen instead of the thread. Only these files are served without the cookie, by exact path: `/static/app.css`, the scripts `datastar-1.0.2.js`, `alerts.js`, `call.js`, `call-worklet.js`, `dictation.js`, `echo-test.js`, `pages.js`, `photo.js` and `pair.js`, `/static/sw.js`, `/static/manifest.webmanifest` and `/static/icon.png`. Photos, the live stream, the todos, calls, pushes, the browser spans and every other route need the cookie. Harold logs `app device refused` (INFO) with a `reason` of `no_cookie` or `unknown_device`, once per reason per hour, never the cookie. See [Pairing a phone](#pairing-a-phone).
 
-These checks protect against web pages and other devices, not against software on the Mac. Any program on the Mac can still reach `127.0.0.1:4330` and send a correct Host, Origin and login. The Mac's own processes are trusted, as they already are with tmux, where any of them can type into the chief's pane.
+The Host, origin and login checks protect against web pages and other devices; the device check adds protection against other programs and accounts on the Mac that reach `127.0.0.1:4330` without the secret. None of them protects against a program that runs as you: it can read the pairing file and pair a device of its own, as it can already type into the chief's pane through tmux.
 
 ### Pairing a phone
 
@@ -89,7 +89,7 @@ A phone is paired once, inside the installed app. The pair screen has one field 
 | Command | What it does |
 |---|---|
 | `harold app pair` | Says whether pairing is set up and locked, and the wrong tries so far. It never shows the code. |
-| `harold app pair --unlock` | Clears the lock and the count. |
+| `harold app pair --unlock` | Clears the lock and the count, by removing `web-app/pairing-lock.json` itself as you. It is not a call to the daemon, because any program on the Mac could make that call and reset the lock to guess without limit. |
 | `harold app devices` | Lists the paired devices with when each was paired and last seen. |
 | `harold app unpair <name>` | Removes a device. Its next request gets `401`, and the app reloads to the pair screen. |
 
@@ -117,11 +117,10 @@ allowed_login = "<your Tailscale login>"
 | `allowed_login` | Your Tailscale login, exactly as Tailscale Serve sends it in `Tailscale-User-Login`. |
 | `app_name` | Optional. The name under the home-screen icon and in the app's title, 1 to 30 characters on one line. Left out, it is `Chief`. iOS shows about 12 characters, so a short name such as `Chief M4` reads best. |
 | `icon` | Optional. The path of a square PNG, 180 to 1024 pixels a side and at most 1 MB. A leading `~/` is the home folder; otherwise the path must be absolute. Left out, the app has no icon of its own. Harold reads the file once, at start, so a change needs a restart. It does not resize the image; iOS scales a larger square down itself. |
-
 | `pairing_file` | Optional. The file holding `HAROLD_PAIRING_CODE=<code>`. A leading `~/` is the home folder. Left out, it is `~/bin/harold/config/pairing.env`. |
 | `require_pairing` | Optional. `true` when left out: only a paired device may use the app. `false` switches the device check off, for a test Harold or for recovery, and Harold logs the WARN `web app allows any device` at every start-up. |
 
-Set `allowed_login` and `app_name` in each Mac's own `local.toml`, so the two Macs' apps differ on the home screen. The file is served at `/static/icon.png` behind the login check, and the manifest and thread page take the name and icon from these keys.
+Set `app_name` and `icon` in each Mac's own `local.toml`, so the two Macs' apps differ on the home screen. The file is served at `/static/icon.png` behind the login check, and the manifest and thread page take the name and icon from these keys.
 
 The section also needs `[notify] chief` (the default `"chief-of-pods"` will do), because that entry decides which agent is the chief. The chief reaches the app only when its folder is on `[notify] web_app`.
 

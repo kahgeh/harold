@@ -18,15 +18,16 @@ service Harold {
 
 // The web app's paired devices and its pairing lock, for `harold app`.
 service HaroldApp {
-  // Whether pairing is set up and locked, and the wrong tries so far; with unlock, clears
-  // the lock and the count first. Never returns the code.
+  // Whether pairing is set up and locked, and the wrong tries so far. Never returns the code.
+  // There is no unlock call: another program on the Mac could use it to reset the lock and
+  // guess without limit, so `harold app pair --unlock` removes the lock file itself.
   rpc PairingStatus (PairingStatusRequest) returns (PairingStatusResponse);
   rpc ListDevices (ListDevicesRequest) returns (ListDevicesResponse);
   rpc UnpairDevice (UnpairDeviceRequest) returns (UnpairDeviceResponse);
 }
 
 message PairingStatusRequest {
-  bool unlock = 1;
+  reserved 1;
 }
 
 message PairingStatusResponse {

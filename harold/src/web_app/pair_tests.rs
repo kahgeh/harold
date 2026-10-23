@@ -446,7 +446,7 @@ async fn changing_the_code_or_unlocking_clears_the_lock_and_a_pairing_resets_the
         pairing.attempt("nope-nope", "d");
     }
     assert_eq!(pairing.attempt(OTHER_CODE, "d"), Attempt::Locked);
-    pairing.unlock().unwrap();
+    super::pair::unlock(&folder.store_path()).unwrap();
     assert!(!pairing.status().locked);
     assert_eq!(pairing.status().tries, 0);
     assert!(matches!(
@@ -841,6 +841,7 @@ async fn harold_app_lists_unpairs_and_unlocks_through_the_service_without_the_co
         .await
         .unwrap();
     assert!(locked.contains("locked: yes") && locked.contains("wrong tries: 5 of 5"));
+    super::pair::unlock(&folder.store_path()).unwrap();
     let unlocked = app(&address, &AppCommand::Pair { unlock: true }, utc)
         .await
         .unwrap();
