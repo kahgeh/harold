@@ -116,7 +116,7 @@ Harold creates its own key pair the first time it starts with `[web_app]` set ([
 
 The app has two pages side by side: the thread page and the todo page. Swipe left from the thread page to reach the todo page and right to come back, or tap **Todos** in the thread page's header and **‹ <app name>** in the todo page's. Two page dots sit above the reply box (at the bottom of the todo page, which has no reply box); the dark one is the page you are on.
 
-The thread page's header holds the app's name, **Todos** with the todo count in orange (no number when nothing waits), the **Turn on alerts** button until push is on, and **Call**.
+The thread page's header holds the app's name, **Todos** with the todo count in orange (no number when nothing waits), the **Turn on alerts** button until push is on, and **Call**, a round phone-icon button (greyed out, with `Voice is not set up on the Mac` as its label, when voice isn't set up).
 
 The thread is the oldest message at the top. It holds the last 30 days of messages; Harold deletes older ones at start and every hour. The page opens with the newest 50 messages and loads older ones, 50 at a time, as you scroll up; "Loading earlier messages…" shows at the top while more remain. While the page is open, each new message appears as soon as Harold stores it. After Harold restarts, the page picks the thread up again by itself within seconds, and keeps the older messages it had loaded. While Harold can't be reached, it tries less often, at least every 30 s.
 
@@ -212,7 +212,7 @@ The route applies only to messages that would reach the phone today. At the desk
 
 ## Calls (stage 1b)
 
-You tap **📞 Call**, and talk with the chief as in a phone call. Harold hears when you stop talking, has the [call answerer](../voice-input/call-answerer.md) answer at once and pass real work to the chief, plays the answer on the phone, and listens again. When the call answerer fails, Harold types what you said into the chief's pane, marked `🎙`, and plays the chief's spoken answer. The desk's calls work the same way; the [voice input reference](../voice-input/README.md) describes them. Call mode uses the `[voice_input]` section for transcription. Without it, the **Call** button is disabled and reads `Voice is not set up on the Mac`, and `POST /call` answers `409` with the same line.
+You tap the phone icon (**Call**) in the header, and talk with the chief as in a phone call. Harold hears when you stop talking, has the [call answerer](../voice-input/call-answerer.md) answer at once and pass real work to the chief, plays the answer on the phone, and listens again. When the call answerer fails, Harold types what you said into the chief's pane, marked `🎙`, and plays the chief's spoken answer. The desk's calls work the same way; the [voice input reference](../voice-input/README.md) describes them. Call mode uses the `[voice_input]` section for transcription. Without it, the **Call** button is greyed out and its label reads `Voice is not set up on the Mac`, and `POST /call` answers `409` with the same line.
 
 Starting a call on the phone ends a call open at the desk first, so the chief does not get turns from the desk's microphone too. Nothing stops the dash from starting a desk call while the phone's call is open.
 

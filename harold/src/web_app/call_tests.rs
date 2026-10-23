@@ -994,14 +994,13 @@ fn each_audio_refusal_has_its_status() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn the_thread_page_offers_a_call_or_says_voice_is_not_set_up() {
-    let offered = r#"<button type="button" id="call-start"><svg class="phone""#;
-    let refused =
-        r#"<button type="button" id="call-start" disabled>Voice is not set up on the Mac</button>"#;
+    let offered = r#"<button type="button" id="call-start" class="icon-button" aria-label="Call"><svg class="phone""#;
+    let refused = r#"<button type="button" id="call-start" class="icon-button" disabled aria-label="Call: voice is not set up on the Mac" title="Voice is not set up on the Mac"><svg class="phone""#;
 
     let set_up = Phone::new(true).await;
     let page = set_up.server.get("/").await.text().await.unwrap();
     assert!(page.contains(offered), "{page}");
-    assert!(page.contains("</svg> Call</button>"), "{page}");
+    assert!(!page.contains("Call</button>"), "{page}");
     assert!(!page.contains(NOT_SET_UP), "{page}");
     assert!(
         page.contains(r#"<script src="/static/call.js" defer></script>"#),
