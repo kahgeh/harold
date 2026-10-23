@@ -132,6 +132,9 @@
       headers: { "Content-Type": "application/octet-stream" },
       body: blob,
     });
+    if (response.status === 401) {
+      location.reload();
+    }
     if (!response.ok) {
       throw new Error("upload refused");
     }

@@ -70,6 +70,9 @@
           },
         }),
       });
+      if (response.status === 401) {
+        location.reload();
+      }
       return response.ok;
     } catch {
       // Harold could not be reached: the subscription is not stored.

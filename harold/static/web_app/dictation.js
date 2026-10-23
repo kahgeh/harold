@@ -51,6 +51,10 @@
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ result }),
       keepalive: true,
+    }).then((response) => {
+      if (response.status === 401) {
+        location.reload();
+      }
     }).catch(() => {});
   }
 

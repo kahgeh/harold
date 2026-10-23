@@ -40,7 +40,15 @@
   // Every request but the audio's says JSON: Harold takes no post from a page without a
   // header another site could not send.
   function send(method, path) {
-    return fetch(path, { method, headers: { "Content-Type": "application/json" } });
+    return fetch(path, { method, headers: { "Content-Type": "application/json" } }).then(reloadWhenUnpaired);
+  }
+
+  // A 401 means this device is no longer paired: the page reloads to the pair screen.
+  function reloadWhenUnpaired(response) {
+    if (response.status === 401) {
+      location.reload();
+    }
+    return response;
   }
 
   function showNotice(text) {
@@ -221,7 +229,7 @@
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
-    }).catch(() => {});
+    }).then(reloadWhenUnpaired).catch(() => {});
   }
 
   // 3 s after Harold answered POST /call: tells Harold what the microphone gave. With no
@@ -327,6 +335,7 @@
         headers: { "Content-Type": "application/octet-stream" },
         body: piece.samples,
       });
+      reloadWhenUnpaired(answer);
       if (!answer.ok) {
         current.failed += 1;
       }
@@ -394,6 +403,7 @@
     };
     try {
       const response = await fetch("/call/answer/" + encodeURIComponent(id));
+      reloadWhenUnpaired(response);
       if (!response.ok) {
         // No longer offered: nothing to play.
         letGo(id);
@@ -549,7 +559,7 @@
       method: "DELETE",
       keepalive: true,
       headers: { "Content-Type": "application/json" },
-    }).catch(() => {});
+    }).then(reloadWhenUnpaired).catch(() => {});
     end(call);
     showNotice(ENDED_BY_HIDING);
   });

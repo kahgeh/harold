@@ -56,6 +56,16 @@ document.addEventListener("click", (event) => {
   });
 })();
 
+// A request answered 401 means this device is not paired, or was unpaired: the page reloads,
+// which shows the pair screen. Datastar's @get and @post announce a refusal as "error" with
+// the status as text.
+document.addEventListener("datastar-fetch", (event) => {
+  const detail = event.detail;
+  if (detail && detail.type === "error" && detail.argsRaw && detail.argsRaw.status === "401") {
+    location.reload();
+  }
+});
+
 // A page that leaves the screen says so with a request that outlives it, and a page on
 // screen says so every 30 s, so a stream the phone leaves open does not hold back the
 // chief's pushes: the server counts a page visible only for 75 s after it last heard from it.
@@ -87,7 +97,13 @@ document.addEventListener("click", (event) => {
       keepalive: true,
       headers: { "Content-Type": "application/json" },
       body,
-    }).catch(() => {});
+    })
+      .then((response) => {
+        if (response.status === 401) {
+          location.reload();
+        }
+      })
+      .catch(() => {});
   // A hidden input is how Datastar's signals are written from outside it.
   const setInput = (input, value) => {
     input.value = value;
