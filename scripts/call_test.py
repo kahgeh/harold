@@ -924,13 +924,13 @@ def main(argv=None):
         if not shutil.which(tool):
             print('FAIL {} is not on PATH'.format(tool))
             return 1
-    binary = args.harold or args.install_dir / 'harold'
+    binary = (args.harold or args.install_dir / 'harold').resolve()
     if not binary.exists():
         print('FAIL no Harold at {}'.format(binary))
         return 1
 
     run = Run(args.install_dir, args.keep, args.log_level, binary=binary,
-              default_toml=args.default_config, wait_for_page_load=args.wait_for_page_load)
+              default_toml=args.default_config and args.default_config.resolve(), wait_for_page_load=args.wait_for_page_load)
     # A signal ends the run through the teardown below, which leaves nothing running.
     for name in (signal.SIGTERM, signal.SIGHUP):
         signal.signal(name, lambda number, frame: sys.exit(128 + number))
