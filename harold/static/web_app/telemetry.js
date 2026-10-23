@@ -54,11 +54,13 @@ function start() {
       [ATTR_SERVICE_NAME]: SERVICE,
       "service.version": meta("harold-version"),
     }),
+    // The processor also sends what it holds when the page is hidden: the page may go away
+    // at any moment on a phone.
     spanProcessors: [
-      new BatchSpanProcessor(
-        new OTLPTraceExporter({ url: `${location.origin}/telemetry/traces` }),
-        { scheduledDelayMillis: SEND_EVERY_MS },
-      ),
+      new BatchSpanProcessor({
+        exporter: new OTLPTraceExporter({ url: `${location.origin}/telemetry/traces` }),
+        scheduledDelayMillis: SEND_EVERY_MS,
+      }),
     ],
   });
   const contextManager = new StackContextManager();
@@ -79,12 +81,9 @@ function start() {
       new FetchInstrumentation({
         ignoreUrls: NOT_TRACED,
         // The span's address is cut to its path: Datastar's @get puts signals in the query.
-        applyCustomAttributesOnSpan: (span, request) => {
-          const address = typeof request === "string" ? request : (request?.url ?? "");
-          if (address) span.setAttribute("url.full", pathOnly(address));
-        },
-        requestHook: (span, request) => {
-          const address = request?.url ?? "";
+        // (A request that failed has no response: Harold cuts that address too.)
+        applyCustomAttributesOnSpan: (span, request, result) => {
+          const address = request?.url ?? result?.url ?? "";
           if (address) span.setAttribute("url.full", pathOnly(address));
         },
       }),
@@ -94,15 +93,6 @@ function start() {
   const tracer = trace.getTracer(SERVICE);
   recordErrors(tracer);
   recordRowsDrawn(tracer);
-
-  // The page may go away at any moment on a phone: send what is held.
-  const flush = () => {
-    provider.forceFlush().catch(() => {});
-  };
-  document.addEventListener("visibilitychange", () => {
-    if (document.visibilityState === "hidden") flush();
-  });
-  addEventListener("pagehide", flush);
 }
 
 /** A script error or a promise nobody caught, as a `browser.error` span. */
@@ -172,6 +162,7 @@ function recordRowsDrawn(tracer) {
 
 try {
   start();
-} catch {
-  // Recording must never stop the app.
+} catch (error) {
+  // Recording must never stop the app; the console says why it did not start.
+  console.error("telemetry.js did not start:", error?.message);
 }

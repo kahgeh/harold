@@ -506,12 +506,20 @@ fn the_telemetry_script_imports_the_bundle_skips_five_paths_and_cuts_urls_to_pat
         r#""browser.message_shown""#,
         r#"getAttribute("data-trace")"#,
         "requestAnimationFrame",
-        "forceFlush",
-        "visibilitychange",
+        "new BatchSpanProcessor({",
+        "scheduledDelayMillis: SEND_EVERY_MS",
     ] {
         assert!(script.contains(wanted), "telemetry.js lacks {wanted}");
     }
-    for absent in ["eval(", "new Function", "innerHTML", "http://", "https://"] {
+    // The processor sends its batch when the page is hidden, unless told not to.
+    for absent in [
+        "eval(",
+        "new Function",
+        "innerHTML",
+        "http://",
+        "https://",
+        "disableAutoFlushOnDocumentHide",
+    ] {
         assert!(!script.contains(absent), "telemetry.js holds {absent}");
     }
 }
