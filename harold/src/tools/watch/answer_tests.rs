@@ -87,7 +87,9 @@ fn a_good_output_gives_the_answer_and_the_cost() {
             cause: Some(Cause {
                 subtype: Some("success".into()),
                 is_error: Some(false),
-                num_turns: None
+                num_turns: None,
+                terminal_reason: None,
+                api_error_status: None
             })
         }
     );
@@ -109,7 +111,9 @@ fn bad_outputs_map_to_their_failures() {
             cause: Some(Cause {
                 subtype: Some("success".into()),
                 is_error: Some(false),
-                num_turns: None
+                num_turns: None,
+                terminal_reason: None,
+                api_error_status: None
             })
         }
     );
@@ -124,7 +128,9 @@ fn bad_outputs_map_to_their_failures() {
             cause: Some(Cause {
                 subtype: Some("error_max_budget_usd".into()),
                 is_error: Some(true),
-                num_turns: None
+                num_turns: None,
+                terminal_reason: None,
+                api_error_status: None
             })
         }
     );
@@ -235,7 +241,9 @@ fn the_cause_is_read_from_the_json() {
         Some(Cause {
             subtype: Some("error_max_turns".into()),
             is_error: Some(true),
-            num_turns: Some(8)
+            num_turns: Some(8),
+            terminal_reason: None,
+            api_error_status: None
         })
     );
     let none = cause_of("{}");
@@ -268,8 +276,50 @@ fn output_that_is_not_json_is_unreadable_json() {
             Some(Cause {
                 subtype: Some("unreadable_json".into()),
                 is_error: None,
-                num_turns: None
+                num_turns: None,
+                terminal_reason: None,
+                api_error_status: None
             })
         );
     }
+}
+
+#[test]
+fn an_api_error_names_its_terminal_reason_and_status() {
+    let cause = cause_of(
+        r#"{"type":"result","subtype":"success","is_error":true,"num_turns":1,"total_cost_usd":0,"terminal_reason":"api_error","api_error_status":404,"result":"CAUSE-CANARY"}"#,
+    );
+    assert_eq!(cause.terminal_reason.as_deref(), Some("api_error"));
+    assert_eq!(cause.api_error_status, Some(404));
+}
+
+#[test]
+fn an_odd_terminal_reason_becomes_other() {
+    let reason =
+        |value: &str| cause_of(&format!(r#"{{"terminal_reason":"{value}"}}"#)).terminal_reason;
+    assert_eq!(reason(&"a".repeat(41)).as_deref(), Some("other"));
+    assert_eq!(reason("Bad reason!").as_deref(), Some("other"));
+    assert_eq!(reason("").as_deref(), Some("other"));
+    assert_eq!(reason(&"a".repeat(40)), Some("a".repeat(40)));
+    assert_eq!(cause_of(r#"{"terminal_reason":7}"#).terminal_reason, None);
+}
+
+#[test]
+fn an_api_error_status_is_kept_only_as_a_whole_number_from_100_to_599() {
+    let status =
+        |value: &str| cause_of(&format!(r#"{{"api_error_status":{value}}}"#)).api_error_status;
+    assert_eq!(status("100"), Some(100));
+    assert_eq!(status("599"), Some(599));
+    for odd in [r#""404""#, "99", "600", "4.5", "-404", "null", "true"] {
+        assert_eq!(status(odd), None, "{odd}");
+    }
+}
+
+#[test]
+fn output_without_either_field_gives_none_for_both() {
+    let cause = cause_of(r#"{"subtype":"success","is_error":true}"#);
+    assert_eq!(
+        (cause.terminal_reason, cause.api_error_status),
+        (None, None)
+    );
 }

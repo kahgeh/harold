@@ -281,6 +281,7 @@ async fn every_log_line_of_the_table_is_written_with_its_fields() {
         "ends_at=",
         "every_minutes=10",
         "every_run=false",
+        "model=\"haiku\"",
     ] {
         assert!(started[0].contains(field), "{field}: {}", started[0]);
     }
@@ -492,7 +493,7 @@ async fn a_process_failed_run_logs_how_it_ended_and_what_claude_code_reported_wi
         settings(),
         vec![
             Step::Exit {
-                stdout: r#"{"subtype":"error_max_turns","is_error":true,"num_turns":8,"result":"CAUSE-CANARY-1"}"#.into(),
+                stdout: r#"{"subtype":"error_max_turns","is_error":true,"num_turns":8,"terminal_reason":"api_error","api_error_status":404,"result":"CAUSE-CANARY-1"}"#.into(),
                 exit: Exit {
                     code: Some(3),
                     signal: None,
@@ -524,6 +525,8 @@ async fn a_process_failed_run_logs_how_it_ended_and_what_claude_code_reported_wi
         "subtype=\"error_max_turns\"",
         "is_error=true",
         "num_turns=8",
+        "terminal_reason=\"api_error\"",
+        "api_error_status=404",
     ] {
         assert!(failed[0].contains(field), "{field}: {}", failed[0]);
     }
@@ -550,6 +553,9 @@ async fn a_process_failed_run_logs_how_it_ended_and_what_claude_code_reported_wi
     assert!(!failed[1].contains("exit_code="), "{}", failed[1]);
     assert!(failed[2].contains("subtype=\"other\"") && failed[2].contains("is_error=true"));
     assert!(!failed[2].contains("num_turns="), "{}", failed[2]);
+    for absent in ["terminal_reason=", "api_error_status="] {
+        assert!(!failed[1].contains(absent) && !failed[2].contains(absent));
+    }
     let exported = test_support::exported_text();
     for canary in ["CAUSE-CANARY-1", "CAUSE-CANARY-2", "CAUSE-CANARY-3"] {
         assert!(!text.contains(canary), "{canary} in harold.log");

@@ -75,6 +75,7 @@ pub(super) struct Started<'a> {
     pub every_minutes: u32,
     pub every_run: bool,
     pub how: How,
+    pub model: &'a str,
 }
 
 /// `watch started`, and the counters' zero for the folder.
@@ -88,6 +89,7 @@ pub(super) fn watch_started(started: &Started<'_>) {
         every_minutes = started.every_minutes,
         every_run = started.every_run,
         how = started.how.as_str(),
+        model = started.model,
         "watch started"
     );
 }
@@ -225,6 +227,8 @@ impl RunObs {
                 subtype = cause.and_then(|c| c.subtype.as_deref()),
                 is_error = cause.and_then(|c| c.is_error),
                 num_turns = cause.and_then(|c| c.num_turns),
+                terminal_reason = cause.and_then(|c| c.terminal_reason.as_deref()),
+                api_error_status = cause.and_then(|c| c.api_error_status),
                 "watch run failed"
             );
         });

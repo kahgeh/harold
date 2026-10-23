@@ -98,6 +98,10 @@ struct ClaudeJson {
     subtype: Option<String>,
     #[serde(default, deserialize_with = "lenient_turns")]
     num_turns: Option<u32>,
+    #[serde(default, deserialize_with = "lenient_text")]
+    terminal_reason: Option<String>,
+    #[serde(default, deserialize_with = "lenient_status")]
+    api_error_status: Option<u16>,
     #[serde(default)]
     result: Option<String>,
     #[serde(default)]
@@ -123,19 +127,41 @@ fn lenient_turns<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<u3
     })
 }
 
-/// What Claude Code reported about how a run went. Never holds text: the subtype is
-/// cut to a fixed shape.
+/// Reads a string field; anything else is not known, and never fails the parse.
+fn lenient_text<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<String>, D::Error> {
+    Ok(match serde_json::Value::deserialize(deserializer)? {
+        serde_json::Value::String(s) => Some(s),
+        _ => None,
+    })
+}
+
+/// Reads `api_error_status` when it is a whole number from 100 to 599; anything else
+/// is not known, and never fails the parse.
+fn lenient_status<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<u16>, D::Error> {
+    Ok(match serde_json::Value::deserialize(deserializer)? {
+        serde_json::Value::Number(n) => n
+            .as_u64()
+            .filter(|status| (100..=599).contains(status))
+            .and_then(|status| u16::try_from(status).ok()),
+        _ => None,
+    })
+}
+
+/// What Claude Code reported about how a run went. Never holds text: the subtype and
+/// the terminal reason are cut to a fixed shape.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Cause {
     pub subtype: Option<String>,
     pub is_error: Option<bool>,
     pub num_turns: Option<u32>,
+    pub terminal_reason: Option<String>,
+    pub api_error_status: Option<u16>,
 }
 
-/// The longest subtype kept.
+/// The longest subtype or terminal reason kept.
 const SUBTYPE_MAX_CHARS: usize = 40;
 
-/// The subtype when it is a short name of `a-z`, `0-9` and `_`, else `other`.
+/// The name when it is short and of `a-z`, `0-9` and `_`, else `other`.
 fn clean_subtype(subtype: &str) -> String {
     let fits = !subtype.is_empty()
         && subtype.len() <= SUBTYPE_MAX_CHARS
@@ -164,6 +190,8 @@ pub(super) fn read_output(stdout: &[u8], exited_ok: bool) -> Read {
                 subtype: Some("unreadable_json".to_owned()),
                 is_error: None,
                 num_turns: None,
+                terminal_reason: None,
+                api_error_status: None,
             }),
         };
     };
@@ -174,6 +202,8 @@ pub(super) fn read_output(stdout: &[u8], exited_ok: bool) -> Read {
         subtype: json.subtype.as_deref().map(clean_subtype),
         is_error: json.is_error,
         num_turns: json.num_turns,
+        terminal_reason: json.terminal_reason.as_deref().map(clean_subtype),
+        api_error_status: json.api_error_status,
     };
     let answer = if json.subtype.as_deref() == Some("error_max_budget_usd") {
         Err(Failure::RunBudgetReached)

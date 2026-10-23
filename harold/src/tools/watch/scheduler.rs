@@ -307,6 +307,7 @@ impl Scheduler {
             every_minutes: row.every_minutes,
             every_run: row.every_run,
             how,
+            model: &self.deps.settings.model,
         });
         tokio::spawn(Arc::clone(self).watch_task(
             row.name.clone(),
