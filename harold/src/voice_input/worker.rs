@@ -39,6 +39,8 @@ const DEFAULT_LANG_CODE: &str = "a";
 pub(crate) struct Transcript {
     pub text: String,
     pub no_speech_prob: f32,
+    /// The language Whisper was told to transcribe in, as the worker's answer says.
+    pub language: String,
 }
 
 /// Why the worker could not load, as its ready line says.
@@ -209,6 +211,8 @@ pub(crate) struct WorkerCommand {
     pub tts_model: String,
     pub voice: String,
     pub lang_code: String,
+    /// The Whisper language code every turn is transcribed in.
+    pub language: String,
     /// The pinned commit of each model, when it is one Harold manages: the worker loads
     /// exactly that commit from the cache.
     pub stt_pin: Option<Pin>,
@@ -255,6 +259,7 @@ impl WorkerCommand {
             tts_model,
             voice: tts_option(tts, "--voice", DEFAULT_VOICE),
             lang_code: tts_option(tts, "--lang_code", DEFAULT_LANG_CODE),
+            language: voice_input.language.clone(),
         })
     }
 }
@@ -299,7 +304,8 @@ impl ProcessWorker {
             .args(["--stt-model", &command.stt_model])
             .args(["--tts-model", &command.tts_model])
             .args(["--voice", &command.voice])
-            .args(["--lang-code", &command.lang_code]);
+            .args(["--lang-code", &command.lang_code])
+            .args(["--language", &command.language]);
         for (flag, pin) in [("stt", &command.stt_pin), ("tts", &command.tts_pin)] {
             if let Some(pin) = pin {
                 worker
@@ -538,6 +544,7 @@ impl VoiceWorker for ProcessWorker {
         Ok(Transcript {
             text: text.to_string(),
             no_speech_prob: reply["no_speech_prob"].as_f64().unwrap_or(1.0) as f32,
+            language: reply["language"].as_str().unwrap_or_default().to_string(),
         })
     }
 
@@ -861,6 +868,7 @@ mod tests {
             tts_model: "tts".into(),
             voice: "af_heart".into(),
             lang_code: "a".into(),
+            language: "en".into(),
             stt_pin: None,
             tts_pin: None,
         };
@@ -1037,6 +1045,51 @@ esac"#;
         std::fs::remove_dir_all(&folder).unwrap();
     }
 
+    #[test]
+    fn the_voice_worker_tells_whisper_the_language() {
+        assert!(VOICE_WORKER_PY.contains("stt.generate(wav, language=language)"));
+        assert!(VOICE_WORKER_PY.contains("argument(\"--language\")"));
+    }
+
+    #[tokio::test]
+    async fn the_worker_is_started_with_the_language_and_the_transcript_carries_it_back() {
+        let folder = temp_folder();
+        let answers = r#"case "$line" in
+*'"op":"transcribe"'*) echo '{"ok":true,"text":"hello","no_speech_prob":0.1,"language":"en"}' ;;
+esac"#;
+        let (command, log) = fake(&folder, READY, answers);
+        let script = folder.join("fake-worker");
+        let text = std::fs::read_to_string(&script).unwrap();
+        std::fs::write(
+            &script,
+            text.replacen(
+                "echo '{\"ready\":true}'",
+                &format!(
+                    "echo \"$@\" > {}.args\necho '{{\"ready\":true}}'",
+                    log.display()
+                ),
+                1,
+            ),
+        )
+        .unwrap();
+        let mut worker = ProcessWorker::start(&command, &folder.join("call")).unwrap();
+        let heard = worker.transcribe(Path::new("/x/turn.wav")).await.unwrap();
+        worker.close().await;
+        let args = std::fs::read_to_string(format!("{}.args", log.display())).unwrap();
+        assert!(args.contains("--language en"), "{args}");
+        assert_eq!(heard.language, "en");
+        std::fs::remove_dir_all(&folder).unwrap();
+    }
+
+    #[test]
+    fn the_command_takes_the_language_from_the_setting() {
+        let mut settings = voice_input(&["--model", "m"]);
+        settings.language = "es".into();
+        let command =
+            WorkerCommand::from_settings_in(&settings, &tts(&[]), &Env::from_process()).unwrap();
+        assert_eq!(command.language, "es");
+    }
+
     #[tokio::test]
     async fn the_worker_is_given_the_pinned_snapshot_of_each_managed_model() {
         let folder = temp_folder();
@@ -1183,6 +1236,7 @@ esac"#;
         VoiceInputSettings {
             model_revision: crate::settings::WHISPER_REVISION.to_string(),
             keep_worker_minutes: 10,
+            language: "en".into(),
             command: "/venv/bin/python".into(),
             args: args.iter().map(|arg| arg.to_string()).collect(),
         }

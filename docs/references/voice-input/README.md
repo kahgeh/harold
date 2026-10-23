@@ -195,10 +195,13 @@ Add a `[voice_input]` section to `local.toml`. The template (`harold/config/loca
 | `args` | The word after `--model` names the Whisper model. The worker uses only that value; the rest of `args` is not passed on. Without `--model` and a value, Harold refuses to start and `harold --check-config` fails. |
 | `model_revision` | The commit of the Whisper model that Harold downloads, checks and loads: 40 lowercase hex characters. Default `a4aaeec0636e6fef84abdcbe3544cb2bf7e9f6fb` (committed 2026-04-12). |
 | `keep_worker_minutes` | How long the voice worker is kept after no web app page is on screen and no call is on. Default `10`. |
+| `language` | The Whisper language code every turn is transcribed in. Default `en`. Whisper is told the language, so it does not guess it from a clip of two or three seconds, which it can get wrong. A code outside Harold's short list of Whisper codes (`en` among them) is refused at start-up. `harold.call_transcribe` records the language the worker used. |
 
 `[tts] model_revision` is the same for Kokoro: default `a71e4d38b236d968966a2002c4c895dbd12b1c3c` (committed 2025-12-02). Both defaults are the commits already in this Mac's cache, so pinning changes nothing here. The defaults are in `harold/config/default.toml` (`[tts]`) and in `harold/src/settings.rs`; `[voice_input]` is set in `local.toml`, so its defaults come from the code.
 
 The worker takes Kokoro's model, voice and language from `[tts] args`: `--model` (default `mlx-community/Kokoro-82M-bf16`), `--voice` (default `af_heart`) and `--lang_code` (default `a`), so a call sounds like the desk.
+
+A call's answers are always in English: `language = "en"` for Whisper, and rule 7 of the [call answerer](call-answerer.md)'s rules. A user who speaks another language sets both `[voice_input] language` and `[tts] --lang_code`, and changes rule 7 by spec; the rules are a constant, not a setting.
 
 With no `[voice_input]` section, the button shows `[c] 📞 call: not set up`, and nothing runs. Harold reads the configuration only at startup.
 

@@ -154,6 +154,7 @@ impl VoiceWorker for FakeWorker {
         Ok(Transcript {
             text,
             no_speech_prob,
+            language: "en".into(),
         })
     }
 

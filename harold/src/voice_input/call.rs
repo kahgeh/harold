@@ -1018,6 +1018,7 @@ impl<P: CallPorts> Call<P> {
             audio_ms,
             waited_ms = tracing::field::Empty,
             load_waited_ms = tracing::field::Empty,
+            language = tracing::field::Empty,
             result = tracing::field::Empty
         ));
         self.transcribe_queued_at = Some(Instant::now());
@@ -1118,6 +1119,7 @@ impl<P: CallPorts> Call<P> {
         let error = match result {
             Ok(transcript) => {
                 if let Some(span) = span {
+                    span.record("language", transcript.language.as_str());
                     let result = if has_speech(&transcript) {
                         "text"
                     } else {

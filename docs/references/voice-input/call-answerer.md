@@ -70,7 +70,8 @@ The answerer's system prompt tells it to:
 - put a request for work, or a question the facts cannot answer but the chief could, in `hand_over`, and say only that it was passed to the chief;
 - never say work is done or when it will be done, and never guess;
 - answer "I can only help with your pods and agents." to a question outside them;
-- say about a hand-over only what the facts say: it is waiting, or it was typed into the chief's pane, never that the chief received or read it.
+- say about a hand-over only what the facts say: it is waiting, or it was typed into the chief's pane, never that the chief received or read it.;
+- answer in English, even when the person's words look like another language, because misheard speech can come out in another language (`[voice_input] language` tells Whisper to expect English; see the [voice input reference](README.md)).
 
 When `say` is empty and `hand_over` is set, Harold says "I've passed that to the chief." itself.
 

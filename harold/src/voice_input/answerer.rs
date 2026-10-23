@@ -56,7 +56,8 @@ Otherwise leave \"hand_over\" out.
 5. About a hand-over, say only what the facts say: it is waiting, or it was typed into the chief's pane. \
 Never say the chief has received it, read it or is working on it.
 6. The person's todos and the chief's queue are in the facts. Answer questions about them from the facts. \
-When a part says it could not be read, say so.";
+When a part says it could not be read, say so.
+7. Answer in English, even when the person's words look like another language. Misheard speech can come out in another language.";
 
 /// How many characters of an agent's work summary the facts hold.
 const WORK_SUMMARY_CHARS: usize = 200;

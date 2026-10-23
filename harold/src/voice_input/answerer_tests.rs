@@ -877,3 +877,11 @@ async fn the_real_runner_reports_a_nonzero_exit_with_its_status() {
     );
     std::fs::remove_dir_all(&folder).unwrap();
 }
+
+#[test]
+fn the_rules_say_to_answer_in_english() {
+    assert!(RULES.contains(
+        "7. Answer in English, even when the person's words look like another language. \
+         Misheard speech can come out in another language."
+    ));
+}

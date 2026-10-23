@@ -106,6 +106,7 @@ impl Scratch {
         let voice_input = VoiceInputSettings {
             model_revision: whisper_revision.to_string(),
             keep_worker_minutes: 10,
+            language: "en".into(),
             command: python.to_string(),
             args: ["--model", whisper].map(String::from).to_vec(),
         };
@@ -715,6 +716,7 @@ async fn the_script_is_started_with_dash_i_and_only_the_four_variables() {
         let voice_input = VoiceInputSettings {
             model_revision: WHISPER_REVISION.into(),
             keep_worker_minutes: 10,
+            language: "en".into(),
             command: scratch.fake_python(WORKS),
             args: ["--model", WHISPER].map(String::from).to_vec(),
         };

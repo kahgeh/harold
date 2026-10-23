@@ -82,6 +82,7 @@ pub(crate) const ALLOWED_FIELDS: &[&str] = &[
     "call_from",
     "cut",
     "audio_ms",
+    "language",
     "waited_ms",
     "source",
     "start_ms",

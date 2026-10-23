@@ -118,6 +118,7 @@ async fn a_worker_that_never_says_ready_fails_its_load_after_120_s() {
         tts_model: "tts".into(),
         voice: "af_heart".into(),
         lang_code: "a".into(),
+        language: "en".into(),
         stt_pin: None,
         tts_pin: None,
     };

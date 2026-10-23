@@ -76,14 +76,16 @@ def load(utils, model, snapshot, commit):
         raise LoadFailure(cause, model)
 
 
-def transcribe(stt, wav):
-    result = stt.generate(wav)
+def transcribe(stt, language, wav):
+    # Told the language, Whisper does not guess it from a clip of two or three seconds.
+    result = stt.generate(wav, language=language)
     segments = getattr(result, "segments", None) or []
     probs = [float(s["no_speech_prob"]) for s in segments if "no_speech_prob" in s]
     return {
         "ok": True,
         "text": result.text.strip(),
         "no_speech_prob": min(probs) if probs else 1.0,
+        "language": language,
     }
 
 
@@ -109,6 +111,7 @@ def main():
         )
         voice = argument("--voice")
         lang_code = argument("--lang-code")
+        language = argument("--language")
         # One throwaway line, so a missing voice fails here and not on the first answer.
         try:
             for _ in tts.generate(text="Ready.", voice=voice, speed=1.0, lang_code=lang_code):
@@ -139,7 +142,7 @@ def main():
         try:
             request = json.loads(line)
             if request["op"] == "transcribe":
-                reply = transcribe(stt, request["wav"])
+                reply = transcribe(stt, language, request["wav"])
             elif request["op"] == "say":
                 reply = say(tts, voice, lang_code, request["text"], request["wav"])
             else:

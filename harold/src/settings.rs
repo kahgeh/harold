@@ -508,6 +508,10 @@ fn kokoro_revision() -> String {
     KOKORO_REVISION.to_string()
 }
 
+fn whisper_language() -> String {
+    "en".to_string()
+}
+
 fn keep_worker_minutes() -> u64 {
     10
 }
@@ -591,7 +595,17 @@ pub(crate) struct VoiceInputSettings {
     /// call is on.
     #[serde(default = "keep_worker_minutes")]
     pub keep_worker_minutes: u64,
+    /// The Whisper language code every turn is transcribed in.
+    #[serde(default = "whisper_language")]
+    pub language: String,
 }
+
+/// The Whisper language codes `[voice_input] language` may be.
+pub(crate) const WHISPER_LANGUAGES: &[&str] = &[
+    "en", "zh", "de", "es", "ru", "ko", "fr", "ja", "pt", "tr", "pl", "ca", "nl", "ar", "sv", "it",
+    "id", "hi", "fi", "vi", "he", "uk", "el", "ms", "cs", "ro", "da", "hu", "ta", "no", "th", "ur",
+    "hr", "bg", "lt", "la",
+];
 
 impl VoiceInputSettings {
     /// The value after `--model` in `args`.
@@ -611,6 +625,12 @@ fn voice_input_errors(voice_input: Option<&VoiceInputSettings>) -> Vec<String> {
     }
     if voice_input.whisper_model().is_none() {
         errors.push("voice_input.args must name the Whisper model with --model".into());
+    }
+    if !WHISPER_LANGUAGES.contains(&voice_input.language.as_str()) {
+        errors.push(format!(
+            "voice_input.language must be a Whisper language code such as en, not {:?}",
+            voice_input.language
+        ));
     }
     errors
 }
@@ -2365,10 +2385,34 @@ mod tests {
     }
 
     #[test]
+    fn voice_input_language_defaults_to_english_and_a_code_outside_the_list_is_refused() {
+        let settings = default_settings_with(
+            "[voice_input]\ncommand = \"python\"\nargs = [\"--model\", \"m\"]\n",
+        );
+        assert_eq!(settings.voice_input.as_ref().unwrap().language, "en");
+        assert!(
+            !settings
+                .validate()
+                .iter()
+                .any(|error| error.starts_with("voice_input.language"))
+        );
+        let refused = default_settings_with(
+            "[voice_input]\ncommand = \"python\"\nargs = [\"--model\", \"m\"]\nlanguage = \"english\"\n",
+        );
+        let errors: Vec<String> = refused
+            .validate()
+            .into_iter()
+            .filter(|error| error.starts_with("voice_input.language"))
+            .collect();
+        assert_eq!(errors.len(), 1, "{errors:?}");
+    }
+
+    #[test]
     fn whisper_model_is_the_value_after_dash_dash_model() {
         let settings = super::VoiceInputSettings {
             model_revision: crate::settings::WHISPER_REVISION.to_string(),
             keep_worker_minutes: 10,
+            language: "en".into(),
             command: "python".into(),
             args: [
                 "-m",
@@ -2386,6 +2430,7 @@ mod tests {
         let without_value = super::VoiceInputSettings {
             model_revision: crate::settings::WHISPER_REVISION.to_string(),
             keep_worker_minutes: 10,
+            language: "en".into(),
             command: "python".into(),
             args: vec!["--model".into()],
         };
