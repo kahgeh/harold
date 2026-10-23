@@ -173,6 +173,7 @@ pub(super) trait QuestionStore: Send + Sync + 'static {
         now_ms: i64,
     ) -> impl Future<Output = Result<std::result::Result<std::result::Result<(), String>, Refusal>>> + Send;
     /// `answer_traced` for an answer that carries no trace, such as one from the dash.
+    #[cfg(test)]
     fn answer(
         &self,
         id: &str,
