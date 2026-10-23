@@ -995,6 +995,26 @@ async fn a_refused_save_sets_its_notice_redraws_the_page_and_logs_its_result() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn each_free_text_input_has_an_id_that_is_unique_on_the_page() {
+    let service = FakeServer::start().await;
+    service
+        .fake
+        .set_list(vec![question("Q1", 2, false), question("Q2", 1, false)]);
+    let directory = TestDirectory::new();
+    let server = TestServer::serve(directory.store().await, service.questions()).await;
+
+    let page = server.get("/").await.text().await.unwrap();
+
+    // The morph keeps the typed-in input only if it can match it by id.
+    for id in ["text-Q1-1", "text-Q2-1"] {
+        let input = format!(r#"<input type="text" id="{id}" class="free-text" name="text.1""#);
+        assert_eq!(page.matches(&input).count(), 1, "{id}: {page}");
+        assert_eq!(page.matches(&format!(r#"id="{id}""#)).count(), 1, "{page}");
+    }
+    assert_eq!(page.matches(r#"class="free-text""#).count(), 2, "{page}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_saved_pick_and_its_words_draw_on_the_next_read() {
     let (_service, server, _directory) = served_with_todos().await;
 

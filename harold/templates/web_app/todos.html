@@ -17,7 +17,7 @@
 <input type="radio" name="pick.{{ decision.index }}" value="{{ option.key }}"{% if option.free %} data-free{% endif %}{% if option.picked %} checked{% endif %}>
 <span class="option-label">{{ option.label }}{% if option.suggested %} <em class="suggested">suggested</em>{% endif %}</span>
 {% if !option.impact.is_empty() %}<small class="impact">{{ option.impact }}</small>
-{% endif %}{% if option.free %}<input type="text" class="free-text" name="text.{{ decision.index }}" value="{{ option.text }}" maxlength="1000" aria-label="{{ option.label }}">
+{% endif %}{% if option.free %}<input type="text" id="text-{{ card.id }}-{{ decision.index }}" class="free-text" name="text.{{ decision.index }}" value="{{ option.text }}" maxlength="1000" aria-label="{{ option.label }}">
 {% endif %}</label>
 {% endfor %}</fieldset>
 {% endfor %}{% if let Some(notice) = card.notice %}<p class="notice" role="status">{{ notice }}</p>
