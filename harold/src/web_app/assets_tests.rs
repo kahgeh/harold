@@ -143,6 +143,41 @@ fn the_older_line_is_centred_in_the_second_text_colour() {
 }
 
 #[test]
+fn the_header_is_a_translucent_blurred_bar_the_pages_scroll_under() {
+    let css = include_str!("../../static/web_app/app.css");
+    let rule = |selector: &str| {
+        let start = css
+            .find(&format!("\n{selector} {{"))
+            .unwrap_or_else(|| panic!("app.css lacks the {selector} rule"));
+        let body = &css[start..];
+        &body[..body.find('}').expect("rule is closed")]
+    };
+    let top = rule(".top");
+    for wanted in [
+        "position: fixed;",
+        "\n  backdrop-filter:",
+        "\n  -webkit-backdrop-filter:",
+        "transparent)",
+    ] {
+        assert!(top.contains(wanted), ".top lacks {wanted:?}");
+    }
+    assert!(
+        top.contains("background: color-mix("),
+        ".top background is not a color-mix"
+    );
+    for (selector, wanted) in [
+        (".page", "\n  padding-top: var(--header-height);"),
+        (".page", "\n  scroll-padding-top: var(--header-height);"),
+        (".call-notice", "var(--header-height)"),
+    ] {
+        assert!(
+            rule(selector).contains(wanted),
+            "{selector} lacks {wanted:?}"
+        );
+    }
+}
+
+#[test]
 fn the_echo_test_script_asks_for_the_calls_microphone_and_plays_the_way_the_call_does() {
     let call = include_str!("../../static/web_app/call.js");
     let script = include_str!("../../static/web_app/echo-test.js");

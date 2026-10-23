@@ -16,6 +16,7 @@
   --end: #e03131;
   --on-end: #fff;
   --target: 48px;
+  --header-height: calc(max(8px, env(safe-area-inset-top)) + 8px + var(--target) + 1px);
 }
 
 @media (prefers-color-scheme: dark) {
@@ -92,8 +93,16 @@ button[hidden] {
 }
 
 .top {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 10;
   padding: max(8px, env(safe-area-inset-top)) 12px 8px 16px;
   border-bottom: 1px solid var(--surface-4);
+  background: color-mix(in srgb, var(--surface-1) 72%, transparent);
+  -webkit-backdrop-filter: saturate(180%) blur(20px);
+  backdrop-filter: saturate(180%) blur(20px);
 }
 
 .row {
@@ -188,6 +197,8 @@ body.on-todos .todos-row {
   flex: 0 0 100%;
   min-width: 0;
   overflow-y: auto;
+  padding-top: var(--header-height);
+  scroll-padding-top: var(--header-height);
   scroll-snap-align: start;
   scroll-snap-stop: always;
 }
@@ -471,7 +482,7 @@ body.on-todos > #reply {
 /* The call: the screen replaces the thread while a call lasts. */
 
 .call-notice {
-  margin: 0;
+  margin: var(--header-height) 0 0;
   padding: 10px 16px;
   background: var(--surface-3);
   text-align: center;
@@ -604,7 +615,7 @@ body.in-call > .call-screen {
   display: flex;
   flex-direction: column;
   gap: 12px;
-  padding: 12px;
+  padding: calc(var(--header-height) + 12px) 12px 12px;
 }
 
 .todos-empty {
