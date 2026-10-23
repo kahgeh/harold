@@ -6,6 +6,7 @@ use std::path::Path;
 use std::process::Command;
 use std::sync::Mutex;
 
+use opentelemetry::Context;
 use time::OffsetDateTime;
 use tracing::{info, warn};
 
@@ -388,14 +389,27 @@ pub(crate) enum ChiefRouting {
 /// agent → NoChief, nothing typed. With several agents in the folder the chief is the first
 /// agent pane of the chief's tmux session. A failing
 /// listing → Err. On typing, records telemetry::prompt_typed(pane, StartedBy::Phone, None,
-/// typed_at), so the chief's turn counts as started from the phone; a typed app reply opens
-/// no phone request, because the phone-request counters keep a fixed channel list. Logs
+/// typed_at), so the chief's turn counts as started from the phone. A typed app reply is
+/// not counted in the phone-request counters, which keep a fixed channel list. Logs
 /// nothing that holds the text.
+#[cfg(test)]
 pub(crate) fn route_to_chief(
     text: &str,
     photo: Option<&Path>,
     chief: &ChiefPane,
     type_into: &dyn Fn(&str, &str) -> Result<(), String>,
+) -> Result<ChiefRouting, String> {
+    route_to_chief_in(text, photo, chief, type_into, None)
+}
+
+/// `route_to_chief` for a reply whose phone request has the context `request`: the typed
+/// prompt keeps it, so the chief's turn joins the request's trace.
+pub(crate) fn route_to_chief_in(
+    text: &str,
+    photo: Option<&Path>,
+    chief: &ChiefPane,
+    type_into: &dyn Fn(&str, &str) -> Result<(), String>,
+    request: Option<Context>,
 ) -> Result<ChiefRouting, String> {
     let (pane_id, busy) = match chief {
         ChiefPane::One { pane_id, busy } => (pane_id, *busy),
@@ -413,8 +427,7 @@ pub(crate) fn route_to_chief(
     };
     type_into(pane_id, &line)?;
     let typed_at = OffsetDateTime::now_utc();
-    // No phone request is opened: the turn counts as started by the phone all the same.
-    telemetry::prompt_typed(pane_id, StartedBy::Phone, None, typed_at);
+    telemetry::prompt_typed(pane_id, StartedBy::Phone, request, typed_at);
     Ok(ChiefRouting::Typed {
         pane_id: pane_id.clone(),
         busy,

@@ -27,6 +27,7 @@ use super::pages::{
 use super::todos::TodosSection;
 use super::{AppState, thread_start_ms};
 use crate::store::{AppMessage, AppReplyState};
+use crate::telemetry;
 use crate::voice_input::PhoneView;
 
 /// How often an open page reads the todos again.
@@ -232,14 +233,34 @@ async fn send_patches(
         let dots_patch = dots.refresh(&state);
         let window = thread_window(&messages, seen.from.as_deref());
         for message in window.rows {
-            let Some(patch) = patch_for(seen.known.get(&message.event_id), message.clone()) else {
+            let before = seen.known.get(&message.event_id);
+            // A row the stream sends for the first time is a span of its own, which the
+            // page's row then joins.
+            let sent = before
+                .is_none()
+                .then(|| {
+                    message
+                        .trace
+                        .as_deref()
+                        .and_then(telemetry::open_app_row_sent)
+                })
+                .flatten();
+            let mut message = message.clone();
+            if let Some(trace) = sent.as_ref().and_then(telemetry::RowSent::traceparent) {
+                message.trace = Some(trace);
+            }
+            let Some(patch) = patch_for(before, message.clone()) else {
                 continue;
             };
             seen.known.insert(
                 message.event_id.clone(),
                 (message.text.clone(), message.state),
             );
-            if patches.send(Ok(patch)).await.is_err() {
+            let delivered = patches.send(Ok(patch)).await.is_ok();
+            if let Some(sent) = sent {
+                sent.end();
+            }
+            if !delivered {
                 return "page_gone";
             }
         }

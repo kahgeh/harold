@@ -747,6 +747,7 @@ fn row(n: usize, at_ms: i64) -> AppMessage {
         text: format!("row {n:03}"),
         state: None,
         photo: None,
+        trace: None,
     }
 }
 

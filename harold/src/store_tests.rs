@@ -484,7 +484,15 @@ async fn fresh_schema_has_one_initial_record_across_reopen() {
     while let Some(row) = rows.next().await.unwrap() {
         names.push(row.get_value(0).unwrap().as_text().unwrap().to_string());
     }
-    assert_eq!(names, ["001_initial", "002_web_app", "003_app_photo"]);
+    assert_eq!(
+        names,
+        [
+            "001_initial",
+            "002_web_app",
+            "003_app_photo",
+            "004_app_message_trace"
+        ]
+    );
 }
 
 #[tokio::test]
@@ -621,7 +629,7 @@ async fn unknown_schema_record_is_rejected_without_modifying_pending_delivery() 
             .get_value(0)
             .unwrap()
             .as_integer(),
-        Some(&4)
+        Some(&5)
     );
 }
 
@@ -2196,6 +2204,7 @@ async fn an_app_reply_is_stored_with_to_chief_and_projected_as_a_user_row() {
             text: "hi".into(),
             state: None,
             photo: None,
+            trace: None,
         }]
     );
 
@@ -2273,6 +2282,7 @@ async fn a_chief_message_is_added_once_and_a_reply_state_is_shown() {
             text: "m".into(),
             state: None,
             photo: None,
+            trace: None,
         }]
     );
 
@@ -2429,7 +2439,7 @@ async fn an_existing_store_gains_002_and_keeps_its_data() {
     // Take the store back to what the base build left: no 002 record and no new tables.
     let conn = store.state.connect().unwrap();
     conn.execute_batch(
-        "DELETE FROM _migrations WHERE name IN ('002_web_app', '003_app_photo');
+        "DELETE FROM _migrations WHERE name IN ('002_web_app', '003_app_photo', '004_app_message_trace');
          DROP TABLE app_messages;
          DROP TABLE app_push_subscriptions;
          DROP TABLE app_photo_uploads;",
@@ -2546,6 +2556,42 @@ async fn migration_003_adds_the_photo_column_and_the_upload_table_keeping_the_ro
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].text, "m");
     assert_eq!(rows[0].photo, None, "a row from before has no photo");
+}
+
+#[tokio::test]
+async fn migration_004_adds_the_trace_column_keeping_the_rows_with_none() {
+    let directory = TestDirectory::new();
+    let store = HaroldStore::open(directory.path()).await.unwrap();
+    store.add_chief_app_message("e1", 10, "m").await.unwrap();
+    // Take the store back to what the build before 004 left.
+    let conn = store.state.connect().unwrap();
+    conn.execute_batch(
+        "DELETE FROM _migrations WHERE name = '004_app_message_trace';
+         ALTER TABLE app_messages DROP COLUMN trace;",
+    )
+    .await
+    .unwrap();
+    drop(conn);
+    drop(store);
+
+    let reopened = HaroldStore::open(directory.path()).await.unwrap();
+    let rows = reopened.app_messages_since(0).await.unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].trace, None, "a row from before has no trace");
+    reopened
+        .add_chief_app_message_traced(
+            "e2",
+            20,
+            "n",
+            Some("00-0af7651916cd43dd8448eb211c80319c-00f067aa0ba902b7-01"),
+        )
+        .await
+        .unwrap();
+    let rows = reopened.app_messages_since(0).await.unwrap();
+    assert_eq!(
+        rows[1].trace.as_deref(),
+        Some("00-0af7651916cd43dd8448eb211c80319c-00f067aa0ba902b7-01")
+    );
 }
 
 #[tokio::test]

@@ -5,11 +5,13 @@ use std::sync::Arc;
 
 use time::OffsetDateTime;
 use tracing::{info, warn};
+use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 
 use super::OpenPages;
 use super::push::{PushOutcome, Pusher, alert_body};
 use crate::outbound::{AppDelivery, AppRoute, NotPushedReason};
 use crate::store::{AppPushUnsubscribed, AppReplyState, HaroldStore, append_app_push_unsubscribed};
+use crate::telemetry;
 
 pub(crate) struct WebAppRoute {
     store: Arc<HaroldStore>,
@@ -48,9 +50,17 @@ impl AppRoute for WebAppRoute {
     /// Blocking: call from `spawn_blocking`. The pushes are blocking requests and run
     /// outside `block_on`.
     fn deliver(&self, event_id: &str, text: &str) -> Result<AppDelivery, String> {
+        // The row records the span it is stored in, which is the turn end's delivery or the
+        // away message, so the page can join the trace when it draws the row.
+        let trace = telemetry::traceparent_of(&tracing::Span::current().context());
         // The error names the store's failure only, never the text.
         self.runtime
-            .block_on(self.store.add_chief_app_message(event_id, now_ms(), text))
+            .block_on(self.store.add_chief_app_message_traced(
+                event_id,
+                now_ms(),
+                text,
+                trace.as_deref(),
+            ))
             .map_err(|error| format!("app thread write failed: {error}"))?;
 
         // A page on screen shows the message; every subscription is skipped, as Safari and the

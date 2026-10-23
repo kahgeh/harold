@@ -357,6 +357,13 @@ pub(crate) fn idle_grpc() -> GrpcSettings {
     }
 }
 
+/// The remote parent the request's `traceparent` header names: the phone's own span. None
+/// when the header is missing or malformed, and the request then starts a new trace.
+pub(crate) fn phone_trace(headers: &axum::http::HeaderMap) -> Option<opentelemetry::Context> {
+    let value = headers.get("traceparent")?.to_str().ok()?;
+    crate::telemetry::context_from_traceparent(value)
+}
+
 /// The app's routes, every one of them, the 404 fallback included, behind
 /// `login::require_login` and then `origin::require_same_origin`, and every response
 /// carrying the content security policy.

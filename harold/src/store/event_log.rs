@@ -103,13 +103,6 @@ pub struct EventEnvelope {
     pub version: EventVersion,
     pub created_at: OffsetDateTime,
     pub trace_id: Option<String>,
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "part of the stored envelope; only tests read it yet"
-        )
-    )]
     pub span_id: Option<String>,
     #[expect(
         dead_code,

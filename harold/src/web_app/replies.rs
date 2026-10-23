@@ -8,11 +8,12 @@ use std::path::Path as FsPath;
 
 use axum::body::Bytes;
 use axum::extract::{Path, State};
-use axum::http::{HeaderValue, StatusCode, header};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::sse::{Event, Sse};
 use axum::response::{IntoResponse, Response};
 use datastar::prelude::PatchSignals;
 use serde::Deserialize;
+use time::OffsetDateTime;
 use tokio::io::AsyncWriteExt;
 use tracing::{info, warn};
 use uuid::Uuid;
@@ -22,6 +23,7 @@ use super::route::now_ms;
 use crate::store::{
     AppPushSubscribed, HaroldStore, append_app_push_subscribed, append_app_reply_with_photo,
 };
+use crate::telemetry;
 
 /// The largest photo taken, in bytes: the limit Claude has for one image.
 pub(crate) const PHOTO_MAX_BYTES: usize = 5 * 1024 * 1024;
@@ -86,7 +88,11 @@ struct SubscriptionKeys {
 /// A blank reply with no photo, one over `REPLY_MAX_CHARS`, a `photo` that names no unused
 /// upload, or a body that is not the signals gives `400`; a store that cannot take it gives
 /// `503`. Both have empty bodies.
-pub(crate) async fn post_reply(State(state): State<AppState>, body: Bytes) -> Response {
+pub(crate) async fn post_reply(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
     if body.len() > REPLY_BODY_MAX_BYTES {
         return StatusCode::BAD_REQUEST.into_response();
     }
@@ -111,10 +117,20 @@ pub(crate) async fn post_reply(State(state): State<AppState>, body: Bytes) -> Re
         }
     }
     let file = photo.as_ref().map(|(_, file)| file.as_str());
-    if append_app_reply_with_photo(&state.store, text, file)
-        .await
-        .is_err()
-    {
+    // The phone's fetch span names itself in `traceparent`; the reply's trace joins it.
+    let parent = super::phone_trace(&headers);
+    let stored = telemetry::store_phone_reply_in(
+        telemetry::WEB_APP_CHANNEL,
+        OffsetDateTime::now_utc(),
+        parent.as_ref(),
+        async {
+            append_app_reply_with_photo(&state.store, text, file)
+                .await
+                .is_ok()
+        },
+    )
+    .await;
+    if !stored {
         if let Some((id, _)) = &photo {
             // Not stored, so the photo can go with the next try.
             let _ = state.store.release_app_photo_upload(id).await;

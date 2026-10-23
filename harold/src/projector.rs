@@ -12,7 +12,7 @@ use crate::agent::snapshot::AgentSnapshotHub;
 use crate::alerts::AlertQueue;
 use crate::inbound::ownership::agent_message_text;
 use crate::inbound::{
-    AgentAddress, ChiefRouting, RouteReport, route_inbound_message, route_to_chief,
+    AgentAddress, ChiefRouting, RouteReport, route_inbound_message, route_to_chief_in,
     type_into_pane_quietly,
 };
 use crate::outbound::left_out::{
@@ -319,9 +319,8 @@ impl ProductionDispatcher {
                 .is_ok_and(|reply| reply.to_chief);
             if for_chief {
                 self.set_reply_state(&delivery.event_id, AppReplyState::NotSentPaused);
-            } else {
-                finish_paused_request(origin);
             }
+            finish_paused_request(origin);
             return Ok(DeliveryOutcome::Skipped);
         }
         let reply =
@@ -336,13 +335,27 @@ impl ProductionDispatcher {
         }
         // The reply's text is never logged: an error names the listing or tmux only.
         let photo = self.photo_path(&reply);
-        let routing = route_to_chief(
-            &reply.text,
-            photo.as_deref(),
-            &self.chief_pane(),
-            self.chief_typer.as_ref(),
-        )
-        .map_err(DispatchError::Retryable)?;
+        let request = phone_request(&delivery.event_id, origin);
+        let routing_span = info_span!(target: TRACE_TARGET, "harold.route");
+        // Fails only when no export layer is installed, and then there is no trace to join.
+        let _ = routing_span.set_parent(request.cx.clone());
+        let routing = routing_span
+            .in_scope(|| {
+                route_to_chief_in(
+                    &reply.text,
+                    photo.as_deref(),
+                    &self.chief_pane(),
+                    self.chief_typer.as_ref(),
+                    Some(request.cx.clone()),
+                )
+            })
+            .map_err(DispatchError::Retryable)?;
+        drop(routing_span);
+        telemetry::finish_phone_request(
+            &request,
+            &chief_routing(&routing),
+            OffsetDateTime::now_utc(),
+        );
         let (state, outcome) = match routing {
             ChiefRouting::Typed { busy: false, .. } => {
                 (AppReplyState::Typed, DeliveryOutcome::Delivered)
@@ -563,6 +576,21 @@ fn route_message(
     Ok(report.outcome)
 }
 
+/// What routing a web app reply to the chief did, as a phone request reports it.
+fn chief_routing(routing: &ChiefRouting) -> Routing {
+    match routing {
+        ChiefRouting::Typed {
+            pane_id, typed_at, ..
+        } => Routing::Typed {
+            pane_id: pane_id.clone(),
+            resolved_by: ResolvedBy::None,
+            tagged: false,
+            typed_at: *typed_at,
+        },
+        ChiefRouting::NoChief => Routing::NoPane,
+    }
+}
+
 /// The key a request the event handler opened is kept under, so a retry finds it.
 fn event_key(event_id: &str) -> String {
     format!("event:{event_id}")
@@ -640,7 +668,12 @@ fn dispatch_away_message(
         held.log(left_out::UpdateKind::AgentMessage, &message.pane_id);
         return Ok(DeliveryOutcome::Skipped);
     }
-    send(&message).map_err(DispatchError::Retryable)?;
+    // The message joins the trace of the prompt last typed into its pane, so the row the
+    // app route stores for it, and the page drawing it, can be followed from the tap.
+    let sending = telemetry::away_message_span(&message.pane_id);
+    sending
+        .in_scope(|| send(&message))
+        .map_err(DispatchError::Retryable)?;
     record_source(AgentAddress::TmuxPane {
         pane_id: message.pane_id,
         label: message.pane_label,

@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 use opentelemetry::global::{self, BoxedTracer};
 use opentelemetry::logs::{LogRecord as _, Logger as _, LoggerProvider as _};
 use opentelemetry::metrics::{Counter, Histogram, Meter};
+use opentelemetry::propagation::{Extractor, TextMapPropagator as _};
 use opentelemetry::trace::{
     SpanBuilder, Status, TraceContextExt, Tracer as _, TracerProvider as _,
 };
@@ -29,6 +30,7 @@ use opentelemetry_sdk::logs::{
 use opentelemetry_sdk::metrics::data::ResourceMetrics;
 use opentelemetry_sdk::metrics::exporter::PushMetricExporter;
 use opentelemetry_sdk::metrics::{PeriodicReader, SdkMeterProvider, Temporality};
+use opentelemetry_sdk::propagation::TraceContextPropagator;
 use opentelemetry_sdk::trace::{
     BatchSpanProcessor, SdkTracerProvider, SimpleSpanProcessor, SpanData, SpanEvents, SpanExporter,
     SpanLinks,
@@ -677,17 +679,69 @@ fn expired(at: OffsetDateTime, now: OffsetDateTime) -> bool {
 
 /// Opens `harold.phone_request` at the reply's own time, as the root of a new trace.
 pub(crate) fn open_phone_request(channel: &'static str, reply_at: OffsetDateTime) -> OpenReply {
+    open_phone_request_in(channel, reply_at, None)
+}
+
+/// Opens `harold.phone_request` at the reply's own time. With a `parent`, such as the
+/// phone's span that `traceparent` names, it joins that trace; without one it is the root
+/// of a new trace.
+pub(crate) fn open_phone_request_in(
+    channel: &'static str,
+    reply_at: OffsetDateTime,
+    parent: Option<&Context>,
+) -> OpenReply {
+    let root = Context::new();
     let span = tracer().build_with_context(
         SpanBuilder::from_name("harold.phone_request")
             .with_start_time(reply_at)
             .with_attributes([KeyValue::new("channel", channel)]),
-        &Context::new(),
+        parent.unwrap_or(&root),
     );
     OpenReply {
         cx: Context::new().with_span(span),
         channel,
         reply_at,
     }
+}
+
+/// The channel of a reply typed in the web app. Its requests are spans only: the
+/// phone-request counters keep a fixed channel list, and the right-agent judging is for
+/// replies whose pane Harold had to find.
+pub(crate) const WEB_APP_CHANNEL: &str = "web_app";
+
+/// Reads one `traceparent` value as the propagator's extractor.
+struct TraceparentValue<'a>(&'a str);
+
+impl Extractor for TraceparentValue<'_> {
+    fn get(&self, key: &str) -> Option<&str> {
+        key.eq_ignore_ascii_case("traceparent").then_some(self.0)
+    }
+
+    fn keys(&self) -> Vec<&str> {
+        vec!["traceparent"]
+    }
+}
+
+/// The remote parent a W3C `traceparent` value names, or none when it is missing or
+/// malformed.
+pub(crate) fn context_from_traceparent(value: &str) -> Option<Context> {
+    let cx = TraceContextPropagator::new()
+        .extract_with_context(&Context::new(), &TraceparentValue(value));
+    cx.span().span_context().is_valid().then_some(cx)
+}
+
+/// The `traceparent` of the span `cx` holds, when it has a valid one.
+pub(crate) fn traceparent_of(cx: &Context) -> Option<String> {
+    let span = cx.span();
+    let span_context = span.span_context();
+    span_context.is_valid().then(|| {
+        format!(
+            "00-{}-{}-{:02x}",
+            span_context.trace_id(),
+            span_context.span_id(),
+            span_context.trace_flags().to_u8()
+        )
+    })
 }
 
 /// Opens the request for a reply sent at `reply_at` and runs `store` inside
@@ -699,7 +753,17 @@ pub(crate) async fn store_phone_reply(
     reply_at: OffsetDateTime,
     store: impl Future<Output = bool>,
 ) -> bool {
-    let reply = open_phone_request(channel, reply_at);
+    store_phone_reply_in(channel, reply_at, None, store).await
+}
+
+/// `store_phone_reply` for a request that joins the trace of `parent`.
+pub(crate) async fn store_phone_reply_in(
+    channel: &'static str,
+    reply_at: OffsetDateTime,
+    parent: Option<&Context>,
+    store: impl Future<Output = bool>,
+) -> bool {
+    let reply = open_phone_request_in(channel, reply_at, parent);
     let storing = tracing::info_span!(target: TRACE_TARGET, "harold.reply_stored");
     // Fails only when no export layer is installed, and then there is no trace to join.
     let _ = storing.set_parent(reply.cx.clone());
@@ -758,8 +822,28 @@ pub(crate) fn finish_phone_request(
     handled_at: OffsetDateTime,
 ) {
     let typed_at = ended_at(routing, handled_at);
+    if reply.channel == WEB_APP_CHANNEL {
+        return end_uncounted(reply, routing, typed_at);
+    }
     let verdict = locked(&PHONE_BOOK).judge(reply.channel, reply.reply_at, typed_at, routing);
     record_finished(reply, routing, typed_at, verdict);
+}
+
+/// Ends a web app reply's request without counting or judging it: its outcome and pane
+/// are on the span. The prompt typed into the pane already holds the request's context.
+fn end_uncounted(reply: &OpenReply, routing: &Routing, typed_at: OffsetDateTime) {
+    let span = reply.cx.span();
+    match routing {
+        Routing::Typed { pane_id, .. } => {
+            span.set_attribute(KeyValue::new("outcome", "typed"));
+            span.set_attribute(KeyValue::new("pane_id", pane_id.clone()));
+        }
+        Routing::NoPane => span.set_attribute(KeyValue::new("outcome", "unavailable")),
+        Routing::Paused => span.set_attribute(KeyValue::new("outcome", "paused")),
+        Routing::NotOwned { .. } => span.set_attribute(KeyValue::new("outcome", "not_owned")),
+    }
+    span.end_with_timestamp(typed_at.into());
+    forget_open_reply(reply);
 }
 
 /// When a request routed as `routing` and handled at `handled_at` ended.
@@ -874,6 +958,61 @@ pub(crate) fn prompt_typed(
             cx,
         },
     );
+}
+
+/// The context of the prompt Harold last typed into `pane_id`, read without taking it, when
+/// it was typed within `PROMPT_KEPT` of `now` and carries one.
+fn peek_prompt_context(pane_id: &str, now: OffsetDateTime) -> Option<Context> {
+    let prompts = locked(&PANE_PROMPTS);
+    let prompt = prompts.get(pane_id)?;
+    (!expired(prompt.typed_at, now))
+        .then(|| prompt.cx.clone())
+        .flatten()
+}
+
+/// `harold.away_message`: a message the chief sent mid-turn from `pane_id`. It continues
+/// the trace of the prompt last typed into the pane while that prompt is within
+/// `PROMPT_KEPT`, and is the root of a new trace after it. The prompt is left for the
+/// turn's own end.
+pub(crate) fn away_message_span(pane_id: &str) -> tracing::Span {
+    let span = tracing::info_span!(
+        target: TRACE_TARGET,
+        parent: None,
+        "harold.away_message",
+        pane_id = crate::pane_id_for_log(pane_id),
+    );
+    if let Some(prompt) = peek_prompt_context(pane_id, OffsetDateTime::now_utc()) {
+        // Fails only when no export layer is installed, and then there is no trace to join.
+        let _ = span.set_parent(prompt);
+    }
+    span
+}
+
+/// `harold.app_row_sent`: the stream sending a row to the page, a child of the span that
+/// stored the row.
+pub(crate) struct RowSent {
+    cx: Context,
+}
+
+/// Opens `harold.app_row_sent` under the span `stored` names, a W3C `traceparent`. None
+/// when it names no valid span.
+pub(crate) fn open_app_row_sent(stored: &str) -> Option<RowSent> {
+    let parent = context_from_traceparent(stored)?;
+    let span = tracer().build_with_context(SpanBuilder::from_name("harold.app_row_sent"), &parent);
+    Some(RowSent {
+        cx: Context::new().with_span(span),
+    })
+}
+
+impl RowSent {
+    /// The `traceparent` of the span, which the page's row carries.
+    pub(crate) fn traceparent(&self) -> Option<String> {
+        traceparent_of(&self.cx)
+    }
+
+    pub(crate) fn end(self) {
+        self.cx.span().end();
+    }
 }
 
 /// The prompt Harold last typed into `pane_id`, if it was typed within `PROMPT_KEPT` of

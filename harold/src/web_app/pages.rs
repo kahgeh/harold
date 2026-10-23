@@ -161,6 +161,8 @@ pub(crate) struct MessageView {
     pub words: Option<&'static str>,
     /// The photo your reply carries, shown above the words.
     pub photo: Option<AppPhoto>,
+    /// The W3C `traceparent` the page joins when it draws the row, as `data-trace`.
+    pub trace: Option<String>,
 }
 
 /// The mark before `me`: stored by Harold, or typed into the chief's pane.
@@ -247,6 +249,7 @@ impl From<AppMessage> for MessageView {
             mark,
             words,
             photo: message.photo,
+            trace: message.trace,
         }
     }
 }

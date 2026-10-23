@@ -34,7 +34,7 @@ const NAMESPACE: &str = "harold";
 const PARTITION_KEY: &str = "main";
 const STATE_DATABASE: &str = "harold-state.db";
 const LOCK_FILE: &str = "harold.lock";
-const MIGRATIONS: [(&str, &str); 3] = [
+const MIGRATIONS: [(&str, &str); 4] = [
     (
         "001_initial",
         include_str!("store/migrations/001_initial.sql"),
@@ -46,6 +46,10 @@ const MIGRATIONS: [(&str, &str); 3] = [
     (
         "003_app_photo",
         include_str!("store/migrations/003_app_photo.sql"),
+    ),
+    (
+        "004_app_message_trace",
+        include_str!("store/migrations/004_app_message_trace.sql"),
     ),
 ];
 
@@ -216,6 +220,9 @@ pub(crate) struct AppMessage {
     pub state: Option<AppReplyState>,
     /// The photo a reply carries; none for a chief message and a reply without one.
     pub photo: Option<AppPhoto>,
+    /// The W3C `traceparent` of the span that stored the row; none for a row stored without
+    /// a trace, such as one from before the column.
+    pub trace: Option<String>,
 }
 
 /// The photo on a row of the thread.
@@ -975,7 +982,7 @@ impl HaroldStore {
         let mut rows = conn
             .query(
                 r#"
-                SELECT m.event_id, m.at_ms, m.sender, m.text, m.state, m.photo, u.id
+                SELECT m.event_id, m.at_ms, m.sender, m.text, m.state, m.photo, u.id, m.trace
                 FROM app_messages m
                 LEFT JOIN app_photo_uploads u ON u.file = m.photo
                 WHERE m.at_ms >= ?1
@@ -1002,6 +1009,7 @@ impl HaroldStore {
                         .to_owned(),
                     kept,
                 }),
+                trace: optional_text(&row, 7)?,
             });
         }
         Ok(messages)
@@ -1015,13 +1023,26 @@ impl HaroldStore {
         at_ms: i64,
         text: &str,
     ) -> Result<()> {
+        self.add_chief_app_message_traced(event_id, at_ms, text, None)
+            .await
+    }
+
+    /// `add_chief_app_message` for a row stored by the span `trace` names, as a W3C
+    /// `traceparent`, so the page can join the trace when it draws the row.
+    pub(crate) async fn add_chief_app_message_traced(
+        &self,
+        event_id: &str,
+        at_ms: i64,
+        text: &str,
+        trace: Option<&str>,
+    ) -> Result<()> {
         self.app_thread_write(
             r#"
-            INSERT INTO app_messages (event_id, at_ms, sender, text)
-            VALUES (?1, ?2, ?3, ?4)
+            INSERT INTO app_messages (event_id, at_ms, sender, text, trace)
+            VALUES (?1, ?2, ?3, ?4, ?5)
             ON CONFLICT(event_id) DO NOTHING
             "#,
-            (event_id, at_ms, AppSender::Chief.text(), text),
+            (event_id, at_ms, AppSender::Chief.text(), text, trace),
         )
         .await
     }
@@ -1411,6 +1432,15 @@ async fn project_turn_completed(
     }
 }
 
+/// The W3C `traceparent` of the span that stored `event`, when it was stored inside one.
+fn traceparent_of(event: &EventEnvelope) -> Option<String> {
+    Some(format!(
+        "00-{}-{}-01",
+        event.trace_id.as_deref()?,
+        event.span_id.as_deref()?
+    ))
+}
+
 /// Adds the user's row to the web app's thread for a reply typed there for the chief.
 /// Whether a row was added. A payload it cannot read adds none; its delivery is staged anyway.
 async fn project_app_reply(conn: &turso::Connection, event: &EventEnvelope) -> Result<bool> {
@@ -1428,8 +1458,8 @@ async fn project_app_reply(conn: &turso::Connection, event: &EventEnvelope) -> R
     let added = conn
         .execute(
             r#"
-            INSERT INTO app_messages (event_id, at_ms, sender, text, photo)
-            VALUES (?1, ?2, ?3, ?4, ?5)
+            INSERT INTO app_messages (event_id, at_ms, sender, text, photo, trace)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6)
             ON CONFLICT(event_id) DO NOTHING
             "#,
             (
@@ -1438,6 +1468,7 @@ async fn project_app_reply(conn: &turso::Connection, event: &EventEnvelope) -> R
                 AppSender::User.text(),
                 reply.text,
                 reply.photo,
+                traceparent_of(event),
             ),
         )
         .await?;
