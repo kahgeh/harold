@@ -179,6 +179,15 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 | tool | A module Harold hosts, with its own storage and gRPC service (ADR 0001) | — |
 | question tool | The tool that holds the chief's todos (questions and instructions) and the user's answers | "question queue" as its name |
 | backlog tool | The tool that holds each product's backlog and the chief's queue | — |
+| knowledge tool | The tool that keeps the knowledge index and answers searches, related notes and suggested links | "search service" |
+| vault | The organisation's knowledge folder of Markdown notes, which Harold reads and never writes | "notes folder", "wiki" |
+| vault note | One Markdown file in the vault | "note" alone, which is a backlog note |
+| knowledge index | Harold's index of the vault by meaning: its passages and embeddings in tursodb, kept durable by buckwal | "search index" alone, "vector DB", "RAG" |
+| embedding worker | The process Harold starts to run the embedding model, as the voice worker runs Whisper | "embed worker", "model server" |
+| passage | A vault note, or a part of a long one, embedded as one unit | "chunk" |
+| embedding | The numbers the model gives a passage or a query, close together for similar meaning | "vector" alone, "fingerprint" |
+| related notes | The vault notes closest in meaning to a vault note | "similar", "neighbours" |
+| suggested link | A related note scoring 0.60 or more that the vault note does not link to yet | "auto-link" |
 | backlog | A product's top 5 items, ranked, and its backlog notes | — |
 | item | One entry in a backlog | — |
 | backlog note | A note kept with a backlog: a rule, history, held or left out | "note" alone |
@@ -217,7 +226,7 @@ Each of these words has one sense in Harold. Anything else is named another way:
 | --- | --- | --- |
 | alert | A HyperDX alert typed to the chief | push (the phone) |
 | summary | Never alone | work summary, activity summary, summary strip |
-| note | The dash's revise or reject text | backlog note |
+| note | The dash's revise or reject text. The web app's "Notes" page and header link mean vault notes, never backlog notes | backlog note, vault note |
 | dash | tmx-agent-dash | HyperDX dashboard |
 | monitor | Never alone | agent monitor, HyperDX alert |
 | session | A tmux session, or a pod session | agent, for the agent itself |

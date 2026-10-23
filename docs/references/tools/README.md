@@ -1,6 +1,6 @@
 # Tools
 
-A tool is a small service inside the Harold daemon that does one job for the agents and keeps its own storage. There are three: the [question tool](questions.md), the [backlog and queue](backlog.md) and the [watch tool](watch.md). This page is for a developer adding another.
+A tool is a small service inside the Harold daemon that does one job for the agents and keeps its own storage. There are four: the [question tool](questions.md), the [backlog and queue](backlog.md), the [watch tool](watch.md) and the [knowledge tool](knowledge.md). This page is for a developer adding another.
 
 ## The contract
 
@@ -50,7 +50,7 @@ tool failed to start    tool=questions reason=store_open_failed
 
 `reason` is a fixed word, never error text or a path. `ToolError` carries only a `&'static str` for this reason. Callers of the missing service get `Unimplemented`, and the CLI prints `the Harold daemon does not serve questions`, or `the Harold daemon does not serve the backlog`.
 
-There is no setting that turns a tool off. To stop one, remove its `start_tool` line from the host.
+The knowledge tool is the one tool with an off switch: it starts only when `[knowledge] vault` is set, and its host call takes a `Launch` (its settings and this Mac's name) beside the context, because it opens a database that needs a bucket. Every other tool has no setting that turns it off; to stop one, remove its `start_tool` line from the host.
 
 ## Adding a tool
 
@@ -67,3 +67,4 @@ There is no setting that turns a tool off. To stop one, remove its `start_tool` 
 - [Question tool](questions.md): the chief's questions for the user, answered from the dash and typed back into the chief's pane.
 - [Backlog and queue](backlog.md): each product's ranked backlog, kept by its product manager, and the chief's own queue.
 - [Watch tool](watch.md): an agent asks Harold to run one of its skills with a model on a schedule, and Harold types the reports into the chief's pane or the agent's.
+- [Knowledge tool](knowledge.md): Harold's index of the organisation's vault of Markdown notes by meaning, for the chief, the web app's Notes page and the dash.

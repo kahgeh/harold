@@ -289,12 +289,14 @@ resolved_by, kind, started_by, turn.start, state, count, session_by, alert, pod.
 spec.state_at, spec.words, spec.revisions, phase, change, event_type,
 event_version, result, watch, run, cost_usd, agent, seconds, event_id,
 exit_code, signal, subtype, is_error, num_turns, cause, model, bytes, total_bytes, ms,
-load_ms, load_waited_ms
+load_ms, load_waited_ms, notes, removed, pending, last_ok_age_s, embed_ms, search_ms, results,
+embed_ms_per_passage, passages, rss_mb, buckwal.outcome, buckwal.retries, buckwal.bytes,
+buckwal.generation, s3.status
 ```
 
 `model` is a Hugging Face repository name from the settings, never a path or a token. Every other field is dropped before export, including `text`, `msg`, `raw_output`, `tag` and `error`. Span events and links are dropped too, and an error status loses its description.
 
-**Which log records are exported.** Only records whose target is `harold`, starts with `harold::`, is `events` or starts with `events::`. Other crates' lines, such as Turso's and reqwest's, interpolate errors and paths into their text, so they stay in `harold.log` only. The collector-health lines also stay in `harold.log` only.
+**Which log records are exported.** Only records whose target is `harold`, starts with `harold::`, is `events` or starts with `events::`, or is `buckwal` or starts with `buckwal::`. Other crates' lines, such as Turso's and reqwest's, interpolate errors and paths into their text, so they stay in `harold.log` only. The collector-health lines also stay in `harold.log` only.
 
 **The chief's pane.** `chief pane changed` (`info`) carries `state` (`found` or `none`), `count` (the agents in the chief's folder), `pane_id` and `session_by` (`setting` when `chief_session` picked the session, `longest` when the longest-running agent did). More than one move of the chief to another pane with `count > 1` in 7 days means an extra session or pane in the chief's folder to close. With `chief_session` set, a `session_by = longest` row means no agent ran in the named session; check that `chief_session` names the session `bin/pod` starts and that the chief runs in it. With it unset, a chief that restarts while a second session holds an older agent in the folder is replaced by that session's first pane, with `count = 2`, until the second session closes.
 
@@ -347,6 +349,26 @@ WHERE ServiceName = 'harold-web-app' AND Timestamp > now() - INTERVAL 1 HOUR GRO
 ```
 
 The clocks of the phone and the Mac can differ by a few milliseconds, so a phone span may start just before its Harold parent in HyperDX.
+
+## The knowledge index
+
+The [knowledge tool](../tools/knowledge.md#logs-and-spans) logs and traces these. No line or span holds a query, a vault note's text or a passage.
+
+**The owner's questions and where they are answered**
+
+1. *Is the index up to date with the vault?* `knowledge indexed` (info) after each pass and each watched change: `notes` (vault notes embedded), `count` (passages embedded), `removed`, `embed_ms`, `pending` (changed files not yet indexed, 0 after a good pass) and `last_ok_age_s`.
+   - **Issue detection:** the hourly timer logs `knowledge index stale` (warn) with `last_ok_age_s` when no pass has succeeded for more than 2 hours, two missed hourly passes. The release watch reports any warn. The card "Knowledge index: hours since the last good pass" shows the time since the last `knowledge indexed` line, info only, with the same 2-hour line.
+   - `knowledge index failed` (warn) carries `reason`: `vault_unreadable`, `worker_failed`, `store_failed` or `bucket_unreachable`.
+   - **Error diagnosis:** for `bucket_unreachable`, the `buckwal.commit` span with `buckwal.outcome = "error"` and its `buckwal.upload` child's `s3.status` and `buckwal.retries` in the same trace say whether the bucket refused (a 4xx) or did not answer. For `worker_failed`, `knowledge worker exited` gives the `reason`: `failed_to_load`, `exited` or `timed_out`.
+2. *Does search find what I mean, and how fast?* The `harold.knowledge.search` span carries `source` (`chief`, `app` or `dash`), `results`, `embed_ms` and `search_ms`.
+   - **Optimisation:** a warm search should take under 300 ms (`embed_ms` plus `search_ms`). The card "Notes searches by source" shows the median and the count, info only.
+   - **Issue detection:** searches with 0 results are counted on the same card. More than 5 in a day means the index or the prompts are off.
+3. *What does it cost the Mac?* `knowledge worker stopped` (info), when the worker stops: `load_ms`, `embed_ms_per_passage` (the mean over its life), `passages` and `rss_mb` (its resident memory just before it stopped, read with `ps`).
+   - **Optimisation:** resident memory over 1.5 GB, or a mean over 200 ms a passage, is the cue to rethink the runtime or the model. The card "Knowledge worker, last 7 days" shows the highest `rss_mb`, the mean `embed_ms_per_passage` and the passages.
+
+**buckwal's telemetry.** Harold never calls `buckwal::telemetry::init`, which would install a second global subscriber and fail beside Harold's. buckwal's spans and log records (target `buckwal`) go through Harold's own subscriber: they are written to `harold.log` as other crates' lines are, and `span_export_filter` and `is_exported_log_target` in `harold/src/telemetry.rs` also export them under `service.name = harold`. `ALLOWED_FIELDS` adds the buckwal attributes the diagnosis uses. **Detection:** `buckwal.commit` spans with `buckwal.outcome = "error"` counted per hour in ClickHouse are on the card "buckwal commits that failed, per hour". Above 0 in an hour on two hours running matches `knowledge index stale`.
+
+The dashboard group "Knowledge index" holds the four cards. They read `otel.otel_logs` and the span table directly, so they are tables and numbers without an earlier tile, and the product filter does not reach them.
 
 ## The dashboards
 

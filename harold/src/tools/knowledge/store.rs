@@ -198,8 +198,8 @@ fn config_for(dir: &Path, bucket: &BucketConfig) -> Config {
     );
     config.prefix = bucket.prefix.clone();
     config.encryption_key_file = Some(bucket.encryption_key_file.clone());
-    config.request_timeout = Duration::from_secs(10);
-    config.retry_deadline = Duration::from_secs(20);
+    config.request_timeout = Duration::from_secs(5);
+    config.retry_deadline = Duration::from_secs(6);
     config
 }
 

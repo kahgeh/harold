@@ -324,6 +324,9 @@ fn only_harold_and_events_log_records_are_exported() {
     tracing::error!(target: "events::store", pane_id = %pane, "events probe");
     tracing::error!(target: "events", pane_id = %pane, "events root probe");
     tracing::error!(pane_id = %pane, "module target probe");
+    tracing::error!(target: "buckwal", pane_id = %pane, "buckwal probe");
+    tracing::error!(target: "buckwal::uploader", pane_id = %pane, "buckwal uploader probe");
+    tracing::error!(target: "buckwalish", "{}", canary);
     // Records from other crates still reach harold.log.
     assert!(logs.text().contains(&canary), "{}", logs.text());
     let exported = test_support::exported_text();
@@ -333,12 +336,14 @@ fn only_harold_and_events_log_records_are_exported() {
         .filter(|l| format!("{:?}", l.record).contains(&pane))
         .map(|l| format!("{:?}", l.record.body().unwrap()))
         .collect();
-    assert_eq!(bodies.len(), 4, "{bodies:#?}");
+    assert_eq!(bodies.len(), 6, "{bodies:#?}");
     for probe in [
         "harold probe",
         "events probe",
         "events root probe",
         "module target probe",
+        "buckwal probe",
+        "buckwal uploader probe",
     ] {
         assert!(
             bodies.iter().any(|body| body.contains(probe)),
@@ -1637,6 +1642,14 @@ const ATTRIBUTES: &[&str] = &[
     "answer_ms",
     "answered_by",
     "cost_micros",
+    "source",
+    "results",
+    "embed_ms",
+    "search_ms",
+    "rss_mb",
+    "embed_ms_per_passage",
+    "passages",
+    "buckwal.outcome",
 ];
 
 /// The spec's span table. The trends panel "One turn, end to end" lists `harold.turn`.
@@ -1654,6 +1667,7 @@ const SPANS: &[&str] = &[
     "harold.call_turn",
     "harold.call_answer",
     "harold.call_transcribe",
+    "harold.knowledge.search",
 ];
 
 /// The spec's cards table: group, card, the metrics or spans its tile reads, and how it
@@ -2006,6 +2020,7 @@ fn the_cards_dashboard_shows_each_card_beside_its_earlier_number_and_nothing_els
             CALL_ANSWERER_SPEND_CARD.to_string(),
         ])
         .chain(WEB_APP_CARDS.map(str::to_string))
+        .chain(KNOWLEDGE_CARDS.map(str::to_string))
         .collect();
     assert_eq!(tile_names(&dashboard), names);
 
@@ -2025,6 +2040,7 @@ fn the_cards_dashboard_shows_each_card_beside_its_earlier_number_and_nothing_els
     assert_eq!(
         groups,
         [
+            "Knowledge index",
             "Notifications (leave the product filter empty)",
             "Phone requests",
             "Pods",
@@ -2134,6 +2150,13 @@ fn the_cards_dashboard_shows_each_card_beside_its_earlier_number_and_nothing_els
 const NOTIFICATIONS_CARD: &str = "Notifications by agent and channel";
 const CALL_TURN_CARD: &str = "Call turn, time to first sound and to the answer, last 7 days";
 /// The web app's cards, in the order the dashboard lists them.
+const KNOWLEDGE_CARDS: [&str; 4] = [
+    "Knowledge index: hours since the last good pass (info; the line is 2)",
+    "Notes searches by source: median ms, searches, searches with 0 results",
+    "Knowledge worker, last 7 days: highest rss_mb, mean ms a passage, passages",
+    "buckwal commits that failed, per hour",
+];
+
 const WEB_APP_CARDS: [&str; 5] = [
     "Web app errors per day",
     "Phone page load (p50, p95)",
@@ -2245,6 +2268,7 @@ fn the_product_filter_reaches_the_pod_and_spec_tiles_only() {
         ("turns", false),
         ("turn-end", false),
         ("web-app", false),
+        ("knowledge", false),
         // The card takes `$__filters`, so the product filter empties it: its container
         // title says to leave that filter empty.
         ("notifications", true),

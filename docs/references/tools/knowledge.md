@@ -1,0 +1,165 @@
+# Knowledge Tool
+
+The knowledge tool is Harold's index of the **vault** by meaning. The vault is the organisation's folder of Markdown notes, such as `personal-chief/vault/knowledge`. A **vault note** is one Markdown file in it. The tool reads every vault note, splits a long one into passages, turns each passage into an embedding with a small model on the Mac, and keeps them in a tursodb database that buckwal makes durable in a bucket. A search turns the words into an embedding and returns the vault notes whose passages are closest.
+
+It is a [tool](README.md): a module of the daemon with its own storage and gRPC service, `harold.tools.knowledge.v1.KnowledgeService` (`harold-api/proto/tools/knowledge.proto`). It trusts local callers (ADR 0002). The chief uses it through `harold tool knowledge`, the web app's Notes page ([away-app reference](../away-app/README.md#notes)) and the dash's `s` key ([dash README](../../../tmx-agent-dash/README.md)) call the same service.
+
+The vault stays the source. Harold only reads it, and the index can always be rebuilt from it.
+
+## The CLI
+
+```sh
+harold tool knowledge search "keeping the index safe if the Mac is lost" [--limit 10]
+harold tool knowledge recent [--limit 10]
+harold tool knowledge related a-knowledge-index-on-buckwal [--limit 10]
+harold tool knowledge links a-knowledge-index-on-buckwal
+harold tool knowledge show a-knowledge-index-on-buckwal
+harold tool knowledge status
+harold tool knowledge rebuild
+```
+
+| Command | What it prints |
+|---|---|
+| `search WORDS` | The closest vault notes, best first, at most `--limit` (1 to 10, default 10). One line each: score, name, kind and description |
+| `recent` | The vault notes changed most recently, newest first, in the same lines with `-` for the score |
+| `related NOTE` | The vault notes closest to the vault note's own passages, the note itself left out. A line ends its kind with `(linked)` when the vault note already links to it |
+| `links NOTE` | The suggested links: related vault notes scoring 0.60 or more that the vault note does not link to yet, at most 5 |
+| `show NOTE` | The vault note's name, title, kind, description and links, then its text as stored, without the front matter |
+| `status` | The vault notes and passages held, the last good pass, the changed files not yet indexed, the runtime and model, the worker (`idle`, `loading`, `ready` or `unavailable`) and the last failure |
+| `rebuild` | Clears the index and builds it again from the vault, then prints the counts |
+
+A vault note is named by its path under the vault without `.md`: `a-knowledge-index-on-buckwal`, `references/hyperdx`. The first search after the worker has stopped waits for the model to load. The CLI waits up to 180 seconds for a knowledge call.
+
+Refusals print one line: `unknown vault note NAME`, `search is resting: the model didn't load`, `the knowledge index is unavailable`, `the Harold daemon does not serve the knowledge tool` (`[knowledge]` is not set). At the service they are `NotFound` `unknown_vault_note`, `Unavailable` `search_resting: <reason>` or `store_failed: <reason>`, `InvalidArgument` `invalid <field>` and `Unimplemented`.
+
+## What is indexed
+
+- **Which files:** every `.md` file under `[knowledge] vault`, in every folder, except the names in `[knowledge] exclude` (paths relative to the vault, with `.md`) and any file or folder whose name starts with `.`. The setting ships empty. The vault's layout belongs to the organisation, so Harold hard-codes none of it.
+- **A vault note's name** is its path without `.md`. Its front matter, when present, gives the title (`name`), `description`, `kind` and `created`. Without front matter the title is the file name and the kind is `unknown`; the note is still indexed. Its `[[links]]` are kept, as written, once each (`[[a|label]]` and `[[a#heading]]` link to `a`), to tell a related note that is already linked from one that is not.
+- **Passages:** a vault note of at most 400 words is one passage. A longer one is split at its headings, then at paragraphs, into passages of at most 400 words; one paragraph longer than that is cut at a word. A heading line inside a code fence is not a heading.
+- **The prompts:** EmbeddingGemma sees a passage as `title: <title> | text: <passage>` and a search as `task: search result | query: <your words>`, the prompts it is trained with. They are recorded as `embeddinggemma` in `index_info`.
+
+## Keeping the index current
+
+- At start-up and every hour, a pass compares each file's SHA-256 with the index. It embeds new and changed vault notes and removes deleted ones. A rename removes the old name and indexes the new one, with no history kept. A pass with nothing to do does not start the embedding worker.
+- Between those passes a file watcher on the vault reacts to a saved vault note: after the vault has been quiet for 2 seconds, a pass runs. If the watcher cannot start, the hourly pass still runs.
+- A change of the model, its dimensions, its runtime or its prompts rebuilds the whole index.
+- `rebuild` clears the index and builds it again.
+- A search during a pass reads the last committed index: a vault note's rows are replaced in one commit.
+- The vault note's time in the index (`changed_at`) is the file's modification time, so `recent` follows the vault's edits, not the pass.
+
+## Searching
+
+- A search embeds the query and asks tursodb for the 40 closest passages (`ORDER BY vector_distance_cos(embedding, vector32(?)) LIMIT 40`). tursodb has no index for dense vectors, so this compares the query with every passage; that stays well under a second into the tens of thousands of passages.
+- It keeps the best passage per vault note, then adds the word bonus: +0.05 for each query word of 4 characters or more found in the note's title or description, and +0.02 for each found in the passage. It returns the top 10 by score with each note's title, kind, description, the passage cut to about 200 characters, and the score. The score is `1 - cosine distance` plus the bonus.
+- A query under 2 characters finds nothing.
+- **Related** and **suggested links** use the closest passages (400 are looked at) to any passage of the vault note.
+
+## The embedding worker
+
+The embedding worker is a Python program, `harold/src/embed_worker.py`, that Harold writes into `tools/knowledge/worker/` (mode 0600) and starts as `<command> <args> -I embed_worker.py --model <model> [--sha256 <hash>]`. It speaks one JSON line per request on stdin and stdout:
+
+```text
+ready:    {"ready": true, "load_ms": 240, "dimensions": 768, "runtime": "llama.cpp"}
+          {"ready": false, "cause": "model_missing" | "model_changed" | "import_failed" | "load_failed"}
+request:  {"id": 1, "texts": ["...", "..."]}
+answer:   {"id": 1, "embeddings": [[...], [...]]}   or   {"id": 1, "error": "failed"}
+```
+
+It starts on the first request that needs it, takes at most 16 texts a request, and stops after 10 minutes with no request. It runs the model with `llama-cpp-python` (llama.cpp, with Metal), keeps no cache on disk and never uses `LlamaDiskCache` (diskcache has an unfixed pickle advisory). It is not given a network: `HF_HUB_OFFLINE=1`, and its stderr is not read. No text, path or error message leaves it.
+
+### The runtime and the model
+
+| | |
+|---|---|
+| Runtime | [`llama-cpp-python`](https://pypi.org/project/llama-cpp-python/) 0.3.36, MIT (llama.cpp, MIT), built from source with Metal. Its other packages: numpy 2.5.4, typing-extensions 4.16.0, diskcache 5.6.3, jinja2 3.1.6, markupsafe 3.0.4. Audited, see [dependency audits](../dependency-audits.md) |
+| Model | EmbeddingGemma 300M, as the GGUF file `embeddinggemma-300M-Q8_0.gguf` (333 590 944 bytes), 768 dimensions |
+| Source | Hugging Face repository `ggml-org/embeddinggemma-300M-GGUF` (public, not gated, no login token), commit `0f741b5a6585bd53aeb15cd1372c56f2a0f65e12` |
+| SHA-256 | `b5ce9d77a3fc4b3b39ccb5643c36777911cc4eb46a66962eadfa3f5f60490d63` |
+| Licence | The Gemma Terms of Use, since it is a derivative of `google/embeddinggemma-300M` |
+
+Harold downloads nothing for this tool. Fetch the model once, into a folder you choose, and check it:
+
+```sh
+mkdir -p ~/.local/share/harold-knowledge && cd ~/.local/share/harold-knowledge
+curl -L -o embeddinggemma-300M-Q8_0.gguf \
+  https://huggingface.co/ggml-org/embeddinggemma-300M-GGUF/resolve/0f741b5a6585bd53aeb15cd1372c56f2a0f65e12/embeddinggemma-300M-Q8_0.gguf
+shasum -a 256 embeddinggemma-300M-Q8_0.gguf     # must print the SHA-256 above
+```
+
+Set `model_sha256` and Harold checks the file before every worker start; a file that differs is refused with `model_changed`.
+
+Install the runtime in a Python of its own, from the audited pins:
+
+```sh
+python3 -m venv ~/.local/share/harold-knowledge/venv
+cd ~/.local/share/harold-knowledge
+venv/bin/python -m pip install scikit-build-core==1.1.1 packaging==26.3 pathspec==1.1.1 cmake==4.4.4 ninja==1.13.2 \
+  numpy==2.5.4 typing-extensions==4.16.0 diskcache==5.6.3 jinja2==3.1.6 markupsafe==3.0.4
+SDKROOT=/Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk CMAKE_ARGS="-DGGML_METAL=on -DLLAVA_BUILD=OFF" \
+  PATH="$PWD/venv/bin:$PATH" venv/bin/python -m pip install llama-cpp-python==0.3.36 --no-binary llama-cpp-python --no-build-isolation
+```
+
+**The build needs an older SDK.** On a Mac whose newest Command Line Tools SDK does not link (`ld: tapi error: malformed file ... libSystem.B.tbd`), set `SDKROOT` to an older one in `/Library/Developer/CommandLineTools/SDKs/`, as above. `MacOSX26.5.sdk` worked on 2026-10-24; the newest, `MacOSX27.0.sdk`, did not.
+
+**Stage 0 results** (2026-10-24, this Mac): of the three routes the spec named, llama.cpp found all 10 of 10 test queries' vault notes in its top 3, model2vec (`potion-base-8M`, MIT) 8 of 10, and the third, `mlx-embeddings` 0.1.0 (GPL-3.0), was audited but not installed since llama.cpp passed first. llama.cpp took about 19 ms a passage at normal priority (170 to 234 ms at background priority on a busy Mac), 0.24 s to load warm and 1.3 GB resident.
+
+## Settings
+
+`[knowledge]` is off unless `vault` is set. Put it in `local.toml`:
+
+```toml
+[knowledge]
+vault = "/Users/you/Dev/p/personal-chief/vault/knowledge"
+exclude = ["MEMORY.md", "log.md"]            # ships as []; this organisation's index and change log
+command = "/Users/you/.local/share/harold-knowledge/venv/bin/python"
+args = []                                    # put before "-I embed_worker.py"
+model = "/Users/you/.local/share/harold-knowledge/embeddinggemma-300M-Q8_0.gguf"
+model_sha256 = "b5ce9d77a3fc4b3b39ccb5643c36777911cc4eb46a66962eadfa3f5f60490d63"   # optional
+
+[knowledge.bucket]
+endpoint = "http://127.0.0.1:9000"
+bucket = "harold-knowledge"
+# prefix = "harold-knowledge/<machine name>"  # the default; Harold turns characters buckwal does not allow into "-"
+credentials_file = "/Users/you/.config/harold/knowledge-bucket"        # access_key=… and secret_key=… lines
+encryption_key_file = "/Users/you/.config/harold/knowledge-key"        # 64 hex digits
+```
+
+- **Keys are never values in a settings file.** The two files hold the S3 keys and the database's encryption key. They must be mode 0600 (no access for group or others), and lie outside the vault and outside every git checkout. When either is readable by others, missing, inside the vault or inside a git checkout, the knowledge tool does not start and Harold logs `knowledge index failed` with `reason=store_failed`, `refused=<why>` and the file's path. Harold passes their contents to buckwal's `Config` and never through `BUCKWAL_*` environment variables.
+- **One prefix per Mac.** buckwal lets one writer hold a database at a time: a second writer on the same prefix takes it over and stops the first. So two Macs never share a prefix.
+- **Validation:** with `vault` set, `vault`, `model`, `credentials_file` and `encryption_key_file` are absolute paths, `command` and `[knowledge.bucket]` are set, `endpoint` starts with `http://` or `https://`, and `prefix` holds only `A-Z a-z 0-9 . _ - /` in non-empty parts. Harold refuses to start and names the key.
+- The bucket holds only ciphertext (buckwal encrypts the database).
+
+## Storage
+
+`<store folder>/tools/knowledge/index/` is the local copy of the database, opened through buckwal; `worker/` holds the worker script. Tables:
+
+| Table | Columns |
+|---|---|
+| `vault_notes` | `name` (primary key), `path`, `title`, `kind`, `description`, `created`, `links` (JSON), `hash`, `changed_at` (milliseconds), `body` (the text, for `show` and the web app) |
+| `passages` | `note`, `seq`, `text`, `embedding` (a `vector32`), primary key (`note`, `seq`) |
+| `index_info` | `runtime`, `model`, `dimensions`, `prompts`, `built_at` |
+
+Every commit is in the bucket before it returns. Delete the local `index/` folder and restart, and buckwal restores the database from the bucket. Delete the prefix's objects as well, and the index is built again from the vault. If the bucket cannot be reached, a pass fails with `bucket_unreachable` and tries again at the next one; searches still read the local copy.
+
+## Logs and spans
+
+| Signal | Fields | When |
+|---|---|---|
+| `knowledge indexed` (info) | `notes`, `count` (passages embedded), `removed`, `embed_ms`, `pending`, `last_ok_age_s` | Each pass and each watched change |
+| `knowledge index failed` (warn) | `reason`: `vault_unreadable`, `worker_failed`, `store_failed` or `bucket_unreachable` | A pass or the start failed |
+| `knowledge index stale` (warn) | `last_ok_age_s` | The hourly timer finds no good pass for over 2 hours |
+| `knowledge worker exited` (warn) | `reason`: `failed_to_load`, `exited` or `timed_out` | The worker could not load, died or did not answer |
+| `knowledge worker stopped` (info) | `load_ms`, `embed_ms_per_passage`, `passages`, `rss_mb` | The worker stops (idle or shutdown) |
+| `harold.knowledge.search` (span) | `source` (`chief`, `app` or `dash`), `results`, `embed_ms`, `search_ms` | Each search |
+
+No line or span holds a query, a vault note's text or a passage. buckwal's spans and log records (target `buckwal`) go through Harold's own subscriber and are exported under `service.name = harold`; Harold never calls `buckwal::telemetry::init`. The [telemetry reference](../telemetry/README.md#the-knowledge-index) has the cards.
+
+## Edge cases
+
+| Case | What happens |
+|---|---|
+| The vault folder is missing or unreadable | `knowledge index failed` with `vault_unreadable`; searches answer from the last index and `status` says so |
+| The worker cannot load | Searches answer `Unavailable`; the web app says "Search is resting: the model didn't load." |
+| A link to a vault note that does not exist | Shown as plain text, not a link |
+| `[knowledge]` is not set | No knowledge tool, no Notes link in the web app, no dash key |

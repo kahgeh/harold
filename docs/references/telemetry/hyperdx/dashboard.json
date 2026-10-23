@@ -38,6 +38,11 @@
       "id": "web-app",
       "title": "Web app (the phone's browser)",
       "collapsed": false
+    },
+    {
+      "id": "knowledge",
+      "title": "Knowledge index",
+      "collapsed": false
     }
   ],
   "filters": [
@@ -877,6 +882,70 @@
         "connectionId": "@CLICKHOUSE_CONNECTION_ID@",
         "sourceId": "@TRACES_SOURCE_ID@",
         "sqlTemplate": "SELECT toDate(Timestamp) AS day, count() AS spans FROM $__sourceTable WHERE ServiceName = 'harold-web-app' AND Timestamp >= now() - INTERVAL 7 DAY AND Timestamp < now() GROUP BY day ORDER BY day DESC"
+      }
+    },
+    {
+      "id": "knowledge-hours-since-good-pass",
+      "name": "Knowledge index: hours since the last good pass (info; the line is 2)",
+      "x": 0,
+      "y": 40,
+      "w": 6,
+      "h": 3,
+      "containerId": "knowledge",
+      "config": {
+        "configType": "sql",
+        "displayType": "number",
+        "connectionId": "@CLICKHOUSE_CONNECTION_ID@",
+        "sourceId": "@TRACES_SOURCE_ID@",
+        "sqlTemplate": "SELECT round((toUnixTimestamp(now()) - toUnixTimestamp(max(Timestamp))) / 3600, 1) FROM otel.otel_logs WHERE ServiceName = 'harold' AND Body = 'knowledge indexed' AND Timestamp >= now() - INTERVAL 7 DAY"
+      }
+    },
+    {
+      "id": "notes-searches-by-source",
+      "name": "Notes searches by source: median ms, searches, searches with 0 results",
+      "x": 6,
+      "y": 40,
+      "w": 18,
+      "h": 3,
+      "containerId": "knowledge",
+      "config": {
+        "configType": "sql",
+        "displayType": "table",
+        "connectionId": "@CLICKHOUSE_CONNECTION_ID@",
+        "sourceId": "@TRACES_SOURCE_ID@",
+        "sqlTemplate": "SELECT SpanAttributes['source'] AS source, quantile(0.5)(toFloat64OrZero(SpanAttributes['embed_ms']) + toFloat64OrZero(SpanAttributes['search_ms'])) AS median_ms, count() AS searches, countIf(SpanAttributes['results'] = '0') AS no_results FROM $__sourceTable WHERE ServiceName = 'harold' AND SpanName = 'harold.knowledge.search' AND Timestamp >= now() - INTERVAL 24 HOUR AND Timestamp < now() GROUP BY source ORDER BY searches DESC"
+      }
+    },
+    {
+      "id": "knowledge-worker-last-week",
+      "name": "Knowledge worker, last 7 days: highest rss_mb, mean ms a passage, passages",
+      "x": 0,
+      "y": 43,
+      "w": 12,
+      "h": 3,
+      "containerId": "knowledge",
+      "config": {
+        "configType": "sql",
+        "displayType": "table",
+        "connectionId": "@CLICKHOUSE_CONNECTION_ID@",
+        "sourceId": "@TRACES_SOURCE_ID@",
+        "sqlTemplate": "SELECT max(toFloat64OrZero(LogAttributes['rss_mb'])) AS highest_rss_mb, round(avg(toFloat64OrZero(LogAttributes['embed_ms_per_passage'])), 1) AS mean_ms_per_passage, sum(toFloat64OrZero(LogAttributes['passages'])) AS passages FROM otel.otel_logs WHERE ServiceName = 'harold' AND Body = 'knowledge worker stopped' AND Timestamp >= now() - INTERVAL 7 DAY"
+      }
+    },
+    {
+      "id": "buckwal-commit-errors-per-hour",
+      "name": "buckwal commits that failed, per hour",
+      "x": 12,
+      "y": 43,
+      "w": 12,
+      "h": 3,
+      "containerId": "knowledge",
+      "config": {
+        "configType": "sql",
+        "displayType": "table",
+        "connectionId": "@CLICKHOUSE_CONNECTION_ID@",
+        "sourceId": "@TRACES_SOURCE_ID@",
+        "sqlTemplate": "SELECT toStartOfHour(Timestamp) AS hour, count() AS failed_commits FROM $__sourceTable WHERE ServiceName = 'harold' AND SpanName = 'buckwal.commit' AND SpanAttributes['buckwal.outcome'] = 'error' AND Timestamp >= now() - INTERVAL 24 HOUR AND Timestamp < now() GROUP BY hour ORDER BY hour DESC"
       }
     }
   ]

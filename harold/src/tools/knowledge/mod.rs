@@ -17,6 +17,8 @@ use crate::tools::{ToolError, ToolHandle};
 mod embed;
 mod guard;
 mod index;
+#[cfg(test)]
+mod live_tests;
 mod search;
 mod service;
 mod store;
@@ -143,3 +145,7 @@ pub(crate) async fn start(
         task,
     })
 }
+
+#[cfg(test)]
+#[path = "start_tests.rs"]
+mod start_tests;

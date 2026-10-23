@@ -373,3 +373,7 @@ impl Embedder for WorkerEmbedder {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "embed_tests.rs"]
+mod tests;

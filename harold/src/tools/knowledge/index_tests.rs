@@ -249,3 +249,39 @@ async fn related_marks_linked_notes_and_suggestions_leave_them_out() {
         SearchError::NotFound
     );
 }
+
+#[tokio::test]
+async fn a_search_exports_its_span_with_counts_and_no_query_or_note_text() {
+    use crate::telemetry::test_support as exported;
+    exported::install();
+    let f = fixture(&[]);
+    f.vault.write(
+        "rivers.md",
+        &note(
+            "rivers",
+            "idea",
+            "fish swim in the zebrafoxtrot river water",
+        ),
+    );
+    f.index.pass(false).await.unwrap();
+    let marker = format!("qq{}", uuid::Uuid::new_v4().simple());
+    let query = format!("fish {marker}");
+    let hits = Knowledge::new(f.index.clone())
+        .search(&query, 10, "dash")
+        .await
+        .unwrap();
+    assert_eq!(hits.len(), 1);
+    let span = exported::spans()
+        .into_iter()
+        .find(|s| {
+            s.name == "harold.knowledge.search"
+                && exported::span_attr(s, "source").as_deref() == Some("dash")
+                && exported::span_attr(s, "results").as_deref() == Some("1")
+        })
+        .expect("the search span was exported");
+    assert!(exported::span_attr(&span, "embed_ms").is_some());
+    assert!(exported::span_attr(&span, "search_ms").is_some());
+    let everything = exported::exported_text();
+    assert!(!everything.contains(&marker));
+    assert!(!everything.contains("zebrafoxtrot"));
+}
