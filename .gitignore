@@ -4,3 +4,4 @@ target/
 .env
 .superpowers/
 __pycache__/
+web-otel/node_modules/
