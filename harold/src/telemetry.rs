@@ -253,6 +253,8 @@ pub(crate) struct Instruments {
     pub notifications: Counter<u64>,
     /// `harold.web_app.pushes`, `{push}`, by `outcome`.
     pub web_app_pushes: Counter<u64>,
+    /// `harold.app_spans.not_forwarded`, `{span}`, by `reason`.
+    pub app_spans_not_forwarded: Counter<u64>,
 }
 
 static INSTRUMENTS: OnceLock<Instruments> = OnceLock::new();
@@ -309,6 +311,7 @@ pub(crate) fn instruments() -> &'static Instruments {
             watch_cost_usd: meter.f64_counter("watch.cost_usd").with_unit("USD").build(),
             notifications: counter("harold.notifications", "{notification}"),
             web_app_pushes: counter("harold.web_app.pushes", "{push}"),
+            app_spans_not_forwarded: counter("harold.app_spans.not_forwarded", "{span}"),
         }
     })
 }
@@ -329,6 +332,21 @@ pub(crate) fn count_notification(agent: &str, channel: &str, outcome: &str) {
             KeyValue::new("outcome", outcome.to_string()),
         ],
     );
+}
+
+/// Every `reason` browser spans can go unforwarded for.
+pub(crate) const APP_SPANS_NOT_FORWARDED_REASONS: [&str; 4] = [
+    "collector_unreachable",
+    "collector_refused",
+    "timed_out",
+    "queue_full",
+];
+
+/// Counts `spans` browser spans Harold took but the collector never got.
+pub(crate) fn count_app_spans_not_forwarded(spans: u64, reason: &'static str) {
+    instruments()
+        .app_spans_not_forwarded
+        .add(spans, &[KeyValue::new("reason", reason)]);
 }
 
 /// Every `channel` a phone request can carry.
@@ -352,6 +370,9 @@ pub(crate) fn register_phone_counters() {
         instruments
             .web_app_pushes
             .add(0, &[KeyValue::new("outcome", outcome)]);
+    }
+    for reason in APP_SPANS_NOT_FORWARDED_REASONS {
+        count_app_spans_not_forwarded(0, reason);
     }
     for channel in PHONE_CHANNELS {
         for resolved_by in ResolvedBy::ALL {

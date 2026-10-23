@@ -49,6 +49,11 @@ const SERVER_STOP_LIMIT: Duration = Duration::from_secs(1);
 #[path = "assets_tests.rs"]
 mod assets_tests;
 
+#[cfg(test)]
+#[path = "browser_traces_tests.rs"]
+mod browser_traces_tests;
+
+pub(crate) mod browser_traces;
 pub(crate) mod call;
 pub(crate) mod chief;
 pub(crate) mod echo_test;
@@ -115,6 +120,8 @@ pub(crate) struct Agents<'a> {
     pub chief_session: Option<&'a str>,
     /// Harold's own gRPC address, where the question tool's service listens.
     pub grpc: &'a GrpcSettings,
+    /// The collector's OTLP HTTP address, where browser spans go; none with export off.
+    pub browser_collector: Option<&'a str>,
 }
 
 /// How long a page may go unheard before it stops counting as on screen. The page beats
@@ -258,6 +265,8 @@ pub(crate) struct AppState {
     pub echo_test: Arc<echo_test::EchoTest>,
     /// The open page streams, which the route reads before it pushes.
     pub pages: Arc<OpenPages>,
+    /// Where the page's browser spans go; off when Harold does not export.
+    pub browser_traces: Arc<browser_traces::BrowserTraces>,
 }
 
 #[cfg(test)]
@@ -297,7 +306,14 @@ impl AppState {
                 Arc::new(echo_test::NeverRuns),
             )),
             pages: Arc::default(),
+            browser_traces: Arc::new(browser_traces::BrowserTraces::new(None)),
         }
+    }
+
+    /// This state with browser spans forwarded to `collector`.
+    pub(crate) fn with_browser_collector(mut self, collector: &str) -> Self {
+        self.browser_traces = Arc::new(browser_traces::BrowserTraces::new(Some(collector)));
+        self
     }
 }
 
@@ -328,6 +344,7 @@ pub(crate) fn idle_agents(grpc: &GrpcSettings) -> Agents<'_> {
         chief_folder: None,
         chief_session: None,
         grpc,
+        browser_collector: None,
     }
 }
 
@@ -353,6 +370,11 @@ pub(crate) fn router(state: AppState) -> Router {
             post(replies::post_photo).layer(DefaultBodyLimit::max(replies::PHOTO_BODY_LIMIT)),
         )
         .route("/replies/photo/{id}", get(replies::get_photo))
+        .route(
+            "/telemetry/traces",
+            post(browser_traces::post_traces)
+                .layer(DefaultBodyLimit::max(browser_traces::BODY_LIMIT + 1)),
+        )
         .route("/dictation/check", post(replies::post_dictation_check))
         .route("/push/subscription", post(replies::post_subscription))
         .route("/updates", get(updates::get_updates))
@@ -446,6 +468,7 @@ pub(crate) async fn start(
             Arc::new(SystemRunner),
         )),
         pages: Arc::default(),
+        browser_traces: Arc::new(browser_traces::BrowserTraces::new(agents.browser_collector)),
     };
     // The voice worker loads while a page is on screen, so a call finds it ready.
     if let Some(calls) = &calls {

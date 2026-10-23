@@ -545,6 +545,10 @@ pub struct TelemetrySettings {
     pub export: bool,
     /// The OpenTelemetry collector's gRPC address, such as `http://localhost:4317`.
     pub otlp_endpoint: Option<String>,
+    /// The collector's OTLP HTTP address, such as `http://localhost:4318`, where Harold
+    /// forwards the web app's browser spans.
+    #[serde(default)]
+    pub otlp_http_endpoint: Option<String>,
     /// The address and port Harold takes alerts on, such as `127.0.0.1:4320`.
     pub alert_listen: Option<String>,
     /// The path of the chief's `products.toml`. Set it on one Mac only, or merges are
@@ -561,6 +565,7 @@ impl Default for TelemetrySettings {
         Self {
             export: true,
             otlp_endpoint: None,
+            otlp_http_endpoint: None,
             alert_listen: None,
             pod_registry: None,
         }
@@ -647,6 +652,14 @@ fn telemetry_errors(telemetry: &TelemetrySettings) -> Vec<String> {
                     .into(),
             );
         }
+    }
+    if let Some(endpoint) = &telemetry.otlp_http_endpoint
+        && !(endpoint.starts_with("http://") && reqwest::Url::parse(endpoint).is_ok())
+    {
+        errors.push(
+            "telemetry.otlp_http_endpoint must be an http:// address such as http://localhost:4318"
+                .into(),
+        );
     }
     if let Some(listen) = &telemetry.alert_listen
         && listen.parse::<SocketAddr>().is_err()
@@ -2324,12 +2337,37 @@ mod tests {
             settings.telemetry.otlp_endpoint.as_deref(),
             Some("http://localhost:4317")
         );
+        assert_eq!(
+            settings.telemetry.otlp_http_endpoint.as_deref(),
+            Some("http://localhost:4318")
+        );
         assert!(settings.telemetry.export);
         assert!(settings.telemetry.alert_listen.is_none());
         assert!(settings.telemetry.pod_registry.is_none());
         assert_eq!(settings.telemetry.alert_addr(), None);
         assert_eq!(settings.telemetry.pod_registry_path(), None);
         assert!(telemetry_validate_errors("").is_empty());
+    }
+
+    #[test]
+    fn the_http_collector_address_must_be_an_http_address() {
+        assert!(
+            telemetry_validate_errors(
+                "[telemetry]\notlp_http_endpoint = \"http://127.0.0.1:4318\"\n"
+            )
+            .is_empty()
+        );
+        for bad in ["localhost:4318", "https://localhost:4318", "http://"] {
+            assert_eq!(
+                telemetry_validate_errors(&format!(
+                    "[telemetry]\notlp_http_endpoint = \"{bad}\"\n"
+                )),
+                [
+                    "telemetry.otlp_http_endpoint must be an http:// address such as http://localhost:4318"
+                ],
+                "{bad}"
+            );
+        }
     }
 
     #[test]
@@ -2522,6 +2560,7 @@ mod tests {
         let telemetry = super::TelemetrySettings {
             export: true,
             otlp_endpoint: Some("localhost:4317".into()),
+            otlp_http_endpoint: None,
             alert_listen: Some("4320".into()),
             pod_registry: Some(String::new()),
         };

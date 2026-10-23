@@ -1057,6 +1057,10 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(calls) = &phone_calls {
         voice_input::init_phone_calls(Arc::clone(calls) as Arc<dyn voice_input::LineTaker>);
     }
+    let browser_collector = telemetry
+        .exporting()
+        .then(|| cfg.telemetry.otlp_http_endpoint.clone())
+        .flatten();
     let web_app = web_app::start_if_set(
         cfg.web_app.as_ref(),
         Arc::clone(&store),
@@ -1068,6 +1072,7 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
             chief_folder: cfg.notify.chief.as_deref(),
             chief_session: cfg.notify.chief_session.as_deref(),
             grpc: &cfg.grpc,
+            browser_collector: browser_collector.as_deref(),
         },
     )
     .await;
