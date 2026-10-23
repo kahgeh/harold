@@ -24,6 +24,7 @@ use tracing::{info, warn};
 use super::schema::{Answer, Kind, Question};
 use super::store::{QuestionStore, Readiness, Ready, StartedBatch, StoreError};
 use super::{NAME, now_ms};
+use crate::telemetry;
 use crate::tools::{ChiefPane, PaneTyping, Typing};
 
 /// How long the newest unsent answer settles before its line starts.
@@ -272,8 +273,12 @@ impl<S: QuestionStore> Sender<S> {
         // is never released after either. A stop between typing and the mark is
         // typed again once at the next start; a failed mark is retried without
         // typing again.
+        let typing_from = time::OffsetDateTime::now_utc();
         match self.typing.type_line(&pane, &batch.text).await {
             how @ (Typing::Typed | Typing::EnterFailed) => {
+                // The chief's turn for this line joins the trace of the answer that came
+                // with one; a line of answers from the dash is a root.
+                telemetry::answers_typed(&pane, &batch.traces, typing_from);
                 // The line reached the pane, so this spell of waiting is over.
                 self.waiting_logged = None;
                 self.inherited = None;
@@ -324,7 +329,12 @@ impl<S: QuestionStore> Sender<S> {
             .store
             .start_batch(&answers, &batch_line(&ready), clock_ms())
             .await?;
-        Ok(started.map_or(Found::Changed, Found::Batch))
+        Ok(started.map_or(Found::Changed, |started| {
+            Found::Batch(StartedBatch {
+                traces: ready.traces,
+                ..started
+            })
+        }))
     }
 
     /// Nothing was typed. A batch built in this run is released: the next

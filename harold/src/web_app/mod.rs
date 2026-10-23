@@ -364,6 +364,14 @@ pub(crate) fn phone_trace(headers: &axum::http::HeaderMap) -> Option<opentelemet
     crate::telemetry::context_from_traceparent(value)
 }
 
+/// The canonical `traceparent` of the phone's span the request names; empty when there is
+/// none, or it is malformed.
+pub(crate) fn phone_traceparent(headers: &axum::http::HeaderMap) -> String {
+    phone_trace(headers)
+        .and_then(|cx| crate::telemetry::traceparent_of(&cx))
+        .unwrap_or_default()
+}
+
 /// The app's routes, every one of them, the 404 fallback included, behind
 /// `login::require_login` and then `origin::require_same_origin`, and every response
 /// carrying the content security policy.

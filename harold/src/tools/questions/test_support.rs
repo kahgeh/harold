@@ -180,17 +180,18 @@ impl QuestionStore for FailingStore {
         self.inner.list(now_ms).await
     }
 
-    async fn answer(
+    async fn answer_traced(
         &self,
         id: &str,
         version: u32,
         send_now: bool,
+        trace_parent: Option<&str>,
         answer: impl FnOnce(&Question) -> Result<Answer, String> + Send,
         now_ms: i64,
     ) -> Result<Result<Result<(), String>, Refusal>, StoreError> {
         self.check()?;
         self.inner
-            .answer(id, version, send_now, answer, now_ms)
+            .answer_traced(id, version, send_now, trace_parent, answer, now_ms)
             .await
     }
 
@@ -303,16 +304,17 @@ impl QuestionStore for MarkHook {
         self.inner.list(now_ms).await
     }
 
-    async fn answer(
+    async fn answer_traced(
         &self,
         id: &str,
         version: u32,
         send_now: bool,
+        trace_parent: Option<&str>,
         answer: impl FnOnce(&Question) -> Result<Answer, String> + Send,
         now_ms: i64,
     ) -> Result<Result<Result<(), String>, Refusal>, StoreError> {
         self.inner
-            .answer(id, version, send_now, answer, now_ms)
+            .answer_traced(id, version, send_now, trace_parent, answer, now_ms)
             .await
     }
 

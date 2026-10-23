@@ -161,12 +161,24 @@ impl<S: QuestionStore> QuestionService for QuestionToolService<S> {
             picks,
             note,
             send_now,
+            trace_parent,
         } = request.into_inner();
         let kind = kind_from_proto(kind)?;
+        // Kept only when it is a well-formed `traceparent`: a stored value is parsed again
+        // when the answers are typed, and says nothing else.
+        let trace_parent = crate::telemetry::context_from_traceparent(&trace_parent)
+            .and_then(|cx| crate::telemetry::traceparent_of(&cx));
         let resolve =
             move |question: &schema::Question| schema::resolve(question, kind, &picks, &note);
         self.store
-            .answer(&id, version, send_now, resolve, now_ms())
+            .answer_traced(
+                &id,
+                version,
+                send_now,
+                trace_parent.as_deref(),
+                resolve,
+                now_ms(),
+            )
             .await
             .map_err(unavailable)?
             .map_err(refused)?

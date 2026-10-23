@@ -297,6 +297,7 @@ fn answer_question_request_round_trips_with_picks() {
         ],
         note: "n".to_string(),
         send_now: false,
+        trace_parent: String::new(),
     };
     assert_eq!(round_trip(&request), request);
 }
@@ -314,4 +315,19 @@ fn answer_question_request_omitting_send_now_decodes_unmarked() {
     };
     let decoded = AnswerQuestionRequest::decode(marked.encode_to_vec().as_slice()).expect("decode");
     assert!(decoded.send_now);
+}
+
+#[test]
+fn answer_question_request_carries_a_trace_parent_and_older_bytes_have_none() {
+    let request = AnswerQuestionRequest {
+        id: "q-1".to_string(),
+        trace_parent: "00-0af7651916cd43dd8448eb211c80319c-00f067aa0ba902b7-01".to_string(),
+        ..Default::default()
+    };
+    assert_eq!(round_trip(&request), request);
+
+    // Field 1 (id) = "q-1" only, as an older client sends it.
+    let bytes = [0x0a, 0x03, b'q', b'-', b'1'];
+    let old = AnswerQuestionRequest::decode(bytes.as_slice()).expect("decode");
+    assert!(old.trace_parent.is_empty());
 }

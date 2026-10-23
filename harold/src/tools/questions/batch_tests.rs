@@ -155,6 +155,7 @@ fn ready_with(answers: Vec<(&str, pb::Question, schema::Answer)>, later: &[&str]
             .map(|(id, q, a)| (id.to_string(), 1, schema::from_proto(q).unwrap(), a))
             .collect(),
         later: later.iter().map(|id| id.to_string()).collect(),
+        traces: Vec::new(),
     }
 }
 
@@ -187,16 +188,17 @@ impl QuestionStore for RacingStore {
         self.inner.list(now_ms).await
     }
 
-    async fn answer(
+    async fn answer_traced(
         &self,
         id: &str,
         version: u32,
         send_now: bool,
+        trace_parent: Option<&str>,
         answer: impl FnOnce(&schema::Question) -> Result<schema::Answer, String> + Send,
         now_ms: i64,
     ) -> Result<Result<Result<(), String>, Refusal>, StoreError> {
         self.inner
-            .answer(id, version, send_now, answer, now_ms)
+            .answer_traced(id, version, send_now, trace_parent, answer, now_ms)
             .await
     }
 
@@ -1900,4 +1902,91 @@ async fn instructions_waiting_do_not_hold_back_later_questions() {
         sender.typing.texts(),
         vec!["ANSWERS 1 | Q1 s1 sha abc: Which? A | later: Q2".to_string()]
     );
+}
+
+/// Answers `id` as the page does, with the `traceparent` of the request that carried it.
+async fn answer_traced_a(store: &impl QuestionStore, id: &str, trace_parent: Option<&str>) {
+    let result = store
+        .answer_traced(
+            id,
+            1,
+            true,
+            trace_parent,
+            |q| schema::resolve_picks(q, Kind::Answer, &[pick(0, "a")], ""),
+            clock_ms(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(result, Ok(Ok(())), "answer {id}");
+}
+
+fn unique_chief_pane() -> String {
+    format!("%q{}", uuid::Uuid::new_v4().simple())
+}
+
+#[tokio::test(start_paused = true)]
+async fn two_traced_answers_type_one_line_under_the_first_with_a_link_to_the_second() {
+    use opentelemetry::trace::TraceContextExt as _;
+    crate::telemetry::test_support::install();
+    let (first, second) = (
+        "00-11111111111111111111111111111111-aaaaaaaaaaaaaaaa-01",
+        "00-22222222222222222222222222222222-bbbbbbbbbbbbbbbb-01",
+    );
+    let folder = TempFolder::new();
+    let store = open_store(&folder).await;
+    put(&*store, question("Q1", "spec-q1", "abc123")).await;
+    put(&*store, question("Q2", "spec-q2", "abc123")).await;
+    answer_traced_a(&*store, "Q1", Some(first)).await;
+    answer_traced_a(&*store, "Q2", Some(second)).await;
+    let pane = unique_chief_pane();
+
+    let sender = spawn_with_chief(&store, FakeTyping::typed_ok(), FakeChief::at(Some(&pane)));
+    tried_without_waiting(&sender, 1).await;
+    until_no_started_batch(&*store).await;
+
+    let typed: Vec<_> = crate::telemetry::test_support::spans()
+        .into_iter()
+        .filter(|span| {
+            span.name == "harold.answers_typed"
+                && span.span_context.trace_id().to_string() == "11111111111111111111111111111111"
+        })
+        .collect();
+    assert_eq!(typed.len(), 1);
+    assert_eq!(typed[0].parent_span_id.to_string(), "aaaaaaaaaaaaaaaa");
+    let links: Vec<_> = typed[0].links.iter().collect();
+    assert_eq!(links.len(), 1);
+    assert_eq!(
+        links[0].span_context.trace_id().to_string(),
+        "22222222222222222222222222222222"
+    );
+    assert_eq!(
+        links[0].span_context.span_id().to_string(),
+        "bbbbbbbbbbbbbbbb"
+    );
+    // The chief's turn joins it.
+    let (_, started_by, cx) =
+        crate::telemetry::take_prompt(&pane, time::OffsetDateTime::now_utc()).expect("a prompt");
+    assert_eq!(started_by, crate::telemetry::StartedBy::Phone);
+    assert_eq!(
+        cx.unwrap().span().span_context().trace_id().to_string(),
+        "11111111111111111111111111111111"
+    );
+    drop(sender);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_line_of_dash_answers_records_no_prompt_and_is_a_root() {
+    crate::telemetry::test_support::install();
+    let folder = TempFolder::new();
+    let store = open_store(&folder).await;
+    put(&*store, question("Q1", "spec-q1", "abc123")).await;
+    answer_traced_a(&*store, "Q1", None).await;
+    let pane = unique_chief_pane();
+
+    let sender = spawn_with_chief(&store, FakeTyping::typed_ok(), FakeChief::at(Some(&pane)));
+    tried_without_waiting(&sender, 1).await;
+    until_no_started_batch(&*store).await;
+
+    assert!(crate::telemetry::take_prompt(&pane, time::OffsetDateTime::now_utc()).is_none());
+    drop(sender);
 }

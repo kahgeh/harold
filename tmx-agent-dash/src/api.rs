@@ -467,6 +467,8 @@ fn answer_request(out: &Outgoing) -> AnswerQuestionRequest {
         picks: out.picks.iter().map(proto_pick).collect(),
         note: out.note.clone(),
         send_now: out.send_now,
+        // The dash carries no trace.
+        trace_parent: String::new(),
     }
 }
 

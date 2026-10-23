@@ -17,7 +17,7 @@ use opentelemetry::logs::{LogRecord as _, Logger as _, LoggerProvider as _};
 use opentelemetry::metrics::{Counter, Histogram, Meter};
 use opentelemetry::propagation::{Extractor, TextMapPropagator as _};
 use opentelemetry::trace::{
-    SpanBuilder, Status, TraceContextExt, Tracer as _, TracerProvider as _,
+    Link, SpanBuilder, Status, TraceContextExt, Tracer as _, TracerProvider as _,
 };
 use opentelemetry::{Context, KeyValue};
 use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
@@ -1015,6 +1015,37 @@ impl RowSent {
     }
 }
 
+/// `harold.answers_typed`: Harold typed an `ANSWERS` line into `pane_id`, started at
+/// `typing_from`. The span continues the trace of the first of `traces`, the answers'
+/// `traceparent`s, and links the others. The prompt is recorded with its context, so the
+/// chief's turn joins the trace. With no usable trace, such as a line of answers from the
+/// dash, nothing is recorded and the turn is a root as before.
+pub(crate) fn answers_typed(pane_id: &str, traces: &[String], typing_from: OffsetDateTime) {
+    let mut parents = traces
+        .iter()
+        .filter_map(|trace| context_from_traceparent(trace));
+    let Some(first) = parents.next() else {
+        return;
+    };
+    let links: Vec<Link> = parents
+        .map(|parent| Link::with_context(parent.span().span_context().clone()))
+        .collect();
+    let now = OffsetDateTime::now_utc();
+    let span = tracer().build_with_context(
+        SpanBuilder::from_name("harold.answers_typed")
+            .with_start_time(typing_from)
+            .with_attributes([KeyValue::new(
+                "pane_id",
+                crate::pane_id_for_log(pane_id).to_string(),
+            )])
+            .with_links(links),
+        &first,
+    );
+    let cx = Context::new().with_span(span);
+    prompt_typed(pane_id, StartedBy::Phone, Some(cx.clone()), now);
+    cx.span().end_with_timestamp(now.into());
+}
+
 /// The prompt Harold last typed into `pane_id`, if it was typed within `PROMPT_KEPT` of
 /// `now`. It is taken once.
 pub(crate) fn take_prompt(
@@ -1627,14 +1658,18 @@ fn resource(machine: &str) -> Resource {
 // ---------------------------------------------------------------------------
 
 /// Passes spans and log records on with only the attributes on `ALLOWED_FIELDS`. Span
-/// events and links are dropped, and an error status loses its description.
+/// events and links are dropped, and an error status loses its description. The one
+/// exception is the links of `harold.answers_typed`, which hold only the ids of the other
+/// answers' spans.
 #[derive(Debug)]
 pub(crate) struct FieldFilter<E>(E);
 
 fn allowed_span(mut span: SpanData) -> SpanData {
     span.attributes.retain(|kv| is_allowed(kv.key.as_str()));
     span.events = SpanEvents::default();
-    span.links = SpanLinks::default();
+    if span.name != "harold.answers_typed" {
+        span.links = SpanLinks::default();
+    }
     if matches!(span.status, Status::Error { .. }) {
         span.status = Status::error("");
     }

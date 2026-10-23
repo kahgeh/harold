@@ -49,6 +49,7 @@ async fn answer<S: QuestionStore>(
             picks,
             note: note.into(),
             send_now: false,
+            trace_parent: String::new(),
         }))
         .await
         .map(|_| ())
@@ -67,6 +68,7 @@ async fn answer_marked<S: QuestionStore>(
             picks: vec![pick(0, "a")],
             note: String::new(),
             send_now,
+            trace_parent: String::new(),
         }))
         .await
         .map(|_| ())
@@ -437,6 +439,7 @@ async fn an_old_client_omitting_send_now_records_unmarked() {
         picks: vec![pick(0, "a")],
         note: String::new(),
         send_now: false,
+        trace_parent: String::new(),
     };
     let bytes = prost::Message::encode_to_vec(&old);
     let request = <pb::AnswerQuestionRequest as prost::Message>::decode(bytes.as_slice()).unwrap();
@@ -830,4 +833,36 @@ async fn returning_set_aside_questions_is_logged_once_for_each_trigger() {
                 && !line.contains("Q3")
         );
     }
+}
+
+#[tokio::test]
+async fn an_answers_trace_parent_is_kept_only_when_it_is_a_well_formed_traceparent() {
+    let folder = TempFolder::new();
+    let store = open_store(&folder).await;
+    let service = service(Arc::clone(&store));
+    for id in ["Q1", "Q2"] {
+        put(&service, question(id, "spec", "abc123")).await.unwrap();
+    }
+    let answer_with = |id: &str, trace_parent: &str| {
+        service.answer_question(Request::new(pb::AnswerQuestionRequest {
+            id: id.into(),
+            version: 1,
+            kind: pb::AnswerKind::Answer as i32,
+            picks: vec![pick(0, "a")],
+            note: String::new(),
+            send_now: true,
+            trace_parent: trace_parent.into(),
+        }))
+    };
+    let phone = "00-0af7651916cd43dd8448eb211c80319c-00f067aa0ba902b7-01";
+
+    answer_with("Q1", phone).await.unwrap();
+    answer_with("Q2", "not a traceparent").await.unwrap();
+
+    let crate::tools::questions::store::Readiness::Ready(ready) =
+        store.ready(i64::MAX, 0).await.unwrap()
+    else {
+        panic!("expected Ready");
+    };
+    assert_eq!(ready.traces, [phone]);
 }

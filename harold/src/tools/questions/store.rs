@@ -17,7 +17,7 @@ use super::schema::{Answer, Kind, Question, check_picks};
 const DATABASE: &str = "questions.db";
 const DISMISSAL_VISIBLE_MS: i64 = 3_600_000;
 
-const MIGRATIONS: [(&str, &str); 4] = [
+const MIGRATIONS: [(&str, &str); 5] = [
     (
         "001_questions",
         include_str!("migrations/001_questions.sql"),
@@ -33,6 +33,10 @@ const MIGRATIONS: [(&str, &str); 4] = [
     (
         "004_saved_picks",
         include_str!("migrations/004_saved_picks.sql"),
+    ),
+    (
+        "005_answer_trace",
+        include_str!("migrations/005_answer_trace.sql"),
     ),
 ];
 
@@ -117,6 +121,9 @@ pub(super) struct Listing {
 pub(super) struct StartedBatch {
     pub id: i64,
     pub text: String,
+    /// The `traceparent` of each answer in the batch that came with one, in the order of
+    /// the answers. Kept in memory only: a batch found after a restart has none.
+    pub traces: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -125,6 +132,9 @@ pub(super) struct Ready {
     pub answers: Vec<(String, u32, Question, Answer)>,
     /// Ids of the deferred questions.
     pub later: Vec<String>,
+    /// The `traceparent` of each unsent answer that came with one, in the order of the
+    /// answers.
+    pub traces: Vec<String>,
 }
 
 /// What the unsent answers allow now.
@@ -153,6 +163,16 @@ pub(super) trait QuestionStore: Send + Sync + 'static {
     /// Records the answer the closure resolves from the stored question. The
     /// inner `Err(field)` is the closure's refusal; nothing is stored then.
     /// `send_now` is the mark that asks for the line without the settle wait.
+    fn answer_traced(
+        &self,
+        id: &str,
+        version: u32,
+        send_now: bool,
+        trace_parent: Option<&str>,
+        answer: impl FnOnce(&Question) -> std::result::Result<Answer, String> + Send,
+        now_ms: i64,
+    ) -> impl Future<Output = Result<std::result::Result<std::result::Result<(), String>, Refusal>>> + Send;
+    /// `answer_traced` for an answer that carries no trace, such as one from the dash.
     fn answer(
         &self,
         id: &str,
@@ -160,7 +180,10 @@ pub(super) trait QuestionStore: Send + Sync + 'static {
         send_now: bool,
         answer: impl FnOnce(&Question) -> std::result::Result<Answer, String> + Send,
         now_ms: i64,
-    ) -> impl Future<Output = Result<std::result::Result<std::result::Result<(), String>, Refusal>>> + Send;
+    ) -> impl Future<Output = Result<std::result::Result<std::result::Result<(), String>, Refusal>>> + Send
+    {
+        self.answer_traced(id, version, send_now, None, answer, now_ms)
+    }
     fn defer(
         &self,
         id: &str,
@@ -500,7 +523,7 @@ async fn put_in(conn: &Connection, question: &Question, now_ms: i64) -> Result<u
     if open_state(&existing.state) {
         conn.execute(
             "UPDATE questions SET version = ?2, state = 'waiting', body = ?3, answer = NULL, \
-             reason = '', batch_id = NULL, send_now = 0, updated_at_ms = ?4, ticks = ?5, picks = ?6 WHERE id = ?1",
+             reason = '', batch_id = NULL, send_now = 0, trace_parent = NULL, updated_at_ms = ?4, ticks = ?5, picks = ?6 WHERE id = ?1",
             (
                 question.id.as_str(),
                 i64::from(version),
@@ -515,7 +538,7 @@ async fn put_in(conn: &Connection, question: &Question, now_ms: i64) -> Result<u
         let position = next_position(conn).await?;
         conn.execute(
             "UPDATE questions SET version = ?2, position = ?5, state = 'waiting', body = ?3, \
-             answer = NULL, reason = '', batch_id = NULL, send_now = 0, updated_at_ms = ?4, \
+             answer = NULL, reason = '', batch_id = NULL, send_now = 0, trace_parent = NULL, updated_at_ms = ?4, \
              ticks = ?6, picks = ?7 WHERE id = ?1",
             (
                 question.id.as_str(),
@@ -655,6 +678,7 @@ async fn answer_in(
     id: &str,
     version: u32,
     send_now: bool,
+    trace_parent: Option<&str>,
     resolve: impl FnOnce(&Question) -> std::result::Result<Answer, String>,
     now_ms: i64,
 ) -> Result<std::result::Result<std::result::Result<(), String>, Refusal>> {
@@ -701,13 +725,14 @@ async fn answer_in(
         .collect();
     conn.execute(
         "UPDATE questions SET state = 'answered', answer = ?2, updated_at_ms = ?3, \
-         send_now = ?4, picks = ?5 WHERE id = ?1",
+         send_now = ?4, picks = ?5, trace_parent = ?6 WHERE id = ?1",
         (
             id,
             serde_json::to_string(&answer)?,
             now_ms,
             i64::from(send_now),
             format_picks(&saved)?,
+            trace_parent,
         ),
     )
     .await?;
@@ -902,11 +927,12 @@ async fn ids_in_state(conn: &Connection, state: &str) -> Result<Vec<String>> {
 
 async fn ready_in(conn: &Connection, now_ms: i64, settle_ms: i64) -> Result<Readiness> {
     let mut answers = Vec::new();
+    let mut traces = Vec::new();
     let mut newest = i64::MIN;
     let mut marked = false;
     let mut rows = conn
         .query(
-            "SELECT id, version, body, answer, updated_at_ms, send_now FROM questions \
+            "SELECT id, version, body, answer, updated_at_ms, send_now, trace_parent FROM questions \
              WHERE state = 'answered' AND batch_id IS NULL ORDER BY position, id",
             (),
         )
@@ -916,6 +942,7 @@ async fn ready_in(conn: &Connection, now_ms: i64, settle_ms: i64) -> Result<Read
             .ok_or_else(|| StoreError::Data("answered question has no answer".into()))?;
         newest = newest.max(integer(&row, 4)?);
         marked |= integer(&row, 5)? == 1;
+        traces.extend(optional_text(&row, 6)?);
         answers.push((
             text(&row, 0)?,
             version_of(&row, 1)?,
@@ -938,6 +965,7 @@ async fn ready_in(conn: &Connection, now_ms: i64, settle_ms: i64) -> Result<Read
     Ok(Readiness::Ready(Ready {
         answers,
         later: ids_in_state(conn, "deferred").await?,
+        traces,
     }))
 }
 
@@ -991,6 +1019,7 @@ async fn start_batch_in(
     Ok(Some(StartedBatch {
         id,
         text: text_of_batch.to_string(),
+        traces: Vec::new(),
     }))
 }
 
@@ -1007,6 +1036,7 @@ async fn started_batch_in(conn: &Connection) -> Result<Option<StartedBatch>> {
     Ok(Some(StartedBatch {
         id: integer(&row, 0)?,
         text: text(&row, 1)?,
+        traces: Vec::new(),
     }))
 }
 
@@ -1121,11 +1151,12 @@ impl QuestionStore for TursoQuestionStore {
         list_in(&conn, now_ms).await
     }
 
-    async fn answer(
+    async fn answer_traced(
         &self,
         id: &str,
         version: u32,
         send_now: bool,
+        trace_parent: Option<&str>,
         answer: impl FnOnce(&Question) -> std::result::Result<Answer, String> + Send,
         now_ms: i64,
     ) -> Result<std::result::Result<std::result::Result<(), String>, Refusal>> {
@@ -1133,7 +1164,7 @@ impl QuestionStore for TursoQuestionStore {
         begin(&conn).await?;
         finish(
             &conn,
-            answer_in(&conn, id, version, send_now, answer, now_ms).await,
+            answer_in(&conn, id, version, send_now, trace_parent, answer, now_ms).await,
         )
         .await
     }

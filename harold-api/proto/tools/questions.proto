@@ -159,6 +159,9 @@ message AnswerQuestionRequest {
   string note = 5;
   // Asks for the ANSWERS line at once, without the settle wait.
   bool send_now = 6;
+  // The W3C traceparent of the request that carried the answer, when it came with one.
+  // Empty from the dash and from older callers.
+  string trace_parent = 7;
 }
 
 message AnswerQuestionResponse {}

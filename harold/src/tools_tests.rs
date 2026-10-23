@@ -558,6 +558,7 @@ async fn the_canary_reaches_no_log_or_export() {
             picks: Vec::new(),
             note: CANARY.into(),
             send_now: true,
+            trace_parent: String::new(),
         },
     )
     .await

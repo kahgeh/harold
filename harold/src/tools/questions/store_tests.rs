@@ -147,7 +147,8 @@ async fn open_creates_and_migrates_questions_db() {
             "001_questions",
             "002_answer_send_now",
             "003_step_ticks",
-            "004_saved_picks"
+            "004_saved_picks",
+            "005_answer_trace"
         ]
     );
 }
@@ -168,7 +169,8 @@ async fn reopening_keeps_the_rows_and_applies_nothing_twice() {
             "001_questions",
             "002_answer_send_now",
             "003_step_ticks",
-            "004_saved_picks"
+            "004_saved_picks",
+            "005_answer_trace"
         ]
     );
 }
@@ -441,7 +443,7 @@ async fn a_write_dropped_inside_its_transaction_does_not_block_the_next() {
     {
         let conn = store.conn.lock().await;
         begin(&conn).await.unwrap();
-        let applied = answer_in(&conn, "Q1", 1, false, |_| Ok(an_answer()), 2)
+        let applied = answer_in(&conn, "Q1", 1, false, None, |_| Ok(an_answer()), 2)
             .await
             .unwrap();
         assert_eq!(applied, Ok(Ok(())));
@@ -452,7 +454,7 @@ async fn a_write_dropped_inside_its_transaction_does_not_block_the_next() {
     {
         let conn = store.conn.lock().await;
         begin(&conn).await.unwrap();
-        answer_in(&conn, "Q1", 1, false, |_| Ok(an_answer()), 2)
+        answer_in(&conn, "Q1", 1, false, None, |_| Ok(an_answer()), 2)
             .await
             .unwrap()
             .unwrap()
@@ -462,7 +464,7 @@ async fn a_write_dropped_inside_its_transaction_does_not_block_the_next() {
     {
         let conn = store.conn.lock().await;
         begin(&conn).await.unwrap();
-        answer_in(&conn, "Q1", 1, false, |_| Ok(an_answer()), 2)
+        answer_in(&conn, "Q1", 1, false, None, |_| Ok(an_answer()), 2)
             .await
             .unwrap()
             .unwrap()
@@ -628,14 +630,15 @@ async fn migration_002_adds_send_now_defaulting_to_zero_and_a_second_open_applie
             "001_questions",
             "002_answer_send_now",
             "003_step_ticks",
-            "004_saved_picks"
+            "004_saved_picks",
+            "005_answer_trace"
         ]
     );
 
     let store = TursoQuestionStore::open(&temp.0).await.unwrap();
     assert!(!marked(&store, "Q1").await);
     drop(store);
-    assert_eq!(migration_rows(&temp.0).await.len(), 4);
+    assert_eq!(migration_rows(&temp.0).await.len(), 5);
 }
 
 #[tokio::test]
@@ -970,7 +973,8 @@ async fn migration_003_adds_ticks_to_a_database_with_rows() {
             "001_questions",
             "002_answer_send_now",
             "003_step_ticks",
-            "004_saved_picks"
+            "004_saved_picks",
+            "005_answer_trace"
         ]
     );
 }
@@ -1618,4 +1622,87 @@ fn store_error_kind_names_the_failing_side() {
         "database"
     );
     assert_eq!(StoreError::Data("bad row".into()).kind(), "data");
+}
+
+const PHONE: &str = "00-0af7651916cd43dd8448eb211c80319c-00f067aa0ba902b7-01";
+
+async fn ready_traces(store: &TursoQuestionStore) -> Vec<String> {
+    let Readiness::Ready(ready) = store.ready(100, SETTLE).await.unwrap() else {
+        panic!("expected Ready");
+    };
+    ready.traces
+}
+
+#[tokio::test]
+async fn an_answers_trace_is_kept_with_it_and_a_new_version_clears_it() {
+    let temp = TempFolder::new();
+    let store = TursoQuestionStore::open(&temp.0).await.unwrap();
+    for id in ["Q1", "Q2", "Q3"] {
+        store.put(question(id), 1).await.unwrap();
+    }
+    store
+        .answer_traced("Q1", 1, true, Some(PHONE), |_| Ok(an_answer()), 5)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    answer_ok(&store, "Q2", 1).await;
+    store
+        .answer_traced("Q3", 1, true, Some(PHONE), |_| Ok(an_answer()), 5)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(ready_traces(&store).await, [PHONE, PHONE]);
+
+    // The question put again is waiting again, with no answer and no trace.
+    store.put(question("Q3"), 6).await.unwrap();
+    assert_eq!(ready_traces(&store).await, [PHONE]);
+}
+
+#[tokio::test]
+async fn migration_005_adds_the_trace_column_to_a_database_with_rows() {
+    let temp = TempFolder::new();
+    std::fs::create_dir_all(&temp.0).unwrap();
+    let database = turso::Builder::new_local(temp.0.join(DATABASE).to_str().unwrap())
+        .build()
+        .await
+        .unwrap();
+    let conn = database.connect().unwrap();
+    conn.execute(
+        "CREATE TABLE _migrations (id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE, \
+         checksum TEXT NOT NULL, applied_at_ms INTEGER NOT NULL)",
+        (),
+    )
+    .await
+    .unwrap();
+    for (name, sql) in &MIGRATIONS[..4] {
+        conn.execute_batch(sql).await.unwrap();
+        conn.execute(
+            "INSERT INTO _migrations (name, checksum, applied_at_ms) VALUES (?1, ?2, 0)",
+            (*name, hex::encode(Sha256::digest(sql.as_bytes()))),
+        )
+        .await
+        .unwrap();
+    }
+    conn.execute(
+        "INSERT INTO questions (id, version, position, state, body, updated_at_ms) \
+         VALUES ('Q1', 1, 1, 'waiting', ?1, 0)",
+        [serde_json::to_string(&question("Q1")).unwrap()],
+    )
+    .await
+    .unwrap();
+    drop(conn);
+    drop(database);
+
+    let store = TursoQuestionStore::open(&temp.0).await.unwrap();
+    assert_eq!(listed_ids(&store).await, [("Q1".to_string(), false)]);
+    store
+        .answer_traced("Q1", 1, true, None, |_| Ok(an_answer()), 5)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(ready_traces(&store).await.is_empty());
 }

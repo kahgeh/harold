@@ -611,6 +611,7 @@ async fn each_route_calls_its_rpc_with_the_form_fields_and_send_now() {
             picks,
             note: String::new(),
             send_now: true,
+            trace_parent: String::new(),
         })
     };
     assert_eq!(
@@ -1084,6 +1085,7 @@ fn answer_call(kind: pb::AnswerKind, picks: Vec<pb::Pick>, note: &str) -> Call {
         picks,
         note: note.into(),
         send_now: true,
+        trace_parent: String::new(),
     })
 }
 
@@ -1318,4 +1320,64 @@ fn todos_client_url_brackets_an_ipv6_host() {
         port: 50051,
     };
     assert_eq!(super::todos::client_url(&grpc), "http://[::1]:50051");
+}
+
+impl TestServer {
+    /// `post` with a `traceparent` header, as the page's fetch timing adds one.
+    async fn post_traced(&self, path: &str, body: &str, traceparent: &str) -> reqwest::Response {
+        let mut request = reqwest::Client::new()
+            .post(self.url(path))
+            .header("Tailscale-User-Login", LOGIN)
+            .header("origin", format!("http://{}", self.addr))
+            .header("traceparent", traceparent);
+        for (name, value) in PAGE_HEADERS {
+            request = request.header(name, value);
+        }
+        request.body(body.to_owned()).send().await.unwrap()
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_answer_carries_the_phones_traceparent_to_the_question_service_when_it_is_well_formed() {
+    let (service, server, _directory) = served_with_todos().await;
+    let phone = "00-0af7651916cd43dd8448eb211c80319c-00f067aa0ba902b7-01";
+
+    for (path, body) in [
+        ("/todos/answer", "id=Q1&version=2&pick.0=a&pick.1=x"),
+        (
+            "/todos/revise",
+            "id=Q1&version=2&pick.0=a&pick.1=x&note=change+it",
+        ),
+        ("/todos/reject", "id=Q1&version=2&pick.0=a&pick.1=x&note=no"),
+    ] {
+        assert_eq!(
+            server.post_traced(path, body, phone).await.status(),
+            200,
+            "{path}"
+        );
+    }
+    server
+        .post_traced(
+            "/todos/answer",
+            "id=Q1&version=2&pick.0=a&pick.1=x",
+            "garbage",
+        )
+        .await;
+    server
+        .post("/todos/answer", "id=Q1&version=2&pick.0=a&pick.1=x")
+        .await;
+    server
+        .post_traced("/todos/done", "id=I1&version=3", phone)
+        .await;
+
+    let sent: Vec<String> = service
+        .fake
+        .calls()
+        .into_iter()
+        .filter_map(|call| match call {
+            Call::Answer(request) => Some(request.trace_parent),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(sent, [phone, phone, phone, "", "", ""]);
 }

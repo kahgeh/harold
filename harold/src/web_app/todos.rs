@@ -10,7 +10,7 @@ use std::time::Duration;
 use askama::Template;
 use axum::body::Bytes;
 use axum::extract::State;
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::sse::{Event, Sse};
 use axum::response::{IntoResponse, Response};
 use datastar::prelude::{PatchElements, PatchSignals};
@@ -696,7 +696,11 @@ fn malformed() -> Response {
 }
 
 /// `POST /todos/answer`: the picks of a question, sent to the chief at once.
-pub(crate) async fn post_answer(State(state): State<AppState>, body: Bytes) -> Response {
+pub(crate) async fn post_answer(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
     let Some(form) = Form::parse(&body) else {
         return malformed();
     };
@@ -724,6 +728,7 @@ pub(crate) async fn post_answer(State(state): State<AppState>, body: Bytes) -> R
             picks,
             note: String::new(),
             send_now: true,
+            trace_parent: super::phone_traceparent(&headers),
         })
         .await;
     finish(&state, kind, &id, outcome).await
@@ -813,6 +818,7 @@ async fn close(state: AppState, body: Bytes, kind: Kind, answer: AnswerKind) -> 
             picks: Vec::new(),
             note: String::new(),
             send_now: true,
+            trace_parent: String::new(),
         })
         .await;
     finish(&state, kind, &id, outcome).await
@@ -830,6 +836,7 @@ pub(crate) async fn post_ignore(State(state): State<AppState>, body: Bytes) -> R
 /// chief at once. A note that is blank or over `NOTE_MAX_CHARS` gives `400`.
 async fn answer_with_note(
     state: AppState,
+    headers: HeaderMap,
     body: Bytes,
     kind: Kind,
     answer: AnswerKind,
@@ -856,15 +863,24 @@ async fn answer_with_note(
             picks,
             note: note.to_owned(),
             send_now: true,
+            trace_parent: super::phone_traceparent(&headers),
         })
         .await;
     finish_with_note(&state, kind, &id, outcome, note).await
 }
 
-pub(crate) async fn post_revise(State(state): State<AppState>, body: Bytes) -> Response {
-    answer_with_note(state, body, Kind::Revise, AnswerKind::Revise).await
+pub(crate) async fn post_revise(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    answer_with_note(state, headers, body, Kind::Revise, AnswerKind::Revise).await
 }
 
-pub(crate) async fn post_reject(State(state): State<AppState>, body: Bytes) -> Response {
-    answer_with_note(state, body, Kind::Reject, AnswerKind::Reject).await
+pub(crate) async fn post_reject(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    answer_with_note(state, headers, body, Kind::Reject, AnswerKind::Reject).await
 }
