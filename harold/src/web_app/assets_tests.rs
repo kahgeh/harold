@@ -245,6 +245,20 @@ fn pages_js_beats_seen_while_the_page_is_visible() {
 }
 
 #[test]
+fn pages_js_copies_a_todo_note_before_any_element_listener_can_redraw_it() {
+    let script = include_str!("../../static/web_app/pages.js");
+    // The copy of the card is taken in the capture phase: a bubbling listener runs after the
+    // textarea's own handler, whose redraw makes restore() write the old note back.
+    for wanted in [
+        r#"document.addEventListener("input", noteEdit, true);"#,
+        r#"document.addEventListener("change", noteEdit, true);"#,
+        r#"document.addEventListener("focusin", noteEdit, true);"#,
+    ] {
+        assert!(script.contains(wanted), "pages.js lacks {wanted}");
+    }
+}
+
+#[test]
 fn photo_js_shrinks_to_2048_as_jpeg_uploads_before_send_and_clears_with_the_x() {
     let script = include_str!("../../static/web_app/photo.js");
     for wanted in [

@@ -404,9 +404,13 @@ document.addEventListener("click", (event) => {
 
   document.addEventListener("input", syncOne);
   document.addEventListener("change", syncOne);
-  document.addEventListener("input", noteEdit);
-  document.addEventListener("change", noteEdit);
-  document.addEventListener("focusin", noteEdit);
+  // These listen in the capture phase, so the copy is taken before any element's own
+  // listener runs. A textarea's Datastar handler changes the page (the counter text) and the
+  // observer below calls restore() as soon as it returns; a bubbling listener would not have
+  // copied the new letter yet, and restore() would write the old note back over it.
+  document.addEventListener("input", noteEdit, true);
+  document.addEventListener("change", noteEdit, true);
+  document.addEventListener("focusin", noteEdit, true);
   // Leaving the card for good drops the note, so picks made elsewhere show. A card a redraw
   // removed is not connected, so its note stays for the redrawn card.
   document.addEventListener("focusout", () => {
