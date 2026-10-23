@@ -1031,7 +1031,7 @@ async fn an_open_stream_is_a_visible_page_until_it_ends() {
     let server = TestServer::serve(directory.store().await).await;
     assert_eq!(server.pages.visible(), 0);
 
-    server.pages.report_seen();
+    server.pages.report_seen(None);
     let mut first = server.updates().await;
     first.next().await.expect("the whole thread");
     visible_pages_reach(&server, 1).await;
@@ -1050,7 +1050,7 @@ async fn a_closed_stream_counts_down_and_a_new_one_waits_for_the_page_to_be_seen
     let directory = TestDirectory::new();
     let store = directory.store().await;
     let server = TestServer::serve(store.clone()).await;
-    server.pages.report_seen();
+    server.pages.report_seen(None);
     let mut page = server.updates().await;
     page.next().await.expect("the whole thread");
     visible_pages_reach(&server, 1).await;
@@ -1073,7 +1073,7 @@ async fn a_closed_stream_counts_down_and_a_new_one_waits_for_the_page_to_be_seen
     let mut again = server.updates().await;
     again.next().await.expect("the whole thread");
     assert_eq!(server.pages.visible(), 0, "not heard from since the report");
-    server.pages.report_seen();
+    server.pages.report_seen(None);
     visible_pages_reach(&server, 1).await;
 
     // The page goes: the next change finds the send failing and the stream counts down.
@@ -1098,7 +1098,7 @@ async fn the_hidden_report_has_the_login_host_and_origin_checks() {
     let server = TestServer::serve(directory.store().await).await;
     let own_origin = format!("http://{}", server.addr);
     let _page = server.pages.open();
-    server.pages.report_seen();
+    server.pages.report_seen(None);
     let client = reqwest::Client::new();
 
     let missing_login = client
@@ -1264,4 +1264,130 @@ async fn a_row_stored_in_a_trace_is_sent_in_its_own_span_and_the_page_gets_that_
         sent[0].span_context.span_id()
     );
     assert!(added.contains(&carried), "{added}");
+}
+
+/// Reads `response` until `wanted` has arrived, and returns everything read.
+async fn read_until(response: &mut reqwest::Response, wanted: &str) -> String {
+    let mut buffer = String::new();
+    while !buffer.contains(wanted) {
+        let chunk = response
+            .chunk()
+            .await
+            .unwrap()
+            .expect("the stream stays open");
+        buffer.push_str(std::str::from_utf8(&chunk).unwrap());
+    }
+    buffer
+}
+
+/// On the paused clock, an open stream sends `_beat` 1, 2 and 3, 15 s apart, and the
+/// stream ends when the page goes. A current-thread runtime, so `CapturedLogs` sees the
+/// server's tasks.
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn a_stream_sends_a_beat_every_15_seconds_until_the_page_goes() {
+    let directory = TestDirectory::new();
+    let server = TestServer::serve(directory.store().await).await;
+    let logs = CapturedLogs::start();
+    let mut page = server.get("/updates").await;
+    let started = tokio::time::Instant::now();
+
+    let read = read_until(&mut page, r#"{"_beat":3}"#).await;
+
+    let first = read.find(r#"{"_beat":1}"#).expect("beat 1");
+    let second = read.find(r#"{"_beat":2}"#).expect("beat 2");
+    let third = read.find(r#"{"_beat":3}"#).expect("beat 3");
+    assert!(first < second && second < third, "{read}");
+    assert_eq!(read.matches("datastar-patch-signals").count(), 3, "{read}");
+    assert_eq!(started.elapsed().as_secs(), 45);
+
+    drop(page);
+    let line = line_with(&logs, "app page disconnected").await;
+    assert!(line.contains(r#"reason="page_gone""#), "{line}");
+}
+
+/// Posts `/page/seen` as the page does, with `body`.
+async fn post_seen(server: &TestServer, body: &str) -> reqwest::StatusCode {
+    let origin = format!("http://{}", server.addr);
+    server
+        .send_with(
+            reqwest::Method::POST,
+            "/page/seen",
+            &[
+                ("sec-fetch-site", "same-origin"),
+                ("origin", &origin),
+                ("content-type", "application/json"),
+            ],
+            body.to_owned(),
+        )
+        .await
+        .status()
+}
+
+fn stalled_lines(logs: &CapturedLogs) -> Vec<String> {
+    logs.text()
+        .lines()
+        .filter(|line| line.contains("app page stream stalled"))
+        .map(str::to_owned)
+        .collect()
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_seen_report_3_beats_behind_logs_one_stall_and_stops_counting_the_stream() {
+    let directory = TestDirectory::new();
+    let server = TestServer::serve(directory.store().await).await;
+    let logs = CapturedLogs::start();
+    let page = server.pages.open();
+    for beat in 1..=4 {
+        page.beat_sent(beat);
+    }
+
+    assert_eq!(post_seen(&server, r#"{"beat":1}"#).await, 204);
+    let lines = stalled_lines(&logs);
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(lines[0].contains("WARN"), "{}", lines[0]);
+    assert!(lines[0].contains("beats_behind=3"), "{}", lines[0]);
+    assert!(lines[0].contains("seconds=45"), "{}", lines[0]);
+    assert_eq!(
+        server.pages.visible(),
+        0,
+        "a stalled stream is not on screen"
+    );
+
+    assert_eq!(post_seen(&server, r#"{"beat":1}"#).await, 204);
+    assert_eq!(stalled_lines(&logs).len(), 1, "once per stream");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_seen_report_1_or_2_beats_behind_logs_nothing_and_an_empty_body_is_accepted() {
+    let directory = TestDirectory::new();
+    let server = TestServer::serve(directory.store().await).await;
+    let logs = CapturedLogs::start();
+    let page = server.pages.open();
+    page.beat_sent(3);
+
+    assert_eq!(post_seen(&server, r#"{"beat":2}"#).await, 204);
+    assert_eq!(post_seen(&server, r#"{"beat":1}"#).await, 204);
+    assert_eq!(post_seen(&server, "").await, 204);
+    assert_eq!(post_seen(&server, "{}").await, 204);
+    assert_eq!(post_seen(&server, "not json").await, 204);
+    assert!(stalled_lines(&logs).is_empty(), "{}", logs.text());
+    assert_eq!(server.pages.visible(), 1);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_seen_report_weighs_only_the_newest_stream() {
+    let directory = TestDirectory::new();
+    let server = TestServer::serve(directory.store().await).await;
+    let logs = CapturedLogs::start();
+    // The page's old stream, cancelled but not yet seen closed, then its new one.
+    let old = server.pages.open();
+    for beat in 1..=6 {
+        old.beat_sent(beat);
+    }
+    let _new = server.pages.open();
+
+    assert_eq!(post_seen(&server, r#"{"beat":0}"#).await, 204);
+
+    assert!(stalled_lines(&logs).is_empty(), "{}", logs.text());
+    assert_eq!(server.pages.visible(), 2);
 }

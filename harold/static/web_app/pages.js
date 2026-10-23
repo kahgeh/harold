@@ -59,27 +59,121 @@ document.addEventListener("click", (event) => {
 // A page that leaves the screen says so with a request that outlives it, and a page on
 // screen says so every 30 s, so a stream the phone leaves open does not hold back the
 // chief's pushes: the server counts a page visible only for 75 s after it last heard from it.
+// The report carries the number of the last beat the stream sent the page.
+//
+// A stream can stall without ending or failing: the server's writes go on succeeding into
+// buffers nobody reads, so the request never ends and the reopen above never fires. The
+// server sends a beat down every open stream every 15 s, as the `_beat` signal, which the
+// hidden #beat input is bound to. A visible page that has had no beat for 45 s reports
+// itself, then reopens the stream with the `stalled` signal set, which Harold logs.
 (function () {
   const PAGE_SEEN_EVERY = 30000;
-  let beat = null;
-  const post = (path) => {
+  const STALL_AFTER_MS = 45000;
+  const STALL_CHECK_EVERY = 5000;
+  const STALL_GRACE_MS = 1000;
+  const beatInput = document.getElementById("beat");
+  const stalledInput = document.getElementById("stalled");
+  const messages = document.getElementById("messages");
+  let seen = null;
+  let watch = null;
+  // What #beat held when last read, the number of the last beat the stream sent, and when
+  // the stream started or last sent one.
+  let lastValue = beatInput ? beatInput.value : "";
+  let lastBeat = Number(lastValue) || 0;
+  let lastActivity = Date.now();
+  const post = (path, body) =>
     fetch(path, {
       method: "POST",
       keepalive: true,
       headers: { "Content-Type": "application/json" },
+      body,
     }).catch(() => {});
+  // A hidden input is how Datastar's signals are written from outside it.
+  const setInput = (input, value) => {
+    input.value = value;
+    input.dispatchEvent(new Event("input", { bubbles: true }));
   };
-  const reportSeen = () => post("/page/seen");
+  const noteBeat = () => {
+    if (!beatInput || beatInput.value === lastValue) {
+      return;
+    }
+    lastValue = beatInput.value;
+    lastBeat = Number(lastValue) || 0;
+    lastActivity = Date.now();
+  };
+  const reportSeen = () => {
+    noteBeat();
+    return post("/page/seen", JSON.stringify({ beat: lastBeat }));
+  };
+  // The stream stalled: say so, and once Harold has answered (it weighs a report against the
+  // page's newest stream, so the new one must not open first), ask for a new one. The new
+  // request carries the `stalled` signal, and replaces the stalled one, which has the same
+  // address.
+  const reopen = () => {
+    lastActivity = Date.now();
+    const answered = Promise.race([reportSeen(), new Promise((r) => setTimeout(r, 2000))]);
+    answered.then(() => {
+      if (stalledInput) {
+        setInput(stalledInput, "1");
+        setTimeout(() => setInput(stalledInput, ""), 2000);
+      }
+      if (messages) {
+        messages.dispatchEvent(new CustomEvent("harold-reopen"));
+      }
+    });
+  };
+  // A second's grace after 45 s, so the stream's third missed beat is sent before the page
+  // reports it, whatever the delay between the page's request and the stream's first beat.
+  let confirming = false;
+  const checkStream = () => {
+    noteBeat();
+    if (
+      confirming ||
+      document.visibilityState !== "visible" ||
+      Date.now() - lastActivity < STALL_AFTER_MS
+    ) {
+      return;
+    }
+    confirming = true;
+    const quietSince = lastActivity;
+    setTimeout(() => {
+      confirming = false;
+      noteBeat();
+      if (document.visibilityState === "visible" && lastActivity === quietSince) {
+        reopen();
+      }
+    }, STALL_GRACE_MS);
+  };
   const reportHidden = () => {
-    clearInterval(beat);
-    beat = null;
+    clearInterval(seen);
+    clearInterval(watch);
+    seen = null;
+    watch = null;
     post("/page/hidden");
   };
   const startBeat = () => {
     reportSeen();
-    clearInterval(beat);
-    beat = setInterval(reportSeen, PAGE_SEEN_EVERY);
+    clearInterval(seen);
+    seen = setInterval(reportSeen, PAGE_SEEN_EVERY);
+    // Time spent hidden is not a stall: Datastar opens the stream again on return.
+    lastActivity = Date.now();
+    clearInterval(watch);
+    watch = setInterval(checkStream, STALL_CHECK_EVERY);
   };
+  // A new request starts the count again from beat 0.
+  document.addEventListener("datastar-fetch", (event) => {
+    const detail = event.detail;
+    if (!detail || !detail.el || detail.el.id !== "messages" || detail.type !== "started") {
+      return;
+    }
+    if (beatInput) {
+      setInput(beatInput, "0");
+    }
+    lastValue = "0";
+    lastBeat = 0;
+    lastActivity = Date.now();
+  });
+  document.addEventListener("datastar-signal-patch", noteBeat);
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "hidden") {
       reportHidden();

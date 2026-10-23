@@ -25,7 +25,7 @@ use super::pages::{
     thread_window,
 };
 use super::todos::TodosSection;
-use super::{AppState, thread_start_ms};
+use super::{AppState, BEAT_EVERY, OpenPage, thread_start_ms};
 use crate::store::{AppMessage, AppReplyState};
 use crate::telemetry;
 use crate::voice_input::PhoneView;
@@ -64,6 +64,18 @@ pub(super) fn oldest_signal(query: &UpdatesQuery) -> Option<Option<String>> {
     )
 }
 
+/// Whether the page's signals say it opened this stream because the last one stalled.
+fn stalled_signal(query: &UpdatesQuery) -> bool {
+    let signals = query
+        .datastar
+        .as_deref()
+        .and_then(|signals| serde_json::from_str::<serde_json::Value>(signals).ok());
+    matches!(
+        signals.as_ref().and_then(|signals| signals.get("stalled")),
+        Some(serde_json::Value::String(flag)) if flag == "1"
+    )
+}
+
 /// The window the stream follows and what the page shows of its rows.
 struct Seen {
     /// The window's oldest row; the newest 50 rows once it is pruned.
@@ -71,6 +83,12 @@ struct Seen {
     /// Every row the page was sent, so a row that comes back into the window when `from`
     /// is pruned is not appended twice.
     known: HashMap<String, Shown>,
+}
+
+/// The way to one open page: the patches it is sent, and its place among the open streams.
+struct Link {
+    patches: mpsc::Sender<Result<Event, Infallible>>,
+    open: OpenPage,
 }
 
 /// What the page shows of one row, to tell a changed row from an unchanged one.
@@ -82,7 +100,9 @@ pub(crate) async fn get_updates(
     State(state): State<AppState>,
     query: Result<Query<UpdatesQuery>, axum::extract::rejection::QueryRejection>,
 ) -> Response {
-    let said = query.ok().and_then(|Query(query)| oldest_signal(&query));
+    let query = query.ok().map(|Query(query)| query);
+    let said = query.as_ref().and_then(oldest_signal);
+    let reopened = query.as_ref().is_some_and(stalled_signal);
     let from = said.as_ref().and_then(Option::as_deref);
     // Watch before the first read, so a change made during it is not missed.
     let changes = state.store.watch_app_thread();
@@ -126,7 +146,16 @@ pub(crate) async fn get_updates(
     if let Some(patch) = oldest_patch {
         let _ = patches.try_send(Ok(patch));
     }
-    info!(rows = window.rows.len(), bytes, "app page connected");
+    if reopened {
+        info!(
+            rows = window.rows.len(),
+            bytes,
+            reopened_after_stall = true,
+            "app page connected"
+        );
+    } else {
+        info!(rows = window.rows.len(), bytes, "app page connected");
+    }
     let seen = Seen {
         from: window.oldest().map(str::to_owned),
         known: shown(window.rows),
@@ -134,8 +163,8 @@ pub(crate) async fn get_updates(
     let open = state.pages.open();
     tokio::spawn(async move {
         // Counted until the stream ends, however it ends.
-        let _open = open;
-        follow_thread(state, changes, call, seen, dots, todos_shown, patches).await;
+        let link = Link { patches, open };
+        follow_thread(state, changes, call, seen, dots, todos_shown, link).await;
     });
     Sse::new(ReceiverStream::<Result<Event, Infallible>>::new(queued))
         .keep_alive(KeepAlive::default())
@@ -151,10 +180,10 @@ async fn follow_thread(
     seen: Seen,
     dots: Dots,
     todos_shown: String,
-    patches: mpsc::Sender<Result<Event, Infallible>>,
+    link: Link,
 ) {
     let connected = Instant::now();
-    let reason = send_patches(state, changes, call, seen, dots, todos_shown, patches).await;
+    let reason = send_patches(state, changes, call, seen, dots, todos_shown, link).await;
     info!(
         reason,
         seconds = connected.elapsed().as_secs(),
@@ -174,13 +203,18 @@ async fn send_patches(
     mut seen: Seen,
     mut dots: Dots,
     mut todos_shown: String,
-    patches: mpsc::Sender<Result<Event, Infallible>>,
+    link: Link,
 ) -> &'static str {
+    let Link { patches, open } = link;
     let mut shutdown = state.shutdown.clone();
     let mut todo_posts = state.todos_changed.subscribe();
     let mut todo_ticks =
         tokio::time::interval_at(tokio::time::Instant::now() + TODOS_EVERY, TODOS_EVERY);
     todo_ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut beat_ticks =
+        tokio::time::interval_at(tokio::time::Instant::now() + BEAT_EVERY, BEAT_EVERY);
+    beat_ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut beat = 0;
     let mut agents = Some(state.snapshots.clone());
     loop {
         tokio::select! {
@@ -190,6 +224,16 @@ async fn send_patches(
                 if changed.is_err() {
                     return "store_stopped";
                 }
+            }
+            _ = beat_ticks.tick() => {
+                // A page that stops getting these knows its stream has stalled.
+                beat += 1;
+                open.beat_sent(beat);
+                // A full queue means a slow page: the beat is skipped, not waited for.
+                if let Err(mpsc::error::TrySendError::Closed(_)) = patches.try_send(Ok(beat_event(beat))) {
+                    return "page_gone";
+                }
+                continue;
             }
             _ = todo_ticks.tick() => {
                 if let Some(patch) = todos_patch(&state, &mut todos_shown).await
@@ -378,6 +422,12 @@ async fn call_changed(call: &mut Option<watch::Receiver<PhoneView>>) -> Option<E
 fn call_screen(view: &PhoneView) -> Option<Event> {
     let section = CallSection::from(view).render().ok()?;
     Some(PatchElements::new(section).into())
+}
+
+/// One patch setting the page's `_beat` signal, which stays on the page: Datastar leaves a
+/// signal whose name starts with `_` out of every request.
+fn beat_event(beat: u64) -> Event {
+    PatchSignals::new(serde_json::json!({ "_beat": beat }).to_string()).into()
 }
 
 /// One patch setting the page's `oldest` signal.

@@ -1131,7 +1131,7 @@ async fn updates_redraws_from_the_oldest_signal_with_the_older_line_and_data_ini
     );
 }
 
-const REOPEN_ATTRIBUTE: &str = r#"data-on:harold-reopen="@get('/updates', {retry: 'error', retryMaxCount: 1000, filterSignals: {include: /^oldest$/}})""#;
+const REOPEN_ATTRIBUTE: &str = r#"data-on:harold-reopen="@get('/updates', {retry: 'error', retryMaxCount: 1000, filterSignals: {include: /^(oldest|stalled)$/}})""#;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn the_thread_page_and_the_first_updates_patch_reopen_updates_when_the_stream_ends() {
@@ -1196,6 +1196,32 @@ async fn updates_logs_the_rows_and_bytes_of_its_first_patch() {
     assert!(line.contains("bytes="), "{line}");
     assert!(!text.contains("row 120"), "{text}");
     drop(first);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn updates_logs_reopened_after_stall_only_when_the_page_says_so() {
+    let directory = TestDirectory::new();
+    let store = directory.store().await;
+    add_rows(&store, 3).await;
+    let server = TestServer::serve(store).await;
+    let logs = CapturedLogs::start();
+
+    drop(first_patch(&server, Some(r#"{"oldest":"r001","stalled":""}"#)).await);
+    assert!(
+        !logs.text().contains("reopened_after_stall"),
+        "{}",
+        logs.text()
+    );
+    drop(first_patch(&server, Some(r#"{"oldest":"r001","stalled":"1"}"#)).await);
+
+    let text = logs.text();
+    let line = text
+        .lines()
+        .find(|line| line.contains("reopened_after_stall"))
+        .unwrap_or_else(|| panic!("no line: {text}"));
+    assert!(line.contains("app page connected"), "{line}");
+    assert!(line.contains("reopened_after_stall=true"), "{line}");
+    assert!(line.contains("rows=3"), "{line}");
 }
 
 #[tokio::test(flavor = "multi_thread")]

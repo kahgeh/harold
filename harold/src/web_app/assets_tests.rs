@@ -292,7 +292,7 @@ fn pages_js_reports_hiding_with_a_request_that_outlives_the_page() {
 fn pages_js_beats_seen_while_the_page_is_visible() {
     let script = include_str!("../../static/web_app/pages.js");
     for wanted in [
-        r#"post("/page/seen")"#,
+        r#"post("/page/seen", "#,
         "PAGE_SEEN_EVERY = 30000",
         "setInterval(reportSeen, PAGE_SEEN_EVERY)",
         "clearInterval(",
@@ -300,6 +300,35 @@ fn pages_js_beats_seen_while_the_page_is_visible() {
     ] {
         assert!(script.contains(wanted), "pages.js lacks {wanted}");
     }
+}
+
+#[test]
+fn pages_js_reopens_a_stream_that_has_had_no_beat_for_45_seconds_while_visible() {
+    let script = include_str!("../../static/web_app/pages.js");
+    for wanted in [
+        "STALL_AFTER_MS = 45000",
+        "STALL_CHECK_EVERY = 5000",
+        "setInterval(checkStream, STALL_CHECK_EVERY)",
+        "Date.now() - lastActivity < STALL_AFTER_MS",
+        "STALL_GRACE_MS = 1000",
+        r#"new CustomEvent("harold-reopen")"#,
+        r#"setInput(stalledInput, "1")"#,
+        "JSON.stringify({ beat: lastBeat })",
+        r#"document.getElementById("beat")"#,
+    ] {
+        assert!(script.contains(wanted), "pages.js lacks {wanted}");
+    }
+}
+
+#[test]
+fn the_thread_binds_the_beat_and_the_reopen_sends_the_stalled_signal() {
+    let thread = include_str!("../../templates/web_app/thread.html");
+    assert!(thread.contains(r#"<input type="hidden" id="beat" data-bind:_beat>"#));
+    assert!(thread.contains(r#"<input type="hidden" id="stalled" data-bind:stalled>"#));
+    let messages = include_str!("../../templates/web_app/messages.html");
+    assert!(messages.contains(
+        "data-on:harold-reopen=\"@get('/updates', {retry: 'error', retryMaxCount: 1000, filterSignals: {include: /^(oldest|stalled)$/}})\""
+    ));
 }
 
 #[test]

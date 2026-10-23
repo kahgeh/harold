@@ -1,17 +1,19 @@
 //! The home-screen web app Harold serves to the phone through `tailscale serve`: one
 //! thread with the chief, on a loopback address, behind the Tailscale login check.
 
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use axum::Router;
+use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, State};
 use axum::http::StatusCode;
 use axum::middleware::{from_fn, from_fn_with_state};
 use axum::routing::{get, post};
+use serde::Deserialize;
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
@@ -136,11 +138,37 @@ struct PageState {
     /// The number the next stream gets.
     next: u64,
     /// The open streams, by number.
-    open: BTreeSet<u64>,
+    open: BTreeMap<u64, Stream>,
     /// Streams numbered up to this one were open when the page last reported itself hidden.
     hidden_through: u64,
     /// When the page last said it is on screen; `None` after a hidden report.
     last_seen: Option<Instant>,
+}
+
+/// What the page reports of one open stream: the beats it sent and whether the page has
+/// fallen too far behind them.
+#[derive(Default)]
+struct Stream {
+    /// The number of the last beat the stream sent.
+    beat: u64,
+    /// When that beat was sent; `None` before the first.
+    beat_at: Option<Instant>,
+    /// The page reported it more than `BEATS_BEHIND_LIMIT` beats behind, so it is logged
+    /// and no longer counts as on screen.
+    stalled: bool,
+}
+
+/// How often an open stream sends the page a beat.
+const BEAT_EVERY: Duration = Duration::from_secs(15);
+
+/// How many beats a stream may be ahead of the page's report before the page counts as
+/// stalled. The beats are `BEAT_EVERY` apart, so 3 behind is 45 s.
+const BEATS_BEHIND_LIMIT: u64 = 2;
+
+/// A stream the page's report found stalled.
+pub(crate) struct Stalled {
+    pub beats_behind: u64,
+    pub seconds: u64,
 }
 
 /// The open page streams, which of them the page has since reported hidden, and when the
@@ -174,7 +202,7 @@ impl OpenPages {
         let mut state = self.state();
         state.next += 1;
         let number = state.next;
-        state.open.insert(number);
+        state.open.insert(number, Stream::default());
         OpenPage {
             pages: Arc::clone(self),
             number,
@@ -188,10 +216,30 @@ impl OpenPages {
         state.last_seen = None;
     }
 
-    /// The page said it is on screen.
-    pub(crate) fn report_seen(&self) {
+    /// The page said it is on screen, and the number of the last beat it got (none from a
+    /// page loaded before beats). Returns the stall if the page's newest stream since the last
+    /// hidden report has sent more than `BEATS_BEHIND_LIMIT` beats since that one, the first
+    /// time only; that stream stops counting as on screen. Older streams are not weighed: a
+    /// page that opened a new stream has left them, even if Harold has not yet seen them close.
+    pub(crate) fn report_seen(&self, beat: Option<u64>) -> Option<Stalled> {
         let now = (self.clock)();
-        self.state().last_seen = Some(now);
+        let mut state = self.state();
+        state.last_seen = Some(now);
+        let hidden_through = state.hidden_through;
+        let stream = state.open.range_mut(hidden_through + 1..).next_back()?.1;
+        let behind = stream.beat.saturating_sub(beat?);
+        if stream.stalled || behind <= BEATS_BEHIND_LIMIT {
+            return None;
+        }
+        stream.stalled = true;
+        // The page's last beat was sent `behind` beats before the stream's last.
+        let since_last = stream
+            .beat_at
+            .map_or(0, |at| now.saturating_duration_since(at).as_secs());
+        Some(Stalled {
+            beats_behind: behind,
+            seconds: behind * BEAT_EVERY.as_secs() + since_last,
+        })
     }
 
     /// The open streams of pages that are on screen: those opened since the last hidden
@@ -205,7 +253,11 @@ impl OpenPages {
         if !heard {
             return 0;
         }
-        state.open.range(state.hidden_through + 1..).count()
+        state
+            .open
+            .range(state.hidden_through + 1..)
+            .filter(|(_, stream)| !stream.stalled)
+            .count()
     }
 }
 
@@ -221,15 +273,43 @@ impl Drop for OpenPage {
     }
 }
 
+impl OpenPage {
+    /// The stream sent beat `beat`.
+    pub(crate) fn beat_sent(&self, beat: u64) {
+        let now = (self.pages.clock)();
+        if let Some(stream) = self.pages.state().open.get_mut(&self.number) {
+            stream.beat = beat;
+            stream.beat_at = Some(now);
+        }
+    }
+}
+
 /// `POST /page/hidden`: the page left the screen, so a push is wanted again.
 async fn post_page_hidden(State(state): State<AppState>) -> StatusCode {
     state.pages.report_hidden();
     StatusCode::NO_CONTENT
 }
 
-/// `POST /page/seen`: the page is on screen, which holds pushes back for another 75 s.
-async fn post_page_seen(State(state): State<AppState>) -> StatusCode {
-    state.pages.report_seen();
+/// What `POST /page/seen` may carry: the last beat the page got.
+#[derive(Deserialize)]
+struct SeenReport {
+    beat: Option<u64>,
+}
+
+/// `POST /page/seen`: the page is on screen, which holds pushes back for another 75 s. The body
+/// is optional JSON, `{"beat": n}`; a page that sends none, or none Harold can read, is
+/// heard as before.
+async fn post_page_seen(State(state): State<AppState>, body: Bytes) -> StatusCode {
+    let beat = serde_json::from_slice::<SeenReport>(&body)
+        .ok()
+        .and_then(|report| report.beat);
+    if let Some(stalled) = state.pages.report_seen(beat) {
+        warn!(
+            beats_behind = stalled.beats_behind,
+            seconds = stalled.seconds,
+            "app page stream stalled"
+        );
+    }
     StatusCode::NO_CONTENT
 }
 

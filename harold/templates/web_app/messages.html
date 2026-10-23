@@ -1,4 +1,4 @@
-<section id="messages" data-init="@get('/updates', {retry: 'error', retryMaxCount: 1000, filterSignals: {include: /^oldest$/}})" data-on:harold-reopen="@get('/updates', {retry: 'error', retryMaxCount: 1000, filterSignals: {include: /^oldest$/}})">
+<section id="messages" data-init="@get('/updates', {retry: 'error', retryMaxCount: 1000, filterSignals: {include: /^oldest$/}})" data-on:harold-reopen="@get('/updates', {retry: 'error', retryMaxCount: 1000, filterSignals: {include: /^(oldest|stalled)$/}})">
 {% if older %}<p id="older" class="older" data-on-intersect="@get('/thread/older', {filterSignals: {include: /^oldest$/}})">Loading earlier messages…</p>
 {% endif %}{% for message in messages %}{{ message|safe }}
 {% endfor %}</section>

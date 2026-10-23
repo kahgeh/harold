@@ -283,7 +283,7 @@ async fn a_visible_page_shows_the_message_and_no_push_goes_out() {
     let (store, route) = route_over(&directory, &service, &pages).await;
     // Three streams: no other test reports three pages, so its record is this one's.
     let _open = [pages.open(), pages.open(), pages.open()];
-    pages.report_seen();
+    pages.report_seen(None);
     crate::telemetry::test_support::install();
 
     let delivery = deliver(&route, "event-1", "hello").await;
@@ -355,7 +355,7 @@ async fn a_stream_opened_after_the_hidden_report_waits_to_hear_from_the_page() {
     let pages = clock.pages();
     let (_store, route) = route_over(&directory, &service, &pages).await;
     let _first = pages.open();
-    pages.report_seen();
+    pages.report_seen(None);
     pages.report_hidden();
     let _second = pages.open();
 
@@ -363,7 +363,7 @@ async fn a_stream_opened_after_the_hidden_report_waits_to_hear_from_the_page() {
     assert_eq!(deliver(&route, "event-1", "a").await, AppDelivery::Pushed);
     assert_eq!(service.requests().len(), 1);
 
-    pages.report_seen();
+    pages.report_seen(None);
     assert_eq!(
         pages.visible(),
         1,
@@ -381,7 +381,7 @@ async fn a_stale_stream_stops_holding_pushes_back_after_75_seconds() {
     let pages = clock.pages();
     let (_store, route) = route_over(&directory, &service, &pages).await;
     let _stale = pages.open();
-    pages.report_seen();
+    pages.report_seen(None);
 
     clock.pass(75);
     assert_eq!(pages.visible(), 1, "75 s is still within the limit");
@@ -389,7 +389,7 @@ async fn a_stale_stream_stops_holding_pushes_back_after_75_seconds() {
     assert_eq!(pages.visible(), 0);
     assert_eq!(deliver(&route, "event-1", "a").await, AppDelivery::Pushed);
 
-    pages.report_seen();
+    pages.report_seen(None);
     assert_eq!(pages.visible(), 1, "a beat brings it back");
 }
 
@@ -399,12 +399,12 @@ async fn a_brief_stream_elsewhere_leaves_the_stale_stream_not_visible() {
     let pages = clock.pages();
     // The locked phone's stream: reported hidden, but its connection stays open.
     let _stale = pages.open();
-    pages.report_seen();
+    pages.report_seen(None);
     pages.report_hidden();
 
     // A page opened briefly elsewhere is on screen while it lasts, the stale stream not.
     let brief = pages.open();
-    pages.report_seen();
+    pages.report_seen(None);
     assert_eq!(pages.visible(), 1);
     drop(brief);
     assert_eq!(
