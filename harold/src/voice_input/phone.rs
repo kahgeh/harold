@@ -2,10 +2,11 @@
 //! plays, and lines it says in its own voice. The ports share one `PhoneLine` with the app's
 //! call routes, which hand it what the phone posts and show the phone what waits for it.
 
+use super::answerer::CallAnswering;
 use super::call::{Ended, lock};
-use super::models::Missing;
+use super::models::{Missing, Status as ModelsStatus};
 use super::phrases::NO_ANSWER_IN_THREAD;
-use super::worker::WorkerError;
+use super::worker::{PooledWorker, TEND_EVERY, WorkerError, WorkerPool};
 use super::{
     AudioSink, AudioSource, CallControl, CallPorts, CallState, CallStatus, LineTaker, Said,
     Speaker, SpeechModels,
@@ -13,6 +14,7 @@ use super::{
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
+use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -626,19 +628,55 @@ pub(crate) struct PhonePorts<B: CallPorts> {
     base: B,
     line: Arc<PhoneLine>,
     sink: Arc<PhoneSink>,
+    /// The voice worker kept ahead of a call while a web app page is on screen.
+    pool: Arc<WorkerPool<B::Worker>>,
 }
 
 impl<B: CallPorts> PhonePorts<B> {
     pub(super) fn new(base: B, line: Arc<PhoneLine>) -> Self {
         let sink = Arc::new(PhoneSink::unopened(Arc::clone(&line)));
-        Self { base, line, sink }
+        Self {
+            base,
+            line,
+            sink,
+            pool: WorkerPool::new(),
+        }
+    }
+
+    /// The keeper's look: loads the worker while `page_on_screen`, once the speech models
+    /// are on the Mac, and lets it go once no page and no call has been on for the keep time.
+    async fn tend(&self, page_on_screen: bool) {
+        let models = self.base.speech_models();
+        let models_ready = models
+            .as_ref()
+            .is_none_or(|models| *models.status().borrow() == ModelsStatus::Ready);
+        let folder = self.base.calls_dir().join("worker");
+        let made = std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&folder);
+        if made.is_err() {
+            return;
+        }
+        self.pool
+            .tend(
+                page_on_screen,
+                models_ready,
+                || self.base.start_worker(&folder),
+                |model| {
+                    if let Some(models) = &models {
+                        models.model_missing(model);
+                    }
+                },
+            )
+            .await;
     }
 }
 
 impl<B: CallPorts> CallPorts for PhonePorts<B> {
     type Source = PhoneSource;
     type Sink = PhoneSink;
-    type Worker = B::Worker;
+    type Worker = PooledWorker<B::Worker>;
     type Panes = B::Panes;
     type Awake = ();
 
@@ -650,17 +688,23 @@ impl<B: CallPorts> CallPorts for PhonePorts<B> {
         Arc::clone(&self.sink)
     }
 
-    fn start_worker(&self, call_dir: &Path) -> Result<B::Worker, WorkerError> {
-        self.base.start_worker(call_dir)
+    /// The worker kept ahead of the call if it is loaded or loading, else a new one.
+    fn start_worker(&self, call_dir: &Path) -> Result<PooledWorker<B::Worker>, WorkerError> {
+        self.pool.for_call(|| self.base.start_worker(call_dir))
     }
 
     /// The call has opened: from now on sounds and lines are offered.
     fn call_opened(&self) {
         self.sink.opened.store(true, Ordering::SeqCst);
+        self.pool.call_opened();
     }
 
     fn speech_models(&self) -> Option<Arc<SpeechModels>> {
         self.base.speech_models()
+    }
+
+    fn answering(&self) -> Option<Arc<CallAnswering>> {
+        self.base.answering()
     }
 
     /// Keeps the model for the view the end of the call sets.
@@ -729,6 +773,7 @@ impl<B: CallPorts> CallPorts for PhonePorts<B> {
 
     fn call_ended(&self, reason: &'static str) {
         self.sink.opened.store(false, Ordering::SeqCst);
+        self.pool.call_ended();
         info!(reason, "app call ended");
         let missing = lock(&self.line.inner).missing.take();
         self.line.view.send_modify(|view| {
@@ -765,6 +810,10 @@ pub(crate) struct PhoneCalls<B: CallPorts> {
     set_up: bool,
     /// The task that copies the open call's status into the view: one for each call.
     follower: Mutex<Option<JoinHandle<()>>>,
+    /// How long the voice worker is kept once no page is on screen and no call is on.
+    keep_worker: Duration,
+    /// The task that loads the worker while a page is on screen, once pages are watched.
+    keeper: Mutex<Option<JoinHandle<()>>>,
 }
 
 impl<B: CallPorts> LineTaker for PhoneCalls<B> {
@@ -789,6 +838,35 @@ impl<B: CallPorts> PhoneCalls<B> {
             line,
             set_up,
             follower: Mutex::default(),
+            keep_worker: Duration::from_secs(10 * 60),
+            keeper: Mutex::default(),
+        }
+    }
+
+    /// Keeps the voice worker for `keep` after the last page and call, instead of 10 minutes.
+    pub(crate) fn keeping_worker_for(mut self, keep: Duration) -> Self {
+        self.keep_worker = keep;
+        self
+    }
+
+    /// Loads the voice worker while `visible` counts a web app page on screen, so a call finds
+    /// it ready. The worker is kept until the keep time after no page is on screen and no call
+    /// is on. Call once, inside the runtime.
+    pub(crate) fn watch_pages(&self, visible: Arc<dyn Fn() -> usize + Send + Sync>) {
+        let ports = Arc::clone(&self.calls.ports);
+        ports.pool.enable(self.keep_worker);
+        let ports = Arc::downgrade(&ports);
+        let keeper = tokio::spawn(async move {
+            loop {
+                sleep(TEND_EVERY).await;
+                let Some(ports) = ports.upgrade() else {
+                    return;
+                };
+                ports.tend(visible() > 0).await;
+            }
+        });
+        if let Some(old) = lock(&self.keeper).replace(keeper) {
+            old.abort();
         }
     }
 
@@ -891,6 +969,10 @@ impl<B: CallPorts> PhoneCalls<B> {
         if let Some(task) = lock(&self.follower).take() {
             task.abort();
         }
+        if let Some(task) = lock(&self.keeper).take() {
+            task.abort();
+        }
+        self.calls.ports.pool.close_all().await;
     }
 
     /// Plays the chief's `line` on the phone, from a blocking thread, as

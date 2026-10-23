@@ -48,6 +48,9 @@ pub(crate) trait PhoneCallApi: Send + Sync {
     fn view(&self) -> watch::Receiver<PhoneView>;
     /// Ends an open call with reason `shutdown`.
     fn shutdown(&self) -> BoxFuture<'_, ()>;
+    /// Has the voice worker loaded while `visible` counts a page on screen. Called once, when
+    /// the web app starts.
+    fn watch_pages(&self, visible: Arc<dyn Fn() -> usize + Send + Sync>);
 }
 
 /// Ends a call open at the desk, and resolves once it has ended.
@@ -125,6 +128,10 @@ impl<B: CallPorts> PhoneCallApi for AppCalls<B> {
 
     fn shutdown(&self) -> BoxFuture<'_, ()> {
         Box::pin(self.phone.shutdown())
+    }
+
+    fn watch_pages(&self, visible: Arc<dyn Fn() -> usize + Send + Sync>) {
+        self.phone.watch_pages(visible);
     }
 }
 

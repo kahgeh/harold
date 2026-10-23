@@ -447,6 +447,11 @@ pub(crate) async fn start(
         )),
         pages: Arc::default(),
     };
+    // The voice worker loads while a page is on screen, so a call finds it ready.
+    if let Some(calls) = &calls {
+        let pages = Arc::clone(&state.pages);
+        calls.watch_pages(Arc::new(move || pages.visible()));
+    }
     let pusher = Arc::new(Pusher::new(key, &settings.allowed_login));
     let route: Arc<dyn AppRoute> =
         Arc::new(WebAppRoute::new(Arc::clone(&store), pusher).with_pages(Arc::clone(&state.pages)));

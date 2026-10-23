@@ -839,9 +839,8 @@ impl<P: CallPorts> Call<P> {
                 call.models_rx = status;
             }
         }
-        call.connecting = !call.worker_ready;
         if call.worker_ready {
-            call.ready_at = Some(Instant::now());
+            call.became_ready();
         } else {
             call.next_tone = Some(Instant::now());
         }
@@ -1270,10 +1269,9 @@ impl<P: CallPorts> Call<P> {
         let Some(worker) = self.worker.as_ref() else {
             return;
         };
-        // A worker that a page loaded ahead of the call logged its own start.
-        if worker.started_by() == "call" {
+        if let Some(started_by) = worker.ready_log_due() {
             let load_ms = worker.load_ms();
-            info!(load_ms, started_by = "call", "voice worker ready");
+            info!(load_ms, started_by, "voice worker ready");
         }
     }
 
@@ -2573,7 +2571,8 @@ impl<P: CallPorts> Call<P> {
             let _ = request.await;
         }
         if let Some(worker) = self.worker.take() {
-            if self.worker_ready && worker.started_by() == "call" {
+            // A worker kept for the next call is stopped later, by its keeper.
+            if self.worker_ready && !worker.kept() {
                 info!(reason = "call_ended", "voice worker stopped");
             }
             worker.close().await;

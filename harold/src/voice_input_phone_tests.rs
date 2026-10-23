@@ -1460,3 +1460,280 @@ async fn a_new_call_logs_a_refusal_again() {
         2
     );
 }
+
+// --- The voice worker loaded ahead of a call, while a web app page is on screen ---
+
+use super::worker::{EARLY_RETRY, Health, TEND_EVERY, WorkerError};
+use tokio::time::sleep as pause;
+
+/// A phone whose pages are watched: `pages` is how many are on screen.
+fn watched(keep: Duration) -> (Phone, Arc<AtomicUsize>) {
+    let base = FakePorts::new();
+    let calls = Arc::new(PhoneCalls::new(base.clone(), true).keeping_worker_for(keep));
+    let phone = Phone {
+        base,
+        calls,
+        said: Arc::default(),
+        unfetched: Arc::default(),
+        spoken: Arc::default(),
+    };
+    let pages = Arc::new(AtomicUsize::new(0));
+    let seen = Arc::clone(&pages);
+    phone
+        .calls
+        .watch_pages(Arc::new(move || seen.load(Ordering::SeqCst)));
+    (phone, pages)
+}
+
+const KEEP: Duration = Duration::from_secs(600);
+
+async fn some_looks(count: u32) {
+    for _ in 0..count {
+        pause(TEND_EVERY).await;
+        settle().await;
+    }
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn a_page_on_screen_loads_the_worker_and_a_call_takes_the_loaded_one() {
+    let logs = CapturedLogs::start();
+    let (phone, pages) = watched(KEEP);
+    some_looks(2).await;
+    assert_eq!(phone.base.worker_log().starts, 0, "no page, no worker");
+
+    pages.store(1, Ordering::SeqCst);
+    some_looks(2).await;
+
+    assert_eq!(phone.base.worker_log().starts, 1);
+    let text = logs.text();
+    assert!(text.contains("voice worker ready"), "{text}");
+    assert!(text.contains("started_by=\"page\""), "{text}");
+
+    // The call takes it: no worker of its own, no connecting, and no load to wait for.
+    let status = phone.start().await;
+    assert_eq!(status.state, CallState::Listening);
+    assert_eq!(phone.base.worker_log().starts, 1);
+    assert_eq!(phone.base.worker_log().closes, 0);
+    assert!(!logs.text().contains("started_by=\"call\""));
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn a_call_that_takes_a_loaded_worker_records_no_load_wait() {
+    crate::telemetry::test_support::install();
+    let (phone, pages) = watched(KEEP);
+    let (answerer, thread) = (
+        super::tests::FakeAnswerer::default(),
+        super::tests::FakeThread::default(),
+    );
+    phone.base.with_answering(answerer.clone(), thread);
+    pages.store(1, Ordering::SeqCst);
+    some_looks(2).await;
+    phone.script([text("how is the build")]);
+
+    phone.start().await;
+    phone.speak().await;
+
+    let trace = answerer.log().asked[0].trace;
+    let spans = crate::telemetry::test_support::spans();
+    let transcribe = spans
+        .iter()
+        .find(|span| span.name == "harold.call_transcribe" && span.span_context.trace_id() == trace)
+        .expect("the turn was transcribed");
+    assert_eq!(
+        crate::telemetry::test_support::span_attr(transcribe, "load_waited_ms").as_deref(),
+        Some("0")
+    );
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn the_worker_stops_ten_minutes_after_the_last_page_leaves_the_screen() {
+    let logs = CapturedLogs::start();
+    let (phone, pages) = watched(KEEP);
+    pages.store(1, Ordering::SeqCst);
+    some_looks(2).await;
+    assert_eq!(phone.base.worker_log().starts, 1);
+
+    pages.store(0, Ordering::SeqCst);
+    pause(Duration::from_secs(9 * 60)).await;
+    settle().await;
+    assert_eq!(phone.base.worker_log().closes, 0, "still kept at 9 minutes");
+    pause(Duration::from_secs(61)).await;
+    settle().await;
+
+    assert_eq!(phone.base.worker_log().closes, 1);
+    assert!(
+        logs.text()
+            .contains("voice worker stopped reason=\"no_page\"")
+    );
+    // A page that comes back loads it again.
+    pages.store(1, Ordering::SeqCst);
+    some_looks(1).await;
+    assert_eq!(phone.base.worker_log().starts, 2);
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn a_page_on_screen_keeps_the_worker_for_ever() {
+    let (phone, pages) = watched(KEEP);
+    pages.store(1, Ordering::SeqCst);
+    some_looks(2).await;
+
+    pause(Duration::from_secs(3 * 60 * 60)).await;
+    settle().await;
+
+    assert_eq!(phone.base.worker_log().starts, 1);
+    assert_eq!(phone.base.worker_log().closes, 0);
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn an_open_call_keeps_the_worker_and_it_goes_back_to_the_pool_when_the_call_ends() {
+    let logs = CapturedLogs::start();
+    let keep = Duration::from_secs(60);
+    let (phone, pages) = watched(keep);
+    pages.store(1, Ordering::SeqCst);
+    some_looks(2).await;
+    phone.start().await;
+    pages.store(0, Ordering::SeqCst);
+
+    // The call goes on for twice the keep time, with the phone posting its pieces.
+    for _ in 0..12 {
+        pause(Duration::from_secs(10)).await;
+        phone.post(Instant::now(), quiet(250));
+        settle().await;
+    }
+    assert_eq!(phone.base.worker_log().closes, 0, "an open call keeps it");
+    phone.calls.stop(false).await;
+    settle().await;
+
+    // The call does not end the worker it took: it stays for the next call.
+    assert_eq!(phone.base.worker_log().closes, 0);
+    assert!(!logs.text().contains("reason=\"call_ended\""));
+    pause(Duration::from_secs(50)).await;
+    settle().await;
+    assert_eq!(
+        phone.base.worker_log().closes,
+        0,
+        "the keep time starts at the call's end"
+    );
+    phone.start().await;
+    assert_eq!(
+        phone.base.worker_log().starts,
+        1,
+        "the next call takes it too"
+    );
+    phone.calls.stop(false).await;
+    settle().await;
+    pause(keep + Duration::from_secs(10)).await;
+    settle().await;
+    assert_eq!(phone.base.worker_log().closes, 1);
+    assert!(
+        logs.text()
+            .contains("voice worker stopped reason=\"no_page\"")
+    );
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn a_call_with_no_page_starts_its_own_worker_which_stays_for_the_keep_time() {
+    let logs = CapturedLogs::start();
+    let (phone, _pages) = watched(KEEP);
+
+    phone.start().await;
+    assert_eq!(phone.base.worker_log().starts, 1);
+    assert!(logs.text().contains("started_by=\"call\""));
+    phone.calls.stop(false).await;
+    settle().await;
+
+    assert_eq!(phone.base.worker_log().closes, 0);
+    pause(Duration::from_secs(11 * 60)).await;
+    settle().await;
+    assert_eq!(phone.base.worker_log().closes, 1);
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn nothing_is_loaded_ahead_of_a_call_until_the_speech_models_are_checked() {
+    let (phone, pages) = watched(KEEP);
+    let models = SpeechModels::stubbed(ModelsStatus::Checking);
+    phone.base.state().models = Some(Arc::clone(&models));
+    pages.store(1, Ordering::SeqCst);
+
+    some_looks(3).await;
+    assert_eq!(phone.base.worker_log().starts, 0);
+
+    models.set_status(ModelsStatus::Ready);
+    some_looks(1).await;
+    assert_eq!(phone.base.worker_log().starts, 1);
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn after_a_failed_early_load_none_starts_until_a_call_is_tapped_or_ten_minutes_pass() {
+    let logs = CapturedLogs::start();
+    let (phone, pages) = watched(KEEP);
+    phone.base.worker_log().starts_loading = true;
+    pages.store(1, Ordering::SeqCst);
+    some_looks(1).await;
+    assert_eq!(phone.base.worker_log().starts, 1);
+    let health = phone.base.worker_log().health.clone().unwrap();
+
+    health.send_replace(Health::Gone(WorkerError::FailedToLoad));
+    some_looks(1).await;
+    assert!(
+        logs.text()
+            .contains("voice worker exited reason=\"failed_to_load\"")
+    );
+    assert_eq!(phone.base.worker_log().closes, 1);
+
+    pause(EARLY_RETRY - Duration::from_secs(30)).await;
+    settle().await;
+    assert_eq!(
+        phone.base.worker_log().starts,
+        1,
+        "not again before ten minutes"
+    );
+    pause(Duration::from_secs(40)).await;
+    settle().await;
+    assert_eq!(phone.base.worker_log().starts, 2, "after ten minutes");
+
+    // A call that is tapped starts one at once, whatever the wait.
+    phone.base.worker_log().starts_loading = false;
+    let health = phone.base.worker_log().health.clone().unwrap();
+    health.send_replace(Health::Gone(WorkerError::FailedToLoad));
+    some_looks(1).await;
+    assert_eq!(phone.base.worker_log().starts, 2);
+    let status = phone.start().await;
+    assert_eq!(phone.base.worker_log().starts, 3);
+    assert_eq!(status.state, CallState::Listening);
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn an_early_worker_that_cannot_find_a_model_has_the_models_look_again() {
+    let (phone, pages) = watched(KEEP);
+    let models = SpeechModels::stubbed(ModelsStatus::Ready);
+    phone.base.state().models = Some(Arc::clone(&models));
+    phone.base.worker_log().starts_loading = true;
+    pages.store(1, Ordering::SeqCst);
+    some_looks(1).await;
+    let health = phone.base.worker_log().health.clone().unwrap();
+
+    health.send_replace(Health::Gone(WorkerError::LoadRefused(
+        super::worker::LoadFailure {
+            cause: super::worker::LoadCause::ModelMissing,
+            model: Some(super::models::WHISPER),
+        },
+    )));
+    some_looks(1).await;
+
+    assert_eq!(models.asked(), ["model_missing"]);
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn shutdown_lets_go_of_the_worker_held() {
+    let (phone, pages) = watched(KEEP);
+    pages.store(1, Ordering::SeqCst);
+    some_looks(2).await;
+
+    phone.calls.shutdown().await;
+
+    assert_eq!(phone.base.worker_log().closes, 1);
+    pause(Duration::from_secs(60)).await;
+    settle().await;
+    assert_eq!(phone.base.worker_log().starts, 1, "the keeper stopped too");
+}

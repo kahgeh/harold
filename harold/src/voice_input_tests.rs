@@ -87,7 +87,11 @@ pub(crate) struct WorkerLog {
     pub(crate) health: Option<Arc<watch::Sender<Health>>>,
 }
 
-pub(crate) struct FakeWorker(Arc<Mutex<WorkerLog>>, Arc<watch::Sender<Health>>);
+pub(crate) struct FakeWorker(
+    Arc<Mutex<WorkerLog>>,
+    Arc<watch::Sender<Health>>,
+    AtomicBool,
+);
 
 impl FakeWorker {
     /// Waits for the worker to finish loading, as a request to the real worker does.
@@ -107,6 +111,10 @@ impl FakeWorker {
 impl VoiceWorker for FakeWorker {
     fn health(&self) -> watch::Receiver<Health> {
         self.1.subscribe()
+    }
+
+    fn ready_log_due(&self) -> Option<&'static str> {
+        (!self.2.swap(true, Ordering::SeqCst)).then_some("call")
     }
 
     async fn transcribe(&mut self, wav: &Path) -> Result<Transcript, WorkerError> {
@@ -374,7 +382,11 @@ impl CallPorts for FakePorts {
         };
         let health = Arc::new(watch::channel(first).0);
         log.health = Some(Arc::clone(&health));
-        Ok(FakeWorker(Arc::clone(&self.0.worker), health))
+        Ok(FakeWorker(
+            Arc::clone(&self.0.worker),
+            health,
+            AtomicBool::new(false),
+        ))
     }
 
     fn panes(&self) -> &Fake {

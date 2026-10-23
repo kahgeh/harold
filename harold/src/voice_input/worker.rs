@@ -9,15 +9,15 @@ use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use std::process::Stdio;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 use tokio::io::{AsyncWriteExt, BufReader, Lines};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
-use tokio::time::timeout;
-use tracing::warn;
+use tokio::time::{Instant, timeout};
+use tracing::{info, warn};
 
 /// The worker's program, written into the call's folder when the call starts.
 pub(crate) const VOICE_WORKER_PY: &str = include_str!("../voice_worker.py");
@@ -179,9 +179,15 @@ pub(crate) trait VoiceWorker: Send + 'static {
     fn load_ms(&self) -> Option<u64> {
         None
     }
-    /// Who started the worker: `call` or, for one loaded ahead of a call, `page`.
-    fn started_by(&self) -> &'static str {
-        "call"
+    /// Who started the worker: `call` or, for one loaded ahead of a call, `page`. Asked once
+    /// the worker is ready, by whoever holds it: `Some` the first time only, so the
+    /// `voice worker ready` line is logged once.
+    fn ready_log_due(&self) -> Option<&'static str> {
+        None
+    }
+    /// Whether closing the worker keeps it for a later call instead of ending it.
+    fn kept(&self) -> bool {
+        false
     }
     fn transcribe(
         &mut self,
@@ -262,6 +268,8 @@ pub(crate) struct ProcessWorker {
     health: watch::Receiver<Health>,
     /// The load time in the ready line; `NO_LOAD_MS` until then or when the line has none.
     load_ms: Arc<AtomicU64>,
+    /// Whether the ready line has been logged.
+    ready_logged: AtomicBool,
     /// Tells the reader to kill the child, and why; dropping it kills the child too.
     kill: Option<oneshot::Sender<WorkerError>>,
     reader: JoinHandle<()>,
@@ -334,6 +342,7 @@ impl ProcessWorker {
             answers,
             health,
             load_ms,
+            ready_logged: AtomicBool::new(false),
             kill: Some(kill),
             reader,
         })
@@ -517,6 +526,10 @@ impl VoiceWorker for ProcessWorker {
         Some(self.load_ms.load(Ordering::SeqCst)).filter(|ms| *ms != NO_LOAD_MS)
     }
 
+    fn ready_log_due(&self) -> Option<&'static str> {
+        (!self.ready_logged.swap(true, Ordering::SeqCst)).then_some("call")
+    }
+
     async fn transcribe(&mut self, wav: &Path) -> Result<Transcript, WorkerError> {
         let reply = self
             .request(json!({"op": "transcribe", "wav": wav.to_string_lossy()}))
@@ -540,6 +553,278 @@ impl VoiceWorker for ProcessWorker {
             self.kill(WorkerError::Exited);
             let _ = (&mut self.reader).await;
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The worker kept ahead of a call (Choice A)
+// ---------------------------------------------------------------------------
+
+/// How often the keeper looks at the pages and at the worker it holds.
+pub(crate) const TEND_EVERY: Duration = Duration::from_secs(5);
+/// After an early load fails, the next waits this long, unless a call is tapped first.
+pub(crate) const EARLY_RETRY: Duration = Duration::from_secs(10 * 60);
+
+/// A worker the pool holds while no call has it.
+struct Idle<W> {
+    worker: W,
+    /// Who started it: `page` for one loaded ahead of a call, else `call`.
+    origin: &'static str,
+}
+
+struct PoolState<W> {
+    idle: Option<Idle<W>>,
+    /// The last time a page was on screen or a call was on.
+    last_active: Instant,
+    /// An early load does not start again before this, unless a call is tapped.
+    retry_after: Option<Instant>,
+    call_open: bool,
+    /// How long the worker is kept once no page is on screen and no call is on.
+    keep: Duration,
+}
+
+/// The voice worker, loaded while a web app page is on screen and kept for a while after:
+/// a phone call takes it if it is loaded or loading, and gives it back when the call ends.
+/// A pool that was never enabled passes every worker through: a call starts its own and ends
+/// it.
+pub(crate) struct WorkerPool<W: VoiceWorker> {
+    state: Mutex<PoolState<W>>,
+    enabled: AtomicBool,
+}
+
+fn is_alive<W: VoiceWorker>(worker: &W) -> bool {
+    matches!(*worker.health().borrow(), Health::Loading | Health::Ready)
+}
+
+impl<W: VoiceWorker> WorkerPool<W> {
+    pub(crate) fn new() -> Arc<Self> {
+        Arc::new(Self {
+            state: Mutex::new(PoolState {
+                idle: None,
+                last_active: Instant::now(),
+                retry_after: None,
+                call_open: false,
+                keep: Duration::from_secs(10 * 60),
+            }),
+            enabled: AtomicBool::new(false),
+        })
+    }
+
+    fn state(&self) -> std::sync::MutexGuard<'_, PoolState<W>> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Turns the early load on: the worker is kept `keep` after the last page and call.
+    pub(crate) fn enable(&self, keep: Duration) {
+        self.state().keep = keep;
+        self.enabled.store(true, Ordering::SeqCst);
+    }
+
+    pub(crate) fn enabled(&self) -> bool {
+        self.enabled.load(Ordering::SeqCst)
+    }
+
+    /// The worker for a call: the one held, if it is loaded or loading, else a new one from
+    /// `start`. A call that is tapped ends the wait after a failed early load.
+    pub(crate) fn for_call(
+        self: &Arc<Self>,
+        start: impl FnOnce() -> Result<W, WorkerError>,
+    ) -> Result<PooledWorker<W>, WorkerError> {
+        let held = {
+            let mut state = self.state();
+            state.retry_after = None;
+            state.idle.take()
+        };
+        if let Some(idle) = held.filter(|idle| is_alive(&idle.worker)) {
+            return Ok(PooledWorker {
+                worker: idle.worker,
+                pool: Arc::clone(self),
+                origin: idle.origin,
+            });
+        }
+        Ok(PooledWorker {
+            worker: start()?,
+            pool: Arc::clone(self),
+            origin: "call",
+        })
+    }
+
+    pub(crate) fn call_opened(&self) {
+        let mut state = self.state();
+        state.call_open = true;
+        state.last_active = Instant::now();
+    }
+
+    pub(crate) fn call_ended(&self) {
+        let mut state = self.state();
+        state.call_open = false;
+        state.last_active = Instant::now();
+    }
+
+    /// A call is done with its worker: it stays for the next call if it is alive and the pool
+    /// holds none, and is closed otherwise.
+    async fn take_back(&self, worker: W, origin: &'static str) {
+        let kept = self.enabled() && is_alive(&worker);
+        let spare = {
+            let mut state = self.state();
+            state.last_active = Instant::now();
+            if kept && state.idle.is_none() {
+                state.idle = Some(Idle { worker, origin });
+                None
+            } else {
+                Some(worker)
+            }
+        };
+        if let Some(worker) = spare {
+            worker.close().await;
+        }
+    }
+
+    /// One look: the worker held is logged ready, replaced when it has gone, and let go once
+    /// no page and no call has been on for `keep`; and one is started when a page is on
+    /// screen, no call has a worker, `models_ready` and an earlier early load did not fail
+    /// within `EARLY_RETRY`. `missing` hears of a model a worker could not find.
+    pub(crate) async fn tend(
+        self: &Arc<Self>,
+        page_on_screen: bool,
+        models_ready: bool,
+        start: impl FnOnce() -> Result<W, WorkerError>,
+        missing: impl FnOnce(&'static str),
+    ) {
+        if !self.enabled() {
+            return;
+        }
+        let now = Instant::now();
+        let (closing, lost) = {
+            let mut state = self.state();
+            if page_on_screen || state.call_open {
+                state.last_active = now;
+            }
+            let mut closing = None;
+            let mut lost = None;
+            let mut gone = None;
+            if let Some(idle) = &state.idle {
+                let health = *idle.worker.health().borrow();
+                match health {
+                    Health::Ready => {
+                        if idle.worker.ready_log_due().is_some() {
+                            let load_ms = idle.worker.load_ms();
+                            info!(load_ms, started_by = idle.origin, "voice worker ready");
+                        }
+                    }
+                    Health::Gone(error) => gone = Some(error),
+                    Health::Loading => {}
+                }
+            }
+            if let Some(error) = gone {
+                log_exited(error);
+                lost = Some(error);
+                state.retry_after = Some(now + EARLY_RETRY);
+                closing = state.idle.take().map(|idle| idle.worker);
+            } else if !page_on_screen
+                && !state.call_open
+                && state.idle.is_some()
+                && now.saturating_duration_since(state.last_active) >= state.keep
+            {
+                info!(reason = "no_page", "voice worker stopped");
+                closing = state.idle.take().map(|idle| idle.worker);
+            }
+            (closing, lost)
+        };
+        if let Some(worker) = closing {
+            worker.close().await;
+        }
+        if let Some(error) = lost
+            && error.cause() == Some(LoadCause::ModelMissing)
+            && let Some(model) = error.model()
+        {
+            missing(model);
+        }
+        let may_start = {
+            let state = self.state();
+            page_on_screen
+                && models_ready
+                && state.idle.is_none()
+                && !state.call_open
+                && state.retry_after.is_none_or(|after| now >= after)
+        };
+        if !may_start {
+            return;
+        }
+        match start() {
+            Ok(worker) => {
+                let spare = {
+                    let mut state = self.state();
+                    if state.idle.is_none() && !state.call_open {
+                        state.idle = Some(Idle {
+                            worker,
+                            origin: "page",
+                        });
+                        None
+                    } else {
+                        Some(worker)
+                    }
+                };
+                if let Some(worker) = spare {
+                    worker.close().await;
+                }
+            }
+            Err(error) => {
+                log_exited(error);
+                self.state().retry_after = Some(now + EARLY_RETRY);
+            }
+        }
+    }
+
+    /// Lets go of the worker held, when Harold stops.
+    pub(crate) async fn close_all(&self) {
+        let idle = self.state().idle.take();
+        if let Some(idle) = idle {
+            idle.worker.close().await;
+        }
+    }
+}
+
+/// A worker a call has from the pool. Closing it hands it back, so it stays for the next
+/// call, unless it has gone or the pool is off.
+pub(crate) struct PooledWorker<W: VoiceWorker> {
+    worker: W,
+    pool: Arc<WorkerPool<W>>,
+    origin: &'static str,
+}
+
+impl<W: VoiceWorker> VoiceWorker for PooledWorker<W> {
+    fn health(&self) -> watch::Receiver<Health> {
+        self.worker.health()
+    }
+
+    fn load_ms(&self) -> Option<u64> {
+        self.worker.load_ms()
+    }
+
+    fn ready_log_due(&self) -> Option<&'static str> {
+        self.worker.ready_log_due().map(|_| self.origin)
+    }
+
+    fn kept(&self) -> bool {
+        self.pool.enabled() && is_alive(&self.worker)
+    }
+
+    async fn transcribe(&mut self, wav: &Path) -> Result<Transcript, WorkerError> {
+        self.worker.transcribe(wav).await
+    }
+
+    async fn say(&mut self, text: &str, wav: &Path) -> Result<(), WorkerError> {
+        self.worker.say(text, wav).await
+    }
+
+    async fn close(self) {
+        let Self {
+            worker,
+            pool,
+            origin,
+        } = self;
+        pool.take_back(worker, origin).await;
     }
 }
 

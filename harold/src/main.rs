@@ -1017,7 +1017,12 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
             })
         });
         Arc::new(web_app::call::AppCalls::new(
-            voice_input::PhoneCalls::new(ports, set_up),
+            voice_input::PhoneCalls::new(ports, set_up).keeping_worker_for(Duration::from_secs(
+                60 * cfg
+                    .voice_input
+                    .as_ref()
+                    .map_or(10, |v| v.keep_worker_minutes),
+            )),
             Arc::clone(&store),
             end_desk,
         ))
