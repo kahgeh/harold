@@ -648,7 +648,7 @@ impl ModelRunner for ClaudeRunner {
 }
 
 /// Ends the process group of a run that is dropped before it finished.
-struct GroupGuard(Option<u32>);
+pub(super) struct GroupGuard(pub(super) Option<u32>);
 
 impl Drop for GroupGuard {
     fn drop(&mut self) {
@@ -696,7 +696,7 @@ async fn exchange(child: &mut Child, prompt: &[u8]) -> Option<(Vec<u8>, bool, St
 
 /// Sends SIGKILL to every process in the group led by `pid`. Nothing to kill is not an
 /// error: the group may have ended with its leader.
-async fn kill_group(pid: u32) {
+pub(super) async fn kill_group(pid: u32) {
     let group = format!("-{pid}");
     let _ = Command::new("/bin/kill")
         .args(["-KILL", "--", &group])

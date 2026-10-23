@@ -6,6 +6,7 @@ mod call;
 mod hand_over;
 mod hang_up;
 mod mac;
+mod models;
 mod phone;
 mod phrases;
 mod speech;
@@ -15,6 +16,9 @@ mod worker;
 pub(crate) use answerer::{CallAnswering, daemon_call_answering};
 use call::{Ended, Event, chief_pane, lock, run_call, sweep_call_folders};
 pub(crate) use mac::MacPorts;
+pub(crate) use models::{
+    Env as ModelsEnv, Missing, SpeechModels, Status as ModelsStatus, SystemHost,
+};
 #[cfg_attr(not(test), allow(unused_imports))]
 pub(crate) use phone::{
     ANSWER_KEEP, AudioRefused, PHONE_SILENT_LIMIT, PIECE_LIMIT_BYTES, PIECES_QUEUED, PLAY_GRACE,
@@ -131,6 +135,17 @@ pub(crate) trait CallPorts: Send + Sync + 'static {
     /// Whether Harold's voice is muted now (`outbound::is_tts_muted` in the daemon). Decision 17.
     fn voice_muted(&self) -> bool;
     fn keep_awake(&self) -> Result<Self::Awake, String>;
+    /// The call has opened: its sounds are offered from now on. Does nothing by default.
+    fn call_opened(&self) {}
+    /// The speech models the call waits for before its worker starts; `None` leaves the worker
+    /// to start at once. The daemon's are set at start-up (`init_speech_models`).
+    fn speech_models(&self) -> Option<Arc<SpeechModels>> {
+        daemon_speech_models()
+    }
+    /// The call ends because `missing` is not on the Mac. Does nothing by default.
+    fn model_missing(&self, missing: &Missing) {
+        let _ = missing;
+    }
     /// A call ended, for `reason` (the `reason` of its `call ended` line). Does nothing by default.
     fn call_ended(&self, reason: &'static str) {
         let _ = reason;
@@ -153,6 +168,9 @@ pub(crate) enum CallState {
     /// No `[voice_input]`: no call can start.
     NotSetUp,
     Off,
+    /// The call is open and the voice worker cannot listen yet: it is loading, or a speech
+    /// model is still being fetched.
+    Connecting,
     Listening,
     Transcribing,
     /// A turn was typed and the chief has not answered yet.
@@ -201,6 +219,9 @@ pub(crate) struct CallStatus {
     /// The last transcript typed into the chief's pane in this call.
     pub last_transcript: Option<String>,
     pub last_result: Option<TurnResult>,
+    /// How far a speech model's download has come, in whole percent, while the call
+    /// connects.
+    pub model_percent: Option<u8>,
 }
 
 /// Who sent a line said into an open call.
@@ -250,6 +271,7 @@ impl<P: CallPorts> CallControl<P> {
                 chief_pane_id: None,
                 last_transcript: None,
                 last_result: None,
+                model_percent: None,
             })),
             call: Mutex::new(None),
         }
@@ -388,6 +410,23 @@ pub(crate) fn init_daemon_calls(calls: DaemonCalls) {
         DAEMON_CALLS.set(calls).is_ok(),
         "init_daemon_calls called more than once"
     );
+}
+
+static SPEECH_MODELS: OnceLock<Arc<SpeechModels>> = OnceLock::new();
+
+/// Sets the daemon's speech models, once, at start-up, and starts looking at them.
+pub(crate) fn init_speech_models(models: Arc<SpeechModels>) {
+    models.start_up();
+    assert!(
+        SPEECH_MODELS.set(models).is_ok(),
+        "init_speech_models called more than once"
+    );
+}
+
+/// The daemon's speech models; `None` before start-up sets them, without `[voice_input]`, in
+/// `--diagnostics` and in tests.
+pub(crate) fn daemon_speech_models() -> Option<Arc<SpeechModels>> {
+    SPEECH_MODELS.get().cloned()
 }
 
 static CALL_ANSWERING: OnceLock<Arc<CallAnswering>> = OnceLock::new();

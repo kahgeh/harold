@@ -1,7 +1,8 @@
-<section id="call" class="call" data-harold-state="{{ state }}" data-harold-sound="{{ sound_id }}" data-harold-speech="{{ speech_id }}" data-harold-speech-text="{{ speech_text }}">
+<section id="call" class="call" data-harold-state="{{ state }}" data-harold-sound="{{ sound_id }}" data-harold-speech="{{ speech_id }}" data-harold-speech-text="{{ speech_text }}" data-harold-notice="{{ notice }}">
 <div class="call-status">
 {% if state == "speaking" %}<p class="call-icon" aria-hidden="true">📞 <span class="bars"><i></i><i></i><i></i><i></i><i></i></span></p>
 {% endif %}{% if !title.is_empty() %}<h2 class="call-title">{{ title }}</h2>
+{% endif %}{% if state == "connecting" %}<p class="call-hint">{{ hint }}</p>
 {% endif %}{% if state == "listening" || state == "thinking" %}<p class="call-hint">Say "bye" or tap End to hang up</p>
 {% if let Some(transcript) = transcript %}<p class="call-heard">You said:<br><span>"🎙 {{ transcript }}"</span></p>
 {% endif %}{% endif %}{% if let Some(line) = line %}<p class="call-line">"{{ line }}"</p>

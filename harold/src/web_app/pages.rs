@@ -18,7 +18,7 @@ use super::todos::{TodoCount, TodosSection};
 use super::updates::{UpdatesQuery, oldest_signal};
 use super::{AppState, DATASTAR_JS, WebAppIdentity, thread_start_ms};
 use crate::store::{AppMessage, AppPhoto, AppReplyState, AppSender};
-use crate::voice_input::{CallState, PhoneView, Said, Speaker};
+use crate::voice_input::{CallState, Missing, PhoneView, Said, Speaker};
 
 /// The content security policy every response carries: Harold's own scripts, styles and
 /// files only, nothing inline and nothing from another site.
@@ -271,7 +271,7 @@ pub(crate) fn dots_show(awaiting: bool, chief: &ChiefPane) -> bool {
 #[derive(Template)]
 #[template(path = "web_app/call.html")]
 pub(crate) struct CallSection {
-    /// `off`, `listening`, `thinking` or `speaking`.
+    /// `off`, `connecting`, `listening`, `thinking` or `speaking`.
     pub state: &'static str,
     /// What the call is doing, in the screen's words; empty when off.
     pub title: &'static str,
@@ -284,6 +284,10 @@ pub(crate) struct CallSection {
     /// The line to say in the phone's own voice, and its text; empty when none.
     pub speech_id: String,
     pub speech_text: String,
+    /// What the screen says under the title while the call connects.
+    pub hint: String,
+    /// Why the call ended, for the page to show in `#call-notice`; empty when there is none.
+    pub notice: String,
 }
 
 impl CallSection {
@@ -297,7 +301,18 @@ impl CallSection {
             sound_id: String::new(),
             speech_id: String::new(),
             speech_text: String::new(),
+            hint: String::new(),
+            notice: String::new(),
         }
+    }
+}
+
+/// The hint of a call that is connecting: how far the speech model's download has come, or
+/// what to wait for.
+fn connecting_hint(percent: Option<u8>) -> String {
+    match percent {
+        Some(percent) => format!("Getting the speech model: {percent}%"),
+        None => "Wait for the tone to stop".to_string(),
     }
 }
 
@@ -314,7 +329,19 @@ impl From<&PhoneView> for CallSection {
         });
         // The tick plays while the chief thinks, so the title follows the state.
         let (state, title) = match view.state {
-            CallState::NotSetUp | CallState::Off => return Self::off(),
+            CallState::NotSetUp => return Self::off(),
+            CallState::Off => {
+                // A call that ended because a speech model is not on the Mac says why.
+                return Self {
+                    notice: view
+                        .missing
+                        .as_ref()
+                        .map(Missing::notice)
+                        .unwrap_or_default(),
+                    ..Self::off()
+                };
+            }
+            CallState::Connecting => ("connecting", "Connecting…"),
             CallState::Listening | CallState::Transcribing => ("listening", "Listening"),
             CallState::Waiting => ("thinking", "Chief is thinking"),
             CallState::Speaking if chief_line => ("speaking", "Chief speaking"),
@@ -344,6 +371,12 @@ impl From<&PhoneView> for CallSection {
                 .map(|speech| speech.id.clone())
                 .unwrap_or_default(),
             speech_text: speech_text.cloned().unwrap_or_default(),
+            hint: if view.state == CallState::Connecting {
+                connecting_hint(view.model_percent)
+            } else {
+                String::new()
+            },
+            notice: String::new(),
         }
     }
 }

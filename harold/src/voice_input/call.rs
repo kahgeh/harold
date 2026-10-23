@@ -7,17 +7,18 @@
 use super::answerer::{Answer, Ask, CallAnswering, CallSoFar, Failure, Remark, Who};
 use super::hand_over::HandOvers;
 use super::hang_up::{Spoken, hang_up};
+use super::models::Status as ModelsStatus;
 use super::phone::sound_length;
 use super::phrases::{
-    BYE, CHIEF_BUSY, FROM_THE_CHIEF, NO_CHIEF, NOTHING_HEARD, PASSED_ON, VOICE_FAILED,
-    VOICE_STOPPED, phrase_file,
+    BYE, CHIEF_BUSY, FROM_THE_CHIEF, MODEL_MISSING, NO_CHIEF, NOTHING_HEARD, ONE_MOMENT, PASSED_ON,
+    VOICE_FAILED, VOICE_STOPPED, phrase_file,
 };
 use super::speech::{FRAME, MAX_TURN_FRAMES, START_FRAMES, SpeechDetector};
-use super::wav::{tick_wav, wav_bytes};
-use super::worker::{Health, Transcript, VoiceWorker, WorkerError};
+use super::wav::{connecting_wav, tick_wav, wav_bytes};
+use super::worker::{Health, LoadCause, Transcript, VoiceWorker, WorkerError, log_exited};
 use super::{
     AudioSink, AudioSource, CallPorts, CallState, CallStatus, SAMPLE_RATE, Said, Speaker,
-    TurnResult,
+    SpeechModels, TurnResult,
 };
 use crate::agent::domain::EffectiveAgentState;
 use crate::away_message::one_line;
@@ -26,7 +27,7 @@ use crate::telemetry::{self, StartedBy};
 use crate::timed_prompts::{
     AgentPane, AgentsView, Attempt, Ports, Reason, Writer, type_when_ready,
 };
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -65,7 +66,10 @@ const RUN_LIMIT: Duration = Duration::from_secs(30);
 const REMARKS_KEPT: usize = 40;
 /// The mark in front of each turn typed into the chief's pane.
 pub(super) const MARK: &str = "🎙";
+/// How often the connecting tone plays while the call connects.
+const TONE_EVERY: Duration = Duration::from_millis(1500);
 const TICK_WAV: &str = "tick.wav";
+const CONNECTING_WAV: &str = "connecting.wav";
 const TURN_WAV: &str = "turn.wav";
 
 /// Why a call ended: the `reason` of `call ended` (Decision 15).
@@ -306,14 +310,16 @@ fn private_dir(dir: &Path) -> std::io::Result<()> {
     std::fs::DirBuilder::new().mode(0o700).create(dir)
 }
 
-/// Makes `<calls>/call-<uuid>/` for the user only, and writes the tick into it.
+/// Makes `<calls>/call-<uuid>/` for the user only, and writes the tick and the connecting
+/// tone into it.
 fn make_call_dir(calls: &Path, dir: &Path) -> std::io::Result<()> {
     std::fs::DirBuilder::new()
         .recursive(true)
         .mode(0o700)
         .create(calls)?;
     private_dir(dir)?;
-    std::fs::write(dir.join(TICK_WAV), tick_wav())
+    std::fs::write(dir.join(TICK_WAV), tick_wav())?;
+    std::fs::write(dir.join(CONNECTING_WAV), connecting_wav())
 }
 
 /// Removes the `call-*` folders under `calls` that a Harold which did not end its calls
@@ -375,6 +381,9 @@ enum Job {
     Make { id: u64, text: String, wav: PathBuf },
 }
 
+/// The worker's first job when a phrase is not kept yet is `Job::Make` for a phrase no sound
+/// waits for; `Call::warm` holds where it is kept.
+
 /// What a sound is, as the voice and play spans name it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Source {
@@ -384,6 +393,8 @@ enum Source {
     Phrase,
     OtherAgent,
     Tick,
+    /// The tone that plays while the call connects.
+    Connecting,
     /// The call answerer's `say`.
     Answer,
 }
@@ -396,6 +407,7 @@ impl Source {
             Self::Phrase => "phrase",
             Self::OtherAgent => "other_agent",
             Self::Tick => "tick",
+            Self::Connecting => "connecting",
             Self::Answer => "answer",
         }
     }
@@ -613,6 +625,23 @@ struct Call<P: CallPorts> {
     /// The health of the call's worker, while it is followed.
     health: Option<watch::Receiver<Health>>,
     worker_ready: bool,
+    /// The call has not heard its worker ready yet: the screen says so, and the connecting
+    /// tone plays.
+    connecting: bool,
+    /// When the next connecting tone is due, while the call connects.
+    next_tone: Option<Instant>,
+    /// When the worker became ready.
+    ready_at: Option<Instant>,
+    /// When the turn at the worker was queued.
+    transcribe_queued_at: Option<Instant>,
+    /// The speech models, followed while the worker waits for them.
+    models_rx: Option<watch::Receiver<ModelsStatus>>,
+    /// The speech models the call asked about.
+    models: Option<Arc<SpeechModels>>,
+    /// Whether the worker has already been started again for a model it could not find.
+    models_retried: bool,
+    /// Phrases the worker makes only to keep: the job's id and where the phrase is kept.
+    warm: HashMap<u64, PathBuf>,
     request: Option<JoinHandle<()>>,
     jobs: VecDeque<Job>,
     worker_exits: u32,
@@ -709,14 +738,27 @@ impl<P: CallPorts> Call<P> {
                 return None;
             }
         };
-        let worker = match ports.start_worker(&dir) {
-            Ok(worker) => worker,
-            Err(error) => {
-                let reason = error.exit_reason().unwrap_or("failed_to_load");
-                warn!(reason, "voice worker exited");
-                not_opened.close(started, Ended::VoiceFailed).await;
-                return None;
+        // A call asks the speech models first: one held back or failed starts its download
+        // now. The worker starts once they are all on the Mac.
+        let models = ports.speech_models();
+        if let Some(models) = &models {
+            models.for_call();
+        }
+        let models_rx = models.as_ref().map(|models| models.status());
+        let models_ready = models_rx
+            .as_ref()
+            .is_none_or(|status| *status.borrow() == ModelsStatus::Ready);
+        let worker = if models_ready {
+            match ports.start_worker(&dir) {
+                Ok(worker) => Some(worker),
+                Err(error) => {
+                    log_exited(error);
+                    not_opened.close(started, Ended::VoiceFailed).await;
+                    return None;
+                }
             }
+        } else {
+            None
         };
         let blocks = events.clone();
         let reader = tokio::spawn(async move {
@@ -745,6 +787,14 @@ impl<P: CallPorts> Call<P> {
             generation: 0,
             health: None,
             worker_ready: false,
+            connecting: true,
+            next_tone: None,
+            ready_at: None,
+            transcribe_queued_at: None,
+            models_rx: None,
+            models,
+            models_retried: false,
+            warm: HashMap::new(),
             request: None,
             jobs: VecDeque::new(),
             worker_exits: 0,
@@ -775,9 +825,29 @@ impl<P: CallPorts> Call<P> {
             remarks: Vec::new(),
             hand_overs: HandOvers::default(),
         };
-        call.watch_worker(&worker);
-        call.worker = Some(worker);
+        match worker {
+            Some(worker) => {
+                call.watch_worker(&worker);
+                call.worker = Some(worker);
+            }
+            None => {
+                // Look at the models now: one that has already failed ends the call.
+                let mut status = models_rx;
+                if let Some(status) = status.as_mut() {
+                    status.mark_changed();
+                }
+                call.models_rx = status;
+            }
+        }
+        call.connecting = !call.worker_ready;
+        if call.worker_ready {
+            call.ready_at = Some(Instant::now());
+        } else {
+            call.next_tone = Some(Instant::now());
+        }
+        call.warm_phrase();
         call.publish();
+        call.ports.call_opened();
         started.send_replace(true);
         Some(call)
     }
@@ -798,6 +868,9 @@ impl<P: CallPorts> Call<P> {
                 () = sleep_until(wake.unwrap_or(far)), if wake.is_some() => self.on_timer().await,
                 health = health_change(&mut self.health), if self.health.is_some() => {
                     self.health_changed(health).await;
+                }
+                status = models_change(&mut self.models_rx), if self.models_rx.is_some() => {
+                    self.models_changed(status).await;
                 }
             }
         }
@@ -948,8 +1021,10 @@ impl<P: CallPorts> Call<P> {
             "harold.call_transcribe",
             audio_ms,
             waited_ms = tracing::field::Empty,
+            load_waited_ms = tracing::field::Empty,
             result = tracing::field::Empty
         ));
+        self.transcribe_queued_at = Some(Instant::now());
         self.jobs.push_back(Job::Transcribe {
             dir,
             queued_at: Instant::now(),
@@ -1036,6 +1111,14 @@ impl<P: CallPorts> Call<P> {
     ) {
         self.request = None;
         let span = self.transcribing.take();
+        if let (Some(span), Some(queued_at)) = (&span, self.transcribe_queued_at.take()) {
+            // How long the turn waited for the worker to finish loading: none when the worker
+            // was ready before the turn was cut.
+            let waited = self.ready_at.map_or(Duration::ZERO, |ready| {
+                ready.saturating_duration_since(queued_at)
+            });
+            span.record("load_waited_ms", millis(waited));
+        }
         let error = match result {
             Ok(transcript) => {
                 if let Some(span) = span {
@@ -1074,6 +1157,17 @@ impl<P: CallPorts> Call<P> {
         worker: P::Worker,
     ) {
         self.request = None;
+        if let Some(keep_as) = self.warm.remove(&id) {
+            self.keep_warm(result.is_ok(), &wav, &keep_as);
+            match result {
+                Ok(()) | Err(WorkerError::Failed) => self.worker_back(generation, worker).await,
+                Err(error) => {
+                    worker.close().await;
+                    self.worker_died(generation, error).await;
+                }
+            }
+            return;
+        }
         let at = self.sounds.iter().position(|sound| sound.id == id);
         match result {
             Ok(()) => {
@@ -1162,9 +1256,76 @@ impl<P: CallPorts> Call<P> {
     async fn health_changed(&mut self, health: Health) {
         match health {
             Health::Loading => {}
-            Health::Ready => self.worker_ready = true,
+            Health::Ready => self.became_ready(),
             Health::Gone(error) => self.worker_died(self.generation, error).await,
         }
+    }
+
+    /// The worker is ready: the call connects, and the connecting tone stops.
+    fn became_ready(&mut self) {
+        self.worker_ready = true;
+        self.ready_at.get_or_insert_with(Instant::now);
+        self.connecting = false;
+        self.next_tone = None;
+        let Some(worker) = self.worker.as_ref() else {
+            return;
+        };
+        // A worker that a page loaded ahead of the call logged its own start.
+        if worker.started_by() == "call" {
+            let load_ms = worker.load_ms();
+            info!(load_ms, started_by = "call", "voice worker ready");
+        }
+    }
+
+    /// The speech models changed while the worker waits for them: the worker starts when they
+    /// are all on the Mac, and the call ends when one will not come.
+    async fn models_changed(&mut self, status: ModelsStatus) {
+        match status {
+            ModelsStatus::Ready if self.worker.is_none() => self.start_worker_again().await,
+            ModelsStatus::Ready => self.models_rx = None,
+            ModelsStatus::Failed(missing) => {
+                self.models_rx = None;
+                self.ports.model_missing(&missing);
+                warn!(model = %missing.model, reason = missing.reason, "call ended for a speech model");
+                self.end_turn(Some("voice_failed"));
+                self.end(Ended::VoiceFailed, Some(MODEL_MISSING)).await;
+            }
+            ModelsStatus::Checking | ModelsStatus::Waiting | ModelsStatus::Downloading { .. } => {}
+        }
+    }
+
+    /// Starts the worker the call was waiting for the speech models to start.
+    async fn start_worker_again(&mut self) {
+        self.models_rx = None;
+        match self.ports.start_worker(&self.dir) {
+            Ok(worker) => {
+                self.watch_worker(&worker);
+                self.worker = Some(worker);
+                if self.worker_ready {
+                    self.became_ready();
+                }
+            }
+            Err(error) => {
+                log_exited(error);
+                self.end(Ended::VoiceFailed, Some(VOICE_FAILED)).await;
+            }
+        }
+    }
+
+    /// The worker could not find `model`: the models look at it again, and the worker starts
+    /// again when they are done. Once for each call.
+    fn wait_for_model(&mut self, model: &str) {
+        let Some(models) = self.models.clone() else {
+            return;
+        };
+        self.models_retried = true;
+        models.model_missing(model);
+        let mut status = models.status();
+        status.mark_changed();
+        self.models_rx = Some(status);
+        self.connecting = true;
+        self.ready_at = None;
+        self.next_tone = Some(Instant::now());
     }
 
     /// The worker of `generation` has gone, seen through its health or a request; each
@@ -1175,27 +1336,47 @@ impl<P: CallPorts> Call<P> {
         if self.done || generation != self.generation {
             return;
         }
-        let reason = error.exit_reason().unwrap_or("exited");
-        warn!(reason, "voice worker exited");
+        log_exited(error);
+        if self.worker_ready {
+            info!(reason = "exited", "voice worker stopped");
+        }
         self.generation += 1;
         self.health = None;
         if let Some(worker) = self.worker.take() {
             worker.close().await;
         }
+        // A speech model the worker could not find may be on its way: look again, once.
+        if let (Some(model), false) = (error.model(), self.models_retried)
+            && error.cause() == Some(LoadCause::ModelMissing)
+            && self.models.is_some()
+        {
+            self.wait_for_model(model);
+            return;
+        }
+        if let (Some(model), Some(models)) = (error.model(), self.models.as_ref())
+            && error.cause() == Some(LoadCause::ModelMissing)
+        {
+            // Still missing after the models were looked at again.
+            let missing = models.missing(model, "failed");
+            self.ports.model_missing(&missing);
+            if self.mode == Mode::Transcribing {
+                self.dropped(TurnResult::Failed);
+            }
+            self.end(Ended::VoiceFailed, Some(MODEL_MISSING)).await;
+            return;
+        }
         self.worker_exits += 1;
-        let restarted =
-            if error == WorkerError::FailedToLoad || !self.worker_ready || self.worker_exits > 1 {
-                None
-            } else {
-                match self.ports.start_worker(&self.dir) {
-                    Ok(worker) => Some(worker),
-                    Err(error) => {
-                        let reason = error.exit_reason().unwrap_or("failed_to_load");
-                        warn!(reason, "voice worker exited");
-                        None
-                    }
+        let restarted = if error.is_load_failure() || !self.worker_ready || self.worker_exits > 1 {
+            None
+        } else {
+            match self.ports.start_worker(&self.dir) {
+                Ok(worker) => Some(worker),
+                Err(error) => {
+                    log_exited(error);
+                    None
                 }
-            };
+            }
+        };
         let Some(worker) = restarted else {
             if self.mode == Mode::Transcribing {
                 self.dropped(TurnResult::Failed);
@@ -1256,14 +1437,34 @@ impl<P: CallPorts> Call<P> {
         }
         if self.answerer_usable() {
             let ports = &self.ports;
-            let trace = self
+            let mut trace = self
                 .turn
                 .take()
                 .unwrap_or_else(|| TurnTrace::open(ports.call_from()));
+            self.one_moment(&mut trace);
             self.queued.push_back(QueuedTurn { text, trace });
             return;
         }
         self.turn_to_chief(text).await;
+    }
+
+    /// Says `One moment.` for a turn that goes to the call answerer. It is the first sound of
+    /// the turn, and the answer is queued behind it, so it never plays over the phrase.
+    fn one_moment(&mut self, trace: &mut TurnTrace) {
+        self.phrase(ONE_MOMENT, After::Nothing);
+        let Some(sound) = self.sounds.back_mut() else {
+            return;
+        };
+        // The phrase notes the turn's first sound on the turn's span; the turn itself notes
+        // only its answer.
+        sound.owned = Some(TurnTrace {
+            span: trace.span.clone(),
+            cut_at: trace.cut_at,
+            typed: false,
+            first_sound_noted: trace.first_sound_noted,
+            answer_noted: true,
+        });
+        trace.first_sound_noted = true;
     }
 
     /// Types the turn into the chief's pane, as every turn was before the call answerer.
@@ -1638,6 +1839,7 @@ impl<P: CallPorts> Call<P> {
         let idle = std::iter::once(self.active_at + IDLE_LIMIT);
         held.chain(awaiting)
             .chain(running)
+            .chain(self.next_tone)
             .chain(self.hold_others_until)
             .chain(idle)
             .min()
@@ -1656,6 +1858,17 @@ impl<P: CallPorts> Call<P> {
         }
         self.await_answer(now);
         self.await_run(now).await;
+        if self.connecting
+            && let Some(due) = self.next_tone
+            && now >= due
+        {
+            let mut next = due;
+            while next <= now {
+                next += TONE_EVERY;
+            }
+            self.next_tone = Some(next);
+            self.play_connecting();
+        }
         if self.hold_others_until.is_some_and(|until| now >= until) {
             self.hold_others_until = None;
         }
@@ -1667,7 +1880,8 @@ impl<P: CallPorts> Call<P> {
     /// Ends a call that nothing happened in for `IDLE_LIMIT`, so a call left open does not
     /// keep the display awake for good. A call doing something then starts its clock again.
     fn idle(&mut self, now: Instant) {
-        let quiet = self.mode == Mode::Listening
+        let quiet = !self.connecting
+            && self.mode == Mode::Listening
             && self.run.is_none()
             && self.queued.is_empty()
             && !self.detector.in_turn()
@@ -2044,6 +2258,67 @@ impl<P: CallPorts> Call<P> {
         });
     }
 
+    /// The connecting tone, when nothing else plays and the user is not speaking.
+    fn play_connecting(&mut self) {
+        if self.playing.is_some()
+            || !self.sounds.is_empty()
+            || (self.mode == Mode::Listening && self.detector.in_turn())
+        {
+            return;
+        }
+        let id = self.new_id();
+        let span = self.play_span(Source::Connecting, None);
+        let task = self.spawn_play(id, self.dir.join(CONNECTING_WAV), Said::Tick, span);
+        self.playing = Some(Playing {
+            id,
+            task,
+            by_tts: false,
+            stopped: false,
+            sound: None,
+        });
+    }
+
+    /// Has the worker make `One moment.` as its first job, and keep it, when this voice has
+    /// none kept yet: the first answered turn then finds it ready.
+    fn warm_phrase(&mut self) {
+        if !self.answerer_usable() {
+            return;
+        }
+        let kept = phrase_file(
+            &self.ports.phrases_dir(),
+            &self.ports.voice_name(),
+            ONE_MOMENT,
+        );
+        if kept.is_file() {
+            return;
+        }
+        let id = self.new_id();
+        let wav = self.dir.join(format!("phrase-{}.wav", Uuid::new_v4()));
+        self.warm.insert(id, kept);
+        self.jobs.push_front(Job::Make {
+            id,
+            text: ONE_MOMENT.to_string(),
+            wav,
+        });
+    }
+
+    /// Moves a phrase the worker made to keep into the phrase folder, or removes the file.
+    fn keep_warm(&self, made: bool, wav: &Path, keep_as: &Path) {
+        if !made {
+            let _ = std::fs::remove_file(wav);
+            return;
+        }
+        let kept = std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&self.ports.phrases_dir())
+            .and_then(|()| std::fs::rename(wav, keep_as));
+        if let Err(error) = kept {
+            warn!(error = %error, "phrase not kept");
+            let _ = std::fs::remove_file(wav);
+        }
+    }
+
     /// Opens the `harold.call_play` span of a sound, which the task playing it runs in.
     fn play_span(&self, source: Source, turn: Option<&tracing::Span>) -> tracing::Span {
         tracing::info_span!(
@@ -2184,12 +2459,19 @@ impl<P: CallPorts> Call<P> {
             .is_some_and(|playing| playing.sound.is_some() && !playing.stopped);
         let state = match self.mode {
             _ if speaking => CallState::Speaking,
+            Mode::Listening | Mode::Transcribing if self.connecting => CallState::Connecting,
             Mode::Listening => CallState::Listening,
             Mode::Transcribing => CallState::Transcribing,
             Mode::Waiting => CallState::Waiting,
             Mode::Ending => CallState::Speaking,
         };
-        lock(&self.status).state = state;
+        let percent = self
+            .models_rx
+            .as_ref()
+            .and_then(|status| status.borrow().percent());
+        let mut status = lock(&self.status);
+        status.state = state;
+        status.model_percent = percent.filter(|_| self.connecting);
     }
 
     /// Logs the end of a call that listened, with how much sound it read and how loud.
@@ -2291,6 +2573,9 @@ impl<P: CallPorts> Call<P> {
             let _ = request.await;
         }
         if let Some(worker) = self.worker.take() {
+            if self.worker_ready && worker.started_by() == "call" {
+                info!(reason = "call_ended", "voice worker stopped");
+            }
             worker.close().await;
         }
         remove_call_folder(&self.dir);
@@ -2314,6 +2599,20 @@ async fn health_change(health: &mut Option<watch::Receiver<Health>>) -> Health {
     let now = *receiver.borrow_and_update();
     if changed.is_err() {
         *health = None;
+    }
+    now
+}
+
+/// The next status `status` reports. Once the speech models are gone for good, `status` is
+/// set to `None` and is no longer followed. Cancel-safe.
+async fn models_change(status: &mut Option<watch::Receiver<ModelsStatus>>) -> ModelsStatus {
+    let Some(receiver) = status.as_mut() else {
+        return std::future::pending().await;
+    };
+    let changed = receiver.changed().await;
+    let now = receiver.borrow_and_update().clone();
+    if changed.is_err() {
+        *status = None;
     }
     now
 }

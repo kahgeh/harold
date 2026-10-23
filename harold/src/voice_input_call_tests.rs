@@ -3,7 +3,7 @@
 //! the final review: the idle end, the mid-call mute end and the talk-now hold's limit.
 
 use super::super::hand_over::{HandOverFact, HandOverState};
-use super::super::phrases::{FROM_THE_CHIEF, PASSED_ON, phrase_file};
+use super::super::phrases::{FROM_THE_CHIEF, ONE_MOMENT, PASSED_ON, phrase_file};
 use super::super::wav::wav_bytes;
 use super::answerer::{Failure, Remark, Who};
 use super::*;
@@ -36,8 +36,14 @@ async fn a_turn_in_hand_when_the_load_fails_is_dropped() {
     h.worker().starts_loading = true;
     h.script([Heard::TimeOut]);
     h.start().await;
+    // The connecting tone has played, and the microphone is not heard in its tail: the
+    // background level is read after it.
+    past_the_tail().await;
+    h.feed(quiet(500));
+    settle().await;
     h.speak().await;
-    assert_eq!(h.state(), CallState::Transcribing);
+    // The worker is still loading, so the screen says the call is connecting.
+    assert_eq!(h.state(), CallState::Connecting);
 
     h.set_health(Health::Gone(WorkerError::FailedToLoad));
     settle().await;
@@ -112,6 +118,8 @@ async fn a_worker_that_never_says_ready_fails_its_load_after_120_s() {
         tts_model: "tts".into(),
         voice: "af_heart".into(),
         lang_code: "a".into(),
+        stt_pin: None,
+        tts_pin: None,
     };
     let worker = ProcessWorker::start(&command, &folder).unwrap();
     let started = Instant::now();
@@ -1114,7 +1122,7 @@ async fn the_answerer_answers_a_turn_and_nothing_is_typed_into_the_chief() {
 
     h.speak().await;
 
-    assert_eq!(h.played(), ["Nothing is building."]);
+    assert_eq!(h.played(), [ONE_MOMENT, "Nothing is building."]);
     assert!(h.keys().is_empty());
     assert_eq!(answerer.log().asked.len(), 1);
     assert_eq!(answerer.log().asked[0].words, "is anything building");
@@ -1129,7 +1137,7 @@ async fn the_answerer_answers_a_turn_and_nothing_is_typed_into_the_chief() {
     // No chief turn to wait for: no update line and no local model.
     assert!(h.ports.state().update_prompts.is_empty());
     sleep(Duration::from_secs(120)).await;
-    assert_eq!(h.played(), ["Nothing is building."]);
+    assert_eq!(h.played(), [ONE_MOMENT, "Nothing is building."]);
 }
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
@@ -1162,10 +1170,10 @@ async fn an_answerer_turn_is_recorded_with_who_answered_how_and_how_fast() {
     assert_eq!(attr(&first[0], "call_from").as_deref(), Some("desk"));
     let answer_ms: u64 = attr(&first[0], "answer_ms").unwrap().parse().unwrap();
     assert!((4000..4200).contains(&answer_ms), "{answer_ms}");
-    assert_eq!(
-        attr(&first[0], "first_sound_ms"),
-        attr(&first[0], "answer_ms")
-    );
+    // "One moment." is the turn's first sound, long before the answer.
+    let first_sound_ms: u64 = attr(&first[0], "first_sound_ms").unwrap().parse().unwrap();
+    assert!(first_sound_ms < 2000, "{first_sound_ms}");
+    assert!(first_sound_ms < answer_ms, "{first_sound_ms} {answer_ms}");
     let second = turn_spans(asked[1].trace);
     assert_eq!(attr(&second[0], "result").as_deref(), Some("handed_over"));
     assert_eq!(attr(&second[0], "answered_by").as_deref(), Some("answerer"));
@@ -1195,7 +1203,7 @@ async fn a_request_for_work_is_passed_on_typed_into_a_busy_chief_and_the_next_tu
     h.speak().await;
     sleep(Duration::from_secs(1)).await;
 
-    assert_eq!(h.played(), ["I've passed that to the chief."]);
+    assert_eq!(h.played(), [ONE_MOMENT, "I've passed that to the chief."]);
     assert_eq!(
         h.keys(),
         [
@@ -1243,7 +1251,7 @@ async fn a_hand_over_with_no_line_of_the_answerers_own_is_said_by_harold() {
 
     h.speak().await;
 
-    assert_eq!(h.played(), [PASSED_ON]);
+    assert_eq!(h.played(), [ONE_MOMENT, PASSED_ON]);
     assert_eq!(h.keys().len(), 2);
 }
 
@@ -1279,17 +1287,17 @@ async fn a_run_over_three_seconds_plays_the_tick_every_three_seconds() {
     h.start().await;
 
     h.speak().await;
-    assert!(h.played().is_empty());
+    assert_eq!(h.played(), [ONE_MOMENT]);
     sleep(Duration::from_millis(3100)).await;
     settle().await;
-    assert_eq!(h.played(), ["tick"]);
+    assert_eq!(h.played(), [ONE_MOMENT, "tick"]);
     sleep(Duration::from_secs(3)).await;
     settle().await;
-    assert_eq!(h.played(), ["tick", "tick"]);
+    assert_eq!(h.played(), [ONE_MOMENT, "tick", "tick"]);
     sleep(Duration::from_secs(2)).await;
     settle().await;
 
-    assert_eq!(h.played(), ["tick", "tick", "Done."]);
+    assert_eq!(h.played(), [ONE_MOMENT, "tick", "tick", "Done."]);
 }
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
@@ -1312,13 +1320,17 @@ async fn a_failed_run_sends_the_turn_to_the_chief_and_the_next_turn_tries_the_an
     assert_eq!(h.state(), CallState::Waiting);
     // The chief answers, as today; its line is the answer, so nothing comes before it.
     h.answer("the chief's answer").await;
-    assert_eq!(h.played(), ["the chief's answer"]);
+    assert_eq!(h.played(), [ONE_MOMENT, "the chief's answer"]);
+    past_the_tail().await;
     h.speak().await;
 
     assert_eq!(answerer.log().asked.len(), 2);
     assert_eq!(answerer.log().asked[1].words, "second words");
     assert_eq!(h.keys().len(), 2);
-    assert_eq!(h.played(), ["the chief's answer", "Fine."]);
+    assert_eq!(
+        h.played(),
+        [ONE_MOMENT, "the chief's answer", ONE_MOMENT, "Fine."]
+    );
 }
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
@@ -1330,7 +1342,7 @@ async fn a_failed_turn_for_a_busy_chief_is_held_as_before() {
 
     h.speak().await;
 
-    assert_eq!(h.played(), [CHIEF_BUSY]);
+    assert_eq!(h.played(), [ONE_MOMENT, CHIEF_BUSY]);
     assert!(h.keys().is_empty());
     h.set_chief(EffectiveAgentState::Idle);
     sleep(Duration::from_secs(2)).await;
@@ -1368,6 +1380,7 @@ async fn a_turn_said_while_a_run_goes_waits_for_it_and_is_asked_with_the_first_i
     h.start().await;
 
     h.speak().await;
+    past_the_tail().await;
     h.speak().await;
     settle().await;
     assert_eq!(answerer.log().asked.len(), 1);
@@ -1440,7 +1453,14 @@ async fn the_chiefs_line_between_turns_plays_after_from_the_chief_and_is_in_the_
 
     assert_eq!(
         h.played(),
-        ["Fine.", FROM_THE_CHIEF, "H1: the build passed.", "Fine."]
+        [
+            ONE_MOMENT,
+            "Fine.",
+            FROM_THE_CHIEF,
+            "H1: the build passed.",
+            ONE_MOMENT,
+            "Fine."
+        ]
     );
     let asked = answerer.log().asked.clone();
     assert!(asked[1].call.remarks.contains(&Remark {
@@ -1448,7 +1468,7 @@ async fn the_chiefs_line_between_turns_plays_after_from_the_chief_and_is_in_the_
         text: "H1: the build passed.".into()
     }));
     assert_eq!(
-        h.sink().said.lock().unwrap()[1],
+        h.sink().said.lock().unwrap()[2],
         Said::Line {
             text: FROM_THE_CHIEF.into(),
             by: Speaker::Chief
@@ -1471,7 +1491,7 @@ async fn talk_now_drops_a_chief_line_waiting_behind_the_answerers_with_its_prefa
     settle().await;
 
     assert_eq!(said_by_chief.await.unwrap(), Some(true));
-    assert_eq!(h.played(), ["Fine."]);
+    assert_eq!(h.played(), [ONE_MOMENT, "Fine."]);
 }
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
@@ -1532,6 +1552,7 @@ async fn a_bye_while_a_run_goes_still_hands_over_but_says_nothing_more() {
     h.script([text("ask the chief to rerun it"), text("bye")]);
     h.start().await;
     h.speak().await;
+    past_the_tail().await;
 
     h.speak().await;
     sleep(Duration::from_secs(3)).await;
@@ -1558,6 +1579,7 @@ async fn a_run_that_ends_while_the_call_is_closing_down_still_hands_over() {
     h.script([text("ask the chief to rerun it"), text("bye")]);
     h.start().await;
     h.speak().await;
+    past_the_tail().await;
 
     h.speak().await;
     // Other events wait in the inbox ahead of the run's answer while the worker closes.

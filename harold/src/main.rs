@@ -439,6 +439,7 @@ impl Harold for HaroldService {
                 chief_pane_id: None,
                 last_transcript: None,
                 last_result: None,
+                model_percent: None,
             })));
         };
         let status = match action {
@@ -457,7 +458,9 @@ fn call_response(status: &voice_input::CallStatus) -> CallResponse {
     let state = match status.state {
         CallState::NotSetUp => harold::CallState::NotSetUp,
         CallState::Off => harold::CallState::Off,
-        CallState::Listening => harold::CallState::Listening,
+        // The `Call` RPC has no value for a call that is connecting: the contract does not
+        // change, so it reads as listening, as the call does once it connects.
+        CallState::Connecting | CallState::Listening => harold::CallState::Listening,
         CallState::Transcribing => harold::CallState::Transcribing,
         CallState::Waiting => harold::CallState::Waiting,
         CallState::Speaking => harold::CallState::Speaking,

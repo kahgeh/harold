@@ -1,6 +1,7 @@
 //! The client of the voice worker: a Python program that keeps Whisper and Kokoro loaded
 //! for the length of a call and answers one JSON line per request.
 
+use super::models::{Env, Pin, pin};
 use crate::settings::{TtsSettings, VoiceInputSettings};
 use serde_json::{Value, json};
 use std::future::Future;
@@ -8,12 +9,15 @@ use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use std::process::Stdio;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 use tokio::io::{AsyncWriteExt, BufReader, Lines};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
+use tracing::warn;
 
 /// The worker's program, written into the call's folder when the call starts.
 pub(crate) const VOICE_WORKER_PY: &str = include_str!("../voice_worker.py");
@@ -23,6 +27,9 @@ pub(crate) const REQUEST_LIMIT: Duration = Duration::from_secs(30);
 pub(crate) const LOAD_LIMIT: Duration = Duration::from_secs(120);
 /// How long `close` waits for the worker to exit before it kills it.
 const CLOSE_LIMIT: Duration = Duration::from_secs(5);
+
+/// `load_ms` before the ready line, or when it gives none.
+const NO_LOAD_MS: u64 = u64::MAX;
 
 const DEFAULT_TTS_MODEL: &str = "mlx-community/Kokoro-82M-bf16";
 pub(super) const DEFAULT_VOICE: &str = "af_heart";
@@ -34,14 +41,58 @@ pub(crate) struct Transcript {
     pub no_speech_prob: f32,
 }
 
+/// Why the worker could not load, as its ready line says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LoadCause {
+    /// A speech model is not in the cache.
+    ModelMissing,
+    /// A package the worker needs would not import.
+    ImportFailed,
+    /// Kokoro's voice from `[tts] args` did not load.
+    VoiceMissing,
+    /// Anything else.
+    LoadFailed,
+}
+
+impl LoadCause {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            LoadCause::ModelMissing => "model_missing",
+            LoadCause::ImportFailed => "import_failed",
+            LoadCause::VoiceMissing => "voice_missing",
+            LoadCause::LoadFailed => "load_failed",
+        }
+    }
+
+    fn from_word(word: &str) -> Self {
+        match word {
+            "model_missing" => LoadCause::ModelMissing,
+            "import_failed" => LoadCause::ImportFailed,
+            "voice_missing" => LoadCause::VoiceMissing,
+            _ => LoadCause::LoadFailed,
+        }
+    }
+}
+
+/// A load the worker itself gave up on: why, and the model it was loading, as the worker
+/// named it, when it is one of the two Harold asked it to load.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct LoadFailure {
+    pub cause: LoadCause,
+    pub model: Option<&'static str>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WorkerError {
     /// The worker's output closed or the worker died.
     Exited,
     /// The worker did not answer within `REQUEST_LIMIT`; it has been killed.
     TimedOut,
-    /// The worker could not load its models, or did not within `LOAD_LIMIT`.
+    /// The worker could not load its models, or did not within `LOAD_LIMIT`, or exited
+    /// before its ready line: `cause = "load_failed"`.
     FailedToLoad,
+    /// The worker's ready line said it could not load, and why.
+    LoadRefused(LoadFailure),
     /// The worker answered that this one request failed.
     Failed,
 }
@@ -52,10 +103,61 @@ impl WorkerError {
         match self {
             WorkerError::Exited => Some("exited"),
             WorkerError::TimedOut => Some("timed_out"),
-            WorkerError::FailedToLoad => Some("failed_to_load"),
+            WorkerError::FailedToLoad | WorkerError::LoadRefused(_) => Some("failed_to_load"),
             WorkerError::Failed => None,
         }
     }
+
+    /// Whether the worker never loaded.
+    pub(crate) fn is_load_failure(self) -> bool {
+        matches!(
+            self,
+            WorkerError::FailedToLoad | WorkerError::LoadRefused(_)
+        )
+    }
+
+    /// The `cause` of `voice worker exited`, for a worker that never loaded.
+    pub(crate) fn cause(self) -> Option<LoadCause> {
+        match self {
+            WorkerError::FailedToLoad => Some(LoadCause::LoadFailed),
+            WorkerError::LoadRefused(failure) => Some(failure.cause),
+            _ => None,
+        }
+    }
+
+    /// The model a refused load was loading.
+    pub(crate) fn model(self) -> Option<&'static str> {
+        match self {
+            WorkerError::LoadRefused(failure) => failure.model,
+            _ => None,
+        }
+    }
+}
+
+/// Logs that a worker exited: its reason, and for a load that failed its cause and, for a
+/// missing model, the model.
+pub(crate) fn log_exited(error: WorkerError) {
+    let reason = error.exit_reason().unwrap_or("exited");
+    match (error.cause(), error.model()) {
+        (Some(cause), Some(model)) if cause == LoadCause::ModelMissing => {
+            warn!(reason, cause = cause.as_str(), model, "voice worker exited");
+        }
+        (Some(cause), _) => warn!(reason, cause = cause.as_str(), "voice worker exited"),
+        (None, _) => warn!(reason, "voice worker exited"),
+    }
+}
+
+/// A name for the life of the process, so a worker's error can stay `Copy`. Only the two
+/// names Harold gave the worker are ever interned.
+fn intern(name: &str) -> &'static str {
+    static NAMES: Mutex<Vec<&'static str>> = Mutex::new(Vec::new());
+    let mut names = NAMES.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some(known) = names.iter().find(|known| **known == name) {
+        return known;
+    }
+    let leaked: &'static str = Box::leak(name.to_string().into_boxed_str());
+    names.push(leaked);
+    leaked
 }
 
 /// Whether a worker has loaded, and whether it is still there.
@@ -73,6 +175,14 @@ pub(crate) trait VoiceWorker: Send + 'static {
     /// The worker's health as it changes, between requests as well as during them.
     /// Waiting for a change is cancel-safe.
     fn health(&self) -> watch::Receiver<Health>;
+    /// How long the worker took to load, as its ready line says, once it is ready.
+    fn load_ms(&self) -> Option<u64> {
+        None
+    }
+    /// Who started the worker: `call` or, for one loaded ahead of a call, `page`.
+    fn started_by(&self) -> &'static str {
+        "call"
+    }
     fn transcribe(
         &mut self,
         wav: &Path,
@@ -93,6 +203,25 @@ pub(crate) struct WorkerCommand {
     pub tts_model: String,
     pub voice: String,
     pub lang_code: String,
+    /// The pinned commit of each model, when it is one Harold manages: the worker loads
+    /// exactly that commit from the cache.
+    pub stt_pin: Option<Pin>,
+    pub tts_pin: Option<Pin>,
+}
+
+/// The value after `name` in the `[tts]` arguments, else `default`.
+fn tts_option(tts: &TtsSettings, name: &str, default: &str) -> String {
+    let args = tts.args.as_deref().unwrap_or_default();
+    let value = args
+        .iter()
+        .position(|arg| arg == name)
+        .and_then(|at| args.get(at + 1));
+    value.map_or(default, String::as_str).to_string()
+}
+
+/// The Kokoro model the `[tts]` arguments name.
+pub(crate) fn tts_model(tts: &TtsSettings) -> String {
+    tts_option(tts, "--model", DEFAULT_TTS_MODEL)
 }
 
 impl WorkerCommand {
@@ -101,20 +230,25 @@ impl WorkerCommand {
         voice_input: &VoiceInputSettings,
         tts: &TtsSettings,
     ) -> Option<Self> {
-        let args = tts.args.as_deref().unwrap_or_default();
-        let option = |name: &str, default: &str| {
-            let value = args
-                .iter()
-                .position(|arg| arg == name)
-                .and_then(|at| args.get(at + 1));
-            value.map_or(default, String::as_str).to_string()
-        };
+        Self::from_settings_in(voice_input, tts, &Env::from_process())
+    }
+
+    /// The same, finding the cache in `env`.
+    pub(crate) fn from_settings_in(
+        voice_input: &VoiceInputSettings,
+        tts: &TtsSettings,
+        env: &Env,
+    ) -> Option<Self> {
+        let stt_model = voice_input.whisper_model()?.to_string();
+        let tts_model = tts_model(tts);
         Some(Self {
             python: voice_input.command.clone(),
-            stt_model: voice_input.whisper_model()?.to_string(),
-            tts_model: option("--model", DEFAULT_TTS_MODEL),
-            voice: option("--voice", DEFAULT_VOICE),
-            lang_code: option("--lang_code", DEFAULT_LANG_CODE),
+            stt_pin: pin(&stt_model, &voice_input.model_revision, env),
+            tts_pin: pin(&tts_model, &tts.model_revision, env),
+            stt_model,
+            tts_model,
+            voice: tts_option(tts, "--voice", DEFAULT_VOICE),
+            lang_code: tts_option(tts, "--lang_code", DEFAULT_LANG_CODE),
         })
     }
 }
@@ -126,6 +260,8 @@ pub(crate) struct ProcessWorker {
     stdin: Option<ChildStdin>,
     answers: mpsc::UnboundedReceiver<String>,
     health: watch::Receiver<Health>,
+    /// The load time in the ready line; `NO_LOAD_MS` until then or when the line has none.
+    load_ms: Arc<AtomicU64>,
     /// Tells the reader to kill the child, and why; dropping it kills the child too.
     kill: Option<oneshot::Sender<WorkerError>>,
     reader: JoinHandle<()>,
@@ -148,13 +284,24 @@ impl ProcessWorker {
             .open(&script)
             .and_then(|mut file| file.write_all(VOICE_WORKER_PY.as_bytes()))
             .map_err(|_| WorkerError::FailedToLoad)?;
-        let mut child = Command::new(&command.python)
+        let mut worker = Command::new(&command.python);
+        worker
             .arg("-I")
             .arg(&script)
             .args(["--stt-model", &command.stt_model])
             .args(["--tts-model", &command.tts_model])
             .args(["--voice", &command.voice])
-            .args(["--lang-code", &command.lang_code])
+            .args(["--lang-code", &command.lang_code]);
+        for (flag, pin) in [("stt", &command.stt_pin), ("tts", &command.tts_pin)] {
+            if let Some(pin) = pin {
+                worker
+                    .arg(format!("--{flag}-snapshot"))
+                    .arg(&pin.snapshot)
+                    .arg(format!("--{flag}-commit"))
+                    .arg(&pin.commit);
+            }
+        }
+        let mut child = worker
             .current_dir(call_dir)
             .env("HF_HUB_OFFLINE", "1")
             .stdin(Stdio::piped())
@@ -169,11 +316,24 @@ impl ProcessWorker {
         let (health_tx, health) = watch::channel(Health::Loading);
         let (answers_tx, answers) = mpsc::unbounded_channel();
         let (kill, killed) = oneshot::channel();
-        let reader = tokio::spawn(read_output(child, lines, health_tx, answers_tx, killed));
+        let load_ms = Arc::new(AtomicU64::new(NO_LOAD_MS));
+        let models = [command.stt_model.clone(), command.tts_model.clone()];
+        let reader = tokio::spawn(read_output(
+            child,
+            lines,
+            Reading {
+                health: health_tx,
+                answers: answers_tx,
+                load_ms: Arc::clone(&load_ms),
+                models,
+            },
+            killed,
+        ));
         Ok(Self {
             stdin: Some(stdin),
             answers,
             health,
+            load_ms,
             kill: Some(kill),
             reader,
         })
@@ -236,23 +396,51 @@ impl ProcessWorker {
     }
 }
 
+/// What the reader task reports through: the worker's health, its answers and its load time,
+/// and the two models it was asked to load.
+struct Reading {
+    health: watch::Sender<Health>,
+    answers: mpsc::UnboundedSender<String>,
+    load_ms: Arc<AtomicU64>,
+    models: [String; 2],
+}
+
+/// How the first JSON line of the worker's output went.
+enum Loaded {
+    Ready {
+        load_ms: Option<u64>,
+    },
+    Refused(LoadFailure),
+    /// Not the ready line, or no line at all.
+    Failed,
+}
+
 /// The reader task: the ready line within `LOAD_LIMIT`, then each answer line, until the
 /// output ends or the worker is killed. The health it last reports is why the worker went.
 /// Before the ready line, a line that is not JSON is a library's stray print and is skipped.
 async fn read_output(
     mut child: Child,
     mut lines: Lines<BufReader<ChildStdout>>,
-    health: watch::Sender<Health>,
-    answers: mpsc::UnboundedSender<String>,
+    reading: Reading,
     mut killed: oneshot::Receiver<WorkerError>,
 ) {
+    let Reading {
+        health,
+        answers,
+        load_ms,
+        models,
+    } = reading;
     let mut kill_asked = false;
     let loaded = tokio::select! {
-        ready = timeout(LOAD_LIMIT, wait_for_ready(&mut lines)) => match ready {
-            Ok(true) => None,
+        ready = timeout(LOAD_LIMIT, wait_for_ready(&mut lines, &models)) => match ready {
+            Ok(Loaded::Ready { load_ms: ms }) => {
+                load_ms.store(ms.unwrap_or(NO_LOAD_MS), Ordering::SeqCst);
+                None
+            }
+            Ok(Loaded::Refused(failure)) => Some(WorkerError::LoadRefused(failure)),
             // A JSON line that is not the ready line, an output that ended or failed, or no
             // ready line in time.
-            Ok(false) | Err(_) => Some(WorkerError::FailedToLoad),
+            Ok(Loaded::Failed) | Err(_) => Some(WorkerError::FailedToLoad),
         },
         why = &mut killed => {
             kill_asked = true;
@@ -281,7 +469,7 @@ async fn read_output(
     };
     health.send_replace(Health::Gone(gone));
     drop(answers);
-    if gone == WorkerError::FailedToLoad || kill_asked {
+    if gone.is_load_failure() || kill_asked {
         let _ = child.kill().await;
         return;
     }
@@ -294,20 +482,39 @@ async fn read_output(
     }
 }
 
-/// Reads up to the first JSON line, and reports whether it is the ready line. A cancelled
-/// wait (a kill, or the load limit) fails the load, so it need not be cancel-safe.
-async fn wait_for_ready(lines: &mut Lines<BufReader<ChildStdout>>) -> bool {
+/// Reads up to the first JSON line, and reports what it says. A cancelled wait (a kill, or
+/// the load limit) fails the load, so it need not be cancel-safe.
+async fn wait_for_ready(lines: &mut Lines<BufReader<ChildStdout>>, models: &[String; 2]) -> Loaded {
     while let Ok(Some(line)) = lines.next_line().await {
-        if let Ok(reply) = serde_json::from_str::<Value>(&line) {
-            return reply["ready"].as_bool() == Some(true);
-        }
+        let Ok(reply) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        return match reply["ready"].as_bool() {
+            Some(true) => Loaded::Ready {
+                load_ms: reply["load_ms"].as_u64(),
+            },
+            Some(false) => {
+                let cause = LoadCause::from_word(reply["cause"].as_str().unwrap_or_default());
+                // Only a model Harold asked for is named: the worker's text goes no further.
+                let model = reply["model"]
+                    .as_str()
+                    .filter(|named| models.iter().any(|asked| asked == named))
+                    .map(intern);
+                Loaded::Refused(LoadFailure { cause, model })
+            }
+            None => Loaded::Failed,
+        };
     }
-    false
+    Loaded::Failed
 }
 
 impl VoiceWorker for ProcessWorker {
     fn health(&self) -> watch::Receiver<Health> {
         self.health.clone()
+    }
+
+    fn load_ms(&self) -> Option<u64> {
+        Some(self.load_ms.load(Ordering::SeqCst)).filter(|ms| *ms != NO_LOAD_MS)
     }
 
     async fn transcribe(&mut self, wav: &Path) -> Result<Transcript, WorkerError> {
@@ -367,6 +574,8 @@ mod tests {
             tts_model: "tts".into(),
             voice: "af_heart".into(),
             lang_code: "a".into(),
+            stt_pin: None,
+            tts_pin: None,
         };
         (command, log)
     }
@@ -470,12 +679,110 @@ esac"#;
     }
 
     #[tokio::test]
-    async fn ready_false_gives_failed_to_load() {
+    async fn ready_false_gives_a_refused_load_with_its_cause_and_model() {
         let folder = temp_folder();
-        let (command, _) = fake(&folder, r#"echo '{"ready":false}'; exit 0"#, ANSWERS);
+        let cases = [
+            (r#"{"ready":false}"#, LoadCause::LoadFailed, None),
+            (
+                r#"{"ready":false,"cause":"model_missing","model":"stt"}"#,
+                LoadCause::ModelMissing,
+                Some("stt"),
+            ),
+            (
+                // A model the worker names that Harold did not ask for is not passed on.
+                r#"{"ready":false,"cause":"model_missing","model":"/etc/passwd"}"#,
+                LoadCause::ModelMissing,
+                None,
+            ),
+            (
+                r#"{"ready":false,"cause":"voice_missing","model":"tts"}"#,
+                LoadCause::VoiceMissing,
+                Some("tts"),
+            ),
+            (
+                r#"{"ready":false,"cause":"import_failed"}"#,
+                LoadCause::ImportFailed,
+                None,
+            ),
+            (
+                r#"{"ready":false,"cause":"nonsense"}"#,
+                LoadCause::LoadFailed,
+                None,
+            ),
+        ];
+        for (line, cause, model) in cases {
+            let (command, _) = fake(&folder, &format!("echo '{line}'; exit 0"), ANSWERS);
+            let mut worker = ProcessWorker::start(&command, &folder.join("call")).unwrap();
+            let result = worker.say("Hi", Path::new("/x/say.wav")).await;
+            let expected = WorkerError::LoadRefused(LoadFailure { cause, model });
+            assert_eq!(result.err(), Some(expected), "{line}");
+            assert_eq!(expected.exit_reason(), Some("failed_to_load"));
+            assert_eq!(expected.cause(), Some(cause));
+            assert_eq!(expected.model(), model);
+        }
+        std::fs::remove_dir_all(&folder).unwrap();
+    }
+
+    #[test]
+    fn a_worker_that_dies_before_its_ready_line_has_cause_load_failed() {
+        assert_eq!(
+            WorkerError::FailedToLoad.cause(),
+            Some(LoadCause::LoadFailed)
+        );
+        assert_eq!(WorkerError::Exited.cause(), None);
+        assert_eq!(WorkerError::FailedToLoad.model(), None);
+    }
+
+    #[tokio::test]
+    async fn the_ready_line_gives_the_load_time() {
+        let folder = temp_folder();
+        let (command, _) = fake(&folder, r#"echo '{"ready":true,"load_ms":3100}'"#, ANSWERS);
+        let worker = ProcessWorker::start(&command, &folder.join("call")).unwrap();
+        assert_eq!(worker.load_ms(), None);
+        assert_eq!(health_after(&worker, false).await, Health::Ready);
+        assert_eq!(worker.load_ms(), Some(3100));
+        worker.close().await;
+        let (command, _) = fake(&folder, READY, ANSWERS);
+        let worker = ProcessWorker::start(&command, &folder.join("call")).unwrap();
+        assert_eq!(health_after(&worker, false).await, Health::Ready);
+        assert_eq!(worker.load_ms(), None);
+        worker.close().await;
+        std::fs::remove_dir_all(&folder).unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_worker_is_given_the_pinned_snapshot_of_each_managed_model() {
+        let folder = temp_folder();
+        let (mut command, log) = fake(&folder, READY, ANSWERS);
+        // The fake worker records its arguments before it reads a line.
+        let script = folder.join("fake-worker");
+        let text = std::fs::read_to_string(&script).unwrap();
+        std::fs::write(
+            &script,
+            text.replacen(
+                "echo '{\"ready\":true}'",
+                &format!(
+                    "echo \"$@\" > {}.args\necho '{{\"ready\":true}}'",
+                    log.display()
+                ),
+                1,
+            ),
+        )
+        .unwrap();
+        command.stt_pin = Some(Pin {
+            snapshot: "/cache/models--a--b/snapshots/abc".into(),
+            commit: "abc".into(),
+        });
         let mut worker = ProcessWorker::start(&command, &folder.join("call")).unwrap();
-        let result = worker.say("Hi", Path::new("/x/say.wav")).await;
-        assert_eq!(result.err(), Some(WorkerError::FailedToLoad));
+        worker.say("Hi", Path::new("/x/say.wav")).await.unwrap();
+        worker.close().await;
+        let args = std::fs::read_to_string(format!("{}.args", log.display())).unwrap();
+        assert!(args.contains("--stt-model stt"), "{args}");
+        assert!(
+            args.contains("--stt-snapshot /cache/models--a--b/snapshots/abc --stt-commit abc"),
+            "{args}"
+        );
+        assert!(!args.contains("--tts-snapshot"), "{args}");
         std::fs::remove_dir_all(&folder).unwrap();
     }
 
@@ -626,6 +933,8 @@ esac"#;
         let allowed = [
             "json",
             "sys",
+            "time",
+            "pathlib",
             "traceback",
             "numpy",
             "soundfile",

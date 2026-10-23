@@ -3,10 +3,12 @@
 //! call routes, which hand it what the phone posts and show the phone what waits for it.
 
 use super::call::{Ended, lock};
+use super::models::Missing;
 use super::phrases::NO_ANSWER_IN_THREAD;
 use super::worker::WorkerError;
 use super::{
-    AudioSink, AudioSource, CallControl, CallPorts, CallState, CallStatus, LineTaker, Said, Speaker,
+    AudioSink, AudioSource, CallControl, CallPorts, CallState, CallStatus, LineTaker, Said,
+    Speaker, SpeechModels,
 };
 use std::collections::HashMap;
 use std::fs::File;
@@ -51,6 +53,10 @@ pub(crate) struct PhoneView {
     pub speech: Option<PhoneSpeech>,
     /// Why the last call ended, once it has.
     pub ended: Option<&'static str>,
+    /// How far a speech model's download has come, while the call connects.
+    pub model_percent: Option<u8>,
+    /// The speech model that is not on the Mac, when the last call ended because of it.
+    pub missing: Option<Missing>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -105,6 +111,8 @@ struct Inner {
     screen: u64,
     /// The reasons already logged for the open call, so each is logged once.
     refused_logged: Vec<AudioRefused>,
+    /// The speech model the call ended for, until the view shows it.
+    missing: Option<Missing>,
 }
 
 /// A piece of samples and when it was recorded.
@@ -161,6 +169,8 @@ impl PhoneLine {
                 sound: None,
                 speech: None,
                 ended: None,
+                model_percent: None,
+                missing: None,
             })
             .0,
             quiet: watch::channel(Quiet {
@@ -640,11 +650,22 @@ impl<B: CallPorts> CallPorts for PhonePorts<B> {
         Arc::clone(&self.sink)
     }
 
-    /// The call opens once its worker has started; from then on sounds and lines are offered.
     fn start_worker(&self, call_dir: &Path) -> Result<B::Worker, WorkerError> {
-        let worker = self.base.start_worker(call_dir)?;
+        self.base.start_worker(call_dir)
+    }
+
+    /// The call has opened: from now on sounds and lines are offered.
+    fn call_opened(&self) {
         self.sink.opened.store(true, Ordering::SeqCst);
-        Ok(worker)
+    }
+
+    fn speech_models(&self) -> Option<Arc<SpeechModels>> {
+        self.base.speech_models()
+    }
+
+    /// Keeps the model for the view the end of the call sets.
+    fn model_missing(&self, missing: &Missing) {
+        lock(&self.line.inner).missing = Some(missing.clone());
     }
 
     fn panes(&self) -> &B::Panes {
@@ -709,6 +730,7 @@ impl<B: CallPorts> CallPorts for PhonePorts<B> {
     fn call_ended(&self, reason: &'static str) {
         self.sink.opened.store(false, Ordering::SeqCst);
         info!(reason, "app call ended");
+        let missing = lock(&self.line.inner).missing.take();
         self.line.view.send_modify(|view| {
             *view = PhoneView {
                 state: CallState::Off,
@@ -716,6 +738,8 @@ impl<B: CallPorts> CallPorts for PhonePorts<B> {
                 sound: None,
                 speech: None,
                 ended: Some(reason),
+                model_percent: None,
+                missing,
             }
         });
     }
@@ -835,9 +859,11 @@ impl<B: CallPorts> PhoneCalls<B> {
         if let Some(task) = follower.take() {
             task.abort();
         }
-        self.line
-            .view
-            .send_if_modified(|view| view.ended.take().is_some());
+        lock(&self.line.inner).missing = None;
+        self.line.view.send_if_modified(|view| {
+            view.missing = None;
+            view.ended.take().is_some()
+        });
     }
 
     /// Ends the call. With `no_sound` the page found no sound from the microphone, and the
@@ -948,9 +974,12 @@ async fn follow<B: CallPorts>(calls: Arc<CallControl<PhonePorts<B>>>, line: Arc<
                 ended = true;
                 return false;
             }
-            let changed = view.state != status.state || view.transcript != status.last_transcript;
+            let changed = view.state != status.state
+                || view.transcript != status.last_transcript
+                || view.model_percent != status.model_percent;
             view.state = status.state;
             view.transcript = status.last_transcript;
+            view.model_percent = status.model_percent;
             changed
         });
         if ended {

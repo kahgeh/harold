@@ -215,6 +215,7 @@ async fn the_source_waits_through_a_line_for_the_phones_voice() {
     let ports = Arc::new(PhonePorts::new(FakePorts::new(), Arc::clone(&line)));
     // The call has opened: its worker has started.
     let _worker = ports.start_worker(Path::new("call")).unwrap();
+    ports.call_opened();
     let start = Instant::now();
     let mut source = ports.open_source().unwrap();
     let reading = tokio::spawn(async move { source.next_stamped().await });
@@ -401,6 +402,7 @@ async fn a_line_for_the_phones_voice_waits_for_its_report_or_its_limit() {
     let ports = Arc::new(PhonePorts::new(base.clone(), Arc::clone(&line)));
     // The call has opened: its worker has started.
     let _worker = ports.start_worker(Path::new("call")).unwrap();
+    ports.call_opened();
     let start = Instant::now();
 
     let speaking = tokio::spawn({
@@ -477,6 +479,8 @@ async fn the_phone_ports_speak_and_end_a_call_on_the_phone() {
             sound: None,
             speech: None,
             ended: Some("stopped"),
+            model_percent: None,
+            missing: None,
         }
     );
     assert!(logs.text().contains("app call ended reason=\"stopped\""));
@@ -1014,6 +1018,8 @@ async fn the_view_follows_the_call() {
         sound: None,
         speech: None,
         ended: Some("stopped"),
+        model_percent: None,
+        missing: None,
     };
     assert_eq!(phone.view(), ended);
     after_a_poll().await;

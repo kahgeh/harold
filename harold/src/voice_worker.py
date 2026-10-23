@@ -1,26 +1,79 @@
 # Harold's voice worker. Harold writes this file into the call's folder and starts it with
 # the Python that has mlx_audio installed. It keeps Whisper and Kokoro loaded for the
 # length of one call and answers one JSON line per request on the real stdout.
+# It never downloads: Harold has fetched and checked the pinned models, and this program
+# runs with HF_HUB_OFFLINE=1.
 import json
 import sys
+import time
 import traceback
+from pathlib import Path
 
 answers = sys.stdout
 sys.stdout = sys.stderr
 
-import numpy
-import soundfile
-import mlx_audio.stt.utils as stt_utils
-import mlx_audio.tts.utils as tts_utils
+try:
+    import numpy
+    import soundfile
+    import mlx_audio.stt.utils as stt_utils
+    import mlx_audio.tts.utils as tts_utils
+except Exception:
+    traceback.print_exc()
+    answers.write(json.dumps({"ready": False, "cause": "import_failed"}) + "\n")
+    answers.flush()
+    sys.exit(0)
 
 
-def argument(name):
-    return sys.argv[sys.argv.index(name) + 1]
+class LoadFailure(Exception):
+    def __init__(self, cause, model=None):
+        super().__init__(cause)
+        self.cause = cause
+        self.model = model
+
+
+def argument(name, default=None):
+    if name in sys.argv:
+        return sys.argv[sys.argv.index(name) + 1]
+    if default is None:
+        raise KeyError(name)
+    return default
 
 
 def answer(value):
     answers.write(json.dumps(value) + "\n")
     answers.flush()
+
+
+def not_in_cache(error):
+    names = {cls.__name__ for cls in type(error).__mro__}
+    return isinstance(error, FileNotFoundError) or "LocalEntryNotFoundError" in names
+
+
+def load(utils, model, snapshot, commit):
+    """Loads `model`. With a pinned `snapshot` folder, exactly that commit is loaded, from
+    the folder when mlx_audio can read the model's name from it, else by name from the
+    cache, whose refs/main must then name the pinned commit. Without one, by name from the
+    cache. Returns the model and how it was loaded."""
+    try:
+        if not snapshot:
+            return utils.load_model(model), "name"
+        folder = Path(snapshot)
+        if not folder.is_dir():
+            raise LoadFailure("model_missing", model)
+        parts = folder.parts
+        # mlx_audio takes the model's name from the folder after `hub`.
+        if "hub" in parts and parts.index("hub") == len(parts) - 4:
+            return utils.load_model(folder), "folder"
+        refs = folder.parents[1] / "refs" / "main"
+        if not refs.is_file() or refs.read_text().strip() != commit:
+            raise LoadFailure("model_missing", model)
+        return utils.load_model(model), "name"
+    except LoadFailure:
+        raise
+    except Exception as error:
+        traceback.print_exc()
+        cause = "model_missing" if not_in_cache(error) else "load_failed"
+        raise LoadFailure(cause, model)
 
 
 def transcribe(stt, wav):
@@ -44,20 +97,44 @@ def say(tts, voice, lang_code, text, wav):
 
 
 def main():
+    started = time.monotonic()
+    stt_model = argument("--stt-model")
+    tts_model = argument("--tts-model")
     try:
-        stt = stt_utils.load_model(argument("--stt-model"))
-        tts = tts_utils.load_model(argument("--tts-model"))
+        stt, stt_how = load(
+            stt_utils, stt_model, argument("--stt-snapshot", ""), argument("--stt-commit", "")
+        )
+        tts, tts_how = load(
+            tts_utils, tts_model, argument("--tts-snapshot", ""), argument("--tts-commit", "")
+        )
         voice = argument("--voice")
         lang_code = argument("--lang-code")
         # One throwaway line, so a missing voice fails here and not on the first answer.
-        for _ in tts.generate(text="Ready.", voice=voice, speed=1.0, lang_code=lang_code):
-            pass
-    except Exception:
+        try:
+            for _ in tts.generate(text="Ready.", voice=voice, speed=1.0, lang_code=lang_code):
+                pass
+        except Exception:
+            traceback.print_exc()
+            raise LoadFailure("voice_missing", tts_model)
+    except LoadFailure as failure:
         # Harold discards stderr; the traceback is there for someone who runs this by hand.
-        traceback.print_exc()
-        answer({"ready": False})
+        reply = {"ready": False, "cause": failure.cause}
+        if failure.model:
+            reply["model"] = failure.model
+        answer(reply)
         return
-    answer({"ready": True})
+    except Exception:
+        traceback.print_exc()
+        answer({"ready": False, "cause": "load_failed"})
+        return
+    answer(
+        {
+            "ready": True,
+            "load_ms": int((time.monotonic() - started) * 1000),
+            "stt_load": stt_how,
+            "tts_load": tts_how,
+        }
+    )
     for line in sys.stdin:
         try:
             request = json.loads(line)

@@ -483,10 +483,16 @@
       return;
     }
     // 8. The call ended on the Mac, by a bye or for any other reason: back to the thread.
+    // A call that ended because a speech model is not on the Mac says why, until the next
+    // Call tap or End; one that ended before the screen showed it live ends the same way.
+    const why = screen.getAttribute("data-harold-notice") || "";
     if (state !== "off") {
       current.live = true;
-    } else if (current.live) {
+    } else if (current.live || why) {
       end(current);
+      if (why) {
+        showNotice(why);
+      }
       return;
     }
     // 4. A new id plays; a cleared one stops.
@@ -546,7 +552,12 @@
     subtree: true,
     childList: true,
     attributes: true,
-    attributeFilter: ["data-harold-state", "data-harold-sound", "data-harold-speech"],
+    attributeFilter: [
+      "data-harold-state",
+      "data-harold-sound",
+      "data-harold-speech",
+      "data-harold-notice",
+    ],
   });
   sync();
 })();

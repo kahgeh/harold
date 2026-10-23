@@ -2171,6 +2171,7 @@ fn call_response_maps_every_state_and_result() {
     let states = [
         (voice_input::CallState::NotSetUp, CallState::NotSetUp),
         (voice_input::CallState::Off, CallState::Off),
+        (voice_input::CallState::Connecting, CallState::Listening),
         (voice_input::CallState::Listening, CallState::Listening),
         (
             voice_input::CallState::Transcribing,
@@ -2195,6 +2196,7 @@ fn call_response_maps_every_state_and_result() {
                 chief_pane_id: Some("%3".into()),
                 last_transcript: Some("check the build".into()),
                 last_result: result,
+                model_percent: None,
             });
             assert_eq!(answer.state, wire_state as i32);
             assert_eq!(answer.last_result, wire_result as i32);
@@ -2207,6 +2209,7 @@ fn call_response_maps_every_state_and_result() {
         chief_pane_id: None,
         last_transcript: None,
         last_result: None,
+        model_percent: None,
     });
     assert_eq!(empty.chief_pane_id, "");
     assert_eq!(empty.last_transcript, "");

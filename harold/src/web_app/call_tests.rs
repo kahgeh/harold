@@ -1101,6 +1101,8 @@ fn view(state: CallState) -> PhoneView {
         sound: None,
         speech: None,
         ended: None,
+        model_percent: None,
+        missing: None,
     }
 }
 
