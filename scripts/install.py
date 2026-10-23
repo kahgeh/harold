@@ -257,10 +257,10 @@ def register_turn_hook(settings_path, hook_path):
                 if hook.get('type') == 'command' and isinstance(hook.get('command'), str) else None
             if script is not None and is_harold_stop_hook(script):
                 harold.append((hook, script))
-    if any(script == Path(hook_path) for _, script in harold):
-        return 'unchanged'
     if len(harold) > 1:
         return manual('The settings file has {} Harold Stop hooks'.format(len(harold)))
+    if harold and harold[0][1] == Path(hook_path):
+        return 'unchanged'
     if harold:
         harold[0][0]['command'] = command
         outcome = 'replaced'

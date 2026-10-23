@@ -1405,7 +1405,10 @@ class TurnHookTests(unittest.TestCase):
         cases = ('{not json', '[]', '{"hooks": []}', '{"hooks": {"Stop": {}}}', '{"hooks": {"Stop": [3]}}',
                  '{"hooks": {"Stop": [{"hooks": [4]}]}}',
                  json.dumps({'hooks': {'Stop': [self.stop('uv run {}'.format(self.old_script)),
-                                                self.stop('python3 {}'.format(second))]}}))
+                                                self.stop('python3 {}'.format(second))]}}),
+                 # The right hook beside an old one still runs twice: unsure, not unchanged.
+                 json.dumps({'hooks': {'Stop': [self.stop(self.command),
+                                                self.stop('uv run {}'.format(self.old_script))]}}))
         for text in cases:
             self.write(text)
             self.assert_manual(text, self.register())
