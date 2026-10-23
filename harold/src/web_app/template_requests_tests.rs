@@ -3,13 +3,11 @@
 
 use std::path::{Path, PathBuf};
 
-/// Each `@get(` and `@post(` call in `html`, from the `@` to its closing parenthesis.
+/// Each `@get(`, `@post(`, `@put(`, `@patch(` and `@delete(` call in `html`, from the `@` to its closing parenthesis.
 fn requests(html: &str) -> Vec<&str> {
     let mut found = Vec::new();
-    for (start, _) in html
-        .match_indices("@get(")
-        .chain(html.match_indices("@post("))
-    {
+    let verbs = ["@get(", "@post(", "@put(", "@patch(", "@delete("];
+    for (start, _) in verbs.iter().flat_map(|verb| html.match_indices(verb)) {
         let mut depth = 0usize;
         let mut end = None;
         for (offset, ch) in html[start..].char_indices() {
@@ -38,21 +36,34 @@ fn signal_requests(html: &str) -> Vec<&str> {
         .collect()
 }
 
-/// Whether the call's `filterSignals` includes anything matching `reply`.
-fn includes_reply(call: &str) -> bool {
-    let include = call
-        .split_once("include: /")
-        .map(|(_, rest)| rest.split('/').next().unwrap_or_default())
-        .unwrap_or_default();
-    include.contains("reply")
+/// The signal names in the call's `filterSignals` include, or `None` when the include is
+/// anything but `^name$` or `^(a|b|...)$` made of literal signal names. Any other shape
+/// (`.*`, `^r`) could match `reply`, so it is refused rather than worked out.
+fn included_signals(call: &str) -> Option<Vec<&str>> {
+    let (_, rest) = call.split_once("include: /")?;
+    let body = rest.split('/').next()?;
+    let names = body.strip_prefix('^')?.strip_suffix('$')?;
+    let names = names
+        .strip_prefix('(')
+        .and_then(|group| group.strip_suffix(')'))
+        .unwrap_or(names);
+    let names: Vec<&str> = names.split('|').collect();
+    let literal = |name: &&str| {
+        !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+    };
+    names.iter().all(literal).then_some(names)
 }
 
 fn check(html: &str) -> Vec<String> {
     let mut problems = Vec::new();
     for call in signal_requests(html) {
-        if !call.contains("filterSignals: {include: /") {
-            problems.push(format!("sends every signal: {call}"));
-        } else if includes_reply(call) && !call.starts_with("@post('/replies'") {
+        let Some(names) = included_signals(call) else {
+            problems.push(format!(
+                "sends every signal or an include the test can't read: {call}"
+            ));
+            continue;
+        };
+        if names.contains(&"reply") && !call.starts_with("@post('/replies'") {
             problems.push(format!("sends the reply draft: {call}"));
         }
     }
@@ -105,4 +116,9 @@ fn the_check_fails_for_a_request_without_a_filter_or_one_that_includes_the_reply
     assert_eq!(check(no_include).len(), 1);
     let leaks = r#"@get('/updates', {filterSignals: {include: /^(oldest|reply)$/}})"#;
     assert_eq!(check(leaks).len(), 1);
+    for include in [".*", "^r", "ply$", "^(oldest|re.*)$"] {
+        let wide = format!("@get('/updates', {{filterSignals: {{include: /{include}/}}}})");
+        assert_eq!(check(&wide).len(), 1, "{include}");
+    }
+    assert_eq!(check("@put('/x')").len(), 1);
 }
