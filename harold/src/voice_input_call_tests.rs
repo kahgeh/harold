@@ -1466,6 +1466,13 @@ async fn the_chiefs_line_between_turns_plays_after_from_the_chief_and_is_in_the_
             by: Speaker::Chief
         }
     );
+    assert_eq!(
+        h.sink().said.lock().unwrap()[4],
+        Said::Line {
+            text: "the build passed.".into(),
+            by: Speaker::Chief
+        }
+    );
 }
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
