@@ -335,7 +335,7 @@ impl ProductionDispatcher {
         }
         // The reply's text is never logged: an error names the listing or tmux only.
         let photo = self.photo_path(&reply);
-        let request = phone_request(&delivery.event_id, origin);
+        let request = phone_request_on(&delivery.event_id, origin, telemetry::WEB_APP_CHANNEL);
         let routing_span = info_span!(target: TRACE_TARGET, "harold.route");
         // Fails only when no export layer is installed, and then there is no trace to join.
         let _ = routing_span.set_parent(request.cx.clone());
@@ -601,6 +601,15 @@ fn event_key(event_id: &str) -> String {
 /// new request that starts when the event was stored, on the `unknown` channel because it is
 /// not known where it came from (after a restart, say). The new request is kept for a retry.
 fn phone_request(event_id: &str, origin: Option<&ReplyOrigin>) -> OpenReply {
+    phone_request_on(event_id, origin, "unknown")
+}
+
+/// `phone_request` whose new request, when none is open, is on `channel`.
+fn phone_request_on(
+    event_id: &str,
+    origin: Option<&ReplyOrigin>,
+    channel: &'static str,
+) -> OpenReply {
     let key = event_key(event_id);
     let open = origin
         .and_then(|origin| origin.trace_id.as_deref())
@@ -610,7 +619,7 @@ fn phone_request(event_id: &str, origin: Option<&ReplyOrigin>) -> OpenReply {
         return reply;
     }
     let started = origin.map_or_else(OffsetDateTime::now_utc, |origin| origin.created_at);
-    let reply = telemetry::open_phone_request("unknown", started);
+    let reply = telemetry::open_phone_request(channel, started);
     telemetry::keep_open_reply_as(key, reply.clone());
     reply
 }

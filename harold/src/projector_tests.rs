@@ -5231,3 +5231,35 @@ fn an_away_message_joins_the_trace_of_the_last_typed_prompt_until_it_is_too_old(
     // The prompt is read without being taken: the turn's own end still finds it.
     assert!(telemetry::take_prompt(&fresh, now).is_some());
 }
+
+#[tokio::test]
+async fn a_web_app_reply_with_no_open_request_is_still_on_the_web_app_channel() {
+    telemetry::test_support::install();
+    let directory = TestDirectory::new();
+    let pane = unique_pane();
+    let with = to_chief(
+        &directory,
+        chief_in(&pane),
+        FakeApp::new(AppDelivery::Pushed),
+    )
+    .await;
+    let before = telemetry::test_support::spans().len();
+
+    let outcome = with.dispatcher.dispatch_with_pause(
+        &inbound_delivery(&unique_event_id(), app_reply("hi")),
+        None,
+        false,
+    );
+
+    assert!(
+        matches!(outcome, Ok(DeliveryOutcome::Delivered)),
+        "{outcome:?}"
+    );
+    let channels: Vec<String> = telemetry::test_support::spans()
+        .into_iter()
+        .skip(before)
+        .filter(|span| span.name == "harold.phone_request" && attr(span, "pane_id") == pane)
+        .map(|span| attr(&span, "channel"))
+        .collect();
+    assert_eq!(channels, ["web_app"]);
+}

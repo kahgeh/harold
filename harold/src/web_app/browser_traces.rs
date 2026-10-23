@@ -84,7 +84,7 @@ impl BrowserTraces {
             return;
         };
         let Ok(permit) = Arc::clone(&self.forwards).try_acquire_owned() else {
-            telemetry::count_app_spans_not_forwarded(spans, "queue_full");
+            not_forwarded(&self.failing, spans, "queue_full");
             return;
         };
         let client = self.client.clone();

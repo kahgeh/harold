@@ -545,6 +545,7 @@ async fn a_collector_nothing_listens_on_is_unreachable() {
 #[tokio::test(flavor = "current_thread")]
 async fn a_batch_beyond_four_forwards_at_once_is_dropped_and_counted() {
     crate::telemetry::test_support::install();
+    let logs = CapturedLogs::start();
     let collector = Collector::start().await;
     *collector.state.hold.lock().unwrap() = Duration::from_millis(1200);
     let app = App::start(Some(&collector.address())).await;
@@ -556,6 +557,11 @@ async fn a_batch_beyond_four_forwards_at_once_is_dropped_and_counted() {
     }
 
     assert_eq!(count("queue_full") - before, 6);
+    assert!(
+        logs.text().contains(r#"reason="queue_full""#),
+        "{}",
+        logs.text()
+    );
     assert_eq!(collector.wait_for_batches(4).await.len(), 4);
 }
 
