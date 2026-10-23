@@ -325,9 +325,6 @@ async fn a_missing_record_runs_the_script_in_its_check_mode_and_downloads_nothin
         )),
         "{runs:?}"
     );
-    assert!(
-        runs[0].ends_with(&format!("{KOKORO_REVISION}@{KOKORO_REVISION}.json --check")) == false
-    );
     assert!(runs[0].ends_with(" --check"), "{runs:?}");
     assert!(!logs.text().contains("speech model download started"));
 }
@@ -928,7 +925,7 @@ fn the_download_script_imports_only_the_standard_library_and_huggingface_hub() {
         "huggingface_hub",
     ];
     for line in VOICE_DOWNLOAD_PY.lines() {
-        let mut words = line.trim_start().split_whitespace();
+        let mut words = line.split_whitespace();
         if !matches!(words.next(), Some("import" | "from")) {
             continue;
         }

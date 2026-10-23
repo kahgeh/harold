@@ -381,9 +381,6 @@ enum Job {
     Make { id: u64, text: String, wav: PathBuf },
 }
 
-/// The worker's first job when a phrase is not kept yet is `Job::Make` for a phrase no sound
-/// waits for; `Call::warm` holds where it is kept.
-
 /// What a sound is, as the voice and play spans name it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Source {
@@ -2309,7 +2306,7 @@ impl<P: CallPorts> Call<P> {
         let kept = std::fs::DirBuilder::new()
             .recursive(true)
             .mode(0o700)
-            .create(&self.ports.phrases_dir())
+            .create(self.ports.phrases_dir())
             .and_then(|()| std::fs::rename(wav, keep_as));
         if let Err(error) = kept {
             warn!(error = %error, "phrase not kept");

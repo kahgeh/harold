@@ -50,11 +50,13 @@ Harold builds them fresh for each turn and sends them, with your spoken words, t
 | Facts | Where Harold reads them |
 |---|---|
 | Each agent: its folder's name, Busy, Idle or Unknown, for how long, and its work summary cut to 200 characters | the agent monitor's snapshot |
-| Each product's pod: slots busy and free, and each spec's id and state | Harold's pod facts, refreshed every minute |
+| Each product's pod: slots busy and free, and each spec's id and state, for the specs that are drafted, waiting for approval, approved or building, and those merged or rejected in the last 24 hours | Harold's pod facts, refreshed every minute |
 | Your todos: id, product, title and progress (`picks 2/2`, `steps 0/6`) | the question tool's gRPC service |
 | The chief's queue: whether a note is Now or Parked, its id, and its first sentence cut to 120 characters | the backlog tool's gRPC service |
 | This call: each hand-over with its state, and what you, the answerer and the chief said (the last 12 remarks, each cut to 600 characters) | the call |
 | The local time | the Mac's clock |
+
+The pods list only live specs because a prompt with every spec of every pod, merged ones and `<id>.revisions.md` files included, came to about 10k tokens for each turn. A file whose name has a second dot, such as `<id>.revisions.md`, is not a spec, since spec ids are kebab-case. With only the live specs the facts are about 3k tokens. The cost of a day's turns is on the telemetry card "Call answerer spend, by day" ([telemetry reference](../telemetry/README.md)); act when its median `input_tokens` is above 6,000, which means the pods' spec count has grown.
 
 A todo's title is the instructions' title, or, for a question, the spec it is about. The facts never hold a backlog note's body, a queue note's full text, a todo's question text or options, a message from the thread, or a transcript of an earlier call.
 

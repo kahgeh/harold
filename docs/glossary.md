@@ -94,7 +94,11 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 | call facts | The facts for a call: what Harold gives the call answerer on each turn, as it gives a watch run its facts. The agents, the pods, and this call's hand-overs and chief lines, and with Choice C(b) your todos and the chief's queue | "brief", "context" |
 | hand-over | A request the call answerer passes to the chief, typed into its pane as `🎙 hand-over H<n>: <request>` | "handoff" (the PnEM's context note), "delegation", "escalation" |
 | talk now | The key, `t`, that cuts the chief's answer short in a call | — |
-| voice worker | The process that turns lines into audio and speech into text | — |
+| voice worker | The process that turns lines into audio and speech into text. It loads the pinned speech models, never downloads them, and waits until Harold has them | — |
+| speech model | Either of the two models the voice worker loads: Whisper, which turns speech into text, and Kokoro, which turns text into speech. The same words in the log lines (`speech model downloaded`) and on the phone | "voice model", "weights", "Whisper" for both |
+| connecting | The call state from tapping Call until the voice worker can listen, shown as "Connecting…" | "ringing", "dialling", "loading" for the state |
+| connecting tone | The soft two-note sound Harold plays every 1.5 s while a call is connecting | "ringtone", "ringback", "tick" (the tick is the chief-thinking sound) |
+| metered | Harold's guess that the Mac is on the iPhone's Personal Hotspot, from the default gateway, which holds back a speech model download | "cellular", "expensive", "offline" |
 | timed prompt | Text Harold types into a pane at a set time each day | — |
 | alert | A HyperDX alert that Harold types to the chief as `harold alert: …` | "alert" for a push |
 | dictation | Turning your speech into text in the web app's reply box, on the phone, for you to check and send | "transcription", which is Whisper on the Mac in a call; "voice message", since nothing recorded is sent |

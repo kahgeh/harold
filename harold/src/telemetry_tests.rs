@@ -1609,6 +1609,7 @@ const METRICS: &[&str] = &[
 
 /// The Metrics table's attributes, plus the two resource attributes every export carries.
 const ATTRIBUTES: &[&str] = &[
+    "load_waited_ms",
     "pod.product",
     "spec.id",
     "change",
@@ -1648,6 +1649,7 @@ const SPANS: &[&str] = &[
     "harold.watch.model",
     "harold.call_turn",
     "harold.call_answer",
+    "harold.call_transcribe",
 ];
 
 /// The spec's cards table: group, card, the metrics or spans its tile reads, and how it
@@ -2179,6 +2181,10 @@ fn the_call_turn_card_is_a_table_of_the_two_sound_times_by_where_the_call_is() {
         "quantileIf(0.95)",
         "INTERVAL 7 DAY",
         "GROUP BY call_from, answered_by",
+        // The column "waited for the load": turns whose transcription waited for the worker.
+        "SpanName = 'harold.call_transcribe'",
+        "toUInt64OrZero(SpanAttributes['load_waited_ms']) > 0",
+        "AS waited_for_the_load",
     ] {
         assert!(sql.contains(piece), "{piece} in {sql}");
     }
