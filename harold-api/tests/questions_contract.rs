@@ -220,7 +220,8 @@ fn question_fields_keep_their_numbers() {
             ("kind", 3),
             ("picks", 4),
             ("note", 5),
-            ("send_now", 6)
+            ("send_now", 6),
+            ("trace_parent", 7)
         ])
     );
     assert!(message_fields("AnswerQuestionResponse").is_empty());
