@@ -15,6 +15,7 @@ mod worker;
 
 pub(crate) use answerer::{CallAnswering, daemon_call_answering};
 use call::{Ended, Event, chief_pane, lock, run_call, sweep_call_folders};
+pub(crate) use hand_over::without_hand_over_tag;
 pub(crate) use mac::MacPorts;
 pub(crate) use models::{Env as ModelsEnv, Missing, SpeechModels, SystemHost};
 #[cfg_attr(not(test), allow(unused_imports))]

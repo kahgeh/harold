@@ -30,7 +30,7 @@ use crate::store::{
     TurnCompleted,
 };
 use crate::telemetry::{self, OpenReply, ResolvedBy, Routing, TRACE_TARGET};
-use crate::voice_input::Speaker;
+use crate::voice_input::{Speaker, without_hand_over_tag};
 use crate::web_app::chief::{ChiefPane, find_chief, is_chief_pane};
 
 pub(crate) trait DeliveryDispatcher: Send + Sync + 'static {
@@ -232,6 +232,21 @@ impl ProductionDispatcher {
             away_text: away,
             ..self
         }
+    }
+
+    /// Whether `pane_id` is the chief's in the snapshot the handler published before this
+    /// delivery. With no hub, no pane is.
+    fn is_chief(&self, pane_id: &str) -> bool {
+        let Some(snapshots) = self.snapshots.as_ref() else {
+            return false;
+        };
+        let settings = self.environment.notify_settings();
+        is_chief_pane(
+            &snapshots.current(),
+            settings.chief.as_deref(),
+            settings.chief_session.as_deref(),
+            pane_id,
+        )
     }
 
     /// The app route for a message from `pane_id`: some only when a web app is set and
@@ -514,6 +529,7 @@ impl ProductionDispatcher {
                 },
                 self.environment.as_ref(),
                 |pane_id| self.chief_app(pane_id),
+                |pane_id| self.is_chief(pane_id),
                 |pane_id, text| {
                     // The phone's call is the web app's.
                     let on_app = self.tracked_agents().may_use(
@@ -712,6 +728,7 @@ fn dispatch_spoken_line(
         &drop_reason,
         environment,
         |_| None,
+        |_| false,
         |_, _| None,
         |_, _| {},
         |_| unreachable!("the app route is off"),
@@ -734,6 +751,7 @@ fn dispatch_spoken_line_with_app<'a>(
     desk_drop: impl FnOnce(&str) -> Option<left_out::Held>,
     environment: &dyn NotifyEnvironment,
     chief_app: impl FnOnce(&str) -> Option<ChiefApp<'a>>,
+    is_chief: impl FnOnce(&str) -> bool,
     in_call: impl FnOnce(&str, &str) -> Option<bool>,
     sent: impl Fn(&str, Channel),
     app_held: impl FnOnce(&str) -> left_out::Held,
@@ -742,6 +760,13 @@ fn dispatch_spoken_line_with_app<'a>(
         |error| DispatchError::Permanent(format!("invalid SpokenLineRequested payload: {error}")),
     )?;
     let pane_id = line.pane_id.as_str();
+    // The chief tags its report of a hand-over `H1: `; the call keeps it for its facts, but
+    // nothing else says or shows it.
+    let said = if is_chief(pane_id) {
+        without_hand_over_tag(&line.text)
+    } else {
+        line.text.as_str()
+    };
     if in_call(pane_id, &line.text) == Some(true) {
         info!(pane_id = %pane_id, "spoken line said in the open call");
         sent(pane_id, Channel::WebApp);
@@ -757,9 +782,8 @@ fn dispatch_spoken_line_with_app<'a>(
             return Ok(DeliveryOutcome::Skipped);
         }
         if let Some(chief_app) = chief_app(pane_id) {
-            let carried_by =
-                deliver_from_chief(&chief_app, &delivery.event_id, &line.text, &line.text)
-                    .map_err(DispatchError::Retryable)?;
+            let carried_by = deliver_from_chief(&chief_app, &delivery.event_id, said, said)
+                .map_err(DispatchError::Retryable)?;
             match carried_by {
                 CarriedBy::Held => {
                     app_held(pane_id).log(left_out::UpdateKind::SpokenLine, pane_id);
@@ -771,7 +795,7 @@ fn dispatch_spoken_line_with_app<'a>(
             return Ok(DeliveryOutcome::Delivered);
         }
         environment
-            .send_spoken_line(&line.text)
+            .send_spoken_line(said)
             .map_err(DispatchError::Retryable)?;
         info!(pane_id = %pane_id, "spoken line sent to the away device");
         sent(pane_id, Channel::Imessage);
@@ -786,7 +810,7 @@ fn dispatch_spoken_line_with_app<'a>(
         return Ok(DeliveryOutcome::Skipped);
     }
     environment
-        .speak_line(&line.text)
+        .speak_line(said)
         .map_err(DispatchError::Retryable)?;
     info!(pane_id = %pane_id, "spoken line said at the desk");
     sent(pane_id, Channel::MachineAudioOutput);

@@ -1451,7 +1451,7 @@ async fn the_chiefs_line_between_turns_plays_after_from_the_chief_and_is_in_the_
 
     assert_eq!(
         h.played(),
-        ["Fine.", FROM_THE_CHIEF, "H1: the build passed.", "Fine."]
+        ["Fine.", FROM_THE_CHIEF, "the build passed.", "Fine."]
     );
     let asked = answerer.log().asked.clone();
     assert!(asked[1].call.remarks.contains(&Remark {

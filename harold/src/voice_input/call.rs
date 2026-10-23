@@ -5,7 +5,7 @@
 //! status.
 
 use super::answerer::{Answer, Ask, CallAnswering, CallSoFar, Failure, Remark, Who};
-use super::hand_over::HandOvers;
+use super::hand_over::{HandOvers, without_hand_over_tag};
 use super::hang_up::{Spoken, hang_up};
 use super::models::Status as ModelsStatus;
 use super::phone::sound_length;
@@ -2080,6 +2080,12 @@ impl<P: CallPorts> Call<P> {
                 preface.by = Some(Speaker::Chief);
             }
         }
+        // The chief's `H1: ` tag stays in its remark, for the facts; it is not said or shown.
+        let line = if by == Speaker::Chief {
+            without_hand_over_tag(&line).to_string()
+        } else {
+            line
+        };
         let id = self.new_id();
         let wav = self.dir.join(format!("answer-{}.wav", Uuid::new_v4()));
         let source = match (by, update) {

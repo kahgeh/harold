@@ -214,3 +214,24 @@ async fn the_chiefs_turn_for_a_typed_hand_over_joins_the_call_turns_trace() {
         turn_trace
     );
 }
+
+#[test]
+fn the_hand_over_tag_is_dropped_from_the_front_of_a_line() {
+    for text in ["H1: green", "H12:  green", "H1:green"] {
+        assert_eq!(super::without_hand_over_tag(text), "green", "{text}");
+    }
+}
+
+#[test]
+fn a_line_without_a_leading_tag_is_left_as_it_is() {
+    for text in [
+        "green H1: x",
+        "Hello: x",
+        "h1: x",
+        "H12345: x",
+        "H1:",
+        "H1:  ",
+    ] {
+        assert_eq!(super::without_hand_over_tag(text), text);
+    }
+}

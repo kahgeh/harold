@@ -2137,6 +2137,7 @@ fn dispatch_line_with_call(
                 away_allowed: true,
             })
         },
+        |_| true,
         |_, text| {
             assert_eq!(text, "hi");
             asked.set(asked.get() + 1);
@@ -2219,6 +2220,7 @@ fn a_spoken_line_with_no_phone_call_open_goes_by_the_lock_rules() {
                     away_allowed: true,
                 })
             },
+            |_| true,
             |_, text| say_in_phone_call_over(None, text, Speaker::Chief),
             |_, _| {},
             |_| {
@@ -3675,6 +3677,98 @@ async fn locked_chief_spoken_line_not_pushed_goes_to_imessage_as_text() {
     assert_eq!(with.away.sends(), ["(app unreachable) All pods are green."]);
     assert!(with.environment.voice_notes().is_empty());
     assert!(with.environment.spoken_lines().is_empty());
+}
+
+fn tagged_line(pane: &str) -> SpokenLineRequested {
+    SpokenLineRequested {
+        pane_id: pane.into(),
+        text: "H1: All green.".into(),
+    }
+}
+
+#[tokio::test]
+async fn a_tagged_chief_line_reaches_the_thread_without_its_tag() {
+    let directory = TestDirectory::new();
+    let with = with_app(
+        &directory,
+        chief_and_pod(),
+        FakeApp::new(AppDelivery::Pushed),
+    )
+    .await;
+
+    with.dispatcher
+        .dispatch(&spoken_delivery(json!(tagged_line("%1"))))
+        .unwrap();
+
+    assert_eq!(
+        with.app.delivered(),
+        [("event-1".to_string(), "All green.".to_string())]
+    );
+}
+
+#[tokio::test]
+async fn a_tagged_chief_line_reaches_imessage_and_the_desk_without_its_tag() {
+    let directory = TestDirectory::new();
+    let with = with_app(
+        &directory,
+        chief_and_pod(),
+        FakeApp::new(AppDelivery::NotPushed(NotPushedReason::NoSubscriptions)),
+    )
+    .await;
+    with.dispatcher
+        .dispatch(&spoken_delivery(json!(tagged_line("%1"))))
+        .unwrap();
+    assert_eq!(with.away.sends(), ["(app unreachable) All green."]);
+
+    with.environment.set_screen_locked(false);
+    with.dispatcher
+        .dispatch_with_pause(&spoken_delivery(json!(tagged_line("%1"))), None, false)
+        .unwrap();
+    assert_eq!(with.environment.spoken_lines(), ["All green."]);
+}
+
+#[test]
+fn a_tagged_line_from_another_pane_is_left_as_it_is() {
+    let environment = FakeEnvironment::new("");
+
+    let outcome = dispatch_line(&environment, &tagged_line("%2"), true, false);
+
+    assert!(matches!(outcome, Ok(DeliveryOutcome::Delivered)));
+    assert_eq!(environment.spoken_lines(), ["H1: All green."]);
+}
+
+#[test]
+fn the_open_call_gets_a_tagged_chief_line_as_written() {
+    let environment = FakeEnvironment::locked("");
+    let app = FakeApp::new(AppDelivery::Pushed);
+    let away = FakeAwayText::default();
+    let asked = std::cell::RefCell::new(Vec::new());
+
+    let outcome = dispatch_spoken_line_with_app(
+        &spoken_delivery(json!(tagged_line("%1"))),
+        false,
+        false,
+        |_| None,
+        |_| None,
+        &environment,
+        |_| {
+            Some(ChiefApp {
+                app: &app,
+                away: &away,
+                away_allowed: true,
+            })
+        },
+        |_| true,
+        |_, text| {
+            asked.borrow_mut().push(text.to_string());
+            Some(true)
+        },
+        |_, _| {},
+        |_| unreachable!("the call said it"),
+    );
+
+    assert!(matches!(outcome, Ok(DeliveryOutcome::Delivered)));
+    assert_eq!(*asked.borrow(), ["H1: All green."]);
 }
 
 #[tokio::test]
