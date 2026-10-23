@@ -6,7 +6,7 @@ use super::phrases::{
     BYE, CHIEF_BUSY, NO_ANSWER, NO_ANSWER_IN_THREAD, NO_CHIEF, NOTHING_HEARD, VOICE_FAILED,
     VOICE_STOPPED,
 };
-use super::wav::tick_wav;
+use super::wav::{connecting_wav, tick_wav};
 use super::worker::{
     Health, ProcessWorker, REQUEST_LIMIT, Transcript, VoiceWorker, WorkerCommand, WorkerError,
 };
@@ -89,12 +89,28 @@ pub(crate) struct WorkerLog {
 
 pub(crate) struct FakeWorker(Arc<Mutex<WorkerLog>>, Arc<watch::Sender<Health>>);
 
+impl FakeWorker {
+    /// Waits for the worker to finish loading, as a request to the real worker does.
+    async fn loaded(&self) -> Result<(), WorkerError> {
+        let mut health = self.1.subscribe();
+        let health = health
+            .wait_for(|health| *health != Health::Loading)
+            .await
+            .map(|health| *health);
+        match health {
+            Ok(Health::Gone(error)) => Err(error),
+            _ => Ok(()),
+        }
+    }
+}
+
 impl VoiceWorker for FakeWorker {
     fn health(&self) -> watch::Receiver<Health> {
         self.1.subscribe()
     }
 
     async fn transcribe(&mut self, wav: &Path) -> Result<Transcript, WorkerError> {
+        self.loaded().await?;
         let heard = {
             let mut log = self.0.lock().unwrap();
             let bytes =
@@ -134,6 +150,7 @@ impl VoiceWorker for FakeWorker {
     }
 
     async fn say(&mut self, text: &str, wav: &Path) -> Result<(), WorkerError> {
+        self.loaded().await?;
         let (scripted, delay) = {
             let mut log = self.0.lock().unwrap();
             log.said.push(text.to_string());
@@ -193,6 +210,8 @@ impl AudioSink for FakeSink {
         let bytes = std::fs::read(wav).map_err(|error| error.to_string())?;
         let what = if bytes == tick_wav() {
             "tick".to_string()
+        } else if bytes == connecting_wav() {
+            "connecting".to_string()
         } else {
             String::from_utf8_lossy(&bytes).into_owned()
         };
@@ -268,6 +287,12 @@ pub(crate) struct PortsState {
     pub(crate) no_answer: Option<&'static str>,
     /// The daemon's call answering, when a test turns it on.
     pub(crate) answering: Option<Arc<CallAnswering>>,
+    /// The speech models a call waits for, when a test turns them on.
+    pub(crate) models: Option<Arc<SpeechModels>>,
+    /// The speech model each call ended for.
+    pub(crate) missing: Vec<Missing>,
+    /// How many times a call opened.
+    pub(crate) opened: usize,
 }
 
 struct PortsInner {
@@ -416,6 +441,18 @@ impl CallPorts for FakePorts {
 
     fn answering(&self) -> Option<Arc<CallAnswering>> {
         self.state().answering.clone()
+    }
+
+    fn speech_models(&self) -> Option<Arc<SpeechModels>> {
+        self.state().models.clone()
+    }
+
+    fn model_missing(&self, missing: &Missing) {
+        self.state().missing.push(missing.clone());
+    }
+
+    fn call_opened(&self) {
+        self.state().opened += 1;
     }
 
     fn keep_awake(&self) -> Result<FakeAwake, String> {

@@ -983,6 +983,21 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
     {
         voice_input::init_call_answering(answering);
     }
+    // The speech models: a missing one is downloaded in the background, pinned and checked
+    // (ADR 0011), and a call waits for them.
+    if let Some(voice_input) = cfg.voice_input.as_ref() {
+        let folder = std::path::Path::new(&store_path)
+            .parent()
+            .unwrap_or(std::path::Path::new("."))
+            .join("speech-models");
+        voice_input::init_speech_models(voice_input::SpeechModels::new(
+            voice_input,
+            &cfg.tts,
+            folder,
+            voice_input::ModelsEnv::from_process(),
+            Arc::new(voice_input::SystemHost),
+        ));
+    }
     // The desk's calls come first: they sweep leftover `call-*` folders before either
     // control can start a call.
     let call_ports = voice_input::MacPorts::from_settings(cfg, snapshots.clone());

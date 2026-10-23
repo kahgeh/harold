@@ -61,6 +61,7 @@ pub(crate) fn is_revision(text: &str) -> bool {
 pub(crate) fn is_model_name(text: &str) -> bool {
     let word = |part: &str| {
         !part.is_empty()
+            && !part.bytes().all(|byte| byte == b'.')
             && part
                 .bytes()
                 .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
@@ -305,6 +306,10 @@ pub(crate) struct SpeechModels {
     status: watch::Sender<Status>,
     pass: Mutex<Pass>,
     wake: Notify,
+    /// A test's models do no work: the asks made of them are noted here, and a test sets
+    /// the status.
+    #[cfg(test)]
+    asked: Option<Mutex<Vec<&'static str>>>,
 }
 
 impl SpeechModels {
@@ -343,7 +348,55 @@ impl SpeechModels {
             status: watch::channel(Status::Checking).0,
             pass: Mutex::default(),
             wake: Notify::new(),
+            #[cfg(test)]
+            asked: None,
         })
+    }
+
+    /// Models for a test of a call: they do no work, only note what they are asked, and
+    /// start in `status`.
+    #[cfg(test)]
+    pub(crate) fn stubbed(status: Status) -> Arc<Self> {
+        Arc::new(Self {
+            wants: Vec::new(),
+            python: "/venv/bin/python".into(),
+            folder: PathBuf::new(),
+            env: Env {
+                path: String::new(),
+                home: PathBuf::new(),
+                hf_home: None,
+                hf_hub_cache: None,
+            },
+            host: Arc::new(SystemHost),
+            status: watch::channel(status).0,
+            pass: Mutex::default(),
+            wake: Notify::new(),
+            asked: Some(Mutex::default()),
+        })
+    }
+
+    /// What a test's models were asked, in order: `for_call` or `model_missing:<model>`.
+    #[cfg(test)]
+    pub(crate) fn asked(&self) -> Vec<&'static str> {
+        self.asked
+            .as_ref()
+            .map(|asked| asked.lock().unwrap().clone())
+            .unwrap_or_default()
+    }
+
+    /// Sets the status of a test's models.
+    #[cfg(test)]
+    pub(crate) fn set_status(&self, status: Status) {
+        self.set(status);
+    }
+
+    #[cfg(test)]
+    fn note(&self, ask: &'static str) -> bool {
+        let Some(asked) = &self.asked else {
+            return false;
+        };
+        asked.lock().unwrap().push(ask);
+        true
     }
 
     pub(crate) fn status(&self) -> watch::Receiver<Status> {
@@ -367,21 +420,33 @@ impl SpeechModels {
     /// A call has been tapped. A download held back by a metered network starts at once, and
     /// one that failed starts again, unless it failed for lack of disk or permission.
     pub(crate) fn for_call(self: &Arc<Self>) {
-        let retry = match &*self.status.borrow() {
-            Status::Waiting => true,
-            Status::Failed(missing) => !NO_RETRY.contains(&missing.reason),
-            _ => false,
-        };
-        if !retry {
+        #[cfg(test)]
+        if self.note("for_call") {
             return;
         }
-        self.set(Status::Checking);
-        self.request(true);
+        let status = self.status.borrow().clone();
+        match status {
+            // The pass that waits goes on at once.
+            Status::Waiting => {
+                self.pass().now = true;
+                self.wake.notify_one();
+            }
+            Status::Failed(missing) if !NO_RETRY.contains(&missing.reason) => {
+                self.set(Status::Checking);
+                self.request(true);
+            }
+            _ => {}
+        }
     }
 
     /// The voice worker could not find `model`: look at it again, and download it if it is
     /// one Harold manages.
     pub(crate) fn model_missing(self: &Arc<Self>, model: &str) {
+        #[cfg(test)]
+        if self.note("model_missing") {
+            self.set(Status::Checking);
+            return;
+        }
         let managed = self
             .wants
             .iter()
@@ -431,7 +496,7 @@ impl SpeechModels {
             if pass.running {
                 pass.again = true;
                 drop(pass);
-                self.wake.notify_waiters();
+                self.wake.notify_one();
                 return;
             }
             pass.running = true;

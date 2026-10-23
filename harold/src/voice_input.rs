@@ -16,9 +16,7 @@ mod worker;
 pub(crate) use answerer::{CallAnswering, daemon_call_answering};
 use call::{Ended, Event, chief_pane, lock, run_call, sweep_call_folders};
 pub(crate) use mac::MacPorts;
-pub(crate) use models::{
-    Env as ModelsEnv, Missing, SpeechModels, Status as ModelsStatus, SystemHost,
-};
+pub(crate) use models::{Env as ModelsEnv, Missing, SpeechModels, SystemHost};
 #[cfg_attr(not(test), allow(unused_imports))]
 pub(crate) use phone::{
     ANSWER_KEEP, AudioRefused, PHONE_SILENT_LIMIT, PIECE_LIMIT_BYTES, PIECES_QUEUED, PLAY_GRACE,

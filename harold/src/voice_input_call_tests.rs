@@ -1616,3 +1616,429 @@ async fn hand_overs_after_the_call_ends_keep_counting_on() {
     assert!(keys.contains("hand-over H1: first request"), "{keys}");
     assert!(keys.contains("hand-over H2: second request"), "{keys}");
 }
+
+// ---------------------------------------------------------------------------
+// Connecting, One moment., and the speech models
+// ---------------------------------------------------------------------------
+
+use super::super::models::{Missing, Status as ModelsStatus};
+use super::super::phrases::MODEL_MISSING;
+use super::super::worker::{LoadCause, LoadFailure};
+use crate::settings::{KOKORO_REVISION, WHISPER_REVISION};
+
+fn missing_model(reason: &'static str) -> Missing {
+    Missing {
+        model: super::super::models::WHISPER.to_string(),
+        reason,
+        command: Some(format!(
+            "`/venv/bin/python -c \"snapshot_download('{}', revision='{WHISPER_REVISION}')\"`",
+            super::super::models::WHISPER
+        )),
+    }
+}
+
+fn load_refused(cause: LoadCause, model: Option<&'static str>) -> Health {
+    Health::Gone(WorkerError::LoadRefused(LoadFailure { cause, model }))
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn a_call_whose_worker_is_loading_is_connecting_and_plays_the_tone_every_1_5_s() {
+    let h = Harness::new();
+    h.worker().starts_loading = true;
+
+    let status = h.start().await;
+
+    assert_eq!(status.state, CallState::Connecting);
+    assert_eq!(h.played(), ["connecting"]);
+    sleep(Duration::from_millis(1400)).await;
+    settle().await;
+    assert_eq!(h.played().len(), 1);
+    sleep(Duration::from_millis(200)).await;
+    settle().await;
+    assert_eq!(h.played(), ["connecting", "connecting"]);
+    sleep(Duration::from_millis(1500)).await;
+    settle().await;
+    let at = h.played_at();
+    assert_eq!(at.len(), 3);
+    assert_eq!(at[1].0 - at[0].0, Duration::from_millis(1500));
+    assert_eq!(at[2].0 - at[1].0, Duration::from_millis(1500));
+    assert_eq!(h.state(), CallState::Connecting);
+    // The sound path names the tone as it names the tick: a sound with no words.
+    assert!(
+        h.sink()
+            .said
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|said| *said == Said::Tick)
+    );
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn when_the_worker_is_ready_the_tone_stops_and_the_call_listens() {
+    let h = Harness::new();
+    h.worker().starts_loading = true;
+    h.start().await;
+    sleep(Duration::from_millis(1600)).await;
+    settle().await;
+    assert_eq!(h.played().len(), 2);
+
+    h.set_health(Health::Ready);
+    settle().await;
+
+    assert_eq!(h.state(), CallState::Listening);
+    sleep(Duration::from_secs(10)).await;
+    settle().await;
+    assert_eq!(h.played().len(), 2, "no tone follows");
+    assert_eq!(h.state(), CallState::Listening);
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn a_loaded_worker_skips_connecting_and_plays_no_tone() {
+    let h = Harness::new();
+
+    let status = h.start().await;
+
+    assert_eq!(status.state, CallState::Listening);
+    sleep(Duration::from_secs(10)).await;
+    settle().await;
+    assert!(h.played().is_empty());
+    assert_eq!(h.ports.state().opened, 1);
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn the_tone_waits_for_the_user_speaking_and_a_connecting_call_is_not_idle() {
+    let h = Harness::new();
+    h.worker().starts_loading = true;
+    h.start().await;
+    past_the_tail().await;
+    h.feed(quiet(500));
+    settle().await;
+    let played = h.played().len();
+    // Speech is in progress when the next tone falls due.
+    h.feed(loud(1200));
+    settle().await;
+    sleep(Duration::from_millis(1100)).await;
+    settle().await;
+    assert_eq!(h.played().len(), played, "the user is not talked over");
+
+    // A call left connecting for longer than the idle limit is not ended as idle.
+    h.feed(quiet(1200));
+    sleep(Duration::from_secs(11 * 60)).await;
+    settle().await;
+    assert_eq!(h.state(), CallState::Connecting);
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn speech_while_connecting_is_transcribed_once_the_worker_is_ready_and_says_how_long_it_waited()
+ {
+    test_support::install();
+    let (h, answerer, _) = answering_harness();
+    h.worker().starts_loading = true;
+    h.script([text("hello")]);
+    h.start().await;
+    past_the_tail().await;
+    h.feed(quiet(500));
+    settle().await;
+
+    h.speak().await;
+    assert!(h.worker().transcribed.is_empty());
+    sleep(Duration::from_secs(2)).await;
+    h.set_health(Health::Ready);
+    settle().await;
+
+    assert_eq!(h.worker().transcribed.len(), 1);
+    let trace = answerer.log().asked[0].trace;
+    let spans = test_support::spans();
+    let transcribe = spans
+        .iter()
+        .find(|span| span.name == "harold.call_transcribe" && span.span_context.trace_id() == trace)
+        .expect("the turn was transcribed");
+    let waited: u64 = test_support::span_attr(transcribe, "load_waited_ms")
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!((2000..2500).contains(&waited), "{waited}");
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn a_loaded_worker_records_no_load_wait() {
+    test_support::install();
+    let (h, answerer, _) = answering_harness();
+    h.script([text("hello")]);
+    h.start().await;
+
+    h.speak().await;
+
+    let trace = answerer.log().asked[0].trace;
+    let spans = test_support::spans();
+    let transcribe = spans
+        .iter()
+        .find(|span| span.name == "harold.call_transcribe" && span.span_context.trace_id() == trace)
+        .expect("the turn was transcribed");
+    assert_eq!(
+        test_support::span_attr(transcribe, "load_waited_ms").as_deref(),
+        Some("0")
+    );
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn one_moment_plays_before_the_answer_and_the_answer_never_plays_over_it() {
+    let (h, answerer, _) = answering_harness();
+    script_runs(&answerer, [run_now(said("Fine."))]);
+    h.sink().hold.store(true, Ordering::SeqCst);
+    h.start().await;
+
+    h.speak().await;
+
+    // The answer is ready, but "One moment." is still playing.
+    assert_eq!(h.played(), [ONE_MOMENT]);
+    assert_eq!(h.state(), CallState::Speaking);
+    h.sink().release();
+    settle().await;
+    assert_eq!(h.played(), [ONE_MOMENT, "Fine."]);
+    h.sink().release();
+    settle().await;
+    assert_eq!(h.state(), CallState::Listening);
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn a_turn_that_ends_the_call_or_is_not_heard_gets_no_one_moment() {
+    let (h, _, _) = answering_harness();
+    h.script([Heard::Unlikely("mumble".into()), text("bye")]);
+    h.start().await;
+
+    h.speak().await;
+    assert_eq!(h.played(), [NOTHING_HEARD]);
+    past_the_tail().await;
+    h.speak().await;
+
+    assert_eq!(h.played(), [NOTHING_HEARD, BYE]);
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn the_worker_makes_one_moment_first_and_it_is_kept_for_the_next_call() {
+    let (h, _, _) = answering_harness();
+    let kept = phrase_file(&h.ports.phrases_dir(), "af_heart", ONE_MOMENT);
+    assert!(!kept.exists());
+
+    h.start().await;
+    settle().await;
+
+    assert_eq!(h.worker().said, [ONE_MOMENT]);
+    assert!(kept.is_file());
+    assert!(h.played().is_empty(), "making the phrase plays nothing");
+    // A turn now finds it kept, and the worker does not make it again.
+    h.speak().await;
+    assert_eq!(h.worker().said, [ONE_MOMENT, "Fine."]);
+    assert_eq!(h.played()[0], ONE_MOMENT);
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn a_phrase_already_kept_is_not_made_again_at_the_start_of_a_call() {
+    let (h, _, _) = answering_harness();
+    let kept = phrase_file(&h.ports.phrases_dir(), "af_heart", ONE_MOMENT);
+    std::fs::create_dir_all(kept.parent().unwrap()).unwrap();
+    std::fs::write(&kept, wav_bytes(&[0; 10], 24_000)).unwrap();
+
+    h.start().await;
+    settle().await;
+
+    assert!(h.worker().said.is_empty());
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn the_worker_starts_when_the_speech_models_are_on_the_mac_and_the_screen_follows_the_download()
+ {
+    let h = Harness::new();
+    let models = SpeechModels::stubbed(ModelsStatus::Checking);
+    h.ports.state().models = Some(Arc::clone(&models));
+
+    let status = h.start().await;
+
+    assert_eq!(status.state, CallState::Connecting);
+    assert_eq!(models.asked(), ["for_call"]);
+    assert_eq!(
+        h.worker().starts,
+        0,
+        "no worker before the models are there"
+    );
+    assert_eq!(h.played(), ["connecting"]);
+    assert_eq!(h.status().model_percent, None);
+    models.set_status(ModelsStatus::Downloading {
+        model: super::super::models::WHISPER.into(),
+        bytes: 450,
+        total: 1000,
+    });
+    settle().await;
+    assert_eq!(h.status().model_percent, Some(45));
+    sleep(Duration::from_millis(1600)).await;
+    settle().await;
+    assert_eq!(h.played().len(), 2, "the tone goes on during the download");
+
+    models.set_status(ModelsStatus::Ready);
+    settle().await;
+
+    assert_eq!(h.worker().starts, 1);
+    assert_eq!(h.state(), CallState::Listening);
+    assert_eq!(h.status().model_percent, None);
+    sleep(Duration::from_secs(5)).await;
+    settle().await;
+    assert_eq!(h.played().len(), 2);
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn models_that_are_ready_start_the_worker_at_once() {
+    let h = Harness::new();
+    let models = SpeechModels::stubbed(ModelsStatus::Ready);
+    h.ports.state().models = Some(models);
+
+    let status = h.start().await;
+
+    assert_eq!(status.state, CallState::Listening);
+    assert_eq!(h.worker().starts, 1);
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn a_failed_download_stops_the_tone_says_the_model_is_missing_and_ends_the_call() {
+    let logs = CapturedLogs::start();
+    let h = Harness::new();
+    let models = SpeechModels::stubbed(ModelsStatus::Checking);
+    h.ports.state().models = Some(Arc::clone(&models));
+    h.start().await;
+    assert_eq!(h.played(), ["connecting"]);
+
+    models.set_status(ModelsStatus::Failed(missing_model("network")));
+    settle().await;
+
+    assert_eq!(h.state(), CallState::Off);
+    assert_eq!(h.tts(), [MODEL_MISSING]);
+    assert_eq!(h.ports.state().ended, ["voice_failed"]);
+    let missing = h.ports.state().missing.clone();
+    assert_eq!(missing, [missing_model("network")]);
+    assert_eq!(h.worker().starts, 0);
+    sleep(Duration::from_secs(10)).await;
+    settle().await;
+    assert_eq!(h.played(), ["connecting"], "the tone stopped");
+    assert!(logs.text().contains("call ended reason=\"voice_failed\""));
+    assert!(h.call_dirs().is_empty());
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn a_call_tapped_after_a_failure_asks_the_models_to_try_again_and_one_that_cannot_ends_at_once()
+ {
+    let h = Harness::new();
+    let models = SpeechModels::stubbed(ModelsStatus::Failed(missing_model("disk_full")));
+    h.ports.state().models = Some(Arc::clone(&models));
+
+    h.start().await;
+    settle().await;
+
+    // The call asked the models first; a failure that cannot be retried ends it now.
+    assert_eq!(models.asked(), ["for_call"]);
+    assert_eq!(h.state(), CallState::Off);
+    assert_eq!(h.tts(), [MODEL_MISSING]);
+    assert_eq!(h.ports.state().missing[0].reason, "disk_full");
+    assert_eq!(h.worker().starts, 0);
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn a_worker_that_cannot_find_a_model_has_the_models_look_again_and_starts_once_more() {
+    let logs = CapturedLogs::start();
+    let h = Harness::new();
+    let models = SpeechModels::stubbed(ModelsStatus::Ready);
+    h.ports.state().models = Some(Arc::clone(&models));
+    h.worker().starts_loading = true;
+    h.start().await;
+    assert_eq!(h.worker().starts, 1);
+
+    h.set_health(load_refused(
+        LoadCause::ModelMissing,
+        Some(super::super::models::WHISPER),
+    ));
+    settle().await;
+
+    assert_eq!(models.asked(), ["for_call", "model_missing"]);
+    assert_eq!(h.state(), CallState::Connecting);
+    assert_eq!(h.worker().starts, 1, "waits for the models");
+    let text = logs.text();
+    assert!(
+        text.contains("voice worker exited reason=\"failed_to_load\" cause=\"model_missing\" model=\"mlx-community/whisper-large-v3-turbo\""),
+        "{text}"
+    );
+
+    models.set_status(ModelsStatus::Ready);
+    settle().await;
+    assert_eq!(h.worker().starts, 2);
+    h.set_health(Health::Ready);
+    settle().await;
+    assert_eq!(h.state(), CallState::Listening);
+
+    // Not again: a second time ends the call with the notice.
+    h.worker().starts_loading = false;
+    h.set_health(load_refused(
+        LoadCause::ModelMissing,
+        Some(super::super::models::WHISPER),
+    ));
+    settle().await;
+    assert_eq!(h.state(), CallState::Off);
+    assert_eq!(h.tts(), [MODEL_MISSING]);
+    assert_eq!(
+        h.ports.state().missing[0].model,
+        super::super::models::WHISPER
+    );
+    assert_eq!(h.ports.state().missing[0].reason, "failed");
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn any_other_cause_of_a_failed_load_says_the_voice_failed() {
+    for cause in [
+        LoadCause::ImportFailed,
+        LoadCause::VoiceMissing,
+        LoadCause::LoadFailed,
+    ] {
+        let logs = CapturedLogs::start();
+        let h = Harness::new();
+        let models = SpeechModels::stubbed(ModelsStatus::Ready);
+        h.ports.state().models = Some(Arc::clone(&models));
+        h.worker().starts_loading = true;
+        h.start().await;
+
+        h.set_health(load_refused(cause, Some(super::super::models::KOKORO)));
+        settle().await;
+
+        assert_eq!(h.state(), CallState::Off, "{cause:?}");
+        assert_eq!(h.tts(), [VOICE_FAILED], "{cause:?}");
+        assert_eq!(models.asked(), ["for_call"], "{cause:?}");
+        assert!(h.ports.state().missing.is_empty());
+        let text = logs.text();
+        assert!(
+            text.contains(&format!("cause=\"{}\"", cause.as_str())),
+            "{text}"
+        );
+        // The model is named only when the model is what is missing.
+        assert!(!text.contains("model=\""), "{text}");
+    }
+    let _ = KOKORO_REVISION;
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn a_call_logs_the_workers_load_when_it_started_the_worker() {
+    let logs = CapturedLogs::start();
+    let h = Harness::new();
+    h.worker().starts_loading = true;
+    h.start().await;
+    h.set_health(Health::Ready);
+    settle().await;
+
+    h.calls.stop().await;
+    settle().await;
+
+    let text = logs.text();
+    assert!(text.contains("voice worker ready"), "{text}");
+    assert!(text.contains("started_by=\"call\""), "{text}");
+    assert!(
+        text.contains("voice worker stopped reason=\"call_ended\""),
+        "{text}"
+    );
+}

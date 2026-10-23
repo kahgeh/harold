@@ -1114,9 +1114,9 @@ impl<P: CallPorts> Call<P> {
         if let (Some(span), Some(queued_at)) = (&span, self.transcribe_queued_at.take()) {
             // How long the turn waited for the worker to finish loading: none when the worker
             // was ready before the turn was cut.
-            let waited = self.ready_at.map_or(Duration::ZERO, |ready| {
-                ready.saturating_duration_since(queued_at)
-            });
+            // A worker that answered was ready, whether or not its health has been read yet.
+            let ready = *self.ready_at.get_or_insert_with(Instant::now);
+            let waited = ready.saturating_duration_since(queued_at);
             span.record("load_waited_ms", millis(waited));
         }
         let error = match result {
