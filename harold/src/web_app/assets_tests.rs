@@ -238,6 +238,51 @@ fn the_echo_test_script_asks_for_the_calls_microphone_and_plays_the_way_the_call
 }
 
 #[test]
+fn the_speech_check_script_posts_only_the_run_and_never_keeps_what_was_said() {
+    let script = include_str!("../../static/web_app/speech-check.js");
+    for wanted in [
+        "webkitSpeechRecognition",
+        "continuous = true",
+        "interimResults = true",
+        "navigator.language",
+        "decodeAudioData",
+        "createBufferSource",
+        "createAnalyser",
+        "/static/check-sentence.wav",
+        "/speech-check/runs",
+        "application/json",
+        "display-mode: standalone",
+        "localStorage",
+        "online",
+        "offline",
+    ] {
+        assert!(script.contains(wanted), "speech-check.js lacks {wanted}");
+    }
+    // Words are read from a result only to be compared; the one post is the run object.
+    assert_eq!(
+        script.matches("fetch(").count(),
+        3,
+        "sentence twice, the run once"
+    );
+    assert!(script.contains("body: JSON.stringify(run)"));
+    for absent in [
+        "transcript:",
+        ".transcript =",
+        "run.transcript",
+        "run.words",
+        "eval(",
+        "new Function",
+        "innerHTML",
+        "http://",
+        "https://",
+        "getUserMedia",
+        "MediaRecorder",
+    ] {
+        assert!(!script.contains(absent), "speech-check.js holds {absent}");
+    }
+}
+
+#[test]
 fn pages_js_keeps_a_same_origin_link_in_the_app() {
     let script = include_str!("../../static/web_app/pages.js");
     for wanted in [

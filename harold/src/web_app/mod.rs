@@ -65,6 +65,7 @@ pub(crate) mod pages;
 pub(crate) mod push;
 pub(crate) mod replies;
 pub(crate) mod route;
+pub(crate) mod speech_check;
 pub(crate) mod todos;
 pub(crate) mod updates;
 
@@ -79,6 +80,10 @@ mod echo_test_tests;
 #[cfg(test)]
 #[path = "dictation_tests.rs"]
 mod dictation_tests;
+
+#[cfg(test)]
+#[path = "speech_check_tests.rs"]
+mod speech_check_tests;
 
 #[cfg(test)]
 #[path = "photo_tests.rs"]
@@ -487,6 +492,11 @@ pub(crate) fn router(state: AppState) -> Router {
         .route("/echo-test", get(echo_test::get_page))
         .route("/echo-test/sample", get(echo_test::get_sample))
         .route("/echo-test/runs", post(echo_test::post_run))
+        .route("/speech-check", get(speech_check::get_page))
+        .route(
+            "/speech-check/runs",
+            post(speech_check::post_run).layer(DefaultBodyLimit::max(speech_check::MAX_BODY_BYTES)),
+        )
         .route("/call", post(call::post_call).delete(call::delete_call))
         .route("/call/audio", post(call::post_audio))
         .route("/call/check", post(call::post_check))

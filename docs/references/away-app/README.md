@@ -286,6 +286,33 @@ Harold's own phrases are made into audio on the Mac. A line that has no audio, s
 - **Logs:** a call writes `app call started` and `app call ended` with a `reason`, and the turns write the desk's lines. No line holds a transcript, audio or the text of a line.
 - **The chief's lines:** a spoken line played in a call is added to the thread as text, so you can read it after. It sends no push and no iMessage.
 
+## Speech check
+
+A throwaway page, run once on the iPhone in the installed app, that shows how Safari's speech recognition (`webkitSpeechRecognition`, as dictation and a phone call use it) behaves in a call-shaped use. It is Stage 0 of call-phone-speech, and Stage 1 removes it, with its route and its log line.
+
+**Opening it.** Nothing links to `/speech-check`. The chief sends `/speech-check` in the thread; a tap on a link to the app's own address opens inside the installed app (`pages.js`).
+
+**The checks.** The screen shows one step at a time and says plainly when to switch the network off and when back on. Each check records only a yes or no, a count, milliseconds or the recognizer's error name:
+
+| # | The check | What you do | Fields (`check<n>_…`) |
+|---|---|---|---|
+| 0 | Recognition with the network off | Turn on airplane mode (or turn off Wi-Fi and cellular), tap Start and say "ten eleven twelve", then turn the network back on | `started`, `results`, `first_result_ms`, `error` (such as `network`, `service-not-allowed`, `not-allowed`) |
+| 1 | Recognition starts inside a tap | Tap Start and say "one two three" | `started`, `results`, `first_result_ms`, `error` |
+| 2 | Recognition starts 2.5 s after a tap, as in a call | Tap Start; the page fetches a file from Harold, waits 2.5 s, then starts recognition; say "four five six" | `started`, `results`, `error` |
+| 3 | Recognition restarts without a tap | Count aloud; the page ends recognition and starts it again 5 times, 2 s apart | `started` (how many of the 5), `errors` (their names) |
+| 4 | When results become final | Read three short sentences shown on screen, pausing 2 s after each | `results`, `final_at_ms` (the ms from a sentence's showing to its first final result), `gap_ms` (the ms from the last interim result to that final one), each as three values with `-` where no final came; `error` |
+| 5 | Listening while Harold's voice plays | Stay quiet while the page plays a 4 s sentence in Harold's voice (Kokoro, `check-sentence.wav`) through the call's own playback path | `started`, `kept_running`, `playback_ok`, `words_heard` (how many of the sentence's 9 words recognition heard, counted on the phone), `error` |
+| 6 | Listening after Harold's voice | Right after check 5, say "seven eight nine" | `restarted` (recognition had stopped and the page started it again without a tap), `heard`, `error` |
+
+**What it sends.** The page keeps the results in `localStorage` and posts them once, after check 6, to `POST /speech-check/runs`, again every 2 to 10 seconds until Harold answers `204`, because check 0 runs with the network off. It never keeps or sends a word you say: words are compared on the phone to produce counts and then thrown away.
+
+| Route | What it does |
+|---|---|
+| `GET /speech-check` | The page. |
+| `POST /speech-check/runs` | The run as JSON: `standalone` and the `check<n>_…` fields above, all optional. Only booleans, whole numbers (at most 600,000 ms, 5 restarts, 3 sentences, 20 words) and error names from the recognizer's list (plus `missing`, `start-failed` and `other`) are accepted. `204` once logged; `400` for any other field, type or name; `413` over 4 KB. Same-origin only, like every post. |
+
+**Reading the results.** Search `harold.log` for `app speech check`. It is one line per run with every field above, for example `check0_error="network" check3_started=5 check4_final_at_ms="5100,5100,5100"`.
+
 ## Echo test
 
 A hidden page that measures how much of Harold's voice the phone's mic picks up while the phone plays it, with the call's own mic settings (`echoCancellation: true`, one channel) and the call's own recorder and player. Its result decides whether Harold can let you cut in on a call.
@@ -331,6 +358,8 @@ Harold logs no message text, no reply, no push address and no key. The app adds 
 | `app reply state` | `event_id` and `state` (`typed`, `waiting_chief_busy`, `not_sent_no_chief` or `not_sent_paused`), logged before the state is written |
 | `app reply stored` | `chars`, the reply's length in characters, and `photo_bytes`, the photo's size, when the reply carries one |
 | `app dictation check` | `result` (`missing`, `ok`, `not_allowed`, `service_not_allowed`, `network`, `no_speech` or `audio_capture`), once per page load |
+| `app speech check` | One per run of the [speech check](#speech-check): `standalone` and the `check<n>_…` fields, never a word |
+| `app speech check not logged` | `reason` (`bad_request`), logged as a warning |
 | `app photo stored` | `photo_bytes` and `kind` (`jpeg` or `png`) |
 | `app photo not shrunk` | A warning, `photo_bytes`, logged beside `app photo stored` for an upload over 3 MB: the phone shrinks to about 0.3 to 1 MB, so it did not, for example a HEIC photo it could not decode |
 | `app photo refused` | A warning with `reason` (`too_large`, `not_an_image`, `store_failed` or `unknown_photo`), and `photo_bytes` when known |

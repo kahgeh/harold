@@ -41,6 +41,8 @@ const PAGES_JS: &[u8] = include_bytes!("../../static/web_app/pages.js");
 const DICTATION_JS: &[u8] = include_bytes!("../../static/web_app/dictation.js");
 const PHOTO_JS: &[u8] = include_bytes!("../../static/web_app/photo.js");
 const ECHO_TEST_JS: &[u8] = include_bytes!("../../static/web_app/echo-test.js");
+const SPEECH_CHECK_JS: &[u8] = include_bytes!("../../static/web_app/speech-check.js");
+const CHECK_SENTENCE_WAV: &[u8] = include_bytes!("../../static/web_app/check-sentence.wav");
 const CALL_JS: &[u8] = include_bytes!("../../static/web_app/call.js");
 const CALL_WORKLET_JS: &[u8] = include_bytes!("../../static/web_app/call-worklet.js");
 
@@ -545,6 +547,8 @@ pub(crate) async fn get_static(
         "call.js" => (JAVASCRIPT, CALL_JS.to_vec()),
         "dictation.js" => (JAVASCRIPT, DICTATION_JS.to_vec()),
         "echo-test.js" => (JAVASCRIPT, ECHO_TEST_JS.to_vec()),
+        "speech-check.js" => (JAVASCRIPT, SPEECH_CHECK_JS.to_vec()),
+        "check-sentence.wav" => ("audio/wav", CHECK_SENTENCE_WAV.to_vec()),
         "pages.js" => (JAVASCRIPT, PAGES_JS.to_vec()),
         "photo.js" => (JAVASCRIPT, PHOTO_JS.to_vec()),
         "call-worklet.js" => (JAVASCRIPT, CALL_WORKLET_JS.to_vec()),

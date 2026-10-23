@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="{{ app_name }}">
+<title>Speech check</title>
+<link rel="stylesheet" href="/static/app.css">
+<script src="/static/speech-check.js" defer></script>
+</head>
+<body class="echo-test">
+<main>
+<h1>Speech check</h1>
+<p>This checks how your phone's speech recognition behaves in a phone call. Follow the screen once, about three minutes, with the volume up.</p>
+<section id="speech-step">
+<h2 id="speech-title"></h2>
+<p id="speech-text"></p>
+<p id="speech-network" class="echo-note" role="status"></p>
+<button type="button" id="speech-go">Start</button>
+<p id="speech-status" role="status"></p>
+</section>
+<ul id="speech-checks">
+<li data-check="0">0. Recognition with the network off: <span>waiting</span></li>
+<li data-check="1">1. Recognition starts inside a tap: <span>waiting</span></li>
+<li data-check="2">2. Recognition starts 2.5 s after a tap: <span>waiting</span></li>
+<li data-check="3">3. Recognition restarts without a tap: <span>waiting</span></li>
+<li data-check="4">4. When results become final: <span>waiting</span></li>
+<li data-check="5">5. Listening while Harold's voice plays: <span>waiting</span></li>
+<li data-check="6">6. Listening after Harold's voice: <span>waiting</span></li>
+</ul>
+<p class="echo-note">Harold gets yes or no answers, counts, times and error names. It never gets a word you say, and nothing is recorded.</p>
+</main>
+</body>
+</html>
