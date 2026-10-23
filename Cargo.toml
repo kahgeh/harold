@@ -4,3 +4,6 @@ resolver = "2"
 
 [workspace.dependencies]
 turso = { version = "=0.8.3", default-features = false, features = ["mimalloc"] }
+
+[workspace.package]
+license = "MIT"

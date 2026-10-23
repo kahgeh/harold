@@ -162,7 +162,7 @@ Press `j` to move the cursor to the `▸ 2 todos waiting` row, then `l` or `Ente
         Do these on PasM1Mac, then tick each one here.
 
           [✓] 1  Open Terminal
-          [✓] 2  Run make deploy in ~/Dev/p/harold/main
+          [✓] 2  Run make deploy in ~/code/harold/main
                  It asks for your password once.
           [ ] 3  Turn on harold in System Settings › Privacy & Security › Accessibility
                  harold shows in the list after its first start.

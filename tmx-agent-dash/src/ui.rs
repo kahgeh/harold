@@ -2507,7 +2507,7 @@ mod tests {
         assert!(content.contains("Build responsive dashboard"));
         assert!(!content.contains("SELECTED SIGNAL"));
         assert!(!content.contains("CURRENT WORK"));
-        assert!(!content.contains("/Users/kahgeh/Dev/p/Codex"));
+        assert!(!content.contains("/Users/you/code/Codex"));
     }
 
     #[test]
@@ -2704,7 +2704,7 @@ mod tests {
 
         assert!(content.contains("SELECTED SIGNAL"));
         assert!(content.contains("CURRENT WORK"));
-        assert!(content.contains("/Users/kahgeh/Dev/p/tmx-agent-dash"));
+        assert!(content.contains("/Users/you/code/tmx-agent-dash"));
         assert!(content.contains("current-feature"));
         assert!(content.contains("Complete the responsive renderer"));
         assert!(content.contains("operator-facing signal"));
@@ -2722,7 +2722,7 @@ mod tests {
             &summary,
             90_000,
         );
-        agent.working_directory = "/Users/kahgeh/Dev/p/tmx-agent-dash".into();
+        agent.working_directory = "/Users/you/code/dev/tmx-agent-dash".into();
         let app = live_app(vec![agent], Some(selected));
 
         let content = rendered(&app, 140, 29, 100_000);
@@ -2931,7 +2931,7 @@ mod tests {
     fn long_detail_app() -> (App, String, String) {
         let selected = incarnation("%17", 91700, 91844, "codex");
         let directory =
-            "/Users/kahgeh/Dev/p/tmx-agent-dash/worktrees/responsive-dashboard/current-feature"
+            "/Users/you/code/tmx-agent-dash/worktrees/responsive-dashboard/current-feature"
                 .to_owned();
         let summary =
             "Complete the responsive renderer while retaining every operator-facing signal"
@@ -3006,7 +3006,7 @@ mod tests {
             session_name: tmux_target.split(':').next().unwrap().into(),
             window_index: 0,
             pane_index: 0,
-            working_directory: format!("/Users/kahgeh/Dev/p/{provider_display_name}"),
+            working_directory: format!("/Users/you/code/{provider_display_name}"),
             work_summary: Some(work_summary.into()),
             state,
             last_transition_at_ms,
@@ -3062,7 +3062,7 @@ mod tests {
                         AgentState::Idle,
                         "Codex",
                         "home",
-                        "/Users/k/Dev/p/sre",
+                        "/Users/k/code/sre",
                         "waiting",
                     ),
                 ],
@@ -3242,7 +3242,7 @@ mod tests {
                         "/p/harold/voice-mute-palette",
                         "b",
                     ),
-                    located("%3", states[2], "Codex", "home", "/Users/k/Dev/p/sre", "c"),
+                    located("%3", states[2], "Codex", "home", "/Users/k/code/sre", "c"),
                 ],
             )
         }
@@ -4998,7 +4998,7 @@ mod tests {
             steps: vec![
                 step("Open Terminal", ""),
                 step(
-                    "Run make deploy in ~/Dev/p/harold/main",
+                    "Run make deploy in ~/code/harold/main",
                     "It asks for your password once.",
                 ),
                 step(
@@ -5096,7 +5096,7 @@ mod tests {
         "        Do these on PasM1Mac, then tick each one here.",
         "",
         "          [ ] 1  Open Terminal",
-        "          [ ] 2  Run make deploy in ~/Dev/p/harold/main",
+        "          [ ] 2  Run make deploy in ~/code/harold/main",
         "                 It asks for your password once.",
         "          [ ] 3  Turn on harold in System Settings \u{203a} Privacy & Security \u{203a} Accessibility",
         "                 harold shows in the list after its first start.",
@@ -5167,7 +5167,7 @@ mod tests {
         assert_eq!(rows[3], "          [\u{2713}] 1  Open Terminal");
         assert_eq!(
             rows[4],
-            "          [\u{2713}] 2  Run make deploy in ~/Dev/p/harold/main"
+            "          [\u{2713}] 2  Run make deploy in ~/code/harold/main"
         );
         assert_eq!(
             rows[6],
@@ -5394,7 +5394,7 @@ mod tests {
             list_60x18(&app)[1..4],
             [
                 "\u{25b2} 2 todos waiting",
-                "          [\u{2713}] 2  Run make deploy in ~/Dev/p/harold/main",
+                "          [\u{2713}] 2  Run make deploy in ~/code/harold/main",
                 "                 It asks for your password once.",
             ]
         );

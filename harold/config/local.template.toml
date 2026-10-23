@@ -34,7 +34,7 @@ effort = "low"
 # max_run_budget_usd = 0.10     # the most --run-budget may ask
 # Folders a watch skill's real path may lie in, besides the watch's own .claude/skills/.
 # Absolute paths only (~/ is not expanded). The organisation repositories' watch skills:
-# skill_folders = ["/Users/kahgeh/Dev/p/chief-of-pods/skills/watches", "/Users/kahgeh/Dev/p/personal-chief/skills/watches"]
+# skill_folders = ["/Users/you/code/chief-of-pods/skills/watches", "/Users/you/code/your-organisation/skills/watches"]
 
 # Override the named provider list only when custom process or visible-screen
 # markers are required. Overrides replace the complete [[agents]] list.
@@ -79,7 +79,7 @@ command = "say"
 # export = false                                                   # export off: Harold sends nothing to the collector and logs no warning
 # otlp_endpoint = "http://localhost:4317"                          # the OpenTelemetry collector's gRPC address, http:// only (no TLS); Harold sends its traces, logs and metrics here
 # alert_listen = "127.0.0.1:4320"                                  # the address and port Harold takes alerts on
-# pod_registry = "/Users/you/Dev/p/<your-vault>/products.toml"    # the organisation's products.toml, in its vault, read every minute for pod facts
+# pod_registry = "/Users/you/code/<your-vault>/products.toml"    # the organisation's products.toml, in its vault, read every minute for pod facts
 
 # A text Harold types into an agent's pane at a set local time each day, only when the
 # agent is idle and its input box is empty. Claude Code agents only. One block for each.
@@ -97,4 +97,4 @@ command = "say"
 # listen = "127.0.0.1:4330"        # loopback only
 # allowed_login = "you@example.com" # your Tailscale login
 # app_name = "Chief M4"            # this Mac's name under the icon, 1 to 30 characters; default "Chief"
-# icon = "~/Dev/p/personal-chief/machines/pasm4mbp/icon.png" # a square PNG, 180 to 1024 pixels a side, at most 1 MB; read at start
+# icon = "~/code/your-organisation/machines/<this Mac>/icon.png" # a square PNG, 180 to 1024 pixels a side, at most 1 MB; read at start

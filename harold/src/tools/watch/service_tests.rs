@@ -117,7 +117,7 @@ async fn start_refuses_with_the_codes_and_messages_the_proto_names() {
         (invalid, "invalid for_minutes".into())
     );
     let mut asked = request(&h, "w");
-    asked.report_to = "/Users/x/Dev/p/other".into();
+    asked.report_to = "/Users/x/code/other".into();
     assert_eq!(
         refusal(&service, asked).await,
         (invalid, "invalid report_to".into())

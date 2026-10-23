@@ -24,7 +24,7 @@ Example local override:
 ```toml
 [activity_summary]
 enabled = true
-cli_path = "/Users/kahgeh/.local/bin/claude"
+cli_path = "/Users/you/.local/bin/claude"
 model = "sonnet"
 effort = "low"
 ```

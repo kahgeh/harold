@@ -4521,7 +4521,7 @@ async fn two_panes_matching_chief_make_the_first_the_chief_for_the_app_and_the_s
     let directory = TestDirectory::new();
     let overrides = "[notify]\nchief = \"chief-of-pods\"\nimessage = [\"chief-of-pods\"]\nweb_app = [\"chief-of-pods\"]";
     let events = vec![
-        agent_observed("%1", 10, "/Users/x/Dev/p/chief-of-pods"),
+        agent_observed("%1", 10, "/Users/x/code/chief-of-pods"),
         agent_observed("%2", 20, "/tmp/chief-of-pods"),
     ];
     let with = with_app_settings(

@@ -74,7 +74,7 @@ Add the section to Harold's configuration:
 listen = "127.0.0.1:4330"
 allowed_login = "<your Tailscale login>"
 # app_name = "Chief M4"
-# icon = "~/Dev/p/personal-chief/machines/pasm4mbp/icon.png"
+# icon = "~/code/your-organisation/machines/<this Mac>/icon.png"
 ```
 
 | Key | Value |

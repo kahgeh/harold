@@ -8,7 +8,7 @@ The watch tool is a [tool](README.md) that holds the watches, runs them and type
 
 ```sh
 harold tool watch start after-release --skill pod-watch --every 10 --for 120
-#   started after-release in /Users/kahgeh/Dev/p/chief-of-pods until 20:45, every 10 minutes, reporting to chief
+#   started after-release in /Users/you/code/chief-of-pods until 20:45, every 10 minutes, reporting to chief
 harold tool watch start after-release --skill pod-watch --every 5 --for 60 --report-to chief --run-budget 0.03 --every-run
 harold tool watch stop after-release        # stopped after-release
 harold tool watch list                      # after-release running in .../chief-of-pods until 20:45, 3 runs, 1 report, $0.03
@@ -46,7 +46,7 @@ model = "haiku"                    # the model every watch runs
 # daily_budget_usd = 1.00          # every watch together, per local day, first come first served
 # run_budget_usd = 0.05            # a run's limit when start gives no --run-budget
 # max_run_budget_usd = 0.10        # the most --run-budget may ask
-# skill_folders = ["/Users/kahgeh/Dev/p/chief-of-pods/skills/watches", "/Users/kahgeh/Dev/p/personal-chief/skills/watches"]
+# skill_folders = ["/Users/you/code/chief-of-pods/skills/watches", "/Users/you/code/your-organisation/skills/watches"]
 ```
 
 Agents choose a watch's settings within these limits, and only the user changes the limits. Harold refuses to start on an invalid value and names the key, as for every other setting: each budget, when set, is above 0; `run_budget_usd` is no more than `max_run_budget_usd` when both are set; each `skill_folders` entry starts with `/` (`~/` is not expanded). An absent budget is never treated as 0. With none set, nothing limits a watch's spending but the timeouts, the turn limit and the number of watches.
@@ -56,7 +56,7 @@ Agents choose a watch's settings within these limits, and only the user changes 
 A watch always names its skill by its folder name under `<folder>/.claude/skills/`. The skill's files may live there, or that entry may be a link to a skill kept elsewhere: in a **watch skill folder**, one of the folders the user lists in `[watch] skill_folders`. The chief keeps its standard watch skills in the chief-of-pods repository (`skills/watches/<name>`) and an organisation keeps its own in its organisation repository (`<organisation repository>/skills/watches/<name>`); each is linked into `.claude/skills/`:
 
 ```sh
-ln -s /Users/kahgeh/Dev/p/chief-of-pods/skills/watches/pod-watch .claude/skills/pod-watch
+ln -s /Users/you/code/chief-of-pods/skills/watches/pod-watch .claude/skills/pod-watch
 ```
 
 - **`skill_folders`** is optional and the user's alone, like the budgets: agents cannot change it. With it unset, only `.claude/skills/` counts. Harold does not check at its start that an entry exists, so one Mac can list an organisation repository it has not cloned: a missing folder matches nothing.

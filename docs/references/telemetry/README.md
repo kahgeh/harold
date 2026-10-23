@@ -25,7 +25,7 @@ The other keys go in the same section of `local.toml`:
 [telemetry]
 otlp_endpoint = "http://localhost:4317"
 alert_listen = "127.0.0.1:4320"
-pod_registry = "~/Dev/p/<your-vault>/products.toml"
+pod_registry = "~/code/<your-vault>/products.toml"
 ```
 
 | Key | Turns on | When left out |
@@ -258,7 +258,7 @@ Metrics are sent every 30 seconds. Every metric also carries `harold.machine`.
 | `harold.phone_request.latency` | histogram, `s`, buckets 1, 2, 5, 10, 30, 60, 120, 300, 600 | `channel`, `resolved_by` |
 | `harold.turn_end_updates` | counter, `{update}` | `outcome` (`model`, `fallback`), `reason` (`none` for `model`, otherwise `no_model`, `model_failed`, `too_long` or `no_name`) |
 | `harold.web_app.pushes` | counter, `{push}` | `outcome` (`accepted`, `gone`, `refused`, `unreachable`) |
-| `harold.notifications` | counter, `{notification}` | `agent` (the pane's folder below the home folder, such as `Dev/p/harold/main`), `channel` (`imessage`, `web_app` or `machine_audio_output`), `outcome` (`sent`, or `kept` when the channel's list held it back). Counted only on a channel that is set up and turned on |
+| `harold.notifications` | counter, `{notification}` | `agent` (the pane's folder below the home folder, such as `code/harold/main`), `channel` (`imessage`, `web_app` or `machine_audio_output`), `outcome` (`sent`, or `kept` when the channel's list held it back). Counted only on a channel that is set up and turned on |
 | `harold.turns` | counter, `{turn}` | `session.id`, `pane_id`, `started_by` |
 | `harold.turn.duration` | histogram, `s`, buckets 10, 30, 60, 120, 300, 600, 1800, 3600 | `started_by` |
 | `pod.specs` | gauge, `{spec}` | `pod.product`, `state` |
@@ -514,7 +514,7 @@ WHERE Body = 'alert typed' AND LogAttributes['alert'] = 'chief-message-held-back
 -- the cause, including alerts still waiting
 SELECT count() FROM otel.otel_logs
 WHERE Body IN ('agent message dropped', 'spoken line dropped')
-  AND LogAttributes['reason'] = 'not_listed' AND LogAttributes['agent'] = 'Dev/p/chief-of-pods'
+  AND LogAttributes['reason'] = 'not_listed' AND LogAttributes['agent'] = 'code/chief-of-pods'
   AND Timestamp > now() - INTERVAL 7 DAY
 ```
 

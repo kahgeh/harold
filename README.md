@@ -43,3 +43,9 @@ The web app's todo page: answer the chief's questions from your phone.
 ## Status
 
 Early development.
+
+## Licence
+
+Harold is licensed under the MIT licence, copyright (c) 2026 kahgeh. See [LICENSE](LICENSE).
+
+The web app's script and the release binaries contain third-party code under its own licence: Datastar (MIT) and OpenSSL (Apache-2.0). Their licence texts are in [LICENSES/](LICENSES/). Each Rust crate in the binaries keeps its own licence, shown on crates.io for the versions in `Cargo.lock`.

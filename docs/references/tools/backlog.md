@@ -98,7 +98,7 @@ A write to a product's backlog (items, backlog notes, an applied import) is chec
 4. The pane isn't an agent's, so it has no folder: refused with `wrong_product`.
 5. The pane's folder is the product's `repo` or inside it: allowed. Otherwise: refused with `wrong_product`.
 
-Step 5 resolves both paths first, so a trailing slash or a symlink (macOS `/var` is `/private/var`) still counts as inside. A path that can't be resolved is used as given, unless it holds `..`, which is refused. A `repo` that is empty or relative has nothing to be inside of, so it is refused. The paths are then compared by components, not as text: a pane in `~/Dev/p/harold-tasks` is not inside `~/Dev/p/harold`, and a pane in `~/Dev/p/harold/sub` is.
+Step 5 resolves both paths first, so a trailing slash or a symlink (macOS `/var` is `/private/var`) still counts as inside. A path that can't be resolved is used as given, unless it holds `..`, which is refused. A `repo` that is empty or relative has nothing to be inside of, so it is refused. The paths are then compared by components, not as text: a pane in `~/code/harold-tasks` is not inside `~/code/harold`, and a pane in `~/code/harold/sub` is.
 
 A write to the queue (every `queue` change, an applied queue import) is refused with `no_pane` without a pane, and with `not_chief` from any pane but the chief's.
 

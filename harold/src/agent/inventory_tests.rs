@@ -365,7 +365,7 @@ fn observed_provider(commands: &[&str]) -> Option<(u32, String)> {
 #[test]
 fn a_program_that_only_mentions_an_agent_in_its_arguments_is_not_an_agent() {
     for command in [
-        "nvim /Users/u/Dev/p/harold/main/CLAUDE.md",
+        "nvim /Users/u/code/harold/main/CLAUDE.md",
         "tail -f /Users/u/.claude/history.jsonl",
         "python3 /Users/u/.claude/skills/x/run.py",
         "/bin/zsh -c source /Users/u/.claude/shell-snapshots/s.sh",

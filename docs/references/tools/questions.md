@@ -52,7 +52,7 @@ Instructions are a todo of the other kind: numbered steps the user does by hand.
   "link": "https://example.com/specs/release-install.md",
   "steps": [
     {"text": "Open Terminal"},
-    {"text": "Run make deploy in ~/Dev/p/harold/main", "detail": "It asks for your password once."}
+    {"text": "Run make deploy in ~/code/harold/main", "detail": "It asks for your password once."}
   ]
 }
 ```

@@ -828,12 +828,12 @@ mod tests {
     fn agent_is_the_folder_below_home() {
         let home = Some("/Users/x");
         assert_eq!(
-            agent_label(Some("/Users/x/Dev/p/harold/main"), home),
-            "Dev/p/harold/main"
+            agent_label(Some("/Users/x/code/harold/main"), home),
+            "code/harold/main"
         );
         assert_eq!(
-            agent_label(Some("/Users/x/Dev/p/harold/"), home),
-            "Dev/p/harold"
+            agent_label(Some("/Users/x/code/harold/"), home),
+            "code/harold"
         );
         assert_eq!(agent_label(Some("/Users/x"), home), "~");
         assert_eq!(agent_label(Some("/tmp/a"), home), "/tmp/a");
@@ -869,35 +869,35 @@ mod tests {
     }
 
     const HOME: Option<&str> = Some("/Users/x");
-    const CHIEF: &str = "/Users/x/Dev/p/chief-of-pods";
+    const CHIEF: &str = "/Users/x/code/chief-of-pods";
 
     #[test]
     fn full_and_home_entries_match_only_that_folder() {
         for entry in [
             CHIEF,
-            "~/Dev/p/chief-of-pods",
-            "/Users/x/Dev/p/chief-of-pods/",
+            "~/code/chief-of-pods",
+            "/Users/x/code/chief-of-pods/",
         ] {
             assert!(entry_matches(CHIEF, entry, HOME), "{entry}");
             assert!(
-                entry_matches("/Users/x/Dev/p/chief-of-pods/", entry, HOME),
+                entry_matches("/Users/x/code/chief-of-pods/", entry, HOME),
                 "{entry}"
             );
             assert!(!entry_matches("/tmp/chief-of-pods", entry, HOME), "{entry}");
             assert!(!entry_matches(
-                "/Users/x/Dev/p/chief-of-pods/tools",
+                "/Users/x/code/chief-of-pods/tools",
                 entry,
                 HOME
             ));
         }
-        assert!(!entry_matches(CHIEF, "~/Dev/p/chief-of-pods", None));
+        assert!(!entry_matches(CHIEF, "~/code/chief-of-pods", None));
     }
 
     #[test]
     fn partial_entries_match_whole_trailing_components() {
         assert!(entry_matches(CHIEF, "chief-of-pods", HOME));
         assert!(entry_matches(
-            "/Users/x/Dev/p/chief-of-pods/",
+            "/Users/x/code/chief-of-pods/",
             "chief-of-pods",
             HOME
         ));
@@ -907,19 +907,19 @@ mod tests {
             HOME
         ));
         assert!(!entry_matches(
-            "/Users/x/Dev/p/chief-of-pods/tools",
+            "/Users/x/code/chief-of-pods/tools",
             "chief-of-pods",
             HOME
         ));
         assert!(!entry_matches(
-            "/Users/x/Dev/p/Chief-of-pods",
+            "/Users/x/code/Chief-of-pods",
             "chief-of-pods",
             HOME
         ));
-        assert!(entry_matches(CHIEF, "p/chief-of-pods", HOME));
+        assert!(entry_matches(CHIEF, "code/chief-of-pods", HOME));
         assert!(!entry_matches(
-            "/Users/x/Dev/q/chief-of-pods",
-            "p/chief-of-pods",
+            "/Users/x/work/chief-of-pods",
+            "code/chief-of-pods",
             HOME
         ));
         assert!(entry_matches("/tmp/chief-of-pods", "chief-of-pods", HOME));
@@ -1047,7 +1047,7 @@ mod tests {
     fn chief_is_quiet_at_the_desk_and_the_first_of_two_matching_panes_is_the_chief() {
         let notify = settings("");
         let one = TrackedAgents::in_folders(&[
-            ("%1", "/Users/x/Dev/p/chief-of-pods"),
+            ("%1", "/Users/x/code/chief-of-pods"),
             ("%2", "/work/harold"),
         ]);
         assert_eq!(one.chief_pane_id(notify.chief.as_deref(), None), Some("%1"));
@@ -1058,7 +1058,7 @@ mod tests {
             Some("spoken update left out (chief)")
         );
         let two = TrackedAgents::in_folders(&[
-            ("%1", "/Users/x/Dev/p/chief-of-pods"),
+            ("%1", "/Users/x/code/chief-of-pods"),
             ("%2", "/tmp/chief-of-pods"),
         ]);
         assert_eq!(two.chief_pane_id(notify.chief.as_deref(), None), Some("%1"));

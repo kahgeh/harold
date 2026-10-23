@@ -123,11 +123,11 @@ fn sources() -> FakeSources {
     FakeSources {
         agents: vec![
             agent(
-                "/Users/me/Dev/p/chief-of-pods/",
+                "/Users/me/code/chief-of-pods/",
                 EffectiveAgentState::Busy,
                 Some(&"x".repeat(300)),
             ),
-            agent("/Users/me/Dev/p/harold", EffectiveAgentState::Idle, None),
+            agent("/Users/me/code/harold", EffectiveAgentState::Idle, None),
         ],
         pods: pods(),
         todos: Some(vec![

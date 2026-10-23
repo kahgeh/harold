@@ -90,7 +90,7 @@ fn every_for_and_report_to_outside_the_table_are_refused() {
         ("chief", Ok(ReportTo::Chief)),
         ("self", Ok(ReportTo::SelfPane)),
         ("", Ok(ReportTo::SelfPane)),
-        ("/Users/x/Dev/p/other", Err(Refusal::Invalid("report_to"))),
+        ("/Users/x/code/other", Err(Refusal::Invalid("report_to"))),
         ("Chief", Err(Refusal::Invalid("report_to"))),
     ] {
         let mut asked = request(&temp.0);

@@ -1466,7 +1466,7 @@ mod tests {
         // A folder that is not there is not an error.
         let missing = parse_watch("[watch]\nskill_folders = [\"/no/such/folder\"]\n");
         assert!(missing.validate().is_empty());
-        for bad in ["~/Dev/p/chief-of-pods/skills/watches", "skills/watches", ""] {
+        for bad in ["~/code/chief-of-pods/skills/watches", "skills/watches", ""] {
             let settings = parse_watch(&format!("[watch]\nskill_folders = [\"{bad}\"]\n"));
             let errors = settings.validate();
             assert_eq!(errors.len(), 1, "{bad:?}: {errors:?}");

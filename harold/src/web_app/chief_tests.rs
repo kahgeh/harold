@@ -187,7 +187,7 @@ fn a_partial_chief_entry_finds_the_chief_and_two_matches_give_the_first() {
         Some(true),
         vec![pane_in(
             "%1",
-            "/Users/x/Dev/p/chief-of-pods",
+            "/Users/x/code/chief-of-pods",
             EffectiveAgentState::Idle,
         )],
     );
@@ -199,7 +199,7 @@ fn a_partial_chief_entry_finds_the_chief_and_two_matches_give_the_first() {
         vec![
             pane_in(
                 "%1",
-                "/Users/x/Dev/p/chief-of-pods",
+                "/Users/x/code/chief-of-pods",
                 EffectiveAgentState::Idle,
             ),
             pane_in("%2", "/tmp/chief-of-pods", EffectiveAgentState::Idle),

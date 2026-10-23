@@ -34,6 +34,9 @@ jobs:
           rustup default 1.97.1
           rustup target add aarch64-apple-darwin
 
+      - name: Check no local paths are tracked
+        run: ./scripts/check_local_paths.sh
+
       - name: Test
         run: |
           cargo test --locked --workspace --target aarch64-apple-darwin
@@ -83,7 +86,8 @@ jobs:
           done
           cp skills/send-message-to-away-device/SKILL.md "dist/$package/skills/send-message-to-away-device/"
           test -f "dist/$package/skills/send-message-to-away-device/SKILL.md"
-          cp README.md "dist/$package/"
+          cp README.md LICENSE "dist/$package/"
+          cp -R LICENSES "dist/$package/LICENSES"
           printf '%s\n' "$GITHUB_SHA" > "dist/$package/REVISION"
           printf '%s\n' "$RELEASE_TAG" > "dist/$package/VERSION"
           tar -czf "dist/$package.tar.gz" -C dist "$package"

@@ -42,8 +42,8 @@ automatic `.opencode/node_modules` bootstrap:
 project=/path/to/project
 cd "$project"
 HAROLD_ADDR=127.0.0.1:50060 \
-HAROLD_PROTO=/Users/kahgeh/Dev/p/harold/harold-api/proto/harold.proto \
-OPENCODE_CONFIG_CONTENT='{"plugin":["file:///Users/kahgeh/Dev/p/harold/hooks/opencode/harold-plugin.js"]}' \
+HAROLD_PROTO=/Users/you/code/harold/harold-api/proto/harold.proto \
+OPENCODE_CONFIG_CONTENT='{"plugin":["file:///Users/you/code/harold/hooks/opencode/harold-plugin.js"]}' \
 opencode .
 ```
 
@@ -59,11 +59,11 @@ entry into that process-local JSON rather than replacing the existing value.
 For the current dashboard acceptance project:
 
 ```sh
-project=/private/tmp/tmx-agent-dash-e2e-20260823/opencode
+project="$(mktemp -d)/opencode"
 cd "$project"
 HAROLD_ADDR=127.0.0.1:50060 \
-HAROLD_PROTO=/Users/kahgeh/Dev/p/harold/harold-api/proto/harold.proto \
-OPENCODE_CONFIG_CONTENT='{"plugin":["file:///Users/kahgeh/Dev/p/harold/hooks/opencode/harold-plugin.js"]}' \
+HAROLD_PROTO=/Users/you/code/harold/harold-api/proto/harold.proto \
+OPENCODE_CONFIG_CONTENT='{"plugin":["file:///Users/you/code/harold/hooks/opencode/harold-plugin.js"]}' \
 opencode .
 ```
 
@@ -80,7 +80,7 @@ discovers and loads the isolated entrypoint without creating project files:
 
 ```sh
 cd "$project"
-OPENCODE_CONFIG_CONTENT='{"plugin":["file:///Users/kahgeh/Dev/p/harold/hooks/opencode/harold-plugin.js"]}' \
+OPENCODE_CONFIG_CONTENT='{"plugin":["file:///Users/you/code/harold/hooks/opencode/harold-plugin.js"]}' \
 opencode debug info
 ```
 

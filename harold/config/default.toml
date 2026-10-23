@@ -36,7 +36,7 @@ model = "haiku"
 # max_run_budget_usd = 0.10
 # Optional. Folders a watch skill's real path may lie in, besides the watch's own
 # .claude/skills/ (absolute paths; a skill is linked into .claude/skills/ from one of them):
-# skill_folders = ["/Users/kahgeh/Dev/p/chief-of-pods/skills/watches", "/Users/kahgeh/Dev/p/personal-chief/skills/watches"]
+# skill_folders = ["/Users/you/code/chief-of-pods/skills/watches", "/Users/you/code/your-organisation/skills/watches"]
 
 # The small model that answers each turn of a call; real work goes to the chief. It runs
 # Claude Code with [activity_summary] cli_path, whether or not activity summaries are on.

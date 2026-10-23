@@ -1,4 +1,4 @@
-.PHONY: build install reinstall deploy release install-release
+.PHONY: build install reinstall deploy release install-release check-paths
 
 PYTHON ?= python3
 
@@ -18,3 +18,6 @@ release:
 
 install-release:
 	$(PYTHON) scripts/release.py install $${VERSION:+--version "$$VERSION"} $${PREFIX:+--prefix "$$PREFIX"} $${SIGNING_IDENTITY:+--signing-identity "$$SIGNING_IDENTITY"}
+
+check-paths:
+	./scripts/check_local_paths.sh

@@ -2307,7 +2307,7 @@ mod tests {
             "%1",
             AgentState::Idle,
             "harold  main",
-            "/Users/k/Dev/p/harold/main",
+            "/Users/k/code/harold/main",
             3,
         );
         assert_eq!(main.group(), "harold");
@@ -2317,7 +2317,7 @@ mod tests {
             "%2",
             AgentState::Idle,
             "harold  voice-mute-palette1",
-            "/Users/k/Dev/p/harold/voice-mute-palette/",
+            "/Users/k/code/harold/voice-mute-palette/",
             3,
         );
         assert_eq!(drifted.group(), "harold");
@@ -2327,7 +2327,7 @@ mod tests {
             "%3",
             AgentState::Idle,
             "kahgeh-com",
-            "/Users/k/Dev/p/kahgeh-com",
+            "/Users/k/code/kahgeh-com",
             3,
         );
         assert_eq!(
@@ -2379,7 +2379,7 @@ mod tests {
                     "/p/harold/voice",
                     3,
                 ),
-                placed("%3", AgentState::Unknown, "home", "/Users/k/Dev/p/sre", 1),
+                placed("%3", AgentState::Unknown, "home", "/Users/k/code/sre", 1),
                 placed("%1", AgentState::Busy, "harold  main", "/p/harold/main", 3),
             ],
         ))
@@ -2406,7 +2406,7 @@ mod tests {
                     "/p/harold/voice",
                     3,
                 ),
-                placed("%3", AgentState::Busy, "home", "/Users/k/Dev/p/sre", 1),
+                placed("%3", AgentState::Busy, "home", "/Users/k/code/sre", 1),
                 placed(
                     "%1",
                     AgentState::Unknown,
@@ -2429,7 +2429,7 @@ mod tests {
             vec![
                 placed("%1", AgentState::Idle, "home", "/Users/k/.claude/skills", 3),
                 placed("%2", AgentState::Idle, "home", "/Users/k/other/skills", 4),
-                placed("%3", AgentState::Idle, "home", "/Users/k/Dev/p/sre", 1),
+                placed("%3", AgentState::Idle, "home", "/Users/k/code/sre", 1),
                 placed("%4", AgentState::Idle, "work", "/w/skills", 0),
             ],
         ))
@@ -2490,7 +2490,7 @@ mod tests {
             0,
             vec![
                 placed("%1", AgentState::Idle, "harold  main", "/p/harold/main", 3),
-                placed("%2", AgentState::Idle, "home", "/Users/k/Dev/p/sre", 1),
+                placed("%2", AgentState::Idle, "home", "/Users/k/code/sre", 1),
                 placed("%3", AgentState::Idle, "home", "/Users/k/Dev/xn", 2),
             ],
         ))
@@ -2521,7 +2521,7 @@ mod tests {
             vec![
                 placed("%1", states[0], "harold  main", "/p/harold/main", 3),
                 placed("%2", states[1], "harold  voice", "/p/harold/voice", 3),
-                placed("%3", states[2], "home", "/Users/k/Dev/p/sre", 1),
+                placed("%3", states[2], "home", "/Users/k/code/sre", 1),
             ],
         )
     }
@@ -2565,7 +2565,7 @@ mod tests {
         app.apply_later_snapshot(snapshot(
             4,
             0,
-            vec![placed("%3", Idle, "home", "/Users/k/Dev/p/sre", 1)],
+            vec![placed("%3", Idle, "home", "/Users/k/code/sre", 1)],
         ))
         .unwrap();
         assert_eq!(waiting_panes(&app), ["%3"]);

@@ -366,7 +366,7 @@ async fn invalid_settings_and_empty_evidence_do_not_start_a_process() {
 async fn activity_summary_real_claude_probe() {
     let settings = ActivitySummarySettings {
         enabled: true,
-        cli_path: "/Users/kahgeh/.local/bin/claude".into(),
+        cli_path: "/Users/you/.local/bin/claude".into(),
         timeout_ms: 60_000,
         ..ActivitySummarySettings::default()
     };

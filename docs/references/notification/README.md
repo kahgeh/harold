@@ -148,10 +148,10 @@ These are Harold's defaults (`default.toml`). With nothing in `local.toml`, only
 
 | Entry | Matches | Example |
 | --- | --- | --- |
-| Starts with `/` | the pane's folder exactly | `/Users/you/Dev/p/chief-of-pods` |
-| Starts with `~/` | the same, with `~` as the home folder | `~/Dev/p/chief-of-pods` |
+| Starts with `/` | the pane's folder exactly | `/Users/you/code/chief-of-pods` |
+| Starts with `~/` | the same, with `~` as the home folder | `~/code/chief-of-pods` |
 | `*` | every pane, whatever its folder (lists only) | `["*"]` |
-| Anything else | a folder whose last whole path components are the entry's | `chief-of-pods` matches `/Users/x/Dev/p/chief-of-pods`, but not `/Users/x/chief-of-pods-old` or `/Users/x/Dev/p/chief-of-pods/tools` |
+| Anything else | a folder whose last whole path components are the entry's | `chief-of-pods` matches `/Users/x/code/chief-of-pods`, but not `/Users/x/chief-of-pods-old` or `/Users/x/code/chief-of-pods/tools` |
 
 Each comparison ignores one trailing `/` on either side, keeps case and does not resolve symbolic links. A subfolder of a matching folder does not match. **An empty list lets no agent use that channel** (`machine_audio_output = []` is a silent desk while the phone still works), and `["*"]` lets every agent use it. `*` also matches a pane Harold has no folder for, and is refused in `chief`. A partial entry such as `chief-of-pods` matches any folder with that name, a second clone included; write the full path to rule that out.
 
@@ -174,7 +174,7 @@ Harold takes a pane's folder, the working directory tmux reports for it, from it
 
 **The phone** checks, in order: with `[web_app]` set and the chief on `web_app`, the message goes to the app (its thread with a push, or played in the phone's call when it is open; the call also takes a spoken line from any pane on `web_app`). Otherwise, or when the app can't take it (no phone has push turned on, or the push is refused), it goes by iMessage if the pane is on that list, and a message the app couldn't take starts `(app unreachable)`. Otherwise it is held back, and the line names the last list checked. The voice mute and the messaging pause are looked at before any list.
 
-Harold writes each of these lines at `INFO` with the pane in a `pane_id` field, and with `channel` (the key of the list that held the pane back), `kind` (`turn_end_update`, `agent_message` or `spoken_line`), `reason` (`not_listed`; `chief` for the chief's own turn-end update at the desk; `messaged_this_turn` for the line above) and `agent` (the pane's folder below the home folder, such as `Dev/p/harold/main`, so it holds no user name). None holds message or spoken text. `<key>` is the channel's key.
+Harold writes each of these lines at `INFO` with the pane in a `pane_id` field, and with `channel` (the key of the list that held the pane back), `kind` (`turn_end_update`, `agent_message` or `spoken_line`), `reason` (`not_listed`; `chief` for the chief's own turn-end update at the desk; `messaged_this_turn` for the line above) and `agent` (the pane's folder below the home folder, such as `code/harold/main`, so it holds no user name). None holds message or spoken text. `<key>` is the channel's key.
 
 **Held back.** An update or message a channel's rules keep from going out is held back: a turn-end update is "left out" and an agent message or spoken line is "dropped". The `harold.delivery` span of a held-back turn-end update has `outcome = held_back` and a `reason`, and its `channel` is the key of the list that held it, not `imessage` for every update. A pane that sent a message this turn is left out by its own choice and is `skipped`, not held back.
 
