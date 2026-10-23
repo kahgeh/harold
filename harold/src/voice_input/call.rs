@@ -2266,6 +2266,11 @@ impl<P: CallPorts> Call<P> {
     /// Starts the ringing: the ringback plays from the next turn of the loop.
     fn begin_ring(&mut self, warm: WarmUp) {
         let now = Instant::now();
+        // A ring going on carries on: it is one span, from the tap to the pick-up.
+        if let Some(ring) = self.ring.as_mut() {
+            ring.next = ring.next.or(Some(now));
+            return;
+        }
         let span = tracing::info_span!(
             target: telemetry::TRACE_TARGET,
             parent: None,
@@ -2328,7 +2333,9 @@ impl<P: CallPorts> Call<P> {
         let busy = self.playing.is_some()
             || !self.sounds.is_empty()
             || (self.mode == Mode::Listening && self.detector.in_turn());
-        let ready = self.worker_ready && ring.warm != WarmUp::Running;
+        // The warm-up's own limit ends it; this one is for a task that never reported.
+        let warmed = ring.warm != WarmUp::Running || ring.started.elapsed() >= WARM_LIMIT * 2;
+        let ready = self.worker_ready && warmed;
         let (wav, said_source) = if cycles > 0 && ready {
             (PICKUP_WAV, Source::Pickup)
         } else {
@@ -2569,6 +2576,10 @@ impl<P: CallPorts> Call<P> {
         }
         self.done = true;
         self.mode = Mode::Ending;
+        if let Some(ring) = self.ring.take() {
+            ring.span.record("cycles", u64::from(ring.cycles));
+            ring.span.record("worker", ring.worker);
+        }
         self.speech = None;
         self.transcribing = None;
         self.end_turn(None);

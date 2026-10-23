@@ -1786,22 +1786,32 @@ async fn a_cold_worker_is_started_during_the_ringing() {
 }
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
-async fn speech_during_the_ringing_starts_no_turn_and_a_ringing_call_is_not_idle() {
+async fn speech_during_the_ringing_starts_no_turn() {
     let h = Harness::new();
-    h.worker().starts_loading = true;
     h.script([text("hello")]);
     h.start_ringing().await;
+    // Past the 0.3 s after the ringback began, in the quiet of the cycle.
+    run_for(1.0).await;
+    h.feed(quiet(500));
     settle().await;
 
     h.speak().await;
-    settle().await;
+    run_for(2.5).await;
+
+    assert_eq!(h.played_all(), ["ringback", "pickup"]);
     assert!(h.worker().transcribed.is_empty());
     assert_eq!(h.status().last_result, None);
+}
 
-    // A call left ringing for longer than the idle limit is not ended as idle.
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn a_ringing_call_is_not_idle() {
+    let h = Harness::new();
+    h.worker().starts_loading = true;
+    h.start_ringing().await;
+
     run_for(11.0 * 60.0).await;
+
     assert_eq!(h.state(), CallState::Connecting);
-    assert!(h.worker().transcribed.is_empty());
 }
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]

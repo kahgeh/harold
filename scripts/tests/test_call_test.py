@@ -305,10 +305,6 @@ class WorkerReadyTests(unittest.TestCase):
         self.assertEqual('', ct.worker_ready_line('nothing'))
 
 
-if __name__ == '__main__':
-    unittest.main()
-
-
 def wav_of(seconds, rate=24000):
     out = io.BytesIO()
     with wave.open(out, 'wb') as sound:
@@ -347,3 +343,7 @@ class OneMomentTests(unittest.TestCase):
 
     def test_none_when_the_answer_is_the_first_sound(self):
         self.assertEqual(0, ct.one_moment_sounds([(0.0, self.shown('a', 'Fine.'))]))
+
+
+if __name__ == '__main__':
+    unittest.main()
