@@ -84,6 +84,23 @@ class HaroldTurnCompleteTest(unittest.TestCase):
         payload = json.loads(command[command.index("-d") + 1])
         self.assertNotIn("session_id", payload)
         self.assertNotIn("turn_started_at", payload)
+        self.assertNotIn("transcript_path", payload)
+
+    @patch.object(harold_turn_complete.subprocess, "run")
+    def test_call_harold_sends_the_transcript_path_when_set(self, run) -> None:
+        harold_turn_complete.call_harold(
+            pane_id="%8",
+            pane_label="harold:2.3",
+            last_user_prompt="refresh events",
+            assistant_message="events refreshed",
+            main_context="harold",
+            grpc_addr="127.0.0.1:55060",
+            transcript_path="/t/s.jsonl",
+        )
+
+        command = run.call_args.args[0]
+        payload = json.loads(command[command.index("-d") + 1])
+        self.assertEqual(payload["transcript_path"], "/t/s.jsonl")
 
     @patch.object(harold_turn_complete.subprocess, "run")
     def test_call_harold_sends_session_and_turn_start_when_set(self, run) -> None:

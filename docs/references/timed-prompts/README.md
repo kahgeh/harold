@@ -149,3 +149,19 @@ If the event cannot be stored after a prompt was typed, Harold logs the error an
 - **One time a day for each entry.** There are no days of the week, dates or intervals.
 - **Nothing is sent to the phone** when a prompt is typed or skipped. Pausing messages to the phone has no effect on timed prompts.
 - **Not on the dash.** The log is where to see what happened to a prompt.
+
+## The restart reminder
+
+Harold also types one line of its own into the chief's pane: a reminder to hand off and restart. It is not a timed prompt: it has no time of day, and it follows the chief's Claude Code session instead.
+
+```toml
+[restart_reminder]
+enabled = true
+after_hours = 24
+after_compactions = 2
+```
+
+- **When it is due.** At the end of a chief turn, once the session is more than `after_hours` old or has compacted at least `after_compactions` times. The session's start is the first `timestamp` among the transcript's lines for that session id, and a compaction is a line with `isCompactSummary: true`. Only those fields and the line's `sessionId` are read, never message text. The Claude Code turn hook sends the transcript's path (`TurnCompleteRequest.transcript_path`); the Codex hook sends none, so a Codex chief gets no reminder.
+- **The line.** `🔁 Harold: this chief session started 18 Oct 10:04 and has compacted 4 times. Hand off and restart at your next stopping point.` The start is in local time. It is typed with the same idle checks as the `ANSWERS` line, as the writer `restart_reminder`, and does not wait on a busy pane beyond about 3 seconds, which covers the moment before Harold's snapshot shows the pane idle: Harold tries again at the next turn end. The state is saved after the line is typed, so a Harold that stops in between may type it once more after the restart.
+- **Once per session.** `restart-reminder.json` in Harold's data folder (mode 0600) keeps, for each session id, the transcript's path, the offset read so far, the start, the compaction count and when the reminder was typed. Harold reads a transcript in full once, then only the bytes added after the offset. Sessions not seen for 30 days are dropped. A new session starts fresh.
+- **Log lines.** `chief restart reminder typed` carries `session.id`, `age_hours` and `compactions`. `chief restart reminder not typed` carries `session.id` and `reason`: `pane_busy`, `no_chief`, `transcript_unreadable` or `no_transcript_path`. It is written once for each session and reason.

@@ -91,6 +91,7 @@ where
             messaging_switch: tokio::sync::Mutex::new(None),
             tts_switch: tokio::sync::Mutex::new(None),
             shutdown: shutdown_rx,
+            restart_reminder: None,
         },
         shutdown,
         task,
@@ -218,6 +219,48 @@ impl Drop for TestDirectory {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);
     }
+}
+
+#[derive(Default)]
+struct RecordedTurnEnds(std::sync::Mutex<Vec<(String, String, String)>>);
+
+impl crate::restart_reminder::TurnEnds for RecordedTurnEnds {
+    fn turn_ended(&self, pane_id: &str, session_id: &str, transcript_path: &str) {
+        self.0
+            .lock()
+            .unwrap()
+            .push((pane_id.into(), session_id.into(), transcript_path.into()));
+    }
+}
+
+#[tokio::test]
+async fn turn_complete_tells_the_restart_reminder_the_session_and_transcript_after_storing() {
+    let directory = TestDirectory::new();
+    let store = Arc::new(store::HaroldStore::open(&directory.0).await.unwrap());
+    let (mut service, _shutdown, task) = test_service(Arc::clone(&store), empty_snapshot());
+    let recorded = Arc::new(RecordedTurnEnds::default());
+    service.restart_reminder =
+        Some(Arc::clone(&recorded) as Arc<dyn crate::restart_reminder::TurnEnds>);
+
+    service
+        .turn_complete(Request::new(TurnCompleteRequest {
+            pane_id: "%8".into(),
+            session_id: "s-1".into(),
+            transcript_path: "/t/s-1.jsonl".into(),
+            ..Default::default()
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        *recorded.0.lock().unwrap(),
+        [(
+            "%8".to_string(),
+            "s-1".to_string(),
+            "/t/s-1.jsonl".to_string()
+        )]
+    );
+    task.abort();
 }
 
 #[tokio::test]
@@ -1685,6 +1728,7 @@ mod one_trace_per_turn {
                 main_context: "harold".into(),
                 session_id: session.clone(),
                 turn_started_at: started.format(&Rfc3339).unwrap(),
+                ..Default::default()
             }))
             .await
             .unwrap();

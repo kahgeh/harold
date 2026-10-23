@@ -10,6 +10,7 @@ mod log_trim;
 mod outbound;
 mod pod_stats;
 mod projector;
+mod restart_reminder;
 mod settings;
 mod store;
 mod telemetry;
@@ -64,6 +65,8 @@ struct HaroldService {
     /// does not queue behind a pause.
     tts_switch: tokio::sync::Mutex<Option<bool>>,
     shutdown: watch::Receiver<()>,
+    /// Told of each turn end once it is stored. `None` when `[restart_reminder]` is off.
+    restart_reminder: Option<Arc<dyn restart_reminder::TurnEnds>>,
 }
 
 /// The service Harold serves.
@@ -72,6 +75,7 @@ fn harold_service(
     store: Arc<store::HaroldStore>,
     snapshots: agent::snapshot::AgentSnapshotHub,
     shutdown: watch::Receiver<()>,
+    restart_reminder: Option<Arc<dyn restart_reminder::TurnEnds>>,
 ) -> HaroldService {
     HaroldService {
         monitor,
@@ -80,6 +84,7 @@ fn harold_service(
         messaging_switch: tokio::sync::Mutex::new(None),
         tts_switch: tokio::sync::Mutex::new(None),
         shutdown,
+        restart_reminder,
     }
 }
 
@@ -228,6 +233,11 @@ impl Harold for HaroldService {
             let pane_id_log = pane_id_for_log(&pane_id);
             info!(pane_id = %pane_id_log, "turn complete received");
 
+            let turn_end = (
+                req.pane_id.clone(),
+                req.session_id.clone(),
+                req.transcript_path.clone(),
+            );
             let event = store::TurnCompleted {
                 pane_id: req.pane_id,
                 pane_label: req.pane_label,
@@ -256,6 +266,9 @@ impl Harold for HaroldService {
             }
 
             info!(pane_id = %pane_id_log, result = "accepted", "turn complete persisted");
+            if let Some(reminder) = &self.restart_reminder {
+                reminder.turn_ended(&turn_end.0, &turn_end.1, &turn_end.2);
+            }
 
             Ok(Response::new(TurnCompleteResponse { accepted: true }))
         }
@@ -1031,7 +1044,27 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
     let tools = tools::start(cfg, &store_path, snapshots.clone(), shutdown_rx.clone()).await;
 
     info!(address = %addr, "Harold listening");
-    let service = harold_service(monitor, Arc::clone(&store), snapshots, shutdown_rx.clone());
+    let restart_reminder = cfg.restart_reminder.enabled.then(|| {
+        let ports = Arc::new(
+            timed_prompts::TmuxPorts::new(snapshots.clone(), cfg.agents.0.clone())
+                .with_chief(&cfg.notify),
+        );
+        let data_folder = std::path::Path::new(&store_path)
+            .parent()
+            .unwrap_or(std::path::Path::new("."));
+        Arc::new(restart_reminder::RestartReminder::new(
+            ports,
+            cfg.restart_reminder.clone(),
+            data_folder,
+        )) as Arc<dyn restart_reminder::TurnEnds>
+    });
+    let service = harold_service(
+        monitor,
+        Arc::clone(&store),
+        snapshots,
+        shutdown_rx.clone(),
+        restart_reminder,
+    );
     let server_result = Server::builder()
         .add_routes(tools.routes.clone())
         .add_service(HaroldServer::new(service))

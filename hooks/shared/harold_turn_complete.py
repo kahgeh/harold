@@ -37,6 +37,7 @@ class TurnComplete:
     assistant_message: str
     session_id: str = ""
     turn_started_at: str = ""
+    transcript_path: str = ""
 
 
 def clean_text(value: str, limit: int) -> str:
@@ -134,6 +135,7 @@ def call_harold(
     grpc_addr: str,
     session_id: str = "",
     turn_started_at: str = "",
+    transcript_path: str = "",
 ) -> None:
     fields = {
         "pane_id": pane_id,
@@ -147,6 +149,8 @@ def call_harold(
         fields["session_id"] = session_id
     if turn_started_at:
         fields["turn_started_at"] = turn_started_at
+    if transcript_path:
+        fields["transcript_path"] = transcript_path
     payload = json.dumps(fields)
     subprocess.run(
         [
@@ -178,4 +182,5 @@ def notify_harold(turn: TurnComplete) -> None:
         grpc_addr=grpc_addr,
         session_id=turn.session_id,
         turn_started_at=turn.turn_started_at,
+        transcript_path=turn.transcript_path,
     )

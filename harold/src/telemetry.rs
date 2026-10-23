@@ -144,6 +144,8 @@ pub(crate) const ALLOWED_FIELDS: &[&str] = &[
     "voice_found",
     "echo_cancellation",
     "standalone",
+    "age_hours",
+    "compactions",
 ];
 
 /// How long shutting the exporters down may take in all.

@@ -26,6 +26,8 @@ message TurnCompleteRequest {
   string session_id = 6;
   // When the turn's prompt was written, RFC 3339, from the transcript line.
   string turn_started_at = 7;
+  // The agent's transcript file, when the hook has one; empty otherwise.
+  string transcript_path = 8;
 }
 
 message TurnCompleteResponse {

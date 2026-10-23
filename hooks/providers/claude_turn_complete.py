@@ -131,6 +131,7 @@ def main() -> int:
                 assistant_message=assistant_message,
                 session_id=string_or_empty(input_data.get("session_id")),
                 turn_started_at=turn_started_at,
+                transcript_path=string_or_empty(transcript_path),
             )
         )
     except Exception:

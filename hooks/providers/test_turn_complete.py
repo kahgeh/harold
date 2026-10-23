@@ -115,6 +115,19 @@ class ProviderHooksTest(unittest.TestCase):
         turn = notify.call_args.args[0]
         self.assertEqual((turn.session_id, turn.turn_started_at), ("s-1", "2026-10-15T08:05:00.000Z"))
 
+    def test_claude_sends_the_transcript_path_and_codex_sends_none(self):
+        self.write_records([{"type": "user", "message": {"content": "p"}}])
+        notify = self.invoke(claude_turn_complete, {"cwd": "/p", "transcript_path": str(self.transcript)})
+        self.assertEqual(notify.call_args.args[0].transcript_path, str(self.transcript))
+        notify = self.invoke(codex_turn_complete, {"cwd": "/p", "transcript_path": str(self.transcript)})
+        self.assertEqual(notify.call_args.args[0].transcript_path, "")
+
+    def test_claude_sends_an_empty_transcript_path_when_given_none(self):
+        for given in ({}, {"transcript_path": 7}):
+            with self.subTest(given=given):
+                notify = self.invoke(claude_turn_complete, {"cwd": "/p", **given})
+                self.assertEqual(notify.call_args.args[0].transcript_path, "")
+
     def test_codex_sends_session_and_last_prompt_time(self):
         self.write_records([
             {"timestamp": "2026-10-15T08:05:00.000Z", "type": "event_msg", "payload": {"type": "user_message", "message": "new prompt"}},

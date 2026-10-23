@@ -46,6 +46,14 @@ model = "haiku"
 timeout_seconds = 15
 run_budget_usd = 0.02 # --max-budget-usd for each run
 
+# Reminds the chief, once per session, to hand off and restart. It is typed into the chief's
+# pane at the end of a turn when its Claude Code session is older than after_hours or has
+# compacted after_compactions times. See docs/references/timed-prompts/README.md.
+[restart_reminder]
+enabled = true
+after_hours = 24
+after_compactions = 2
+
 [agent_monitor]
 inventory_interval_ms = 2000
 inventory_timeout_ms = 3000

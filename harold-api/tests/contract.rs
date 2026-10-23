@@ -183,6 +183,7 @@ fn turn_complete_preserves_legacy_wire_fields() {
             ("main_context".to_string(), 5),
             ("session_id".to_string(), 6),
             ("turn_started_at".to_string(), 7),
+            ("transcript_path".to_string(), 8),
         ]
     );
 }
@@ -192,6 +193,7 @@ fn turn_complete_request_carries_session_and_start() {
     let request = TurnCompleteRequest {
         session_id: "abc".into(),
         turn_started_at: "2026-10-15T08:00:00Z".into(),
+        transcript_path: "/t/s.jsonl".into(),
         ..Default::default()
     };
     let bytes = request.encode_to_vec();
@@ -199,9 +201,10 @@ fn turn_complete_request_carries_session_and_start() {
     assert_eq!(
         (
             decoded.session_id.as_str(),
-            decoded.turn_started_at.as_str()
+            decoded.turn_started_at.as_str(),
+            decoded.transcript_path.as_str()
         ),
-        ("abc", "2026-10-15T08:00:00Z")
+        ("abc", "2026-10-15T08:00:00Z", "/t/s.jsonl")
     );
     // An old hook sends neither field.
     let old_hook = TurnCompleteRequest {
@@ -212,9 +215,10 @@ fn turn_complete_request_carries_session_and_start() {
     assert_eq!(
         (
             decoded.session_id.as_str(),
-            decoded.turn_started_at.as_str()
+            decoded.turn_started_at.as_str(),
+            decoded.transcript_path.as_str()
         ),
-        ("", "")
+        ("", "", "")
     );
 }
 

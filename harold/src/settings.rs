@@ -264,6 +264,40 @@ impl WatchSettings {
     }
 }
 
+/// The `[restart_reminder]` table: when Harold reminds the chief to hand off and restart.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub(crate) struct RestartReminderSettings {
+    pub enabled: bool,
+    /// A session older than this many hours is due.
+    pub after_hours: u32,
+    /// A session that has compacted this many times is due.
+    pub after_compactions: u32,
+}
+
+impl Default for RestartReminderSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            after_hours: 24,
+            after_compactions: 2,
+        }
+    }
+}
+
+impl RestartReminderSettings {
+    pub(crate) fn validate(&self) -> Vec<String> {
+        let mut errors = Vec::new();
+        if self.after_hours == 0 {
+            errors.push("restart_reminder.after_hours must be at least 1".into());
+        }
+        if self.after_compactions == 0 {
+            errors.push("restart_reminder.after_compactions must be at least 1".into());
+        }
+        errors
+    }
+}
+
 /// The `[call_answerer]` table: the small model that answers each turn of a call. Its
 /// program and environment are the activity summary's (`cli_path`, `environment`).
 #[derive(Clone, Debug, Deserialize, PartialEq)]
@@ -1033,6 +1067,8 @@ pub struct Settings {
     #[serde(default)]
     pub(crate) call_answerer: CallAnswererSettings,
     #[serde(default)]
+    pub(crate) restart_reminder: RestartReminderSettings,
+    #[serde(default)]
     pub(crate) agents: AgentSettings,
     #[serde(default)]
     pub(crate) agent_monitor: AgentMonitorSettings,
@@ -1063,6 +1099,7 @@ impl Settings {
         errors.extend(self.activity_summary.validate());
         errors.extend(self.watch.validate());
         errors.extend(self.call_answerer.validate());
+        errors.extend(self.restart_reminder.validate());
         errors.extend(away_messages_only_from_error(
             self.notify.away_messages_only_from.as_deref(),
         ));
