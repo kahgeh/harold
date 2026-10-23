@@ -298,13 +298,14 @@ fn pass_on_after_call<P: CallPorts>(
     hand_overs: &HandOvers,
     words: String,
     answer: Answer,
+    turn: &tracing::Span,
 ) {
     match answer {
         Answer::Said {
             hand_over: Some(request),
             ..
         } => {
-            hand_overs.start(ports, &request);
+            hand_overs.start(ports, &request, Some(turn));
         }
         Answer::Said { .. } => {}
         Answer::Failed(_) => {
@@ -710,7 +711,7 @@ struct Call<P: CallPorts> {
     awake: Option<P::Awake>,
     next_id: u64,
     /// The run going when the call ended, with the words it answers.
-    detached: Option<(u64, String)>,
+    detached: Option<(u64, String, tracing::Span)>,
     /// The call answerer, when the daemon has one.
     answering: Option<Arc<CallAnswering>>,
     /// Set when the answerer's program could not be started: the call stops trying it.
@@ -913,10 +914,16 @@ impl<P: CallPorts> Call<P> {
             let Event::Answered { id, answer } = event else {
                 continue;
             };
-            if self.detached.as_ref().is_some_and(|(run, _)| *run == id)
-                && let Some((_, words)) = self.detached.take()
+            if self.detached.as_ref().is_some_and(|(run, ..)| *run == id)
+                && let Some((_, words, turn)) = self.detached.take()
             {
-                pass_on_after_call(Arc::clone(&self.ports), &self.hand_overs, words, answer);
+                pass_on_after_call(
+                    Arc::clone(&self.ports),
+                    &self.hand_overs,
+                    words,
+                    answer,
+                    &turn,
+                );
             }
         }
     }
@@ -1557,7 +1564,7 @@ impl<P: CallPorts> Call<P> {
             if let Err(mpsc::error::SendError(Event::Answered { answer, .. })) =
                 events.send(Event::Answered { id, answer })
             {
-                pass_on_after_call(ports, &hand_overs, words, answer);
+                pass_on_after_call(ports, &hand_overs, words, answer, &span);
             }
         });
         let now = Instant::now();
@@ -1610,6 +1617,7 @@ impl<P: CallPorts> Call<P> {
                         &self.hand_overs,
                         run.text,
                         Answer::Failed(failure),
+                        &run.trace.span,
                     );
                 } else {
                     self.fall_back(run.text, run.trace).await;
@@ -1621,7 +1629,8 @@ impl<P: CallPorts> Call<P> {
     fn run_said(&mut self, run: AnswerRun, say: String, hand_over: Option<String>) {
         let handed_over = hand_over.is_some();
         if let Some(request) = &hand_over {
-            self.hand_overs.start(Arc::clone(&self.ports), request);
+            self.hand_overs
+                .start(Arc::clone(&self.ports), request, Some(&run.trace.span));
         }
         let say = if say.trim().is_empty() {
             PASSED_ON.to_string()
@@ -2622,7 +2631,7 @@ impl<P: CallPorts> Call<P> {
             if why == Ended::Shutdown {
                 run.task.abort();
             } else {
-                self.detached = Some((run.id, run.text));
+                self.detached = Some((run.id, run.text, run.trace.span.clone()));
             }
         }
         if why == Ended::Shutdown {

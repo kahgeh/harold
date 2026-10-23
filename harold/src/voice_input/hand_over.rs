@@ -13,12 +13,14 @@ use super::CallPorts;
 use super::call::{MARK, chief_pane};
 use crate::agent::domain::EffectiveAgentState;
 use crate::away_message::one_line;
+use crate::telemetry::{self, StartedBy};
 use crate::timed_prompts::{Attempt, Ports, Reason, Writer, type_when_ready};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 use tokio::time::{Instant, sleep};
 use tracing::{info, warn};
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 /// How often a hand-over that could not be typed is tried again.
 pub(super) const RETRY: Duration = Duration::from_secs(5);
@@ -69,8 +71,14 @@ impl HandOvers {
     }
 
     /// Numbers the hand-over and starts typing it, in a task that outlives the call.
-    /// Returns the number, such as `H1`.
-    pub(super) fn start<P: CallPorts>(&self, ports: Arc<P>, request: &str) -> String {
+    /// Returns the number, such as `H1`. With the call turn's span, the chief's turn for the
+    /// typed line joins that turn's trace.
+    pub(super) fn start<P: CallPorts>(
+        &self,
+        ports: Arc<P>,
+        request: &str,
+        turn: Option<&tracing::Span>,
+    ) -> String {
         let id = format!("H{}", self.count.fetch_add(1, Ordering::SeqCst) + 1);
         let request: String = one_line(request).chars().take(REQUEST_CHARS).collect();
         self.shared
@@ -86,6 +94,7 @@ impl HandOvers {
             Arc::clone(&self.shared),
             id.clone(),
             request,
+            turn.map(OpenTelemetrySpanExt::context),
         ));
         id
     }
@@ -134,6 +143,7 @@ async fn keep_trying<P: CallPorts>(
     shared: Arc<Mutex<Vec<HandOverFact>>>,
     id: String,
     request: String,
+    turn: Option<opentelemetry::Context>,
 ) {
     let line = format!("{MARK} hand-over {id}: {request}");
     let began = Instant::now();
@@ -142,6 +152,12 @@ async fn keep_trying<P: CallPorts>(
         let reason = match try_once(&*ports, &line).await {
             Try::Typed { pane, while_busy } => {
                 mark_typed(&shared, &id);
+                telemetry::prompt_typed(
+                    &pane,
+                    StartedBy::Voice,
+                    turn,
+                    time::OffsetDateTime::now_utc(),
+                );
                 let wait_ms = u64::try_from(began.elapsed().as_millis()).unwrap_or(u64::MAX);
                 info!(
                     hand_over_id = %id,

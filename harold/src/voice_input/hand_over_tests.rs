@@ -35,9 +35,9 @@ async fn a_hand_over_is_typed_at_once_into_a_busy_chief_and_numbered() {
         .set(|s| s.view.panes[0].state = EffectiveAgentState::Busy);
     let hand_overs = HandOvers::default();
 
-    let first = hand_overs.start(Arc::clone(&ports), "rerun the\nharold build");
+    let first = hand_overs.start(Arc::clone(&ports), "rerun the\nharold build", None);
     settle().await;
-    let second = hand_overs.start(Arc::clone(&ports), "and tell me when");
+    let second = hand_overs.start(Arc::clone(&ports), "and tell me when", None);
     sleep(Duration::from_secs(1)).await;
     settle().await;
 
@@ -73,7 +73,7 @@ async fn a_hand_over_waits_while_the_box_holds_text_and_is_typed_once_it_is_empt
         .set(|s| s.screen = Some(HOLDS_TEXT.to_string()));
     let hand_overs = HandOvers::default();
 
-    hand_overs.start(Arc::clone(&ports), "rerun the build");
+    hand_overs.start(Arc::clone(&ports), "rerun the build", None);
     sleep(Duration::from_secs(12)).await;
 
     assert!(keys_of(&ports).is_empty());
@@ -110,7 +110,7 @@ async fn a_hand_over_not_typed_in_30_minutes_is_given_up_and_the_thread_is_told(
         .set(|s| s.screen = Some(HOLDS_TEXT.to_string()));
     let hand_overs = HandOvers::default();
 
-    hand_overs.start(Arc::clone(&ports), "rerun the build");
+    hand_overs.start(Arc::clone(&ports), "rerun the build", None);
     sleep(GIVE_UP - Duration::from_secs(10)).await;
     settle().await;
     assert!(thread.0.lock().unwrap().is_empty());
@@ -147,7 +147,7 @@ async fn with_no_chief_running_a_hand_over_waits_and_the_give_up_has_no_pane_to_
     ports.fake_panes().set(|s| s.view.panes.clear());
     let hand_overs = HandOvers::default();
 
-    hand_overs.start(Arc::clone(&ports), "rerun the build");
+    hand_overs.start(Arc::clone(&ports), "rerun the build", None);
     sleep(GIVE_UP + Duration::from_secs(10)).await;
     settle().await;
 
@@ -167,7 +167,7 @@ async fn a_hand_over_waits_for_a_chief_whose_state_is_unknown_and_for_a_pane_lis
         .fake_panes()
         .set(|s| s.view.panes[0].state = EffectiveAgentState::Unknown);
     let hand_overs = HandOvers::default();
-    hand_overs.start(Arc::clone(&ports), "one");
+    hand_overs.start(Arc::clone(&ports), "one", None);
     sleep(Duration::from_secs(11)).await;
     assert!(keys_of(&ports).is_empty());
 
@@ -182,4 +182,35 @@ async fn a_hand_over_waits_for_a_chief_whose_state_is_unknown_and_for_a_pane_lis
     sleep(Duration::from_secs(6)).await;
     settle().await;
     assert_eq!(keys_of(&ports).len(), 2);
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn the_chiefs_turn_for_a_typed_hand_over_joins_the_call_turns_trace() {
+    use opentelemetry::trace::TraceContextExt as _;
+    crate::telemetry::test_support::install();
+    let (ports, _) = ports_with_thread();
+    // A pane of its own: the prompts kept by pane are shared by every test.
+    let pane = format!("%h{}", uuid::Uuid::new_v4().simple());
+    ports
+        .fake_panes()
+        .set(|s| s.view.panes[0].pane_id = pane.clone());
+    let hand_overs = HandOvers::default();
+    let turn = tracing::info_span!(target: crate::telemetry::TRACE_TARGET, "test.call_turn");
+    let turn_trace = turn.context().span().span_context().trace_id();
+
+    hand_overs.start(Arc::clone(&ports), "rerun the build", Some(&turn));
+    settle().await;
+    sleep(Duration::from_secs(1)).await;
+    settle().await;
+
+    let (_, started_by, cx) =
+        crate::telemetry::take_prompt(&pane, time::OffsetDateTime::now_utc()).expect("a prompt");
+    assert_eq!(started_by, StartedBy::Voice);
+    assert_eq!(
+        cx.expect("with the call turn's context")
+            .span()
+            .span_context()
+            .trace_id(),
+        turn_trace
+    );
 }
