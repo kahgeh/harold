@@ -4990,11 +4990,11 @@ mod tests {
             spec: String::new(),
             sha: String::new(),
             link: "https://example.com/i1".into(),
-            intro: "Do these on PasM1Mac, then tick each one here.".into(),
+            intro: "Do these on studio-mac, then tick each one here.".into(),
             version: 1,
             deferred: false,
             decisions: vec![],
-            title: "Install Harold 0.15.0 on PasM1Mac".into(),
+            title: "Install Harold 0.15.0 on studio-mac".into(),
             steps: vec![
                 step("Open Terminal", ""),
                 step(
@@ -5093,7 +5093,7 @@ mod tests {
     }
 
     const MOCK_I1_STEPS: [&str; 12] = [
-        "        Do these on PasM1Mac, then tick each one here.",
+        "        Do these on studio-mac, then tick each one here.",
         "",
         "          [ ] 1  Open Terminal",
         "          [ ] 2  Run make deploy in ~/code/harold/main",
@@ -5129,7 +5129,7 @@ mod tests {
         let rows = todo_block(&app, 107, "\u{25be} I1", 15);
         assert_eq!(
             rows[0],
-            "\u{25b6}   \u{25be} I1 \u{b7} instructions \u{b7} 1 of 2 todos \u{b7} 0 of 4 ticked \u{b7} harold \u{b7} Install Harold 0.15.0 on PasM1Mac"
+            "\u{25b6}   \u{25be} I1 \u{b7} instructions \u{b7} 1 of 2 todos \u{b7} 0 of 4 ticked \u{b7} harold \u{b7} Install Harold 0.15.0 on studio-mac"
         );
         assert_eq!(rows[1..13], MOCK_I1_STEPS);
         assert_eq!(
@@ -5160,8 +5160,9 @@ mod tests {
         keys(&mut app, "jjj");
         let rows = todo_block(&app, 107, "\u{25be} I1", 11);
         assert!(
-            rows[0]
-                .ends_with("2 of 4 ticked \u{b7} harold \u{b7} Install Harold 0.15.0 on PasM1Mac")
+            rows[0].ends_with(
+                "2 of 4 ticked \u{b7} harold \u{b7} Install Harold 0.15.0 on studio-mac"
+            )
         );
         assert!(rows[0].starts_with("    \u{25be} I1"), "{}", rows[0]);
         assert_eq!(rows[3], "          [\u{2713}] 1  Open Terminal");
@@ -5381,7 +5382,7 @@ mod tests {
         );
         assert_eq!(
             header_text_58(&app),
-            "\u{25be} I1 \u{b7} instructions \u{b7} 1 of 2 todos \u{b7} 0 of 4 ticked \u{b7} harold \u{b7} Install Harold 0.15.0 on PasM1Mac"
+            "\u{25be} I1 \u{b7} instructions \u{b7} 1 of 2 todos \u{b7} 0 of 4 ticked \u{b7} harold \u{b7} Install Harold 0.15.0 on studio-mac"
         );
         assert_eq!(
             footer_inner(&app, 60, 18),

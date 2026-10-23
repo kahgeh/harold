@@ -33,18 +33,18 @@ Setting up takes five steps: Tailscale on both devices, `tailscale serve`, the `
 
 ### Tailscale on the Mac and the iPhone
 
-Install Tailscale on this Mac (PasM4MBP) and on the iPhone, and sign both in to the same tailnet, the private network Tailscale makes from the devices signed in to your account. Only devices in that tailnet can reach the app.
+Install Tailscale on this Mac (laptop-mac) and on the iPhone, and sign both in to the same tailnet, the private network Tailscale makes from the devices signed in to your account. Only devices in that tailnet can reach the app.
 
 Before `tailscale serve` will serve HTTPS, the tailnet needs two settings turned on in the Tailscale admin console:
 
-- **MagicDNS**, which gives the Mac its name in the tailnet, `pasm4mbp.<tailnet>.ts.net`;
+- **MagicDNS**, which gives the Mac its name in the tailnet, `laptop-mac.<tailnet>.ts.net`;
 - **HTTPS certificates**, which let Tailscale obtain a certificate for that name.
 
 The first run of `tailscale serve` offers a link to turn on whichever is off. The `tailscale` command must also be on the `PATH`: the Mac app can install its command-line tool from its settings.
 
 ### Publishing the app with `tailscale serve`
 
-Harold listens on `127.0.0.1:4330`. `tailscale serve` takes HTTPS requests from the tailnet at `https://pasm4mbp.<tailnet>.ts.net/`, with a certificate Tailscale obtains, and passes them to that address:
+Harold listens on `127.0.0.1:4330`. `tailscale serve` takes HTTPS requests from the tailnet at `https://laptop-mac.<tailnet>.ts.net/`, with a certificate Tailscale obtains, and passes them to that address:
 
 ```sh
 tailscale serve --bg http://127.0.0.1:4330
@@ -94,7 +94,7 @@ The section also needs `[notify] chief` (the default `"chief-of-pods"` will do),
 
 ### Adding the app to the home screen
 
-On the iPhone, open `https://pasm4mbp.<tailnet>.ts.net/` in Safari, tap the Share button, and choose **Add to Home Screen**. The name under the icon is `app_name`, or **Chief** when none is set, and the icon shows the `icon` file when one is set. iOS saves the name and icon when you add the app and does not read them again. To see a changed name or icon: delete the app from the home screen, add it again from Safari, and tap **Turn on alerts** again, because deleting the app also deletes its sign-up for pushes. Open the app from that icon from now on: iOS delivers pushes only to a web app opened from the home screen, so a Safari tab does not show **Turn on alerts** at all.
+On the iPhone, open `https://laptop-mac.<tailnet>.ts.net/` in Safari, tap the Share button, and choose **Add to Home Screen**. The name under the icon is `app_name`, or **Chief** when none is set, and the icon shows the `icon` file when one is set. iOS saves the name and icon when you add the app and does not read them again. To see a changed name or icon: delete the app from the home screen, add it again from Safari, and tap **Turn on alerts** again, because deleting the app also deletes its sign-up for pushes. Open the app from that icon from now on: iOS delivers pushes only to a web app opened from the home screen, so a Safari tab does not show **Turn on alerts** at all.
 
 ### Turning on push
 

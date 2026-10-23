@@ -155,11 +155,11 @@ Closed todos take one row, counting questions and instructions together. With an
   ● BUSY   harold-main               Building dash-one-version
 ```
 
-Press `j` to move the cursor to the `▸ 2 todos waiting` row, then `l` or `Enter` to open it. The first todo in the chief's order opens in full and the row becomes its header; every other todo stays one row under it. For instructions, the header is `▾ I1 · instructions · 1 of 2 todos · 0 of 4 ticked · harold · Install Harold 0.15.0 on PasM1Mac`, and the steps follow it, each with its detail dim underneath. `Space` ticks a step (`[✓]`) and unticks it again, in any order; ticking sends nothing and Harold keeps the ticks, so a restart or a second dash shows the same ones. `done` tells the chief you are done, `ignore` that you will not do them:
+Press `j` to move the cursor to the `▸ 2 todos waiting` row, then `l` or `Enter` to open it. The first todo in the chief's order opens in full and the row becomes its header; every other todo stays one row under it. For instructions, the header is `▾ I1 · instructions · 1 of 2 todos · 0 of 4 ticked · harold · Install Harold 0.15.0 on studio-mac`, and the steps follow it, each with its detail dim underneath. `Space` ticks a step (`[✓]`) and unticks it again, in any order; ticking sends nothing and Harold keeps the ticks, so a restart or a second dash shows the same ones. `done` tells the chief you are done, `ignore` that you will not do them:
 
 ```text
-    ▾ I1 · instructions · 1 of 2 todos · 2 of 4 ticked · harold · Install Harold 0.15.0 on PasM1Mac
-        Do these on PasM1Mac, then tick each one here.
+    ▾ I1 · instructions · 1 of 2 todos · 2 of 4 ticked · harold · Install Harold 0.15.0 on studio-mac
+        Do these on studio-mac, then tick each one here.
 
           [✓] 1  Open Terminal
           [✓] 2  Run make deploy in ~/code/harold/main
@@ -198,7 +198,7 @@ A question's header is `▾ Q1 · question · 1 of 2 todos · harold · durable-
           later
           revise…
           reject…
-    ▸ I1 · instructions · 0 of 4 ticked · harold · Install Harold 0.15.0 on PasM1Mac
+    ▸ I1 · instructions · 0 of 4 ticked · harold · Install Harold 0.15.0 on studio-mac
 ```
 
 The cursor stops on the header, on each option or step, on each action row (`send`, `later`, `revise…`, `reject…`, or `done` and `ignore`) and on each other todo's row. It skips the intro, the asks, the details, the impact lines and the blank rows. `j` and `k` move through all of them like any other rows: `j` from the chief's row goes to the header, then over each option or step and action row and each other todo's row, then on to the next agent row. `l` or `Enter` on another todo's row opens that todo. `h` (or `Esc`) closes the todo again with the cursor on its header; the picks are kept, and `l` on the header opens it as it was. The yellow marks the header and the row under the cursor.

@@ -292,18 +292,23 @@ fn error_replies_name_the_machine_that_sends_them() {
 fn routing_reports_how_the_pane_was_chosen() {
     let env = FakeEnv::with_panes(vec![tmux("%1", "harold:1.0"), tmux("%2", "chief:1.0")]);
 
-    let report = route_owned_reply(&env, "PasM4MBP", Some("chief"), "hello").unwrap();
+    let report = route_owned_reply(&env, "laptop-mac", Some("chief"), "hello").unwrap();
     assert_eq!(
         chosen(&report.routing),
         Some(("%2", ResolvedBy::TagSubstring, true))
     );
-    let report = route_owned_reply(&env, "PasM4MBP", Some("chief:1.0"), "hello").unwrap();
+    let report = route_owned_reply(&env, "laptop-mac", Some("chief:1.0"), "hello").unwrap();
     assert_eq!(
         chosen(&report.routing),
         Some(("%2", ResolvedBy::ExactTag, true))
     );
-    let report =
-        route_owned_reply(&FakeEnv::with_panes(Vec::new()), "PasM4MBP", None, "hello").unwrap();
+    let report = route_owned_reply(
+        &FakeEnv::with_panes(Vec::new()),
+        "laptop-mac",
+        None,
+        "hello",
+    )
+    .unwrap();
     assert_eq!(report.routing, Routing::NoPane);
 }
 
@@ -314,14 +319,14 @@ fn an_untagged_reply_reports_the_latest_notifier_or_the_my_agent_fallback() {
     clear_routing_state();
     let env = FakeEnv::with_panes(vec![tmux("%3", "alir-app:0.1"), tmux("%4", "my-agent:0.0")]);
 
-    let report = route_owned_reply(&env, "PasM4MBP", None, "hello").unwrap();
+    let report = route_owned_reply(&env, "laptop-mac", None, "hello").unwrap();
     assert_eq!(
         chosen(&report.routing),
         Some(("%4", ResolvedBy::MyAgent, false))
     );
 
     set_last_away_notification_source_agent(tmux("%3", "alir-app:0.1"));
-    let report = route_owned_reply(&env, "PasM4MBP", None, "hello").unwrap();
+    let report = route_owned_reply(&env, "laptop-mac", None, "hello").unwrap();
     assert_eq!(
         chosen(&report.routing),
         Some(("%3", ResolvedBy::LatestNotifier, false))

@@ -472,8 +472,8 @@ fn agent_message_is_the_pane_address_then_the_text_as_stored() {
         "🤖 beep",
     ] {
         assert_eq!(
-            agent_message_text("PasM4MBP", "pods:0.1", text),
-            format!("[PasM4MBP/pods:0.1] {text}")
+            agent_message_text("laptop-mac", "pods:0.1", text),
+            format!("[laptop-mac/pods:0.1] {text}")
         );
     }
 }
@@ -482,10 +482,10 @@ fn agent_message_is_the_pane_address_then_the_text_as_stored() {
 fn sent_agent_message_is_read_back_as_a_notification_from_its_mac() {
     let sent = format!(
         "🤖 {}",
-        agent_message_text("PasM4MBP", "pods:0.1", "Pod 3 is blocked")
+        agent_message_text("laptop-mac", "pods:0.1", "Pod 3 is blocked")
     );
 
     let marker = parse_marker(&sent).expect("an agent message carries a marker");
-    assert_eq!(marker.machine, "PasM4MBP");
+    assert_eq!(marker.machine, "laptop-mac");
     assert!(marker.is_notification);
 }

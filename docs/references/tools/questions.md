@@ -47,8 +47,8 @@ Instructions are a todo of the other kind: numbered steps the user does by hand.
 {
   "id": "I1",
   "product": "harold",
-  "title": "Install Harold 0.15.0 on PasM1Mac",
-  "intro": "Do these on PasM1Mac, then tick each one here.",
+  "title": "Install Harold 0.15.0 on studio-mac",
+  "intro": "Do these on studio-mac, then tick each one here.",
   "link": "https://example.com/specs/release-install.md",
   "steps": [
     {"text": "Open Terminal"},

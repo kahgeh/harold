@@ -1859,7 +1859,7 @@ async fn startup_waits_for_an_unreadable_database_then_feeds_its_rows() {
 #[test]
 fn agent_message_goes_out_with_one_marker() {
     let text = crate::inbound::ownership::agent_message_text(
-        "PasM4MBP",
+        "laptop-mac",
         "pods:0.1",
         "Pod 3 is blocked on a merge conflict in store.rs",
     );
@@ -1868,7 +1868,7 @@ fn agent_message_goes_out_with_one_marker() {
 
     assert_eq!(
         script,
-        "tell application \"Messages\" to send \"🤖 [PasM4MBP/pods:0.1] Pod 3 is blocked on a merge conflict in store.rs\" to buddy \"+61400000000\""
+        "tell application \"Messages\" to send \"🤖 [laptop-mac/pods:0.1] Pod 3 is blocked on a merge conflict in store.rs\" to buddy \"+61400000000\""
     );
     assert_eq!(script.matches('🤖').count(), 1);
 }

@@ -45,7 +45,7 @@ telemetry.pod_registry must be the path of the chief's products.toml
 
 A well-formed alert address that cannot be listened on, such as a port another program already holds, does not stop Harold. Harold logs `alert address unavailable` with `reason = bind_failed` and runs with the alert address off until it restarts. Every other part of Harold, telemetry included, runs as usual.
 
-Every export carries the resource attributes `service.name = "harold"` and `harold.machine = <machine_name>`, so the data of PasM4MBP and PasM1Mac stays apart. Set `pod_registry` on one Mac only. Both Macs reading the same pods would count every merge twice.
+Every export carries the resource attributes `service.name = "harold"` and `harold.machine = <machine_name>`, so the data of laptop-mac and studio-mac stays apart. Set `pod_registry` on one Mac only. Both Macs reading the same pods would count every merge twice.
 
 `harold.log` is written as today, with export on or off: the same lines, with message text still in them.
 
@@ -134,7 +134,7 @@ These rules decide `wrong`:
 1. Only a request typed on time can later count as wrong. A late or dropped request never does.
 2. "The next phone reply" is literal. Any counted reply replaces or clears the earlier one, including a reply that found no pane. A reply another Mac owns, or one that arrives while messaging is paused, leaves it alone.
 3. Only a request whose pane Harold chose can count as wrong: `resolved_by` of `latest_notifier`, `ai_model` or `my_agent`. A request the user tagged (`exact_tag`, `tag_substring`) never counts as wrong.
-4. A reply tagged for another Mac (`[PasM1Mac/pane] …` or `[PasM1Mac] …`) is a tag for a different pane. The Mac that typed the earlier request counts that request as wrong under rules 1 and 3, within 10 minutes. The tagged reply itself is counted only by the Mac it names, and, as rule 2 says, it leaves the earlier request in place. A reply with no machine in its tag that another Mac owns because it sent the latest phone notification counts nothing here.
+4. A reply tagged for another Mac (`[studio-mac/pane] …` or `[studio-mac] …`) is a tag for a different pane. The Mac that typed the earlier request counts that request as wrong under rules 1 and 3, within 10 minutes. The tagged reply itself is counted only by the Mac it names, and, as rule 2 says, it leaves the earlier request in place. A reply with no machine in its tag that another Mac owns because it sent the latest phone notification counts nothing here.
 5. A request is counted as wrong at most once. A second tagged reply within the 10 minutes, for another Mac or for another pane here, does not count it again.
 
 `resolved_by` says how the pane was chosen:

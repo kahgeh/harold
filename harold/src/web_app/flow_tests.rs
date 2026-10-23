@@ -762,7 +762,7 @@ async fn a_request_with_a_foreign_host_is_refused() {
         "EVIL.example:80",
         "ts.net.evil.example",
         "evil-ts.net",
-        "pasm4mbp.tail1234.ts.net.evil.example",
+        "laptop-mac.tail1234.ts.net.evil.example",
         wrong_port.as_str(),
     ] {
         let page = server
@@ -792,8 +792,8 @@ async fn a_request_with_a_foreign_host_is_refused() {
     assert_nothing_stored(&store).await;
 
     for host in [
-        "pasm4mbp.tail1234.ts.net",
-        "PASM4MBP.Tail1234.TS.NET:443",
+        "laptop-mac.tail1234.ts.net",
+        "LAPTOP-MAC.Tail1234.TS.NET:443",
         localhost.as_str(),
     ] {
         let page = server
@@ -808,8 +808,8 @@ async fn a_request_with_a_foreign_host_is_refused() {
             reqwest::Method::POST,
             "/replies",
             &[
-                ("host", "pasm4mbp.tail1234.ts.net"),
-                ("origin", "https://pasm4mbp.tail1234.ts.net"),
+                ("host", "laptop-mac.tail1234.ts.net"),
+                ("origin", "https://laptop-mac.tail1234.ts.net"),
                 ("datastar-request", "true"),
                 ("content-type", "application/json"),
             ],
