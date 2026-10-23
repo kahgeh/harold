@@ -226,6 +226,23 @@ The todo page lists the chief's todos as cards in the question tool's order: the
 
 The web app reads the todos through the question tool's gRPC service on Harold's own address (`[grpc]`), every 2 seconds while a page is open and at once after each post ([ADR 0007](../../adr/0007-the-web-app-reaches-todos-through-the-question-service.md)). The posts are `POST /todos/answer`, `/todos/picks`, `/todos/later`, `/todos/tick`, `/todos/done`, `/todos/ignore`, `/todos/revise` and `/todos/reject`, each behind the login and same-origin checks like every route. The phone saves a question's picks with `/todos/picks` each time you select an option and after half a second of typing; a save the tool took answers `204` and does not redraw your page, and every open page shows the saved picks at its next todo read.
 
+## Notes
+
+**Notes** means the vault notes, the organisation's Markdown notes that the [knowledge tool](../tools/knowledge.md) indexes. It never means backlog notes. The page exists only when `[knowledge] vault` is set; without it there is no Notes link and the routes answer `404`.
+
+- **The link.** The thread's header shows **Notes** beside **Todos**. It opens the Notes page, and ‹ back comes back to the thread. The header row wraps: until push is on, **Turn on alerts** takes a second line, so the row fits at 320 px.
+- **The page** is a search box, then **Changed lately**: the 10 vault notes changed most recently, newest first. Each row shows only the vault note's kind (such as `idea`, `reference` or `decision`) and its title. Nothing more is on the first screen: no description, no matching passage and no related list.
+- **A search** runs as you pause typing (300 ms). The list becomes **Closest notes**, at most 10 rows, in the same form. A query under 2 characters keeps the recent list. When nothing matches the list reads `No notes match.` When the model could not load it reads `Search is resting: the model didn't load.` and when the tool cannot be reached, `Notes are not available right now.`
+- **Tapping a row** opens the vault note, read-only: its kind, its title and its Markdown rendered, with raw HTML switched off (shown as the text it is), images left out, and links only to a web address, mail or a place in the page. Its `[[links]]` show as plain words, not links. There is no related list. A vault note that no longer exists answers `404`.
+
+| Route | Answers |
+|---|---|
+| `GET /notes` | The page, with the 10 most recent |
+| `GET /notes/search?q=` | A Datastar patch of the list (`#notes-list`) |
+| `GET /notes/{name}` | The vault note `name`, a path under the vault without `.md`, such as `references/hyperdx`. A vault note named `search` is shadowed by the search route |
+
+The routes sit behind the web app's login, device, host and origin checks like every other route. The web app reads the vault notes through the knowledge tool's gRPC service on Harold's own address, as it reads the todos ([ADR 0007](../../adr/0007-the-web-app-reaches-todos-through-the-question-service.md)). A search carries `source = "app"` on the tool's `harold.knowledge.search` span; the words typed ride in the request's URL only as far as Harold's own address, and no log line holds them.
+
 ## What reaches the phone, and by which route
 
 With `[web_app]` set, the chief's messages always go into the app's thread. Once a phone has turned on push, they reach the phone as a push instead of through iMessage; until then, each also goes to iMessage, starting `(app unreachable)`. Every other agent's messages, and your iMessage replies, work as before:

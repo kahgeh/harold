@@ -1112,6 +1112,7 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
             chief_session: cfg.notify.chief_session.as_deref(),
             grpc: &cfg.grpc,
             browser_collector: browser_collector.as_deref(),
+            knowledge: cfg.knowledge.enabled(),
         },
     )
     .await;

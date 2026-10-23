@@ -60,6 +60,7 @@ pub(crate) mod call;
 pub(crate) mod chief;
 pub(crate) mod echo_test;
 pub(crate) mod login;
+pub(crate) mod notes;
 pub(crate) mod origin;
 pub(crate) mod pages;
 pub(crate) mod pair;
@@ -93,6 +94,9 @@ mod photo_tests;
 #[cfg(test)]
 pub(crate) mod fake_push;
 
+#[cfg(test)]
+#[path = "notes_tests.rs"]
+mod notes_tests;
 #[cfg(test)]
 #[path = "todos_tests.rs"]
 mod todos_tests;
@@ -134,6 +138,8 @@ pub(crate) struct Agents<'a> {
     pub grpc: &'a GrpcSettings,
     /// The collector's OTLP HTTP address, where browser spans go; none with export off.
     pub browser_collector: Option<&'a str>,
+    /// Whether the knowledge tool is set: the Notes page and its link exist.
+    pub knowledge: bool,
 }
 
 /// How long a page may go unheard before it stops counting as on screen. The page beats
@@ -349,6 +355,9 @@ pub(crate) struct AppState {
     pub chief_session: Option<Arc<str>>,
     /// The question tool's service, reached through Harold's own gRPC address.
     pub questions: todos::Questions,
+    /// The knowledge tool's service, reached through Harold's own gRPC address; `None`
+    /// when `[knowledge]` is not set, and then there is no Notes link and no Notes route.
+    pub notes: Option<notes::Notes>,
     /// Bumped by each todo post, so every open page reads the todos again at once.
     pub todos_changed: Arc<watch::Sender<u64>>,
     /// The echo test's runs, sample and recent silent runs.
@@ -392,6 +401,7 @@ impl AppState {
             chief_folder: None,
             chief_session: None,
             questions: todos::Questions::lazy(&idle_grpc()),
+            notes: None,
             todos_changed: Arc::new(watch::channel(0).0),
             echo_test: Arc::new(echo_test::EchoTest::new(
                 std::env::temp_dir().join("harold-echo-test-unused"),
@@ -444,6 +454,7 @@ pub(crate) fn idle_agents(grpc: &GrpcSettings) -> Agents<'_> {
         chief_session: None,
         grpc,
         browser_collector: None,
+        knowledge: false,
     }
 }
 
@@ -505,6 +516,9 @@ pub(crate) fn router(state: AppState) -> Router {
         .route("/todos/ignore", post(todos::post_ignore))
         .route("/todos/revise", post(todos::post_revise))
         .route("/todos/reject", post(todos::post_reject))
+        .route("/notes", get(notes::get_notes))
+        .route("/notes/search", get(notes::get_search))
+        .route("/notes/{*name}", get(notes::get_note))
         .route("/echo-test", get(echo_test::get_page))
         .route("/echo-test/sample", get(echo_test::get_sample))
         .route("/echo-test/runs", post(echo_test::post_run))
@@ -595,6 +609,7 @@ pub(crate) async fn start(
         chief_folder: agents.chief_folder.map(Arc::from),
         chief_session: agents.chief_session.map(Arc::from),
         questions: todos::Questions::lazy(agents.grpc),
+        notes: agents.knowledge.then(|| notes::Notes::lazy(agents.grpc)),
         todos_changed: Arc::new(watch::channel(0).0),
         echo_test: Arc::new(echo_test::EchoTest::new(
             echo_test::echo_test_path(store_path),

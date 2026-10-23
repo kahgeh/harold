@@ -74,6 +74,8 @@ pub(crate) struct ThreadPage {
     pub todos: TodosSection,
     /// The todo count on the **Todos** button.
     pub todo_count: TodoCount,
+    /// Whether the header links the Notes page: the knowledge tool is set.
+    pub notes_on: bool,
     /// Whether the page records and sends browser spans: Harold exports to a collector.
     pub browser_traces: bool,
     /// Harold's version: the `service.version` of the page's spans.
@@ -432,6 +434,7 @@ pub(crate) async fn get_thread(State(state): State<AppState>) -> Response {
     let rows = window.rows.len();
     let page = ThreadPage {
         todo_count: todos.count(),
+        notes_on: state.notes.is_some(),
         todos,
         app_name: state.identity.name.clone(),
         has_icon: state.identity.icon.is_some(),

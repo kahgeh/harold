@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="{{ app_name }}">
+<title>Notes</title>
+<link rel="manifest" href="/static/manifest.webmanifest">
+{% if has_icon %}<link rel="apple-touch-icon" href="/static/icon.png">
+{% endif %}<link rel="stylesheet" href="/static/app.css">
+<script type="module" src="/static/datastar-1.0.2.js"></script>
+</head>
+<body class="notes">
+<header class="bar top">
+<div class="row">
+<a href="/" id="to-thread" class="back-button"><svg viewBox="0 0 12 20" width="12" height="20" aria-hidden="true"><path d="M10 2L2 10l8 8" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>{{ app_name }}</a>
+<h2>Notes</h2>
+</div>
+</header>
+<main class="notes-page">
+<div class="notes-search"><input type="search" id="notes-query" placeholder="Search your notes" aria-label="Search your notes" autocomplete="off" maxlength="200" data-on:input__debounce.300ms="@get('/notes/search?q=' + encodeURIComponent(evt.target.value), {filterSignals: {include: /^none$/}})"></div>
+{{ list|safe }}</main>
+</body>
+</html>

@@ -1,0 +1,5 @@
+<section id="notes-list" class="notes-list">
+<p class="notes-head">{{ heading }}</p>
+{% for row in rows %}<a class="note-row" href="{{ row.href }}"><span class="note-kind">{{ row.kind }}</span><span class="note-title">{{ row.title }}</span></a>
+{% endfor %}{% if !message.is_empty() %}<p class="notes-message" role="status">{{ message }}</p>
+{% endif %}</section>
