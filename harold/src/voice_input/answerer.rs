@@ -9,7 +9,7 @@
 
 use super::hand_over::HandOverFact;
 use crate::agent::snapshot::AgentSnapshotHub;
-use crate::pod_stats::{self, PodSnapshot};
+use crate::pod_stats::{self, PodSnapshot, SpecFacts, SpecState};
 use crate::settings::{AgentProviderSettings, CallAnswererSettings, GrpcSettings};
 use crate::telemetry;
 use crate::timed_prompts;
@@ -275,6 +275,21 @@ fn facts_json(
     })
 }
 
+/// How long a merged or rejected spec stays in the facts.
+const FINISHED_KEPT_MS: i64 = 24 * 60 * 60 * 1000;
+
+/// Whether a spec belongs in the facts: drafted, waiting for approval, approved or building,
+/// or merged or rejected within the last 24 hours. Older ones would only fill the prompt.
+fn is_live(spec: &SpecFacts, now_ms: i64) -> bool {
+    match spec.state {
+        SpecState::Drafted | SpecState::Waiting | SpecState::Approved | SpecState::Building => true,
+        SpecState::Merged | SpecState::Rejected => {
+            let since = (spec.state_at.unix_timestamp_nanos() / 1_000_000) as i64;
+            now_ms - since <= FINISHED_KEPT_MS
+        }
+    }
+}
+
 fn pods(snapshot: &PodSnapshot, now_ms: i64) -> Vec<Value> {
     snapshot
         .slots
@@ -286,6 +301,7 @@ fn pods(snapshot: &PodSnapshot, now_ms: i64) -> Vec<Value> {
                 .map(|specs| {
                     specs
                         .iter()
+                        .filter(|spec| is_live(spec, now_ms))
                         .map(|spec| {
                             let since = (spec.state_at.unix_timestamp_nanos() / 1_000_000) as i64;
                             json!({

@@ -682,7 +682,8 @@ fn read_text(path: &Path) -> Option<String> {
 /// writes). `building` = busy worktree folder names -> the creation time of their
 /// agent-pane file; `merged` = spec id -> the time of the reflog entry `merge <id>: ...`
 /// (the entry's own time, not the commit's), or from seeing the worktree go. A spec is a
-/// `specs/<id>.md` file: an id with no spec file is not a spec. A pod without a `specs`
+/// `specs/<id>.md` file: an id with no spec file is not a spec, and neither is a file with
+/// a second dot, such as `<id>.revisions.md`. A pod without a `specs`
 /// folder has no specs; one whose `specs` folder cannot be read is an error.
 pub(crate) fn read_specs(
     pod: &Path,
@@ -702,7 +703,12 @@ pub(crate) fn read_specs(
             if path.extension()? != "md" {
                 return None;
             }
-            Some(path.file_stem()?.to_str()?.to_owned())
+            let id = path.file_stem()?.to_str()?;
+            // Spec ids are kebab-case: `<id>.revisions.md` and the like are not specs.
+            if id.contains('.') {
+                return None;
+            }
+            Some(id.to_owned())
         })
         .collect();
     ids.sort();

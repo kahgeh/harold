@@ -316,6 +316,63 @@ fn a_hand_over_with_no_line_is_kept_for_the_call_to_word() {
 // The facts and the prompt
 // ---------------------------------------------------------------------------
 
+fn spec(id: &str, state: SpecState, age_hours: i64) -> SpecFacts {
+    SpecFacts {
+        id: id.into(),
+        state,
+        state_at: time::OffsetDateTime::now_utc() - time::Duration::hours(age_hours),
+        ready_at: None,
+        approved_at: None,
+        merged_at: None,
+        words: 100,
+        revisions: 0,
+    }
+}
+
+/// A pod with 100 old merged specs, 3 live ones, one merged and one rejected an hour ago,
+/// and one rejected 30 hours ago.
+fn crowded_pod() -> PodSnapshot {
+    let mut specs: Vec<SpecFacts> = (0..100)
+        .map(|n| spec(&format!("old-{n}"), SpecState::Merged, 48 + n))
+        .collect();
+    specs.extend([
+        spec("drafted-one", SpecState::Drafted, 5),
+        spec("waiting-one", SpecState::Waiting, 5),
+        spec("building-one", SpecState::Building, 5),
+        spec("just-merged", SpecState::Merged, 1),
+        spec("just-rejected", SpecState::Rejected, 1),
+        spec("long-rejected", SpecState::Rejected, 30),
+    ]);
+    let mut snapshot = PodSnapshot::default();
+    snapshot
+        .slots
+        .insert("harold".into(), SlotCounts { busy: 1, free: 2 });
+    snapshot.specs.insert("harold".into(), specs);
+    snapshot
+}
+
+#[test]
+fn the_facts_list_the_live_specs_and_those_finished_in_the_last_day() {
+    let facts = super::pods(&crowded_pod(), now_ms());
+    let ids: Vec<&str> = facts[0]["specs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|spec| spec["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        ids,
+        [
+            "drafted-one",
+            "waiting-one",
+            "building-one",
+            "just-merged",
+            "just-rejected"
+        ]
+    );
+    assert_eq!(facts[0]["slots"], json!({"busy": 1, "free": 2}));
+}
+
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn the_prompt_holds_the_agents_the_pods_the_todos_the_queue_this_call_and_the_words() {
     let runner = FakeRunner::giving([ok(SAMPLE)]);

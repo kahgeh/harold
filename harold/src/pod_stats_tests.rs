@@ -1026,6 +1026,20 @@ fn a_revision_keeps_ready_and_raises_revisions() {
 }
 
 #[test]
+fn a_file_with_a_second_dot_is_not_a_spec() {
+    let pod = Pod::new();
+    let dir = pod.root.join("pod");
+    write(&dir.join("specs/a.md"), "# Spec\n");
+    write(&dir.join("specs/a.revisions.md"), "# Revisions\n");
+    write(&dir.join("specs/b.revisions.md"), "# Revisions\n");
+
+    let specs = read_specs(&dir, &HashMap::new(), &HashMap::new(), UtcOffset::UTC).unwrap();
+
+    let ids: Vec<&str> = specs.iter().map(|spec| spec.id.as_str()).collect();
+    assert_eq!(ids, ["a"]);
+}
+
+#[test]
 fn revisions_count_the_revision_headings() {
     assert_eq!(
         revisions("# R\n## Revision 1, x\n## Revisions\n### Revision 2\n"),
