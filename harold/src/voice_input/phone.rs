@@ -665,7 +665,7 @@ impl<B: CallPorts> PhonePorts<B> {
                 || self.base.start_worker(&folder),
                 |model| {
                     if let Some(models) = &models {
-                        models.model_missing(model);
+                        models.model_missing(model, false);
                     }
                 },
             )

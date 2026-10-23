@@ -426,22 +426,40 @@ impl SpeechModels {
         }
         let status = self.status.borrow().clone();
         match status {
-            // The pass that waits goes on at once.
-            Status::Waiting => {
-                self.pass().now = true;
-                self.wake.notify_one();
-            }
-            Status::Failed(missing) if !NO_RETRY.contains(&missing.reason) => {
+            // A failure that can be mended: try again, without waiting for Wi-Fi.
+            Status::Failed(missing) if self.retry_on_call(&missing) => {
                 self.set(Status::Checking);
                 self.request(true);
             }
-            _ => {}
+            // A pass that is going, or waiting for Wi-Fi, goes on at once.
+            _ => {
+                let mut pass = self.pass();
+                if pass.running {
+                    pass.now = true;
+                    drop(pass);
+                    self.wake.notify_one();
+                }
+            }
         }
     }
 
+    /// Whether a call tapped after `missing` tries again. Not after a full disk or a download
+    /// that is not allowed, which end the call at once, unless the model is not one Harold
+    /// manages: the user may have fetched it by hand from the notice.
+    fn retry_on_call(&self, missing: &Missing) -> bool {
+        if !NO_RETRY.contains(&missing.reason) {
+            return true;
+        }
+        !self
+            .wants
+            .iter()
+            .any(|want| matches!(want, Want::Managed(m) if m.model == missing.model))
+    }
+
     /// The voice worker could not find `model`: look at it again, and download it if it is
-    /// one Harold manages.
-    pub(crate) fn model_missing(self: &Arc<Self>, model: &str) {
+    /// one Harold manages. `call_waiting` is a call that waits for it, which a metered network
+    /// no longer holds back.
+    pub(crate) fn model_missing(self: &Arc<Self>, model: &str, call_waiting: bool) {
         #[cfg(test)]
         if self.note("model_missing") {
             self.set(Status::Checking);
@@ -453,7 +471,7 @@ impl SpeechModels {
             .any(|want| matches!(want, Want::Managed(m) if m.model == model));
         if managed {
             self.set(Status::Checking);
-            self.request(true);
+            self.request(call_waiting);
             return;
         }
         self.set(Status::Failed(self.missing(model, "not_allowed")));
@@ -465,7 +483,7 @@ impl SpeechModels {
         let revision = revision.as_str();
         let command = (is_model_name(model) && is_revision(revision)).then(|| {
             format!(
-                "`{} -c \"from huggingface_hub import snapshot_download; snapshot_download('{model}', revision='{revision}', token=False)\"`",
+                "{} -c \"from huggingface_hub import snapshot_download; snapshot_download('{model}', revision='{revision}', token=False)\"",
                 self.python
             )
         });
@@ -521,6 +539,7 @@ impl SpeechModels {
             let Want::Managed(managed) = want else {
                 continue;
             };
+            self.set(Status::Checking);
             if self.record_holds(managed) {
                 continue;
             }
@@ -569,7 +588,7 @@ impl SpeechModels {
     /// and downloads what is missing or wrong.
     async fn settle(self: &Arc<Self>, managed: &Managed) -> Result<(), &'static str> {
         if self.write_script().is_err() {
-            return Err("failed");
+            return Err(self.not_downloaded(managed, "failed"));
         }
         if !self.record_path(managed).exists() {
             match self.run_script(managed, true).await {
@@ -594,6 +613,11 @@ impl SpeechModels {
         }
         self.wait_while_metered().await;
         info!(model = %managed.model, total_bytes = managed.size, "speech model download started");
+        self.set(Status::Downloading {
+            model: managed.model.clone(),
+            bytes: 0,
+            total: managed.size,
+        });
         let started = Instant::now();
         match self.run_script(managed, false).await {
             Outcome::Done(bytes) => {

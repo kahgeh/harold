@@ -43,6 +43,7 @@ LOGIN = 'call-test'
 QUESTION = 'How many todos are waiting'
 REQUEST = 'Ask the chief to rerun the harold build'
 FROM_THE_CHIEF = 'From the chief.'
+ONE_MOMENT = 'One moment.'
 TODO_ID = 'QCALLTEST'
 NO_RECIPIENT = 'call-test@harold.invalid'
 ANSWER_LINE = 'Call test answer.'
@@ -753,9 +754,13 @@ def play(run):
 
         def heard():
             # #call keeps showing the last turn's words until the next turn replaces them.
-            found = wait_until(
-                lambda: phone.since(mark, lambda s: s['heard'] and s['heard'] != call.last_heard),
-                LIMIT_HEARD, '"You said" line', since=until)
+            def shown():
+                # The phone fetches and reports each sound meanwhile, such as "One moment.".
+                for sound in call.sounds_since(mark):
+                    call.serve(sound)
+                return phone.since(mark, lambda s: s['heard'] and s['heard'] != call.last_heard)
+
+            found = wait_until(shown, LIMIT_HEARD, '"You said" line', since=until)
             said = found[2]['heard']
             call.last_heard = said
             share = word_match(said, text)
@@ -775,7 +780,7 @@ def play(run):
 
     def todos_answer():
         shown = call.wait_for_line(
-            lambda line: bool(re.search(r'\b(1|one)\b', line.lower())), LIMIT_ANSWER,
+            lambda line: line != ONE_MOMENT and bool(re.search(r'\b(1|one)\b', line.lower())), LIMIT_ANSWER,
             "the call answerer's answer naming one todo", until)
         answer_marks['todos'] = shown['sound']
         log = run.log()
@@ -785,7 +790,7 @@ def play(run):
 
     if not add(run_step("the call answerer answers 'how many todos'", LIMIT_ANSWER, todos_answer, since=until)):
         return results
-    results.extend(turn_times('todos', phone, leg_mark, until, lambda line: bool(re.search(r'\b(1|one)\b', line.lower()))))
+    results.extend(turn_times('todos', phone, leg_mark, until, lambda line: line != ONE_MOMENT and bool(re.search(r'\b(1|one)\b', line.lower()))))
     wav = call.wavs.get(answer_marks['todos'])
     if not add(run_step('the answerer\'s answer is a WAV', LIMIT_FETCH,
                         lambda: wav_check(wav))):

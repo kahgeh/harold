@@ -633,6 +633,8 @@ impl<W: VoiceWorker> WorkerPool<W> {
         let held = {
             let mut state = self.state();
             state.retry_after = None;
+            // Before the slot is empty for the keeper to see: it starts no worker beside a call.
+            state.call_open = true;
             state.idle.take()
         };
         if let Some(idle) = held.filter(|idle| is_alive(&idle.worker)) {

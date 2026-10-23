@@ -264,8 +264,8 @@ fn the_notice_names_the_model_the_reason_and_the_command() {
         missing.notice(),
         format!(
             "The speech model {WHISPER} didn't download (network). To get it, run on the Mac: \
-             `/venv/bin/python -c \"from huggingface_hub import snapshot_download; \
-             snapshot_download('{WHISPER}', revision='{WHISPER_REVISION}', token=False)\"`, \
+             /venv/bin/python -c \"from huggingface_hub import snapshot_download; \
+             snapshot_download('{WHISPER}', revision='{WHISPER_REVISION}', token=False)\", \
              then call again."
         )
     );
@@ -669,7 +669,7 @@ async fn a_model_the_worker_cannot_find_that_is_not_one_of_the_two_is_reported_m
     models.start_up();
     until(&models, finished).await;
 
-    models.model_missing("mlx-community/whisper-small");
+    models.model_missing("mlx-community/whisper-small", true);
 
     let Status::Failed(missing) = until(&models, finished).await else {
         panic!("the model is missing");
@@ -694,7 +694,7 @@ async fn a_model_the_worker_cannot_find_is_checked_and_downloaded_again() {
         snapshot_dir(&scratch.cache(), WHISPER, WHISPER_REVISION).join("weights.safetensors"),
     )
     .unwrap();
-    models.model_missing(WHISPER);
+    models.model_missing(WHISPER, true);
 
     assert_eq!(
         until(&models, |s| *s == Status::Checking).await,
@@ -809,7 +809,10 @@ async fn the_screen_follows_the_bytes_in_the_blobs_folder_every_ten_seconds() {
     tokio::time::advance(PROGRESS_EVERY + Duration::from_secs(1)).await;
     tokio::time::resume();
 
-    let seen = until(&models, |s| matches!(s, Status::Downloading { .. })).await;
+    let seen = until(&models, |s| {
+        matches!(s, Status::Downloading { bytes: 500, .. })
+    })
+    .await;
     assert_eq!(
         seen,
         Status::Downloading {
@@ -932,4 +935,42 @@ fn the_download_script_imports_only_the_standard_library_and_huggingface_hub() {
         let module = words.next().unwrap();
         assert!(allowed.contains(&module), "unexpected import: {line}");
     }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_call_tapped_while_the_models_are_still_being_looked_at_ends_the_wait_for_wifi() {
+    let logs = CapturedLogs::start();
+    let scratch = Scratch::new();
+    scratch.both_checked();
+    scratch.record(WHISPER, WHISPER_REVISION, 999);
+    scratch.host.on_hotspot();
+    let models = scratch.models(&scratch.fake_python(WORKS));
+
+    // The pass has started but has not looked at the gateway yet when the call is tapped.
+    models.start_up();
+    models.for_call();
+
+    assert_eq!(until(&models, finished).await, Status::Ready);
+    assert_eq!(scratch.runs().len(), 1);
+    assert!(!logs.text().contains("speech model download waiting"));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_call_after_the_user_fetched_an_unmanaged_model_tries_it_again() {
+    let scratch = Scratch::new();
+    scratch.both_checked();
+    let models = scratch.models_for(
+        &scratch.fake_python(WORKS),
+        "mlx-community/whisper-small",
+        WHISPER_REVISION,
+        KOKORO_REVISION,
+    );
+    models.start_up();
+    until(&models, finished).await;
+    models.model_missing("mlx-community/whisper-small", true);
+    assert!(matches!(until(&models, finished).await, Status::Failed(_)));
+
+    models.for_call();
+
+    assert_eq!(until(&models, finished).await, Status::Ready);
 }

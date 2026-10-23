@@ -1314,7 +1314,7 @@ impl<P: CallPorts> Call<P> {
             return;
         };
         self.models_retried = true;
-        models.model_missing(model);
+        models.model_missing(model, true);
         let mut status = models.status();
         status.mark_changed();
         self.models_rx = Some(status);
