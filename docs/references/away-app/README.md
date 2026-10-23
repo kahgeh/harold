@@ -296,7 +296,7 @@ A throwaway page, run once on the iPhone in the installed app, that shows how Sa
 
 | # | The check | What you do | Fields (`check<n>_…`) |
 |---|---|---|---|
-| 0 | Recognition with the network off | Turn on airplane mode (or turn off Wi-Fi and cellular), tap Start and say "ten eleven twelve", then turn the network back on | `started`, `results`, `first_result_ms`, `error` (such as `network`, `service-not-allowed`, `not-allowed`) |
+| 0 | Recognition with the network off | Turn on airplane mode (or turn off Wi-Fi and cellular), tap Start and say "ten eleven twelve", then turn the network back on | `offline` (the phone said it was offline when the check began; a result without it says nothing about on-device recognition), `started`, `results`, `first_result_ms`, `error` (such as `network`, `service-not-allowed`, `not-allowed`) |
 | 1 | Recognition starts inside a tap | Tap Start and say "one two three" | `started`, `results`, `first_result_ms`, `error` |
 | 2 | Recognition starts 2.5 s after a tap, as in a call | Tap Start; the page fetches a file from Harold, waits 2.5 s, then starts recognition; say "four five six" | `started`, `results`, `error` |
 | 3 | Recognition restarts without a tap | Count aloud; the page ends recognition and starts it again 5 times, 2 s apart | `started` (how many of the 5), `errors` (their names) |

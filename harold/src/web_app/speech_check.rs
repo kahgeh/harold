@@ -73,6 +73,8 @@ pub(crate) struct Run {
     pub standalone: bool,
 
     /// Check 0, recognition with the network off.
+    /// Whether the phone said it was offline when the check started.
+    pub check0_offline: bool,
     pub check0_started: bool,
     pub check0_results: bool,
     pub check0_first_result_ms: Option<u32>,
@@ -182,6 +184,7 @@ fn log_run(run: &Run) {
     let error = |name: Option<ErrorName>| name.map(ErrorName::as_str);
     info!(
         standalone = run.standalone,
+        check0_offline = run.check0_offline,
         check0_started = run.check0_started,
         check0_results = run.check0_results,
         check0_first_result_ms = run.check0_first_result_ms,

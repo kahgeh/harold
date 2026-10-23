@@ -19,7 +19,7 @@ const ROUTES: [(&str, &str); 2] = [("GET", "/speech-check"), ("POST", "/speech-c
 /// A whole run as the page posts it, every field present.
 const FULL_RUN: &str = r#"{
     "standalone": true,
-    "check0_started": true, "check0_results": false, "check0_error": "network",
+    "check0_offline": true, "check0_started": true, "check0_results": false, "check0_error": "network",
     "check1_started": true, "check1_results": true, "check1_first_result_ms": 640,
     "check2_started": true, "check2_results": true,
     "check3_started": 4, "check3_errors": ["not-allowed"],
@@ -191,6 +191,7 @@ async fn a_run_is_answered_204_and_logged_as_one_line_with_its_fields() {
         .unwrap_or_else(|| panic!("no line: {captured}"));
     for field in [
         "standalone=true",
+        "check0_offline=true",
         "check0_started=true",
         "check0_results=false",
         r#"check0_error="network""#,

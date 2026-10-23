@@ -159,6 +159,7 @@ pub(crate) const ALLOWED_FIELDS: &[&str] = &[
     "cycles",
     "worker",
     "warm_ms",
+    "check0_offline",
     "check0_started",
     "check0_results",
     "check0_first_result_ms",

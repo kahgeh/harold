@@ -96,7 +96,7 @@
 
   function hold() {
     try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify({ run, done: current >= STEPS.length }));
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({ run, step: current, done: current >= STEPS.length }));
     } catch (error) {
       // A private window may refuse; the run still posts from memory.
     }
@@ -217,6 +217,9 @@
 
   // Check 0, with the network off, and check 1, inside a tap.
   async function check0() {
+    // Whether the phone said it was offline when the check started: without it, a result
+    // from a phone that was still online would read as recognition working on the device.
+    run.check0_offline = navigator.onLine === false;
     say("Listening. Say “ten eleven twelve”.");
     saveListen("check0", await listen(anyResult), true);
   }
@@ -633,6 +636,12 @@
     send();
   } else if (!Recognition) {
     showMissing();
+  } else if (earlier && !earlier.done && earlier.step > 0 && earlier.step < STEPS.length) {
+    // The app reloaded between checks, for example while the network was switched: carry on.
+    Object.assign(run, earlier.run);
+    current = earlier.step;
+    STEPS.slice(0, current).forEach((step) => step.checks.forEach((check) => showCheck(check, "done")));
+    showStep();
   } else {
     showStep();
   }
