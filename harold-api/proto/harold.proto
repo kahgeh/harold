@@ -16,6 +16,45 @@ service Harold {
   rpc Call (CallRequest) returns (CallResponse);
 }
 
+// The web app's paired devices and its pairing lock, for `harold app`.
+service HaroldApp {
+  // Whether pairing is set up and locked, and the wrong tries so far; with unlock, clears
+  // the lock and the count first. Never returns the code.
+  rpc PairingStatus (PairingStatusRequest) returns (PairingStatusResponse);
+  rpc ListDevices (ListDevicesRequest) returns (ListDevicesResponse);
+  rpc UnpairDevice (UnpairDeviceRequest) returns (UnpairDeviceResponse);
+}
+
+message PairingStatusRequest {
+  bool unlock = 1;
+}
+
+message PairingStatusResponse {
+  bool set_up = 1;
+  // When not set up: missing, no_code, too_short or mode.
+  string reason = 2;
+  bool locked = 3;
+  uint32 tries = 4;
+}
+
+message ListDevicesRequest {}
+
+message PairedDevice {
+  string name = 1;
+  int64 paired_at_ms = 2;
+  int64 last_seen_ms = 3;
+}
+
+message ListDevicesResponse {
+  repeated PairedDevice devices = 1;
+}
+
+message UnpairDeviceRequest {
+  string name = 1;
+}
+
+message UnpairDeviceResponse {}
+
 message TurnCompleteRequest {
   string pane_id = 1;
   string pane_label = 2;

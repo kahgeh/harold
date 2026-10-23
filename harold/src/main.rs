@@ -748,6 +748,13 @@ fn print_help() {
     println!("  harold speak --src-id ID TEXT");
     println!("                          Say TEXT from tmux pane ID, or send it as a voice note;");
     println!("                          exit 0 once the daemon has stored it; 3s timeout");
+    println!("  harold app pair [--unlock]");
+    println!(
+        "                          Say whether web app pairing is set up and locked; --unlock"
+    );
+    println!("                          clears the lock and the wrong tries. Never shows the code");
+    println!("  harold app devices      List the devices paired with the web app");
+    println!("  harold app unpair NAME  Remove a paired device; its next request is refused");
     println!("  harold tool questions put");
     println!(
         "                          Add a question from JSON on stdin; prints its id and version"
@@ -810,7 +817,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Err(line)
             if matches!(
                 args.first().map(String::as_str),
-                Some(cli::AWAY_MESSAGE_COMMAND | cli::SPEAK_COMMAND | cli::TOOL_COMMAND)
+                Some(
+                    cli::AWAY_MESSAGE_COMMAND
+                        | cli::SPEAK_COMMAND
+                        | cli::TOOL_COMMAND
+                        | cli::APP_COMMAND
+                )
             ) =>
         {
             exit_with_line(&line)
@@ -842,6 +854,7 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
             | cli::Mode::SendMessageToAwayDevice(_)
             | cli::Mode::Speak(_)
             | cli::Mode::Tool(_)
+            | cli::Mode::App(_)
     );
     let launchd = started_by_launchd(&mode);
     // Before `load`, which would deserialise (or reject) the settings this names.
@@ -891,6 +904,14 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
         cli::Mode::Speak(ref args) => {
             if let Err(line) = cli::speak(&settings, args).await {
                 exit_with_line(&line);
+            }
+            return Ok(());
+        }
+        cli::Mode::App(ref command) => {
+            let address = settings.grpc.addr()?.to_string();
+            match cli::app(&address, command, telemetry::local_offset()).await {
+                Ok(text) => println!("{text}"),
+                Err(line) => exit_with_line(&line),
             }
             return Ok(());
         }
@@ -1123,6 +1144,11 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
     let server_result = Server::builder()
         .add_routes(tools.routes.clone())
         .add_service(HaroldServer::new(service))
+        .add_service(harold::harold_app_server::HaroldAppServer::new(
+            web_app::pair::AppService {
+                pairing: web_app.as_ref().map(|running| Arc::clone(&running.pairing)),
+            },
+        ))
         .serve_with_shutdown(addr, async {
             shutdown_signal().await;
             info!("shutting down");

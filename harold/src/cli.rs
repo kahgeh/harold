@@ -27,6 +27,36 @@ pub(crate) enum Mode {
     SendMessageToAwayDevice(AwayMessageArgs),
     Speak(AwayMessageArgs),
     Tool(ToolCommand),
+    App(AppCommand),
+}
+
+/// A `harold app` command: the web app's pairing and its paired devices.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum AppCommand {
+    /// Report whether pairing is set up and locked; with `unlock`, clear the lock first.
+    Pair {
+        unlock: bool,
+    },
+    Devices,
+    Unpair {
+        name: String,
+    },
+}
+
+pub(crate) const APP_COMMAND: &str = "app";
+const APP_USAGE_LINE: &str =
+    "invalid argument: usage is harold app pair [--unlock] | devices | unpair NAME";
+
+fn parse_app(args: &[&str]) -> Result<AppCommand, String> {
+    match args {
+        ["pair"] => Ok(AppCommand::Pair { unlock: false }),
+        ["pair", "--unlock"] => Ok(AppCommand::Pair { unlock: true }),
+        ["devices"] => Ok(AppCommand::Devices),
+        ["unpair", name] if !name.is_empty() && !name.starts_with("--") => Ok(AppCommand::Unpair {
+            name: (*name).into(),
+        }),
+        _ => Err(APP_USAGE_LINE.into()),
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -571,6 +601,7 @@ impl Mode {
                 parse_source_and_text(rest, SPEAK_ARGUMENTS, SPOKEN_LENGTH_LINE).map(Self::Speak)
             }
             [TOOL_COMMAND, rest @ ..] => parse_tool(rest).map(Self::Tool),
+            [APP_COMMAND, rest @ ..] => parse_app(rest).map(Self::App),
             ["--diagnostic" | "--diagnostics"] => Ok(Self::Diagnostics { delay_seconds: 0 }),
             ["--diagnostic" | "--diagnostics", "--delay"] => {
                 Ok(Self::Diagnostics { delay_seconds: 10 })
@@ -1647,12 +1678,155 @@ async fn backlog_call(
     }
 }
 
+/// `ms` since the Unix epoch as `2026-10-23 14:05` at `offset`.
+fn minute_text(ms: i64, offset: time::UtcOffset) -> String {
+    let Ok(at) = time::OffsetDateTime::from_unix_timestamp(ms.div_euclid(1000)) else {
+        return "unknown".into();
+    };
+    let at = at.to_offset(offset);
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}",
+        at.year(),
+        u8::from(at.month()),
+        at.day(),
+        at.hour(),
+        at.minute()
+    )
+}
+
+/// What a `harold app pair` report says about a pairing file that is not usable.
+fn not_set_up_words(reason: &str) -> &'static str {
+    match reason {
+        "missing" => "the pairing file is missing or cannot be read",
+        "no_code" => "the pairing file has no HAROLD_PAIRING_CODE line",
+        "too_short" => "the pairing code has fewer than 6 characters",
+        "mode" => "the pairing file can be read by others; its mode must be 0600",
+        _ => "the pairing file cannot be used",
+    }
+}
+
+fn app_refusal_line(status: &tonic::Status, command: &AppCommand) -> String {
+    match status.code() {
+        tonic::Code::Unimplemented => "the Harold daemon does not serve app commands".into(),
+        tonic::Code::FailedPrecondition => "the web app is not running".into(),
+        tonic::Code::NotFound => match command {
+            AppCommand::Unpair { name } => format!("no device is called {name}"),
+            _ => "no such device".into(),
+        },
+        _ => "the Harold daemon refused the command".into(),
+    }
+}
+
+/// Runs a `harold app` command against the daemon at `address`. `Ok` is the text to print:
+/// never the pairing code. `Err` is the one line to print.
+pub(crate) async fn app(
+    address: &str,
+    command: &AppCommand,
+    offset: time::UtcOffset,
+) -> Result<String, String> {
+    call_within(CALL_DEADLINE, CALL_DEADLINE, async {
+        let mut client =
+            crate::harold::harold_app_client::HaroldAppClient::connect(format!("http://{address}"))
+                .await
+                .map_err(|_| "the Harold daemon is not reachable".to_string())?;
+        let refused = |status: tonic::Status| app_refusal_line(&status, command);
+        match command {
+            AppCommand::Pair { unlock } => {
+                let status = client
+                    .pairing_status(crate::harold::PairingStatusRequest { unlock: *unlock })
+                    .await
+                    .map_err(refused)?
+                    .into_inner();
+                let mut lines = Vec::new();
+                if *unlock {
+                    lines.push("unlocked".to_string());
+                }
+                if status.set_up {
+                    lines.push("pairing is set up".into());
+                } else {
+                    lines.push(format!(
+                        "pairing is not set up: {}",
+                        not_set_up_words(&status.reason)
+                    ));
+                }
+                lines.push(format!(
+                    "locked: {}",
+                    if status.locked { "yes" } else { "no" }
+                ));
+                lines.push(format!("wrong tries: {} of 5", status.tries));
+                Ok(lines.join("\n"))
+            }
+            AppCommand::Devices => {
+                let devices = client
+                    .list_devices(crate::harold::ListDevicesRequest {})
+                    .await
+                    .map_err(refused)?
+                    .into_inner()
+                    .devices;
+                if devices.is_empty() {
+                    return Ok("no paired devices".into());
+                }
+                let lines: Vec<String> = devices
+                    .iter()
+                    .map(|device| {
+                        format!(
+                            "{} (paired {}, last seen {})",
+                            device.name,
+                            minute_text(device.paired_at_ms, offset),
+                            minute_text(device.last_seen_ms, offset)
+                        )
+                    })
+                    .collect();
+                Ok(lines.join("\n"))
+            }
+            AppCommand::Unpair { name } => {
+                client
+                    .unpair_device(crate::harold::UnpairDeviceRequest { name: name.clone() })
+                    .await
+                    .map_err(refused)?;
+                Ok(format!("unpaired {name}"))
+            }
+        }
+    })
+    .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn parse(args: &[&str]) -> Result<Mode, String> {
         Mode::parse(&args.iter().map(|a| a.to_string()).collect::<Vec<_>>())
+    }
+
+    #[test]
+    fn app_commands_parse() {
+        use super::AppCommand::*;
+        assert_eq!(
+            parse(&["app", "pair"]),
+            Ok(Mode::App(Pair { unlock: false }))
+        );
+        assert_eq!(
+            parse(&["app", "pair", "--unlock"]),
+            Ok(Mode::App(Pair { unlock: true }))
+        );
+        assert_eq!(parse(&["app", "devices"]), Ok(Mode::App(Devices)));
+        assert_eq!(
+            parse(&["app", "unpair", "iPhone, paired 23 Oct"]),
+            Ok(Mode::App(Unpair {
+                name: "iPhone, paired 23 Oct".into()
+            }))
+        );
+        for bad in [
+            vec!["app"],
+            vec!["app", "pair", "123456"],
+            vec!["app", "pair", "--code", "x"],
+            vec!["app", "unpair"],
+            vec!["app", "unpair", "--all"],
+            vec!["app", "devices", "extra"],
+        ] {
+            assert_eq!(parse(&bad), Err(APP_USAGE_LINE.to_string()), "{bad:?}");
+        }
     }
 
     #[test]
