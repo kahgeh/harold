@@ -1,4 +1,4 @@
-//! WAV bytes for a turn's samples, and the soft tick played while waiting.
+//! WAV bytes for a turn's samples, and the soft tick and connecting tone played while waiting.
 
 use std::f64::consts::PI;
 
@@ -35,6 +35,25 @@ pub(crate) fn tick_wav() -> Vec<u8> {
             (peak * (-t * 100.0).exp() * (2.0 * PI * 880.0 * t).sin()) as i16
         })
         .collect();
+    wav_bytes(&samples, RATE)
+}
+
+/// The connecting tone: two soft notes, 480 Hz then 620 Hz, 0.3 s each, 0.6 s together, at
+/// the tick's loudness (peak 0.2 of full scale), at 24 kHz. Each note fades in and out over
+/// 30 ms, so it does not click.
+pub(crate) fn connecting_wav() -> Vec<u8> {
+    const RATE: u32 = 24_000;
+    const NOTE: usize = 7_200;
+    const FADE: usize = 720;
+    let peak = 0.2 * f64::from(i16::MAX);
+    let mut samples = Vec::with_capacity(2 * NOTE);
+    for pitch in [480.0, 620.0] {
+        for i in 0..NOTE {
+            let t = i as f64 / f64::from(RATE);
+            let edge = i.min(NOTE - 1 - i).min(FADE) as f64 / FADE as f64;
+            samples.push((peak * edge * (2.0 * PI * pitch * t).sin()) as i16);
+        }
+    }
     wav_bytes(&samples, RATE)
 }
 
@@ -78,5 +97,24 @@ mod tests {
             .unwrap();
         assert!(peak > 0);
         assert!(f64::from(peak) <= 0.2 * 32767.0);
+    }
+
+    #[test]
+    fn connecting_tone_is_two_soft_notes_in_six_tenths_of_a_second() {
+        let bytes = connecting_wav();
+        assert_eq!(u32_at(&bytes, 24), 24_000);
+        let samples: Vec<i16> = bytes[44..]
+            .chunks(2)
+            .map(|c| i16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        assert_eq!(samples.len(), 14_400);
+        let peak = samples.iter().map(|s| s.unsigned_abs()).max().unwrap();
+        assert!(peak > 5_000);
+        assert!(f64::from(peak) <= 0.2 * 32767.0);
+        // The notes begin and end quietly, and the second is higher than the first.
+        assert_eq!(samples[0], 0);
+        assert_eq!(samples[7_199], 0);
+        let crossings = |part: &[i16]| part.windows(2).filter(|w| (w[0] < 0) != (w[1] < 0)).count();
+        assert!(crossings(&samples[7_200..]) > crossings(&samples[..7_200]));
     }
 }

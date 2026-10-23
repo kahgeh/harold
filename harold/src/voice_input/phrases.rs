@@ -16,6 +16,10 @@ pub(crate) const PASSED_ON: &str = "I've passed that to the chief.";
 pub(crate) const BYE: &str = "Bye.";
 /// Said through the `[tts]` command, never by the worker.
 pub(crate) const VOICE_STOPPED: &str = "The voice stopped. One moment.";
+/// Said after each turn that goes to the call answerer, before the answer.
+pub(crate) const ONE_MOMENT: &str = "One moment.";
+/// Said in the phone's own voice when a call ends because a speech model did not download.
+pub(crate) const MODEL_MISSING: &str = "The speech model isn't on the Mac yet.";
 /// Said through the `[tts]` command, never by the worker.
 pub(crate) const VOICE_FAILED: &str = "The voice failed. Call ended.";
 

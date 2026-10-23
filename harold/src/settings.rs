@@ -493,8 +493,30 @@ impl Default for AgentMonitorSettings {
     }
 }
 
+/// The commit of `mlx-community/whisper-large-v3-turbo` that Harold downloads and loads
+/// (committed 2026-04-12).
+pub(crate) const WHISPER_REVISION: &str = "a4aaeec0636e6fef84abdcbe3544cb2bf7e9f6fb";
+/// The commit of `mlx-community/Kokoro-82M-bf16` that Harold downloads and loads
+/// (committed 2025-12-02).
+pub(crate) const KOKORO_REVISION: &str = "a71e4d38b236d968966a2002c4c895dbd12b1c3c";
+
+fn whisper_revision() -> String {
+    WHISPER_REVISION.to_string()
+}
+
+fn kokoro_revision() -> String {
+    KOKORO_REVISION.to_string()
+}
+
+fn keep_worker_minutes() -> u64 {
+    10
+}
+
 #[derive(Debug, Deserialize)]
 pub struct TtsSettings {
+    /// The commit of the Kokoro model, 40 lowercase hex characters.
+    #[serde(default = "kokoro_revision")]
+    pub model_revision: String,
     pub command: String,
     pub voice: Option<String>,
     pub args: Option<Vec<String>>,
@@ -562,6 +584,13 @@ pub(crate) struct VoiceInputSettings {
     /// The worker's arguments. `--model` names the Whisper model.
     #[serde(default)]
     pub args: Vec<String>,
+    /// The commit of the Whisper model, 40 lowercase hex characters.
+    #[serde(default = "whisper_revision")]
+    pub model_revision: String,
+    /// How many minutes the voice worker is kept after no web app page is on screen and no
+    /// call is on.
+    #[serde(default = "keep_worker_minutes")]
+    pub keep_worker_minutes: u64,
 }
 
 impl VoiceInputSettings {
@@ -2311,8 +2340,35 @@ mod tests {
     }
 
     #[test]
+    fn voice_input_keeps_the_worker_ten_minutes_and_pins_both_speech_models_by_default() {
+        let settings = default_settings_with(
+            "[voice_input]\ncommand = \"python\"\nargs = [\"--model\", \"m\"]\n",
+        );
+        let voice_input = settings.voice_input.expect("[voice_input] is set");
+        assert_eq!(voice_input.keep_worker_minutes, 10);
+        assert_eq!(
+            voice_input.model_revision,
+            "a4aaeec0636e6fef84abdcbe3544cb2bf7e9f6fb"
+        );
+        assert_eq!(
+            settings.tts.model_revision,
+            "a71e4d38b236d968966a2002c4c895dbd12b1c3c"
+        );
+        let set = default_settings_with(
+            "[voice_input]\ncommand = \"python\"\nkeep_worker_minutes = 3\nmodel_revision = \"abc\"\n",
+        );
+        let set = set.voice_input.unwrap();
+        assert_eq!(
+            (set.keep_worker_minutes, set.model_revision.as_str()),
+            (3, "abc")
+        );
+    }
+
+    #[test]
     fn whisper_model_is_the_value_after_dash_dash_model() {
         let settings = super::VoiceInputSettings {
+            model_revision: crate::settings::WHISPER_REVISION.to_string(),
+            keep_worker_minutes: 10,
             command: "python".into(),
             args: [
                 "-m",
@@ -2328,6 +2384,8 @@ mod tests {
             Some("mlx-community/whisper-large-v3-turbo")
         );
         let without_value = super::VoiceInputSettings {
+            model_revision: crate::settings::WHISPER_REVISION.to_string(),
+            keep_worker_minutes: 10,
             command: "python".into(),
             args: vec!["--model".into()],
         };

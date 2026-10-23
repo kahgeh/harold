@@ -146,6 +146,13 @@ pub(crate) const ALLOWED_FIELDS: &[&str] = &[
     "standalone",
     "age_hours",
     "compactions",
+    "cause",
+    "model",
+    "bytes",
+    "total_bytes",
+    "ms",
+    "load_ms",
+    "load_waited_ms",
 ];
 
 /// How long shutting the exporters down may take in all.

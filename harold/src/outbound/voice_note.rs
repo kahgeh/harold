@@ -257,6 +257,7 @@ mod tests {
 
     fn mlx() -> TtsSettings {
         TtsSettings {
+            model_revision: crate::settings::KOKORO_REVISION.to_string(),
             command: "/venv/bin/python".into(),
             voice: None,
             args: Some(
@@ -281,6 +282,7 @@ mod tests {
 
     fn say_only() -> TtsSettings {
         TtsSettings {
+            model_revision: crate::settings::KOKORO_REVISION.to_string(),
             command: "say".into(),
             args: None,
             ..mlx()

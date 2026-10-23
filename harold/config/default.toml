@@ -91,9 +91,17 @@ idle_all = ["agents", "commands"]
 
 [tts]
 command = "say"
+# The commit of the Kokoro model (mlx-community/Kokoro-82M-bf16) that Harold downloads, checks
+# and loads when [voice_input] is set. 40 lowercase hex characters.
+model_revision = "a71e4d38b236d968966a2002c4c895dbd12b1c3c"
 # voice can be overridden in local.toml, e.g. voice = "Samantha"
 # fallback_command can be set in local.toml to run a backup TTS command
 # if the primary command fails.
+
+# [voice_input] is set in local.toml. Its settings besides `command` and `args`, and their
+# defaults:
+#   keep_worker_minutes = 10
+#   model_revision = "a4aaeec0636e6fef84abdcbe3544cb2bf7e9f6fb"  # mlx-community/whisper-large-v3-turbo
 
 [log]
 level = "info"

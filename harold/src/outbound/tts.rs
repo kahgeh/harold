@@ -512,6 +512,7 @@ mod tests {
     #[test]
     fn notify_with_fallback_uses_fallback_when_primary_fails() {
         let tts = TtsSettings {
+            model_revision: crate::settings::KOKORO_REVISION.to_string(),
             command: "/usr/bin/false".into(),
             voice: None,
             args: None,
@@ -530,6 +531,7 @@ mod tests {
     #[test]
     fn notify_with_fallback_fails_without_fallback() {
         let tts = TtsSettings {
+            model_revision: crate::settings::KOKORO_REVISION.to_string(),
             command: "/usr/bin/false".into(),
             voice: None,
             args: None,
@@ -548,6 +550,7 @@ mod tests {
     /// A `[tts]` that writes its last argument to `out`.
     fn writes_last_argument_to(out: &std::path::Path) -> TtsSettings {
         TtsSettings {
+            model_revision: crate::settings::KOKORO_REVISION.to_string(),
             command: "/bin/sh".into(),
             voice: None,
             args: Some(vec![

@@ -575,6 +575,7 @@ esac"#;
 
     fn tts(args: &[&str]) -> TtsSettings {
         TtsSettings {
+            model_revision: crate::settings::KOKORO_REVISION.to_string(),
             command: "python".into(),
             voice: None,
             args: Some(args.iter().map(|arg| arg.to_string()).collect()),
@@ -586,6 +587,8 @@ esac"#;
 
     fn voice_input(args: &[&str]) -> VoiceInputSettings {
         VoiceInputSettings {
+            model_revision: crate::settings::WHISPER_REVISION.to_string(),
+            keep_worker_minutes: 10,
             command: "/venv/bin/python".into(),
             args: args.iter().map(|arg| arg.to_string()).collect(),
         }

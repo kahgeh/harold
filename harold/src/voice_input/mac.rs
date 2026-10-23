@@ -251,6 +251,7 @@ impl MacPorts {
             chief_folder: settings.notify.chief.clone(),
             chief_session: settings.notify.chief_session.clone(),
             tts: Arc::new(TtsSettings {
+                model_revision: tts.model_revision.clone(),
                 command: tts.command.clone(),
                 voice: tts.voice.clone(),
                 args: tts.args.clone(),
