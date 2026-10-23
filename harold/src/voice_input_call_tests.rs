@@ -2130,3 +2130,72 @@ async fn a_call_logs_the_workers_load_when_it_started_the_worker() {
         "{text}"
     );
 }
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn a_warm_up_that_never_reports_does_not_hold_the_call_for_ever() {
+    let (h, answerer, _) = answering_harness();
+    answerer.log().warm_panics = true;
+    h.start_ringing().await;
+
+    run_for(11.0).await;
+    assert_eq!(h.state(), CallState::Connecting);
+    run_for(2.0).await;
+
+    assert_eq!(h.state(), CallState::Listening);
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn a_model_wait_keeps_the_one_ring_and_its_cycles() {
+    test_support::install();
+    let h = Harness::new();
+    let models = SpeechModels::stubbed(ModelsStatus::Ready);
+    h.ports.state().models = Some(Arc::clone(&models));
+    h.worker().starts_loading = true;
+    h.start_ringing().await;
+    run_for(10.0).await;
+
+    h.set_health(load_refused(
+        LoadCause::ModelMissing,
+        Some(super::super::models::WHISPER),
+    ));
+    settle().await;
+    models.set_status(ModelsStatus::Ready);
+    settle().await;
+    h.set_health(Health::Ready);
+    run_for(3.0).await;
+
+    assert_eq!(h.state(), CallState::Listening);
+    // Ringbacks at 0, 3, 6 and 9 s, then the pick-up: one span, four cycles.
+    assert!(
+        test_support::spans().iter().any(|span| {
+            let attr = |key| test_support::span_attr(span, key);
+            span.name == "harold.call_ring"
+                && attr("cycles").as_deref() == Some("4")
+                && attr("worker").as_deref() == Some("loaded_now")
+        }),
+        "the ring went on across the model wait"
+    );
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn a_call_hung_up_while_ringing_records_its_cycles_and_worker() {
+    test_support::install();
+    let h = Harness::new();
+    h.worker().starts_loading = true;
+    h.start_ringing().await;
+    run_for(7.0).await;
+
+    h.calls.stop().await;
+    settle().await;
+
+    // Ringbacks at 0, 3 and 6 s.
+    assert!(
+        test_support::spans().iter().any(|span| {
+            let attr = |key| test_support::span_attr(span, key);
+            span.name == "harold.call_ring"
+                && attr("cycles").as_deref() == Some("3")
+                && attr("worker").as_deref() == Some("loaded_now")
+        }),
+        "the span of a call hung up while ringing has its fields"
+    );
+}

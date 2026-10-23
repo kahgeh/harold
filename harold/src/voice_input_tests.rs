@@ -512,6 +512,8 @@ pub(crate) struct AnswererLog {
     /// How long each warm-up takes, and whether it never ends.
     pub(crate) warm_takes: Duration,
     pub(crate) warm_hangs: bool,
+    /// Whether each warm-up panics.
+    pub(crate) warm_panics: bool,
 }
 
 /// A call answerer that gives what the test scripted, `said` with no hand-over when the
@@ -571,11 +573,12 @@ impl CallAnswerer for FakeAnswerer {
 
     fn warm(&self) -> BoxFuture<'_, Option<serde_json::Value>> {
         Box::pin(async move {
-            let (n, takes, hangs) = {
+            let (n, takes, hangs, panics) = {
                 let mut log = self.log();
                 log.warms += 1;
-                (log.warms, log.warm_takes, log.warm_hangs)
+                (log.warms, log.warm_takes, log.warm_hangs, log.warm_panics)
             };
+            assert!(!panics, "the warm-up panics");
             sleep(takes).await;
             if hangs {
                 std::future::pending::<()>().await;

@@ -512,7 +512,7 @@ HAVING started > downloaded
 
 - **Error diagnosis:** the `reason` on `speech model not downloaded`, then the notice's command, run by hand.
 - **Optimisation:** `ms` per GB from `speech model downloaded`.
-- **The worker's load** is the log line `voice worker ready` with `load_ms` and `started_by` (`page` or `call`), and `voice worker stopped` with `reason` `no_page`, `call_ended` or `exited`. The tap-to-listening time is the `harold.call_ring` span. A worker `started_by = call` while a page was on screen means the page was not seen in time, and the call's `harold.call_ring` has `worker = loaded_now` or `cycles` of 2 or more.
+- **The worker's load** is the log line `voice worker ready` with `load_ms` and `started_by` (`page` or `call`), and `voice worker stopped` with `reason` `no_page`, `call_ended` or `exited`. The tap-to-listening time is the `harold.call_ring` span. A worker `started_by = call` while a page was on screen means the page was not seen in time, and the call's `harold.call_ring` has `worker = loaded_now`; `cycles` of 4 or more is slow whichever the worker.
 - No progress lines are logged. The phone shows progress, and the start and end lines say whether a model was missing or still downloading.
 
 ## How an alert reaches the chief
