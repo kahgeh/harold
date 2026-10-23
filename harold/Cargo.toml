@@ -22,6 +22,8 @@ notify = "8.2"
 reqwest = { version = "0.12.28", features = ["blocking", "json", "multipart"] }
 harold-api = { path = "../harold-api" }
 turso.workspace = true
+buckwal = { git = "https://github.com/kahgeh/buckwal.git", rev = "b17a4241c79f5c546f1fbc77c20719a063fb8161" }
+pulldown-cmark = { version = "=0.13.1", default-features = false }
 opendata_log = { package = "opendata-log", version = "=1.0.0" }
 opendata_common = { package = "opendata-common", version = "=0.1.17" }
 sha2 = "0.10"

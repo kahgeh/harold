@@ -3057,3 +3057,92 @@ fn the_web_app_cards_are_tables_over_the_browser_spans_and_the_phone_turns() {
         assert!(sql.contains("INTERVAL 7 DAY"), "{name}: {sql}");
     }
 }
+
+#[test]
+fn a_buckwal_span_is_exported_under_harold_with_its_allowed_fields() {
+    test_support::install();
+    let marker = format!("m{}", uuid::Uuid::new_v4().simple());
+    let span = tracing::info_span!(
+        target: "buckwal",
+        "buckwal.commit",
+        buckwal.outcome = tracing::field::Empty,
+        buckwal.bytes = 7_u64,
+        text = %marker,
+    );
+    span.record("buckwal.outcome", "error");
+    drop(span.entered());
+    let found: Vec<_> = test_support::spans()
+        .into_iter()
+        .filter(|s| s.name == "buckwal.commit")
+        .collect();
+    let found = found
+        .iter()
+        .find(|s| test_support::span_attr(s, "buckwal.bytes").as_deref() == Some("7"))
+        .expect("the buckwal span reached the exporter");
+    assert_eq!(
+        test_support::span_attr(found, "buckwal.outcome").as_deref(),
+        Some("error")
+    );
+    assert_eq!(test_support::span_attr(found, "text"), None);
+    assert!(!test_support::exported_text().contains(&marker));
+}
+
+#[test]
+fn a_real_buckwal_commit_reaches_the_exporter() {
+    test_support::install();
+    let dir = std::env::temp_dir().join(format!("harold-buckwal-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let config = buckwal::Config::new(&dir, "http://127.0.0.1:1", "test", "ak", "sk");
+    let db = buckwal::open_with_store(config, Arc::new(buckwal::store::MemStore::new())).unwrap();
+    let conn = db.connect().unwrap();
+    conn.execute("CREATE TABLE t(a)", &[]).unwrap();
+    conn.execute("INSERT INTO t VALUES (1)", &[]).unwrap();
+    assert!(
+        test_support::spans()
+            .iter()
+            .any(|s| s.name == "buckwal.commit"),
+        "a buckwal.commit span was exported"
+    );
+    drop(conn);
+    drop(db);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_knowledge_lines_export_their_counts_and_no_text() {
+    test_support::install();
+    let marker = format!("m{}", uuid::Uuid::new_v4().simple());
+    tracing::info!(
+        target: "harold::tools::knowledge",
+        notes = 3_u64,
+        count = 9_u64,
+        removed = 1_u64,
+        embed_ms = 40_u64,
+        pending = 0_u64,
+        last_ok_age_s = 0_u64,
+        query = %marker,
+        "knowledge indexed"
+    );
+    let logs = test_support::logs();
+    let record = logs
+        .iter()
+        .find(|l| format!("{:?}", l.record).contains("knowledge indexed"))
+        .expect("the line was exported");
+    let keys: Vec<&str> = record
+        .record
+        .attributes_iter()
+        .map(|(k, _)| k.as_str())
+        .collect();
+    for key in [
+        "notes",
+        "count",
+        "removed",
+        "embed_ms",
+        "pending",
+        "last_ok_age_s",
+    ] {
+        assert!(keys.contains(&key), "{key} in {keys:?}");
+    }
+    assert!(!keys.contains(&"query"));
+    assert!(!test_support::exported_text().contains(&marker));
+}

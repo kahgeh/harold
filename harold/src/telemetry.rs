@@ -63,6 +63,21 @@ pub(crate) const HEALTH_TARGET: &str = "harold::telemetry_health";
 /// The only span attributes and log-record attributes that leave Harold. Everything else,
 /// such as `text`, `msg`, `raw_output`, `tag` and `error`, is dropped before export.
 pub(crate) const ALLOWED_FIELDS: &[&str] = &[
+    "notes",
+    "removed",
+    "pending",
+    "last_ok_age_s",
+    "embed_ms",
+    "search_ms",
+    "results",
+    "embed_ms_per_passage",
+    "passages",
+    "rss_mb",
+    "buckwal.outcome",
+    "buckwal.retries",
+    "buckwal.bytes",
+    "buckwal.generation",
+    "s3.status",
     "pane_id",
     "provider_id",
     "program",
@@ -217,7 +232,12 @@ fn is_exported_log_target(target: &str) -> bool {
                 .strip_prefix(name)
                 .is_some_and(|rest| rest.starts_with("::"))
     };
-    target != HEALTH_TARGET && (ours("harold") || ours("events"))
+    target != HEALTH_TARGET && (ours("harold") || ours("events") || ours("buckwal"))
+}
+
+/// Whether a span with `target` is buckwal's own.
+fn is_buckwal_target(target: &str) -> bool {
+    target == "buckwal" || target.starts_with("buckwal::")
 }
 
 // ---------------------------------------------------------------------------
@@ -1466,7 +1486,9 @@ fn not_a_trace_span() -> FilterFn<impl Fn(&Metadata<'_>) -> bool + Send + Sync +
 /// events, which `FieldFilter` drops.
 fn span_export_filter() -> FilterFn<impl Fn(&Metadata<'_>) -> bool + Send + Sync + 'static> {
     filter_fn(|meta: &Metadata<'_>| {
-        is_trace_span(meta) || (meta.is_event() && *meta.level() == Level::ERROR)
+        is_trace_span(meta)
+            || (meta.is_span() && is_buckwal_target(meta.target()))
+            || (meta.is_event() && *meta.level() == Level::ERROR)
     })
     .with_max_level_hint(LevelFilter::INFO)
 }
