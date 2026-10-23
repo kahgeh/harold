@@ -16,7 +16,8 @@
   --end: #e03131;
   --on-end: #fff;
   --target: 48px;
-  --header-height: calc(max(8px, env(safe-area-inset-top)) + 8px + var(--target) + 1px);
+  --status-strip: max(8px, env(safe-area-inset-top));
+  --header-height: calc(var(--status-strip) + 8px + var(--target) + 1px);
 }
 
 @media (prefers-color-scheme: dark) {
@@ -98,9 +99,14 @@ button[hidden] {
   left: 0;
   right: 0;
   z-index: 10;
-  padding: max(8px, env(safe-area-inset-top)) 12px 8px 16px;
+  padding: var(--status-strip) 12px 8px 16px;
   border-bottom: 1px solid var(--surface-4);
-  background: color-mix(in srgb, var(--surface-1) 72%, transparent);
+  /* Only the strip under the status bar lets the messages show through, blurred. */
+  background: linear-gradient(
+    to bottom,
+    color-mix(in srgb, var(--surface-1) 72%, transparent) 0 var(--status-strip),
+    var(--surface-1) var(--status-strip)
+  );
   -webkit-backdrop-filter: saturate(180%) blur(20px);
   backdrop-filter: saturate(180%) blur(20px);
 }
@@ -197,8 +203,8 @@ body.on-todos .todos-row {
   flex: 0 0 100%;
   min-width: 0;
   overflow-y: auto;
-  padding-top: var(--header-height);
-  scroll-padding-top: var(--header-height);
+  padding-top: calc(var(--header-height) + var(--notice-height, 0px));
+  scroll-padding-top: calc(var(--header-height) + var(--notice-height, 0px));
   scroll-snap-align: start;
   scroll-snap-stop: always;
 }
@@ -482,8 +488,14 @@ body.on-todos > #reply {
 /* The call: the screen replaces the thread while a call lasts. */
 
 .call-notice {
-  margin: var(--header-height) 0 0;
+  position: fixed;
+  top: var(--header-height);
+  left: 0;
+  right: 0;
+  z-index: 10;
+  margin: 0;
   padding: 10px 16px;
+  border-bottom: 1px solid var(--surface-4);
   background: var(--surface-3);
   text-align: center;
 }
@@ -615,7 +627,7 @@ body.in-call > .call-screen {
   display: flex;
   flex-direction: column;
   gap: 12px;
-  padding: calc(var(--header-height) + 12px) 12px 12px;
+  padding: calc(var(--header-height) + var(--notice-height, 0px) + 12px) 12px 12px;
 }
 
 .todos-empty {

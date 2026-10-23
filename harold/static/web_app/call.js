@@ -12,6 +12,12 @@
     return;
   }
 
+  // The notice floats under the header, so the pages pad by its height while it shows.
+  new ResizeObserver(() => {
+    const height = notice.hidden ? 0 : notice.offsetHeight;
+    document.documentElement.style.setProperty("--notice-height", height + "px");
+  }).observe(notice);
+
   // The microphone hears a sound's echo for a moment after it stops.
   const MUTE_TAIL_S = 0.3;
   const REFUSAL_MS = 3000;

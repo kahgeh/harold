@@ -147,7 +147,7 @@ fn the_older_line_is_centred_in_the_second_text_colour() {
 }
 
 #[test]
-fn the_header_is_a_translucent_blurred_bar_the_pages_scroll_under() {
+fn the_status_strip_is_blurred_and_the_header_row_and_notice_are_solid() {
     let css = include_str!("../../static/web_app/app.css");
     let rule = |selector: &str| {
         let start = css
@@ -161,24 +161,42 @@ fn the_header_is_a_translucent_blurred_bar_the_pages_scroll_under() {
         "position: fixed;",
         "\n  backdrop-filter:",
         "\n  -webkit-backdrop-filter:",
-        "transparent)",
+        "background: linear-gradient(",
+        "color-mix(in srgb, var(--surface-1) 72%, transparent) 0 var(--status-strip),",
+        "var(--surface-1) var(--status-strip)",
     ] {
         assert!(top.contains(wanted), ".top lacks {wanted:?}");
     }
+    let root = rule(":root");
     assert!(
-        top.contains("background: color-mix("),
-        ".top background is not a color-mix"
+        root.contains("--status-strip:"),
+        ":root lacks --status-strip"
     );
-    for (selector, wanted) in [
-        (".page", "\n  padding-top: var(--header-height);"),
-        (".page", "\n  scroll-padding-top: var(--header-height);"),
-        (".call-notice", "var(--header-height)"),
-        ("#todos", "var(--header-height)"),
+    assert!(
+        root.contains("--header-height: calc(var(--status-strip)"),
+        "--header-height does not use --status-strip"
+    );
+    let notice = rule(".call-notice");
+    for wanted in [
+        "position: fixed;",
+        "top: var(--header-height);",
+        "background: var(--surface-3);",
     ] {
+        assert!(notice.contains(wanted), ".call-notice lacks {wanted:?}");
+    }
+    assert!(
+        !notice.contains("backdrop-filter"),
+        ".call-notice must not blur"
+    );
+    for selector in [".page", "#todos"] {
         assert!(
-            rule(selector).contains(wanted),
-            "{selector} lacks {wanted:?}"
+            rule(selector).contains("var(--notice-height, 0px)"),
+            "{selector} lacks the notice height"
         );
+    }
+    let call = include_str!("../../static/web_app/call.js");
+    for wanted in ["ResizeObserver", "--notice-height"] {
+        assert!(call.contains(wanted), "call.js lacks {wanted:?}");
     }
 }
 
