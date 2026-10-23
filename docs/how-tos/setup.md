@@ -248,7 +248,15 @@ Both scripts call the same shared notifier after translating their provider's co
 
 ### Register Claude Code
 
-Add the Stop hook to `~/.claude/settings.json`. Use the absolute path for your installation. Replace an existing Harold Stop hook command rather than adding a duplicate:
+`scripts/install.py` registers this hook for you and prints one line for it, `Claude Code turn hook: <outcome>`:
+
+- `unchanged`: `~/.claude/settings.json` already runs the installed `claude_turn_complete.py`.
+- `replaced`: the one Harold Stop hook there, either `claude_turn_complete.py` at another path or a script that imports `harold_turn_complete`, now runs the installed one. The old script file stays where it was.
+- `added`: there was no Harold Stop hook, so the installer added one.
+
+The installer keeps the first version of the file beside it as `settings.json.before-harold`, edits a symlinked file through the link, and leaves every other hook and setting alone. When the file is missing, is not valid JSON, has a `Stop` list it does not recognise or has two Harold hooks, it changes nothing and prints the JSON to add instead.
+
+To do it by hand, add the Stop hook to `~/.claude/settings.json`. Use the absolute path for your installation. Replace an existing Harold Stop hook command rather than adding a duplicate:
 
 ```json
 {

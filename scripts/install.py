@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import plistlib
+import re
 import shutil
 import shlex
 import stat
@@ -128,6 +129,34 @@ def prebuilt_files(directory):
     return {name: directory / name for name in ('harold', 'tmx-agent-dash')}
 
 
+def write_settings(target, data):
+    """Write `data` as the settings file `target` (already resolved), keeping the first version
+    beside it as `<name>.before-harold`. The write is atomic and keeps the file's mode. Raises
+    OSError or ValueError, with the file as it was."""
+    backup = target.with_name(target.name + '.before-harold')
+    temporary = None
+    try:
+        text = json.dumps(data, indent=2, ensure_ascii=False, allow_nan=False) + '\n'
+        text.encode('utf-8')
+        # lexists: an existing symlink there counts as a copy, and is never written through.
+        if not os.path.lexists(backup):
+            shutil.copy2(target, backup)
+        # Owner-only from the first byte: the file can hold tokens in its env block.
+        descriptor, name = tempfile.mkstemp(dir=target.parent, prefix=target.name + '.', suffix='.harold-tmp')
+        temporary = Path(name)
+        with os.fdopen(descriptor, 'w', encoding='utf-8') as handle:
+            handle.write(text)
+        temporary.chmod(stat.S_IMODE(target.stat().st_mode))
+        os.replace(temporary, target)
+    except (OSError, ValueError):
+        try:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+
+
 def link_claude_mod(settings_path, mod_dir):
     """Name the mod's folder in CLAUDE_CODE_PLUGIN_DIRS in Claude Code's settings.
 
@@ -155,29 +184,95 @@ def link_claude_mod(settings_path, mod_dir):
         return 'unchanged'
     env[PLUGIN_DIRS] = ':'.join(folders + [str(mod_dir)])
     data['env'] = env
-    backup = target.with_name(target.name + '.before-harold')
-    temporary = None
     try:
-        text = json.dumps(data, indent=2, ensure_ascii=False, allow_nan=False) + '\n'
-        text.encode('utf-8')
-        # lexists: an existing symlink there counts as a copy, and is never written through.
-        if not os.path.lexists(backup):
-            shutil.copy2(target, backup)
-        # Owner-only from the first byte: the file can hold tokens in its env block.
-        descriptor, name = tempfile.mkstemp(dir=target.parent, prefix=target.name + '.', suffix='.harold-tmp')
-        temporary = Path(name)
-        with os.fdopen(descriptor, 'w', encoding='utf-8') as handle:
-            handle.write(text)
-        temporary.chmod(stat.S_IMODE(target.stat().st_mode))
-        os.replace(temporary, target)
+        write_settings(target, data)
     except (OSError, ValueError) as error:
-        try:
-            if temporary is not None:
-                temporary.unlink(missing_ok=True)
-        except OSError:
-            pass
         return manual('The settings file could not be written ({})'.format(getattr(error, 'strerror', None) or error))
     return 'appended' if folders else 'added'
+
+
+TURN_HOOK = 'claude_turn_complete.py'
+# A script that imports Harold's shared notifier is a Harold hook, whatever it is called.
+NOTIFIER_IMPORT = re.compile(r'^\s*(?:import|from)\s+harold_turn_complete\b', re.MULTILINE)
+
+
+def turn_hook_command(hook_path):
+    return 'python3 {}'.format(shlex.quote(str(hook_path)))
+
+
+def stop_hook_script(command):
+    """The script a Stop hook command runs: its last argument that ends in .py, else None."""
+    try:
+        words = shlex.split(command)
+    except ValueError:
+        return None
+    scripts = [word for word in words if word.endswith('.py')]
+    return Path(os.path.expanduser(scripts[-1])) if scripts else None
+
+
+def is_harold_stop_hook(script):
+    """Harold's own claude_turn_complete.py, or a script that imports harold_turn_complete."""
+    if script.name == TURN_HOOK:
+        return True
+    try:
+        with open(script, encoding='utf-8', errors='replace') as handle:
+            return bool(NOTIFIER_IMPORT.search(handle.read(1_000_000)))
+    except OSError:
+        return False
+
+
+def register_turn_hook(settings_path, hook_path):
+    """Make Harold's claude_turn_complete.py the Claude Code Stop hook in the settings.
+
+    Returns 'unchanged' (a Stop command already runs `hook_path`), 'replaced' (the one Harold
+    Stop hook that ran another script now runs it) or 'added' (there was none), or the text
+    of the JSON for the person to add when the file is missing, not valid JSON, has a Stop
+    list this does not know the shape of, or has two Harold hooks; then nothing is written.
+    No other tool's hook is touched. A symlinked file is edited through the link, and its
+    backup sits beside the real file.
+    """
+    command = turn_hook_command(hook_path)
+
+    def manual(reason):
+        entry = {'matcher': '', 'hooks': [{'type': 'command', 'command': command}]}
+        return '{}. Add this entry to "hooks": "Stop" in {}, in place of any Harold Stop hook: {}'.format(
+            reason, settings_path, json.dumps(entry))
+
+    target = settings_path.resolve()
+    try:
+        data = json.loads(target.read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        return manual('The settings file is missing or is not valid JSON')
+    hooks = data.get('hooks', {}) if isinstance(data, dict) else None
+    stop = hooks.get('Stop', []) if isinstance(hooks, dict) else None
+    if not isinstance(stop, list) or not all(
+            isinstance(entry, dict) and isinstance(entry.get('hooks', []), list)
+            and all(isinstance(hook, dict) for hook in entry.get('hooks', []))
+            for entry in stop):
+        return manual('The settings file has a Stop hook list of a shape this does not know')
+    harold = []
+    for entry in stop:
+        for hook in entry.get('hooks', []):
+            script = stop_hook_script(hook['command']) \
+                if hook.get('type') == 'command' and isinstance(hook.get('command'), str) else None
+            if script is not None and is_harold_stop_hook(script):
+                harold.append((hook, script))
+    if any(script == Path(hook_path) for _, script in harold):
+        return 'unchanged'
+    if len(harold) > 1:
+        return manual('The settings file has {} Harold Stop hooks'.format(len(harold)))
+    if harold:
+        harold[0][0]['command'] = command
+        outcome = 'replaced'
+    else:
+        hooks = data.setdefault('hooks', {})
+        hooks.setdefault('Stop', []).append({'matcher': '', 'hooks': [{'type': 'command', 'command': command}]})
+        outcome = 'added'
+    try:
+        write_settings(target, data)
+    except (OSError, ValueError) as error:
+        return manual('The settings file could not be written ({})'.format(getattr(error, 'strerror', None) or error))
+    return outcome
 
 
 def write_skill(source, destination, binary):
@@ -618,6 +713,8 @@ def install(args, repo):
                 print(message, flush=True)
             outcome = link_claude_mod(CLAUDE_SETTINGS, bundle / 'hooks/claude-mod')
             print('Claude Code mod: {}'.format(outcome), flush=True)
+            outcome = register_turn_hook(CLAUDE_SETTINGS, bundle / 'hooks' / TURN_HOOK)
+            print('Claude Code turn hook: {}'.format(outcome), flush=True)
             for agent, skills_folder in AGENT_SKILL_FOLDERS:
                 print('{} skill: {}'.format(agent, link_skill(skills_folder, bundle / 'skills' / SKILL_NAME)),
                       flush=True)

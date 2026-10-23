@@ -263,6 +263,89 @@ async fn turn_complete_tells_the_restart_reminder_the_session_and_transcript_aft
     task.abort();
 }
 
+#[derive(Clone, Default)]
+struct WarnLogs(Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for WarnLogs {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl WarnLogs {
+    fn count(&self, message: &str) -> usize {
+        String::from_utf8(self.0.lock().unwrap().clone())
+            .unwrap()
+            .lines()
+            .filter(|line| line.contains(message))
+            .count()
+    }
+}
+
+/// A snapshot with Claude panes `ids[0]` and `ids[1]` and a Codex pane `ids[2]`.
+fn claude_and_codex_snapshot(ids: &[String; 3]) -> AgentSnapshot {
+    let mut snapshot = populated_snapshot(1, None);
+    let template = snapshot.panes[0].clone();
+    snapshot.panes = [(&ids[0], "claude"), (&ids[1], "claude"), (&ids[2], "codex")]
+        .into_iter()
+        .map(|(pane_id, provider_id)| {
+            let mut pane = template.clone();
+            pane.pane.incarnation.pane_id = pane_id.clone();
+            pane.pane.incarnation.provider_id = provider_id.into();
+            pane
+        })
+        .collect();
+    snapshot
+}
+
+#[tokio::test]
+async fn a_claude_turn_end_without_a_session_id_warns_once_for_its_pane() {
+    crate::test_logs::keep_second_dispatcher();
+    let logs = WarnLogs::default();
+    let writer = logs.clone();
+    let _guard = tracing::subscriber::set_default(
+        tracing_subscriber::fmt()
+            .with_writer(move || writer.clone())
+            .with_ansi(false)
+            .without_time()
+            .with_max_level(tracing::Level::INFO)
+            .finish(),
+    );
+    // The warned panes are kept for the whole process, so no other test may share these.
+    let ids: [String; 3] =
+        std::array::from_fn(|_| format!("%{}", uuid::Uuid::new_v4().as_u128() % 10u128.pow(18)));
+    let directory = TestDirectory::new();
+    let store = Arc::new(store::HaroldStore::open(&directory.0).await.unwrap());
+    let (service, _shutdown, task) =
+        test_service(Arc::clone(&store), claude_and_codex_snapshot(&ids));
+    let warning = "turn hook sends no session id";
+    let end = |pane_id: &str, session_id: &str| {
+        let request = TurnCompleteRequest {
+            pane_id: pane_id.into(),
+            session_id: session_id.into(),
+            ..Default::default()
+        };
+        service.turn_complete(Request::new(request))
+    };
+
+    end(&ids[2], "").await.unwrap();
+    end(&ids[0], "s-1").await.unwrap();
+    assert_eq!(logs.count(warning), 0, "a Codex pane, or a session id");
+
+    end(&ids[0], "").await.unwrap();
+    end(&ids[0], "").await.unwrap();
+    assert_eq!(logs.count(warning), 1, "once for the pane");
+
+    end(&ids[1], "").await.unwrap();
+    assert_eq!(logs.count(warning), 2, "again for another pane");
+    task.abort();
+}
+
 #[tokio::test]
 async fn turn_complete_accepts_only_after_appending_every_request_field() {
     let directory = TestDirectory::new();

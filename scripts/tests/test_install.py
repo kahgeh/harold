@@ -1320,6 +1320,130 @@ class ClaudeSettingsTests(unittest.TestCase):
         self.assertFalse(self.path.is_symlink())
 
 
+class TurnHookTests(unittest.TestCase):
+    def setUp(self):
+        import install
+        self.install = install
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        root = Path(self.temp.name)
+        self.path = root / '.claude' / 'settings.json'
+        self.backup = self.path.with_name('settings.json.before-harold')
+        self.hook = root / 'bin/harold/hooks/claude_turn_complete.py'
+        self.command = 'python3 {}'.format(self.hook)
+        self.old_script = root / '.claude/hooks/turn_complete.py'
+        self.old_script.parent.mkdir(parents=True)
+        self.old_script.write_text('from harold_turn_complete import TurnComplete, notify_harold\n')
+
+    def register(self):
+        return self.install.register_turn_hook(self.path, self.hook)
+
+    def write(self, data):
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.write_text(data if isinstance(data, str) else json.dumps(data))
+
+    def stop(self, *commands):
+        return {'matcher': '', 'hooks': [{'type': 'command', 'command': command} for command in commands]}
+
+    def read(self):
+        return json.loads(self.path.read_text())
+
+    def assert_manual(self, text, outcome):
+        self.assertEqual(self.path.read_text(), text)
+        self.assertFalse(self.backup.exists())
+        self.assertIn(self.command, outcome)
+        self.assertIn('"Stop"', outcome)
+
+    def test_a_hook_running_a_script_that_imports_the_notifier_is_replaced(self):
+        other = {'matcher': 'Bash', 'hooks': [{'type': 'command', 'command': 'echo other'}]}
+        before = {'model': 'x', 'env': {'A': '1'}, 'hooks': {'Stop': [self.stop('uv run {}'.format(self.old_script))],
+                                                           'PreToolUse': [other]}}
+        self.write(before)
+        self.assertEqual(self.register(), 'replaced')
+        after = self.read()
+        self.assertEqual(after['hooks']['Stop'], [self.stop(self.command)])
+        self.assertEqual(after['hooks']['PreToolUse'], [other])
+        self.assertEqual((after['model'], after['env']), ('x', {'A': '1'}))
+        self.assertEqual(json.loads(self.backup.read_text()), before)
+        self.assertTrue(self.old_script.exists())
+
+    def test_harolds_own_script_at_another_path_is_replaced_and_its_other_keys_kept(self):
+        entry = {'matcher': '', 'hooks': [{'type': 'command', 'timeout': 9,
+                                           'command': 'python3 /old/bin/harold/hooks/claude_turn_complete.py'}]}
+        self.write({'hooks': {'Stop': [entry]}})
+        self.assertEqual(self.register(), 'replaced')
+        self.assertEqual(self.read()['hooks']['Stop'][0]['hooks'],
+                         [{'type': 'command', 'timeout': 9, 'command': self.command}])
+
+    def test_the_right_command_is_unchanged(self):
+        text = json.dumps({'hooks': {'Stop': [self.stop(self.command)]}})
+        self.write(text)
+        self.assertEqual(self.register(), 'unchanged')
+        self.assertEqual(self.path.read_text(), text)
+        self.assertFalse(self.backup.exists())
+
+    def test_no_stop_hook_gets_one_added(self):
+        for before in ({'model': 'x'}, {'hooks': {}}, {'hooks': {'Stop': []}}):
+            self.backup.unlink(missing_ok=True)
+            self.write(before)
+            self.assertEqual(self.register(), 'added')
+            after = self.read()
+            self.assertEqual(after['hooks']['Stop'], [self.stop(self.command)])
+            self.assertEqual(json.loads(self.backup.read_text()), before)
+
+    def test_another_tools_stop_hook_is_kept_and_ours_added(self):
+        script = Path(self.temp.name) / 'other.py'
+        script.write_text('print("other tool")\n')
+        entries = [self.stop('python3 {}'.format(script)), self.stop('echo done')]
+        self.write({'hooks': {'Stop': entries}})
+        self.assertEqual(self.register(), 'added')
+        self.assertEqual(self.read()['hooks']['Stop'], entries + [self.stop(self.command)])
+
+    def test_unsure_cases_change_nothing_and_print_the_json(self):
+        second = Path(self.temp.name) / 'second.py'
+        second.write_text('import harold_turn_complete\n')
+        cases = ('{not json', '[]', '{"hooks": []}', '{"hooks": {"Stop": {}}}', '{"hooks": {"Stop": [3]}}',
+                 '{"hooks": {"Stop": [{"hooks": [4]}]}}',
+                 json.dumps({'hooks': {'Stop': [self.stop('uv run {}'.format(self.old_script)),
+                                                self.stop('python3 {}'.format(second))]}}))
+        for text in cases:
+            self.write(text)
+            self.assert_manual(text, self.register())
+
+    def test_a_missing_file_writes_nothing_and_prints_the_json(self):
+        outcome = self.register()
+        self.assertFalse(self.path.exists())
+        self.assertIn(self.command, outcome)
+
+    def test_a_symlinked_settings_file_is_edited_through_the_link(self):
+        real = Path(self.temp.name) / 'dotfiles/settings.json'
+        real.parent.mkdir()
+        real.write_text(json.dumps({'model': 'x'}))
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.symlink_to(real)
+        self.assertEqual(self.register(), 'added')
+        self.assertTrue(self.path.is_symlink())
+        self.assertEqual(json.loads(real.read_text())['hooks']['Stop'], [self.stop(self.command)])
+        self.assertEqual(json.loads(real.with_name('settings.json.before-harold').read_text()), {'model': 'x'})
+        self.assertFalse(self.backup.exists())
+
+    def test_a_hook_for_another_tool_is_never_touched(self):
+        script = Path(self.temp.name) / 'notify.sh'
+        script.write_text('#!/bin/sh\n')
+        before = {'hooks': {'Stop': [self.stop('sh {}'.format(script), 'python3 /x/notes.py')]}}
+        self.write(before)
+        self.assertEqual(self.register(), 'added')
+        self.assertEqual(self.read()['hooks']['Stop'][0], before['hooks']['Stop'][0])
+
+    def test_the_file_keeps_its_mode_and_leaves_no_temporary_file(self):
+        self.write({'model': 'x'})
+        self.path.chmod(0o600)
+        self.register()
+        self.assertEqual(self.path.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(sorted(p.name for p in self.path.parent.iterdir() if p.is_file()),
+                         ['settings.json', 'settings.json.before-harold'])
+
+
 class SkillTests(unittest.TestCase):
     NAME = 'send-message-to-away-device'
 

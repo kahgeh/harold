@@ -69,6 +69,9 @@ struct HaroldService {
     restart_reminder: Option<Arc<dyn restart_reminder::TurnEnds>>,
 }
 
+/// The provider id of Claude Code panes.
+const CLAUDE_PROVIDER_ID: &str = "claude";
+
 /// The service Harold serves.
 fn harold_service(
     monitor: agent::runtime::AgentMonitorHandle,
@@ -127,6 +130,27 @@ where
 }
 
 impl HaroldService {
+    /// Warns once for each pane when a Claude turn end carries no session id: the Stop hook
+    /// in `~/.claude/settings.json` is not Harold's `claude_turn_complete.py`.
+    fn warn_when_claude_sends_no_session_id(&self, pane_id: &str, pane_id_log: &str) {
+        let is_claude = self.snapshots.current().panes.iter().any(|pane| {
+            pane.pane.incarnation.pane_id == pane_id
+                && pane.pane.incarnation.provider_id == CLAUDE_PROVIDER_ID
+        });
+        // Panes already warned, for the life of the process.
+        static WARNED: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+            std::sync::OnceLock::new();
+        if is_claude
+            && WARNED
+                .get_or_init(Default::default)
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .insert(pane_id.to_string())
+        {
+            tracing::warn!(pane_id = %pane_id_log, "turn hook sends no session id");
+        }
+    }
+
     /// Persists a changed pause flag and flips the switch, see `apply_setting`. `switched`
     /// reads the switch's current value: the published snapshot can lag a change that is
     /// stored but not yet projected, so with no earlier request to go by, a request is a
@@ -232,6 +256,9 @@ impl Harold for HaroldService {
             let pane_id = req.pane_id.clone();
             let pane_id_log = pane_id_for_log(&pane_id);
             info!(pane_id = %pane_id_log, "turn complete received");
+            if req.session_id.is_empty() {
+                self.warn_when_claude_sends_no_session_id(&pane_id, pane_id_log);
+            }
 
             let turn_end = (
                 req.pane_id.clone(),
