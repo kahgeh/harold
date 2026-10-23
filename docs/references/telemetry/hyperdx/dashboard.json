@@ -33,6 +33,11 @@
       "id": "notifications",
       "title": "Notifications (leave the product filter empty)",
       "collapsed": false
+    },
+    {
+      "id": "web-app",
+      "title": "Web app (the phone's browser)",
+      "collapsed": false
     }
   ],
   "filters": [
@@ -792,6 +797,86 @@
         "connectionId": "@CLICKHOUSE_CONNECTION_ID@",
         "sourceId": "@TRACES_SOURCE_ID@",
         "sqlTemplate": "SELECT toDate(Timestamp) AS day, sum(toUInt64OrZero(SpanAttributes['cost_micros'])) / 1000000 AS spend_usd FROM $__sourceTable WHERE ServiceName = 'harold' AND SpanName = 'harold.call_answer' AND Timestamp >= now() - INTERVAL 7 DAY AND Timestamp < now() GROUP BY day ORDER BY day"
+      }
+    },
+    {
+      "id": "web-app-errors-per-day",
+      "name": "Web app errors per day",
+      "x": 0,
+      "y": 30,
+      "w": 12,
+      "h": 4,
+      "containerId": "web-app",
+      "config": {
+        "configType": "sql",
+        "displayType": "table",
+        "connectionId": "@CLICKHOUSE_CONNECTION_ID@",
+        "sourceId": "@TRACES_SOURCE_ID@",
+        "sqlTemplate": "SELECT toDate(Timestamp) AS day, SpanAttributes['exception.type'] AS exception_type, SpanAttributes['code.filepath'] AS script, count() AS errors FROM $__sourceTable WHERE ServiceName = 'harold-web-app' AND SpanName = 'browser.error' AND Timestamp >= now() - INTERVAL 7 DAY AND Timestamp < now() GROUP BY day, exception_type, script ORDER BY day DESC, errors DESC"
+      }
+    },
+    {
+      "id": "phone-page-load-p50-p95",
+      "name": "Phone page load (p50, p95)",
+      "x": 12,
+      "y": 30,
+      "w": 12,
+      "h": 4,
+      "containerId": "web-app",
+      "config": {
+        "configType": "sql",
+        "displayType": "table",
+        "connectionId": "@CLICKHOUSE_CONNECTION_ID@",
+        "sourceId": "@TRACES_SOURCE_ID@",
+        "sqlTemplate": "SELECT toDate(Timestamp) AS day, count() AS loads, quantile(0.5)(Duration) / 1000000000 AS p50_s, quantile(0.95)(Duration) / 1000000000 AS p95_s FROM $__sourceTable WHERE ServiceName = 'harold-web-app' AND SpanName = 'documentLoad' AND Timestamp >= now() - INTERVAL 7 DAY AND Timestamp < now() GROUP BY day ORDER BY day DESC"
+      }
+    },
+    {
+      "id": "browser-spans-not-forwarded-per-day",
+      "name": "Browser spans not forwarded per day",
+      "x": 0,
+      "y": 34,
+      "w": 12,
+      "h": 3,
+      "containerId": "web-app",
+      "config": {
+        "configType": "sql",
+        "displayType": "table",
+        "connectionId": "@CLICKHOUSE_CONNECTION_ID@",
+        "sourceId": "@METRICS_SOURCE_ID@",
+        "sqlTemplate": "SELECT toDate(TimeUnix) AS day, Attributes['reason'] AS reason, sum(rise) AS spans FROM (SELECT TimeUnix, MetricName, Attributes, if(Value >= before, Value - before, Value) AS rise FROM (SELECT TimeUnix, MetricName, Attributes, Value, lagInFrame(Value, 1, toFloat64(0)) OVER (PARTITION BY cityHash64(MetricName, ResourceAttributes, Attributes) ORDER BY TimeUnix ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS before FROM $__sourceTable(sum) WHERE MetricName IN ('harold.app_spans.not_forwarded') AND TimeUnix >= now() - INTERVAL 8 DAY AND TimeUnix < now())) WHERE TimeUnix >= now() - INTERVAL 7 DAY GROUP BY day, reason ORDER BY day DESC, reason"
+      }
+    },
+    {
+      "id": "phone-turns-in-one-trace",
+      "name": "Phone turns in one trace",
+      "x": 12,
+      "y": 34,
+      "w": 12,
+      "h": 3,
+      "containerId": "web-app",
+      "config": {
+        "configType": "sql",
+        "displayType": "table",
+        "connectionId": "@CLICKHOUSE_CONNECTION_ID@",
+        "sourceId": "@TRACES_SOURCE_ID@",
+        "sqlTemplate": "SELECT toDate(Timestamp) AS day, count() AS phone_turns, countIf(ParentSpanId != '') AS joined, round(100 * joined / phone_turns, 1) AS joined_percent FROM $__sourceTable WHERE ServiceName = 'harold' AND SpanName = 'harold.turn' AND SpanAttributes['started_by'] = 'phone' AND Timestamp >= now() - INTERVAL 7 DAY AND Timestamp < now() GROUP BY day ORDER BY day DESC"
+      }
+    },
+    {
+      "id": "browser-spans-stored-per-day",
+      "name": "Browser spans stored per day",
+      "x": 0,
+      "y": 37,
+      "w": 12,
+      "h": 3,
+      "containerId": "web-app",
+      "config": {
+        "configType": "sql",
+        "displayType": "table",
+        "connectionId": "@CLICKHOUSE_CONNECTION_ID@",
+        "sourceId": "@TRACES_SOURCE_ID@",
+        "sqlTemplate": "SELECT toDate(Timestamp) AS day, count() AS spans FROM $__sourceTable WHERE ServiceName = 'harold-web-app' AND Timestamp >= now() - INTERVAL 7 DAY AND Timestamp < now() GROUP BY day ORDER BY day DESC"
       }
     }
   ]

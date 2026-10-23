@@ -21,9 +21,10 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 | build worker | An agent building one spec in its own worktree | "slot" for the worker |
 | slot | A place for one build worker in a pod, busy or free | — |
 | pod registry | The vault's `products.toml`, named by `[telemetry] pod_registry` | — |
-| collector | The OpenTelemetry collector at `http://localhost:4317`, part of the local stack. It takes Harold's traces, logs and metrics over OTLP gRPC and stores them in ClickHouse | "ClickHouse" for where Harold sends, "exporter", "agent" for the collector |
+| browser span | A span the web app records in the phone's browser, such as a page load, a request or a script error, which Harold forwards to the collector | "RUM", "client span", "frontend telemetry" |
+| collector | The OpenTelemetry collector at `http://localhost:4317` and `http://localhost:4318`, part of the local stack. It takes Harold's traces, logs and metrics over OTLP gRPC on 4317, and browser spans, which Harold forwards, as OTLP JSON on 4318, and stores them in ClickHouse | "ClickHouse" for where Harold sends, "exporter", "agent" for the collector |
 | local stack | The services in `~/code/sre/stack` on a Mac, which are the collector, ClickHouse and HyperDX | "SRE stack", "observability stack", "HyperDX" for the whole |
-| export, export on, export off | Harold sending to the collector, set by `[telemetry] export` and `otlp_endpoint`. Export is on by default; `export = false` sets it off | "telemetry on/off" for export, "disabled", "enabled", "no address", "push" |
+| export, export on, export off | Harold sending to the collector, set by `[telemetry] export`, `otlp_endpoint` and `otlp_http_endpoint`. Export is on by default; `export = false` sets it off, and then Harold also leaves out the page's tracing script and drops any browser span posted to it | "telemetry on/off" for export, "disabled", "enabled", "no address", "push" |
 | user | The person Harold works for | — |
 | phone | The user's iPhone, reached by iMessage or the web app | "away device", except in the skill name `send-message-to-away-device` |
 

@@ -32,6 +32,7 @@ pod_registry = "~/code/<your-vault>/products.toml"
 |---|---|---|
 | `export` | Export, when true. False is export off: no pipeline is built, nothing is sent and no line is logged. `otlp_endpoint` is still checked | True: export is on |
 | `otlp_endpoint` | The collector's address for export of spans, log records and metrics, over OTLP gRPC. Plain `http://` only: Harold is built without TLS, so an `https://` address is refused | `http://localhost:4317`, from `default.toml` |
+| `otlp_http_endpoint` | The collector's OTLP HTTP address, where Harold forwards the web app's browser spans as OTLP JSON. Plain `http://` only | `http://localhost:4318`, from `default.toml` |
 | `alert_listen` | The alert address, `POST /alert` on this address and port | No address is opened |
 | `pod_registry` | The pod facts, read from the organisation's `products.toml`, in its vault | No pod folder is read and no `git` command runs |
 
@@ -39,6 +40,7 @@ pod_registry = "~/code/<your-vault>/products.toml"
 
 ```
 telemetry.otlp_endpoint must be an http:// address such as http://localhost:4317
+telemetry.otlp_http_endpoint must be an http:// address such as http://localhost:4318
 telemetry.alert_listen must be an address and port such as 127.0.0.1:4320
 telemetry.pod_registry must be the path of the chief's products.toml
 ```
@@ -261,6 +263,7 @@ Metrics are sent every 30 seconds. Every metric also carries `harold.machine`.
 | `harold.phone_request.latency` | histogram, `s`, buckets 1, 2, 5, 10, 30, 60, 120, 300, 600 | `channel`, `resolved_by` |
 | `harold.turn_end_updates` | counter, `{update}` | `outcome` (`model`, `fallback`), `reason` (`none` for `model`, otherwise `no_model`, `model_failed`, `too_long` or `no_name`) |
 | `harold.web_app.pushes` | counter, `{push}` | `outcome` (`accepted`, `gone`, `refused`, `unreachable`) |
+| `harold.app_spans.not_forwarded` | counter, `{span}` | `reason` (`collector_unreachable`, `collector_refused`, `timed_out`, `queue_full`) |
 | `harold.notifications` | counter, `{notification}` | `agent` (the pane's folder below the home folder, such as `code/harold/main`), `channel` (`imessage`, `web_app` or `machine_audio_output`), `outcome` (`sent`, or `kept` when the channel's list held it back). Counted only on a channel that is set up and turned on |
 | `harold.turns` | counter, `{turn}` | `session.id`, `pane_id`, `started_by` |
 | `harold.turn.duration` | histogram, `s`, buckets 10, 30, 60, 120, 300, 600, 1800, 3600 | `started_by` |
@@ -317,6 +320,34 @@ Export never slows Harold:
 
 An `otlp_endpoint` that cannot be used at all logs `telemetry export off: the collector address could not be used`, and Harold runs with export off.
 
+## Browser spans
+
+The web app records what happens in the phone's browser as spans under `service.name = harold-web-app`: a `documentLoad` span with `documentFetch` and one `resourceFetch` per script and stylesheet, a fetch span for each request (the `POST /replies` of a Send, a todo answer), a `browser.error` span for each script error, and a `browser.message_shown` span when a row of the thread is drawn. Harold serves the page's `telemetry.js` and one vendored OpenTelemetry bundle only while export is on ([ADR 0012](../../adr/0012-browser-libraries-are-vendored-as-one-bundle-built-from-a-pinned-audited-npm-lockfile.md)).
+
+**The route.** The page posts a batch every 5 seconds, and when it is hidden, to `POST /telemetry/traces`, behind the login and origin checks, as OTLP JSON. Harold answers `200 {}` at once, `413` for a body over 256 KB and `400` for one that is not OTLP JSON. With export off it answers `200 {}` and drops the batch.
+
+**What Harold keeps.** Spans from three scopes only: document load, fetch and `harold-web-app`. Each keeps its trace id, span id, parent span id, name (letters, digits and `_ . - / :` only), kind, times and status code, and these attributes: `url.full` (rewritten to its path: no scheme, host, query or fragment), `http.request.method`, `http.response.status_code`, `http.response_content_length`, `user_agent.original`, `error.kind`, `exception.type`, `code.filepath` (a path), `code.lineno`, `code.column`, `harold.row` (`chief` or `me`, on `browser.message_shown` only) and, on `browser.error` only, `exception.message` cut to 200 characters. Events keep their name and time. Links, status messages and every other attribute are dropped. The resource is set by Harold: `service.name = harold-web-app` and Harold's version. **`exception.message` is the only free text in the web app's spans**, a choice the user made knowingly; a message can quote page data.
+
+**Forwarding.** In the background, to `[telemetry] otlp_http_endpoint` + `/v1/traces`, each forward under 2 seconds and at most 4 at a time. A batch beyond that is dropped. Spans that did not reach the collector are counted in `harold.app_spans.not_forwarded` by `reason`. One line, `app traces not forwarded` with `reason`, is logged when forwarding starts failing, and `app traces forwarded again` when it recovers. The lines carry no span content.
+
+**One trace from the tap to the answer.** The page's fetch timing adds a `traceparent` header to `POST /replies` and the todo answers. Harold opens `harold.phone_request` (`channel = web_app`) under the phone's span and stores the reply inside `harold.reply_stored`, so the typed prompt, the chief's turn, `harold.turn_complete`, `harold.delivery` and the answer row join the phone's trace. The row is stored with the `traceparent` of the span that stored it (`app_messages.trace`); the update stream opens `harold.app_row_sent` when it first sends the row, and the row carries that span as `data-trace`, so the page records `browser.message_shown` as its child. A message the chief sends mid-turn opens `harold.away_message` under the pane's last typed prompt while it is within one hour. A todo answer keeps the `traceparent` with the answer (`trace_parent`); the `ANSWERS` line opens `harold.answers_typed` under the first answer's trace with a link to each other, and a line of answers from the dash is a root. A hand-over joins the call turn's trace. A web app reply is not counted in the phone-request counters.
+
+```
+SELECT SpanName, Timestamp, Duration / 1000000 AS ms
+FROM otel.otel_traces
+WHERE TraceId = '<trace id>'
+ORDER BY Timestamp
+```
+
+The first real batch after an install:
+
+```
+SELECT SpanName, count() FROM otel.otel_traces
+WHERE ServiceName = 'harold-web-app' AND Timestamp > now() - INTERVAL 1 HOUR GROUP BY SpanName
+```
+
+The clocks of the phone and the Mac can differ by a few milliseconds, so a phone span may start just before its Harold parent in HyperDX.
+
 ## The dashboards
 
 The definition files are in [`hyperdx/`](hyperdx/), in the shape HyperDX 2.40's external API takes. [Creating the definitions](#creating-the-definitions) gives the commands.
@@ -350,6 +381,11 @@ Each tile's window is written into its query: `TimeUnix >= now() - INTERVAL 24 H
 | Turns | Call turn, time to first sound and to the answer, last 7 days | a table with one row per `call_from` and `answered_by`: the number of `harold.call_turn` spans, and the p50 and p95, in seconds, of `first_sound_ms` and of `answer_ms` over the last 7 days. The aim is an `answer_ms` p50 about 5.5 s for `answerer` (`first_sound_ms` follows it, since the answer is the first sound), and near the chief's own turn time plus 1 s for `chief`. On a day with at least 3 answerer turns, act when the `answer_ms` p50 is above 7 s, or above 15 s for `chief`: look at a turn's trace, where the long child span shows the slow part (`call_answer`'s `model_ms` against `call_transcribe`, and `load_waited_ms` against the worker's `load_ms`). The last column, `waited_for_the_load`, counts the `harold.call_transcribe` spans in those turns with `load_waited_ms` above 0; a call now rings until its worker is ready, so a first turn does not wait for the load and only a worker restarted mid-call can make it non-zero; the early-load signal is `harold.call_ring`. On a day with at least 3 call turns, more `chief` turns than `answerer` turns means the call answerer is failing. Info only: no alert, no earlier tile | SQL: `harold.call_turn` spans, `quantileIf` over the turns that carry the number |
 | Turns | Call answers failed, by day | the number of `harold.call_answer` spans with `result = failed` for each of the last 7 days. Above 2 on a day is the cue to look. Info only: no alert. The release watch already reports any `call answer failed` WARN since an install | SQL: `harold.call_answer` spans counted per day |
 | Turns | Call answerer spend, by day | the sum of `cost_micros` of `harold.call_answer` spans, in dollars, for each of the last 7 days. Above $0.10 on a day, about 300 turns at today's price, means far more turns than expected or a prompt that grew. Act when the median `input_tokens` of a day's answers is above 6,000 (`SELECT quantile(0.5)(toUInt64OrZero(SpanAttributes['input_tokens'])) FROM otel.otel_traces WHERE SpanName = 'harold.call_answer' AND Timestamp > now() - INTERVAL 1 DAY`): the cause is then the pods' spec count. Info only: no alert | SQL: `harold.call_answer` spans, `cost_micros` summed per day |
+| Web app | Web app errors per day | `browser.error` spans for each of the last 7 days, by `exception.type` and `code.filepath`. Act when an error is new, or when any one passes 5 in a day | SQL table over `harold-web-app` spans |
+| Web app | Phone page load (p50, p95) | `documentLoad` spans for each of the last 7 days: the number, p50 and p95 in seconds. Act when the p95 passes 3 s on a day with at least 5 loads | SQL table |
+| Web app | Browser spans not forwarded per day | `harold.app_spans.not_forwarded` for each day and `reason`. Act on any value above 0: check the collector, then the `app traces not forwarded` line | SQL table: the counter rule |
+| Web app | Phone turns in one trace | `harold.turn` spans with `started_by = phone`, and the share with a parent, for each day. Act when it is below 90% on a day with at least 5 phone turns; a reply typed after the prompt is kept (1 hour), or after a restart, loses its link | SQL table |
+| Web app | Browser spans stored per day | the number of `harold-web-app` spans for each day. Act when it passes 2,000 a day; a normal day is a few hundred | SQL table |
 | Notifications | Notifications by agent and channel | a table with one row per `agent` and `channel`, and two columns, `sent` and `kept`: `harold.notifications` over the range you pick. A `kept` is something that channel's list held back; the chief rule, the voice mute, the pause and a message sent this turn are not `kept`. Only channels that are set up and turned on have rows. Severity info. You read it to see who is talking to you and to decide your lists: an agent with more than 20 `kept` in a day on the channel you use is one to consider adding, and an agent you expect to hear whose `sent` stops rising while it is working is one to look at. For a row, the `agent message dropped`, `spoken line dropped` and `notification skipped` lines with that `agent` and `channel` give `pane_id`, `kind`, `reason` and the times; `spoken update left out (not in notify.machine_audio_output)` gives them for a desk update | SQL: the counter rule over the range, with the day before `$__fromTime` for the lag, `$__timeFilter` and `$__filters`. No fixed period, no earlier tile |
 
 The notifications card and the call turn card are the two cards that are tables and have no earlier tile. Sixteen of the eighteen number cards are raw SQL tiles. Only the two slot cards use HyperDX's builder. The SQL tiles read ClickHouse through the connection, for three reasons:
@@ -414,6 +450,7 @@ Harold sends counters and histograms as running totals, the OpenTelemetry defaul
 - `harold.phone_requests`, for each `outcome` (`typed`, `unavailable`), `channel` and `resolved_by`;
 - `harold.phone_requests.wrong`, for each `channel` and `resolved_by`;
 - `harold.web_app.pushes`, for each `outcome` (`accepted`, `gone`, `refused`, `unreachable`);
+- `harold.app_spans.not_forwarded`, for each `reason`;
 - `harold.turn_end_updates`, for `outcome = fallback` with `reason = model_failed`, which `local-model-failing` reads.
 
 The pod facts do the same for each product on its first poll: `pod.merges` with no `spec.id`, and `pod.merged_lines` for each `change`. Each series then has a first point of 0 before anything happens, and the first real request after a restart is a rise HyperDX can see.

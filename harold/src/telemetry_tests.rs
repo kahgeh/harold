@@ -1589,6 +1589,7 @@ async fn a_reply_is_kept_open_before_it_is_stored_and_dropped_if_it_is_not() {
 
 /// The spec's Metrics table.
 const METRICS: &[&str] = &[
+    "harold.app_spans.not_forwarded",
     "pod.slots.busy",
     "pod.slots.free",
     "pod.merges",
@@ -1609,6 +1610,8 @@ const METRICS: &[&str] = &[
 
 /// The Metrics table's attributes, plus the two resource attributes every export carries.
 const ATTRIBUTES: &[&str] = &[
+    "exception.type",
+    "code.filepath",
     "load_waited_ms",
     "pod.product",
     "spec.id",
@@ -1638,6 +1641,7 @@ const ATTRIBUTES: &[&str] = &[
 
 /// The spec's span table. The trends panel "One turn, end to end" lists `harold.turn`.
 const SPANS: &[&str] = &[
+    "browser.error",
     "harold.phone_request",
     "harold.route",
     "harold.turn",
@@ -2001,6 +2005,7 @@ fn the_cards_dashboard_shows_each_card_beside_its_earlier_number_and_nothing_els
             CALL_ANSWERS_FAILED_CARD.to_string(),
             CALL_ANSWERER_SPEND_CARD.to_string(),
         ])
+        .chain(WEB_APP_CARDS.map(str::to_string))
         .collect();
     assert_eq!(tile_names(&dashboard), names);
 
@@ -2025,7 +2030,8 @@ fn the_cards_dashboard_shows_each_card_beside_its_earlier_number_and_nothing_els
             "Pods",
             "Specs",
             "Turn-end updates",
-            "Turns"
+            "Turns",
+            "Web app (the phone's browser)"
         ]
     );
 
@@ -2127,6 +2133,14 @@ fn the_cards_dashboard_shows_each_card_beside_its_earlier_number_and_nothing_els
 
 const NOTIFICATIONS_CARD: &str = "Notifications by agent and channel";
 const CALL_TURN_CARD: &str = "Call turn, time to first sound and to the answer, last 7 days";
+/// The web app's cards, in the order the dashboard lists them.
+const WEB_APP_CARDS: [&str; 5] = [
+    "Web app errors per day",
+    "Phone page load (p50, p95)",
+    "Browser spans not forwarded per day",
+    "Phone turns in one trace",
+    "Browser spans stored per day",
+];
 const CALL_ANSWERS_FAILED_CARD: &str = "Call answers failed, by day";
 const CALL_ANSWERER_SPEND_CARD: &str = "Call answerer spend, by day";
 
@@ -2230,6 +2244,7 @@ fn the_product_filter_reaches_the_pod_and_spec_tiles_only() {
         ("phone", false),
         ("turns", false),
         ("turn-end", false),
+        ("web-app", false),
         // The card takes `$__filters`, so the product filter empties it: its container
         // title says to leave that filter empty.
         ("notifications", true),
@@ -2312,8 +2327,8 @@ fn every_tile_that_counts_a_running_total_uses_the_counter_rule() {
         }
     }
     // Eight counter cards and two lead-time cards, each with its earlier number, the
-    // notifications card and three trends panels.
-    assert_eq!(counted, 24);
+    // notifications card, the browser spans not forwarded card and three trends panels.
+    assert_eq!(counted, 25);
 }
 
 #[test]
@@ -2980,4 +2995,65 @@ fn the_old_setup_loop_stops_when_hyperdx_cannot_be_reached() {
         !calls.iter().any(|call| call.starts_with("POST")),
         "{calls:?}"
     );
+}
+
+#[test]
+fn the_web_app_cards_are_tables_over_the_browser_spans_and_the_phone_turns() {
+    let dashboard = definition("dashboard.json");
+    let sql_of = |name: &str, source: &str| {
+        let card = tiles(&dashboard)
+            .iter()
+            .find(|tile| tile["name"] == name)
+            .unwrap_or_else(|| panic!("the {name} card"));
+        assert_eq!(card["containerId"], "web-app", "{name}");
+        assert_eq!(card["config"]["displayType"], "table", "{name}");
+        assert_eq!(card["config"]["sourceId"], source, "{name}");
+        card["config"]["sqlTemplate"].as_str().unwrap().to_owned()
+    };
+    for (name, source, pieces) in [
+        (
+            "Web app errors per day",
+            "@TRACES_SOURCE_ID@",
+            &[
+                "ServiceName = 'harold-web-app'",
+                "SpanName = 'browser.error'",
+                "SpanAttributes['exception.type']",
+                "SpanAttributes['code.filepath']",
+            ][..],
+        ),
+        (
+            "Phone page load (p50, p95)",
+            "@TRACES_SOURCE_ID@",
+            &[
+                "SpanName = 'documentLoad'",
+                "quantile(0.5)",
+                "quantile(0.95)",
+            ][..],
+        ),
+        (
+            "Browser spans not forwarded per day",
+            "@METRICS_SOURCE_ID@",
+            &["harold.app_spans.not_forwarded", "Attributes['reason']"][..],
+        ),
+        (
+            "Phone turns in one trace",
+            "@TRACES_SOURCE_ID@",
+            &[
+                "SpanName = 'harold.turn'",
+                "SpanAttributes['started_by'] = 'phone'",
+                "ParentSpanId != ''",
+            ][..],
+        ),
+        (
+            "Browser spans stored per day",
+            "@TRACES_SOURCE_ID@",
+            &["ServiceName = 'harold-web-app'", "GROUP BY day"][..],
+        ),
+    ] {
+        let sql = sql_of(name, source);
+        for piece in pieces {
+            assert!(sql.contains(piece), "{name}: {piece} in {sql}");
+        }
+        assert!(sql.contains("INTERVAL 7 DAY"), "{name}: {sql}");
+    }
 }

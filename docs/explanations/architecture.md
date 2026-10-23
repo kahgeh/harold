@@ -78,7 +78,7 @@ flowchart LR
 | snapshot publisher | Sends snapshots to clients over `WatchAgentStates` | `harold/src/agent/snapshot.rs`, `harold/src/main.rs` |
 | tool host, question tool, backlog tool, watch tool | Hosts tools with their own storage and gRPC services (ADR 0001). The dash and the web app are clients of the question tool | `harold/src/tools.rs`, `harold/src/tools/` |
 | calls, call answerer, voice worker and speech models | Voice calls with the chief, the call answerer (the small model that answers each turn and hands real work to the chief), the process that turns lines into audio and speech into text, and the check of the two speech models it loads: Harold downloads a missing one at start-up, pinned to a commit and checked file by file ([ADR 0011](../adr/0011-harold-downloads-missing-speech-models-at-start-up.md)) | `harold/src/voice_input.rs`, `harold/src/voice_input/` (`answerer.rs`, `hand_over.rs`, `models.rs`), `harold/src/voice_worker.py`, `harold/src/voice_download.py` |
-| web app | The phone's web app: the thread, push, calls and the todos, which it shows and answers through the question tool's service | `harold/src/web_app/`, `harold/static/web_app/`, `harold/templates/web_app/` |
+| web app | The phone's web app: the thread, push, calls and the todos, which it shows and answers through the question tool's service. Its page records page loads, requests and script errors as spans (`telemetry.js` and one vendored OpenTelemetry bundle) and posts them to Harold's `POST /telemetry/traces`, which keeps only the fields it allows and forwards them to the collector | `harold/src/web_app/`, `harold/static/web_app/`, `harold/templates/web_app/` |
 | activity summaries | Optional work summaries that Claude Code writes from an agent's evidence | `harold/src/activity_summary.rs` |
 | timed prompts | Text typed into a pane at a set time each day | `harold/src/timed_prompts.rs` |
 | alerts | HyperDX alerts typed to the chief | `harold/src/alerts.rs` |
@@ -104,7 +104,7 @@ What other components or products depend on, each with where its contract is wri
 - **The pod registry:** Harold reads the vault's `products.toml` for pod stats. Contract: the [telemetry reference](../references/telemetry/README.md).
 - **The routing tag** on replies. Contract: the [inbound routing reference](../references/inbound-message-routing/README.md).
 - **Files in Harold's data folder:** under the store folder, the event stream (`log/`) and `harold-state.db`; beside it, each tool's database (`tools/<tool>`), the web app's key (`web-push/vapid.pem`), the echo test's runs (`echo-test/`, one JSON file per run) and the web app's photos (`app-photos/`, folder mode 0700, files 0600; the hourly prune deletes an upload no reply names after 1 hour, and a photo when its thread row goes, at 30 days). Also beside it, `speech-models/` (folder mode 0700): the download script `voice_download.py` (file mode 0600) and, for each speech model Harold has checked, a record of its files' paths, sizes and sha256 (`<org>--<name>@<commit>.json`, mode 0600). Contracts: the [operation reference](../references/operation/README.md), the [tools references](../references/tools/README.md) and the [web app reference](../references/away-app/README.md).
-- **Telemetry:** export is on by default, over OTLP gRPC to the collector at `http://localhost:4317`, and `[telemetry] export = false` sets it off. Contract: the [telemetry reference](../references/telemetry/README.md).
+- **Telemetry:** export is on by default, over OTLP gRPC to the collector at `http://localhost:4317`, and `[telemetry] export = false` sets it off. Harold also forwards the web app's browser spans as OTLP JSON to `[telemetry] otlp_http_endpoint`, `http://localhost:4318`, because a browser cannot speak gRPC. Contract: the [telemetry reference](../references/telemetry/README.md).
 
 ## Decisions
 
@@ -128,6 +128,7 @@ One line per architectural decision, oldest first. Each date is the commit that 
 - 2026-10-23: ADR 0009, a call is answered by a small model and real work goes to the chief as a hand-over, typed into the chief's pane even while it is busy, so a call no longer waits for a large model. [ADR 0009](../adr/0009-a-call-is-answered-by-a-small-model.md)
 - 2026-10-23: ADR 0010, photos reach the chief as files: the phone shrinks a photo, Harold stores it in `app-photos/` without decoding it, and the line typed to the chief names its absolute path. [ADR 0010](../adr/0010-photos-reach-the-chief-as-files.md)
 - 2026-10-23: ADR 0011, Harold downloads a missing speech model at start-up, from Hugging Face, pinned to a commit and checked file by file, with no token, while the voice worker stays offline; on the iPhone's hotspot the start-up download waits, and a tapped call starts it. [ADR 0011](../adr/0011-harold-downloads-missing-speech-models-at-start-up.md)
+- 2026-10-23: ADR 0012, browser libraries are vendored as one bundle built from a pinned, audited npm lockfile, and browser spans reach the collector only through Harold's route, which keeps allowed fields and cuts URLs to their path. [ADR 0012](../adr/0012-browser-libraries-are-vendored-as-one-bundle-built-from-a-pinned-audited-npm-lockfile.md)
 
 ## Departures from the standards
 
@@ -136,7 +137,7 @@ Each place Harold does not follow the organisation's `knowledge/standards.md`, w
 - **Other languages beside Rust.** The voice worker (`harold/src/voice_worker.py`), the installer (`scripts/*.py`) and the turn-complete hooks (`hooks/providers/`, `hooks/shared/`) are Python, `scripts/install.sh` and `scripts/bootstrap.sh` are shell, the Claude Code mod is TypeScript, and the OpenCode plugin and the web app's scripts (`harold/static/web_app/`) are JavaScript. Each fits the program it extends, and the standard raises another language as a question, not a breach. Until: not set.
 - **axum's version.** Harold uses axum `0.8.8` (`harold/Cargo.toml`), unpinned, where the standard names `=0.8.7`. No one has said why. Until: not set.
 - **Dependency audits** live in the table in `docs/references/dependency-audits.md`, linked from the README, to keep the front page short. Until: not set.
-- **Licences of shipped third-party code** are in `LICENSES/`: Datastar (the web app's script) and OpenSSL (linked statically into the release binaries).
+- **Licences of shipped third-party code** are in `LICENSES/`: Datastar (the web app's script), OpenTelemetry JS (the web app's browser bundle, built by `scripts/build_web_otel.sh`) and OpenSSL (linked statically into the release binaries).
 
 ## How it works
 
