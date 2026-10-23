@@ -2,7 +2,7 @@
 //! thread with the chief, on a loopback address, behind the Tailscale login check.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
@@ -62,6 +62,7 @@ pub(crate) mod echo_test;
 pub(crate) mod login;
 pub(crate) mod origin;
 pub(crate) mod pages;
+pub(crate) mod pair;
 pub(crate) mod push;
 pub(crate) mod replies;
 pub(crate) mod route;
@@ -95,6 +96,10 @@ pub(crate) mod fake_push;
 #[cfg(test)]
 #[path = "todos_tests.rs"]
 mod todos_tests;
+
+#[cfg(test)]
+#[path = "pair_tests.rs"]
+mod pair_tests;
 
 #[cfg(test)]
 #[path = "template_requests_tests.rs"]
@@ -352,6 +357,8 @@ pub(crate) struct AppState {
     pub pages: Arc<OpenPages>,
     /// Where the page's browser spans go; off when Harold does not export.
     pub browser_traces: Arc<browser_traces::BrowserTraces>,
+    /// The paired devices, and the pairing code's tries.
+    pub pairing: Arc<pair::Pairing>,
 }
 
 #[cfg(test)]
@@ -392,7 +399,14 @@ impl AppState {
             )),
             pages: Arc::default(),
             browser_traces: Arc::new(browser_traces::BrowserTraces::new(None)),
+            pairing: Arc::new(pair::Pairing::off()),
         }
+    }
+
+    /// This state with `pairing` in place of the one that admits every device.
+    pub(crate) fn with_pairing(mut self, pairing: pair::Pairing) -> Self {
+        self.pairing = Arc::new(pairing);
+        self
     }
 
     /// This state with browser spans forwarded to `collector`.
@@ -458,11 +472,13 @@ pub(crate) fn phone_traceparent(headers: &axum::http::HeaderMap) -> String {
 }
 
 /// The app's routes, every one of them, the 404 fallback included, behind
-/// `login::require_login` and then `origin::require_same_origin`, and every response
+/// `login::require_login`, then `pair::require_device`, then `origin::require_same_origin`,
+/// and every response
 /// carrying the content security policy.
 pub(crate) fn router(state: AppState) -> Router {
     Router::new()
         .route("/", get(pages::get_thread))
+        .route("/pair", post(pair::post_pair))
         .route("/static/{name}", get(pages::get_static))
         .route("/replies", post(replies::post_reply))
         .route(
@@ -504,11 +520,13 @@ pub(crate) fn router(state: AppState) -> Router {
         .route("/call/talk-now", post(call::post_talk_now))
         .route("/call/answer/{id}", get(call::get_answer))
         .fallback(pages::not_found)
-        // The last layer added runs first: the login check, then the origin check.
+        // The last layer added runs first: the login check, then the device check, then
+        // the origin check.
         .layer(from_fn_with_state(
             state.clone(),
             origin::require_same_origin,
         ))
+        .layer(from_fn_with_state(state.clone(), pair::require_device))
         .layer(from_fn_with_state(state.clone(), login::require_login))
         .layer(from_fn(pages::add_policy))
         .with_state(state)
@@ -520,6 +538,8 @@ pub(crate) struct Running {
     pub route: Arc<dyn AppRoute>,
     /// Ends when the server and the pruning have stopped, after shutdown.
     pub handle: JoinHandle<()>,
+    /// The paired devices, which the gRPC service lists and unpairs.
+    pub pairing: Arc<pair::Pairing>,
     /// The address the app listens on, which tests read for the port.
     #[cfg(test)]
     pub local_addr: std::net::SocketAddr,
@@ -554,6 +574,14 @@ pub(crate) async fn start(
         icon: settings.load_icon()?,
     };
 
+    let pairing = Arc::new(pair::Pairing::load(
+        pair::devices_path(store_path),
+        PathBuf::from(crate::settings::expand_tilde(settings.pairing_file())),
+        settings.require_pairing,
+        Arc::new(Instant::now),
+    )?);
+    pair::warn_when_off(&pairing);
+
     prune(&store).await;
     let state = AppState {
         store: Arc::clone(&store),
@@ -574,6 +602,7 @@ pub(crate) async fn start(
         )),
         pages: Arc::default(),
         browser_traces: Arc::new(browser_traces::BrowserTraces::new(agents.browser_collector)),
+        pairing: Arc::clone(&pairing),
     };
     // The voice worker loads while a page is on screen, so a call finds it ready.
     if let Some(calls) = &calls {
@@ -605,6 +634,7 @@ pub(crate) async fn start(
     Ok(Running {
         route,
         handle,
+        pairing,
         #[cfg(test)]
         local_addr,
     })

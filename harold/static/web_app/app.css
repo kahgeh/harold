@@ -903,3 +903,49 @@ body.in-call > .call-screen {
 .echo-test li.fail {
   color: var(--end);
 }
+
+/* The pair screen, shown to a device that is not paired. */
+.pair-body {
+  align-items: center;
+  justify-content: center;
+  padding: max(16px, env(safe-area-inset-top)) 16px max(16px, env(safe-area-inset-bottom));
+}
+
+.pair {
+  width: 100%;
+  max-width: 360px;
+}
+
+.pair h1 {
+  margin: 0 0 8px;
+  font-size: 24px;
+}
+
+.pair-hint {
+  margin: 0 0 16px;
+  color: var(--text-2);
+}
+
+.pair-form {
+  display: flex;
+  gap: 8px;
+}
+
+.pair-form input {
+  flex: 1;
+  min-width: 0;
+  min-height: var(--target);
+  padding: 0 16px;
+  border: 1px solid var(--border);
+  border-radius: 24px;
+  background: var(--surface-2);
+}
+
+.pair-notice {
+  margin: 12px 0 0;
+  color: var(--end);
+}
+
+.pair-notice[hidden] {
+  display: none;
+}

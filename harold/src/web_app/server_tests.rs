@@ -123,6 +123,8 @@ fn settings(listen: &str) -> WebAppSettings {
         allowed_login: LOGIN.into(),
         app_name: None,
         icon: None,
+        require_pairing: false,
+        pairing_file: None,
     }
 }
 

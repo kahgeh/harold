@@ -39,6 +39,7 @@ const ALERTS_JS: &[u8] = include_bytes!("../../static/web_app/alerts.js");
 const SW_JS: &[u8] = include_bytes!("../../static/web_app/sw.js");
 const PAGES_JS: &[u8] = include_bytes!("../../static/web_app/pages.js");
 const DICTATION_JS: &[u8] = include_bytes!("../../static/web_app/dictation.js");
+const PAIR_JS: &[u8] = include_bytes!("../../static/web_app/pair.js");
 const PHOTO_JS: &[u8] = include_bytes!("../../static/web_app/photo.js");
 const ECHO_TEST_JS: &[u8] = include_bytes!("../../static/web_app/echo-test.js");
 const SPEECH_CHECK_JS: &[u8] = include_bytes!("../../static/web_app/speech-check.js");
@@ -550,6 +551,7 @@ pub(crate) async fn get_static(
         "speech-check.js" => (JAVASCRIPT, SPEECH_CHECK_JS.to_vec()),
         "check-sentence.wav" => ("audio/wav", CHECK_SENTENCE_WAV.to_vec()),
         "pages.js" => (JAVASCRIPT, PAGES_JS.to_vec()),
+        "pair.js" => (JAVASCRIPT, PAIR_JS.to_vec()),
         "photo.js" => (JAVASCRIPT, PHOTO_JS.to_vec()),
         "call-worklet.js" => (JAVASCRIPT, CALL_WORKLET_JS.to_vec()),
         "sw.js" => (JAVASCRIPT, SW_JS.to_vec()),

@@ -687,6 +687,20 @@ pub(crate) struct WebAppSettings {
     pub app_name: Option<String>,
     /// The path of the app's PNG icon, with a leading `~/` expanded; no icon when left out.
     pub icon: Option<String>,
+    /// Whether only a paired device may use the app. `false` switches the check off, for a
+    /// test Harold or for recovery; Harold then warns at every start.
+    #[serde(default = "require_pairing_by_default")]
+    pub require_pairing: bool,
+    /// The file holding `HAROLD_PAIRING_CODE=<code>`, with a leading `~/` expanded;
+    /// `~/bin/harold/config/pairing.env` when left out.
+    pub pairing_file: Option<String>,
+}
+
+/// Where the pairing code is kept unless `[web_app] pairing_file` says otherwise.
+const DEFAULT_PAIRING_FILE: &str = "~/bin/harold/config/pairing.env";
+
+fn require_pairing_by_default() -> bool {
+    true
 }
 
 /// The longest `app_name`, in characters.
@@ -716,6 +730,11 @@ fn square_png_side(bytes: &[u8]) -> Option<u32> {
 }
 
 impl WebAppSettings {
+    /// The pairing file's path as written, `~/` not yet expanded.
+    pub(crate) fn pairing_file(&self) -> &str {
+        self.pairing_file.as_deref().unwrap_or(DEFAULT_PAIRING_FILE)
+    }
+
     /// The name under the icon.
     pub(crate) fn name(&self) -> &str {
         self.app_name.as_deref().unwrap_or("Chief")
@@ -2741,6 +2760,21 @@ mod tests {
     }
 
     const WEB_APP_FOLDER: &str = "[notify]\nchief = \"/work/chief-of-pods\"\n";
+
+    #[test]
+    fn pairing_is_required_and_the_pairing_file_has_its_default_path() {
+        let section = "[web_app]\nlisten = \"127.0.0.1:4330\"\nallowed_login = \"a@b.c\"";
+        let settings = crate::settings::settings_with(&format!("{WEB_APP_FOLDER}{section}"));
+        let web_app = settings.web_app.unwrap();
+        assert!(web_app.require_pairing);
+        assert_eq!(web_app.pairing_file(), "~/bin/harold/config/pairing.env");
+        let settings = crate::settings::settings_with(&format!(
+            "{WEB_APP_FOLDER}{section}\nrequire_pairing = false\npairing_file = \"/x/pairing.env\""
+        ));
+        let web_app = settings.web_app.unwrap();
+        assert!(!web_app.require_pairing);
+        assert_eq!(web_app.pairing_file(), "/x/pairing.env");
+    }
 
     #[test]
     fn web_app_is_off_when_the_section_is_absent() {

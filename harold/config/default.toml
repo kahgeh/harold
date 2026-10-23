@@ -124,3 +124,7 @@ machine_audio_output = ["chief-of-pods"]
 
 # Timed prompts: none by default. Add [[timed_prompts]] entries in local.toml.
 # See docs/references/timed-prompts/README.md.
+
+# The web app ([web_app] in local.toml) admits only paired devices. The pairing code is a line
+# HAROLD_PAIRING_CODE=<code> in ~/bin/harold/config/pairing.env (mode 0600), or in the file
+# [web_app] pairing_file names. [web_app] require_pairing = false switches the check off.

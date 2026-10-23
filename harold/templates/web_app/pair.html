@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="{{ app_name }}">
+<title>{{ app_name }}</title>
+<link rel="manifest" href="/static/manifest.webmanifest">
+{% if has_icon %}<link rel="apple-touch-icon" href="/static/icon.png">
+{% endif %}<link rel="stylesheet" href="/static/app.css">
+<script src="/static/pair.js" defer></script>
+</head>
+<body class="pair-body">
+<main class="pair">
+<h1>Pair this phone</h1>
+<p class="pair-hint">Type the pairing code you keep on the Mac.</p>
+<form id="pair-form" class="pair-form" autocomplete="off">
+<input type="password" id="pair-code" name="code" maxlength="100" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false" aria-label="Pairing code" placeholder="Pairing code" required>
+<button type="submit" id="pair-button">Pair</button>
+</form>
+<p id="pair-notice" class="pair-notice" role="alert" hidden></p>
+</main>
+</body>
+</html>
