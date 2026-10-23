@@ -764,6 +764,17 @@ fn print_help() {
     println!("  harold tool questions order ID...   Put the listed questions first, in order");
     println!("  harold tool questions list          List the waiting questions");
     println!("  harold tool questions show ID       Print a question's picks");
+    println!("  harold tool knowledge search WORDS [--limit N]");
+    println!(
+        "                          Search the vault by meaning: score, name, kind, description"
+    );
+    println!("  harold tool knowledge recent [--limit N]   The vault notes changed most recently");
+    println!("  harold tool knowledge related NOTE [--limit N]");
+    println!("                          The vault notes closest in meaning, linked or not");
+    println!("  harold tool knowledge links NOTE   Suggested links: related, not yet linked");
+    println!("  harold tool knowledge show NOTE    The vault note's text and links, as stored");
+    println!("  harold tool knowledge status       Vault notes, passages, last pass, worker");
+    println!("  harold tool knowledge rebuild      Clear the index and build it again");
     println!("  harold tool watch start NAME --skill SKILL --every MINUTES --for MINUTES");
     println!("                          [--report-to chief|self] [--run-budget USD] [--every-run]");
     println!(

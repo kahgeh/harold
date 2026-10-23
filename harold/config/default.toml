@@ -40,6 +40,21 @@ model = "haiku"
 # .claude/skills/ (absolute paths; a skill is linked into .claude/skills/ from one of them):
 # skill_folders = ["/Users/you/code/chief-of-pods/skills/watches", "/Users/you/code/your-organisation/skills/watches"]
 
+# The knowledge tool indexes the organisation's vault of Markdown notes by meaning. It is
+# off until `vault` is set. Put these in config/local.toml:
+#   vault = "/Users/you/code/your-organisation/vault/knowledge"
+#   command = "/path/to/venv/bin/python"          # the Python with llama-cpp-python installed
+#   model = "/path/to/embeddinggemma-300M-Q8_0.gguf"
+#   [knowledge.bucket]
+#   endpoint = "http://127.0.0.1:9000"
+#   bucket = "harold-knowledge"
+#   credentials_file = "/Users/you/.config/harold/knowledge-bucket"   # mode 0600
+#   encryption_key_file = "/Users/you/.config/harold/knowledge-key"   # mode 0600
+[knowledge]
+# Vault note files, relative to the vault, that are not indexed. This organisation's index
+# and change log would be exclude = ["MEMORY.md", "log.md"].
+exclude = []
+
 # The small model that answers each turn of a call; real work goes to the chief. It runs
 # Claude Code with [activity_summary] cli_path, whether or not activity summaries are on.
 [call_answerer]

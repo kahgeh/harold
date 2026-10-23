@@ -11,6 +11,8 @@ use crate::harold::{
 use crate::settings::Settings;
 use harold_api::tools::backlog::v1 as backlog_api;
 use harold_api::tools::backlog::v1::backlog_service_client::BacklogServiceClient;
+use harold_api::tools::knowledge::v1 as knowledge_api;
+use harold_api::tools::knowledge::v1::knowledge_service_client::KnowledgeServiceClient;
 use harold_api::tools::questions::v1 as questions;
 use harold_api::tools::questions::v1::question_service_client::QuestionServiceClient;
 use harold_api::tools::watch::v1 as watch_api;
@@ -235,6 +237,240 @@ pub(crate) enum ToolCommand {
     QuestionsShow { id: String },
     Backlog(BacklogCommand),
     Watch(WatchCommand),
+    Knowledge(KnowledgeCommand),
+}
+
+const KNOWLEDGE_USAGE_LINE: &str = "invalid argument: usage is harold tool knowledge search WORDS [--limit N] | recent [--limit N] | related NOTE [--limit N] | links NOTE | show NOTE | status | rebuild";
+
+/// How long a knowledge call may take: the first search after a pause waits for the
+/// embedding model to load, and a rebuild embeds the whole vault.
+const KNOWLEDGE_DEADLINE: Duration = Duration::from_secs(180);
+
+/// A `harold tool knowledge` command. `NOTE` is a vault note's name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum KnowledgeCommand {
+    Search { query: String, limit: u32 },
+    Recent { limit: u32 },
+    Related { name: String, limit: u32 },
+    Links { name: String },
+    Show { name: String },
+    Status,
+    Rebuild,
+}
+
+/// Splits `--limit N` off the end of a command's arguments.
+fn split_limit<'a>(args: &'a [&'a str]) -> Result<(&'a [&'a str], u32), String> {
+    match args {
+        [rest @ .., "--limit", n] => n
+            .parse::<u32>()
+            .ok()
+            .filter(|n| (1..=10).contains(n))
+            .map(|n| (rest, n))
+            .ok_or_else(|| KNOWLEDGE_USAGE_LINE.to_string()),
+        _ => Ok((args, 10)),
+    }
+}
+
+fn parse_knowledge(args: &[&str]) -> Result<KnowledgeCommand, String> {
+    let usage = || KNOWLEDGE_USAGE_LINE.to_string();
+    match args {
+        ["search", rest @ ..] => {
+            let (words, limit) = split_limit(rest)?;
+            let query = words.join(" ");
+            if query.trim().is_empty() {
+                return Err(usage());
+            }
+            Ok(KnowledgeCommand::Search { query, limit })
+        }
+        ["recent", rest @ ..] => {
+            let (extra, limit) = split_limit(rest)?;
+            if !extra.is_empty() {
+                return Err(usage());
+            }
+            Ok(KnowledgeCommand::Recent { limit })
+        }
+        ["related", name, rest @ ..] => {
+            let (extra, limit) = split_limit(rest)?;
+            if !extra.is_empty() {
+                return Err(usage());
+            }
+            Ok(KnowledgeCommand::Related {
+                name: (*name).into(),
+                limit,
+            })
+        }
+        ["links", name] => Ok(KnowledgeCommand::Links {
+            name: (*name).into(),
+        }),
+        ["show", name] => Ok(KnowledgeCommand::Show {
+            name: (*name).into(),
+        }),
+        ["status"] => Ok(KnowledgeCommand::Status),
+        ["rebuild"] => Ok(KnowledgeCommand::Rebuild),
+        _ => Err(usage()),
+    }
+}
+
+/// One line per hit: score, name, kind and description. A list with no score shows `-`.
+fn knowledge_hit_line(hit: &knowledge_api::Hit, scored: bool) -> String {
+    let score = if scored {
+        format!("{:.2}", hit.score)
+    } else {
+        "-".into()
+    };
+    let linked = if hit.linked { " (linked)" } else { "" };
+    format!(
+        "{score} {} {}{linked} {}",
+        hit.name, hit.kind, hit.description
+    )
+}
+
+/// The line printed for a refusal from the knowledge service. `command` is the caller's.
+fn knowledge_refusal_line(status: &tonic::Status, command: &KnowledgeCommand) -> String {
+    let name = match command {
+        KnowledgeCommand::Related { name, .. }
+        | KnowledgeCommand::Links { name }
+        | KnowledgeCommand::Show { name } => name.as_str(),
+        _ => "",
+    };
+    match (status.code(), status.message()) {
+        (tonic::Code::Unimplemented, _) => {
+            "the Harold daemon does not serve the knowledge tool".into()
+        }
+        (tonic::Code::NotFound, "unknown_vault_note") => format!("unknown vault note {name}"),
+        (tonic::Code::Unavailable, message) if message.starts_with("search_resting") => {
+            "search is resting: the model didn't load".into()
+        }
+        (tonic::Code::Unavailable, _) => "the knowledge index is unavailable".into(),
+        (tonic::Code::InvalidArgument, message) => message.into(),
+        _ => "the Harold daemon refused the call".into(),
+    }
+}
+
+/// Runs a `harold tool knowledge` command. `Ok` is the text to print; `Err` the one line.
+pub(crate) async fn knowledge_within(
+    address: &str,
+    command: &KnowledgeCommand,
+    wait: Duration,
+) -> Result<String, String> {
+    call_within(KNOWLEDGE_DEADLINE, wait, async {
+        let mut client = KnowledgeServiceClient::connect(format!("http://{address}"))
+            .await
+            .map_err(|_| "the Harold daemon is not reachable".to_string())?;
+        let refused = |status: tonic::Status| knowledge_refusal_line(&status, command);
+        let lines = |hits: &[knowledge_api::Hit], scored: bool| {
+            if hits.is_empty() {
+                return "no vault notes".to_string();
+            }
+            hits.iter()
+                .map(|hit| knowledge_hit_line(hit, scored))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        match command {
+            KnowledgeCommand::Search { query, limit } => {
+                let found = client
+                    .search(knowledge_api::SearchRequest {
+                        query: query.clone(),
+                        limit: *limit,
+                        source: "chief".into(),
+                    })
+                    .await
+                    .map_err(refused)?
+                    .into_inner();
+                Ok(lines(&found.hits, true))
+            }
+            KnowledgeCommand::Recent { limit } => {
+                let found = client
+                    .recent(knowledge_api::RecentRequest { limit: *limit })
+                    .await
+                    .map_err(refused)?
+                    .into_inner();
+                Ok(lines(&found.hits, false))
+            }
+            KnowledgeCommand::Related { name, limit } => {
+                let found = client
+                    .related(knowledge_api::RelatedRequest {
+                        name: name.clone(),
+                        limit: *limit,
+                    })
+                    .await
+                    .map_err(refused)?
+                    .into_inner();
+                Ok(lines(&found.hits, true))
+            }
+            KnowledgeCommand::Links { name } => {
+                let found = client
+                    .suggest_links(knowledge_api::SuggestLinksRequest { name: name.clone() })
+                    .await
+                    .map_err(refused)?
+                    .into_inner();
+                Ok(lines(&found.hits, true))
+            }
+            KnowledgeCommand::Show { name } => {
+                let note = client
+                    .show_vault_note(knowledge_api::ShowVaultNoteRequest { name: name.clone() })
+                    .await
+                    .map_err(refused)?
+                    .into_inner();
+                Ok(format!(
+                    "name: {}\ntitle: {}\nkind: {}\ndescription: {}\nlinks: {}\n\n{}",
+                    note.name,
+                    note.title,
+                    note.kind,
+                    note.description,
+                    note.links.join(", "),
+                    note.text.trim_end()
+                ))
+            }
+            KnowledgeCommand::Status => {
+                let status = client
+                    .status(knowledge_api::StatusRequest {})
+                    .await
+                    .map_err(refused)?
+                    .into_inner();
+                Ok(knowledge_status_text(&status))
+            }
+            KnowledgeCommand::Rebuild => {
+                let built = client
+                    .rebuild(knowledge_api::RebuildRequest {})
+                    .await
+                    .map_err(refused)?
+                    .into_inner();
+                Ok(format!(
+                    "rebuilt {} vault notes, {} passages",
+                    built.vault_notes, built.passages
+                ))
+            }
+        }
+    })
+    .await
+}
+
+fn knowledge_status_text(status: &knowledge_api::StatusResponse) -> String {
+    let last = if status.last_ok_ms == 0 {
+        "no pass has succeeded yet".to_string()
+    } else {
+        let now = time::OffsetDateTime::now_utc().unix_timestamp() * 1000;
+        format!("{} s ago", ((now - status.last_ok_ms) / 1000).max(0))
+    };
+    let mut lines = vec![
+        format!("vault notes: {}", status.vault_notes),
+        format!("passages: {}", status.passages),
+        format!("last good pass: {last}"),
+        format!("pending: {}", status.pending),
+        format!(
+            "runtime: {} {} ({} dimensions)",
+            status.runtime, status.model, status.dimensions
+        ),
+        format!("worker: {}", status.worker),
+    ];
+    if status.vault_unreadable {
+        lines.push("the vault cannot be read: searches answer from the last index".into());
+    } else if !status.last_failure.is_empty() {
+        lines.push(format!("last pass failed: {}", status.last_failure));
+    }
+    lines.join("\n")
 }
 
 const WATCH_USAGE_LINE: &str = "invalid argument: usage is harold tool watch start NAME --skill SKILL --every MINUTES --for MINUTES [--report-to chief|self] [--run-budget USD] [--every-run] | stop NAME | list";
@@ -571,6 +807,7 @@ fn parse_tool(args: &[&str]) -> Result<ToolCommand, String> {
     match args {
         ["backlog", rest @ ..] => parse_backlog(rest).map(ToolCommand::Backlog),
         ["watch", rest @ ..] => parse_watch(rest).map(ToolCommand::Watch),
+        ["knowledge", rest @ ..] => parse_knowledge(rest).map(ToolCommand::Knowledge),
         ["questions", "put"] => Ok(ToolCommand::QuestionsPut),
         ["questions", "list"] => Ok(ToolCommand::QuestionsList),
         ["questions", "show", id] => Ok(ToolCommand::QuestionsShow { id: (*id).into() }),
@@ -983,6 +1220,9 @@ pub(crate) async fn tool(
         )
         .await;
     }
+    if let ToolCommand::Knowledge(knowledge) = command {
+        return knowledge_within(address, knowledge, KNOWLEDGE_DEADLINE).await;
+    }
     tool_within(address, command, stdin, CALL_DEADLINE).await
 }
 
@@ -1188,7 +1428,9 @@ pub(crate) async fn tool_within(
             }
             // `tool` runs a backlog command through `backlog_within`, and a watch
             // command through `watch_within`.
-            ToolCommand::Backlog(_) | ToolCommand::Watch(_) => Err(TOOL_USAGE_LINE.into()),
+            ToolCommand::Backlog(_) | ToolCommand::Watch(_) | ToolCommand::Knowledge(_) => {
+                Err(TOOL_USAGE_LINE.into())
+            }
         }
     })
     .await
@@ -1797,6 +2039,145 @@ mod tests {
 
     fn parse(args: &[&str]) -> Result<Mode, String> {
         Mode::parse(&args.iter().map(|a| a.to_string()).collect::<Vec<_>>())
+    }
+
+    #[test]
+    fn knowledge_commands_parse() {
+        let tool = |rest: &[&str]| {
+            let mut args = vec!["tool", "knowledge"];
+            args.extend_from_slice(rest);
+            parse(&args)
+        };
+        assert_eq!(
+            tool(&["search", "keeping", "the", "index", "safe"]),
+            Ok(Mode::Tool(ToolCommand::Knowledge(
+                KnowledgeCommand::Search {
+                    query: "keeping the index safe".into(),
+                    limit: 10
+                }
+            )))
+        );
+        assert_eq!(
+            tool(&["search", "buckwal", "--limit", "3"]),
+            Ok(Mode::Tool(ToolCommand::Knowledge(
+                KnowledgeCommand::Search {
+                    query: "buckwal".into(),
+                    limit: 3
+                }
+            )))
+        );
+        assert_eq!(
+            tool(&["recent"]),
+            Ok(Mode::Tool(ToolCommand::Knowledge(
+                KnowledgeCommand::Recent { limit: 10 }
+            )))
+        );
+        assert_eq!(
+            tool(&["related", "references/hyperdx", "--limit", "5"]),
+            Ok(Mode::Tool(ToolCommand::Knowledge(
+                KnowledgeCommand::Related {
+                    name: "references/hyperdx".into(),
+                    limit: 5
+                }
+            )))
+        );
+        assert_eq!(
+            tool(&["links", "a-note"]),
+            Ok(Mode::Tool(ToolCommand::Knowledge(
+                KnowledgeCommand::Links {
+                    name: "a-note".into()
+                }
+            )))
+        );
+        assert_eq!(
+            tool(&["show", "a-note"]),
+            Ok(Mode::Tool(ToolCommand::Knowledge(KnowledgeCommand::Show {
+                name: "a-note".into()
+            })))
+        );
+        assert_eq!(
+            tool(&["status"]),
+            Ok(Mode::Tool(ToolCommand::Knowledge(KnowledgeCommand::Status)))
+        );
+        assert_eq!(
+            tool(&["rebuild"]),
+            Ok(Mode::Tool(ToolCommand::Knowledge(
+                KnowledgeCommand::Rebuild
+            )))
+        );
+        for bad in [
+            vec![],
+            vec!["search"],
+            vec!["search", "x", "--limit", "0"],
+            vec!["search", "x", "--limit", "11"],
+            vec!["search", "x", "--limit", "many"],
+            vec!["related"],
+            vec!["links"],
+            vec!["show", "a", "b"],
+            vec!["status", "now"],
+            vec!["forget"],
+        ] {
+            assert_eq!(tool(&bad), Err(KNOWLEDGE_USAGE_LINE.to_string()), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn a_knowledge_hit_prints_score_name_kind_and_description() {
+        let hit = knowledge_api::Hit {
+            name: "a-note".into(),
+            kind: "idea".into(),
+            description: "About things".into(),
+            score: 0.8123,
+            linked: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            knowledge_hit_line(&hit, true),
+            "0.81 a-note idea (linked) About things"
+        );
+        assert_eq!(
+            knowledge_hit_line(&hit, false),
+            "- a-note idea (linked) About things"
+        );
+    }
+
+    #[test]
+    fn knowledge_refusals_are_one_plain_line() {
+        let show = KnowledgeCommand::Show {
+            name: "nope".into(),
+        };
+        let line = |status: tonic::Status| knowledge_refusal_line(&status, &show);
+        assert_eq!(
+            line(tonic::Status::not_found("unknown_vault_note")),
+            "unknown vault note nope"
+        );
+        assert_eq!(
+            line(tonic::Status::unavailable("search_resting: failed_to_load")),
+            "search is resting: the model didn't load"
+        );
+        assert_eq!(
+            line(tonic::Status::unimplemented("")),
+            "the Harold daemon does not serve the knowledge tool"
+        );
+    }
+
+    #[test]
+    fn knowledge_status_names_the_vault_trouble() {
+        let status = knowledge_api::StatusResponse {
+            vault_notes: 77,
+            passages: 108,
+            runtime: "llama.cpp".into(),
+            model: "m.gguf".into(),
+            dimensions: 768,
+            worker: "idle".into(),
+            vault_unreadable: true,
+            ..Default::default()
+        };
+        let text = knowledge_status_text(&status);
+        assert!(text.contains("vault notes: 77"));
+        assert!(text.contains("passages: 108"));
+        assert!(text.contains("no pass has succeeded yet"));
+        assert!(text.contains("searches answer from the last index"));
     }
 
     #[test]

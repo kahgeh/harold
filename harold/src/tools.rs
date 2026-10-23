@@ -27,6 +27,7 @@ use crate::settings::{AgentProviderSettings, Settings, WatchSettings};
 use crate::timed_prompts::{self, AgentPane, InputBox, LineOutcome, Ports, TmuxPorts, Writer};
 
 pub(crate) mod backlog;
+pub(crate) mod knowledge;
 pub(crate) mod questions;
 pub(crate) mod watch;
 
@@ -144,6 +145,8 @@ pub(crate) struct Extras {
     pub(crate) watch_settings: WatchSettings,
     pub(crate) model_environment: Vec<(std::ffi::OsString, std::ffi::OsString)>,
     pub(crate) cli_path: String,
+    /// The knowledge tool's launch; `None` unless `[knowledge] vault` is set.
+    pub(crate) knowledge: Option<knowledge::Launch>,
 }
 
 /// What a started tool gives back: the gRPC routes the host adds to its
@@ -218,6 +221,10 @@ pub(crate) async fn start(
         watch_settings: cfg.watch.clone(),
         model_environment: cfg.activity_summary.environment.0.clone(),
         cli_path: cfg.activity_summary.cli_path.clone(),
+        knowledge: cfg.knowledge.enabled().then(|| knowledge::Launch {
+            settings: cfg.knowledge.clone(),
+            machine_name: cfg.machine_name.clone(),
+        }),
     };
     let pane_folder = SnapshotPaneFolder { ports };
     start_with(
@@ -246,6 +253,8 @@ async fn start_with(
         routes: Routes::default(),
         tasks: Vec::new(),
     };
+    let knowledge_launch = extras.knowledge.clone();
+    let knowledge_shutdown = shutdown.clone();
     let [
         (questions_name, questions_ctx),
         (backlog_name, backlog_ctx),
@@ -266,6 +275,18 @@ async fn start_with(
     );
     start_tool(backlog_name, backlog::start(backlog_ctx).await, &mut tools);
     start_tool(watch_name, watch::start(watch_ctx).await, &mut tools);
+    if let Some(launch) = knowledge_launch {
+        start_tool(
+            knowledge::NAME,
+            knowledge::start(
+                launch,
+                data_folder(store_path, knowledge::NAME),
+                knowledge_shutdown,
+            )
+            .await,
+            &mut tools,
+        );
+    }
     tools
 }
 

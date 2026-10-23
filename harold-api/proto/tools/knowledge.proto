@@ -1,0 +1,131 @@
+// The knowledge tool: Harold's index of the vault by meaning.
+//
+// A vault note is one Markdown file in the vault; its name is its path without ".md",
+// such as "a-knowledge-index-on-buckwal" or "references/hyperdx".
+//
+// Callers (the chief's CLI, the web app and the dash):
+//   Search         the closest vault notes to some words, best passage per note,
+//                  closest first. `source` is "chief", "app" or "dash" and goes only
+//                  to the search span.
+//   Recent         the vault notes changed most recently, newest first.
+//   Related        the vault notes closest to a vault note's own passages, the note
+//                  itself left out, each marked linked or not linked.
+//   SuggestLinks   related notes scoring 0.60 or more that the note does not link to
+//                  yet, at most 5.
+//   ShowVaultNote  a vault note as stored.
+//   Status         what the index holds and how it is doing.
+//   Rebuild        clears the index and builds it again from the vault.
+//
+// Refusals:
+//   InvalidArgument      message "invalid <field>".
+//   NotFound             message "unknown_vault_note".
+//   Unavailable          message "search_resting" when the embedding worker could not
+//                        load, or "store_failed" when the database could not be read;
+//                        the details carry a fixed reason word, never error text.
+//
+// The server trusts local callers: there is no token.
+syntax = "proto3";
+
+package harold.tools.knowledge.v1;
+
+service KnowledgeService {
+  rpc Search(SearchRequest) returns (SearchResponse);
+  rpc Recent(RecentRequest) returns (RecentResponse);
+  rpc Related(RelatedRequest) returns (RelatedResponse);
+  rpc SuggestLinks(SuggestLinksRequest) returns (SuggestLinksResponse);
+  rpc ShowVaultNote(ShowVaultNoteRequest) returns (VaultNote);
+  rpc Status(StatusRequest) returns (StatusResponse);
+  rpc Rebuild(RebuildRequest) returns (RebuildResponse);
+}
+
+// One vault note in a list.
+message Hit {
+  string name = 1;
+  string title = 2;
+  string kind = 3;
+  string description = 4;
+  // The matching passage cut to about 200 characters; empty for Recent.
+  string passage = 5;
+  // Closeness plus the word bonus; 0 for Recent.
+  double score = 6;
+  // Related and SuggestLinks only: whether the asked vault note links to this one.
+  bool linked = 7;
+  // Unix milliseconds the vault note last changed in the index.
+  int64 changed_at_ms = 8;
+}
+
+message SearchRequest {
+  string query = 1;
+  // 0 means 10; at most 10.
+  uint32 limit = 2;
+  string source = 3;
+}
+message SearchResponse {
+  repeated Hit hits = 1;
+}
+
+message RecentRequest {
+  uint32 limit = 1;
+}
+message RecentResponse {
+  repeated Hit hits = 1;
+}
+
+message RelatedRequest {
+  string name = 1;
+  uint32 limit = 2;
+}
+message RelatedResponse {
+  repeated Hit hits = 1;
+}
+
+message SuggestLinksRequest {
+  string name = 1;
+}
+message SuggestLinksResponse {
+  repeated Hit hits = 1;
+}
+
+message ShowVaultNoteRequest {
+  string name = 1;
+}
+message VaultNote {
+  string name = 1;
+  string title = 2;
+  string kind = 3;
+  string description = 4;
+  string created = 5;
+  // The [[links]] the note holds, as vault note names as written.
+  repeated string links = 6;
+  // The note's text as stored, front matter removed.
+  string text = 7;
+  // The file's path under the vault.
+  string path = 8;
+  int64 changed_at_ms = 9;
+}
+
+message StatusRequest {}
+message StatusResponse {
+  uint32 vault_notes = 1;
+  uint32 passages = 2;
+  // Unix milliseconds of the last successful pass; 0 when none has succeeded.
+  int64 last_ok_ms = 3;
+  // Changed files not yet indexed.
+  uint32 pending = 4;
+  string runtime = 5;
+  string model = 6;
+  uint32 dimensions = 7;
+  // "idle", "loading", "ready" or "unavailable".
+  string worker = 8;
+  // When the last pass failed: "vault_unreadable", "worker_failed", "store_failed"
+  // or "bucket_unreachable"; empty otherwise.
+  string last_failure = 9;
+  // True when searches answer from the last index because the vault cannot be read.
+  bool vault_unreadable = 10;
+}
+
+message RebuildRequest {}
+message RebuildResponse {
+  uint32 vault_notes = 1;
+  uint32 passages = 2;
+}

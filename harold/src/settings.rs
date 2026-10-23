@@ -264,6 +264,128 @@ impl WatchSettings {
     }
 }
 
+/// The `[knowledge]` table: the knowledge tool, off unless `vault` is set. The bucket's two
+/// secrets are never values here: `credentials_file` and `encryption_key_file` name files.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub(crate) struct KnowledgeSettings {
+    /// The organisation's folder of Markdown notes. Harold reads it and never writes it.
+    pub vault: Option<String>,
+    /// Vault note file names, relative to the vault, that are not indexed.
+    pub exclude: Vec<String>,
+    /// The Python of the embedding runtime.
+    pub command: Option<String>,
+    /// Arguments before the embedding worker's script.
+    pub args: Vec<String>,
+    /// The path of the embedding model's GGUF file.
+    pub model: Option<String>,
+    /// When set, the model file's SHA-256 is checked before the worker loads it.
+    pub model_sha256: Option<String>,
+    pub bucket: Option<KnowledgeBucketSettings>,
+}
+
+/// Where buckwal keeps the knowledge index's copy.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub(crate) struct KnowledgeBucketSettings {
+    pub endpoint: String,
+    pub bucket: String,
+    /// Every key of the index goes under it. Absent: `harold-knowledge/<machine name>`.
+    pub prefix: Option<String>,
+    /// A file with `access_key=...` and `secret_key=...` lines, mode 0600.
+    pub credentials_file: String,
+    /// A file with the 64 hex digits of the database's encryption key, mode 0600.
+    pub encryption_key_file: String,
+}
+
+impl KnowledgeSettings {
+    pub(crate) fn enabled(&self) -> bool {
+        self.vault.is_some()
+    }
+
+    /// The bucket prefix: the one set, else `harold-knowledge/<machine name>` with each
+    /// character buckwal does not accept in a prefix turned into `-`.
+    pub(crate) fn prefix(&self, machine_name: &str) -> String {
+        if let Some(prefix) = self.bucket.as_ref().and_then(|b| b.prefix.clone()) {
+            return prefix;
+        }
+        let machine: String = machine_name
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+                    c
+                } else {
+                    '-'
+                }
+            })
+            .collect();
+        format!("harold-knowledge/{machine}")
+    }
+
+    pub(crate) fn validate(&self) -> Vec<String> {
+        let mut errors = Vec::new();
+        let Some(vault) = &self.vault else {
+            return errors;
+        };
+        let absolute = |value: &str| value.starts_with('/') && value.len() <= 4_096;
+        if !absolute(vault) {
+            errors.push("knowledge.vault must be an absolute path starting with /".into());
+        }
+        if self.exclude.iter().any(|name| {
+            name.is_empty() || name.starts_with('/') || name.split('/').any(|part| part == "..")
+        }) {
+            errors
+                .push("knowledge.exclude entries must be file names relative to the vault".into());
+        }
+        match &self.command {
+            Some(command) if !command.is_empty() => {}
+            _ => errors.push("knowledge.command is required when knowledge.vault is set".into()),
+        }
+        match &self.model {
+            Some(model) if absolute(model) => {}
+            _ => errors.push("knowledge.model must be the absolute path of the GGUF file".into()),
+        }
+        if self
+            .model_sha256
+            .as_ref()
+            .is_some_and(|hash| hash.len() != 64 || !hash.bytes().all(|b| b.is_ascii_hexdigit()))
+        {
+            errors.push("knowledge.model_sha256 must be 64 hex digits".into());
+        }
+        let Some(bucket) = &self.bucket else {
+            errors.push("[knowledge.bucket] is required when knowledge.vault is set".into());
+            return errors;
+        };
+        if !(bucket.endpoint.starts_with("http://") || bucket.endpoint.starts_with("https://")) {
+            errors.push("knowledge.bucket.endpoint must start with http:// or https://".into());
+        }
+        if bucket.bucket.is_empty() {
+            errors.push("knowledge.bucket.bucket is required".into());
+        }
+        if !absolute(&bucket.credentials_file) {
+            errors.push("knowledge.bucket.credentials_file must be an absolute path".into());
+        }
+        if !absolute(&bucket.encryption_key_file) {
+            errors.push("knowledge.bucket.encryption_key_file must be an absolute path".into());
+        }
+        if bucket.prefix.as_ref().is_some_and(|prefix| {
+            prefix.is_empty()
+                || prefix
+                    .split('/')
+                    .any(|part| part.is_empty() || part == "." || part == "..")
+                || !prefix
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '/'))
+        }) {
+            errors.push(
+                "knowledge.bucket.prefix may hold only A-Z, a-z, 0-9, '.', '_', '-' and '/', in non-empty parts"
+                    .into(),
+            );
+        }
+        errors
+    }
+}
+
 /// The `[restart_reminder]` table: when Harold reminds the chief to hand off and restart.
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(default)]
@@ -1146,6 +1268,8 @@ pub struct Settings {
     #[serde(default)]
     pub(crate) watch: WatchSettings,
     #[serde(default)]
+    pub(crate) knowledge: KnowledgeSettings,
+    #[serde(default)]
     pub(crate) call_answerer: CallAnswererSettings,
     #[serde(default)]
     pub(crate) restart_reminder: RestartReminderSettings,
@@ -1179,6 +1303,7 @@ impl Settings {
         errors.extend(self.agents.validate(&self.agent_monitor));
         errors.extend(self.activity_summary.validate());
         errors.extend(self.watch.validate());
+        errors.extend(self.knowledge.validate());
         errors.extend(self.call_answerer.validate());
         errors.extend(self.restart_reminder.validate());
         errors.extend(away_messages_only_from_error(
@@ -1526,6 +1651,82 @@ mod tests {
         for host in ["0.0.0.0", "::", "100.64.0.1", "invalid host"] {
             assert!(!super::is_loopback_host(host), "{host}");
         }
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct KnowledgeFixture {
+        #[serde(default)]
+        knowledge: super::KnowledgeSettings,
+    }
+
+    fn parse_knowledge(source: &str) -> super::KnowledgeSettings {
+        Config::builder()
+            .add_source(File::from_str(source, FileFormat::Toml))
+            .build()
+            .and_then(Config::try_deserialize::<KnowledgeFixture>)
+            .expect("knowledge fixture should deserialize")
+            .knowledge
+    }
+
+    const KNOWLEDGE_ON: &str = r#"
+[knowledge]
+vault = "/Users/x/org/vault/knowledge"
+exclude = ["MEMORY.md", "log.md"]
+command = "/venv/bin/python"
+model = "/models/embeddinggemma-300M-Q8_0.gguf"
+[knowledge.bucket]
+endpoint = "http://127.0.0.1:9000"
+bucket = "harold-knowledge"
+credentials_file = "/Users/x/.config/harold/knowledge-bucket"
+encryption_key_file = "/Users/x/.config/harold/knowledge-key"
+"#;
+
+    #[test]
+    fn knowledge_ships_off_with_no_exclusions() {
+        let shipped = parse_knowledge(include_str!("../config/default.toml"));
+        assert!(!shipped.enabled());
+        assert!(shipped.exclude.is_empty());
+        assert!(shipped.validate().is_empty());
+    }
+
+    #[test]
+    fn a_complete_knowledge_table_is_valid_and_keeps_no_key_as_a_value() {
+        let settings = parse_knowledge(KNOWLEDGE_ON);
+        assert!(settings.enabled());
+        assert_eq!(settings.validate(), Vec::<String>::new());
+        assert_eq!(settings.exclude, ["MEMORY.md", "log.md"]);
+        let bucket = settings.bucket.unwrap();
+        assert!(bucket.credentials_file.ends_with("knowledge-bucket"));
+    }
+
+    #[test]
+    fn the_prefix_is_the_machine_name_unless_set() {
+        let mut settings = parse_knowledge(KNOWLEDGE_ON);
+        assert_eq!(settings.prefix("PasM4MBP"), "harold-knowledge/PasM4MBP");
+        assert_eq!(
+            settings.prefix("Pas M4 (work)"),
+            "harold-knowledge/Pas-M4--work-"
+        );
+        settings.bucket.as_mut().unwrap().prefix = Some("custom/one".into());
+        assert_eq!(settings.prefix("PasM4MBP"), "custom/one");
+    }
+
+    #[test]
+    fn knowledge_names_what_is_missing_or_wrong() {
+        let wrong =
+            |from: &str, to: &str| parse_knowledge(&KNOWLEDGE_ON.replace(from, to)).validate();
+        assert!(wrong("vault = \"/Users", "vault = \"Users")[0].contains("knowledge.vault"));
+        assert!(wrong("command = \"/venv/bin/python\"\n", "")[0].contains("knowledge.command"));
+        assert!(wrong("model = \"/models", "model = \"models")[0].contains("knowledge.model"));
+        assert!(wrong("http://127", "ftp://127")[0].contains("knowledge.bucket.endpoint"));
+        assert!(
+            wrong("exclude = [\"MEMORY.md\"", "exclude = [\"../x.md\"")[0]
+                .contains("knowledge.exclude")
+        );
+        let no_bucket = KNOWLEDGE_ON.split("[knowledge.bucket]").next().unwrap();
+        assert!(parse_knowledge(no_bucket).validate()[0].contains("[knowledge.bucket]"));
+        let bad_prefix = format!("{KNOWLEDGE_ON}prefix = \"a b\"\n");
+        assert!(parse_knowledge(&bad_prefix).validate()[0].contains("knowledge.bucket.prefix"));
     }
 
     #[derive(Debug, Deserialize)]

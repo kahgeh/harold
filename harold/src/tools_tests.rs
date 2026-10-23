@@ -71,6 +71,7 @@ pub(crate) fn no_extras() -> Extras {
         agents: Arc::new(NoAgents),
         pods: Arc::new(NoPods),
         watch_settings: WatchSettings::default(),
+        knowledge: None,
         model_environment: Vec::new(),
         cli_path: "claude".into(),
     }
