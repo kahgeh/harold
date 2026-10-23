@@ -42,6 +42,10 @@ fn the_call_script_keeps_its_contract() {
         "step,",
         "error_name: name",
         "processorOptions: { report: true }",
+        // A call that ended for a missing speech model shows why, until the next Call or End.
+        r#"getAttribute("data-harold-notice")"#,
+        "showNotice(why)",
+        r#""data-harold-notice","#,
     ] {
         assert!(script.contains(wanted), "call.js lacks {wanted}");
     }

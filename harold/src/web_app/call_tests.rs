@@ -22,8 +22,8 @@ use crate::store::{AppSender, EventVersion, HaroldStore, append_app_push_subscri
 use crate::telemetry::test_support;
 use crate::voice_input::tests::{FakePorts, loud, quiet, text, typed};
 use crate::voice_input::{
-    AudioRefused, CallPorts, CallState, LineTaker, PIECE_LIMIT_BYTES, PhoneCalls, PhoneSound,
-    PhoneSpeech, PhoneView, Said, Speaker,
+    AudioRefused, CallPorts, CallState, LineTaker, Missing, PIECE_LIMIT_BYTES, PhoneCalls,
+    PhoneSound, PhoneSpeech, PhoneView, Said, Speaker,
 };
 use crate::web_app::fake_push::FakePushService;
 use crate::web_app::origin::loopback_hosts;
@@ -1115,6 +1115,62 @@ fn sound(id: &str, said: Said) -> Option<PhoneSound> {
 
 fn render(view: &PhoneView) -> String {
     CallSection::from(view).render().unwrap()
+}
+
+#[test]
+fn the_call_section_shows_connecting_with_its_hint_and_a_downloads_progress() {
+    let end = r#"<button type="button" id="call-end" class="call-end">End</button>"#;
+    let html = render(&view(CallState::Connecting));
+    assert!(html.contains(r#"data-harold-state="connecting""#), "{html}");
+    assert!(
+        html.contains(r#"<h2 class="call-title">Connecting…</h2>"#),
+        "{html}"
+    );
+    assert!(
+        html.contains(r#"<p class="call-hint">Wait for the tone to stop</p>"#),
+        "{html}"
+    );
+    assert!(!html.contains("Say &quot;bye&quot;"), "{html}");
+    assert!(!html.contains("Talk now"), "{html}");
+    assert!(html.contains(end), "{html}");
+
+    let mut downloading = view(CallState::Connecting);
+    downloading.model_percent = Some(45);
+    let html = render(&downloading);
+    assert!(
+        html.contains(r#"<p class="call-hint">Getting the speech model: 45%</p>"#),
+        "{html}"
+    );
+    assert!(!html.contains("Wait for the tone to stop"), "{html}");
+    // The tone plays as a sound with no words, as the tick does.
+    let mut tone = view(CallState::Connecting);
+    tone.sound = sound("c1", Said::Tick);
+    let html = render(&tone);
+    assert!(html.contains(r#"data-harold-sound="c1""#), "{html}");
+    assert!(!html.contains("call-line"), "{html}");
+}
+
+#[test]
+fn a_call_that_ended_for_a_missing_model_carries_the_notice_with_the_command() {
+    let mut ended = view(CallState::Off);
+    ended.ended = Some("voice_failed");
+    ended.missing = Some(Missing {
+        model: "mlx-community/whisper-large-v3-turbo".into(),
+        reason: "network",
+        command: Some("`/venv/bin/python -c \"snapshot_download('m', token=False)\"`".into()),
+    });
+    let html = render(&ended);
+    assert!(html.contains(r#"data-harold-state="off""#), "{html}");
+    assert!(
+        html.contains("data-harold-notice=\"The speech model mlx-community/whisper-large-v3-turbo didn&#39;t download (network). To get it, run on the Mac: `/venv/bin/python -c &#34;snapshot_download(&#39;m&#39;, token=False)&#34;`, then call again.\""),
+        "{html}"
+    );
+
+    // An ended call that was not for a model, and a live one, carry no notice.
+    let mut other = view(CallState::Off);
+    other.ended = Some("stopped");
+    assert!(render(&other).contains(r#"data-harold-notice="""#));
+    assert!(render(&view(CallState::Listening)).contains(r#"data-harold-notice="""#));
 }
 
 #[test]

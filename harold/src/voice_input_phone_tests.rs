@@ -1,6 +1,7 @@
 //! The phone's side of a call, on paused time: pieces posted into the open call's source,
 //! sounds offered until the phone reports them played, and lines for the phone's own voice.
 
+use super::models::Status as ModelsStatus;
 use super::phone::{PhonePorts, PhoneSink, STATUS_EVERY};
 use super::phrases::{
     BYE, CHIEF_BUSY, NO_ANSWER_IN_THREAD, NO_CHIEF, NOTHING_HEARD, VOICE_STOPPED, phrase_file,
@@ -8,9 +9,10 @@ use super::phrases::{
 use super::tests::{FakePorts, Heard, UPDATE, loud, past_the_tail, quiet, settle, text, typed};
 use super::wav::wav_bytes;
 use super::{
-    ANSWER_KEEP, AudioRefused, AudioSink, AudioSource, CallPorts, CallState, CallStatus,
+    ANSWER_KEEP, AudioRefused, AudioSink, AudioSource, CallPorts, CallState, CallStatus, Missing,
     PHONE_SILENT_LIMIT, PIECE_LIMIT_BYTES, PIECES_QUEUED, PLAY_GRACE, PhoneCalls, PhoneLine,
-    PhoneSound, PhoneSpeech, PhoneView, SPEECH_BASE, SPEECH_PER_CHAR, Said, Speaker, TurnResult,
+    PhoneSound, PhoneSpeech, PhoneView, SPEECH_BASE, SPEECH_PER_CHAR, Said, Speaker, SpeechModels,
+    TurnResult,
 };
 use crate::agent::domain::EffectiveAgentState;
 use crate::outbound::fake::CapturedLogs;
@@ -1032,6 +1034,55 @@ async fn the_view_follows_the_call() {
     assert_eq!(phone.view().state, CallState::Listening);
     assert_eq!(phone.view().ended, None);
     assert!(phone.calls.is_following());
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn the_view_shows_connecting_a_downloads_progress_and_the_model_a_call_ended_for() {
+    let phone = Phone::new();
+    let models = SpeechModels::stubbed(ModelsStatus::Checking);
+    phone.base.state().models = Some(Arc::clone(&models));
+    phone.auto_play(Duration::from_millis(600));
+
+    phone.start().await;
+    after_a_poll().await;
+    assert_eq!(phone.view().state, CallState::Connecting);
+    assert_eq!(phone.view().model_percent, None);
+    // The connecting tone is a sound the phone fetches and plays, with no words.
+    assert_eq!(phone.said(), [Said::Tick]);
+
+    models.set_status(ModelsStatus::Downloading {
+        model: "mlx-community/whisper-large-v3-turbo".into(),
+        bytes: 450,
+        total: 1000,
+    });
+    after_a_poll().await;
+    assert_eq!(phone.view().state, CallState::Connecting);
+    assert_eq!(phone.view().model_percent, Some(45));
+
+    let missing = Missing {
+        model: "mlx-community/whisper-large-v3-turbo".into(),
+        reason: "network",
+        command: Some("`python -c ...`".into()),
+    };
+    models.set_status(ModelsStatus::Failed(missing.clone()));
+    settle().await;
+    // The phone says its line, and then the call is over.
+    sleep(Duration::from_secs(5)).await;
+    settle().await;
+    after_a_poll().await;
+    let view = phone.view();
+    assert_eq!(view.state, CallState::Off);
+    assert_eq!(view.ended, Some("voice_failed"));
+    assert_eq!(view.missing, Some(missing));
+    assert_eq!(view.model_percent, None);
+    // The phone says the line in its own voice.
+    assert_eq!(phone.spoken(), ["The speech model isn't on the Mac yet."]);
+
+    // The next call no longer shows the model the last one ended for.
+    models.set_status(ModelsStatus::Ready);
+    phone.start().await;
+    assert_eq!(phone.view().missing, None);
+    assert_eq!(phone.view().state, CallState::Listening);
 }
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
