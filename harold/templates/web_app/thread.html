@@ -48,7 +48,7 @@
 <button type="button" id="photo-remove" class="icon-button quiet-button" aria-label="Remove the photo"><svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
 </div>
 <p id="listening-note" class="listening-note" role="status" hidden><span class="listen-dot"></span><span id="listening-text">Listening</span></p>
-<form id="reply" class="bar bottom" data-indicator:sending data-on:submit="@post('/replies')">
+<form id="reply" class="bar bottom" data-indicator:sending data-on:submit="@post('/replies', {filterSignals: {include: /^(reply|photo)$/}})">
 <input type="text" data-bind:reply maxlength="1000" placeholder="Reply to the chief" aria-label="Reply to the chief" autocomplete="off">
 <input type="hidden" id="photo-id" data-bind:photo>
 <input type="file" id="photo-file" accept="image/*" hidden>

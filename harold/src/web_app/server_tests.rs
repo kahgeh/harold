@@ -854,7 +854,7 @@ async fn the_thread_page_shows_the_newest_50_and_an_older_line_naming_the_oldest
     assert!(!body.contains(r#"id="m-r070""#));
     assert!(
         body.contains(
-            r#"<p id="older" class="older" data-on-intersect="@get('/thread/older')">Loading earlier messages…</p>"#
+            r#"<p id="older" class="older" data-on-intersect="@get('/thread/older', {filterSignals: {include: /^oldest$/}})">Loading earlier messages…</p>"#
         ),
         "{body}"
     );
@@ -904,7 +904,8 @@ async fn the_thread_page_logs_rows_bytes_and_ms_and_no_message_text() {
 }
 
 /// The same text on every page and patch, so Datastar never sets up a new watcher.
-const OLDER_ATTRIBUTE: &str = r#"data-on-intersect="@get('/thread/older')""#;
+const OLDER_ATTRIBUTE: &str =
+    r#"data-on-intersect="@get('/thread/older', {filterSignals: {include: /^oldest$/}})""#;
 
 /// `GET /thread/older` with the page's signals, as Datastar sends them.
 async fn get_older(server: &TestServer, signals: Option<&str>) -> reqwest::Response {
@@ -1115,7 +1116,7 @@ async fn updates_redraws_from_the_oldest_signal_with_the_older_line_and_data_ini
     assert!(first.contains(r#"id="m-r120""#));
     assert!(first.contains(OLDER_ATTRIBUTE), "{first}");
     assert!(
-        first.contains(r#"data-init="@get('/updates', {retry: 'error', retryMaxCount: 1000})""#),
+        first.contains(r#"data-init="@get('/updates', {retry: 'error', retryMaxCount: 1000, filterSignals: {include: /^oldest$/}})""#),
         "{first}"
     );
 
@@ -1124,13 +1125,12 @@ async fn updates_redraws_from_the_oldest_signal_with_the_older_line_and_data_ini
     assert_eq!(row_count(&first), 120, "every row");
     assert!(!first.contains(r#"id="older""#), "{first}");
     assert!(
-        first.contains(r#"data-init="@get('/updates', {retry: 'error', retryMaxCount: 1000})""#),
+        first.contains(r#"data-init="@get('/updates', {retry: 'error', retryMaxCount: 1000, filterSignals: {include: /^oldest$/}})""#),
         "{first}"
     );
 }
 
-const REOPEN_ATTRIBUTE: &str =
-    r#"data-on:harold-reopen="@get('/updates', {retry: 'error', retryMaxCount: 1000})""#;
+const REOPEN_ATTRIBUTE: &str = r#"data-on:harold-reopen="@get('/updates', {retry: 'error', retryMaxCount: 1000, filterSignals: {include: /^oldest$/}})""#;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn the_thread_page_and_the_first_updates_patch_reopen_updates_when_the_stream_ends() {
@@ -1171,7 +1171,7 @@ async fn updates_draws_the_newest_50_for_a_missing_unknown_pruned_or_malformed_s
         assert!(first.contains(OLDER_ATTRIBUTE), "{signals:?}");
         assert!(
             first
-                .contains(r#"data-init="@get('/updates', {retry: 'error', retryMaxCount: 1000})""#)
+                .contains(r#"data-init="@get('/updates', {retry: 'error', retryMaxCount: 1000, filterSignals: {include: /^oldest$/}})""#)
         );
     }
 }

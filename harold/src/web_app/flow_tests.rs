@@ -373,7 +373,7 @@ async fn a_new_stream_starts_with_the_whole_thread() {
     );
     assert!(first.contains(r#"id="messages""#), "{first}");
     assert!(
-        first.contains(r#"data-init="@get('/updates', {retry: 'error', retryMaxCount: 1000})""#),
+        first.contains(r#"data-init="@get('/updates', {retry: 'error', retryMaxCount: 1000, filterSignals: {include: /^oldest$/}})""#),
         "{first}"
     );
     assert!(
@@ -457,7 +457,7 @@ async fn markup_in_a_reply_is_escaped_in_the_page_and_the_stream() {
     // The page's own Datastar expressions are fixed template text.
     assert!(
         page.contains(
-            r#"<form id="reply" class="bar bottom" data-indicator:sending data-on:submit="@post('/replies')">"#
+            r#"<form id="reply" class="bar bottom" data-indicator:sending data-on:submit="@post('/replies', {filterSignals: {include: /^(reply|photo)$/}})">"#
         ),
         "{page}"
     );
@@ -468,7 +468,7 @@ async fn markup_in_a_reply_is_escaped_in_the_page_and_the_stream() {
         "{page}"
     );
     assert!(
-        page.contains(r#"<section id="messages" data-init="@get('/updates', {retry: 'error', retryMaxCount: 1000})" "#),
+        page.contains(r#"<section id="messages" data-init="@get('/updates', {retry: 'error', retryMaxCount: 1000, filterSignals: {include: /^oldest$/}})" "#),
         "{page}"
     );
 
@@ -828,7 +828,7 @@ async fn the_send_button_is_disabled_while_a_reply_is_posting() {
 
     assert!(
         page.contains(
-            r#"<form id="reply" class="bar bottom" data-indicator:sending data-on:submit="@post('/replies')">"#
+            r#"<form id="reply" class="bar bottom" data-indicator:sending data-on:submit="@post('/replies', {filterSignals: {include: /^(reply|photo)$/}})">"#
         ),
         "{page}"
     );

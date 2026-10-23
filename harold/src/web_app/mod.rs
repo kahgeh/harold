@@ -84,6 +84,10 @@ pub(crate) mod fake_push;
 #[path = "todos_tests.rs"]
 mod todos_tests;
 
+#[cfg(test)]
+#[path = "template_requests_tests.rs"]
+mod template_requests_tests;
+
 /// What the app is called and looks like on the phone, read once at start.
 #[derive(Debug, Clone)]
 pub(crate) struct WebAppIdentity {

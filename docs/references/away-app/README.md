@@ -63,6 +63,8 @@ The login header comes from the device, not from the page, so every page open in
 - **Posts from another page:** a reply or a push sign-up must come from the app's own page. The browser must say the request is from the same site (`Sec-Fetch-Site: same-origin`, or else an `Origin` that matches the Host), and the request must carry a header another site's page cannot send without asking first: `Datastar-Request: true`, which the page's reply form sends, or `Content-Type: application/json`, which the push sign-up sends. Harold never grants that asking, so another site's page cannot post at all.
 - **Another Host:** a page can point its own name at `127.0.0.1` and reach Harold's listener. Harold refuses every request whose Host is not the tailnet name or the loopback address, so such a page gets nothing.
 
+**What each request sends.** Datastar's `@get` puts every signal on the page in the URL, and `@post` puts them in the body, unless the call names the ones to send. Each call in the app's templates sets `filterSignals` to the signals its handler reads: `/updates` and `/thread/older` send `oldest`, and `POST /replies` sends `reply` and `photo`. The todo posts send their own form fields. A reply still being typed therefore leaves the phone only when you tap **Send**, and never lands in a URL that a proxy, a log or the browser might record. A test fails if a template adds a request without the filter.
+
 These checks protect against web pages and other devices, not against software on the Mac. Any program on the Mac can still reach `127.0.0.1:4330` and send a correct Host, Origin and login. The Mac's own processes are trusted, as they already are with tmux, where any of them can type into the chief's pane.
 
 ### The `[web_app]` section
