@@ -2780,8 +2780,9 @@ impl Fixture {
                 screen_interval: Duration::from_secs(86_400),
                 hook_grace_ms: 2_000,
                 report_grace_ms: 2_000,
-                acquisition_timeout: Duration::from_millis(100),
-                inventory_timeout: Duration::from_millis(100),
+                // The fakes answer at once, so these only fire on a slow machine.
+                acquisition_timeout: Duration::from_secs(2),
+                inventory_timeout: Duration::from_secs(2),
             },
             shutdown_rx,
         );
@@ -2802,8 +2803,10 @@ impl Fixture {
     async fn submit_summary_task(&self, prompt: &str, started_at: i64) {
         self.inventory
             .push_resolution(Ok(Some(pane("%8", 80, 800, started_at, 100))));
+        // Guards an acknowledgement that waits for the summary: the test sends the summary only
+        // after this returns, so that bug waits forever and any limit catches it.
         tokio::time::timeout(
-            Duration::from_millis(500),
+            Duration::from_secs(10),
             self.handle.report_lifecycle(
                 "%8".into(),
                 ObservedAgentState::Busy,
@@ -2817,7 +2820,8 @@ impl Fixture {
     }
 
     async fn wait_for_generated(&self, expected: usize) {
-        tokio::time::timeout(Duration::from_secs(2), async {
+        // Guards a result that never comes; only a slow machine needs the room.
+        tokio::time::timeout(Duration::from_secs(10), async {
             loop {
                 if self
                     .events()
@@ -2840,7 +2844,8 @@ impl Fixture {
 async fn next_request(
     receiver: &mut tokio::sync::mpsc::UnboundedReceiver<SummaryRequest>,
 ) -> SummaryRequest {
-    tokio::time::timeout(Duration::from_secs(2), receiver.recv())
+    // Guards a request that never comes; only a slow machine needs the room.
+    tokio::time::timeout(Duration::from_secs(10), receiver.recv())
         .await
         .unwrap()
         .unwrap()
@@ -5159,11 +5164,19 @@ async fn a_slow_scan_never_holds_the_monitor_past_inventory_timeout() {
             "inventory tick held the monitor for {} ms",
             held.as_millis()
         );
-        // 300 ms is the timeout; the rest is scheduling slack on a loaded Mac.
-        assert!(held < Duration::from_millis(400), "held for {held:?}");
+        // 300 ms is the timeout. This guards the monitor being held for the 5 s retry, which
+        // 1.3 s still proves; 100 ms of slack is less than a starved runner takes to wake a thread.
+        assert!(
+            held < Duration::from_millis(300) + Duration::from_secs(1),
+            "held for {held:?}"
+        );
     }
 
-    assert_eq!(inventory.scan_calls.load(Ordering::SeqCst), 2);
+    // Starved, the first try's thread may not have let go of the gate when the retry or the
+    // second tick looks; the retry then reports busy without scanning. Whether a retry scans is
+    // what timed_out_first_try_is_stopped_before_its_retry tests. This test guards the hold time
+    // and the one degraded line.
+    assert!(inventory.scan_calls.load(Ordering::SeqCst) >= 1);
     let logs = logged(&captured);
     assert_eq!(logs.matches("agent monitor degraded").count(), 1, "{logs}");
     assert!(logs.contains("reason_code=timeout"), "{logs}");

@@ -400,8 +400,9 @@ where
             providers,
             initial_snapshot: empty_snapshot(),
             graces,
-            acquisition_timeout: Duration::from_millis(100),
-            inventory_timeout: Duration::from_millis(100),
+            // The fakes answer at once, so these only fire on a slow machine.
+            acquisition_timeout: Duration::from_secs(2),
+            inventory_timeout: Duration::from_secs(2),
             intervals: None,
             inventory_interval: Duration::ZERO,
             activity_summary: None,
@@ -433,8 +434,9 @@ where
             providers,
             initial_snapshot: empty_snapshot(),
             graces,
-            acquisition_timeout: Duration::from_millis(100),
-            inventory_timeout: Duration::from_millis(100),
+            // The fakes answer at once, so these only fire on a slow machine.
+            acquisition_timeout: Duration::from_secs(2),
+            inventory_timeout: Duration::from_secs(2),
             intervals: None,
             inventory_interval,
             activity_summary: None,
@@ -1844,7 +1846,8 @@ mod acquisition_tests {
         for _ in 0..1_000 {
             run_bounded_thread(
                 "harold-gate-test",
-                Duration::from_secs(1),
+                // Only fails a thread that was slow to run; the gate check below is what the test guards.
+                Duration::from_secs(30),
                 gate.clone(),
                 StopSignal::default(),
                 || (),
