@@ -71,6 +71,24 @@
             "where": "",
             "whereLanguage": "sql",
             "alias": "wrong"
+          },
+          {
+            "aggFn": "sum",
+            "valueExpression": "Value",
+            "metricName": "harold.phone_requests",
+            "metricType": "sum",
+            "where": "Attributes['outcome'] = 'typed' AND Attributes['channel'] != 'web_app'",
+            "whereLanguage": "sql",
+            "alias": "typed, judged channels"
+          },
+          {
+            "aggFn": "sum",
+            "valueExpression": "Value",
+            "metricName": "harold.phone_requests",
+            "metricType": "sum",
+            "where": "Attributes['outcome'] = 'unavailable' AND Attributes['channel'] != 'web_app'",
+            "whereLanguage": "sql",
+            "alias": "unavailable, judged channels"
           }
         ],
         "formulas": [
@@ -83,7 +101,7 @@
             }
           },
           {
-            "expression": "(A - C) / (A + B)",
+            "expression": "(D - C) / (D + E)",
             "alias": "right agent",
             "numberFormat": {
               "output": "percent",
