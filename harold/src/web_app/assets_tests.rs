@@ -467,14 +467,11 @@ fn the_photo_rules_are_in_the_stylesheet() {
 fn dictation_js_listens_into_the_box_and_tells_harold_once() {
     let script = include_str!("../../static/web_app/dictation.js");
     for wanted in [
-        // The mic hides when neither API exists, and when a failure is remembered.
+        // The mic hides only when neither API exists; an old remembered hide is cleared.
         "window.SpeechRecognition || window.webkitSpeechRecognition",
         r#"report("missing");"#,
         r#"const STORAGE_KEY = "harold-dictation";"#,
-        "const REMEMBER_MS = 7 * 24 * 60 * 60 * 1000;",
-        "age >= 0 && age < REMEMBER_MS",
-        "localStorage.getItem(STORAGE_KEY)",
-        "localStorage.setItem(STORAGE_KEY, String(Date.now()))",
+        "localStorage.removeItem(STORAGE_KEY)",
         // The recognition starts with the phone's language, interim results and no end.
         "r.lang = navigator.language;",
         "r.interimResults = true;",
@@ -521,6 +518,10 @@ fn dictation_js_listens_into_the_box_and_tells_harold_once() {
         "getUserMedia",
         "MediaRecorder",
         "transcript:",
+        // A refusal never hides the mic or is remembered.
+        "REMEMBER_MS",
+        "failedRecently",
+        "setFlag(onInput, false)",
     ] {
         assert!(!script.contains(absent), "dictation.js holds {absent}");
     }

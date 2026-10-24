@@ -23,7 +23,6 @@
   }
 
   const STORAGE_KEY = "harold-dictation";
-  const REMEMBER_MS = 7 * 24 * 60 * 60 * 1000;
   const QUIET_MS = 4000;
   const NOTICE_MS = 3000;
   // The browser's error names, and the words the check carries for them.
@@ -62,23 +61,6 @@
   function setFlag(input, on) {
     input.value = on ? "1" : "";
     input.dispatchEvent(new Event("input", { bubbles: true }));
-  }
-
-  function failedRecently() {
-    try {
-      const age = Date.now() - Number(localStorage.getItem(STORAGE_KEY));
-      return age >= 0 && age < REMEMBER_MS;
-    } catch (error) {
-      return false;
-    }
-  }
-
-  function remember() {
-    try {
-      localStorage.setItem(STORAGE_KEY, String(Date.now()));
-    } catch (error) {
-      // A private window may refuse; the next page load tries again.
-    }
   }
 
   function showNote(text, notice) {
@@ -178,8 +160,6 @@
         report(ERROR_RESULTS[error]);
       }
       if (error === "not-allowed" || error === "service-not-allowed") {
-        remember();
-        setFlag(onInput, false);
         notice("Dictation isn't available in this app.");
       } else if (error === "network") {
         notice("Dictation needs a connection.");
@@ -219,8 +199,11 @@
     report("missing");
     return;
   }
-  if (failedRecently()) {
-    return;
+  try {
+    // Clears a hide that an older page remembered after a refusal.
+    localStorage.removeItem(STORAGE_KEY);
+  } catch (error) {
+    // A private window may refuse; there is nothing to clear then.
   }
   setFlag(onInput, true);
 
