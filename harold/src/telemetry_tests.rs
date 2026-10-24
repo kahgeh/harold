@@ -3593,3 +3593,16 @@ fn the_check_exits_2_when_hyperdx_cannot_be_checked() {
         refused.stderr
     );
 }
+
+#[test]
+fn the_check_names_a_missing_alert_and_its_missing_webhook_together() {
+    let stand_in = applied();
+    stand_in.remove("alerts", "watch-cost-high");
+    stand_in.remove("webhooks", "harold-alerts-watch-cost-high");
+    let result = stand_in.check(&[]);
+    assert_eq!(result.code, 1);
+    assert_eq!(
+        result.stdout,
+        "alert watch-cost-high: missing in HyperDX\nwebhook harold-alerts-watch-cost-high: missing in HyperDX\ncheck_hyperdx_alerts: 2 problems\n"
+    );
+}

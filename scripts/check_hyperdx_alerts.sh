@@ -43,28 +43,28 @@ problems=$(jq -n -r --argjson expected "$expected" --argjson alerts "$alerts" --
       $expected[] as $want
       | ($have | map(select(.name == $want.name))) as $found
       | ($hooks | map(select(.name == "harold-alerts-\($want.name)"))) as $hook
-      | if ($found | length) == 0 then "alert \($want.name): missing in HyperDX"
-        elif ($found | length) > 1 then "alert \($want.name): HyperDX has \($found | length) of that name"
-        else
-          $found[0] as $alert
-          | (
-              ["threshold", "thresholdType", "interval", "numConsecutiveWindows"][] as $field
-              | select(($alert[$field] // null) != $want[$field])
-              | "alert \($want.name): \($field) is \($alert[$field] // null | show) in HyperDX, \($want[$field] | show) in the file"
-            ),
-            (
-              if ($hook | length) == 0 then "webhook harold-alerts-\($want.name): missing in HyperDX"
-              elif ($hook | length) > 1 then "webhook harold-alerts-\($want.name): HyperDX has \($hook | length) of that name"
-              elif $alert.channel.webhookId != $hook[0].id then "alert \($want.name): does not point at webhook harold-alerts-\($want.name)"
-              else empty end
-            )
-        end
+      | (
+          if ($found | length) == 0 then "alert \($want.name): missing in HyperDX"
+          elif ($found | length) > 1 then "alert \($want.name): HyperDX has \($found | length) of that name"
+          else
+            $found[0] as $alert
+            | ["threshold", "thresholdType", "interval", "numConsecutiveWindows"][] as $field
+            | select(($alert[$field] // null) != $want[$field])
+            | "alert \($want.name): \($field) is \($alert[$field] // null | show) in HyperDX, \($want[$field] | show) in the file"
+          end
+        ),
+        (
+          if ($hook | length) == 0 then "webhook harold-alerts-\($want.name): missing in HyperDX"
+          elif ($hook | length) > 1 then "webhook harold-alerts-\($want.name): HyperDX has \($hook | length) of that name"
+          elif ($found | length) == 1 and $found[0].channel.webhookId != $hook[0].id then "alert \($want.name): does not point at webhook harold-alerts-\($want.name)"
+          else empty end
+        )
     ),
     (
       $have[] | select((.tags // []) | index("harold")) | select(.name as $n | $names | index($n) | not)
       | "alert \(.name): tagged harold in HyperDX, has no file"
     )
-')
+') || cannot_check "could not compare HyperDX with the files"
 
 if [ -n "$problems" ]; then
     echo "$problems"
