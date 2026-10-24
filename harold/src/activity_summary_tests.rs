@@ -4,6 +4,9 @@ use std::time::Duration;
 
 use super::*;
 
+/// A generous limit for a child to start or be reaped; a passing test never waits for it.
+const EVENTUALLY: Duration = Duration::from_secs(10);
+
 struct Fixture(PathBuf);
 
 fn python_executable() -> &'static str {
@@ -186,7 +189,7 @@ fn hanging_script() -> &'static str {
 }
 
 async fn started(fixture: &Fixture) -> serde_json::Value {
-    tokio::time::timeout(Duration::from_secs(3), async {
+    tokio::time::timeout(EVENTUALLY, async {
         loop {
             if let Ok(text) = std::fs::read_to_string(fixture.path("started"))
                 && let Ok(value) = serde_json::from_str(&text)
@@ -201,7 +204,7 @@ async fn started(fixture: &Fixture) -> serde_json::Value {
 }
 
 async fn assert_cleaned(started: &serde_json::Value) {
-    tokio::time::timeout(Duration::from_secs(3), async {
+    tokio::time::timeout(EVENTUALLY, async {
         loop {
             let exists = std::process::Command::new("/bin/kill")
                 .args(["-0", &started["pid"].to_string()])

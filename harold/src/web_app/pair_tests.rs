@@ -12,7 +12,7 @@ use super::origin::loopback_hosts;
 use super::pair::{Attempt, NotSetUp, Pairing, devices_path};
 use super::{AppState, WebAppIdentity, router};
 use crate::outbound::fake::CapturedLogs;
-use crate::store::HaroldStore;
+use crate::store::{HaroldStore, StoreError};
 
 const LOGIN: &str = "chief@example.com";
 /// The pairing code of the tests. It must appear nowhere in a log, a page or a command's text.
@@ -95,7 +95,17 @@ struct Server {
 
 impl Server {
     async fn start(folder: &Folder, pairing: Pairing) -> Self {
-        let store = Arc::new(HaroldStore::open(folder.store_path()).await.unwrap());
+        // A restart starts at once, but the old store's lock goes only when the last clone drops.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let store = loop {
+            match HaroldStore::open(folder.store_path()).await {
+                Ok(store) => break Arc::new(store),
+                Err(StoreError::InUse) if Instant::now() < deadline => {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+                Err(error) => panic!("the store must open: {error:?}"),
+            }
+        };
         let (shutdown, shutdown_rx) = watch::channel(());
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();

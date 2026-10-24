@@ -807,9 +807,30 @@ async fn the_screen_follows_the_bytes_in_the_blobs_folder_every_ten_seconds() {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
 
-    tokio::time::pause();
-    tokio::time::advance(PROGRESS_EVERY + Duration::from_secs(1)).await;
-    tokio::time::resume();
+    // The follow task makes its ticker only when it first runs, so one advance can come too
+    // early, and it may tick before it has read the total. Advance one interval at a time until the
+    // screen shows both.
+    let shown = |models: &Arc<SpeechModels>| {
+        matches!(
+            models.status().borrow().clone(),
+            Status::Downloading {
+                bytes: 500,
+                total: 1000,
+                ..
+            }
+        )
+    };
+    let limit = std::time::Instant::now() + Duration::from_secs(10);
+    while !shown(&models) {
+        assert!(
+            std::time::Instant::now() < limit,
+            "the screen must show the bytes"
+        );
+        tokio::time::pause();
+        tokio::time::advance(PROGRESS_EVERY).await;
+        tokio::time::resume();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 
     let seen = until(&models, |s| {
         matches!(s, Status::Downloading { bytes: 500, .. })
