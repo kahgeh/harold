@@ -3,6 +3,7 @@
 # from its file. Reads HYPERDX_URL from the environment. Reads the HyperDX access key, on one line, from the file named by
 # HYPERDX_API_KEY_FILE (default ~/.config/harold/hyperdx-access-key). The file must be a non-empty regular file that
 # only its owner can read (mode 0600 or 0400) and that lies outside every git checkout, as for the knowledge tool's key files.
+# The mode check uses BSD stat, so it works on macOS only. A GIT_DIR in the environment makes the git-checkout rule refuse every key file.
 # Exit 0: every alert matches. Exit 1: one line per problem. Exit 2: HyperDX could not be checked.
 set -euo pipefail
 
