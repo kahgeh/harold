@@ -3336,9 +3336,11 @@ fn the_knowledge_lines_export_their_counts_and_no_text() {
 
 /// A stand-in for `curl` that answers `scripts/check_hyperdx_alerts.sh` from the same store as
 /// `STAND_IN_HDX`. It reads the key from the `-K -` config on stdin and keeps it in
-/// `$STORE/key_seen`, so a test can see that the key arrived there and not on the command line.
+/// `$STORE/key_seen`, and keeps its command line in `$STORE/curl_args`, so a test can see that the
+/// key arrived on stdin and not on the command line.
 const STAND_IN_CURL: &str = r#"#!/bin/sh
 cat > "$STORE/key_seen"
+echo "$@" > "$STORE/curl_args"
 for url; do :; done
 [ -z "$HDX_UNREACHABLE" ] || { echo "curl: (7) Failed to connect to hyperdx.test" >&2; exit 7; }
 [ -z "$HDX_DOWN" ] || { echo '{"message":"Unauthorized"}'; exit 0; }
@@ -3355,8 +3357,13 @@ struct CheckResult {
 }
 
 impl StandIn {
-    /// Runs `scripts/check_hyperdx_alerts.sh` with the stand-in `curl` first on `PATH`.
+    /// Runs `scripts/check_hyperdx_alerts.sh` with the stand-in `curl` first on `PATH`, and with
+    /// `CHECK_KEY` in a 0600 key file in the store.
     fn check(&self, env: &[(&str, &str)]) -> CheckResult {
+        self.check_with_key(CHECK_KEY, env)
+    }
+
+    fn check_with_key(&self, key: &str, env: &[(&str, &str)]) -> CheckResult {
         use std::os::unix::fs::PermissionsExt;
         let bin = self.store.join("bin");
         std::fs::create_dir_all(&bin).unwrap();
@@ -3364,6 +3371,9 @@ impl StandIn {
         std::fs::write(&curl, STAND_IN_CURL).unwrap();
         std::fs::set_permissions(&curl, std::fs::Permissions::from_mode(0o755)).unwrap();
         let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
+        let key_file = self.store.join("hyperdx-access-key");
+        std::fs::write(&key_file, format!("{key}\n")).unwrap();
+        std::fs::set_permissions(&key_file, std::fs::Permissions::from_mode(0o600)).unwrap();
         let mut command = std::process::Command::new("bash");
         command
             .arg("scripts/check_hyperdx_alerts.sh")
@@ -3371,7 +3381,8 @@ impl StandIn {
             .env("PATH", path)
             .env("STORE", &self.store)
             .env("HYPERDX_URL", "http://hyperdx.test")
-            .env("HYPERDX_API_KEY", CHECK_KEY)
+            .env("HYPERDX_API_KEY_FILE", &key_file)
+            .env_remove("HYPERDX_API_KEY")
             .env_remove("HDX_DOWN")
             .env_remove("HDX_UNREACHABLE");
         for (name, value) in env {
@@ -3384,7 +3395,7 @@ impl StandIn {
             stderr: String::from_utf8(output.stderr).unwrap(),
         };
         assert!(
-            !result.stdout.contains(CHECK_KEY) && !result.stderr.contains(CHECK_KEY),
+            key.is_empty() || !result.stdout.contains(key) && !result.stderr.contains(key),
             "the key is in the output: {} {}",
             result.stdout,
             result.stderr
@@ -3425,6 +3436,99 @@ fn the_check_passes_after_the_create_loop() {
     assert!(
         key_seen.contains(CHECK_KEY),
         "the key reaches curl on stdin"
+    );
+}
+
+const CHECK_REFUSED: &str = "check_hyperdx_alerts: cannot check, ";
+
+#[test]
+fn the_check_refuses_a_key_file_others_can_read() {
+    use std::os::unix::fs::PermissionsExt;
+    let stand_in = applied();
+    let key_file = stand_in.store.join("loose-key");
+    std::fs::write(&key_file, "known-key\n").unwrap();
+    std::fs::set_permissions(&key_file, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let result = stand_in.check(&[("HYPERDX_API_KEY_FILE", key_file.to_str().unwrap())]);
+    assert_eq!(result.code, 2);
+    assert!(result.stdout.is_empty(), "{}", result.stdout);
+    assert!(
+        result.stderr.starts_with(&format!(
+            "{CHECK_REFUSED}{}: readable by group or others",
+            key_file.display()
+        )),
+        "{}",
+        result.stderr
+    );
+    assert_eq!(result.stderr.lines().count(), 1);
+}
+
+#[test]
+fn the_check_refuses_a_missing_or_empty_key_file() {
+    let stand_in = applied();
+    let missing = stand_in.store.join("no-such-key");
+    let result = stand_in.check(&[("HYPERDX_API_KEY_FILE", missing.to_str().unwrap())]);
+    assert_eq!(result.code, 2);
+    assert_eq!(
+        result.stderr,
+        format!("{CHECK_REFUSED}{}: missing\n", missing.display())
+    );
+    let result = stand_in.check_with_key("", &[]);
+    assert_eq!(result.code, 2);
+    assert!(result.stderr.contains(": empty"), "{}", result.stderr);
+}
+
+#[test]
+fn the_check_refuses_a_key_file_inside_a_git_checkout() {
+    let stand_in = applied();
+    let checkout = stand_in.store.join("checkout");
+    std::fs::create_dir_all(&checkout).unwrap();
+    let init = std::process::Command::new("git")
+        .args(["init", "-q"])
+        .arg(&checkout)
+        .status()
+        .unwrap();
+    assert!(init.success());
+    let key_file = checkout.join("key");
+    std::fs::write(&key_file, "known-key\n").unwrap();
+    std::fs::set_permissions(
+        &key_file,
+        std::os::unix::fs::PermissionsExt::from_mode(0o600),
+    )
+    .unwrap();
+    let result = stand_in.check(&[("HYPERDX_API_KEY_FILE", key_file.to_str().unwrap())]);
+    assert_eq!(result.code, 2);
+    assert_eq!(
+        result.stderr,
+        format!(
+            "{CHECK_REFUSED}{}: inside a git checkout\n",
+            key_file.display()
+        )
+    );
+}
+
+#[test]
+fn the_check_without_hyperdx_url_cannot_check() {
+    let stand_in = applied();
+    let result = stand_in.check(&[("HYPERDX_URL", "")]);
+    assert_eq!(result.code, 2);
+    assert_eq!(result.stderr, format!("{CHECK_REFUSED}set HYPERDX_URL\n"));
+}
+
+#[test]
+fn a_key_with_a_quote_and_a_backslash_reaches_curl_escaped() {
+    let stand_in = applied();
+    let key = r#"ab"cd\ef"#;
+    let result = stand_in.check_with_key(key, &[]);
+    assert_eq!(result.code, 0, "{} {}", result.stdout, result.stderr);
+    let key_seen = std::fs::read_to_string(stand_in.store.join("key_seen")).unwrap();
+    assert_eq!(
+        key_seen,
+        "header = \"Authorization: Bearer ab\\\"cd\\\\ef\"\n"
+    );
+    let args = std::fs::read_to_string(stand_in.store.join("curl_args")).unwrap();
+    assert!(
+        !args.contains("cd"),
+        "the key is on curl's command line: {args}"
     );
 }
 

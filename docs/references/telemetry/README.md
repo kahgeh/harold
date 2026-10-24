@@ -745,20 +745,32 @@ done
 
 `harold-alerts` is then unused and may be deleted.
 
-After the create or update loops, run the check by hand. It compares HyperDX with the alert files and with the `harold-alerts-<name>` webhooks, and it uses the same `HYPERDX_URL` and `HYPERDX_API_KEY`:
+After the create or update loops, run the check by hand. It compares HyperDX with the alert files and with the `harold-alerts-<name>` webhooks. It uses the same `HYPERDX_URL`. It reads the key from a file, not from `HYPERDX_API_KEY`. The file is `~/.config/harold/hyperdx-access-key`, or the file named by `HYPERDX_API_KEY_FILE`.
+
+Make the file once from the local stack's provisioning output. The path below is where the stack lives on your machine; change it if it differs. Make it again when the stack is provisioned from scratch:
+
+```sh
+umask 077
+jq -r .accessKey ~/code/sre/stack/hyperdx/state.json > ~/.config/harold/hyperdx-access-key
+```
+
+The loops above may take their key from the same file: `export HYPERDX_API_KEY=$(cat ~/.config/harold/hyperdx-access-key)`.
+
+Run the check:
 
 ```sh
 scripts/check_hyperdx_alerts.sh
 ```
 
-The check prints `check_hyperdx_alerts: ok, <n> alerts` and exits 0 when HyperDX holds every alert in `hyperdx/` with its file's `threshold`, `thresholdType`, `interval` and `numConsecutiveWindows`. A file with no `numConsecutiveWindows` must match `null`, which is what HyperDX returns for it. The check also expects each alert to point at its own webhook, and no alert tagged `harold` to be without a file. Otherwise it prints one line per problem and exits 1. If HyperDX cannot be reached or does not answer with a list, it exits 2.
+The check prints `check_hyperdx_alerts: ok, <n> alerts` and exits 0 when HyperDX holds every alert in `hyperdx/` with its file's `threshold`, `thresholdType`, `interval` and `numConsecutiveWindows`. A file with no `numConsecutiveWindows` must match `null`, which is what HyperDX returns for it. The check also expects each alert to point at its own webhook, and no alert tagged `harold` to be without a file. Otherwise it prints one line per problem and exits 1. The check exits 2, with one line that starts `check_hyperdx_alerts: cannot check`, when `HYPERDX_URL` is not set, when the key file is missing, empty or not a regular file, when group or others can read it, when it lies inside a git checkout, when HyperDX cannot be reached, or when it does not answer with a list.
 
 ## Not tested until real use
 
-The definitions were written from HyperDX 2.40's API source and the local stack's own provisioning, and checked only by tests that read the files. Nothing was sent to the running stack. Untested until then:
+The definitions were written from HyperDX 2.40's API source and the local stack's own provisioning, and checked by tests that read the files. The alerts and their webhooks were applied to the local stack on 2026-10-24, and `scripts/check_hyperdx_alerts.sh` checks that the stack holds them. Untested until real use:
 
 - data arriving in HyperDX from either Mac;
-- the dashboards, panels and alerts working as written in HyperDX 2.40, including the field names, the SQL tiles and the counter rule's SQL in ClickHouse;
+- the dashboards, panels and the counter rule's SQL working as written in HyperDX 2.40, including the field names and the SQL tiles in ClickHouse;
+- each alert firing in HyperDX as its file says;
 - the counting from 0 at start reaching HyperDX as a first point of 0;
 - the stack's containers reaching Harold's alert address, and each webhook's body arriving as written;
 - the hooks' new fields on the installed agents.

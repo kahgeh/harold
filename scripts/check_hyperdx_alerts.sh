@@ -1,24 +1,39 @@
 #!/usr/bin/env bash
 # Fails when HyperDX lacks an alert that docs/references/telemetry/hyperdx/alert-*.json defines, or holds one that differs
-# from its file. Reads HYPERDX_URL and HYPERDX_API_KEY from the environment, as the README's commands do.
+# from its file. Reads HYPERDX_URL from the environment. Reads the HyperDX access key, on one line, from the file named by
+# HYPERDX_API_KEY_FILE (default ~/.config/harold/hyperdx-access-key). The file must be a non-empty regular file that
+# only its owner can read (mode 0600 or 0400) and that lies outside every git checkout, as for the knowledge tool's key files.
 # Exit 0: every alert matches. Exit 1: one line per problem. Exit 2: HyperDX could not be checked.
 set -euo pipefail
 
 cd "$(git rev-parse --show-toplevel)"
 
-: "${HYPERDX_URL:?check_hyperdx_alerts: set HYPERDX_URL}"
-: "${HYPERDX_API_KEY:?check_hyperdx_alerts: set HYPERDX_API_KEY}"
+cannot_check() {
+    echo "check_hyperdx_alerts: cannot check, $1" >&2
+    exit 2
+}
+
+[ -n "${HYPERDX_URL:-}" ] || cannot_check "set HYPERDX_URL"
+
+key_file=${HYPERDX_API_KEY_FILE:-$HOME/.config/harold/hyperdx-access-key}
+[ -e "$key_file" ] || cannot_check "$key_file: missing"
+[ -f "$key_file" ] || cannot_check "$key_file: not a regular file"
+[ -s "$key_file" ] || cannot_check "$key_file: empty"
+mode=$(stat -L -f %Lp "$key_file" 2>/dev/null || stat -L -c %a "$key_file") || cannot_check "$key_file: cannot read its mode"
+[ $((8#$mode & 8#077)) -eq 0 ] || cannot_check "$key_file: readable by group or others (mode $mode), run chmod 600"
+git -C "$(dirname "$key_file")" rev-parse >/dev/null 2>&1 && cannot_check "$key_file: inside a git checkout"
+IFS= read -r key <"$key_file" || [ -n "$key" ] || cannot_check "$key_file: cannot read it"
+[ -n "$key" ] || cannot_check "$key_file: empty"
+
+# curl's config syntax needs \ and " in a quoted value escaped.
+key=${key//\\/\\\\}
+key=${key//\"/\\\"}
 
 dir=docs/references/telemetry/hyperdx
 
 # The key goes to curl on stdin, so it never shows in a process list.
 fetch() {
-    printf 'header = "Authorization: Bearer %s"\n' "$HYPERDX_API_KEY" | curl -sS -m 20 -K - "$HYPERDX_URL/api/v2/$1"
-}
-
-cannot_check() {
-    echo "check_hyperdx_alerts: cannot check, $1" >&2
-    exit 2
+    printf 'header = "Authorization: Bearer %s"\n' "$key" | curl -sS -m 20 -K - "$HYPERDX_URL/api/v2/$1"
 }
 
 alerts=$(fetch alerts) || cannot_check "no answer from $HYPERDX_URL"
