@@ -1702,13 +1702,13 @@ encryption_key_file = "/Users/x/.config/harold/knowledge-key"
     #[test]
     fn the_prefix_is_the_machine_name_unless_set() {
         let mut settings = parse_knowledge(KNOWLEDGE_ON);
-        assert_eq!(settings.prefix("PasM4MBP"), "harold-knowledge/PasM4MBP");
+        assert_eq!(settings.prefix("laptop-mac"), "harold-knowledge/laptop-mac");
         assert_eq!(
             settings.prefix("Pas M4 (work)"),
             "harold-knowledge/Pas-M4--work-"
         );
         settings.bucket.as_mut().unwrap().prefix = Some("custom/one".into());
-        assert_eq!(settings.prefix("PasM4MBP"), "custom/one");
+        assert_eq!(settings.prefix("laptop-mac"), "custom/one");
     }
 
     #[test]

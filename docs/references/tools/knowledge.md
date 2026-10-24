@@ -111,7 +111,7 @@ SDKROOT=/Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk CMAKE_ARGS="-DGG
 
 ```toml
 [knowledge]
-vault = "/Users/you/Dev/p/personal-chief/vault/knowledge"
+vault = "/Users/you/notes/vault/knowledge"
 exclude = ["MEMORY.md", "log.md"]            # ships as []; this organisation's index and change log
 command = "/Users/you/.local/share/harold-knowledge/venv/bin/python"
 args = []                                    # put before "-I embed_worker.py"
