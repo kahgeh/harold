@@ -185,8 +185,8 @@ fn the_status_strip_is_blurred_and_the_header_row_and_notice_are_solid() {
     }
     let root = rule(":root");
     assert!(
-        root.contains("--status-strip:"),
-        ":root lacks --status-strip"
+        root.contains("--status-strip: max(8px, calc(env(safe-area-inset-top) - 12px));"),
+        ":root lacks the --status-strip that starts under the phone's icons"
     );
     assert!(
         root.contains("--header-height: calc(var(--status-strip)"),
