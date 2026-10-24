@@ -724,11 +724,12 @@ async fn now_id(conn: &Connection) -> Result<Option<String>> {
 }
 
 /// Moves the parked items at `from` and after it by `by` positions.
-async fn shift_parked(conn: &Connection, from: i64, by: i64, now_ms: i64) -> Result<()> {
+/// A move leaves `updated_at_ms` alone: it is the time the item's text changed.
+async fn shift_parked(conn: &Connection, from: i64, by: i64) -> Result<()> {
     conn.execute(
-        "UPDATE queue_items SET position = position + ?2, updated_at_ms = ?3 \
+        "UPDATE queue_items SET position = position + ?2 \
          WHERE state = 'parked' AND position >= ?1",
-        (from, by, now_ms),
+        (from, by),
     )
     .await?;
     Ok(())
@@ -736,15 +737,14 @@ async fn shift_parked(conn: &Connection, from: i64, by: i64, now_ms: i64) -> Res
 
 /// Parks the Now item, if there is one, at position 1. Runs before an item is
 /// made Now, so the `one_now` index never sees two.
-async fn park_the_now(conn: &Connection, now_ms: i64) -> Result<()> {
+async fn park_the_now(conn: &Connection) -> Result<()> {
     let Some(id) = now_id(conn).await? else {
         return Ok(());
     };
-    shift_parked(conn, 1, 1, now_ms).await?;
+    shift_parked(conn, 1, 1).await?;
     conn.execute(
-        "UPDATE queue_items SET state = 'parked', position = 1, updated_at_ms = ?2 \
-         WHERE id = ?1",
-        (id, now_ms),
+        "UPDATE queue_items SET state = 'parked', position = 1 WHERE id = ?1",
+        [id],
     )
     .await?;
     Ok(())
@@ -769,8 +769,8 @@ async fn add_queue_item_in(
     }
     let id = format!("N{}", highest + 1);
     match state {
-        QueueState::Now => park_the_now(conn, now_ms).await?,
-        _ => shift_parked(conn, i64::from(position), 1, now_ms).await?,
+        QueueState::Now => park_the_now(conn).await?,
+        _ => shift_parked(conn, i64::from(position), 1).await?,
     }
     conn.execute(
         "INSERT INTO queue_items (id, state, position, text, done_at_ms, updated_at_ms) \
@@ -798,7 +798,6 @@ async fn add_queue_item_in(
 async fn set_now_in(
     conn: &Connection,
     id: &str,
-    now_ms: i64,
 ) -> Result<std::result::Result<(String, u32), Refusal>> {
     let Some(item) = queue_item_in(conn, id).await? else {
         return Ok(Err(Refusal::NotFound));
@@ -808,12 +807,11 @@ async fn set_now_in(
         QueueState::Now => {}
         QueueState::Parked => {
             // The item's own position is overwritten when it is made Now.
-            shift_parked(conn, i64::from(item.position) + 1, -1, now_ms).await?;
-            park_the_now(conn, now_ms).await?;
+            shift_parked(conn, i64::from(item.position) + 1, -1).await?;
+            park_the_now(conn).await?;
             conn.execute(
-                "UPDATE queue_items SET state = 'now', position = 0, updated_at_ms = ?2 \
-                 WHERE id = ?1",
-                (id, now_ms),
+                "UPDATE queue_items SET state = 'now', position = 0 WHERE id = ?1",
+                [id],
             )
             .await?;
         }
@@ -824,7 +822,6 @@ async fn set_now_in(
 async fn order_queue_in(
     conn: &Connection,
     ids: &[String],
-    now_ms: i64,
 ) -> Result<std::result::Result<u32, Refusal>> {
     let current = parked_ids(conn).await?;
     if let Some(id) = ids.iter().find(|id| !current.contains(id)) {
@@ -842,8 +839,8 @@ async fn order_queue_in(
     }
     for (position, id) in order.iter().enumerate() {
         conn.execute(
-            "UPDATE queue_items SET position = ?2, updated_at_ms = ?3 WHERE id = ?1",
-            (*id, position as i64 + 1, now_ms),
+            "UPDATE queue_items SET position = ?2 WHERE id = ?1",
+            (*id, position as i64 + 1),
         )
         .await?;
     }
@@ -885,7 +882,7 @@ async fn done_queue_item_in(
     )
     .await?;
     if item.state == QueueState::Parked {
-        shift_parked(conn, i64::from(item.position) + 1, -1, now_ms).await?;
+        shift_parked(conn, i64::from(item.position) + 1, -1).await?;
     }
     Ok(Ok(parked_count(conn).await?))
 }
@@ -1131,21 +1128,21 @@ impl BacklogStore for TursoBacklogStore {
     async fn set_now(
         &self,
         id: &str,
-        now_ms: i64,
+        _now_ms: i64,
     ) -> Result<std::result::Result<(String, u32), Refusal>> {
         let conn = self.conn.lock().await;
         begin(&conn).await?;
-        finish_refusable(&conn, set_now_in(&conn, id, now_ms).await).await
+        finish_refusable(&conn, set_now_in(&conn, id).await).await
     }
 
     async fn order_queue(
         &self,
         ids: &[String],
-        now_ms: i64,
+        _now_ms: i64,
     ) -> Result<std::result::Result<u32, Refusal>> {
         let conn = self.conn.lock().await;
         begin(&conn).await?;
-        finish_refusable(&conn, order_queue_in(&conn, ids, now_ms).await).await
+        finish_refusable(&conn, order_queue_in(&conn, ids).await).await
     }
 
     async fn update_queue_item(

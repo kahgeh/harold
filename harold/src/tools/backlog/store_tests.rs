@@ -466,7 +466,7 @@ async fn now_moves_the_old_now_to_parked_position_one() {
     let now = listing.now.unwrap();
     assert_eq!(now.state, QueueState::Now);
     assert_eq!(now.position, 0);
-    assert_eq!(now.updated_at_ms, 2);
+    assert_eq!(now.updated_at_ms, 1);
 }
 
 #[tokio::test]
@@ -816,4 +816,70 @@ async fn an_import_round_trips_through_the_store() {
     // The next item added gets the next id.
     let added = store.add_queue_item("later", Place::End, 2).await.unwrap();
     assert_eq!(added.unwrap().0.id, "N8");
+}
+
+/// The `updated_at_ms` of every queue item, by id.
+async fn queue_times(store: &TursoBacklogStore) -> Vec<(String, i64)> {
+    let listing = store.list_queue(0).await.unwrap();
+    let mut times: Vec<(String, i64)> = listing
+        .now
+        .into_iter()
+        .chain(listing.parked)
+        .chain(listing.done)
+        .map(|item| (item.id, item.updated_at_ms))
+        .collect();
+    times.sort();
+    times
+}
+
+#[tokio::test]
+async fn moving_a_queue_item_leaves_its_age_alone() {
+    let folder = TempFolder::new();
+    let store = open_store(&folder).await;
+    add(&store, "a", Place::End).await;
+    add(&store, "b", Place::End).await;
+    add(&store, "c", Place::End).await;
+    let ones =
+        |ids: &[&str]| -> Vec<(String, i64)> { ids.iter().map(|id| (id.to_string(), 1)).collect() };
+    store.set_now("N1", 10).await.unwrap().unwrap();
+    assert_eq!(queue_times(&store).await, ones(&["N1", "N2", "N3"]));
+    // Making N2 Now parks N1.
+    store.set_now("N2", 20).await.unwrap().unwrap();
+    assert_eq!(queue_times(&store).await, ones(&["N1", "N2", "N3"]));
+    store
+        .order_queue(&ids(&["N3", "N1"]), 30)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(queue_times(&store).await, ones(&["N1", "N2", "N3"]));
+    // Adding an item ahead of the others shifts them without touching them.
+    store
+        .add_queue_item("d", Place::Now, 40)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(queue_times(&store).await[3], ("N4".to_string(), 40));
+    assert_eq!(
+        queue_times(&store).await[..3],
+        ones(&["N1", "N2", "N3"])[..]
+    );
+    // Done on an item ahead of the others shifts them without touching them.
+    store.done_queue_item("N2", 50).await.unwrap().unwrap();
+    assert_eq!(
+        queue_times(&store).await,
+        [("N1", 1), ("N2", 50), ("N3", 1), ("N4", 40)].map(|(id, at)| (id.to_string(), at))
+    );
+}
+
+#[tokio::test]
+async fn updating_a_queue_item_restarts_its_age() {
+    let folder = TempFolder::new();
+    let store = open_store(&folder).await;
+    add(&store, "a", Place::End).await;
+    store
+        .update_queue_item("N1", "a, edited", 5)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(queue_times(&store).await, [("N1".to_string(), 5)]);
 }

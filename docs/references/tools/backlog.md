@@ -140,15 +140,15 @@ harold tool backlog queue list [--json] [--done-since <YYYY-MM-DD>]
 The text on stdin is taken as it is, without the newlines at its end. `queue list` prints:
 
 ```text
-Now: N4 Draft the release note for the filter change
+Now: N4 (3h) Draft the release note for the filter change
 Parked:
-  1. N3 Reply to the question about CSV quoting
-  2. N2 Book the room for Thursday's review
+  1. N3 (2d) Reply to the question about CSV quoting
+  2. N2 (45m) Book the room for Thursday's review
 Done today:
   N1 Merged the dark theme colours
 ```
 
-Each item shows its first line only. With no Now item the first line is `Now: nothing`. The done items are listed oldest first. "Done today" means done since local midnight. `--done-since <date>` lists the items done since that date's midnight instead, under `Done since <date>:`. The CLI works out both midnights with the Mac's current UTC offset, so across a daylight-saving change `--done-since` is an hour off. With `--json` it prints `{"now", "parked", "done", "note"}`, each item with its `id`, `state`, `position`, full `text`, `done_at_ms` and `updated_at_ms`.
+Each item shows its first line only. The Now item and each parked item show their age after the id: `(<n>m)` under an hour, `(<n>h)` under two days, otherwise `(<n>d)`, rounded down. The age counts from when the item's text was added or last changed (`add`, `update`); moving the item with `now` or `order`, or shifting it when another item is added or done, does not reset it. The done items show no age. With no Now item the first line is `Now: nothing`. The done items are listed oldest first. "Done today" means done since local midnight. `--done-since <date>` lists the items done since that date's midnight instead, under `Done since <date>:`. The CLI works out both midnights with the Mac's current UTC offset, so across a daylight-saving change `--done-since` is an hour off. With `--json` it prints `{"now", "parked", "done", "note"}`, each item with its `id`, `state`, `position`, full `text`, `done_at_ms` and `updated_at_ms`, the time the item's text was added or last changed, or when it was done. Items stored before this change keep the time of their last move.
 
 Moving the files in and out is under [Import and export](#import-and-export).
 

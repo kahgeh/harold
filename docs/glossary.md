@@ -195,6 +195,7 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 | backlog note | A note kept with a backlog: a rule, history, held or left out | "note" alone |
 | queue | The chief's own list of things to do, with one Now item | — |
 | Now item | The queue's current item | — |
+| queue item age | How long ago a queue item's text was added or last changed. Moving the item does not change it | "last updated" (a move is not an update) |
 | evidence | A pointer, such as a file and line, that backs an item | — |
 
 ## Storing and delivering

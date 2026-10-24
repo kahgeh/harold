@@ -1551,6 +1551,17 @@ fn queue_item_json(item: &backlog_api::QueueItem) -> serde_json::Value {
     })
 }
 
+/// How long ago a queue item's text changed: `(45m)` under an hour, `(3h)`
+/// under two days, else `(2d)`, rounded down.
+fn queue_age(now_ms: i64, updated_at_ms: i64) -> String {
+    let minutes = (now_ms - updated_at_ms).max(0) / 60_000;
+    match minutes {
+        0..=59 => format!("({minutes}m)"),
+        60..=2879 => format!("({}h)", minutes / 60),
+        _ => format!("({}d)", minutes / 1440),
+    }
+}
+
 fn first_line(text: &str) -> &str {
     text.lines().next().unwrap_or_default()
 }
@@ -1885,15 +1896,21 @@ async fn backlog_call(
                 return Ok(listed.to_string());
             }
             let mut lines = vec![match &listing.now {
-                Some(item) => format!("Now: {} {}", item.id, first_line(&item.text)),
+                Some(item) => format!(
+                    "Now: {} {} {}",
+                    item.id,
+                    queue_age(ms(now), item.updated_at_ms),
+                    first_line(&item.text)
+                ),
                 None => "Now: nothing".into(),
             }];
             lines.push("Parked:".into());
             lines.extend(listing.parked.iter().map(|item| {
                 format!(
-                    "  {}. {} {}",
+                    "  {}. {} {} {}",
                     item.position,
                     item.id,
+                    queue_age(ms(now), item.updated_at_ms),
                     first_line(&item.text)
                 )
             }));
@@ -3715,6 +3732,18 @@ mod tests {
 
     impl BacklogServer {
         async fn run(&self, pane: &str, words: &[&str], input: &str) -> Result<String, String> {
+            self.run_at(pane, words, input, time::OffsetDateTime::now_utc())
+                .await
+        }
+
+        /// Runs the command as if the CLI's clock read `now`.
+        async fn run_at(
+            &self,
+            pane: &str,
+            words: &[&str],
+            input: &str,
+            now: time::OffsetDateTime,
+        ) -> Result<String, String> {
             let Ok(Mode::Tool(ToolCommand::Backlog(command))) = backlog_parse(words) else {
                 panic!("not a backlog command: {words:?}");
             };
@@ -3724,7 +3753,7 @@ mod tests {
                 input.as_bytes(),
                 pane,
                 time::UtcOffset::UTC,
-                time::OffsetDateTime::now_utc(),
+                now,
                 command.deadline(),
             )
             .await
@@ -3927,8 +3956,8 @@ mod tests {
         }
         assert_eq!(
             listed,
-            "Now: nothing\nParked:\n  1. N3 third, edited\n  2. N2 second\n  3. N4 urgent\n  \
-             4. N5 top\nDone today:\n  N1 first"
+            "Now: nothing\nParked:\n  1. N3 (0m) third, edited\n  2. N2 (0m) second\n  \
+             3. N4 (0m) urgent\n  4. N5 (0m) top\nDone today:\n  N1 first"
         );
         let json: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(json["now"], serde_json::Value::Null);
@@ -3940,6 +3969,66 @@ mod tests {
             since.ends_with("Done since 2026-01-01:\n  N1 first"),
             "{since}"
         );
+    }
+
+    #[test]
+    fn a_queue_age_rounds_down_to_minutes_hours_or_days() {
+        let minute = 60_000;
+        for (age_ms, expected) in [
+            (-minute, "(0m)"),
+            (59 * minute + 59_999, "(59m)"),
+            (60 * minute, "(1h)"),
+            (47 * 60 * minute + 59 * minute, "(47h)"),
+            (48 * 60 * minute, "(2d)"),
+            (5 * 24 * 60 * minute + 23 * 60 * minute, "(5d)"),
+        ] {
+            assert_eq!(queue_age(age_ms, 0), expected, "{age_ms}");
+        }
+    }
+
+    #[tokio::test]
+    async fn queue_list_shows_the_age_of_the_now_and_parked_items_only() {
+        let server = backlog_server().await;
+        let chief = "%2";
+        for (words, input) in [
+            (vec!["queue", "add", "--now"], "call design\n"),
+            (vec!["queue", "add"], "mic button\n"),
+            (vec!["queue", "add"], "finished\n"),
+            (vec!["queue", "done", "N3"], ""),
+        ] {
+            server.run(chief, &words, input).await.unwrap();
+        }
+        let started = time::OffsetDateTime::now_utc();
+        let mut listed = Vec::new();
+        for later in [
+            time::Duration::minutes(45),
+            time::Duration::hours(3),
+            time::Duration::days(2),
+        ] {
+            listed.push(
+                server
+                    .run_at(
+                        chief,
+                        &["queue", "list", "--done-since", "2026-01-01"],
+                        "",
+                        started + later,
+                    )
+                    .await
+                    .unwrap(),
+            );
+        }
+        println!("{}", listed.join("\n--\n"));
+        for (listing, age) in listed.iter().zip(["(45m)", "(3h)", "(2d)"]) {
+            assert!(
+                listing.contains(&format!("Now: N1 {age} call design")),
+                "{listing}"
+            );
+            assert!(
+                listing.contains(&format!("  1. N2 {age} mic button")),
+                "{listing}"
+            );
+            assert!(listing.ends_with("  N3 finished"), "{listing}");
+        }
     }
 
     #[tokio::test]
