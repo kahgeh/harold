@@ -1753,6 +1753,7 @@ const METRICS: &[&str] = &[
 const ATTRIBUTES: &[&str] = &[
     "exception.type",
     "code.filepath",
+    "harold.opened_at",
     "load_waited_ms",
     "pod.product",
     "spec.id",
@@ -2294,12 +2295,13 @@ const KNOWLEDGE_CARDS: [&str; 4] = [
 ];
 
 /// The web app's cards, in the order the dashboard lists them.
-const WEB_APP_CARDS: [&str; 5] = [
+const WEB_APP_CARDS: [&str; 6] = [
     "Web app errors per day",
     "Phone page load (p50, p95)",
     "Browser spans not forwarded per day",
     "Phone turns in one trace",
     "Browser spans stored per day",
+    "Thread opened at the oldest row, 7 days",
 ];
 const CALL_ANSWERS_FAILED_CARD: &str = "Call answers failed, by day";
 const CALL_ANSWERER_SPEND_CARD: &str = "Call answerer spend, by day";

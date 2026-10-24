@@ -222,6 +222,8 @@ document.addEventListener("datastar-fetch", (event) => {
   const READ_MARK = "harold-read-mark";
   // How long to wait for the stream's reconnect patch before opening anyway, in milliseconds.
   const PATCH_WAIT_MS = 1000;
+  // How long a sent reply may take to come back as a row, in milliseconds.
+  const REPLY_WAIT_MS = 10000;
 
   let following = true;
   let unseen = 0;
@@ -445,6 +447,11 @@ document.addEventListener("datastar-fetch", (event) => {
       following = distanceFromBottom() <= NEAR_BOTTOM;
       if (distanceFromBottom() <= 1) {
         newMessage.hidden = true;
+        // The end of the thread is in view, so the newest row is read, however tall it is.
+        const rows = messageRows();
+        if (placed && document.visibilityState === "visible" && rows.length > 0) {
+          advanceMark(rows[rows.length - 1]);
+        }
       }
     },
     { passive: true },
@@ -461,7 +468,12 @@ document.addEventListener("datastar-fetch", (event) => {
   newMessage.addEventListener("click", scrollToBottom);
   if (reply) {
     reply.addEventListener("submit", () => {
+      // Harold refuses an empty reply, so the flag is also cleared after a few seconds: a
+      // reply sent from another device must not move this device's mark.
       replySent = true;
+      setTimeout(() => {
+        replySent = false;
+      }, REPLY_WAIT_MS);
       scrollToBottom();
     });
   }
