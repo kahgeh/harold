@@ -36,6 +36,7 @@ Every field except `intro`, `impact`, `suggested` and `free` is required. The ru
 - There is at least one decision. Each decision has an `ask` and 1 to 9 options.
 - Option `key` and `label` are not blank. Keys are unique within a decision. At most one option is `suggested`.
 - A `free` option asks for typed text instead of a fixed answer.
+- `spec_file` is optional: the full path of the spec's Markdown file on the Mac (see [The checked time and a changed spec](#the-checked-time-and-a-changed-spec)).
 
 A broken rule is refused with the field's name and nothing is stored. The CLI only translates the JSON; the daemon checks the rules.
 
@@ -69,21 +70,42 @@ A refusal names the field, such as `invalid steps.2.text` or `invalid steps.2.de
 
 Instructions are never a waiting question. They are left out of the `waiting` count in `ListQuestions`, and so they do not hold back questions set aside with `later`.
 
-## The nine RPCs
+## The ten RPCs
 
 | RPC | Who | What it does |
 | --- | --- | --- |
 | `PutQuestion` | chief | Adds a question or instructions. With an existing id it raises the question version and makes the question `waiting` again, with no answer, whatever its state. A waiting or deferred question keeps its place; any other goes last. Returns `id` and `version`. |
 | `DismissQuestion` | chief | Withdraws a waiting or deferred question or instructions, with a `reason` the dash shows. If that leaves no question waiting and no answer unsent, the deferred questions return to `waiting`, at the end. |
 | `ReorderQuestions` | chief | Puts the listed ids, of questions and instructions, that are waiting or deferred first, in that order, keeping their state. Other ids are ignored, so a race with a dismissal is harmless. |
-| `ListQuestions` | dash | Returns the waiting todos, then the deferred ones (flagged `deferred`), the count `waiting`, and `dismissed`: the id and reason of every question dismissed in the last hour. |
+| `ListQuestions` | dash, web app | Returns the waiting todos, then the deferred ones (flagged `deferred`), the count `waiting`, `dismissed`: the id and reason of every question dismissed in the last hour, `checked_at_ms`: when the chief last called `MarkChecked` (0 before the first), and for each todo its `spec_state`. |
 | `AnswerQuestion` | dash | Answers a question at the question version the dash saw. |
 | `DeferQuestion` | dash | Sets a question aside (`later`). Instructions cannot be set aside: it is refused as `invalid id`. It stays with the other questions and returns to `waiting` later (see [The answers line](#the-answers-line)). |
 | `TickStep` | dash | Ticks or unticks one step of waiting instructions (see [Ticking](#ticking)). |
 | `SavePicks` | dash, web app | Replaces the saved picks of a waiting or deferred question (see [Saved picks](#saved-picks)). |
-| `ShowQuestion` | chief, CLI | Returns a stored question in any state with its question version, state, dismissal reason and saved picks. An id that was never stored is `NotFound` `unknown_question`. |
+| `ShowQuestion` | chief, CLI | Returns a stored question in any state with its question version, state, dismissal reason, saved picks and `spec_state`. An id that was never stored is `NotFound` `unknown_question`. It never returns `spec_file`. |
+| `MarkChecked` | chief | Records that the chief has just checked every todo against its spec. Returns `checked_at_ms`. |
 
 The `waiting` count in `ListQuestions` is the number of questions listed, deferred ones included. Instructions are listed but not counted. Each listed item carries `ticked`: the step numbers ticked, counting from 1, empty for a question, and `picks`: the saved picks of a question, empty for instructions.
+
+### The checked time and a changed spec
+
+The chief runs `harold tool questions checked` after its own check passes. Harold keeps the time in the one-row `checks` table, and `ListQuestions` returns it as `checked_at_ms`. The web app's todo page shows it as the [checked line](../away-app/README.md#the-todos).
+
+A todo may name its spec with `spec_file`. The rules, all refused as `invalid spec_file` with nothing stored:
+
+- It is an absolute path ending in `.md`, under 1,000 characters, on a todo that has a `sha`.
+- Once symlinks are resolved, it sits inside the `.superpowers/pod/specs/` folder of a product in the registry (the `Products` port). A symlink inside a specs folder that points out of it is refused. A file that does not exist yet passes when its folder resolves to a specs folder.
+- When the registry cannot be read at `put`, the todo is stored and its spec stays `unknown` until the check passes.
+
+Each time the todos are listed, the tool resolves the path again, checks the containment again, and compares the file's SHA-256 (first 12 hex digits, or as many as the todo's `sha` holds) with the todo's `sha`. It reads the file again only when its size or modified time has changed, so a list costs one `stat` per todo. A todo's `spec_state` is then:
+
+- `CURRENT`: the checksum matches;
+- `CHANGED`: the checksum differs, which is a **changed spec**;
+- `UNKNOWN`: no `spec_file`, or the file is missing, is not a regular file, is over 1 MB, is outside every registered specs folder now, or the registry cannot be read. An `UNKNOWN` todo behaves as before.
+
+`AnswerQuestion` and `SavePicks` refuse a `CHANGED` todo, open at the version asked, as `FailedPrecondition` `spec_changed`. A todo put again with the new `sha` is `CURRENT`, and keeps its picks for unchanged decisions as always. `spec_file` is never returned, shown, logged or sent to the phone.
+
+The question tool also tests the checked line's rule once a minute: more than 2 hours since the last check (or none), with at least one todo listed. It logs `todos not checked` once when the rule first holds, and again only after a check, or an empty list, has cleared it.
 
 ### Ticking
 
@@ -120,6 +142,7 @@ The note is sent only with `REVISE` and `REJECT`. For `ANSWER` and `FREE_TEXT` i
 | `InvalidArgument` | `invalid <field>` | A rule is broken. The field is named, such as `invalid link`, `invalid decisions.1.options.2.key`, `invalid picks`, `invalid note`, `invalid kind`, `invalid steps` or `invalid step`. Nothing is stored. |
 | `FailedPrecondition` | `version_changed` | The question or instructions were put again since the dash read them. |
 | `FailedPrecondition` | `not_waiting` | The question or instructions are dismissed, already answered, or unknown. |
+| `FailedPrecondition` | `spec_changed` | `AnswerQuestion` or `SavePicks` names a todo whose spec changed after it was asked. Checked after `version_changed` is ruled out, so an answer at an old version is `version_changed`. |
 | `InvalidArgument` | `invalid step` | `TickStep` names a step number below 1 or above the number of steps, which includes any step of a question. `TickStep` checks `not_waiting` and `version_changed` first. |
 | `NotFound` | `unknown_question` | `ShowQuestion` names an id that was never stored. |
 | `Unavailable` | `the question database is unavailable` | A database write failed. |
@@ -135,9 +158,10 @@ harold tool questions order Q3 Q1              # ordered 2
 harold tool questions put < instructions.json     # stored I1 v1
 harold tool questions dismiss Q1 --reason "spec withdrawn"   # dismissed Q1
 harold tool questions show Q1                    # the question and each decision's pick
+harold tool questions checked                    # checked at 14:05
 ```
 
-`put` accepts the JSON for a question or for instructions. `order` and `dismiss` take ids of either. `list` prints `<id> v<version> <product> <spec> picks <picked>/<decisions>`, with ` (deferred)` after a deferred one, and `<id> v<version> <product> steps <ticked>/<n>` for instructions, such as `I1 v1 harold steps 2/4`. `show` prints a head line `<id> v<version> <product> <spec> <state>`, then one line per decision: `  <n> <ask>: <key> <label>`, `  <n> <ask>: <key> "<text>"` for a free pick, or `  <n> <ask>: no pick`. Any other use prints `invalid argument: usage is harold tool questions put|dismiss|order|list|show`. If the daemon is not running the CLI prints `the Harold daemon is not reachable`, and after 3 seconds without an answer, `the Harold daemon did not answer within 3 seconds`.
+`put` accepts the JSON for a question or for instructions. `order` and `dismiss` take ids of either. `list` prints `<id> v<version> <product> <spec> picks <picked>/<decisions>`, with ` (deferred)` after a deferred one, and `<id> v<version> <product> steps <ticked>/<n>` for instructions, such as `I1 v1 harold steps 2/4`. ` (changed spec)` ends the line of a todo with a changed spec. `checked` prints `checked at HH:MM`, the Mac's local time. `show` prints a head line `<id> v<version> <product> <spec> <state>`, then one line per decision: `  <n> <ask>: <key> <label>`, `  <n> <ask>: <key> "<text>"` for a free pick, or `  <n> <ask>: no pick`. Any other use prints `invalid argument: usage is harold tool questions put|dismiss|order|list|show|checked`. If the daemon is not running the CLI prints `the Harold daemon is not reachable`, and after 3 seconds without an answer, `the Harold daemon did not answer within 3 seconds`.
 
 The user answers in the dash, not through the CLI. See the [dash README](../../../tmx-agent-dash/README.md#todos).
 
@@ -205,7 +229,7 @@ If Harold stops while a batch is being typed, or between typing and marking, the
 
 ## Log lines
 
-Ten fixed lines, with only the fields `tool`, `question_id`, `version`, `reason`, `kind`, `count` and `after`, and `error` on `picks not saved`, which stays in `harold.log`. No question or answer text is ever logged.
+Fourteen fixed lines, with only the fields `tool`, `question_id`, `version`, `reason`, `kind`, `count`, `after`, `waiting`, `minutes` and `never`, and `error` on `picks not saved`, which stays in `harold.log`. No question or answer text is ever logged.
 
 | Line | Fields | Notes |
 | --- | --- | --- |
@@ -218,6 +242,10 @@ Ten fixed lines, with only the fields `tool`, `question_id`, `version`, `reason`
 | `answers batch typed` | `tool`, `reason` | `reason` is `typed`, or `enter_failed` when Enter failed after the text went in (a warning). |
 | `answers batch waiting` | `tool`, `reason` | `reason` is `no_chief`, `pane_busy`, `no_pane` or `store_failed`. |
 | `set-aside questions returned` | `tool`, `count`, `after` | Info, written once per return and only when `count` is above 0. `after` is `answers_line`, `later` or `dismiss`. No question id or text is logged. It is written by the store as the questions move, so it comes just before the `question dismissed` or `answers batch typed` line that caused it, and in the rare case that the write then fails it may stand for a return that did not happen. |
+| `todos checked` | `tool`, `count` | Info, on `MarkChecked`. `count` is the todos listed. |
+| `todos not checked` | `tool`, `waiting`, `minutes`, `never` | A warning, once each time the checked line turns red. `minutes` is since the last check, 0 with `never` true when there was none. |
+| `todo changed spec` | `tool`, `question_id`, `version` | A warning, once per question version. |
+| `todo spec unknown` | `tool`, `question_id`, `version`, `reason` | Info, once per question version that names a `spec_file`. `reason` is `missing`, `not_a_file`, `too_large`, `outside_specs` or `registry_unreadable`. |
 | `tool failed to start` | `tool`, `reason` | `reason` is `store_open_failed`. |
 
 ## Data folder and rollback
@@ -229,6 +257,8 @@ Migration `002_answer_send_now.sql` adds `send_now INTEGER NOT NULL DEFAULT 0` t
 Migration `003_step_ticks.sql` adds `ticks TEXT NOT NULL DEFAULT ''` to `questions`: the ticked step numbers. The instructions themselves go in the existing `body` column. An older Harold refuses the migrated `questions.db`; roll back by moving `questions.db` aside.
 
 Migration `004_saved_picks.sql` adds `picks TEXT NOT NULL DEFAULT ''` to `questions`: the latest picks as JSON, one entry per picked decision (`decision`, `key`, `text`). An older Harold refuses the migrated `questions.db`; roll back by moving `questions.db` aside, as for 002 and 003.
+
+Migration `006_todos_current.sql` adds `spec_file TEXT NOT NULL DEFAULT ''` to `questions` and creates the one-row table `checks` (`id` always 1, `checked_at_ms`). Existing rows get an empty `spec_file`. An older Harold refuses the migrated `questions.db`; roll back by moving `questions.db` aside.
 
 The core store is untouched. To roll back:
 

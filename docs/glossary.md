@@ -114,6 +114,8 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 | todo page | The web app's page that lists your todos and lets you answer them from the phone | "task page", "queue page" |
 | page dots | The two dots above the reply box that show which page is open | "pager", "swipe indicator" |
 | todo count | The orange number on the thread page's **Todos** button: the waiting questions and the instructions, questions set aside with **Later** left out | "badge", "unread count" |
+| checked line | The line at the top of the web app's todo page saying when the chief last checked the todos. It turns red when the check is over 2 hours old and a todo waits | "freshness", "sync line" |
+| changed spec | A todo whose spec file no longer matches the checksum it was asked with, which is the question tool's spec state `changed` | "stale", "outdated", "out of date" |
 | sent line | The line at the top of the web app's todo page that says which answer was sent to the chief, such as `Q53: revise sent to the chief.` It stays until the next answer from that page or until the page is left | "toast", "banner" |
 | new-message count | The number beside the speech-bubble icon in the todo page's header: the chief's messages that arrived while the todo page was open | "unread count", "notification count" |
 | sender label | The small word at the bottom right of each message, `chief` or `me` | "byline", "name tag" |
