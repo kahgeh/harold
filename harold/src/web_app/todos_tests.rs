@@ -1579,7 +1579,7 @@ async fn a_changed_spec_shows_its_notice_turns_send_off_and_leaves_revise_and_re
         first.contains(r#"class="send" disabled>"#),
         "Send is off: {first}"
     );
-    for absent in ["card-more", "Revise", "Reject"] {
+    for absent in ["card-more", "Revise", "Reject", "note-box", "Cancel"] {
         assert!(!first.contains(absent), "{absent}: {first}");
     }
     assert!(first.contains("Later</button>"), "Later stays: {first}");
@@ -1716,4 +1716,37 @@ async fn a_spec_changed_post_logs_its_result_and_no_todo_id() {
         "{text}"
     );
     assert!(!lines[0].contains("Q1"), "{text}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_revise_refused_for_a_changed_spec_opens_no_note_box_and_keeps_later() {
+    let (service, server, _directory) = served_with_todos().await;
+    service.fake.0.lock().unwrap().write_refusal =
+        Some(Status::failed_precondition("spec_changed"));
+    service.fake.set_list(vec![
+        changed(question("Q1", 2, false)),
+        instructions("I1", 3),
+    ]);
+
+    for path in ["/todos/revise", "/todos/reject"] {
+        let redrawn = server
+            .post(path, "id=Q1&version=2&pick.0=a&note=make+it+shorter")
+            .await
+            .text()
+            .await
+            .unwrap();
+
+        assert_eq!(redrawn.matches(CHANGED_NOTICE).count(), 1, "{redrawn}");
+        assert!(!redrawn.contains("note-box"), "{path}: {redrawn}");
+        assert!(
+            !redrawn.contains(r#""mode""#),
+            "no open mode is sent: {redrawn}"
+        );
+        assert!(!redrawn.contains("Cancel"), "{redrawn}");
+        assert!(
+            redrawn.contains(r#"class="later-button" data-on:click="@post('/todos/later'"#),
+            "Later stays, shown whatever the page's signals hold: {redrawn}"
+        );
+    }
+    assert!(service.fake.calls().is_empty());
 }

@@ -804,7 +804,10 @@ async fn finish_with_note(
     }
     state.questions.close_note(id);
     let mode = match kind {
-        Kind::Revise | Kind::Reject if outcome != Outcome::Sent => Some(kind.word()),
+        // A changed spec leaves no note box to keep open: Revise and Reject are gone with it.
+        Kind::Revise | Kind::Reject if !matches!(outcome, Outcome::Sent | Outcome::SpecChanged) => {
+            Some(kind.word())
+        }
         _ => None,
     };
     if let Some(mode) = mode {

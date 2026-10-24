@@ -22,17 +22,21 @@
 {% endif %}</label>
 {% endfor %}</fieldset>
 {% endfor %}{% if let Some(notice) = card.notice %}<p class="notice" role="status">{{ notice }}</p>
-{% endif %}<div class="note-box" data-attr:hidden="!(!!$t.{{ card.sig }}.mode)"{% if card.open_mode.is_empty() %} hidden{% endif %}>
+{% endif %}{% if !card.changed %}<div class="note-box" data-attr:hidden="!(!!$t.{{ card.sig }}.mode)"{% if card.open_mode.is_empty() %} hidden{% endif %}>
 <label for="note-{{ card.id }}" data-text="$t.{{ card.sig }}.mode === 'reject' ? 'Why reject it?' : 'What should change?'">{% if card.open_mode == "reject" %}Why reject it?{% else %}What should change?{% endif %}</label>
 <textarea id="note-{{ card.id }}" name="note" maxlength="1999" rows="3" data-on:input="$t.{{ card.sig }}.len = evt.target.value.length">{{ card.note }}</textarea>
 <small class="note-count" data-attr:hidden="!($t.{{ card.sig }}.len >= 1800)" data-text="$t.{{ card.sig }}.len + ' / 1999'" hidden></small>
 </div>
-<div class="card-actions">
+{% endif %}{% if card.changed %}<div class="card-actions">
+<button type="submit" class="send" disabled>Send</button>
+<button type="button" class="later-button" data-on:click="@post('/todos/later', {contentType: 'form'})">Later</button>
+</div>
+{% else %}<div class="card-actions">
 <button type="submit" data-text="$t.{{ card.sig }}.mode === 'revise' ? 'Send revise' : $t.{{ card.sig }}.mode === 'reject' ? 'Send reject' : 'Send'" class="send"{% if card.send_disabled %} disabled{% endif %}>{% if card.open_mode == "revise" %}Send revise{% else if card.open_mode == "reject" %}Send reject{% else %}Send{% endif %}</button>
 <button type="button" class="later-button" data-attr:hidden="!(!$t.{{ card.sig }}.mode)"{% if !card.open_mode.is_empty() %} hidden{% endif %} data-on:click="@post('/todos/later', {contentType: 'form'})">Later</button>
 <button type="button" class="later-button" data-attr:hidden="!(!!$t.{{ card.sig }}.mode)"{% if card.open_mode.is_empty() %} hidden{% endif %} data-on:click="$t.{{ card.sig }}.mode = ''; $t.{{ card.sig }}.len = 0; evt.target.form.elements.note.value = ''; evt.target.form.elements.note.dispatchEvent(new Event('input', {bubbles: true}))">Cancel</button>
 </div>
-{% if !card.changed %}<div class="card-more" data-attr:hidden="!(!$t.{{ card.sig }}.mode)"{% if !card.open_mode.is_empty() %} hidden{% endif %}>
+{% endif %}{% if !card.changed %}<div class="card-more" data-attr:hidden="!(!$t.{{ card.sig }}.mode)"{% if !card.open_mode.is_empty() %} hidden{% endif %}>
 <button type="button" class="later-button" data-on:click="$t.{{ card.sig }}.mode = 'revise'">Revise…</button>
 <button type="button" class="later-button" data-on:click="$t.{{ card.sig }}.mode = 'reject'">Reject…</button>
 </div>
