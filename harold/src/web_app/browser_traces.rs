@@ -307,6 +307,16 @@ fn keep_attribute(key: &str, value: &Value, span_name: &str, scope: &str) -> Opt
         {
             Some(string_attribute(key, text()?))
         }
+        "harold.opened_at"
+            if scope == SERVICE_NAME
+                && span_name == "browser.thread_opened"
+                && matches!(text()?, "first_unread" | "newest" | "oldest_on_page") =>
+        {
+            Some(string_attribute(key, text()?))
+        }
+        "harold.unread" if scope == SERVICE_NAME && span_name == "browser.thread_opened" => Some(
+            json!({ "key": key, "value": { "intValue": number().filter(|n| *n >= 0)?.to_string() } }),
+        ),
         "http.response.status_code"
         | "http.response_content_length"
         | "code.lineno"

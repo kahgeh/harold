@@ -634,3 +634,31 @@ fn the_thread_page_loads_the_telemetry_script_before_datastar_and_the_deferred_s
         assert!(telemetry < at(later), "telemetry.js loads after {later}");
     }
 }
+
+#[test]
+fn pages_js_opens_the_thread_at_the_read_mark() {
+    let script = include_str!("../../static/web_app/pages.js");
+    for wanted in [
+        r#""harold-read-mark""#,
+        "new IntersectionObserver",
+        "function openAtReadMark()",
+        // The thread closure has its own listener for the page coming back.
+        "function openWhenPatched()",
+        r#"document.addEventListener("datastar-signal-patch", open)"#,
+        "harold:thread-opened",
+    ] {
+        assert!(script.contains(wanted), "pages.js lacks {wanted}");
+    }
+    // The load places the thread at the read mark, not with a bare scrollToBottom().
+    let end = script
+        .rfind("openAtReadMark();")
+        .expect("the load opens at the read mark");
+    assert!(
+        !script[end..].contains("scrollToBottom();"),
+        "the load ends with scrollToBottom()"
+    );
+    // Storage may be refused: the read and the write each sit in a try.
+    let read = &script[script.find("function readMark()").unwrap()..];
+    assert!(read.starts_with("function readMark() {\n    try {\n      return localStorage"));
+    assert!(script.contains("try {\n      localStorage.setItem(READ_MARK"));
+}

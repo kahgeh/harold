@@ -217,8 +217,19 @@ document.addEventListener("datastar-fetch", (event) => {
   // How far from the bottom the thread may be and still follow new messages, in pixels.
   const NEAR_BOTTOM = 80;
 
+  // The key of this device's read mark in localStorage: the id of the newest message row
+  // that has been fully on screen while the page was visible.
+  const READ_MARK = "harold-read-mark";
+  // How long to wait for the stream's reconnect patch before opening anyway, in milliseconds.
+  const PATCH_WAIT_MS = 1000;
+
   let following = true;
   let unseen = 0;
+  // Whether a reply was just sent, so the next row of mine becomes the read mark.
+  let replySent = false;
+  // Whether the page has been put in place since it was last hidden. Rows seen before that
+  // are where the page was kept, not where the reader is.
+  let placed = false;
   // The thread's scroll height as of the last change, to tell how much older rows add.
   let previousHeight = 0;
 
@@ -231,6 +242,133 @@ document.addEventListener("datastar-fetch", (event) => {
     following = true;
     newMessage.hidden = true;
   }
+
+  function messageRows() {
+    return Array.from(messages.children).filter((row) => row.classList.contains("message"));
+  }
+
+  function readMark() {
+    try {
+      return localStorage.getItem(READ_MARK);
+    } catch {
+      return null;
+    }
+  }
+
+  // Moves the read mark to the row, never back: a row at or before the mark is left alone.
+  function advanceMark(row) {
+    if (!row.id) {
+      return;
+    }
+    const current = readMark();
+    if (current === row.id) {
+      return;
+    }
+    const rows = messageRows();
+    const at = current === null ? -1 : rows.findIndex((candidate) => candidate.id === current);
+    if (at >= 0 && rows.indexOf(row) <= at) {
+      return;
+    }
+    try {
+      localStorage.setItem(READ_MARK, row.id);
+    } catch {
+      // A private window may refuse storage: the thread then opens at the newest message.
+    }
+  }
+
+  // A row counts as read when all of it sits between the header and the reply bar.
+  const inView = new IntersectionObserver(
+    (entries) => {
+      if (!placed || document.visibilityState !== "visible") {
+        return;
+      }
+      for (const entry of entries) {
+        // A row taller than the thread counts once its end is in view.
+        const whole =
+          entry.intersectionRatio >= 0.99 ||
+          (entry.boundingClientRect.height > entry.rootBounds.height &&
+            entry.boundingClientRect.bottom <= entry.rootBounds.bottom + 1);
+        if (entry.isIntersecting && whole) {
+          advanceMark(entry.target);
+        }
+      }
+    },
+    { root: thread, threshold: [0, 0.5, 1] },
+  );
+
+  // Asks the observer for the state of every row again, which it only reports on a change.
+  function watchRows() {
+    messageRows().forEach((row) => {
+      inView.unobserve(row);
+      inView.observe(row);
+    });
+  }
+
+  function placeUnder(row) {
+    const room = parseFloat(getComputedStyle(thread).paddingTop) || 0;
+    thread.scrollTop +=
+      row.getBoundingClientRect().top - thread.getBoundingClientRect().top - room;
+  }
+
+  // Puts the thread where the reader stopped: at the first row after the read mark that is
+  // not mine, else at the newest message.
+  function openAtReadMark() {
+    const rows = messageRows();
+    const mark = readMark();
+    let openedAt = "newest";
+    let unread = 0;
+    let target = null;
+    if (mark !== null && rows.length > 0) {
+      const at = rows.findIndex((row) => row.id === mark);
+      const others = rows.slice(at + 1).filter((row) => !row.classList.contains("user"));
+      unread = others.length;
+      if (others.length > 0) {
+        target = at < 0 ? rows[0] : others[0];
+        openedAt = at < 0 ? "oldest_on_page" : "first_unread";
+      }
+    }
+    if (target) {
+      placeUnder(target);
+      following = distanceFromBottom() <= NEAR_BOTTOM;
+      newMessage.hidden = true;
+    } else {
+      scrollToBottom();
+    }
+    previousHeight = thread.scrollHeight;
+    placed = true;
+    watchRows();
+    document.dispatchEvent(
+      new CustomEvent("harold:thread-opened", { detail: { openedAt, unread } }),
+    );
+  }
+
+  // Back in view: the stream opens again and resends the thread, so the page is placed once
+  // that has landed, or after a second.
+  let waiting = null;
+  function openWhenPatched() {
+    if (waiting) {
+      return;
+    }
+    const open = () => {
+      clearTimeout(waiting.timer);
+      document.removeEventListener("datastar-signal-patch", open);
+      rowChange.disconnect();
+      waiting = null;
+      openAtReadMark();
+    };
+    const rowChange = new MutationObserver(open);
+    rowChange.observe(messages, { childList: true });
+    document.addEventListener("datastar-signal-patch", open);
+    waiting = { timer: setTimeout(open, PATCH_WAIT_MS) };
+  }
+
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "hidden") {
+      placed = false;
+    } else if (document.visibilityState === "visible") {
+      openWhenPatched();
+    }
+  });
 
   function onTodos() {
     return pages.scrollLeft > pages.clientWidth / 2;
@@ -284,6 +422,11 @@ document.addEventListener("datastar-fetch", (event) => {
     if (!(row instanceof Element) || !row.classList.contains("message")) {
       return;
     }
+    inView.observe(row);
+    if (replySent && row.classList.contains("user")) {
+      replySent = false;
+      advanceMark(row);
+    }
     if (onTodos() && row.classList.contains("chief")) {
       unseen += 1;
       showCount();
@@ -317,7 +460,10 @@ document.addEventListener("datastar-fetch", (event) => {
   });
   newMessage.addEventListener("click", scrollToBottom);
   if (reply) {
-    reply.addEventListener("submit", scrollToBottom);
+    reply.addEventListener("submit", () => {
+      replySent = true;
+      scrollToBottom();
+    });
   }
 
   // A row added to the thread: followed if the reader was at the bottom, else offered.
@@ -544,8 +690,7 @@ document.addEventListener("datastar-fetch", (event) => {
     attributeFilter: ["value", "checked", "data-mode"],
   });
 
-  scrollToBottom();
-  previousHeight = thread.scrollHeight;
+  openAtReadMark();
   syncPage();
   syncSends();
 })();

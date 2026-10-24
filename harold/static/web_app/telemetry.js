@@ -93,6 +93,7 @@ function start() {
   const tracer = trace.getTracer(SERVICE);
   recordErrors(tracer);
   recordRowsDrawn(tracer);
+  recordThreadOpened(tracer);
 }
 
 /** A script error or a promise nobody caught, as a `browser.error` span. */
@@ -158,6 +159,22 @@ function recordRowsDrawn(tracer) {
       }
     }
   }).observe(messages, { childList: true });
+}
+
+/**
+ * Where the thread opened, as a `browser.thread_opened` span: pages.js announces each
+ * placement with a `harold:thread-opened` event holding `openedAt` (`first_unread`, `newest`
+ * or `oldest_on_page`) and `unread`, the count of rows after the read mark that are not mine.
+ */
+function recordThreadOpened(tracer) {
+  document.addEventListener("harold:thread-opened", (event) => {
+    const { openedAt, unread } = event.detail ?? {};
+    if (!Number.isInteger(unread)) return;
+    const span = tracer.startSpan("browser.thread_opened", {
+      attributes: { "harold.opened_at": String(openedAt), "harold.unread": unread },
+    });
+    span.end();
+  });
 }
 
 try {

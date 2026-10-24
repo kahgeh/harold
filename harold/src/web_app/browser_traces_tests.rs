@@ -632,3 +632,59 @@ async fn only_the_two_versioned_scripts_are_cached_for_a_year() {
         assert!(response.headers().get("cache-control").is_none(), "{path}");
     }
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn thread_opened_keeps_its_two_attributes_and_nothing_else_does() {
+    let collector = Collector::start().await;
+    let app = App::start(Some(&collector.address())).await;
+    let opened = |id: &str, opened_at: &str, unread: Value| {
+        span(
+            "browser.thread_opened",
+            id,
+            "",
+            vec![
+                text("harold.opened_at", opened_at),
+                attribute("harold.unread", unread),
+            ],
+        )
+    };
+    let spans = vec![
+        opened("00f067aa0ba902c1", "first_unread", json!({ "intValue": 3 })),
+        opened(
+            "00f067aa0ba902c2",
+            "oldest_on_page",
+            json!({ "intValue": "50" }),
+        ),
+        opened("00f067aa0ba902c3", "nowhere", json!({ "intValue": "-1" })),
+        span(
+            "browser.message_shown",
+            "00f067aa0ba902c4",
+            "",
+            vec![
+                text("harold.opened_at", "newest"),
+                attribute("harold.unread", json!({ "intValue": 1 })),
+            ],
+        ),
+    ];
+
+    app.post(batch("harold-web-app", spans).to_string()).await;
+
+    let spans = spans_of(&collector.wait_for_batches(1).await);
+    assert_eq!(spans.len(), 4);
+    assert_eq!(
+        attribute_of(&spans[0], "harold.opened_at"),
+        Some(&json!({ "stringValue": "first_unread" }))
+    );
+    assert_eq!(
+        attribute_of(&spans[0], "harold.unread"),
+        Some(&json!({ "intValue": "3" }))
+    );
+    assert_eq!(
+        attribute_of(&spans[1], "harold.opened_at"),
+        Some(&json!({ "stringValue": "oldest_on_page" }))
+    );
+    // A value outside the three, or a negative count, is dropped.
+    assert!(spans[2].get("attributes").is_none(), "{:?}", spans[2]);
+    // The same keys on another span are dropped.
+    assert!(spans[3].get("attributes").is_none(), "{:?}", spans[3]);
+}
