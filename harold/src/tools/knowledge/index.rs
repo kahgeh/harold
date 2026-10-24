@@ -58,6 +58,14 @@ pub(crate) struct PassStatus {
     pub last_failure: Option<Failure>,
 }
 
+/// Why a vault note was not indexed.
+enum Skip {
+    /// The model took no embedding of this vault note; the others go on.
+    Note,
+    /// The pass cannot go on.
+    Pass(Failure),
+}
+
 /// What one pass did.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct PassCounts {
@@ -219,10 +227,23 @@ impl Index {
             .map_err(|()| Failure::VaultUnreadable)?;
         let store = Arc::clone(&self.store);
         if rebuild {
+            // A model that cannot load must not leave the index empty.
+            self.embedder
+                .ready()
+                .await
+                .map_err(|_: EmbedError| Failure::WorkerFailed)?;
             blocking(&store, Store::clear).await?;
         }
+        let mut known = blocking(&store, Store::index_info).await?;
+        // A change of model empties the index without starting the worker: every passage
+        // was embedded by the model that was there before.
+        if let (Some(held), Some(configured)) = (&known, self.embedder.configured_model())
+            && held.model != configured
+        {
+            blocking(&store, Store::clear).await?;
+            known = None;
+        }
         let mut stored: HashMap<String, String> = blocking(&store, Store::hashes).await?;
-        let known = blocking(&store, Store::index_info).await?;
         let changed_count = files
             .iter()
             .filter(|f| stored.get(&f.name) != Some(&f.hash))
@@ -235,6 +256,7 @@ impl Index {
         self.update(|s| s.pending = changed_count);
 
         let mut counts = PassCounts::default();
+        let mut skipped = 0_usize;
         if changed_count > 0 || known.is_none() && !files.is_empty() {
             let info = self
                 .embedder
@@ -257,10 +279,17 @@ impl Index {
                 if stored.get(&file.name) == Some(&file.hash) {
                     continue;
                 }
-                let embedded = self.index_file(file, &info).await?;
-                counts.notes += 1;
-                counts.passages += embedded.0;
-                counts.embed_ms += embedded.1;
+                match self.index_file(file, &info).await {
+                    Ok(embedded) => {
+                        counts.notes += 1;
+                        counts.passages += embedded.0;
+                        counts.embed_ms += embedded.1;
+                    }
+                    // One vault note the model cannot take does not stop the others; the
+                    // pass reports the failure when it is done.
+                    Err(Skip::Note) => skipped += 1,
+                    Err(Skip::Pass(failure)) => return Err(failure),
+                }
             }
         }
         for name in &removed {
@@ -268,16 +297,15 @@ impl Index {
             blocking(&store, move |s| s.delete_note(&name)).await?;
             counts.removed += 1;
         }
+        if skipped > 0 {
+            return Err(Failure::WorkerFailed);
+        }
         Ok(counts)
     }
 
     /// Embeds one vault note's passages and replaces its rows. Returns the passages
     /// embedded and the milliseconds the embedding took.
-    async fn index_file(
-        &self,
-        file: &VaultFile,
-        info: &ModelInfo,
-    ) -> Result<(usize, u64), Failure> {
+    async fn index_file(&self, file: &VaultFile, info: &ModelInfo) -> Result<(usize, u64), Skip> {
         let note: ParsedNote = parse_note(&file.name, &file.text);
         let passages = split_passages(&note.body);
         let prompts: Vec<String> = passages
@@ -289,10 +317,13 @@ impl Index {
             .embedder
             .embed(prompts)
             .await
-            .map_err(|_: EmbedError| Failure::WorkerFailed)?;
+            .map_err(|error| match error {
+                EmbedError::Failed => Skip::Note,
+                EmbedError::Unavailable(_) => Skip::Pass(Failure::WorkerFailed),
+            })?;
         let embed_ms = started.elapsed().as_millis() as u64;
         if vectors.iter().any(|v| v.len() != info.dimensions) {
-            return Err(Failure::WorkerFailed);
+            return Err(Skip::Note);
         }
         let rows: Vec<(String, Vec<f32>)> = passages.into_iter().zip(vectors).collect();
         let count = rows.len();
@@ -300,7 +331,8 @@ impl Index {
         blocking(&self.store, move |s| {
             s.replace_note(&note, &path, &hash, mtime, &rows)
         })
-        .await?;
+        .await
+        .map_err(Skip::Pass)?;
         Ok((count, embed_ms))
     }
 

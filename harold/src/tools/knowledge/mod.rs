@@ -6,6 +6,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use harold_api::tools::knowledge::v1::knowledge_service_server::KnowledgeServiceServer;
 use tonic::service::Routes;
@@ -28,10 +29,9 @@ mod text;
 
 pub(crate) const NAME: &str = "knowledge";
 
-/// The reason `start` gives when the database cannot be opened or a secret file is refused.
+/// The reason `start` gives when a secret file is refused, and the one the open reports when
+/// its thread fails.
 const STORE_FAILED: &str = "store_failed";
-/// The reason `start` gives when the bucket cannot be reached while opening.
-const BUCKET_UNREACHABLE: &str = "bucket_unreachable";
 
 /// What the host gives the knowledge tool: its settings and this Mac's name.
 #[derive(Clone)]
@@ -93,29 +93,6 @@ pub(crate) async fn start(
         encryption_key_file: key_file.to_path_buf(),
     };
     let db_folder = data_folder.join("index");
-    let opened = tokio::task::spawn_blocking(move || {
-        std::fs::create_dir_all(&db_folder)
-            .map_err(|_| store::StoreError::StoreFailed)
-            .and_then(|()| store::Store::open(&db_folder, &bucket_config))
-    })
-    .await;
-    let store = match opened {
-        Ok(Ok(store)) => Arc::new(store),
-        Ok(Err(error)) => {
-            warn!(reason = error.reason(), "knowledge index failed");
-            return Err(ToolError {
-                reason: match error {
-                    store::StoreError::BucketUnreachable => BUCKET_UNREACHABLE,
-                    store::StoreError::StoreFailed => STORE_FAILED,
-                },
-            });
-        }
-        Err(_) => {
-            return Err(ToolError {
-                reason: STORE_FAILED,
-            });
-        }
-    };
     let embedder = embed::WorkerEmbedder::new(
         embed::WorkerCommand {
             python: command.to_string(),
@@ -126,24 +103,75 @@ pub(crate) async fn start(
         },
         embed::IDLE_LIMIT,
     );
-    let index = index::Index::new(
-        store,
-        embedder.clone(),
-        vault.to_path_buf(),
-        &settings.exclude,
-    );
-    let service = service::KnowledgeToolService::new(Arc::clone(&index));
-    let reaper = embedder.spawn_reaper(shutdown.clone());
-    let task = tokio::spawn(async move {
-        index::run(Arc::clone(&index), shutdown).await;
-        let _ = reaper.await;
-        // Dropping the last handle closes the database, which blocks while buckwal ends.
-        let _ = tokio::task::spawn_blocking(move || drop(index)).await;
-    });
+    let (vault, exclude) = (vault.to_path_buf(), settings.exclude.clone());
+    let opening = Arc::new(service::Opening::default());
+    let service = service::KnowledgeToolService::new(Arc::clone(&opening));
+    let task = tokio::spawn(open_and_run(Opening {
+        opening,
+        db_folder,
+        bucket_config,
+        embedder,
+        vault,
+        exclude,
+        shutdown,
+    }));
     Ok(ToolHandle {
         routes: Routes::new(KnowledgeServiceServer::new(service)),
         task,
     })
+}
+
+/// How long the open waits before it tries again when the database could not open, as when
+/// the bucket is down while Harold starts.
+const OPEN_RETRY: Duration = Duration::from_secs(30);
+
+/// Everything the background task needs to open the database and keep the index current.
+struct Opening {
+    opening: Arc<service::Opening>,
+    db_folder: PathBuf,
+    bucket_config: store::BucketConfig,
+    embedder: Arc<embed::WorkerEmbedder>,
+    vault: PathBuf,
+    exclude: Vec<String>,
+    shutdown: tokio::sync::watch::Receiver<()>,
+}
+
+/// Opens the database, trying again every `OPEN_RETRY` until it opens, then serves the index
+/// and keeps it current until shutdown. Until it opens, every call answers `Unavailable`.
+async fn open_and_run(mut task: Opening) {
+    let store = loop {
+        let (folder, config) = (task.db_folder.clone(), task.bucket_config.clone());
+        let opened = tokio::task::spawn_blocking(move || {
+            std::fs::create_dir_all(&folder)
+                .map_err(|_| store::StoreError::StoreFailed)
+                .and_then(|()| store::Store::open(&folder, &config))
+        })
+        .await;
+        match opened {
+            Ok(Ok(store)) => break Arc::new(store),
+            Ok(Err(error)) => {
+                warn!(reason = error.reason(), "knowledge index failed");
+                task.opening.failed(error.reason());
+            }
+            Err(_) => task.opening.failed(STORE_FAILED),
+        }
+        tokio::select! {
+            () = tokio::time::sleep(OPEN_RETRY) => {}
+            _ = task.shutdown.changed() => return,
+        }
+    };
+    let index = index::Index::new(
+        store,
+        task.embedder.clone(),
+        task.vault.clone(),
+        &task.exclude,
+    );
+    task.opening.opened(Arc::clone(&index));
+    let reaper = task.embedder.spawn_reaper(task.shutdown.clone());
+    index::run(Arc::clone(&index), task.shutdown.clone()).await;
+    let _ = reaper.await;
+    // Dropping the last handle closes the database, which blocks while buckwal ends.
+    let _ = tokio::task::spawn_blocking(move || drop(index)).await;
 }
 
 #[cfg(test)]

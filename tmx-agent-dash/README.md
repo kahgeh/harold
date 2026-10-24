@@ -78,7 +78,7 @@ cell says "Nothing", the key does nothing there, so a key never means two things
 | `n` / `N` | Next or previous waiting agent (wraps) | Next or previous waiting todo (wraps) | Same | Same | Same | Types |
 | `o` | Nothing | Open the todo's link, if it is `http://` or `https://` | Same | Same | Same | Types |
 | `g` / `G` | First / last row | Same | Same | Same | Same | Types |
-| `c` / `t`, `f`, `/`, `s`, `q` | `c` / `t`: call / talk now, on the chief's row · `f`: search · `/`: command palette · `s`: notes search (while connected) · `q`: quit | Nothing | Nothing | Nothing | Nothing | Types |
+| `c` / `t`, `f`, `/`, `s`, `q` | `c` / `t`: call / talk now, on the chief's row · `f`: search · `/`: command palette · `s`: notes search (while connected, when Harold serves the knowledge tool) · `q`: quit | Nothing | Nothing | Nothing | Nothing | Types |
 | Ctrl+L, Ctrl+Q, Ctrl+C | Retry the Harold connection now (clearing and redrawing the screen) · quit · quit | Same | Same | Same | Same | Same: the text and the query are kept, and nothing is typed |
 
 - **Quit keys:** Ctrl+Q and Ctrl+C quit from every mode, including a note and the
@@ -137,7 +137,7 @@ for what the switch does.
 
 ## Notes search
 
-`s` opens the vault notes over the agent list, while the dash is connected to Harold. Vault notes are the organisation's Markdown notes, which Harold's [knowledge tool](../docs/references/tools/knowledge.md) indexes by meaning; they are not backlog notes. The dash reads them through the tool's gRPC service on Harold's own address. It needs `[knowledge] vault` set in Harold, and with the tool off the list reads `Harold does not serve notes.`
+`s` opens the vault notes over the agent list, while the dash is connected to Harold. Vault notes are the organisation's Markdown notes, which Harold's [knowledge tool](../docs/references/tools/knowledge.md) indexes by meaning; they are not backlog notes. The dash reads them through the tool's gRPC service on Harold's own address. It needs `[knowledge] vault` set in Harold: the dash asks once when its stream opens, and when Harold does not serve the tool `s` does nothing.
 
 - The box shows the 10 vault notes changed most recently, newest first, each with its kind and title.
 - **Typing searches.** Any printable key starts a search, and the list becomes the closest 10 vault notes after you pause for 300 ms. A query under 2 characters shows the recent list again. The first search after a pause waits for the model to load, and the box reads `Looking…`; if the model could not load it reads `Search is resting: the model didn't load.`

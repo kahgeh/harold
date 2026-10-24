@@ -251,6 +251,8 @@ pub struct App {
     pub palette: Option<PaletteState>,
     /// The notes search over the agent list, open after `s`.
     pub notes: Option<NotesView>,
+    /// Whether Harold serves the knowledge tool; `s` does nothing until it is known to.
+    pub notes_available: bool,
     pub selected: Option<AgentIncarnation>,
     /// The call, unknown until Harold answers and again after a failed poll or a disconnect.
     pub call: Option<CallView>,
@@ -367,6 +369,7 @@ impl App {
             search,
             palette: None,
             notes: None,
+            notes_available: false,
             selected,
             call: None,
             questions: QuestionBlock::default(),
@@ -1023,8 +1026,13 @@ impl App {
 
     /// Takes an answer to the notes search; one that comes after the view closed is dropped.
     pub fn notes_event(&mut self, event: NotesEvent) -> Option<String> {
+        if let NotesEvent::Available(available) = event {
+            self.notes_available = available;
+            return None;
+        }
         let view = self.notes.as_mut()?;
         match event {
+            NotesEvent::Available(_) => None,
             NotesEvent::Loaded { seq, result } => {
                 view.loaded(seq, result);
                 None
@@ -1040,6 +1048,7 @@ impl App {
     /// Closes the notes search, as the stream ending does: nothing can be asked without Harold.
     pub fn close_notes(&mut self) {
         self.notes = None;
+        self.notes_available = false;
     }
 
     /// Selects the first visible row, or nothing when no row shows.
@@ -1120,7 +1129,9 @@ impl App {
                 });
             }
             KeyCode::Char('q') => return Effect::Quit,
-            KeyCode::Char('s') if self.connection == ConnectionState::Live => {
+            KeyCode::Char('s')
+                if self.connection == ConnectionState::Live && self.notes_available =>
+            {
                 let (view, action) = NotesView::open();
                 self.notes = Some(view);
                 return Effect::Notes(action);
@@ -4177,6 +4188,9 @@ mod tests {
     fn s_opens_the_notes_search_only_while_live_and_esc_closes_it() {
         use crate::notes::NotesAction;
         let mut live = test_app(ConnectionState::Live);
+        // Until Harold is known to serve the tool, `s` does nothing.
+        assert_eq!(live.handle_key(KeyCode::Char('s')), Effect::None);
+        live.notes_event(crate::notes::NotesEvent::Available(true));
         assert!(matches!(
             live.handle_key(KeyCode::Char('s')),
             Effect::Notes(NotesAction::Load { seq: 1, .. })
@@ -4186,6 +4200,7 @@ mod tests {
         assert!(live.notes.is_none());
 
         let mut connecting = test_app(ConnectionState::Connecting);
+        connecting.notes_event(crate::notes::NotesEvent::Available(true));
         assert_eq!(connecting.handle_key(KeyCode::Char('s')), Effect::None);
         assert!(connecting.notes.is_none());
     }
@@ -4194,6 +4209,7 @@ mod tests {
     fn while_the_notes_search_is_open_the_list_keys_do_not_reach_the_agents() {
         use crate::notes::{NoteLine, NotesAction, NotesEvent};
         let mut app = test_app(ConnectionState::Live);
+        app.notes_event(NotesEvent::Available(true));
         let Effect::Notes(NotesAction::Load { seq, .. }) = app.handle_key(KeyCode::Char('s'))
         else {
             panic!("s reads the recent list");

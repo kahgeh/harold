@@ -43,7 +43,8 @@ Refusals print one line: `unknown vault note NAME`, `search is resting: the mode
 
 - At start-up and every hour, a pass compares each file's SHA-256 with the index. It embeds new and changed vault notes and removes deleted ones. A rename removes the old name and indexes the new one, with no history kept. A pass with nothing to do does not start the embedding worker.
 - Between those passes a file watcher on the vault reacts to a saved vault note: after the vault has been quiet for 2 seconds, a pass runs. If the watcher cannot start, the hourly pass still runs.
-- A change of the model, its dimensions, its runtime or its prompts rebuilds the whole index.
+- A change of the model, its dimensions, its runtime or its prompts rebuilds the whole index: a pass compares the configured model's file name with the one recorded without starting the worker, and the worker's own report of the model and prompts when it starts. A `rebuild` that cannot load the model leaves the index as it was.
+- A vault note the model cannot embed is skipped and the pass goes on with the others, then reports `worker_failed`; the next pass tries it again.
 - `rebuild` clears the index and builds it again.
 - A search during a pass reads the last committed index: a vault note's rows are replaced in one commit.
 - The vault note's time in the index (`changed_at`) is the file's modification time, so `recent` follows the vault's edits, not the pass.
@@ -140,7 +141,7 @@ encryption_key_file = "/Users/you/.config/harold/knowledge-key"        # 64 hex 
 | `passages` | `note`, `seq`, `text`, `embedding` (a `vector32`), primary key (`note`, `seq`) |
 | `index_info` | `runtime`, `model`, `dimensions`, `prompts`, `built_at` |
 
-Every commit is in the bucket before it returns. Delete the local `index/` folder and restart, and buckwal restores the database from the bucket. Delete the prefix's objects as well, and the index is built again from the vault. If the bucket cannot be reached, a pass fails with `bucket_unreachable` and tries again at the next one; searches still read the local copy.
+Every commit is in the bucket before it returns. Delete the local `index/` folder and restart, and buckwal restores the database from the bucket. Delete the prefix's objects as well, and the index is built again from the vault. If the bucket cannot be reached when Harold starts, the tool starts anyway, answers `Unavailable` (`store_failed: bucket_unreachable`) and tries to open the database again every 30 seconds. Once it is open and the bucket cannot be reached, a pass fails with `bucket_unreachable` and tries again at the next one; searches still read the local copy.
 
 ## Logs and spans
 
@@ -162,4 +163,4 @@ No line or span holds a query, a vault note's text or a passage. buckwal's spans
 | The vault folder is missing or unreadable | `knowledge index failed` with `vault_unreadable`; searches answer from the last index and `status` says so |
 | The worker cannot load | Searches answer `Unavailable`; the web app says "Search is resting: the model didn't load." |
 | A link to a vault note that does not exist | Shown as plain text, not a link |
-| `[knowledge]` is not set | No knowledge tool, no Notes link in the web app, no dash key |
+| `[knowledge]` is not set | No knowledge tool, no Notes link in the web app, and the dash's `s` does nothing (it asks Harold once when the stream opens, and `Unimplemented` means off) |

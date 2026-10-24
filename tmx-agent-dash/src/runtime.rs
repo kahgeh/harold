@@ -447,6 +447,7 @@ where
     T: ScreenPort,
 {
     core.notes_backend = stream.notes_backend();
+    core.probe_notes();
     let result = async {
         // The call's state is asked for as the stream opens, so the button finds the
         // chief's pane before any call, and then on every tick of the poll. Each poll
@@ -1257,6 +1258,17 @@ impl RuntimeCore {
     /// read hides the line and sets no status, as a failed question read does.
     fn now_listed(&mut self, result: Result<Option<String>, SourceError>) -> bool {
         self.app.observe_now(result.ok().flatten())
+    }
+
+    /// Asks whether Harold serves the knowledge tool; the answer says whether `s` does anything.
+    fn probe_notes(&self) {
+        let Some(backend) = self.notes_backend.clone() else {
+            return;
+        };
+        let sender = self.notes_sender.clone();
+        tokio::spawn(async move {
+            let _ = sender.send(NotesEvent::Available(backend.available().await));
+        });
     }
 
     /// Starts a notes read, or the opening of a vault note's file, without holding the
@@ -2218,6 +2230,7 @@ mod tests {
         };
         let mut core = live_core(false);
         core.notes_backend = Some(notes.clone());
+        core.app.notes_available = true;
 
         assert_eq!(
             core.handle_key(KeyCode::Char('s'), &navigator),
@@ -2227,7 +2240,7 @@ mod tests {
         let view = core.app.notes.as_ref().unwrap();
         assert_eq!(view.rows[0].name, "recent-note");
 
-        // Two keys typed in a burst: only the last search runs, after the pause.
+        // Three keys typed in a burst: only the last search runs, after the pause.
         core.handle_key(KeyCode::Char('a'), &navigator);
         core.handle_key(KeyCode::Char('b'), &navigator);
         core.handle_key(KeyCode::Char('c'), &navigator);
@@ -2259,6 +2272,7 @@ mod tests {
         };
         let mut core = live_core(false);
         core.notes_backend = Some(notes);
+        core.app.notes_available = true;
         core.handle_key(KeyCode::Char('s'), &navigator);
         next_notes_event(&mut core, &navigator).await;
         core.handle_key(KeyCode::Enter, &navigator);
@@ -2277,6 +2291,7 @@ mod tests {
     async fn without_a_knowledge_tool_the_list_says_notes_are_not_available() {
         let navigator = FakeNavigator::successful();
         let mut core = live_core(false);
+        core.app.notes_available = true;
         core.handle_key(KeyCode::Char('s'), &navigator);
         next_notes_event(&mut core, &navigator).await;
         let message = core.app.notes.as_ref().unwrap().message.clone().unwrap();

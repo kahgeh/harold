@@ -54,6 +54,8 @@ pub(super) struct FakeEmbedder {
     pub embedded: Mutex<Vec<String>>,
     pub fail: Mutex<Option<EmbedError>>,
     pub model: Mutex<String>,
+    /// A text that makes the embedding of the batch holding it fail.
+    pub poison: Mutex<Option<String>>,
 }
 
 impl FakeEmbedder {
@@ -62,6 +64,7 @@ impl FakeEmbedder {
             embedded: Mutex::new(Vec::new()),
             fail: Mutex::new(None),
             model: Mutex::new("fake-model".into()),
+            poison: Mutex::new(None),
         })
     }
 
@@ -112,6 +115,11 @@ impl Embedder for FakeEmbedder {
             if let Some(error) = *self.fail.lock().unwrap() {
                 return Err(error);
             }
+            if let Some(poison) = &*self.poison.lock().unwrap()
+                && texts.iter().any(|t| t.contains(poison.as_str()))
+            {
+                return Err(EmbedError::Failed);
+            }
             self.embedded.lock().unwrap().extend(texts.iter().cloned());
             Ok(texts.iter().map(|t| Self::vector(t)).collect())
         })
@@ -119,5 +127,9 @@ impl Embedder for FakeEmbedder {
 
     fn state(&self) -> &'static str {
         "ready"
+    }
+
+    fn configured_model(&self) -> Option<String> {
+        Some(self.model.lock().unwrap().clone())
     }
 }

@@ -59,6 +59,10 @@ pub(crate) trait Embedder: Send + Sync + 'static {
     fn embed(&self, texts: Vec<String>) -> BoxFuture<'_, Result<Vec<Vec<f32>>, EmbedError>>;
     /// `idle`, `loading`, `ready` or `unavailable`, for `status`.
     fn state(&self) -> &'static str;
+    /// The name the model will be recorded under, known without starting the worker.
+    fn configured_model(&self) -> Option<String> {
+        None
+    }
 }
 
 /// How to start the worker.
@@ -87,8 +91,6 @@ struct Live {
 #[derive(Default)]
 struct Inner {
     live: Option<Live>,
-    /// Set when the last start failed, until a start works.
-    failed: Option<&'static str>,
 }
 
 /// The real worker, started on demand and stopped when idle.
@@ -255,13 +257,9 @@ impl WorkerEmbedder {
             self.state.store(LOADING, Relaxed);
             match self.start_live().await {
                 Ok(live) => {
-                    inner.failed = None;
                     inner.live = Some(live);
                 }
                 Err(error) => {
-                    if let EmbedError::Unavailable(reason) = error {
-                        inner.failed = Some(reason);
-                    }
                     self.state.store(UNAVAILABLE, Relaxed);
                     return Err(error);
                 }
@@ -284,7 +282,6 @@ impl WorkerEmbedder {
                 Err(error) => {
                     if let EmbedError::Unavailable(reason) = error {
                         warn!(reason, "knowledge worker exited");
-                        inner.failed = Some(reason);
                         if let Some(mut live) = inner.live.take() {
                             let _ = live.child.kill().await;
                         }
@@ -361,6 +358,13 @@ impl Embedder for WorkerEmbedder {
 
     fn embed(&self, texts: Vec<String>) -> BoxFuture<'_, Result<Vec<Vec<f32>>, EmbedError>> {
         Box::pin(self.embed_inner(texts))
+    }
+
+    fn configured_model(&self) -> Option<String> {
+        self.command
+            .model_path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
     }
 
     fn state(&self) -> &'static str {

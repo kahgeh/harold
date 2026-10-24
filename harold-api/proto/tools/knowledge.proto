@@ -19,8 +19,9 @@
 // Refusals:
 //   InvalidArgument      message "invalid <field>".
 //   NotFound             message "unknown_vault_note".
-//   Unavailable          message "search_resting" when the embedding worker could not
-//                        load, or "store_failed" when the database could not be read;
+//   Unavailable          message "search_resting: <reason>" when the embedding worker
+//                        could not load, or "store_failed: <reason>" when the database
+//                        is not open or could not be read;
 //                        the details carry a fixed reason word, never error text.
 //
 // The server trusts local callers: there is no token.

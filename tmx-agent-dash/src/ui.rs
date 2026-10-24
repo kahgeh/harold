@@ -1577,8 +1577,6 @@ fn footer_hints(
     ]
 }
 
-/// While keys are swallowed after the questions hid under the cursor, the footer says
-/// the way out.
 /// The notes search over the agent list: the query, then the vault notes by kind and title.
 fn render_notes(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let Some(view) = &app.notes else {
@@ -1655,6 +1653,8 @@ fn render_notes_footer(frame: &mut Frame<'_>, area: Rect) {
     );
 }
 
+/// While keys are swallowed after the questions hid under the cursor, the footer says
+/// the way out.
 fn render_swallow_footer(frame: &mut Frame<'_>, area: Rect) {
     let key = Style::default().fg(INK);
     let words = Style::default().fg(Color::Yellow);
@@ -3249,6 +3249,7 @@ mod tests {
         use crate::app::Effect;
         use crate::notes::{NoteLine, NotesAction};
         let mut app = live_app(Vec::new(), None);
+        app.notes_event(crate::notes::NotesEvent::Available(true));
         let Effect::Notes(NotesAction::Load { seq, .. }) =
             app.handle_key(crossterm::event::KeyCode::Char('s'))
         else {
@@ -3282,6 +3283,7 @@ mod tests {
         use crate::app::Effect;
         use crate::notes::NotesAction;
         let mut app = live_app(Vec::new(), None);
+        app.notes_event(crate::notes::NotesEvent::Available(true));
         let Effect::Notes(NotesAction::Load { seq, .. }) =
             app.handle_key(crossterm::event::KeyCode::Char('s'))
         else {

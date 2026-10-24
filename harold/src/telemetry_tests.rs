@@ -2149,7 +2149,7 @@ fn the_cards_dashboard_shows_each_card_beside_its_earlier_number_and_nothing_els
 
 const NOTIFICATIONS_CARD: &str = "Notifications by agent and channel";
 const CALL_TURN_CARD: &str = "Call turn, time to first sound and to the answer, last 7 days";
-/// The web app's cards, in the order the dashboard lists them.
+/// The knowledge index's cards, in the order the dashboard lists them.
 const KNOWLEDGE_CARDS: [&str; 4] = [
     "Knowledge index: hours since the last good pass (info; the line is 2)",
     "Notes searches by source: median ms, searches, searches with 0 results",
@@ -2157,6 +2157,7 @@ const KNOWLEDGE_CARDS: [&str; 4] = [
     "buckwal commits that failed, per hour",
 ];
 
+/// The web app's cards, in the order the dashboard lists them.
 const WEB_APP_CARDS: [&str; 5] = [
     "Web app errors per day",
     "Phone page load (p50, p95)",

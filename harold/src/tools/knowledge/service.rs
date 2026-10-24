@@ -10,17 +10,51 @@ use super::index::Index;
 use super::search::{Hit, Knowledge, SearchError, clamp};
 use super::store::NoteRow;
 
+/// The index, once the database has opened. Until then, and while the bucket cannot be
+/// reached at start-up, every call answers `Unavailable` with the reason it is not open.
+#[derive(Default)]
+pub(super) struct Opening {
+    index: std::sync::OnceLock<Arc<Index>>,
+    reason: std::sync::Mutex<&'static str>,
+}
+
+impl Opening {
+    pub(super) fn opened(&self, index: Arc<Index>) {
+        let _ = self.index.set(index);
+    }
+
+    pub(super) fn failed(&self, reason: &'static str) {
+        *self.reason.lock().unwrap_or_else(|e| e.into_inner()) = reason;
+    }
+}
+
 pub(super) struct KnowledgeToolService {
-    knowledge: Knowledge,
-    embedder_state: Arc<Index>,
+    opening: Arc<Opening>,
 }
 
 impl KnowledgeToolService {
-    pub(super) fn new(index: Arc<Index>) -> Self {
-        Self {
-            knowledge: Knowledge::new(Arc::clone(&index)),
-            embedder_state: index,
-        }
+    pub(super) fn new(opening: Arc<Opening>) -> Self {
+        Self { opening }
+    }
+
+    fn index(&self) -> Result<Arc<Index>, Status> {
+        self.opening.index.get().cloned().ok_or_else(|| {
+            let reason = *self
+                .opening
+                .reason
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let reason = if reason.is_empty() {
+                "store_failed"
+            } else {
+                reason
+            };
+            Status::unavailable(format!("store_failed: {reason}"))
+        })
+    }
+
+    fn knowledge(&self) -> Result<Knowledge, Status> {
+        self.index().map(Knowledge::new)
     }
 }
 
@@ -82,7 +116,7 @@ impl KnowledgeService for KnowledgeToolService {
             return Err(invalid("query"));
         }
         let hits = self
-            .knowledge
+            .knowledge()?
             .search(
                 &request.query,
                 clamp(request.limit),
@@ -100,7 +134,7 @@ impl KnowledgeService for KnowledgeToolService {
         request: Request<pb::RecentRequest>,
     ) -> Result<Response<pb::RecentResponse>, Status> {
         let notes = self
-            .knowledge
+            .knowledge()?
             .recent(clamp(request.into_inner().limit))
             .await
             .map_err(status_of)?;
@@ -118,7 +152,7 @@ impl KnowledgeService for KnowledgeToolService {
             return Err(invalid("name"));
         }
         let hits = self
-            .knowledge
+            .knowledge()?
             .related(&request.name, clamp(request.limit))
             .await
             .map_err(status_of)?;
@@ -136,7 +170,7 @@ impl KnowledgeService for KnowledgeToolService {
             return Err(invalid("name"));
         }
         let hits = self
-            .knowledge
+            .knowledge()?
             .suggest_links(&request.name)
             .await
             .map_err(status_of)?;
@@ -154,7 +188,7 @@ impl KnowledgeService for KnowledgeToolService {
             return Err(invalid("name"));
         }
         let note = self
-            .knowledge
+            .knowledge()?
             .show(&request.name)
             .await
             .map_err(status_of)?;
@@ -167,7 +201,7 @@ impl KnowledgeService for KnowledgeToolService {
             links: note.links,
             text: note.body,
             file: self
-                .embedder_state
+                .index()?
                 .vault()
                 .join(&note.path)
                 .to_string_lossy()
@@ -181,7 +215,7 @@ impl KnowledgeService for KnowledgeToolService {
         &self,
         _: Request<pb::StatusRequest>,
     ) -> Result<Response<pb::StatusResponse>, Status> {
-        let index = &self.embedder_state;
+        let index = &self.index()?;
         let store = Arc::clone(&index.store);
         let (notes, passages) = super::index::blocking(&store, |s| s.counts())
             .await
@@ -216,14 +250,14 @@ impl KnowledgeService for KnowledgeToolService {
         _: Request<pb::RebuildRequest>,
     ) -> Result<Response<pb::RebuildResponse>, Status> {
         let counts = self
-            .embedder_state
+            .index()?
             .pass(true)
             .await
             .map_err(|failure| match failure {
                 super::index::Failure::WorkerFailed => Status::unavailable("search_resting"),
                 other => Status::unavailable(format!("store_failed: {}", other.reason())),
             })?;
-        let store = Arc::clone(&self.embedder_state.store);
+        let store = Arc::clone(&self.index()?.store);
         let (notes, passages) = super::index::blocking(&store, |s| s.counts())
             .await
             .map_err(|failure| status_of(failure.into()))?;

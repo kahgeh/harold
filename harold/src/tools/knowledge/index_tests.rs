@@ -180,6 +180,55 @@ async fn another_model_rebuilds_every_passage() {
 }
 
 #[tokio::test]
+async fn another_model_alone_rebuilds_the_index_without_a_changed_file() {
+    let f = fixture(&[]);
+    f.vault.write("a.md", &note("a", "idea", "one"));
+    f.vault.write("b.md", &note("b", "idea", "two"));
+    f.index.pass(false).await.unwrap();
+    let before = f.embedder.embedded_count();
+    *f.embedder.model.lock().unwrap() = "another-model".into();
+    f.index.pass(false).await.unwrap();
+    assert_eq!(f.embedder.embedded_count(), before + 2);
+    let info = blocking(&f.index.store, |s| s.index_info())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(info.model, "another-model");
+}
+
+#[tokio::test]
+async fn a_rebuild_with_a_model_that_cannot_load_keeps_the_index() {
+    let f = fixture(&[]);
+    f.vault.write("a.md", &note("a", "idea", "one"));
+    f.index.pass(false).await.unwrap();
+    *f.embedder.fail.lock().unwrap() = Some(EmbedError::Unavailable("failed_to_load"));
+    assert_eq!(f.index.pass(true).await, Err(Failure::WorkerFailed));
+    assert_eq!(counts(&f).await, (1, 1));
+}
+
+#[tokio::test]
+async fn one_vault_note_the_model_cannot_take_does_not_stop_the_others() {
+    let f = fixture(&[]);
+    f.vault
+        .write("a-first.md", &note("a-first", "idea", "fine words"));
+    f.vault
+        .write("b-bad.md", &note("b-bad", "idea", "poisonous words"));
+    f.vault
+        .write("c-last.md", &note("c-last", "idea", "more fine words"));
+    *f.embedder.poison.lock().unwrap() = Some("poisonous".into());
+    assert_eq!(f.index.pass(false).await, Err(Failure::WorkerFailed));
+    assert_eq!(
+        counts(&f).await,
+        (2, 2),
+        "the notes before and after were indexed"
+    );
+    assert_eq!(f.index.status().last_failure, Some(Failure::WorkerFailed));
+    *f.embedder.poison.lock().unwrap() = None;
+    assert_eq!(f.index.pass(false).await.unwrap().notes, 1);
+    assert_eq!(counts(&f).await, (3, 3));
+}
+
+#[tokio::test]
 async fn rebuild_clears_and_builds_again() {
     let f = fixture(&[]);
     f.vault.write("a.md", &note("a", "idea", "one"));

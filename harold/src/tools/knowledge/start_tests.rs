@@ -55,13 +55,49 @@ async fn a_secret_file_inside_the_vault_stops_the_tool_from_starting() {
 }
 
 #[tokio::test]
-async fn a_bucket_that_cannot_be_reached_stops_the_tool_with_its_reason() {
+async fn a_bucket_that_cannot_be_reached_at_start_leaves_the_tool_up_and_answering_unavailable() {
+    use harold_api::tools::knowledge::v1::knowledge_service_client::KnowledgeServiceClient;
     let (vault, secrets, data) = (TempFolder::new(), TempFolder::new(), TempFolder::new());
-    let (_stop, shutdown) = tokio::sync::watch::channel(());
-    let started = start(launch(&vault, &secrets, 0o600), data.0.clone(), shutdown).await;
-    let reason = started.err().map(|e| e.reason);
-    assert!(
-        matches!(reason, Some("bucket_unreachable" | "store_failed")),
-        "{reason:?}"
-    );
+    let (stop, shutdown) = tokio::sync::watch::channel(());
+    let handle = start(launch(&vault, &secrets, 0o600), data.0.clone(), shutdown)
+        .await
+        .map_err(|e| e.reason)
+        .expect("the tool starts without its bucket");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (incoming, connections) = tokio::sync::mpsc::channel(1);
+    tokio::spawn(async move {
+        while let Ok((socket, _)) = listener.accept().await {
+            if incoming
+                .send(Ok::<_, std::io::Error>(socket))
+                .await
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
+    let routes = handle.routes;
+    let server = tokio::spawn(async move {
+        let _ = tonic::transport::Server::builder()
+            .add_routes(routes)
+            .serve_with_incoming(tokio_stream::wrappers::ReceiverStream::new(connections))
+            .await;
+    });
+    let mut client = KnowledgeServiceClient::connect(format!("http://{address}"))
+        .await
+        .unwrap();
+    // The open is still trying, or has failed once: either way it is not open.
+    for _ in 0..2 {
+        let refused = client
+            .recent(harold_api::tools::knowledge::v1::RecentRequest { limit: 10 })
+            .await
+            .unwrap_err();
+        assert_eq!(refused.code(), tonic::Code::Unavailable);
+        assert!(refused.message().starts_with("store_failed"), "{refused:?}");
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    }
+    server.abort();
+    let _ = stop.send(());
+    let _ = handle.task.await;
 }

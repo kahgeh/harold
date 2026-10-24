@@ -33,6 +33,10 @@ pub trait NotesBackend: Send + Sync {
     fn search(&self, query: String) -> BoxFuture<Result<Vec<NoteLine>, String>>;
     /// The absolute path of a vault note's file.
     fn file(&self, name: String) -> BoxFuture<Result<String, String>>;
+    /// Whether Harold serves the knowledge tool at all: `s` is for nothing when it does not.
+    fn available(&self) -> BoxFuture<bool> {
+        Box::pin(async { true })
+    }
 }
 
 pub type SharedBackend = Arc<dyn NotesBackend>;
@@ -85,6 +89,8 @@ pub enum NotesKey {
 /// What an answer reports to the view.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NotesEvent {
+    /// Whether Harold serves the knowledge tool, as asked when the stream opened.
+    Available(bool),
     Loaded {
         seq: u64,
         result: Result<Vec<NoteLine>, String>,

@@ -273,9 +273,6 @@ impl SourceStream {
         .map_err(|error| SourceError::transport(error.to_string()))
     }
 
-    /// The first line of the chief's Now item, `None` when the queue has none, or an
-    /// error when the backlog tool cannot be reached: an older Harold answers
-    /// `Unimplemented`.
     /// The knowledge tool as the notes search asks it; `None` before the stream has a channel.
     pub fn notes_backend(&self) -> Option<SharedBackend> {
         self.knowledge
@@ -283,6 +280,9 @@ impl SourceStream {
             .map(|client| Arc::new(KnowledgeNotes { client }) as SharedBackend)
     }
 
+    /// The first line of the chief's Now item, `None` when the queue has none, or an
+    /// error when the backlog tool cannot be reached: an older Harold answers
+    /// `Unimplemented`.
     pub async fn list_queue_now(&self) -> Result<Option<String>, SourceError> {
         let Some(mut client) = self.backlog.clone() else {
             return Err(SourceError::transport("backlog tool unavailable"));
@@ -1824,6 +1824,17 @@ impl NotesBackend for KnowledgeNotes {
                     .collect()),
                 Ok(Err(status)) => Err(notes_refusal(&status)),
                 Err(_) => Err("Notes are not available right now.".into()),
+            }
+        })
+    }
+
+    fn available(&self) -> crate::notes::BoxFuture<bool> {
+        let mut client = self.client.clone();
+        Box::pin(async move {
+            let request = RecentRequest { limit: 1 };
+            match tokio::time::timeout(NOTES_FILE_TIMEOUT, client.recent(request)).await {
+                Ok(Err(status)) => status.code() != tonic::Code::Unimplemented,
+                _ => true,
             }
         })
     }
