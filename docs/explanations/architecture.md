@@ -86,7 +86,7 @@ flowchart LR
 | CLI | `harold` and its subcommands: `tool`, `speak`, `send-message-to-away-device` and the rest | `harold/src/cli.rs` |
 | haroldctl and the installer | Install, start, stop and check the service | `scripts/` |
 | hooks, Claude Code mod, OpenCode plugin | Tell Harold what an agent did | `hooks/` |
-| tmx-agent-dash | The dash: agent rows, todo rows, voice and messaging switches | `tmx-agent-dash/` |
+| tmx-agent-dash | The dash: agent rows, todo rows, voice and messaging switches, and the notes search (`s`) over the knowledge tool | `tmx-agent-dash/` |
 | API contracts | The protobuf definitions shared by Harold, the dash and the tools | `harold-api/` |
 
 ## Interfaces

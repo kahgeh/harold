@@ -166,6 +166,12 @@ impl KnowledgeService for KnowledgeToolService {
             created: note.created,
             links: note.links,
             text: note.body,
+            file: self
+                .embedder_state
+                .vault()
+                .join(&note.path)
+                .to_string_lossy()
+                .into_owned(),
             path: note.path,
             changed_at_ms: note.changed_at_ms,
         }))

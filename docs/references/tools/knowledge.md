@@ -24,7 +24,7 @@ harold tool knowledge rebuild
 | `recent` | The vault notes changed most recently, newest first, in the same lines with `-` for the score |
 | `related NOTE` | The vault notes closest to the vault note's own passages, the note itself left out. A line ends its kind with `(linked)` when the vault note already links to it |
 | `links NOTE` | The suggested links: related vault notes scoring 0.60 or more that the vault note does not link to yet, at most 5 |
-| `show NOTE` | The vault note's name, title, kind, description and links, then its text as stored, without the front matter |
+| `show NOTE` | The vault note's name, title, kind, description and links, then its text as stored, without the front matter. At the service the `VaultNote` message also carries `file`, the file's absolute path, which the dash opens in `$EDITOR` |
 | `status` | The vault notes and passages held, the last good pass, the changed files not yet indexed, the runtime and model, the worker (`idle`, `loading`, `ready` or `unavailable`) and the last failure |
 | `rebuild` | Clears the index and builds it again from the vault, then prints the counts |
 

@@ -74,7 +74,10 @@ pub fn render(frame: &mut Frame<'_>, app: &App, now_ms: i64) {
     render_summary(frame, summary, app);
     render_search(frame, search, app);
     render_workspace(frame, workspace, app, now_ms);
-    if app.swallowing_keys() {
+    render_notes(frame, workspace, app);
+    if app.notes.is_some() {
+        render_notes_footer(frame, footer);
+    } else if app.swallowing_keys() {
         render_swallow_footer(frame, footer);
     } else if app.holding_block_keys() {
         render_hold_footer(frame, footer);
@@ -1576,6 +1579,82 @@ fn footer_hints(
 
 /// While keys are swallowed after the questions hid under the cursor, the footer says
 /// the way out.
+/// The notes search over the agent list: the query, then the vault notes by kind and title.
+fn render_notes(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    let Some(view) = &app.notes else {
+        return;
+    };
+    let width = usize::from(area.width).saturating_sub(4);
+    let query = sanitize_display(&view.query, 200);
+    let mut lines = vec![Line::from(vec![
+        Span::styled("> ", Style::default().fg(AMBER)),
+        Span::styled(query, Style::default().fg(INK).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            if view.typing { "█" } else { "" },
+            Style::default().fg(AMBER),
+        ),
+    ])];
+    let heading = match (view.searched, view.loading) {
+        (true, false) => "Closest notes",
+        (false, false) => "Changed lately",
+        (_, true) => "Looking…",
+    };
+    lines.push(Line::from(Span::styled(
+        heading,
+        Style::default().fg(MUTED),
+    )));
+    let kind_width = 12;
+    for (index, row) in view.rows.iter().enumerate() {
+        let (kind, title) = row.display();
+        let selected = index == view.cursor;
+        let marker = if selected { "▸" } else { " " };
+        let kind = fit(&kind, kind_width);
+        let title = fit(&title, width.saturating_sub(kind_width + 3));
+        let title_style = if selected {
+            Style::default().fg(INK).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(INK)
+        };
+        lines.push(Line::from(vec![
+            Span::styled(format!("{marker} "), Style::default().fg(AMBER)),
+            Span::styled(format!("{kind:<kind_width$} "), Style::default().fg(MUTED)),
+            Span::styled(title.into_owned(), title_style),
+        ]));
+    }
+    if let Some(message) = &view.message {
+        lines.push(Line::from(Span::styled(
+            sanitize_display(message, 200),
+            Style::default().fg(CORAL),
+        )));
+    }
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(lines).block(board_block().borders(Borders::ALL).title(" Notes ")),
+        area,
+    );
+}
+
+fn render_notes_footer(frame: &mut Frame<'_>, area: Rect) {
+    let key = Style::default().fg(INK);
+    let words = Style::default().fg(MUTED);
+    let line = Line::from(vec![
+        Span::styled(" type", key),
+        Span::styled(" search  ", words),
+        Span::styled("j/k", key),
+        Span::styled(" move  ", words),
+        Span::styled("Enter", key),
+        Span::styled(" open in $EDITOR  ", words),
+        Span::styled("/", key),
+        Span::styled(" type j or k  ", words),
+        Span::styled("Esc", key),
+        Span::styled(" back", words),
+    ]);
+    frame.render_widget(
+        Paragraph::new(line).block(board_block().borders(Borders::ALL)),
+        area,
+    );
+}
+
 fn render_swallow_footer(frame: &mut Frame<'_>, area: Rect) {
     let key = Style::default().fg(INK);
     let words = Style::default().fg(Color::Yellow);
@@ -3166,6 +3245,57 @@ mod tests {
     }
 
     #[test]
+    fn the_notes_search_draws_its_rows_over_the_agent_list_and_its_own_footer() {
+        use crate::app::Effect;
+        use crate::notes::{NoteLine, NotesAction};
+        let mut app = live_app(Vec::new(), None);
+        let Effect::Notes(NotesAction::Load { seq, .. }) =
+            app.handle_key(crossterm::event::KeyCode::Char('s'))
+        else {
+            panic!("s reads the recent list");
+        };
+        assert!(rendered(&app, 140, 38, 100_000).contains("Looking…"));
+        let row = |name: &str, kind: &str| NoteLine {
+            name: name.into(),
+            title: name.into(),
+            kind: kind.into(),
+        };
+        app.notes_event(crate::notes::NotesEvent::Loaded {
+            seq,
+            result: Ok(vec![
+                row("a-knowledge-index-on-buckwal", "idea"),
+                row("hyperdx", "reference"),
+            ]),
+        });
+        let content = rendered(&app, 140, 38, 100_000);
+        assert!(content.contains(" Notes "), "{content}");
+        assert!(content.contains("Changed lately"));
+        assert!(content.contains("▸ idea"));
+        assert!(content.contains("a-knowledge-index-on-buckwal"));
+        assert!(content.contains("reference"));
+        assert!(content.contains("open in $EDITOR"));
+        assert!(!content.contains("Command"));
+    }
+
+    #[test]
+    fn the_notes_search_fits_the_smallest_terminal_and_shows_a_failure() {
+        use crate::app::Effect;
+        use crate::notes::NotesAction;
+        let mut app = live_app(Vec::new(), None);
+        let Effect::Notes(NotesAction::Load { seq, .. }) =
+            app.handle_key(crossterm::event::KeyCode::Char('s'))
+        else {
+            panic!("s reads the recent list");
+        };
+        app.notes_event(crate::notes::NotesEvent::Loaded {
+            seq,
+            result: Err("Search is resting: the model didn't load.".into()),
+        });
+        let content = rendered(&app, 60, 18, 100_000);
+        assert!(content.contains("Search is resting"), "{content}");
+    }
+
+    #[test]
     fn palette_explains_when_commands_are_unavailable() {
         let mut app = App::new(
             crate::app::ConnectionState::Connecting,
@@ -4299,7 +4429,7 @@ mod tests {
                 "`n` / `N`",
                 "`o`",
                 "`g` / `G`",
-                "`c` / `t`, `f`, `/`, `q`",
+                "`c` / `t`, `f`, `/`, `s`, `q`",
                 "Ctrl+L, Ctrl+Q, Ctrl+C",
             ]
         );

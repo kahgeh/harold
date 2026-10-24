@@ -50,6 +50,10 @@ pub enum NavigationError {
     NotWebLink,
     /// This navigator cannot open links.
     LinksUnavailable,
+    /// This navigator cannot open an editor.
+    EditorUnavailable,
+    /// Only the absolute path of a file is opened in the editor.
+    NotAFilePath,
     CommandIo {
         operation: &'static str,
         detail: String,
@@ -67,6 +71,8 @@ impl fmt::Display for NavigationError {
             Self::EmptyPane => formatter.write_str("tmux pane ID must not be empty"),
             Self::NotWebLink => formatter.write_str("only an http(s) link can be opened"),
             Self::LinksUnavailable => formatter.write_str("links cannot be opened here"),
+            Self::EditorUnavailable => formatter.write_str("an editor cannot be opened here"),
+            Self::NotAFilePath => formatter.write_str("only a file's absolute path can be opened"),
             Self::CommandIo { operation, detail } => {
                 write!(formatter, "could not {operation}: {detail}")
             }
@@ -85,6 +91,11 @@ pub trait PaneNavigator {
     /// Opens a question's link in the user's browser.
     fn open_link(&self, _link: &str) -> Result<(), NavigationError> {
         Err(NavigationError::LinksUnavailable)
+    }
+
+    /// Opens a file in `$EDITOR` in a new tmux window.
+    fn open_editor(&self, _file: &str) -> Result<(), NavigationError> {
+        Err(NavigationError::EditorUnavailable)
     }
 }
 
@@ -235,6 +246,39 @@ impl PaneNavigator for TmuxNavigator {
         self.run_command("open", "open link", &[link])?;
         Ok(())
     }
+
+    /// Runs `tmux new-window` with `$EDITOR` (`vi` when it is unset) on the file. The editor
+    /// is handed over as a variable and the path as an argument, so neither is read as
+    /// shell text beyond the editor's own words.
+    fn open_editor(&self, file: &str) -> Result<(), NavigationError> {
+        if !file.starts_with('/') || file.chars().any(char::is_control) {
+            return Err(NavigationError::NotAFilePath);
+        }
+        let editor = self
+            .context
+            .var_os("EDITOR".as_ref())
+            .map(|value| value.to_string_lossy().into_owned())
+            .filter(|value| !value.trim().is_empty() && !value.chars().any(char::is_control))
+            .unwrap_or_else(|| "vi".to_owned());
+        let editor_variable = format!("EDITOR={editor}");
+        self.run_tmux(
+            "open editor",
+            &[
+                "new-window",
+                "-n",
+                "note",
+                "--",
+                "env",
+                &editor_variable,
+                "sh",
+                "-c",
+                "exec $EDITOR \"$1\"",
+                "sh",
+                file,
+            ],
+        )?;
+        Ok(())
+    }
 }
 
 fn command_failure_detail(program: &str, stderr: &[u8]) -> String {
@@ -318,6 +362,7 @@ mod tests {
     struct FakeContext {
         tmux: Option<OsString>,
         tmux_pane: Option<OsString>,
+        editor: Option<OsString>,
     }
 
     impl FakeContext {
@@ -325,6 +370,14 @@ mod tests {
             Self {
                 tmux: Some("/tmp/tmux-501/default,123,0".into()),
                 tmux_pane: Some("%23".into()),
+                editor: None,
+            }
+        }
+
+        fn with_editor(editor: &str) -> Self {
+            Self {
+                editor: Some(editor.into()),
+                ..Self::valid()
             }
         }
     }
@@ -334,6 +387,7 @@ mod tests {
             match name.to_str() {
                 Some("TMUX") => self.tmux.clone(),
                 Some("TMUX_PANE") => self.tmux_pane.clone(),
+                Some("EDITOR") => self.editor.clone(),
                 _ => None,
             }
         }
@@ -415,8 +469,14 @@ mod tests {
             ),
         ] {
             let runner = FakeRunner::with_outputs(Vec::new());
-            let (navigator, observed_runner) =
-                navigator_with(runner, FakeContext { tmux, tmux_pane });
+            let (navigator, observed_runner) = navigator_with(
+                runner,
+                FakeContext {
+                    tmux,
+                    tmux_pane,
+                    editor: None,
+                },
+            );
 
             assert_eq!(navigator.discover_client().unwrap(), None, "{name}");
             assert!(observed_runner.calls().is_empty(), "{name}");
@@ -439,6 +499,62 @@ mod tests {
                 vec!["switch-client".into(), "-t".into(), "%27".into()]
             )]
         );
+    }
+
+    #[test]
+    fn open_editor_opens_a_tmux_window_with_the_editor_and_the_file_as_separate_arguments() {
+        let (navigator, runner) = navigator_with(
+            FakeRunner::successful(""),
+            FakeContext::with_editor("nvim -u NONE"),
+        );
+        navigator
+            .open_editor("/vault/references/a note.md")
+            .unwrap();
+        let calls = runner.calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "tmux");
+        assert_eq!(
+            calls[0].1,
+            vec![
+                "new-window",
+                "-n",
+                "note",
+                "--",
+                "env",
+                "EDITOR=nvim -u NONE",
+                "sh",
+                "-c",
+                "exec $EDITOR \"$1\"",
+                "sh",
+                "/vault/references/a note.md",
+            ]
+        );
+    }
+
+    #[test]
+    fn open_editor_uses_vi_without_an_editor_and_refuses_anything_but_an_absolute_path() {
+        let (navigator, runner) = navigator_with(FakeRunner::successful(""), FakeContext::valid());
+        navigator.open_editor("/vault/a.md").unwrap();
+        assert!(runner.calls()[0].1.contains(&"EDITOR=vi".to_string()));
+
+        let (navigator, runner) =
+            navigator_with(FakeRunner::with_outputs(Vec::new()), FakeContext::valid());
+        for file in ["", "relative.md", "-n", "/vault/a\n.md"] {
+            assert_eq!(
+                navigator.open_editor(file),
+                Err(NavigationError::NotAFilePath)
+            );
+        }
+        assert!(runner.calls().is_empty());
+
+        let (navigator, _) = navigator_with(FakeRunner::failed("no server"), FakeContext::valid());
+        assert!(matches!(
+            navigator.open_editor("/vault/a.md"),
+            Err(NavigationError::CommandFailed {
+                operation: "open editor",
+                ..
+            })
+        ));
     }
 
     #[test]

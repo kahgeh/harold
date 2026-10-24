@@ -2,6 +2,7 @@ use std::collections::HashSet;
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::time::Duration;
 
 use harold_api::harold::{
@@ -13,6 +14,10 @@ use harold_api::harold::{
 };
 use harold_api::tools::backlog::v1::{
     ListQueueRequest, ListQueueResponse, backlog_service_client::BacklogServiceClient,
+};
+use harold_api::tools::knowledge::v1::{
+    Hit as KnowledgeHit, RecentRequest, SearchRequest, ShowVaultNoteRequest,
+    knowledge_service_client::KnowledgeServiceClient,
 };
 use harold_api::tools::questions::v1::{
     AnswerKind as ProtoAnswerKind, AnswerQuestionRequest, Decision, DecisionOption,
@@ -27,6 +32,7 @@ use crate::app::{
     AgentIncarnation, AgentRow, AgentState, CallAction, CallState, CallView, MonitorHealth,
     MonitorHealthState, Snapshot,
 };
+use crate::notes::{NoteLine, NotesBackend, ROWS, SharedBackend};
 use crate::questions::{
     AnswerKind, DecisionView, OptionView, Outgoing, PickView, QuestionView, Queue, SendResult,
     StepView,
@@ -149,6 +155,7 @@ pub struct SourceStream {
     voice: Option<HaroldClient<Channel>>,
     questions: Option<QuestionServiceClient<Channel>>,
     backlog: Option<BacklogServiceClient<Channel>>,
+    knowledge: Option<KnowledgeServiceClient<Channel>>,
 }
 
 trait SnapshotReader: Send + 'static {
@@ -191,6 +198,7 @@ where
         voice: None,
         questions: None,
         backlog: None,
+        knowledge: None,
     }
 }
 
@@ -268,6 +276,13 @@ impl SourceStream {
     /// The first line of the chief's Now item, `None` when the queue has none, or an
     /// error when the backlog tool cannot be reached: an older Harold answers
     /// `Unimplemented`.
+    /// The knowledge tool as the notes search asks it; `None` before the stream has a channel.
+    pub fn notes_backend(&self) -> Option<SharedBackend> {
+        self.knowledge
+            .clone()
+            .map(|client| Arc::new(KnowledgeNotes { client }) as SharedBackend)
+    }
+
     pub async fn list_queue_now(&self) -> Result<Option<String>, SourceError> {
         let Some(mut client) = self.backlog.clone() else {
             return Err(SourceError::transport("backlog tool unavailable"));
@@ -371,7 +386,8 @@ impl AgentStateSource {
             let mut source = spawn_reader(stream);
             source.voice = Some(client);
             source.questions = Some(QuestionServiceClient::new(channel.clone()));
-            source.backlog = Some(BacklogServiceClient::new(channel));
+            source.backlog = Some(BacklogServiceClient::new(channel.clone()));
+            source.knowledge = Some(KnowledgeServiceClient::new(channel));
             Ok(source)
         })
     }
@@ -1740,5 +1756,90 @@ mod question_tests {
             SendResult::VersionChanged
         );
         assert_eq!(super::tick_send_result(Ok(())), SendResult::Recorded);
+    }
+}
+
+/// How long a notes read may take: the first search after the embedding worker has stopped
+/// waits for its model to load.
+const NOTES_READ_TIMEOUT: Duration = Duration::from_secs(60);
+/// How long the path of a vault note's file may take.
+const NOTES_FILE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The knowledge tool's service as the notes search's backend.
+struct KnowledgeNotes {
+    client: KnowledgeServiceClient<Channel>,
+}
+
+fn note_line(hit: KnowledgeHit) -> NoteLine {
+    NoteLine {
+        name: hit.name,
+        title: hit.title,
+        kind: hit.kind,
+    }
+}
+
+/// The words the view shows for a refused read.
+fn notes_refusal(status: &tonic::Status) -> String {
+    match (status.code(), status.message()) {
+        (tonic::Code::Unavailable, message) if message.starts_with("search_resting") => {
+            "Search is resting: the model didn't load.".into()
+        }
+        (tonic::Code::Unimplemented, _) => "Harold does not serve notes.".into(),
+        _ => "Notes are not available right now.".into(),
+    }
+}
+
+impl NotesBackend for KnowledgeNotes {
+    fn recent(&self) -> crate::notes::BoxFuture<Result<Vec<NoteLine>, String>> {
+        let mut client = self.client.clone();
+        Box::pin(async move {
+            let request = RecentRequest { limit: ROWS as u32 };
+            match tokio::time::timeout(NOTES_READ_TIMEOUT, client.recent(request)).await {
+                Ok(Ok(response)) => Ok(response
+                    .into_inner()
+                    .hits
+                    .into_iter()
+                    .map(note_line)
+                    .collect()),
+                Ok(Err(status)) => Err(notes_refusal(&status)),
+                Err(_) => Err("Notes are not available right now.".into()),
+            }
+        })
+    }
+
+    fn search(&self, query: String) -> crate::notes::BoxFuture<Result<Vec<NoteLine>, String>> {
+        let mut client = self.client.clone();
+        Box::pin(async move {
+            let request = SearchRequest {
+                query,
+                limit: ROWS as u32,
+                source: "dash".into(),
+            };
+            match tokio::time::timeout(NOTES_READ_TIMEOUT, client.search(request)).await {
+                Ok(Ok(response)) => Ok(response
+                    .into_inner()
+                    .hits
+                    .into_iter()
+                    .map(note_line)
+                    .collect()),
+                Ok(Err(status)) => Err(notes_refusal(&status)),
+                Err(_) => Err("Notes are not available right now.".into()),
+            }
+        })
+    }
+
+    fn file(&self, name: String) -> crate::notes::BoxFuture<Result<String, String>> {
+        let mut client = self.client.clone();
+        Box::pin(async move {
+            let request = ShowVaultNoteRequest { name };
+            match tokio::time::timeout(NOTES_FILE_TIMEOUT, client.show_vault_note(request)).await {
+                Ok(Ok(response)) => Ok(response.into_inner().file),
+                Ok(Err(status)) if status.code() == tonic::Code::NotFound => {
+                    Err("That vault note is gone.".into())
+                }
+                Ok(Err(status)) => Err(notes_refusal(&status)),
+                Err(_) => Err("Notes are not available right now.".into()),
+            }
+        })
     }
 }

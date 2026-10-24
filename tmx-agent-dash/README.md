@@ -78,7 +78,7 @@ cell says "Nothing", the key does nothing there, so a key never means two things
 | `n` / `N` | Next or previous waiting agent (wraps) | Next or previous waiting todo (wraps) | Same | Same | Same | Types |
 | `o` | Nothing | Open the todo's link, if it is `http://` or `https://` | Same | Same | Same | Types |
 | `g` / `G` | First / last row | Same | Same | Same | Same | Types |
-| `c` / `t`, `f`, `/`, `q` | `c` / `t`: call / talk now, on the chief's row · `f`: search · `/`: command palette · `q`: quit | Nothing | Nothing | Nothing | Nothing | Types |
+| `c` / `t`, `f`, `/`, `s`, `q` | `c` / `t`: call / talk now, on the chief's row · `f`: search · `/`: command palette · `s`: notes search (while connected) · `q`: quit | Nothing | Nothing | Nothing | Nothing | Types |
 | Ctrl+L, Ctrl+Q, Ctrl+C | Retry the Harold connection now (clearing and redrawing the screen) · quit · quit | Same | Same | Same | Same | Same: the text and the query are kept, and nothing is typed |
 
 - **Quit keys:** Ctrl+Q and Ctrl+C quit from every mode, including a note and the
@@ -134,6 +134,17 @@ goes, then `REV`, then the version, so transport, voice and the paused marker st
 visible. A failed request is reported as `MESSAGING ERROR: …`. See Harold's
 [operation reference](../docs/references/operation/README.md#pausing-messaging)
 for what the switch does.
+
+## Notes search
+
+`s` opens the vault notes over the agent list, while the dash is connected to Harold. Vault notes are the organisation's Markdown notes, which Harold's [knowledge tool](../docs/references/tools/knowledge.md) indexes by meaning; they are not backlog notes. The dash reads them through the tool's gRPC service on Harold's own address. It needs `[knowledge] vault` set in Harold, and with the tool off the list reads `Harold does not serve notes.`
+
+- The box shows the 10 vault notes changed most recently, newest first, each with its kind and title.
+- **Typing searches.** Any printable key starts a search, and the list becomes the closest 10 vault notes after you pause for 300 ms. A query under 2 characters shows the recent list again. The first search after a pause waits for the model to load, and the box reads `Looking…`; if the model could not load it reads `Search is resting: the model didn't load.`
+- `j` / `k` (and ↓ / ↑) move the cursor, `g` / `G` go to the first and last row, while the keys are for moving. To search for a word that begins with `j`, `k` or `g`, press `/` first: then every key types, and only the arrows move.
+- **Enter** opens the vault note's file in `$EDITOR` (`vi` when it is unset), in a new tmux window named `note`. The dash stays where it is.
+- **Esc** clears the query, then leaves the list and goes back to the agents. Ctrl+Q, Ctrl+C and Ctrl+L act as everywhere. `q` types a `q` here and does not quit.
+- There is no note pane and no related list. When the connection to Harold ends, the list closes.
 
 ## Now line
 

@@ -183,6 +183,54 @@ async fn the_real_index_meets_the_acceptance_criteria() {
     println!("related:\n{related}");
     assert!(related.contains("(linked)"));
 
+    // 6: what the dash asks, as the dash asks it: the 10 most recent, a search from the
+    // dash, and the absolute file of a vault note.
+    {
+        use harold_api::tools::knowledge::v1 as pb;
+        use harold_api::tools::knowledge::v1::knowledge_service_client::KnowledgeServiceClient;
+        let mut client = KnowledgeServiceClient::connect(format!("http://{}", served.address))
+            .await
+            .unwrap();
+        let recent = client
+            .recent(pb::RecentRequest { limit: 10 })
+            .await
+            .unwrap()
+            .into_inner()
+            .hits;
+        assert_eq!(recent.len(), 10);
+        assert!(
+            recent
+                .windows(2)
+                .all(|w| w[0].changed_at_ms >= w[1].changed_at_ms)
+        );
+        let found = client
+            .search(pb::SearchRequest {
+                query: "keeping the index safe if the Mac is lost".into(),
+                limit: 10,
+                source: "dash".into(),
+            })
+            .await
+            .unwrap()
+            .into_inner()
+            .hits;
+        assert!(found.len() <= 10 && !found.is_empty());
+        let shown = client
+            .show_vault_note(pb::ShowVaultNoteRequest {
+                name: "references/harold-locations".into(),
+            })
+            .await
+            .unwrap()
+            .into_inner();
+        println!("dash opens {}", shown.file);
+        assert_eq!(
+            shown.file,
+            std::path::Path::new(&env("KI_VAULT"))
+                .join("references/harold-locations.md")
+                .to_string_lossy()
+        );
+        assert!(std::path::Path::new(&shown.file).is_file());
+    }
+
     // 3.
     let saved = Instant::now();
     let path = std::path::Path::new(&env("KI_VAULT")).join("zz-live-check.md");

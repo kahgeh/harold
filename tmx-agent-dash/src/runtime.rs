@@ -19,6 +19,7 @@ use crate::app::{
 };
 use crate::cli::Options;
 use crate::navigation::{NavigationError, PaneNavigator, TmuxNavigator};
+use crate::notes::{DEBOUNCE, NoteLine, NotesAction, NotesEvent, SharedBackend};
 use crate::questions::{Outgoing, PickView, Queue, SendResult, UNAVAILABLE_NOTICE};
 use crate::terminal::{TerminalError, TerminalGuard};
 use crate::text::sanitize_display;
@@ -203,6 +204,8 @@ where
         // The block lives only while a stream does: without Harold nothing can be
         // answered, so it hides until a stream opens and the queue is read again.
         core.app.hide_questions();
+        core.app.close_notes();
+        core.notes_backend = None;
         match outcome {
             Ok(Control::Quit) => return Ok(()),
             Ok(Control::Retry) => {
@@ -287,6 +290,10 @@ trait StreamPort: Sized {
     fn defer_question<'a>(&'a mut self, _id: &'a str) -> BoxFuture<'a, Result<(), SourceError>> {
         Box::pin(async { Err(SourceError::Transport("question tool unavailable".into())) })
     }
+    /// The knowledge tool, for the notes search; none when this stream cannot reach it.
+    fn notes_backend(&self) -> Option<SharedBackend> {
+        None
+    }
 }
 
 impl SourcePort for AgentStateSource {
@@ -353,6 +360,10 @@ impl StreamPort for SourceStream {
 
     fn defer_question<'a>(&'a mut self, id: &'a str) -> BoxFuture<'a, Result<(), SourceError>> {
         Box::pin(SourceStream::defer_question(self, id))
+    }
+
+    fn notes_backend(&self) -> Option<SharedBackend> {
+        SourceStream::notes_backend(self)
     }
 }
 
@@ -435,6 +446,7 @@ where
     N: PaneNavigator,
     T: ScreenPort,
 {
+    core.notes_backend = stream.notes_backend();
     let result = async {
         // The call's state is asked for as the stream opens, so the button finds the
         // chief's pane before any call, and then on every tick of the poll. Each poll
@@ -510,6 +522,10 @@ where
                         break Ok(Control::Continue);
                     }
                 }
+            }
+            Some(event) = core.notes_events.recv() => {
+                core.notes_arrived(event, navigator);
+                draw(terminal, &core.app, clock)?;
             }
             item = input.recv() => {
                 if let Some(Ok(RuntimeInput::Key(key))) = &item {
@@ -1139,6 +1155,13 @@ struct RuntimeCore {
     /// A read no key asked for changed the question under the cursor: the next key, if
     /// it still goes to the question rows, is dropped. Any key clears it.
     drop_next_block_key: bool,
+    /// The knowledge tool, while a stream is open.
+    notes_backend: Option<SharedBackend>,
+    /// The notes search's answers, taken by the stream loop.
+    notes_events: mpsc::UnboundedReceiver<NotesEvent>,
+    notes_sender: mpsc::UnboundedSender<NotesEvent>,
+    /// The newest read's number: a typing pause that is no longer the newest does not search.
+    notes_latest: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl RuntimeCore {
@@ -1151,6 +1174,7 @@ impl RuntimeCore {
         let navigation_issue = client
             .is_none()
             .then_some(RuntimeStatus::NavigationUnavailable);
+        let (notes_sender, notes_events) = mpsc::unbounded_channel();
         Self {
             app: App::new(
                 ConnectionState::Connecting,
@@ -1176,6 +1200,10 @@ impl RuntimeCore {
             endpoint_display: sanitize_display(endpoint, ERROR_LIMIT),
             question_poll_interval: QUESTION_POLL_INTERVAL,
             drop_next_block_key: false,
+            notes_backend: None,
+            notes_events,
+            notes_sender,
+            notes_latest: Arc::default(),
         }
     }
 
@@ -1229,6 +1257,65 @@ impl RuntimeCore {
     /// read hides the line and sets no status, as a failed question read does.
     fn now_listed(&mut self, result: Result<Option<String>, SourceError>) -> bool {
         self.app.observe_now(result.ok().flatten())
+    }
+
+    /// Starts a notes read, or the opening of a vault note's file, without holding the
+    /// stream: the answer comes back through `notes_events`.
+    fn start_notes(&mut self, action: NotesAction) {
+        let sender = self.notes_sender.clone();
+        let Some(backend) = self.notes_backend.clone() else {
+            let unavailable = "Notes are not available right now.".to_owned();
+            let _ = sender.send(match action {
+                NotesAction::Load { seq, .. } => NotesEvent::Loaded {
+                    seq,
+                    result: Err(unavailable),
+                },
+                NotesAction::Open { .. } => NotesEvent::File(Err(unavailable)),
+            });
+            return;
+        };
+        match action {
+            NotesAction::Load {
+                query,
+                seq,
+                debounce,
+            } => {
+                self.notes_latest.store(seq, Ordering::SeqCst);
+                let latest = Arc::clone(&self.notes_latest);
+                tokio::spawn(async move {
+                    if debounce {
+                        sleep(DEBOUNCE).await;
+                        if latest.load(Ordering::SeqCst) != seq {
+                            return;
+                        }
+                    }
+                    let result: Result<Vec<NoteLine>, String> = if query.chars().count() < 2 {
+                        backend.recent().await
+                    } else {
+                        backend.search(query).await
+                    };
+                    let _ = sender.send(NotesEvent::Loaded { seq, result });
+                });
+            }
+            NotesAction::Open { name } => {
+                tokio::spawn(async move {
+                    let _ = sender.send(NotesEvent::File(backend.file(name).await));
+                });
+            }
+        }
+    }
+
+    /// Takes an answer of the notes search: a list for the view, or a file to open.
+    fn notes_arrived(&mut self, event: NotesEvent, navigator: &impl PaneNavigator) {
+        let Some(file) = self.app.notes_event(event) else {
+            return;
+        };
+        if let Err(error) = navigator.open_editor(&file) {
+            let detail = sanitize_display(&error.to_string(), ERROR_LIMIT);
+            if let Some(view) = self.app.notes.as_mut() {
+                view.failed(detail);
+            }
+        }
     }
 
     fn open_link(&mut self, link: &str, navigator: &impl PaneNavigator) {
@@ -1368,6 +1455,10 @@ impl RuntimeCore {
             },
             Effect::Defer(id) => Control::Defer(id),
             Effect::OpenLink(link) => Control::OpenLink(link),
+            Effect::Notes(action) => {
+                self.start_notes(action);
+                Control::Continue
+            }
             Effect::Navigate { pane_id } => {
                 let Some(client) = self.client.as_deref() else {
                     self.app
@@ -1417,6 +1508,7 @@ mod tests {
         FocusReading, MonitorHealth, MonitorHealthState, RuntimeStatus, Snapshot,
     };
     use crate::navigation::{NavigationError, PaneNavigator};
+    use crate::notes::NoteLine;
     use crate::questions::{
         AnswerKind, DecisionView, OptionView, Outgoing, PickView, QStop, QuestionView, Queue,
         SendResult,
@@ -2044,6 +2136,151 @@ mod tests {
         live.tts_muted = muted;
         core.accept_snapshot(live, 1_000);
         core
+    }
+
+    /// The knowledge tool as the notes search sees it; every call is logged.
+    #[derive(Default)]
+    struct FakeNotes {
+        log: std::sync::Mutex<Vec<String>>,
+        fail_search: bool,
+    }
+
+    impl crate::notes::NotesBackend for FakeNotes {
+        fn recent(&self) -> crate::notes::BoxFuture<Result<Vec<NoteLine>, String>> {
+            self.log.lock().unwrap().push("recent".into());
+            Box::pin(async {
+                Ok(vec![NoteLine {
+                    name: "recent-note".into(),
+                    title: "Recent".into(),
+                    kind: "idea".into(),
+                }])
+            })
+        }
+
+        fn search(&self, query: String) -> crate::notes::BoxFuture<Result<Vec<NoteLine>, String>> {
+            self.log.lock().unwrap().push(format!("search {query}"));
+            let fail = self.fail_search;
+            Box::pin(async move {
+                if fail {
+                    return Err("Search is resting: the model didn't load.".into());
+                }
+                Ok(vec![NoteLine {
+                    name: format!("found-{query}"),
+                    title: "Found".into(),
+                    kind: "reference".into(),
+                }])
+            })
+        }
+
+        fn file(&self, name: String) -> crate::notes::BoxFuture<Result<String, String>> {
+            self.log.lock().unwrap().push(format!("file {name}"));
+            Box::pin(async move { Ok(format!("/vault/{name}.md")) })
+        }
+    }
+
+    struct EditorNavigator {
+        opened: Rc<RefCell<Vec<String>>>,
+        fail: bool,
+    }
+
+    impl PaneNavigator for EditorNavigator {
+        fn jump_to(&self, _: &str, _: &str) -> Result<(), NavigationError> {
+            Ok(())
+        }
+
+        fn open_editor(&self, file: &str) -> Result<(), NavigationError> {
+            self.opened.borrow_mut().push(file.into());
+            if self.fail {
+                return Err(NavigationError::CommandFailed {
+                    operation: "open editor",
+                    detail: "no tmux".into(),
+                });
+            }
+            Ok(())
+        }
+    }
+
+    async fn next_notes_event(core: &mut RuntimeCore, navigator: &impl PaneNavigator) {
+        let event = tokio::time::timeout(Duration::from_secs(5), core.notes_events.recv())
+            .await
+            .expect("an answer comes")
+            .expect("the channel is open");
+        core.notes_arrived(event, navigator);
+    }
+
+    #[tokio::test]
+    async fn the_notes_search_lists_searches_after_a_pause_and_opens_the_file_in_the_editor() {
+        let notes = Arc::new(FakeNotes::default());
+        let opened = Rc::new(RefCell::new(Vec::new()));
+        let navigator = EditorNavigator {
+            opened: Rc::clone(&opened),
+            fail: false,
+        };
+        let mut core = live_core(false);
+        core.notes_backend = Some(notes.clone());
+
+        assert_eq!(
+            core.handle_key(KeyCode::Char('s'), &navigator),
+            Control::Continue
+        );
+        next_notes_event(&mut core, &navigator).await;
+        let view = core.app.notes.as_ref().unwrap();
+        assert_eq!(view.rows[0].name, "recent-note");
+
+        // Two keys typed in a burst: only the last search runs, after the pause.
+        core.handle_key(KeyCode::Char('a'), &navigator);
+        core.handle_key(KeyCode::Char('b'), &navigator);
+        core.handle_key(KeyCode::Char('c'), &navigator);
+        next_notes_event(&mut core, &navigator).await; // the one-letter query's recent list
+        next_notes_event(&mut core, &navigator).await; // the search
+        assert_eq!(
+            notes.log.lock().unwrap().clone(),
+            vec!["recent", "recent", "search abc"],
+            "the typing that was overtaken never searched"
+        );
+        assert_eq!(core.app.notes.as_ref().unwrap().rows[0].name, "found-abc");
+
+        core.handle_key(KeyCode::Enter, &navigator);
+        next_notes_event(&mut core, &navigator).await;
+        assert_eq!(*opened.borrow(), vec!["/vault/found-abc.md".to_owned()]);
+        assert!(core.app.notes.is_some(), "the dash stays on the list");
+    }
+
+    #[tokio::test]
+    async fn a_failed_editor_open_and_a_resting_search_are_shown_in_the_list() {
+        let notes = Arc::new(FakeNotes {
+            fail_search: true,
+            ..Default::default()
+        });
+        let opened = Rc::new(RefCell::new(Vec::new()));
+        let navigator = EditorNavigator {
+            opened: Rc::clone(&opened),
+            fail: true,
+        };
+        let mut core = live_core(false);
+        core.notes_backend = Some(notes);
+        core.handle_key(KeyCode::Char('s'), &navigator);
+        next_notes_event(&mut core, &navigator).await;
+        core.handle_key(KeyCode::Enter, &navigator);
+        next_notes_event(&mut core, &navigator).await;
+        let message = core.app.notes.as_ref().unwrap().message.clone().unwrap();
+        assert!(message.contains("could not open editor"), "{message}");
+        core.handle_key(KeyCode::Char('x'), &navigator);
+        core.handle_key(KeyCode::Char('y'), &navigator);
+        next_notes_event(&mut core, &navigator).await;
+        next_notes_event(&mut core, &navigator).await;
+        let message = core.app.notes.as_ref().unwrap().message.clone().unwrap();
+        assert!(message.contains("Search is resting"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn without_a_knowledge_tool_the_list_says_notes_are_not_available() {
+        let navigator = FakeNavigator::successful();
+        let mut core = live_core(false);
+        core.handle_key(KeyCode::Char('s'), &navigator);
+        next_notes_event(&mut core, &navigator).await;
+        let message = core.app.notes.as_ref().unwrap().message.clone().unwrap();
+        assert_eq!(message, "Notes are not available right now.");
     }
 
     #[test]

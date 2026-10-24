@@ -2,6 +2,7 @@ pub mod api;
 pub mod app;
 pub mod cli;
 pub mod navigation;
+pub mod notes;
 pub mod questions;
 pub mod runtime;
 pub mod terminal;

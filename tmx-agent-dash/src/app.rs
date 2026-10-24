@@ -1,3 +1,4 @@
+use crate::notes::{NotesAction, NotesEvent, NotesKey, NotesView};
 use crate::questions::{
     BlockEffect, Mode, Outgoing, PickView, QStop, QuestionBlock, Queue, SendResult,
 };
@@ -248,6 +249,8 @@ pub struct App {
     pub snapshot: Snapshot,
     pub search: SearchState,
     pub palette: Option<PaletteState>,
+    /// The notes search over the agent list, open after `s`.
+    pub notes: Option<NotesView>,
     pub selected: Option<AgentIncarnation>,
     /// The call, unknown until Harold answers and again after a failed poll or a disconnect.
     pub call: Option<CallView>,
@@ -307,6 +310,8 @@ pub enum Effect {
     },
     Defer(String),
     OpenLink(String),
+    /// The notes search asks the runtime to read a list or open a vault note.
+    Notes(NotesAction),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -361,6 +366,7 @@ impl App {
             snapshot,
             search,
             palette: None,
+            notes: None,
             selected,
             call: None,
             questions: QuestionBlock::default(),
@@ -1001,6 +1007,41 @@ impl App {
         Effect::None
     }
 
+    fn handle_notes_key(&mut self, code: KeyCode) -> Effect {
+        let Some(view) = self.notes.as_mut() else {
+            return Effect::None;
+        };
+        match view.handle_key(code) {
+            NotesKey::None => Effect::None,
+            NotesKey::Close => {
+                self.notes = None;
+                Effect::None
+            }
+            NotesKey::Action(action) => Effect::Notes(action),
+        }
+    }
+
+    /// Takes an answer to the notes search; one that comes after the view closed is dropped.
+    pub fn notes_event(&mut self, event: NotesEvent) -> Option<String> {
+        let view = self.notes.as_mut()?;
+        match event {
+            NotesEvent::Loaded { seq, result } => {
+                view.loaded(seq, result);
+                None
+            }
+            NotesEvent::File(Ok(file)) => Some(file),
+            NotesEvent::File(Err(message)) => {
+                view.failed(message);
+                None
+            }
+        }
+    }
+
+    /// Closes the notes search, as the stream ending does: nothing can be asked without Harold.
+    pub fn close_notes(&mut self) {
+        self.notes = None;
+    }
+
     /// Selects the first visible row, or nothing when no row shows.
     pub fn select_first_row(&mut self) {
         self.select_boundary(false);
@@ -1023,6 +1064,9 @@ impl App {
             .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
         {
             return Effect::None;
+        }
+        if self.notes.is_some() {
+            return self.handle_notes_key(key.code);
         }
         if self.swallowing_keys {
             // Esc returns the keys to the list, which already has the cursor.
@@ -1076,6 +1120,11 @@ impl App {
                 });
             }
             KeyCode::Char('q') => return Effect::Quit,
+            KeyCode::Char('s') if self.connection == ConnectionState::Live => {
+                let (view, action) = NotesView::open();
+                self.notes = Some(view);
+                return Effect::Notes(action);
+            }
             KeyCode::Esc if !self.search.query.is_empty() => {
                 self.search.query.clear();
                 self.search_changed();
@@ -1955,6 +2004,10 @@ mod tests {
         app.handle_key(KeyCode::Esc);
         assert_eq!(app.visible_counts(), (2, 2));
         assert_eq!(app.selected, Some(first));
+    }
+
+    fn test_app(connection: ConnectionState) -> App {
+        App::new(connection, snapshot(0, 0, Vec::new()), empty_search(), None)
     }
 
     fn empty_app() -> App {
@@ -4118,5 +4171,58 @@ mod tests {
         app.selected = None;
         app.select_first_row();
         assert_eq!(app.selected.as_ref().unwrap().pane_id, "%2");
+    }
+
+    #[test]
+    fn s_opens_the_notes_search_only_while_live_and_esc_closes_it() {
+        use crate::notes::NotesAction;
+        let mut live = test_app(ConnectionState::Live);
+        assert!(matches!(
+            live.handle_key(KeyCode::Char('s')),
+            Effect::Notes(NotesAction::Load { seq: 1, .. })
+        ));
+        assert!(live.notes.is_some());
+        assert_eq!(live.handle_key(KeyCode::Esc), Effect::None);
+        assert!(live.notes.is_none());
+
+        let mut connecting = test_app(ConnectionState::Connecting);
+        assert_eq!(connecting.handle_key(KeyCode::Char('s')), Effect::None);
+        assert!(connecting.notes.is_none());
+    }
+
+    #[test]
+    fn while_the_notes_search_is_open_the_list_keys_do_not_reach_the_agents() {
+        use crate::notes::{NoteLine, NotesAction, NotesEvent};
+        let mut app = test_app(ConnectionState::Live);
+        let Effect::Notes(NotesAction::Load { seq, .. }) = app.handle_key(KeyCode::Char('s'))
+        else {
+            panic!("s reads the recent list");
+        };
+        app.notes_event(NotesEvent::Loaded {
+            seq,
+            result: Ok(vec![NoteLine {
+                name: "a-note".into(),
+                title: "A note".into(),
+                kind: "idea".into(),
+            }]),
+        });
+        // `q` is a letter to type here, not a quit.
+        assert!(matches!(
+            app.handle_key(KeyCode::Char('q')),
+            Effect::Notes(NotesAction::Load { .. })
+        ));
+        app.handle_key(KeyCode::Esc);
+        assert_eq!(
+            app.handle_key(KeyCode::Enter),
+            Effect::Notes(NotesAction::Open {
+                name: "a-note".into()
+            })
+        );
+        assert_eq!(
+            app.notes_event(NotesEvent::File(Ok("/vault/a-note.md".into()))),
+            Some("/vault/a-note.md".into())
+        );
+        app.close_notes();
+        assert_eq!(app.notes_event(NotesEvent::File(Ok("x".into()))), None);
     }
 }
