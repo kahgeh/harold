@@ -3333,3 +3333,263 @@ fn the_knowledge_lines_export_their_counts_and_no_text() {
     assert!(!keys.contains(&"query"));
     assert!(!test_support::exported_text().contains(&marker));
 }
+
+/// A stand-in for `curl` that answers `scripts/check_hyperdx_alerts.sh` from the same store as
+/// `STAND_IN_HDX`. It reads the key from the `-K -` config on stdin and keeps it in
+/// `$STORE/key_seen`, so a test can see that the key arrived there and not on the command line.
+const STAND_IN_CURL: &str = r#"#!/bin/sh
+cat > "$STORE/key_seen"
+for url; do :; done
+[ -z "$HDX_UNREACHABLE" ] || { echo "curl: (7) Failed to connect to hyperdx.test" >&2; exit 7; }
+[ -z "$HDX_DOWN" ] || { echo '{"message":"Unauthorized"}'; exit 0; }
+kind=${url##*/}
+cat "$STORE/$kind"/*.json 2>/dev/null | jq -s '{data: .}'
+"#;
+
+const CHECK_KEY: &str = "known-key-0123456789";
+
+struct CheckResult {
+    code: i32,
+    stdout: String,
+    stderr: String,
+}
+
+impl StandIn {
+    /// Runs `scripts/check_hyperdx_alerts.sh` with the stand-in `curl` first on `PATH`.
+    fn check(&self, env: &[(&str, &str)]) -> CheckResult {
+        use std::os::unix::fs::PermissionsExt;
+        let bin = self.store.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let curl = bin.join("curl");
+        std::fs::write(&curl, STAND_IN_CURL).unwrap();
+        std::fs::set_permissions(&curl, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
+        let mut command = std::process::Command::new("bash");
+        command
+            .arg("scripts/check_hyperdx_alerts.sh")
+            .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join(".."))
+            .env("PATH", path)
+            .env("STORE", &self.store)
+            .env("HYPERDX_URL", "http://hyperdx.test")
+            .env("HYPERDX_API_KEY", CHECK_KEY)
+            .env_remove("HDX_DOWN")
+            .env_remove("HDX_UNREACHABLE");
+        for (name, value) in env {
+            command.env(name, value);
+        }
+        let output = command.output().unwrap();
+        let result = CheckResult {
+            code: output.status.code().unwrap(),
+            stdout: String::from_utf8(output.stdout).unwrap(),
+            stderr: String::from_utf8(output.stderr).unwrap(),
+        };
+        assert!(
+            !result.stdout.contains(CHECK_KEY) && !result.stderr.contains(CHECK_KEY),
+            "the key is in the output: {} {}",
+            result.stdout,
+            result.stderr
+        );
+        result
+    }
+
+    /// Rewrites the one object of `kind` named `name`.
+    fn edit(&self, kind: &str, name: &str, change: impl FnOnce(&mut serde_json::Value)) {
+        let id = self.only(kind, name)["id"].as_str().unwrap().to_owned();
+        let path = self.store.join(kind).join(format!("{id}.json"));
+        let mut object: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        change(&mut object);
+        std::fs::write(&path, object.to_string()).unwrap();
+    }
+
+    fn remove(&self, kind: &str, name: &str) {
+        let id = self.only(kind, name)["id"].as_str().unwrap().to_owned();
+        std::fs::remove_file(self.store.join(kind).join(format!("{id}.json"))).unwrap();
+    }
+}
+
+fn applied() -> StandIn {
+    let stand_in = StandIn::new();
+    let stderr = stand_in.run(&create_alerts());
+    assert_eq!(stand_in.objects("alerts").len(), 6, "{stderr}");
+    stand_in
+}
+
+#[test]
+fn the_check_passes_after_the_create_loop() {
+    let stand_in = applied();
+    let result = stand_in.check(&[]);
+    assert_eq!(result.code, 0, "{} {}", result.stdout, result.stderr);
+    assert_eq!(result.stdout, "check_hyperdx_alerts: ok, 6 alerts\n");
+    let key_seen = std::fs::read_to_string(stand_in.store.join("key_seen")).unwrap();
+    assert!(
+        key_seen.contains(CHECK_KEY),
+        "the key reaches curl on stdin"
+    );
+}
+
+#[test]
+fn the_check_names_an_alert_that_is_missing() {
+    let stand_in = applied();
+    stand_in.remove("alerts", "wrong-agent");
+    let result = stand_in.check(&[]);
+    assert_eq!(result.code, 1);
+    assert_eq!(
+        result.stdout,
+        "alert wrong-agent: missing in HyperDX\ncheck_hyperdx_alerts: 1 problems\n"
+    );
+}
+
+#[test]
+fn the_check_names_a_changed_threshold_with_both_values() {
+    let stand_in = applied();
+    stand_in.edit("alerts", "phone-request-slow", |alert| {
+        alert["threshold"] = 61.into();
+    });
+    let result = stand_in.check(&[]);
+    assert_eq!(result.code, 1);
+    assert!(
+        result
+            .stdout
+            .contains("alert phone-request-slow: threshold is 61 in HyperDX, 60 in the file\n"),
+        "{}",
+        result.stdout
+    );
+}
+
+#[test]
+fn the_check_names_a_changed_comparison_and_interval() {
+    let stand_in = applied();
+    stand_in.edit("alerts", "wrong-agent", |alert| {
+        alert["thresholdType"] = "below".into();
+        alert["interval"] = "1h".into();
+    });
+    let result = stand_in.check(&[]);
+    assert_eq!(result.code, 1);
+    assert!(
+        result.stdout.contains(
+            "alert wrong-agent: thresholdType is below in HyperDX, above_exclusive in the file\n"
+        ),
+        "{}",
+        result.stdout
+    );
+    assert!(
+        result
+            .stdout
+            .contains("alert wrong-agent: interval is 1h in HyperDX, 5m in the file\n"),
+        "{}",
+        result.stdout
+    );
+}
+
+#[test]
+fn the_check_names_a_changed_number_of_windows() {
+    let stand_in = applied();
+    stand_in.edit("alerts", "slot-idle", |alert| {
+        alert["numConsecutiveWindows"] = 4.into();
+    });
+    let result = stand_in.check(&[]);
+    assert_eq!(result.code, 1);
+    assert!(
+        result
+            .stdout
+            .contains("alert slot-idle: numConsecutiveWindows is 4 in HyperDX, 8 in the file\n"),
+        "{}",
+        result.stdout
+    );
+}
+
+#[test]
+fn the_check_accepts_only_the_recorded_default_for_a_file_without_windows() {
+    let stand_in = applied();
+    let alert = stand_in.only("alerts", "wrong-agent");
+    assert!(
+        alert["numConsecutiveWindows"].is_null(),
+        "the default HyperDX returns when the file has none is null"
+    );
+    stand_in.edit("alerts", "wrong-agent", |alert| {
+        alert["numConsecutiveWindows"] = 3.into();
+    });
+    let result = stand_in.check(&[]);
+    assert_eq!(result.code, 1);
+    assert!(
+        result.stdout.contains(
+            "alert wrong-agent: numConsecutiveWindows is 3 in HyperDX, none in the file\n"
+        ),
+        "{}",
+        result.stdout
+    );
+}
+
+#[test]
+fn the_check_names_a_second_alert_of_one_name() {
+    let stand_in = applied();
+    stand_in.run(
+        r#"fill alert-wrong-agent.json | hdx -X POST "$HYPERDX_URL/api/v2/alerts" --data-binary @- >/dev/null"#,
+    );
+    let result = stand_in.check(&[]);
+    assert_eq!(result.code, 1);
+    assert!(
+        result
+            .stdout
+            .contains("alert wrong-agent: HyperDX has 2 of that name\n"),
+        "{}",
+        result.stdout
+    );
+}
+
+#[test]
+fn the_check_names_a_harold_alert_that_has_no_file_and_ignores_others() {
+    let stand_in = applied();
+    stand_in.run(
+        r#"echo '{"name": "stray", "tags": ["harold"]}' | hdx -X POST "$HYPERDX_URL/api/v2/alerts" --data-binary @- >/dev/null
+echo '{"name": "Alert: other", "tags": ["sre"]}' | hdx -X POST "$HYPERDX_URL/api/v2/alerts" --data-binary @- >/dev/null
+echo '{"name": "alert-sink"}' | hdx -X POST "$HYPERDX_URL/api/v2/webhooks" --data-binary @- >/dev/null"#,
+    );
+    let result = stand_in.check(&[]);
+    assert_eq!(result.code, 1);
+    assert_eq!(
+        result.stdout,
+        "alert stray: tagged harold in HyperDX, has no file\ncheck_hyperdx_alerts: 1 problems\n"
+    );
+}
+
+#[test]
+fn the_check_names_a_missing_webhook_and_an_alert_pointing_elsewhere() {
+    let stand_in = applied();
+    stand_in.remove("webhooks", "harold-alerts-slot-idle");
+    stand_in.edit("alerts", "wrong-agent", |alert| {
+        alert["channel"]["webhookId"] = "somewhere-else".into();
+    });
+    let result = stand_in.check(&[]);
+    assert_eq!(result.code, 1);
+    assert!(
+        result
+            .stdout
+            .contains("webhook harold-alerts-slot-idle: missing in HyperDX\n"),
+        "{}",
+        result.stdout
+    );
+    assert!(
+        result
+            .stdout
+            .contains("alert wrong-agent: does not point at webhook harold-alerts-wrong-agent\n"),
+        "{}",
+        result.stdout
+    );
+}
+
+#[test]
+fn the_check_exits_2_when_hyperdx_cannot_be_checked() {
+    let stand_in = applied();
+    let down = stand_in.check(&[("HDX_UNREACHABLE", "1")]);
+    assert_eq!(down.code, 2, "{} {}", down.stdout, down.stderr);
+    assert!(down.stderr.contains("cannot check"), "{}", down.stderr);
+    let refused = stand_in.check(&[("HDX_DOWN", "1")]);
+    assert_eq!(refused.code, 2, "{} {}", refused.stdout, refused.stderr);
+    assert!(
+        refused.stderr.contains("did not answer with a list"),
+        "{}",
+        refused.stderr
+    );
+}

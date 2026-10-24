@@ -745,6 +745,14 @@ done
 
 `harold-alerts` is then unused and may be deleted.
 
+After the create or update loops, run the check by hand. It compares HyperDX with the alert files and with the `harold-alerts-<name>` webhooks, and it uses the same `HYPERDX_URL` and `HYPERDX_API_KEY`:
+
+```sh
+scripts/check_hyperdx_alerts.sh
+```
+
+The check prints `check_hyperdx_alerts: ok, <n> alerts` and exits 0 when HyperDX holds every alert in `hyperdx/` with its file's `threshold`, `thresholdType`, `interval` and `numConsecutiveWindows`. A file with no `numConsecutiveWindows` must match `null`, which is what HyperDX returns for it. The check also expects each alert to point at its own webhook, and no alert tagged `harold` to be without a file. Otherwise it prints one line per problem and exits 1. If HyperDX cannot be reached or does not answer with a list, it exits 2.
+
 ## Not tested until real use
 
 The definitions were written from HyperDX 2.40's API source and the local stack's own provisioning, and checked only by tests that read the files. Nothing was sent to the running stack. Untested until then:
