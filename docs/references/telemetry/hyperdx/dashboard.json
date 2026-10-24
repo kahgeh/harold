@@ -885,6 +885,22 @@
       }
     },
     {
+      "id": "thread-opened-at-the-oldest-row-7-days",
+      "name": "Thread opened at the oldest row, 7 days",
+      "x": 12,
+      "y": 37,
+      "w": 12,
+      "h": 3,
+      "containerId": "web-app",
+      "config": {
+        "configType": "sql",
+        "displayType": "table",
+        "connectionId": "@CLICKHOUSE_CONNECTION_ID@",
+        "sourceId": "@TRACES_SOURCE_ID@",
+        "sqlTemplate": "SELECT count() AS opens, countIf(SpanAttributes['harold.opened_at'] = 'oldest_on_page') AS at_oldest_row, round(100 * at_oldest_row / opens, 1) AS oldest_percent FROM $__sourceTable WHERE ServiceName = 'harold-web-app' AND SpanName = 'browser.thread_opened' AND Timestamp >= now() - INTERVAL 7 DAY AND Timestamp < now()"
+      }
+    },
+    {
       "id": "knowledge-hours-since-good-pass",
       "name": "Knowledge index: hours since the last good pass (info; the line is 2)",
       "x": 0,
