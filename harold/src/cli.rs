@@ -2876,6 +2876,154 @@ mod tests {
         }
     }
 
+    #[test]
+    fn checked_parses_and_takes_nothing_more() {
+        assert_eq!(
+            parse(&["tool", "questions", "checked"]),
+            Ok(Mode::Tool(ToolCommand::QuestionsChecked))
+        );
+        assert!(parse(&["tool", "questions", "checked", "extra"]).is_err());
+    }
+
+    #[test]
+    fn put_carries_the_spec_file_when_the_json_names_one() {
+        let named = SPEC_JSON.replacen(
+            "\"sha\"",
+            "\"spec_file\": \"/repo/.superpowers/pod/specs/dash.md\", \"sha\"",
+            1,
+        );
+        assert_eq!(
+            question_from_json(&named).unwrap().spec_file,
+            "/repo/.superpowers/pod/specs/dash.md"
+        );
+        assert_eq!(question_from_json(SPEC_JSON).unwrap().spec_file, "");
+    }
+
+    #[test]
+    fn list_marks_a_changed_spec_after_everything_else() {
+        let listed =
+            |spec_state, deferred, steps: Vec<questions::Step>| questions::ListedQuestion {
+                question: Some(questions::Question {
+                    id: "Q1".into(),
+                    product: "harold".into(),
+                    spec: "dash".into(),
+                    steps,
+                    ..Default::default()
+                }),
+                version: 1,
+                deferred,
+                spec_state: questions::SpecState::from_str_name(spec_state).unwrap() as i32,
+                ..Default::default()
+            };
+        assert_eq!(
+            list_line(&listed("SPEC_STATE_CHANGED", false, vec![])),
+            "Q1 v1 harold dash picks 0/0 (changed spec)"
+        );
+        assert_eq!(
+            list_line(&listed("SPEC_STATE_CHANGED", true, vec![])),
+            "Q1 v1 harold dash picks 0/0 (deferred) (changed spec)"
+        );
+        for state in ["SPEC_STATE_CURRENT", "SPEC_STATE_UNKNOWN"] {
+            assert_eq!(
+                list_line(&listed(state, false, vec![])),
+                "Q1 v1 harold dash picks 0/0"
+            );
+        }
+        let steps = vec![questions::Step {
+            text: "one".into(),
+            detail: String::new(),
+        }];
+        assert_eq!(
+            list_line(&listed("SPEC_STATE_CHANGED", false, steps)),
+            "Q1 v1 harold steps 0/1 (changed spec)"
+        );
+    }
+
+    fn wall_ms() -> i64 {
+        (time::OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000) as i64
+    }
+
+    /// A registry of one product, whose repo is `repo`.
+    struct OneProduct(std::path::PathBuf);
+    impl crate::tools::Products for OneProduct {
+        fn products(&self) -> Result<Vec<(String, std::path::PathBuf)>, &'static str> {
+            Ok(vec![("harold".into(), self.0.clone())])
+        }
+    }
+
+    #[tokio::test]
+    async fn checked_prints_the_time_and_list_marks_a_spec_that_changed() {
+        let folder = std::env::temp_dir().join(format!("harold-cli-tool-{}", uuid::Uuid::new_v4()));
+        let specs = folder.join("repo/.superpowers/pod/specs");
+        std::fs::create_dir_all(&specs).unwrap();
+        let repo = std::fs::canonicalize(folder.join("repo")).unwrap();
+        let spec = std::fs::canonicalize(&specs).unwrap().join("dash.md");
+        std::fs::write(&spec, b"first").unwrap();
+        let sha = hex::encode(<sha2::Sha256 as sha2::Digest>::digest(b"first"));
+        let (stop, shutdown) = tokio::sync::watch::channel(());
+        let handle = crate::tools::questions::start(crate::tools::ToolContext {
+            data_folder: folder.join("data"),
+            typing: Some(std::sync::Arc::new(Typist)),
+            chief_pane: std::sync::Arc::new(NoChief),
+            pane_folder: std::sync::Arc::new(NoFolder),
+            products: std::sync::Arc::new(OneProduct(repo)),
+            agents: std::sync::Arc::new(crate::tools::tests::NoAgents),
+            pods: std::sync::Arc::new(crate::tools::tests::NoPods),
+            watch_settings: Default::default(),
+            model_environment: Vec::new(),
+            cli_path: "claude".into(),
+            shutdown,
+        })
+        .await
+        .unwrap_or_else(|e| panic!("start failed: {}", e.reason));
+        let serving = serve(handle.routes).await;
+        let address = serving.address.clone();
+
+        let json = SPEC_JSON.replacen("abc123", &sha[..12], 1).replacen(
+            "\"sha\"",
+            &format!("\"spec_file\": \"{}\", \"sha\"", spec.display()),
+            1,
+        );
+        let put = tool(&address, &ToolCommand::QuestionsPut, json.as_bytes()).await;
+        let current = tool(&address, &ToolCommand::QuestionsList, &b""[..]).await;
+        std::fs::write(&spec, b"first, then revised").unwrap();
+        let changed = tool(&address, &ToolCommand::QuestionsList, &b""[..]).await;
+        let before = watch_time(wall_ms(), crate::telemetry::local_offset());
+        let checked = tool(&address, &ToolCommand::QuestionsChecked, &b""[..]).await;
+        let after = watch_time(wall_ms(), crate::telemetry::local_offset());
+        let outside = tool(
+            &address,
+            &ToolCommand::QuestionsPut,
+            json.replacen(&spec.display().to_string(), "/etc/hosts.md", 1)
+                .as_bytes(),
+        )
+        .await;
+
+        drop(serving);
+        drop(stop);
+        let _ = handle.task.await;
+        let _ = std::fs::remove_dir_all(&folder);
+        assert_eq!(put, Ok("stored q-1 v1".into()));
+        assert_eq!(
+            current,
+            Ok("q-1 v1 harold dash picks 0/1\n1 waiting".into())
+        );
+        assert_eq!(
+            changed,
+            Ok("q-1 v1 harold dash picks 0/1 (changed spec)\n1 waiting".into())
+        );
+        let checked = checked.unwrap();
+        assert!(
+            [
+                format!("checked at {before}"),
+                format!("checked at {after}")
+            ]
+            .contains(&checked),
+            "{checked} between {before} and {after}"
+        );
+        assert_eq!(outside, Err("invalid spec_file".into()));
+    }
+
     #[tokio::test]
     async fn the_chief_puts_lists_orders_and_dismisses_through_the_tool() {
         let folder = std::env::temp_dir().join(format!("harold-cli-tool-{}", uuid::Uuid::new_v4()));
