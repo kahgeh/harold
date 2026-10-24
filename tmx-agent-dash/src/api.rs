@@ -1431,11 +1431,13 @@ mod question_tests {
                 decisions,
                 title: String::new(),
                 steps: vec![],
+                ..Default::default()
             }),
             version,
             deferred,
             ticked: vec![],
             picks: vec![],
+            ..Default::default()
         }
     }
 
@@ -1489,6 +1491,7 @@ mod question_tests {
                     deferred: false,
                     ticked: vec![],
                     picks: vec![],
+                    ..Default::default()
                 },
                 hostile,
             ],
@@ -1497,6 +1500,7 @@ mod question_tests {
                 id: "Q7".into(),
                 reason: "no longer \x1b[1mneeded".into(),
             }],
+            ..Default::default()
         });
 
         let ids: Vec<&str> = queue.questions.iter().map(|q| q.id.as_str()).collect();
@@ -1605,14 +1609,17 @@ mod question_tests {
                             detail: String::new(),
                         },
                     ],
+                    ..Default::default()
                 }),
                 version: 3,
                 deferred: false,
                 ticked: vec![2],
                 picks: vec![],
+                ..Default::default()
             }],
             waiting: 1,
             dismissed: vec![],
+            ..Default::default()
         });
         assert_eq!(queue.questions.len(), 1);
         let q = &queue.questions[0];
@@ -1636,6 +1643,7 @@ mod question_tests {
             questions: vec![none],
             waiting: 1,
             dismissed: vec![],
+            ..Default::default()
         });
         assert!(queue.questions.is_empty());
     }
@@ -1653,6 +1661,7 @@ mod question_tests {
             questions: vec![item],
             waiting: 1,
             dismissed: vec![],
+            ..Default::default()
         });
         let q = &queue.questions[0];
         assert_eq!(q.steps[0].text, "run");
@@ -1716,6 +1725,7 @@ mod question_tests {
             questions: vec![item],
             waiting: 1,
             dismissed: vec![],
+            ..Default::default()
         });
         assert_eq!(
             queue.questions[0].picks,
