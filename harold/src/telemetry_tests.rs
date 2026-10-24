@@ -1403,6 +1403,142 @@ fn a_tag_for_another_mac_after_harolds_choice_counts_the_earlier_request_wrong()
     assert!(outcomes.iter().any(|outcome| outcome == "not_owned"));
 }
 
+/// How many `web_app` requests `outcome` has counted, with `resolved_by = none`. Other
+/// tests in this process also finish web app requests, so a test checks for a rise of at
+/// least what it finished.
+fn web_app_requests(outcome: &str) -> u64 {
+    test_support::exact_counter_value(
+        "harold.phone_requests",
+        &[
+            ("channel", WEB_APP_CHANNEL),
+            ("outcome", outcome),
+            ("resolved_by", "none"),
+        ],
+    )
+    .unwrap_or(0)
+}
+
+fn web_app_latency_sum() -> f64 {
+    test_support::histogram_sum(
+        "harold.phone_request.latency",
+        &[("channel", WEB_APP_CHANNEL)],
+    )
+    .unwrap_or(0.0)
+}
+
+fn web_app_typed(typed_at: OffsetDateTime) -> Routing {
+    Routing::Typed {
+        pane_id: unique_pane(),
+        resolved_by: ResolvedBy::MyAgent,
+        tagged: false,
+        typed_at,
+    }
+}
+
+#[test]
+fn a_web_app_request_typed_on_time_is_counted_typed_with_its_latency() {
+    test_support::install();
+    let now = OffsetDateTime::now_utc();
+    let (typed_before, latency_before) = (web_app_requests("typed"), web_app_latency_sum());
+    let reply = open_phone_request(WEB_APP_CHANNEL, now - time::Duration::seconds(30));
+
+    finish_phone_request_in(&mut PhoneBook::default(), &reply, &web_app_typed(now), now);
+
+    assert!(web_app_requests("typed") > typed_before);
+    assert!(web_app_latency_sum() >= latency_before + 29.0);
+    assert_eq!(
+        test_support::exact_counter_value(
+            "harold.phone_requests.wrong",
+            &[("channel", WEB_APP_CHANNEL), ("resolved_by", "none")],
+        ),
+        None,
+        "a web app reply is never judged wrong"
+    );
+}
+
+#[test]
+fn a_web_app_request_with_no_pane_is_counted_unavailable() {
+    test_support::install();
+    let now = OffsetDateTime::now_utc();
+    let before = web_app_requests("unavailable");
+    let reply = open_phone_request(WEB_APP_CHANNEL, now);
+
+    finish_phone_request_in(&mut PhoneBook::default(), &reply, &Routing::NoPane, now);
+
+    assert!(web_app_requests("unavailable") > before);
+}
+
+#[test]
+fn a_web_app_request_typed_eleven_minutes_late_is_counted_unavailable() {
+    test_support::install();
+    let now = OffsetDateTime::now_utc();
+    let before = web_app_requests("unavailable");
+    let reply = open_phone_request(WEB_APP_CHANNEL, now - time::Duration::minutes(11));
+
+    finish_phone_request_in(&mut PhoneBook::default(), &reply, &web_app_typed(now), now);
+
+    assert!(web_app_requests("unavailable") > before);
+}
+
+#[test]
+fn paused_and_not_owned_web_app_requests_add_nothing() {
+    test_support::install();
+    let now = OffsetDateTime::now_utc();
+    let book = &mut PhoneBook::default();
+    for routing in [Routing::Paused, Routing::NotOwned { tagged: true }] {
+        let verdict = book.judge(WEB_APP_CHANNEL, now, now, &routing);
+        assert_eq!(
+            verdict,
+            PhoneVerdict {
+                outcome: None,
+                latency: None,
+                wrong: None
+            }
+        );
+    }
+}
+
+#[test]
+fn a_web_app_reply_leaves_the_wrong_agent_look_back_on_the_imessage_reply() {
+    let channel = unique_channel();
+    let mut book = PhoneBook::default();
+    let now = OffsetDateTime::now_utc();
+    let first = open_phone_request(channel, now - time::Duration::seconds(60));
+    finish_phone_request_in(
+        &mut book,
+        &first,
+        &typed("%look-back-a", false),
+        now - time::Duration::seconds(50),
+    );
+    // Typed, unavailable and not-owned web app replies in between.
+    for routing in [
+        web_app_typed(now - time::Duration::seconds(30)),
+        Routing::NoPane,
+        Routing::NotOwned { tagged: true },
+    ] {
+        let web = open_phone_request(WEB_APP_CHANNEL, now - time::Duration::seconds(30));
+        finish_phone_request_in(&mut book, &web, &routing, now - time::Duration::seconds(30));
+    }
+    let tagged = open_phone_request(channel, now - time::Duration::seconds(10));
+    finish_phone_request_in(&mut book, &tagged, &typed("%look-back-b", true), now);
+
+    assert_eq!(
+        test_support::counter_value(
+            "harold.phone_requests.wrong",
+            &[("channel", channel), ("resolved_by", "latest_notifier")],
+        ),
+        Some(1),
+        "the first iMessage reply is still the one looked back at"
+    );
+    assert_eq!(
+        test_support::exact_counter_value(
+            "harold.phone_requests.wrong",
+            &[("channel", WEB_APP_CHANNEL), ("resolved_by", "none")],
+        ),
+        None
+    );
+}
+
 #[test]
 fn a_typed_request_keeps_its_prompt_for_the_next_turn_end_on_its_pane() {
     let pane = unique_pane();
@@ -2534,8 +2670,32 @@ fn each_alert_has_its_own_webhook_posting_what_the_alert_address_accepts() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn phone_requests_carry_imessage_or_unknown_as_their_channel() {
+fn judged_phone_requests_carry_imessage_or_unknown_as_their_channel() {
     assert_eq!(PHONE_CHANNELS, ["imessage", "unknown"]);
+}
+
+#[test]
+fn the_web_app_phone_request_series_are_exported_from_zero_but_never_wrong() {
+    test_support::install();
+    register_phone_counters();
+    for outcome in ["typed", "unavailable"] {
+        let set = [
+            ("channel", WEB_APP_CHANNEL),
+            ("outcome", outcome),
+            ("resolved_by", "none"),
+        ];
+        assert!(
+            test_support::exact_counter_value("harold.phone_requests", &set).is_some(),
+            "{set:?}"
+        );
+    }
+    assert_eq!(
+        test_support::counter_value(
+            "harold.phone_requests.wrong",
+            &[("channel", WEB_APP_CHANNEL)]
+        ),
+        None
+    );
 }
 
 #[test]

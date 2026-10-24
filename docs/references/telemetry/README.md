@@ -134,7 +134,7 @@ Each counted request has one outcome:
 These rules decide `wrong`:
 
 1. Only a request typed on time can later count as wrong. A late or dropped request never does.
-2. "The next phone reply" is literal. Any counted reply replaces or clears the earlier one, including a reply that found no pane. A reply another Mac owns, or one that arrives while messaging is paused, leaves it alone.
+2. "The next phone reply" is literal. Any counted reply replaces or clears the earlier one, including a reply that found no pane. A web app reply is counted but never judged: it always goes to the chief's pane, so it leaves the look-back alone, and never replaces the last typed iMessage reply that rule looks back at. A reply another Mac owns, or one that arrives while messaging is paused, leaves it alone.
 3. Only a request whose pane Harold chose can count as wrong: `resolved_by` of `latest_notifier`, `ai_model` or `my_agent`. A request the user tagged (`exact_tag`, `tag_substring`) never counts as wrong.
 4. A reply tagged for another Mac (`[studio-mac/pane] …` or `[studio-mac] …`) is a tag for a different pane. The Mac that typed the earlier request counts that request as wrong under rules 1 and 3, within 10 minutes. The tagged reply itself is counted only by the Mac it names, and, as rule 2 says, it leaves the earlier request in place. A reply with no machine in its tag that another Mac owns because it sent the latest phone notification counts nothing here.
 5. A request is counted as wrong at most once. A second tagged reply within the 10 minutes, for another Mac or for another pane here, does not count it again.
@@ -156,6 +156,7 @@ These rules decide `wrong`:
 |---|---|---|
 | `imessage` | a reply read from the Messages database | the message's own time |
 | `unknown` | a reply with no open request, for example one stored before a restart | when it was stored |
+| `web_app` | a reply sent from the web app | its `POST /replies` |
 
 **Not counted:** replies another Mac owns, which that Mac counts, and replies routed while messaging is paused. Their span is still exported, with outcome `not_owned` or `paused`. A reply Harold read but did not store carries `ignored`. These three outcomes appear on spans only, never on the metrics.
 
@@ -321,7 +322,7 @@ The web app records what happens in the phone's browser as spans under `service.
 
 **Forwarding.** In the background, to `[telemetry] otlp_http_endpoint` + `/v1/traces`, each forward under 2 seconds and at most 4 at a time. A batch beyond that is dropped. Spans that did not reach the collector are counted in `harold.app_spans.not_forwarded` by `reason`. One line, `app traces not forwarded` with `reason`, is logged when forwarding starts failing, and `app traces forwarded again` when it recovers. The lines carry no span content.
 
-**One trace from the tap to the answer.** The page's fetch timing adds a `traceparent` header to `POST /replies` and the todo answers. Harold opens `harold.phone_request` (`channel = web_app`) under the phone's span and stores the reply inside `harold.reply_stored`, so the typed prompt, the chief's turn, `harold.turn_complete`, `harold.delivery` and the answer row join the phone's trace. The row is stored with the `traceparent` of the span that stored it (`app_messages.trace`); the update stream opens `harold.app_row_sent` when it first sends the row, and the row carries that span as `data-trace`, so the page records `browser.message_shown` as its child. A message the chief sends mid-turn opens `harold.away_message` under the pane's last typed prompt while it is within one hour. A todo answer keeps the `traceparent` with the answer (`trace_parent`); the `ANSWERS` line opens `harold.answers_typed` under the first answer's trace with a link to each other, and a line of answers from the dash is a root. A hand-over joins the call turn's trace. A web app reply is not counted in the phone-request counters.
+**One trace from the tap to the answer.** The page's fetch timing adds a `traceparent` header to `POST /replies` and the todo answers. Harold opens `harold.phone_request` (`channel = web_app`) under the phone's span and stores the reply inside `harold.reply_stored`, so the typed prompt, the chief's turn, `harold.turn_complete`, `harold.delivery` and the answer row join the phone's trace. The row is stored with the `traceparent` of the span that stored it (`app_messages.trace`); the update stream opens `harold.app_row_sent` when it first sends the row, and the row carries that span as `data-trace`, so the page records `browser.message_shown` as its child. A message the chief sends mid-turn opens `harold.away_message` under the pane's last typed prompt while it is within one hour. A todo answer keeps the `traceparent` with the answer (`trace_parent`); the `ANSWERS` line opens `harold.answers_typed` under the first answer's trace with a link to each other, and a line of answers from the dash is a root. A hand-over joins the call turn's trace.
 
 ```
 SELECT SpanName, Timestamp, Duration / 1000000 AS ms
@@ -458,8 +459,8 @@ Harold sends counters and histograms as running totals, the OpenTelemetry defaul
 
 **Counting from 0 at start.** With export on, Harold records 0 once, at start, for every attribute set of the counters the alerts read:
 
-- `harold.phone_requests`, for each `outcome` (`typed`, `unavailable`), `channel` and `resolved_by`;
-- `harold.phone_requests.wrong`, for each `channel` and `resolved_by`;
+- `harold.phone_requests`, for each `outcome` (`typed`, `unavailable`), `channel` and `resolved_by`, and for `channel = web_app` with `resolved_by = none` only;
+- `harold.phone_requests.wrong`, for each `channel` and `resolved_by` of `imessage` and `unknown`, never `web_app`;
 - `harold.web_app.pushes`, for each `outcome` (`accepted`, `gone`, `refused`, `unreachable`);
 - `harold.app_spans.not_forwarded`, for each `reason`;
 - `harold.turn_end_updates`, for `outcome = fallback` with `reason = model_failed`, which `local-model-failing` reads.

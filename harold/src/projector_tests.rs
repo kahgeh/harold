@@ -5357,3 +5357,62 @@ async fn a_web_app_reply_with_no_open_request_is_still_on_the_web_app_channel() 
         .collect();
     assert_eq!(channels, ["web_app"]);
 }
+
+fn web_app_requests(outcome: &str) -> u64 {
+    telemetry::test_support::exact_counter_value(
+        "harold.phone_requests",
+        &[
+            ("channel", "web_app"),
+            ("outcome", outcome),
+            ("resolved_by", "none"),
+        ],
+    )
+    .unwrap_or(0)
+}
+
+#[tokio::test]
+async fn a_stored_web_app_reply_with_a_chief_pane_is_counted_typed() {
+    telemetry::test_support::install();
+    let directory = TestDirectory::new();
+    let pane = unique_pane();
+    let with = to_chief(
+        &directory,
+        chief_in(&pane),
+        FakeApp::new(AppDelivery::Pushed),
+    )
+    .await;
+    let before = web_app_requests("typed");
+
+    let outcome = with.dispatcher.dispatch_with_pause(
+        &inbound_delivery(&unique_event_id(), app_reply("hi")),
+        None,
+        false,
+    );
+
+    assert!(
+        matches!(outcome, Ok(DeliveryOutcome::Delivered)),
+        "{outcome:?}"
+    );
+    assert!(web_app_requests("typed") > before);
+}
+
+#[tokio::test]
+async fn a_stored_web_app_reply_with_no_chief_pane_is_counted_unavailable() {
+    telemetry::test_support::install();
+    let directory = TestDirectory::new();
+    let with = to_chief(
+        &directory,
+        vec![agent_observed("%2", 20, "/work/harold")],
+        FakeApp::new(AppDelivery::Pushed),
+    )
+    .await;
+    let before = web_app_requests("unavailable");
+
+    let _ = with.dispatcher.dispatch_with_pause(
+        &inbound_delivery(&unique_event_id(), app_reply("hi")),
+        None,
+        false,
+    );
+
+    assert!(web_app_requests("unavailable") > before);
+}

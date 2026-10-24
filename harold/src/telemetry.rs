@@ -443,6 +443,17 @@ pub(crate) fn register_phone_counters() {
                 .add(0, &[channel, resolved]);
         }
     }
+    // Web app replies are counted but never judged, so they have no `.wrong` series.
+    for outcome in ["typed", "unavailable"] {
+        instruments.phone_requests.add(
+            0,
+            &[
+                KeyValue::new("channel", WEB_APP_CHANNEL),
+                KeyValue::new("outcome", outcome),
+                KeyValue::new("resolved_by", ResolvedBy::None.as_str()),
+            ],
+        );
+    }
 }
 
 /// Records 0 once for `product`'s merge counters with no `spec.id`: `pod.merges`, and
@@ -621,6 +632,9 @@ impl PhoneBook {
         typed_at: OffsetDateTime,
         routing: &Routing,
     ) -> PhoneVerdict {
+        if channel == WEB_APP_CHANNEL {
+            return Self::count_only(reply_at, typed_at, routing);
+        }
         let Routing::Typed {
             pane_id,
             resolved_by,
@@ -655,6 +669,41 @@ impl PhoneBook {
             outcome: Some(if on_time { "typed" } else { "unavailable" }),
             latency: Some(latency),
             wrong,
+        }
+    }
+
+    /// Counts a web app reply without judging it. It always goes to the chief's pane, so
+    /// no pane Harold picked can be wrong, and it must not replace the last typed reply
+    /// that the wrong-agent rule looks back at.
+    fn count_only(
+        reply_at: OffsetDateTime,
+        typed_at: OffsetDateTime,
+        routing: &Routing,
+    ) -> PhoneVerdict {
+        match routing {
+            Routing::Typed { .. } => {
+                // A reply handled before its own time (a clock difference) took no time.
+                let latency = Duration::try_from(typed_at - reply_at).unwrap_or(Duration::ZERO);
+                PhoneVerdict {
+                    outcome: Some(if latency <= ON_TIME {
+                        "typed"
+                    } else {
+                        "unavailable"
+                    }),
+                    latency: Some(latency),
+                    wrong: None,
+                }
+            }
+            Routing::NoPane => PhoneVerdict {
+                outcome: Some("unavailable"),
+                latency: None,
+                wrong: None,
+            },
+            Routing::NotOwned { .. } | Routing::Paused => PhoneVerdict {
+                outcome: None,
+                latency: None,
+                wrong: None,
+            },
         }
     }
 
@@ -752,9 +801,9 @@ pub(crate) fn open_phone_request_in(
     }
 }
 
-/// The channel of a reply typed in the web app. Its requests are spans only: the
-/// phone-request counters keep a fixed channel list, and the right-agent judging is for
-/// replies whose pane Harold had to find.
+/// The channel of a reply typed in the web app. Its requests are counted but not
+/// judged: a web app reply always goes to the chief's pane, so there is no pane Harold
+/// picked that could be wrong.
 pub(crate) const WEB_APP_CHANNEL: &str = "web_app";
 
 /// Reads one `traceparent` value as the propagator's extractor.
@@ -870,28 +919,8 @@ pub(crate) fn finish_phone_request(
     handled_at: OffsetDateTime,
 ) {
     let typed_at = ended_at(routing, handled_at);
-    if reply.channel == WEB_APP_CHANNEL {
-        return end_uncounted(reply, routing, typed_at);
-    }
     let verdict = locked(&PHONE_BOOK).judge(reply.channel, reply.reply_at, typed_at, routing);
     record_finished(reply, routing, typed_at, verdict);
-}
-
-/// Ends a web app reply's request without counting or judging it: its outcome and pane
-/// are on the span. The prompt typed into the pane already holds the request's context.
-fn end_uncounted(reply: &OpenReply, routing: &Routing, typed_at: OffsetDateTime) {
-    let span = reply.cx.span();
-    match routing {
-        Routing::Typed { pane_id, .. } => {
-            span.set_attribute(KeyValue::new("outcome", "typed"));
-            span.set_attribute(KeyValue::new("pane_id", pane_id.clone()));
-        }
-        Routing::NoPane => span.set_attribute(KeyValue::new("outcome", "unavailable")),
-        Routing::Paused => span.set_attribute(KeyValue::new("outcome", "paused")),
-        Routing::NotOwned { .. } => span.set_attribute(KeyValue::new("outcome", "not_owned")),
-    }
-    span.end_with_timestamp(typed_at.into());
-    forget_open_reply(reply);
 }
 
 /// When a request routed as `routing` and handled at `handled_at` ended.
@@ -923,6 +952,8 @@ fn record_finished(
     verdict: PhoneVerdict,
 ) {
     let resolved_by = match routing {
+        // A web app reply always goes to the chief's pane: no pane was chosen.
+        Routing::Typed { .. } if reply.channel == WEB_APP_CHANNEL => ResolvedBy::None,
         Routing::Typed { resolved_by, .. } => *resolved_by,
         Routing::NotOwned { .. } | Routing::Paused | Routing::NoPane => ResolvedBy::None,
     };
