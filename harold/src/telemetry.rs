@@ -610,6 +610,8 @@ impl PhoneBook {
 
     /// Counts a reply sent at `reply_at` and handled at `typed_at`.
     ///
+    /// - A `web_app` reply is counted but not judged: it never replaces or clears the last
+    ///   typed reply and never marks one wrong (see `count_only`).
     /// - `NotOwned` and `Paused` are not counted, and leave the last typed reply as it was.
     /// - `NoPane` is unavailable.
     /// - `Typed` is typed when it was typed within `ON_TIME`, and unavailable otherwise.
