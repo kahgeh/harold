@@ -10,8 +10,10 @@ use tonic::service::Routes;
 use crate::tools::{ToolContext, ToolError, ToolHandle};
 
 mod batch;
+mod monitor;
 mod schema;
 mod service;
+mod spec;
 mod store;
 #[cfg(test)]
 mod test_support;
@@ -36,14 +38,20 @@ pub(crate) async fn start(ctx: ToolContext) -> Result<ToolHandle, ToolError> {
         })?;
     let store = Arc::new(store);
     let wake = Arc::new(Notify::new());
-    let service = service::QuestionToolService::new(Arc::clone(&store), Arc::clone(&wake));
-    let task = tokio::spawn(batch::run(
-        store,
-        typing,
-        ctx.chief_pane,
-        wake,
-        ctx.shutdown,
-    ));
+    let service =
+        service::QuestionToolService::new(Arc::clone(&store), Arc::clone(&wake), ctx.products);
+    let task = tokio::spawn(async move {
+        tokio::join!(
+            batch::run(
+                Arc::clone(&store),
+                typing,
+                ctx.chief_pane,
+                wake,
+                ctx.shutdown.clone(),
+            ),
+            monitor::run(store, ctx.shutdown),
+        );
+    });
     Ok(ToolHandle {
         routes: Routes::new(QuestionServiceServer::new(service)),
         task,

@@ -10,11 +10,14 @@
 //                    dash shows.
 //   ReorderQuestions puts the listed waiting or deferred ids, of questions and
 //                    instructions, first, in order.
+//   MarkChecked      records that the chief has just checked every todo against
+//                    its spec.
 //
 // The dash calls:
 //   ListQuestions    the waiting and deferred questions and instructions, the
 //                    count of questions waiting (instructions are not counted),
-//                    and recently dismissed ids with their reasons.
+//                    recently dismissed ids with their reasons, the time of the
+//                    chief's last check, and each todo's spec state.
 //   AnswerQuestion   answers a question (picks or a note) or instructions
 //                    (DONE or IGNORE) at the version the dash saw.
 //   DeferQuestion    sets a question aside; it returns to waiting once a batch is typed and nothing else waits.
@@ -27,7 +30,11 @@
 //
 // Refusals:
 //   InvalidArgument      message "invalid <field>" for a broken rule; nothing
-//                        is stored. `invalid step` is a step number that is 0
+//                        is stored. `invalid spec_file` is a path that is not
+//                        absolute, does not end in `.md`, is 1,000 characters
+//                        or more, comes with no `sha`, or does not sit inside
+//                        the `.superpowers/pod/specs/` folder of a registered
+//                        product once symlinks are resolved. `invalid step` is a step number that is 0
 //                        or past the last step, or a tick on a question.
 //                        `invalid picks` is a pick list that breaks the
 //                        revise rule (see SavePicks).
@@ -35,7 +42,9 @@
 //                        that was never stored).
 //   FailedPrecondition   message "version_changed" (the question or instructions
 //                        changed since the dash read it) or "not_waiting" (it is no longer
-//                        waiting for an answer).
+//                        waiting for an answer) or "spec_changed" (AnswerQuestion
+//                        and SavePicks: the todo's spec file no longer matches
+//                        the checksum it was asked with).
 //   Unavailable          the database write failed.
 //
 // The server trusts local callers: there is no token.
@@ -53,6 +62,7 @@ service QuestionService {
   rpc TickStep(TickStepRequest) returns (TickStepResponse);
   rpc SavePicks(SavePicksRequest) returns (SavePicksResponse);
   rpc ShowQuestion(ShowQuestionRequest) returns (ShowQuestionResponse);
+  rpc MarkChecked(MarkCheckedRequest) returns (MarkCheckedResponse);
 }
 
 message DecisionOption {
@@ -84,6 +94,10 @@ message Question {
   // Instructions only: the title and the numbered steps.
   string title = 8;
   repeated Step steps = 9;
+  // Optional, put only: the full path of the spec's Markdown file, which the tool
+  // opens only inside a registered product's `.superpowers/pod/specs/` folder to
+  // compare its checksum with `sha`. Never returned: reads leave it empty.
+  string spec_file = 10;
 }
 
 message PutQuestionRequest {
@@ -118,6 +132,15 @@ message ListedQuestion {
   repeated uint32 ticked = 4;
   // A question only: the saved picks, one per picked decision.
   repeated Pick picks = 5;
+  SpecState spec_state = 6;
+}
+
+// Whether the todo's spec file still has the checksum the todo was asked with.
+// UNKNOWN: no spec file was named, or it could not be read safely.
+enum SpecState {
+  SPEC_STATE_UNKNOWN = 0;
+  SPEC_STATE_CURRENT = 1;
+  SPEC_STATE_CHANGED = 2;
 }
 
 message Dismissed {
@@ -130,6 +153,9 @@ message ListQuestionsResponse {
   // The questions waiting; instructions are left out.
   uint32 waiting = 2;
   repeated Dismissed dismissed = 3;
+  // When the chief last called MarkChecked, in milliseconds since the Unix epoch;
+  // 0 before the first check.
+  int64 checked_at_ms = 4;
 }
 
 enum AnswerKind {
@@ -206,4 +232,11 @@ message ShowQuestionResponse {
   string state = 3;
   string reason = 4;
   repeated Pick picks = 5;
+  SpecState spec_state = 6;
+}
+
+message MarkCheckedRequest {}
+
+message MarkCheckedResponse {
+  int64 checked_at_ms = 1;
 }

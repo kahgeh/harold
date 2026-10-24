@@ -490,6 +490,7 @@ fn listed_question() -> ListedQuestion {
             ],
             title: String::new(),
             steps: vec![],
+            spec_file: String::new(),
         }),
         version: 3,
         deferred: false,
@@ -499,6 +500,7 @@ fn listed_question() -> ListedQuestion {
             key: "a".into(),
             text: "SECRET-PICK-TEXT".into(),
         }],
+        spec_state: 0,
     }
 }
 
@@ -519,11 +521,13 @@ fn listed_instructions() -> ListedQuestion {
                     detail: "SECRET-DETAIL".into(),
                 })
                 .collect(),
+            spec_file: String::new(),
         }),
         version: 1,
         deferred: false,
         ticked: vec![1, 2],
         picks: vec![],
+        spec_state: 0,
     }
 }
 

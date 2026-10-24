@@ -37,6 +37,7 @@ fn question(id: &str) -> Question {
                 free: false,
             }],
         }],
+        spec_file: String::new(),
     }
 }
 
@@ -148,7 +149,8 @@ async fn open_creates_and_migrates_questions_db() {
             "002_answer_send_now",
             "003_step_ticks",
             "004_saved_picks",
-            "005_answer_trace"
+            "005_answer_trace",
+            "006_todos_current"
         ]
     );
 }
@@ -170,7 +172,8 @@ async fn reopening_keeps_the_rows_and_applies_nothing_twice() {
             "002_answer_send_now",
             "003_step_ticks",
             "004_saved_picks",
-            "005_answer_trace"
+            "005_answer_trace",
+            "006_todos_current"
         ]
     );
 }
@@ -631,14 +634,15 @@ async fn migration_002_adds_send_now_defaulting_to_zero_and_a_second_open_applie
             "002_answer_send_now",
             "003_step_ticks",
             "004_saved_picks",
-            "005_answer_trace"
+            "005_answer_trace",
+            "006_todos_current"
         ]
     );
 
     let store = TursoQuestionStore::open(&temp.0).await.unwrap();
     assert!(!marked(&store, "Q1").await);
     drop(store);
-    assert_eq!(migration_rows(&temp.0).await.len(), 5);
+    assert_eq!(migration_rows(&temp.0).await.len(), 6);
 }
 
 #[tokio::test]
@@ -909,6 +913,7 @@ fn instructions(id: &str, steps: &[&str]) -> Question {
         steps: steps.iter().map(|s| step(s)).collect(),
         intro: String::new(),
         decisions: vec![],
+        spec_file: String::new(),
     }
 }
 
@@ -974,7 +979,8 @@ async fn migration_003_adds_ticks_to_a_database_with_rows() {
             "002_answer_send_now",
             "003_step_ticks",
             "004_saved_picks",
-            "005_answer_trace"
+            "005_answer_trace",
+            "006_todos_current"
         ]
     );
 }
@@ -1705,4 +1711,94 @@ async fn migration_005_adds_the_trace_column_to_a_database_with_rows() {
         .unwrap()
         .unwrap();
     assert!(ready_traces(&store).await.is_empty());
+}
+
+#[tokio::test]
+async fn the_spec_file_is_kept_with_the_question_and_replaced_by_the_next_version() {
+    let temp = TempFolder::new();
+    let store = TursoQuestionStore::open(&temp.0).await.unwrap();
+    let named = Question {
+        spec_file: "/repo/.superpowers/pod/specs/a.md".into(),
+        ..question("Q1")
+    };
+    store.put(named.clone(), 1).await.unwrap();
+    let listed = store.list(2).await.unwrap().questions;
+    assert_eq!(listed[0].question.spec_file, named.spec_file);
+    assert_eq!(
+        store.show("Q1").await.unwrap().unwrap().question.spec_file,
+        named.spec_file
+    );
+
+    // A question read for an answer is not given the path: it is not in the body.
+    let body = serde_json::to_string(&named).unwrap();
+    assert!(!body.contains("specs/a.md"), "{body}");
+
+    store.put(question("Q1"), 3).await.unwrap();
+    assert_eq!(
+        store.show("Q1").await.unwrap().unwrap().question.spec_file,
+        "",
+        "a version that names none clears it"
+    );
+}
+
+#[tokio::test]
+async fn the_checked_time_is_zero_before_a_check_and_the_last_check_after() {
+    let temp = TempFolder::new();
+    let store = TursoQuestionStore::open(&temp.0).await.unwrap();
+    assert_eq!(store.list(0).await.unwrap().checked_at_ms, 0);
+    store.mark_checked(1_000).await.unwrap();
+    assert_eq!(store.list(2_000).await.unwrap().checked_at_ms, 1_000);
+    store.mark_checked(5_000).await.unwrap();
+    assert_eq!(store.list(6_000).await.unwrap().checked_at_ms, 5_000);
+    drop(store);
+
+    let store = TursoQuestionStore::open(&temp.0).await.unwrap();
+    assert_eq!(
+        store.list(7_000).await.unwrap().checked_at_ms,
+        5_000,
+        "kept across a restart"
+    );
+}
+
+#[tokio::test]
+async fn migration_006_adds_the_spec_file_and_the_checks_table_to_a_database_with_rows() {
+    let temp = TempFolder::new();
+    std::fs::create_dir_all(&temp.0).unwrap();
+    let database = turso::Builder::new_local(temp.0.join(DATABASE).to_str().unwrap())
+        .build()
+        .await
+        .unwrap();
+    let conn = database.connect().unwrap();
+    conn.execute(
+        "CREATE TABLE _migrations (id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE, \
+         checksum TEXT NOT NULL, applied_at_ms INTEGER NOT NULL)",
+        (),
+    )
+    .await
+    .unwrap();
+    for (name, sql) in &MIGRATIONS[..5] {
+        conn.execute_batch(sql).await.unwrap();
+        conn.execute(
+            "INSERT INTO _migrations (name, checksum, applied_at_ms) VALUES (?1, ?2, 0)",
+            (*name, hex::encode(Sha256::digest(sql.as_bytes()))),
+        )
+        .await
+        .unwrap();
+    }
+    conn.execute(
+        "INSERT INTO questions (id, version, position, state, body, updated_at_ms) \
+         VALUES ('Q1', 1, 1, 'waiting', ?1, 0)",
+        [serde_json::to_string(&question("Q1")).unwrap()],
+    )
+    .await
+    .unwrap();
+    drop(conn);
+    drop(database);
+
+    let store = TursoQuestionStore::open(&temp.0).await.unwrap();
+    let listing = store.list(1).await.unwrap();
+    assert_eq!(listing.questions[0].question.spec_file, "");
+    assert_eq!(listing.checked_at_ms, 0);
+    store.mark_checked(9).await.unwrap();
+    assert_eq!(store.list(10).await.unwrap().checked_at_ms, 9);
 }

@@ -17,7 +17,7 @@ use super::schema::{Answer, Kind, Question, check_picks};
 const DATABASE: &str = "questions.db";
 const DISMISSAL_VISIBLE_MS: i64 = 3_600_000;
 
-const MIGRATIONS: [(&str, &str); 5] = [
+const MIGRATIONS: [(&str, &str); 6] = [
     (
         "001_questions",
         include_str!("migrations/001_questions.sql"),
@@ -37,6 +37,10 @@ const MIGRATIONS: [(&str, &str); 5] = [
     (
         "005_answer_trace",
         include_str!("migrations/005_answer_trace.sql"),
+    ),
+    (
+        "006_todos_current",
+        include_str!("migrations/006_todos_current.sql"),
     ),
 ];
 
@@ -115,6 +119,8 @@ pub(super) struct Listing {
     pub questions: Vec<Listed>,
     /// Id and reason of questions dismissed within the last hour.
     pub dismissed: Vec<(String, String)>,
+    /// When the chief last marked the todos checked; 0 before the first check.
+    pub checked_at_ms: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -160,6 +166,8 @@ pub(super) trait QuestionStore: Send + Sync + 'static {
     ) -> impl Future<Output = Result<std::result::Result<u32, Refusal>>> + Send;
     fn reorder(&self, ids: &[String], now_ms: i64) -> impl Future<Output = Result<()>> + Send;
     fn list(&self, now_ms: i64) -> impl Future<Output = Result<Listing>> + Send;
+    /// Records that the chief checked the todos at `now_ms`.
+    fn mark_checked(&self, now_ms: i64) -> impl Future<Output = Result<()>> + Send;
     /// Records the answer the closure resolves from the stored question. The
     /// inner `Err(field)` is the closure's refusal; nothing is stored then.
     /// `send_now` is the mark that asks for the line without the settle wait.
@@ -511,9 +519,15 @@ async fn put_in(conn: &Connection, question: &Question, now_ms: i64) -> Result<u
     let Some(existing) = stored(conn, &question.id).await? else {
         let position = next_position(conn).await?;
         conn.execute(
-            "INSERT INTO questions (id, version, position, state, body, updated_at_ms) \
-             VALUES (?1, 1, ?2, 'waiting', ?3, ?4)",
-            (question.id.as_str(), position, body, now_ms),
+            "INSERT INTO questions (id, version, position, state, body, updated_at_ms, spec_file) \
+             VALUES (?1, 1, ?2, 'waiting', ?3, ?4, ?5)",
+            (
+                question.id.as_str(),
+                position,
+                body,
+                now_ms,
+                question.spec_file.as_str(),
+            ),
         )
         .await?;
         return Ok(1);
@@ -524,7 +538,8 @@ async fn put_in(conn: &Connection, question: &Question, now_ms: i64) -> Result<u
     if open_state(&existing.state) {
         conn.execute(
             "UPDATE questions SET version = ?2, state = 'waiting', body = ?3, answer = NULL, \
-             reason = '', batch_id = NULL, send_now = 0, trace_parent = NULL, updated_at_ms = ?4, ticks = ?5, picks = ?6 WHERE id = ?1",
+             reason = '', batch_id = NULL, send_now = 0, trace_parent = NULL, updated_at_ms = ?4, ticks = ?5, picks = ?6, \
+             spec_file = ?7 WHERE id = ?1",
             (
                 question.id.as_str(),
                 i64::from(version),
@@ -532,6 +547,7 @@ async fn put_in(conn: &Connection, question: &Question, now_ms: i64) -> Result<u
                 now_ms,
                 ticks,
                 picks,
+                question.spec_file.as_str(),
             ),
         )
         .await?;
@@ -540,7 +556,7 @@ async fn put_in(conn: &Connection, question: &Question, now_ms: i64) -> Result<u
         conn.execute(
             "UPDATE questions SET version = ?2, position = ?5, state = 'waiting', body = ?3, \
              answer = NULL, reason = '', batch_id = NULL, send_now = 0, trace_parent = NULL, updated_at_ms = ?4, \
-             ticks = ?6, picks = ?7 WHERE id = ?1",
+             ticks = ?6, picks = ?7, spec_file = ?8 WHERE id = ?1",
             (
                 question.id.as_str(),
                 i64::from(version),
@@ -549,6 +565,7 @@ async fn put_in(conn: &Connection, question: &Question, now_ms: i64) -> Result<u
                 position,
                 ticks,
                 picks,
+                question.spec_file.as_str(),
             ),
         )
         .await?;
@@ -641,14 +658,16 @@ async fn list_in(conn: &Connection, now_ms: i64) -> Result<Listing> {
     let mut questions = Vec::new();
     let mut rows = conn
         .query(
-            "SELECT body, version, state, ticks, picks FROM questions WHERE state IN ('waiting','deferred') \
+            "SELECT body, version, state, ticks, picks, spec_file FROM questions WHERE state IN ('waiting','deferred') \
              ORDER BY CASE state WHEN 'waiting' THEN 0 ELSE 1 END, position, id",
             (),
         )
         .await?;
     while let Some(row) = rows.next().await? {
+        let mut question: Question = serde_json::from_str(&text(&row, 0)?)?;
+        question.spec_file = text(&row, 5)?;
         questions.push(Listed {
-            question: serde_json::from_str(&text(&row, 0)?)?,
+            question,
             version: version_of(&row, 1)?,
             deferred: text(&row, 2)? == "deferred",
             ticked: parse_ticks(&text(&row, 3)?),
@@ -671,7 +690,28 @@ async fn list_in(conn: &Connection, now_ms: i64) -> Result<Listing> {
     Ok(Listing {
         questions,
         dismissed,
+        checked_at_ms: checked_at_in(conn).await?,
     })
+}
+
+async fn checked_at_in(conn: &Connection) -> Result<i64> {
+    let mut rows = conn
+        .query("SELECT checked_at_ms FROM checks WHERE id = 1", ())
+        .await?;
+    match rows.next().await? {
+        Some(row) => integer(&row, 0),
+        None => Ok(0),
+    }
+}
+
+async fn mark_checked_in(conn: &Connection, now_ms: i64) -> Result<()> {
+    conn.execute("DELETE FROM checks WHERE id = 1", ()).await?;
+    conn.execute(
+        "INSERT INTO checks (id, checked_at_ms) VALUES (1, ?1)",
+        (now_ms,),
+    )
+    .await?;
+    Ok(())
 }
 
 async fn answer_in(
@@ -896,15 +936,17 @@ async fn save_picks_in(
 async fn show_in(conn: &Connection, id: &str) -> Result<Option<Shown>> {
     let mut rows = conn
         .query(
-            "SELECT body, version, state, reason, picks FROM questions WHERE id = ?1",
+            "SELECT body, version, state, reason, picks, spec_file FROM questions WHERE id = ?1",
             [id],
         )
         .await?;
     let Some(row) = rows.next().await? else {
         return Ok(None);
     };
+    let mut question: Question = serde_json::from_str(&text(&row, 0)?)?;
+    question.spec_file = text(&row, 5)?;
     Ok(Some(Shown {
-        question: serde_json::from_str(&text(&row, 0)?)?,
+        question,
         version: version_of(&row, 1)?,
         state: text(&row, 2)?,
         reason: text(&row, 3)?,
@@ -1150,6 +1192,12 @@ impl QuestionStore for TursoQuestionStore {
         let conn = self.conn.lock().await;
         roll_back_abandoned(&conn).await?;
         list_in(&conn, now_ms).await
+    }
+
+    async fn mark_checked(&self, now_ms: i64) -> Result<()> {
+        let conn = self.conn.lock().await;
+        begin(&conn).await?;
+        finish(&conn, mark_checked_in(&conn, now_ms).await).await
     }
 
     async fn answer_traced(

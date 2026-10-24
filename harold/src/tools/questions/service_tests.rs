@@ -10,7 +10,7 @@ use super::*;
 use crate::tools::questions::test_support::*;
 
 fn service<S: QuestionStore>(store: Arc<S>) -> QuestionToolService<S> {
-    QuestionToolService::new(store, Arc::new(Notify::new()))
+    QuestionToolService::new(store, Arc::new(Notify::new()), no_products())
 }
 
 async fn put<S: QuestionStore>(
@@ -116,7 +116,8 @@ fn listed(response: &pb::ListQuestionsResponse) -> Vec<(String, u32, bool)> {
 async fn put_list_answer_round_trip() {
     let folder = TempFolder::new();
     let wake = Arc::new(Notify::new());
-    let service = QuestionToolService::new(open_store(&folder).await, Arc::clone(&wake));
+    let service =
+        QuestionToolService::new(open_store(&folder).await, Arc::clone(&wake), no_products());
 
     let stored = put(&service, question("Q1", "spec-1", "abc123"))
         .await
@@ -505,7 +506,8 @@ async fn tick_step_ticks_and_logs_a_fixed_line_without_step_text() {
     let (logs, _guard) = capture_logs();
     let folder = TempFolder::new();
     let wake = Arc::new(Notify::new());
-    let service = QuestionToolService::new(open_store(&folder).await, Arc::clone(&wake));
+    let service =
+        QuestionToolService::new(open_store(&folder).await, Arc::clone(&wake), no_products());
     put(&service, instructions_proto("I1", &["TICK-CANARY-77 step"]))
         .await
         .unwrap();
@@ -643,7 +645,8 @@ async fn save_picks_stores_picks_lists_them_and_wakes_nothing() {
     let (logs, _guard) = capture_logs();
     let folder = TempFolder::new();
     let wake = Arc::new(Notify::new());
-    let service = QuestionToolService::new(open_store(&folder).await, Arc::clone(&wake));
+    let service =
+        QuestionToolService::new(open_store(&folder).await, Arc::clone(&wake), no_products());
     put(&service, question("Q1", "spec", "abc")).await.unwrap();
     // The put left a wake permit; take it so only a save could leave another.
     wake.notified().await;
@@ -865,4 +868,416 @@ async fn an_answers_trace_parent_is_kept_only_when_it_is_a_well_formed_tracepare
         panic!("expected Ready");
     };
     assert_eq!(ready.traces, [phone]);
+}
+
+// ---------------------------------------------------------------------------
+// Spec files, the changed spec, and the checked time
+// ---------------------------------------------------------------------------
+
+/// A registered product with a specs folder, and a service over it.
+struct Specs {
+    repo: std::path::PathBuf,
+    _repo_folder: TempFolder,
+    _db_folder: TempFolder,
+    service: QuestionToolService<crate::tools::questions::store::TursoQuestionStore>,
+}
+
+impl Specs {
+    async fn new() -> Self {
+        let repo_folder = TempFolder::new();
+        let specs = repo_folder.0.join("repo").join(".superpowers/pod/specs");
+        std::fs::create_dir_all(&specs).unwrap();
+        let repo = std::fs::canonicalize(repo_folder.0.join("repo")).unwrap();
+        let db_folder = TempFolder::new();
+        let products = Arc::new(FakeProducts(Ok(vec![("harold".into(), repo.clone())])));
+        let service = QuestionToolService::new(
+            open_store(&db_folder).await,
+            Arc::new(Notify::new()),
+            products,
+        );
+        Self {
+            repo,
+            _repo_folder: repo_folder,
+            _db_folder: db_folder,
+            service,
+        }
+    }
+
+    fn file(&self, name: &str) -> String {
+        self.repo
+            .join(".superpowers/pod/specs")
+            .join(name)
+            .to_str()
+            .unwrap()
+            .to_owned()
+    }
+
+    fn write(&self, name: &str, bytes: &[u8]) -> String {
+        let path = self.file(name);
+        std::fs::write(&path, bytes).unwrap();
+        path
+    }
+}
+
+fn asked_with(id: &str, bytes: &[u8], spec_file: &str) -> pb::Question {
+    pb::Question {
+        spec_file: spec_file.into(),
+        ..question(id, "knowledge-index", &sha12(bytes))
+    }
+}
+
+fn state_of(response: &pb::ListQuestionsResponse, id: &str) -> pb::SpecState {
+    let listed = response
+        .questions
+        .iter()
+        .find(|q| q.question.as_ref().unwrap().id == id)
+        .unwrap();
+    pb::SpecState::try_from(listed.spec_state).unwrap()
+}
+
+#[tokio::test]
+async fn a_spec_file_outside_every_specs_folder_is_refused_and_nothing_is_stored() {
+    let specs = Specs::new().await;
+    let elsewhere = TempFolder::new();
+    std::fs::create_dir_all(&elsewhere.0).unwrap();
+    let outside = elsewhere.0.join("a.md");
+    std::fs::write(&outside, b"x").unwrap();
+    let refused = put(
+        &specs.service,
+        asked_with("Q1", b"x", outside.to_str().unwrap()),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(refused.code(), Code::InvalidArgument);
+    assert_eq!(refused.message(), "invalid spec_file");
+    assert!(list(&specs.service).await.questions.is_empty());
+}
+
+#[tokio::test]
+async fn a_spec_file_that_breaks_a_plain_rule_is_refused_with_the_fields_name() {
+    let specs = Specs::new().await;
+    let inside = specs.write("a.md", b"x");
+    let mut cases = vec![
+        ("relative", asked_with("Q1", b"x", "specs/a.md")),
+        (
+            "not markdown",
+            asked_with("Q1", b"x", &inside.replace(".md", ".txt")),
+        ),
+        (
+            "too long",
+            asked_with("Q1", b"x", &format!("/{}.md", "a".repeat(1000))),
+        ),
+    ];
+    let mut no_sha = asked_with("Q1", b"x", &inside);
+    no_sha.sha = String::new();
+    cases.push(("no sha", no_sha));
+    for (what, question) in cases {
+        let refused = put(&specs.service, question).await.unwrap_err();
+        assert_eq!(refused.code(), Code::InvalidArgument, "{what}");
+        assert_eq!(refused.message(), "invalid spec_file", "{what}");
+    }
+    assert!(list(&specs.service).await.questions.is_empty());
+}
+
+#[tokio::test]
+async fn a_symlink_inside_the_specs_folder_leading_out_is_refused_at_put() {
+    let specs = Specs::new().await;
+    let elsewhere = TempFolder::new();
+    std::fs::create_dir_all(&elsewhere.0).unwrap();
+    let outside = elsewhere.0.join("a.md");
+    std::fs::write(&outside, b"x").unwrap();
+    let link = specs.file("link.md");
+    std::os::unix::fs::symlink(&outside, &link).unwrap();
+    let refused = put(&specs.service, asked_with("Q1", b"x", &link))
+        .await
+        .unwrap_err();
+    assert_eq!(refused.message(), "invalid spec_file");
+}
+
+#[tokio::test]
+async fn the_spec_state_follows_the_file_and_the_path_is_never_returned() {
+    let specs = Specs::new().await;
+    let path = specs.write("a.md", b"first");
+    put(&specs.service, asked_with("Q1", b"first", &path))
+        .await
+        .unwrap();
+    put(&specs.service, question("Q2", "other", "abc"))
+        .await
+        .unwrap();
+
+    let response = list(&specs.service).await;
+    assert_eq!(state_of(&response, "Q1"), pb::SpecState::Current);
+    assert_eq!(state_of(&response, "Q2"), pb::SpecState::Unknown);
+    assert!(
+        response
+            .questions
+            .iter()
+            .all(|q| q.question.as_ref().unwrap().spec_file.is_empty())
+    );
+
+    specs.write("a.md", b"first, then revised");
+    let response = list(&specs.service).await;
+    assert_eq!(state_of(&response, "Q1"), pb::SpecState::Changed);
+
+    let shown = specs
+        .service
+        .show_question(Request::new(pb::ShowQuestionRequest { id: "Q1".into() }))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(shown.spec_state, pb::SpecState::Changed as i32);
+    assert_eq!(shown.question.unwrap().spec_file, "");
+
+    specs.write("a.md", b"first");
+    assert_eq!(
+        state_of(&list(&specs.service).await, "Q1"),
+        pb::SpecState::Current,
+        "changed back"
+    );
+}
+
+#[tokio::test]
+async fn a_changed_spec_refuses_an_answer_and_a_pick_until_the_chief_puts_it_again() {
+    let specs = Specs::new().await;
+    let path = specs.write("a.md", b"first");
+    put(&specs.service, asked_with("Q1", b"first", &path))
+        .await
+        .unwrap();
+    specs.write("a.md", b"second version");
+
+    for kind in [
+        pb::AnswerKind::Answer,
+        pb::AnswerKind::Revise,
+        pb::AnswerKind::Reject,
+    ] {
+        let note = if kind == pb::AnswerKind::Answer {
+            ""
+        } else {
+            "why"
+        };
+        let picks = if kind == pb::AnswerKind::Reject {
+            vec![]
+        } else {
+            vec![pick(0, "a")]
+        };
+        let refused = answer(&specs.service, "Q1", 1, kind, picks, note)
+            .await
+            .unwrap_err();
+        assert_eq!(refused.code(), Code::FailedPrecondition, "{kind:?}");
+        assert_eq!(refused.message(), "spec_changed", "{kind:?}");
+    }
+    let refused = specs
+        .service
+        .save_picks(Request::new(pb::SavePicksRequest {
+            id: "Q1".into(),
+            version: 1,
+            picks: vec![pick(0, "a")],
+        }))
+        .await
+        .unwrap_err();
+    assert_eq!(refused.code(), Code::FailedPrecondition);
+    assert_eq!(refused.message(), "spec_changed");
+    let still = list(&specs.service).await;
+    assert_eq!(
+        listed(&still),
+        vec![("Q1".into(), 1, false)],
+        "still waiting"
+    );
+
+    // Put again with the new checksum: the notice goes, and the answer is taken.
+    put(&specs.service, asked_with("Q1", b"second version", &path))
+        .await
+        .unwrap();
+    assert_eq!(
+        state_of(&list(&specs.service).await, "Q1"),
+        pb::SpecState::Current
+    );
+    answer(
+        &specs.service,
+        "Q1",
+        2,
+        pb::AnswerKind::Answer,
+        vec![pick(0, "a")],
+        "",
+    )
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn an_answer_at_an_old_version_is_version_changed_not_spec_changed() {
+    let specs = Specs::new().await;
+    let path = specs.write("a.md", b"first");
+    put(&specs.service, asked_with("Q1", b"first", &path))
+        .await
+        .unwrap();
+    specs.write("a.md", b"second version");
+    put(&specs.service, asked_with("Q1", b"second version", &path))
+        .await
+        .unwrap();
+    let refused = answer(
+        &specs.service,
+        "Q1",
+        1,
+        pb::AnswerKind::Answer,
+        vec![pick(0, "a")],
+        "",
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(refused.message(), "version_changed");
+}
+
+#[tokio::test]
+async fn instructions_with_a_spec_file_follow_the_same_rule() {
+    let specs = Specs::new().await;
+    let path = specs.write("a.md", b"first");
+    let mut steps = instructions_proto("I1", &["do it"]);
+    steps.sha = sha12(b"first");
+    steps.spec_file = path;
+    put(&specs.service, steps).await.unwrap();
+    specs.write("a.md", b"second version");
+    for kind in [pb::AnswerKind::Done, pb::AnswerKind::Ignore] {
+        let refused = answer(&specs.service, "I1", 1, kind, vec![], "")
+            .await
+            .unwrap_err();
+        assert_eq!(refused.message(), "spec_changed", "{kind:?}");
+    }
+}
+
+#[tokio::test]
+async fn a_registry_that_cannot_be_read_stores_the_todo_and_keeps_it_unknown() {
+    let (logs, _guard) = capture_logs();
+    let db = TempFolder::new();
+    let service = QuestionToolService::new(
+        open_store(&db).await,
+        Arc::new(Notify::new()),
+        Arc::new(FakeProducts(Err("registry_unreadable"))),
+    );
+    put(
+        &service,
+        asked_with("Q1", b"first", "/anywhere/.superpowers/pod/specs/a.md"),
+    )
+    .await
+    .unwrap();
+    let response = list(&service).await;
+    assert_eq!(state_of(&response, "Q1"), pb::SpecState::Unknown);
+    answer(
+        &service,
+        "Q1",
+        1,
+        pb::AnswerKind::Answer,
+        vec![pick(0, "a")],
+        "",
+    )
+    .await
+    .expect("an unknown spec does not stop an answer");
+    let lines = logs.with("todo spec unknown");
+    assert_eq!(lines.len(), 1, "{:#?}", logs.lines());
+    assert!(
+        lines[0].contains("reason=\"registry_unreadable\""),
+        "{}",
+        lines[0]
+    );
+}
+
+#[tokio::test]
+async fn a_changed_or_unknown_spec_is_logged_once_per_version_without_the_path() {
+    let (logs, _guard) = capture_logs();
+    let specs = Specs::new().await;
+    let canary = specs.write("canary-5521.md", b"first");
+    put(&specs.service, asked_with("Q1", b"first", &canary))
+        .await
+        .unwrap();
+    let gone = specs.file("gone-5521.md");
+    put(&specs.service, asked_with("Q2", b"x", &gone))
+        .await
+        .unwrap();
+
+    list(&specs.service).await;
+    specs.write("canary-5521.md", b"second version");
+    for _ in 0..3 {
+        list(&specs.service).await;
+    }
+    let changed = logs.with("todo changed spec");
+    assert_eq!(changed.len(), 1, "{:#?}", logs.lines());
+    assert_eq!(
+        field_names(&changed[0], "todo changed spec"),
+        ["tool", "question_id", "version"]
+    );
+    let unknown = logs.with("todo spec unknown");
+    assert_eq!(unknown.len(), 1, "{:#?}", logs.lines());
+    assert_eq!(
+        field_names(&unknown[0], "todo spec unknown"),
+        ["tool", "question_id", "version", "reason"]
+    );
+    assert!(unknown[0].contains("reason=\"missing\""), "{}", unknown[0]);
+
+    // A new version logs again.
+    put(&specs.service, asked_with("Q1", b"first", &canary))
+        .await
+        .unwrap();
+    list(&specs.service).await;
+    assert_eq!(logs.with("todo changed spec").len(), 2);
+
+    // Nothing the tool logs carries the path.
+    let _ = answer(
+        &specs.service,
+        "Q1",
+        2,
+        pb::AnswerKind::Answer,
+        vec![pick(0, "a")],
+        "",
+    )
+    .await;
+    assert!(
+        logs.lines().iter().all(|line| !line.contains("5521")),
+        "{:#?}",
+        logs.lines()
+    );
+}
+
+#[tokio::test]
+async fn mark_checked_stores_the_time_lists_it_and_logs_the_count() {
+    let (logs, _guard) = capture_logs();
+    let folder = TempFolder::new();
+    let service = service(open_store(&folder).await);
+    assert_eq!(list(&service).await.checked_at_ms, 0);
+    put(&service, question("Q1", "spec", "abc")).await.unwrap();
+    put(&service, instructions_proto("I1", &["a"]))
+        .await
+        .unwrap();
+    put(&service, question("Q2", "spec", "abc")).await.unwrap();
+    defer(&service, "Q2").await.unwrap();
+
+    let before = now_ms();
+    let checked = service
+        .mark_checked(Request::new(pb::MarkCheckedRequest {}))
+        .await
+        .unwrap()
+        .into_inner()
+        .checked_at_ms;
+    assert!(checked >= before && checked <= now_ms());
+    assert_eq!(list(&service).await.checked_at_ms, checked);
+
+    let lines = logs.with("todos checked");
+    assert_eq!(lines.len(), 1, "{:#?}", logs.lines());
+    assert_eq!(field_names(&lines[0], "todos checked"), ["tool", "count"]);
+    assert!(
+        lines[0].contains("count=3"),
+        "every listed todo waits: {}",
+        lines[0]
+    );
+}
+
+#[tokio::test]
+async fn mark_checked_on_a_failing_store_is_unavailable() {
+    let folder = TempFolder::new();
+    let store = FailingStore::new(open_store(&folder).await);
+    let service = QuestionToolService::new(store, Arc::new(Notify::new()), no_products());
+    let refused = service
+        .mark_checked(Request::new(pb::MarkCheckedRequest {}))
+        .await
+        .unwrap_err();
+    assert_eq!(refused.code(), Code::Unavailable);
 }

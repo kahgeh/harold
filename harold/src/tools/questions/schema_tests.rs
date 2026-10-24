@@ -38,6 +38,7 @@ fn proto() -> pb::Question {
             decision("First?", vec![option("a"), option("b"), free_option("z")]),
             decision("Second?", vec![option("a"), option("b")]),
         ],
+        spec_file: String::new(),
     }
 }
 
@@ -226,6 +227,7 @@ fn instructions_proto() -> pb::Question {
         decisions: vec![],
         title: "Set up the thing".into(),
         steps: vec![step("First", "detail one"), step("Second", "")],
+        spec_file: String::new(),
     }
 }
 

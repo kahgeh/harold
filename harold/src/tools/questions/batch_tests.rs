@@ -167,6 +167,10 @@ struct RacingStore {
 }
 
 impl QuestionStore for RacingStore {
+    async fn mark_checked(&self, now_ms: i64) -> Result<(), StoreError> {
+        self.inner.mark_checked(now_ms).await
+    }
+
     async fn put(&self, question: schema::Question, now_ms: i64) -> Result<u32, StoreError> {
         self.inner.put(question, now_ms).await
     }
@@ -330,6 +334,7 @@ fn a_free_pick_on_an_early_decision_renders_in_place() {
                 }],
             })
             .to_vec(),
+        spec_file: String::new(),
     })
     .unwrap();
     let picked = |ask: &str, label: &str, free| schema::Picked {

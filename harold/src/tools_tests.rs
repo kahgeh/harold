@@ -218,6 +218,7 @@ fn question(id: &str) -> pb::Question {
                 free: false,
             }],
         }],
+        spec_file: String::new(),
     }
 }
 

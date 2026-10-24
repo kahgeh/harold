@@ -8,6 +8,8 @@ const MAX_ID: usize = 32;
 const MAX_TEXT: usize = 2000;
 const MAX_OPTIONS: usize = 9;
 const MAX_STEPS: usize = 20;
+/// A `spec_file` path must be shorter than this, in characters.
+const MAX_SPEC_FILE: usize = 1000;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) struct Choice {
@@ -43,6 +45,10 @@ pub(super) struct Question {
     pub title: String,
     #[serde(default)]
     pub steps: Vec<Step>,
+    /// The path of the spec's file, kept in its own column and never in the body. Empty when
+    /// none was named, and always empty in a question read for an answer or a batch.
+    #[serde(skip)]
+    pub spec_file: String,
 }
 
 impl Question {
@@ -96,6 +102,7 @@ pub(super) fn from_proto(q: pb::Question) -> Result<Question, String> {
     if !id_ok {
         return Err("id".into());
     }
+    check_spec_file(&q)?;
     if !q.steps.is_empty() {
         return instructions_from_proto(q);
     }
@@ -136,7 +143,26 @@ pub(super) fn from_proto(q: pb::Question) -> Result<Question, String> {
         decisions,
         title: String::new(),
         steps: Vec::new(),
+        spec_file: q.spec_file,
     })
+}
+
+/// An absolute path ending in `.md`, shorter than `MAX_SPEC_FILE`, on a todo that has a
+/// `sha`. Whether it sits in a registered specs folder is for the service to check.
+fn check_spec_file(q: &pb::Question) -> Result<(), String> {
+    if q.spec_file.is_empty() {
+        return Ok(());
+    }
+    let path = std::path::Path::new(&q.spec_file);
+    let well_formed = path.is_absolute()
+        && q.spec_file.ends_with(".md")
+        && q.spec_file.chars().count() < MAX_SPEC_FILE
+        && !q.spec_file.contains('\0')
+        && !q.sha.trim().is_empty();
+    match well_formed {
+        true => Ok(()),
+        false => Err("spec_file".into()),
+    }
 }
 
 fn is_http(link: &str) -> bool {
@@ -187,6 +213,7 @@ fn instructions_from_proto(q: pb::Question) -> Result<Question, String> {
         decisions: Vec::new(),
         title: q.title,
         steps,
+        spec_file: q.spec_file,
     })
 }
 
@@ -230,6 +257,7 @@ fn decision_from_proto(n: usize, d: pb::Decision) -> Result<Decision, String> {
     })
 }
 
+/// The question as the API returns it: the spec file's path is left out.
 pub(super) fn to_proto(q: &Question) -> pb::Question {
     pb::Question {
         id: q.id.clone(),
@@ -265,6 +293,7 @@ pub(super) fn to_proto(q: &Question) -> pb::Question {
                 detail: s.detail.clone(),
             })
             .collect(),
+        spec_file: String::new(),
     }
 }
 

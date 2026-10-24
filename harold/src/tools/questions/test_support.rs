@@ -18,6 +18,26 @@ use crate::tools::{BoxFuture, ChiefPane, PaneTyping, Typing};
 
 pub(super) const CHIEF_PANE: &str = "%9";
 
+/// The first 12 hex digits of the SHA-256 of `bytes`, as the chief writes a spec's `sha`.
+pub(super) fn sha12(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    hex::encode(Sha256::digest(bytes))[..12].to_owned()
+}
+
+/// A `Products` with no products, for a service whose todos name no spec file.
+pub(super) fn no_products() -> Arc<dyn crate::tools::Products> {
+    Arc::new(FakeProducts(Ok(Vec::new())))
+}
+
+/// A `Products` that returns the result it was given.
+pub(super) struct FakeProducts(pub Result<Vec<(String, PathBuf)>, &'static str>);
+
+impl crate::tools::Products for FakeProducts {
+    fn products(&self) -> Result<Vec<(String, PathBuf)>, &'static str> {
+        self.0.clone()
+    }
+}
+
 /// A folder under the system temp folder, removed when dropped.
 pub(super) struct TempFolder(pub PathBuf);
 
@@ -156,6 +176,11 @@ impl FailingStore {
 }
 
 impl QuestionStore for FailingStore {
+    async fn mark_checked(&self, now_ms: i64) -> Result<(), StoreError> {
+        self.check()?;
+        self.inner.mark_checked(now_ms).await
+    }
+
     async fn put(&self, question: Question, now_ms: i64) -> Result<u32, StoreError> {
         self.check()?;
         self.inner.put(question, now_ms).await
@@ -283,6 +308,10 @@ impl MarkHook {
 }
 
 impl QuestionStore for MarkHook {
+    async fn mark_checked(&self, now_ms: i64) -> Result<(), StoreError> {
+        self.inner.mark_checked(now_ms).await
+    }
+
     async fn put(&self, question: Question, now_ms: i64) -> Result<u32, StoreError> {
         self.inner.put(question, now_ms).await
     }
@@ -491,6 +520,7 @@ pub(super) fn question_with(
         title: String::new(),
         steps: vec![],
         decisions,
+        spec_file: String::new(),
     }
 }
 
