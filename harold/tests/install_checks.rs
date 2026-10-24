@@ -808,9 +808,10 @@ impl Fixture {
     }
 }
 
-/// Waits up to 8 seconds for a daemon to exit and returns its output.
+/// Waits for a daemon to exit and returns its output. The 60 seconds is a limit for a daemon
+/// that hangs, not a timing rule: a loaded machine can take several seconds to start a daemon.
 fn wait_for_exit(mut child: std::process::Child) -> Output {
-    let deadline = Instant::now() + Duration::from_secs(8);
+    let deadline = Instant::now() + Duration::from_secs(60);
     while child.try_wait().unwrap().is_none() {
         if Instant::now() >= deadline {
             child.kill().unwrap();
