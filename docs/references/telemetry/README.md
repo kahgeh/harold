@@ -281,20 +281,9 @@ Metrics are sent every 30 seconds. Every metric also carries `harold.machine`.
 
 No exported item carries what the user or an agent wrote, a voice line, the AI model's output, an error message, the recipient or a token.
 
-**Allowed fields.** Exported spans and log records keep only the attributes on this list, `ALLOWED_FIELDS` in `harold/src/telemetry.rs`:
+**Allowed fields.** Exported spans and log records keep only the attributes on `ALLOWED_FIELDS` in [`harold/src/telemetry.rs`](../../../harold/src/telemetry.rs). That list is the only source: each field on it is an id, a count, a time, a fixed word or a short name, never free text. A change to what leaves Harold is a change to that list, made in a spec and reviewed with it.
 
-```
-pane_id, provider_id, program, pane, session.id, session.source, component, reason, outcome, channel,
-resolved_by, kind, started_by, turn.start, state, count, session_by, alert, pod.product, spec.id,
-spec.state_at, spec.words, spec.revisions, phase, change, event_type,
-event_version, result, watch, run, cost_usd, agent, seconds, event_id,
-exit_code, signal, subtype, is_error, num_turns, cause, model, bytes, total_bytes, ms,
-load_ms, load_waited_ms, notes, removed, pending, last_ok_age_s, embed_ms, search_ms, results,
-embed_ms_per_passage, passages, rss_mb, buckwal.outcome, buckwal.retries, buckwal.bytes,
-buckwal.generation, s3.status
-```
-
-`model` is a Hugging Face repository name from the settings, never a path or a token. Every other field is dropped before export, including `text`, `msg`, `raw_output`, `tag` and `error`. Span events and links are dropped too, and an error status loses its description.
+`model` is a model name from the settings, a Hugging Face repository for the voice or the `[watch] model` setting, never a path or a token. Every other field is dropped before export, including `text`, `msg`, `raw_output`, `tag` and `error`. Span events and links are dropped too, and an error status loses its description.
 
 **Which log records are exported.** Only records whose target is `harold`, starts with `harold::`, is `events` or starts with `events::`, or is `buckwal` or starts with `buckwal::`. Other crates' lines, such as Turso's and reqwest's, interpolate errors and paths into their text, so they stay in `harold.log` only. The collector-health lines also stay in `harold.log` only.
 
