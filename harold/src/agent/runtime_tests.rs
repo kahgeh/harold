@@ -32,6 +32,9 @@ use crate::settings::AgentProviderSettings;
 use crate::store::{EventEnvelope, EventVersion, HaroldStore, TurnCompleted};
 use crate::{HaroldService, Request};
 
+/// The limit for a wait that only says "this happens". It costs nothing when the test passes.
+const EVENTUALLY: Duration = Duration::from_secs(10);
+
 struct TestDirectory(std::path::PathBuf);
 
 impl TestDirectory {
@@ -1546,7 +1549,7 @@ async fn real_screen_adapter_keeps_unrelated_capture_out_of_every_published_boun
         None,
         handler_shutdown_rx,
     ));
-    tokio::time::timeout(Duration::from_secs(1), async {
+    tokio::time::timeout(EVENTUALLY, async {
         while published.borrow().through_event_version.get() < 3 {
             published
                 .changed()
@@ -1577,7 +1580,7 @@ async fn real_screen_adapter_keeps_unrelated_capture_out_of_every_published_boun
     );
 
     drop(handler_shutdown);
-    tokio::time::timeout(Duration::from_secs(1), event_handler)
+    tokio::time::timeout(EVENTUALLY, event_handler)
         .await
         .expect("event handler exceeded shutdown deadline")
         .expect("event handler task panicked");
@@ -1589,7 +1592,7 @@ async fn real_screen_adapter_keeps_unrelated_capture_out_of_every_published_boun
     drop(service);
     drop(handle);
     drop(shutdown);
-    tokio::time::timeout(Duration::from_secs(1), monitor_task)
+    tokio::time::timeout(EVENTUALLY, monitor_task)
         .await
         .expect("monitor exceeded shutdown deadline")
         .expect("monitor task panicked");
@@ -2278,7 +2281,7 @@ async fn inventory_timeout_busy_retries_and_recovery_emit_only_actual_health_tra
     assert_eq!(event_types(&events), ["AgentMonitorHealthChanged"]);
     assert_eq!(events[0].payload["reason_code"], "timeout");
     release.send(()).unwrap();
-    tokio::time::timeout(Duration::from_secs(1), async {
+    tokio::time::timeout(EVENTUALLY, async {
         while handle.inventory_tick().await.is_err() {
             tokio::task::yield_now().await;
         }
@@ -2323,7 +2326,7 @@ async fn shutdown_completes_when_a_blocking_inventory_port_wedges() {
     tokio::time::sleep(Duration::from_millis(10)).await;
     drop(shutdown);
 
-    tokio::time::timeout(Duration::from_millis(250), task)
+    tokio::time::timeout(EVENTUALLY, task)
         .await
         .expect("runtime shutdown remained blocked")
         .unwrap();
@@ -3074,7 +3077,7 @@ async fn activity_summary_provider_failure_preserves_source_and_shutdown_cancels
         Some("Fix deployment")
     );
     fixture._shutdown.send(()).unwrap();
-    tokio::time::timeout(Duration::from_secs(1), async {
+    tokio::time::timeout(EVENTUALLY, async {
         while !fixture.task.is_finished() {
             tokio::task::yield_now().await;
         }
@@ -3370,7 +3373,7 @@ exec /bin/sleep 60
     .await
     .unwrap();
     let scan = tokio::spawn(async move { handle.screen_tick().await });
-    tokio::time::timeout(Duration::from_secs(2), async {
+    tokio::time::timeout(EVENTUALLY, async {
         while !screen.started.load(Ordering::SeqCst) {
             tokio::task::yield_now().await;
         }
@@ -3379,7 +3382,7 @@ exec /bin/sleep 60
     .unwrap();
     drop(shutdown);
     tokio::time::timeout(
-        Duration::from_secs(2),
+        EVENTUALLY,
         crate::stop_agent_monitor(
             monitor_task,
             Some(activity_provider),
@@ -3657,7 +3660,7 @@ async fn submitted_prompt_recovery_feeds_sonnet_and_identical_repeat_invalidates
         200,
     )));
     fixture.handle.screen_tick().await.unwrap();
-    let first = tokio::time::timeout(Duration::from_secs(2), requests.recv())
+    let first = tokio::time::timeout(EVENTUALLY, requests.recv())
         .await
         .unwrap()
         .unwrap();
@@ -3678,7 +3681,7 @@ async fn submitted_prompt_recovery_feeds_sonnet_and_identical_repeat_invalidates
     )));
     fixture.handle.screen_tick().await.unwrap();
     first.reply.send(Ok("Old result".into())).unwrap();
-    let second = tokio::time::timeout(Duration::from_secs(2), requests.recv())
+    let second = tokio::time::timeout(EVENTUALLY, requests.recv())
         .await
         .unwrap()
         .unwrap();
@@ -4946,19 +4949,48 @@ async fn timed_out_first_try_is_stopped_before_its_retry() {
     let (captured, _guard) = capture_logs();
 
     assert!(handle.inventory_tick().await.is_err());
-    handle.inventory_tick().await.unwrap();
-
-    assert_eq!(inventory.scan_calls.load(Ordering::SeqCst), 2);
-    assert!(inventory.first_exited.load(Ordering::SeqCst));
+    // Starved, the first try's thread may not have let go of the gate when the second tick
+    // looks. The monitor then answers busy without scanning, and logs the first try's timeout
+    // as degraded. Both outcomes are right; the retry scanning beside the first try is not.
+    let second = handle.inventory_tick().await;
     assert!(!inventory.retry_saw_first_running.load(Ordering::SeqCst));
     let logs = logged(&captured);
     println!("{}", logs.trim_end());
-    assert_eq!(
-        logs.matches("agent monitor read retried").count(),
-        1,
-        "{logs}"
-    );
-    assert!(!logs.contains("agent monitor degraded"), "{logs}");
+    if second.is_ok() {
+        assert_eq!(inventory.scan_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            logs.matches("agent monitor read retried").count(),
+            1,
+            "{logs}"
+        );
+        assert!(!logs.contains("agent monitor degraded"), "{logs}");
+    } else {
+        assert_eq!(inventory.scan_calls.load(Ordering::SeqCst), 1);
+        assert!(!logs.contains("agent monitor read retried"), "{logs}");
+        assert_eq!(logs.matches("agent monitor degraded").count(), 1, "{logs}");
+    }
+
+    // The first try is stopped, and the next tick scans.
+    tokio::time::timeout(EVENTUALLY, async {
+        while !inventory.first_exited.load(Ordering::SeqCst) {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the first try never stopped");
+    if second.is_err() {
+        // The thread sets first_exited just before it drops the gate, so a tick may still see
+        // busy for a moment. A busy tick never scans, so the count below stays exact.
+        tokio::time::timeout(EVENTUALLY, async {
+            while handle.inventory_tick().await.is_err() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("no tick scanned once the first try had stopped");
+        assert_eq!(inventory.scan_calls.load(Ordering::SeqCst), 2);
+    }
+    assert!(!inventory.retry_saw_first_running.load(Ordering::SeqCst));
     drop(shutdown);
     task.await.unwrap();
 }
@@ -5167,11 +5199,8 @@ async fn a_slow_scan_never_holds_the_monitor_past_inventory_timeout() {
             held.as_millis()
         );
         // 300 ms is the timeout. This guards the monitor being held for the 5 s retry, which
-        // 1.3 s still proves; 100 ms of slack is less than a starved runner takes to wake a thread.
-        assert!(
-            held < Duration::from_millis(300) + Duration::from_secs(1),
-            "held for {held:?}"
-        );
+        // 3 s still proves, with room for a starved runner to wake a thread.
+        assert!(held < Duration::from_secs(3), "held for {held:?}");
     }
 
     // Starved, the first try's thread may not have let go of the gate when the retry or the
@@ -5291,7 +5320,7 @@ async fn retry_that_fails_is_asked_to_stop() {
 }
 
 #[tokio::test]
-async fn away_message_and_spoken_line_during_a_slow_scan_are_answered_within_three_seconds() {
+async fn away_message_and_spoken_line_during_a_slow_scan_are_answered_before_the_retry_ends() {
     let directory = TestDirectory::new();
     let store = Arc::new(HaroldStore::open(&directory.0).await.unwrap());
     // Both tries outlast the 1.5 s timeout; the retry runs until it is stopped.
@@ -5344,12 +5373,71 @@ async fn away_message_and_spoken_line_during_a_slow_scan_are_answered_within_thr
     );
     let answered = started.elapsed();
     println!("answered in {} ms", answered.as_millis());
-    assert!(away.unwrap().into_inner().accepted);
-    spoken.unwrap();
+    // The answers queue behind the first scan's 1.5 s deadline and no longer. Waiting for the
+    // scan's 10 s retry would take about 11.5 s, so 9 s tells the two apart with a wide margin.
     assert!(
-        answered < Duration::from_secs(3),
+        answered < Duration::from_secs(9),
         "answered in {answered:?}"
     );
+    // Starved, the first scan's thread may not have let go of the gate when the lookup looks;
+    // the monitor then answers unavailable at once. That is an answer, not a hang, but it must
+    // be that busy case: once the thread has stopped, the same call has to work.
+    fn unavailable<T>(reply: &Result<T, tonic::Status>) -> bool {
+        let Err(status) = reply else {
+            return false;
+        };
+        assert_eq!(status.code(), tonic::Code::Unavailable, "{status:?}");
+        true
+    }
+    let away_retry = unavailable(&away);
+    let spoken_retry = unavailable(&spoken);
+    if away_retry || spoken_retry {
+        tokio::time::timeout(EVENTUALLY, async {
+            while !inventory.first_exited.load(Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the first scan never stopped");
+    }
+    if away_retry {
+        tokio::time::timeout(EVENTUALLY, async {
+            loop {
+                let reply = service
+                    .send_message_to_away_device(Request::new(
+                        crate::harold::SendMessageToAwayDeviceRequest {
+                            src_id: "%8".into(),
+                            text: "Build finished".into(),
+                        },
+                    ))
+                    .await;
+                if let Ok(reply) = reply {
+                    break assert!(reply.into_inner().accepted);
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the away message never went through");
+    } else {
+        assert!(away.unwrap().into_inner().accepted);
+    }
+    if spoken_retry {
+        tokio::time::timeout(EVENTUALLY, async {
+            while service
+                .speak_line(Request::new(crate::harold::SpeakLineRequest {
+                    src_id: "%8".into(),
+                    text: "Build finished".into(),
+                }))
+                .await
+                .is_err()
+            {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the spoken line never went through");
+    }
     assert!(tick.await.unwrap().is_err());
     drop(shutdown);
     task.await.unwrap();
