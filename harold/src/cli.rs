@@ -146,7 +146,7 @@ const NOT_STORED_LINE: &str = "the Harold daemon could not store the message";
 pub(crate) const SPEAK_COMMAND: &str = "speak";
 pub(crate) const TOOL_COMMAND: &str = "tool";
 const TOOL_USAGE_LINE: &str =
-    "invalid argument: usage is harold tool questions put|dismiss|order|list|show";
+    "invalid argument: usage is harold tool questions put|dismiss|order|list|show|checked";
 const SPEAK_ARGUMENTS: &str = "invalid argument: usage is speak --src-id ID TEXT";
 const SPOKEN_LENGTH_LINE: &str = "the spoken line must be 1 to 300 characters";
 const SPOKEN_NOT_STORED_LINE: &str = "the Harold daemon could not store the spoken line";
@@ -235,6 +235,7 @@ pub(crate) enum ToolCommand {
     QuestionsOrder { ids: Vec<String> },
     QuestionsList,
     QuestionsShow { id: String },
+    QuestionsChecked,
     Backlog(BacklogCommand),
     Watch(WatchCommand),
     Knowledge(KnowledgeCommand),
@@ -810,6 +811,7 @@ fn parse_tool(args: &[&str]) -> Result<ToolCommand, String> {
         ["knowledge", rest @ ..] => parse_knowledge(rest).map(ToolCommand::Knowledge),
         ["questions", "put"] => Ok(ToolCommand::QuestionsPut),
         ["questions", "list"] => Ok(ToolCommand::QuestionsList),
+        ["questions", "checked"] => Ok(ToolCommand::QuestionsChecked),
         ["questions", "show", id] => Ok(ToolCommand::QuestionsShow { id: (*id).into() }),
         ["questions", "dismiss", id, "--reason", reason] => Ok(ToolCommand::QuestionsDismiss {
             id: (*id).into(),
@@ -1122,6 +1124,7 @@ fn question_from_json(text: &str) -> Result<questions::Question, String> {
         decisions,
         title: json_optional_text(&value, "title")?,
         steps,
+        spec_file: json_optional_text(&value, "spec_file")?,
     })
 }
 
@@ -1130,24 +1133,34 @@ fn list_line(listed: &questions::ListedQuestion) -> String {
     let question = listed.question.clone().unwrap_or_default();
     if !question.steps.is_empty() {
         return format!(
-            "{} v{} {} steps {}/{}",
+            "{} v{} {} steps {}/{}{}",
             question.id,
             listed.version,
             question.product,
             listed.ticked.len(),
-            question.steps.len()
+            question.steps.len(),
+            changed_spec_suffix(listed.spec_state)
         );
     }
     let deferred = if listed.deferred { " (deferred)" } else { "" };
     format!(
-        "{} v{} {} {} picks {}/{}{deferred}",
+        "{} v{} {} {} picks {}/{}{deferred}{}",
         question.id,
         listed.version,
         question.product,
         question.spec,
         listed.picks.len(),
-        question.decisions.len()
+        question.decisions.len(),
+        changed_spec_suffix(listed.spec_state)
     )
+}
+
+/// ` (changed spec)` after a todo whose spec file no longer matches its checksum.
+fn changed_spec_suffix(spec_state: i32) -> &'static str {
+    match questions::SpecState::try_from(spec_state) {
+        Ok(questions::SpecState::Changed) => " (changed spec)",
+        _ => "",
+    }
 }
 
 /// The `show` output: a head line, then one line per decision with its pick.
@@ -1425,6 +1438,17 @@ pub(crate) async fn tool_within(
                     .map_err(refused)?
                     .into_inner();
                 Ok(show_lines(&shown))
+            }
+            ToolCommand::QuestionsChecked => {
+                let checked = client
+                    .mark_checked(questions::MarkCheckedRequest {})
+                    .await
+                    .map_err(refused)?
+                    .into_inner();
+                Ok(format!(
+                    "checked at {}",
+                    watch_time(checked.checked_at_ms, crate::telemetry::local_offset())
+                ))
             }
             // `tool` runs a backlog command through `backlog_within`, and a watch
             // command through `watch_within`.
@@ -2593,7 +2617,8 @@ mod tests {
 
     #[test]
     fn an_unknown_tool_command_is_refused_with_usage() {
-        let usage = "invalid argument: usage is harold tool questions put|dismiss|order|list|show";
+        let usage =
+            "invalid argument: usage is harold tool questions put|dismiss|order|list|show|checked";
         for words in [
             vec!["tool"],
             vec!["tool", "questions"],
@@ -2614,7 +2639,7 @@ mod tests {
         assert_eq!(
             result,
             Err(
-                "invalid argument: usage is harold tool questions put|dismiss|order|list|show"
+                "invalid argument: usage is harold tool questions put|dismiss|order|list|show|checked"
                     .into()
             )
         );
@@ -2699,6 +2724,7 @@ mod tests {
             deferred: false,
             ticked: vec![1, 3],
             picks: vec![],
+            spec_state: 0,
         };
         assert_eq!(list_line(&instructions), "I1 v2 harold steps 2/4");
         let question = questions::ListedQuestion {
@@ -2712,6 +2738,7 @@ mod tests {
             deferred: true,
             ticked: vec![],
             picks: vec![],
+            spec_state: 0,
         };
         assert_eq!(
             list_line(&question),
@@ -2767,6 +2794,7 @@ mod tests {
                     text: "on Friday".into(),
                 },
             ],
+            spec_state: 0,
         };
         assert_eq!(
             show_lines(&shown),
@@ -2789,6 +2817,7 @@ mod tests {
             deferred: false,
             ticked: vec![],
             picks: vec![questions::Pick::default(); 2],
+            spec_state: 0,
         };
         assert_eq!(list_line(&listed), "Q43 v1 harold watch-jobs picks 2/4");
     }
@@ -3321,7 +3350,7 @@ mod tests {
         assert_eq!(
             parse(&["tool", "questions"]),
             Err(
-                "invalid argument: usage is harold tool questions put|dismiss|order|list|show"
+                "invalid argument: usage is harold tool questions put|dismiss|order|list|show|checked"
                     .into()
             )
         );
