@@ -40,7 +40,7 @@ impl Fixture {
                 command.env_remove(name);
             }
         }
-        let mut child = command
+        let child = command
             .args(args)
             .env("HAROLD_CONFIG_DIR", &self.0)
             .env("HAROLD_ENV", "local")
@@ -49,16 +49,7 @@ impl Fixture {
             .stderr(Stdio::piped())
             .spawn()
             .unwrap();
-        let deadline = Instant::now() + Duration::from_secs(8);
-        while child.try_wait().unwrap().is_none() {
-            if Instant::now() >= deadline {
-                child.kill().unwrap();
-                let output = child.wait_with_output().unwrap();
-                panic!("probe did not exit: {output:?}");
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        let output = child.wait_with_output().unwrap();
+        let output = wait_for_exit(child);
         assert!(
             !self.0.join("unopened-store").exists(),
             "probe opened storage"
@@ -808,15 +799,16 @@ impl Fixture {
     }
 }
 
-/// Waits for a daemon to exit and returns its output. The 60 seconds is a limit for a daemon
-/// that hangs, not a timing rule: a loaded machine can take several seconds to start a daemon.
+/// Waits for a process (a probe or a daemon) to exit and returns its output. The 60 seconds is a
+/// limit for a process that hangs, not a timing rule: a loaded machine can take several seconds
+/// to start a process.
 fn wait_for_exit(mut child: std::process::Child) -> Output {
     let deadline = Instant::now() + Duration::from_secs(60);
     while child.try_wait().unwrap().is_none() {
         if Instant::now() >= deadline {
             child.kill().unwrap();
             let output = child.wait_with_output().unwrap();
-            panic!("daemon did not exit: {output:?}");
+            panic!("process did not exit: {output:?}");
         }
         std::thread::sleep(Duration::from_millis(10));
     }
