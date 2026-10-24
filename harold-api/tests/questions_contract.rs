@@ -1,5 +1,7 @@
 use harold_api::FILE_DESCRIPTOR_SET;
-use harold_api::tools::questions::v1::{AnswerKind, AnswerQuestionRequest, Pick};
+use harold_api::tools::questions::v1::{
+    AnswerKind, AnswerQuestionRequest, ListQuestionsResponse, ListedQuestion, Pick, SpecState,
+};
 use prost::Message;
 
 #[derive(Clone, PartialEq, Message)]
@@ -109,7 +111,7 @@ fn fields(expected: &[(&str, i32)]) -> Vec<(String, i32)> {
 }
 
 #[test]
-fn question_service_lists_its_nine_rpcs() {
+fn question_service_lists_its_ten_rpcs() {
     let descriptor = questions_file_descriptor()
         .service
         .into_iter()
@@ -133,6 +135,7 @@ fn question_service_lists_its_nine_rpcs() {
             "TickStep",
             "SavePicks",
             "ShowQuestion",
+            "MarkChecked",
         ]
     );
 }
@@ -165,6 +168,7 @@ fn question_fields_keep_their_numbers() {
             ("decisions", 7),
             ("title", 8),
             ("steps", 9),
+            ("spec_file", 10),
         ])
     );
     assert_eq!(
@@ -192,7 +196,12 @@ fn question_fields_keep_their_numbers() {
     assert!(message_fields("ListQuestionsRequest").is_empty());
     assert_eq!(
         message_fields("ListQuestionsResponse"),
-        fields(&[("questions", 1), ("waiting", 2), ("dismissed", 3)])
+        fields(&[
+            ("questions", 1),
+            ("waiting", 2),
+            ("dismissed", 3),
+            ("checked_at_ms", 4)
+        ])
     );
     assert_eq!(
         message_fields("ListedQuestion"),
@@ -201,7 +210,8 @@ fn question_fields_keep_their_numbers() {
             ("version", 2),
             ("deferred", 3),
             ("ticked", 4),
-            ("picks", 5)
+            ("picks", 5),
+            ("spec_state", 6)
         ])
     );
     assert_eq!(
@@ -245,9 +255,46 @@ fn question_fields_keep_their_numbers() {
             ("version", 2),
             ("state", 3),
             ("reason", 4),
-            ("picks", 5)
+            ("picks", 5),
+            ("spec_state", 6)
         ])
     );
+    assert!(message_fields("MarkCheckedRequest").is_empty());
+    assert_eq!(
+        message_fields("MarkCheckedResponse"),
+        fields(&[("checked_at_ms", 1)])
+    );
+}
+
+#[test]
+fn spec_states_keep_their_numbers() {
+    let descriptor = questions_file_descriptor()
+        .enum_type
+        .into_iter()
+        .find(|value| value.name.as_deref() == Some("SpecState"))
+        .expect("SpecState descriptor");
+    let values: Vec<(String, i32)> = descriptor
+        .value
+        .into_iter()
+        .map(|value| (value.name.expect("name"), value.number.expect("number")))
+        .collect();
+    assert_eq!(
+        values,
+        fields(&[
+            ("SPEC_STATE_UNKNOWN", 0),
+            ("SPEC_STATE_CURRENT", 1),
+            ("SPEC_STATE_CHANGED", 2),
+        ])
+    );
+}
+
+#[test]
+fn a_listed_question_from_an_older_server_has_an_unknown_spec_state_and_no_check() {
+    // ListedQuestion with only field 2 (version) = 1, as a server before the spec state sends it.
+    let old = ListedQuestion::decode([0x10, 0x01].as_slice()).expect("decode");
+    assert_eq!(old.spec_state, SpecState::Unknown as i32);
+    let none = ListQuestionsResponse::decode([0x10, 0x00].as_slice()).expect("decode");
+    assert_eq!(none.checked_at_ms, 0);
 }
 
 #[test]

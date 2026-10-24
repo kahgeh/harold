@@ -417,7 +417,7 @@ Harold logs no message text, no reply, no push address and no key. The app adds 
 | `app photo not shrunk` | A warning, `photo_bytes`, logged beside `app photo stored` for an upload over 3 MB: the phone shrinks to about 0.3 to 1 MB, so it did not, for example a HEIC photo it could not decode |
 | `app photo refused` | A warning with `reason` (`too_large`, `not_an_image`, `store_failed` or `unknown_photo`), and `photo_bytes` when known |
 | `app photos pruned` | `kind` (`expired` for photos past their keep time, `unused` for uploads no reply named) and `count`, logged by the hourly prune when it deletes any. A row showing `photo removed` has an `expired` count at the hour it went; an upload that never arrived has no `app photo stored` line |
-| `app todo answered` | `kind` (`answer`, `free_text`, `picks`, `later`, `tick`, `done`, `ignore`, `revise` or `reject`) and `result` (`sent`, `version_changed`, `not_waiting` or `unavailable`). The line never carries the todo's id; the question tool's own lines in `harold.log` do |
+| `app todo answered` | `kind` (`answer`, `free_text`, `picks`, `later`, `tick`, `done`, `ignore`, `revise` or `reject`) and `result` (`sent`, `version_changed`, `not_waiting`, `spec_changed` or `unavailable`). The line never carries the todo's id; the question tool's own lines in `harold.log` do |
 | `app todos not read` | `reason` (`unavailable` or `timeout`), logged once when reads start failing |
 | `app todos read again` | none, logged once when reads recover |
 | `app call started` | none |
