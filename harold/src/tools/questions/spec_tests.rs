@@ -75,6 +75,38 @@ fn the_spec_changing_and_changing_back_is_current_again() {
 }
 
 #[test]
+fn a_sha_that_is_not_twelve_or_more_hex_digits_says_nothing_about_the_file() {
+    let fixture = Fixture::new();
+    let file = fixture.write("a.md", b"first");
+    let right = sha12(b"first");
+    for asked in [&right[..1], &right[..11], "not-hex-at-all", "zzzzzzzzzzzz"] {
+        assert_eq!(
+            fixture.checker.state(&file, asked),
+            State::Unknown(None),
+            "{asked}"
+        );
+    }
+    let whole = hex::encode(Sha256::digest(b"first"));
+    assert_eq!(fixture.checker.state(&file, &whole), State::Current);
+    assert_eq!(fixture.checker.state(&file, &whole[..40]), State::Current);
+}
+
+#[test]
+fn a_pipe_in_place_of_the_file_is_not_a_file_and_is_never_waited_on() {
+    let fixture = Fixture::new();
+    let pipe = fixture.specs().join("pipe.md");
+    let status = std::process::Command::new("mkfifo")
+        .arg(&pipe)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert_eq!(
+        fixture.checker.state(pipe.to_str().unwrap(), &sha12(b"x")),
+        State::Unknown(Some(Reason::NotAFile))
+    );
+}
+
+#[test]
 fn a_todo_with_no_spec_file_or_no_sha_is_unknown_without_a_reason() {
     let fixture = Fixture::new();
     let file = fixture.write("a.md", b"first");

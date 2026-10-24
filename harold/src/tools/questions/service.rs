@@ -43,14 +43,9 @@ impl<S: QuestionStore> QuestionToolService<S> {
     async fn spec_states(&self, asked: Vec<(String, String)>) -> Vec<State> {
         let checker = Arc::clone(&self.checker);
         let count = asked.len();
-        tokio::task::spawn_blocking(move || {
-            asked
-                .iter()
-                .map(|(file, sha)| checker.state(file, sha))
-                .collect()
-        })
-        .await
-        .unwrap_or_else(|_| vec![State::Unknown(None); count])
+        tokio::task::spawn_blocking(move || checker.states(&asked))
+            .await
+            .unwrap_or_else(|_| vec![State::Unknown(None); count])
     }
 
     /// Logs a changed or unknown spec once per question version, and forgets the versions

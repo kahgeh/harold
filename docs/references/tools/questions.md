@@ -97,7 +97,7 @@ A todo may name its spec with `spec_file`. The rules, all refused as `invalid sp
 - Once symlinks are resolved, it sits inside the `.superpowers/pod/specs/` folder of a product in the registry (the `Products` port). A symlink inside a specs folder that points out of it is refused. A file that does not exist yet passes when its folder resolves to a specs folder.
 - When the registry cannot be read at `put`, the todo is stored and its spec stays `unknown` until the check passes.
 
-Each time the todos are listed, the tool resolves the path again, checks the containment again, and compares the file's SHA-256 (first 12 hex digits, or as many as the todo's `sha` holds) with the todo's `sha`. It reads the file again only when its size or modified time has changed, so a list costs one `stat` per todo. A todo's `spec_state` is then:
+Each time the todos are listed, the tool resolves the path again, checks the containment again, and compares the file's SHA-256 (first 12 hex digits, or as many as the todo's `sha` holds) with the todo's `sha`. It reads the registry once for each list, and for each todo resolves the path and opens the file to read its size and modified time; it reads and hashes the file again only when either has changed. The file is judged by the handle it opened, and is opened without blocking, so a pipe put in its place is `UNKNOWN` (`not_a_file`) and cannot stall the list. A `sha` of fewer than 12 hex digits, or with other characters, says nothing about the file, so the todo is `UNKNOWN`. A todo's `spec_state` is then:
 
 - `CURRENT`: the checksum matches;
 - `CHANGED`: the checksum differs, which is a **changed spec**;

@@ -1,6 +1,6 @@
 //! The spec file check: whether the file a todo names still has the checksum the todo was
 //! asked with. The tool opens a file only after resolving symlinks and finding it inside the
-//! `.superpowers/pod/specs/` folder of a registered product (ADR 0014); it only hashes it.
+//! `.superpowers/pod/specs/` folder of a registered product (ADR 0015); it only hashes it.
 
 use std::collections::HashMap;
 use std::fs::File;
@@ -80,14 +80,30 @@ impl SpecChecker {
         }
     }
 
-    /// The state of the todo asked with `sha`, whose spec is `spec_file`.
+    /// The state of each todo, as `(spec_file, sha)`. The registry is read once for all.
+    pub(super) fn states(&self, asked: &[(String, String)]) -> Vec<State> {
+        let roots = self.roots();
+        asked
+            .iter()
+            .map(|(file, sha)| self.state_in(&roots, file, sha))
+            .collect()
+    }
+
+    /// The state of one todo asked with `sha`, whose spec is `spec_file`.
+    #[cfg(test)]
     pub(super) fn state(&self, spec_file: &str, sha: &str) -> State {
-        if spec_file.is_empty() || sha.trim().is_empty() {
+        self.states(&[(spec_file.to_owned(), sha.to_owned())])[0]
+    }
+
+    fn state_in(&self, roots: &Result<Vec<PathBuf>, Reason>, spec_file: &str, sha: &str) -> State {
+        // The `sha` is the first 12 or more hex digits of the checksum; anything else says
+        // nothing about the file, so it is neither current nor changed.
+        let Some(asked) = asked_checksum(sha).filter(|_| !spec_file.is_empty()) else {
             return State::Unknown(None);
-        }
-        match self.digest_of(spec_file) {
+        };
+        match self.digest_of(roots, spec_file) {
             Err(reason) => State::Unknown(Some(reason)),
-            Ok(digest) => match digest.starts_with(&sha.trim().to_ascii_lowercase()) {
+            Ok(digest) => match digest.starts_with(&asked) {
                 true => State::Current,
                 false => State::Changed,
             },
@@ -95,14 +111,21 @@ impl SpecChecker {
     }
 
     /// The checksum of the file, in hex, read again only when its size or time changed.
-    fn digest_of(&self, spec_file: &str) -> Result<String, Reason> {
-        let roots = self.roots()?;
+    fn digest_of(
+        &self,
+        roots: &Result<Vec<PathBuf>, Reason>,
+        spec_file: &str,
+    ) -> Result<String, Reason> {
+        let roots = roots.as_ref().map_err(|reason| *reason)?;
         // Resolved again at every call, so a symlink changed later cannot lead out.
         let resolved = std::fs::canonicalize(spec_file).map_err(|_| Reason::Missing)?;
-        if !inside(&resolved, &roots) {
+        if !inside(&resolved, roots) {
             return Err(Reason::OutsideSpecs);
         }
-        let metadata = std::fs::metadata(&resolved).map_err(|_| Reason::Missing)?;
+        // Opened before it is judged, and judged by the open handle, so what is read is what
+        // was checked. A pipe swapped in cannot block the open, and is not a regular file.
+        let file = open_without_blocking(&resolved).map_err(|_| Reason::Missing)?;
+        let metadata = file.metadata().map_err(|_| Reason::Missing)?;
         if !metadata.is_file() {
             return Err(Reason::NotAFile);
         }
@@ -110,15 +133,17 @@ impl SpecChecker {
             return Err(Reason::TooLarge);
         }
         let modified = metadata.modified().ok();
-        let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(held) = cache.get(&resolved)
-            && held.len == metadata.len()
-            && held.modified == modified
         {
-            return Ok(held.digest.clone());
+            let cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(held) = cache.get(&resolved)
+                && held.len == metadata.len()
+                && held.modified == modified
+            {
+                return Ok(held.digest.clone());
+            }
         }
-        let digest = hash_of(&resolved)?;
-        cache.insert(
+        let digest = hash_of(file)?;
+        self.cache.lock().unwrap_or_else(|e| e.into_inner()).insert(
             resolved,
             Cached {
                 len: metadata.len(),
@@ -163,8 +188,29 @@ fn resolve_for_put(path: &Path) -> Option<PathBuf> {
     Some(folder.join(name))
 }
 
-fn hash_of(path: &Path) -> Result<String, Reason> {
-    let file = File::open(path).map_err(|_| Reason::Missing)?;
+/// `O_NONBLOCK`, so opening a pipe in a regular file's place returns at once.
+const O_NONBLOCK: i32 = if cfg!(target_os = "macos") {
+    0x0004
+} else {
+    0o4000
+};
+
+fn open_without_blocking(path: &Path) -> std::io::Result<File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    File::options()
+        .read(true)
+        .custom_flags(O_NONBLOCK)
+        .open(path)
+}
+
+/// The checksum asked for: 12 to 64 hex digits, in lower case.
+fn asked_checksum(sha: &str) -> Option<String> {
+    let sha = sha.trim().to_ascii_lowercase();
+    let hex = (12..=64).contains(&sha.len()) && sha.bytes().all(|b| b.is_ascii_hexdigit());
+    hex.then_some(sha)
+}
+
+fn hash_of(file: File) -> Result<String, Reason> {
     let mut bytes = Vec::new();
     // One byte past the limit, so a file that grew since the stat is caught.
     file.take(MAX_SPEC_BYTES + 1)
