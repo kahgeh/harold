@@ -33,6 +33,7 @@ pub(super) enum Call {
 #[derive(Default)]
 pub(super) struct FakeState {
     pub list: Vec<pb::ListedQuestion>,
+    pub checked_at_ms: i64,
     pub list_fails: bool,
     /// The refusal every write answers with, if any.
     pub write_refusal: Option<Status>,
@@ -50,6 +51,10 @@ impl FakeQuestions {
 
     pub fn set_list(&self, list: Vec<pb::ListedQuestion>) {
         self.lock().list = list;
+    }
+
+    pub fn set_checked(&self, checked_at_ms: i64) {
+        self.lock().checked_at_ms = checked_at_ms;
     }
 
     pub fn calls(&self) -> Vec<Call> {
@@ -98,6 +103,7 @@ impl QuestionService for FakeQuestions {
             questions: state.list.clone(),
             waiting: 0,
             dismissed: Vec::new(),
+            checked_at_ms: state.checked_at_ms,
         }))
     }
     async fn answer_question(
@@ -113,6 +119,12 @@ impl QuestionService for FakeQuestions {
     ) -> Result<Response<pb::DeferQuestionResponse>, Status> {
         self.write(Call::Defer(request.into_inner().id))?;
         Ok(Response::new(pb::DeferQuestionResponse {}))
+    }
+    async fn mark_checked(
+        &self,
+        _: Request<pb::MarkCheckedRequest>,
+    ) -> Result<Response<pb::MarkCheckedResponse>, Status> {
+        Err(Status::unimplemented("mark_checked"))
     }
     async fn tick_step(
         &self,
@@ -310,6 +322,7 @@ pub(super) fn question(id: &str, version: u32, deferred: bool) -> pb::ListedQues
         deferred,
         ticked: Vec::new(),
         picks: Vec::new(),
+        spec_state: 0,
     }
 }
 
@@ -333,6 +346,7 @@ pub(super) fn instructions(id: &str, version: u32) -> pb::ListedQuestion {
         deferred: false,
         ticked: vec![2],
         picks: Vec::new(),
+        spec_state: 0,
     }
 }
 
@@ -1380,4 +1394,326 @@ async fn an_answer_carries_the_phones_traceparent_to_the_question_service_when_i
         })
         .collect();
     assert_eq!(sent, [phone, phone, phone, "", "", ""]);
+}
+
+// ---------------------------------------------------------------------------
+// The checked line and the changed spec
+// ---------------------------------------------------------------------------
+
+use std::sync::atomic::{AtomicI64, Ordering};
+
+const HOUR_MS: i64 = 3_600_000;
+
+fn at(day: u8, hour: u8, minute: u8) -> i64 {
+    time::OffsetDateTime::new_utc(
+        time::Date::from_calendar_date(2026, time::Month::October, day).unwrap(),
+        time::Time::from_hms(hour, minute, 0).unwrap(),
+    )
+    .unix_timestamp()
+        * 1000
+}
+
+/// A question client whose clock reads what the test sets.
+fn questions_at(service: &FakeServer, now: i64) -> (Questions, Arc<AtomicI64>) {
+    let clock = Arc::new(AtomicI64::new(now));
+    let reads = Arc::clone(&clock);
+    (
+        service
+            .questions()
+            .with_clock(move || reads.load(Ordering::SeqCst)),
+        clock,
+    )
+}
+
+fn checked_line(page: &str) -> Option<String> {
+    let start = page.find(r#"<p class="checked-line"#)?;
+    let rest = &page[start..];
+    Some(rest[..rest.find("</p>")? + 4].to_owned())
+}
+
+#[test]
+fn the_checked_line_has_four_forms() {
+    let utc = time::UtcOffset::UTC;
+    let line = |checked, now| {
+        let line = super::todos::CheckedLine::of(checked, now, utc);
+        (line.text, line.stale)
+    };
+    assert_eq!(
+        line(at(24, 14, 5), at(24, 14, 30)),
+        ("Checked by the chief at 14:05".to_owned(), false)
+    );
+    assert_eq!(
+        line(at(23, 23, 50), at(24, 0, 10)),
+        ("Checked by the chief yesterday at 23:50".to_owned(), false)
+    );
+    assert_eq!(
+        line(at(24, 9, 40), at(24, 14, 30)),
+        ("Not checked since 09:40".to_owned(), true)
+    );
+    assert_eq!(
+        line(at(23, 14, 5), at(24, 14, 30)),
+        ("Not checked since yesterday at 14:05".to_owned(), true)
+    );
+    assert_eq!(
+        line(at(22, 14, 5), at(24, 14, 30)),
+        ("Not checked since 22 Oct at 14:05".to_owned(), true)
+    );
+    assert_eq!(
+        line(0, at(24, 14, 30)),
+        ("Not checked yet".to_owned(), true)
+    );
+}
+
+#[test]
+fn the_checked_line_turns_red_just_after_two_hours() {
+    let utc = time::UtcOffset::UTC;
+    let checked = at(24, 9, 40);
+    let stale = |now| super::todos::CheckedLine::of(checked, now, utc).stale;
+    assert!(!stale(checked + 2 * HOUR_MS));
+    assert!(stale(checked + 2 * HOUR_MS + 1));
+}
+
+#[test]
+fn the_checked_line_uses_the_macs_offset() {
+    let plus_ten = time::UtcOffset::from_hms(10, 0, 0).unwrap();
+    let line = super::todos::CheckedLine::of(at(24, 4, 5), at(24, 4, 30), plus_ten);
+    assert_eq!(line.text, "Checked by the chief at 14:05");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_page_draws_the_checked_line_above_the_cards_and_it_turns_red_with_the_clock() {
+    let service = FakeServer::start().await;
+    service.fake.set_list(vec![question("Q1", 2, false)]);
+    service.fake.set_checked(at(24, 14, 5));
+    let (questions, clock) = questions_at(&service, at(24, 14, 30));
+    let directory = TestDirectory::new();
+    let server = TestServer::serve(directory.store().await, questions).await;
+
+    let page = server.get("/").await.text().await.unwrap();
+    assert_eq!(
+        checked_line(&page).as_deref(),
+        Some(r#"<p class="checked-line">Checked by the chief at 14:05</p>"#),
+        "{page}"
+    );
+    assert!(page.find("checked-line").unwrap() < page.find(r#"id="todo-Q1""#).unwrap());
+
+    clock.store(at(24, 16, 6), Ordering::SeqCst);
+    let page = server.get("/").await.text().await.unwrap();
+    assert_eq!(
+        checked_line(&page).as_deref(),
+        Some(r#"<p class="checked-line stale">Not checked since 14:05</p>"#),
+        "{page}"
+    );
+
+    service.fake.set_checked(0);
+    let page = server.get("/").await.text().await.unwrap();
+    assert_eq!(
+        checked_line(&page).as_deref(),
+        Some(r#"<p class="checked-line stale">Not checked yet</p>"#),
+        "{page}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn with_no_todo_the_checked_line_is_left_out() {
+    let service = FakeServer::start().await;
+    service.fake.set_checked(at(24, 14, 5));
+    let (questions, _clock) = questions_at(&service, at(24, 20, 0));
+    let directory = TestDirectory::new();
+    let server = TestServer::serve(directory.store().await, questions).await;
+
+    let page = server.get("/").await.text().await.unwrap();
+
+    assert!(page.contains("No todos for you."), "{page}");
+    assert!(!page.contains("checked-line"), "{page}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_stream_turns_the_line_red_by_itself_when_two_hours_pass() {
+    let service = FakeServer::start().await;
+    service.fake.set_list(vec![question("Q1", 1, false)]);
+    service.fake.set_checked(at(24, 14, 5));
+    let (questions, clock) = questions_at(&service, at(24, 14, 30));
+    let directory = TestDirectory::new();
+    let server = TestServer::serve(directory.store().await, questions).await;
+    let mut response = server.get("/updates").await;
+    let mut seen = String::new();
+    clock.store(at(24, 16, 30), Ordering::SeqCst);
+
+    tokio::time::timeout(std::time::Duration::from_secs(8), async {
+        loop {
+            let chunk = response.chunk().await.unwrap().expect("the stream goes on");
+            seen.push_str(&String::from_utf8_lossy(&chunk));
+            if seen.contains("checked-line stale") {
+                return;
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("a red line within the poll interval and a margin: {seen}"));
+    assert!(seen.contains("Not checked since 14:05"), "{seen}");
+}
+
+fn changed(mut listed: pb::ListedQuestion) -> pb::ListedQuestion {
+    listed.spec_state = pb::SpecState::Changed as i32;
+    listed
+}
+
+const CHANGED_NOTICE: &str = r#"<p class="notice" role="status">Changed spec: the spec changed after this was asked. The chief will put it again.</p>"#;
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_changed_spec_shows_its_notice_turns_send_off_and_leaves_revise_and_reject_out() {
+    let service = FakeServer::start().await;
+    service.fake.set_list(vec![
+        changed(question("Q1", 2, false)),
+        question("Q2", 1, false),
+    ]);
+    let directory = TestDirectory::new();
+    let server = TestServer::serve(directory.store().await, service.questions()).await;
+
+    let page = server.get("/").await.text().await.unwrap();
+    let (first, second) = page.split_once(r#"id="todo-Q2""#).unwrap();
+
+    assert!(first.contains(CHANGED_NOTICE), "{first}");
+    assert!(
+        first.contains(r#"class="send" disabled>"#),
+        "Send is off: {first}"
+    );
+    for absent in ["card-more", "Revise", "Reject"] {
+        assert!(!first.contains(absent), "{absent}: {first}");
+    }
+    assert!(first.contains("Later</button>"), "Later stays: {first}");
+    assert!(!second.contains("Changed spec"), "{second}");
+    assert!(second.contains("card-more"), "{second}");
+    assert!(!first.contains("/specs/"), "no path is drawn");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_changed_spec_turns_done_and_ignore_off_on_instructions() {
+    let service = FakeServer::start().await;
+    service.fake.set_list(vec![changed(instructions("I1", 3))]);
+    let directory = TestDirectory::new();
+    let server = TestServer::serve(directory.store().await, service.questions()).await;
+
+    let page = server.get("/").await.text().await.unwrap();
+
+    assert!(page.contains(CHANGED_NOTICE), "{page}");
+    assert!(page.contains(r#"class="send" disabled>Done"#), "{page}");
+    assert!(
+        page.contains(r#"class="later-button" disabled data-on:click="@post('/todos/ignore'"#),
+        "{page}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_changed_spec_goes_when_the_list_no_longer_marks_it() {
+    let service = FakeServer::start().await;
+    service
+        .fake
+        .set_list(vec![changed(question("Q1", 2, false))]);
+    let directory = TestDirectory::new();
+    let server = TestServer::serve(directory.store().await, service.questions()).await;
+    assert!(
+        server
+            .get("/")
+            .await
+            .text()
+            .await
+            .unwrap()
+            .contains("Changed spec")
+    );
+
+    let mut again = question("Q1", 3, false);
+    again.picks = vec![pick(1, "x", "")];
+    service.fake.set_list(vec![again]);
+    let page = server.get("/").await.text().await.unwrap();
+
+    assert!(!page.contains("Changed spec"), "{page}");
+    assert!(
+        !page.contains(r#"class="send" disabled"#),
+        "Send is on again: {page}"
+    );
+    assert!(page.contains("card-more"), "{page}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_answer_refused_for_a_changed_spec_draws_the_notice_and_no_sent_line() {
+    let (service, server, _directory) = served_with_todos().await;
+    service.fake.0.lock().unwrap().write_refusal =
+        Some(Status::failed_precondition("spec_changed"));
+
+    // The list the answer is refused against already marks the spec as changed.
+    service.fake.set_list(vec![
+        changed(question("Q1", 2, false)),
+        instructions("I1", 3),
+    ]);
+    let response = server
+        .post("/todos/answer", "id=Q1&version=2&pick.0=a&pick.1=x")
+        .await;
+
+    assert_eq!(response.status(), 200);
+    let redrawn = response.text().await.unwrap();
+    assert_eq!(redrawn.matches(CHANGED_NOTICE).count(), 1, "{redrawn}");
+    assert!(
+        redrawn.contains(r#"{"sent":""}"#),
+        "no sent line: {redrawn}"
+    );
+    assert!(service.fake.calls().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_spec_changed_refusal_keeps_its_notice_until_the_chief_puts_the_todo_again() {
+    let (service, server, _directory) = served_with_todos().await;
+    service.fake.0.lock().unwrap().write_refusal =
+        Some(Status::failed_precondition("spec_changed"));
+
+    // The refusal lands while the list still shows the spec as current.
+    let redrawn = server
+        .post("/todos/answer", "id=Q1&version=2&pick.0=a&pick.1=x")
+        .await
+        .text()
+        .await
+        .unwrap();
+    assert!(redrawn.contains(CHANGED_NOTICE), "{redrawn}");
+    assert!(
+        server
+            .get("/")
+            .await
+            .text()
+            .await
+            .unwrap()
+            .contains(CHANGED_NOTICE)
+    );
+
+    // Put again: the list marks nothing, and the notice goes.
+    service.fake.0.lock().unwrap().write_refusal = None;
+    service
+        .fake
+        .set_list(vec![question("Q1", 3, false), instructions("I1", 3)]);
+    let page = server.get("/").await.text().await.unwrap();
+    assert!(!page.contains("Changed spec"), "{page}");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_spec_changed_post_logs_its_result_and_no_todo_id() {
+    let logs = CapturedLogs::start();
+    let (service, server, _directory) = served_with_todos().await;
+    service.fake.0.lock().unwrap().write_refusal =
+        Some(Status::failed_precondition("spec_changed"));
+
+    server
+        .post("/todos/answer", "id=Q1&version=2&pick.0=a&pick.1=x")
+        .await;
+
+    let text = logs.text();
+    let lines: Vec<&str> = text
+        .lines()
+        .filter(|line| line.contains("app todo answered"))
+        .collect();
+    assert_eq!(lines.len(), 1, "{text}");
+    assert!(
+        lines[0].contains("kind=\"answer\"") && lines[0].contains("result=\"spec_changed\""),
+        "{text}"
+    );
+    assert!(!lines[0].contains("Q1"), "{text}");
 }

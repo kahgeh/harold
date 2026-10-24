@@ -636,6 +636,17 @@ body.in-call > .call-screen {
   text-align: center;
 }
 
+.checked-line {
+  margin: 0 2px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.checked-line.stale {
+  color: var(--end);
+  font-weight: 600;
+}
+
 .card {
   padding: 12px;
   border: 1px solid var(--surface-4);

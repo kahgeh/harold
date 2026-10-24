@@ -17,7 +17,7 @@ use datastar::prelude::{PatchElements, PatchSignals};
 use harold_api::tools::questions::v1::question_service_client::QuestionServiceClient;
 use harold_api::tools::questions::v1::{
     AnswerKind, AnswerQuestionRequest, DeferQuestionRequest, ListQuestionsRequest, ListedQuestion,
-    Pick, SavePicksRequest, TickStepRequest,
+    Pick, SavePicksRequest, SpecState, TickStepRequest,
 };
 use tonic::transport::{Channel, Endpoint};
 use tonic::{Code, Status};
@@ -35,6 +35,24 @@ const NOTE_MAX_CHARS: usize = 1999;
 
 /// How long one read of the todos may take, as the dash allows.
 const READ_LIMIT: Duration = Duration::from_secs(2);
+
+/// The checked line turns red this long after the last check, when a todo is waiting.
+const STALE_AFTER_MS: i64 = 2 * 60 * 60 * 1000;
+
+/// The notice on a card whose spec has changed since it was asked.
+const CHANGED_SPEC_NOTICE: &str =
+    "Changed spec: the spec changed after this was asked. The chief will put it again.";
+
+const MONTHS: [&str; 12] = [
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+];
+
+/// Wall-clock milliseconds since the Unix epoch.
+type Clock = Arc<dyn Fn() -> i64 + Send + Sync>;
+
+fn wall_clock() -> i64 {
+    (time::OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000) as i64
+}
 
 /// Why a read of the todos failed, as `app todos not read` logs it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,10 +76,15 @@ impl ReadFailure {
 struct Shared {
     /// The last list a read returned, in the tool's order with the set-aside questions last.
     last: Option<Vec<ListedQuestion>>,
+    /// When the chief last checked the todos, as the last good read said; 0 before the first check.
+    checked_at_ms: i64,
     /// True from the first failed read until the next good one.
     failing: bool,
     /// A refusal's words per todo id, kept until the todo is gone or next answered.
     notices: HashMap<String, String>,
+    /// The version of each todo whose answer was refused for a changed spec, until the todo is
+    /// gone or put again.
+    changed_refusals: HashMap<String, u32>,
     /// The note box a refusal leaves open per todo id (`revise` or `reject`) and the note
     /// posted, kept until the todo is gone or next posted.
     open_notes: HashMap<String, (&'static str, String)>,
@@ -78,6 +101,8 @@ pub(super) fn client_url(grpc: &GrpcSettings) -> String {
 pub(crate) struct Questions {
     pub(super) client: QuestionServiceClient<Channel>,
     shared: Arc<Mutex<Shared>>,
+    /// The time the checked line is measured against; a test swaps it.
+    clock: Clock,
 }
 
 impl Questions {
@@ -90,7 +115,15 @@ impl Questions {
         Self {
             client: QuestionServiceClient::new(channel),
             shared: Arc::default(),
+            clock: Arc::new(wall_clock),
         }
+    }
+
+    /// The same todos, with the checked line measured against `clock`.
+    #[cfg(test)]
+    pub(super) fn with_clock(mut self, clock: impl Fn() -> i64 + Send + Sync + 'static) -> Self {
+        self.clock = Arc::new(clock);
+        self
     }
 
     /// Reads the todos once. A failed read keeps the last list and logs
@@ -102,13 +135,17 @@ impl Questions {
             match tokio::time::timeout(READ_LIMIT, client.list_questions(ListQuestionsRequest {}))
                 .await
             {
-                Ok(Ok(response)) => Ok(response.into_inner().questions),
+                Ok(Ok(response)) => {
+                    let response = response.into_inner();
+                    Ok((response.questions, response.checked_at_ms))
+                }
                 Ok(Err(_)) => Err(ReadFailure::Unavailable),
                 Err(_) => Err(ReadFailure::Timeout),
             };
         let mut shared = self.shared.lock().unwrap_or_else(|e| e.into_inner());
         match read {
-            Ok(mut list) => {
+            Ok((mut list, checked_at_ms)) => {
+                shared.checked_at_ms = checked_at_ms;
                 // The tool's order, the questions set aside last.
                 list.sort_by_key(|listed| listed.deferred);
                 if shared.failing {
@@ -120,6 +157,14 @@ impl Questions {
                     .filter_map(|l| l.question.as_ref().map(|q| q.id.as_str()))
                     .collect();
                 shared.notices.retain(|id, _| ids.contains(&id.as_str()));
+                // A changed-spec refusal holds only for the version it was made at: the chief
+                // putting the todo again takes it off.
+                shared.changed_refusals.retain(|id, version| {
+                    list.iter().any(|listed| {
+                        listed.version == *version
+                            && listed.question.as_ref().is_some_and(|q| &q.id == id)
+                    })
+                });
                 shared.open_notes.retain(|id, _| ids.contains(&id.as_str()));
                 shared.last = Some(list);
             }
@@ -130,13 +175,23 @@ impl Questions {
                 }
             }
         }
-        Self::section(&shared)
+        self.section(&shared)
     }
 
     /// Shows `text` on the card of todo `id` until it is gone or answered.
     pub(super) fn set_notice(&self, id: &str, text: &str) {
         let mut shared = self.shared.lock().unwrap_or_else(|e| e.into_inner());
         shared.notices.insert(id.to_owned(), text.to_owned());
+    }
+
+    /// Keeps the changed-spec notice on todo `id` at the version last read, even if the list
+    /// has not marked the spec as changed yet.
+    fn refused_for_changed_spec(&self, id: &str) {
+        let Some(version) = self.find(id).map(|listed| listed.version) else {
+            return;
+        };
+        let mut shared = self.shared.lock().unwrap_or_else(|e| e.into_inner());
+        shared.changed_refusals.insert(id.to_owned(), version);
     }
 
     /// Leaves the note box of todo `id` open on `mode` (`revise` or `reject`), holding `note`.
@@ -159,19 +214,32 @@ impl Questions {
         shared.notices.remove(id);
     }
 
-    fn section(shared: &Shared) -> TodosSection {
+    fn section(&self, shared: &Shared) -> TodosSection {
         match &shared.last {
             None => TodosSection {
                 unreadable: true,
+                checked: None,
                 cards: Vec::new(),
                 waiting: 0,
             },
             Some(list) => TodosSection {
                 unreadable: false,
+                checked: (!list.is_empty()).then(|| {
+                    CheckedLine::of(
+                        shared.checked_at_ms,
+                        (self.clock)(),
+                        crate::telemetry::local_offset(),
+                    )
+                }),
                 cards: list
                     .iter()
                     .filter_map(|listed| {
-                        Card::from_listed(listed, &shared.notices, &shared.open_notes)
+                        Card::from_listed(
+                            listed,
+                            &shared.notices,
+                            &shared.changed_refusals,
+                            &shared.open_notes,
+                        )
                     })
                     .collect(),
                 waiting: list.iter().filter(|listed| !listed.deferred).count(),
@@ -186,9 +254,70 @@ impl Questions {
 pub(crate) struct TodosSection {
     /// No list has ever been read.
     unreadable: bool,
+    /// The checked line; none when no todo is listed.
+    checked: Option<CheckedLine>,
     cards: Vec<Card>,
     /// The todo count: the waiting questions and the instructions.
     waiting: usize,
+}
+
+/// The line at the top of the page saying when the chief last checked the todos.
+pub(super) struct CheckedLine {
+    pub(super) text: String,
+    /// Over 2 hours since the check, or none yet: the line is red.
+    pub(super) stale: bool,
+}
+
+impl CheckedLine {
+    /// The line for a check at `checked_at_ms` (0 for none), seen at `now_ms`, in the Mac's
+    /// `offset`. It is only drawn while a todo is listed, so a todo is waiting.
+    pub(super) fn of(checked_at_ms: i64, now_ms: i64, offset: time::UtcOffset) -> Self {
+        if checked_at_ms <= 0 {
+            return Self {
+                text: "Not checked yet".to_owned(),
+                stale: true,
+            };
+        }
+        let local = |ms: i64| {
+            time::OffsetDateTime::from_unix_timestamp(ms.div_euclid(1000))
+                .unwrap_or(time::OffsetDateTime::UNIX_EPOCH)
+                .to_offset(offset)
+        };
+        let (checked, now) = (local(checked_at_ms), local(now_ms));
+        let clock = format!("{:02}:{:02}", checked.hour(), checked.minute());
+        let day = if checked.date() == now.date() || checked.date() > now.date() {
+            Day::Today
+        } else if now.date().previous_day() == Some(checked.date()) {
+            Day::Yesterday
+        } else {
+            Day::On(format!(
+                "{} {}",
+                checked.day(),
+                MONTHS[usize::from(u8::from(checked.month())) - 1]
+            ))
+        };
+        let stale = now_ms.saturating_sub(checked_at_ms) > STALE_AFTER_MS;
+        let text = match (stale, day) {
+            (false, Day::Today) => format!("Checked by the chief at {clock}"),
+            (false, Day::Yesterday) => format!("Checked by the chief yesterday at {clock}"),
+            (false, Day::On(date)) => format!("Checked by the chief on {date} at {clock}"),
+            (true, Day::Today) => format!("Not checked since {clock}"),
+            (true, Day::Yesterday) => format!("Not checked since yesterday at {clock}"),
+            (true, Day::On(date)) => format!("Not checked since {date} at {clock}"),
+        };
+        Self { text, stale }
+    }
+}
+
+enum Day {
+    Today,
+    Yesterday,
+    On(String),
+}
+
+/// Whether the todo's spec file no longer matches the checksum it was asked with.
+fn has_changed_spec(listed: &ListedQuestion) -> bool {
+    SpecState::try_from(listed.spec_state) == Ok(SpecState::Changed)
 }
 
 impl TodosSection {
@@ -222,6 +351,9 @@ struct Card {
     decisions: Vec<DecisionView>,
     steps: Vec<StepView>,
     notice: Option<String>,
+    /// The spec changed after the todo was asked: Send, Done and Ignore are off, and Revise and
+    /// Reject are left out.
+    changed: bool,
     /// Send is off: with a note open, until it has words; otherwise until every decision has a pick.
     send_disabled: bool,
     /// The card's name in the page's signals: the id's letters and digits.
@@ -265,9 +397,12 @@ impl Card {
     fn from_listed(
         listed: &ListedQuestion,
         notices: &HashMap<String, String>,
+        changed_refusals: &HashMap<String, u32>,
         open_notes: &HashMap<String, (&'static str, String)>,
     ) -> Option<Self> {
         let question = listed.question.as_ref()?;
+        let changed = has_changed_spec(listed);
+        let refused_for_change = changed_refusals.get(&question.id) == Some(&listed.version);
         let is_question = question.steps.is_empty();
         let link = (!question.link.is_empty()).then(|| {
             let text = if question.spec.is_empty() {
@@ -363,15 +498,25 @@ impl Card {
             link,
             decisions,
             steps,
-            notice: notices.get(&question.id).cloned(),
-            send_disabled: match open_notes.get(&question.id) {
-                Some((_, note)) => note.trim().is_empty(),
-                None => !can_send,
+            notice: if changed || refused_for_change {
+                Some(CHANGED_SPEC_NOTICE.to_owned())
+            } else {
+                notices.get(&question.id).cloned()
             },
+            changed,
+            send_disabled: changed
+                || match open_notes.get(&question.id) {
+                    Some((_, note)) => note.trim().is_empty(),
+                    None => !can_send,
+                },
             sig: signal_name(&question.id),
-            open_mode: open_notes.get(&question.id).map_or("", |(mode, _)| mode),
+            open_mode: open_notes
+                .get(&question.id)
+                .filter(|_| !changed)
+                .map_or("", |(mode, _)| mode),
             note: open_notes
                 .get(&question.id)
+                .filter(|_| !changed)
                 .map(|(_, note)| note.clone())
                 .unwrap_or_default(),
             id: question.id.clone(),
@@ -433,6 +578,7 @@ enum Outcome {
     Sent,
     VersionChanged,
     NotWaiting,
+    SpecChanged,
     Unavailable,
 }
 
@@ -441,6 +587,7 @@ impl Outcome {
         match self {
             Self::Sent => "sent",
             Self::VersionChanged => "version_changed",
+            Self::SpecChanged => "spec_changed",
             Self::NotWaiting => "not_waiting",
             Self::Unavailable => "unavailable",
         }
@@ -453,6 +600,7 @@ impl Outcome {
                 match status.message() {
                     "version_changed" => Self::VersionChanged,
                     "not_waiting" => Self::NotWaiting,
+                    "spec_changed" => Self::SpecChanged,
                     _ => Self::Unavailable,
                 }
             }
@@ -466,6 +614,8 @@ impl Outcome {
             Self::Sent => None,
             Self::VersionChanged => Some(format!("{id} changed. Look again before you send.")),
             Self::NotWaiting => Some(format!("{id} was already answered or withdrawn.")),
+            // Drawn from the todo's own spec state, and from `changed_refusals`.
+            Self::SpecChanged => None,
             Self::Unavailable if kind == Kind::Picks => {
                 Some("Harold can't save your picks right now".to_owned())
             }
@@ -648,6 +798,9 @@ async fn finish_with_note(
     match outcome.notice(id, kind) {
         Some(notice) => state.questions.set_notice(id, &notice),
         None => state.questions.clear_notice(id),
+    }
+    if outcome == Outcome::SpecChanged {
+        state.questions.refused_for_changed_spec(id);
     }
     state.questions.close_note(id);
     let mode = match kind {
