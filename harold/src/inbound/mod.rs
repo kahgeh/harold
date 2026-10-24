@@ -390,8 +390,8 @@ pub(crate) enum ChiefRouting {
 /// agent pane of the chief's tmux session. A failing
 /// listing → Err. On typing, records telemetry::prompt_typed(pane, StartedBy::Phone, None,
 /// typed_at), so the chief's turn counts as started from the phone. A typed app reply is
-/// not counted in the phone-request counters, which keep a fixed channel list. Logs
-/// nothing that holds the text.
+/// counted on the `web_app` channel but never judged wrong. Logs nothing that holds the
+/// text.
 #[cfg(test)]
 pub(crate) fn route_to_chief(
     text: &str,
