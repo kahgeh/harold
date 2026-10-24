@@ -359,8 +359,12 @@ async fn readiness_probe_reads_only_one_snapshot_and_handles_eof_error_and_timeo
             assert!(output.stdout.is_empty());
         }
         if matches!(kind, ResponseKind::Pending) {
-            assert!(started.elapsed() < Duration::from_secs(7));
-            assert!(String::from_utf8_lossy(&output.stderr).contains("timed out"));
+            assert!(started.elapsed() >= Duration::from_secs(5));
+            assert!(
+                String::from_utf8_lossy(&output.stderr)
+                    .contains("readiness check timed out after 5 seconds"),
+                "{output:?}"
+            );
         }
     }
 }
@@ -799,11 +803,13 @@ impl Fixture {
     }
 }
 
-/// Waits for a process (a probe or a daemon) to exit and returns its output. The 60 seconds is a
-/// limit for a process that hangs, not a timing rule: a loaded machine can take several seconds
-/// to start a process.
+/// The limit for a process (a probe or a daemon) that hangs, not a timing rule: a loaded machine
+/// can take several seconds to start a process.
+const HANG_LIMIT: Duration = Duration::from_secs(60);
+
+/// Waits for a process (a probe or a daemon) to exit and returns its output.
 fn wait_for_exit(mut child: std::process::Child) -> Output {
-    let deadline = Instant::now() + Duration::from_secs(60);
+    let deadline = Instant::now() + HANG_LIMIT;
     while child.try_wait().unwrap().is_none() {
         if Instant::now() >= deadline {
             child.kill().unwrap();
@@ -971,13 +977,14 @@ fn under_launchd_a_clean_shutdown_marks_the_crash_file_clean() {
     let port = listener.local_addr().unwrap().port();
     drop(listener);
     let fixture = Fixture::new(&format!("{VALID}\n[grpc]\nport = {port}\n"));
-    let child = fixture.daemon_command(true).spawn().unwrap();
-    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut child = fixture.daemon_command(true).spawn().unwrap();
+    let deadline = Instant::now() + HANG_LIMIT;
     while std::net::TcpStream::connect(("127.0.0.1", port)).is_err() {
-        assert!(
-            Instant::now() < deadline,
-            "the daemon did not start listening"
-        );
+        if Instant::now() >= deadline {
+            child.kill().unwrap();
+            let output = child.wait_with_output().unwrap();
+            panic!("the daemon did not start listening: {output:?}");
+        }
         std::thread::sleep(Duration::from_millis(50));
     }
     let running = std::fs::read_to_string(fixture.crashes()).unwrap();
