@@ -15,6 +15,8 @@ struct State {
     /// Data sequences the fake refuses, as TypeDB would refuse a record it cannot take.
     refuse: BTreeSet<u64>,
     unreachable: bool,
+    /// The position read fails as TypeDB would when its database is gone.
+    position_fails: bool,
     applied: Vec<u64>,
 }
 
@@ -28,8 +30,8 @@ impl FakeGraph {
         self.state.lock().unwrap().refuse.insert(sequence);
     }
 
-    pub(crate) fn stop_refusing(&self) {
-        self.state.lock().unwrap().refuse.clear();
+    pub(crate) fn fail_position(&self, fail: bool) {
+        self.state.lock().unwrap().position_fails = fail;
     }
 
     pub(crate) fn set_unreachable(&self, unreachable: bool) {
@@ -103,7 +105,11 @@ impl GraphBackend for FakeGraph {
     }
 
     async fn position(&self) -> BackendResult<Position> {
-        Ok(self.lock()?.position)
+        let state = self.lock()?;
+        if state.position_fails {
+            return Err(BackendError::Refused("database_missing".into()));
+        }
+        Ok(state.position)
     }
 
     async fn apply_schema(&self, record: &SchemaRecord, sequence: u64) -> BackendResult<()> {
@@ -231,6 +237,4 @@ impl GraphBackend for FakeGraph {
     async fn snapshot(&self) -> BackendResult<Snapshot> {
         Ok(self.lock()?.snapshot.clone())
     }
-
-    async fn stop(&self) {}
 }

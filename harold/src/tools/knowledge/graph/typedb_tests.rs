@@ -102,3 +102,24 @@ fn a_typedb_error_body_gives_a_one_word_reason() {
     );
     assert_eq!(reason(&serde_json::Value::Null), "server_error");
 }
+
+#[test]
+fn only_a_coded_400_is_a_refusal_and_every_other_failure_is_the_servers() {
+    let reply = |status: u16, body: serde_json::Value| Reply { status, body };
+    let coded = serde_json::json!({"code": "CNT9"});
+    assert_eq!(
+        refusal(&reply(400, coded.clone())),
+        BackendError::Refused("cnt9".into())
+    );
+    for status in [401, 404, 500, 503] {
+        assert_eq!(
+            refusal(&reply(status, coded.clone())),
+            BackendError::Unreachable,
+            "{status}"
+        );
+    }
+    assert_eq!(
+        refusal(&reply(400, serde_json::Value::Null)),
+        BackendError::Unreachable
+    );
+}

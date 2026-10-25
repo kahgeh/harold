@@ -185,6 +185,17 @@ struct Reply {
     body: Value,
 }
 
+/// What a reply that is not a success means. Only a 400 that carries a TypeDB code says the
+/// database refused the query. Any other status (sign-in, missing database, server error) is
+/// a fault of the server, not of a record, so it must never make the graph behind.
+fn refusal(reply: &Reply) -> BackendError {
+    if reply.status == 400 && reply.body["code"].is_string() {
+        BackendError::Refused(reason(&reply.body))
+    } else {
+        BackendError::Unreachable
+    }
+}
+
 impl TypeDbBackend {
     /// One request. A token the server refuses is replaced once.
     async fn send(&self, method: Method, path: &str, body: Option<&Value>) -> BackendResult<Reply> {
@@ -211,14 +222,14 @@ impl TypeDbBackend {
             let body = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
             return Ok(Reply { status, body });
         }
-        Err(BackendError::Refused("sign_in".into()))
+        Err(BackendError::Unreachable)
     }
 
     async fn ok(&self, method: Method, path: &str, body: Option<&Value>) -> BackendResult<Reply> {
         let reply = self.send(method, path, body).await?;
         match reply.status {
             200..=299 => Ok(reply),
-            _ => Err(BackendError::Refused(reason(&reply.body))),
+            _ => Err(refusal(&reply)),
         }
     }
 
@@ -237,8 +248,8 @@ impl TypeDbBackend {
                 .as_array()
                 .map(|rows| rows.iter().map(|row| row["data"].clone()).collect())
                 .unwrap_or_default()),
-            206 => Err(BackendError::Refused("truncated".into())),
-            _ => Err(BackendError::Refused(reason(&reply.body))),
+            206 => Err(BackendError::Unreachable),
+            _ => Err(refusal(&reply)),
         }
     }
 
@@ -255,7 +266,7 @@ impl TypeDbBackend {
             .ok(Method::POST, "/v1/transactions/open", Some(&open))
             .await?;
         let Some(id) = opened.body["transactionId"].as_str().map(str::to_string) else {
-            return Err(BackendError::Refused("server_error".into()));
+            return Err(BackendError::Unreachable);
         };
         let result = self.run(&id, statements, position).await;
         if result.is_err() {
@@ -510,10 +521,6 @@ impl GraphBackend for TypeDbBackend {
         }
         Ok(snapshot)
     }
-
-    async fn stop(&self) {
-        self.server.stop().await;
-    }
 }
 
 /// Makes the TypeDB client on the first graph call. The server starts on its first request and
@@ -522,17 +529,30 @@ pub(crate) struct TypeDbOpener {
     pub binary: PathBuf,
     pub idle: Duration,
     pub shutdown: tokio::sync::watch::Receiver<()>,
+    /// The one server of this opener, so a second open never starts a second server.
+    pub server: std::sync::Mutex<Option<Arc<TypeDbServer>>>,
 }
 
 #[tonic::async_trait]
 impl BackendOpener for TypeDbOpener {
     async fn open(&self, typedb_folder: &Path) -> Result<Arc<dyn GraphBackend>, GraphError> {
-        let server = TypeDbServer::new(ServerConfig {
-            binary: self.binary.clone(),
-            folder: typedb_folder.to_path_buf(),
-            idle: self.idle,
-        });
-        drop(server.spawn_reaper(self.shutdown.clone()));
+        let mut held = self
+            .server
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let server = match &*held {
+            Some(server) => Arc::clone(server),
+            None => {
+                let server = TypeDbServer::new(ServerConfig {
+                    binary: self.binary.clone(),
+                    folder: typedb_folder.to_path_buf(),
+                    idle: self.idle,
+                });
+                drop(server.spawn_reaper(self.shutdown.clone()));
+                *held = Some(Arc::clone(&server));
+                server
+            }
+        };
         Ok(Arc::new(TypeDbBackend::new(server)))
     }
 }

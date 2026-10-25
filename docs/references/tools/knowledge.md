@@ -237,13 +237,13 @@ TypeDB Community Edition 3.x runs on this Mac and listens on `127.0.0.1` only. H
 ```toml
 [knowledge.graph]
 enabled = true
-server = "/opt/homebrew/bin/typedb_server_bin"   # the absolute path of the TypeDB server binary
+server = "/Users/you/typedb-3.14.1/bin/typedb_server_bin"   # the absolute path of the TypeDB server binary
 idle_minutes = 10                                # the default
 ```
 
 `enabled` needs `[knowledge] vault` and `server`. Harold refuses to start and names the key when either is missing.
 
-**Install it.** The audited version is TypeDB server 3.14.1 from Homebrew (see [dependency audits](../dependency-audits.md), row 11). Run `brew install typedb`, then check `typedb_server_bin --version` prints `server 3.14.1`. Do not use the Homebrew service: Harold starts the server itself.
+**Install it.** The audited version is TypeDB server 3.14.1 from Homebrew (see [dependency audits](../dependency-audits.md), row 11). Harold starts only that version: before each start it runs `typedb_server_bin --version` and refuses any other output than `server 3.14.1` (a warn line `knowledge graph server is not the audited version`, and the call answers `typedb_unreachable`). Set `server` to the path of a 3.14.1 binary. Homebrew may give a different version, and `brew upgrade` changes the system install, so do neither blindly: fetch the 3.14.1 bottle with `brew fetch`, check its sha256 against row 11, and extract it into a folder of its own. Do not use the Homebrew service: Harold starts the server itself.
 
 **What Harold does with the server.**
 - It writes its own `config.yml` in `<store>/tools/knowledge/graph/typedb/` each time it starts the server. Both listeners (gRPC and HTTP) are on `127.0.0.1` on free ports. TypeDB's reporting and monitoring are off. The config that Homebrew ships listens on `0.0.0.0` and reports, so Harold never uses it.
@@ -252,7 +252,7 @@ idle_minutes = 10                                # the default
 - The database is `harold_knowledge`. A relation for a link in a vault note's text is `note_link`, because `links` is a reserved TypeQL word. `harold tool knowledge relations` still shows it as `links`.
 - A start takes about 2 s. One change takes about 35 ms. A rebuild of 2,000 vault notes and 6,000 relation records takes about 12 s.
 
-**Live tests.** The live tests start a server of their own in a temporary folder. They read the binary from `HAROLD_TYPEDB_BIN`, else from `/opt/homebrew/bin/typedb_server_bin`, and skip with a note when it is missing.
+**Live tests.** The live tests start a server of their own in a temporary folder. They read the binary from `HAROLD_TYPEDB_BIN` and skip with a note when it is not set or is missing.
 
 ### Refusals
 

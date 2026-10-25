@@ -12,6 +12,7 @@ struct MemoryInner {
     next: u64,
     records: Vec<(u64, Vec<u8>)>,
     fail: bool,
+    fail_reads: bool,
 }
 
 impl MemoryLog {
@@ -21,6 +22,10 @@ impl MemoryLog {
 
     pub(crate) fn fail_appends(&self, fail: bool) {
         self.inner.lock().unwrap().fail = fail;
+    }
+
+    pub(crate) fn fail_reads(&self, fail: bool) {
+        self.inner.lock().unwrap().fail_reads = fail;
     }
 
     pub(crate) fn len(&self) -> usize {
@@ -43,6 +48,9 @@ impl RecordLog for MemoryLog {
 
     async fn read_after(&self, after: Option<u64>) -> Result<Vec<(u64, Vec<u8>)>, LogError> {
         let inner = self.inner.lock().unwrap();
+        if inner.fail_reads {
+            return Err(LogError("test read failure".into()));
+        }
         Ok(inner
             .records
             .iter()

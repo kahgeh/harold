@@ -82,6 +82,4 @@ pub(crate) trait GraphBackend: Send + Sync {
     async fn would_change(&self, op: &Op) -> BackendResult<bool>;
     async fn relations_of(&self, name: &str) -> BackendResult<Vec<RelationRow>>;
     async fn snapshot(&self) -> BackendResult<Snapshot>;
-    /// Stops the server if this backend started it.
-    async fn stop(&self);
 }

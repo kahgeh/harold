@@ -406,7 +406,7 @@ fn knowledge_refusal_line(status: &tonic::Status, command: &KnowledgeCommand) ->
             "the knowledge graph could not write its log, so nothing changed".into()
         }
         (tonic::Code::Unavailable, "typedb_unreachable") => {
-            "TypeDB did not answer: the change is logged and applies on the next call".into()
+            "TypeDB did not answer: a change already logged applies on the next call".into()
         }
         (tonic::Code::FailedPrecondition, "not_refused") => {
             "that record was not refused: only the record the catch-up stopped at can be voided"

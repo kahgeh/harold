@@ -299,6 +299,17 @@ impl Task {
         caught_up
     }
 
+    /// The records waiting, or 0 when the logs cannot be read.
+    async fn waiting_now(&self) -> usize {
+        catchup::waiting(
+            &*self.writer.backend,
+            &*self.writer.schema_log,
+            &*self.writer.data_log,
+        )
+        .await
+        .unwrap_or(0)
+    }
+
     /// Publishes the two gauges' numbers. The typed relations are counted when asked, since
     /// it reads the whole graph; the records waiting are read from the logs and the position.
     async fn publish_metrics(&self, count_typed: bool) {
@@ -328,6 +339,9 @@ impl Task {
             .filter_map(|(_, value)| serde_json::from_slice(value).ok())
             .collect();
         for step in schema::pending(&logged) {
+            if !schema::only_adds(step.define) {
+                return Err(GraphError::LogFailed);
+            }
             let record = SchemaRecord {
                 step: step.number,
                 at_ms: now_ms(),
@@ -364,7 +378,11 @@ impl Task {
                 self.set_phase(Phase::Unapplied);
                 Err(GraphError::TypeDbUnreachable)
             }
-            Err(CatchUpError::Log(_)) => Err(GraphError::LogFailed),
+            Err(CatchUpError::Log(_)) => {
+                // Not Rebuilding and not Ready: the next change tries the catch-up again.
+                self.set_phase(Phase::Unapplied);
+                Err(GraphError::LogFailed)
+            }
         }
     }
 
@@ -382,6 +400,7 @@ impl Task {
             waiting,
             "knowledge graph behind"
         );
+        metrics::publish(waiting, None);
         *lock(&self.writer.shared.last_refusal) = Some(refusal.clone());
         self.set_phase(Phase::Behind(refusal));
     }
@@ -488,6 +507,10 @@ impl Task {
             return Err(GraphError::InvalidRelation);
         }
         op.well_formed()?;
+        // A change queued before a refusal must not pass the refused record.
+        if let Some(error) = self.writer.phase_error() {
+            return Err(error);
+        }
         if *lock(&self.writer.shared.phase) == Phase::Unapplied {
             self.catch_up().await?;
         }
@@ -530,10 +553,8 @@ impl Task {
             }
             // The pass must mark a vault note missing, never remove one a typed relation names.
             Op::RemoveVaultNote { name } => {
-                if state(name)
-                    .await?
-                    .is_some_and(|state| state.in_typed_relation)
-                {
+                let named = state(name).await?;
+                if named.is_some_and(|state| state.in_typed_relation) {
                     return Err(GraphError::InvalidVaultNote);
                 }
             }
@@ -560,6 +581,8 @@ impl Task {
             Ok(()) => Ok(sequence),
             Err(BackendError::Unreachable) => {
                 self.set_phase(Phase::Unapplied);
+                // The record is logged and waits: the gauge must show it.
+                metrics::publish(self.waiting_now().await.max(1), None);
                 Err(GraphError::TypeDbUnreachable)
             }
             Err(BackendError::Refused(reason)) => {

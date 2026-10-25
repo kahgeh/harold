@@ -18,7 +18,6 @@ use super::TypeDbBackend;
 fn binary() -> Option<PathBuf> {
     let found = std::env::var_os("HAROLD_TYPEDB_BIN")
         .map(PathBuf::from)
-        .or_else(|| Some(PathBuf::from("/opt/homebrew/bin/typedb_server_bin")))
         .filter(|path| path.is_file());
     if found.is_none() {
         eprintln!("skipped: no TypeDB server binary (set HAROLD_TYPEDB_BIN)");

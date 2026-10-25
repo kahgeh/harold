@@ -76,8 +76,12 @@ pub(crate) async fn sync_vault(
         .chain(fresh)
         .chain(gone_notes(&snapshot, &names));
     for op in ops {
-        if writer.submit(op, By::Index).await?.is_some() {
-            synced.logged += 1;
+        match writer.submit(op, By::Index).await {
+            Ok(Some(_)) => synced.logged += 1,
+            Ok(None) => {}
+            // One vault note the graph cannot name must not stop the rest of the pass.
+            Err(GraphError::InvalidVaultNote | GraphError::InvalidReason) => {}
+            Err(error) => return Err(error),
         }
     }
     Ok(synced)

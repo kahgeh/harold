@@ -318,7 +318,7 @@ impl Index {
     /// Writes what differs between the vault and the knowledge graph. A graph that cannot take
     /// it does not fail the pass: the index does not depend on the graph.
     async fn sync_graph(&self, files: &[VaultFile]) {
-        let Some(runtime) = self.graph.get() else {
+        let Some(runtime) = self.graph.get().filter(|runtime| runtime.enabled()) else {
             return;
         };
         let vault: Vec<Desired> = files

@@ -103,5 +103,5 @@ command = "say"
 # It needs [knowledge] vault. Install TypeDB server 3.14.1 yourself; Harold starts it.
 # [knowledge.graph]
 # enabled = true
-# server = "/opt/homebrew/bin/typedb_server_bin"   # the absolute path of the TypeDB server binary
+# server = "/Users/you/typedb-3.14.1/bin/typedb_server_bin"   # the absolute path of the TypeDB server binary
 # idle_minutes = 10                                # stop TypeDB after this many minutes without a graph call

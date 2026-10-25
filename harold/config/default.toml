@@ -61,7 +61,7 @@ exclude = []
 # first graph call and stops it after idle_minutes without one.
 #   [knowledge.graph]
 #   enabled = true
-#   server = "/opt/homebrew/bin/typedb_server_bin"
+#   server = "/Users/you/typedb-3.14.1/bin/typedb_server_bin"
 [knowledge.graph]
 enabled = false
 idle_minutes = 10

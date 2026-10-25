@@ -370,3 +370,48 @@ async fn an_unreachable_server_refuses_a_change_with_typedb_unreachable() {
     rig.graph.set_unreachable(false);
     writer.submit(note("b"), By::Call).await.unwrap();
 }
+
+#[tokio::test]
+async fn a_change_queued_behind_a_refused_record_does_not_pass_it() {
+    let rig = Rig::new();
+    let writer = rig.start().await.unwrap();
+    rig.graph.refuse(0);
+    let (first, second) = tokio::join!(
+        writer.submit(note("a"), By::Call),
+        writer.submit(note("b"), By::Call)
+    );
+    assert_eq!(first.unwrap_err(), GraphError::Behind);
+    assert_eq!(second.unwrap_err(), GraphError::Behind);
+    assert_eq!(rig.data.len(), 1, "the second change was never logged");
+    assert_eq!(writer.status().await.unwrap().waiting, 1);
+}
+
+#[tokio::test]
+async fn a_position_that_cannot_be_read_never_makes_the_graph_behind() {
+    let rig = Rig::new();
+    let writer = rig.start().await.unwrap();
+    with_notes(&writer, &["a"]).await;
+    drop(writer);
+    // A start whose position read fails is unreachable, not a refused record 0.
+    rig.graph.fail_position(true);
+    let error = rig.start().await.err().unwrap();
+    assert_eq!(error, GraphError::TypeDbUnreachable);
+    rig.graph.fail_position(false);
+    let writer = rig.start().await.unwrap();
+    assert!(writer.status().await.unwrap().last_refusal.is_none());
+}
+
+#[tokio::test]
+async fn a_rebuild_that_cannot_read_a_log_leaves_the_writer_able_to_go_on() {
+    let rig = Rig::new();
+    let writer = rig.start().await.unwrap();
+    with_notes(&writer, &["a"]).await;
+    rig.data.fail_reads(true);
+    assert_eq!(writer.rebuild().await.unwrap_err(), GraphError::LogFailed);
+    rig.data.fail_reads(false);
+    assert!(
+        writer.rebuild().await.is_ok(),
+        "not stuck in graph_rebuilding"
+    );
+    assert_eq!(writer.snapshot().await.unwrap().notes.len(), 1);
+}

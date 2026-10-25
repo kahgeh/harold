@@ -76,6 +76,7 @@ impl GraphRuntime {
     }
 
     /// The graph writer once started, without starting it.
+    #[cfg(test)]
     pub(crate) fn started(&self) -> Option<GraphWriter> {
         self.writer.get().cloned()
     }

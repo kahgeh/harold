@@ -35,6 +35,11 @@ impl From<LogError> for CatchUpError {
     }
 }
 
+/// A failed read of the position is never a refused record: no record is at fault.
+fn position_error(_: BackendError) -> CatchUpError {
+    CatchUpError::Unreachable
+}
+
 fn backend_error(sequence: u64, error: BackendError) -> CatchUpError {
     match error {
         BackendError::Unreachable => CatchUpError::Unreachable,
@@ -48,7 +53,7 @@ pub(crate) async fn catch_up(
     schema_log: &dyn RecordLog,
     data_log: &dyn RecordLog,
 ) -> Result<Applied, CatchUpError> {
-    let position = backend.position().await.map_err(|e| backend_error(0, e))?;
+    let position = backend.position().await.map_err(position_error)?;
     let mut applied = Applied::default();
     for (sequence, value) in schema_log.read_after(position.schema).await? {
         let record: SchemaRecord = serde_json::from_slice(&value).map_err(|_| {
@@ -67,7 +72,7 @@ pub(crate) async fn catch_up(
     // A void is logged after the record it names, so it is in this slice whenever that record is.
     let mut voided = HashSet::new();
     let mut decoded = Vec::with_capacity(records.len());
-    for (sequence, value) in &records {
+    for (_, value) in &records {
         let record = serde_json::from_slice::<DataRecord>(value).ok();
         if let Some(DataRecord {
             op: Op::VoidRecord {
@@ -112,7 +117,7 @@ pub(crate) async fn waiting(
     schema_log: &dyn RecordLog,
     data_log: &dyn RecordLog,
 ) -> Result<usize, CatchUpError> {
-    let position = backend.position().await.map_err(|e| backend_error(0, e))?;
+    let position = backend.position().await.map_err(position_error)?;
     Ok(schema_log.read_after(position.schema).await?.len()
         + data_log.read_after(position.data).await?.len())
 }

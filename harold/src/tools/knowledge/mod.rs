@@ -113,6 +113,7 @@ pub(crate) async fn start(
                 binary: PathBuf::from(binary),
                 idle: Duration::from_secs(u64::from(settings.graph.idle_minutes) * 60),
                 shutdown: shutdown.clone(),
+                server: Default::default(),
             }),
         ),
         _ => graph::runtime::GraphRuntime::off(),

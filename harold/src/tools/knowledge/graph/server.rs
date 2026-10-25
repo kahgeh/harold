@@ -23,6 +23,8 @@ const STOP_LIMIT: Duration = Duration::from_secs(15);
 const REAP_EVERY: Duration = Duration::from_secs(30);
 const REQUEST_LIMIT: Duration = Duration::from_secs(120);
 const CONNECT_LIMIT: Duration = Duration::from_secs(5);
+/// The only TypeDB version Harold starts: the one audited in `docs/references/dependency-audits.md`.
+pub(crate) const PINNED_VERSION: &str = "3.14.1";
 /// The account a new TypeDB data folder starts with. Harold replaces its password at once.
 const USER: &str = "admin";
 const DEFAULT_PASSWORD: &str = "password";
@@ -209,7 +211,32 @@ impl TypeDbServer {
         }
     }
 
+    /// Refuses a binary that is not the audited version.
+    async fn check_version(&self) -> Result<(), BackendError> {
+        let output = Command::new(&self.config.binary)
+            .arg("--version")
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .output()
+            .await
+            .map_err(|error| {
+                warn!(error = %error, "knowledge graph server did not start");
+                BackendError::Unreachable
+            })?;
+        let text = String::from_utf8_lossy(&output.stdout);
+        if text.trim() == format!("server {PINNED_VERSION}") {
+            return Ok(());
+        }
+        warn!(
+            wanted = PINNED_VERSION,
+            "knowledge graph server is not the audited version"
+        );
+        Err(BackendError::Unreachable)
+    }
+
     async fn start(&self) -> Result<Live, BackendError> {
+        self.check_version().await?;
         let started = Instant::now();
         let folder = &self.config.folder;
         for sub in ["", "data", "log"] {
@@ -294,14 +321,14 @@ impl TypeDbServer {
     /// so Harold replaces it with a random one it keeps in a private file.
     async fn sign_in(&self, base: &str) -> Result<String, BackendError> {
         let file = self.password_file();
-        if let Ok(saved) = std::fs::read_to_string(&file) {
-            if let Some(token) = self.sign_in_with(base, saved.trim()).await? {
-                return Ok(token);
-            }
+        if let Ok(saved) = std::fs::read_to_string(&file)
+            && let Some(token) = self.sign_in_with(base, saved.trim()).await?
+        {
+            return Ok(token);
         }
         let Some(token) = self.sign_in_with(base, DEFAULT_PASSWORD).await? else {
             warn!("knowledge graph server refused the sign-in");
-            return Err(BackendError::Refused("sign_in".into()));
+            return Err(BackendError::Unreachable);
         };
         let password = format!(
             "{}{}",
@@ -319,11 +346,11 @@ impl TypeDbServer {
             .map_err(|_| BackendError::Unreachable)?;
         if !changed.status().is_success() {
             let _ = std::fs::remove_file(&file);
-            return Err(BackendError::Refused("sign_in".into()));
+            return Err(BackendError::Unreachable);
         }
         self.sign_in_with(base, &password)
             .await?
-            .ok_or_else(|| BackendError::Refused("sign_in".into()))
+            .ok_or(BackendError::Unreachable)
     }
 
     /// Stops the server now, if it runs: a polite end first, a kill after `STOP_LIMIT`.
