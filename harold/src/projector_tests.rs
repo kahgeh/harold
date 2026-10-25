@@ -21,8 +21,10 @@ use crate::agent::domain::{
 use crate::agent::snapshot::AgentSnapshotHub;
 use crate::inbound::AgentAddress;
 use crate::inbound::RouteReport;
+#[cfg_attr(not(feature = "imessage"), allow(unused_imports))]
 use crate::inbound::ownership::agent_message_text;
 use crate::outbound::fake::{CapturedLogs, FakeEnvironment};
+#[cfg_attr(not(feature = "imessage"), allow(unused_imports))]
 use crate::outbound::notify_tests::{FAKE_MACHINE, FakeApp, FakeAwayText};
 use crate::outbound::{
     AppDelivery, AppRoute, ChiefApp, DeliveryOutcome, NotPushedReason, SystemEnvironment,
@@ -1240,6 +1242,7 @@ async fn malformed_away_message_does_not_block_a_valid_later_delivery() {
     assert!(store.next_pending_delivery().await.unwrap().is_none());
 }
 
+#[cfg(feature = "imessage")]
 #[test]
 fn away_message_is_sent_through_the_dispatchers_environment() {
     let environment = Arc::new(FakeEnvironment::locked(""));
@@ -1252,6 +1255,7 @@ fn away_message_is_sent_through_the_dispatchers_environment() {
     assert_eq!(environment.reply_targets(), ["%47"]);
 }
 
+#[cfg(feature = "imessage")]
 #[test]
 fn turn_completed_is_sent_through_the_dispatchers_environment() {
     let environment = Arc::new(FakeEnvironment::locked(""));
@@ -1286,6 +1290,7 @@ fn turn_delivery(pane_id: &str, prompt: &str) -> PendingDelivery {
     }
 }
 
+#[cfg(feature = "imessage")]
 #[test]
 fn pane_that_sent_a_message_gets_no_update_for_that_turn_only() {
     let environment = Arc::new(FakeEnvironment::locked(""));
@@ -1307,6 +1312,7 @@ fn pane_that_sent_a_message_gets_no_update_for_that_turn_only() {
     assert_eq!(environment.delivered().len(), 1);
 }
 
+#[cfg(feature = "imessage")]
 #[test]
 fn two_messages_in_one_turn_are_both_sent_and_the_update_is_left_out() {
     let environment = Arc::new(FakeEnvironment::locked(""));
@@ -1323,6 +1329,7 @@ fn two_messages_in_one_turn_are_both_sent_and_the_update_is_left_out() {
     assert!(environment.delivered().is_empty());
 }
 
+#[cfg(feature = "imessage")]
 #[test]
 fn message_dropped_by_the_pause_leaves_no_mark() {
     let environment = Arc::new(FakeEnvironment::locked(""));
@@ -1340,6 +1347,7 @@ fn message_dropped_by_the_pause_leaves_no_mark() {
     assert!(matches!(update, Ok(DeliveryOutcome::Delivered)));
 }
 
+#[cfg(feature = "imessage")]
 #[test]
 fn update_10_minutes_after_the_message_is_sent() {
     let environment = Arc::new(FakeEnvironment::locked(""));
@@ -1354,6 +1362,7 @@ fn update_10_minutes_after_the_message_is_sent() {
     assert!(matches!(update, Ok(DeliveryOutcome::Delivered)));
 }
 
+#[cfg(feature = "imessage")]
 #[tokio::test]
 async fn update_waits_behind_a_message_whose_send_fails_and_is_then_left_out() {
     let directory = TestDirectory::new();
@@ -1494,6 +1503,7 @@ async fn update_from_outside_the_update_folder_is_handled_without_a_phone_messag
     assert!(store.next_pending_delivery().await.unwrap().is_none());
 }
 
+#[cfg(feature = "imessage")]
 #[tokio::test]
 async fn update_from_the_update_folder_is_sent() {
     let directory = TestDirectory::new();
@@ -1509,6 +1519,7 @@ async fn update_from_the_update_folder_is_sent() {
     assert_eq!(environment.reply_targets(), ["%1"]);
 }
 
+#[cfg(feature = "imessage")]
 #[tokio::test]
 async fn two_agents_in_the_update_folder_both_send_their_updates() {
     let directory = TestDirectory::new();
@@ -1667,6 +1678,7 @@ async fn requested_message_from_outside_the_folder_is_dropped() {
     assert!(environment.away_messages().is_empty());
 }
 
+#[cfg(feature = "imessage")]
 #[tokio::test]
 async fn requested_message_from_inside_the_folder_is_sent() {
     let directory = TestDirectory::new();
@@ -1680,6 +1692,7 @@ async fn requested_message_from_inside_the_folder_is_sent() {
     assert_eq!(environment.reply_targets(), ["%1"]);
 }
 
+#[cfg(feature = "imessage")]
 #[tokio::test]
 async fn two_agents_in_the_folder_both_send_their_messages() {
     let directory = TestDirectory::new();
@@ -1737,6 +1750,7 @@ async fn requested_message_is_dropped_while_no_agent_is_in_the_folder() {
     assert!(environment.reply_targets().is_empty());
 }
 
+#[cfg(feature = "imessage")]
 #[tokio::test]
 async fn requested_message_is_sent_without_the_setting() {
     let directory = TestDirectory::new();
@@ -1771,6 +1785,7 @@ async fn requested_message_off_the_list_is_dropped_while_harold_cannot_list_the_
     assert!(environment.reply_targets().is_empty());
 }
 
+#[cfg(feature = "imessage")]
 #[tokio::test]
 async fn listed_agents_message_whose_send_failed_is_sent_on_the_retry() {
     let directory = TestDirectory::new();
@@ -1896,6 +1911,7 @@ async fn paused_message_from_outside_the_folder_is_skipped_by_the_pause() {
     );
 }
 
+#[cfg(feature = "imessage")]
 #[tokio::test]
 async fn agent_in_the_folder_that_sent_a_message_gets_no_update_for_that_turn() {
     let directory = TestDirectory::new();
@@ -2764,6 +2780,7 @@ fn dispatch_turn_end(
 
 /// Delivers a turn end on `pane_id` as the event handler does, on this thread, through the
 /// daemon's dispatcher over the fake `environment`.
+#[cfg_attr(not(feature = "imessage"), allow(dead_code))]
 pub(crate) fn dispatch_turn_end_with_fake_environment(
     pane_id: &str,
     environment: &Arc<FakeEnvironment>,
@@ -2820,6 +2837,7 @@ fn deliveries_under(
         .collect()
 }
 
+#[cfg(feature = "imessage")]
 #[test]
 fn a_given_up_turn_end_records_given_up_and_keeps_no_trace() {
     let event_id = uuid::Uuid::new_v4();
@@ -2871,6 +2889,7 @@ fn a_turn_end_delivery_span_carries_text_cut() {
     }
 }
 
+#[cfg(feature = "imessage")]
 #[test]
 fn a_turn_end_delivery_continues_the_trace_kept_for_its_event() {
     let event_id = uuid::Uuid::new_v4();
@@ -2893,6 +2912,7 @@ fn a_turn_end_delivery_continues_the_trace_kept_for_its_event() {
     );
 }
 
+#[cfg(feature = "imessage")]
 #[test]
 fn a_turn_end_sent_while_away_records_the_away_channel() {
     let event_id = uuid::Uuid::new_v4();
@@ -2951,6 +2971,7 @@ fn skipped_span_of(dispatcher: &dyn DeliveryDispatcher, pane: &str) -> (String, 
     )
 }
 
+#[cfg(feature = "imessage")]
 #[test]
 fn a_repeated_turn_end_records_its_channel_and_reason() {
     for (locked, channel) in [(false, "machine_audio_output"), (true, "imessage")] {
@@ -2973,6 +2994,7 @@ fn a_repeated_turn_end_records_its_channel_and_reason() {
     }
 }
 
+#[cfg(feature = "imessage")]
 #[test]
 fn a_turn_end_after_the_pane_messaged_the_phone_records_its_channel_and_reason() {
     let environment = Arc::new(FakeEnvironment::locked(""));
@@ -3003,6 +3025,7 @@ fn a_paused_away_turn_end_records_skipped_on_the_away_channel() {
     assert_eq!(span, ("imessage".into(), "messaging_pause".into()));
 }
 
+#[cfg(feature = "imessage")]
 #[test]
 fn a_failed_turn_end_records_failed_and_its_retry_stays_in_the_trace() {
     let event_id = uuid::Uuid::new_v4();
@@ -3031,6 +3054,7 @@ fn a_failed_turn_end_records_failed_and_its_retry_stays_in_the_trace() {
     );
 }
 
+#[cfg(feature = "imessage")]
 #[test]
 fn a_turn_end_with_no_kept_trace_starts_its_own() {
     telemetry::test_support::install();
@@ -3056,6 +3080,7 @@ fn a_turn_end_with_no_kept_trace_starts_its_own() {
     assert!(started_own);
 }
 
+#[cfg(feature = "imessage")]
 #[test]
 fn only_a_turn_end_gets_a_delivery_span() {
     use opentelemetry::trace::TraceContextExt as _;
@@ -3082,6 +3107,7 @@ fn only_a_turn_end_gets_a_delivery_span() {
     assert!(deliveries_under(parent).is_empty());
 }
 
+#[cfg(feature = "imessage")]
 #[test]
 fn a_turn_end_delivered_before_its_event_id_is_kept_joins_the_turn_by_its_pane() {
     let (trace_id, parent, cx) = a_live_turn();
@@ -3118,6 +3144,7 @@ fn a_turn_end_delivered_before_its_event_id_is_kept_joins_the_turn_by_its_pane()
     assert_eq!(deliveries_under(parent).len(), 1);
 }
 
+#[cfg(feature = "imessage")]
 #[test]
 fn a_turn_stored_before_its_delivery_is_kept_by_its_event_id_only() {
     let (_, parent, cx) = a_live_turn();
@@ -3144,6 +3171,7 @@ fn a_turn_stored_before_its_delivery_is_kept_by_its_event_id_only() {
     assert_eq!(deliveries_under(parent).len(), 1);
 }
 
+#[cfg(feature = "imessage")]
 #[test]
 fn a_turn_whose_store_failed_is_not_joined_by_a_later_turn_end() {
     let (_, parent, cx) = a_live_turn();
@@ -3529,6 +3557,7 @@ async fn chief_away_message_goes_to_the_app_only() {
     assert!(with.environment.delivered().is_empty());
 }
 
+#[cfg(feature = "imessage")]
 #[tokio::test]
 async fn chief_away_message_not_pushed_goes_to_imessage_once() {
     let directory = TestDirectory::new();
@@ -3640,6 +3669,7 @@ async fn locked_chief_spoken_line_goes_to_the_app_as_text() {
     assert!(with.away.sends().is_empty());
 }
 
+#[cfg(feature = "imessage")]
 #[tokio::test]
 async fn locked_chief_spoken_line_not_pushed_goes_to_imessage_as_text() {
     let directory = TestDirectory::new();
@@ -3686,6 +3716,7 @@ async fn a_tagged_chief_line_reaches_the_thread_without_its_tag() {
     );
 }
 
+#[cfg(feature = "imessage")]
 #[tokio::test]
 async fn a_tagged_chief_line_reaches_imessage_and_the_desk_without_its_tag() {
     let directory = TestDirectory::new();
@@ -3772,6 +3803,7 @@ async fn unlocked_chief_spoken_line_is_said_at_the_desk_as_today() {
     assert!(with.away.sends().is_empty());
 }
 
+#[cfg(feature = "imessage")]
 #[tokio::test]
 async fn chief_message_goes_to_imessage_as_today_while_the_listing_fails() {
     let directory = TestDirectory::new();
@@ -3820,6 +3852,7 @@ async fn a_failed_thread_write_is_retryable_and_sends_nothing() {
     assert!(with.environment.reply_targets().is_empty());
 }
 
+#[cfg(feature = "imessage")]
 #[tokio::test]
 async fn a_chief_turn_end_records_the_app_as_its_channel_and_the_fallback_as_today() {
     for (delivery, channel) in [
@@ -4520,6 +4553,7 @@ async fn chief_message_the_app_cannot_push_is_dropped_when_the_chief_is_not_on_i
     assert!(!text.contains("All pods are green"), "{text}");
 }
 
+#[cfg(feature = "imessage")]
 #[tokio::test]
 async fn chief_off_the_web_app_list_goes_by_imessage_and_not_to_the_app() {
     let directory = TestDirectory::new();
@@ -4588,6 +4622,7 @@ async fn spoken_lines_from_unlisted_panes_are_dropped_on_each_channel_naming_its
     assert!(!text.contains("All green."), "{text}");
 }
 
+#[cfg(feature = "imessage")]
 #[tokio::test]
 async fn two_panes_matching_chief_make_the_first_the_chief_for_the_app_and_the_second_uses_the_lists()
  {
@@ -4731,6 +4766,7 @@ async fn an_agent_message_a_list_holds_back_counts_kept_and_logs_the_fields() {
     assert_eq!(notified(&format!("{tree}/harold"), "imessage", "sent"), 0);
 }
 
+#[cfg(feature = "imessage")]
 #[tokio::test]
 async fn a_message_and_a_line_a_channel_took_count_sent() {
     let directory = TestDirectory::new();

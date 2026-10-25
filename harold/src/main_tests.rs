@@ -1718,6 +1718,7 @@ mod one_trace_per_turn {
     use opentelemetry::trace::TraceId;
     use opentelemetry_sdk::trace::SpanData;
     use time::OffsetDateTime;
+    #[cfg_attr(not(feature = "imessage"), allow(unused_imports))]
     use time::format_description::well_known::Rfc3339;
 
     use super::{
@@ -1725,6 +1726,7 @@ mod one_trace_per_turn {
     };
     use crate::inbound::RouteReport;
     use crate::outbound::fake::FakeEnvironment;
+    #[cfg_attr(not(feature = "imessage"), allow(unused_imports))]
     use crate::outbound::{DeliveryOutcome, OutboundChannel};
     use crate::projector::tests::fake_dispatcher;
     use crate::projector::{Router, handle_next_delivery};
@@ -1780,6 +1782,7 @@ mod one_trace_per_turn {
             .collect()
     }
 
+    #[cfg(feature = "imessage")]
     #[tokio::test]
     async fn a_reply_a_turn_end_and_its_delivery_form_one_trace() {
         test_support::install();
@@ -1944,6 +1947,7 @@ mod one_trace_per_turn {
         task.abort();
     }
 
+    #[cfg(feature = "imessage")]
     #[tokio::test]
     async fn no_text_leaves_harold() {
         test_support::install();

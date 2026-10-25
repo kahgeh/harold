@@ -34,10 +34,10 @@ REFUSAL_SENTENCES = (
     'notify.telegram is no longer read: the lists are imessage, web_app and machine_audio_output. Remove it from config/local.toml or the HAROLD__ environment variables.',
     'notify.away_channel is no longer read: Harold reaches the phone by iMessage only. Remove it from config/local.toml or the HAROLD__ environment variables.',
     'grpc.host must be a loopback address (127.0.0.0/8, ::1 or localhost): Harold no longer serves other Macs.',
-    'notify.imessage is set, but this Harold is built without iMessage: remove it from config/local.toml.',
-    'imessage is set, but this Harold is built without iMessage: remove it from config/local.toml.',
-    'chat_db is set, but this Harold is built without iMessage: remove it from config/local.toml.',
-    'voice_input is set, but this Harold is built without calls: remove it from config/local.toml.',
+    'notify.imessage is set, but this Harold is built without iMessage: remove it from config/local.toml or the HAROLD__ environment variables.',
+    'imessage is set, but this Harold is built without iMessage: remove it from config/local.toml or the HAROLD__ environment variables.',
+    'chat_db is set, but this Harold is built without iMessage: remove it from config/local.toml or the HAROLD__ environment variables.',
+    'voice_input is set, but this Harold is built without calls: remove it from config/local.toml or the HAROLD__ environment variables.',
 )
 SKILL_NAME = 'send-message-to-away-device'
 SKILL_FILE = 'skills/{}/SKILL.md'.format(SKILL_NAME)

@@ -851,6 +851,7 @@ pub(crate) fn traceparent_of(cx: &Context) -> Option<String> {
 /// `harold.reply_stored`, so the event it stores records the request's trace. A stored
 /// reply's request stays open for the event handler; otherwise it ends as `ignored`.
 /// Returns whether the reply was stored.
+#[cfg(any(feature = "imessage", test))]
 pub(crate) async fn store_phone_reply(
     channel: &'static str,
     reply_at: OffsetDateTime,
@@ -1150,6 +1151,7 @@ pub(crate) fn take_prompt(
 pub(crate) enum StartedBy {
     Phone,
     TimedPrompt,
+    #[cfg_attr(not(feature = "calls"), allow(dead_code))]
     Voice,
     Desk,
     Unknown,
@@ -1672,6 +1674,7 @@ impl Pipeline {
 
     /// Sends everything queued now.
     #[cfg(test)]
+    #[cfg_attr(not(feature = "imessage"), allow(dead_code))]
     pub(crate) fn force_flush(&self) -> OTelSdkResult {
         let spans = self.tracer_provider.force_flush();
         let logs = self.logger_provider.force_flush();

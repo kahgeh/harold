@@ -8,9 +8,12 @@
 use std::sync::{LazyLock, Mutex};
 
 use super::parse_tag;
-use crate::settings::{get_settings, is_valid_machine_name};
+use crate::settings::get_settings;
+#[cfg(any(feature = "imessage", test))]
+use crate::settings::is_valid_machine_name;
 
 /// Starts every message Harold sends.
+#[cfg(any(feature = "imessage", test))]
 const HAROLD_MARKER: char = '🤖';
 
 // ---------------------------------------------------------------------------
@@ -18,6 +21,7 @@ const HAROLD_MARKER: char = '🤖';
 // ---------------------------------------------------------------------------
 
 /// The machine named at the start of a message Harold sent.
+#[cfg(any(feature = "imessage", test))]
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Marker<'a> {
     pub(crate) machine: &'a str,
@@ -29,6 +33,7 @@ pub(crate) struct Marker<'a> {
 /// The marker in `text`, if it is a message Harold sent that names its Mac. A tag whose
 /// machine part cannot be a machine name is a pane label from before machine names
 /// (`🤖 [harold:0.1] …`) and is not a marker.
+#[cfg(any(feature = "imessage", test))]
 pub(crate) fn parse_marker(text: &str) -> Option<Marker<'_>> {
     let rest = text.trim_start().strip_prefix(HAROLD_MARKER)?.trim_start();
     let (tag, _) = rest.strip_prefix('[')?.split_once(']')?;
@@ -68,6 +73,7 @@ pub(crate) struct NotifierRecord {
 struct Latest {
     machine: String,
     /// The `date` of the row it was read from.
+    #[cfg(any(feature = "imessage", test))]
     date: i64,
 }
 
@@ -93,6 +99,7 @@ impl NotifierRecord {
     /// The latest notifier is the one with the greatest `date`; two rows with the same
     /// `date` are ordered by machine name, ignoring case, and the greater name wins. So rows
     /// can be fed in any order and give the same latest notifier.
+    #[cfg(any(feature = "imessage", test))]
     pub(crate) fn record_marker(&mut self, text: &str, date: i64) {
         let Some(marker) = parse_marker(text) else {
             return;
@@ -125,6 +132,7 @@ impl NotifierRecord {
         &self.machines
     }
 
+    #[cfg(any(feature = "imessage", test))]
     fn is_listed(&self, machine: &str) -> bool {
         self.machines
             .iter()
@@ -142,6 +150,7 @@ static NOTIFIERS: LazyLock<Mutex<NotifierRecord>> =
 static FED_MARKERS: Mutex<Vec<(String, i64)>> = Mutex::new(Vec::new());
 
 /// Record a `🤖 [...]` message read from the conversation, with the `date` of its row.
+#[cfg(any(feature = "imessage", test))]
 pub(crate) fn record_marker(text: &str, date: i64) {
     #[cfg(test)]
     FED_MARKERS.lock().unwrap().push((text.to_string(), date));
@@ -235,6 +244,7 @@ pub(crate) fn pane_address(machine: &str, pane_label: &str) -> String {
     format!("[{machine}/{pane_label}]")
 }
 
+#[cfg(any(feature = "imessage", test))]
 pub(crate) fn notification_text(
     machine: &str,
     pane_label: &str,

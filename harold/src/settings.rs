@@ -1067,10 +1067,14 @@ impl Channel {
 pub(crate) const EVERYONE: &str = "*";
 
 impl NotifySettings {
-    /// The folders whose agents may use `channel`.
+    /// The folders whose agents may use `channel`. A build without `imessage` has no folder for
+    /// `Channel::Imessage`, whatever the config holds, so no rule sends a message that way.
     pub(crate) fn list(&self, channel: Channel) -> &[String] {
         match channel {
+            #[cfg(feature = "imessage")]
             Channel::Imessage => &self.imessage,
+            #[cfg(not(feature = "imessage"))]
+            Channel::Imessage => &[],
             Channel::WebApp => &self.web_app,
             Channel::MachineAudioOutput => &self.machine_audio_output,
         }
@@ -1550,7 +1554,7 @@ fn away_channel_is_imessage(local: &Config) -> bool {
 #[cfg(not(all(feature = "imessage", feature = "calls")))]
 fn needs_feature_sentence(setting: &str, part: &str) -> String {
     format!(
-        "{setting} is set, but this Harold is built without {part}: remove it from config/local.toml."
+        "{setting} is set, but this Harold is built without {part}: remove it from config/local.toml or the HAROLD__ environment variables."
     )
 }
 
@@ -2555,6 +2559,7 @@ encryption_key_file = "/Users/x/.config/harold/knowledge-key"
             .collect()
     }
 
+    #[cfg(feature = "imessage")]
     #[test]
     fn defaults_carry_the_four_keys() {
         let settings = default_settings_with("");
@@ -2569,6 +2574,7 @@ encryption_key_file = "/Users/x/.config/harold/knowledge-key"
         assert!(notify_errors("").is_empty());
     }
 
+    #[cfg(feature = "imessage")]
     #[test]
     fn bad_entries_stop_the_start_naming_key_and_entry() {
         for key in ["chief", "imessage", "web_app", "machine_audio_output"] {
@@ -2653,6 +2659,7 @@ encryption_key_file = "/Users/x/.config/harold/knowledge-key"
         default_settings_with(known);
     }
 
+    #[cfg(feature = "imessage")]
     #[test]
     fn old_key_alone_fills_chief_and_all_lists_and_warns() {
         let (settings, warned) =
@@ -2714,11 +2721,40 @@ encryption_key_file = "/Users/x/.config/harold/knowledge-key"
             assert_eq!(
                 removed(local),
                 [format!(
-                    "{setting} is set, but this Harold is built without iMessage: remove it from config/local.toml."
+                    "{setting} is set, but this Harold is built without iMessage: remove it from config/local.toml or the HAROLD__ environment variables."
                 )],
                 "{setting}"
             );
         }
+    }
+
+    #[cfg(not(feature = "imessage"))]
+    #[test]
+    fn a_build_without_imessage_has_an_empty_imessage_list_whatever_the_config_holds() {
+        let settings = default_settings_with("");
+        assert_eq!(settings.notify.imessage, ["chief-of-pods"]);
+        assert!(settings.notify.list(super::Channel::Imessage).is_empty());
+        assert_eq!(settings.notify.list(super::Channel::WebApp).len(), 1);
+    }
+
+    #[cfg(not(feature = "imessage"))]
+    #[test]
+    fn a_build_without_imessage_refuses_an_imessage_setting_from_the_environment() {
+        let environment = config::Environment::with_prefix("HAROLD")
+            .separator("__")
+            .source(Some(
+                [(
+                    "HAROLD__IMESSAGE__RECIPIENT".to_string(),
+                    "a@b.c".to_string(),
+                )]
+                .into(),
+            ));
+        let local = Config::builder().add_source(environment).build().unwrap();
+        let messages = super::settings_missing_a_feature(&local);
+        assert_eq!(messages.len(), 1);
+        assert!(messages[0].starts_with("imessage is set"), "{messages:?}");
+        assert!(messages[0].contains("config/local.toml"), "{messages:?}");
+        assert!(messages[0].contains("HAROLD__"), "{messages:?}");
     }
 
     #[cfg(not(feature = "imessage"))]
@@ -2735,7 +2771,7 @@ encryption_key_file = "/Users/x/.config/harold/knowledge-key"
         assert_eq!(
             removed("[voice_input]\ncommand = \"python\"\n"),
             [
-                "voice_input is set, but this Harold is built without calls: remove it from config/local.toml."
+                "voice_input is set, but this Harold is built without calls: remove it from config/local.toml or the HAROLD__ environment variables."
             ]
         );
         assert!(removed("").is_empty());

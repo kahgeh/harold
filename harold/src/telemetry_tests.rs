@@ -487,6 +487,7 @@ fn the_health_lines_are_written_to_harold_log() {
     );
 }
 
+#[cfg(feature = "imessage")]
 #[tokio::test(flavor = "multi_thread")]
 async fn a_closed_collector_port_does_not_slow_harold_and_logs_one_failing_line() {
     // A port nobody listens on: bind, read the port, drop the listener.

@@ -1017,6 +1017,7 @@ impl HaroldStore {
 
     /// Adds a chief message to the web app's thread. A second call for the same event adds
     /// nothing.
+    #[cfg(any(feature = "calls", test))]
     pub(crate) async fn add_chief_app_message(
         &self,
         event_id: &str,
@@ -2104,6 +2105,7 @@ pub async fn append_messaging_paused_changed(store: &HaroldStore, paused: bool) 
     Ok(())
 }
 
+#[cfg(any(feature = "imessage", test))]
 pub async fn append_inbound_message(store: &HaroldStore, event: &InboundMessage) -> Result<()> {
     store
         .append([NewEvent::new("InboundMessageReceived", json!(event))])

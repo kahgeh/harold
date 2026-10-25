@@ -387,6 +387,7 @@ pub(crate) enum Writer {
     TimedPrompt,
     Alert,
     PhoneReply,
+    #[cfg_attr(not(feature = "calls"), allow(dead_code))]
     Voice,
     /// A hand-over: the call answerer's request for the chief. Like a spoken turn it is not
     /// held back by another writer's hold, and it is the one writer that may type into a

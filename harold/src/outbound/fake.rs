@@ -93,6 +93,7 @@ impl FakeEnvironment {
     }
 
     /// Makes the next turn-end send fail with `error`, and the ones after it succeed.
+    #[cfg_attr(not(feature = "imessage"), allow(dead_code))]
     pub(crate) fn fail_next_send_with(&self, error: &str) {
         *self.fail_next.lock().unwrap() = Some(error.to_string());
     }

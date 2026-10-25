@@ -543,6 +543,7 @@ pub(crate) fn desk_line_dropped_reason(
 mod tests {
     use std::time::{Duration, Instant};
 
+    #[cfg_attr(not(feature = "imessage"), allow(unused_imports))]
     use super::{
         ChiefLookup, MARK_LIFETIME, MESSAGED_THIS_TURN, PanePosition, TrackedAgents, agent_label,
         channel_live, desk_line_dropped_reason, desk_update_reason, entry_matches, left_out_reason,
@@ -856,6 +857,7 @@ mod tests {
         Channel::MachineAudioOutput,
     ];
 
+    #[cfg(feature = "imessage")]
     #[test]
     fn with_the_defaults_only_the_chief_may_use_a_channel() {
         let notify = settings("");
@@ -872,6 +874,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "imessage")]
     #[test]
     fn an_empty_list_lets_nobody_through_and_star_lets_everyone() {
         let agents = TrackedAgents::in_folders(&[("%1", "/any/where/chief-of-pods"), ("%2", "/w")]);
@@ -886,6 +889,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "imessage")]
     #[test]
     fn each_list_decides_on_its_own() {
         let notify = settings("[notify]\nmachine_audio_output = [\"a\"]\nimessage = [\"b\"]");
@@ -903,6 +907,7 @@ mod tests {
         assert_eq!(message_dropped_reason(&notify, &agents, false, "%2"), None);
     }
 
+    #[cfg(feature = "imessage")]
     #[test]
     fn imessage_list_decides_who_reaches_the_phone() {
         let notify = settings("[notify]\nimessage = [\"a\"]");
@@ -946,6 +951,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "imessage")]
     #[test]
     fn no_pane_is_spoken_at_the_desk_the_chiefs_included() {
         let notify = settings("");
@@ -982,6 +988,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "imessage")]
     #[test]
     fn a_failed_listing_keeps_the_last_good_folders() {
         let notify = settings("");
@@ -991,6 +998,7 @@ mod tests {
         assert!(!agents.may_use(&notify, Channel::Imessage, "%7"));
     }
 
+    #[cfg(feature = "imessage")]
     #[test]
     fn a_folder_is_not_kept_past_the_latest_listing() {
         let notify = settings("");
@@ -1004,6 +1012,7 @@ mod tests {
         assert!(back.may_use(&notify, Channel::Imessage, "%5"));
     }
 
+    #[cfg_attr(not(feature = "imessage"), allow(dead_code))]
     fn snapshot_of(inventory_healthy: bool, panes: &[(&str, &str)]) -> AgentSnapshot {
         let version = EventVersion::from_column(3).expect("valid revision");
         AgentSnapshot {

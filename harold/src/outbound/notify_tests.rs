@@ -4,6 +4,7 @@ use std::time::Duration;
 use super::NotifyEnvironment;
 use super::fake::{CapturedLogs, FakeEnvironment, turn};
 use super::left_out::TrackedAgents;
+#[cfg_attr(not(feature = "imessage"), allow(unused_imports))]
 use super::{
     AppDelivery, AppRoute, AwayText, CarriedBy, ChiefApp, DeliveryOutcome, NotPushedReason,
     NotifyState, OutboundChannel, deliver_from_chief, notify, notify_with_app,
@@ -28,6 +29,7 @@ fn notify_turn_among(
     notify(turn, "trace", state, agents, environment)
 }
 
+#[cfg(feature = "imessage")]
 #[test]
 fn locked_screen_sends_the_update_to_the_phone_and_records_the_reply_target() {
     let environment = FakeEnvironment::locked("");
@@ -106,6 +108,7 @@ fn the_voice_mute_does_not_change_a_left_out_desk_update() {
     assert_eq!(outcome, Ok(DeliveryOutcome::HeldBack { reason: "at_desk" }));
 }
 
+#[cfg(feature = "imessage")]
 #[test]
 fn the_old_skip_settings_change_nothing() {
     let environment =
@@ -117,6 +120,7 @@ fn the_old_skip_settings_change_nothing() {
     assert_eq!(outcome, Ok(DeliveryOutcome::Delivered));
 }
 
+#[cfg(feature = "imessage")]
 #[test]
 fn same_turn_within_30_seconds_is_sent_once() {
     let environment = FakeEnvironment::locked("");
@@ -142,6 +146,7 @@ fn same_turn_within_30_seconds_is_sent_once() {
     );
 }
 
+#[cfg(feature = "imessage")]
 #[test]
 fn another_prompt_or_pane_is_not_a_duplicate() {
     let environment = FakeEnvironment::locked("");
@@ -160,6 +165,7 @@ fn another_prompt_or_pane_is_not_a_duplicate() {
     assert_eq!(environment.delivered().len(), 3);
 }
 
+#[cfg(feature = "imessage")]
 #[test]
 fn failed_delivery_is_not_recorded_so_the_retry_is_sent() {
     let environment = FakeEnvironment::locked("");
@@ -203,6 +209,7 @@ fn update_after_a_requested_message_is_left_out() {
     assert!(environment.reply_targets().is_empty());
 }
 
+#[cfg(feature = "imessage")]
 #[test]
 fn mark_affects_one_turn_only() {
     let (environment, state) = marked_pane();
@@ -221,6 +228,7 @@ fn mark_affects_one_turn_only() {
     );
 }
 
+#[cfg(feature = "imessage")]
 #[test]
 fn mark_older_than_the_limit_has_no_effect() {
     let (environment, state) = marked_pane();
@@ -252,6 +260,7 @@ fn later_requested_message_replaces_the_mark() {
     );
 }
 
+#[cfg(feature = "imessage")]
 #[test]
 fn mark_does_not_affect_another_pane_and_survives_its_turn() {
     let (environment, state) = marked_pane();
@@ -270,6 +279,7 @@ fn mark_does_not_affect_another_pane_and_survives_its_turn() {
     );
 }
 
+#[cfg(feature = "imessage")]
 #[test]
 fn turn_ending_at_the_desk_is_left_out_and_removes_the_mark() {
     let (environment, state) = marked_pane();
@@ -306,6 +316,7 @@ fn repeat_of_a_left_out_turn_is_left_out_as_a_duplicate() {
     assert!(environment.delivered().is_empty());
 }
 
+#[cfg(feature = "imessage")]
 #[test]
 fn duplicate_turn_still_removes_the_mark() {
     let environment = FakeEnvironment::locked("");
@@ -333,6 +344,7 @@ fn duplicate_turn_still_removes_the_mark() {
     assert_eq!(environment.delivered().len(), 2);
 }
 
+#[cfg(feature = "imessage")]
 #[test]
 fn paused_update_is_skipped_as_before_and_removes_the_mark() {
     let (environment, state) = marked_pane();
@@ -391,6 +403,7 @@ fn pane_off_the_list_sends_nothing_to_the_phone() {
     assert!(environment.delivered().is_empty());
 }
 
+#[cfg(feature = "imessage")]
 #[test]
 fn pane_on_the_list_sends_its_update() {
     let environment = FakeEnvironment::locked(ONLY_FROM_CHIEF);
@@ -427,6 +440,7 @@ fn with_no_agent_in_a_listed_folder_every_pane_is_held_back_on_both_channels() {
     }
 }
 
+#[cfg(feature = "imessage")]
 #[test]
 fn the_default_lists_speak_nobody_but_a_chief_of_pods_folder() {
     // The shipped defaults, not FakeEnvironment's open lists: lists named, all as shipped.
@@ -451,6 +465,7 @@ fn the_default_lists_speak_nobody_but_a_chief_of_pods_folder() {
     );
 }
 
+#[cfg(feature = "imessage")]
 #[test]
 fn an_empty_machine_audio_output_silences_the_desk_but_not_the_phone() {
     let agents = chief_and_pod();
@@ -981,6 +996,7 @@ fn an_update_a_list_holds_back_counts_kept_and_logs_the_fields() {
     }
 }
 
+#[cfg(feature = "imessage")]
 #[test]
 fn a_delivered_update_counts_sent_on_the_channel_that_took_it() {
     let tree = unique_tree();
@@ -1158,5 +1174,77 @@ fn a_shown_turn_end_update_counts_as_delivered_on_the_app() {
 
     assert_eq!(outcome, Ok(DeliveryOutcome::Delivered));
     assert!(environment.delivered().is_empty());
+    assert!(away.sends().is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// A build without iMessage: no rule reaches the stub
+// ---------------------------------------------------------------------------
+
+/// The shipped defaults list `chief-of-pods` for iMessage, and pane %1 runs the chief there.
+#[cfg(not(feature = "imessage"))]
+fn chief_with_default_lists() -> (crate::settings::Settings, TrackedAgents) {
+    (
+        crate::settings::settings_with(""),
+        TrackedAgents::in_folders(&[("%1", "/work/chief-of-pods")]),
+    )
+}
+
+#[cfg(not(feature = "imessage"))]
+#[test]
+fn without_imessage_a_locked_screen_update_from_the_chief_is_held_back_and_nothing_is_sent() {
+    let environment = FakeEnvironment::locked("");
+    let state = NotifyState::default();
+    let agents = TrackedAgents::in_folders(&[("%1", "/work/chief-of-pods")]);
+
+    let outcome = notify_turn_among(&environment, &state, &agents, &turn("%1", "build it"));
+
+    assert_eq!(
+        outcome,
+        Ok(DeliveryOutcome::HeldBack {
+            reason: "not_listed",
+        })
+    );
+    assert!(environment.delivered().is_empty());
+    assert!(environment.reply_targets().is_empty());
+}
+
+#[cfg(not(feature = "imessage"))]
+#[test]
+fn without_imessage_a_spoken_line_and_an_away_message_are_dropped_not_retried() {
+    let (settings, agents) = chief_with_default_lists();
+
+    let spoken =
+        super::left_out::spoken_line_dropped_reason(&settings.notify, &agents, false, "%1")
+            .expect("the line is held");
+    assert_eq!(spoken.line, "spoken line dropped (not in notify.imessage)");
+    assert_eq!(spoken.reason, "not_listed");
+
+    let message = super::left_out::message_dropped_reason(&settings.notify, &agents, false, "%1")
+        .expect("the message is held");
+    assert_eq!(
+        message.line,
+        "agent message dropped (not in notify.imessage)"
+    );
+    assert_eq!(message.reason, "not_listed");
+}
+
+#[cfg(not(feature = "imessage"))]
+#[test]
+fn without_imessage_the_chief_message_an_app_cannot_push_is_held_and_not_sent_away() {
+    let (settings, agents) = chief_with_default_lists();
+    let away_allowed = agents.may_use(&settings.notify, crate::settings::Channel::Imessage, "%1");
+    let app = FakeApp::new(AppDelivery::NotPushed(NotPushedReason::NoSubscriptions));
+    let away = FakeAwayText::default();
+    let chief_app = ChiefApp {
+        app: &app,
+        away: &away,
+        away_allowed,
+    };
+
+    let carried = deliver_from_chief(&chief_app, "event-1", "text", "text");
+
+    assert!(!away_allowed);
+    assert_eq!(carried, Ok(CarriedBy::Held));
     assert!(away.sends().is_empty());
 }

@@ -5,8 +5,8 @@
 mod shared;
 
 pub(crate) use shared::{
-    AudioRefused, CallState, CallStatus, LineTaker, Missing, NO_CHIEF, PhoneStarted, PhoneView,
-    Said, Speaker, TurnResult, VOICE_FAILED, without_hand_over_tag,
+    AudioRefused, CallState, CallStatus, Missing, NO_CHIEF, PhoneStarted, PhoneView, Said, Speaker,
+    TurnResult, VOICE_FAILED, without_hand_over_tag,
 };
 
 /// No phone call is open in this build.
@@ -57,7 +57,11 @@ pub(crate) fn daemon_calls() -> Option<&'static DaemonCalls> {
     None
 }
 
+#[cfg(test)]
+pub(crate) use shared::LineTaker;
+
 /// No phone call is open in this build, whatever `phone` is.
+#[cfg(test)]
 pub(crate) fn say_in_phone_call_over(
     _phone: Option<&dyn LineTaker>,
     _line: &str,
