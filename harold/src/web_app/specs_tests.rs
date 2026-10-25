@@ -788,11 +788,13 @@ fn the_share_button_posts_through_datastar_and_not_plain_fetch() {
         template.contains("data-on:click=\"@post('{{ share_path }}'"),
         "the Share button does not use Datastar's @post"
     );
-    // Datastar retries a failed request up to 10 times; a repeated Share would ask the chief again.
-    assert!(
-        template.contains("retryMaxCount: 0"),
-        "the Share post may retry"
-    );
+    // Datastar retries a failed request on its own; a repeated Share would ask the chief again.
+    for option in ["retry: 'never'", "retryMaxCount: 0", "openWhenHidden: true"] {
+        assert!(
+            template.contains(option),
+            "the Share post lacks {option}, so it may go again"
+        );
+    }
     for absent in ["fetch(", "XMLHttpRequest", "<form"] {
         assert!(!template.contains(absent), "spec.html holds {absent}");
     }
