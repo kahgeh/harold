@@ -795,6 +795,8 @@ impl Fixture {
             // Not the real home or tmux server: a running daemon must not read real state.
             .env("HOME", &self.0)
             .env("TMUX_TMPDIR", &self.0)
+            // The daemon removes `$TMPDIR/harold-voice-notes/` at start: not the real one.
+            .env("TMPDIR", &self.0)
             .env_remove("TMUX")
             .env("NO_COLOR", "1")
             .stdout(Stdio::piped())
