@@ -306,6 +306,64 @@ fn the_speech_check_script_posts_only_the_run_and_never_keeps_what_was_said() {
 }
 
 #[test]
+fn the_speech_check_counts_digits_as_heard_words() {
+    let script = include_str!("../../static/web_app/speech-check.js");
+    let code = script
+        .split("// words-start")
+        .nth(1)
+        .and_then(|rest| rest.split("// words-end").next())
+        .expect("speech-check.js lacks the words-start and words-end markers");
+    let list = |name: &str| {
+        let prefix = format!("const {name} = ");
+        script
+            .lines()
+            .find_map(|line| line.trim().strip_prefix(&prefix))
+            .unwrap_or_else(|| panic!("speech-check.js lacks {name}"))
+            .trim_end_matches(';')
+            .to_string()
+    };
+    let program = format!(
+        r#"
+const CHECK1_WORDS = {};
+const CHECK2_WORDS = {};
+const NUMBER_WORDS = {};
+{code}
+const event = (transcript) => ({{ results: [[{{ transcript }}]] }});
+const heard = (transcript, expected) => hasExpected(event(transcript), 0, expected);
+const cases = [
+  [CHECK1_WORDS, ["123", "1 2 3", "one two three", "One, two, three."], true],
+  [CHECK2_WORDS, ["456", "4 5 6", "four five six", "Four, five, six."], true],
+  [NUMBER_WORDS, ["789", "7 8 9", "seven eight nine", "Seven, eight, nine."], true],
+  [CHECK1_WORDS, ["Hello there"], false],
+];
+const wrong = [];
+for (const [expected, transcripts, want] of cases) {{
+  for (const transcript of transcripts) {{
+    if (heard(transcript, expected) !== want) wrong.push(transcript);
+  }}
+}}
+if (wrong.length > 0) {{
+  console.log("wrong: " + wrong.join(" | "));
+  process.exit(1);
+}}
+"#,
+        list("CHECK1_WORDS"),
+        list("CHECK2_WORDS"),
+        list("NUMBER_WORDS"),
+    );
+    let output = std::process::Command::new("node")
+        .args(["-e", &program])
+        .output()
+        .expect("the test needs `node` on the PATH, and it is missing");
+    assert!(
+        output.status.success(),
+        "node failed: {}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn pages_js_keeps_a_same_origin_link_in_the_app() {
     let script = include_str!("../../static/web_app/pages.js");
     for wanted in [

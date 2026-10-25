@@ -109,8 +109,11 @@
     }
   }
 
+  // assets_tests.rs runs the code from words-start to words-end under node.
+  // words-start
+  // A run of letters is one word; a run of digits is one word per digit, so "123" is 1, 2, 3.
   function words(result) {
-    return Array.from(result[0].transcript.toLowerCase().matchAll(/[a-z0-9]+/g), (m) => m[0]);
+    return Array.from(result[0].transcript.toLowerCase().matchAll(/[a-z]+|[0-9]/g), (m) => m[0]);
   }
 
   // Whether any result of the event, from `from` on, holds a word.
@@ -132,6 +135,7 @@
     }
     return false;
   }
+  // words-end
 
   // One recognition, started by `listen`, that tells `on` what happened. The words of a
   // result reach only `on.result`, which counts them and keeps nothing.
