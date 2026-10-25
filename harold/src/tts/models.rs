@@ -456,6 +456,22 @@ impl Registry {
         record_holds_at(&legacy, folder)
     }
 
+    /// Lists the files of `row` and fails it `unsafe_format` when one can run code. A Hub that
+    /// cannot be asked fails it with the Hub's reason. True when the formats are safe.
+    async fn formats_are_safe(&self, row: &Row) -> bool {
+        match self.deps.fetcher.list_files(&row.id, &row.revision).await {
+            Ok(files) if has_only_safe_weights(&files) => true,
+            Ok(_) => {
+                self.failed(row, "unsafe_format");
+                false
+            }
+            Err(reason) => {
+                self.failed(row, reason);
+                false
+            }
+        }
+    }
+
     /// Copies the legacy record to `record` (mode 0600). False when it cannot be copied.
     fn adopt_legacy_record(&self, row: &Row, record: &Path) -> bool {
         let Some(speech_models) = self
@@ -518,6 +534,11 @@ impl Registry {
             return;
         }
         let record = self.record_path(row);
+        // A model the user asked for is format-checked before anything is checked or fetched,
+        // also after a restart: a request that waited for approval has not been listed yet.
+        if row.asked && !record.exists() && !self.formats_are_safe(row).await {
+            return;
+        }
         if !record.exists() {
             // Kokoro was a speech model before the TTS server: its record still holds, and a
             // start-up after the upgrade needs no network to check it again.
@@ -980,7 +1001,7 @@ impl Registry {
                 .iter()
                 .find(|row| row.id == model)
                 .ok_or(SetDefaultRefusal::UnknownModel)?;
-            if row.phase == Phase::WaitingForApproval {
+            if row.phase != Phase::Ready {
                 return Err(SetDefaultRefusal::NotReady);
             }
             if voice.is_empty()

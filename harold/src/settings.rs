@@ -768,6 +768,9 @@ fn migrate_tts(tts: &mut TtsSettings, local: &Config) {
         .windows(2)
         .find(|pair| pair[0] == "--voice")
         .map(|pair| pair[1].clone());
+    // The command is the Python that runs mlx_audio: the server uses it when `[voice_input]`
+    // names none.
+    tts.python.get_or_insert_with(|| tts.command.clone());
     tts.engine = TtsEngine::Server;
     tts.migrated = true;
 }
@@ -3773,6 +3776,7 @@ encryption_key_file = "/work/key"
         assert_eq!(tts.engine, TtsEngine::Server);
         assert!(tts.migrated);
         assert_eq!(tts.legacy_voice.as_deref(), Some("bf_emma"));
+        assert_eq!(tts.python.as_deref(), Some("/work/venv/bin/python"));
     }
 
     #[test]

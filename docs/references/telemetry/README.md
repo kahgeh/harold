@@ -587,19 +587,18 @@ The TTS server adds signals and two cards ([TTS server](../tts/README.md)). None
 `model` is the model's id (its repository name), never a path. No field holds the text.
 
 - **Optimisation.** The p50 and p95 of `first_audio_ms` per day, by machine and `loaded`, on the first card, which also splits by `device`.
-- **Issue detection.** On the Omarchy machine, `device = cpu` on `harold.tts.speak` means the voice ran on the CPU: expected 0 spans a day there. `tts gpu unavailable` is the nudge: expected 0 lines, at most one for each reason in one Harold run. The release watch runs:
+- **Issue detection.** On the Omarchy machine, `device = cpu` on `harold.tts.speak` means the voice ran on the CPU: expected 0 spans a day there. The Mac's worker always reports `apple_gpu`, so any `cpu` span comes from Linux. `tts gpu unavailable` is the nudge: expected 0 lines, at most one for each reason in one Harold run. The release watch runs:
 
 ```
 SELECT count() FROM otel.otel_traces
 WHERE SpanName = 'harold.tts.speak'
   AND SpanAttributes['device'] = 'cpu'
-  AND ResourceAttributes['os.type'] = 'linux'
   AND Timestamp > now() - INTERVAL 1 DAY
 ```
 
 and looks for the `tts gpu unavailable` line in `harold.log`. Either above 0 is a report. More than 2 on a day is worth a look. `tts model download failed` is a warn, which the release watch already looks for.
 
-- **Error diagnosis.** From a failed line: `reason` and `model`, then the worker's exit in `harold.log`. From a slow line: `loaded` tells whether the load or the speech was slow. `harold tool tts models` shows each model's state and reason.
+- **Error diagnosis.** From a failed line: `reason` and `model`, then `harold.log` for `tts failed` (the worker's own error output is discarded). From a slow line: `loaded` tells whether the load or the speech was slow. `harold tool tts models` shows each model's state and reason.
 
 ## How an alert reaches the chief
 

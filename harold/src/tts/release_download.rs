@@ -130,7 +130,7 @@ impl ReleaseDownloader {
         }
     }
 
-    /// Downloads each file into `folder` (made 0700) that is not there with its size, checks it
+    /// Downloads each file into `folder` (made 0700), checks it
     /// and writes `record` once all are in place. `progress` is told the bytes of this run so
     /// far. Returns the bytes downloaded.
     pub(crate) async fn download_all(

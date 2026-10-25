@@ -867,3 +867,50 @@ fn the_hand_command_downloads_the_pinned_commit_without_a_token() {
             .is_none()
     );
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_request_that_waited_for_approval_is_format_checked_after_a_restart() {
+    let scratch = Scratch::new();
+    scratch.cached(KOKORO_MLX, KOKORO_REVISION, 100);
+    let first = scratch.registry();
+    assert_eq!(
+        first.add_model("huggingface", REPO, REVISION).await,
+        Err(AddRefusal::NotApproved)
+    );
+    // The entry is added, and Harold restarts. The repository holds a pickle file.
+    scratch.approve(REPO, REVISION, WorkerKind::THIS_BUILD.as_str());
+    *scratch.hub.files.lock().unwrap() = vec![
+        RemoteFile {
+            path: "model.safetensors".into(),
+            size: 5,
+        },
+        RemoteFile {
+            path: "weights.pkl".into(),
+            size: 5,
+        },
+    ];
+    let second = scratch.registry();
+
+    second.start_up();
+
+    until(&second, |registry| {
+        state_of(registry, REPO) == InfoState::Failed
+    })
+    .await;
+    let listed = second.list().into_iter().find(|m| m.id == REPO).unwrap();
+    assert_eq!(listed.reason, "unsafe_format");
+    assert!(
+        !scratch
+            .hub
+            .calls()
+            .iter()
+            .any(|call| call.starts_with("download"))
+    );
+    assert!(
+        !scratch
+            .hub
+            .calls()
+            .iter()
+            .any(|call| call.starts_with("check"))
+    );
+}
