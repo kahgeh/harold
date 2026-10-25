@@ -49,7 +49,7 @@ Calls use the server. The voice worker loads Whisper only. When a call rings, Ha
 | `Speak` | `text` (1 to 4,000 characters), optional `model` and `voice` | A stream of 16-bit PCM mono audio. The first message holds the sample rate. |
 | `ListModels` | none | Each model: `id`, `source`, `revision`, `worker`, `voices`, `state`, `reason`, `size_bytes`, `is_default`, `default_voice`. |
 | `AddModel` | `source` (`huggingface`), `repo`, `revision` | `id` and `state`. |
-| `RemoveModel` | `id` | Done. The default model cannot be removed. |
+| `RemoveModel` | `id` | Done. The default model cannot be removed. Harold stops the TTS worker only when it holds that model. |
 | `SetDefault` | `model`, `voice` | Done, kept in Harold's store. |
 
 | Refusal | Code and word |
@@ -66,6 +66,7 @@ Calls use the server. The voice worker loads Whisper only. When a call rings, Ha
 | Model is for the other worker | `FailedPrecondition` `unsupported_worker` |
 | A weight file that can run code | `FailedPrecondition` `unsafe_format` |
 | Remove the default model | `FailedPrecondition` `default_model` |
+| `Speak` while the voice is muted in the dash | `FailedPrecondition` `voice_muted` |
 
 ## The CLI
 
@@ -75,7 +76,7 @@ Calls use the server. The voice worker loads Whisper only. When a call rings, Ha
 | `harold tool tts add REPO@REVISION` | Asks for a Hugging Face model at a pinned commit. |
 | `harold tool tts remove ID` | Removes a model from the list. The files stay in the Hugging Face cache, which other programs share. |
 | `harold tool tts default MODEL VOICE` | Sets the default model and voice. |
-| `harold tool tts speak TEXT` | Says the text at the desk. |
+| `harold tool tts speak TEXT` | Says the text at the desk. While the voice is muted it makes no sound and prints that the voice is muted. |
 
 ## The approved model list
 
@@ -129,7 +130,7 @@ The Linux Python packages are pinned with hashes in `harold/src/tts/requirements
 
 | Signal | Kind | Fields |
 |---|---|---|
-| `harold.tts.speak` | span | `model`, `caller` (`desk`, `call`), `result` (`spoke`, `failed`), `first_audio_ms`, `loaded`, `device` (`gpu`, `cpu`, `apple_gpu`) |
+| `harold.tts.speak` | span | `model`, `caller` (`desk`, `call`), `result` (`spoke`, `failed`, `stopped`), `first_audio_ms`, `loaded`, `device` (`gpu`, `cpu`, `apple_gpu`) |
 | `tts gpu unavailable` | warn, once for each reason in a run | `reason` |
 | `tts failed` | warn | `reason` (`worker_failed`, `model_downloading`, `model_missing`, `timed_out`), `model`, `caller` |
 | `tts model downloaded` | info | `model`, `bytes`, `ms` |

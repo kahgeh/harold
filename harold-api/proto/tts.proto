@@ -16,7 +16,8 @@
 //   InvalidArgument      "invalid_text", "unknown_model" and "unknown_voice" (Speak);
 //                        "invalid_revision", "invalid_repo" and "unsupported_source" (AddModel).
 //   FailedPrecondition   "unsupported_worker", "unsafe_format" (AddModel),
-//                        "default_model" (RemoveModel).
+//                        "default_model" (RemoveModel), "voice_muted" (Speak: the voice is
+//                        muted in the dash).
 //   NotFound             "unknown_model" (RemoveModel, SetDefault).
 //   (SetDefault)         FailedPrecondition "model_not_ready"; InvalidArgument "unknown_voice";
 //                        Unavailable "store_unavailable".

@@ -578,7 +578,7 @@ The TTS server adds signals and two cards ([TTS server](../tts/README.md)). None
 
 | Signal | Kind | Fields | Answers |
 |---|---|---|---|
-| `harold.tts.speak` | span | `model`, `caller` (`desk`, `call`), `result` (`spoke`, `failed`), `first_audio_ms`, `loaded` (`true` when this request loaded the model), `device` (`gpu`, `cpu`, `apple_gpu`) | Does a line start fast, on each machine? |
+| `harold.tts.speak` | span | `model`, `caller` (`desk`, `call`), `result` (`spoke`, `failed`, `stopped`), `first_audio_ms`, `loaded` (`true` when this request loaded the model), `device` (`gpu`, `cpu`, `apple_gpu`) | Does a line start fast, on each machine? |
 | `tts gpu unavailable` | warn, once for each reason in a Harold run | `reason` (`no_gpu`, `no_driver`, `cuda_load_failed`, `gpu_out_of_memory`) | Is the voice slower than it can be? |
 | `tts failed` | warn | `reason` (`worker_failed`, `model_downloading`, `model_missing`, `timed_out`), `model`, `caller` | When a line failed, why, and did the fallback speak? |
 | `tts model downloaded` | info | `model`, `bytes`, `ms` | Which models are on each machine? |

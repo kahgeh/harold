@@ -78,6 +78,29 @@ async fn another_model_stops_the_worker_and_starts_one_for_it() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn stop_if_holding_stops_only_a_worker_that_holds_the_model() {
+    let (supervisor, script) = supervisor();
+
+    supervisor.stop_if_holding("m").await;
+    assert_eq!(
+        script.closed.load(Ordering::SeqCst),
+        0,
+        "no worker is running"
+    );
+
+    drain(say(&supervisor, &mlx("m")).await.ok().unwrap()).await;
+    supervisor.stop_if_holding("other").await;
+    assert_eq!(script.closed.load(Ordering::SeqCst), 0);
+    drain(say(&supervisor, &mlx("m")).await.ok().unwrap()).await;
+    assert_eq!(script.launches.load(Ordering::SeqCst), 1);
+
+    supervisor.stop_if_holding("m").await;
+    assert_eq!(script.closed.load(Ordering::SeqCst), 1);
+    drain(say(&supervisor, &mlx("m")).await.ok().unwrap()).await;
+    assert_eq!(script.launches.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test(start_paused = true)]
 async fn the_worker_stops_after_ten_minutes_idle_and_starts_on_the_next_request() {
     let (supervisor, script) = supervisor();
     drain(say(&supervisor, &mlx("m")).await.ok().unwrap()).await;

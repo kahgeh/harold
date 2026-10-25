@@ -168,6 +168,16 @@ impl Speech {
     }
 }
 
+impl Drop for Speech {
+    /// A line that is dropped before `finish` ran was not read to its end: the reader stopped.
+    /// Stopping a line is normal, so there is no log line.
+    fn drop(&mut self) {
+        if self.end.is_some() {
+            self.span.record("result", "stopped");
+        }
+    }
+}
+
 impl TtsServer {
     /// A server over `registry` and `supervisor`. Called inside the runtime: the blocking
     /// callers reach the runtime through the handle it takes.

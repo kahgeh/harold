@@ -651,3 +651,110 @@ async fn the_phase_of_a_fresh_registry_is_checking() {
     assert_eq!(registry.list()[0].state, InfoState::Downloading);
     assert_eq!(Phase::Checking, Phase::Checking);
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_line_dropped_before_its_end_makes_a_span_with_result_stopped() {
+    test_support::install();
+    let fixture = fixture().await;
+    let mut client = client_of(&fixture.server).await;
+    // The fake sends one piece, then holds the rest of the line.
+    fixture.script.lines.lock().unwrap().push(Next::Hold);
+    let mut stream = client
+        .speak(say("Stops early."))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(stream.message().await.unwrap().is_some());
+    drop(stream);
+    drop(client);
+    // The server sees the stream end before the rest of the line comes.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    fixture.script.release.notify_one();
+
+    let stopped = async {
+        loop {
+            let found = test_support::spans().iter().any(|span| {
+                span.name == "harold.tts.speak"
+                    && test_support::span_attr(span, "model").as_deref()
+                        == Some(fixture.model.as_str())
+                    && test_support::span_attr(span, "result").as_deref() == Some("stopped")
+            });
+            if found {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    };
+    timeout(Duration::from_secs(5), stopped)
+        .await
+        .unwrap_or_else(|_| {
+            let seen: Vec<_> = test_support::spans()
+                .iter()
+                .filter(|span| span.name == "harold.tts.speak")
+                .map(|span| {
+                    (
+                        test_support::span_attr(span, "model"),
+                        test_support::span_attr(span, "result"),
+                    )
+                })
+                .collect();
+            panic!("no stopped span: {seen:?}")
+        });
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn with_the_voice_muted_speak_answers_voice_muted_and_the_worker_gets_no_request() {
+    let fixture = fixture().await;
+    let mut client = client_of(&fixture.server).await;
+
+    crate::outbound::set_tts_muted(true);
+    let refused = collect(&mut client, say("Muted.")).await;
+    crate::outbound::set_tts_muted(false);
+
+    let refused = refused.unwrap_err();
+    assert_eq!(
+        (refused.code(), refused.message()),
+        (Code::FailedPrecondition, "voice_muted")
+    );
+    assert_eq!(fixture.script.launches.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn remove_model_of_a_model_the_worker_does_not_hold_leaves_the_worker_running() {
+    let fixture = fixture().await;
+    let mut client = client_of(&fixture.server).await;
+    let revision = "e".repeat(40);
+    fixture.scratch.safe_files();
+    fixture
+        .scratch
+        .approve("org/other", &revision, WorkerKind_this());
+    client
+        .add_model(AddModelRequest {
+            source: "huggingface".into(),
+            repo: "org/other".into(),
+            revision,
+        })
+        .await
+        .unwrap();
+    until(fixture.server.registry(), |registry| {
+        registry
+            .list()
+            .iter()
+            .any(|model| model.id == "org/other" && model.state == InfoState::Ready)
+    })
+    .await;
+    collect(&mut client, say("Loads the default."))
+        .await
+        .unwrap();
+
+    client
+        .remove_model(RemoveModelRequest {
+            id: "org/other".into(),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(fixture.script.closed.load(Ordering::SeqCst), 0);
+    collect(&mut client, say("Still loaded.")).await.unwrap();
+    assert_eq!(fixture.script.launches.load(Ordering::SeqCst), 1);
+}

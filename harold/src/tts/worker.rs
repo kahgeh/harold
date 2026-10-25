@@ -668,6 +668,20 @@ impl Supervisor {
         }
     }
 
+    /// Stops the worker at once when it holds the MLX model `model`, for a removed model. A
+    /// worker that holds another model, or none, keeps running. An ONNX worker holds only
+    /// Kokoro, which cannot be removed.
+    pub(crate) async fn stop_if_holding(&self, model: &str) {
+        let mut live = self.live.lock().await;
+        let holds = matches!(
+            live.as_ref().map(|running| &running.load),
+            Some(Load::Mlx { model: held, .. }) if held == model
+        );
+        if holds && let Some(running) = live.take() {
+            running.session.close().await;
+        }
+    }
+
     /// Looks at the idle time every `TEND_EVERY` until `shutdown` closes, then stops the
     /// worker.
     pub(crate) async fn tend(self: Arc<Self>, mut shutdown: tokio::sync::watch::Receiver<()>) {

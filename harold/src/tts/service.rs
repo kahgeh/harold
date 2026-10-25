@@ -92,6 +92,9 @@ impl TtsService for TtsApi {
         request: Request<SpeakRequest>,
     ) -> Result<Response<Self::SpeakStream>, Status> {
         require_local(request.remote_addr())?;
+        if crate::outbound::is_tts_muted() {
+            return Err(Status::failed_precondition("voice_muted"));
+        }
         let request = request.into_inner();
         // A caller of the API is the desk's: it plays the line, or hears it from the CLI.
         let mut speech = self
@@ -103,7 +106,12 @@ impl TtsService for TtsApi {
         tokio::spawn(async move {
             let mut rate = speech.sample_rate;
             loop {
-                let piece = match speech.next().await {
+                // A reader that has gone stops the line now, not at its next piece.
+                let next = tokio::select! {
+                    next = speech.next() => next,
+                    () = sender.closed() => return,
+                };
+                let piece = match next {
                     Ok(Some(piece)) => piece,
                     Ok(None) => return,
                     Err(failure) => {
@@ -178,7 +186,7 @@ impl TtsService for TtsApi {
             Ok(()) => {
                 // A worker that holds the removed model is stopped; the next request loads
                 // the one it asks for.
-                self.server.supervisor().stop().await;
+                self.server.supervisor().stop_if_holding(&id).await;
                 Ok(Response::new(RemoveModelResponse {}))
             }
             Err(RemoveRefusal::DefaultModel) => Err(Status::failed_precondition("default_model")),
