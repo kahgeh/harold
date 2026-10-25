@@ -439,3 +439,115 @@ fn knowledge_graph_messages_round_trip_and_keep_their_field_numbers() {
     };
     assert_eq!(round_trip(&void), void);
 }
+
+fn tts_file_descriptor() -> FileDescriptorProto {
+    FileDescriptorSet::decode(FILE_DESCRIPTOR_SET)
+        .expect("decode Harold descriptor set")
+        .file
+        .into_iter()
+        .find(|file| file.package.as_deref() == Some("harold.tts.v1"))
+        .expect("TTS package descriptor")
+}
+
+fn tts_message_fields(name: &str) -> Vec<(String, i32)> {
+    tts_file_descriptor()
+        .message_type
+        .into_iter()
+        .find(|message| message.name.as_deref() == Some(name))
+        .unwrap_or_else(|| panic!("missing {name} descriptor"))
+        .field
+        .into_iter()
+        .map(|field| {
+            (
+                field.name.expect("field name"),
+                field.number.expect("field number"),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn tts_service_lists_its_five_rpcs() {
+    let service = tts_file_descriptor()
+        .service
+        .into_iter()
+        .find(|service| service.name.as_deref() == Some("TtsService"))
+        .expect("TtsService descriptor");
+    let methods: Vec<String> = service
+        .method
+        .into_iter()
+        .map(|method| method.name.expect("method name"))
+        .collect();
+
+    assert_eq!(
+        methods,
+        ["Speak", "ListModels", "AddModel", "RemoveModel", "SetDefault"]
+    );
+}
+
+#[test]
+fn tts_fields_keep_their_numbers() {
+    let named = |fields: &[(&str, i32)]| -> Vec<(String, i32)> {
+        fields
+            .iter()
+            .map(|(name, number)| (name.to_string(), *number))
+            .collect()
+    };
+
+    assert_eq!(
+        tts_message_fields("SpeakRequest"),
+        named(&[("text", 1), ("model", 2), ("voice", 3)])
+    );
+    assert_eq!(
+        tts_message_fields("AudioChunk"),
+        named(&[("sample_rate", 1), ("pcm", 2)])
+    );
+    assert_eq!(
+        tts_message_fields("Model"),
+        named(&[
+            ("id", 1),
+            ("source", 2),
+            ("revision", 3),
+            ("worker", 4),
+            ("voices", 5),
+            ("state", 6),
+            ("reason", 7),
+            ("size_bytes", 8),
+            ("is_default", 9),
+            ("default_voice", 10),
+        ])
+    );
+    assert_eq!(
+        tts_message_fields("AddModelRequest"),
+        named(&[("source", 1), ("repo", 2), ("revision", 3)])
+    );
+    assert_eq!(
+        tts_message_fields("SetDefaultRequest"),
+        named(&[("model", 1), ("voice", 2)])
+    );
+}
+
+#[test]
+fn a_tts_audio_chunk_round_trips() {
+    use harold_api::tts::v1::{AudioChunk, Model, ModelState};
+
+    let chunk = AudioChunk {
+        sample_rate: 24_000,
+        pcm: vec![1, 0, 255, 127],
+    };
+    assert_eq!(round_trip(&chunk), chunk);
+
+    let model = Model {
+        id: "mlx-community/Kokoro-82M-bf16".to_string(),
+        source: "huggingface".to_string(),
+        revision: "a".repeat(40),
+        worker: "mlx".to_string(),
+        voices: vec!["af_heart".to_string()],
+        state: ModelState::Failed.into(),
+        reason: "check_failed".to_string(),
+        size_bytes: 389_410_807,
+        is_default: true,
+        default_voice: "af_heart".to_string(),
+    };
+    assert_eq!(round_trip(&model), model);
+}

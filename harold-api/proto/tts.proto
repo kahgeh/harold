@@ -1,0 +1,107 @@
+// The TTS server: one per machine. It turns text into audio for the desk voice, for calls and
+// for the CLI, and it keeps the list of TTS models on the machine.
+//
+//   Speak        streams the audio of one line: 16-bit PCM, mono. The first message holds the
+//                sample rate; the later ones hold 0. Empty `model` and `voice` mean the default.
+//   ListModels   every TTS model, with its state and whether it is the default.
+//   AddModel     asks for a model by its source, repository and pinned commit. Harold
+//                downloads it only when it is on the approved model list.
+//   RemoveModel  removes a model. The default model cannot be removed.
+//   SetDefault   sets the default model and voice, kept in Harold's store.
+//
+// Refusals:
+//   PermissionDenied     "not_local" (any call from an address that is not loopback);
+//                        "not_approved" (AddModel: the model is not on the approved list, and
+//                        is recorded as waiting_for_approval).
+//   InvalidArgument      "invalid_text" (Speak), "invalid_revision", "invalid_repo",
+//                        "unsupported_source" (AddModel), "unknown_model" and "unknown_voice".
+//   FailedPrecondition   "unsupported_worker", "unsafe_format" (AddModel),
+//                        "default_model" (RemoveModel).
+//   NotFound             "unknown_model" (RemoveModel, SetDefault).
+//   Unavailable          "model_downloading", "model_missing", "worker_failed", "timed_out"
+//                        (Speak).
+//
+// The server trusts local callers: there is no token (ADR 0002).
+syntax = "proto3";
+
+package harold.tts.v1;
+
+service TtsService {
+  rpc Speak(SpeakRequest) returns (stream AudioChunk);
+  rpc ListModels(ListModelsRequest) returns (ListModelsResponse);
+  rpc AddModel(AddModelRequest) returns (AddModelResponse);
+  rpc RemoveModel(RemoveModelRequest) returns (RemoveModelResponse);
+  rpc SetDefault(SetDefaultRequest) returns (SetDefaultResponse);
+}
+
+message SpeakRequest {
+  // 1 to 4,000 characters.
+  string text = 1;
+  string model = 2;
+  string voice = 3;
+}
+
+message AudioChunk {
+  // Set in the first message; 0 in the later ones.
+  uint32 sample_rate = 1;
+  // 16-bit little-endian PCM, mono.
+  bytes pcm = 2;
+}
+
+enum ModelState {
+  MODEL_STATE_UNSPECIFIED = 0;
+  MODEL_STATE_READY = 1;
+  MODEL_STATE_DOWNLOADING = 2;
+  MODEL_STATE_FAILED = 3;
+  MODEL_STATE_WAITING_FOR_APPROVAL = 4;
+}
+
+message Model {
+  // The repository name, such as "mlx-community/Kokoro-82M-bf16".
+  string id = 1;
+  // "huggingface" or "github_release".
+  string source = 2;
+  string revision = 3;
+  // "mlx" or "onnx".
+  string worker = 4;
+  repeated string voices = 5;
+  ModelState state = 6;
+  // Why the state is failed or waiting_for_approval; empty otherwise.
+  string reason = 7;
+  uint64 size_bytes = 8;
+  bool is_default = 9;
+  // The default voice, set on the default model only.
+  string default_voice = 10;
+}
+
+message ListModelsRequest {}
+
+message ListModelsResponse {
+  repeated Model models = 1;
+}
+
+message AddModelRequest {
+  // "huggingface".
+  string source = 1;
+  string repo = 2;
+  // 40 lowercase hex characters.
+  string revision = 3;
+}
+
+message AddModelResponse {
+  string id = 1;
+  ModelState state = 2;
+}
+
+message RemoveModelRequest {
+  string id = 1;
+}
+
+message RemoveModelResponse {}
+
+message SetDefaultRequest {
+  string model = 1;
+  string voice = 2;
+}
+
+message SetDefaultResponse {}

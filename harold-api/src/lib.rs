@@ -4,6 +4,12 @@ pub mod harold {
     tonic::include_proto!("harold");
 }
 
+pub mod tts {
+    pub mod v1 {
+        tonic::include_proto!("harold.tts.v1");
+    }
+}
+
 pub mod tools {
     pub mod backlog {
         pub mod v1 {
