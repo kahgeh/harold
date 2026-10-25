@@ -59,7 +59,7 @@ Boxes are parts and cylinders are stores. Each dark group is where the parts run
 
 | Call | Caller | Reads |
 |---|---|---|
-| `search`, `related`, `links`, `show`, `recent` | the chief, the Notes page, the dash's `s` (search only) | the knowledge index, through buckwal's local copy |
+| `search`, `related`, `links`, `show`, `recent` | the chief, the Notes page, the dash's `s` (`search`, `recent` and `show`) | the knowledge index, through buckwal's local copy |
 | `status`, `rebuild` | the chief | the knowledge index (`rebuild` reads the vault again) |
 | `relate`, `unrelate`, `relations`, `graph status` | the chief | the graph writer, then TypeDB |
 | `graph rebuild`, `graph void` | the chief | the schema log and the data log, then TypeDB. A rebuild never reads the vault |
@@ -71,7 +71,7 @@ Boxes are parts and cylinders are stores. Each dark group is where the parts run
 | The index's local copy | buckwal restores the database from the bucket at the next start |
 | The bucket's objects too | the next pass builds the index again from the vault |
 | TypeDB's data | Harold rebuilds the graph from the two logs, at start or with `graph rebuild` |
-| The two logs | the typed relations are lost. The vault notes and their links come back from the next pass over the vault |
+| The two logs | TypeDB still holds the graph, but the next `graph rebuild` or rebuild at start has no records to replay, so the typed relations are lost |
 | The Mac | the vault and the bucket survive, if they live elsewhere. The logs and TypeDB's data are on this Mac only, so the typed relations are lost |
 
 ## The CLI
