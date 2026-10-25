@@ -775,6 +775,19 @@ fn print_help() {
     println!("  harold tool knowledge show NOTE    The vault note's text and links, as stored");
     println!("  harold tool knowledge status       Vault notes, passages, last pass, worker");
     println!("  harold tool knowledge rebuild      Clear the index and build it again");
+    println!("  harold tool knowledge relate FROM RELATION TO");
+    println!("                          Record a typed relation: relates_to, supersedes, part_of,");
+    println!("                          inspired_by or contradicts");
+    println!("  harold tool knowledge unrelate FROM RELATION TO   Remove a typed relation");
+    println!("  harold tool knowledge relations NOTE   The vault note's links and typed relations");
+    println!(
+        "  harold tool knowledge graph status     The graph position, log ends and records waiting"
+    );
+    println!(
+        "  harold tool knowledge graph rebuild    Drop the graph and replay it from its two logs"
+    );
+    println!("  harold tool knowledge graph void SEQUENCE --reason WORD");
+    println!("                          Pass the one record the graph refused");
     println!("  harold tool watch start NAME --skill SKILL --every MINUTES --for MINUTES");
     println!("                          [--report-to chief|self] [--run-budget USD] [--every-run]");
     println!(

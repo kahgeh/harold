@@ -6,6 +6,9 @@ use harold_api::tools::knowledge::v1 as pb;
 use harold_api::tools::knowledge::v1::knowledge_service_server::KnowledgeService;
 use tonic::{Request, Response, Status};
 
+use super::graph::records::{By, Op, well_formed_name};
+use super::graph::runtime::GraphRuntime;
+use super::graph::writer::{GraphError, GraphWriter};
 use super::index::Index;
 use super::search::{Hit, Knowledge, SearchError, clamp};
 use super::store::NoteRow;
@@ -15,6 +18,8 @@ use super::store::NoteRow;
 #[derive(Default)]
 pub(super) struct Opening {
     index: std::sync::OnceLock<Arc<Index>>,
+    /// The knowledge graph: off, or started on its first call.
+    pub(super) graph: std::sync::OnceLock<Arc<GraphRuntime>>,
     reason: std::sync::Mutex<&'static str>,
 }
 
@@ -53,6 +58,13 @@ impl KnowledgeToolService {
         })
     }
 
+    async fn graph(&self) -> Result<GraphWriter, Status> {
+        let Some(runtime) = self.opening.graph.get() else {
+            return Err(graph_status(GraphError::Off));
+        };
+        runtime.writer().await.map_err(graph_status)
+    }
+
     fn knowledge(&self) -> Result<Knowledge, Status> {
         self.index().map(Knowledge::new)
     }
@@ -65,6 +77,19 @@ fn status_of(error: SearchError) -> Status {
         SearchError::Store(error) => {
             Status::unavailable(format!("store_failed: {}", error.reason()))
         }
+    }
+}
+
+/// A graph refusal as a gRPC status: the message is the reason word.
+fn graph_status(error: GraphError) -> Status {
+    let reason = error.reason();
+    match error {
+        GraphError::InvalidRelation | GraphError::InvalidVaultNote | GraphError::InvalidReason => {
+            Status::invalid_argument(reason)
+        }
+        GraphError::UnknownVaultNote => Status::not_found(reason),
+        GraphError::NotRefused => Status::failed_precondition(reason),
+        _ => Status::unavailable(reason),
     }
 }
 
@@ -266,5 +291,124 @@ impl KnowledgeService for KnowledgeToolService {
             vault_notes: notes as u32,
             passages: passages as u32,
         }))
+    }
+
+    async fn relate(
+        &self,
+        request: Request<pb::RelateRequest>,
+    ) -> Result<Response<pb::RelateResponse>, Status> {
+        let request = request.into_inner();
+        let graph = self.graph().await?;
+        let op = Op::PutRelation {
+            from: request.from,
+            relation: request.relation,
+            to: request.to,
+        };
+        let changed = graph.submit(op, By::Call).await.map_err(graph_status)?;
+        Ok(Response::new(pb::RelateResponse {
+            changed: changed.is_some(),
+        }))
+    }
+
+    async fn unrelate(
+        &self,
+        request: Request<pb::RelateRequest>,
+    ) -> Result<Response<pb::RelateResponse>, Status> {
+        let request = request.into_inner();
+        let graph = self.graph().await?;
+        let op = Op::RemoveRelation {
+            from: request.from,
+            relation: request.relation,
+            to: request.to,
+        };
+        let changed = graph.submit(op, By::Call).await.map_err(graph_status)?;
+        Ok(Response::new(pb::RelateResponse {
+            changed: changed.is_some(),
+        }))
+    }
+
+    async fn relations_of(
+        &self,
+        request: Request<pb::RelationsOfRequest>,
+    ) -> Result<Response<pb::RelationsOfResponse>, Status> {
+        let request = request.into_inner();
+        if !well_formed_name(&request.vault_note) {
+            return Err(invalid("vault_note"));
+        }
+        let rows = self
+            .graph()
+            .await?
+            .relations_of(&request.vault_note)
+            .await
+            .map_err(graph_status)?;
+        Ok(Response::new(pb::RelationsOfResponse {
+            relations: rows
+                .into_iter()
+                .map(|row| pb::GraphRelation {
+                    name: row.other,
+                    title: row.other_title,
+                    relation: row.relation,
+                    outgoing: row.outgoing,
+                    missing: row.other_missing,
+                })
+                .collect(),
+        }))
+    }
+
+    async fn graph_status(
+        &self,
+        _: Request<pb::GraphStatusRequest>,
+    ) -> Result<Response<pb::GraphStatusResponse>, Status> {
+        let Some(runtime) = self.opening.graph.get().filter(|r| r.enabled()) else {
+            return Ok(Response::new(pb::GraphStatusResponse::default()));
+        };
+        let graph = runtime.writer().await.map_err(graph_status)?;
+        let status = graph.status().await.map_err(graph_status)?;
+        let refusal = status.last_refusal;
+        Ok(Response::new(pb::GraphStatusResponse {
+            enabled: true,
+            has_schema_position: status.schema_position.is_some(),
+            schema_position: status.schema_position.unwrap_or(0),
+            has_data_position: status.data_position.is_some(),
+            data_position: status.data_position.unwrap_or(0),
+            has_schema_end: status.schema_end.is_some(),
+            schema_end: status.schema_end.unwrap_or(0),
+            has_data_end: status.data_end.is_some(),
+            data_end: status.data_end.unwrap_or(0),
+            waiting: status.waiting as u64,
+            has_last_refusal: refusal.is_some(),
+            last_refusal_sequence: refusal.as_ref().map_or(0, |r| r.sequence),
+            last_refusal_reason: refusal.map(|r| r.reason).unwrap_or_default(),
+        }))
+    }
+
+    async fn rebuild_graph(
+        &self,
+        _: Request<pb::RebuildGraphRequest>,
+    ) -> Result<Response<pb::RebuildGraphResponse>, Status> {
+        let rebuilt = self.graph().await?.rebuild().await.map_err(graph_status)?;
+        Ok(Response::new(pb::RebuildGraphResponse {
+            schema_steps: rebuilt.applied.schema_steps as u64,
+            records: rebuilt.applied.records as u64,
+            voided: rebuilt.applied.voided as u64,
+            vault_notes: rebuilt.vault_notes as u64,
+            links: rebuilt.links as u64,
+            typed_relations: rebuilt.typed_relations as u64,
+            ms: rebuilt.ms,
+        }))
+    }
+
+    async fn void_graph_record(
+        &self,
+        request: Request<pb::VoidGraphRecordRequest>,
+    ) -> Result<Response<pb::VoidGraphRecordResponse>, Status> {
+        let request = request.into_inner();
+        let void_sequence = self
+            .graph()
+            .await?
+            .void(request.sequence, request.reason)
+            .await
+            .map_err(graph_status)?;
+        Ok(Response::new(pb::VoidGraphRecordResponse { void_sequence }))
     }
 }

@@ -16,6 +16,7 @@ use crate::settings::KnowledgeSettings;
 use crate::tools::{ToolError, ToolHandle};
 
 mod embed;
+mod graph;
 mod guard;
 mod index;
 #[cfg(test)]
@@ -105,6 +106,18 @@ pub(crate) async fn start(
     );
     let (vault, exclude) = (vault.to_path_buf(), settings.exclude.clone());
     let opening = Arc::new(service::Opening::default());
+    let graph = match (settings.graph.enabled, settings.graph.server.as_deref()) {
+        (true, Some(binary)) => graph::runtime::GraphRuntime::new(
+            graph::runtime::GraphFolders::under(&data_folder),
+            Arc::new(graph::typedb::TypeDbOpener {
+                binary: PathBuf::from(binary),
+                idle: Duration::from_secs(u64::from(settings.graph.idle_minutes) * 60),
+                shutdown: shutdown.clone(),
+            }),
+        ),
+        _ => graph::runtime::GraphRuntime::off(),
+    };
+    let _ = opening.graph.set(Arc::new(graph));
     let service = service::KnowledgeToolService::new(Arc::clone(&opening));
     let task = tokio::spawn(open_and_run(Opening {
         opening,
@@ -166,6 +179,9 @@ async fn open_and_run(mut task: Opening) {
         task.vault.clone(),
         &task.exclude,
     );
+    if let Some(graph) = task.opening.graph.get() {
+        index.set_graph(Arc::clone(graph));
+    }
     task.opening.opened(Arc::clone(&index));
     let reaper = task.embedder.spawn_reaper(task.shutdown.clone());
     index::run(Arc::clone(&index), task.shutdown.clone()).await;
@@ -173,6 +189,10 @@ async fn open_and_run(mut task: Opening) {
     // Dropping the last handle closes the database, which blocks while buckwal ends.
     let _ = tokio::task::spawn_blocking(move || drop(index)).await;
 }
+
+#[cfg(test)]
+#[path = "service_graph_tests.rs"]
+mod service_graph_tests;
 
 #[cfg(test)]
 #[path = "start_tests.rs"]

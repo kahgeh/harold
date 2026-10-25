@@ -30,6 +30,7 @@ fn launch(vault: &TempFolder, secrets: &TempFolder, credentials_mode: u32) -> La
                 credentials_file: credentials.to_string_lossy().into_owned(),
                 encryption_key_file: key.to_string_lossy().into_owned(),
             }),
+            graph: Default::default(),
         },
         machine_name: "m".into(),
     }

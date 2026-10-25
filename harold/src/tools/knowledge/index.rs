@@ -10,6 +10,8 @@ use tokio::sync::Notify;
 use tracing::{info, warn};
 
 use super::embed::{EmbedError, Embedder, ModelInfo};
+use super::graph::runtime::GraphRuntime;
+use super::graph::sync::{Desired, sync_vault};
 use super::store::{IndexInfo, Store, StoreError};
 use super::text::{ParsedNote, parse_note, passage_prompt, split_passages};
 
@@ -92,6 +94,9 @@ pub(crate) struct Index {
     status: Mutex<PassStatus>,
     one_pass: tokio::sync::Mutex<()>,
     started: Instant,
+    /// The knowledge graph's writer, when the graph is on: the pass writes vault notes and
+    /// links to it.
+    graph: std::sync::OnceLock<Arc<GraphRuntime>>,
 }
 
 pub(crate) fn now_ms() -> i64 {
@@ -113,7 +118,13 @@ impl Index {
             status: Mutex::new(PassStatus::default()),
             one_pass: tokio::sync::Mutex::new(()),
             started: Instant::now(),
+            graph: std::sync::OnceLock::new(),
         })
+    }
+
+    /// Makes the pass write vault notes and links to the knowledge graph.
+    pub(crate) fn set_graph(&self, graph: Arc<GraphRuntime>) {
+        let _ = self.graph.set(graph);
     }
 
     pub(crate) fn status(&self) -> PassStatus {
@@ -297,10 +308,38 @@ impl Index {
             blocking(&store, move |s| s.delete_note(&name)).await?;
             counts.removed += 1;
         }
+        self.sync_graph(&files).await;
         if skipped > 0 {
             return Err(Failure::WorkerFailed);
         }
         Ok(counts)
+    }
+
+    /// Writes what differs between the vault and the knowledge graph. A graph that cannot take
+    /// it does not fail the pass: the index does not depend on the graph.
+    async fn sync_graph(&self, files: &[VaultFile]) {
+        let Some(runtime) = self.graph.get() else {
+            return;
+        };
+        let vault: Vec<Desired> = files
+            .iter()
+            .map(|file| {
+                let note = parse_note(&file.name, &file.text);
+                Desired {
+                    name: file.name.clone(),
+                    title: note.title,
+                    kind: note.kind,
+                    links: note.links,
+                }
+            })
+            .collect();
+        let synced = match runtime.writer().await {
+            Ok(graph) => sync_vault(&graph, &vault).await.map(|_| ()),
+            Err(error) => Err(error),
+        };
+        if let Err(error) = synced {
+            warn!(reason = error.reason(), "knowledge graph sync failed");
+        }
     }
 
     /// Embeds one vault note's passages and replaces its rows. Returns the passages

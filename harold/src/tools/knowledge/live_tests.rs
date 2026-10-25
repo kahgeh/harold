@@ -31,6 +31,7 @@ fn launch(prefix: &str) -> Launch {
                 credentials_file: env("KI_CREDENTIALS"),
                 encryption_key_file: env("KI_KEY"),
             }),
+            graph: Default::default(),
         },
         machine_name: "test-mac".into(),
     }

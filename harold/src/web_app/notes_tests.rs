@@ -103,6 +103,42 @@ impl KnowledgeService for Fake {
     ) -> Result<Response<pb::RebuildResponse>, Status> {
         Err(Status::unimplemented("rebuild"))
     }
+    async fn relate(
+        &self,
+        _: Request<pb::RelateRequest>,
+    ) -> Result<Response<pb::RelateResponse>, Status> {
+        Err(Status::unimplemented("relate"))
+    }
+    async fn unrelate(
+        &self,
+        _: Request<pb::RelateRequest>,
+    ) -> Result<Response<pb::RelateResponse>, Status> {
+        Err(Status::unimplemented("unrelate"))
+    }
+    async fn relations_of(
+        &self,
+        _: Request<pb::RelationsOfRequest>,
+    ) -> Result<Response<pb::RelationsOfResponse>, Status> {
+        Err(Status::unimplemented("relations_of"))
+    }
+    async fn graph_status(
+        &self,
+        _: Request<pb::GraphStatusRequest>,
+    ) -> Result<Response<pb::GraphStatusResponse>, Status> {
+        Err(Status::unimplemented("graph_status"))
+    }
+    async fn rebuild_graph(
+        &self,
+        _: Request<pb::RebuildGraphRequest>,
+    ) -> Result<Response<pb::RebuildGraphResponse>, Status> {
+        Err(Status::unimplemented("rebuild_graph"))
+    }
+    async fn void_graph_record(
+        &self,
+        _: Request<pb::VoidGraphRecordRequest>,
+    ) -> Result<Response<pb::VoidGraphRecordResponse>, Status> {
+        Err(Status::unimplemented("void_graph_record"))
+    }
 }
 
 struct Served {

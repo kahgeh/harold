@@ -18,6 +18,8 @@ harold tool knowledge status
 harold tool knowledge rebuild
 ```
 
+The graph has its own commands, [below](#the-graphs-commands).
+
 | Command | What it prints |
 |---|---|
 | `search WORDS` | The closest vault notes, best first, at most `--limit` (1 to 10, default 10). One line each: score, name, kind and description |
@@ -155,6 +157,130 @@ Every commit is in the bucket before it returns. Delete the local `index/` folde
 | `harold.knowledge.search` (span) | `source` (`chief`, `app` or `dash`), `results`, `embed_ms`, `search_ms` | Each search |
 
 No line or span holds a query, a vault note's text or a passage. buckwal's spans and log records (target `buckwal`) go through Harold's own subscriber and are exported under `service.name = harold`; Harold never calls `buckwal::telemetry::init`. The [telemetry reference](../telemetry/README.md#the-knowledge-index) has the cards.
+
+## The knowledge graph
+
+The **knowledge graph** holds the vault notes, their links and the **typed relations** the chief records, such as `ideas-stay-in-the-vault` **inspired_by** `a-knowledge-index-on-buckwal`. TypeDB holds it. It is a separate store from the knowledge index: `search`, `related` and `links` do not change. It is off unless `[knowledge.graph] enabled` is set.
+
+The rule is that **the graph must be recoverable**. The graph writer, one task in Harold, takes changes one at a time from the chief's calls and from the pass over the vault. For each change it:
+
+1. **Checks it.** The relation type exists, both vault notes are in the graph and not missing, and every field is well formed. A change that fails is refused and never reaches the log.
+2. **Logs it.** It appends one record to the data log and flushes it. If the log cannot be written, the change is refused `log_failed` and TypeDB is not touched.
+3. **Applies it.** In one TypeDB write transaction, it applies the change and moves the **graph position**.
+4. **Answers.** The caller hears back once the transaction commits.
+
+A change the graph already holds is not logged, so a pass over an unchanged vault logs nothing. Each change is safe to apply twice. Catch-up and replay apply every record whose sequence is greater than the position, never "the position plus one", since log sequences can jump.
+
+**The relation types:** `relates_to`, `supersedes`, `part_of`, `inspired_by` and `contradicts`. A new type is a schema step, which comes with a Harold release.
+
+### The graph's commands
+
+```sh
+harold tool knowledge relate ideas-stay-in-the-vault inspired_by a-knowledge-index-on-buckwal
+harold tool knowledge unrelate ideas-stay-in-the-vault inspired_by a-knowledge-index-on-buckwal
+harold tool knowledge relations a-knowledge-index-on-buckwal
+harold tool knowledge graph status
+harold tool knowledge graph rebuild
+harold tool knowledge graph void 1291 --reason typo
+```
+
+| Command | What it does |
+|---|---|
+| `relate FROM RELATION TO` | Records a typed relation. Both vault notes must be in the graph and not missing. Prints `already related` when the graph held it |
+| `unrelate FROM RELATION TO` | Removes one. It works when a vault note has gone, and a relation that is not there is not an error |
+| `relations NOTE` | The vault note's links and typed relations, both ways: `->` or `<-`, the relation, the other vault note, `(missing)` when its file has gone, and its title |
+| `graph status` | The graph position, the end of each log, the records waiting and the last refusal |
+| `graph rebuild` | Drops the graph database, makes it again, replays the schema log, then the data log, and prints what it replayed |
+| `graph void SEQUENCE --reason WORD` | Appends a voided record for the one record the catch-up stopped at |
+
+### When a vault note goes
+
+The pass logs a `remove_link` for each link of the vault note, then:
+
+- **No typed relation names it:** `remove_vault_note`.
+- **A typed relation names it:** `mark_vault_note_missing`. The vault note stays, marked missing, and its relations stay. `relations` shows it as `(missing)`, so the chief can record the relation again on the new path and remove the old one. A rename shows as one vault note going and another coming.
+- **The file comes back:** `put_vault_note` clears the mark, and the links return.
+
+Harold also refuses `remove_vault_note` for a vault note a typed relation names.
+
+### A record TypeDB refuses
+
+The check in step 1 should stop this, so it means a bug. The catch-up stops at the record and logs `knowledge graph behind` (warn) with its `sequence`. Graph calls answer `Unavailable` `graph_behind`. Read the record in the data log, then run `graph void SEQUENCE --reason WORD`. That appends a `void_record`. The catch-up passes the refused record and goes on, and every later replay honours the void. Only the refused record can be voided: any other sequence is `FailedPrecondition` `not_refused`.
+
+### The logs
+
+Two OpenData logs in `<store>/tools/knowledge/graph/`, mode 0700, with no retention. They are the graph's source.
+
+| Log | Folder | Records |
+|---|---|---|
+| Schema log | `schema-log/` | JSON: `step`, `at_ms`, `define` (the step's TypeQL) |
+| Data log | `data-log/` | JSON: `op` (`put_vault_note`, `mark_vault_note_missing`, `remove_vault_note`, `put_link`, `remove_link`, `put_relation`, `remove_relation`, `void_record`), `at_ms`, `by` (`index` or `call`), and the op's fields. No vault note text |
+
+A vault note is named in the graph by its name (its path without `.md`), kept in the `path` attribute. The logs live on this Mac's disk, as the event stream does. They survive the loss of TypeDB's database, not the loss of the Mac.
+
+**Schema steps** are numbered, in Harold's code. Harold appends a step to the schema log once, flushes it, then applies it. Steps only add: a step may define a type or an attribute and never removes or renames one, since a rebuild replays the whole schema log before any data. A test over the step list refuses a step that does.
+
+### Rebuilding
+
+`graph rebuild` prints, for example:
+
+```text
+rebuilt the knowledge graph: 1 schema step, 1284 data records, 0 voided, 77 vault notes, 213 links, 9 typed relations, 4.1 s
+```
+
+Searches by meaning still work during a rebuild. Graph calls answer `Unavailable` `graph_rebuilding`. The same rebuild runs on its own when Harold finds the database missing at start, logged `knowledge graph rebuilt` with `reason=missing`. A rebuild never reads the vault. The index's own `rebuild` and `status` stay index only.
+
+### Running TypeDB
+
+TypeDB Community Edition 3.x runs on this Mac and listens on `127.0.0.1` only. Harold refuses to start it with any other address. You install the binary: Harold downloads nothing. Harold starts it on the first graph call, with its data folder in `<store>/tools/knowledge/graph/typedb/`, and stops it after `idle_minutes` without a graph call.
+
+```toml
+[knowledge.graph]
+enabled = true
+server = "/opt/homebrew/bin/typedb_server_bin"   # the absolute path of the TypeDB server binary
+idle_minutes = 10                                # the default
+```
+
+`enabled` needs `[knowledge] vault` and `server`. Harold refuses to start and names the key when either is missing.
+
+**Install it.** The audited version is TypeDB server 3.14.1 from Homebrew (see [dependency audits](../dependency-audits.md), row 11). Run `brew install typedb`, then check `typedb_server_bin --version` prints `server 3.14.1`. Do not use the Homebrew service: Harold starts the server itself.
+
+**What Harold does with the server.**
+- It writes its own `config.yml` in `<store>/tools/knowledge/graph/typedb/` each time it starts the server. Both listeners (gRPC and HTTP) are on `127.0.0.1` on free ports. TypeDB's reporting and monitoring are off. The config that Homebrew ships listens on `0.0.0.0` and reports, so Harold never uses it.
+- It talks to the HTTP API with the `reqwest` that Harold already has. The graph adds no crate.
+- A new data folder starts with TypeDB's default `admin` password. Harold replaces it at once with a random one, kept in `typedb/password` (mode 0600).
+- The database is `harold_knowledge`. A relation for a link in a vault note's text is `note_link`, because `links` is a reserved TypeQL word. `harold tool knowledge relations` still shows it as `links`.
+- A start takes about 2 s. One change takes about 35 ms. A rebuild of 2,000 vault notes and 6,000 relation records takes about 12 s.
+
+**Live tests.** The live tests start a server of their own in a temporary folder. They read the binary from `HAROLD_TYPEDB_BIN`, else from `/opt/homebrew/bin/typedb_server_bin`, and skip with a note when it is missing.
+
+### Refusals
+
+| Case | Service answer | CLI line |
+|---|---|---|
+| Unknown relation type, or the same vault note on both sides | `InvalidArgument` `invalid relation` | `invalid relation` |
+| A vault note name that is not well formed | `InvalidArgument` `invalid vault_note` | `invalid vault_note` |
+| A vault note not in the graph, or missing (`relate`) | `NotFound` `unknown_vault_note` | `unknown vault note` |
+| `[knowledge.graph] enabled` is off | `Unavailable` `graph_off` | `the knowledge graph is off` |
+| The catch-up stopped at a refused record | `Unavailable` `graph_behind` | `the knowledge graph is behind its logs` |
+| A rebuild runs | `Unavailable` `graph_rebuilding` | `the knowledge graph is rebuilding` |
+| The data log could not be written | `Unavailable` `log_failed` | `could not write its log, so nothing changed` |
+| TypeDB did not answer | `Unavailable` `typedb_unreachable` | `TypeDB did not answer` |
+| `graph void` for another sequence | `FailedPrecondition` `not_refused` | `that record was not refused` |
+
+### Graph logs and spans
+
+| Signal | Fields | When |
+|---|---|---|
+| `harold.knowledge.graph_waiting` (gauge) | none | The data and schema records with a sequence greater than the graph position. Published after each change while the graph is on |
+| `harold.knowledge.typed_relations` (gauge) | none | The typed relations in the graph |
+| `knowledge graph behind` (warn) | `sequence`, `reason`, `waiting` | TypeDB refuses a record |
+| `knowledge graph record voided` (warn) | `sequence`, `reason` | A record is voided |
+| `knowledge graph rebuilt` (info) | `reason` (`asked` or `missing`), `schema_steps`, `records`, `voided`, `ms` | A rebuild ends |
+| `harold.knowledge.graph_rebuild` (span) | `reason`, `schema_steps`, `records`, `voided`, `ms`, `result` | Each rebuild |
+| `knowledge graph sync failed` (warn) | `reason` | The pass could not write to the graph. The index pass does not fail for it |
+
+No field holds a vault note's path or text. The [telemetry reference](../telemetry/README.md#the-knowledge-graph) has the questions and the cards.
 
 ## Edge cases
 

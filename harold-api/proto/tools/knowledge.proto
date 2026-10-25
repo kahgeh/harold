@@ -16,13 +16,25 @@
 //   Status         what the index holds and how it is doing.
 //   Rebuild        clears the index and builds it again from the vault.
 //
+// The knowledge graph (typed relations between vault notes, in TypeDB):
+//   Relate         records a typed relation: from, relation, to.
+//   Unrelate       removes one; a relation that is not there is not an error.
+//   RelationsOf    a vault note's links and typed relations, both ways.
+//   GraphStatus    whether the graph is on and how far it is behind its logs.
+//   RebuildGraph   drops the graph database and replays the schema log, then the data log.
+//   VoidGraphRecord  voids the one record the catch-up stopped at.
+//   Status and Rebuild stay index only.
+//
 // Refusals:
 //   InvalidArgument      message "invalid <field>".
 //   NotFound             message "unknown_vault_note".
+//   FailedPrecondition   message "not_refused" (VoidGraphRecord for any other sequence).
 //   Unavailable          message "search_resting: <reason>" when the embedding worker
 //                        could not load, or "store_failed: <reason>" when the database
 //                        is not open or could not be read;
 //                        the details carry a fixed reason word, never error text.
+//                        Graph calls also say "graph_off", "graph_behind", "graph_rebuilding",
+//                        "log_failed" or "typedb_unreachable".
 //
 // The server trusts local callers: there is no token.
 syntax = "proto3";
@@ -37,6 +49,12 @@ service KnowledgeService {
   rpc ShowVaultNote(ShowVaultNoteRequest) returns (VaultNote);
   rpc Status(StatusRequest) returns (StatusResponse);
   rpc Rebuild(RebuildRequest) returns (RebuildResponse);
+  rpc Relate(RelateRequest) returns (RelateResponse);
+  rpc Unrelate(RelateRequest) returns (RelateResponse);
+  rpc RelationsOf(RelationsOfRequest) returns (RelationsOfResponse);
+  rpc GraphStatus(GraphStatusRequest) returns (GraphStatusResponse);
+  rpc RebuildGraph(RebuildGraphRequest) returns (RebuildGraphResponse);
+  rpc VoidGraphRecord(VoidGraphRecordRequest) returns (VoidGraphRecordResponse);
 }
 
 // One vault note in a list.
@@ -131,4 +149,82 @@ message RebuildRequest {}
 message RebuildResponse {
   uint32 vault_notes = 1;
   uint32 passages = 2;
+}
+
+// Relate and Unrelate. `from` and `to` are vault note names; `relation` is one of
+// relates_to, supersedes, part_of, inspired_by, contradicts.
+message RelateRequest {
+  string from = 1;
+  string relation = 2;
+  string to = 3;
+}
+
+message RelateResponse {
+  // False when the graph already held the change, so nothing was logged.
+  bool changed = 1;
+}
+
+message RelationsOfRequest {
+  string vault_note = 1;
+}
+
+// One link or typed relation of the asked vault note.
+message GraphRelation {
+  // The vault note on the other side.
+  string name = 1;
+  string title = 2;
+  // "links" for a [[link]] in a vault note's text, else the typed relation's type.
+  string relation = 3;
+  // True when the asked vault note is the source (from).
+  bool outgoing = 4;
+  // True when the vault note on the other side has gone from the vault.
+  bool missing = 5;
+}
+
+message RelationsOfResponse {
+  repeated GraphRelation relations = 1;
+}
+
+message GraphStatusRequest {}
+
+// The sequences are log sequences, not counts. A `has_` flag is false when the log or the
+// position holds no record yet.
+message GraphStatusResponse {
+  bool enabled = 1;
+  bool has_schema_position = 2;
+  uint64 schema_position = 3;
+  bool has_data_position = 4;
+  uint64 data_position = 5;
+  bool has_schema_end = 6;
+  uint64 schema_end = 7;
+  bool has_data_end = 8;
+  uint64 data_end = 9;
+  // Records with a sequence greater than the position, in both logs.
+  uint64 waiting = 10;
+  bool has_last_refusal = 11;
+  uint64 last_refusal_sequence = 12;
+  string last_refusal_reason = 13;
+}
+
+message RebuildGraphRequest {}
+
+message RebuildGraphResponse {
+  uint64 schema_steps = 1;
+  uint64 records = 2;
+  uint64 voided = 3;
+  uint64 vault_notes = 4;
+  uint64 links = 5;
+  uint64 typed_relations = 6;
+  uint64 ms = 7;
+}
+
+message VoidGraphRecordRequest {
+  uint64 sequence = 1;
+  // One word: letters, digits, "_" and "-".
+  string reason = 2;
+}
+
+message VoidGraphRecordResponse {
+  // The data log sequence of the voided record.
+  uint64 void_sequence = 1;
 }

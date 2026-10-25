@@ -202,6 +202,11 @@ pub(crate) const ALLOWED_FIELDS: &[&str] = &[
     "check6_restarted",
     "check6_heard",
     "check6_error",
+    "sequence",
+    "waiting",
+    "schema_steps",
+    "records",
+    "voided",
 ];
 
 /// How long shutting the exporters down may take in all.

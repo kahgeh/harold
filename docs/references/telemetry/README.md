@@ -356,6 +356,17 @@ The [knowledge tool](../tools/knowledge.md#logs-and-spans) logs and traces these
 3. *What does it cost the Mac?* `knowledge worker stopped` (info), when the worker stops: `load_ms`, `embed_ms_per_passage` (the mean over its life), `passages` and `rss_mb` (its resident memory just before it stopped, read with `ps`).
    - **Optimisation:** resident memory over 1.5 GB, or a mean over 200 ms a passage, is the cue to rethink the runtime or the model. The card "Knowledge worker, last 7 days" shows the highest `rss_mb`, the mean `embed_ms_per_passage` and the passages.
 
+## The knowledge graph
+
+The [knowledge tool](../tools/knowledge.md#graph-logs-and-spans) logs and traces these. No field holds a vault note's path or text.
+
+1. *Is the graph in step with its logs?* The gauge `harold.knowledge.graph_waiting` counts the schema and data records with a sequence greater than the graph position. It is published after each change while the graph is on.
+   - **Issue detection:** the card "Graph records waiting" shows it, info only, with a line at 0. Over 0 for more than 10 minutes means the graph is short of its logs. The `knowledge graph behind` warn line fires then (`sequence`, `reason`, `waiting`), and the release watch looks for it. It should never happen.
+   - **Error diagnosis:** the warn line names the record's sequence and a reason word. `harold tool knowledge graph status` prints the position, the end of each log, the records waiting and the last refusal. Read the record from the data log by its sequence. A `voided` count above 0 on a rebuild span leads to the `knowledge graph record voided` lines.
+2. *If TypeDB were lost, would the rebuild work, and how long would it take?* The span `harold.knowledge.graph_rebuild` carries `reason` (`asked` or `missing`), `schema_steps`, `records`, `voided`, `ms` and `result`.
+   - **Optimisation:** the `ms` for the vault's size is the number a change is judged by. The aim is under 30 s at today's size.
+3. *Is the chief using the typed relations?* The gauge `harold.knowledge.typed_relations` counts them. The card "Typed relations, 30 days" shows it, info only. Flat for 30 days means the chief is not using them, and its skill rule is worth a look.
+
 **buckwal's telemetry.** Harold never calls `buckwal::telemetry::init`, which would install a second global subscriber and fail beside Harold's. buckwal's spans and log records (target `buckwal`) go through Harold's own subscriber: they are written to `harold.log` as other crates' lines are, and `span_export_filter` and `is_exported_log_target` in `harold/src/telemetry.rs` also export them under `service.name = harold`. `ALLOWED_FIELDS` adds the buckwal attributes the diagnosis uses. **Detection:** `buckwal.commit` spans with `buckwal.outcome = "error"` counted per hour in ClickHouse are on the card "buckwal commits that failed, per hour". Above 0 in an hour on two hours running matches `knowledge index stale`.
 
 The dashboard group "Knowledge index" holds the four cards. They read `otel.otel_logs` and the span table directly, so they are tables and numbers without an earlier tile, and the product filter does not reach them.

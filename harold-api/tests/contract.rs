@@ -392,3 +392,50 @@ fn agent_state_snapshot_carries_harold_version_in_field_seven() {
     }
     assert_eq!(fields.len(), 7);
 }
+
+#[test]
+fn knowledge_graph_messages_round_trip_and_keep_their_field_numbers() {
+    use harold_api::tools::knowledge::v1::{
+        GraphRelation, GraphStatusResponse, RebuildGraphResponse, RelateRequest,
+        RelationsOfResponse, VoidGraphRecordRequest,
+    };
+
+    let relate = RelateRequest {
+        from: "a".into(),
+        relation: "part_of".into(),
+        to: "b".into(),
+    };
+    assert_eq!(round_trip(&relate), relate);
+    let relations = RelationsOfResponse {
+        relations: vec![GraphRelation {
+            name: "b".into(),
+            title: "B".into(),
+            relation: "links".into(),
+            outgoing: true,
+            missing: true,
+        }],
+    };
+    assert_eq!(round_trip(&relations), relations);
+    let status = GraphStatusResponse {
+        enabled: true,
+        has_data_position: true,
+        data_position: 1285,
+        waiting: 2,
+        has_last_refusal: true,
+        last_refusal_sequence: 1291,
+        last_refusal_reason: "refused".into(),
+        ..Default::default()
+    };
+    assert_eq!(round_trip(&status), status);
+    let rebuilt = RebuildGraphResponse {
+        schema_steps: 1,
+        records: 1284,
+        ..Default::default()
+    };
+    assert_eq!(round_trip(&rebuilt), rebuilt);
+    let void = VoidGraphRecordRequest {
+        sequence: 1291,
+        reason: "typo".into(),
+    };
+    assert_eq!(round_trip(&void), void);
+}

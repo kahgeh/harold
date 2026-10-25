@@ -241,7 +241,7 @@ pub(crate) enum ToolCommand {
     Knowledge(KnowledgeCommand),
 }
 
-const KNOWLEDGE_USAGE_LINE: &str = "invalid argument: usage is harold tool knowledge search WORDS [--limit N] | recent [--limit N] | related NOTE [--limit N] | links NOTE | show NOTE | status | rebuild";
+const KNOWLEDGE_USAGE_LINE: &str = "invalid argument: usage is harold tool knowledge search WORDS [--limit N] | recent [--limit N] | related NOTE [--limit N] | links NOTE | show NOTE | status | rebuild | relate FROM RELATION TO | unrelate FROM RELATION TO | relations NOTE | graph status | graph rebuild | graph void SEQUENCE --reason WORD";
 
 /// How long a knowledge call may take: the first search after a pause waits for the
 /// embedding model to load, and a rebuild embeds the whole vault.
@@ -250,13 +250,44 @@ const KNOWLEDGE_DEADLINE: Duration = Duration::from_secs(180);
 /// A `harold tool knowledge` command. `NOTE` is a vault note's name.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum KnowledgeCommand {
-    Search { query: String, limit: u32 },
-    Recent { limit: u32 },
-    Related { name: String, limit: u32 },
-    Links { name: String },
-    Show { name: String },
+    Search {
+        query: String,
+        limit: u32,
+    },
+    Recent {
+        limit: u32,
+    },
+    Related {
+        name: String,
+        limit: u32,
+    },
+    Links {
+        name: String,
+    },
+    Show {
+        name: String,
+    },
     Status,
     Rebuild,
+    Relate {
+        from: String,
+        relation: String,
+        to: String,
+    },
+    Unrelate {
+        from: String,
+        relation: String,
+        to: String,
+    },
+    Relations {
+        name: String,
+    },
+    GraphStatus,
+    GraphRebuild,
+    GraphVoid {
+        sequence: u64,
+        reason: String,
+    },
 }
 
 /// Splits `--limit N` off the end of a command's arguments.
@@ -308,6 +339,25 @@ fn parse_knowledge(args: &[&str]) -> Result<KnowledgeCommand, String> {
         }),
         ["status"] => Ok(KnowledgeCommand::Status),
         ["rebuild"] => Ok(KnowledgeCommand::Rebuild),
+        ["relate", from, relation, to] => Ok(KnowledgeCommand::Relate {
+            from: (*from).into(),
+            relation: (*relation).into(),
+            to: (*to).into(),
+        }),
+        ["unrelate", from, relation, to] => Ok(KnowledgeCommand::Unrelate {
+            from: (*from).into(),
+            relation: (*relation).into(),
+            to: (*to).into(),
+        }),
+        ["relations", name] => Ok(KnowledgeCommand::Relations {
+            name: (*name).into(),
+        }),
+        ["graph", "status"] => Ok(KnowledgeCommand::GraphStatus),
+        ["graph", "rebuild"] => Ok(KnowledgeCommand::GraphRebuild),
+        ["graph", "void", sequence, "--reason", reason] => Ok(KnowledgeCommand::GraphVoid {
+            sequence: sequence.parse().map_err(|_| usage())?,
+            reason: (*reason).into(),
+        }),
         _ => Err(usage()),
     }
 }
@@ -331,6 +381,7 @@ fn knowledge_refusal_line(status: &tonic::Status, command: &KnowledgeCommand) ->
     let name = match command {
         KnowledgeCommand::Related { name, .. }
         | KnowledgeCommand::Links { name }
+        | KnowledgeCommand::Relations { name }
         | KnowledgeCommand::Show { name } => name.as_str(),
         _ => "",
     };
@@ -338,7 +389,29 @@ fn knowledge_refusal_line(status: &tonic::Status, command: &KnowledgeCommand) ->
         (tonic::Code::Unimplemented, _) => {
             "the Harold daemon does not serve the knowledge tool".into()
         }
+        (tonic::Code::NotFound, "unknown_vault_note") if name.is_empty() => {
+            "unknown vault note: one of the two is not in the graph".into()
+        }
         (tonic::Code::NotFound, "unknown_vault_note") => format!("unknown vault note {name}"),
+        (tonic::Code::Unavailable, "graph_off") => {
+            "the knowledge graph is off: set [knowledge.graph] enabled".into()
+        }
+        (tonic::Code::Unavailable, "graph_behind") => {
+            "the knowledge graph is behind its logs: run harold tool knowledge graph status".into()
+        }
+        (tonic::Code::Unavailable, "graph_rebuilding") => {
+            "the knowledge graph is rebuilding: try again soon".into()
+        }
+        (tonic::Code::Unavailable, "log_failed") => {
+            "the knowledge graph could not write its log, so nothing changed".into()
+        }
+        (tonic::Code::Unavailable, "typedb_unreachable") => {
+            "TypeDB did not answer: the change is logged and applies on the next call".into()
+        }
+        (tonic::Code::FailedPrecondition, "not_refused") => {
+            "that record was not refused: only the record the catch-up stopped at can be voided"
+                .into()
+        }
         (tonic::Code::Unavailable, message) if message.starts_with("search_resting") => {
             "search is resting: the model didn't load".into()
         }
@@ -443,9 +516,143 @@ pub(crate) async fn knowledge_within(
                     built.vault_notes, built.passages
                 ))
             }
+            KnowledgeCommand::Relate { from, relation, to } => {
+                let done = client
+                    .relate(knowledge_api::RelateRequest {
+                        from: from.clone(),
+                        relation: relation.clone(),
+                        to: to.clone(),
+                    })
+                    .await
+                    .map_err(refused)?
+                    .into_inner();
+                Ok(if done.changed {
+                    format!("related {from} {relation} {to}")
+                } else {
+                    format!("already related {from} {relation} {to}")
+                })
+            }
+            KnowledgeCommand::Unrelate { from, relation, to } => {
+                let done = client
+                    .unrelate(knowledge_api::RelateRequest {
+                        from: from.clone(),
+                        relation: relation.clone(),
+                        to: to.clone(),
+                    })
+                    .await
+                    .map_err(refused)?
+                    .into_inner();
+                Ok(if done.changed {
+                    format!("unrelated {from} {relation} {to}")
+                } else {
+                    format!("no relation {from} {relation} {to}")
+                })
+            }
+            KnowledgeCommand::Relations { name } => {
+                let found = client
+                    .relations_of(knowledge_api::RelationsOfRequest {
+                        vault_note: name.clone(),
+                    })
+                    .await
+                    .map_err(refused)?
+                    .into_inner();
+                Ok(knowledge_relations_text(&found.relations))
+            }
+            KnowledgeCommand::GraphStatus => {
+                let status = client
+                    .graph_status(knowledge_api::GraphStatusRequest {})
+                    .await
+                    .map_err(refused)?
+                    .into_inner();
+                Ok(knowledge_graph_status_text(&status))
+            }
+            KnowledgeCommand::GraphRebuild => {
+                let built = client
+                    .rebuild_graph(knowledge_api::RebuildGraphRequest {})
+                    .await
+                    .map_err(refused)?
+                    .into_inner();
+                Ok(format!(
+                    "rebuilt the knowledge graph: {} schema {}, {} data records, {} voided, {} vault notes, {} links, {} typed relations, {:.1} s",
+                    built.schema_steps,
+                    if built.schema_steps == 1 { "step" } else { "steps" },
+                    built.records,
+                    built.voided,
+                    built.vault_notes,
+                    built.links,
+                    built.typed_relations,
+                    built.ms as f64 / 1000.0
+                ))
+            }
+            KnowledgeCommand::GraphVoid { sequence, reason } => {
+                let done = client
+                    .void_graph_record(knowledge_api::VoidGraphRecordRequest {
+                        sequence: *sequence,
+                        reason: reason.clone(),
+                    })
+                    .await
+                    .map_err(refused)?
+                    .into_inner();
+                Ok(format!(
+                    "voided record {sequence} (void record {})",
+                    done.void_sequence
+                ))
+            }
         }
     })
     .await
+}
+
+/// One line per relation: the direction, the relation, the other vault note and its title.
+fn knowledge_relations_text(relations: &[knowledge_api::GraphRelation]) -> String {
+    if relations.is_empty() {
+        return "no relations".into();
+    }
+    relations
+        .iter()
+        .map(|relation| {
+            let arrow = if relation.outgoing { "->" } else { "<-" };
+            let missing = if relation.missing { " (missing)" } else { "" };
+            format!(
+                "{arrow} {} {}{missing} {}",
+                relation.relation, relation.name, relation.title
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn knowledge_graph_status_text(status: &knowledge_api::GraphStatusResponse) -> String {
+    if !status.enabled {
+        return "the knowledge graph is off".into();
+    }
+    let sequence = |has: bool, value: u64| {
+        if has {
+            value.to_string()
+        } else {
+            "none".into()
+        }
+    };
+    let mut lines = vec![
+        format!(
+            "position: schema {}, data {}",
+            sequence(status.has_schema_position, status.schema_position),
+            sequence(status.has_data_position, status.data_position)
+        ),
+        format!(
+            "log ends: schema {}, data {}",
+            sequence(status.has_schema_end, status.schema_end),
+            sequence(status.has_data_end, status.data_end)
+        ),
+        format!("records waiting: {}", status.waiting),
+    ];
+    if status.has_last_refusal {
+        lines.push(format!(
+            "last refusal: record {} ({})",
+            status.last_refusal_sequence, status.last_refusal_reason
+        ));
+    }
+    lines.join("\n")
 }
 
 fn knowledge_status_text(status: &knowledge_api::StatusResponse) -> String {
@@ -2145,6 +2352,51 @@ mod tests {
                 KnowledgeCommand::Rebuild
             )))
         );
+        let knowledge = |command| Ok(Mode::Tool(ToolCommand::Knowledge(command)));
+        assert_eq!(
+            tool(&["relate", "a", "part_of", "b"]),
+            knowledge(KnowledgeCommand::Relate {
+                from: "a".into(),
+                relation: "part_of".into(),
+                to: "b".into()
+            })
+        );
+        assert_eq!(
+            tool(&["unrelate", "a", "part_of", "b"]),
+            knowledge(KnowledgeCommand::Unrelate {
+                from: "a".into(),
+                relation: "part_of".into(),
+                to: "b".into()
+            })
+        );
+        assert_eq!(
+            tool(&["relations", "a"]),
+            knowledge(KnowledgeCommand::Relations { name: "a".into() })
+        );
+        assert_eq!(
+            tool(&["graph", "status"]),
+            knowledge(KnowledgeCommand::GraphStatus)
+        );
+        assert_eq!(
+            tool(&["graph", "rebuild"]),
+            knowledge(KnowledgeCommand::GraphRebuild)
+        );
+        assert_eq!(
+            tool(&["graph", "void", "1291", "--reason", "typo"]),
+            knowledge(KnowledgeCommand::GraphVoid {
+                sequence: 1291,
+                reason: "typo".into()
+            })
+        );
+        for bad in [
+            vec!["relate", "a", "part_of"],
+            vec!["relations"],
+            vec!["graph"],
+            vec!["graph", "void", "x", "--reason", "typo"],
+            vec!["graph", "void", "5"],
+        ] {
+            assert_eq!(tool(&bad), Err(KNOWLEDGE_USAGE_LINE.to_string()), "{bad:?}");
+        }
         for bad in [
             vec![],
             vec!["search"],
@@ -2159,6 +2411,53 @@ mod tests {
         ] {
             assert_eq!(tool(&bad), Err(KNOWLEDGE_USAGE_LINE.to_string()), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn graph_refusals_and_output_are_plain_lines() {
+        let relate = KnowledgeCommand::Relate {
+            from: "a".into(),
+            relation: "part_of".into(),
+            to: "b".into(),
+        };
+        let line = |status: tonic::Status| knowledge_refusal_line(&status, &relate);
+        assert!(line(tonic::Status::unavailable("graph_off")).contains("is off"));
+        assert!(line(tonic::Status::unavailable("graph_behind")).contains("graph status"));
+        assert!(line(tonic::Status::unavailable("graph_rebuilding")).contains("rebuilding"));
+        assert!(line(tonic::Status::unavailable("log_failed")).contains("nothing changed"));
+        assert!(line(tonic::Status::unavailable("typedb_unreachable")).contains("TypeDB"));
+        assert!(line(tonic::Status::failed_precondition("not_refused")).contains("not refused"));
+        assert_eq!(
+            line(tonic::Status::invalid_argument("invalid relation")),
+            "invalid relation"
+        );
+        assert!(
+            line(tonic::Status::not_found("unknown_vault_note")).contains("unknown vault note")
+        );
+        let rows = [knowledge_api::GraphRelation {
+            name: "b".into(),
+            title: "B".into(),
+            relation: "supersedes".into(),
+            outgoing: true,
+            missing: true,
+        }];
+        assert_eq!(
+            knowledge_relations_text(&rows),
+            "-> supersedes b (missing) B"
+        );
+        assert_eq!(knowledge_relations_text(&[]), "no relations");
+        let status = knowledge_api::GraphStatusResponse {
+            enabled: true,
+            has_data_position: true,
+            data_position: 5,
+            has_last_refusal: true,
+            last_refusal_sequence: 6,
+            last_refusal_reason: "refused".into(),
+            ..Default::default()
+        };
+        let text = knowledge_graph_status_text(&status);
+        assert!(text.contains("data 5") && text.contains("schema none"));
+        assert!(text.contains("last refusal: record 6 (refused)"));
     }
 
     #[test]

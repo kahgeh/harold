@@ -186,11 +186,19 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 | knowledge tool | The tool that keeps the knowledge index and answers searches, related notes and suggested links | "search service" |
 | vault | The organisation's knowledge folder of Markdown notes, which Harold reads and never writes | "notes folder", "wiki" |
 | vault note | One Markdown file in the vault | "note" alone, which is a backlog note |
-| knowledge index | Harold's index of the vault by meaning: its passages and embeddings in tursodb, kept durable by buckwal | "search index" alone, "vector DB", "RAG" |
+| knowledge index | Harold's index of the vault by meaning: its passages and embeddings in tursodb, kept durable by buckwal | "search index" alone, "vector DB", "RAG". The knowledge graph is a separate store. |
 | embedding worker | The process Harold starts to run the embedding model, as the voice worker runs Whisper | "embed worker", "model server" |
 | passage | A vault note, or a part of a long one, embedded as one unit | "chunk" |
 | embedding | The numbers the model gives a passage or a query, close together for similar meaning | "vector" alone, "fingerprint" |
 | related notes | The vault notes closest in meaning to a vault note | "similar", "neighbours" |
+| knowledge graph | The vault notes, their links and their typed relations, held in TypeDB and rebuilt from the schema log and the data log | "knowledge base", "graph database" for the whole thing |
+| typed relation | A relation the chief records between two vault notes, of one of the schema's types, such as `supersedes` | "link" (a `[[link]]` in a vault note's text), "edge", "suggested link" (the knowledge index's guess, never stored in the graph) |
+| schema log, data log | The two OpenData logs the knowledge graph is rebuilt from: one for schema steps, one for every insert and update | "event stream" (Harold's own log), "journal" |
+| graph position | The record inside TypeDB of the last schema step and data record applied, as log sequences | "cursor" (`read-cursor.json`), "checkpoint", "count" |
+| schema step | One numbered addition to the knowledge graph's schema, in Harold's code | "migration" (the Turso store's) |
+| graph writer | The one task in Harold that checks, logs and applies every knowledge graph change, one at a time | "worker" (the voice and embedding workers) |
+| voided record | A `void_record` in the data log that tells every replay to pass one refused record | "skip", "deleted record" |
+| missing vault note | A vault note whose file has gone while a typed relation still names it, kept in the knowledge graph with its relations | "orphan", "dangling" |
 | suggested link | A related note scoring 0.60 or more that the vault note does not link to yet | "auto-link" |
 | backlog | A product's top 5 items, ranked, and its backlog notes | — |
 | item | One entry in a backlog | — |

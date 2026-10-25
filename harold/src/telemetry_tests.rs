@@ -1747,6 +1747,8 @@ const METRICS: &[&str] = &[
     "watch.runs",
     "watch.cost_usd",
     "harold.notifications",
+    "harold.knowledge.graph_waiting",
+    "harold.knowledge.typed_relations",
 ];
 
 /// The Metrics table's attributes, plus the two resource attributes every export carries.
@@ -1791,6 +1793,7 @@ const ATTRIBUTES: &[&str] = &[
 
 /// The spec's span table. The trends panel "One turn, end to end" lists `harold.turn`.
 const SPANS: &[&str] = &[
+    "harold.knowledge.graph_rebuild",
     "browser.error",
     "harold.phone_request",
     "harold.route",
@@ -2287,11 +2290,13 @@ fn the_cards_dashboard_shows_each_card_beside_its_earlier_number_and_nothing_els
 const NOTIFICATIONS_CARD: &str = "Notifications by agent and channel";
 const CALL_TURN_CARD: &str = "Call turn, time to first sound and to the answer, last 7 days";
 /// The knowledge index's cards, in the order the dashboard lists them.
-const KNOWLEDGE_CARDS: [&str; 4] = [
+const KNOWLEDGE_CARDS: [&str; 6] = [
     "Knowledge index: hours since the last good pass (info; the line is 2)",
     "Notes searches by source: median ms, searches, searches with 0 results",
     "Knowledge worker, last 7 days: highest rss_mb, mean ms a passage, passages",
     "buckwal commits that failed, per hour",
+    "Graph records waiting (info; the line is 0)",
+    "Typed relations, 30 days (info)",
 ];
 
 /// The web app's cards, in the order the dashboard lists them.

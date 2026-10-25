@@ -282,6 +282,30 @@ pub(crate) struct KnowledgeSettings {
     /// When set, the model file's SHA-256 is checked before the worker loads it.
     pub model_sha256: Option<String>,
     pub bucket: Option<KnowledgeBucketSettings>,
+    /// The knowledge graph in TypeDB, off unless `enabled`.
+    pub graph: KnowledgeGraphSettings,
+}
+
+/// The `[knowledge.graph]` table: typed relations between vault notes, held in TypeDB and
+/// rebuilt from two OpenData logs. Off unless `enabled`; it needs `knowledge.vault` and `server`.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub(crate) struct KnowledgeGraphSettings {
+    pub enabled: bool,
+    /// The absolute path of the TypeDB server binary. Harold starts it and downloads nothing.
+    pub server: Option<String>,
+    /// TypeDB stops after this many minutes without a graph call.
+    pub idle_minutes: u32,
+}
+
+impl Default for KnowledgeGraphSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            server: None,
+            idle_minutes: 10,
+        }
+    }
 }
 
 /// Where buckwal keeps the knowledge index's copy.
@@ -324,6 +348,21 @@ impl KnowledgeSettings {
 
     pub(crate) fn validate(&self) -> Vec<String> {
         let mut errors = Vec::new();
+        if self.graph.enabled {
+            if self.vault.is_none() {
+                errors.push("knowledge.graph.enabled needs knowledge.vault".into());
+            }
+            match &self.graph.server {
+                Some(server) if server.starts_with('/') && server.len() <= 4_096 => {}
+                _ => errors.push(
+                    "knowledge.graph.server must be the absolute path of the TypeDB server binary"
+                        .into(),
+                ),
+            }
+            if !(1..=1_440).contains(&self.graph.idle_minutes) {
+                errors.push("knowledge.graph.idle_minutes must be from 1 to 1440".into());
+            }
+        }
         let Some(vault) = &self.vault else {
             return errors;
         };
@@ -1687,6 +1726,24 @@ encryption_key_file = "/Users/x/.config/harold/knowledge-key"
         assert!(!shipped.enabled());
         assert!(shipped.exclude.is_empty());
         assert!(shipped.validate().is_empty());
+    }
+
+    #[test]
+    fn the_knowledge_graph_ships_off_and_needs_the_vault_and_the_server() {
+        let shipped = parse_knowledge(include_str!("../config/default.toml"));
+        assert!(!shipped.graph.enabled);
+        assert_eq!(shipped.graph.idle_minutes, 10);
+        let on =
+            |extra: &str| parse_knowledge(&format!("{KNOWLEDGE_ON}\n[knowledge.graph]\n{extra}"));
+        let good = on("enabled = true\nserver = \"/opt/homebrew/bin/typedb_server_bin\"\n");
+        assert_eq!(good.validate(), Vec::<String>::new());
+        assert!(on("enabled = true\n").validate()[0].contains("knowledge.graph.server"));
+        let relative = on("enabled = true\nserver = \"typedb\"\n");
+        assert!(relative.validate()[0].contains("knowledge.graph.server"));
+        let idle = on("enabled = true\nserver = \"/x/typedb\"\nidle_minutes = 0\n");
+        assert!(idle.validate()[0].contains("idle_minutes"));
+        let no_vault = parse_knowledge("[knowledge.graph]\nenabled = true\nserver = \"/x\"\n");
+        assert!(no_vault.validate()[0].contains("needs knowledge.vault"));
     }
 
     #[test]

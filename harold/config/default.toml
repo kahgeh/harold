@@ -55,6 +55,17 @@ model = "haiku"
 # and change log would be exclude = ["MEMORY.md", "log.md"].
 exclude = []
 
+# The knowledge graph keeps typed links between vault notes in TypeDB, rebuilt from two
+# OpenData logs. It is off until you set these in config/local.toml, and it needs
+# [knowledge] vault. You install the TypeDB server; Harold starts it on 127.0.0.1 on the
+# first graph call and stops it after idle_minutes without one.
+#   [knowledge.graph]
+#   enabled = true
+#   server = "/opt/homebrew/bin/typedb_server_bin"
+[knowledge.graph]
+enabled = false
+idle_minutes = 10
+
 # The small model that answers each turn of a call; real work goes to the chief. It runs
 # Claude Code with [activity_summary] cli_path, whether or not activity summaries are on.
 [call_answerer]
