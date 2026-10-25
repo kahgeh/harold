@@ -6,6 +6,74 @@ It is a [tool](README.md): a module of the daemon with its own storage and gRPC 
 
 The vault stays the source. Harold only reads it, and the index can always be rebuilt from it.
 
+## How the parts fit
+
+<pre class="mermaid">
+flowchart LR
+  subgraph Callers["Callers"]
+    CLI["The chief: harold tool knowledge"]
+    WEB["Web app: Notes page"]
+    DASH["Dash: the s search"]
+  end
+  subgraph Tool["Harold: the knowledge tool"]
+    PASS["Watcher and passes: start-up, hourly, and 2 s after a save"]
+    EMB["Embedding worker: EmbeddingGemma, started on demand, stops after 10 minutes idle"]
+    IDX["Knowledge index: tursodb, opened through buckwal"]
+    GW["Graph writer: checks, logs, then applies each change"]
+    TDB["TypeDB: started by Harold, stops after idle_minutes"]
+  end
+  subgraph Disk["This Mac's local disk"]
+    VAULT[("The vault: .md vault notes")]
+    LOCAL[("Index local copy: tools/knowledge/index")]
+    LOGS[("Schema log and data log: OpenData, ObjectStoreConfig Local")]
+    TFILES[("TypeDB data: tools/knowledge/graph/typedb")]
+  end
+  subgraph Remote["The bucket"]
+    BUCKET[("Encrypted bucket: ciphertext only, one prefix per Mac")]
+  end
+  VAULT --> PASS
+  PASS --> EMB
+  PASS --> IDX
+  PASS --> GW
+  IDX --> LOCAL
+  LOCAL --> BUCKET
+  GW --> LOGS
+  GW --> TDB
+  TDB --> TFILES
+  CLI --> IDX
+  CLI --> GW
+  WEB --> IDX
+  DASH --> IDX
+  classDef existing fill:#eef0f4,stroke:#8e96a3,color:#1d2420
+  class CLI,WEB,DASH,PASS,EMB,IDX,GW,TDB,VAULT,LOCAL,LOGS,TFILES,BUCKET existing
+  style Callers fill:#1b1d23,stroke:#a4adbb,color:#ffffff
+  style Tool fill:#1b1d23,stroke:#a4adbb,color:#ffffff
+  style Disk fill:#1b1d23,stroke:#a4adbb,color:#ffffff
+  style Remote fill:#1b1d23,stroke:#a4adbb,color:#ffffff
+  linkStyle default stroke:#8e96a3,stroke-width:2px
+</pre>
+
+Boxes are parts and cylinders are stores. Each dark group is where the parts run or live. An arrow points from a part to what it reads or writes. A search embeds the query with the embedding worker, as a pass embeds passages. The graph exists only when `[knowledge.graph] enabled` is set.
+
+**Which store each call reads:**
+
+| Call | Caller | Reads |
+|---|---|---|
+| `search`, `related`, `links`, `show`, `recent` | the chief, the Notes page, the dash's `s` (search only) | the knowledge index, through buckwal's local copy |
+| `status`, `rebuild` | the chief | the knowledge index (`rebuild` reads the vault again) |
+| `relate`, `unrelate`, `relations`, `graph status` | the chief | the graph writer, then TypeDB |
+| `graph rebuild`, `graph void` | the chief | the schema log and the data log, then TypeDB. A rebuild never reads the vault |
+
+**What survives which loss:**
+
+| Lost | What happens |
+|---|---|
+| The index's local copy | buckwal restores the database from the bucket at the next start |
+| The bucket's objects too | the next pass builds the index again from the vault |
+| TypeDB's data | Harold rebuilds the graph from the two logs, at start or with `graph rebuild` |
+| The two logs | the typed relations are lost. The vault notes and their links come back from the next pass over the vault |
+| The Mac | the vault and the bucket survive, if they live elsewhere. The logs and TypeDB's data are on this Mac only, so the typed relations are lost |
+
 ## The CLI
 
 ```sh
