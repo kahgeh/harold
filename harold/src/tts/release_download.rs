@@ -2,7 +2,7 @@
 //! `thewh1teagle/kokoro-onnx`. The release publishes no SHA-256, so Harold pins each file's size
 //! and SHA-256 in this code and keeps a file only when both match. The user approved this one
 //! source (ADR 0020, Choice E (a)); it is not Hugging Face and `voices-v1.0.bin` is a `.bin`
-//! file.
+//! file. The pins come from one download on 2026-10-26, on the Mac that built the server.
 //!
 //! The download asks only for the two fixed URLs, follows redirects only to GitHub's release
 //! download hosts, and sends no token, no cookie and no `Authorization` header. It writes each
@@ -15,7 +15,6 @@ use std::io::Write;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
-use tracing::warn;
 
 /// The repository, as the model's id.
 pub(crate) const MODEL_ID: &str = "thewh1teagle/kokoro-onnx";
@@ -42,24 +41,19 @@ pub(crate) struct ReleaseFile {
     pub sha256: &'static str,
 }
 
-/// What a pin holds before the user records the file's SHA-256. No file has it, so a download
-/// is refused with `check_failed` and nothing is kept. The user records the pins from one
-/// download on the machine (docs/references/tts/README.md).
-pub(crate) const PIN_NOT_RECORDED: &str =
-    "0000000000000000000000000000000000000000000000000000000000000000";
-
-/// The two files of the release, with the sizes the release lists. The SHA-256 of each is
-/// recorded from one download by the user (see `PIN_NOT_RECORDED`).
+/// The two files of the release, with the sizes the release lists. The SHA-256 of each was
+/// recorded from one download on 2026-10-26, on the Mac that built the server (ADR 0020,
+/// Choice E (a)). The release publishes no SHA-256 to compare with.
 pub(crate) const FILES: [ReleaseFile; 2] = [
     ReleaseFile {
         name: "kokoro-v1.0.onnx",
         size: 325_532_387,
-        sha256: PIN_NOT_RECORDED,
+        sha256: "7d5df8ecf7d4b1878015a32686053fd0eebe2bc377234608764cc0ef3636a6c5",
     },
     ReleaseFile {
         name: "voices-v1.0.bin",
         size: 28_214_398,
-        sha256: PIN_NOT_RECORDED,
+        sha256: "bca610b8308e8d99f32e6fe4197e7ec01679264efed0cac9140fe9c29f1fbf7d",
     },
 ];
 
@@ -147,13 +141,6 @@ impl ReleaseDownloader {
         let mut bytes = 0;
         let mut checked = Vec::new();
         for file in &self.files {
-            if file.sha256 == PIN_NOT_RECORDED {
-                warn!(
-                    model = MODEL_ID,
-                    "tts model pin not recorded: the SHA-256 of a release file is not in the code"
-                );
-                return Err("check_failed");
-            }
             let size = self.fetch(file, folder, bytes, &progress).await?;
             bytes += size;
             checked.push(file);

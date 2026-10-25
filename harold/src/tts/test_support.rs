@@ -4,7 +4,7 @@
 use super::fetch::{Env, Host, snapshot_dir};
 use super::hub::{Fetcher, RemoteFile};
 use super::models::*;
-use super::release_download::ReleaseDownloader;
+use super::release_download::{FILES, ReleaseDownloader};
 use super::worker::*;
 use crate::settings::KOKORO_REVISION;
 use crate::tools::BoxFuture;
@@ -373,7 +373,13 @@ impl Scratch {
             },
             host: self.host.clone(),
             fetcher: self.hub.clone(),
-            release: Arc::new(ReleaseDownloader::production()),
+            // The real pins, against an address no server answers: a download fails at once and
+            // no test uses the network.
+            release: Arc::new(ReleaseDownloader::for_test(
+                "http://127.0.0.1:9/release".to_string(),
+                FILES.to_vec(),
+                vec!["127.0.0.1".to_string()],
+            )),
             default_row: self.default_row.clone(),
         }
     }

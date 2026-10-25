@@ -813,9 +813,33 @@ async fn the_release_row_with_a_record_that_holds_is_ready_without_a_download() 
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn the_release_row_with_unrecorded_pins_is_listed_failed_with_check_failed() {
+async fn a_release_row_whose_download_fails_its_check_is_listed_failed_with_check_failed() {
     let logs = CapturedLogs::start();
     let scratch = Scratch::new();
+    // A local server that answers every request with five bytes, which is not the pinned size.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        loop {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            tokio::spawn(async move {
+                let mut request = [0u8; 1024];
+                let _ = stream.read(&mut request).await;
+                let _ = stream
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\ncontent-length: 5\r\nconnection: close\r\n\r\nwrong",
+                    )
+                    .await;
+            });
+        }
+    });
+    let mut deps = scratch.deps();
+    deps.release = Arc::new(release_download::ReleaseDownloader::for_test(
+        format!("http://127.0.0.1:{port}/release"),
+        release_download::FILES.to_vec(),
+        vec!["127.0.0.1".to_string()],
+    ));
     let row = Row {
         id: release_download::MODEL_ID.to_string(),
         source: Source::GithubRelease,
@@ -826,7 +850,7 @@ async fn the_release_row_with_unrecorded_pins_is_listed_failed_with_check_failed
         voices: Vec::new(),
         asked: false,
     };
-    let registry = Registry::new(scratch.deps(), row);
+    let registry = Registry::new(deps, row);
 
     registry.start_up();
 

@@ -107,15 +107,6 @@ On Linux, a Hugging Face model needs `huggingface_hub` in `[tts] python`. The pi
 - Kokoro on Linux uses `harold/src/tts/release_download.rs`. It asks only for the two fixed URLs, follows redirects only to GitHub's release download hosts, and sends no token, cookie or `Authorization` header. It writes a temporary file, computes the SHA-256 while it writes, and renames the file into place only when the size and the SHA-256 equal the pins.
 - One download runs at a time on the machine, and none starts on the iPhone's hotspot until a call or the user starts one.
 
-### Recording the Linux pins
-
-The SHA-256 of the two release files is not recorded in the code yet: the machine that built the server does not download real models. Until you record it, the Linux download refuses with `check_failed` and keeps nothing. On the Linux machine:
-
-1. Download each file once into a scratch folder.
-2. Run `sha256sum` on each file.
-3. Put the two values in `FILES` in `harold/src/tts/release_download.rs`, in place of the 64 zeros.
-4. Add the values to row 14 of [dependency audits](../dependency-audits.md).
-
 ## The GPU on Linux
 
 The ONNX worker starts `CUDAExecutionProvider` first, with `gpu_mem_limit` set to 1 GB and `arena_extend_strategy` set to `kSameAsRequested`, and `CPUExecutionProvider` second. It checks which one the loaded session uses.
@@ -145,7 +136,6 @@ The build uses fakes and fake servers only. These checks are for the user to run
 1. Speak a desk line, make a call, and add one approved model.
 2. Read `first_audio_ms` with the model loaded and after a stop.
 3. On the Omarchy machine, measure a short and a long line on the GPU and, with CUDA turned off for the test, on the CPU. Record both here. The aims are a p95 under 150 ms on the GPU and under 500 ms on the CPU and on the Mac, with the model loaded.
-4. Record the Linux pins (above).
 
 ## Troubleshooting
 

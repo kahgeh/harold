@@ -345,20 +345,23 @@ async fn an_unreachable_server_is_a_network_failure() {
     );
 }
 
-#[tokio::test]
-async fn pins_that_are_not_recorded_refuse_the_download_before_it_asks_for_anything() {
-    let fake = Fake::start(HashMap::new()).await;
-    let downloader = ReleaseDownloader::for_test(
-        format!("http://127.0.0.1:{}/release", fake.port),
-        FILES.to_vec(),
-        vec!["127.0.0.1".into()],
-    );
-    let (folder, record) = scratch();
-
-    let result = downloader.download_all(&folder, &record, |_| {}).await;
-
-    assert_eq!(result, Err("check_failed"));
-    assert!(fake.paths().is_empty());
+#[test]
+fn the_pins_are_recorded_sha256_values() {
+    for file in FILES {
+        assert_eq!(file.sha256.len(), 64, "{}", file.name);
+        assert!(
+            file.sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+            "{} is not lowercase hex",
+            file.name
+        );
+        assert!(
+            file.sha256.bytes().any(|byte| byte != b'0'),
+            "{}",
+            file.name
+        );
+    }
 }
 
 #[test]
