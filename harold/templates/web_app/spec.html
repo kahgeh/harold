@@ -22,7 +22,7 @@
 <main class="notes-page vault-note spec-page">
 <p class="note-kind spec-top">{{ product }} · {{ id }} · sha {{ sha }}</p>
 <h3>{{ title }}</h3>
-{% if share %}<p class="spec-share"><button type="button" id="share-spec" class="share-button" data-on:click="@post('{{ share_path }}', {filterSignals: {include: /^none$/}})">Share</button></p>
+{% if share %}<p class="spec-share"><button type="button" id="share-spec" class="share-button" data-on:click="@post('{{ share_path }}', {filterSignals: {include: /^none$/}, retryMaxCount: 0})">Share</button></p>
 {% endif %}<div class="note-text">{{ html|safe }}</div>
 </main>
 </body>

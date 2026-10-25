@@ -768,3 +768,26 @@ async fn the_specs_listener_opens_only_with_a_pod_registry() {
     with.handle.await.unwrap();
     without.handle.await.unwrap();
 }
+
+#[test]
+fn the_share_button_posts_through_datastar_and_not_plain_fetch() {
+    let template = include_str!("../../templates/web_app/spec.html");
+    assert!(
+        template.contains("data-on:click=\"@post('{{ share_path }}'"),
+        "the Share button does not use Datastar's @post"
+    );
+    // Datastar retries a failed request up to 10 times; a repeated Share would ask the chief again.
+    assert!(
+        template.contains("retryMaxCount: 0"),
+        "the Share post may retry"
+    );
+    for absent in ["fetch(", "XMLHttpRequest", "<form"] {
+        assert!(!template.contains(absent), "spec.html holds {absent}");
+    }
+    let script = include_str!("../../static/web_app/specs.js");
+    assert!(!script.contains("fetch("), "specs.js posts with fetch");
+    assert!(
+        !script.contains("/share"),
+        "specs.js posts the share request"
+    );
+}
