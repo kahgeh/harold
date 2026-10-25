@@ -111,6 +111,17 @@ button[hidden] {
   backdrop-filter: saturate(180%) blur(20px);
 }
 
+/* black-translucent draws the time and icons in white, so the light strip gets a dark tint. */
+@media (prefers-color-scheme: light) {
+  .top {
+    background: linear-gradient(
+      to bottom,
+      color-mix(in srgb, var(--surface-1), black 60%) 0 var(--status-strip),
+      var(--surface-1) var(--status-strip)
+    );
+  }
+}
+
 .row {
   display: flex;
   flex: 1;

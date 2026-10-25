@@ -914,3 +914,61 @@ fn the_guard_fails_on_a_fetch_post_and_passes_on_the_call_audio_and_on_reads() {
         .is_empty()
     );
 }
+
+#[test]
+fn every_home_screen_page_runs_under_the_status_bar_and_the_light_strip_is_tinted() {
+    let pages = [
+        (
+            "thread",
+            include_str!("../../templates/web_app/thread.html"),
+        ),
+        ("notes", include_str!("../../templates/web_app/notes.html")),
+        ("note", include_str!("../../templates/web_app/note.html")),
+        (
+            "specs_list",
+            include_str!("../../templates/web_app/specs_list.html"),
+        ),
+        ("spec", include_str!("../../templates/web_app/spec.html")),
+        (
+            "spec_gone",
+            include_str!("../../templates/web_app/spec_gone.html"),
+        ),
+        ("pair", include_str!("../../templates/web_app/pair.html")),
+        (
+            "echo_test",
+            include_str!("../../templates/web_app/echo_test.html"),
+        ),
+        (
+            "speech_check",
+            include_str!("../../templates/web_app/speech_check.html"),
+        ),
+    ];
+    for (name, page) in pages {
+        assert!(
+            page.contains(r#"<meta name="apple-mobile-web-app-capable" content="yes">"#),
+            "{name}.html lacks the capable meta"
+        );
+        assert!(
+            page.contains(
+                r#"<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">"#
+            ),
+            "{name}.html lacks the black-translucent meta"
+        );
+    }
+    let css = include_str!("../../static/web_app/app.css");
+    let start = css
+        .find("@media (prefers-color-scheme: light) {")
+        .expect("app.css lacks the light-mode header tint");
+    let tint = &css[start..];
+    let tint = &tint[..tint.find("\n}\n").expect("tint is closed")];
+    for wanted in [
+        ".top {",
+        "color-mix(in srgb, var(--surface-1), black 60%) 0 var(--status-strip),",
+        "var(--surface-1) var(--status-strip)",
+    ] {
+        assert!(
+            tint.contains(wanted),
+            "the light-mode tint lacks {wanted:?}"
+        );
+    }
+}
