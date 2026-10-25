@@ -142,10 +142,13 @@ impl Speech {
     }
 
     async fn finish(&mut self) -> Result<(), SpeakFailure> {
-        let Some(end) = self.end.take() else {
+        let Some(end) = self.end.as_mut() else {
             return Ok(());
         };
-        match end.await {
+        // `end` stays set while it is awaited, so a line dropped in this wait is `stopped`.
+        let ended = end.await;
+        self.end = None;
+        match ended {
             Ok(Ok(done)) => {
                 self.span.record("device", done.device.as_str());
                 self.span.record("result", "spoke");

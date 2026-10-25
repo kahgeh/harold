@@ -669,8 +669,8 @@ impl Supervisor {
     }
 
     /// Stops the worker at once when it holds the MLX model `model`, for a removed model. A
-    /// worker that holds another model, or none, keeps running. An ONNX worker holds only
-    /// Kokoro, which cannot be removed.
+    /// worker that holds another model, or none, keeps running. An ONNX worker is not stopped
+    /// here: it stops when another model is asked for, or when it is idle.
     pub(crate) async fn stop_if_holding(&self, model: &str) {
         let mut live = self.live.lock().await;
         let holds = matches!(
