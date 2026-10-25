@@ -1356,11 +1356,29 @@ async fn post_run(server: &TestServer, body: String) -> reqwest::Response {
         .post(server.url("/echo-test/runs"))
         .header("Tailscale-User-Login", LOGIN)
         .header("Sec-Fetch-Site", "same-origin")
+        .header("Datastar-Request", "true")
         .header("Content-Type", "application/json")
         .body(body)
         .send()
         .await
         .unwrap()
+}
+
+/// The class and the text of the one result line in the Datastar events that patch
+/// `#echo-results`.
+async fn echo_line(response: reqwest::Response) -> (String, String) {
+    assert_eq!(response.status(), 200);
+    let events = response.text().await.unwrap();
+    let html = events
+        .lines()
+        .find_map(|line| line.strip_prefix("data: elements "))
+        .unwrap_or_else(|| panic!("an elements patch in {events}"));
+    let rest = html
+        .strip_prefix(r#"<ul id="echo-results"><li"#)
+        .unwrap_or_else(|| panic!("the results list in {html}"));
+    let (attributes, text) = rest.split_once('>').unwrap();
+    let text = text.strip_suffix("</li></ul>").unwrap();
+    (attributes.trim().to_owned(), text.to_owned())
 }
 
 fn run_body(kind: &str, loud_frames: usize) -> String {
@@ -1406,8 +1424,8 @@ async fn the_echo_test_page_serves_its_script_and_says_no_sound_is_sent() {
     assert!(page.contains("loudness numbers"), "{page}");
     assert!(page.contains("no sound"), "{page}");
     assert!(
-        !page.contains("datastar"),
-        "the page does not load Datastar"
+        page.contains(r#"<script type="module" src="/static/datastar-1.0.2.js"></script>"#),
+        "the page loads Datastar, which the script posts through: {page}"
     );
 
     // Nothing in the app links to it.
@@ -1451,11 +1469,14 @@ async fn a_run_is_written_under_echo_test_answered_with_its_verdict_and_logged_w
     let (server, folder) = echo_server(&directory, &FakeSay::new(false)).await;
 
     let response = post_run(&server, run_body("silent", 2)).await;
-    assert_eq!(response.status(), 200);
-    let answer: serde_json::Value = response.json().await.unwrap();
-    assert_eq!(answer["verdict"], "pass");
-    assert_eq!(answer["saved"], true);
-    let line = answer["line"].as_str().unwrap();
+    assert_eq!(
+        response.headers()["content-type"],
+        "text/event-stream",
+        "the answer is Datastar events"
+    );
+    let (class, line) = echo_line(response).await;
+    assert_eq!(class, "", "a pass has no class");
+    let line = line.as_str();
     assert!(line.starts_with("Silent, on the table: pass."), "{line}");
     assert!(line.contains("2%"), "{line}");
 
@@ -1489,25 +1510,30 @@ async fn a_run_is_written_under_echo_test_answered_with_its_verdict_and_logged_w
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_failed_run_patches_its_line_in_class_fail_and_escapes_it() {
+    let directory = TestDirectory::new();
+    let (server, _) = echo_server(&directory, &FakeSay::new(false)).await;
+
+    // Every playback frame is loud, so the silent run fails.
+    let (class, line) = echo_line(post_run(&server, run_body("silent", 100)).await).await;
+    assert_eq!(class, r#"class="fail""#);
+    assert!(line.contains("fail"), "{line}");
+    assert!(!line.contains('<'), "{line}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_talk_run_uses_the_newest_silent_run_of_its_setup() {
     let directory = TestDirectory::new();
     let (server, folder) = echo_server(&directory, &FakeSay::new(false)).await;
 
-    let first: serde_json::Value = post_run(&server, run_body("talk", 100))
-        .await
-        .json()
-        .await
-        .unwrap();
-    assert_eq!(first["verdict"], "run_silent_first");
+    let (_, first) = echo_line(post_run(&server, run_body("talk", 100)).await).await;
+    assert!(first.contains("run silent first"), "{first}");
 
     // The silent run's frames are all 100, so the bar is 200 and the talk run's 500s clear it.
     assert_eq!(post_run(&server, run_body("silent", 0)).await.status(), 200);
-    let talk: serde_json::Value = post_run(&server, run_body("talk", 100))
-        .await
-        .json()
-        .await
-        .unwrap();
-    assert_eq!(talk["verdict"], "pass");
+    let (class, talk) = echo_line(post_run(&server, run_body("talk", 100)).await).await;
+    assert_eq!(class, "", "{talk}");
+    assert!(talk.contains("pass"), "{talk}");
     assert_eq!(
         run_files(&folder).len(),
         3,

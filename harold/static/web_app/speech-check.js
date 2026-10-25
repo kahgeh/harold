@@ -4,7 +4,7 @@
 // What it keeps and sends are yes or no answers, counts, milliseconds and the recognizer's
 // error names. A word the user says is compared on the phone and thrown away: it is never
 // stored and never sent. The results are held in `localStorage` and posted to
-// `POST /speech-check/runs` once the last check is done, again and again until Harold takes
+// `POST /speech-check/runs`, through Datastar's @post, once the last check is done, again and again until Harold takes
 // them, because check 0 runs with the network off.
 "use strict";
 
@@ -547,13 +547,51 @@
     advance();
   }
 
-  function post() {
-    return fetch(RUNS_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(run),
-    });
+  // Datastar's own module, the one the page loads: its signals and its @post.
+  const datastar = import("/static/datastar-1.0.2.js");
+
+  // Sets `signals`, then sends `include`d signals with Datastar's @post (or `action`). Resolves
+  // to the HTTP status when Datastar announced an error for the request, else 200; rejects when
+  // the request could not be sent. A request is never retried, and it stays open while the page hides (the
+  // default would abort it and send it again on return), so one failed post is one
+  // post, and a 401 (the device is no longer paired) reloads to the pair screen.
+  async function post(element, url, signals, include, options = {}) {
+    // A request with no element of its own gets one, so another request's error is not taken for its.
+    const el = element || document.createElement("span");
+    const { actions, mergePatch } = await datastar;
+    mergePatch(signals);
+    let status = 200;
+    const note = (event) => {
+      const detail = event.detail;
+      if (detail && detail.type === "error" && detail.el === el) {
+        status = Number(detail.argsRaw && detail.argsRaw.status) || 0;
+      }
+    };
+    document.addEventListener("datastar-fetch", note);
+    try {
+      await actions[options.action || "post"](
+        { el, evt: undefined, error: (name) => new Error(name), cleanups: new Map() },
+        url,
+        {
+          filterSignals: { include },
+          openWhenHidden: true,
+          requestCancellation: "disabled",
+          retry: "never",
+          retryMaxCount: 0,
+          ...options.request,
+        },
+      );
+    } finally {
+      document.removeEventListener("datastar-fetch", note);
+    }
+    if (status === 401) {
+      location.reload();
+    }
+    return status;
   }
+
+  // The run is the signals; Harold reads them back as the run's JSON.
+  const RUN_SIGNALS = /^(standalone|check\d_[a-z_]+)$/;
 
   function clearHeld() {
     try {
@@ -568,14 +606,14 @@
     let delay = RETRY_MIN_MS;
     for (;;) {
       try {
-        const response = await post();
-        if (response.status === 204) {
+        const status = await post(statusLine, RUNS_URL, run, RUN_SIGNALS);
+        if (status === 200) {
           clearHeld();
           say("Sent. Harold has your results. You can close this page.");
           return;
         }
-        if (response.status >= 400 && response.status < 500) {
-          say("Harold refused the results (" + response.status + "). Tell the chief.");
+        if (status >= 400 && status < 500) {
+          say("Harold refused the results (" + status + "). Tell the chief.");
           return;
         }
       } catch (error) {

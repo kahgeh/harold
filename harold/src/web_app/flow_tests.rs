@@ -97,18 +97,15 @@ impl TestServer {
         format!("http://{}{path}", self.addr)
     }
 
-    /// Posts `body` with the headers the app's own page sends: Datastar's `@post` to
-    /// `/replies`, and `alerts.js`'s fetch to `/push/subscription`.
+    /// Posts `body` with the headers the app's own page sends: Datastar's `@post`.
     async fn post(&self, path: &str, body: impl Into<reqwest::Body>) -> reqwest::Response {
-        let mut request = reqwest::Client::new()
+        let request = reqwest::Client::new()
             .post(self.url(path))
             .header("Tailscale-User-Login", LOGIN)
             .header("sec-fetch-site", "same-origin")
             .header("origin", format!("http://{}", self.addr))
+            .header("datastar-request", "true")
             .header("content-type", "application/json");
-        if path == "/replies" {
-            request = request.header("datastar-request", "true");
-        }
         request.body(body).send().await.unwrap()
     }
 
@@ -724,10 +721,12 @@ async fn a_same_origin_datastar_post_is_accepted() {
     for headers in [
         [
             ("sec-fetch-site", "same-origin"),
+            ("datastar-request", "true"),
             ("content-type", "application/json"),
         ],
         [
             ("origin", origin.as_str()),
+            ("datastar-request", "true"),
             ("content-type", "Application/JSON; charset=utf-8"),
         ],
     ] {
@@ -746,6 +745,157 @@ async fn a_same_origin_datastar_post_is_accepted() {
     assert_eq!(stored.len(), 3, "{stored:?}");
     assert_eq!(stored[0].0, "InboundMessageReceived");
     assert_eq!(stored[0].1["text"], "from the page");
+}
+
+/// Current-thread runtime, so `CapturedLogs` sees the middleware's lines.
+#[tokio::test(flavor = "current_thread")]
+async fn a_json_post_without_the_datastar_header_is_refused_and_logged_by_route() {
+    let logs = CapturedLogs::start();
+    let directory = TestDirectory::new();
+    let store = directory.store().await;
+    let server = TestServer::serve(store.clone()).await;
+    let own = [
+        ("sec-fetch-site", "same-origin"),
+        ("content-type", "application/json"),
+    ];
+
+    for (method, path) in [
+        (reqwest::Method::POST, "/push/subscription"),
+        (reqwest::Method::POST, "/replies"),
+        (reqwest::Method::POST, "/page/hidden"),
+        (reqwest::Method::POST, "/pair"),
+        (reqwest::Method::DELETE, "/call"),
+        (reqwest::Method::POST, "/call/check"),
+    ] {
+        let response = server
+            .send_with(method.clone(), path, &own, a_subscription())
+            .await;
+        assert_eq!(response.status(), 403, "{method} {path}");
+        assert!(response.bytes().await.unwrap().is_empty(), "{path}");
+    }
+    assert_nothing_stored(&store).await;
+    let captured = logs.text();
+    assert_eq!(
+        captured.matches("app post refused").count(),
+        6,
+        "{captured}"
+    );
+    for route in [
+        "/push/subscription",
+        "/replies",
+        "/page/hidden",
+        "/pair",
+        "/call",
+        "/call/check",
+    ] {
+        assert!(
+            captured.contains(&format!("route=\"{route}\"")),
+            "{route} in {captured}"
+        );
+    }
+    assert!(captured.contains(r#"reason="not_datastar""#), "{captured}");
+    assert!(!captured.contains("web.push.apple.com"), "{captured}");
+
+    // A post from another site, or another Host, is refused without a line.
+    let before = logs.text().matches("app post refused").count();
+    let cross = [
+        ("sec-fetch-site", "cross-site"),
+        ("content-type", "application/json"),
+    ];
+    let response = server
+        .send_with(reqwest::Method::POST, "/replies", &cross, String::new())
+        .await;
+    assert_eq!(response.status(), 403);
+    assert_eq!(logs.text().matches("app post refused").count(), before);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn only_the_audio_route_takes_octet_stream_and_only_the_traces_route_takes_json_without_the_header()
+ {
+    let directory = TestDirectory::new();
+    let store = directory.store().await;
+    let server = TestServer::serve(store.clone()).await;
+    let with = |content_type: &'static str| {
+        [
+            ("sec-fetch-site", "same-origin"),
+            ("content-type", content_type),
+        ]
+    };
+    let octet = with("application/octet-stream");
+    let json = with("application/json");
+
+    // The two approved routes are let in by their own type: the audio route answers 409
+    // for no open call, not 403.
+    let audio = server
+        .send_with(
+            reqwest::Method::POST,
+            "/call/audio?at=0",
+            &octet,
+            String::new(),
+        )
+        .await;
+    assert_eq!(audio.status(), 409);
+    let traces = server
+        .send_with(
+            reqwest::Method::POST,
+            "/telemetry/traces",
+            &json,
+            "{}".into(),
+        )
+        .await;
+    assert_ne!(traces.status(), 403, "the exporter's JSON passes");
+
+    // Each type is let in on its own route only.
+    for (path, headers) in [
+        ("/call/audio?at=0", &json),
+        ("/telemetry/traces", &octet),
+        ("/replies/photo", &octet),
+        ("/replies/photo", &json),
+        ("/call/check", &octet),
+        ("/push/subscription", &octet),
+        ("/push/subscription", &json),
+        ("/echo-test/runs", &json),
+    ] {
+        let response = server
+            .send_with(reqwest::Method::POST, path, headers, String::new())
+            .await;
+        assert_eq!(response.status(), 403, "{path} with {headers:?}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_delete_with_the_datastar_header_passes_the_origin_check() {
+    let directory = TestDirectory::new();
+    let server = TestServer::serve(directory.store().await).await;
+
+    // No call is set up in the test server, so `DELETE /call` answers 409, past the check.
+    let datastar = [
+        ("sec-fetch-site", "same-origin"),
+        ("datastar-request", "true"),
+    ];
+    let passed = server
+        .send_with(reqwest::Method::DELETE, "/call", &datastar, String::new())
+        .await;
+    assert_eq!(passed.status(), 409);
+    let refused = server
+        .send_with(
+            reqwest::Method::DELETE,
+            "/call",
+            &[("sec-fetch-site", "same-origin")],
+            String::new(),
+        )
+        .await;
+    assert_eq!(refused.status(), 403);
+    // A header with any other value is no Datastar header.
+    let other = server
+        .send_with(
+            reqwest::Method::DELETE,
+            "/call",
+            &[("sec-fetch-site", "same-origin"), ("datastar-request", "1")],
+            String::new(),
+        )
+        .await;
+    assert_eq!(other.status(), 403);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1062,6 +1212,7 @@ async fn a_closed_stream_counts_down_and_a_new_one_waits_for_the_page_to_be_seen
             &[
                 ("sec-fetch-site", "same-origin"),
                 ("origin", &format!("http://{}", server.addr)),
+                ("datastar-request", "true"),
                 ("content-type", "application/json"),
             ],
             String::new(),
@@ -1217,6 +1368,7 @@ async fn the_seen_report_answers_204_with_the_login_host_and_origin_checks() {
             &[
                 ("sec-fetch-site", "same-origin"),
                 ("origin", &own_origin),
+                ("datastar-request", "true"),
                 ("content-type", "application/json"),
             ],
             String::new(),
@@ -1315,6 +1467,7 @@ async fn post_seen(server: &TestServer, body: &str) -> reqwest::StatusCode {
             &[
                 ("sec-fetch-site", "same-origin"),
                 ("origin", &origin),
+                ("datastar-request", "true"),
                 ("content-type", "application/json"),
             ],
             body.to_owned(),
@@ -1390,4 +1543,24 @@ async fn a_seen_report_weighs_only_the_newest_stream() {
 
     assert!(stalled_lines(&logs).is_empty(), "{}", logs.text());
     assert_eq!(server.pages.visible(), 2);
+}
+
+#[test]
+fn a_stream_knows_how_many_hidden_reports_came_while_it_was_open() {
+    let pages = std::sync::Arc::new(super::OpenPages::default());
+    let first = pages.open();
+    let second = pages.open();
+    let (first, second) = (first.hidden_reports(), second.hidden_reports());
+    assert_eq!(first.word(), "false");
+
+    pages.report_hidden();
+    assert_eq!((first.word(), second.word()), ("true", "true"));
+    // A stream opened after the report did not see it.
+    let open_later = pages.open();
+    let later = open_later.hidden_reports();
+    assert_eq!(later.word(), "false");
+
+    pages.report_hidden();
+    assert_eq!((first.word(), second.word()), ("repeated", "repeated"));
+    assert_eq!(later.word(), "true");
 }

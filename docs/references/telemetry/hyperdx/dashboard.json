@@ -901,6 +901,38 @@
       }
     },
     {
+      "id": "web-app-posts-refused-by-route",
+      "name": "Web app posts refused, by route, per day",
+      "x": 0,
+      "y": 49,
+      "w": 12,
+      "h": 3,
+      "containerId": "web-app",
+      "config": {
+        "configType": "sql",
+        "displayType": "table",
+        "connectionId": "@CLICKHOUSE_CONNECTION_ID@",
+        "sourceId": "@TRACES_SOURCE_ID@",
+        "sqlTemplate": "SELECT toDate(Timestamp) AS day, LogAttributes['route'] AS route, count() AS refused FROM otel.otel_logs WHERE ServiceName = 'harold' AND Body = 'app post refused' AND Timestamp >= now() - INTERVAL 7 DAY AND Timestamp < now() GROUP BY day, route ORDER BY day DESC, refused DESC"
+      }
+    },
+    {
+      "id": "pages-closed-without-hidden-report",
+      "name": "Pages closed without a hidden report, share per day",
+      "x": 12,
+      "y": 49,
+      "w": 12,
+      "h": 3,
+      "containerId": "web-app",
+      "config": {
+        "configType": "sql",
+        "displayType": "table",
+        "connectionId": "@CLICKHOUSE_CONNECTION_ID@",
+        "sourceId": "@TRACES_SOURCE_ID@",
+        "sqlTemplate": "SELECT toDate(Timestamp) AS day, count() AS closes, round(100 * countIf(LogAttributes['hidden_reported'] = 'false') / count(), 1) AS without_report_percent, countIf(LogAttributes['hidden_reported'] = 'repeated') AS repeated FROM otel.otel_logs WHERE ServiceName = 'harold' AND Body = 'app page disconnected' AND Timestamp >= now() - INTERVAL 7 DAY AND Timestamp < now() GROUP BY day ORDER BY day DESC"
+      }
+    },
+    {
       "id": "knowledge-hours-since-good-pass",
       "name": "Knowledge index: hours since the last good pass (info; the line is 2)",
       "x": 0,

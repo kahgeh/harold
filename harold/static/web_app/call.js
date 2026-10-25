@@ -37,13 +37,77 @@
   // #call's attributes as last read, so only a change acts.
   const seen = { sound: "", speech: "" };
 
-  // Every request but the audio's says JSON: Harold takes no post from a page without a
-  // header another site could not send.
-  function send(method, path) {
-    return fetch(path, { method, headers: { "Content-Type": "application/json" } }).then(reloadWhenUnpaired);
+  // Datastar's own module, the one the page loads: its signals and its @post.
+  const datastar = import("/static/datastar-1.0.2.js");
+
+  // Sets `signals`, then sends `include`d signals with Datastar's @post (or `action`). Resolves
+  // to the HTTP status when Datastar announced an error for the request, else 200; rejects when
+  // the request could not be sent. A request is never retried, so one failed post is one
+  // post, and a 401 (the device is no longer paired) reloads to the pair screen.
+  async function post(element, url, signals, include, options = {}) {
+    // A request with no element of its own gets one, so another request's error is not taken for its.
+    const el = element || document.createElement("span");
+    const { actions, mergePatch } = await datastar;
+    mergePatch(signals);
+    let status = 200;
+    const note = (event) => {
+      const detail = event.detail;
+      if (detail && detail.type === "error" && detail.el === el) {
+        status = Number(detail.argsRaw && detail.argsRaw.status) || 0;
+      }
+    };
+    document.addEventListener("datastar-fetch", note);
+    try {
+      await actions[options.action || "post"](
+        { el, evt: undefined, error: (name) => new Error(name), cleanups: new Map() },
+        url,
+        {
+          filterSignals: { include },
+          openWhenHidden: true,
+          requestCancellation: "disabled",
+          retry: "never",
+          retryMaxCount: 0,
+          ...options.request,
+        },
+      );
+    } finally {
+      document.removeEventListener("datastar-fetch", note);
+    }
+    if (status === 401) {
+      location.reload();
+    }
+    return status;
   }
 
-  // A 401 means this device is no longer paired: the page reloads to the pair screen.
+  // Every request but the audio's goes through Datastar's @post or @delete, which sends
+  // `Datastar-Request: true`: Harold takes no post from a page without a header another site
+  // could not send. These send no signal, and one that hides with the page stays open.
+  function send(method, path) {
+    return post(null, path, {}, /^none$/, {
+      action: method === "DELETE" ? "delete" : "post",
+      request: { openWhenHidden: true },
+    });
+  }
+
+  // The fields of the call check, as signals; each is cleared before a check sets its own.
+  const CHECK_FIELDS = [
+    "problem",
+    "step",
+    "error_name",
+    "context_state",
+    "track_state",
+    "track_muted",
+    "pieces_made",
+    "pieces_posted",
+    "pieces_dropped",
+    "posts_failed",
+    "empty_blocks",
+  ];
+  const CHECK_SIGNALS =
+    /^(problem|step|error_name|context_state|track_state|track_muted|pieces_made|pieces_posted|pieces_dropped\..*|posts_failed|empty_blocks)$/;
+
+  // A 401 on the audio post: this device is no longer paired, and the page reloads to the
+  // pair screen.
   function reloadWhenUnpaired(response) {
     if (response.status === 401) {
       location.reload();
@@ -156,25 +220,29 @@
       recorder.connect(ctx.destination);
       current.start = ctx.currentTime;
       step = "call";
-      const response = await send("POST", "/call");
-      // A 200 holds the call's id; a 409 the line saying why no call started.
-      const text = response.ok || response.status === 409 ? await response.text() : "";
+      // A 200 patches `_callId` to the call's id, or `_callWhy` to the line that gives the
+      // reason no call started.
+      const { getPath, mergePatch } = await datastar;
+      mergePatch({ _callId: "", _callWhy: "" });
+      const status = await send("POST", "/call");
+      const id = getPath("_callId");
+      const why = getPath("_callWhy");
       if (call !== current) {
         // Hung up while it opened: a DELETE sent then may have come first, so end it again.
-        if (response.ok && !call) {
+        if (id && !call) {
           send("DELETE", "/call").catch(() => {});
         }
         return;
       }
-      if (response.status === 409) {
-        refuse(current, text);
+      if (why) {
+        refuse(current, why);
         return;
       }
-      if (!response.ok || !text) {
+      if (status !== 200 || !id) {
         end(current);
         return;
       }
-      current.id = text;
+      current.id = id;
       current.open = true;
       current.checkId = setTimeout(() => check(current), CHECK_MS);
       sync();
@@ -225,11 +293,13 @@
   }
 
   function postCheck(body) {
-    fetch("/call/check", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    }).then(reloadWhenUnpaired).catch(() => {});
+    post(
+      null,
+      "/call/check",
+      { ...Object.fromEntries(CHECK_FIELDS.map((field) => [field, null])), ...body },
+      CHECK_SIGNALS,
+      { request: { openWhenHidden: true } },
+    ).catch(() => {});
   }
 
   // 3 s after Harold answered POST /call: tells Harold what the microphone gave. With no
@@ -557,11 +627,7 @@
     if (document.visibilityState !== "hidden" || !call) {
       return;
     }
-    fetch("/call", {
-      method: "DELETE",
-      keepalive: true,
-      headers: { "Content-Type": "application/json" },
-    }).then(reloadWhenUnpaired).catch(() => {});
+    send("DELETE", "/call").catch(() => {});
     end(call);
     showNotice(ENDED_BY_HIDING);
   });

@@ -13,14 +13,20 @@ fn the_call_script_keeps_its_contract() {
         // Each piece carries the id POST /call answered.
         "/call/audio?call=",
         "&at=",
-        "current.id = text",
+        "current.id = id",
         "application/octet-stream",
         "echoCancellation: true",
         "wakeLock",
         "/call/played?id=",
         "start_ms=",
         "/call/talk-now",
-        "keepalive: true",
+        // Every call post but the audio goes through Datastar, once, and stays open as the
+        // page hides.
+        "actions[options.action || \"post\"]",
+        "openWhenHidden: true",
+        "retry: \"never\"",
+        "retryMaxCount: 0",
+        r#"send("DELETE", "/call").catch"#,
         "Call ended: the app was closed or the phone locked",
         "prefers-reduced-motion",
         r#"audioWorklet.addModule("/static/call-worklet.js")"#,
@@ -236,7 +242,9 @@ fn the_echo_test_script_asks_for_the_calls_microphone_and_plays_the_way_the_call
         "/echo-test/runs",
         "getSettings()",
         "display-mode: standalone",
-        "application/json",
+        "actions[options.action || \"post\"]",
+        "retry: \"never\"",
+        "retryMaxCount: 0",
         "harold-call-recorder",
     ] {
         assert!(script.contains(wanted), "echo-test.js lacks {wanted}");
@@ -266,7 +274,9 @@ fn the_speech_check_script_posts_only_the_run_and_never_keeps_what_was_said() {
         "createAnalyser",
         "/static/check-sentence.wav",
         "/speech-check/runs",
-        "application/json",
+        "actions[options.action || \"post\"]",
+        "retry: \"never\"",
+        "retryMaxCount: 0",
         "display-mode: standalone",
         "localStorage",
         "online",
@@ -274,13 +284,10 @@ fn the_speech_check_script_posts_only_the_run_and_never_keeps_what_was_said() {
     ] {
         assert!(script.contains(wanted), "speech-check.js lacks {wanted}");
     }
-    // Words are read from a result only to be compared; the one post is the run object.
-    assert_eq!(
-        script.matches("fetch(").count(),
-        3,
-        "sentence twice, the run once"
-    );
-    assert!(script.contains("body: JSON.stringify(run)"));
+    // Words are read from a result only to be compared; the one post is the run object,
+    // sent through Datastar, so `fetch(` is only the sentence, twice.
+    assert_eq!(script.matches("fetch(").count(), 2, "the sentence twice");
+    assert!(script.contains("post(statusLine, RUNS_URL, run, RUN_SIGNALS)"));
     for absent in [
         "transcript:",
         ".transcript =",
@@ -337,10 +344,12 @@ fn pages_js_reopens_updates_only_when_the_stream_really_ended() {
 fn pages_js_reports_hiding_with_a_request_that_outlives_the_page() {
     let script = include_str!("../../static/web_app/pages.js");
     for wanted in [
-        r#"post("/page/hidden")"#,
-        "fetch(path, {",
-        r#"method: "POST""#,
-        "keepalive: true",
+        r#"report("/page/hidden", {}, /^none$/)"#,
+        // Through Datastar, open while the page hides, and sent once.
+        "actions[options.action || \"post\"]",
+        "openWhenHidden: true",
+        "retry: \"never\"",
+        "retryMaxCount: 0",
         r#"document.addEventListener("visibilitychange""#,
         r#"document.visibilityState === "hidden""#,
         r#"window.addEventListener("pagehide", reportHidden)"#,
@@ -353,7 +362,7 @@ fn pages_js_reports_hiding_with_a_request_that_outlives_the_page() {
 fn pages_js_beats_seen_while_the_page_is_visible() {
     let script = include_str!("../../static/web_app/pages.js");
     for wanted in [
-        r#"post("/page/seen", "#,
+        r#"report("/page/seen", { beat: lastBeat }, /^beat$/)"#,
         "PAGE_SEEN_EVERY = 30000",
         "setInterval(reportSeen, PAGE_SEEN_EVERY)",
         "clearInterval(",
@@ -374,7 +383,7 @@ fn pages_js_reopens_a_stream_that_has_had_no_beat_for_45_seconds_while_visible()
         "STALL_GRACE_MS = 1000",
         r#"new CustomEvent("harold-reopen")"#,
         r#"setInput(stalledInput, "1")"#,
-        "JSON.stringify({ beat: lastBeat })",
+        "{ beat: lastBeat }",
         r#"document.getElementById("beat")"#,
     ] {
         assert!(script.contains(wanted), "pages.js lacks {wanted}");
@@ -417,10 +426,12 @@ fn photo_js_shrinks_to_2048_as_jpeg_uploads_before_send_and_clears_with_the_x() 
         // Decoded without a blob: address, which `img-src 'self'` would refuse.
         "createImageBitmap(file",
         r#"canvas.toBlob(resolve, "image/jpeg", QUALITY)"#,
-        // It uploads at once, with fetch, and reads the id back as text.
-        r#"fetch("/replies/photo""#,
-        r#""Content-Type": "application/octet-stream""#,
-        "(await response.text()).trim()",
+        // It uploads at once, through Datastar, as the base64 `_photo` signal that only this
+        // post sends and the script clears; Harold patches the `photo` signal to the id.
+        r#"post(button, "/replies/photo", { _photo: photo }, /^_photo$/"#,
+        "filterSignals: { include: /^_photo$/, exclude: /^$/ }",
+        r#"mergePatch({ _photo: "" })"#,
+        r#"getPath("photo")"#,
         // The id goes to the hidden input bound to the `photo` signal, with its input event.
         r#"idInput.dispatchEvent(new Event("input", { bubbles: true }))"#,
         // Send is disabled while the upload runs, and a submit then is stopped.
@@ -499,9 +510,11 @@ fn dictation_js_listens_into_the_box_and_tells_harold_once() {
         "Dictation needs a connection.",
         "The microphone gave no sound.",
         "const NOTICE_MS = 3000;",
-        // One check per page load, as JSON, to the one route.
-        r#"fetch("/dictation/check""#,
-        "JSON.stringify({ result })",
+        // One check per page load, through Datastar, to the one route, open while the page
+        // hides.
+        r#"post(null, "/dictation/check", { result }, /^result$/"#,
+        "openWhenHidden: true",
+        "retryMaxCount: 0",
         "if (reported) {",
         r#"report("ok");"#,
         // The signals are set through hidden inputs Datastar binds.
@@ -526,7 +539,12 @@ fn dictation_js_listens_into_the_box_and_tells_harold_once() {
         assert!(!script.contains(absent), "dictation.js holds {absent}");
     }
     // The words are never sent: the only post is the check, with the result word alone.
-    assert_eq!(script.matches("fetch(").count(), 1);
+    assert_eq!(
+        script.matches("post(").count(),
+        2,
+        "the helper and its one use"
+    );
+    assert!(!script.contains("fetch("));
 }
 
 #[test]
@@ -716,4 +734,183 @@ fn pages_js_opens_the_thread_at_the_read_mark() {
     let read = &script[script.find("function readMark()").unwrap()..];
     assert!(read.starts_with("function readMark() {\n    try {\n      return localStorage"));
     assert!(script.contains("try {\n      localStorage.setItem(READ_MARK"));
+}
+
+/// The calls in `source` that send a post or a delete without Datastar: a `fetch(` whose
+/// method is not the literal `GET`, `navigator.sendBeacon(`, or an `XMLHttpRequest`. The
+/// call page's raw audio post in `call.js` is the one approved exception: it is the `fetch`
+/// that sends `application/octet-stream`.
+fn unapproved_posts(file: &str, source: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    for at in source.match_indices("fetch(").map(|(at, _)| at) {
+        // `datastar-fetch` names an event, and `x.fetch(` is some other object's call,
+        // except on the global object.
+        let head = &source[..at];
+        let global = ["window.", "self.", "globalThis."]
+            .iter()
+            .any(|prefix| head.ends_with(prefix));
+        let before = head.chars().next_back();
+        let other = before.is_some_and(|c| c == '-' || c.is_alphanumeric() || c == '_')
+            || (before == Some('.') && !global);
+        if other {
+            continue;
+        }
+        let arguments = call_arguments(&source[at + "fetch(".len()..]);
+        // A second argument that is not an object literal hides its method.
+        if second_argument(arguments).is_some_and(|second| !second.starts_with('{')) {
+            found.push(format!("{file}: fetch({arguments}"));
+            continue;
+        }
+        let Some(method) = arguments.find("method") else {
+            continue;
+        };
+        let after = arguments[method + "method".len()..].trim_start();
+        let literal_get = after
+            .strip_prefix(':')
+            .map(str::trim_start)
+            .and_then(|rest| rest.strip_prefix('"'))
+            .and_then(|rest| rest.split('"').next())
+            .is_some_and(|word| word.eq_ignore_ascii_case("GET"));
+        let audio = file == "call.js"
+            && arguments.contains(r#""Content-Type": "application/octet-stream""#);
+        if !literal_get && !audio {
+            found.push(format!("{file}: fetch({arguments}"));
+        }
+    }
+    for other in ["sendBeacon(", "XMLHttpRequest"] {
+        if source.contains(other) {
+            found.push(format!("{file}: {other}"));
+        }
+    }
+    found
+}
+
+/// The text after the first top-level comma of `arguments`, trimmed; none for one argument.
+fn second_argument(arguments: &str) -> Option<&str> {
+    let mut depth = 0;
+    for (at, c) in arguments.char_indices() {
+        match c {
+            '(' | '{' | '[' => depth += 1,
+            ')' | '}' | ']' => depth -= 1,
+            ',' if depth == 0 => {
+                let rest = arguments[at + 1..].trim();
+                return (!rest.is_empty()).then_some(rest);
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The text of a call's arguments, from just after its `(` up to the matching `)`.
+fn call_arguments(rest: &str) -> &str {
+    let mut depth = 1;
+    for (at, c) in rest.char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return &rest[..at];
+                }
+            }
+            _ => {}
+        }
+    }
+    rest
+}
+
+/// The page scripts: every `.js` in `static/web_app/` except the vendored bundles, by name
+/// and source.
+fn page_scripts() -> Vec<(String, String)> {
+    let folder = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("static/web_app");
+    let mut scripts: Vec<_> = std::fs::read_dir(folder)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().is_some_and(|extension| extension == "js"))
+        .filter_map(|path| {
+            let name = path.file_name()?.to_str()?.to_owned();
+            let vendored = ["datastar-", "otel-", "mermaid-"]
+                .iter()
+                .any(|prefix| name.starts_with(prefix));
+            (!vendored).then(|| (name, std::fs::read_to_string(&path).unwrap()))
+        })
+        .collect();
+    scripts.sort();
+    scripts
+}
+
+#[test]
+fn no_page_script_posts_or_deletes_without_datastar_except_the_call_audio() {
+    let scripts = page_scripts();
+    // The scan reads the scripts it should: the call script and the pair script are there.
+    for wanted in ["call.js", "pair.js", "pages.js", "photo.js", "telemetry.js"] {
+        assert!(scripts.iter().any(|(name, _)| name == wanted), "{wanted}");
+    }
+    let found: Vec<_> = scripts
+        .iter()
+        .flat_map(|(name, source)| unapproved_posts(name, source))
+        .collect();
+    assert!(found.is_empty(), "posts outside Datastar: {found:#?}");
+    // The one exception is still there, and is still a post.
+    let call = &scripts
+        .iter()
+        .find(|(name, _)| name == "call.js")
+        .unwrap()
+        .1;
+    assert!(call.contains(r#"fetch(path, {"#) && call.contains("/call/audio?call="));
+}
+
+#[test]
+fn the_guard_fails_on_a_fetch_post_and_passes_on_the_call_audio_and_on_reads() {
+    let post = r#"fetch("/x", { method: "POST", body: "{}" });"#;
+    let delete = r#"fetch(path, { method: "DELETE", keepalive: true })"#;
+    let shorthand = r#"fetch(path, { method, headers })"#;
+    let read = r#"fetch(SENTENCE_URL, { cache: "no-store" }); fetch("/a", { method: "GET" });"#;
+    let audio = r#"await fetch(path, {
+        method: "POST",
+        headers: { "Content-Type": "application/octet-stream" },
+        body: piece.samples,
+      });"#;
+    for source in [post, delete, shorthand] {
+        for file in ["pair.js", "call.js", "any.js"] {
+            assert_eq!(unapproved_posts(file, source).len(), 1, "{file} {source}");
+        }
+    }
+    assert!(unapproved_posts("echo-test.js", read).is_empty());
+    assert!(unapproved_posts("call.js", audio).is_empty());
+    // The exception is the call page's, and only the audio post.
+    assert_eq!(unapproved_posts("pair.js", audio).len(), 1);
+    assert_eq!(
+        unapproved_posts("call.js", &format!("{audio}{post}")).len(),
+        1
+    );
+    for beacon in ["navigator.sendBeacon(url)", "new XMLHttpRequest()"] {
+        assert_eq!(unapproved_posts("any.js", beacon).len(), 1, "{beacon}");
+    }
+    // The global object's `fetch` is the same call, and options in a variable hide a method.
+    for sneaky in [
+        r#"window.fetch("/x", { method: "POST" })"#,
+        r#"self.fetch("/x", { method: "POST" })"#,
+        r#"globalThis.fetch("/x", { method: "DELETE" })"#,
+        "fetch(url, options)",
+        "fetch(path, init())",
+    ] {
+        assert_eq!(unapproved_posts("any.js", sneaky).len(), 1, "{sneaky}");
+    }
+    assert!(
+        unapproved_posts(
+            "any.js",
+            r#"fetch("/a"); fetch("/a", { cache: "no-store" })"#
+        )
+        .is_empty()
+    );
+    // An event name and a method of another object are no `fetch` call.
+    assert!(
+        unapproved_posts(
+            "any.js",
+            r#"x.fetch("/a", {method: "POST"}); "datastar-fetch(""#
+        )
+        .is_empty()
+    );
 }

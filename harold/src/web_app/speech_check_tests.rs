@@ -99,6 +99,7 @@ impl TestServer {
             .header("Tailscale-User-Login", LOGIN)
             .header("sec-fetch-site", "same-origin")
             .header("origin", format!("http://{}", self.addr))
+            .header("datastar-request", "true")
             .header("content-type", "application/json")
             .body(body)
             .send()

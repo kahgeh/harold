@@ -23,6 +23,49 @@
 
   const done = [];
 
+  // Datastar's own module, the one the page loads: its signals and its @post.
+  const datastar = import("/static/datastar-1.0.2.js");
+
+  // Sets `signals`, then sends `include`d signals with Datastar's @post (or `action`). Resolves
+  // to the HTTP status when Datastar announced an error for the request, else 200; rejects when
+  // the request could not be sent. A request is never retried, and it stays open while the page hides (the
+  // default would abort it and send it again on return), so one failed post is one
+  // post, and a 401 (the device is no longer paired) reloads to the pair screen.
+  async function post(element, url, signals, include, options = {}) {
+    // A request with no element of its own gets one, so another request's error is not taken for its.
+    const el = element || document.createElement("span");
+    const { actions, mergePatch } = await datastar;
+    mergePatch(signals);
+    let status = 200;
+    const note = (event) => {
+      const detail = event.detail;
+      if (detail && detail.type === "error" && detail.el === el) {
+        status = Number(detail.argsRaw && detail.argsRaw.status) || 0;
+      }
+    };
+    document.addEventListener("datastar-fetch", note);
+    try {
+      await actions[options.action || "post"](
+        { el, evt: undefined, error: (name) => new Error(name), cleanups: new Map() },
+        url,
+        {
+          filterSignals: { include },
+          openWhenHidden: true,
+          requestCancellation: "disabled",
+          retry: "never",
+          retryMaxCount: 0,
+          ...options.request,
+        },
+      );
+    } finally {
+      document.removeEventListener("datastar-fetch", note);
+    }
+    if (status === 401) {
+      location.reload();
+    }
+    return status;
+  }
+
   function chosen(name) {
     const input = document.querySelector('input[name="' + name + '"]:checked');
     return input ? input.value : "";
@@ -149,14 +192,17 @@
         user_agent: navigator.userAgent,
       };
       say("Sending the loudness numbers to your Mac…");
-      const sent = await fetch("/echo-test/runs", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      });
-      const answer = await sent.json().catch(() => ({}));
-      if (sent.ok && answer.line) {
-        showResult(setup, kind, answer.line, answer.verdict === "fail");
+      // The run is the signals: Harold reads them back as the run's JSON, and patches
+      // #echo-results to the verdict's line.
+      const status = await post(
+        start,
+        "/echo-test/runs",
+        body,
+        /^(setup|kind|frames|playing_from|playing_to|echo_cancellation|standalone|user_agent)$/,
+      );
+      const line = results.firstElementChild;
+      if (status === 200 && line && line.textContent) {
+        showResult(setup, kind, line.textContent, line.className === "fail");
         say("Done.");
       } else {
         showResult(setup, kind, describe(setup, kind) + ": not saved. Harold did not keep this run.", true);

@@ -1753,6 +1753,8 @@ const METRICS: &[&str] = &[
 
 /// The Metrics table's attributes, plus the two resource attributes every export carries.
 const ATTRIBUTES: &[&str] = &[
+    "route",
+    "hidden_reported",
     "exception.type",
     "code.filepath",
     "harold.opened_at",
@@ -2300,13 +2302,15 @@ const KNOWLEDGE_CARDS: [&str; 6] = [
 ];
 
 /// The web app's cards, in the order the dashboard lists them.
-const WEB_APP_CARDS: [&str; 6] = [
+const WEB_APP_CARDS: [&str; 8] = [
     "Web app errors per day",
     "Phone page load (p50, p95)",
     "Browser spans not forwarded per day",
     "Phone turns in one trace",
     "Browser spans stored per day",
     "Thread opened at the oldest row, 7 days",
+    "Web app posts refused, by route, per day",
+    "Pages closed without a hidden report, share per day",
 ];
 const CALL_ANSWERS_FAILED_CARD: &str = "Call answers failed, by day";
 const CALL_ANSWERER_SPEND_CARD: &str = "Call answerer spend, by day";

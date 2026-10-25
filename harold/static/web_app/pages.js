@@ -91,19 +91,55 @@ document.addEventListener("datastar-fetch", (event) => {
   let lastValue = beatInput ? beatInput.value : "";
   let lastBeat = Number(lastValue) || 0;
   let lastActivity = Date.now();
-  const post = (path, body) =>
-    fetch(path, {
-      method: "POST",
-      keepalive: true,
-      headers: { "Content-Type": "application/json" },
-      body,
-    })
-      .then((response) => {
-        if (response.status === 401) {
-          location.reload();
-        }
-      })
-      .catch(() => {});
+  // Datastar's own module, the one the page loads: its signals and its @post.
+  const datastar = import("/static/datastar-1.0.2.js");
+
+  // Sets `signals`, then sends `include`d signals with Datastar's @post (or `action`). Resolves
+  // to the HTTP status when Datastar announced an error for the request, else 200; rejects when
+  // the request could not be sent. A request is never retried, and it stays open while the page hides (the
+  // default would abort it and send it again on return), so one failed post is one
+  // post, and a 401 (the device is no longer paired) reloads to the pair screen.
+  async function post(element, url, signals, include, options = {}) {
+    // A request with no element of its own gets one, so another request's error is not taken for its.
+    const el = element || document.createElement("span");
+    const { actions, mergePatch } = await datastar;
+    mergePatch(signals);
+    let status = 200;
+    const note = (event) => {
+      const detail = event.detail;
+      if (detail && detail.type === "error" && detail.el === el) {
+        status = Number(detail.argsRaw && detail.argsRaw.status) || 0;
+      }
+    };
+    document.addEventListener("datastar-fetch", note);
+    try {
+      await actions[options.action || "post"](
+        { el, evt: undefined, error: (name) => new Error(name), cleanups: new Map() },
+        url,
+        {
+          filterSignals: { include },
+          openWhenHidden: true,
+          requestCancellation: "disabled",
+          retry: "never",
+          retryMaxCount: 0,
+          ...options.request,
+        },
+      );
+    } finally {
+      document.removeEventListener("datastar-fetch", note);
+    }
+    if (status === 401) {
+      location.reload();
+    }
+    return status;
+  }
+
+  // A report goes as the page hides too, so the request stays open then: with no `keepalive`
+  // in Datastar's @post the phone can drop one, which Harold's 75 s rule covers.
+  const report = (path, signals, include) =>
+    post(document.body, path, signals, include, { request: { openWhenHidden: true } }).catch(
+      () => {},
+    );
   // A hidden input is how Datastar's signals are written from outside it.
   const setInput = (input, value) => {
     input.value = value;
@@ -119,7 +155,7 @@ document.addEventListener("datastar-fetch", (event) => {
   };
   const reportSeen = () => {
     noteBeat();
-    return post("/page/seen", JSON.stringify({ beat: lastBeat }));
+    return report("/page/seen", { beat: lastBeat }, /^beat$/);
   };
   // The stream stalled: say so, and once Harold has answered (it weighs a report against the
   // page's newest stream, so the new one must not open first), ask for a new one. The new
@@ -165,7 +201,7 @@ document.addEventListener("datastar-fetch", (event) => {
     clearInterval(watch);
     seen = null;
     watch = null;
-    post("/page/hidden");
+    report("/page/hidden", {}, /^none$/);
   };
   const startBeat = () => {
     reportSeen();

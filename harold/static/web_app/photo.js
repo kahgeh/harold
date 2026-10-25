@@ -1,9 +1,10 @@
 // Attaches one photo to a reply. The photo button opens the phone's own chooser; the chosen
 // photo is drawn to a canvas no longer than 2,048 px on its longer side and sent to Harold
 // as JPEG at quality 0.85, which also turns an iPhone's HEIC photo into JPEG. The upload
-// goes at once, with fetch rather than Datastar, because Datastar cannot send a raw image:
-// Harold answers the photo's id as plain text, which goes into the hidden input bound to
-// the `photo` signal, so the reply's own post names it.
+// goes at once through Datastar's @post, as the base64 `_photo` signal: the leading `_` keeps
+// it out of every request by default, and only this post asks for it. Harold answers by
+// patching the `photo` signal to the photo's id, which the hidden input is bound to, so the
+// reply's own post names it. The script clears `_photo` once the post ends.
 "use strict";
 
 (function () {
@@ -126,19 +127,79 @@
     preview.getContext("2d").drawImage(canvas, x, y, side, side, 0, 0, THUMBNAIL, THUMBNAIL);
   }
 
-  async function upload(blob) {
-    const response = await fetch("/replies/photo", {
-      method: "POST",
-      headers: { "Content-Type": "application/octet-stream" },
-      body: blob,
-    });
-    if (response.status === 401) {
+  // Datastar's own module, the one the page loads: its signals and its @post.
+  const datastar = import("/static/datastar-1.0.2.js");
+
+  // Sets `signals`, then sends `include`d signals with Datastar's @post (or `action`). Resolves
+  // to the HTTP status when Datastar announced an error for the request, else 200; rejects when
+  // the request could not be sent. A request is never retried, and it stays open while the page hides (the
+  // default would abort it and send it again on return), so one failed post is one
+  // post, and a 401 (the device is no longer paired) reloads to the pair screen.
+  async function post(element, url, signals, include, options = {}) {
+    // A request with no element of its own gets one, so another request's error is not taken for its.
+    const el = element || document.createElement("span");
+    const { actions, mergePatch } = await datastar;
+    mergePatch(signals);
+    let status = 200;
+    const note = (event) => {
+      const detail = event.detail;
+      if (detail && detail.type === "error" && detail.el === el) {
+        status = Number(detail.argsRaw && detail.argsRaw.status) || 0;
+      }
+    };
+    document.addEventListener("datastar-fetch", note);
+    try {
+      await actions[options.action || "post"](
+        { el, evt: undefined, error: (name) => new Error(name), cleanups: new Map() },
+        url,
+        {
+          filterSignals: { include },
+          openWhenHidden: true,
+          requestCancellation: "disabled",
+          retry: "never",
+          retryMaxCount: 0,
+          ...options.request,
+        },
+      );
+    } finally {
+      document.removeEventListener("datastar-fetch", note);
+    }
+    if (status === 401) {
       location.reload();
     }
-    if (!response.ok) {
+    return status;
+  }
+
+  // The JPEG as base64, without the data: URL's front.
+  function base64Of(blob) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result).slice(String(reader.result).indexOf(",") + 1));
+      reader.onerror = () => reject(reader.error);
+      reader.readAsDataURL(blob);
+    });
+  }
+
+  // Sends the photo, and returns the id Harold patched into the `photo` signal.
+  async function upload(blob) {
+    const { getPath, mergePatch } = await datastar;
+    const photo = await base64Of(blob);
+    try {
+      // Only this post sends `_photo`: the default filter leaves it out of every other.
+      const status = await post(button, "/replies/photo", { _photo: photo }, /^_photo$/, {
+        request: { filterSignals: { include: /^_photo$/, exclude: /^$/ } },
+      });
+      if (status !== 200) {
+        throw new Error("upload refused");
+      }
+    } finally {
+      mergePatch({ _photo: "" });
+    }
+    const id = getPath("photo");
+    if (typeof id !== "string" || id === "") {
       throw new Error("upload refused");
     }
-    return (await response.text()).trim();
+    return id;
   }
 
   async function choose(file) {

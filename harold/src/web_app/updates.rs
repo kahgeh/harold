@@ -183,10 +183,12 @@ async fn follow_thread(
     link: Link,
 ) {
     let connected = Instant::now();
+    let hidden = link.open.hidden_reports();
     let reason = send_patches(state, changes, call, seen, dots, todos_shown, link).await;
     info!(
         reason,
         seconds = connected.elapsed().as_secs(),
+        hidden_reported = hidden.word(),
         "app page disconnected"
     );
 }

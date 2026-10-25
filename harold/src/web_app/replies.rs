@@ -27,9 +27,12 @@ use crate::telemetry;
 
 /// The largest photo taken, in bytes: the limit Claude has for one image.
 pub(crate) const PHOTO_MAX_BYTES: usize = 5 * 1024 * 1024;
-/// The body limit of the photo route: just over `PHOTO_MAX_BYTES`, so the handler, not
-/// axum's own refusal, answers a photo that is too large.
-pub(crate) const PHOTO_BODY_LIMIT: usize = PHOTO_MAX_BYTES + 1024;
+/// The longest `_photo` signal taken, in characters: `PHOTO_MAX_BYTES` as base64.
+const PHOTO_MAX_BASE64: usize = PHOTO_MAX_BYTES.div_ceil(3) * 4;
+/// The body limit of the photo route: 7 MB, which holds a photo of `PHOTO_MAX_BYTES` as
+/// base64 with the JSON around it and some more, so the handler, not axum's own refusal,
+/// answers a photo that is a little too large.
+pub(crate) const PHOTO_BODY_LIMIT: usize = 7 * 1024 * 1024 + 1024;
 /// A photo over this size was not shrunk by the phone, which makes one of about 1 MB.
 const PHOTO_NOT_SHRUNK_BYTES: usize = 3 * 1024 * 1024;
 
@@ -62,6 +65,13 @@ struct ReplySignals {
     reply: String,
     /// The id `POST /replies/photo` answered; empty or missing when no photo is attached.
     #[serde(default)]
+    photo: String,
+}
+
+/// The photo as `photo.js` posts it: the `_photo` signal, the resized JPEG as base64.
+#[derive(Deserialize)]
+struct PhotoSignals {
+    #[serde(rename = "_photo")]
     photo: String,
 }
 
@@ -172,11 +182,24 @@ fn photo_kind(bytes: &[u8]) -> Option<&'static str> {
     }
 }
 
-/// `POST /replies/photo`: the body is the photo, shrunk by the page. Answers `200` with the
-/// photo's id as plain text once it is written to `app-photos/` and recorded; `413` when it
-/// is over `PHOTO_MAX_BYTES`, `400` when it does not start like a JPEG or a PNG, `503` when
-/// it cannot be written or recorded.
+/// `POST /replies/photo`: the body is the page's `_photo` signal, the photo shrunk by the
+/// page, as base64. Answers `200` with the `photo` signal patched to the photo's id once it
+/// is written to `app-photos/` and recorded; `413` when the photo is over `PHOTO_MAX_BYTES`,
+/// `400` when the body is not that signal or the photo does not start like a JPEG or a
+/// PNG, `503` when it cannot be written or recorded.
 pub(crate) async fn post_photo(State(state): State<AppState>, body: Bytes) -> Response {
+    let Ok(signals) = serde_json::from_slice::<PhotoSignals>(&body) else {
+        warn!(reason = "not_an_image", "app photo refused");
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    if signals.photo.len() > PHOTO_MAX_BASE64 {
+        warn!(reason = "too_large", "app photo refused");
+        return StatusCode::PAYLOAD_TOO_LARGE.into_response();
+    }
+    let Ok(body) = openssl::base64::decode_block(&signals.photo) else {
+        warn!(reason = "not_an_image", "app photo refused");
+        return StatusCode::BAD_REQUEST.into_response();
+    };
     let photo_bytes = body.len();
     if photo_bytes > PHOTO_MAX_BYTES {
         warn!(reason = "too_large", photo_bytes, "app photo refused");
@@ -208,7 +231,8 @@ pub(crate) async fn post_photo(State(state): State<AppState>, body: Bytes) -> Re
     if photo_bytes > PHOTO_NOT_SHRUNK_BYTES {
         warn!(photo_bytes, "app photo not shrunk");
     }
-    ([(header::CONTENT_TYPE, "text/plain")], id).into_response()
+    let signal = serde_json::json!({ "photo": id }).to_string();
+    super::datastar_events([PatchSignals::new(signal)])
 }
 
 /// Writes `bytes` to `file` in `directory`: the folder at mode 0700 and the file at 0600.

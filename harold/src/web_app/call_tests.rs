@@ -35,6 +35,15 @@ use crate::web_app::{AppState, router, start};
 const LOGIN: &str = "chief@example.com";
 const CANARY: &str = "CALL-CANARY-5520";
 const NOT_SET_UP: &str = "Voice is not set up on the Mac";
+
+/// The string `name` that Datastar events patch into the page's signals, if they do.
+fn signal_of(events: &str, name: &str) -> Option<String> {
+    let patch = events
+        .lines()
+        .find_map(|line| line.strip_prefix("data: signals "))?;
+    let signals: serde_json::Value = serde_json::from_str(patch).ok()?;
+    signals[name].as_str().map(str::to_owned)
+}
 /// How long a test waits for anything before it fails.
 const LIMIT: Duration = Duration::from_secs(5);
 /// Samples in one posted piece: a quarter of a second at 16 kHz.
@@ -118,15 +127,20 @@ impl TestServer {
     }
 
     /// Sends `method` to `path` as the app's own page does: the login, same-origin, and
-    /// the audio's media type.
+    /// for the audio route its media type, for any other Datastar's header and JSON.
     async fn send(&self, method: Method, path: &str, body: Vec<u8>) -> reqwest::Response {
         let origin = format!("http://{}", self.addr);
-        let headers = [
+        let mut headers = vec![
             ("tailscale-user-login", LOGIN),
             ("sec-fetch-site", "same-origin"),
             ("origin", origin.as_str()),
-            ("content-type", "application/octet-stream"),
         ];
+        if path.starts_with("/call/audio") {
+            headers.push(("content-type", "application/octet-stream"));
+        } else {
+            headers.push(("datastar-request", "true"));
+            headers.push(("content-type", "application/json"));
+        }
         self.send_with(method, path, &headers, body).await
     }
 
@@ -149,13 +163,18 @@ impl TestServer {
         self.send(Method::POST, &path, bytes).await.status()
     }
 
-    /// `POST /call`, which must answer `200` with the new call's id as plain text.
+    /// `POST /call`, which must answer `200` with Datastar events that patch `_callId` to
+    /// the new call's id.
     async fn post_call(&self) -> String {
         let response = self.send(Method::POST, "/call", Vec::new()).await;
         assert_eq!(response.status(), 200);
         let content_type = response.headers()["content-type"].to_str().unwrap();
-        assert!(content_type.starts_with("text/plain"), "{content_type}");
-        let call = response.text().await.unwrap();
+        assert!(
+            content_type.starts_with("text/event-stream"),
+            "{content_type}"
+        );
+        let events = response.text().await.unwrap();
+        let call = signal_of(&events, "_callId").expect("a call id");
         assert_eq!(call.len(), 32, "{call}");
         assert!(call.chars().all(|c| c.is_ascii_hexdigit()), "{call}");
         call
@@ -818,14 +837,20 @@ async fn post_call_says_why_no_call_started() {
             .to_str()
             .unwrap()
             .to_owned();
-        (status, content_type, response.text().await.unwrap())
+        let events = response.text().await.unwrap();
+        assert_eq!(signal_of(&events, "_callId"), None, "{events}");
+        let why = signal_of(&events, "_callWhy").expect("the line about why no call started");
+        (status, content_type, why)
     }
 
     let no_chief = Phone::new(true).await;
     no_chief.base.fake_panes().set(|s| s.view.panes.clear());
     let (status, content_type, body) = refused(&no_chief.server).await;
-    assert_eq!(status, 409);
-    assert!(content_type.starts_with("text/plain"), "{content_type}");
+    assert_eq!(status, 200);
+    assert!(
+        content_type.starts_with("text/event-stream"),
+        "{content_type}"
+    );
     assert_eq!(body, "There's no chief running.");
 
     // The call's folder cannot be made: the voice fails.
@@ -834,13 +859,16 @@ async fn post_call_says_why_no_call_started() {
     std::fs::create_dir_all(calls_dir.parent().unwrap()).unwrap();
     std::fs::write(&calls_dir, "not a folder").unwrap();
     let (status, _, body) = refused(&failing.server).await;
-    assert_eq!(status, 409);
+    assert_eq!(status, 200);
     assert_eq!(body, "The voice failed. Call ended.");
 
     let not_set_up = Phone::new(false).await;
     let (status, content_type, body) = refused(&not_set_up.server).await;
-    assert_eq!(status, 409);
-    assert!(content_type.starts_with("text/plain"), "{content_type}");
+    assert_eq!(status, 200);
+    assert!(
+        content_type.starts_with("text/event-stream"),
+        "{content_type}"
+    );
     assert_eq!(body, NOT_SET_UP);
     assert!(not_set_up.desk_ends.lock().unwrap().is_empty());
 
@@ -848,7 +876,7 @@ async fn post_call_says_why_no_call_started() {
     let store = Arc::new(HaroldStore::open(directory.store_path()).await.unwrap());
     let no_calls = TestServer::serve(store, None).await;
     let (status, _, body) = refused(&no_calls).await;
-    assert_eq!(status, 409);
+    assert_eq!(status, 200);
     assert_eq!(body, NOT_SET_UP);
     for (method, path) in [
         (Method::POST, "/call/audio?at=0"),
@@ -1340,6 +1368,7 @@ impl TestServer {
             ("tailscale-user-login", LOGIN),
             ("sec-fetch-site", "same-origin"),
             ("origin", origin.as_str()),
+            ("datastar-request", "true"),
             ("content-type", "application/json"),
         ];
         self.send_with(

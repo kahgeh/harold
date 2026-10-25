@@ -11,7 +11,7 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
 use super::origin::loopback_hosts;
-use super::replies::{PHOTO_MAX_BYTES, REPLY_MAX_CHARS};
+use super::replies::{PHOTO_BODY_LIMIT, PHOTO_MAX_BYTES, REPLY_MAX_CHARS};
 use super::{AppState, prune, router};
 use crate::outbound::fake::CapturedLogs;
 use crate::store::{EventVersion, HaroldStore};
@@ -21,6 +21,21 @@ const CANARY: &str = "APP-CANARY-7731";
 const DAY_MS: i64 = 24 * 60 * 60 * 1000;
 
 /// A JPEG's first bytes, then `len - 4` filler bytes.
+/// The id in the Datastar events that patch the `photo` signal.
+fn photo_id_of(events: &str) -> String {
+    let line = events
+        .lines()
+        .find_map(|line| line.strip_prefix("data: signals "))
+        .unwrap_or_else(|| panic!("a signals patch in {events}"));
+    let signals: serde_json::Value = serde_json::from_str(line).unwrap();
+    signals["photo"].as_str().expect("a photo id").to_owned()
+}
+
+/// The body of the photo post: the `_photo` signal.
+fn photo_signal(bytes: Vec<u8>) -> String {
+    serde_json::json!({ "_photo": openssl::base64::encode_block(&bytes) }).to_string()
+}
+
 fn jpeg(len: usize) -> Vec<u8> {
     let mut bytes = vec![0xFF, 0xD8, 0xFF, 0xE0];
     bytes.resize(len, 7);
@@ -93,15 +108,23 @@ impl TestServer {
         format!("http://{}{path}", self.addr)
     }
 
-    /// Posts `bytes` to the photo route with the headers `photo.js` sends.
+    /// Posts `bytes` to the photo route as `photo.js` does: Datastar's `@post` with the
+    /// photo as the base64 signal `_photo`.
     async fn upload(&self, bytes: Vec<u8>) -> reqwest::Response {
+        let body = serde_json::json!({ "_photo": openssl::base64::encode_block(&bytes) });
+        self.upload_body(body.to_string()).await
+    }
+
+    /// Posts `body` to the photo route with the headers `photo.js` sends.
+    async fn upload_body(&self, body: String) -> reqwest::Response {
         reqwest::Client::new()
             .post(self.url("/replies/photo"))
             .header("Tailscale-User-Login", LOGIN)
             .header("sec-fetch-site", "same-origin")
             .header("origin", format!("http://{}", self.addr))
-            .header("content-type", "application/octet-stream")
-            .body(bytes)
+            .header("datastar-request", "true")
+            .header("content-type", "application/json")
+            .body(body)
             .send()
             .await
             .unwrap()
@@ -111,7 +134,7 @@ impl TestServer {
     async fn upload_jpeg(&self) -> String {
         let response = self.upload(jpeg(100)).await;
         assert_eq!(response.status(), 200);
-        response.text().await.unwrap()
+        photo_id_of(&response.text().await.unwrap())
     }
 
     /// Posts a reply as Datastar's `@post` sends it.
@@ -189,9 +212,9 @@ async fn a_jpeg_and_a_png_are_stored_under_app_photos_at_mode_0600_and_the_id_is
 
     let jpeg_response = server.upload(jpeg(1500)).await;
     assert_eq!(jpeg_response.status(), 200);
-    assert_eq!(jpeg_response.headers()["content-type"], "text/plain");
-    let jpeg_id = jpeg_response.text().await.unwrap();
-    let png_id = server.upload(png(900)).await.text().await.unwrap();
+    assert_eq!(jpeg_response.headers()["content-type"], "text/event-stream");
+    let jpeg_id = photo_id_of(&jpeg_response.text().await.unwrap());
+    let png_id = photo_id_of(&server.upload(png(900)).await.text().await.unwrap());
 
     for id in [&jpeg_id, &png_id] {
         assert_eq!(id.len(), 36, "{id}");
@@ -240,6 +263,42 @@ async fn a_4_mb_photo_is_stored_and_logged_as_not_shrunk_and_the_limit_is_5_mb()
     assert!(captured.contains(r#"reason="too_large""#), "{captured}");
     assert!(captured.contains("photo_bytes=5242881"), "{captured}");
     assert_eq!(files_in(&directory.photos()).len(), 2, "nothing was kept");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_body_over_the_photo_routes_limit_gets_413_and_nothing_is_kept() {
+    let directory = TestDirectory::new();
+    let server = TestServer::serve(directory.store().await).await;
+
+    // The limit holds 5 MB of photo as base64 in its JSON, and a little more.
+    assert!(PHOTO_BODY_LIMIT > photo_signal(jpeg(PHOTO_MAX_BYTES)).len());
+    assert_eq!(server.upload(jpeg(PHOTO_MAX_BYTES)).await.status(), 200);
+
+    // A body one byte over the limit is refused by the route, not read.
+    let too_big = format!(
+        r#"{{"_photo":"{}"}}"#,
+        "A".repeat(PHOTO_BODY_LIMIT - r#"{"_photo":""}"#.len() + 1)
+    );
+    assert_eq!(too_big.len(), PHOTO_BODY_LIMIT + 1);
+    assert_eq!(server.upload_body(too_big).await.status(), 413);
+    assert_eq!(files_in(&directory.photos()).len(), 1, "nothing was kept");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_photo_that_is_not_base64_or_not_the_signal_is_refused_with_400() {
+    let directory = TestDirectory::new();
+    let server = TestServer::serve(directory.store().await).await;
+
+    for body in [
+        r#"{"_photo":"not base64 !!"}"#,
+        r#"{"photo":"AAAA"}"#,
+        r#"{"_photo":5}"#,
+        "",
+    ] {
+        let response = server.upload_body(body.to_owned()).await;
+        assert_eq!(response.status(), 400, "{body}");
+    }
+    assert!(files_in(&directory.photos()).is_empty());
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -306,8 +365,8 @@ async fn the_photo_routes_have_the_login_host_and_origin_checks() {
                 _ => client
                     .post(server.url(&path))
                     .header("sec-fetch-site", "same-origin")
-                    .header("content-type", "application/octet-stream")
-                    .body(jpeg(100)),
+                    .header("content-type", "application/json")
+                    .body(photo_signal(jpeg(100))),
             };
             if let Some(login) = login {
                 request = request.header("Tailscale-User-Login", login);
@@ -320,10 +379,18 @@ async fn the_photo_routes_have_the_login_host_and_origin_checks() {
 
     // A post that is not from the app's own page, or whose Host is not the app's.
     for headers in [
-        vec![("content-type", "application/octet-stream")],
+        vec![
+            ("content-type", "application/json"),
+            ("datastar-request", "true"),
+        ],
         vec![
             ("sec-fetch-site", "cross-site"),
-            ("content-type", "application/octet-stream"),
+            ("content-type", "application/json"),
+            ("datastar-request", "true"),
+        ],
+        vec![
+            ("sec-fetch-site", "same-origin"),
+            ("content-type", "application/json"),
         ],
         vec![("sec-fetch-site", "same-origin")],
         vec![
@@ -333,13 +400,14 @@ async fn the_photo_routes_have_the_login_host_and_origin_checks() {
         vec![
             ("host", "evil.example"),
             ("sec-fetch-site", "same-origin"),
-            ("content-type", "application/octet-stream"),
+            ("content-type", "application/json"),
+            ("datastar-request", "true"),
         ],
     ] {
         let mut request = client
             .post(server.url("/replies/photo"))
             .header("Tailscale-User-Login", LOGIN)
-            .body(jpeg(100));
+            .body(photo_signal(jpeg(100)));
         for (name, value) in &headers {
             request = request.header(*name, *value);
         }
@@ -452,7 +520,7 @@ async fn the_photo_is_served_with_its_type_and_a_private_day_of_caching() {
     let directory = TestDirectory::new();
     let server = TestServer::serve(directory.store().await).await;
     let jpeg_id = server.upload_jpeg().await;
-    let png_id = server.upload(png(300)).await.text().await.unwrap();
+    let png_id = photo_id_of(&server.upload(png(300)).await.text().await.unwrap());
 
     let response = server.get(&format!("/replies/photo/{jpeg_id}")).await;
     assert_eq!(response.status(), 200);

@@ -141,6 +141,7 @@ impl Server {
             .request(method, self.url(path))
             .header("Tailscale-User-Login", LOGIN)
             .header("Origin", format!("http://{}", self.addr))
+            .header("Datastar-Request", "true")
             .header("Content-Type", "application/json")
     }
 
@@ -148,13 +149,73 @@ impl Server {
         self.request(reqwest::Method::GET, path)
     }
 
-    async fn pair_with(&self, code: &str) -> reqwest::Response {
-        self.request(reqwest::Method::POST, "/pair")
+    /// Posts the code as the pair page does. The answer is `200` Datastar events either way;
+    /// `Answer` reads them back as the outcome.
+    async fn pair_with(&self, code: &str) -> Answer {
+        let response = self
+            .request(reqwest::Method::POST, "/pair")
             .header("User-Agent", "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0)")
             .body(serde_json::json!({ "code": code }).to_string())
             .send()
             .await
-            .unwrap()
+            .unwrap();
+        if response.status() == 404 {
+            // Pairing is off: the route is not there.
+            return Answer {
+                status: 404,
+                text: String::new(),
+                headers: response.headers().clone(),
+            };
+        }
+        assert_eq!(response.status(), 200);
+        assert_eq!(response.headers()["content-type"], "text/event-stream");
+        let headers = response.headers().clone();
+        let events = response.text().await.unwrap();
+        let notice = events
+            .lines()
+            .find_map(|line| line.strip_prefix("data: elements "))
+            .map(|html| {
+                let open = html
+                    .strip_prefix(r#"<p id="pair-notice" class="pair-notice" role="alert">"#)
+                    .expect("the notice line");
+                open.strip_suffix("</p>").unwrap().replace("&#39;", "'")
+            });
+        let status = match notice.as_deref() {
+            None => {
+                assert!(
+                    events.contains(r#"data: signals {"paired":true}"#),
+                    "{events}"
+                );
+                204
+            }
+            Some("That code didn't work") => 400,
+            Some("Pairing is locked on the Mac") => 423,
+            Some("Pairing isn't set up on the Mac") => 503,
+            Some(other) => panic!("a notice nobody wrote: {other}"),
+        };
+        Answer {
+            status,
+            text: notice.unwrap_or_default(),
+            headers,
+        }
+    }
+}
+
+/// What a post of a code came to: the status it stands for (204 paired, 400 wrong, 423
+/// locked, 503 not set up), the notice, and the answer's headers.
+struct Answer {
+    status: u16,
+    text: String,
+    headers: reqwest::header::HeaderMap,
+}
+
+impl Answer {
+    fn status(&self) -> u16 {
+        self.status
+    }
+
+    async fn text(self) -> Result<String, ()> {
+        Ok(self.text)
     }
 }
 
@@ -164,9 +225,9 @@ impl Drop for Server {
     }
 }
 
-fn cookie_of(response: &reqwest::Response) -> String {
+fn cookie_of(response: &Answer) -> String {
     response
-        .headers()
+        .headers
         .get("set-cookie")
         .expect("a cookie")
         .to_str()
@@ -410,7 +471,7 @@ async fn ten_posts_at_once_get_at_most_five_tries() {
     for _ in 0..10 {
         let server = Arc::clone(&server);
         posts.push(tokio::spawn(async move {
-            server.pair_with("not-the-code").await.status().as_u16()
+            server.pair_with("not-the-code").await.status()
         }));
     }
     let mut statuses = Vec::new();

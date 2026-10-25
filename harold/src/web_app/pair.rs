@@ -24,6 +24,7 @@ use axum::extract::{Request, State};
 use axum::http::{HeaderMap, Method, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{Html, IntoResponse, Response};
+use datastar::prelude::{PatchElements, PatchSignals};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracing::{info, warn};
@@ -617,9 +618,11 @@ struct PairBody {
 /// The longest body `POST /pair` reads.
 const PAIR_BODY_MAX: usize = 1024;
 
-/// `POST /pair` with `{"code": "..."}`: `204` with the cookie, `400` "That code didn't
-/// work", `423` "Pairing is locked on the Mac", `503` "Pairing isn't set up on the Mac". A
-/// body that is not that JSON gets `400` and is not counted as a try.
+/// `POST /pair` with the page's `code` signal, `{"code": "..."}`. Answers `200` as Datastar
+/// events: the cookie, with `{"paired": true}` for a code that paired; otherwise the page's
+/// `#pair-notice` patched to "That code didn't work", "Pairing is locked on the Mac" or
+/// "Pairing isn't set up on the Mac". A body that is not that JSON gets `400` and is not
+/// counted as a try.
 pub(crate) async fn post_pair(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -630,22 +633,31 @@ pub(crate) async fn post_pair(
     }
     let Ok(body) = serde_json::from_slice::<PairBody>(&body[..body.len().min(PAIR_BODY_MAX + 1)])
     else {
-        return (StatusCode::BAD_REQUEST, WRONG).into_response();
+        return StatusCode::BAD_REQUEST.into_response();
     };
     if body.code.len() > PAIR_BODY_MAX {
-        return (StatusCode::BAD_REQUEST, WRONG).into_response();
+        return StatusCode::BAD_REQUEST.into_response();
     }
     match state.pairing.attempt(&body.code, &device_name(&headers)) {
         Attempt::Paired(secret) => (
-            StatusCode::NO_CONTENT,
             [(header::SET_COOKIE, set_cookie_value(&secret))],
+            super::datastar_events([PatchSignals::new(r#"{"paired":true}"#)]),
         )
             .into_response(),
-        Attempt::Wrong => (StatusCode::BAD_REQUEST, WRONG).into_response(),
-        Attempt::Locked => (StatusCode::LOCKED, LOCKED).into_response(),
-        Attempt::NotSetUp(_) => (StatusCode::SERVICE_UNAVAILABLE, NOT_SET_UP).into_response(),
+        Attempt::Wrong => notice(WRONG),
+        Attempt::Locked => notice(LOCKED),
+        Attempt::NotSetUp(_) => notice(NOT_SET_UP),
         Attempt::Failed => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
+}
+
+/// The pair screen's notice line, patched to show `text`.
+fn notice(text: &str) -> Response {
+    let line = format!(
+        r#"<p id="pair-notice" class="pair-notice" role="alert">{}</p>"#,
+        super::escape_html(text)
+    );
+    super::datastar_events([PatchElements::new(line)])
 }
 
 /// What the pair screen says for each refusal.

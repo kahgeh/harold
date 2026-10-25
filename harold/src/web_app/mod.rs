@@ -4,6 +4,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -176,6 +177,8 @@ struct Stream {
     /// The page reported it more than `BEATS_BEHIND_LIMIT` beats behind, so it is logged
     /// and no longer counts as on screen.
     stalled: bool,
+    /// How many `POST /page/hidden` reports reached Harold while the stream was open.
+    hidden: Arc<AtomicU32>,
 }
 
 /// How often an open stream sends the page a beat.
@@ -222,10 +225,13 @@ impl OpenPages {
         let mut state = self.state();
         state.next += 1;
         let number = state.next;
-        state.open.insert(number, Stream::default());
+        let stream = Stream::default();
+        let hidden = HiddenReports(Arc::clone(&stream.hidden));
+        state.open.insert(number, stream);
         OpenPage {
             pages: Arc::clone(self),
             number,
+            hidden,
         }
     }
 
@@ -234,6 +240,9 @@ impl OpenPages {
         let mut state = self.state();
         state.hidden_through = state.next;
         state.last_seen = None;
+        for stream in state.open.values() {
+            stream.hidden.fetch_add(1, Ordering::Relaxed);
+        }
     }
 
     /// The page said it is on screen, and the number of the last beat it got (none from a
@@ -285,6 +294,23 @@ impl OpenPages {
 pub(crate) struct OpenPage {
     pages: Arc<OpenPages>,
     number: u64,
+    hidden: HiddenReports,
+}
+
+/// The hidden reports one stream saw, readable after the stream leaves the open set.
+#[derive(Clone)]
+pub(crate) struct HiddenReports(Arc<AtomicU32>);
+
+impl HiddenReports {
+    /// The `hidden_reported` field of the stream's close line: `false` for none, `true` for
+    /// one report, `repeated` for more than one, which no retry should cause.
+    pub(crate) fn word(&self) -> &'static str {
+        match self.0.load(Ordering::Relaxed) {
+            0 => "false",
+            1 => "true",
+            _ => "repeated",
+        }
+    }
 }
 
 impl Drop for OpenPage {
@@ -294,6 +320,11 @@ impl Drop for OpenPage {
 }
 
 impl OpenPage {
+    /// The count of hidden reports this stream sees, which outlives the stream.
+    pub(crate) fn hidden_reports(&self) -> HiddenReports {
+        self.hidden.clone()
+    }
+
     /// The stream sent beat `beat`.
     pub(crate) fn beat_sent(&self, beat: u64) {
         let now = (self.pages.clock)();
@@ -331,6 +362,35 @@ async fn post_page_seen(State(state): State<AppState>, body: Bytes) -> StatusCod
         );
     }
     StatusCode::NO_CONTENT
+}
+
+/// A `200` that carries `events` as a Datastar event stream, which the page's `@post` or
+/// `@delete` reads: patched signals, or patched elements.
+pub(crate) fn datastar_events<E: Into<axum::response::sse::Event>>(
+    events: impl IntoIterator<Item = E>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let events: Vec<_> = events
+        .into_iter()
+        .map(|event| Ok::<_, std::convert::Infallible>(event.into()))
+        .collect();
+    axum::response::sse::Sse::new(tokio_stream::iter(events)).into_response()
+}
+
+/// `text` for use as HTML text or as a double-quoted attribute value.
+pub(crate) fn escape_html(text: &str) -> String {
+    let mut escaped = String::with_capacity(text.len());
+    for c in text.chars() {
+        match c {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            '\'' => escaped.push_str("&#39;"),
+            c => escaped.push(c),
+        }
+    }
+    escaped
 }
 
 /// What every route can reach.

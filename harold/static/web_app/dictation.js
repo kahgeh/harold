@@ -39,21 +39,58 @@
   let quietTimer = null;
   let noticeTimer = null;
 
-  // Tells Harold the first thing known about dictation on this page, and nothing after.
+  // Datastar's own module, the one the page loads: its signals and its @post.
+  const datastar = import("/static/datastar-1.0.2.js");
+
+  // Sets `signals`, then sends `include`d signals with Datastar's @post (or `action`). Resolves
+  // to the HTTP status when Datastar announced an error for the request, else 200; rejects when
+  // the request could not be sent. A request is never retried, and it stays open while the page hides (the
+  // default would abort it and send it again on return), so one failed post is one
+  // post, and a 401 (the device is no longer paired) reloads to the pair screen.
+  async function post(element, url, signals, include, options = {}) {
+    // A request with no element of its own gets one, so another request's error is not taken for its.
+    const el = element || document.createElement("span");
+    const { actions, mergePatch } = await datastar;
+    mergePatch(signals);
+    let status = 200;
+    const note = (event) => {
+      const detail = event.detail;
+      if (detail && detail.type === "error" && detail.el === el) {
+        status = Number(detail.argsRaw && detail.argsRaw.status) || 0;
+      }
+    };
+    document.addEventListener("datastar-fetch", note);
+    try {
+      await actions[options.action || "post"](
+        { el, evt: undefined, error: (name) => new Error(name), cleanups: new Map() },
+        url,
+        {
+          filterSignals: { include },
+          openWhenHidden: true,
+          requestCancellation: "disabled",
+          retry: "never",
+          retryMaxCount: 0,
+          ...options.request,
+        },
+      );
+    } finally {
+      document.removeEventListener("datastar-fetch", note);
+    }
+    if (status === 401) {
+      location.reload();
+    }
+    return status;
+  }
+
+  // Tells Harold the first thing known about dictation on this page, and nothing after. It
+  // may go as the page hides, so the request stays open then.
   function report(result) {
     if (reported) {
       return;
     }
     reported = true;
-    fetch("/dictation/check", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ result }),
-      keepalive: true,
-    }).then((response) => {
-      if (response.status === 401) {
-        location.reload();
-      }
+    post(null, "/dictation/check", { result }, /^result$/, {
+      request: { openWhenHidden: true },
     }).catch(() => {});
   }
 

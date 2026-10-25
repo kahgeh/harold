@@ -12,6 +12,7 @@ use axum::extract::rejection::{JsonRejection, QueryRejection};
 use axum::extract::{Path, Query, State};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
+use datastar::prelude::PatchSignals;
 use serde::Deserialize;
 use tokio::sync::watch;
 use tokio::time::Instant;
@@ -178,13 +179,14 @@ fn read_start_ms(raw: &str) -> Option<u64> {
     Some(ms.clamp(0, START_MS_LIMIT).unsigned_abs())
 }
 
-/// `POST /call`: `200` once the call listens, with a `text/plain` body holding the call's
-/// id, which each piece of its audio carries. A call already open is taken over: it goes on
-/// with a new id, and pieces carrying the older one are refused. Otherwise `409` with a
-/// `text/plain` line saying why no call started.
+/// `POST /call`: always `200` as Datastar events, which the page's `@post` reads. Once the
+/// call listens the `_callId` signal is patched to the call's id, which each piece of its
+/// audio carries; a call already open is taken over: it goes on with a new id, and pieces
+/// carrying the older one are refused. Otherwise `_callWhy` is patched to the line that
+/// gives the reason no call started.
 pub(crate) async fn post_call(State(state): State<AppState>) -> Response {
     let Some(calls) = state.calls.as_ref().filter(|calls| calls.set_up()) else {
-        return (StatusCode::CONFLICT, NOT_SET_UP).into_response();
+        return call_signal("_callWhy", NOT_SET_UP);
     };
     let PhoneStarted { status, call } = calls.start().await;
     let why = match (status.state, status.last_result) {
@@ -193,11 +195,17 @@ pub(crate) async fn post_call(State(state): State<AppState>) -> Response {
         (CallState::Off, _) => VOICE_FAILED,
         // A call that listens always has an id; without one the phone could post nothing.
         _ => match call {
-            Some(call) => return (StatusCode::OK, call).into_response(),
+            Some(call) => return call_signal("_callId", &call),
             None => VOICE_FAILED,
         },
     };
-    (StatusCode::CONFLICT, why).into_response()
+    call_signal("_callWhy", why)
+}
+
+/// The answer to `POST /call`: the signal `name` patched to `value`.
+fn call_signal(name: &str, value: &str) -> Response {
+    let signal = serde_json::json!({ (name): value }).to_string();
+    super::datastar_events([PatchSignals::new(signal)])
 }
 
 /// `POST /call/audio?call=<id>&at=<ms>`: a piece of little-endian `i16` audio for the call

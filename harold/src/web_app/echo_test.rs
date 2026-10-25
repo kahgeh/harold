@@ -13,6 +13,7 @@ use axum::body::{Body, to_bytes};
 use axum::extract::State;
 use axum::http::{StatusCode, header};
 use axum::response::{Html, IntoResponse, Response};
+use datastar::prelude::PatchElements;
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use tokio::sync::Mutex as AsyncMutex;
@@ -450,8 +451,9 @@ fn not_saved(status: StatusCode, reason: &'static str) -> Response {
         .into_response()
 }
 
-/// `POST /echo-test/runs`: judges one run, writes it under `echo-test/` and answers
-/// `{ saved, verdict, line, ... }`. `400` for a run `parse_run` refuses; `500` when the file
+/// `POST /echo-test/runs`: reads the run from the page's signals, judges it, writes it under
+/// `echo-test/` and answers `200` with `#echo-results` patched to the verdict's line, in
+/// class `fail` for a failed run. `400` for a run `parse_run` refuses; `500` when the file
 /// cannot be written.
 pub(crate) async fn post_run(State(state): State<AppState>, body: Body) -> Response {
     let Ok(bytes) = to_bytes(body, MAX_BODY_BYTES + 1).await else {
@@ -482,9 +484,16 @@ pub(crate) async fn post_run(State(state): State<AppState>, body: Body) -> Respo
         echo.recent.record(run.setup, at_ms, p95);
     }
     log_run(&run, &verdict);
-    let mut answer = serde_json::to_value(&verdict).unwrap_or_default();
-    answer["saved"] = true.into();
-    axum::Json(answer).into_response()
+    let class = if verdict.outcome == Outcome::Fail {
+        r#" class="fail""#
+    } else {
+        ""
+    };
+    let line = format!(
+        r#"<ul id="echo-results"><li{class}>{}</li></ul>"#,
+        super::escape_html(&verdict.line)
+    );
+    super::datastar_events([PatchElements::new(line)])
 }
 
 /// The `echo test run` line: fixed words, a share or a yes or no, never sound or text.
