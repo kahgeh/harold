@@ -3589,6 +3589,41 @@ async fn chief_away_message_not_pushed_goes_to_imessage_once() {
     assert_eq!(with.environment.reply_targets(), ["%1"]);
 }
 
+#[cfg(not(feature = "imessage"))]
+#[test]
+fn without_imessage_an_away_message_is_held_back_and_not_retried() {
+    let environment = Arc::new(FakeEnvironment::locked(""));
+
+    let outcome = dispatcher_with(&environment)
+        .dispatch(&away_delivery(json!(pod_message("Pod 3 is blocked"))));
+
+    assert!(outcome.is_ok(), "{outcome:?}");
+    assert!(environment.away_messages().is_empty());
+    assert!(environment.delivered().is_empty());
+}
+
+#[cfg(not(feature = "imessage"))]
+#[tokio::test]
+async fn without_imessage_a_chief_message_an_app_cannot_push_is_held_and_not_sent_away() {
+    let directory = TestDirectory::new();
+    let with = with_app(
+        &directory,
+        chief_and_pod(),
+        FakeApp::new(AppDelivery::NotPushed(NotPushedReason::NoSubscriptions)),
+    )
+    .await;
+
+    let outcome = with.dispatcher.dispatch(&away_delivery(json!(message_from(
+        "%1",
+        "All pods are green"
+    ))));
+
+    assert!(outcome.is_ok(), "{outcome:?}");
+    assert!(with.away.sends().is_empty());
+    assert!(with.environment.away_messages().is_empty());
+    assert!(with.environment.delivered().is_empty());
+}
+
 #[tokio::test]
 async fn other_panes_messages_are_handled_as_today() {
     let mut chief_gone = chief_and_pod();

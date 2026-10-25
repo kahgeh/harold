@@ -16,12 +16,13 @@ trap 'rm -f "$log"' EXIT
 # A warning line is `warning: ...`. The linker message and the per-crate count line are not
 # compiler warnings of the code, so they do not count.
 warnings_in_log() {
-    grep -E '^warning: ' "$log" | grep -vE '^warning: (linker stderr|`[^`]+` \(.*\) generated [0-9]+ warnings?)'
+    grep -E '^warning(\[E[0-9]+\])?: ' "$log" | grep -vE '^warning: (linker stderr|`[^`]+` \(.*\) generated [0-9]+ warnings?)'
 }
 
 run() {
     echo "check_features: $*"
-    "$@" 2>&1 | tee "$log"
+    # No colour codes, so the warning test sees the line start even when CARGO_TERM_COLOR=always.
+    CARGO_TERM_COLOR=never "$@" 2>&1 | tee "$log"
     if [ "${PIPESTATUS[0]}" -ne 0 ]; then
         echo "check_features: failed: $*" >&2
         exit 1
