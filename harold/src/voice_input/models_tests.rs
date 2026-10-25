@@ -3,7 +3,10 @@
 
 use super::*;
 use crate::outbound::fake::CapturedLogs;
-use crate::settings::{KOKORO_REVISION, WHISPER_REVISION};
+use crate::settings::WHISPER_REVISION;
+use crate::tools::BoxFuture;
+use crate::tts::fetch::VOICE_DOWNLOAD_PY;
+use std::net::Ipv4Addr;
 use std::os::unix::fs::PermissionsExt;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -93,16 +96,28 @@ impl Scratch {
     }
 
     fn models(&self, python: &str) -> Arc<SpeechModels> {
-        self.models_for(python, WHISPER, WHISPER_REVISION, KOKORO_REVISION)
+        self.models_for(python, WHISPER, WHISPER_REVISION)
     }
 
-    fn models_for(
-        &self,
-        python: &str,
-        whisper: &str,
-        whisper_revision: &str,
-        kokoro_revision: &str,
-    ) -> Arc<SpeechModels> {
+    /// The models of the usual settings, waiting for `tts`'s default model too.
+    fn models_with_tts(&self, python: &str, tts: Arc<TtsServer>) -> Arc<SpeechModels> {
+        let voice_input = VoiceInputSettings {
+            model_revision: WHISPER_REVISION.to_string(),
+            keep_worker_minutes: 10,
+            language: "en".into(),
+            command: python.to_string(),
+            args: ["--model", WHISPER].map(String::from).to_vec(),
+        };
+        SpeechModels::new(
+            &voice_input,
+            self.folder(),
+            self.env(),
+            Arc::clone(&self.host) as Arc<dyn Host>,
+            Some(tts),
+        )
+    }
+
+    fn models_for(&self, python: &str, whisper: &str, whisper_revision: &str) -> Arc<SpeechModels> {
         let voice_input = VoiceInputSettings {
             model_revision: whisper_revision.to_string(),
             keep_worker_minutes: 10,
@@ -110,21 +125,12 @@ impl Scratch {
             command: python.to_string(),
             args: ["--model", whisper].map(String::from).to_vec(),
         };
-        let tts = TtsSettings {
-            model_revision: kokoro_revision.to_string(),
-            command: "say".into(),
-            voice: None,
-            args: None,
-            fallback_command: None,
-            fallback_voice: None,
-            fallback_args: None,
-        };
         SpeechModels::new(
             &voice_input,
-            &tts,
             self.folder(),
             self.env(),
             Arc::clone(&self.host) as Arc<dyn Host>,
+            None,
         )
     }
 
@@ -145,12 +151,10 @@ impl Scratch {
         std::fs::write(self.folder().join(name), text).unwrap();
     }
 
-    /// Both models cached and recorded.
+    /// The model cached and recorded.
     fn both_checked(&self) {
-        for (model, revision) in [(WHISPER, WHISPER_REVISION), (KOKORO, KOKORO_REVISION)] {
-            self.snapshot(model, revision, 100);
-            self.record(model, revision, 100);
-        }
+        self.snapshot(WHISPER, WHISPER_REVISION, 100);
+        self.record(WHISPER, WHISPER_REVISION, 100);
     }
 }
 
@@ -238,22 +242,24 @@ fn only_the_iphone_hotspot_range_is_metered() {
 }
 
 #[test]
-fn a_pin_is_made_only_for_the_two_models_at_a_full_commit() {
+fn a_pin_is_made_only_for_the_model_at_a_full_commit() {
     let env = Env {
         path: "/bin".into(),
         home: "/h".into(),
         hf_home: None,
         hf_hub_cache: Some("/cache".into()),
     };
-    let pinned = pin(KOKORO, KOKORO_REVISION, &env).unwrap();
-    assert_eq!(pinned.commit, KOKORO_REVISION);
+    let pinned = pin(WHISPER, WHISPER_REVISION, &env).unwrap();
+    assert_eq!(pinned.commit, WHISPER_REVISION);
     assert_eq!(
         pinned.snapshot,
-        snapshot_dir(Path::new("/cache"), KOKORO, KOKORO_REVISION)
+        snapshot_dir(Path::new("/cache"), WHISPER, WHISPER_REVISION)
     );
-    assert!(pin("mlx-community/other", KOKORO_REVISION, &env).is_none());
-    assert!(pin(KOKORO, "main", &env).is_none());
-    assert!(pin("evil;rm/x", KOKORO_REVISION, &env).is_none());
+    assert!(pin("mlx-community/other", WHISPER_REVISION, &env).is_none());
+    // Kokoro is a TTS model, downloaded by the TTS server.
+    assert!(pin("mlx-community/Kokoro-82M-bf16", WHISPER_REVISION, &env).is_none());
+    assert!(pin(WHISPER, "main", &env).is_none());
+    assert!(pin("evil;rm/x", WHISPER_REVISION, &env).is_none());
 }
 
 #[test]
@@ -310,8 +316,6 @@ async fn a_missing_record_runs_the_script_in_its_check_mode_and_downloads_nothin
     let logs = CapturedLogs::start();
     let scratch = Scratch::new();
     scratch.snapshot(WHISPER, WHISPER_REVISION, 100);
-    scratch.record(WHISPER, WHISPER_REVISION, 100);
-    scratch.snapshot(KOKORO, KOKORO_REVISION, 100);
     let models = scratch.models(&scratch.fake_python(WORKS));
 
     models.start_up();
@@ -321,7 +325,7 @@ async fn a_missing_record_runs_the_script_in_its_check_mode_and_downloads_nothin
     assert_eq!(runs.len(), 1, "{runs:?}");
     assert!(
         runs[0].starts_with(&format!(
-            "-I {}/voice_download.py {KOKORO} {KOKORO_REVISION} ",
+            "-I {}/voice_download.py {WHISPER} {WHISPER_REVISION} ",
             scratch.folder().display()
         )),
         "{runs:?}"
@@ -334,16 +338,14 @@ async fn a_missing_record_runs_the_script_in_its_check_mode_and_downloads_nothin
 async fn a_check_that_finds_a_file_missing_starts_the_download_and_logs_it() {
     let logs = CapturedLogs::start();
     let scratch = Scratch::new();
-    scratch.snapshot(WHISPER, WHISPER_REVISION, 100);
-    scratch.record(WHISPER, WHISPER_REVISION, 100);
     scratch.both_checked();
     // The first run is the check, which finds the file missing; the second downloads.
     let python = scratch.fake_python(&format!(
         "case \"$*\" in *--check*) echo '{{\"done\": false, \"reason\": \"missing\"}}';; *) {WORKS};; esac"
     ));
     std::fs::remove_file(scratch.folder().join(format!(
-        "{}@{KOKORO_REVISION}.json",
-        KOKORO.replace('/', "--")
+        "{}@{WHISPER_REVISION}.json",
+        WHISPER.replace('/', "--")
     )))
     .unwrap();
     let models = scratch.models(&python);
@@ -357,10 +359,10 @@ async fn a_check_that_finds_a_file_missing_starts_the_download_and_logs_it() {
     assert!(!runs[1].contains("--check"));
     let text = logs.text();
     assert!(text.contains(&format!(
-        "speech model download started model={KOKORO} total_bytes=389410807"
+        "speech model download started model={WHISPER} total_bytes=1613979758"
     )));
     assert!(text.contains(&format!(
-        "speech model downloaded model={KOKORO} bytes=2000 ms="
+        "speech model downloaded model={WHISPER} bytes=2000 ms="
     )));
 }
 
@@ -390,7 +392,7 @@ async fn a_missing_snapshot_file_starts_the_download() {
     let scratch = Scratch::new();
     scratch.both_checked();
     std::fs::remove_file(
-        snapshot_dir(&scratch.cache(), KOKORO, KOKORO_REVISION).join("weights.safetensors"),
+        snapshot_dir(&scratch.cache(), WHISPER, WHISPER_REVISION).join("weights.safetensors"),
     )
     .unwrap();
     let models = scratch.models(&scratch.fake_python(WORKS));
@@ -612,33 +614,19 @@ async fn a_call_after_a_failed_download_starts_it_again_unless_the_disk_or_a_per
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn a_model_outside_the_two_a_bad_name_or_a_short_revision_is_refused_and_never_run() {
+async fn a_model_outside_the_list_a_bad_name_or_a_short_revision_is_refused_and_never_run() {
     let cases = [
-        (WHISPER, "main", KOKORO_REVISION),
-        (WHISPER, &WHISPER_REVISION[..39], KOKORO_REVISION),
-        (
-            "mlx-community/whisper-small",
-            WHISPER_REVISION,
-            KOKORO_REVISION,
-        ),
-        (
-            "mlx-community/x;touch pwned",
-            WHISPER_REVISION,
-            KOKORO_REVISION,
-        ),
-        ("evil org/model", WHISPER_REVISION, KOKORO_REVISION),
-        (WHISPER, WHISPER_REVISION, "abc"),
+        (WHISPER, "main"),
+        (WHISPER, &WHISPER_REVISION[..39]),
+        ("mlx-community/whisper-small", WHISPER_REVISION),
+        ("mlx-community/x;touch pwned", WHISPER_REVISION),
+        ("evil org/model", WHISPER_REVISION),
     ];
-    for (whisper, whisper_revision, kokoro_revision) in cases {
+    for (whisper, whisper_revision) in cases {
         let logs = CapturedLogs::start();
         let scratch = Scratch::new();
         scratch.both_checked();
-        let models = scratch.models_for(
-            &scratch.fake_python(WORKS),
-            whisper,
-            whisper_revision,
-            kokoro_revision,
-        );
+        let models = scratch.models_for(&scratch.fake_python(WORKS), whisper, whisper_revision);
 
         models.start_up();
 
@@ -649,15 +637,12 @@ async fn a_model_outside_the_two_a_bad_name_or_a_short_revision_is_refused_and_n
         let refused = logs.text().contains("speech model setting refused");
         // A model outside the list with a good name and commit is not refused, only unmanaged.
         let outside_list = whisper == "mlx-community/whisper-small";
-        assert_eq!(
-            refused, !outside_list,
-            "{whisper} {whisper_revision} {kokoro_revision}"
-        );
+        assert_eq!(refused, !outside_list, "{whisper} {whisper_revision}");
     }
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn a_model_the_worker_cannot_find_that_is_not_one_of_the_two_is_reported_missing_not_downloaded()
+async fn a_model_the_worker_cannot_find_that_is_not_the_listed_one_is_reported_missing_not_downloaded()
  {
     let scratch = Scratch::new();
     scratch.both_checked();
@@ -665,7 +650,6 @@ async fn a_model_the_worker_cannot_find_that_is_not_one_of_the_two_is_reported_m
         &scratch.fake_python(WORKS),
         "mlx-community/whisper-small",
         WHISPER_REVISION,
-        KOKORO_REVISION,
     );
     models.start_up();
     until(&models, finished).await;
@@ -720,21 +704,12 @@ async fn the_script_is_started_with_dash_i_and_only_the_four_variables() {
             command: scratch.fake_python(WORKS),
             args: ["--model", WHISPER].map(String::from).to_vec(),
         };
-        let tts = TtsSettings {
-            model_revision: KOKORO_REVISION.into(),
-            command: "say".into(),
-            voice: None,
-            args: None,
-            fallback_command: None,
-            fallback_voice: None,
-            fallback_args: None,
-        };
         SpeechModels::new(
             &voice_input,
-            &tts,
             scratch.folder(),
             env,
             Arc::clone(&scratch.host) as Arc<dyn Host>,
+            None,
         )
     };
     // Harold's own environment holds more, which the script must not get.
@@ -986,7 +961,6 @@ async fn a_call_after_the_user_fetched_an_unmanaged_model_tries_it_again() {
         &scratch.fake_python(WORKS),
         "mlx-community/whisper-small",
         WHISPER_REVISION,
-        KOKORO_REVISION,
     );
     models.start_up();
     until(&models, finished).await;
@@ -996,4 +970,111 @@ async fn a_call_after_the_user_fetched_an_unmanaged_model_tries_it_again() {
     models.for_call();
 
     assert_eq!(until(&models, finished).await, Status::Ready);
+}
+
+// ---------------------------------------------------------------------------
+// The TTS server's default model
+// ---------------------------------------------------------------------------
+
+mod tts_default {
+    use super::*;
+    use crate::tts::models::DefaultStatus;
+    use crate::tts::test_support::{FakeLauncher, Scratch as TtsScratch, Script};
+    use crate::tts::worker::Supervisor;
+    use tokio::sync::Notify;
+
+    fn server_of(scratch: &TtsScratch, script: &Arc<Script>) -> Arc<TtsServer> {
+        let registry = scratch.registry();
+        registry.start_up();
+        TtsServer::new(
+            registry,
+            Supervisor::new(
+                Arc::new(FakeLauncher(Arc::clone(script))),
+                Duration::from_secs(600),
+            ),
+        )
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_call_waits_for_the_default_tts_model_and_the_phone_shows_its_download() {
+        let scratch = Scratch::new();
+        scratch.both_checked();
+        let tts_scratch = TtsScratch::new();
+        let gate = Arc::new(Notify::new());
+        *tts_scratch.hub.gate.lock().unwrap() = Some(gate.clone());
+        let server = server_of(&tts_scratch, &Arc::new(Script::default()));
+        let models = scratch.models_with_tts(&scratch.fake_python(WORKS), server.clone());
+
+        models.start_up();
+
+        let shown = until(&models, |status| {
+            matches!(status, Status::Downloading { .. })
+        })
+        .await;
+        assert_eq!(
+            shown,
+            Status::Downloading {
+                model: crate::tts::models::KOKORO_MLX.to_string(),
+                bytes: 10,
+                total: 100
+            }
+        );
+        assert_eq!(shown.percent(), Some(10));
+        gate.notify_one();
+        assert_eq!(until(&models, finished).await, Status::Ready);
+        assert_eq!(server.registry().default_status(), DefaultStatus::Ready);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_default_tts_model_that_failed_ends_the_wait_with_the_notice() {
+        let scratch = Scratch::new();
+        scratch.both_checked();
+        let tts_scratch = TtsScratch::new();
+        tts_scratch
+            .hub
+            .downloads
+            .lock()
+            .unwrap()
+            .push(Err("check_failed"));
+        let server = server_of(&tts_scratch, &Arc::new(Script::default()));
+        let models = scratch.models_with_tts(&scratch.fake_python(WORKS), server);
+
+        models.start_up();
+
+        let Status::Failed(missing) = until(&models, finished).await else {
+            panic!("the TTS model failed its check");
+        };
+        assert_eq!(missing.model, crate::tts::models::KOKORO_MLX);
+        assert_eq!(missing.reason, "check_failed");
+        let command = missing.command.expect("a command to fetch it by hand");
+        assert!(command.contains("snapshot_download('mlx-community/Kokoro-82M-bf16'"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_call_starts_the_tts_worker_while_it_rings() {
+        let scratch = Scratch::new();
+        scratch.both_checked();
+        let tts_scratch = TtsScratch::new();
+        tts_scratch.cached(
+            crate::tts::models::KOKORO_MLX,
+            crate::settings::KOKORO_REVISION,
+            100,
+        );
+        let script = Arc::new(Script::default());
+        let server = server_of(&tts_scratch, &script);
+        let models = scratch.models_with_tts(&scratch.fake_python(WORKS), server);
+        models.start_up();
+        assert_eq!(until(&models, finished).await, Status::Ready);
+        assert_eq!(script.launches.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+        models.for_call();
+
+        timeout(Duration::from_secs(10), async {
+            while script.launches.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the TTS worker started");
+    }
 }

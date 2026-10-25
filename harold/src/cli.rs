@@ -17,6 +17,8 @@ use harold_api::tools::questions::v1 as questions;
 use harold_api::tools::questions::v1::question_service_client::QuestionServiceClient;
 use harold_api::tools::watch::v1 as watch_api;
 use harold_api::tools::watch::v1::watch_service_client::WatchServiceClient;
+use harold_api::tts::v1 as tts_api;
+use harold_api::tts::v1::tts_service_client::TtsServiceClient;
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Mode {
@@ -240,6 +242,223 @@ pub(crate) enum ToolCommand {
     Backlog(BacklogCommand),
     Watch(WatchCommand),
     Knowledge(KnowledgeCommand),
+    Tts(TtsCommand),
+}
+
+const TTS_USAGE_LINE: &str = "invalid argument: usage is harold tool tts models | add REPO@REVISION | remove ID | default MODEL VOICE | speak TEXT";
+
+/// How long a TTS call may take: the first line after a pause waits for the model to load.
+const TTS_DEADLINE: Duration = Duration::from_secs(120);
+
+/// A `harold tool tts` command.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum TtsCommand {
+    Models,
+    Add { repo: String, revision: String },
+    Remove { id: String },
+    Default { model: String, voice: String },
+    Speak { text: String },
+}
+
+fn parse_tts(args: &[&str]) -> Result<TtsCommand, String> {
+    let usage = || TTS_USAGE_LINE.to_string();
+    match args {
+        ["models"] => Ok(TtsCommand::Models),
+        ["add", spec] => {
+            let (repo, revision) = spec.split_once('@').ok_or_else(usage)?;
+            if repo.is_empty() || revision.is_empty() {
+                return Err(usage());
+            }
+            Ok(TtsCommand::Add {
+                repo: repo.into(),
+                revision: revision.into(),
+            })
+        }
+        ["remove", id] => Ok(TtsCommand::Remove { id: (*id).into() }),
+        ["default", model, voice] => Ok(TtsCommand::Default {
+            model: (*model).into(),
+            voice: (*voice).into(),
+        }),
+        ["speak", words @ ..] if !words.is_empty() => Ok(TtsCommand::Speak {
+            text: words.join(" "),
+        }),
+        _ => Err(usage()),
+    }
+}
+
+/// The line printed for a refusal from the TTS server.
+fn tts_refusal_line(status: &tonic::Status) -> String {
+    match (status.code(), status.message()) {
+        (tonic::Code::Unimplemented, _) => "the Harold daemon does not serve the TTS server".into(),
+        (tonic::Code::PermissionDenied, "not_local") => {
+            "refused: the call is not from this machine".into()
+        }
+        (tonic::Code::PermissionDenied, "not_approved") => "waiting for approval: the model is not on the approved list (tts-models.toml); the chief has it audited".into(),
+        (_, "invalid_revision") => "invalid revision: use 40 lowercase hex characters".into(),
+        (_, "invalid_repo") => "invalid repository: use ORG/NAME".into(),
+        (_, "unsupported_source") => "unsupported source: only huggingface".into(),
+        (_, "unsupported_worker") => "this machine's TTS worker cannot run that model".into(),
+        (_, "unsafe_format") => "refused: the model has a weight file that can run code (.bin, .pt, .pth or .pkl)".into(),
+        (_, "default_model") => "the default model cannot be removed".into(),
+        (_, "unknown_model") => "unknown model: run harold tool tts models".into(),
+        (_, "unknown_voice") => "unknown voice for that model".into(),
+        (_, "model_not_ready") => "the model is not ready: it waits for approval".into(),
+        (_, "model_downloading") => "the TTS model is still downloading: try again soon".into(),
+        (_, "model_missing") => "the TTS model is not on this machine: run harold tool tts models".into(),
+        (_, "worker_failed") => "the TTS worker failed: see harold.log".into(),
+        (_, "timed_out") => "the TTS worker did not answer in time".into(),
+        (_, "invalid_text") => "the text must be 1 to 4,000 characters".into(),
+        (_, "") => "the Harold daemon refused the call".into(),
+        (_, message) => message.to_string(),
+    }
+}
+
+fn tts_state_word(state: i32) -> &'static str {
+    match tts_api::ModelState::try_from(state) {
+        Ok(tts_api::ModelState::Ready) => "ready",
+        Ok(tts_api::ModelState::Downloading) => "downloading",
+        Ok(tts_api::ModelState::Failed) => "failed",
+        Ok(tts_api::ModelState::WaitingForApproval) => "waiting_for_approval",
+        _ => "unknown",
+    }
+}
+
+/// One line for a model: the default mark, its id, its state and reason, its worker, size and
+/// voices.
+fn tts_model_line(model: &tts_api::Model) -> String {
+    let mark = if model.is_default { "*" } else { " " };
+    let reason = if model.reason.is_empty() {
+        String::new()
+    } else {
+        format!(" ({})", model.reason)
+    };
+    let voice = if model.default_voice.is_empty() {
+        String::new()
+    } else {
+        format!(", default voice {}", model.default_voice)
+    };
+    let voices = if model.voices.is_empty() {
+        String::new()
+    } else {
+        format!(", voices {}", model.voices.join(" "))
+    };
+    format!(
+        "{mark} {} {}{reason} {} {}@{} {} MB{voice}{voices}",
+        model.id,
+        tts_state_word(model.state),
+        model.worker,
+        model.source,
+        model.revision,
+        model.size_bytes / 1_000_000,
+    )
+}
+
+/// Runs a `harold tool tts` command. `Ok` is the text to print; `Err` the one line. `speak`
+/// plays the line with `player` at the desk.
+pub(crate) async fn tts_within(
+    address: &str,
+    command: &TtsCommand,
+    wait: Duration,
+    player: &str,
+) -> Result<String, String> {
+    let connect = || async {
+        TtsServiceClient::connect(format!("http://{address}"))
+            .await
+            .map_err(|_| "the Harold daemon is not reachable".to_string())
+    };
+    if let TtsCommand::Speak { text } = command {
+        let audio = call_within(TTS_DEADLINE, wait, async {
+            let mut client = connect().await?;
+            let mut stream = client
+                .speak(tts_api::SpeakRequest {
+                    text: text.clone(),
+                    model: String::new(),
+                    voice: String::new(),
+                })
+                .await
+                .map_err(|status| tts_refusal_line(&status))?
+                .into_inner();
+            let mut audio = crate::tts::Audio {
+                sample_rate: 0,
+                pcm: Vec::new(),
+            };
+            while let Some(chunk) = stream
+                .message()
+                .await
+                .map_err(|status| tts_refusal_line(&status))?
+            {
+                if chunk.sample_rate != 0 {
+                    audio.sample_rate = chunk.sample_rate;
+                }
+                audio.pcm.extend(chunk.pcm);
+            }
+            Ok::<_, String>(audio)
+        })
+        .await?;
+        // The playing is not part of the daemon's wait.
+        let wav = crate::tts::play::TempWav::write(&std::env::temp_dir(), &audio)
+            .map_err(|_| "the line could not be written to play".to_string())?;
+        let played = tokio::process::Command::new(player)
+            .arg(wav.path())
+            .status()
+            .await
+            .map_err(|_| format!("{player} could not start"))?;
+        return if played.success() {
+            Ok("said".into())
+        } else {
+            Err(format!("{player} failed"))
+        };
+    }
+    call_within(TTS_DEADLINE, wait, async {
+        let mut client = connect().await?;
+        let refused = |status: tonic::Status| tts_refusal_line(&status);
+        match command {
+            TtsCommand::Models => {
+                let models = client
+                    .list_models(tts_api::ListModelsRequest {})
+                    .await
+                    .map_err(refused)?
+                    .into_inner()
+                    .models;
+                Ok(models
+                    .iter()
+                    .map(tts_model_line)
+                    .collect::<Vec<_>>()
+                    .join("\n"))
+            }
+            TtsCommand::Add { repo, revision } => {
+                let added = client
+                    .add_model(tts_api::AddModelRequest {
+                        source: "huggingface".into(),
+                        repo: repo.clone(),
+                        revision: revision.clone(),
+                    })
+                    .await
+                    .map_err(refused)?
+                    .into_inner();
+                Ok(format!("{} {}", added.id, tts_state_word(added.state)))
+            }
+            TtsCommand::Remove { id } => {
+                client
+                    .remove_model(tts_api::RemoveModelRequest { id: id.clone() })
+                    .await
+                    .map_err(refused)?;
+                Ok(format!("removed {id}"))
+            }
+            TtsCommand::Default { model, voice } => {
+                client
+                    .set_default(tts_api::SetDefaultRequest {
+                        model: model.clone(),
+                        voice: voice.clone(),
+                    })
+                    .await
+                    .map_err(refused)?;
+                Ok(format!("default is {model} {voice}"))
+            }
+            TtsCommand::Speak { .. } => Err(TTS_USAGE_LINE.into()),
+        }
+    })
+    .await
 }
 
 const KNOWLEDGE_USAGE_LINE: &str = "invalid argument: usage is harold tool knowledge search WORDS [--limit N] | recent [--limit N] | related NOTE [--limit N] | links NOTE | show NOTE | status | rebuild | relate FROM RELATION TO | unrelate FROM RELATION TO | relations NOTE | graph status | graph rebuild | graph void SEQUENCE --reason WORD";
@@ -1017,6 +1236,7 @@ fn parse_tool(args: &[&str]) -> Result<ToolCommand, String> {
         ["backlog", rest @ ..] => parse_backlog(rest).map(ToolCommand::Backlog),
         ["watch", rest @ ..] => parse_watch(rest).map(ToolCommand::Watch),
         ["knowledge", rest @ ..] => parse_knowledge(rest).map(ToolCommand::Knowledge),
+        ["tts", rest @ ..] => parse_tts(rest).map(ToolCommand::Tts),
         ["questions", "put"] => Ok(ToolCommand::QuestionsPut),
         ["questions", "list"] => Ok(ToolCommand::QuestionsList),
         ["questions", "checked"] => Ok(ToolCommand::QuestionsChecked),
@@ -1071,6 +1291,10 @@ pub(crate) fn check_config(settings: &Settings) -> Result<(), Box<dyn std::error
         serde_json::json!({
             "grpc_addr": settings.grpc.addr()?.to_string(),
             "store_path": settings.store.resolved_path(),
+            "tts_engine": match settings.tts.engine {
+                crate::settings::TtsEngine::Command => "command",
+                crate::settings::TtsEngine::Server => "server",
+            },
         })
     );
     Ok(())
@@ -1445,6 +1669,9 @@ pub(crate) async fn tool(
     if let ToolCommand::Knowledge(knowledge) = command {
         return knowledge_within(address, knowledge, KNOWLEDGE_DEADLINE).await;
     }
+    if let ToolCommand::Tts(tts) = command {
+        return tts_within(address, tts, TTS_DEADLINE, crate::tts::play::PLAYER).await;
+    }
     tool_within(address, command, stdin, CALL_DEADLINE).await
 }
 
@@ -1661,9 +1888,10 @@ pub(crate) async fn tool_within(
             }
             // `tool` runs a backlog command through `backlog_within`, and a watch
             // command through `watch_within`.
-            ToolCommand::Backlog(_) | ToolCommand::Watch(_) | ToolCommand::Knowledge(_) => {
-                Err(TOOL_USAGE_LINE.into())
-            }
+            ToolCommand::Backlog(_)
+            | ToolCommand::Watch(_)
+            | ToolCommand::Knowledge(_)
+            | ToolCommand::Tts(_) => Err(TOOL_USAGE_LINE.into()),
         }
     })
     .await
@@ -4862,5 +5090,408 @@ mod tests {
             .await,
             Err("unknown watch nope".into())
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // harold tool tts
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn tts_commands_parse_and_a_malformed_one_prints_the_usage() {
+        let revision = "a".repeat(40);
+        assert_eq!(parse_tts(&["models"]), Ok(TtsCommand::Models));
+        assert_eq!(
+            parse_tts(&["add", &format!("org/name@{revision}")]),
+            Ok(TtsCommand::Add {
+                repo: "org/name".into(),
+                revision: revision.clone()
+            })
+        );
+        assert_eq!(
+            parse_tts(&["remove", "org/name"]),
+            Ok(TtsCommand::Remove {
+                id: "org/name".into()
+            })
+        );
+        assert_eq!(
+            parse_tts(&["default", "org/name", "af_heart"]),
+            Ok(TtsCommand::Default {
+                model: "org/name".into(),
+                voice: "af_heart".into()
+            })
+        );
+        assert_eq!(
+            parse_tts(&["speak", "All", "green."]),
+            Ok(TtsCommand::Speak {
+                text: "All green.".into()
+            })
+        );
+        for bad in [
+            vec![],
+            vec!["models", "extra"],
+            vec!["add"],
+            vec!["add", "no-revision"],
+            vec!["add", "@abc"],
+            vec!["add", "org/name@"],
+            vec!["remove"],
+            vec!["default", "only-a-model"],
+            vec!["speak"],
+            vec!["nonsense"],
+        ] {
+            assert_eq!(parse_tts(&bad), Err(TTS_USAGE_LINE.to_string()), "{bad:?}");
+        }
+        assert_eq!(
+            Mode::parse(&["tool".into(), "tts".into(), "models".into()]),
+            Ok(Mode::Tool(ToolCommand::Tts(TtsCommand::Models)))
+        );
+    }
+
+    #[test]
+    fn each_tts_refusal_prints_one_plain_line() {
+        let line = |code, message: &str| tts_refusal_line(&tonic::Status::new(code, message));
+        assert_eq!(
+            line(tonic::Code::PermissionDenied, "not_approved"),
+            "waiting for approval: the model is not on the approved list (tts-models.toml); the chief has it audited"
+        );
+        assert_eq!(
+            line(tonic::Code::PermissionDenied, "not_local"),
+            "refused: the call is not from this machine"
+        );
+        assert_eq!(
+            line(tonic::Code::InvalidArgument, "invalid_revision"),
+            "invalid revision: use 40 lowercase hex characters"
+        );
+        assert_eq!(
+            line(tonic::Code::FailedPrecondition, "unsafe_format"),
+            "refused: the model has a weight file that can run code (.bin, .pt, .pth or .pkl)"
+        );
+        assert_eq!(
+            line(tonic::Code::FailedPrecondition, "default_model"),
+            "the default model cannot be removed"
+        );
+        assert_eq!(
+            line(tonic::Code::Unavailable, "model_downloading"),
+            "the TTS model is still downloading: try again soon"
+        );
+        assert_eq!(
+            line(tonic::Code::Unimplemented, ""),
+            "the Harold daemon does not serve the TTS server"
+        );
+        assert_eq!(
+            line(tonic::Code::Internal, ""),
+            "the Harold daemon refused the call"
+        );
+    }
+
+    #[test]
+    fn a_model_line_shows_the_default_mark_state_reason_worker_size_and_voices() {
+        let model = tts_api::Model {
+            id: "mlx-community/Kokoro-82M-bf16".into(),
+            source: "huggingface".into(),
+            revision: "a".repeat(40),
+            worker: "mlx".into(),
+            voices: vec!["af_heart".into(), "am_adam".into()],
+            state: tts_api::ModelState::Ready.into(),
+            reason: String::new(),
+            size_bytes: 389_410_807,
+            is_default: true,
+            default_voice: "af_heart".into(),
+        };
+        assert_eq!(
+            tts_model_line(&model),
+            format!(
+                "* mlx-community/Kokoro-82M-bf16 ready mlx huggingface@{} 389 MB, default voice af_heart, voices af_heart am_adam",
+                "a".repeat(40)
+            )
+        );
+        let waiting = tts_api::Model {
+            is_default: false,
+            default_voice: String::new(),
+            voices: Vec::new(),
+            state: tts_api::ModelState::WaitingForApproval.into(),
+            reason: "not_approved".into(),
+            size_bytes: 0,
+            ..model
+        };
+        assert!(tts_model_line(&waiting).starts_with(
+            "  mlx-community/Kokoro-82M-bf16 waiting_for_approval (not_approved) mlx"
+        ));
+    }
+
+    mod tts_server {
+        use super::*;
+        use harold_api::tts::v1::tts_service_server::{TtsService, TtsServiceServer};
+        use std::sync::{Arc, Mutex};
+        use tokio_stream::wrappers::ReceiverStream;
+
+        /// A TTS service that notes each call and answers as the test set it.
+        #[derive(Default)]
+        struct Fake {
+            calls: Arc<Mutex<Vec<String>>>,
+            refuse: Option<tonic::Status>,
+        }
+
+        #[tonic::async_trait]
+        impl TtsService for Fake {
+            type SpeakStream = ReceiverStream<Result<tts_api::AudioChunk, tonic::Status>>;
+
+            async fn speak(
+                &self,
+                request: tonic::Request<tts_api::SpeakRequest>,
+            ) -> Result<tonic::Response<Self::SpeakStream>, tonic::Status> {
+                if let Some(status) = &self.refuse {
+                    return Err(status.clone());
+                }
+                let request = request.into_inner();
+                self.calls
+                    .lock()
+                    .unwrap()
+                    .push(format!("speak {}", request.text));
+                let (sender, receiver) = tokio::sync::mpsc::channel(4);
+                sender
+                    .send(Ok(tts_api::AudioChunk {
+                        sample_rate: 24_000,
+                        pcm: vec![1, 0],
+                    }))
+                    .await
+                    .unwrap();
+                sender
+                    .send(Ok(tts_api::AudioChunk {
+                        sample_rate: 0,
+                        pcm: vec![2, 0],
+                    }))
+                    .await
+                    .unwrap();
+                Ok(tonic::Response::new(ReceiverStream::new(receiver)))
+            }
+
+            async fn list_models(
+                &self,
+                _: tonic::Request<tts_api::ListModelsRequest>,
+            ) -> Result<tonic::Response<tts_api::ListModelsResponse>, tonic::Status> {
+                if let Some(status) = &self.refuse {
+                    return Err(status.clone());
+                }
+                Ok(tonic::Response::new(tts_api::ListModelsResponse {
+                    models: vec![tts_api::Model {
+                        id: "org/kokoro".into(),
+                        source: "huggingface".into(),
+                        revision: "b".repeat(40),
+                        worker: "mlx".into(),
+                        state: tts_api::ModelState::Ready.into(),
+                        size_bytes: 5_000_000,
+                        is_default: true,
+                        default_voice: "af_heart".into(),
+                        ..Default::default()
+                    }],
+                }))
+            }
+
+            async fn add_model(
+                &self,
+                request: tonic::Request<tts_api::AddModelRequest>,
+            ) -> Result<tonic::Response<tts_api::AddModelResponse>, tonic::Status> {
+                if let Some(status) = &self.refuse {
+                    return Err(status.clone());
+                }
+                let request = request.into_inner();
+                self.calls.lock().unwrap().push(format!(
+                    "add {} {}@{}",
+                    request.source, request.repo, request.revision
+                ));
+                Ok(tonic::Response::new(tts_api::AddModelResponse {
+                    id: request.repo,
+                    state: tts_api::ModelState::Downloading.into(),
+                }))
+            }
+
+            async fn remove_model(
+                &self,
+                request: tonic::Request<tts_api::RemoveModelRequest>,
+            ) -> Result<tonic::Response<tts_api::RemoveModelResponse>, tonic::Status> {
+                if let Some(status) = &self.refuse {
+                    return Err(status.clone());
+                }
+                self.calls
+                    .lock()
+                    .unwrap()
+                    .push(format!("remove {}", request.into_inner().id));
+                Ok(tonic::Response::new(tts_api::RemoveModelResponse {}))
+            }
+
+            async fn set_default(
+                &self,
+                request: tonic::Request<tts_api::SetDefaultRequest>,
+            ) -> Result<tonic::Response<tts_api::SetDefaultResponse>, tonic::Status> {
+                let request = request.into_inner();
+                self.calls
+                    .lock()
+                    .unwrap()
+                    .push(format!("default {} {}", request.model, request.voice));
+                Ok(tonic::Response::new(tts_api::SetDefaultResponse {}))
+            }
+        }
+
+        async fn serve(fake: Fake) -> String {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap().to_string();
+            let (incoming, connections) = tokio::sync::mpsc::channel(1);
+            tokio::spawn(async move {
+                while let Ok((socket, _)) = listener.accept().await {
+                    if incoming
+                        .send(Ok::<_, std::io::Error>(socket))
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            });
+            tokio::spawn(
+                tonic::transport::Server::builder()
+                    .add_service(TtsServiceServer::new(fake))
+                    .serve_with_incoming(tokio_stream::wrappers::ReceiverStream::new(connections)),
+            );
+            address
+        }
+
+        async fn run(address: &str, command: TtsCommand, player: &str) -> Result<String, String> {
+            tts_within(address, &command, Duration::from_secs(20), player).await
+        }
+
+        #[tokio::test]
+        async fn models_add_remove_and_default_print_one_line_each() {
+            let fake = Fake::default();
+            let calls = fake.calls.clone();
+            let address = serve(fake).await;
+
+            assert_eq!(
+                run(&address, TtsCommand::Models, "/usr/bin/true").await,
+                Ok(format!(
+                    "* org/kokoro ready mlx huggingface@{} 5 MB, default voice af_heart",
+                    "b".repeat(40)
+                ))
+            );
+            assert_eq!(
+                run(
+                    &address,
+                    TtsCommand::Add {
+                        repo: "org/other".into(),
+                        revision: "c".repeat(40)
+                    },
+                    "/usr/bin/true"
+                )
+                .await,
+                Ok("org/other downloading".to_string())
+            );
+            assert_eq!(
+                run(
+                    &address,
+                    TtsCommand::Remove {
+                        id: "org/other".into()
+                    },
+                    "/usr/bin/true"
+                )
+                .await,
+                Ok("removed org/other".to_string())
+            );
+            assert_eq!(
+                run(
+                    &address,
+                    TtsCommand::Default {
+                        model: "org/kokoro".into(),
+                        voice: "am_adam".into()
+                    },
+                    "/usr/bin/true"
+                )
+                .await,
+                Ok("default is org/kokoro am_adam".to_string())
+            );
+            assert_eq!(
+                *calls.lock().unwrap(),
+                [
+                    format!("add huggingface org/other@{}", "c".repeat(40)),
+                    "remove org/other".to_string(),
+                    "default org/kokoro am_adam".to_string(),
+                ]
+            );
+        }
+
+        #[tokio::test]
+        async fn a_refusal_prints_its_line() {
+            let fake = Fake {
+                refuse: Some(tonic::Status::permission_denied("not_approved")),
+                ..Fake::default()
+            };
+            let address = serve(fake).await;
+
+            let refused = run(
+                &address,
+                TtsCommand::Add {
+                    repo: "org/other".into(),
+                    revision: "c".repeat(40),
+                },
+                "/usr/bin/true",
+            )
+            .await;
+
+            assert_eq!(
+                refused,
+                Err("waiting for approval: the model is not on the approved list (tts-models.toml); the chief has it audited".to_string())
+            );
+        }
+
+        #[tokio::test]
+        async fn no_daemon_prints_that_it_is_not_reachable() {
+            assert_eq!(
+                run("127.0.0.1:1", TtsCommand::Models, "/usr/bin/true").await,
+                Err("the Harold daemon is not reachable".to_string())
+            );
+        }
+
+        #[tokio::test]
+        async fn speak_plays_the_audio_it_gets_with_the_player() {
+            use std::os::unix::fs::PermissionsExt;
+            let folder =
+                std::env::temp_dir().join(format!("harold-cli-tts-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&folder).unwrap();
+            let player = folder.join("player");
+            std::fs::write(&player, "#!/bin/sh\ncp \"$1\" \"$0.wav\"\n").unwrap();
+            std::fs::set_permissions(&player, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let fake = Fake::default();
+            let calls = fake.calls.clone();
+            let address = serve(fake).await;
+
+            let said = run(
+                &address,
+                TtsCommand::Speak {
+                    text: "All green.".into(),
+                },
+                &player.display().to_string(),
+            )
+            .await;
+
+            assert_eq!(said, Ok("said".to_string()));
+            assert_eq!(*calls.lock().unwrap(), ["speak All green."]);
+            let wav = std::fs::read(folder.join("player.wav")).unwrap();
+            assert_eq!(&wav[0..4], b"RIFF");
+            assert_eq!(u32::from_le_bytes(wav[24..28].try_into().unwrap()), 24_000);
+            assert_eq!(&wav[44..], [1, 0, 2, 0]);
+            std::fs::remove_dir_all(&folder).unwrap();
+        }
+
+        #[tokio::test]
+        async fn speak_fails_with_the_players_name_when_it_fails() {
+            let address = serve(Fake::default()).await;
+
+            let said = run(
+                &address,
+                TtsCommand::Speak { text: "Hi.".into() },
+                "/usr/bin/false",
+            )
+            .await;
+
+            assert_eq!(said, Err("/usr/bin/false failed".to_string()));
+        }
     }
 }

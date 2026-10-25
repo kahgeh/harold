@@ -17,6 +17,7 @@ mod store;
 mod telemetry;
 mod timed_prompts;
 mod tools;
+mod tts;
 mod util;
 #[cfg(feature = "calls")]
 mod voice_input;
@@ -783,6 +784,16 @@ fn print_help() {
     println!("  harold tool questions order ID...   Put the listed questions first, in order");
     println!("  harold tool questions list          List the waiting questions");
     println!("  harold tool questions show ID       Print a question's picks");
+    println!(
+        "  harold tool tts models              List the TTS models, their state and the default"
+    );
+    println!(
+        "  harold tool tts add REPO@REVISION   Ask for a TTS model; it downloads only when it is"
+    );
+    println!("                          on the approved list (tts-models.toml)");
+    println!("  harold tool tts remove ID           Remove a TTS model (not the default)");
+    println!("  harold tool tts default MODEL VOICE Set the default TTS model and voice");
+    println!("  harold tool tts speak TEXT          Say TEXT at the desk through the TTS server");
     println!("  harold tool knowledge search WORDS [--limit N]");
     println!(
         "                          Search the vault by meaning: score, name, kind, description"
@@ -917,10 +928,10 @@ fn start_calls(
             .join("speech-models");
         voice_input::init_speech_models(voice_input::SpeechModels::new(
             voice_input,
-            &cfg.tts,
             folder,
             voice_input::ModelsEnv::from_process(),
             Arc::new(voice_input::SystemHost),
+            tts::server(),
         ));
     }
     // The desk's calls come first: they sweep leftover `call-*` folders before either
@@ -1157,6 +1168,9 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(queue) = &telemetry_tasks.alert_queue {
         store.set_alert_queue(queue.clone());
     }
+    // The TTS server comes before the calls: a call waits for its default model.
+    let tts_server = tts::start(cfg, Arc::clone(&store), &store_path, shutdown_rx.clone()).await;
+    tts::init_server(Arc::clone(&tts_server));
     let phone_calls = start_calls(cfg, &store, &store_path, &snapshots);
     let browser_collector = telemetry
         .exporting()
@@ -1236,6 +1250,11 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
     let server_result = Server::builder()
         .add_routes(tools.routes.clone())
         .add_service(HaroldServer::new(service))
+        .add_service(
+            harold_api::tts::v1::tts_service_server::TtsServiceServer::new(
+                tts::service::TtsApi::new(Arc::clone(&tts_server)),
+            ),
+        )
         .add_service(harold::harold_app_server::HaroldAppServer::new(
             web_app::pair::AppService {
                 pairing: web_app.as_ref().map(|running| Arc::clone(&running.pairing)),
@@ -1253,6 +1272,7 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(calls) = voice_input::daemon_calls() {
         calls.shutdown().await;
     }
+    tts_server.supervisor().stop().await;
 
     // Wait for the handler, the listener, the timed-prompt task, the tools, the web app, the
     // pod facts and the alert address to stop before returning.

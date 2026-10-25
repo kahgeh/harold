@@ -490,7 +490,8 @@ async fn fresh_schema_has_one_initial_record_across_reopen() {
             "001_initial",
             "002_web_app",
             "003_app_photo",
-            "004_app_message_trace"
+            "004_app_message_trace",
+            "005_tts_default"
         ]
     );
 }
@@ -629,7 +630,7 @@ async fn unknown_schema_record_is_rejected_without_modifying_pending_delivery() 
             .get_value(0)
             .unwrap()
             .as_integer(),
-        Some(&5)
+        Some(&6)
     );
 }
 
@@ -2713,4 +2714,39 @@ async fn an_upload_a_reply_took_is_not_deleted_as_unused() {
     );
     assert!(store.app_photo_file("p1").await.unwrap().is_some());
     assert!(store.app_photo_file("p2").await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn the_tts_default_is_one_row_that_survives_a_reopen() {
+    let directory = TestDirectory::new();
+    let store = HaroldStore::open(directory.path()).await.unwrap();
+    assert_eq!(store.tts_default().await.unwrap(), None);
+
+    store
+        .set_tts_default("org/model", "af_heart")
+        .await
+        .unwrap();
+    store.set_tts_default("org/other", "am_adam").await.unwrap();
+    drop(store);
+
+    let reopened = HaroldStore::open(directory.path()).await.unwrap();
+    assert_eq!(
+        reopened.tts_default().await.unwrap(),
+        Some(("org/other".to_string(), "am_adam".to_string()))
+    );
+    let conn = reopened.state.connect().unwrap();
+    let mut rows = conn
+        .query("SELECT COUNT(*) FROM tts_default", ())
+        .await
+        .unwrap();
+    assert_eq!(
+        rows.next()
+            .await
+            .unwrap()
+            .unwrap()
+            .get_value(0)
+            .unwrap()
+            .as_integer(),
+        Some(&1)
+    );
 }

@@ -71,6 +71,14 @@ const VALID: &str = if cfg!(feature = "imessage") {
     ""
 };
 
+/// The `[tts] engine` a config that sets none resolves to: the command on the Mac, the server
+/// on Linux.
+const PLATFORM_ENGINE: &str = if cfg!(target_os = "linux") {
+    "server"
+} else {
+    "command"
+};
+
 #[test]
 fn build_features_prints_the_features_of_this_build_and_needs_no_config() {
     let mut expected = String::new();
@@ -112,6 +120,7 @@ fn config_probe_returns_only_resolved_nonsecret_settings_without_opening_storage
         serde_json::json!({
             "grpc_addr": "127.0.0.1:50060",
             "store_path": fixture.0.join("unopened-store").to_str().unwrap(),
+            "tts_engine": PLATFORM_ENGINE,
         })
     );
     assert!(!String::from_utf8_lossy(&output.stdout).contains("secret-recipient"));
@@ -1032,4 +1041,59 @@ fn under_launchd_a_clean_shutdown_marks_the_crash_file_clean() {
         std::fs::read_to_string(fixture.crashes()).unwrap(),
         "clean\n"
     );
+}
+
+fn engine_of(overlay: &str) -> String {
+    let output = Fixture::new(overlay).run(&["--check-config"]);
+    assert!(output.status.success(), "{output:?}");
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    value["tts_engine"].as_str().unwrap().to_owned()
+}
+
+/// This Mac's hand-written Kokoro command, as its `local.toml` holds it.
+const HAND_WRITTEN_KOKORO: &str = "\n[tts]\ncommand = '/work/venv/bin/python'\nargs = ['-m', 'mlx_audio.tts.generate', '--model', 'mlx-community/Kokoro-82M-bf16', '--voice', 'af_heart', '--play', '--text']\n";
+
+#[test]
+fn the_install_check_takes_the_hand_written_kokoro_command_as_the_server() {
+    assert_eq!(
+        engine_of(&format!("{VALID}{HAND_WRITTEN_KOKORO}")),
+        "server"
+    );
+}
+
+#[test]
+fn an_engine_the_config_sets_is_kept_even_with_the_kokoro_command() {
+    assert_eq!(
+        engine_of(&format!("{VALID}{HAND_WRITTEN_KOKORO}engine = 'command'\n")),
+        "command"
+    );
+    assert_eq!(
+        engine_of(&format!(
+            "{VALID}\n[tts]\nengine = 'server'\ncommand = 'say'\n"
+        )),
+        "server"
+    );
+}
+
+#[test]
+fn the_default_command_and_other_commands_stay_the_platforms_engine() {
+    assert_eq!(engine_of(VALID), PLATFORM_ENGINE);
+    assert_eq!(
+        engine_of(&format!(
+            "{VALID}\n[tts]\ncommand = 'say'\nargs = ['-r', '200']\n"
+        )),
+        PLATFORM_ENGINE
+    );
+}
+
+#[test]
+fn a_bad_engine_or_idle_time_is_refused_by_the_install_check() {
+    for overlay in [
+        "engine = 'cloud'",
+        "idle_minutes = 0",
+        "idle_minutes = 5000",
+    ] {
+        let output = Fixture::new(&format!("{VALID}\n[tts]\n{overlay}\n")).run(&["--check-config"]);
+        assert!(!output.status.success(), "{overlay}");
+    }
 }

@@ -1742,6 +1742,10 @@ const METRICS: &[&str] = &[
 
 /// The Metrics table's attributes, plus the two resource attributes every export carries.
 const ATTRIBUTES: &[&str] = &[
+    "first_audio_ms",
+    "loaded",
+    "device",
+    "caller",
     "route",
     "hidden_reported",
     "exception.type",
@@ -1784,6 +1788,7 @@ const ATTRIBUTES: &[&str] = &[
 
 /// The spec's span table. The trends panel "One turn, end to end" lists `harold.turn`.
 const SPANS: &[&str] = &[
+    "harold.tts.speak",
     "harold.knowledge.graph_rebuild",
     "browser.error",
     "harold.phone_request",
@@ -2132,6 +2137,7 @@ fn the_cards_dashboard_shows_each_card_beside_its_earlier_number_and_nothing_els
         ])
         .chain(WEB_APP_CARDS.map(str::to_string))
         .chain(KNOWLEDGE_CARDS.map(str::to_string))
+        .chain(TTS_CARDS.map(str::to_string))
         .collect();
     assert_eq!(tile_names(&dashboard), names);
 
@@ -2156,6 +2162,7 @@ fn the_cards_dashboard_shows_each_card_beside_its_earlier_number_and_nothing_els
             "Phone requests",
             "Pods",
             "Specs",
+            "TTS server",
             "Turns",
             "Web app (the phone's browser)"
         ]
@@ -2279,6 +2286,11 @@ const WEB_APP_CARDS: [&str; 8] = [
     "Thread opened at the oldest row, 7 days",
     "Web app posts refused, by route, per day",
     "Pages closed without a hidden report, share per day",
+];
+/// The TTS server's cards, in the order the dashboard lists them.
+const TTS_CARDS: [&str; 2] = [
+    "TTS time to first audio, p50 and p95 by machine, loaded and device, last 7 days",
+    "TTS failures per day, by machine, caller and reason",
 ];
 const CALL_ANSWERS_FAILED_CARD: &str = "Call answers failed, by day";
 const CALL_ANSWERER_SPEND_CARD: &str = "Call answerer spend, by day";
@@ -2405,6 +2417,7 @@ fn the_product_filter_reaches_the_pod_and_spec_tiles_only() {
         ("turns", false),
         ("web-app", false),
         ("knowledge", false),
+        ("tts", false),
         // The card takes `$__filters`, so the product filter empties it: its container
         // title says to leave that filter empty.
         ("notifications", true),
@@ -3702,4 +3715,47 @@ fn the_check_names_a_missing_alert_and_its_missing_webhook_together() {
         result.stdout,
         "alert watch-cost-high: missing in HyperDX\nwebhook harold-alerts-watch-cost-high: missing in HyperDX\ncheck_hyperdx_alerts: 2 problems\n"
     );
+}
+
+#[test]
+fn the_tts_cards_read_first_audio_by_machine_loaded_and_device_and_the_failures_by_reason() {
+    let dashboard = definition("dashboard.json");
+    let sql_of = |name: &str| {
+        let card = tiles(&dashboard)
+            .iter()
+            .find(|tile| tile["name"] == name)
+            .expect("the TTS card");
+        assert_eq!(card["config"]["displayType"], "table");
+        assert_eq!(card["containerId"], "tts");
+        card["config"]["sqlTemplate"].as_str().unwrap().to_owned()
+    };
+
+    let speed = sql_of(TTS_CARDS[0]);
+    for piece in [
+        "SpanName = 'harold.tts.speak'",
+        "SpanAttributes['result'] = 'spoke'",
+        "ResourceAttributes['harold.machine'] AS machine",
+        "SpanAttributes['loaded'] AS loaded",
+        "SpanAttributes['device'] AS device",
+        "quantile(0.5)(toFloat64OrZero(SpanAttributes['first_audio_ms']))",
+        "quantile(0.95)(toFloat64OrZero(SpanAttributes['first_audio_ms']))",
+        "INTERVAL 7 DAY",
+        "GROUP BY day, machine, loaded, device",
+    ] {
+        assert!(speed.contains(piece), "{piece} in {speed}");
+    }
+
+    let failures = sql_of(TTS_CARDS[1]);
+    for piece in [
+        "otel.otel_logs",
+        "Body = 'tts failed'",
+        "LogAttributes['caller'] AS caller",
+        "LogAttributes['reason'] AS reason",
+        "ResourceAttributes['harold.machine'] AS machine",
+        "GROUP BY day, machine, caller, reason",
+    ] {
+        assert!(failures.contains(piece), "{piece} in {failures}");
+    }
+    // Nothing in either card reads the text of a line.
+    assert!(!speed.contains("text") && !failures.contains("text"));
 }

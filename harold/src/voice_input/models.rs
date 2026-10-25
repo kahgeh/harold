@@ -1,16 +1,16 @@
-//! The two speech models the voice worker loads, Whisper and Kokoro: which commit of each
-//! Harold loads, whether the Mac has it checked, and the download of a missing one at
-//! start-up (ADR 0011). Harold downloads only the two repositories listed here, each pinned
-//! to a commit, through `voice_download.py`, and checks every file. The voice worker never
-//! downloads.
+//! The speech model the voice worker loads, Whisper: which commit Harold loads, whether the Mac
+//! has it checked, and the download of a missing one at start-up (ADR 0011). Harold downloads
+//! only the repository listed here, pinned to a commit, through `voice_download.py`, and checks
+//! every file. The voice worker never downloads.
+//!
+//! Kokoro is a TTS model, downloaded by the TTS server (ADR 0020). A call still waits for the
+//! default TTS model: the models follow the server's status for it, after Whisper.
 
 use super::Missing;
 use super::answerer::{GroupGuard, kill_group};
-use crate::settings::{TtsSettings, VoiceInputSettings};
-use crate::tools::BoxFuture;
+use crate::settings::VoiceInputSettings;
+use crate::tts::{TtsServer, models::DefaultStatus};
 use serde_json::Value;
-use std::net::Ipv4Addr;
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -21,23 +21,18 @@ use tokio::sync::{Notify, watch};
 use tokio::time::{Instant, interval_at, sleep, timeout};
 use tracing::{info, warn};
 
-/// The download program, written into the speech-models folder before each run.
-pub(crate) const VOICE_DOWNLOAD_PY: &str = include_str!("../voice_download.py");
+pub(crate) use crate::tts::fetch::{
+    DISK_MARGIN, DOWNLOAD_LIMIT, Env, Host, METERED_RECHECK, SystemHost, folder_bytes, is_hotspot,
+    is_model_name, is_revision, repo_dir, snapshot_dir,
+};
 
 pub(crate) const WHISPER: &str = "mlx-community/whisper-large-v3-turbo";
-pub(crate) const KOKORO: &str = "mlx-community/Kokoro-82M-bf16";
 
-/// The only repositories Harold downloads, and each one's size in bytes at the pinned commit
+/// The only repository the speech models download, and its size in bytes at the pinned commit
 /// (for the disk check and the progress of a download).
-const ALLOWED: [(&str, u64); 2] = [(WHISPER, 1_613_979_758), (KOKORO, 389_410_807)];
-/// Free space needed on top of a model's size before its download starts.
-const DISK_MARGIN: u64 = 1_000_000_000;
-/// A run of the download program that has not finished by now is stopped.
-pub(crate) const DOWNLOAD_LIMIT: Duration = Duration::from_secs(2 * 60 * 60);
+const ALLOWED: [(&str, u64); 1] = [(WHISPER, 1_613_979_758)];
 /// How often the call screen's progress is read from the cache.
 const PROGRESS_EVERY: Duration = Duration::from_secs(10);
-/// How often a start-up download held back by a metered network looks again.
-const METERED_RECHECK: Duration = Duration::from_secs(10 * 60);
 
 /// The reasons a call is not given another download at once.
 const NO_RETRY: [&str; 2] = ["disk_full", "not_allowed"];
@@ -49,84 +44,6 @@ const REASONS: [&str; 5] = [
     "check_failed",
     "not_allowed",
 ];
-
-/// 40 lowercase hex characters.
-pub(crate) fn is_revision(text: &str) -> bool {
-    text.len() == 40
-        && text
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-}
-
-/// `<org>/<name>` in letters, digits, `.`, `_` and `-`.
-pub(crate) fn is_model_name(text: &str) -> bool {
-    let word = |part: &str| {
-        !part.is_empty()
-            && !part.bytes().all(|byte| byte == b'.')
-            && part
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
-    };
-    text.split_once('/')
-        .is_some_and(|(org, name)| word(org) && word(name))
-}
-
-/// What the download program and the cache are told about the Mac.
-#[derive(Debug, Clone)]
-pub(crate) struct Env {
-    pub path: String,
-    pub home: PathBuf,
-    pub hf_home: Option<String>,
-    pub hf_hub_cache: Option<String>,
-}
-
-impl Env {
-    pub(crate) fn from_process() -> Self {
-        let var = |name: &str| std::env::var(name).ok().filter(|value| !value.is_empty());
-        Self {
-            path: var("PATH").unwrap_or_else(|| "/usr/bin:/bin".to_string()),
-            home: var("HOME").map(PathBuf::from).unwrap_or_default(),
-            hf_home: var("HF_HOME"),
-            hf_hub_cache: var("HF_HUB_CACHE"),
-        }
-    }
-
-    /// `$HF_HUB_CACHE`, else `$HF_HOME/hub`, else `~/.cache/huggingface/hub`.
-    pub(crate) fn cache(&self) -> PathBuf {
-        if let Some(cache) = &self.hf_hub_cache {
-            return PathBuf::from(cache);
-        }
-        if let Some(home) = &self.hf_home {
-            return Path::new(home).join("hub");
-        }
-        self.home.join(".cache/huggingface/hub")
-    }
-
-    /// The only variables the download program is given.
-    fn script_vars(&self) -> Vec<(&'static str, String)> {
-        let mut vars = vec![
-            ("PATH", self.path.clone()),
-            ("HOME", self.home.display().to_string()),
-        ];
-        vars.extend(self.hf_home.clone().map(|home| ("HF_HOME", home)));
-        vars.extend(
-            self.hf_hub_cache
-                .clone()
-                .map(|cache| ("HF_HUB_CACHE", cache)),
-        );
-        vars
-    }
-}
-
-/// `<cache>/models--<org>--<name>`.
-fn repo_dir(cache: &Path, model: &str) -> PathBuf {
-    cache.join(format!("models--{}", model.replace('/', "--")))
-}
-
-/// The folder of `model` at `commit`: `<cache>/models--<org>--<name>/snapshots/<commit>`.
-pub(crate) fn snapshot_dir(cache: &Path, model: &str, commit: &str) -> PathBuf {
-    repo_dir(cache, model).join("snapshots").join(commit)
-}
 
 /// A speech model pinned to a commit, ready to hand to the voice worker.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -201,67 +118,6 @@ impl Status {
     }
 }
 
-/// What the Mac says about itself: free disk space and the default route's gateway.
-pub(crate) trait Host: Send + Sync + 'static {
-    /// The bytes free on the disk holding `dir`.
-    fn free_bytes<'a>(&'a self, dir: &'a Path) -> BoxFuture<'a, Option<u64>>;
-    /// The default route's gateway.
-    fn gateway(&self) -> BoxFuture<'_, Option<Ipv4Addr>>;
-}
-
-/// The Mac's own answers, from `df` and `route`.
-pub(crate) struct SystemHost;
-
-impl Host for SystemHost {
-    fn free_bytes<'a>(&'a self, dir: &'a Path) -> BoxFuture<'a, Option<u64>> {
-        Box::pin(async move {
-            let mut existing = dir;
-            while !existing.exists() {
-                existing = existing.parent()?;
-            }
-            let output = Command::new("/bin/df")
-                .arg("-Pk")
-                .arg(existing)
-                .stdin(Stdio::null())
-                .stderr(Stdio::null())
-                .output()
-                .await
-                .ok()?;
-            let text = String::from_utf8_lossy(&output.stdout);
-            let available: u64 = text
-                .lines()
-                .nth(1)?
-                .split_whitespace()
-                .nth(3)?
-                .parse()
-                .ok()?;
-            Some(available.saturating_mul(1024))
-        })
-    }
-
-    fn gateway(&self) -> BoxFuture<'_, Option<Ipv4Addr>> {
-        Box::pin(async move {
-            let output = Command::new("/sbin/route")
-                .args(["-n", "get", "default"])
-                .stdin(Stdio::null())
-                .stderr(Stdio::null())
-                .output()
-                .await
-                .ok()?;
-            let text = String::from_utf8_lossy(&output.stdout);
-            text.lines()
-                .find_map(|line| line.trim().strip_prefix("gateway:"))
-                .and_then(|gateway| gateway.trim().parse().ok())
-        })
-    }
-}
-
-/// The iPhone Personal Hotspot's own range, `172.20.10.0/28`.
-pub(crate) fn is_hotspot(gateway: Ipv4Addr) -> bool {
-    let [a, b, c, d] = gateway.octets();
-    (a, b, c) == (172, 20, 10) && d < 16
-}
-
 #[derive(Default)]
 struct Pass {
     running: bool,
@@ -282,6 +138,8 @@ pub(crate) struct SpeechModels {
     status: watch::Sender<Status>,
     pass: Mutex<Pass>,
     wake: Notify,
+    /// The TTS server, whose default model a call waits for after Whisper.
+    tts: Option<Arc<TtsServer>>,
     /// A test's models do no work: the asks made of them are noted here, and a test sets
     /// the status.
     #[cfg(test)]
@@ -289,32 +147,29 @@ pub(crate) struct SpeechModels {
 }
 
 impl SpeechModels {
-    /// The models `voice_input` and `tts` name, each with its commit. A setting that is
-    /// refused is logged and its model is not managed.
+    /// The model `voice_input` names, with its commit. A setting that is refused is logged and
+    /// its model is not managed. With `tts`, the models also wait for the TTS server's
+    /// default model.
     pub(crate) fn new(
         voice_input: &VoiceInputSettings,
-        tts: &TtsSettings,
         folder: PathBuf,
         env: Env,
         host: Arc<dyn Host>,
+        tts: Option<Arc<TtsServer>>,
     ) -> Arc<Self> {
         let whisper = voice_input.whisper_model().unwrap_or(WHISPER);
-        let kokoro = super::worker::tts_model(tts);
-        let wants = [
-            (whisper.to_string(), voice_input.model_revision.clone()),
-            (kokoro, tts.model_revision.clone()),
-        ]
-        .into_iter()
-        .map(|(model, revision)| {
-            if let Some(managed) = managed(&model, &revision) {
-                return Want::Managed(managed);
-            }
-            if !is_model_name(&model) || !is_revision(&revision) {
-                warn!("speech model setting refused");
-            }
-            Want::Unmanaged { model, revision }
-        })
-        .collect();
+        let wants = [(whisper.to_string(), voice_input.model_revision.clone())]
+            .into_iter()
+            .map(|(model, revision)| {
+                if let Some(managed) = managed(&model, &revision) {
+                    return Want::Managed(managed);
+                }
+                if !is_model_name(&model) || !is_revision(&revision) {
+                    warn!("speech model setting refused");
+                }
+                Want::Unmanaged { model, revision }
+            })
+            .collect();
         Arc::new(Self {
             wants,
             python: voice_input.command.clone(),
@@ -324,6 +179,7 @@ impl SpeechModels {
             status: watch::channel(Status::Checking).0,
             pass: Mutex::default(),
             wake: Notify::new(),
+            tts,
             #[cfg(test)]
             asked: None,
         })
@@ -347,6 +203,7 @@ impl SpeechModels {
             status: watch::channel(status).0,
             pass: Mutex::default(),
             wake: Notify::new(),
+            tts: None,
             asked: Some(Mutex::default()),
         })
     }
@@ -399,6 +256,11 @@ impl SpeechModels {
         #[cfg(test)]
         if self.note("for_call") {
             return;
+        }
+        // The TTS worker starts while the call rings, and the default TTS model's download
+        // is not held back.
+        if let Some(tts) = &self.tts {
+            tts.warm_for_call();
         }
         let status = self.status.borrow().clone();
         match status {
@@ -525,7 +387,54 @@ impl SpeechModels {
                 return;
             }
         }
+        if let Some(tts) = self.tts.clone()
+            && let Err(missing) = self.follow_tts(&tts).await
+        {
+            self.set(Status::Failed(missing));
+            return;
+        }
         self.set(Status::Ready);
+    }
+
+    /// Follows the TTS server's default model until it is ready, or says why it will not
+    /// come. The phone's progress shows its download.
+    async fn follow_tts(&self, tts: &Arc<TtsServer>) -> Result<(), Missing> {
+        let registry = tts.registry();
+        let mut changes = registry.subscribe();
+        loop {
+            match registry.default_status() {
+                DefaultStatus::Ready => return Ok(()),
+                DefaultStatus::Failed {
+                    model,
+                    reason,
+                    revision,
+                    source,
+                } => {
+                    let command = (source == crate::tts::models::Source::HuggingFace)
+                        .then(|| registry.hand_command(&self.python, &model, &revision))
+                        .flatten();
+                    return Err(Missing {
+                        model,
+                        reason,
+                        command,
+                    });
+                }
+                DefaultStatus::Downloading {
+                    model,
+                    bytes,
+                    total,
+                } => self.set(Status::Downloading {
+                    model,
+                    bytes,
+                    total,
+                }),
+                DefaultStatus::Waiting => self.set(Status::Waiting),
+                DefaultStatus::Checking => self.set(Status::Checking),
+            }
+            if changes.changed().await.is_err() {
+                return Ok(());
+            }
+        }
     }
 
     fn record_path(&self, managed: &Managed) -> PathBuf {
@@ -588,6 +497,8 @@ impl SpeechModels {
             return Err(self.not_downloaded(managed, "disk_full"));
         }
         self.wait_while_metered().await;
+        // One download at a time on the machine: a TTS model's download holds the same slot.
+        let _slot = crate::tts::fetch::download_slot().lock().await;
         info!(model = %managed.model, total_bytes = managed.size, "speech model download started");
         self.set(Status::Downloading {
             model: managed.model.clone(),
@@ -630,26 +541,9 @@ impl SpeechModels {
         }
     }
 
-    /// Writes the download program into the speech-models folder (0700), as a file for the
-    /// user only, never reusing one that is there.
+    /// Writes the download program into the speech-models folder (0700).
     fn write_script(&self) -> std::io::Result<()> {
-        std::fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(&self.folder)?;
-        std::fs::set_permissions(&self.folder, std::fs::Permissions::from_mode(0o700))?;
-        let script = self.folder.join("voice_download.py");
-        match std::fs::remove_file(&script) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error),
-        }
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&script)?;
-        std::io::Write::write_all(&mut file, VOICE_DOWNLOAD_PY.as_bytes())
+        crate::tts::fetch::write_download_script(&self.folder)
     }
 
     /// Runs the download program on `managed`, in check mode or not, and follows its output.
@@ -736,19 +630,6 @@ impl SpeechModels {
 enum Outcome {
     Done(u64),
     Failed(&'static str),
-}
-
-/// The bytes of the files in `dir`, partial downloads included.
-fn folder_bytes(dir: &Path) -> u64 {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return 0;
-    };
-    entries
-        .flatten()
-        .filter_map(|entry| entry.metadata().ok())
-        .filter(|meta| meta.is_file())
-        .map(|meta| meta.len())
-        .sum()
 }
 
 #[cfg(test)]

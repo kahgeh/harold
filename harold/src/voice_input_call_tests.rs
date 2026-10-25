@@ -115,12 +115,8 @@ async fn a_worker_that_never_says_ready_fails_its_load_after_120_s() {
     let command = WorkerCommand {
         python: script.display().to_string(),
         stt_model: "stt".into(),
-        tts_model: "tts".into(),
-        voice: "af_heart".into(),
-        lang_code: "a".into(),
         language: "en".into(),
         stt_pin: None,
-        tts_pin: None,
     };
     let worker = ProcessWorker::start(&command, &folder).unwrap();
     let started = Instant::now();
@@ -2088,11 +2084,7 @@ async fn a_worker_that_cannot_find_a_model_has_the_models_look_again_and_starts_
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn any_other_cause_of_a_failed_load_says_the_voice_failed() {
-    for cause in [
-        LoadCause::ImportFailed,
-        LoadCause::VoiceMissing,
-        LoadCause::LoadFailed,
-    ] {
+    for cause in [LoadCause::ImportFailed, LoadCause::LoadFailed] {
         let logs = CapturedLogs::start();
         let h = Harness::new();
         let models = SpeechModels::stubbed(ModelsStatus::Ready);
@@ -2100,7 +2092,7 @@ async fn any_other_cause_of_a_failed_load_says_the_voice_failed() {
         h.worker().starts_loading = true;
         h.start().await;
 
-        h.set_health(load_refused(cause, Some(super::super::models::KOKORO)));
+        h.set_health(load_refused(cause, Some(super::super::models::WHISPER)));
         settle().await;
 
         assert_eq!(h.state(), CallState::Off, "{cause:?}");

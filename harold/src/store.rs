@@ -34,7 +34,7 @@ const NAMESPACE: &str = "harold";
 const PARTITION_KEY: &str = "main";
 const STATE_DATABASE: &str = "harold-state.db";
 const LOCK_FILE: &str = "harold.lock";
-const MIGRATIONS: [(&str, &str); 4] = [
+const MIGRATIONS: [(&str, &str); 5] = [
     (
         "001_initial",
         include_str!("store/migrations/001_initial.sql"),
@@ -50,6 +50,10 @@ const MIGRATIONS: [(&str, &str); 4] = [
     (
         "004_app_message_trace",
         include_str!("store/migrations/004_app_message_trace.sql"),
+    ),
+    (
+        "005_tts_default",
+        include_str!("store/migrations/005_tts_default.sql"),
     ),
 ];
 
@@ -1095,6 +1099,30 @@ impl HaroldStore {
     pub(crate) async fn delete_app_messages_before(&self, before_ms: i64) -> Result<()> {
         self.app_thread_write("DELETE FROM app_messages WHERE at_ms < ?1", (before_ms,))
             .await
+    }
+
+    /// The default TTS model and voice, when one was set.
+    pub(crate) async fn tts_default(&self) -> Result<Option<(String, String)>> {
+        let conn = self.state.connect()?;
+        let mut rows = conn
+            .query("SELECT model, voice FROM tts_default WHERE id = 1", ())
+            .await?;
+        rows.next()
+            .await?
+            .map(|row| Ok((required_text(&row, 0)?, required_text(&row, 1)?)))
+            .transpose()
+    }
+
+    /// Sets the default TTS model and voice.
+    pub(crate) async fn set_tts_default(&self, model: &str, voice: &str) -> Result<()> {
+        self.delivery_write(
+            r#"
+            INSERT INTO tts_default (id, model, voice) VALUES (1, ?1, ?2)
+            ON CONFLICT(id) DO UPDATE SET model = excluded.model, voice = excluded.voice
+            "#,
+            (model, voice),
+        )
+        .await
     }
 
     /// Records a photo file written to `app-photos/`: `id` is its name without the

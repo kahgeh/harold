@@ -292,18 +292,10 @@ impl MacPorts {
             worker: settings
                 .voice_input
                 .as_ref()
-                .and_then(|voice_input| WorkerCommand::from_settings(voice_input, tts)),
+                .and_then(WorkerCommand::from_settings),
             chief_folder: settings.notify.chief.clone(),
             chief_session: settings.notify.chief_session.clone(),
-            tts: Arc::new(TtsSettings {
-                model_revision: tts.model_revision.clone(),
-                command: tts.command.clone(),
-                voice: tts.voice.clone(),
-                args: tts.args.clone(),
-                fallback_command: tts.fallback_command.clone(),
-                fallback_voice: tts.fallback_voice.clone(),
-                fallback_args: tts.fallback_args.clone(),
-            }),
+            tts: Arc::new(tts.clone()),
             sink: Arc::new(MacSink::new()),
             // The program and environment the call answerer and the watch tool use.
             runner: settings.call_answerer.enabled.then(|| {
@@ -452,11 +444,15 @@ impl CallPorts for MacPorts {
         std::env::temp_dir().join("harold-voice-phrases")
     }
 
+    /// The default model and voice of the TTS server, which make a call's lines.
     fn voice_name(&self) -> String {
-        self.worker
-            .as_ref()
-            .map_or(DEFAULT_VOICE, |command| command.voice.as_str())
-            .to_string()
+        crate::tts::server().map_or_else(
+            || DEFAULT_VOICE.to_string(),
+            |server| {
+                let (model, voice) = server.registry().default_pair();
+                format!("{}-{voice}", model.replace('/', "-"))
+            },
+        )
     }
 
     fn voice_muted(&self) -> bool {

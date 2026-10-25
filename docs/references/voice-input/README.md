@@ -37,7 +37,7 @@ When a call starts, Harold:
 2. checks that an agent runs in the chief's folder (if none does, it says `There's no chief running.` and the call ends);
 3. starts `caffeinate -d -w <Harold's pid>`, which keeps the display awake for the length of the call, and exits by itself when Harold does;
 4. starts `ffmpeg` with avfoundation on the default microphone, reading 16 kHz mono samples;
-5. starts the voice worker, or takes the one already loaded, and waits first for the speech models to be on the Mac ([The voice worker](#the-voice-worker), [Speech models](#speech-models)).
+5. starts the voice worker, or takes the one already loaded, and waits first for the speech model and the default TTS model to be on the Mac ([The voice worker](#the-voice-worker), [Speech models](#speech-models)). It also starts the TTS worker, which keeps Kokoro loaded, so the first line of the call does not wait for the load ([TTS server](../tts/README.md)).
 
 Every call starts *connecting*, like a phone call, whatever the worker's state. Harold plays the ringback, "ring-ring": a 400 Hz and 450 Hz pair for 0.4 s, 0.2 s of quiet, the pair again for 0.4 s, then 2.0 s of quiet, 3.0 s a cycle. At least one whole cycle plays, and the ring never stops part-way. At the end of a cycle Harold checks whether the call is ready: the voice worker is ready, and the call answerer's warm-up (below) has finished or passed its 5 s limit. If not, another whole cycle plays. If so, Harold plays the pick-up, two quick soft notes rising from 660 Hz to 880 Hz in 0.15 s, and when it ends the call is listening. So the tap-to-listening time is at least 3.15 s. The phone's screen shows `Connecting…` until then; the dash's button shows `listening`, since the `Call` RPC has no value for it.
 
@@ -51,7 +51,7 @@ The ringing is sound like any other: the microphone's pieces are dropped while i
    - **Dropped** when the transcript is empty, or when Whisper's no-speech probability is above 0.6. Harold says `Sorry, I didn't catch that.` and listens again. The probability is the lowest over Whisper's segments, and 1.0 when there are none.
    - **Typed** otherwise. Harold types `🎙 <transcript>` and Enter into the chief's pane, with the rules timed prompts use: the pane must be idle and its input box empty. It takes the same per-pane lock as other writers, so a spoken line never interleaves with an alert or a timed prompt. Like a phone reply, it is not held back by the one-minute "typed recently" hold, because you are speaking now. The turn is recorded in harold-telemetry with `started_by = voice`.
 4. If the chief's answer has not started 3 seconds after the turn is typed, Harold plays a soft tick every 3 seconds, so the call is not silent. The button shows `chief thinking`.
-5. The chief answers with `harold speak`. During a call, the voice worker makes the line into audio with Kokoro and the call plays it with `afplay`. If the worker cannot make a line, or `afplay` cannot play it, Harold says it with the `[tts]` command instead. When the answer ends, Harold listens again.
+5. The chief answers with `harold speak`. During a call, the TTS server makes the line into audio (Kokoro, or the model set as the default) and the call plays it with `afplay`. If the server cannot make a line, or `afplay` cannot play it, Harold says it with the `[tts]` command instead. When the answer ends, Harold listens again.
 
 The chief treats `🎙` lines as possibly misheard, and confirms anything consequential before acting. That is the chief's behavior, not Harold's: the transcript is typed without a confirmation step.
 
@@ -201,11 +201,9 @@ Add a `[voice_input]` section to `local.toml`. The template (`harold/config/loca
 | `keep_worker_minutes` | How long the voice worker is kept after no web app page is on screen and no call is on. Default `10`. |
 | `language` | The Whisper language code every turn is transcribed in. Default `en`. Whisper is told the language, so it does not guess it from a clip of two or three seconds, which it can get wrong. A code outside Harold's short list of Whisper codes (`en` among them) is refused at start-up. `harold.call_transcribe` records the language the worker used. |
 
-`[tts] model_revision` is the same for Kokoro: default `a71e4d38b236d968966a2002c4c895dbd12b1c3c` (committed 2025-12-02). Both defaults are the commits already in this Mac's cache, so pinning changes nothing here. The defaults are in `harold/config/default.toml` (`[tts]`) and in `harold/src/settings.rs`; `[voice_input]` is set in `local.toml`, so its defaults come from the code.
+Kokoro is a TTS model, not a speech model: the TTS server downloads and loads it, and `[tts] model_revision` pins it (default `a71e4d38b236d968966a2002c4c895dbd12b1c3c`, committed 2025-12-02). A call's voice is the TTS server's default model and voice: set them with `harold tool tts default MODEL VOICE`. The server's settings are in the [TTS server reference](../tts/README.md#settings). The voice worker no longer reads `--model`, `--voice` or `--lang_code` from `[tts] args`. The defaults are in `harold/config/default.toml` (`[tts]`) and in `harold/src/settings.rs`; `[voice_input]` is set in `local.toml`, so its defaults come from the code.
 
-The worker takes Kokoro's model, voice and language from `[tts] args`: `--model` (default `mlx-community/Kokoro-82M-bf16`), `--voice` (default `af_heart`) and `--lang_code` (default `a`), so a call sounds like the desk.
-
-A call's answers are always in English: `language = "en"` for Whisper, and rule 7 of the [call answerer](call-answerer.md)'s rules. A user who speaks another language sets both `[voice_input] language` and `[tts] --lang_code`, and changes rule 7 by spec; the rules are a constant, not a setting.
+A call's answers are always in English: `language = "en"` for Whisper, and rule 7 of the [call answerer](call-answerer.md)'s rules. A user who speaks another language sets `[voice_input] language` and a default voice of that language, and changes rule 7 by spec; the rules are a constant, not a setting.
 
 With no `[voice_input]` section, the button shows `[c] 📞 call: not set up`, and nothing runs. Harold reads the configuration only at startup.
 
@@ -217,42 +215,38 @@ macOS charges the microphone permission to the program that runs `ffmpeg`, which
 
 ## The voice worker
 
-The voice worker keeps the speech models loaded for the length of a call, so a turn does not wait for them to load.
+The voice worker keeps Whisper loaded for the length of a call, so a turn does not wait for it to load. It only turns speech into text: the TTS server makes the lines.
 
-**What it is.** A Python program (`harold/src/voice_worker.py`) compiled into `harold` as text. When a call starts, Harold writes it to the call's folder as `voice_worker.py` (mode 0600, in a folder of mode 0700) and runs it with `[voice_input]`'s Python, as `python -I voice_worker.py` with the model, voice and language arguments, and for a model Harold manages the folder of its pinned commit (`--stt-snapshot`, `--stt-commit`, `--tts-snapshot`, `--tts-commit`). `HF_HUB_OFFLINE=1` is set, so a missing model fails to load instead of downloading. The worker never downloads: Harold downloads a missing speech model at start-up ([Speech models](#speech-models)).
+**What it is.** A Python program (`harold/src/voice_worker.py`) compiled into `harold` as text. When a call starts, Harold writes it to the call's folder as `voice_worker.py` (mode 0600, in a folder of mode 0700) and runs it with `[voice_input]`'s Python, as `python -I voice_worker.py` with the model and language arguments, and for a model Harold manages the folder of its pinned commit (`--stt-snapshot`, `--stt-commit`). `HF_HUB_OFFLINE=1` is set, so a missing model fails to load instead of downloading. The worker never downloads: Harold downloads a missing speech model at start-up ([Speech models](#speech-models)).
 
-**What it loads.** Two models, once, exactly the pinned commit of each:
+**What it loads.** One model, once, exactly its pinned commit: Whisper large-v3-turbo (the model named in `[voice_input]`), through `mlx_audio.stt.utils.load_model`.
 
-- Whisper large-v3-turbo (the model named in `[voice_input]`), through `mlx_audio.stt.utils.load_model`;
-- Kokoro, through `mlx_audio.tts.utils.load_model`.
+`mlx_audio` is given the snapshot folder `<cache>/models--<org>--<name>/snapshots/<commit>` as a path, which it reads the model's name from when the cache folder is called `hub` (the default cache is). In a cache folder not called `hub`, the worker passes the name instead, under `HF_HUB_OFFLINE=1`, and first checks that the cache's `refs/main` names the pinned commit. The ready line says which applied (`stt_load`: `folder` or `name`); the `mlx_audio` of this Mac's `[voice_input]` Python takes the folder (checked in its source: both `load_model` functions take a `Path` under `hub`).
 
-For each, `mlx_audio` is given the snapshot folder `<cache>/models--<org>--<name>/snapshots/<commit>` as a path, which it reads the model's name from when the cache folder is called `hub` (the default cache is). In a cache folder not called `hub`, the worker passes the name instead, under `HF_HUB_OFFLINE=1`, and first checks that the cache's `refs/main` names the pinned commit. The ready line says which applied (`stt_load` and `tts_load`: `folder` or `name`); the `mlx_audio` of this Mac's `[voice_input]` Python takes the folder (checked in its source: both `load_model` functions take a `Path` under `hub`).
-
-It then says a throwaway line, so a missing voice fails at load and not on the first answer. It imports only what the installed `mlx_audio` already brings, plus `numpy` and `soundfile`.
+It imports only what the installed `mlx_audio` already brings.
 
 **The protocol.** One JSON object per line, on standard input and standard output. The worker redirects its other output to standard error, which Harold discards.
 
 | Direction | Line | Meaning |
 |---|---|---|
-| worker to Harold | `{"ready": true, "load_ms": <n>}` | Both models are loaded, in `load_ms` milliseconds. `{"ready": false, "cause": "<cause>", "model": "<model>"}` means loading failed: `model_missing` (not in the cache), `import_failed`, `voice_missing` (Kokoro's voice from `[tts] args` did not load) or `load_failed` (anything else), with the model it was loading when that is known. It must come within 120 seconds, or the load counts as `failed_to_load`. |
+| worker to Harold | `{"ready": true, "load_ms": <n>}` | The model is loaded, in `load_ms` milliseconds. `{"ready": false, "cause": "<cause>", "model": "<model>"}` means loading failed: `model_missing` (not in the cache), `import_failed` or `load_failed` (anything else), with the model it was loading when that is known. It must come within 120 seconds, or the load counts as `failed_to_load`. |
 | Harold to worker | `{"op": "transcribe", "wav": <path>}` | Answered with `{"ok": true, "text": ..., "no_speech_prob": ...}` |
-| Harold to worker | `{"op": "say", "text": ..., "wav": <path>}` | Answered with `{"ok": true}` once the file is written |
 
-Any answer with `"ok"` other than true means that one request failed. The worker stays up, the turn is dropped with result `failed`, and a line that was to be spoken goes through the `[tts]` command instead. A worker answers one request at a time and must answer each within 30 seconds, or Harold kills it.
+Any answer with `"ok"` other than true means that one request failed. The worker stays up and the turn is dropped with result `failed`. A line that the TTS server cannot make goes through the `[tts]` command instead, and the voice worker stays up. A worker answers one request at a time and must answer each within 30 seconds, or Harold kills it.
 
 **When it starts and stops.** The desk's calls start it with the call, and it stops when the call ends: Harold closes its input, waits up to 5 seconds for it to exit, then kills it.
 
-The phone's calls keep it ahead: while a page of the web app is on screen (the push skip's state), Harold loads the worker once both speech models are checked, and a phone call takes it if it is loaded or loading, so the call rings one cycle and the first turn is transcribed in about half a second. The call gives the worker back when it ends. The worker stops `[voice_input] keep_worker_minutes` (10) minutes after no page is on screen and no call is on. After a failed early load Harold does not start another until a call is tapped or 10 minutes have passed. Outside a call, `harold speak` works as before, one `[tts]` command per line.
+The phone's calls keep it ahead: while a page of the web app is on screen (the push skip's state), Harold loads the worker once the speech model and the default TTS model are checked, and a phone call takes it if it is loaded or loading, so the call rings one cycle and the first turn is transcribed in about half a second. The call gives the worker back when it ends. The worker stops `[voice_input] keep_worker_minutes` (10) minutes after no page is on screen and no call is on. After a failed early load Harold does not start another until a call is tapped or 10 minutes have passed. Outside a call, `harold speak` works as before, one `[tts]` command per line.
 
 The log says how it went: `voice worker ready` with `load_ms` and `started_by` (`page` for one loaded for a page, `call` for one a call started) and `voice worker stopped` with `reason` `no_page`, `call_ended` or `exited`. A worker started by a call under the page rule means the page was not seen in time.
 
-**Phrases.** Harold's own phrases are made once by the worker and kept in `$TMPDIR/harold-voice-phrases/` as `<first 16 hex of sha256(voice + "\n" + phrase)>.wav`, so a later call plays them without waiting. Two phrases always go through the `[tts]` command, never the worker, because the worker is the thing that failed: `The voice stopped. One moment.` and `The voice failed. Call ended.`. On the phone, `The speech model isn't on the Mac yet.` is said by the phone's own voice, not the worker. `There's no chief running.` at the start comes before any worker exists, so it plays from the phrase folder when the file is there, and otherwise through `[tts]`.
+**Phrases.** Harold's own phrases are made once by the TTS server and kept in `$TMPDIR/harold-voice-phrases/` as `<first 16 hex of sha256(voice + "\n" + phrase)>.wav`, where `voice` is the default TTS model and voice, so a later call plays them without waiting. Two phrases always go through the `[tts]` command, never the TTS server, because the voice is the thing that failed: `The voice stopped. One moment.` and `The voice failed. Call ended.`. On the phone, `The speech model isn't on the Mac yet.` is said by the phone's own voice, not the worker. `There's no chief running.` at the start comes before any worker exists, so it plays from the phrase folder when the file is there, and otherwise through `[tts]`.
 
-**Memory.** About 3.1 GB while the worker is loaded (3.5 GB at its peak): Whisper large-v3-turbo about 1.6 GB and Kokoro about 0.35 GB of files, plus what the models use. The desk's worker is loaded only around calls; the phone's is loaded while a web app page is on screen and for the keep time after.
+**Memory.** About 2.7 GB while the worker is loaded: Whisper large-v3-turbo about 1.6 GB of files, plus what the model uses. Kokoro, about 0.4 GB, is loaded by the TTS worker, once for the whole machine. The desk's worker is loaded only around calls; the phone's is loaded while a web app page is on screen and for the keep time after.
 
 ### If the worker dies
 
-Harold notices when the worker's output ends, when it does not answer a request within 30 seconds, or when it does not load within 120 seconds. Each is logged as `voice worker exited` with `reason` `exited`, `timed_out` or `failed_to_load`. A worker that fails to load also gives `cause` (`model_missing`, `import_failed`, `voice_missing` or `load_failed`) and, for `model_missing`, the `model`. A worker that dies before its ready line has `cause = "load_failed"`.
+Harold notices when the worker's output ends, when it does not answer a request within 30 seconds, or when it does not load within 120 seconds. Each is logged as `voice worker exited` with `reason` `exited`, `timed_out` or `failed_to_load`. A worker that fails to load also gives `cause` (`model_missing`, `import_failed` or `load_failed`) and, for `model_missing`, the `model`. A worker that dies before its ready line has `cause = "load_failed"`.
 
 - **First death, after it had loaded.** The turn in hand is dropped, with result `failed`. Harold starts the worker again and says `The voice stopped. One moment.` through `[tts]`, then listens again.
 - **Second death in the same call, a worker that never loaded (`failed_to_load`), or a restart that cannot start.** Harold says `The voice failed. Call ended.` and ends the call with `voice_failed`.
@@ -263,24 +257,23 @@ Before the ready line, the worker's output may hold a line that is not JSON, suc
 
 ### Why did the voice fail to load?
 
-Look at the `cause` on `voice worker exited` first, and at `speech model not downloaded` (its `reason` says why a model is not on the Mac). Harold discards the worker's standard error, so the log shows the cause and not the traceback. To see the error, run the worker by hand the way Harold runs it. Harold writes the script into the call's folder, runs it from there with `HF_HUB_OFFLINE=1`, and passes the values from `[voice_input]` and `[tts] args`:
+Look at the `cause` on `voice worker exited` first, and at `speech model not downloaded` (its `reason` says why a model is not on the Mac). Harold discards the worker's standard error, so the log shows the cause and not the traceback. To see the error, run the worker by hand the way Harold runs it. Harold writes the script into the call's folder, runs it from there with `HF_HUB_OFFLINE=1`, and passes the values from `[voice_input]`:
 
 ```sh
 cd "$(mktemp -d)"
 cp <harold repo>/harold/src/voice_worker.py .
 HF_HUB_OFFLINE=1 <[voice_input] command> -I voice_worker.py \
-  --stt-model <Whisper model> --tts-model <Kokoro model> \
-  --voice <voice> --lang-code <lang code> < /dev/null
+  --stt-model <Whisper model> --language <language> < /dev/null
 # For a model Harold manages, also: --stt-snapshot <cache>/models--<org>--<name>/snapshots/<commit> --stt-commit <commit>
 ```
 
-`<Whisper model>` is the word after `--model` in `[voice_input] args`. The Kokoro model, voice and language come from `[tts] args`, with the defaults in [Settings](#settings). The worker prints `{"ready": true, "load_ms": ...}` when it loads, or `{"ready": false, "cause": ...}` when it does not, and then exits, because its input is empty. Either way of failing prints its traceback to standard error, where you see it: an import error, such as a Python without `mlx_audio`, and a model or voice that fails to load. Harold still discards standard error, so no traceback reaches `harold.log`.
+`<Whisper model>` is the word after `--model` in `[voice_input] args`. The language is `[voice_input] language`. The TTS server's worker has its own steps: see the [TTS server reference](../tts/README.md). The worker prints `{"ready": true, "load_ms": ...}` when it loads, or `{"ready": false, "cause": ...}` when it does not, and then exits, because its input is empty. Either way of failing prints its traceback to standard error, where you see it: an import error, such as a Python without `mlx_audio`, and a model that fails to load. Harold still discards standard error, so no traceback reaches `harold.log`.
 
 ## Speech models
 
 Harold downloads a missing speech model at start-up, pinned to a commit and checked file by file ([ADR 0011](../../adr/0011-harold-downloads-missing-speech-models-at-start-up.md)). The voice worker never downloads: it loads the checked models with `HF_HUB_OFFLINE=1`. On 20 October the first phone call ended with `voice worker exited reason="failed_to_load"` and "The voice failed.", because the Whisper model was not downloaded and nothing said so; this section is the answer to that.
 
-**The two models.** Harold downloads only `mlx-community/whisper-large-v3-turbo` (1,613,979,758 bytes) and `mlx-community/Kokoro-82M-bf16` (389,410,807 bytes), a list held in `harold/src/voice_input/models.rs`, each at the commit set in `[voice_input] model_revision` and `[tts] model_revision`.
+**The model.** Harold downloads only `mlx-community/whisper-large-v3-turbo` (1,613,979,758 bytes), a list held in `harold/src/voice_input/models.rs`, at the commit set in `[voice_input] model_revision`. The TTS server downloads Kokoro and the approved TTS models by the same path, with the same rules and one download at a time on the machine, and logs `tts model downloaded`. A call waits for the default TTS model as well, and the phone shows its progress.
 
 - A revision must be 40 lowercase hex characters, and a model `<org>/<name>` in letters, digits, `.`, `_` and `-`. Otherwise Harold logs `speech model setting refused` and downloads nothing.
 - A configured model outside the list is never downloaded. If the worker cannot find it, the call ends with the notice below, which names the model and the command.
@@ -352,7 +345,7 @@ Messages are fixed text, with values in fields, as harold-telemetry's test `ever
 | warn | `call audio refused` | `reason`: `full`, `malformed` or `too_large`; once per reason per call, for the phone's open call only |
 | info | `voice worker ready` | `load_ms` (how long the worker took to load), `started_by`: `page` (loaded for a web app page) or `call` |
 | info | `voice worker stopped` | `reason`: `no_page` (10 minutes after no page and no call), `call_ended` or `exited` |
-| warn | `voice worker exited` | `reason`: `exited`, `timed_out` or `failed_to_load`; for a worker that never loaded also `cause` (`model_missing`, `import_failed`, `voice_missing` or `load_failed`), and for `model_missing` the `model` |
+| warn | `voice worker exited` | `reason`: `exited`, `timed_out` or `failed_to_load`; for a worker that never loaded also `cause` (`model_missing`, `import_failed` or `load_failed`), and for `model_missing` the `model` |
 | warn | `display not kept awake` | `error` |
 | warn | `microphone not opened` | `error` |
 | warn | `call folder not made` | `error` |
@@ -419,7 +412,7 @@ The core, in `harold/src/voice_input.rs`, is internal Rust, not an API. A call i
 | `panes`, `chief_folder` | The chief's pane and the folder (`[notify] chief`). |
 | `speak_with_tts`, `stop_desk_line` | Say a line with the `[tts]` command and resolve when it ends; stop such a line. |
 | `turn_end_update(prompt)` | The desk's turn-end update for a turn that ended without `harold speak`. |
-| `calls_dir`, `phrases_dir`, `voice_name` | Where call folders and kept phrases live, and the Kokoro voice in each phrase's file name. |
+| `calls_dir`, `phrases_dir`, `voice_name` | Where call folders and kept phrases live, and the default TTS model and voice in each phrase's file name. |
 | `voice_muted` | Whether Harold's voice is muted now. |
 | `keep_awake` | Hold the display awake for the call. |
 

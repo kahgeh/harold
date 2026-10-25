@@ -481,7 +481,13 @@ fn tts_service_lists_its_five_rpcs() {
 
     assert_eq!(
         methods,
-        ["Speak", "ListModels", "AddModel", "RemoveModel", "SetDefault"]
+        [
+            "Speak",
+            "ListModels",
+            "AddModel",
+            "RemoveModel",
+            "SetDefault"
+        ]
     );
 }
 

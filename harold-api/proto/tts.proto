@@ -13,15 +13,18 @@
 //   PermissionDenied     "not_local" (any call from an address that is not loopback);
 //                        "not_approved" (AddModel: the model is not on the approved list, and
 //                        is recorded as waiting_for_approval).
-//   InvalidArgument      "invalid_text" (Speak), "invalid_revision", "invalid_repo",
-//                        "unsupported_source" (AddModel), "unknown_model" and "unknown_voice".
+//   InvalidArgument      "invalid_text", "unknown_model" and "unknown_voice" (Speak);
+//                        "invalid_revision", "invalid_repo" and "unsupported_source" (AddModel).
 //   FailedPrecondition   "unsupported_worker", "unsafe_format" (AddModel),
 //                        "default_model" (RemoveModel).
 //   NotFound             "unknown_model" (RemoveModel, SetDefault).
+//   (SetDefault)         FailedPrecondition "model_not_ready"; InvalidArgument "unknown_voice";
+//                        Unavailable "store_unavailable".
 //   Unavailable          "model_downloading", "model_missing", "worker_failed", "timed_out"
-//                        (Speak).
+//                        (Speak); "network", "not_found", "not_allowed" or "failed" (AddModel,
+//                        when the Hub could not be asked for the model's files).
 //
-// The server trusts local callers: there is no token (ADR 0002).
+// Harold trusts local callers: there is no token (ADR 0002).
 syntax = "proto3";
 
 package harold.tts.v1;

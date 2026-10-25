@@ -6,6 +6,8 @@
 #   {"done": false, "reason": "<word>"}    network, not_found, disk_full, check_failed, not_allowed,
 #                                          failed, or (with --check only) missing
 # With --check it downloads nothing: it only checks the cached files.
+# With --list it downloads and checks nothing: it prints {"files": [{"path": <name>, "size":
+# <bytes>}, ...]} for the commit and then {"done": true, "bytes": <n>}; the record is not written.
 # It sends no token and no telemetry, asks only for the commit it was given, and checks
 # every file the commit lists, by size and, for large files, by sha256.
 import errno
@@ -113,8 +115,9 @@ def write_record(record, model, commit, files):
 
 
 def main():
-    arguments = [argument for argument in sys.argv[1:] if argument != "--check"]
+    arguments = [argument for argument in sys.argv[1:] if argument not in ("--check", "--list")]
     check_only = "--check" in sys.argv[1:]
+    list_only = "--list" in sys.argv[1:]
     if len(arguments) != 3:
         fail("failed")
     model, commit, record = arguments
@@ -129,6 +132,17 @@ def main():
     if info.sha != commit:
         fail("check_failed")
     total = sum(sibling.size or 0 for sibling in info.siblings)
+    if list_only:
+        say(
+            {
+                "files": [
+                    {"path": sibling.rfilename, "size": sibling.size or 0}
+                    for sibling in info.siblings
+                ]
+            }
+        )
+        say({"done": True, "bytes": total})
+        return
     say({"total": total})
     cache = os.environ.get("HF_HUB_CACHE")
     if not cache:

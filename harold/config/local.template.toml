@@ -58,6 +58,13 @@ command = "say"
 # Or use a custom TTS executable. Harold appends the message as the final arg.
 # command = "/path/to/python"
 # args = ["-m", "mlx_audio.tts.generate", "--voice", "af_heart", "--play", "--text"]
+# Or speak through the TTS server, which keeps Kokoro loaded: engine = "server". The server uses
+# [voice_input] command as its Python on the Mac; on Linux set python (kokoro-onnx and
+# onnxruntime-gpu). Models other than Kokoro download only when they are in tts-models.toml,
+# beside this file (mode 0600; see docs/references/tts/README.md).
+# engine = "server"
+# python = "/home/you/.local/share/harold/tts-venv/bin/python"
+# idle_minutes = 10   # the TTS worker stops after this many minutes with no request or call
 
 # Calls with the chief at the desk (tmx-agent-dash: c). Off when absent. The worker loads the Whisper model named by --model, with command as its Python.
 # [voice_input] needs the `calls` feature, which the Mac package has.

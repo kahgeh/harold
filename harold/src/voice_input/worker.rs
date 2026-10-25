@@ -1,8 +1,10 @@
-//! The client of the voice worker: a Python program that keeps Whisper and Kokoro loaded
-//! for the length of a call and answers one JSON line per request.
+//! The client of the voice worker: a Python program that keeps Whisper loaded for the length
+//! of a call and answers one JSON line per request. The lines of a call are made by the TTS
+//! server, not by this worker.
 
 use super::models::{Env, Pin, pin};
-use crate::settings::{TtsSettings, VoiceInputSettings};
+use crate::settings::VoiceInputSettings;
+use crate::tts::{Caller, TtsServer};
 use serde_json::{Value, json};
 use std::future::Future;
 use std::io::Write;
@@ -23,7 +25,7 @@ use tracing::{info, warn};
 pub(crate) const VOICE_WORKER_PY: &str = include_str!("../voice_worker.py");
 /// How long the worker has to answer one request.
 pub(crate) const REQUEST_LIMIT: Duration = Duration::from_secs(30);
-/// How long the worker has to load both models.
+/// How long the worker has to load its model.
 pub(crate) const LOAD_LIMIT: Duration = Duration::from_secs(120);
 /// How long `close` waits for the worker to exit before it kills it.
 const CLOSE_LIMIT: Duration = Duration::from_secs(5);
@@ -31,9 +33,8 @@ const CLOSE_LIMIT: Duration = Duration::from_secs(5);
 /// `load_ms` before the ready line, or when it gives none.
 const NO_LOAD_MS: u64 = u64::MAX;
 
-const DEFAULT_TTS_MODEL: &str = "mlx-community/Kokoro-82M-bf16";
+/// The voice that names a call's phrase files when the TTS server has not started.
 pub(super) const DEFAULT_VOICE: &str = "af_heart";
-const DEFAULT_LANG_CODE: &str = "a";
 
 /// What Whisper heard in one turn.
 pub(crate) struct Transcript {
@@ -50,8 +51,6 @@ pub(crate) enum LoadCause {
     ModelMissing,
     /// A package the worker needs would not import.
     ImportFailed,
-    /// Kokoro's voice from `[tts] args` did not load.
-    VoiceMissing,
     /// Anything else.
     LoadFailed,
 }
@@ -61,7 +60,6 @@ impl LoadCause {
         match self {
             LoadCause::ModelMissing => "model_missing",
             LoadCause::ImportFailed => "import_failed",
-            LoadCause::VoiceMissing => "voice_missing",
             LoadCause::LoadFailed => "load_failed",
         }
     }
@@ -70,14 +68,13 @@ impl LoadCause {
         match word {
             "model_missing" => LoadCause::ModelMissing,
             "import_failed" => LoadCause::ImportFailed,
-            "voice_missing" => LoadCause::VoiceMissing,
             _ => LoadCause::LoadFailed,
         }
     }
 }
 
 /// A load the worker itself gave up on: why, and the model it was loading, as the worker
-/// named it, when it is one of the two Harold asked it to load.
+/// named it, when it is the one Harold asked it to load.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct LoadFailure {
     pub cause: LoadCause,
@@ -208,57 +205,26 @@ pub(crate) trait VoiceWorker: Send + 'static {
 pub(crate) struct WorkerCommand {
     pub python: String,
     pub stt_model: String,
-    pub tts_model: String,
-    pub voice: String,
-    pub lang_code: String,
     /// The Whisper language code every turn is transcribed in.
     pub language: String,
-    /// The pinned commit of each model, when it is one Harold manages: the worker loads
-    /// exactly that commit from the cache.
+    /// The pinned commit of the Whisper model, when it is one Harold manages: the worker
+    /// loads exactly that commit from the cache.
     pub stt_pin: Option<Pin>,
-    pub tts_pin: Option<Pin>,
-}
-
-/// The value after `name` in the `[tts]` arguments, else `default`.
-fn tts_option(tts: &TtsSettings, name: &str, default: &str) -> String {
-    let args = tts.args.as_deref().unwrap_or_default();
-    let value = args
-        .iter()
-        .position(|arg| arg == name)
-        .and_then(|at| args.get(at + 1));
-    value.map_or(default, String::as_str).to_string()
-}
-
-/// The Kokoro model the `[tts]` arguments name.
-pub(crate) fn tts_model(tts: &TtsSettings) -> String {
-    tts_option(tts, "--model", DEFAULT_TTS_MODEL)
 }
 
 impl WorkerCommand {
     /// The worker's command from the settings; `None` without a Whisper model.
-    pub(crate) fn from_settings(
-        voice_input: &VoiceInputSettings,
-        tts: &TtsSettings,
-    ) -> Option<Self> {
-        Self::from_settings_in(voice_input, tts, &Env::from_process())
+    pub(crate) fn from_settings(voice_input: &VoiceInputSettings) -> Option<Self> {
+        Self::from_settings_in(voice_input, &Env::from_process())
     }
 
     /// The same, finding the cache in `env`.
-    pub(crate) fn from_settings_in(
-        voice_input: &VoiceInputSettings,
-        tts: &TtsSettings,
-        env: &Env,
-    ) -> Option<Self> {
+    pub(crate) fn from_settings_in(voice_input: &VoiceInputSettings, env: &Env) -> Option<Self> {
         let stt_model = voice_input.whisper_model()?.to_string();
-        let tts_model = tts_model(tts);
         Some(Self {
             python: voice_input.command.clone(),
             stt_pin: pin(&stt_model, &voice_input.model_revision, env),
-            tts_pin: pin(&tts_model, &tts.model_revision, env),
             stt_model,
-            tts_model,
-            voice: tts_option(tts, "--voice", DEFAULT_VOICE),
-            lang_code: tts_option(tts, "--lang_code", DEFAULT_LANG_CODE),
             language: voice_input.language.clone(),
         })
     }
@@ -302,18 +268,13 @@ impl ProcessWorker {
             .arg("-I")
             .arg(&script)
             .args(["--stt-model", &command.stt_model])
-            .args(["--tts-model", &command.tts_model])
-            .args(["--voice", &command.voice])
-            .args(["--lang-code", &command.lang_code])
             .args(["--language", &command.language]);
-        for (flag, pin) in [("stt", &command.stt_pin), ("tts", &command.tts_pin)] {
-            if let Some(pin) = pin {
-                worker
-                    .arg(format!("--{flag}-snapshot"))
-                    .arg(&pin.snapshot)
-                    .arg(format!("--{flag}-commit"))
-                    .arg(&pin.commit);
-            }
+        if let Some(pin) = &command.stt_pin {
+            worker
+                .arg("--stt-snapshot")
+                .arg(&pin.snapshot)
+                .arg("--stt-commit")
+                .arg(&pin.commit);
         }
         let mut child = worker
             .current_dir(call_dir)
@@ -331,7 +292,7 @@ impl ProcessWorker {
         let (answers_tx, answers) = mpsc::unbounded_channel();
         let (kill, killed) = oneshot::channel();
         let load_ms = Arc::new(AtomicU64::new(NO_LOAD_MS));
-        let models = [command.stt_model.clone(), command.tts_model.clone()];
+        let models = [command.stt_model.clone()];
         let reader = tokio::spawn(read_output(
             child,
             lines,
@@ -417,7 +378,7 @@ struct Reading {
     health: watch::Sender<Health>,
     answers: mpsc::UnboundedSender<String>,
     load_ms: Arc<AtomicU64>,
-    models: [String; 2],
+    models: [String; 1],
 }
 
 /// How the first JSON line of the worker's output went.
@@ -499,7 +460,7 @@ async fn read_output(
 
 /// Reads up to the first JSON line, and reports what it says. A cancelled wait (a kill, or
 /// the load limit) fails the load, so it need not be cancel-safe.
-async fn wait_for_ready(lines: &mut Lines<BufReader<ChildStdout>>, models: &[String; 2]) -> Loaded {
+async fn wait_for_ready(lines: &mut Lines<BufReader<ChildStdout>>, models: &[String; 1]) -> Loaded {
     while let Ok(Some(line)) = lines.next_line().await {
         let Ok(reply) = serde_json::from_str::<Value>(&line) else {
             continue;
@@ -548,10 +509,11 @@ impl VoiceWorker for ProcessWorker {
         })
     }
 
+    /// The line is made by the TTS server, not by this worker: a failure fails this line only
+    /// and leaves the worker running.
     async fn say(&mut self, text: &str, wav: &Path) -> Result<(), WorkerError> {
-        self.request(json!({"op": "say", "text": text, "wav": wav.to_string_lossy()}))
-            .await
-            .map(|_| ())
+        let server = crate::tts::server().ok_or(WorkerError::Failed)?;
+        say_through(&server, text, wav).await
     }
 
     async fn close(mut self) {
@@ -561,6 +523,27 @@ impl VoiceWorker for ProcessWorker {
             let _ = (&mut self.reader).await;
         }
     }
+}
+
+/// Says `text` through the TTS server, as a call's line, into the 16-bit PCM WAV at `wav` (mode
+/// 0600). A line the server could not make fails with `WorkerError::Failed`; the server logs why.
+pub(super) async fn say_through(
+    server: &std::sync::Arc<TtsServer>,
+    text: &str,
+    wav: &Path,
+) -> Result<(), WorkerError> {
+    let audio = server
+        .speak_all(Caller::Call, text)
+        .await
+        .map_err(|_| WorkerError::Failed)?;
+    let _ = std::fs::remove_file(wav);
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(wav)
+        .and_then(|mut file| file.write_all(&crate::tts::play::wav_bytes(&audio)))
+        .map_err(|_| WorkerError::Failed)
 }
 
 // ---------------------------------------------------------------------------
@@ -840,7 +823,7 @@ impl<W: VoiceWorker> VoiceWorker for PooledWorker<W> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::settings::{TtsSettings, VoiceInputSettings};
+    use crate::settings::VoiceInputSettings;
     use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
 
@@ -865,12 +848,8 @@ mod tests {
         let command = WorkerCommand {
             python: script.display().to_string(),
             stt_model: "stt".into(),
-            tts_model: "tts".into(),
-            voice: "af_heart".into(),
-            lang_code: "a".into(),
             language: "en".into(),
             stt_pin: None,
-            tts_pin: None,
         };
         (command, log)
     }
@@ -878,28 +857,22 @@ mod tests {
     const READY: &str = r#"echo '{"ready":true}'"#;
     const ANSWERS: &str = r#"case "$line" in
 *'"op":"transcribe"'*) echo '{"ok":true,"text":"hello","no_speech_prob":0.1}' ;;
-*'"op":"say"'*) echo '{"ok":true}' ;;
 esac"#;
 
     #[tokio::test]
-    async fn answers_transcribe_and_say_after_ready() {
+    async fn answers_transcribe_after_ready() {
         let folder = temp_folder();
         let (command, log) = fake(&folder, READY, ANSWERS);
         let mut worker = ProcessWorker::start(&command, &folder.join("call")).unwrap();
         let heard = worker.transcribe(Path::new("/x/turn.wav")).await.unwrap();
         assert_eq!(heard.text, "hello");
         assert!((heard.no_speech_prob - 0.1).abs() < 1e-6);
-        worker
-            .say("Hi there", Path::new("/x/say.wav"))
-            .await
-            .unwrap();
         worker.close().await;
         let logged = std::fs::read_to_string(&log).unwrap();
         let lines: Vec<&str> = logged.lines().collect();
-        assert_eq!(lines.len(), 3, "{logged}");
+        assert_eq!(lines.len(), 2, "{logged}");
         assert!(lines[0].contains(r#""op":"transcribe""#));
-        assert!(lines[1].contains(r#""op":"say""#));
-        assert_eq!(lines[2], "closed");
+        assert_eq!(lines[1], "closed");
         std::fs::remove_dir_all(&folder).unwrap();
     }
 
@@ -908,7 +881,7 @@ esac"#;
         let folder = temp_folder();
         let (command, log) = fake(&folder, READY, ANSWERS);
         let mut worker = ProcessWorker::start(&command, &folder.join("call")).unwrap();
-        worker.say("Hi", Path::new("/x/say.wav")).await.unwrap();
+        worker.transcribe(Path::new("/x/turn.wav")).await.unwrap();
         worker.close().await;
         assert!(std::fs::read_to_string(&log).unwrap().ends_with("closed\n"));
         std::fs::remove_dir_all(&folder).unwrap();
@@ -990,11 +963,6 @@ esac"#;
                 None,
             ),
             (
-                r#"{"ready":false,"cause":"voice_missing","model":"tts"}"#,
-                LoadCause::VoiceMissing,
-                Some("tts"),
-            ),
-            (
                 r#"{"ready":false,"cause":"import_failed"}"#,
                 LoadCause::ImportFailed,
                 None,
@@ -1008,7 +976,7 @@ esac"#;
         for (line, cause, model) in cases {
             let (command, _) = fake(&folder, &format!("echo '{line}'; exit 0"), ANSWERS);
             let mut worker = ProcessWorker::start(&command, &folder.join("call")).unwrap();
-            let result = worker.say("Hi", Path::new("/x/say.wav")).await;
+            let result = worker.transcribe(Path::new("/x/turn.wav")).await;
             let expected = WorkerError::LoadRefused(LoadFailure { cause, model });
             assert_eq!(result.err(), Some(expected), "{line}");
             assert_eq!(expected.exit_reason(), Some("failed_to_load"));
@@ -1085,8 +1053,7 @@ esac"#;
     fn the_command_takes_the_language_from_the_setting() {
         let mut settings = voice_input(&["--model", "m"]);
         settings.language = "es".into();
-        let command =
-            WorkerCommand::from_settings_in(&settings, &tts(&[]), &Env::from_process()).unwrap();
+        let command = WorkerCommand::from_settings_in(&settings, &Env::from_process()).unwrap();
         assert_eq!(command.language, "es");
     }
 
@@ -1114,7 +1081,7 @@ esac"#;
             commit: "abc".into(),
         });
         let mut worker = ProcessWorker::start(&command, &folder.join("call")).unwrap();
-        worker.say("Hi", Path::new("/x/say.wav")).await.unwrap();
+        worker.transcribe(Path::new("/x/turn.wav")).await.unwrap();
         worker.close().await;
         let args = std::fs::read_to_string(format!("{}.args", log.display())).unwrap();
         assert!(args.contains("--stt-model stt"), "{args}");
@@ -1122,7 +1089,7 @@ esac"#;
             args.contains("--stt-snapshot /cache/models--a--b/snapshots/abc --stt-commit abc"),
             "{args}"
         );
-        assert!(!args.contains("--tts-snapshot"), "{args}");
+        assert!(!args.contains("--tts"), "{args}");
         std::fs::remove_dir_all(&folder).unwrap();
     }
 
@@ -1143,7 +1110,7 @@ esac"#;
         let ready = format!("echo hello\necho '{{\"progress\":1}}'\n{READY}");
         let (command, _) = fake(&folder, &ready, ANSWERS);
         let mut worker = ProcessWorker::start(&command, &folder.join("call")).unwrap();
-        let result = worker.say("Hi", Path::new("/x/say.wav")).await;
+        let result = worker.transcribe(Path::new("/x/turn.wav")).await;
         assert_eq!(result.err(), Some(WorkerError::FailedToLoad));
         std::fs::remove_dir_all(&folder).unwrap();
     }
@@ -1153,7 +1120,7 @@ esac"#;
         let folder = temp_folder();
         let (command, _) = fake(&folder, "exit 1", ANSWERS);
         let mut worker = ProcessWorker::start(&command, &folder.join("call")).unwrap();
-        let result = worker.say("Hi", Path::new("/x/say.wav")).await;
+        let result = worker.transcribe(Path::new("/x/turn.wav")).await;
         assert_eq!(result.err(), Some(WorkerError::FailedToLoad));
         std::fs::remove_dir_all(&folder).unwrap();
     }
@@ -1162,15 +1129,15 @@ esac"#;
     async fn ok_false_gives_failed_and_keeps_the_worker() {
         let folder = temp_folder();
         let body = r#"case "$line" in
-*'"op":"transcribe"'*) echo '{"ok":false}' ;;
-*) echo '{"ok":true}' ;;
+*bad.wav*) echo '{"ok":false}' ;;
+*) echo '{"ok":true,"text":"x","no_speech_prob":0.1}' ;;
 esac"#;
         let (command, _) = fake(&folder, READY, body);
         let mut worker = ProcessWorker::start(&command, &folder.join("call")).unwrap();
-        let result = worker.transcribe(Path::new("/x/turn.wav")).await;
+        let result = worker.transcribe(Path::new("/x/bad.wav")).await;
         assert_eq!(result.err(), Some(WorkerError::Failed));
         assert_eq!(WorkerError::Failed.exit_reason(), None);
-        assert!(worker.say("Hi", Path::new("/x/say.wav")).await.is_ok());
+        assert!(worker.transcribe(Path::new("/x/good.wav")).await.is_ok());
         worker.close().await;
         std::fs::remove_dir_all(&folder).unwrap();
     }
@@ -1215,21 +1182,9 @@ esac"#;
         let folder = temp_folder();
         let (command, _) = fake(&folder, READY, "echo garbage");
         let mut worker = ProcessWorker::start(&command, &folder.join("call")).unwrap();
-        let result = worker.say("Hi", Path::new("/x/say.wav")).await;
+        let result = worker.transcribe(Path::new("/x/turn.wav")).await;
         assert_eq!(result.err(), Some(WorkerError::Exited));
         std::fs::remove_dir_all(&folder).unwrap();
-    }
-
-    fn tts(args: &[&str]) -> TtsSettings {
-        TtsSettings {
-            model_revision: crate::settings::KOKORO_REVISION.to_string(),
-            command: "python".into(),
-            voice: None,
-            args: Some(args.iter().map(|arg| arg.to_string()).collect()),
-            fallback_command: None,
-            fallback_voice: None,
-            fallback_args: None,
-        }
     }
 
     fn voice_input(args: &[&str]) -> VoiceInputSettings {
@@ -1243,33 +1198,6 @@ esac"#;
     }
 
     #[test]
-    fn kokoro_options_come_from_tts_args() {
-        let tts = tts(&[
-            "-m",
-            "mlx_audio.tts.generate",
-            "--voice",
-            "bf_emma",
-            "--play",
-            "--text",
-        ]);
-        let input = voice_input(&["-m", "mlx_audio.stt.generate", "--model", "whisper-x"]);
-        let command = WorkerCommand::from_settings(&input, &tts).unwrap();
-        assert_eq!(command.python, "/venv/bin/python");
-        assert_eq!(command.stt_model, "whisper-x");
-        assert_eq!(command.voice, "bf_emma");
-        assert_eq!(command.tts_model, "mlx-community/Kokoro-82M-bf16");
-        assert_eq!(command.lang_code, "a");
-
-        let explicit = self::tts(&["--model", "m", "--lang_code", "b"]);
-        let command = WorkerCommand::from_settings(&input, &explicit).unwrap();
-        assert_eq!(command.tts_model, "m");
-        assert_eq!(command.lang_code, "b");
-        assert_eq!(command.voice, "af_heart");
-
-        assert!(WorkerCommand::from_settings(&voice_input(&["-m", "x"]), &tts).is_none());
-    }
-
-    #[test]
     fn the_worker_imports_only_the_installed_packages() {
         let allowed = [
             "json",
@@ -1277,10 +1205,7 @@ esac"#;
             "time",
             "pathlib",
             "traceback",
-            "numpy",
-            "soundfile",
             "mlx_audio.stt.utils",
-            "mlx_audio.tts.utils",
         ];
         let mut seen = 0;
         for line in VOICE_WORKER_PY.lines() {
@@ -1293,5 +1218,87 @@ esac"#;
             seen += 1;
         }
         assert_eq!(seen, allowed.len());
+    }
+
+    #[tokio::test]
+    async fn a_calls_line_is_made_by_the_tts_server_into_a_wav_for_the_user_only() {
+        let fixture = crate::tts::test_support::fixture().await;
+        let folder = temp_folder();
+        let wav = folder.join("say.wav");
+        // An old file with a wider mode is never reused.
+        std::fs::write(&wav, "old").unwrap();
+        std::fs::set_permissions(&wav, std::fs::Permissions::from_mode(0o666)).unwrap();
+
+        say_through(&fixture.server, "Hi there", &wav)
+            .await
+            .unwrap();
+
+        let expected = crate::tts::play::wav_bytes(&crate::tts::Audio {
+            sample_rate: 24_000,
+            pcm: vec![0, 0, 0, 0, 1, 0, 1, 0, 2, 0, 2, 0],
+        });
+        assert_eq!(std::fs::read(&wav).unwrap(), expected);
+        assert_eq!(
+            std::fs::metadata(&wav).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        // The server made it for a call.
+        crate::telemetry::test_support::install();
+        let spans = crate::telemetry::test_support::spans();
+        assert!(spans.iter().any(|span| {
+            span.name == "harold.tts.speak"
+                && crate::telemetry::test_support::span_attr(span, "model").as_deref()
+                    == Some(fixture.model.as_str())
+                && crate::telemetry::test_support::span_attr(span, "caller").as_deref()
+                    == Some("call")
+        }));
+        std::fs::remove_dir_all(&folder).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_line_the_tts_server_cannot_make_fails_that_line_only() {
+        let fixture = crate::tts::test_support::fixture().await;
+        fixture
+            .script
+            .lines
+            .lock()
+            .unwrap()
+            .push(crate::tts::test_support::Next::Exit);
+        let folder = temp_folder();
+        let wav = folder.join("say.wav");
+
+        let result = say_through(&fixture.server, "Hi there", &wav).await;
+
+        assert_eq!(result.err(), Some(WorkerError::Failed));
+        assert_eq!(WorkerError::Failed.exit_reason(), None);
+        assert!(!wav.exists());
+        std::fs::remove_dir_all(&folder).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_voice_worker_with_no_tts_server_started_fails_the_line() {
+        let folder = temp_folder();
+        let (command, _) = fake(&folder, READY, ANSWERS);
+        let mut worker = ProcessWorker::start(&command, &folder.join("call")).unwrap();
+
+        let result = worker.say("Hi", &folder.join("say.wav")).await;
+
+        assert_eq!(result.err(), Some(WorkerError::Failed));
+        worker.close().await;
+        std::fs::remove_dir_all(&folder).unwrap();
+    }
+
+    #[test]
+    fn the_voice_worker_loads_whisper_only_and_makes_no_audio() {
+        for word in ["tts", "Kokoro", "say", "soundfile", "numpy", "voice"] {
+            assert!(
+                !VOICE_WORKER_PY
+                    .lines()
+                    .filter(|line| !line.trim_start().starts_with('#'))
+                    .any(|line| line.contains(word)),
+                "the voice worker names {word}"
+            );
+        }
+        assert!(VOICE_WORKER_PY.contains("stt_utils"));
     }
 }

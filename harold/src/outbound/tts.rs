@@ -1,12 +1,14 @@
 use std::borrow::Cow;
 use std::process::Command;
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use tracing::{info, warn};
 
-use crate::settings::{TtsSettings, get_settings};
+use crate::settings::{TtsEngine, TtsSettings, get_settings};
+use crate::tts::play::{PLAYER, TempWav};
+use crate::tts::{Audio, Caller, TtsServer};
 use crate::voice_input::{Speaker, say_in_open_call};
 
 pub(crate) fn regex_strip_think(text: &str) -> String {
@@ -203,7 +205,11 @@ fn notify_with_fallback_from(
         Ok(Said::Ended(false)) => warn!(command = %tts.command, "TTS command failed"),
         Err(e) => warn!(error = %e, command = %tts.command, "TTS command failed to start"),
     }
+    run_fallback(tts, message, stopper, started_at)
+}
 
+/// Says `message` with the `[tts]` fallback command; false when none is set or it fails.
+fn run_fallback(tts: &TtsSettings, message: &str, stopper: &LineStopper, started_at: u64) -> bool {
     let Some(fallback_command) = &tts.fallback_command else {
         return false;
     };
@@ -239,6 +245,63 @@ fn notify_with_fallback_from(
     }
 }
 
+/// Says `line` through the TTS server: makes the audio, writes it to a temporary WAV file
+/// (mode 0600), plays it with `player` and deletes the file. A failure of the server or of
+/// the player runs the `[tts]` fallback command. A stop since the line started ends it, and
+/// counts as said.
+fn speak_through_server(
+    tts: &TtsSettings,
+    line: &str,
+    stopper: &LineStopper,
+    server: Option<&Arc<TtsServer>>,
+    player: &str,
+) -> bool {
+    let started_at = stopper.generation();
+    let message = as_last_argument(line);
+    let Some(server) = server else {
+        warn!(reason = "worker_failed", caller = "desk", "tts failed");
+        return run_fallback(tts, &message, stopper, started_at);
+    };
+    // The server logs why a line failed.
+    let Ok(audio) = server.speak_all_blocking(Caller::Desk, line) else {
+        return run_fallback(tts, &message, stopper, started_at);
+    };
+    if stopper.generation() != started_at {
+        info!("TTS line stopped");
+        return true;
+    }
+    match play_audio(&audio, player, stopper, started_at) {
+        Ok(Said::Ended(true)) => {
+            info!("TTS notification sent");
+            true
+        }
+        Ok(Said::Stopped) => {
+            info!("TTS line stopped");
+            true
+        }
+        Ok(Said::Ended(false)) => {
+            warn!(command = player, "TTS player failed");
+            run_fallback(tts, &message, stopper, started_at)
+        }
+        Err(error) => {
+            warn!(error = %error, command = player, "TTS player failed to start");
+            run_fallback(tts, &message, stopper, started_at)
+        }
+    }
+}
+
+/// Plays `audio` with `player` from a temporary WAV file, which is deleted after.
+fn play_audio(
+    audio: &Audio,
+    player: &str,
+    stopper: &LineStopper,
+    started_at: u64,
+) -> std::io::Result<Said> {
+    let wav = TempWav::write(&std::env::temp_dir(), audio)?;
+    let path = wav.path().display().to_string();
+    run_tts_command(player, None, None, &path, stopper, started_at)
+}
+
 /// `line` as it is passed as a program's last argument: a line that starts with `-` gets
 /// one space in front, so `say` does not read it as an option. The space is
 /// not heard.
@@ -250,8 +313,8 @@ pub(crate) fn as_last_argument(line: &str) -> Cow<'_, str> {
     }
 }
 
-/// Say `line` in the open call, or with the `[tts]` command, falling back to the fallback
-/// command, when no call is open. Nothing heard is added to the line.
+/// Say `line` in the open call, or at the desk with the `[tts]` engine (the command, or the TTS
+/// server), falling back to the fallback command, when no call is open. Nothing heard is added to the line.
 pub(crate) fn speak_line(line: &str) -> bool {
     speak_line_through(&get_settings().tts, line)
 }
@@ -265,9 +328,14 @@ fn speak_line_through(tts: &TtsSettings, line: &str) -> bool {
 }
 
 /// Says `line` with `tts`, returning when it has ended or been stopped; true when it was
-/// said or stopped.
+/// said or stopped. With `engine = "server"` the line goes through the TTS server.
 pub(crate) fn speak_line_with(tts: &TtsSettings, line: &str, stopper: &LineStopper) -> bool {
-    notify_with_fallback(tts, &as_last_argument(line), stopper)
+    match tts.engine {
+        TtsEngine::Command => notify_with_fallback(tts, &as_last_argument(line), stopper),
+        TtsEngine::Server => {
+            speak_through_server(tts, line, stopper, crate::tts::server().as_ref(), PLAYER)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -284,6 +352,7 @@ mod tests {
             fallback_command: Some("/usr/bin/true".into()),
             fallback_voice: None,
             fallback_args: None,
+            ..TtsSettings::default()
         };
 
         assert!(notify_with_fallback(
@@ -303,6 +372,7 @@ mod tests {
             fallback_command: None,
             fallback_voice: None,
             fallback_args: None,
+            ..TtsSettings::default()
         };
 
         assert!(!notify_with_fallback(
@@ -326,6 +396,7 @@ mod tests {
             fallback_command: None,
             fallback_voice: None,
             fallback_args: None,
+            ..TtsSettings::default()
         }
     }
 
@@ -487,5 +558,228 @@ mod tests {
                 "x".repeat(500)
             )
         );
+    }
+
+    use crate::tts::play::wav_bytes;
+    use crate::tts::test_support::fixture;
+    use std::os::unix::fs::PermissionsExt;
+
+    /// A player that copies the WAV file it is given to `<out>.wav` and notes its path.
+    fn copying_player(folder: &std::path::Path) -> String {
+        let player = folder.join("player");
+        std::fs::write(
+            &player,
+            "#!/bin/sh\ncp \"$1\" \"$0.wav\"\nprintf %s \"$1\" > \"$0.path\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&player, std::fs::Permissions::from_mode(0o700)).unwrap();
+        player.display().to_string()
+    }
+
+    fn server_tts(out: &std::path::Path) -> TtsSettings {
+        TtsSettings {
+            engine: TtsEngine::Server,
+            ..writes_last_argument_to_as_fallback(out)
+        }
+    }
+
+    /// The `[tts]` whose fallback writes its last argument to `out`.
+    fn writes_last_argument_to_as_fallback(out: &std::path::Path) -> TtsSettings {
+        let fallback = writes_last_argument_to(out);
+        TtsSettings {
+            command: "/usr/bin/false".into(),
+            fallback_command: Some(fallback.command),
+            fallback_args: fallback.args,
+            ..TtsSettings::default()
+        }
+    }
+
+    fn scratch_folder() -> std::path::PathBuf {
+        let folder = std::env::temp_dir().join(format!("harold-desk-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&folder).unwrap();
+        folder
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn with_the_server_engine_a_line_goes_through_the_server_and_plays_from_a_temporary_wav()
+    {
+        let fixture = fixture().await;
+        let folder = scratch_folder();
+        let player = copying_player(&folder);
+        let tts = server_tts(&folder.join("fallback-out"));
+        let server = fixture.server.clone();
+
+        let said = tokio::task::spawn_blocking(move || {
+            speak_through_server(
+                &tts,
+                "All green.",
+                &LineStopper::default(),
+                Some(&server),
+                &player,
+            )
+        })
+        .await
+        .unwrap();
+
+        assert!(said);
+        let played = std::fs::read(folder.join("player.wav")).unwrap();
+        let expected = wav_bytes(&Audio {
+            sample_rate: 24_000,
+            pcm: vec![0, 0, 0, 0, 1, 0, 1, 0, 2, 0, 2, 0],
+        });
+        assert_eq!(played, expected);
+        // The fallback did not run, and the temporary file is gone after the line plays.
+        assert!(!folder.join("fallback-out").exists());
+        let path = std::fs::read_to_string(folder.join("player.path")).unwrap();
+        assert!(!std::path::Path::new(&path).exists());
+        assert!(path.contains("harold-tts-") && path.ends_with(".wav"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_server_failure_runs_the_fallback_command_with_the_line() {
+        let fixture = fixture().await;
+        fixture
+            .script
+            .lines
+            .lock()
+            .unwrap()
+            .push(crate::tts::test_support::Next::Exit);
+        let folder = scratch_folder();
+        let out = folder.join("fallback-out");
+        let tts = server_tts(&out);
+        let player = copying_player(&folder);
+        let server = fixture.server.clone();
+
+        let said = tokio::task::spawn_blocking(move || {
+            speak_through_server(
+                &tts,
+                "-3 tests failing",
+                &LineStopper::default(),
+                Some(&server),
+                &player,
+            )
+        })
+        .await
+        .unwrap();
+
+        assert!(said);
+        // The fallback gets the line as `command` does.
+        assert_eq!(std::fs::read_to_string(&out).unwrap(), " -3 tests failing");
+        assert!(!folder.join("player.wav").exists());
+    }
+
+    #[test]
+    fn without_a_started_server_the_fallback_speaks_and_with_none_the_line_fails() {
+        let folder = scratch_folder();
+        let out = folder.join("fallback-out");
+        let tts = server_tts(&out);
+
+        assert!(speak_through_server(
+            &tts,
+            "Hello.",
+            &LineStopper::default(),
+            None,
+            "/usr/bin/true"
+        ));
+        assert_eq!(std::fs::read_to_string(&out).unwrap(), "Hello.");
+
+        let mut without = server_tts(&folder.join("none"));
+        without.fallback_command = None;
+        assert!(!speak_through_server(
+            &without,
+            "Hello.",
+            &LineStopper::default(),
+            None,
+            "/usr/bin/true"
+        ));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_player_that_fails_runs_the_fallback() {
+        let fixture = fixture().await;
+        let folder = scratch_folder();
+        let out = folder.join("fallback-out");
+        let tts = server_tts(&out);
+        let server = fixture.server.clone();
+
+        let said = tokio::task::spawn_blocking(move || {
+            speak_through_server(
+                &tts,
+                "Hello.",
+                &LineStopper::default(),
+                Some(&server),
+                "/usr/bin/false",
+            )
+        })
+        .await
+        .unwrap();
+
+        assert!(said);
+        assert_eq!(std::fs::read_to_string(&out).unwrap(), "Hello.");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_line_stopped_while_it_plays_counts_as_said_and_skips_the_fallback() {
+        let fixture = fixture().await;
+        let folder = scratch_folder();
+        let marker = folder.join("started");
+        let player = folder.join("slow-player");
+        std::fs::write(
+            &player,
+            format!("#!/bin/sh\ntouch '{}'\nsleep 5\n", marker.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&player, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let out = folder.join("fallback-out");
+        let tts = server_tts(&out);
+        let stopper = Arc::new(LineStopper::default());
+        let server = fixture.server.clone();
+        let speaking = {
+            let stopper = stopper.clone();
+            let player = player.display().to_string();
+            tokio::task::spawn_blocking(move || {
+                speak_through_server(&tts, "A long line.", &stopper, Some(&server), &player)
+            })
+        };
+        let started = std::time::Instant::now();
+        while !marker.exists() && started.elapsed() < Duration::from_secs(10) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(marker.exists(), "the player never started");
+        stopper.stop();
+
+        assert!(speaking.await.unwrap());
+        assert!(started.elapsed() < Duration::from_secs(4));
+        assert!(!out.exists());
+    }
+
+    #[test]
+    fn the_server_engine_without_a_started_server_runs_the_fallback_through_speak_line_with() {
+        let folder = scratch_folder();
+        let out = folder.join("fallback-out");
+        let tts = server_tts(&out);
+
+        assert!(speak_line_with(&tts, "Hi.", &LineStopper::default()));
+
+        assert_eq!(std::fs::read_to_string(&out).unwrap(), "Hi.");
+    }
+
+    #[test]
+    fn the_command_engine_never_asks_the_server() {
+        let out = std::env::temp_dir().join(format!("harold-tts-{}", uuid::Uuid::new_v4()));
+        let mut tts = writes_last_argument_to(&out);
+        tts.engine = TtsEngine::Command;
+
+        assert!(speak_line_with(
+            &tts,
+            "Said by the command.",
+            &LineStopper::default()
+        ));
+
+        assert_eq!(
+            std::fs::read_to_string(&out).unwrap(),
+            "Said by the command."
+        );
+        let _ = std::fs::remove_file(out);
     }
 }

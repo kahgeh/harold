@@ -408,6 +408,8 @@ Each tile's window is written into its query: `TimeUnix >= now() - INTERVAL 24 H
 | Web app | Thread opened at the oldest row, 7 days | the share of `browser.thread_opened` spans with `harold.opened_at = oldest_on_page` over the last 7 days. A share above 10% means the 50-row page is too short for how long you are away: a backlog item. A wrong position shows as `newest` with `harold.unread` above 0, or `first_unread` right after a reply; the span's trace id and the `app page connected` line at the same second show whether a reconnect patch landed late. Info only: no alert | SQL table |
 | Web app | Web app posts refused, by route, per day | the `app post refused` lines for each of the last 7 days, by `route`. Expected: none after the release. Any count is a page that still posts without Datastar, which the asset test should have caught: look at once. Info only: no alert | SQL table over `otel.otel_logs` |
 | Web app | Pages closed without a hidden report, share per day | the `app page disconnected` lines for each of the last 7 days: the number, the share with `hidden_reported = false`, and the number with `repeated`. A share over 20% on a day with at least 10 closes means the phone drops the hidden reports often and they hold back pushes: the user then decides whether to keep the three hide-time posts through Datastar. A `repeated` above 0 means a report reached Harold twice, which no retry should cause. Info only: no alert | SQL table over `otel.otel_logs` |
+| TTS server | TTS time to first audio, p50 and p95 by machine, loaded and device, last 7 days | for each day, machine, `loaded` and `device`: the number of `harold.tts.speak` spans and the p50 and p95 of `first_audio_ms`, for lines that were spoken. The aims, with the model loaded: a p95 under 150 ms on the RTX 4090 (`device = gpu`), and under 500 ms on the Mac and on a CPU fallback. A model change is judged by it | SQL table over `harold.tts.speak` spans |
+| TTS server | TTS failures per day, by machine, caller and reason | the `tts failed` lines for each of the last 7 days, by machine, `caller` (`desk`, `call`) and `reason`. A failure that affects only calls shows here. Info only: no alert, because you hear a missing line | SQL table over the logs |
 | Notifications | Spoken lines dropped while locked, by pane, per day | the `spoken line dropped (screen locked)` lines for each of the last 7 days, by `pane_id`. More than 3 drops on a day from one pane means that agent speaks while the user is away: change its skill to send text instead. Expected: under 3 a day for each pane, since the chief's lines go to the web app as text. Info only: no alert | SQL table over `otel.otel_logs` |
 | Notifications | Notifications by agent and channel | a table with one row per `agent` and `channel`, and two columns, `sent` and `kept`: `harold.notifications` over the range you pick. A `kept` is something that channel's list held back; the chief rule, the voice mute, the pause and a message sent this turn are not `kept`. Only channels that are set up and turned on have rows. Severity info. You read it to see who is talking to you and to decide your lists: an agent with more than 20 `kept` in a day on the channel you use is one to consider adding, and an agent you expect to hear whose `sent` stops rising while it is working is one to look at. For a row, the `agent message dropped`, `spoken line dropped` and `notification skipped` lines with that `agent` and `channel` give `pane_id`, `kind`, `reason` and the times; `spoken update left out (not in notify.machine_audio_output)` gives them for a desk update | SQL: the counter rule over the range, with the day before `$__fromTime` for the lag, `$__timeFilter` and `$__filters`. No fixed period, no earlier tile |
 
@@ -569,6 +571,35 @@ HAVING started > downloaded
 - **Optimisation:** `ms` per GB from `speech model downloaded`.
 - **The worker's load** is the log line `voice worker ready` with `load_ms` and `started_by` (`page` or `call`), and `voice worker stopped` with `reason` `no_page`, `call_ended` or `exited`. The tap-to-listening time is the `harold.call_ring` span. A worker `started_by = call` while a page was on screen means the page was not seen in time, and the call's `harold.call_ring` has `worker = loaded_now`; `cycles` of 4 or more is slow whichever the worker.
 - No progress lines are logged. The phone shows progress, and the start and end lines say whether a model was missing or still downloading.
+
+### The TTS server
+
+The TTS server adds signals and two cards ([TTS server](../tts/README.md)). None is an alert: you hear a missing line.
+
+| Signal | Kind | Fields | Answers |
+|---|---|---|---|
+| `harold.tts.speak` | span | `model`, `caller` (`desk`, `call`), `result` (`spoke`, `failed`), `first_audio_ms`, `loaded` (`true` when this request loaded the model), `device` (`gpu`, `cpu`, `apple_gpu`) | Does a line start fast, on each machine? |
+| `tts gpu unavailable` | warn, once for each reason in a Harold run | `reason` (`no_gpu`, `no_driver`, `cuda_load_failed`, `gpu_out_of_memory`) | Is the voice slower than it can be? |
+| `tts failed` | warn | `reason` (`worker_failed`, `model_downloading`, `model_missing`, `timed_out`), `model`, `caller` | When a line failed, why, and did the fallback speak? |
+| `tts model downloaded` | info | `model`, `bytes`, `ms` | Which models are on each machine? |
+| `tts model download failed` | warn | `model`, `reason` (`not_approved`, `unsafe_format`, `check_failed`, `network`; also `disk_full`, `not_allowed`, `not_found` and `failed`) | Did a download fail? |
+
+`model` is the model's id (its repository name), never a path. No field holds the text.
+
+- **Optimisation.** The p50 and p95 of `first_audio_ms` per day, by machine and `loaded`, on the first card, which also splits by `device`.
+- **Issue detection.** On the Omarchy machine, `device = cpu` on `harold.tts.speak` means the voice ran on the CPU: expected 0 spans a day there. `tts gpu unavailable` is the nudge: expected 0 lines, at most one for each reason in one Harold run. The release watch runs:
+
+```
+SELECT count() FROM otel.otel_traces
+WHERE SpanName = 'harold.tts.speak'
+  AND SpanAttributes['device'] = 'cpu'
+  AND ResourceAttributes['os.type'] = 'linux'
+  AND Timestamp > now() - INTERVAL 1 DAY
+```
+
+and looks for the `tts gpu unavailable` line in `harold.log`. Either above 0 is a report. More than 2 on a day is worth a look. `tts model download failed` is a warn, which the release watch already looks for.
+
+- **Error diagnosis.** From a failed line: `reason` and `model`, then the worker's exit in `harold.log`. From a slow line: `loaded` tells whether the load or the speech was slow. `harold tool tts models` shows each model's state and reason.
 
 ## How an alert reaches the chief
 

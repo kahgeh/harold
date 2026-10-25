@@ -678,18 +678,124 @@ fn keep_worker_minutes() -> u64 {
     10
 }
 
-#[derive(Debug, Deserialize)]
-#[cfg_attr(not(feature = "calls"), allow(dead_code))]
+/// What speaks the desk's lines: the `[tts]` command, or the TTS server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TtsEngine {
+    Command,
+    Server,
+}
+
+impl TtsEngine {
+    /// The server on Linux, which has no `say`; the command on the Mac.
+    pub fn platform_default() -> Self {
+        if cfg!(target_os = "linux") {
+            TtsEngine::Server
+        } else {
+            TtsEngine::Command
+        }
+    }
+}
+
+fn tts_engine() -> TtsEngine {
+    TtsEngine::platform_default()
+}
+
+fn tts_idle_minutes() -> u64 {
+    10
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct TtsSettings {
     /// The commit of the Kokoro model, 40 lowercase hex characters.
     #[serde(default = "kokoro_revision")]
     pub model_revision: String,
+    /// `command` or `server`. The default is `command` on the Mac and `server` on Linux.
+    #[serde(default = "tts_engine")]
+    pub engine: TtsEngine,
+    /// On Linux, the Python that has `kokoro-onnx` and `onnxruntime-gpu`. On the Mac, the
+    /// server uses `[voice_input] command`.
+    #[serde(default)]
+    pub python: Option<String>,
+    /// How many minutes the TTS worker is kept with no request and no call open.
+    #[serde(default = "tts_idle_minutes")]
+    pub idle_minutes: u64,
     pub command: String,
     pub voice: Option<String>,
     pub args: Option<Vec<String>>,
     pub fallback_command: Option<String>,
     pub fallback_voice: Option<String>,
     pub fallback_args: Option<Vec<String>>,
+    /// Set when `load` took a hand-written Kokoro command (`mlx_audio.tts.generate`) with no
+    /// `engine` as `engine = "server"`.
+    #[serde(skip)]
+    pub migrated: bool,
+    /// The `--voice` of that hand-written command: the server's voice until a default is set.
+    #[serde(skip)]
+    pub legacy_voice: Option<String>,
+}
+
+impl Default for TtsSettings {
+    fn default() -> Self {
+        Self {
+            model_revision: kokoro_revision(),
+            engine: tts_engine(),
+            python: None,
+            idle_minutes: tts_idle_minutes(),
+            command: "say".to_string(),
+            voice: None,
+            args: None,
+            fallback_command: None,
+            fallback_voice: None,
+            fallback_args: None,
+            migrated: false,
+            legacy_voice: None,
+        }
+    }
+}
+
+/// The step that takes this Mac's hand-written Kokoro command as the server: a `[tts]` that
+/// sets no `engine` and runs `mlx_audio.tts.generate` becomes `engine = "server"`, keeping the
+/// command's `--voice`. The install check (`harold --check-config`) shows the engine that
+/// resulted.
+fn migrate_tts(tts: &mut TtsSettings, local: &Config) {
+    let engine_set = local.get::<config::Value>("tts.engine").is_ok();
+    let args = tts.args.as_deref().unwrap_or_default();
+    if engine_set || !args.iter().any(|arg| arg == "mlx_audio.tts.generate") {
+        return;
+    }
+    tts.legacy_voice = args
+        .windows(2)
+        .find(|pair| pair[0] == "--voice")
+        .map(|pair| pair[1].clone());
+    tts.engine = TtsEngine::Server;
+    tts.migrated = true;
+}
+
+/// The most minutes `[tts] idle_minutes` may be: one day.
+const TTS_IDLE_MINUTES_MAX: u64 = 24 * 60;
+
+fn tts_errors(tts: &TtsSettings) -> Vec<String> {
+    let mut errors = Vec::new();
+    if !(1..=TTS_IDLE_MINUTES_MAX).contains(&tts.idle_minutes) {
+        errors.push(format!(
+            "tts.idle_minutes must be between 1 and {TTS_IDLE_MINUTES_MAX}"
+        ));
+    }
+    if tts
+        .python
+        .as_deref()
+        .is_some_and(|python| python.trim().is_empty())
+    {
+        errors.push("tts.python must not be empty".to_string());
+    }
+    errors
+}
+
+/// The approved model list, `tts-models.toml`, beside `local.toml`.
+pub(crate) fn tts_models_path() -> std::path::PathBuf {
+    let (config_dir, _) = config_location();
+    std::path::Path::new(&config_dir).join("tts-models.toml")
 }
 
 #[derive(Debug, Deserialize)]
@@ -1383,6 +1489,7 @@ impl Settings {
         errors.extend(self.activity_summary.validate());
         errors.extend(self.watch.validate());
         errors.extend(self.knowledge.validate());
+        errors.extend(tts_errors(&self.tts));
         errors.extend(self.call_answerer.validate());
         errors.extend(self.restart_reminder.validate());
         errors.extend(away_messages_only_from_error(
@@ -1420,6 +1527,7 @@ impl Settings {
             .map(|table| table.into_keys().collect::<Vec<_>>())
             .unwrap_or_default();
         settings.notify.old_key_applied = apply_old_key(&mut settings.notify, &local_keys);
+        migrate_tts(&mut settings.tts, &local);
         Ok(Arc::new(settings))
     }
 
@@ -1643,8 +1751,9 @@ mod tests {
     use serde::Deserialize;
 
     use super::{
-        AgentMonitorSettings, AgentProviderSettings, AgentSettings, Settings,
-        is_valid_machine_name, machine_name_error, machine_name_from_hostname,
+        AgentMonitorSettings, AgentProviderSettings, AgentSettings, Settings, TtsEngine,
+        TtsSettings, is_valid_machine_name, machine_name_error, machine_name_from_hostname,
+        migrate_tts, tts_errors, tts_models_path,
     };
 
     fn grpc(host: &str) -> super::GrpcSettings {
@@ -2864,7 +2973,7 @@ encryption_key_file = "/work/key"
         let out =
             std::env::temp_dir().join(format!("harold-settings-tts-{}", uuid::Uuid::new_v4()));
         let settings = default_settings_with(&format!(
-            "[tts]\ncommand = \"/bin/sh\"\nargs = [\"-c\", \"printf %s \\\"$1\\\" > '{}'\", \"sh\"]\n",
+            "[tts]\nengine = \"command\"\ncommand = \"/bin/sh\"\nargs = [\"-c\", \"printf %s \\\"$1\\\" > '{}'\", \"sh\"]\n",
             out.display()
         ));
         assert!(crate::outbound::tts::speak_line_with(
@@ -3644,5 +3753,81 @@ encryption_key_file = "/work/key"
         let _guard = TempDirGuard(dir.clone());
         let dir_str = dir.to_str().expect("utf-8 temp dir");
         assert!(Settings::load_defaults(dir_str).is_err());
+    }
+
+    fn tts_of(local: &str) -> (TtsSettings, Config) {
+        let config = Config::builder()
+            .add_source(File::from_str(local, FileFormat::Toml))
+            .build()
+            .unwrap();
+        (config.get::<TtsSettings>("tts").unwrap(), config)
+    }
+
+    const KOKORO_COMMAND: &str = "[tts]\ncommand = \"/work/venv/bin/python\"\nargs = [\"-m\", \"mlx_audio.tts.generate\", \"--model\", \"mlx-community/Kokoro-82M-bf16\", \"--voice\", \"bf_emma\", \"--play\", \"--text\"]\n";
+
+    #[test]
+    fn the_hand_written_kokoro_command_with_no_engine_becomes_the_server_with_its_voice() {
+        let (mut tts, config) = tts_of(KOKORO_COMMAND);
+        migrate_tts(&mut tts, &config);
+
+        assert_eq!(tts.engine, TtsEngine::Server);
+        assert!(tts.migrated);
+        assert_eq!(tts.legacy_voice.as_deref(), Some("bf_emma"));
+    }
+
+    #[test]
+    fn an_engine_the_local_config_sets_is_never_migrated() {
+        let (mut tts, config) = tts_of(&format!("{KOKORO_COMMAND}engine = \"command\"\n"));
+        migrate_tts(&mut tts, &config);
+
+        assert_eq!(tts.engine, TtsEngine::Command);
+        assert!(!tts.migrated);
+        assert_eq!(tts.legacy_voice, None);
+    }
+
+    #[test]
+    fn the_say_command_and_other_commands_are_not_migrated() {
+        for local in [
+            "[tts]\ncommand = \"say\"\n",
+            "[tts]\ncommand = \"say\"\nargs = [\"-r\", \"200\"]\n",
+            "[tts]\ncommand = \"/p/python\"\nargs = [\"-m\", \"other.tts\", \"--text\"]\n",
+        ] {
+            let (mut tts, config) = tts_of(local);
+            migrate_tts(&mut tts, &config);
+            assert_eq!(tts.engine, TtsEngine::platform_default(), "{local}");
+            assert!(!tts.migrated);
+        }
+    }
+
+    #[test]
+    fn the_tts_engine_idle_time_and_python_have_defaults_and_are_checked() {
+        let settings = default_settings_with("");
+        assert_eq!(settings.tts.engine, TtsEngine::platform_default());
+        assert_eq!(settings.tts.idle_minutes, 10);
+        assert_eq!(settings.tts.python, None);
+        assert!(tts_errors(&settings.tts).is_empty());
+
+        let server = default_settings_with(
+            "[tts]\nengine = \"server\"\npython = \"/venv/bin/python\"\nidle_minutes = 30\n",
+        );
+        assert_eq!(server.tts.engine, TtsEngine::Server);
+        assert_eq!(server.tts.idle_minutes, 30);
+        assert_eq!(server.tts.python.as_deref(), Some("/venv/bin/python"));
+
+        for (bad, message) in [
+            ("idle_minutes = 0", "tts.idle_minutes"),
+            ("idle_minutes = 1441", "tts.idle_minutes"),
+            ("python = \" \"", "tts.python"),
+        ] {
+            let errors = tts_errors(&default_settings_with(&format!("[tts]\n{bad}\n")).tts);
+            assert_eq!(errors.len(), 1, "{bad}");
+            assert!(errors[0].contains(message), "{bad}: {errors:?}");
+        }
+    }
+
+    #[test]
+    fn the_approved_model_list_sits_beside_local_toml() {
+        let path = tts_models_path();
+        assert_eq!(path.file_name().unwrap(), "tts-models.toml");
     }
 }

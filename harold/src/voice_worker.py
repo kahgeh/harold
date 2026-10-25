@@ -1,7 +1,8 @@
 # Harold's voice worker. Harold writes this file into the call's folder and starts it with
-# the Python that has mlx_audio installed. It keeps Whisper and Kokoro loaded for the
-# length of one call and answers one JSON line per request on the real stdout.
-# It never downloads: Harold has fetched and checked the pinned models, and this program
+# the Python that has mlx_audio installed. It keeps Whisper loaded for the length of one call
+# and answers one JSON line per request on the real stdout. It only turns speech to text: the
+# lines of a call are made by the TTS server (tts_worker_mlx.py).
+# It never downloads: Harold has fetched and checked the pinned model, and this program
 # runs with HF_HUB_OFFLINE=1.
 import json
 import sys
@@ -13,10 +14,7 @@ answers = sys.stdout
 sys.stdout = sys.stderr
 
 try:
-    import numpy
-    import soundfile
     import mlx_audio.stt.utils as stt_utils
-    import mlx_audio.tts.utils as tts_utils
 except Exception:
     traceback.print_exc()
     answers.write(json.dumps({"ready": False, "cause": "import_failed"}) + "\n")
@@ -89,36 +87,14 @@ def transcribe(stt, language, wav):
     }
 
 
-def say(tts, voice, lang_code, text, wav):
-    chunks = [
-        numpy.asarray(part.audio).reshape(-1)
-        for part in tts.generate(text=text, voice=voice, speed=1.0, lang_code=lang_code)
-    ]
-    soundfile.write(wav, numpy.concatenate(chunks), tts.sample_rate)
-    return {"ok": True}
-
-
 def main():
     started = time.monotonic()
     stt_model = argument("--stt-model")
-    tts_model = argument("--tts-model")
     try:
         stt, stt_how = load(
             stt_utils, stt_model, argument("--stt-snapshot", ""), argument("--stt-commit", "")
         )
-        tts, tts_how = load(
-            tts_utils, tts_model, argument("--tts-snapshot", ""), argument("--tts-commit", "")
-        )
-        voice = argument("--voice")
-        lang_code = argument("--lang-code")
         language = argument("--language")
-        # One throwaway line, so a missing voice fails here and not on the first answer.
-        try:
-            for _ in tts.generate(text="Ready.", voice=voice, speed=1.0, lang_code=lang_code):
-                pass
-        except Exception:
-            traceback.print_exc()
-            raise LoadFailure("voice_missing", tts_model)
     except LoadFailure as failure:
         # Harold discards stderr; the traceback is there for someone who runs this by hand.
         reply = {"ready": False, "cause": failure.cause}
@@ -135,7 +111,6 @@ def main():
             "ready": True,
             "load_ms": int((time.monotonic() - started) * 1000),
             "stt_load": stt_how,
-            "tts_load": tts_how,
         }
     )
     for line in sys.stdin:
@@ -143,8 +118,6 @@ def main():
             request = json.loads(line)
             if request["op"] == "transcribe":
                 reply = transcribe(stt, language, request["wav"])
-            elif request["op"] == "say":
-                reply = say(tts, voice, lang_code, request["text"], request["wav"])
             else:
                 reply = {"ok": False}
         except Exception:

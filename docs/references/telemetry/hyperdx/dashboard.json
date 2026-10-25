@@ -38,6 +38,11 @@
       "id": "knowledge",
       "title": "Knowledge index",
       "collapsed": false
+    },
+    {
+      "id": "tts",
+      "title": "TTS server",
+      "collapsed": false
     }
   ],
   "filters": [
@@ -957,6 +962,38 @@
         "connectionId": "@CLICKHOUSE_CONNECTION_ID@",
         "sourceId": "@METRICS_SOURCE_ID@",
         "sqlTemplate": "SELECT toStartOfDay(TimeUnix) AS day, max(Value) AS typed_relations FROM $__sourceTable(gauge) WHERE MetricName = 'harold.knowledge.typed_relations' AND TimeUnix >= now() - INTERVAL 30 DAY AND TimeUnix < now() GROUP BY day ORDER BY day DESC"
+      }
+    },
+    {
+      "id": "tts-time-to-first-audio",
+      "name": "TTS time to first audio, p50 and p95 by machine, loaded and device, last 7 days",
+      "x": 0,
+      "y": 52,
+      "w": 12,
+      "h": 4,
+      "containerId": "tts",
+      "config": {
+        "configType": "sql",
+        "displayType": "table",
+        "connectionId": "@CLICKHOUSE_CONNECTION_ID@",
+        "sourceId": "@TRACES_SOURCE_ID@",
+        "sqlTemplate": "SELECT toDate(Timestamp) AS day, ResourceAttributes['harold.machine'] AS machine, SpanAttributes['loaded'] AS loaded, SpanAttributes['device'] AS device, count() AS lines, quantile(0.5)(toFloat64OrZero(SpanAttributes['first_audio_ms'])) AS p50_ms, quantile(0.95)(toFloat64OrZero(SpanAttributes['first_audio_ms'])) AS p95_ms FROM $__sourceTable WHERE ServiceName = 'harold' AND SpanName = 'harold.tts.speak' AND SpanAttributes['result'] = 'spoke' AND Timestamp >= now() - INTERVAL 7 DAY AND Timestamp < now() GROUP BY day, machine, loaded, device ORDER BY day DESC, machine, loaded, device"
+      }
+    },
+    {
+      "id": "tts-failures-by-day",
+      "name": "TTS failures per day, by machine, caller and reason",
+      "x": 12,
+      "y": 52,
+      "w": 12,
+      "h": 4,
+      "containerId": "tts",
+      "config": {
+        "configType": "sql",
+        "displayType": "table",
+        "connectionId": "@CLICKHOUSE_CONNECTION_ID@",
+        "sourceId": "@TRACES_SOURCE_ID@",
+        "sqlTemplate": "SELECT toDate(Timestamp) AS day, ResourceAttributes['harold.machine'] AS machine, LogAttributes['caller'] AS caller, LogAttributes['reason'] AS reason, count() AS failed FROM otel.otel_logs WHERE ServiceName = 'harold' AND Body = 'tts failed' AND Timestamp >= now() - INTERVAL 7 DAY AND Timestamp < now() GROUP BY day, machine, caller, reason ORDER BY day DESC, failed DESC"
       }
     }
   ]

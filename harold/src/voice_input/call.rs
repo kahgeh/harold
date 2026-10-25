@@ -674,6 +674,9 @@ struct Call<P: CallPorts> {
     models_rx: Option<watch::Receiver<ModelsStatus>>,
     /// The speech models the call asked about.
     models: Option<Arc<SpeechModels>>,
+    /// Held for the length of the call: the TTS worker is not stopped for being idle while it
+    /// lives, and its idle time starts when the call ends.
+    _tts: Option<crate::tts::CallGuard>,
     /// Whether the worker has already been started again for a model it could not find.
     models_retried: bool,
     request: Option<JoinHandle<()>>,
@@ -827,6 +830,7 @@ impl<P: CallPorts> Call<P> {
             transcribe_queued_at: None,
             models_rx: None,
             models,
+            _tts: crate::tts::server().map(|server| server.call_guard()),
             models_retried: false,
             request: None,
             jobs: VecDeque::new(),
