@@ -21,5 +21,5 @@ The chief published every spec as a private artifact, so each spec left the mach
 - The spec pages hold no more than the spec files hold. The web app shows them to the one paired device on the tailnet.
 - The chief's and the PnEM's change, to publish one spec only on request, is made outside Harold after this merge.
 - The phone downloads the Mermaid bundle, about 5 MB, once for each bundle name, because the versioned file is served as immutable.
-- The Mermaid bundle holds `elkjs`, which is under EPL-2.0. The licence text is in `LICENSES/mermaid-bundle.md`.
+- The Mermaid bundle leaves out `elkjs` (EPL-2.0). A diagram that asks for the ELK layout shows its source.
 - Upgrading Mermaid is a deliberate, audited act, as for the OpenTelemetry bundle.
