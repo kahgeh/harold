@@ -73,7 +73,7 @@ cell says "Nothing", the key does nothing there, so a key never means two things
 | `l` / → | Nothing | Open the todo (on another todo's row, open that todo) | Nothing | Nothing | Nothing | Types `l` |
 | `h` / ← | Nothing | Close the todo, when open | Close the todo, cursor to its header | Same | Same | Types `h` |
 | Space | Nothing | Nothing | Pick the option; a free option opens its field | Nothing | Tick the step, or untick it | Types a space |
-| Enter | Switch the invoking tmux client to the pane under the cursor | Open or close the todo | Nothing | `send` sends the answer at once; `later` sets the question aside; `revise…` or `reject…` opens a note; `done` tells the chief you are done; `ignore` tells it you will not | Nothing | Search: keep the query · palette: run · field: keep the text and pick the option · note: send it |
+| Enter | Switch the invoking tmux client to the pane under the cursor | Open or close the todo | Nothing | `send` sends the answer at once; `relegate to idea…`, `revise…` or `reject…` opens a note; `done` tells the chief you are done; `ignore` tells it you will not | Nothing | Search: keep the query · palette: run · field: keep the text and pick the option · note: send it |
 | Esc | Clear an accepted filter, or nothing | Close the todo, when open | Close the todo, cursor to its header | Same | Same | Search: clear the query and leave · palette: close · field or note: discard and leave |
 | `n` / `N` | Next or previous waiting agent (wraps) | Next or previous waiting todo (wraps) | Same | Same | Same | Types |
 | `o` | Nothing | Open the todo's link, if it is `http://` or `https://` | Same | Same | Same | Types |
@@ -206,13 +206,13 @@ A question's header is `▾ Q1 · question · 1 of 2 todos · harold · durable-
 
           send
           ─────────────
-          later
+          relegate to idea…
           revise…
           reject…
     ▸ I1 · instructions · 0 of 4 ticked · harold · Install Harold 0.15.0 on studio-mac
 ```
 
-The cursor stops on the header, on each option or step, on each action row (`send`, `later`, `revise…`, `reject…`, or `done` and `ignore`) and on each other todo's row. It skips the intro, the asks, the details, the impact lines and the blank rows. `j` and `k` move through all of them like any other rows: `j` from the chief's row goes to the header, then over each option or step and action row and each other todo's row, then on to the next agent row. `l` or `Enter` on another todo's row opens that todo. `h` (or `Esc`) closes the todo again with the cursor on its header; the picks are kept, and `l` on the header opens it as it was. The yellow marks the header and the row under the cursor.
+The cursor stops on the header, on each option or step, on each action row (`send`, `relegate to idea…`, `revise…`, `reject…`, or `done` and `ignore`) and on each other todo's row. It skips the intro, the asks, the details, the impact lines and the blank rows. `j` and `k` move through all of them like any other rows: `j` from the chief's row goes to the header, then over each option or step and action row and each other todo's row, then on to the next agent row. `l` or `Enter` on another todo's row opens that todo. `h` (or `Esc`) closes the todo again with the cursor on its header; the picks are kept, and `l` on the header opens it as it was. The yellow marks the header and the row under the cursor.
 
 With several todos waiting, the open todo shows in full one at a time, and `n` and `N` step between them. The detail panel, on a wide terminal, shows the asking agent while the cursor is on its todo rows.
 
@@ -226,12 +226,10 @@ To answer, move to `send` and press `Enter`. The dash re-reads the questions fir
 
 The other action rows:
 
-- **later** sets the question aside, keeping its picks, and shows the next waiting one.
+- **relegate to idea…** opens a note for anything to add to the idea. `Enter` on it sends a relegate answer at once, with the picks made so far, and the note may be empty. The question leaves your todos for good, and the chief keeps it as an idea note.
 - **revise…** opens a note saying what to change, and **reject…** a note saying why. `Enter` on a note sends it as a revise or reject answer, with the picks made so far and at once like `send`; a blank note is not sent. `Esc` discards the note.
 
-`n` and `N` move to the next or previous waiting question, wrapping over the listed order, set-aside questions included. With one question listed they do nothing. The picks of the question you leave stay, as do the picks of a question set aside with **later** and of a closed question. Every pick is saved in Harold as you make it (a `Space` on an option, or `Enter` on a free option's text; text half-typed is not saved until `Enter`), so a dash restart, a reconnect or a second dash shows the same saved picks. A question that opens at a question version the dash holds no picks for starts from its saved picks, and a decision with no saved pick starts from its suggested option. Saved picks belong to the question version they were made on, but the chief putting a question again keeps the picks on decisions whose ask and options did not change: the notice says so. The saved picks of a question that is answered or dismissed stay in Harold until the id is put again.
-
-Questions set aside come back after a line is typed with no question waiting, when a **later** leaves none waiting and no answer unsent, or when the chief dismisses the last waiting question and no answer is unsent.
+`n` and `N` move to the next or previous waiting question, wrapping over the listed order. With one question listed they do nothing. The picks of the question you leave stay, as do the picks of a closed question. Every pick is saved in Harold as you make it (a `Space` on an option, or `Enter` on a free option's text; text half-typed is not saved until `Enter`), so a dash restart, a reconnect or a second dash shows the same saved picks. A question that opens at a question version the dash holds no picks for starts from its saved picks, and a decision with no saved pick starts from its suggested option. Saved picks belong to the question version they were made on, but the chief putting a question again keeps the picks on decisions whose ask and options did not change: the notice says so. The saved picks of a question that is answered or dismissed stay in Harold until the id is put again.
 
 ### When the chief's row is hidden or scrolled off
 

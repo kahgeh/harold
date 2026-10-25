@@ -8,21 +8,21 @@
 //                    same id (the version rises and it is waiting again).
 //   DismissQuestion  withdraws a question or instructions, with a reason the
 //                    dash shows.
-//   ReorderQuestions puts the listed waiting or deferred ids, of questions and
+//   ReorderQuestions puts the listed waiting ids, of questions and
 //                    instructions, first, in order.
 //   MarkChecked      records that the chief has just checked every todo against
 //                    its spec.
 //
 // The dash calls:
-//   ListQuestions    the waiting and deferred questions and instructions, the
+//   ListQuestions    the waiting questions and instructions, the
 //                    count of questions waiting (instructions are not counted),
 //                    recently dismissed ids with their reasons, the time of the
 //                    chief's last check, and each todo's spec state.
-//   AnswerQuestion   answers a question (picks or a note) or instructions
-//                    (DONE or IGNORE) at the version the dash saw.
-//   DeferQuestion    sets a question aside; it returns to waiting once a batch is typed and nothing else waits.
+//   AnswerQuestion   answers a question (picks or a note), relegates it to an idea
+//                    (RELEGATE: the picks so far and an optional note) or answers
+//                    instructions (DONE or IGNORE) at the version the dash saw.
 //   TickStep         ticks or unticks one step of waiting instructions.
-//   SavePicks        replaces the saved picks of a waiting or deferred question
+//   SavePicks        replaces the saved picks of a waiting question
 //                    at the version the dash saw.
 //
 // The chief of pods and the CLI also call:
@@ -58,7 +58,6 @@ service QuestionService {
   rpc ReorderQuestions(ReorderQuestionsRequest) returns (ReorderQuestionsResponse);
   rpc ListQuestions(ListQuestionsRequest) returns (ListQuestionsResponse);
   rpc AnswerQuestion(AnswerQuestionRequest) returns (AnswerQuestionResponse);
-  rpc DeferQuestion(DeferQuestionRequest) returns (DeferQuestionResponse);
   rpc TickStep(TickStepRequest) returns (TickStepResponse);
   rpc SavePicks(SavePicksRequest) returns (SavePicksResponse);
   rpc ShowQuestion(ShowQuestionRequest) returns (ShowQuestionResponse);
@@ -127,7 +126,8 @@ message ListQuestionsRequest {}
 message ListedQuestion {
   Question question = 1;
   uint32 version = 2;
-  bool deferred = 3;
+  reserved 3;
+  reserved "deferred";
   // Instructions only: the step numbers (from 1) that are ticked.
   repeated uint32 ticked = 4;
   // A question only: the saved picks, one per picked decision.
@@ -167,6 +167,9 @@ enum AnswerKind {
   // Instructions only, with no picks and no note.
   ANSWER_KIND_DONE = 5;
   ANSWER_KIND_IGNORE = 6;
+  // A question only: the picks so far by the revise rule, and a note of 0 to 1,999
+  // characters. The question leaves the todos for good and the chief keeps it as an idea.
+  ANSWER_KIND_RELEGATE = 7;
 }
 
 // One choice for one decision. `decision` counts from 0; `text` is set only
@@ -192,12 +195,6 @@ message AnswerQuestionRequest {
 
 message AnswerQuestionResponse {}
 
-message DeferQuestionRequest {
-  string id = 1;
-}
-
-message DeferQuestionResponse {}
-
 // Ticks (`ticked` true) or unticks one step, counted from 1, of waiting
 // instructions at the version the dash saw.
 message TickStepRequest {
@@ -209,7 +206,7 @@ message TickStepRequest {
 
 message TickStepResponse {}
 
-// Replaces the saved picks of a waiting or deferred question at the version the
+// Replaces the saved picks of a waiting question at the version the
 // dash saw. The picks follow the revise rule: any picks so far, in decision
 // order, keys valid, a free pick with `text`. An empty list clears them.
 message SavePicksRequest {
@@ -224,7 +221,7 @@ message ShowQuestionRequest {
   string id = 1;
 }
 
-// `state` is waiting, deferred, answered, sent or dismissed; `reason` is the
+// `state` is waiting, answered, sent or dismissed; `reason` is the
 // dismissal reason, empty otherwise.
 message ShowQuestionResponse {
   Question question = 1;

@@ -510,7 +510,7 @@ pub(crate) fn router(state: AppState) -> Router {
         .route("/thread/older", get(pages::get_thread_older))
         .route("/todos/answer", post(todos::post_answer))
         .route("/todos/picks", post(todos::post_picks))
-        .route("/todos/later", post(todos::post_later))
+        .route("/todos/relegate", post(todos::post_relegate))
         .route("/todos/tick", post(todos::post_tick))
         .route("/todos/done", post(todos::post_done))
         .route("/todos/ignore", post(todos::post_ignore))

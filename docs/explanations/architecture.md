@@ -132,6 +132,7 @@ One line per architectural decision, oldest first. Each date is the commit that 
 - 2026-10-23: ADR 0013, the web app admits only paired devices, by a device-secret cookie whose fingerprint Harold keeps, and a device is paired by typing a fixed code kept in a file outside the repository, which five wrong tries lock for good. [ADR 0013](../adr/0013-the-web-app-admits-only-paired-devices-by-a-device-secret-cookie-whose-fingerprint-harold-keeps.md)
 - 2026-10-24: ADR 0014, the vault is indexed by meaning inside Harold, with a local model and a buckwal-durable tursodb, so the chief, the web app and the dash can find a vault note by what it means. [ADR 0014](../adr/0014-the-vault-is-indexed-by-meaning-inside-harold-with-a-local-model-and-a-buckwal-durable-tursodb.md)
 - 2026-10-24: ADR 0015, the question tool reads the spec files the chief names, only inside a registered product's specs folder, so a todo whose spec changed after it was asked is marked and cannot be answered. [ADR 0015](../adr/0015-the-question-tool-reads-the-spec-files-the-chief-names.md)
+- 2026-10-25: "Relegate to idea" replaced Later on a question, in the dash and the web app: it goes through `AnswerQuestion` as the kind `RELEGATE`, `DeferQuestion` and the deferred state are gone, and the answers line asks the chief to keep the question as an idea note. The notes in [ADR 0006](../adr/0006-answers-go-to-the-chief-early.md) and [ADR 0007](../adr/0007-the-web-app-reaches-todos-through-the-question-service.md) say what no longer holds.
 
 ## Departures from the standards
 

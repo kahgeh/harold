@@ -21,8 +21,8 @@ use harold_api::tools::knowledge::v1::{
 };
 use harold_api::tools::questions::v1::{
     AnswerKind as ProtoAnswerKind, AnswerQuestionRequest, Decision, DecisionOption,
-    DeferQuestionRequest, ListQuestionsRequest, ListQuestionsResponse, ListedQuestion, Pick,
-    SavePicksRequest, Step, TickStepRequest, question_service_client::QuestionServiceClient,
+    ListQuestionsRequest, ListQuestionsResponse, ListedQuestion, Pick, SavePicksRequest, Step,
+    TickStepRequest, question_service_client::QuestionServiceClient,
 };
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -327,20 +327,6 @@ impl SourceStream {
         }
     }
 
-    pub async fn defer_question(&self, id: &str) -> Result<(), SourceError> {
-        let Some(mut client) = self.questions.clone() else {
-            return Err(SourceError::transport("question tool unavailable"));
-        };
-        tokio::time::timeout(
-            VOICE_REQUEST_TIMEOUT,
-            client.defer_question(DeferQuestionRequest { id: id.to_owned() }),
-        )
-        .await
-        .map_err(|_| SourceError::transport("question request timed out"))?
-        .map(|_| ())
-        .map_err(|error| SourceError::transport(error.to_string()))
-    }
-
     pub async fn close(mut self) {
         if let Some(reader) = self.reader.take() {
             reader.abort();
@@ -493,6 +479,7 @@ fn proto_answer_kind(kind: AnswerKind) -> ProtoAnswerKind {
         AnswerKind::Answer => ProtoAnswerKind::Answer,
         AnswerKind::Revise => ProtoAnswerKind::Revise,
         AnswerKind::Reject => ProtoAnswerKind::Reject,
+        AnswerKind::Relegate => ProtoAnswerKind::Relegate,
         AnswerKind::FreeText => ProtoAnswerKind::FreeText,
         AnswerKind::Done => ProtoAnswerKind::Done,
         AnswerKind::Ignore => ProtoAnswerKind::Ignore,
@@ -545,7 +532,6 @@ fn map_listed_question(listed: ListedQuestion) -> Option<QuestionView> {
         link: question_text(&question.link),
         intro: question_text(&question.intro),
         version: listed.version,
-        deferred: listed.deferred,
         decisions: question.decisions.into_iter().map(map_decision).collect(),
         title: question_text(&question.title),
         steps: question.steps.into_iter().map(map_step).collect(),
@@ -1419,7 +1405,7 @@ mod question_tests {
         }
     }
 
-    fn listed(id: &str, version: u32, deferred: bool, decisions: Vec<Decision>) -> ListedQuestion {
+    fn listed(id: &str, version: u32, decisions: Vec<Decision>) -> ListedQuestion {
         ListedQuestion {
             question: Some(Question {
                 id: id.into(),
@@ -1434,7 +1420,6 @@ mod question_tests {
                 ..Default::default()
             }),
             version,
-            deferred,
             ticked: vec![],
             picks: vec![],
             ..Default::default()
@@ -1453,7 +1438,6 @@ mod question_tests {
         let mut hostile = listed(
             "Q3",
             1,
-            false,
             vec![decision("\x1b[2Jwipe?", vec![option("a", false, false)])],
         );
         let question = hostile.question.as_mut().unwrap();
@@ -1467,7 +1451,6 @@ mod question_tests {
                 listed(
                     "Q2",
                     4,
-                    false,
                     vec![
                         decision(
                             "Protocol?",
@@ -1479,16 +1462,14 @@ mod question_tests {
                 listed(
                     "Q1",
                     1,
-                    true,
-                    vec![decision("Later?", vec![option("a", true, false)])],
+                    vec![decision("Which?", vec![option("a", true, false)])],
                 ),
                 // No decisions, or a decision with no options: never shown.
-                listed("Q8", 1, false, vec![]),
-                listed("Q9", 1, false, vec![decision("Empty?", vec![])]),
+                listed("Q8", 1, vec![]),
+                listed("Q9", 1, vec![decision("Empty?", vec![])]),
                 ListedQuestion {
                     question: None,
                     version: 1,
-                    deferred: false,
                     ticked: vec![],
                     picks: vec![],
                     ..Default::default()
@@ -1507,11 +1488,8 @@ mod question_tests {
         assert_eq!(ids, ["Q2", "Q1", "Q3"]);
         assert_eq!(queue.waiting, 3, "the dropped questions are not counted");
         let q2 = &queue.questions[0];
-        assert_eq!((q2.version, q2.deferred), (4, false));
-        assert_eq!(
-            (queue.questions[1].version, queue.questions[1].deferred),
-            (1, true)
-        );
+        assert_eq!(q2.version, 4);
+        assert_eq!(queue.questions[1].version, 1);
         assert_eq!(q2.product, "harold");
         assert_eq!(q2.spec, "dash-question-queue");
         assert_eq!(q2.sha, "d84bf386a2a5");
@@ -1612,7 +1590,6 @@ mod question_tests {
                     ..Default::default()
                 }),
                 version: 3,
-                deferred: false,
                 ticked: vec![2],
                 picks: vec![],
                 ..Default::default()
@@ -1637,7 +1614,7 @@ mod question_tests {
         assert_eq!(queue.waiting, 1);
 
         // Neither steps nor decisions is still dropped.
-        let mut none = listed("Q8", 1, false, vec![]);
+        let mut none = listed("Q8", 1, vec![]);
         none.question.as_mut().unwrap().title = "t".into();
         let queue = map_queue(ListQuestionsResponse {
             questions: vec![none],
@@ -1650,7 +1627,7 @@ mod question_tests {
 
     #[test]
     fn map_queue_cleans_step_text() {
-        let mut item = listed("I1", 1, false, vec![]);
+        let mut item = listed("I1", 1, vec![]);
         let question = item.question.as_mut().unwrap();
         question.title = "\x1b[31mTitle\x1b[0m".into();
         question.steps = vec![Step {
@@ -1713,7 +1690,6 @@ mod question_tests {
         let mut item = listed(
             "Q43",
             2,
-            false,
             vec![decision("Which?", vec![option("a", false, false)])],
         );
         item.picks = vec![super::Pick {
@@ -1746,8 +1722,12 @@ mod question_tests {
     }
 
     #[test]
-    fn done_and_ignore_map_to_proto_kinds() {
+    fn done_ignore_and_relegate_map_to_proto_kinds() {
         use crate::questions::AnswerKind;
+        assert_eq!(
+            proto_answer_kind(AnswerKind::Relegate),
+            ProtoAnswerKind::Relegate
+        );
         assert_eq!(proto_answer_kind(AnswerKind::Done), ProtoAnswerKind::Done);
         assert_eq!(
             proto_answer_kind(AnswerKind::Ignore),

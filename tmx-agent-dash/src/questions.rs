@@ -37,7 +37,6 @@ pub struct QuestionView {
     pub link: String,
     pub intro: String,
     pub version: u32,
-    pub deferred: bool,
     pub decisions: Vec<DecisionView>,
     /// Instructions only: the title shown in their rows.
     pub title: String,
@@ -100,6 +99,8 @@ pub enum AnswerKind {
     Answer,
     Revise,
     Reject,
+    /// The question leaves the todos and the chief keeps it as an idea.
+    Relegate,
     FreeText,
     /// Instructions are done.
     Done,
@@ -132,6 +133,7 @@ pub struct Outgoing {
 pub enum NoteKind {
     Revise,
     Reject,
+    Relegate,
     FreeText,
 }
 
@@ -170,7 +172,6 @@ pub enum BlockEffect {
     /// Move the cursor to this stop.
     Cursor(QStop),
     OpenLink(String),
-    Defer(String),
     Send(Outgoing),
     /// Save the question's current picks, in decision order.
     SavePicks {
@@ -303,12 +304,17 @@ pub struct QuestionBlock {
     suspended: bool,
 }
 
-/// The notice when Harold could not save an answer or a deferral.
+/// The notice when Harold could not save an answer.
 pub const UNAVAILABLE_NOTICE: &str = "Harold can't save answers right now";
 
-/// The rows under every decision's options. `send` sends the picks, `later` defers the
-/// question, and the other two open a note to send with the picks.
-pub const ANSWER_ACTIONS: [&str; 4] = ["send", "later", "revise\u{2026}", "reject\u{2026}"];
+/// The rows under every decision's options. `send` sends the picks, and the other three
+/// open a note to send with the picks. The note of `relegate to idea…` may be empty.
+pub const ANSWER_ACTIONS: [&str; 4] = [
+    "send",
+    "relegate to idea\u{2026}",
+    "revise\u{2026}",
+    "reject\u{2026}",
+];
 
 /// The rows under instructions' steps.
 pub const INSTRUCTION_ACTIONS: [&str; 2] = ["done", "ignore"];
@@ -481,7 +487,7 @@ impl QuestionBlock {
         !self.suspended && (!self.queue.questions.is_empty() || self.notice.is_some())
     }
 
-    /// The number of listed todos, both kinds, set-aside questions included.
+    /// The number of listed todos, both kinds.
     pub fn todos_waiting(&self) -> usize {
         self.queue.questions.len()
     }
@@ -497,8 +503,8 @@ impl QuestionBlock {
         !self.suspended && matches!(self.mode, Mode::Note { .. })
     }
 
-    /// The row the open note belongs to: the free option's, or `revise…`'s or
-    /// `reject…`'s. `None` with no note, or while the rows are not shown.
+    /// The row the open note belongs to: the free option's, or `relegate to idea…`'s,
+    /// `revise…`'s or `reject…`'s. `None` with no note, or while the rows are not shown.
     pub fn note_stop(&self) -> Option<QStop> {
         if !self.note_open() || !self.open || self.question().is_none() {
             return None;
@@ -507,6 +513,7 @@ impl QuestionBlock {
             return None;
         };
         match kind {
+            NoteKind::Relegate => Some(QStop::Action(1)),
             NoteKind::Revise => Some(QStop::Action(2)),
             NoteKind::Reject => Some(QStop::Action(3)),
             NoteKind::FreeText => self
@@ -973,8 +980,8 @@ impl QuestionBlock {
                 BlockEffect::Send(self.outgoing(q, kind, note))
             }
             1 => {
-                self.defer_locally(&q.id);
-                BlockEffect::Defer(q.id.clone())
+                self.open_note(NoteKind::Relegate);
+                BlockEffect::None
             }
             2 => {
                 self.open_note(NoteKind::Revise);
@@ -1047,7 +1054,8 @@ impl QuestionBlock {
             }
             KeyCode::Enter => {
                 let typed = text.trim().to_string();
-                if typed.is_empty() {
+                // A relegate sends with no note; every other note needs words.
+                if typed.is_empty() && kind != NoteKind::Relegate {
                     return BlockEffect::None;
                 }
                 match kind {
@@ -1063,11 +1071,11 @@ impl QuestionBlock {
                         self.mode = Mode::Choosing;
                         return self.save_picks(&q);
                     }
-                    NoteKind::Revise | NoteKind::Reject => {
-                        let kind = if kind == NoteKind::Revise {
-                            AnswerKind::Revise
-                        } else {
-                            AnswerKind::Reject
+                    NoteKind::Revise | NoteKind::Reject | NoteKind::Relegate => {
+                        let kind = match kind {
+                            NoteKind::Revise => AnswerKind::Revise,
+                            NoteKind::Reject => AnswerKind::Reject,
+                            _ => AnswerKind::Relegate,
                         };
                         return BlockEffect::Send(self.outgoing(&q, kind, typed));
                     }
@@ -1095,15 +1103,6 @@ impl QuestionBlock {
                 text,
             });
         }
-    }
-
-    fn defer_locally(&mut self, id: &str) {
-        if let Some(index) = self.queue.questions.iter().position(|q| q.id == id) {
-            let mut q = self.queue.questions.remove(index);
-            q.deferred = true;
-            self.queue.questions.push(q);
-        }
-        self.select_first();
     }
 
     fn question(&self) -> Option<&QuestionView> {
@@ -1216,7 +1215,6 @@ mod tests {
             link: "https://example.com/x".into(),
             intro: "intro".into(),
             version,
-            deferred: false,
             title: String::new(),
             steps: vec![],
             ticked: vec![],
@@ -1300,10 +1298,15 @@ mod tests {
     }
 
     #[test]
-    fn the_answer_actions_are_send_later_revise_and_reject() {
+    fn the_answer_actions_are_send_relegate_to_idea_revise_and_reject() {
         assert_eq!(
             ANSWER_ACTIONS,
-            ["send", "later", "revise\u{2026}", "reject\u{2026}"]
+            [
+                "send",
+                "relegate to idea\u{2026}",
+                "revise\u{2026}",
+                "reject\u{2026}"
+            ]
         );
     }
 
@@ -1873,28 +1876,56 @@ mod tests {
     }
 
     #[test]
-    fn later_keeps_picks_and_defers() {
-        let mut b = open_block(vec![question("Q1", 1, 2), question("Q2", 1, 1)]);
+    fn relegate_to_idea_opens_a_note_that_sends_with_the_picks_even_when_empty() {
+        let mut b = open_block(vec![question("Q1", 2, 2), question("Q2", 1, 1)]);
         press(&mut b, KeyCode::Char(' '), opt_stop(1, 0));
         assert_eq!(
             press(&mut b, KeyCode::Enter, QStop::Action(1)),
-            BlockEffect::Defer("Q1".into())
+            BlockEffect::None
         );
-        let v = b.view().unwrap();
-        assert_eq!(v.id, "Q2", "the next waiting question shows");
-        assert!(v.open, "and stays open");
-        press(&mut b, KeyCode::Char('n'), QStop::Header);
-        assert_eq!(b.view().unwrap().id, "Q1");
-        assert_eq!(picked(&b), keys(&["b", "a"]));
-
-        // With one question, later shows it again with its picks.
-        let mut b = open_block(vec![question("Q1", 1, 1)]);
-        press(&mut b, KeyCode::Char(' '), opt_stop(0, 0));
+        assert_eq!(
+            b.view().unwrap().mode,
+            Mode::Note {
+                kind: NoteKind::Relegate,
+                text: String::new()
+            }
+        );
+        assert_eq!(b.note_stop(), Some(QStop::Action(1)));
+        // Enter on the empty note sends the picks so far.
         assert_eq!(
             press(&mut b, KeyCode::Enter, QStop::Action(1)),
-            BlockEffect::Defer("Q1".into())
+            BlockEffect::Send(Outgoing {
+                id: "Q1".into(),
+                version: 2,
+                kind: AnswerKind::Relegate,
+                picks: vec![pick(0, "b", ""), pick(1, "a", "")],
+                note: String::new(),
+                send_now: true,
+            })
         );
-        assert_eq!(picked(&b), keys(&["a"]));
+
+        // With words typed, the note goes with it, and a blank one counts as empty.
+        let mut b = open_block(vec![question("Q1", 1, 1)]);
+        press(&mut b, KeyCode::Enter, QStop::Action(1));
+        type_text(&mut b, "  park it ");
+        assert_eq!(
+            send_of(press(&mut b, KeyCode::Enter, QStop::Action(1))).note,
+            "park it"
+        );
+        let mut b = open_block(vec![question("Q1", 1, 1)]);
+        press(&mut b, KeyCode::Enter, QStop::Action(1));
+        type_text(&mut b, "   ");
+        let out = send_of(press(&mut b, KeyCode::Enter, QStop::Action(1)));
+        assert_eq!((out.kind, out.note.as_str()), (AnswerKind::Relegate, ""));
+
+        // Esc leaves the note without sending.
+        let mut b = open_block(vec![question("Q1", 1, 1)]);
+        press(&mut b, KeyCode::Enter, QStop::Action(1));
+        assert_eq!(
+            press(&mut b, KeyCode::Esc, QStop::Action(1)),
+            BlockEffect::None
+        );
+        assert_eq!(b.view().unwrap().mode, Mode::Choosing);
     }
 
     #[test]
@@ -2283,7 +2314,6 @@ mod tests {
             link: "https://example.com/i".into(),
             intro: "do these".into(),
             version,
-            deferred: false,
             decisions: vec![],
             title: format!("Title {id}"),
             steps: (1..=steps)
@@ -2316,12 +2346,10 @@ mod tests {
 
     #[test]
     fn closed_block_counts_both_kinds() {
-        let mut deferred = question("Q2", 1, 1);
-        deferred.deferred = true;
         let b = block(vec![
             instructions("I1", 1, 2),
             question("Q1", 1, 1),
-            deferred,
+            question("Q2", 1, 1),
         ]);
         assert_eq!(b.todos_waiting(), 3);
         let view = b.view().unwrap();

@@ -88,27 +88,11 @@ async fn dismiss<S: QuestionStore>(
         .map(|_| ())
 }
 
-async fn defer<S: QuestionStore>(
-    service: &QuestionToolService<S>,
-    id: &str,
-) -> Result<(), tonic::Status> {
-    service
-        .defer_question(Request::new(pb::DeferQuestionRequest { id: id.into() }))
-        .await
-        .map(|_| ())
-}
-
-fn listed(response: &pb::ListQuestionsResponse) -> Vec<(String, u32, bool)> {
+fn listed(response: &pb::ListQuestionsResponse) -> Vec<(String, u32)> {
     response
         .questions
         .iter()
-        .map(|q| {
-            (
-                q.question.as_ref().unwrap().id.clone(),
-                q.version,
-                q.deferred,
-            )
-        })
+        .map(|q| (q.question.as_ref().unwrap().id.clone(), q.version))
         .collect()
 }
 
@@ -133,10 +117,7 @@ async fn put_list_answer_round_trip() {
         .expect("a write wakes the sender");
 
     let listing = list(&service).await;
-    assert_eq!(
-        listed(&listing),
-        vec![("Q1".into(), 1, false), ("Q2".into(), 1, false)]
-    );
+    assert_eq!(listed(&listing), vec![("Q1".into(), 1), ("Q2".into(), 1)]);
     assert_eq!(listing.waiting, 2);
     assert_eq!(
         listing.questions[0].question.as_ref().unwrap().spec,
@@ -153,9 +134,8 @@ async fn put_list_answer_round_trip() {
     )
     .await
     .unwrap();
-    defer(&service, "Q2").await.unwrap();
     let listing = list(&service).await;
-    assert_eq!(listed(&listing), vec![("Q2".into(), 1, true)]);
+    assert_eq!(listed(&listing), vec![("Q2".into(), 1)]);
     assert_eq!(listing.waiting, 1);
 
     let again = put(&service, question("Q2", "spec-2", "fff000"))
@@ -177,7 +157,7 @@ async fn put_list_answer_round_trip() {
     assert_eq!(listing.dismissed[0].id, "Q2");
     assert_eq!(listing.dismissed[0].reason, "not needed");
     println!(
-        "evidence: put Q1 v1, answered; Q2 deferred then put again as v2; dismissed Q2 listed with its reason; waiting = {}",
+        "evidence: put Q1 v1, answered; Q2 put again as v2; dismissed Q2 listed with its reason; waiting = {}",
         listing.waiting
     );
 }
@@ -247,7 +227,7 @@ async fn a_broken_rule_is_invalid_argument_naming_the_field_and_stores_nothing()
         (refused.code(), refused.message()),
         (Code::InvalidArgument, "invalid kind")
     );
-    assert_eq!(listed(&list(&service).await), vec![("Q2".into(), 1, false)]);
+    assert_eq!(listed(&list(&service).await), vec![("Q2".into(), 1)]);
     println!(
         "evidence: bad link -> invalid link, bad id -> invalid id, no question -> invalid question, bad picks -> invalid picks, blank revise note -> invalid note, unspecified kind -> invalid kind; nothing stored"
     );
@@ -295,13 +275,15 @@ async fn version_changed_and_not_waiting_reach_the_caller() {
         (refused.code(), refused.message()),
         (Code::FailedPrecondition, "not_waiting")
     );
-    let refused = defer(&service, "Q9").await.unwrap_err();
+    let refused = answer(&service, "Q9", 1, pb::AnswerKind::Relegate, vec![], "")
+        .await
+        .unwrap_err();
     assert_eq!(
         (refused.code(), refused.message()),
         (Code::FailedPrecondition, "not_waiting")
     );
     println!(
-        "evidence: answer at v1 after v2 -> FailedPrecondition version_changed; answer, dismiss after dismissal and defer of an unknown id -> FailedPrecondition not_waiting"
+        "evidence: answer at v1 after v2 -> FailedPrecondition version_changed; answer and dismiss after dismissal, and relegate of an unknown id, -> FailedPrecondition not_waiting"
     );
 }
 
@@ -334,10 +316,6 @@ async fn a_failing_write_is_unavailable() {
         dismiss(&service, "Q1", "x").await.unwrap_err().code(),
         Code::Unavailable
     );
-    assert_eq!(
-        defer(&service, "Q1").await.unwrap_err().code(),
-        Code::Unavailable
-    );
     let reorder = service
         .reorder_questions(Request::new(pb::ReorderQuestionsRequest {
             ids: vec!["Q1".into()],
@@ -347,9 +325,9 @@ async fn a_failing_write_is_unavailable() {
     assert_eq!(reorder.code(), Code::Unavailable);
 
     // Reads still work, and nothing changed.
-    assert_eq!(listed(&list(&service).await), vec![("Q1".into(), 1, false)]);
+    assert_eq!(listed(&list(&service).await), vec![("Q1".into(), 1)]);
     println!(
-        "evidence: put, answer, dismiss, defer and reorder on a failing database -> Unavailable ({:?}); Q1 still waiting at v1",
+        "evidence: put, answer, dismiss and reorder on a failing database -> Unavailable ({:?}); Q1 still waiting at v1",
         refused.message()
     );
 }
@@ -395,7 +373,12 @@ async fn log_lines_carry_only_tool_id_version_reason() {
     for message in ["question stored", "question answered", "question dismissed"] {
         for line in logs.with(message) {
             let names = field_names(&line, message);
-            assert_eq!(names, ["tool", "question_id", "version"], "{line}");
+            let expected: &[&str] = if message == "question answered" {
+                &["tool", "question_id", "version", "kind"]
+            } else {
+                &["tool", "question_id", "version"]
+            };
+            assert_eq!(names, expected, "{line}");
             assert!(line.contains("tool=\"questions\""), "{line}");
         }
     }
@@ -760,10 +743,8 @@ async fn show_question_of_an_unknown_id_is_not_found() {
     assert_eq!(missing.message(), "unknown_question");
 }
 
-const RETURNED: &str = "set-aside questions returned";
-
 #[tokio::test]
-async fn returning_set_aside_questions_is_logged_once_for_each_trigger() {
+async fn a_relegate_is_stored_logged_with_its_kind_and_does_not_come_back() {
     let (logs, _guard) = capture_logs();
     let folder = TempFolder::new();
     let store = open_store(&folder).await;
@@ -773,69 +754,112 @@ async fn returning_set_aside_questions_is_logged_once_for_each_trigger() {
             .await
             .unwrap();
     }
-
-    // dismiss: Q2 and Q3 set aside, Q1 withdrawn.
-    defer(&service, "Q2").await.unwrap();
-    defer(&service, "Q3").await.unwrap();
-    assert!(logs.with(RETURNED).is_empty());
-    dismiss(&service, "Q1", "withdrawn").await.unwrap();
-    let lines = logs.with(RETURNED);
-    assert_eq!(lines.len(), 1, "{lines:#?}");
-    assert!(
-        lines[0].contains("count=2") && lines[0].contains("after=\"dismiss\""),
-        "{lines:#?}"
-    );
-    assert_eq!(field_names(&lines[0], RETURNED), ["tool", "count", "after"]);
-
-    // later: Q2 waits alone after Q3 is set aside, then Q2 itself is set aside.
-    defer(&service, "Q3").await.unwrap();
-    assert_eq!(logs.with(RETURNED).len(), 1, "Q2 still waits");
-    defer(&service, "Q2").await.unwrap();
-    let lines = logs.with(RETURNED);
-    assert_eq!(lines.len(), 2, "{lines:#?}");
-    assert!(lines[1].contains("count=2") && lines[1].contains("after=\"later\""));
-
-    // answers_line: Q2 answered and Q3 set aside; the typed line returns Q3.
-    // Deferring Q2 returned both, so both wait again.
-    answer(&service, "Q2", 1, pb::AnswerKind::Revise, vec![], "fix it")
+    answer(
+        &service,
+        "Q1",
+        1,
+        pb::AnswerKind::Relegate,
+        vec![pick(0, "a")],
+        "CANARY-NOTE park it",
+    )
+    .await
+    .unwrap();
+    answer(&service, "Q2", 1, pb::AnswerKind::Relegate, vec![], "")
         .await
         .unwrap();
-    defer(&service, "Q3").await.unwrap();
-    assert_eq!(logs.with(RETURNED).len(), 2, "an answer is still unsent");
+    assert_eq!(listed(&list(&service).await), vec![("Q3".into(), 1)]);
+    assert_eq!(show(&service, "Q1").await.unwrap().state, "answered");
+
+    let lines = logs.with("question answered");
+    assert_eq!(lines.len(), 2, "{lines:#?}");
+    for line in &lines {
+        assert!(line.contains("kind=\"relegate\""), "{line}");
+        assert!(!line.contains("CANARY"), "{line}");
+    }
+
+    // The line goes, and the relegated question stays out of the todos.
     let batch = store
-        .start_batch(&[("Q2".to_string(), 1)], "ANSWERS 1", 10)
+        .start_batch(
+            &[("Q1".to_string(), 1), ("Q2".to_string(), 1)],
+            "ANSWERS 2",
+            10,
+        )
         .await
         .unwrap()
         .expect("batch started");
     store.batch_typed(batch.id, 11).await.unwrap();
-    let lines = logs.with(RETURNED);
-    assert_eq!(lines.len(), 3, "{lines:#?}");
-    assert!(lines[2].contains("count=1") && lines[2].contains("after=\"answers_line\""));
+    assert_eq!(listed(&list(&service).await), vec![("Q3".into(), 1)]);
+    assert_eq!(show(&service, "Q1").await.unwrap().state, "sent");
+    assert!(logs.with("set-aside questions returned").is_empty());
+}
 
-    // count 0 writes nothing, after a dismiss and after a typed line, and no
-    // line holds an id or any question text.
-    dismiss(&service, "Q3", "withdrawn").await.unwrap();
-    put(&service, question("Q4", "spec", "abc")).await.unwrap();
-    answer(&service, "Q4", 1, pb::AnswerKind::Revise, vec![], "fix it")
+#[tokio::test]
+async fn question_answered_names_every_kind() {
+    let (logs, _guard) = capture_logs();
+    let folder = TempFolder::new();
+    let service = service(open_store(&folder).await);
+    let kinds = [
+        (pb::AnswerKind::Answer, "answer", vec![pick(0, "a")], ""),
+        (
+            pb::AnswerKind::FreeText,
+            "free_text",
+            vec![free_pick(0, "z", "typed")],
+            "",
+        ),
+        (pb::AnswerKind::Revise, "revise", vec![], "fix"),
+        (pb::AnswerKind::Reject, "reject", vec![], "no"),
+        (pb::AnswerKind::Relegate, "relegate", vec![], ""),
+    ];
+    for (n, (kind, _, picks, note)) in kinds.iter().enumerate() {
+        let id = format!("Q{n}");
+        put(&service, question(&id, "spec", "abc")).await.unwrap();
+        answer(&service, &id, 1, *kind, picks.clone(), note)
+            .await
+            .unwrap();
+    }
+    put(&service, instructions_proto("I1", &["a"]))
         .await
         .unwrap();
-    let batch = store
-        .start_batch(&[("Q4".to_string(), 1)], "ANSWERS 1", 20)
+    put(&service, instructions_proto("I2", &["a"]))
         .await
-        .unwrap()
-        .expect("batch started");
-    store.batch_typed(batch.id, 21).await.unwrap();
-    let lines = logs.with(RETURNED);
-    assert_eq!(lines.len(), 3, "{lines:#?}");
-    for line in &lines {
-        assert_eq!(field_names(line, RETURNED), ["tool", "count", "after"]);
-        assert!(
-            !line.contains("CANARY")
-                && !line.contains("Q1")
-                && !line.contains("Q2")
-                && !line.contains("Q3")
-        );
-    }
+        .unwrap();
+    answer(&service, "I1", 1, pb::AnswerKind::Done, vec![], "")
+        .await
+        .unwrap();
+    answer(&service, "I2", 1, pb::AnswerKind::Ignore, vec![], "")
+        .await
+        .unwrap();
+    let lines = logs.with("question answered");
+    let found: Vec<bool> = [
+        "answer",
+        "free_text",
+        "revise",
+        "reject",
+        "relegate",
+        "done",
+        "ignore",
+    ]
+    .iter()
+    .zip(&lines)
+    .map(|(word, line)| line.contains(&format!("kind=\"{word}\"")))
+    .collect();
+    assert_eq!(lines.len(), 7, "{lines:#?}");
+    assert!(found.iter().all(|ok| *ok), "{lines:#?}");
+}
+
+#[tokio::test]
+async fn instructions_refuse_a_relegate() {
+    let folder = TempFolder::new();
+    let service = service(open_store(&folder).await);
+    put(&service, instructions_proto("I1", &["a"]))
+        .await
+        .unwrap();
+    let refused = answer(&service, "I1", 1, pb::AnswerKind::Relegate, vec![], "")
+        .await
+        .unwrap_err();
+    assert_eq!(refused.code(), Code::InvalidArgument);
+    assert_eq!(refused.message(), "invalid kind");
+    assert_eq!(listed(&list(&service).await), vec![("I1".into(), 1)]);
 }
 
 #[tokio::test]
@@ -1049,6 +1073,7 @@ async fn a_changed_spec_refuses_an_answer_and_a_pick_until_the_chief_puts_it_aga
         pb::AnswerKind::Answer,
         pb::AnswerKind::Revise,
         pb::AnswerKind::Reject,
+        pb::AnswerKind::Relegate,
     ] {
         let note = if kind == pb::AnswerKind::Answer {
             ""
@@ -1078,11 +1103,7 @@ async fn a_changed_spec_refuses_an_answer_and_a_pick_until_the_chief_puts_it_aga
     assert_eq!(refused.code(), Code::FailedPrecondition);
     assert_eq!(refused.message(), "spec_changed");
     let still = list(&specs.service).await;
-    assert_eq!(
-        listed(&still),
-        vec![("Q1".into(), 1, false)],
-        "still waiting"
-    );
+    assert_eq!(listed(&still), vec![("Q1".into(), 1)], "still waiting");
 
     // Put again with the new checksum: the notice goes, and the answer is taken.
     put(&specs.service, asked_with("Q1", b"second version", &path))
@@ -1248,7 +1269,6 @@ async fn mark_checked_stores_the_time_lists_it_and_logs_the_count() {
         .await
         .unwrap();
     put(&service, question("Q2", "spec", "abc")).await.unwrap();
-    defer(&service, "Q2").await.unwrap();
 
     let before = now_ms();
     let checked = service

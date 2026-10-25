@@ -1052,7 +1052,10 @@ fn question_row_lines(
             };
             put(&mut out, QUESTION_OPTION_INDENT, action, style, Some(stop));
             if view.note_stop == Some(stop)
-                && let Some(note) = note_text(&view.mode, &[NoteKind::Revise, NoteKind::Reject])
+                && let Some(note) = note_text(
+                    &view.mode,
+                    &[NoteKind::Relegate, NoteKind::Revise, NoteKind::Reject],
+                )
             {
                 put_note(&mut out, QUESTION_OPTION_INDENT, &note, yellow);
             }
@@ -1183,6 +1186,7 @@ fn note_text(mode: &Mode, kinds: &[NoteKind]) -> Option<String> {
     };
     let label = match kind {
         _ if !kinds.contains(kind) => return None,
+        NoteKind::Relegate => "relegate:",
         NoteKind::Revise => "revise:",
         NoteKind::Reject => "reject:",
         NoteKind::FreeText => "answer:",
@@ -1472,7 +1476,7 @@ fn footer_hints(
         // Every key types into the note, so only Enter, Esc and the global keys are named.
         let (enter, enter_words) = match note {
             NoteKind::FreeText => ("Enter", " keep"),
-            NoteKind::Revise | NoteKind::Reject => ("Enter", " send"),
+            NoteKind::Revise | NoteKind::Reject | NoteKind::Relegate => ("Enter", " send"),
         };
         if compact {
             return vec![
@@ -4016,7 +4020,6 @@ mod tests {
                 link: "https://example.com/spec".into(),
                 intro: "The server needs a wire protocol.".into(),
                 version: 1,
-                deferred: false,
                 title: String::new(),
                 steps: vec![],
                 ticked: vec![],
@@ -4522,7 +4525,6 @@ mod tests {
             link: "https://example.com/spec".into(),
             intro: intro.into(),
             version: 1,
-            deferred: false,
             title: String::new(),
             steps: vec![],
             ticked: vec![],
@@ -4671,7 +4673,7 @@ mod tests {
     }
 
     #[test]
-    fn send_is_first_action_then_rule_then_later_revise_reject() {
+    fn send_is_first_action_then_rule_then_relegate_to_idea_revise_reject() {
         let lines = text_lines(&open_chief_question(), 100, 60, 100_000);
         let at = |needle: &str| {
             lines
@@ -4683,7 +4685,7 @@ mod tests {
         assert_eq!(inner(&lines[n + 1]), "");
         assert_eq!(at("send"), n + 2);
         assert_eq!(at("─────────────"), n + 3);
-        assert_eq!(at("later"), n + 4);
+        assert_eq!(at("relegate to idea…"), n + 4);
         assert_eq!(at("revise…"), n + 5);
         assert_eq!(at("reject…"), n + 6);
     }
@@ -5075,6 +5077,24 @@ mod tests {
     }
 
     #[test]
+    fn a_relegate_note_shows_on_its_row_and_the_footer_says_enter_sends() {
+        let mut app = app_at(tall_queue(3, ""), QStop::Action(1));
+        app.handle_key(KeyCode::Enter);
+        assert!(app.questions.note_open());
+        assert!(rendered_lines(&app, 120, 24, 100_000).contains("relegate: █"));
+        app.handle_key(KeyCode::Char('o'));
+        app.handle_key(KeyCode::Char('k'));
+        assert!(rendered_lines(&app, 120, 24, 100_000).contains("relegate: ok█"));
+        let footer = footer_rows(&rendered_lines(&app, 140, 38, 100_000));
+        assert!(footer.contains("Enter send"), "{footer}");
+        assert!(footer.contains("Esc discard"), "{footer}");
+        app.handle_key(KeyCode::Esc);
+        let lines = rendered_lines(&app, 120, 24, 100_000);
+        assert!(!lines.contains("relegate:"), "{lines}");
+        assert!(lines.contains("relegate to idea…"), "{lines}");
+    }
+
+    #[test]
     fn the_footer_names_only_the_keys_a_note_takes() {
         let mut app = question_app(true);
         open_revise_note(&mut app);
@@ -5126,7 +5146,6 @@ mod tests {
             link: "https://example.com/i1".into(),
             intro: "Do these on studio-mac, then tick each one here.".into(),
             version: 1,
-            deferred: false,
             decisions: vec![],
             title: "Install Harold 0.15.0 on studio-mac".into(),
             steps: vec![

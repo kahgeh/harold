@@ -114,7 +114,7 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 | todo page | The web app's page that lists your todos and lets you answer them from the phone | "task page", "queue page" |
 | page dots | The two dots above the reply box that show which page is open | "pager", "swipe indicator" |
 | read mark | The newest thread message a device has shown fully on screen, kept in that device's browser | "last seen", "read receipt", "unread marker" |
-| todo count | The orange number on the thread page's **Todos** button: the waiting questions and the instructions, questions set aside with **Later** left out | "badge", "unread count" |
+| todo count | The orange number on the thread page's **Todos** button: the waiting questions and the instructions | "badge", "unread count" |
 | checked line | The line at the top of the web app's todo page saying when the chief last checked the todos. It turns red when the check is over 2 hours old and a todo waits | "freshness", "sync line" |
 | changed spec | A todo whose spec file no longer matches the checksum it was asked with, which is the question tool's spec state `changed` | "stale", "outdated", "out of date" |
 | sent line | The line at the top of the web app's todo page that says which answer was sent to the chief, such as `Q53: revise sent to the chief.` It stays until the next answer from that page or until the page is left | "toast", "banner" |
@@ -149,8 +149,8 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 | step | One numbered line of instructions, with its text and optional detail | "task", "item" |
 | tick, ticked, untick | A step marked `[✓]` with `Space`, and the reverse. The ticked count, `2 of 4 ticked`, is the steps ticked out of all steps. | "check", or "done" for a single step |
 | done | The action row of instructions that tells the chief they are done, and the answers line's `done` | "send" for it, "done" for a single step |
-| ignore | The action row of instructions that tells the chief you will not do them, and takes them off your todos | "later", "set aside", "reject" for it |
-| waiting question | A question not yet answered, set aside or dismissed. Instructions are never one. | "waiting" alone |
+| ignore | The action row of instructions that tells the chief you will not do them, and takes them off your todos | "relegate to idea", "reject" for it |
+| waiting question | A question not yet answered, relegated or dismissed. Instructions are never one. | "waiting" alone |
 | todo rows | Every row the todos take under the chief's row: the closed row while closed, and while open the open todo's rows plus the other todos' todo rows | "question rows", "question block" |
 | closed row | The one row `▸ n todos waiting` that stands for every todo while closed | — |
 | todo header | The first row of an open todo, a question's or instructions': `▾ I1 · instructions · 1 of 2 todos · …` | "question header" |
@@ -165,11 +165,12 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 | saved picks | The picks Harold holds for a question as the user makes them, stored in the `questions` table, before and after an answer is sent, and carried to the next question version for unchanged decisions | "draft", "unsent answer" |
 | free option | An option that takes the user's own text | — |
 | text field | Where the user types a free option's text | — |
-| action row | A question's `send`, `later`, `revise…`, `reject…`, or the `done` and `ignore` of instructions | "actions" alone |
+| action row | A question's `send`, `relegate to idea…`, `revise…`, `reject…`, or the `done` and `ignore` of instructions | "actions" alone |
 | send | The action row that sends the answer with every decision's pick, at once | "record", "send now" |
-| later, set aside | The action row `later`, and what it does: the question waits until no other question is waiting | "defer" and "deferred" in what the user reads. `DeferQuestion` is the API's name |
+| relegate to idea | The action row `relegate to idea…` of a question, and what it does: the question leaves the todos for good, and the answers line asks the chief to keep it as an idea note | "later", "set aside", "defer", "ignore" (that is for instructions), "reject" |
+| idea note | A vault note that the chief writes for a relegated question, with the question, its intro, decisions and impacts, the picks so far, your note and the spec's link and file, so the idea comes back ready to work on | "note" alone (that is a backlog note), "backlog item", "todo" |
 | revise…, reject… | The action rows that open a note asking for a change, or saying why not | — |
-| note | The text typed for `revise…` or `reject…` | "note" for a backlog note |
+| note | The text typed for `revise…`, `reject…` or `relegate to idea…` | "note" for a backlog note |
 | notice | A short line under the todo rows, such as `Q1 changed, your picks were cleared`, `Q1 changed, picks kept for unchanged decisions` or `Harold can't save your picks right now` | — |
 | question version | The count that rises each time the chief puts a question again | "version" alone |
 | answers line | The line starting `ANSWERS` that Harold types into the chief's pane | "batch line" |
@@ -277,7 +278,7 @@ One line is kept as it stands:
   - `docs/adr/0001-tools-are-modules-hosted-by-harold.md:8`: "question queue" (the question tool).
   - `docs/adr/0002-tool-services-trust-local-callers.md:8`: "peer calls" (peer RPCs).
 
-The words "process", "target", "slot", "queue", "plugin", "watcher", "header", "record", "version", "waiting", "held" and "defer" were also searched in code and docs. They are used there in ordinary senses or as names (the `defer` API, a build target, an HTTP header), and need no entry.
+The words "process", "target", "slot", "queue", "plugin", "watcher", "header", "record", "version", "waiting" and "held" were also searched in code and docs. They are used there in ordinary senses or as names (a build target, an HTTP header), and need no entry.
 
 Words kept in the docs on purpose, one line each. They are plain English or a name, not the glossary's term, so the search for each finds them there:
 

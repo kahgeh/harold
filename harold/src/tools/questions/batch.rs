@@ -89,17 +89,12 @@ pub(super) fn clean(field: &str) -> String {
     out
 }
 
-/// `ANSWERS <n> | <answer> | ... | later: <id>, <id>`, every field cleaned.
+/// `ANSWERS <n> | <answer> | ...`, every field cleaned.
 pub(super) fn batch_line(ready: &Ready) -> String {
     let mut line = format!("ANSWERS {}", ready.answers.len());
     for (id, _, question, answer) in &ready.answers {
         line.push_str(" | ");
         line.push_str(&answer_part(id, question, answer));
-    }
-    if !ready.later.is_empty() {
-        let later: Vec<String> = ready.later.iter().map(|id| clean(id)).collect();
-        line.push_str(" | later: ");
-        line.push_str(&later.join(", "));
     }
     line
 }
@@ -120,6 +115,15 @@ fn answer_part(id: &str, question: &Question, answer: &Answer) -> String {
         Kind::Ignore => format!("{id} {}: ignored", clean(&question.product)),
         Kind::Revise => format!("{id} {spec}: revise \"{}\"", clean(&answer.note)),
         Kind::Reject => format!("{id} {spec}: reject \"{}\"", clean(&answer.note)),
+        Kind::Relegate => {
+            let note = clean(&answer.note);
+            let note = note.trim();
+            if note.is_empty() {
+                format!("{id} {spec}: relegate to idea")
+            } else {
+                format!("{id} {spec}: relegate to idea \"{note}\"")
+            }
+        }
         Kind::Answer | Kind::FreeText => {
             let picks: Vec<String> = answer
                 .picks

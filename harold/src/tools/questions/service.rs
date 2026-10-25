@@ -90,7 +90,7 @@ impl<S: QuestionStore> QuestionToolService<S> {
         let Some(shown) = self.store.show(id).await.map_err(unavailable)? else {
             return Ok(());
         };
-        if shown.version != version || !matches!(shown.state.as_str(), "waiting" | "deferred") {
+        if shown.version != version || !matches!(shown.state.as_str(), "waiting") {
             return Ok(());
         }
         let asked = vec![(shown.question.spec_file.clone(), shown.question.sha.clone())];
@@ -116,7 +116,6 @@ fn refused(refusal: Refusal) -> Status {
     Status::failed_precondition(match refusal {
         Refusal::VersionChanged => "version_changed",
         Refusal::NotWaiting => "not_waiting",
-        Refusal::NotAQuestion => return invalid("id"),
     })
 }
 
@@ -140,11 +139,25 @@ fn pick_to_proto(pick: &SavedPick) -> pb::Pick {
     }
 }
 
+/// The word `question answered` logs for the kind.
+fn kind_word(kind: Kind) -> &'static str {
+    match kind {
+        Kind::Answer => "answer",
+        Kind::FreeText => "free_text",
+        Kind::Revise => "revise",
+        Kind::Reject => "reject",
+        Kind::Relegate => "relegate",
+        Kind::Done => "done",
+        Kind::Ignore => "ignore",
+    }
+}
+
 fn kind_from_proto(kind: i32) -> Result<Kind, Status> {
     match pb::AnswerKind::try_from(kind) {
         Ok(pb::AnswerKind::Answer) => Ok(Kind::Answer),
         Ok(pb::AnswerKind::Revise) => Ok(Kind::Revise),
         Ok(pb::AnswerKind::Reject) => Ok(Kind::Reject),
+        Ok(pb::AnswerKind::Relegate) => Ok(Kind::Relegate),
         Ok(pb::AnswerKind::FreeText) => Ok(Kind::FreeText),
         Ok(pb::AnswerKind::Done) => Ok(Kind::Done),
         Ok(pb::AnswerKind::Ignore) => Ok(Kind::Ignore),
@@ -249,7 +262,6 @@ impl<S: QuestionStore> QuestionService for QuestionToolService<S> {
             .map(|(listed, state)| pb::ListedQuestion {
                 question: Some(schema::to_proto(&listed.question)),
                 version: listed.version,
-                deferred: listed.deferred,
                 ticked: listed.ticked.clone(),
                 picks: listed.picks.iter().map(pick_to_proto).collect(),
                 spec_state: spec_state_to_proto(*state) as i32,
@@ -309,22 +321,14 @@ impl<S: QuestionStore> QuestionService for QuestionToolService<S> {
             .map_err(refused)?
             .map_err(|field| invalid(&field))?;
         self.written();
-        info!(tool = NAME, question_id = %id, version, "question answered");
+        info!(
+            tool = NAME,
+            question_id = %id,
+            version,
+            kind = kind_word(kind),
+            "question answered"
+        );
         Ok(Response::new(pb::AnswerQuestionResponse {}))
-    }
-
-    async fn defer_question(
-        &self,
-        request: Request<pb::DeferQuestionRequest>,
-    ) -> Result<Response<pb::DeferQuestionResponse>, Status> {
-        let id = request.into_inner().id;
-        self.store
-            .defer(&id, now_ms())
-            .await
-            .map_err(unavailable)?
-            .map_err(refused)?;
-        self.written();
-        Ok(Response::new(pb::DeferQuestionResponse {}))
     }
 
     async fn tick_step(

@@ -21,3 +21,7 @@ The web app is a client of `harold.tools.questions.v1.QuestionService` on Harold
   The router applies both as layers to every route, so all eight `POST /todos/...` routes pass them before any call reaches the tool. Route tests cover each of the eight. `/todos/picks` is the post that calls `SavePicks`: the phone saves a card's picks as they are made. `/todos/revise` and `/todos/reject` call `AnswerQuestion` with a note and the picks so far.
 - **When the question tool did not start**, the todo page says it can't read the todos, and the thread works as before.
 - **Polling:** the web app polls every 2 seconds while a page is open, as the dash does.
+
+## Note, 2026-10-25
+
+The web app no longer uses `DeferQuestion`, which is removed. It relegates a question through `AnswerQuestion` with the kind `RELEGATE`, by `POST /todos/relegate` in place of `POST /todos/later`. The count of eight `POST /todos/...` routes does not change, and the login and same-origin checks apply to the new route as to the others.

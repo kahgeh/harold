@@ -493,7 +493,6 @@ fn listed_question() -> ListedQuestion {
             spec_file: String::new(),
         }),
         version: 3,
-        deferred: false,
         ticked: vec![],
         picks: vec![Pick {
             decision: 0,
@@ -524,7 +523,6 @@ fn listed_instructions() -> ListedQuestion {
             spec_file: String::new(),
         }),
         version: 1,
-        deferred: false,
         ticked: vec![1, 2],
         picks: vec![],
         spec_state: 0,

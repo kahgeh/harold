@@ -63,6 +63,7 @@ pub(super) enum Kind {
     Answer,
     Revise,
     Reject,
+    Relegate,
     FreeText,
     Done,
     Ignore,
@@ -415,6 +416,8 @@ pub(super) fn resolve_picks(
                 return Err("note".into());
             }
         }
+        // A relegate takes any picks so far, and its note may be empty.
+        Kind::Relegate => {}
     }
     if too_long(note) {
         return Err("note".into());

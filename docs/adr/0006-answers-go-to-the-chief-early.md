@@ -19,3 +19,7 @@ The question tool used to type nothing to the chief until no question was waitin
 - The chief hears answers in several lines, not one; it must read each `ANSWERS n` line on its own.
 - The stored mark survives a busy pane and a restart. A Harold without migration 002 refuses the migrated store, so a rollback means moving `questions.db` aside.
 - Dismissing the last waiting question returns the set-aside ones, by the same rule as `later` (dismiss-returns-set-aside).
+
+## Note, 2026-10-25
+
+"Relegate to idea" replaced Later, and no question is deferred any more. So the rules above for a set-aside question no longer hold: it does not return to waiting after a line, a defer or a dismiss, and the early line has no `later:` part. A relegated question goes through the same early line as every answer, as `relegate to idea`. The rest of this ADR stands.

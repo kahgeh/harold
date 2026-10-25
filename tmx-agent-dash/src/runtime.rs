@@ -20,7 +20,7 @@ use crate::app::{
 use crate::cli::Options;
 use crate::navigation::{NavigationError, PaneNavigator, TmuxNavigator};
 use crate::notes::{DEBOUNCE, NoteLine, NotesAction, NotesEvent, SharedBackend};
-use crate::questions::{Outgoing, PickView, Queue, SendResult, UNAVAILABLE_NOTICE};
+use crate::questions::{Outgoing, PickView, Queue, SendResult};
 use crate::terminal::{TerminalError, TerminalGuard};
 use crate::text::sanitize_display;
 
@@ -180,7 +180,6 @@ where
                 | Control::Answer(_)
                 | Control::Tick { .. }
                 | Control::SavePicks { .. }
-                | Control::Defer(_)
                 | Control::OpenLink(_) => {}
             }
         }
@@ -220,7 +219,6 @@ where
                 | Control::Answer(_)
                 | Control::Tick { .. }
                 | Control::SavePicks { .. }
-                | Control::Defer(_)
                 | Control::OpenLink(_),
             ) => {
                 let detail = core
@@ -286,9 +284,6 @@ trait StreamPort: Sized {
         _picks: &'a [PickView],
     ) -> BoxFuture<'a, SendResult> {
         Box::pin(async { SendResult::Unavailable })
-    }
-    fn defer_question<'a>(&'a mut self, _id: &'a str) -> BoxFuture<'a, Result<(), SourceError>> {
-        Box::pin(async { Err(SourceError::Transport("question tool unavailable".into())) })
     }
     /// The knowledge tool, for the notes search; none when this stream cannot reach it.
     fn notes_backend(&self) -> Option<SharedBackend> {
@@ -358,10 +353,6 @@ impl StreamPort for SourceStream {
         Box::pin(SourceStream::save_picks(self, id, version, picks))
     }
 
-    fn defer_question<'a>(&'a mut self, id: &'a str) -> BoxFuture<'a, Result<(), SourceError>> {
-        Box::pin(SourceStream::defer_question(self, id))
-    }
-
     fn notes_backend(&self) -> Option<SharedBackend> {
         SourceStream::notes_backend(self)
     }
@@ -423,7 +414,6 @@ where
                     | Control::Answer(_)
                     | Control::Tick { .. }
                     | Control::SavePicks { .. }
-                    | Control::Defer(_)
                     | Control::OpenLink(_) => draw(terminal, &core.app, clock)?,
                 }
             }
@@ -460,7 +450,7 @@ where
         //
         // The question queue is read the same way: as the stream opens, every
         // QUESTION_POLL_INTERVAL, before each key that goes to the question rows, and
-        // after each answer or deferral. Each read is awaited inline and
+        // after each answer. Each read is awaited inline and
         // bounded by VOICE_REQUEST_TIMEOUT. The chief's Now item is read beside the
         // queue as the stream opens and on each QUESTION_POLL_INTERVAL, the same way,
         // except when that queue read timed out (see `read_now`).
@@ -594,18 +584,6 @@ where
                     draw(terminal, &core.app, clock)?;
                     continue;
                 }
-                if let Control::Defer(id) = &control {
-                    if stream.defer_question(id).await.is_err() {
-                        core.app.questions.set_notice(UNAVAILABLE_NOTICE.into());
-                    }
-                    let listed = stream.list_questions().await;
-                    core.questions_refreshed(listed);
-                    question_poll
-                        .as_mut()
-                        .reset(tokio::time::Instant::now() + core.question_poll_interval);
-                    draw(terminal, &core.app, clock)?;
-                    continue;
-                }
                 if let Control::OpenLink(link) = &control {
                     core.open_link(link, navigator);
                     draw(terminal, &core.app, clock)?;
@@ -690,7 +668,6 @@ async fn wait_for_retry(
                         | Control::Answer(_)
                         | Control::Tick { .. }
                         | Control::SavePicks { .. }
-                        | Control::Defer(_)
                         | Control::OpenLink(_)
                 ) {
                     return Ok(control);
@@ -1127,7 +1104,6 @@ enum Control {
         step: u32,
         ticked: bool,
     },
-    Defer(String),
     OpenLink(String),
 }
 
@@ -1241,8 +1217,7 @@ impl RuntimeCore {
         }
     }
 
-    /// Takes a read no key asked for: the poll, or the read after an answer or a
-    /// deferral. If it changes the question in view while the cursor is on its rows, the
+    /// Takes a read no key asked for: the poll, or the read after an answer. If it changes the question in view while the cursor is on its rows, the
     /// next key for them is dropped, as it was typed for what was there before. A read that
     /// hides the rows moves the cursor to the chief's row, and the next key acts there. Reports
     /// whether the block changed at all.
@@ -1465,7 +1440,6 @@ impl RuntimeCore {
                 step,
                 ticked,
             },
-            Effect::Defer(id) => Control::Defer(id),
             Effect::OpenLink(link) => Control::OpenLink(link),
             Effect::Notes(action) => {
                 self.start_notes(action);
@@ -2475,7 +2449,6 @@ mod tests {
             link: "https://example.com/spec".into(),
             intro: "intro".into(),
             version,
-            deferred: false,
             title: String::new(),
             steps: vec![],
             ticked: vec![],
@@ -2920,12 +2893,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_later_row_calls_defer_question() {
+    async fn the_relegate_row_opens_a_note_and_enter_on_it_answers_with_relegate() {
         let mut core = connected_core();
         let mut queue = question("Q1", 1, 1);
         queue.questions.push(question_view("Q2", 1, 1));
         queue.waiting = 2;
         let probe = question_probe(Some(queue));
+        let mut after = question("Q2", 1, 1);
+        after.waiting = 1;
+        probe
+            .lock()
+            .unwrap()
+            .answers
+            .push_back((SendResult::Recorded, Some(after)));
         let log = run_question_stream(
             &mut core,
             &probe,
@@ -2936,16 +2916,22 @@ mod tests {
                 KeyCode::Char('j'),
                 KeyCode::Char('j'),
                 KeyCode::Char('j'),
+                // The row opens the note, and Enter on the empty note sends.
+                KeyCode::Enter,
                 KeyCode::Enter,
             ],
         )
         .await;
-        let mut expected = lists(7);
-        expected.extend(["defer Q1".to_string(), "list".to_string()]);
-        assert_eq!(log, expected);
+        assert!(log.contains(&"answer Q1 v1".to_string()), "{log:?}");
+        let sent = probe.lock().unwrap().sent.clone();
+        assert_eq!(sent.len(), 1, "{sent:?}");
+        assert_eq!(
+            (sent[0].kind, sent[0].note.as_str(), sent[0].send_now),
+            (crate::questions::AnswerKind::Relegate, "", true)
+        );
+        assert_eq!(sent[0].picks.len(), 1, "the picks so far go with it");
         let view = core.app.questions.view().unwrap();
-        assert_eq!((view.id.as_str(), view.position), ("Q2", 1));
-        assert_eq!(core.app.question_stop, Some(QStop::Header));
+        assert_eq!(view.id, "Q2", "Q1 left the todo rows");
     }
 
     #[tokio::test]
@@ -3046,8 +3032,6 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(outcome, Control::Quit);
-        let log = probe.lock().unwrap().log.clone();
-        assert!(!log.iter().any(|call| call.starts_with("defer")), "{log:?}");
         let view = core.app.questions.view().unwrap();
         assert_eq!(view.mode, crate::questions::Mode::Choosing);
         assert_eq!(
@@ -3115,7 +3099,6 @@ mod tests {
         .unwrap();
         assert_eq!(outcome, Control::Quit);
         let log = probe.lock().unwrap().log.clone();
-        assert!(!log.iter().any(|call| call.starts_with("defer")), "{log:?}");
         assert!(
             !log.iter().any(|call| call.starts_with("answer")),
             "{log:?}"
@@ -4138,22 +4121,6 @@ mod tests {
             state.saved.push(picks.to_vec());
             let result = state.saves.pop_front().unwrap_or(SendResult::Recorded);
             Box::pin(async move { result })
-        }
-
-        fn defer_question<'a>(&'a mut self, id: &'a str) -> BoxFuture<'a, Result<(), SourceError>> {
-            let Some(probe) = &self.questions else {
-                return Box::pin(async { Err(SourceError::Transport("no question tool".into())) });
-            };
-            let mut state = probe.lock().unwrap();
-            state.log.push(format!("defer {id}"));
-            if let Some(queue) = state.queue.as_mut()
-                && let Some(index) = queue.questions.iter().position(|q| q.id == id)
-            {
-                let mut question = queue.questions.remove(index);
-                question.deferred = true;
-                queue.questions.push(question);
-            }
-            Box::pin(async { Ok(()) })
         }
 
         fn close_stream(self) -> BoxFuture<'static, ()> {

@@ -16,8 +16,8 @@ use axum::response::{IntoResponse, Response};
 use datastar::prelude::{PatchElements, PatchSignals};
 use harold_api::tools::questions::v1::question_service_client::QuestionServiceClient;
 use harold_api::tools::questions::v1::{
-    AnswerKind, AnswerQuestionRequest, DeferQuestionRequest, ListQuestionsRequest, ListedQuestion,
-    Pick, SavePicksRequest, SpecState, TickStepRequest,
+    AnswerKind, AnswerQuestionRequest, ListQuestionsRequest, ListedQuestion, Pick,
+    SavePicksRequest, SpecState, TickStepRequest,
 };
 use tonic::transport::{Channel, Endpoint};
 use tonic::{Code, Status};
@@ -74,7 +74,7 @@ impl ReadFailure {
 /// failing, and the notices on cards.
 #[derive(Default)]
 struct Shared {
-    /// The last list a read returned, in the tool's order with the set-aside questions last.
+    /// The last list a read returned, in the tool's order.
     last: Option<Vec<ListedQuestion>>,
     /// When the chief last checked the todos, as the last good read said; 0 before the first check.
     checked_at_ms: i64,
@@ -144,10 +144,8 @@ impl Questions {
             };
         let mut shared = self.shared.lock().unwrap_or_else(|e| e.into_inner());
         match read {
-            Ok((mut list, checked_at_ms)) => {
+            Ok((list, checked_at_ms)) => {
                 shared.checked_at_ms = checked_at_ms;
-                // The tool's order, the questions set aside last.
-                list.sort_by_key(|listed| listed.deferred);
                 if shared.failing {
                     shared.failing = false;
                     info!("app todos read again");
@@ -242,7 +240,7 @@ impl Questions {
                         )
                     })
                     .collect(),
-                waiting: list.iter().filter(|listed| !listed.deferred).count(),
+                waiting: list.len(),
             },
         }
     }
@@ -344,21 +342,20 @@ struct Card {
     is_question: bool,
     kind: &'static str,
     product: String,
-    later: bool,
     heading: String,
     under: Option<String>,
     link: Option<CardLink>,
     decisions: Vec<DecisionView>,
     steps: Vec<StepView>,
     notice: Option<String>,
-    /// The spec changed after the todo was asked: Send, Done and Ignore are off, and Revise and
-    /// Reject are left out.
+    /// The spec changed after the todo was asked: Send, Done and Ignore are off, and Revise,
+    /// Reject and Relegate to idea are left out.
     changed: bool,
     /// Send is off: with a note open, until it has words; otherwise until every decision has a pick.
     send_disabled: bool,
     /// The card's name in the page's signals: the id's letters and digits.
     sig: String,
-    /// `revise` or `reject` while a refusal leaves the note box open, else empty.
+    /// `revise`, `reject` or `relegate` while a refusal leaves the note box open, else empty.
     open_mode: &'static str,
     /// The note a refusal left in the box.
     note: String,
@@ -492,7 +489,6 @@ impl Card {
                 "instructions"
             },
             product: question.product.clone(),
-            later: listed.deferred,
             heading,
             under,
             link,
@@ -538,13 +534,13 @@ fn signal_name(id: &str) -> String {
 enum Kind {
     Answer,
     FreeText,
-    Later,
     Picks,
     Tick,
     Done,
     Ignore,
     Revise,
     Reject,
+    Relegate,
 }
 
 impl Kind {
@@ -552,13 +548,13 @@ impl Kind {
         match self {
             Self::Answer => "answer",
             Self::FreeText => "free_text",
-            Self::Later => "later",
             Self::Picks => "picks",
             Self::Tick => "tick",
             Self::Done => "done",
             Self::Ignore => "ignore",
             Self::Revise => "revise",
             Self::Reject => "reject",
+            Self::Relegate => "relegate",
         }
     }
 
@@ -566,8 +562,10 @@ impl Kind {
     fn sent_word(self) -> Option<&'static str> {
         match self {
             Self::Answer | Self::FreeText => Some("answer"),
-            Self::Done | Self::Ignore | Self::Revise | Self::Reject => Some(self.word()),
-            Self::Later | Self::Picks | Self::Tick => None,
+            Self::Done | Self::Ignore | Self::Revise | Self::Reject | Self::Relegate => {
+                Some(self.word())
+            }
+            Self::Picks | Self::Tick => None,
         }
     }
 }
@@ -757,16 +755,6 @@ impl Questions {
         Outcome::of(result.map(|r| r.map(|_| ())))
     }
 
-    async fn defer(&self, id: String) -> Outcome {
-        let mut client = self.client.clone();
-        let result = tokio::time::timeout(
-            WRITE_LIMIT,
-            client.defer_question(DeferQuestionRequest { id }),
-        )
-        .await;
-        Outcome::of(result.map(|r| r.map(|_| ())))
-    }
-
     async fn save_picks(&self, request: SavePicksRequest) -> Outcome {
         let mut client = self.client.clone();
         let result = tokio::time::timeout(WRITE_LIMIT, client.save_picks(request)).await;
@@ -786,7 +774,7 @@ async fn finish(state: &AppState, kind: Kind, id: &str, outcome: Outcome) -> Res
     finish_with_note(state, kind, id, outcome, "").await
 }
 
-/// As `finish`, and a refused revise or reject leaves the note box open holding `note`.
+/// As `finish`, and a refused revise, reject or relegate leaves the note box open holding `note`.
 async fn finish_with_note(
     state: &AppState,
     kind: Kind,
@@ -804,8 +792,11 @@ async fn finish_with_note(
     }
     state.questions.close_note(id);
     let mode = match kind {
-        // A changed spec leaves no note box to keep open: Revise and Reject are gone with it.
-        Kind::Revise | Kind::Reject if !matches!(outcome, Outcome::Sent | Outcome::SpecChanged) => {
+        // A changed spec leaves no note box to keep open: Revise, Reject and Relegate are gone
+        // with it.
+        Kind::Revise | Kind::Reject | Kind::Relegate
+            if !matches!(outcome, Outcome::Sent | Outcome::SpecChanged) =>
+        {
             Some(kind.word())
         }
         _ => None,
@@ -920,15 +911,6 @@ pub(crate) async fn post_picks(State(state): State<AppState>, body: Bytes) -> Re
     StatusCode::NO_CONTENT.into_response()
 }
 
-/// `POST /todos/later`: sets a question aside.
-pub(crate) async fn post_later(State(state): State<AppState>, body: Bytes) -> Response {
-    let Some(id) = Form::parse(&body).and_then(|form| form.id()) else {
-        return malformed();
-    };
-    let outcome = state.questions.defer(id.clone()).await;
-    finish(&state, Kind::Later, &id, outcome).await
-}
-
 /// `POST /todos/tick`: ticks or unticks one step of instructions.
 pub(crate) async fn post_tick(State(state): State<AppState>, body: Bytes) -> Response {
     let Some(form) = Form::parse(&body) else {
@@ -988,8 +970,9 @@ pub(crate) async fn post_ignore(State(state): State<AppState>, body: Bytes) -> R
     close(state, body, Kind::Ignore, AnswerKind::Ignore).await
 }
 
-/// `POST /todos/revise` and `POST /todos/reject`: the picks so far and a note, sent to the
-/// chief at once. A note that is blank or over `NOTE_MAX_CHARS` gives `400`.
+/// `POST /todos/revise`, `POST /todos/reject` and `POST /todos/relegate`: the picks so far
+/// and a note, sent to the chief at once. A note over `NOTE_MAX_CHARS` gives `400`, and so
+/// does a blank one, except for a relegate, whose note is optional.
 async fn answer_with_note(
     state: AppState,
     headers: HeaderMap,
@@ -1004,7 +987,7 @@ async fn answer_with_note(
         return malformed();
     };
     let note = form.get("note").unwrap_or("").trim();
-    if note.is_empty() || note.chars().count() > NOTE_MAX_CHARS {
+    if (note.is_empty() && kind != Kind::Relegate) || note.chars().count() > NOTE_MAX_CHARS {
         return malformed();
     }
     let Some(picks) = state.questions.partial_picks(&id, &form) else {
@@ -1039,4 +1022,12 @@ pub(crate) async fn post_reject(
     body: Bytes,
 ) -> Response {
     answer_with_note(state, headers, body, Kind::Reject, AnswerKind::Reject).await
+}
+
+pub(crate) async fn post_relegate(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    answer_with_note(state, headers, body, Kind::Relegate, AnswerKind::Relegate).await
 }

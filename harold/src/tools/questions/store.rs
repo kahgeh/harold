@@ -8,16 +8,14 @@ use harold_api::tools::questions::v1 as pb;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
-use tracing::info;
 use turso::Connection;
 
-use super::NAME;
 use super::schema::{Answer, Kind, Question, check_picks};
 
 const DATABASE: &str = "questions.db";
 const DISMISSAL_VISIBLE_MS: i64 = 3_600_000;
 
-const MIGRATIONS: [(&str, &str); 6] = [
+const MIGRATIONS: [(&str, &str); 7] = [
     (
         "001_questions",
         include_str!("migrations/001_questions.sql"),
@@ -41,6 +39,10 @@ const MIGRATIONS: [(&str, &str); 6] = [
     (
         "006_todos_current",
         include_str!("migrations/006_todos_current.sql"),
+    ),
+    (
+        "007_no_deferred",
+        include_str!("migrations/007_no_deferred.sql"),
     ),
 ];
 
@@ -74,8 +76,6 @@ type Result<T> = std::result::Result<T, StoreError>;
 pub(super) enum Refusal {
     VersionChanged,
     NotWaiting,
-    /// The id holds instructions, which the action does not apply to.
-    NotAQuestion,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -107,7 +107,6 @@ pub(super) struct Shown {
 pub(super) struct Listed {
     pub question: Question,
     pub version: u32,
-    pub deferred: bool,
     /// Ticked step numbers, from 1, ascending. Empty for a question.
     pub ticked: Vec<u32>,
     /// The saved picks of a question, by decision.
@@ -136,8 +135,6 @@ pub(super) struct StartedBatch {
 pub(super) struct Ready {
     /// Id, version, question and answer of each unsent answer, by position.
     pub answers: Vec<(String, u32, Question, Answer)>,
-    /// Ids of the deferred questions.
-    pub later: Vec<String>,
     /// The `traceparent` of each unsent answer that came with one, in the order of the
     /// answers.
     pub traces: Vec<String>,
@@ -193,12 +190,7 @@ pub(super) trait QuestionStore: Send + Sync + 'static {
     {
         self.answer_traced(id, version, send_now, None, answer, now_ms)
     }
-    fn defer(
-        &self,
-        id: &str,
-        now_ms: i64,
-    ) -> impl Future<Output = Result<std::result::Result<u32, Refusal>>> + Send;
-    /// Ticks or unticks one step of waiting or deferred instructions.
+    /// Ticks or unticks one step of waiting instructions.
     fn tick(
         &self,
         id: &str,
@@ -207,7 +199,7 @@ pub(super) trait QuestionStore: Send + Sync + 'static {
         ticked: bool,
         now_ms: i64,
     ) -> impl Future<Output = Result<std::result::Result<(), TickRefusal>>> + Send;
-    /// Replaces the saved picks of a waiting or deferred question at `version`.
+    /// Replaces the saved picks of a waiting question at `version`.
     /// The inner `Err(field)` is `picks`; nothing is stored then.
     fn save_picks(
         &self,
@@ -430,7 +422,7 @@ async fn stored(conn: &Connection, id: &str) -> Result<Option<Stored>> {
 }
 
 fn open_state(state: &str) -> bool {
-    state == "waiting" || state == "deferred"
+    state == "waiting"
 }
 
 async fn next_position(conn: &Connection) -> Result<i64> {
@@ -612,7 +604,6 @@ async fn dismiss_in(
         (id, reason, now_ms),
     )
     .await?;
-    return_deferred_when_idle(conn, now_ms, "dismiss").await?;
     Ok(Ok(existing.version))
 }
 
@@ -620,7 +611,7 @@ async fn reorder_in(conn: &Connection, ids: &[String], now_ms: i64) -> Result<()
     let mut current: Vec<(String, i64)> = Vec::new();
     let mut rows = conn
         .query(
-            "SELECT id, position FROM questions WHERE state IN ('waiting','deferred') \
+            "SELECT id, position FROM questions WHERE state = 'waiting' \
              ORDER BY position, id",
             (),
         )
@@ -658,8 +649,8 @@ async fn list_in(conn: &Connection, now_ms: i64) -> Result<Listing> {
     let mut questions = Vec::new();
     let mut rows = conn
         .query(
-            "SELECT body, version, state, ticks, picks, spec_file FROM questions WHERE state IN ('waiting','deferred') \
-             ORDER BY CASE state WHEN 'waiting' THEN 0 ELSE 1 END, position, id",
+            "SELECT body, version, state, ticks, picks, spec_file FROM questions WHERE state = 'waiting' \
+             ORDER BY position, id",
             (),
         )
         .await?;
@@ -669,7 +660,6 @@ async fn list_in(conn: &Connection, now_ms: i64) -> Result<Listing> {
         questions.push(Listed {
             question,
             version: version_of(&row, 1)?,
-            deferred: text(&row, 2)? == "deferred",
             ticked: parse_ticks(&text(&row, 3)?),
             picks: parse_picks(&text(&row, 4)?),
         });
@@ -778,60 +768,6 @@ async fn answer_in(
     )
     .await?;
     Ok(Ok(Ok(())))
-}
-
-async fn defer_in(
-    conn: &Connection,
-    id: &str,
-    now_ms: i64,
-) -> Result<std::result::Result<u32, Refusal>> {
-    let Some(existing) = stored(conn, id).await? else {
-        return Ok(Err(Refusal::NotWaiting));
-    };
-    if !open_state(&existing.state) {
-        return Ok(Err(Refusal::NotWaiting));
-    }
-    if body_of(conn, id).await?.is_instructions() {
-        return Ok(Err(Refusal::NotAQuestion));
-    }
-    let position = next_position(conn).await?;
-    conn.execute(
-        "UPDATE questions SET state = 'deferred', position = ?2, updated_at_ms = ?3 WHERE id = ?1",
-        (id, position, now_ms),
-    )
-    .await?;
-    return_deferred_when_idle(conn, now_ms, "later").await?;
-    Ok(Ok(existing.version))
-}
-
-async fn body_of(conn: &Connection, id: &str) -> Result<Question> {
-    let mut rows = conn
-        .query("SELECT body FROM questions WHERE id = ?1", [id])
-        .await?;
-    let row = rows
-        .next()
-        .await?
-        .ok_or_else(|| StoreError::Data("question row is missing".into()))?;
-    Ok(serde_json::from_str(&text(&row, 0)?)?)
-}
-
-/// Ids of the waiting questions; waiting instructions are left out, so they
-/// never hold set-aside questions back.
-async fn waiting_question_ids(conn: &Connection) -> Result<Vec<String>> {
-    let mut ids = Vec::new();
-    let mut rows = conn
-        .query(
-            "SELECT id, body FROM questions WHERE state = 'waiting' ORDER BY position, id",
-            (),
-        )
-        .await?;
-    while let Some(row) = rows.next().await? {
-        let question: Question = serde_json::from_str(&text(&row, 1)?)?;
-        if !question.is_instructions() {
-            ids.push(text(&row, 0)?);
-        }
-    }
-    Ok(ids)
 }
 
 async fn tick_in(
@@ -954,20 +890,6 @@ async fn show_in(conn: &Connection, id: &str) -> Result<Option<Shown>> {
     }))
 }
 
-async fn ids_in_state(conn: &Connection, state: &str) -> Result<Vec<String>> {
-    let mut ids = Vec::new();
-    let mut rows = conn
-        .query(
-            "SELECT id FROM questions WHERE state = ?1 ORDER BY position, id",
-            [state],
-        )
-        .await?;
-    while let Some(row) = rows.next().await? {
-        ids.push(text(&row, 0)?);
-    }
-    Ok(ids)
-}
-
 async fn ready_in(conn: &Connection, now_ms: i64, settle_ms: i64) -> Result<Readiness> {
     let mut answers = Vec::new();
     let mut traces = Vec::new();
@@ -1005,11 +927,7 @@ async fn ready_in(conn: &Connection, now_ms: i64, settle_ms: i64) -> Result<Read
             wait_ms: settle_ms - elapsed,
         });
     }
-    Ok(Readiness::Ready(Ready {
-        answers,
-        later: ids_in_state(conn, "deferred").await?,
-        traces,
-    }))
+    Ok(Readiness::Ready(Ready { answers, traces }))
 }
 
 /// Whether the question is still answered, unsent, at this version.
@@ -1095,50 +1013,6 @@ async fn batch_typed_in(conn: &Connection, batch_id: i64, now_ms: i64) -> Result
         (batch_id, now_ms),
     )
     .await?;
-    // Deferred questions wait again, after everything else, once none is waiting.
-    if waiting_question_ids(conn).await?.is_empty() {
-        return_deferred(conn, now_ms, "answers_line").await?;
-    }
-    Ok(())
-}
-
-/// Nothing waiting and no answer in the way of a line: the set-aside
-/// questions would never come back, so they come back now. A defer and a
-/// dismiss both end here.
-async fn return_deferred_when_idle(
-    conn: &Connection,
-    now_ms: i64,
-    after: &'static str,
-) -> Result<()> {
-    if waiting_question_ids(conn).await?.is_empty()
-        && ids_in_state(conn, "answered").await?.is_empty()
-    {
-        return_deferred(conn, now_ms, after).await?;
-    }
-    Ok(())
-}
-
-/// Deferred questions wait again, after everything else. Logs how many came
-/// back, when any did.
-async fn return_deferred(conn: &Connection, now_ms: i64, after: &'static str) -> Result<()> {
-    let ids = ids_in_state(conn, "deferred").await?;
-    for id in &ids {
-        let position = next_position(conn).await?;
-        conn.execute(
-            "UPDATE questions SET state = 'waiting', position = ?2, updated_at_ms = ?3 \
-             WHERE id = ?1",
-            (id.as_str(), position, now_ms),
-        )
-        .await?;
-    }
-    if !ids.is_empty() {
-        info!(
-            tool = NAME,
-            count = ids.len(),
-            after,
-            "set-aside questions returned"
-        );
-    }
     Ok(())
 }
 
@@ -1216,12 +1090,6 @@ impl QuestionStore for TursoQuestionStore {
             answer_in(&conn, id, version, send_now, trace_parent, answer, now_ms).await,
         )
         .await
-    }
-
-    async fn defer(&self, id: &str, now_ms: i64) -> Result<std::result::Result<u32, Refusal>> {
-        let conn = self.conn.lock().await;
-        begin(&conn).await?;
-        finish(&conn, defer_in(&conn, id, now_ms).await).await
     }
 
     async fn tick(

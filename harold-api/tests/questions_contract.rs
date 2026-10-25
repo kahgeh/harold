@@ -28,6 +28,19 @@ struct DescriptorProto {
     name: Option<String>,
     #[prost(message, repeated, tag = "2")]
     field: Vec<FieldDescriptorProto>,
+    #[prost(message, repeated, tag = "9")]
+    reserved_range: Vec<ReservedRange>,
+    #[prost(string, repeated, tag = "10")]
+    reserved_name: Vec<String>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct ReservedRange {
+    #[prost(int32, optional, tag = "1")]
+    start: Option<i32>,
+    /// Exclusive.
+    #[prost(int32, optional, tag = "2")]
+    end: Option<i32>,
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -84,6 +97,14 @@ fn questions_file_descriptor() -> FileDescriptorProto {
         .expect("questions package descriptor")
 }
 
+fn message_descriptor(name: &str) -> DescriptorProto {
+    questions_file_descriptor()
+        .message_type
+        .into_iter()
+        .find(|message| message.name.as_deref() == Some(name))
+        .unwrap_or_else(|| panic!("missing {name} descriptor"))
+}
+
 fn message_fields(name: &str) -> Vec<(String, i32)> {
     let descriptor = questions_file_descriptor()
         .message_type
@@ -131,7 +152,6 @@ fn question_service_lists_its_ten_rpcs() {
             "ReorderQuestions",
             "ListQuestions",
             "AnswerQuestion",
-            "DeferQuestion",
             "TickStep",
             "SavePicks",
             "ShowQuestion",
@@ -208,7 +228,6 @@ fn question_fields_keep_their_numbers() {
         fields(&[
             ("question", 1),
             ("version", 2),
-            ("deferred", 3),
             ("ticked", 4),
             ("picks", 5),
             ("spec_state", 6)
@@ -235,8 +254,15 @@ fn question_fields_keep_their_numbers() {
         ])
     );
     assert!(message_fields("AnswerQuestionResponse").is_empty());
-    assert_eq!(message_fields("DeferQuestionRequest"), fields(&[("id", 1)]));
-    assert!(message_fields("DeferQuestionResponse").is_empty());
+    for gone in ["DeferQuestionRequest", "DeferQuestionResponse"] {
+        assert!(
+            !questions_file_descriptor()
+                .message_type
+                .iter()
+                .any(|message| message.name.as_deref() == Some(gone)),
+            "{gone} is removed"
+        );
+    }
     assert_eq!(
         message_fields("TickStepRequest"),
         fields(&[("id", 1), ("version", 2), ("step", 3), ("ticked", 4)])
@@ -319,10 +345,24 @@ fn answer_kinds_keep_their_numbers() {
             ("ANSWER_KIND_FREE_TEXT", 4),
             ("ANSWER_KIND_DONE", 5),
             ("ANSWER_KIND_IGNORE", 6),
+            ("ANSWER_KIND_RELEGATE", 7),
         ])
     );
     assert_eq!(AnswerKind::Answer as i32, 1);
     assert_eq!(AnswerKind::FreeText as i32, 4);
+    assert_eq!(AnswerKind::Relegate as i32, 7);
+}
+
+#[test]
+fn listed_question_reserves_the_removed_deferred_field() {
+    let listed = message_descriptor("ListedQuestion");
+    let ranges: Vec<(i32, i32)> = listed
+        .reserved_range
+        .iter()
+        .map(|range| (range.start.expect("start"), range.end.expect("end")))
+        .collect();
+    assert_eq!(ranges, [(3, 4)]);
+    assert_eq!(listed.reserved_name, ["deferred"]);
 }
 
 #[test]

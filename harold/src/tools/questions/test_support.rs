@@ -220,11 +220,6 @@ impl QuestionStore for FailingStore {
             .await
     }
 
-    async fn defer(&self, id: &str, now_ms: i64) -> Result<Result<u32, Refusal>, StoreError> {
-        self.check()?;
-        self.inner.defer(id, now_ms).await
-    }
-
     async fn tick(
         &self,
         id: &str,
@@ -345,10 +340,6 @@ impl QuestionStore for MarkHook {
         self.inner
             .answer_traced(id, version, send_now, trace_parent, answer, now_ms)
             .await
-    }
-
-    async fn defer(&self, id: &str, now_ms: i64) -> Result<Result<u32, Refusal>, StoreError> {
-        self.inner.defer(id, now_ms).await
     }
 
     async fn tick(

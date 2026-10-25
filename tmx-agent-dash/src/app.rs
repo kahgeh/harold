@@ -312,7 +312,6 @@ pub enum Effect {
         step: u32,
         ticked: bool,
     },
-    Defer(String),
     OpenLink(String),
     /// The notes search asks the runtime to read a list or open a vault note.
     Notes(NotesAction),
@@ -807,10 +806,6 @@ impl App {
                 Effect::None
             }
             BlockEffect::OpenLink(link) => Effect::OpenLink(link),
-            BlockEffect::Defer(id) => {
-                self.question_stop = Some(QStop::Header);
-                Effect::Defer(id)
-            }
             BlockEffect::Send(out) => Effect::Answer(out),
             BlockEffect::SavePicks { id, version, picks } => {
                 Effect::SavePicks { id, version, picks }
@@ -3018,7 +3013,6 @@ mod tests {
             link: "https://example.com/spec".into(),
             intro: "intro".into(),
             version,
-            deferred: false,
             title: String::new(),
             steps: vec![],
             ticked: vec![],
@@ -3046,7 +3040,7 @@ mod tests {
         select_pane(app, "%3");
         app.handle_key(KeyCode::Char('j'));
         app.handle_key(KeyCode::Char('l'));
-        // Four options, then send, later and revise….
+        // Four options, then send, relegate to idea… and revise….
         for _ in 0..7 {
             app.handle_key(KeyCode::Char('j'));
         }
@@ -3514,15 +3508,21 @@ mod tests {
     }
 
     #[test]
-    fn later_moves_the_cursor_to_the_new_current_header() {
+    fn relegate_to_idea_opens_a_note_and_enter_on_it_answers_with_relegate() {
         let mut app = call_app(CallState::Off);
         app.observe_questions(question_queue(&["Q1", "Q2"]));
         app.handle_key(KeyCode::Char('j'));
         app.handle_key(KeyCode::Char('l'));
         app.land_on(&Stop::Question(QStop::Action(1)));
-        assert_eq!(app.handle_key(KeyCode::Enter), Effect::Defer("Q1".into()));
-        assert_eq!(app.cursor_stop(), Some(Stop::Question(QStop::Header)));
-        assert_eq!(app.questions.view().unwrap().id, "Q2");
+        assert_eq!(app.handle_key(KeyCode::Enter), Effect::None);
+        assert!(app.questions.note_open());
+        match app.handle_key(KeyCode::Enter) {
+            Effect::Answer(out) => {
+                assert_eq!((out.id.as_str(), out.kind), ("Q1", AnswerKind::Relegate));
+                assert!(out.note.is_empty());
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]
@@ -3836,7 +3836,8 @@ mod tests {
         assert!(app.cursor_on_question());
         assert_eq!(app.questions.view().unwrap().notice, None);
         app.land_on(&Stop::Question(QStop::Action(1)));
-        assert_eq!(app.handle_key(KeyCode::Enter), Effect::Defer("Q1".into()));
+        assert_eq!(app.handle_key(KeyCode::Enter), Effect::None);
+        assert!(app.questions.note_open(), "the row acts again");
 
         // A change while no note is open does not hold.
         let mut app = call_app(CallState::Off);

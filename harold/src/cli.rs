@@ -1142,9 +1142,8 @@ fn list_line(listed: &questions::ListedQuestion) -> String {
             changed_spec_suffix(listed.spec_state)
         );
     }
-    let deferred = if listed.deferred { " (deferred)" } else { "" };
     format!(
-        "{} v{} {} {} picks {}/{}{deferred}{}",
+        "{} v{} {} {} picks {}/{}{}",
         question.id,
         listed.version,
         question.product,
@@ -2738,7 +2737,6 @@ mod tests {
                 ..Default::default()
             }),
             version: 2,
-            deferred: false,
             ticked: vec![1, 3],
             picks: vec![],
             spec_state: 0,
@@ -2752,15 +2750,11 @@ mod tests {
                 ..Default::default()
             }),
             version: 1,
-            deferred: true,
             ticked: vec![],
             picks: vec![],
             spec_state: 0,
         };
-        assert_eq!(
-            list_line(&question),
-            "Q1 v1 harold dash picks 0/0 (deferred)"
-        );
+        assert_eq!(list_line(&question), "Q1 v1 harold dash picks 0/0");
     }
 
     #[test]
@@ -2831,7 +2825,6 @@ mod tests {
                 ..Default::default()
             }),
             version: 1,
-            deferred: false,
             ticked: vec![],
             picks: vec![questions::Pick::default(); 2],
             spec_state: 0,
@@ -2918,31 +2911,25 @@ mod tests {
 
     #[test]
     fn list_marks_a_changed_spec_after_everything_else() {
-        let listed =
-            |spec_state, deferred, steps: Vec<questions::Step>| questions::ListedQuestion {
-                question: Some(questions::Question {
-                    id: "Q1".into(),
-                    product: "harold".into(),
-                    spec: "dash".into(),
-                    steps,
-                    ..Default::default()
-                }),
-                version: 1,
-                deferred,
-                spec_state: questions::SpecState::from_str_name(spec_state).unwrap() as i32,
+        let listed = |spec_state, steps: Vec<questions::Step>| questions::ListedQuestion {
+            question: Some(questions::Question {
+                id: "Q1".into(),
+                product: "harold".into(),
+                spec: "dash".into(),
+                steps,
                 ..Default::default()
-            };
+            }),
+            version: 1,
+            spec_state: questions::SpecState::from_str_name(spec_state).unwrap() as i32,
+            ..Default::default()
+        };
         assert_eq!(
-            list_line(&listed("SPEC_STATE_CHANGED", false, vec![])),
+            list_line(&listed("SPEC_STATE_CHANGED", vec![])),
             "Q1 v1 harold dash picks 0/0 (changed spec)"
-        );
-        assert_eq!(
-            list_line(&listed("SPEC_STATE_CHANGED", true, vec![])),
-            "Q1 v1 harold dash picks 0/0 (deferred) (changed spec)"
         );
         for state in ["SPEC_STATE_CURRENT", "SPEC_STATE_UNKNOWN"] {
             assert_eq!(
-                list_line(&listed(state, false, vec![])),
+                list_line(&listed(state, vec![])),
                 "Q1 v1 harold dash picks 0/0"
             );
         }
@@ -2951,7 +2938,7 @@ mod tests {
             detail: String::new(),
         }];
         assert_eq!(
-            list_line(&listed("SPEC_STATE_CHANGED", false, steps)),
+            list_line(&listed("SPEC_STATE_CHANGED", steps)),
             "Q1 v1 harold steps 0/1 (changed spec)"
         );
     }

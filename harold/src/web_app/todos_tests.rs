@@ -25,7 +25,6 @@ const LOGIN: &str = "chief@example.com";
 #[derive(Debug, Clone, PartialEq)]
 pub(super) enum Call {
     Answer(pb::AnswerQuestionRequest),
-    Defer(String),
     Tick(pb::TickStepRequest),
     Save(pb::SavePicksRequest),
 }
@@ -112,13 +111,6 @@ impl QuestionService for FakeQuestions {
     ) -> Result<Response<pb::AnswerQuestionResponse>, Status> {
         self.write(Call::Answer(request.into_inner()))?;
         Ok(Response::new(pb::AnswerQuestionResponse {}))
-    }
-    async fn defer_question(
-        &self,
-        request: Request<pb::DeferQuestionRequest>,
-    ) -> Result<Response<pb::DeferQuestionResponse>, Status> {
-        self.write(Call::Defer(request.into_inner().id))?;
-        Ok(Response::new(pb::DeferQuestionResponse {}))
     }
     async fn mark_checked(
         &self,
@@ -292,7 +284,7 @@ fn option(key: &str, label: &str, suggested: bool, free: bool) -> pb::DecisionOp
 }
 
 /// Q1: two decisions, the first with a suggested option, the second with a free option.
-pub(super) fn question(id: &str, version: u32, deferred: bool) -> pb::ListedQuestion {
+pub(super) fn question(id: &str, version: u32) -> pb::ListedQuestion {
     pb::ListedQuestion {
         question: Some(pb::Question {
             id: id.into(),
@@ -319,7 +311,6 @@ pub(super) fn question(id: &str, version: u32, deferred: bool) -> pb::ListedQues
             ..Default::default()
         }),
         version,
-        deferred,
         ticked: Vec::new(),
         picks: Vec::new(),
         spec_state: 0,
@@ -343,7 +334,6 @@ pub(super) fn instructions(id: &str, version: u32) -> pb::ListedQuestion {
             ..Default::default()
         }),
         version,
-        deferred: false,
         ticked: vec![2],
         picks: Vec::new(),
         spec_state: 0,
@@ -357,30 +347,27 @@ pub(super) fn instructions(id: &str, version: u32) -> pb::ListedQuestion {
 #[tokio::test(flavor = "multi_thread")]
 async fn the_list_draws_question_and_instruction_cards_and_counts_the_waiting_ones() {
     let service = FakeServer::start().await;
-    let mut later = question("Q3", 1, true);
-    later.picks = vec![pb::Pick {
+    let mut third = question("Q3", 1);
+    third.picks = vec![pb::Pick {
         decision: 1,
         key: "y".into(),
         text: "saved words".into(),
     }];
-    let mut saved = question("Q2", 4, false);
+    let mut saved = question("Q2", 4);
     saved.picks = vec![pb::Pick {
         decision: 0,
         key: "a".into(),
         text: String::new(),
     }];
-    service.fake.set_list(vec![
-        later,
-        question("Q1", 2, false),
-        instructions("I1", 3),
-        saved,
-    ]);
+    service
+        .fake
+        .set_list(vec![question("Q1", 2), instructions("I1", 3), saved, third]);
     let directory = TestDirectory::new();
     let server = TestServer::serve(directory.store().await, service.questions()).await;
 
     let page = server.get("/").await.text().await.unwrap();
 
-    // Waiting first in the tool's order, then the set-aside question.
+    // The tool's order.
     let q1 = page.find(r#"id="todo-Q1""#).expect("Q1");
     let i1 = page.find(r#"id="todo-I1""#).expect("I1");
     let q2 = page.find(r#"id="todo-Q2""#).expect("Q2");
@@ -388,10 +375,12 @@ async fn the_list_draws_question_and_instruction_cards_and_counts_the_waiting_on
     assert!(q1 < i1 && i1 < q2 && q2 < q3, "{page}");
     assert!(page.contains("Q1 · question · harold</p>"), "{page}");
     assert!(page.contains("I1 · instructions · harold</p>"), "{page}");
+    assert!(page.contains("Q3 · question · harold</p>"), "{page}");
     assert!(
-        page.contains("Q3 · question · harold · later</p>"),
-        "{page}"
+        !page.contains(" · later"),
+        "no card is marked later: {page}"
     );
+    assert!(!page.contains("card later"), "{page}");
     assert!(page.contains("<h3>Intro of Q1</h3>"), "{page}");
     assert!(
         page.contains("<h3>Title of I1</h3>") && page.contains("Do these"),
@@ -431,16 +420,13 @@ async fn the_list_draws_question_and_instruction_cards_and_counts_the_waiting_on
         .matches(r#"name="ticked" value="true" checked"#)
         .count();
     assert_eq!(ticked, 1, "{page}");
-    // Two waiting todos (Q1, Q2) and one set of instructions; the question set aside is left out.
+    // Three waiting questions (Q1, Q2, Q3) and one set of instructions.
     assert!(
-        page.contains(r#"<span id="todo-count" class="todo-count">3</span>"#),
+        page.contains(r#"<span id="todo-count" class="todo-count">4</span>"#),
         "{page}"
     );
     // Send is on only where every decision has a pick: Q1's second decision has none.
-    assert!(
-        page.contains(r#"class="send" disabled>Send</button>"#),
-        "{page}"
-    );
+    assert!(page.contains(r#" disabled>Send</button>"#), "{page}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -494,7 +480,7 @@ async fn a_failing_read_keeps_the_last_list_and_logs_once_each_way() {
     {
         let mut state = service.fake.0.lock().unwrap();
         state.list_fails = false;
-        state.list = vec![question("Q1", 1, false)];
+        state.list = vec![question("Q1", 1)];
     }
     let html = questions.refresh().await.render().unwrap();
     assert!(html.contains(r#"id="todo-Q1""#), "{html}");
@@ -524,7 +510,7 @@ async fn the_stream_sends_the_todos_and_the_count_when_the_list_changes() {
     assert_eq!(response.status(), 200);
     let mut seen = String::new();
     // The first event is the thread; the todos are not sent while they are as the page drew them.
-    service.fake.set_list(vec![question("Q1", 1, false)]);
+    service.fake.set_list(vec![question("Q1", 1)]);
 
     let patch = tokio::time::timeout(std::time::Duration::from_secs(6), async {
         loop {
@@ -574,7 +560,7 @@ async fn served_with_todos() -> (FakeServer, TestServer, TestDirectory) {
     let service = FakeServer::start().await;
     service
         .fake
-        .set_list(vec![question("Q1", 2, false), instructions("I1", 3)]);
+        .set_list(vec![question("Q1", 2), instructions("I1", 3)]);
     let directory = TestDirectory::new();
     let server = TestServer::serve(directory.store().await, service.questions()).await;
     // The page's own read fills the list the posts check picks against.
@@ -601,7 +587,8 @@ async fn each_route_calls_its_rpc_with_the_form_fields_and_send_now() {
             "/todos/answer",
             "id=Q1&version=2&pick.0=b&pick.1=y&text.1=my+own%20words%21",
         ),
-        ("/todos/later", "id=Q1"),
+        ("/todos/relegate", "id=Q1&version=2&pick.0=a"),
+        ("/todos/relegate", "id=Q1&version=2&note=park+it"),
         ("/todos/tick", "id=I1&version=3&step=1&ticked=true"),
         ("/todos/tick", "id=I1&version=3&step=2"),
         ("/todos/done", "id=I1&version=3"),
@@ -643,7 +630,8 @@ async fn each_route_calls_its_rpc_with_the_form_fields_and_send_now() {
                 vec![pick(0, "b", ""), pick(1, "y", "my own words!")],
                 "Q1"
             ),
-            Call::Defer("Q1".into()),
+            answer_call(pb::AnswerKind::Relegate, vec![pick(0, "a", "")], ""),
+            answer_call(pb::AnswerKind::Relegate, Vec::new(), "park it"),
             Call::Tick(pb::TickStepRequest {
                 id: "I1".into(),
                 version: 3,
@@ -729,8 +717,9 @@ async fn a_malformed_form_gives_400_and_no_call() {
             "id=Q1&version=2&pick.0=a&pick.1=y&text.1=+++",
         ),
         ("/todos/answer", "id=Q1&version=2&pick.0=a&pick.1=%ZZ"),
-        ("/todos/later", ""),
-        ("/todos/later", "id=+"),
+        ("/todos/relegate", ""),
+        ("/todos/relegate", "id=+"),
+        ("/todos/relegate", "id=Q1"),
         ("/todos/tick", "id=I1&version=3&step=0&ticked=true"),
         ("/todos/tick", "id=I1&version=3&step=one"),
         ("/todos/tick", "id=I1&version=3"),
@@ -750,7 +739,7 @@ async fn only_a_post_with_the_login_and_the_same_origin_reaches_the_tool() {
     let (service, server, _directory) = served_with_todos().await;
     let forms = [
         ("/todos/answer", "id=Q1&version=2&pick.0=a&pick.1=x"),
-        ("/todos/later", "id=Q1"),
+        ("/todos/relegate", "id=Q1&version=2&pick.0=a"),
         ("/todos/tick", "id=I1&version=3&step=1&ticked=true"),
         ("/todos/done", "id=I1&version=3"),
         ("/todos/ignore", "id=I1&version=3"),
@@ -809,7 +798,7 @@ async fn each_post_logs_its_kind_and_result_but_never_the_todo_id() {
         .post("/todos/answer", "id=Q1&version=2&pick.0=a&pick.1=x")
         .await;
     service.fake.0.lock().unwrap().write_refusal = Some(Status::failed_precondition("not_waiting"));
-    server.post("/todos/later", "id=Q1").await;
+    server.post("/todos/relegate", "id=Q1&version=2").await;
 
     let text = logs.text();
     let lines: Vec<&str> = text
@@ -822,7 +811,7 @@ async fn each_post_logs_its_kind_and_result_but_never_the_todo_id() {
         "{text}"
     );
     assert!(
-        lines[1].contains("kind=\"later\"") && lines[1].contains("result=\"not_waiting\""),
+        lines[1].contains("kind=\"relegate\"") && lines[1].contains("result=\"not_waiting\""),
         "{text}"
     );
     assert!(lines.iter().all(|line| !line.contains("Q1")), "{text}");
@@ -835,7 +824,7 @@ async fn a_new_stream_starts_with_the_todos_as_they_are_now() {
     let server = TestServer::serve(directory.store().await, service.questions()).await;
     // The page was drawn with no todos; they change before the stream opens.
     server.get("/").await;
-    service.fake.set_list(vec![question("Q1", 1, false)]);
+    service.fake.set_list(vec![question("Q1", 1)]);
     let mut response = server.get("/updates").await;
 
     let first = String::from_utf8_lossy(&response.chunk().await.unwrap().unwrap()).into_owned();
@@ -1014,7 +1003,7 @@ async fn each_free_text_input_has_an_id_that_is_unique_on_the_page() {
     let service = FakeServer::start().await;
     service
         .fake
-        .set_list(vec![question("Q1", 2, false), question("Q2", 1, false)]);
+        .set_list(vec![question("Q1", 2), question("Q2", 1)]);
     let directory = TestDirectory::new();
     let server = TestServer::serve(directory.store().await, service.questions()).await;
 
@@ -1082,7 +1071,8 @@ async fn the_question_form_saves_picks_on_change_and_debounced_input() {
         "'/todos/reject'",
         r#"data-on:change="evt.target.name !== 'note' && ($sent = '', @post('/todos/picks', {contentType: 'form'}))""#,
         r#"data-on:input__debounce.500ms="evt.target.type === 'text' && @post('/todos/picks', {contentType: 'form'})""#,
-        r#"data-on:click="@post('/todos/later', {contentType: 'form'})""#,
+        "'/todos/relegate'",
+        r#"data-on:click="$t.Q1.mode = 'relegate'">Relegate to idea…</button>"#,
         r#"data-on:change="@post('/todos/tick', {contentType: 'form'})""#,
     ] {
         assert!(page.contains(wanted), "page lacks {wanted}");
@@ -1204,7 +1194,7 @@ async fn the_sent_line_is_the_posting_pages_and_the_next_post_empties_it() {
     let (service, server, _directory) = served_with_todos().await;
     service
         .fake
-        .set_list(vec![question("Q7", 2, false), instructions("I1", 3)]);
+        .set_list(vec![question("Q7", 2), instructions("I1", 3)]);
     server.get("/").await;
 
     let line = |id: &str, word: &str| format!(r#""sent":"{id}: {word} sent to the chief.""#);
@@ -1222,10 +1212,7 @@ async fn the_sent_line_is_the_posting_pages_and_the_next_post_empties_it() {
     assert!(!page.contains("sent to the chief"), "{page}");
 
     // Every other post empties it.
-    for (path, body) in [
-        ("/todos/later", "id=Q7"),
-        ("/todos/tick", "id=I1&version=3&step=1&ticked=true"),
-    ] {
+    for (path, body) in [("/todos/tick", "id=I1&version=3&step=1&ticked=true")] {
         let redrawn = server.post(path, body).await.text().await.unwrap();
         assert!(redrawn.contains(r#""sent":"""#), "{path}: {redrawn}");
     }
@@ -1244,6 +1231,7 @@ async fn the_sent_line_is_the_posting_pages_and_the_next_post_empties_it() {
             "reject",
             "Q7",
         ),
+        ("/todos/relegate", "id=Q7&version=2", "relegate", "Q7"),
         ("/todos/done", "id=I1&version=3", "done", "I1"),
         ("/todos/ignore", "id=I1&version=3", "ignore", "I1"),
     ] {
@@ -1325,6 +1313,105 @@ async fn a_question_card_has_the_revise_and_reject_parts_and_instructions_do_not
     for absent in ["card-more", "note-box", "Revise", "Reject", "Cancel"] {
         assert!(!instructions_card.contains(absent), "{absent}");
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn relegate_sends_with_an_empty_note_and_refuses_a_note_of_2000_characters() {
+    let (service, server, _directory) = served_with_todos().await;
+
+    for body in [
+        "id=Q1&version=2&pick.0=a&note=",
+        "id=Q1&version=2&pick.0=a&note=+++%0A",
+        "id=Q1&version=2",
+    ] {
+        let response = server.post("/todos/relegate", body).await;
+        assert_eq!(response.status(), 200, "{body}");
+        let redrawn = response.text().await.unwrap();
+        assert!(
+            redrawn.contains(r#""sent":"Q1: relegate sent to the chief.""#),
+            "{redrawn}"
+        );
+    }
+    assert_eq!(
+        service.fake.calls(),
+        vec![
+            answer_call(pb::AnswerKind::Relegate, vec![pick(0, "a", "")], ""),
+            answer_call(pb::AnswerKind::Relegate, vec![pick(0, "a", "")], ""),
+            answer_call(pb::AnswerKind::Relegate, Vec::new(), ""),
+        ]
+    );
+
+    let long = format!("id=Q1&version=2&pick.0=a&note={}", "x".repeat(2000));
+    assert_eq!(server.post("/todos/relegate", &long).await.status(), 400);
+    assert_eq!(service.fake.calls().len(), 3);
+    let at_limit = format!("id=Q1&version=2&pick.0=a&note={}", "x".repeat(1999));
+    assert_eq!(
+        server.post("/todos/relegate", &at_limit).await.status(),
+        200
+    );
+    assert_eq!(service.fake.calls().len(), 4);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn later_is_gone() {
+    let (service, server, _directory) = served_with_todos().await;
+
+    let response = server.post("/todos/later", "id=Q1").await;
+
+    assert_eq!(response.status(), 404);
+    assert!(service.fake.calls().is_empty());
+    let page = server.get("/").await.text().await.unwrap();
+    assert!(!page.contains("/todos/later"), "{page}");
+    assert!(!page.contains(">Later<"), "{page}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_question_card_has_relegate_to_idea_with_its_note_label_and_a_send_that_needs_no_words() {
+    let (_service, server, _directory) = served_with_todos().await;
+
+    let page = server.get("/").await.text().await.unwrap();
+    let (question_card, _) = page.split_once(r#"id="todo-I1""#).unwrap();
+
+    assert!(question_card.contains("Relegate to idea…</button>"));
+    assert!(question_card.contains("Anything to add to the idea? (optional)"));
+    assert!(question_card.contains(r#"$t.Q1.mode === 'relegate' ? '/todos/relegate'"#));
+    // Its own Send is not the one the page's script turns off while a note is empty.
+    let (_, relegate_send) = question_card
+        .split_once(r#"<button type="submit" class="send-relegate""#)
+        .expect("the Send relegate button");
+    let button = &relegate_send[..relegate_send.find("</button>").unwrap()];
+    assert!(button.contains(">Send relegate"), "{button}");
+    assert!(!button.contains("disabled"), "{button}");
+    assert!(button.contains("data-attr:hidden="), "{button}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refused_relegate_redraws_the_card_with_the_note_open_in_relegate_mode() {
+    let (service, server, _directory) = served_with_todos().await;
+    service.fake.0.lock().unwrap().write_refusal =
+        Some(Status::failed_precondition("version_changed"));
+
+    let redrawn = server
+        .post(
+            "/todos/relegate",
+            "id=Q1&version=2&pick.0=a&note=idea+words",
+        )
+        .await
+        .text()
+        .await
+        .unwrap();
+
+    assert!(
+        redrawn.contains("Q1 changed. Look again before you send."),
+        "{redrawn}"
+    );
+    assert!(redrawn.contains("idea words</textarea>"), "{redrawn}");
+    assert!(redrawn.contains(r#""mode":"relegate""#), "{redrawn}");
+    assert!(
+        redrawn.contains(">Anything to add to the idea? (optional)</label>"),
+        "{redrawn}"
+    );
+    assert!(!redrawn.contains("sent to the chief"), "{redrawn}");
 }
 
 #[test]
@@ -1483,7 +1570,7 @@ fn the_checked_line_uses_the_macs_offset() {
 #[tokio::test(flavor = "multi_thread")]
 async fn the_page_draws_the_checked_line_above_the_cards_and_it_turns_red_with_the_clock() {
     let service = FakeServer::start().await;
-    service.fake.set_list(vec![question("Q1", 2, false)]);
+    service.fake.set_list(vec![question("Q1", 2)]);
     service.fake.set_checked(at(24, 14, 5));
     let (questions, clock) = questions_at(&service, at(24, 14, 30));
     let directory = TestDirectory::new();
@@ -1531,7 +1618,7 @@ async fn with_no_todo_the_checked_line_is_left_out() {
 #[tokio::test(flavor = "multi_thread")]
 async fn the_stream_turns_the_line_red_by_itself_when_two_hours_pass() {
     let service = FakeServer::start().await;
-    service.fake.set_list(vec![question("Q1", 1, false)]);
+    service.fake.set_list(vec![question("Q1", 1)]);
     service.fake.set_checked(at(24, 14, 5));
     let (questions, clock) = questions_at(&service, at(24, 14, 30));
     let directory = TestDirectory::new();
@@ -1562,12 +1649,12 @@ fn changed(mut listed: pb::ListedQuestion) -> pb::ListedQuestion {
 const CHANGED_NOTICE: &str = r#"<p class="notice" role="status">Changed spec: the spec changed after this was asked. The chief will put it again.</p>"#;
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_changed_spec_shows_its_notice_turns_send_off_and_leaves_revise_and_reject_out() {
+async fn a_changed_spec_shows_its_notice_turns_send_off_and_leaves_revise_reject_and_relegate_out()
+{
     let service = FakeServer::start().await;
-    service.fake.set_list(vec![
-        changed(question("Q1", 2, false)),
-        question("Q2", 1, false),
-    ]);
+    service
+        .fake
+        .set_list(vec![changed(question("Q1", 2)), question("Q2", 1)]);
     let directory = TestDirectory::new();
     let server = TestServer::serve(directory.store().await, service.questions()).await;
 
@@ -1579,10 +1666,17 @@ async fn a_changed_spec_shows_its_notice_turns_send_off_and_leaves_revise_and_re
         first.contains(r#"class="send" disabled>"#),
         "Send is off: {first}"
     );
-    for absent in ["card-more", "Revise", "Reject", "note-box", "Cancel"] {
+    for absent in [
+        "card-more",
+        "Revise",
+        "Reject",
+        "Relegate",
+        "note-box",
+        "Cancel",
+        "Later",
+    ] {
         assert!(!first.contains(absent), "{absent}: {first}");
     }
-    assert!(first.contains("Later</button>"), "Later stays: {first}");
     assert!(!second.contains("Changed spec"), "{second}");
     assert!(second.contains("card-more"), "{second}");
     assert!(!first.contains("/specs/"), "no path is drawn");
@@ -1608,9 +1702,7 @@ async fn a_changed_spec_turns_done_and_ignore_off_on_instructions() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_changed_spec_goes_when_the_list_no_longer_marks_it() {
     let service = FakeServer::start().await;
-    service
-        .fake
-        .set_list(vec![changed(question("Q1", 2, false))]);
+    service.fake.set_list(vec![changed(question("Q1", 2))]);
     let directory = TestDirectory::new();
     let server = TestServer::serve(directory.store().await, service.questions()).await;
     assert!(
@@ -1623,7 +1715,7 @@ async fn a_changed_spec_goes_when_the_list_no_longer_marks_it() {
             .contains("Changed spec")
     );
 
-    let mut again = question("Q1", 3, false);
+    let mut again = question("Q1", 3);
     again.picks = vec![pick(1, "x", "")];
     service.fake.set_list(vec![again]);
     let page = server.get("/").await.text().await.unwrap();
@@ -1643,10 +1735,9 @@ async fn an_answer_refused_for_a_changed_spec_draws_the_notice_and_no_sent_line(
         Some(Status::failed_precondition("spec_changed"));
 
     // The list the answer is refused against already marks the spec as changed.
-    service.fake.set_list(vec![
-        changed(question("Q1", 2, false)),
-        instructions("I1", 3),
-    ]);
+    service
+        .fake
+        .set_list(vec![changed(question("Q1", 2)), instructions("I1", 3)]);
     let response = server
         .post("/todos/answer", "id=Q1&version=2&pick.0=a&pick.1=x")
         .await;
@@ -1689,7 +1780,7 @@ async fn a_spec_changed_refusal_keeps_its_notice_until_the_chief_puts_the_todo_a
     service.fake.0.lock().unwrap().write_refusal = None;
     service
         .fake
-        .set_list(vec![question("Q1", 3, false), instructions("I1", 3)]);
+        .set_list(vec![question("Q1", 3), instructions("I1", 3)]);
     let page = server.get("/").await.text().await.unwrap();
     assert!(!page.contains("Changed spec"), "{page}");
 }
@@ -1719,16 +1810,15 @@ async fn a_spec_changed_post_logs_its_result_and_no_todo_id() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_revise_refused_for_a_changed_spec_opens_no_note_box_and_keeps_later() {
+async fn a_note_refused_for_a_changed_spec_opens_no_note_box_and_offers_no_relegate() {
     let (service, server, _directory) = served_with_todos().await;
     service.fake.0.lock().unwrap().write_refusal =
         Some(Status::failed_precondition("spec_changed"));
-    service.fake.set_list(vec![
-        changed(question("Q1", 2, false)),
-        instructions("I1", 3),
-    ]);
+    service
+        .fake
+        .set_list(vec![changed(question("Q1", 2)), instructions("I1", 3)]);
 
-    for path in ["/todos/revise", "/todos/reject"] {
+    for path in ["/todos/revise", "/todos/reject", "/todos/relegate"] {
         let redrawn = server
             .post(path, "id=Q1&version=2&pick.0=a&note=make+it+shorter")
             .await
@@ -1743,10 +1833,7 @@ async fn a_revise_refused_for_a_changed_spec_opens_no_note_box_and_keeps_later()
             "no open mode is sent: {redrawn}"
         );
         assert!(!redrawn.contains("Cancel"), "{redrawn}");
-        assert!(
-            redrawn.contains(r#"class="later-button" data-on:click="@post('/todos/later'"#),
-            "Later stays, shown whatever the page's signals hold: {redrawn}"
-        );
+        assert!(!redrawn.contains("Relegate"), "{redrawn}");
     }
     assert!(service.fake.calls().is_empty());
 }
