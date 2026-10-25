@@ -2535,8 +2535,8 @@ mod tests {
     }
 
     /// `k` from the agent row to the question's header (the question's rows are at the
-    /// top of the list here, as no chief is named), `l` to open it, then `j` three times to `send`, for a question with
-    /// one decision of two options.
+    /// top of the list here, as no chief is named), `l` to open it, then `j` three times
+    /// to `send`, for a question with one decision of two options.
     const TO_SEND: [KeyCode; 5] = [
         KeyCode::Char('k'),
         KeyCode::Char('l'),
