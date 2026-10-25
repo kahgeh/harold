@@ -90,7 +90,7 @@ pub(crate) enum Speaker {
 /// Somewhere the chief's spoken lines can be said: a set of calls, of which one may be open.
 pub(crate) trait LineTaker: Send + Sync {
     /// Says `line` in the open call, from a blocking thread, and returns once it has ended.
-    /// `None` when no call is open (or the line is not one these calls say).
+    /// `None` when no call is open.
     fn say_blocking(&self, line: &str, by: Speaker) -> Option<bool>;
 }
 

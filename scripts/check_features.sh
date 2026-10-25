@@ -13,8 +13,8 @@ features=(imessage calls)
 log="$(mktemp)"
 trap 'rm -f "$log"' EXIT
 
-# A warning line is `warning: ...`. The linker message and the per-crate count line are not
-# compiler warnings of the code, so they do not count.
+# A warning line is `warning: ...` or, with a code, `warning[E....]: ...`. The linker message
+# and the per-crate count line are not compiler warnings of the code, so they do not count.
 warnings_in_log() {
     grep -E '^warning(\[E[0-9]+\])?: ' "$log" | grep -vE '^warning: (linker stderr|`[^`]+` \(.*\) generated [0-9]+ warnings?)'
 }
