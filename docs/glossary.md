@@ -45,6 +45,9 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 | collector | The OpenTelemetry collector at `http://localhost:4317` and `http://localhost:4318`, part of the local stack. It takes Harold's traces, logs and metrics over OTLP gRPC on 4317, and browser spans, which Harold forwards, as OTLP JSON on 4318, and stores them in ClickHouse | "ClickHouse" for where Harold sends, "exporter", "agent" for the collector |
 | local stack | The services in `~/code/sre/stack` on a Mac, which are the collector, ClickHouse and HyperDX | "SRE stack", "observability stack", "HyperDX" for the whole |
 | export, export on, export off | Harold sending to the collector, set by `[telemetry] export`, `otlp_endpoint` and `otlp_http_endpoint`. Export is on by default; `export = false` sets it off, and then Harold also leaves out the page's tracing script and drops any browser span posted to it | "telemetry on/off" for export, "disabled", "enabled", "no address", "push" |
+| machine stats | The disk, memory, swap and CPU use that Harold reads on its own machine and sends to HyperDX | "system metrics" alone, "host metrics" |
+| normal range | For one machine, metric and local hour of the day, the use from 0 to the top that Harold computes from the same hour on the last 7 days | "baseline" (that is the pane's prompt fingerprints), "threshold" (that is HyperDX's fixed limit) |
+| hourly use | The mean of one machine stat for one local hour, kept for 14 days in the hourly use file, `data/machine-hourly-use.json` | "baseline", "history" (that is a pane's history capture, or a history note) |
 | user | The person Harold works for | — |
 | phone | The user's iPhone, reached by iMessage or the web app | "away device", except in the skill name `send-message-to-away-device` |
 

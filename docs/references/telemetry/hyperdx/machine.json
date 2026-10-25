@@ -1,0 +1,143 @@
+{
+  "name": "Machine resources",
+  "tags": [
+    "harold"
+  ],
+  "tiles": [
+    {
+      "id": "disk-used-free",
+      "name": "Disk used and free (home disk)",
+      "x": 0,
+      "y": 0,
+      "w": 12,
+      "h": 6,
+      "config": {
+        "configType": "sql",
+        "displayType": "line",
+        "connectionId": "@CLICKHOUSE_CONNECTION_ID@",
+        "sourceId": "@METRICS_SOURCE_ID@",
+        "sqlTemplate": "SELECT $__timeInterval(TimeUnix) AS ts, ResourceAttributes['harold.machine'] AS machine, avgIf(Value, Attributes['state'] = 'used') AS used_bytes, avgIf(Value, Attributes['state'] = 'free') AS free_bytes FROM $__sourceTable(gauge) WHERE MetricName = 'system.filesystem.usage' AND $__timeFilter(TimeUnix) GROUP BY ts, machine ORDER BY ts"
+      }
+    },
+    {
+      "id": "disk-growth",
+      "name": "Disk growth per day, last 7 days",
+      "x": 12,
+      "y": 0,
+      "w": 12,
+      "h": 6,
+      "config": {
+        "configType": "sql",
+        "displayType": "table",
+        "connectionId": "@CLICKHOUSE_CONNECTION_ID@",
+        "sourceId": "@METRICS_SOURCE_ID@",
+        "sqlTemplate": "SELECT ResourceAttributes['harold.machine'] AS machine, (argMax(Value, TimeUnix) - argMin(Value, TimeUnix)) / greatest(dateDiff('second', min(TimeUnix), max(TimeUnix)) / 86400, 0.04) AS growth_bytes_per_day, argMax(Value, TimeUnix) AS used_bytes FROM $__sourceTable(gauge) WHERE MetricName = 'system.filesystem.usage' AND Attributes['state'] = 'used' AND TimeUnix >= now() - INTERVAL 7 DAY GROUP BY machine ORDER BY machine"
+      }
+    },
+    {
+      "id": "memory",
+      "name": "Memory use and its normal range top",
+      "x": 0,
+      "y": 6,
+      "w": 12,
+      "h": 6,
+      "config": {
+        "configType": "sql",
+        "displayType": "line",
+        "connectionId": "@CLICKHOUSE_CONNECTION_ID@",
+        "sourceId": "@METRICS_SOURCE_ID@",
+        "sqlTemplate": "SELECT $__timeInterval(TimeUnix) AS ts, ResourceAttributes['harold.machine'] AS machine, avgIf(Value, MetricName = 'system.memory.utilization') AS use, avgIf(Value, MetricName = 'harold.machine.normal_top' AND Attributes['metric'] = 'memory') AS normal_top FROM $__sourceTable(gauge) WHERE MetricName IN ('system.memory.utilization', 'harold.machine.normal_top') AND $__timeFilter(TimeUnix) AND (MetricName = 'system.memory.utilization' OR Attributes['metric'] = 'memory') GROUP BY ts, machine ORDER BY ts"
+      }
+    },
+    {
+      "id": "swap",
+      "name": "Swap in use and its normal range top",
+      "x": 12,
+      "y": 6,
+      "w": 12,
+      "h": 6,
+      "config": {
+        "configType": "sql",
+        "displayType": "line",
+        "connectionId": "@CLICKHOUSE_CONNECTION_ID@",
+        "sourceId": "@METRICS_SOURCE_ID@",
+        "sqlTemplate": "SELECT $__timeInterval(TimeUnix) AS ts, ResourceAttributes['harold.machine'] AS machine, avgIf(Value, MetricName = 'system.paging.usage') AS use, avgIf(Value, MetricName = 'harold.machine.normal_top' AND Attributes['metric'] = 'swap') AS normal_top FROM $__sourceTable(gauge) WHERE MetricName IN ('system.paging.usage', 'harold.machine.normal_top') AND $__timeFilter(TimeUnix) AND (MetricName = 'system.paging.usage' OR Attributes['metric'] = 'swap') GROUP BY ts, machine ORDER BY ts"
+      }
+    },
+    {
+      "id": "cpu",
+      "name": "CPU use and its normal range top",
+      "x": 0,
+      "y": 12,
+      "w": 12,
+      "h": 6,
+      "config": {
+        "configType": "sql",
+        "displayType": "line",
+        "connectionId": "@CLICKHOUSE_CONNECTION_ID@",
+        "sourceId": "@METRICS_SOURCE_ID@",
+        "sqlTemplate": "SELECT $__timeInterval(TimeUnix) AS ts, ResourceAttributes['harold.machine'] AS machine, avgIf(Value, MetricName = 'system.cpu.utilization') AS use, avgIf(Value, MetricName = 'harold.machine.normal_top' AND Attributes['metric'] = 'cpu') AS normal_top FROM $__sourceTable(gauge) WHERE MetricName IN ('system.cpu.utilization', 'harold.machine.normal_top') AND $__timeFilter(TimeUnix) AND (MetricName = 'system.cpu.utilization' OR Attributes['metric'] = 'cpu') GROUP BY ts, machine ORDER BY ts"
+      }
+    },
+    {
+      "id": "load",
+      "name": "Load average, 1 minute",
+      "x": 12,
+      "y": 12,
+      "w": 12,
+      "h": 6,
+      "config": {
+        "configType": "sql",
+        "displayType": "line",
+        "connectionId": "@CLICKHOUSE_CONNECTION_ID@",
+        "sourceId": "@METRICS_SOURCE_ID@",
+        "sqlTemplate": "SELECT $__timeInterval(TimeUnix) AS ts, ResourceAttributes['harold.machine'] AS machine, avg(Value) AS load_1m FROM $__sourceTable(gauge) WHERE MetricName = 'system.cpu.load_average.1m' AND $__timeFilter(TimeUnix) GROUP BY ts, machine ORDER BY ts"
+      }
+    },
+    {
+      "id": "past-normal",
+      "name": "Past the normal range, by metric",
+      "x": 0,
+      "y": 18,
+      "w": 12,
+      "h": 6,
+      "config": {
+        "configType": "sql",
+        "displayType": "line",
+        "connectionId": "@CLICKHOUSE_CONNECTION_ID@",
+        "sourceId": "@METRICS_SOURCE_ID@",
+        "sqlTemplate": "SELECT $__timeInterval(TimeUnix) AS ts, concat(ResourceAttributes['harold.machine'], ' ', Attributes['metric']) AS series, max(Value) AS past_normal FROM $__sourceTable(gauge) WHERE MetricName = 'harold.machine.past_normal' AND $__timeFilter(TimeUnix) GROUP BY ts, series ORDER BY ts"
+      }
+    },
+    {
+      "id": "harold-itself",
+      "name": "Harold's own memory and CPU",
+      "x": 12,
+      "y": 18,
+      "w": 12,
+      "h": 6,
+      "config": {
+        "configType": "sql",
+        "displayType": "line",
+        "connectionId": "@CLICKHOUSE_CONNECTION_ID@",
+        "sourceId": "@METRICS_SOURCE_ID@",
+        "sqlTemplate": "SELECT $__timeInterval(TimeUnix) AS ts, ResourceAttributes['harold.machine'] AS machine, avgIf(Value, MetricName = 'process.memory.usage') AS memory_bytes, avgIf(Value, MetricName = 'process.cpu.utilization') AS cpu FROM $__sourceTable(gauge) WHERE MetricName IN ('process.memory.usage', 'process.cpu.utilization') AND $__timeFilter(TimeUnix) GROUP BY ts, machine ORDER BY ts"
+      }
+    },
+    {
+      "id": "reading-p95",
+      "name": "Machine stats reading p95",
+      "x": 0,
+      "y": 24,
+      "w": 12,
+      "h": 6,
+      "config": {
+        "configType": "sql",
+        "displayType": "line",
+        "connectionId": "@CLICKHOUSE_CONNECTION_ID@",
+        "sourceId": "@TRACES_SOURCE_ID@",
+        "sqlTemplate": "SELECT $__timeInterval(Timestamp) AS ts, ResourceAttributes['harold.machine'] AS machine, quantile(0.95)(Duration) / 1000000 AS p95_ms FROM $__sourceTable WHERE ServiceName = 'harold' AND SpanName = 'harold.machine_stats' AND $__timeFilter(Timestamp) GROUP BY ts, machine ORDER BY ts"
+      }
+    }
+  ]
+}

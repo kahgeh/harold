@@ -219,6 +219,12 @@ pub(crate) const ALLOWED_FIELDS: &[&str] = &[
     "schema_steps",
     "records",
     "voided",
+    "metric",
+    "value",
+    "normal_top",
+    "days",
+    "top_processes",
+    "minutes",
 ];
 
 /// How long shutting the exporters down may take in all.
@@ -1741,11 +1747,21 @@ impl Pipeline {
 /// Stops one provider.
 type ProviderStop = Box<dyn FnOnce() + Send>;
 
-/// What every export carries: the service and the Mac it runs on.
+/// The `os.type` of this machine: `darwin` or `linux`.
+fn os_type() -> &'static str {
+    match std::env::consts::OS {
+        "macos" => "darwin",
+        other => other,
+    }
+}
+
+/// What every export carries: the service, the machine it runs on and that machine's
+/// operating system.
 fn resource(machine: &str) -> Resource {
     Resource::builder()
         .with_service_name("harold")
         .with_attribute(KeyValue::new("harold.machine", machine.to_string()))
+        .with_attribute(KeyValue::new("os.type", os_type()))
         .build()
 }
 

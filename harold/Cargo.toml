@@ -51,6 +51,7 @@ jwt-simple = { version = "=0.12.16", default-features = false, features = ["pure
 askama = { version = "=0.14.0", default-features = false, features = ["derive", "std"] }
 datastar = { version = "=0.3.1", default-features = false, features = ["axum"] }
 openssl = { version = "=0.10.75", features = ["vendored"] }
+sysinfo = { version = "=0.35.2", default-features = false, features = ["disk", "system"] }
 
 [dev-dependencies]
 tokio = { version = "1.49.0", features = ["test-util"] }

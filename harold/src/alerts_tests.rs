@@ -103,7 +103,7 @@ fn known_alerts_make_the_exact_line() {
 }
 
 #[test]
-fn the_five_alerts_are_the_ones_in_the_specs() {
+fn the_seven_alerts_are_the_ones_in_the_specs() {
     assert_eq!(
         ALERT_NAMES,
         [
@@ -111,7 +111,9 @@ fn the_five_alerts_are_the_ones_in_the_specs() {
             "phone-request-slow",
             "wrong-agent",
             "slot-idle",
-            "watch-cost-high"
+            "watch-cost-high",
+            "machine-past-normal",
+            "disk-low"
         ]
     );
     // The local model is gone, and so is its alert.
@@ -365,6 +367,25 @@ async fn firing_cleared_firing_type_three_lines() {
         texts(&fake),
         [SLOT_IDLE_FIRING, SLOT_IDLE_CLEARED, SLOT_IDLE_FIRING]
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_machine_alerts_type_a_firing_and_one_cleared() {
+    for name in ["machine-past-normal", "disk-low"] {
+        let fake = idle_chief();
+        let (queue, _shutdown_tx, _handle) = deliver_to(&fake, Some(CHIEF));
+        let firing = alert_line(format!(r#"{{"alert":"{name}","state":"firing"}}"#).as_bytes())
+            .expect("a posted firing is accepted");
+        let cleared = alert_line(format!(r#"{{"alert":"{name}","state":"cleared"}}"#).as_bytes())
+            .expect("a posted cleared is accepted");
+        // HyperDX posts firing again in every window, and cleared once.
+        for line in [&firing, &firing, &cleared, &cleared] {
+            queue.send(line.clone()).await.unwrap();
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            busy_then_idle(&fake).await;
+        }
+        assert_eq!(texts(&fake), [firing, cleared], "{name}");
+    }
 }
 
 #[tokio::test(start_paused = true)]

@@ -1,6 +1,6 @@
 # Telemetry
 
-Harold can send its traces, logs and metrics to an OpenTelemetry collector, so they show in the local HyperDX. The data answers two questions: how the pods are moving, and whether a reply from the phone reaches the agent it was meant for. Six HyperDX alerts come back to Harold, which types them into the chief's pane.
+Harold can send its traces, logs and metrics to an OpenTelemetry collector, so they show in the local HyperDX. The data answers two questions: how the pods are moving, and whether a reply from the phone reaches the agent it was meant for. Seven HyperDX alerts come back to Harold, which types them into the chief's pane.
 
 With `export = false`, Harold works and logs exactly as before.
 
@@ -315,6 +315,7 @@ Metrics are sent every 30 seconds. Every metric also carries `harold.machine`.
 | `pod.agents` | gauge, `{agent}` | `role` (`chief`, `pnem`, `pod_coordination`, `build_worker`, `other`), `pod.product` for the pod roles |
 | `watch.runs` | counter, `{run}` | `folder`, `outcome` (`quiet`, `report`, `skipped`, or a failure reason: `timeout`, `process_failed`, `run_budget_reached`, `unreadable_answer`, `skill_missing`, `max_turns_reached`) |
 | `watch.cost_usd` | counter, `USD` | `folder` |
+| `system.*`, `process.*`, `harold.machine.normal_top`, `harold.machine.past_normal` | gauges | see [Machine stats](#machine-stats) |
 
 `pod.specs` reports every state of every product, 0 included, so a card can read 0. `pod.pods` reports both states of every registered product, and `pod.agents` reports every pod role of every product, 0 included.
 
@@ -563,6 +564,40 @@ Two limits remain:
 - A series whose previous point is older than the lookback counts from 0. After a restart that is right, because the counter starts again at 0. If the collector was unreachable for longer than the lookback while Harold kept running, the rise during the outage is counted when export resumes.
 - The builder panel "Phone requests reaching the right agent" and the two counter alerts, `phone-request-unavailable` and `wrong-agent`, still use HyperDX's reading. They depend on the counting from 0 above.
 
+## Machine stats
+
+Harold reads its own machine every 60 seconds (the `sysinfo` crate) and sends the readings as gauges. They are in every build and need no feature. The export carries `harold.machine` and `os.type` (`darwin` or `linux`) on the resource, so the "Machine resources" dashboard groups by machine. A reading is a `harold.machine_stats` span with `result` (`ok` or `failed`). A reading that fails logs the warn line `machine stats failed` with `reason`. The machine gauges then send no point for that minute. `harold.machine.past_normal` and `harold.machine.normal_top` keep their last value.
+
+| Gauge | Unit | Attributes |
+|---|---|---|
+| `system.filesystem.usage` | bytes | `volume` = `home`, `state` = `used` or `free` |
+| `system.filesystem.utilization` | 0 to 1 | `volume` = `home` |
+| `system.memory.usage` | bytes | `state` = `used` or `free` |
+| `system.memory.utilization` | 0 to 1 | |
+| `system.paging.usage` | bytes (swap in use) | |
+| `system.cpu.utilization` | 0 to 1, all cores | |
+| `system.cpu.load_average.1m` | threads | |
+| `process.memory.usage` | bytes (Harold itself) | |
+| `process.cpu.utilization` | 0 to 1, all cores (Harold itself) | |
+| `harold.machine.normal_top` | the metric's unit: a share for memory and CPU, bytes for swap | `metric` = `memory`, `swap` or `cpu` |
+| `harold.machine.past_normal` | 1 or 0 | `metric` = `memory`, `swap` or `cpu` |
+
+The disk is the one that holds the home folder. No path is sent.
+
+**The normal range.** HyperDX 2.40 has no normal range: an alert has a fixed `threshold`. So Harold computes the normal range and HyperDX alerts on the 0-or-1 gauge `harold.machine.past_normal`.
+
+- Harold keeps the **hourly use**, the mean of each metric for each local hour, for the last 14 days (336 hours), in `<harold's folder>/data/machine-hourly-use.json` (mode 0600, written through a rename). It writes the file once an hour, when a local hour ends. When Harold starts, it reads the file and drops the means older than 14 days. A file that is missing starts empty. A file that cannot be read starts empty too, after the warn line `machine stats failed` with `reason` = `hourly_use_unreadable`. A file that cannot be written logs `reason` = `hourly_use_unwritable`.
+- The hour is the machine's local hour. On the day the clocks go forward, the skipped hour has no mean, and that hour then has 6 of 7 days. On the day the clocks go back, the hour that occurs twice gets one mean of both.
+- For the current hour of the day, the top of the normal range is the median of that hour's means on the last 7 days plus 3 times their median absolute deviation. It is at least the median plus a floor: 10 percentage points of memory or CPU, and 1 GB of swap.
+- With fewer than 5 of the 7 days, nothing is judged for that metric at that hour. On a new machine `machine-past-normal` cannot fire for about the first 5 days.
+- Every 60 seconds Harold compares the mean of the last 15 minutes with the top. `past_normal` changes to 1 at the first comparison where the mean is over the top, and back to 0 at the first comparison where it is at or under the top, or where the hour cannot be judged. A failed reading changes nothing.
+- When `past_normal` changes to 1, Harold logs the warn line `machine use past normal` with `metric`, `value`, `normal_top`, `days` and `top_processes` (3 process names with their share, no arguments or paths). Swap has no use for each process in `sysinfo`, so for swap the processes are the 3 largest in memory. When it changes back, Harold logs the info line `machine use back to normal` with `metric` and `minutes`.
+- Disk use has no normal range. `disk-low` alone alerts on it, and a dashboard card shows its growth per day.
+
+**When the alerts clear.** HyperDX 2.40 reduces a gauge to its last sample in each 15-minute window and posts `resolved` at the first check whose window is back under the threshold. `machine-past-normal` clears about 15 to 30 minutes after the last machine's `past_normal` goes back to 0. `disk-low` clears about 15 to 30 minutes after every home disk is under 90%. Both alerts are not grouped, because Harold's alert address keeps one state for each alert name: a grouped alert could clear for one machine while another is still past, and the chief would hear `cleared` too early. Harold types `harold alert: <name> cleared` once for each spell, by the rule in [How an alert reaches the chief](#how-an-alert-reaches-the-chief).
+
+**The dashboard.** `machine.json` is the "Machine resources" dashboard. It has no filters. Its tiles are: disk used and free, disk growth per day, memory, swap and CPU use drawn with `harold.machine.normal_top`, load average, `past_normal` by machine and metric, Harold's own memory and CPU, and "Machine stats reading p95" (the aim is under 50 ms).
+
 ## The alerts
 
 | Alert | Fires when | HyperDX definition |
@@ -572,6 +607,8 @@ Two limits remain:
 | `wrong-agent` | A request is counted as wrong | sum of `harold.phone_requests.wrong` above 0, every 5 minutes |
 | `slot-idle` | A slot is free for more than 2 hours in a row between 08:00 and 23:00 local | for each product, the last sample of each 15-minute window has at least 1 slot free, for 8 windows in a row |
 | `watch-cost-high` | Watches spent more than $1.00 in a day. Severity: warn. Action: the chief stops or tunes the watch (`harold tool watch list` shows the spend; `watch.cost_usd` by `folder` names the folder, and the `harold.watch.run` spans with the highest `cost_usd` name the watch and run). Expected firing rate: rarely. No budget ships, so this is the only spending signal until the user sets one | sum of `watch.cost_usd` above 1.00, over 1 day |
+| `machine-past-normal` | Memory, swap or CPU use stayed past the normal range of its machine and local hour for 30 minutes. Severity: warn. Action: open the "Machine resources" dashboard, find the metric, and stop or fix the process that the `machine use past normal` line names. Expected rate: about 1 a week at most, by machine and metric (a guess until the first review) | `max` of `harold.machine.past_normal` over every machine and metric, not grouped, with `threshold` 1 and `thresholdType` `above`, every 15 minutes, for 2 windows in a row |
+| `disk-low` | A home disk was 90% full or more for 30 minutes. Severity: warn. Action: look today, then free space. Expected rate: 0 a month on the Mac, whose home disk was 56% full on 25 October | `max` of `system.filesystem.utilization` over every machine, not grouped, above 0.9, every 15 minutes, for 2 windows in a row |
 
 Their basis is the period the spec drew, 11 to 15 October:
 
@@ -657,7 +694,7 @@ When the port is taken at start, Harold logs `alert address unavailable` (`reaso
 
 Harold answers:
 
-- `204` for a post naming one of the five alerts with state `firing` or `cleared`. It then types exactly `harold alert: <name> <state>` into the chief's pane: the first agent pane of the chief's tmux session in the folder `[notify] chief` matches.
+- `204` for a post naming one of the seven alerts with state `firing` or `cleared`. It then types exactly `harold alert: <name> <state>` into the chief's pane: the first agent pane of the chief's tmux session in the folder `[notify] chief` matches.
 - `400` for anything else, including another path or method. It logs `alert ignored (unknown alert)` and types nothing.
 
 Harold also types lines of its own the same way. The first is `harold alert: delivery-given-up firing`, when it gives up a delivery after 10 failed tries (see the [notification reference](../notification/README.md#architecture)). It carries no message text. It is typed only when `alert_listen` is set and the address opened, with the checks below, as a posted line is. A post naming `delivery-given-up` is answered `400`.
@@ -765,7 +802,7 @@ Run them from the repository root.
 **Create** the dashboards:
 
 ```sh
-for file in dashboard.json trends.json; do
+for file in dashboard.json trends.json machine.json; do
   fill "$file" | hdx -X POST "$HYPERDX_URL/api/v2/dashboards/validate" --data-binary @-   # HyperDX's own check
   fill "$file" | hdx -X POST "$HYPERDX_URL/api/v2/dashboards" --data-binary @- | jq -r '.data.id // .id'
 done
@@ -774,7 +811,7 @@ done
 Then create each alert's webhook and the alert pointing at it. A webhook that already exists is reused. An alert that already exists is left for the update commands, so a second run creates nothing:
 
 ```sh
-for name in phone-request-unavailable phone-request-slow wrong-agent slot-idle watch-cost-high; do
+for name in phone-request-unavailable phone-request-slow wrong-agent slot-idle watch-cost-high machine-past-normal disk-low; do
   WEBHOOK_ID=$(webhook_id "harold-alerts-$name") || break
   if [ -z "$WEBHOOK_ID" ]; then
     WEBHOOK_ID=$(fill "webhook-$name.json" | hdx -X POST "$HYPERDX_URL/api/v2/webhooks" --data-binary @- | jq -r '.data.id // .id')
@@ -797,14 +834,15 @@ fill dashboard.json \
   | jq --argjson old "$old" '.filters |= map(. as $filter | ([$old.filters[] | select(.name == $filter.name) | .id][0]) as $id | if $id then .id = $id else . end)' \
   | hdx -X PUT "$HYPERDX_URL/api/v2/dashboards/$(echo "$old" | jq -r .id)" --data-binary @-
 
-# "Harold trends" has no filters.
+# "Harold trends" and "Machine resources" have no filters.
 fill trends.json | hdx -X PUT "$HYPERDX_URL/api/v2/dashboards/$(dashboard "Harold trends" | jq -r .id)" --data-binary @-
+fill machine.json | hdx -X PUT "$HYPERDX_URL/api/v2/dashboards/$(dashboard "Machine resources" | jq -r .id)" --data-binary @-
 ```
 
 Then update each alert's webhook and the alert. The loop looks up both ids before it sends either PUT, and stops at the first name whose webhook or alert is missing or is named twice:
 
 ```sh
-for name in phone-request-unavailable phone-request-slow wrong-agent slot-idle watch-cost-high; do
+for name in phone-request-unavailable phone-request-slow wrong-agent slot-idle watch-cost-high machine-past-normal disk-low; do
   WEBHOOK_ID=$(webhook_id "harold-alerts-$name") || break
   [ -n "$WEBHOOK_ID" ] || { echo "no webhook harold-alerts-$name: create it first" >&2; break; }
   id=$(alert_id "$name") || break
@@ -817,7 +855,7 @@ done
 A HyperDX set up from the earlier single-webhook files has one webhook named `harold-alerts` and none of the per-alert ones. Create them with this loop, which skips any that already exist, then run the update loop above:
 
 ```sh
-for name in phone-request-unavailable phone-request-slow wrong-agent slot-idle watch-cost-high; do
+for name in phone-request-unavailable phone-request-slow wrong-agent slot-idle watch-cost-high machine-past-normal disk-low; do
   WEBHOOK_ID=$(webhook_id "harold-alerts-$name") || break
   [ -z "$WEBHOOK_ID" ] || continue
   fill "webhook-$name.json" | hdx -X POST "$HYPERDX_URL/api/v2/webhooks" --data-binary @- | jq -r '.data.id // .id'
@@ -864,4 +902,5 @@ The definitions were written from HyperDX 2.40's API source and the local stack'
 - each alert firing in HyperDX as its file says;
 - the counting from 0 at start reaching HyperDX as a first point of 0;
 - the stack's containers reaching Harold's alert address, and each webhook's body arriving as written;
-- the hooks' new fields on the installed agents.
+- the hooks' new fields on the installed agents;
+- the machine stats: the alert firing rate, the floors of the normal range, the readings on the Omarchy machine, and the time from use back under the top to `cleared`.

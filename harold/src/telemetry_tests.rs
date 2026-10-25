@@ -305,6 +305,27 @@ fn every_export_carries_the_service_and_machine() {
         attribute("harold.machine").as_deref(),
         Some(test_support::MACHINE)
     );
+    let expected = if cfg!(target_os = "macos") {
+        "darwin"
+    } else {
+        "linux"
+    };
+    assert_eq!(attribute("os.type").as_deref(), Some(expected));
+}
+
+#[test]
+fn the_machine_stats_fields_are_allowed() {
+    for field in [
+        "metric",
+        "value",
+        "normal_top",
+        "days",
+        "top_processes",
+        "minutes",
+        "reason",
+    ] {
+        assert!(ALLOWED_FIELDS.contains(&field), "{field}");
+    }
 }
 
 #[test]
@@ -1744,6 +1765,17 @@ async fn a_reply_is_kept_open_before_it_is_stored_and_dropped_if_it_is_not() {
 
 /// The spec's Metrics table.
 const METRICS: &[&str] = &[
+    "system.filesystem.usage",
+    "system.filesystem.utilization",
+    "system.memory.usage",
+    "system.memory.utilization",
+    "system.paging.usage",
+    "system.cpu.utilization",
+    "system.cpu.load_average.1m",
+    "process.memory.usage",
+    "process.cpu.utilization",
+    "harold.machine.normal_top",
+    "harold.machine.past_normal",
     "harold.app_spans.not_forwarded",
     "pod.slots.busy",
     "pod.slots.free",
@@ -1775,6 +1807,7 @@ const ATTRIBUTES: &[&str] = &[
     "caller",
     "route",
     "hidden_reported",
+    "metric",
     "exception.type",
     "code.filepath",
     "harold.opened_at",
@@ -1821,6 +1854,7 @@ const ATTRIBUTES: &[&str] = &[
 const SPANS: &[&str] = &[
     "harold.tts.speak",
     "harold.knowledge.graph_rebuild",
+    "harold.machine_stats",
     "browser.error",
     "harold.phone_request",
     "harold.route",
@@ -2020,11 +2054,14 @@ fn strings_in(value: &serde_json::Value, out: &mut Vec<String>) {
 /// The dotted names starting `pod.` or `harold.` in `text`, such as `pod.slots.free` in
 /// `MetricName = 'pod.slots.free'`.
 fn dotted_names(text: &str) -> Vec<String> {
-    let is_name_char = |c: char| c.is_ascii_lowercase() || c == '_' || c == '.';
+    let is_name_char =
+        |c: char| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '.';
     let mut names = Vec::new();
     for (start, _) in text.char_indices() {
         let rest = &text[start..];
-        if !(rest.starts_with("pod.") || rest.starts_with("harold.") || rest.starts_with("watch."))
+        if !["pod.", "harold.", "watch.", "system.", "process."]
+            .iter()
+            .any(|prefix| rest.starts_with(prefix))
         {
             continue;
         }
@@ -2081,13 +2118,18 @@ fn every_definition_is_valid_json_naming_only_known_metrics_and_attributes() {
     assert_eq!(
         files,
         [
+            "alert-disk-low.json",
+            "alert-machine-past-normal.json",
             "alert-phone-request-slow.json",
             "alert-phone-request-unavailable.json",
             "alert-slot-idle.json",
             "alert-watch-cost-high.json",
             "alert-wrong-agent.json",
             "dashboard.json",
+            "machine.json",
             "trends.json",
+            "webhook-disk-low.json",
+            "webhook-machine-past-normal.json",
             "webhook-phone-request-slow.json",
             "webhook-phone-request-unavailable.json",
             "webhook-slot-idle.json",
@@ -2678,6 +2720,24 @@ fn the_alert_files_carry_the_spec_thresholds() {
             "above_exclusive",
             1440,
         ),
+        (
+            "machine-past-normal",
+            METRICS_SOURCE,
+            "harold.machine.past_normal",
+            "max",
+            1.0,
+            "above",
+            30,
+        ),
+        (
+            "disk-low",
+            METRICS_SOURCE,
+            "system.filesystem.utilization",
+            "max",
+            0.9,
+            "above",
+            30,
+        ),
     ];
     assert_eq!(
         expected.map(|(name, ..)| name),
@@ -2741,6 +2801,131 @@ fn the_alert_files_carry_the_spec_thresholds() {
     );
     assert_eq!(config("wrong-agent")["select"][0]["where"], "");
     assert_eq!(config("slot-idle")["groupBy"], "Attributes['pod.product']");
+}
+
+#[test]
+fn the_machine_dashboard_shows_each_machine_and_its_normal_range() {
+    let dashboard = definition("machine.json");
+    assert_eq!(dashboard["name"], "Machine resources");
+    assert_eq!(dashboard["tags"], serde_json::json!(["harold"]));
+    assert_eq!(
+        tile_names(&dashboard),
+        [
+            "Disk used and free (home disk)",
+            "Disk growth per day, last 7 days",
+            "Memory use and its normal range top",
+            "Swap in use and its normal range top",
+            "CPU use and its normal range top",
+            "Load average, 1 minute",
+            "Past the normal range, by metric",
+            "Harold's own memory and CPU",
+            "Machine stats reading p95",
+        ]
+    );
+    for tile in tiles(&dashboard) {
+        let name = tile["name"].as_str().unwrap();
+        let config = &tile["config"];
+        assert_eq!(config["configType"], "sql", "{name}");
+        assert_eq!(
+            config["connectionId"], "@CLICKHOUSE_CONNECTION_ID@",
+            "{name}"
+        );
+        let sql = config["sqlTemplate"].as_str().unwrap();
+        // Every tile groups by machine, and none uses the counter rule.
+        assert!(
+            sql.contains("ResourceAttributes['harold.machine']"),
+            "{name}: {sql}"
+        );
+        assert!(!sql.contains("rise"), "{name}: {sql}");
+    }
+    let sql_of = |name: &str| {
+        let tile = tiles(&dashboard)
+            .iter()
+            .find(|tile| tile["name"] == name)
+            .unwrap();
+        tile["config"]["sqlTemplate"].as_str().unwrap().to_owned()
+    };
+    for (card, use_metric, metric) in [
+        (
+            "Memory use and its normal range top",
+            "system.memory.utilization",
+            "memory",
+        ),
+        (
+            "Swap in use and its normal range top",
+            "system.paging.usage",
+            "swap",
+        ),
+        (
+            "CPU use and its normal range top",
+            "system.cpu.utilization",
+            "cpu",
+        ),
+    ] {
+        let sql = sql_of(card);
+        for piece in [
+            format!("MetricName = '{use_metric}'"),
+            "MetricName = 'harold.machine.normal_top'".to_owned(),
+            format!("Attributes['metric'] = '{metric}'"),
+            "FROM $__sourceTable(gauge)".to_owned(),
+        ] {
+            assert!(sql.contains(&piece), "{card} must have {piece}: {sql}");
+        }
+    }
+    let disk = sql_of("Disk used and free (home disk)");
+    assert!(disk.contains("system.filesystem.usage"), "{disk}");
+    assert!(disk.contains("Attributes['state'] = 'used'"), "{disk}");
+    assert!(disk.contains("Attributes['state'] = 'free'"), "{disk}");
+    let growth = sql_of("Disk growth per day, last 7 days");
+    assert!(growth.contains("INTERVAL 7 DAY"), "{growth}");
+    assert!(growth.contains("growth_bytes_per_day"), "{growth}");
+    let past = sql_of("Past the normal range, by metric");
+    assert!(past.contains("harold.machine.past_normal"), "{past}");
+    assert!(past.contains("Attributes['metric']"), "{past}");
+    let own = sql_of("Harold's own memory and CPU");
+    assert!(own.contains("process.memory.usage"), "{own}");
+    assert!(own.contains("process.cpu.utilization"), "{own}");
+    let reading = tiles(&dashboard).last().unwrap();
+    assert_eq!(reading["config"]["sourceId"], "@TRACES_SOURCE_ID@");
+    let sql = reading["config"]["sqlTemplate"].as_str().unwrap();
+    assert!(sql.contains("SpanName = 'harold.machine_stats'"), "{sql}");
+    assert!(sql.contains("quantile(0.95)(Duration)"), "{sql}");
+    // Only the placeholders the README fills.
+    let mut texts = Vec::new();
+    strings_in(&dashboard, &mut texts);
+    for text in texts.iter().filter(|text| text.contains('@')) {
+        assert!(
+            [
+                "@CLICKHOUSE_CONNECTION_ID@",
+                "@METRICS_SOURCE_ID@",
+                "@TRACES_SOURCE_ID@"
+            ]
+            .contains(&text.as_str()),
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn the_two_machine_alerts_have_no_group_by() {
+    // Harold's alert address keeps one state for each alert name, so a grouped alert could
+    // clear for one machine while another is still past.
+    for name in ["machine-past-normal", "disk-low"] {
+        let alert = definition(&format!("alert-{name}.json"));
+        let config = &alert["chartConfig"];
+        assert!(
+            config
+                .get("groupBy")
+                .is_none_or(|group| group.is_null() || group == ""),
+            "{name} is grouped"
+        );
+        assert_eq!(alert["interval"], "15m", "{name}");
+        assert_eq!(alert["numConsecutiveWindows"], 2, "{name}");
+        assert_eq!(config["select"][0]["metricType"], "gauge", "{name}");
+        assert_eq!(config["select"][0]["where"], "", "{name}");
+    }
+    // The other alerts keep what they had.
+    assert!(definition("alert-slot-idle.json")["chartConfig"]["groupBy"].is_string());
 }
 
 #[test]
@@ -2996,8 +3181,8 @@ fn create_alerts() -> String {
 fn the_create_loop_makes_each_alert_with_its_own_webhook() {
     let stand_in = StandIn::new();
     let stderr = stand_in.run(&create_alerts());
-    assert_eq!(stand_in.objects("webhooks").len(), 5, "{stderr}");
-    assert_eq!(stand_in.objects("alerts").len(), 5, "{stderr}");
+    assert_eq!(stand_in.objects("webhooks").len(), 7, "{stderr}");
+    assert_eq!(stand_in.objects("alerts").len(), 7, "{stderr}");
     for name in crate::alerts::ALERT_NAMES {
         let webhook = stand_in.only("webhooks", &format!("harold-alerts-{name}"));
         let alert = stand_in.only("alerts", name);
@@ -3011,8 +3196,8 @@ fn the_create_loop_run_twice_makes_nothing_new() {
     stand_in.run(&create_alerts());
     stand_in.forget_calls();
     let stderr = stand_in.run(&create_alerts());
-    assert_eq!(stand_in.objects("webhooks").len(), 5, "{stderr}");
-    assert_eq!(stand_in.objects("alerts").len(), 5, "{stderr}");
+    assert_eq!(stand_in.objects("webhooks").len(), 7, "{stderr}");
+    assert_eq!(stand_in.objects("alerts").len(), 7, "{stderr}");
     for name in crate::alerts::ALERT_NAMES {
         assert!(
             stderr.contains(&format!(
@@ -3188,8 +3373,8 @@ done"#,
         .map(|name| stand_in.only("webhooks", &format!("harold-alerts-{name}"))["id"].clone());
     stand_in.forget_calls();
     let stderr = stand_in.run(&readme_block("A HyperDX set up from the earlier"));
-    // The old webhook, the two kept, and the three created.
-    assert_eq!(stand_in.objects("webhooks").len(), 6, "{stderr}");
+    // The old webhook, the two kept, and the five created.
+    assert_eq!(stand_in.objects("webhooks").len(), 8, "{stderr}");
     for name in crate::alerts::ALERT_NAMES {
         stand_in.only("webhooks", &format!("harold-alerts-{name}"));
     }
@@ -3199,7 +3384,7 @@ done"#,
     }
     let calls = stand_in.calls();
     let posts = calls.iter().filter(|call| call.starts_with("POST")).count();
-    assert_eq!(posts, 3, "{calls:?}");
+    assert_eq!(posts, 5, "{calls:?}");
 }
 
 #[test]
@@ -3541,7 +3726,7 @@ impl StandIn {
 fn applied() -> StandIn {
     let stand_in = StandIn::new();
     let stderr = stand_in.run(&create_alerts());
-    assert_eq!(stand_in.objects("alerts").len(), 5, "{stderr}");
+    assert_eq!(stand_in.objects("alerts").len(), 7, "{stderr}");
     stand_in
 }
 
@@ -3550,7 +3735,7 @@ fn the_check_passes_after_the_create_loop() {
     let stand_in = applied();
     let result = stand_in.check(&[]);
     assert_eq!(result.code, 0, "{} {}", result.stdout, result.stderr);
-    assert_eq!(result.stdout, "check_hyperdx_alerts: ok, 5 alerts\n");
+    assert_eq!(result.stdout, "check_hyperdx_alerts: ok, 7 alerts\n");
     let key_seen = std::fs::read_to_string(stand_in.store.join("key_seen")).unwrap();
     assert!(
         key_seen.contains(CHECK_KEY),

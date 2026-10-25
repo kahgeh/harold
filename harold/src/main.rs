@@ -8,6 +8,7 @@ mod cli;
 mod crash_guard;
 mod inbound;
 mod log_trim;
+mod machine_stats;
 mod outbound;
 mod pod_stats;
 mod projector;
@@ -1355,9 +1356,11 @@ fn mark_clean(guard: crash_guard::CrashGuard) {
     }
 }
 
-/// The pod facts and the alert address, each started only when its `[telemetry]` key is
-/// set. With neither set, nothing starts: no `git` command runs and no address is opened.
+/// The machine stats, the pod facts and the alert address, each started only when its
+/// `[telemetry]` key is set. With none set, nothing starts: no machine is read, no `git`
+/// command runs and no address is opened.
 struct TelemetryTasks {
+    machine_stats: Option<tokio::task::JoinHandle<()>>,
     pod_stats: Option<tokio::task::JoinHandle<()>>,
     alerts: Option<tokio::task::JoinHandle<()>>,
     alert_queue: Option<alerts::AlertQueue>,
@@ -1366,6 +1369,9 @@ struct TelemetryTasks {
 impl TelemetryTasks {
     /// Waits for the pod facts and the alert address to stop, after shutdown.
     async fn stopped(self) {
+        if let Some(handle) = self.machine_stats {
+            let _ = handle.await;
+        }
         if let Some(handle) = self.pod_stats {
             let _ = handle.await;
         }
@@ -1383,6 +1389,14 @@ async fn start_telemetry_tasks(
     snapshots: &agent::snapshot::AgentSnapshotHub,
     shutdown_rx: &watch::Receiver<()>,
 ) -> TelemetryTasks {
+    // The machine stats are read only when the telemetry is exported: nothing else reads them.
+    let machine_stats =
+        (cfg.telemetry.export && cfg.telemetry.otlp_endpoint.is_some()).then(|| {
+            machine_stats::start(
+                machine_stats::hourly_use_file(std::path::Path::new(&cfg.store.resolved_path())),
+                shutdown_rx.clone(),
+            )
+        });
     // The pod facts are read only when the chief's registry is named.
     let pod_stats = cfg.telemetry.pod_registry_path().map(|registry| {
         pod_stats::start(
@@ -1416,6 +1430,7 @@ async fn start_telemetry_tasks(
         None => (None, None),
     };
     TelemetryTasks {
+        machine_stats,
         pod_stats,
         alerts,
         alert_queue,

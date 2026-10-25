@@ -1,0 +1,32 @@
+{
+  "name": "disk-low",
+  "note": "disk-low",
+  "message": "A home disk has been 90% full or more for 30 minutes.",
+  "source": "inline",
+  "chartConfig": {
+    "name": "disk-low",
+    "displayType": "line",
+    "sourceId": "@METRICS_SOURCE_ID@",
+    "select": [
+      {
+        "aggFn": "max",
+        "valueExpression": "Value",
+        "metricName": "system.filesystem.utilization",
+        "metricType": "gauge",
+        "where": "",
+        "whereLanguage": "sql"
+      }
+    ]
+  },
+  "threshold": 0.9,
+  "thresholdType": "above",
+  "interval": "15m",
+  "numConsecutiveWindows": 2,
+  "channel": {
+    "type": "webhook",
+    "webhookId": "@WEBHOOK_ID@"
+  },
+  "tags": [
+    "harold"
+  ]
+}

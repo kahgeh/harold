@@ -1,0 +1,32 @@
+{
+  "name": "machine-past-normal",
+  "note": "machine-past-normal",
+  "message": "Memory, swap or CPU use has been past its normal range on a machine for 30 minutes.",
+  "source": "inline",
+  "chartConfig": {
+    "name": "machine-past-normal",
+    "displayType": "line",
+    "sourceId": "@METRICS_SOURCE_ID@",
+    "select": [
+      {
+        "aggFn": "max",
+        "valueExpression": "Value",
+        "metricName": "harold.machine.past_normal",
+        "metricType": "gauge",
+        "where": "",
+        "whereLanguage": "sql"
+      }
+    ]
+  },
+  "threshold": 1,
+  "thresholdType": "above",
+  "interval": "15m",
+  "numConsecutiveWindows": 2,
+  "channel": {
+    "type": "webhook",
+    "webhookId": "@WEBHOOK_ID@"
+  },
+  "tags": [
+    "harold"
+  ]
+}

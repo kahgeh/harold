@@ -2115,12 +2115,17 @@ async fn with_export_off_nothing_is_opened_or_run() {
     assert!(!guard.exporting(), "no export pipeline is built");
     assert!(build_failed.is_none());
 
-    let (_shutdown_tx, shutdown_rx) = watch::channel(());
+    let (shutdown_tx, shutdown_rx) = watch::channel(());
     let tasks =
         super::start_telemetry_tasks(&cfg, &AgentSnapshotHub::new(empty_snapshot()), &shutdown_rx)
             .await;
+    assert!(
+        tasks.machine_stats.is_none(),
+        "export off, so no machine read"
+    );
     assert!(tasks.pod_stats.is_none(), "no pod facts, so no git command");
     assert!(tasks.alerts.is_none(), "no alert address");
+    drop(shutdown_tx);
     tasks.stopped().await;
     guard.shutdown().await;
 }
@@ -2133,7 +2138,7 @@ async fn a_taken_alert_address_logs_a_warning_and_harold_runs_without_it() {
         crate::settings::settings_with(&format!("[telemetry]\nalert_listen = \"{address}\"\n"));
     let logs = crate::outbound::fake::CapturedLogs::start();
 
-    let (_shutdown_tx, shutdown_rx) = watch::channel(());
+    let (shutdown_tx, shutdown_rx) = watch::channel(());
     let tasks =
         super::start_telemetry_tasks(&cfg, &AgentSnapshotHub::new(empty_snapshot()), &shutdown_rx)
             .await;
@@ -2146,6 +2151,7 @@ async fn a_taken_alert_address_logs_a_warning_and_harold_runs_without_it() {
         .unwrap_or_else(|| panic!("no warning in {lines}"));
     assert!(warning.trim_start().starts_with("WARN"), "{warning}");
     assert!(warning.contains("reason=\"bind_failed\""), "{warning}");
+    drop(shutdown_tx);
     tasks.stopped().await;
     drop(taken);
 }
