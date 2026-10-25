@@ -145,8 +145,9 @@ pub(crate) enum Load {
         snapshot: PathBuf,
         commit: String,
     },
-    /// An ONNX model and its voices file.
+    /// An ONNX model and its voices file. `model` is the id of its row; the worker does not get it.
     Onnx {
+        model: String,
         model_file: PathBuf,
         voices_file: PathBuf,
     },
@@ -157,6 +158,13 @@ impl Load {
         match self {
             Load::Mlx { .. } => WorkerKind::Mlx,
             Load::Onnx { .. } => WorkerKind::Onnx,
+        }
+    }
+
+    /// The id of the model this load holds.
+    pub(crate) fn model(&self) -> &str {
+        match self {
+            Load::Mlx { model, .. } | Load::Onnx { model, .. } => model,
         }
     }
 }
@@ -291,6 +299,7 @@ impl Launcher for ProcessLauncher {
                         .args(["--commit", commit]);
                 }
                 Load::Onnx {
+                    model: _,
                     model_file,
                     voices_file,
                 } => {
@@ -668,15 +677,13 @@ impl Supervisor {
         }
     }
 
-    /// Stops the worker at once when it holds the MLX model `model`, for a removed model. A
-    /// worker that holds another model, or none, keeps running. An ONNX worker is not stopped
-    /// here: it stops when another model is asked for, or when it is idle.
+    /// Stops the worker at once when it holds the model `model`, for a removed model. A worker
+    /// that holds another model, or none, keeps running.
     pub(crate) async fn stop_if_holding(&self, model: &str) {
         let mut live = self.live.lock().await;
-        let holds = matches!(
-            live.as_ref().map(|running| &running.load),
-            Some(Load::Mlx { model: held, .. }) if held == model
-        );
+        let holds = live
+            .as_ref()
+            .is_some_and(|running| running.load.model() == model);
         if holds && let Some(running) = live.take() {
             running.session.close().await;
         }

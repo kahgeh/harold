@@ -26,6 +26,14 @@ pub(crate) fn mlx(model: &str) -> Load {
     }
 }
 
+pub(crate) fn onnx(model: &str) -> Load {
+    Load::Onnx {
+        model: model.to_string(),
+        model_file: PathBuf::from("/x/m.onnx"),
+        voices_file: PathBuf::from("/x/v.bin"),
+    }
+}
+
 pub(crate) fn ready() -> Ready {
     Ready {
         load_ms: 5,

@@ -773,8 +773,40 @@ fn the_release_row_is_found_in_its_own_folder() {
     assert_eq!(
         load,
         Load::Onnx {
+            model: release_download::MODEL_ID.to_string(),
             model_file: folder.join("kokoro-v1.0.onnx"),
             voices_file: folder.join("voices-v1.0.bin"),
+        }
+    );
+}
+
+#[test]
+fn a_hugging_face_onnx_row_loads_its_snapshot_files_with_the_rows_id() {
+    let scratch = Scratch::new();
+    let row = Row {
+        id: "someone/other-onnx".to_string(),
+        source: Source::HuggingFace,
+        revision: "a".repeat(40),
+        worker: WorkerKind::Onnx,
+        phase: Phase::Ready,
+        size: 1,
+        voices: Vec::new(),
+        asked: false,
+    };
+    let registry = Registry::new(scratch.deps(), row.clone());
+    let snapshot = snapshot_dir(&scratch.cache(), &row.id, &row.revision);
+    std::fs::create_dir_all(&snapshot).unwrap();
+    std::fs::write(snapshot.join("m.onnx"), b"a").unwrap();
+    std::fs::write(snapshot.join("voices.bin"), b"b").unwrap();
+
+    let load = registry.load_of(&row).unwrap();
+
+    assert_eq!(
+        load,
+        Load::Onnx {
+            model: "someone/other-onnx".to_string(),
+            model_file: snapshot.join("m.onnx"),
+            voices_file: snapshot.join("voices.bin"),
         }
     );
 }

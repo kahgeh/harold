@@ -819,13 +819,14 @@ impl Registry {
             (WorkerKind::Onnx, Source::GithubRelease) => {
                 let folder = self.release_folder(row);
                 Some(Load::Onnx {
+                    model: row.id.clone(),
                     model_file: folder.join(release_download::MODEL_FILE),
                     voices_file: folder.join(release_download::VOICES_FILE),
                 })
             }
             (WorkerKind::Onnx, Source::HuggingFace) => {
                 let snapshot = snapshot_dir(&self.deps.env.cache(), &row.id, &row.revision);
-                onnx_files(&snapshot)
+                onnx_files(&row.id, &snapshot)
             }
         }
     }
@@ -1150,7 +1151,7 @@ fn voices_in(folder: &Path) -> Vec<String> {
 }
 
 /// The one `.onnx` file and the one voices file in the snapshot of an ONNX model.
-fn onnx_files(snapshot: &Path) -> Option<Load> {
+fn onnx_files(model: &str, snapshot: &Path) -> Option<Load> {
     let names: Vec<PathBuf> = std::fs::read_dir(snapshot)
         .ok()?
         .flatten()
@@ -1166,6 +1167,7 @@ fn onnx_files(snapshot: &Path) -> Option<Load> {
         found.next().is_none().then_some(first)
     };
     Some(Load::Onnx {
+        model: model.to_string(),
         model_file: only(&|name| name.ends_with(".onnx"))?,
         voices_file: only(&|name| name.starts_with("voices"))?,
     })

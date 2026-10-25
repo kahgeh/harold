@@ -101,6 +101,21 @@ async fn stop_if_holding_stops_only_a_worker_that_holds_the_model() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn stop_if_holding_stops_a_worker_that_holds_the_onnx_model() {
+    let (supervisor, script) = supervisor();
+    drain(say(&supervisor, &onnx("m")).await.ok().unwrap()).await;
+
+    supervisor.stop_if_holding("other").await;
+    assert_eq!(script.closed.load(Ordering::SeqCst), 0);
+    drain(say(&supervisor, &onnx("m")).await.ok().unwrap()).await;
+    assert_eq!(script.launches.load(Ordering::SeqCst), 1);
+
+    supervisor.stop_if_holding("m").await;
+    assert_eq!(script.closed.load(Ordering::SeqCst), 1);
+    assert!(!supervisor.is_loaded().await);
+}
+
+#[tokio::test(start_paused = true)]
 async fn the_worker_stops_after_ten_minutes_idle_and_starts_on_the_next_request() {
     let (supervisor, script) = supervisor();
     drain(say(&supervisor, &mlx("m")).await.ok().unwrap()).await;
@@ -350,6 +365,7 @@ fn this_build_load() -> Load {
         mlx("m")
     } else {
         Load::Onnx {
+            model: "m".into(),
             model_file: "/x/m.onnx".into(),
             voices_file: "/x/v.bin".into(),
         }
@@ -547,6 +563,7 @@ async fn a_load_for_the_other_platforms_worker_is_refused() {
     let fake = FakePython::new("exit 0");
     let other = if cfg!(target_os = "macos") {
         Load::Onnx {
+            model: "m".into(),
             model_file: "/x/m.onnx".into(),
             voices_file: "/x/v.bin".into(),
         }
