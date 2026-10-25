@@ -75,6 +75,8 @@ pub(crate) struct Run {
     /// Check 0, recognition with the network off.
     /// Whether the phone said it was offline when the check started.
     pub check0_offline: bool,
+    /// Whether the phone said it was offline at the moment listening started.
+    pub check0_offline_at_start: bool,
     pub check0_started: bool,
     pub check0_results: bool,
     pub check0_first_result_ms: Option<u32>,
@@ -83,23 +85,32 @@ pub(crate) struct Run {
     /// Check 1, recognition starts inside a tap.
     pub check1_started: bool,
     pub check1_results: bool,
+    /// Whether recognition heard one of the words asked for ("one two three"), compared on
+    /// the phone.
+    pub check1_heard: bool,
     pub check1_first_result_ms: Option<u32>,
     pub check1_error: Option<ErrorName>,
 
     /// Check 2, recognition starts 2.5 s after a tap.
     pub check2_started: bool,
     pub check2_results: bool,
+    /// Whether recognition heard one of the words asked for ("four five six").
+    pub check2_heard: bool,
     pub check2_error: Option<ErrorName>,
 
     /// Check 3, recognition restarts without a tap: how many of the 5 started, and the
     /// error names of those that did not.
     pub check3_started: u8,
+    /// How many of the 5 restarts heard any word.
+    pub check3_heard: u8,
     pub check3_errors: Vec<ErrorName>,
 
     /// Check 4, when results become final: whether any came, then for each of the three
     /// sentences the ms from the sentence's showing to its final result, and from the last
     /// interim result to that final one; null where no final came.
     pub check4_results: bool,
+    /// How many of the 3 sentences had any word heard.
+    pub check4_heard: u8,
     pub check4_final_at_ms: Vec<Option<u32>>,
     pub check4_gap_ms: Vec<Option<u32>>,
     pub check4_error: Option<ErrorName>,
@@ -133,6 +144,8 @@ impl Run {
             .flatten()
             .all(|ms| ms <= MAX_MS)
             && usize::from(self.check3_started) <= RESTARTS
+            && usize::from(self.check3_heard) <= RESTARTS
+            && usize::from(self.check4_heard) <= SENTENCES
             && self.check3_errors.len() <= RESTARTS
             && self.check4_final_at_ms.len() <= SENTENCES
             && self.check4_gap_ms.len() <= SENTENCES
@@ -185,20 +198,25 @@ fn log_run(run: &Run) {
     info!(
         standalone = run.standalone,
         check0_offline = run.check0_offline,
+        check0_offline_at_start = run.check0_offline_at_start,
         check0_started = run.check0_started,
         check0_results = run.check0_results,
         check0_first_result_ms = run.check0_first_result_ms,
         check0_error = error(run.check0_error),
         check1_started = run.check1_started,
         check1_results = run.check1_results,
+        check1_heard = run.check1_heard,
         check1_first_result_ms = run.check1_first_result_ms,
         check1_error = error(run.check1_error),
         check2_started = run.check2_started,
         check2_results = run.check2_results,
+        check2_heard = run.check2_heard,
         check2_error = error(run.check2_error),
         check3_started = run.check3_started,
+        check3_heard = run.check3_heard,
         check3_errors = names(&run.check3_errors),
         check4_results = run.check4_results,
+        check4_heard = run.check4_heard,
         check4_final_at_ms = times(&run.check4_final_at_ms),
         check4_gap_ms = times(&run.check4_gap_ms),
         check4_error = error(run.check4_error),

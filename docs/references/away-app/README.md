@@ -373,13 +373,15 @@ A throwaway page, run once on the iPhone in the installed app, that shows how Sa
 
 | # | The check | What you do | Fields (`check<n>_…`) |
 |---|---|---|---|
-| 0 | Recognition with the network off | Turn on airplane mode (or turn off Wi-Fi and cellular), tap Start and say "ten eleven twelve", then turn the network back on | `offline` (the phone said it was offline when the check began; a result without it says nothing about on-device recognition), `started`, `results`, `first_result_ms`, `error` (such as `network`, `service-not-allowed`, `not-allowed`) |
-| 1 | Recognition starts inside a tap | Tap Start and say "one two three" | `started`, `results`, `first_result_ms`, `error` |
-| 2 | Recognition starts 2.5 s after a tap, as in a call | Tap Start; the page fetches a file from Harold, waits 2.5 s, then starts recognition; say "four five six" | `started`, `results`, `error` |
-| 3 | Recognition restarts without a tap | Count aloud; the page ends recognition and starts it again 5 times, 2 s apart | `started` (how many of the 5), `errors` (their names) |
-| 4 | When results become final | Read three short sentences shown on screen, pausing 2 s after each | `results`, `final_at_ms` (the ms from a sentence's showing to its first final result), `gap_ms` (the ms from the last interim result to that final one), each as three values with `-` where no final came; `error` |
+| 0 | Recognition with the network off | Turn on airplane mode (or turn off Wi-Fi and cellular), tap Start and say "ten eleven twelve", then turn the network back on | `offline` (the phone said it was offline when the check began; a result without it says nothing about on-device recognition), `offline_at_start` (the same, read when listening starts), `started`, `results`, `first_result_ms`, `error` (such as `network`, `service-not-allowed`, `not-allowed`) |
+| 1 | Recognition starts inside a tap | Tap Start and say "one two three" | `started`, `results`, `heard` (one of the words came in a result, compared on the phone), `first_result_ms`, `error` |
+| 2 | Recognition starts 2.5 s after a tap, as in a call | Tap Start; the page fetches a file from Harold, waits 2.5 s, then starts recognition; say "four five six" | `started`, `results`, `heard`, `error` |
+| 3 | Recognition restarts without a tap | Count aloud; the page ends recognition and starts it again 5 times, 2 s apart | `started` (how many of the 5), `heard` (how many of the 5 heard any word), `errors` (their names) |
+| 4 | When results become final | Read three short sentences shown on screen, pausing 2 s after each | `results`, `heard` (how many of the 3 sentences had any word heard), `final_at_ms` (the ms from a sentence's showing to its first final result), `gap_ms` (the ms from the last interim result to that final one), each as three values with `-` where no final came; `error` |
 | 5 | Listening while Harold's voice plays | Stay quiet while the page plays a 4 s sentence in Harold's voice (Kokoro, `check-sentence.wav`) through the call's own playback path | `started`, `kept_running`, `playback_ok`, `words_heard` (how many of the sentence's 9 words recognition heard, counted on the phone), `error` |
 | 6 | Listening after Harold's voice | Right after check 5, say "seven eight nine" | `restarted` (recognition had stopped and the page started it again without a tap), `heard`, `error` |
+
+**Passed.** For checks 1, 2 and 3, "passed" means started and heard: `started` alone does not pass a check. Each check closes its recognition, waits for its `onend` (at most 2 s), and waits 1 s more before the next check can start; every check makes a new recognition object.
 
 **What it sends.** The page keeps the results in `localStorage` and posts them once, after check 6, to `POST /speech-check/runs`, again every 2 to 10 seconds until Harold answers `204`, because check 0 runs with the network off. It never keeps or sends a word you say: words are compared on the phone to produce counts and then thrown away.
 

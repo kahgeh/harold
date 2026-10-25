@@ -25,6 +25,9 @@
   // The words of check-sentence.wav, for the count in check 5.
   const SENTENCE_WORDS = ["hello", "this", "is", "harold", "your", "phone", "checking", "my", "voice"];
   const NUMBER_WORDS = ["seven", "eight", "nine", "7", "8", "9"];
+  // The words each check asks for, for the yes or no of whether Safari heard them.
+  const CHECK1_WORDS = ["one", "two", "three", "1", "2", "3"];
+  const CHECK2_WORDS = ["four", "five", "six", "4", "5", "6"];
   // Three short sentences for check 4, shown one after another.
   const READ_SENTENCES = [
     "The weather is lovely today.",
@@ -38,6 +41,10 @@
   const LISTEN_MAX_MS = 9000;
   const AFTER_RESULT_MS = 2500;
   const START_WAIT_MS = 3000;
+  // After a check closes its recognition, how long it waits for `onend` at most, and how
+  // long the page waits after that before the next check can start.
+  const END_WAIT_MS = 2000;
+  const BETWEEN_CHECKS_MS = 1000;
   const RESTARTS = 5;
   const RESTART_EVERY_MS = 2000;
   const READ_MS = 4500;
@@ -106,6 +113,26 @@
     return Array.from(result[0].transcript.toLowerCase().matchAll(/[a-z0-9]+/g), (m) => m[0]);
   }
 
+  // Whether any result of the event, from `from` on, holds a word.
+  function hasWords(event, from) {
+    for (let i = from; i < event.results.length; i += 1) {
+      if (words(event.results[i]).length > 0) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  // Whether any result of the event, from `from` on, holds one of the `expected` words.
+  function hasExpected(event, from, expected) {
+    for (let i = from; i < event.results.length; i += 1) {
+      if (words(event.results[i]).some((word) => expected.includes(word))) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   // One recognition, started by `listen`, that tells `on` what happened. The words of a
   // result reach only `on.result`, which counts them and keeps nothing.
   function open(on) {
@@ -113,12 +140,15 @@
     r.lang = navigator.language;
     r.interimResults = true;
     r.continuous = true;
-    const state = { closing: false, started: false, error: null, ended: false };
+    const state = { closing: false, started: false, error: null, ended: false, heard: false };
     r.onstart = () => {
       state.started = true;
       if (on.start) on.start();
     };
     r.onresult = (event) => {
+      if (hasWords(event, event.resultIndex)) {
+        state.heard = true;
+      }
       if (on.result) on.result(event);
     };
     r.onerror = (event) => {
@@ -164,19 +194,34 @@
     }
   }
 
+  // Closes the recognition and waits for its `onend`, at most `END_WAIT_MS`, so that the
+  // next recognition does not start while Safari still holds this one.
+  async function closeAndWait(rec) {
+    rec.close();
+    if (rec.state.error === "start-failed") {
+      return;
+    }
+    await waitUntil(() => rec.state.ended, END_WAIT_MS);
+  }
+
   // Listens until the recognizer errors or ends, `AFTER_RESULT_MS` after the first result
   // that `counts` accepts, or `LISTEN_MAX_MS`. Starts at once, from the tap that called it.
-  // Returns { started, results, firstResultMs, error }.
-  async function listen(counts) {
-    const out = { started: false, results: false, firstResultMs: null, error: null };
+  // `expected` are the words the check asks for; `onstart` runs when listening starts.
+  // Returns { started, results, heard, firstResultMs, error }.
+  async function listen(counts, expected, onstart) {
+    const out = { started: false, results: false, heard: false, firstResultMs: null, error: null };
     const from = performance.now();
     let resultAt = null;
     const rec = open({
       start: () => {
         out.started = true;
+        if (onstart) onstart();
       },
       result: (event) => {
         out.results = true;
+        if (expected && hasExpected(event, event.resultIndex, expected)) {
+          out.heard = true;
+        }
         if (resultAt === null && counts(event)) {
           resultAt = performance.now();
           out.firstResultMs = elapsed(from);
@@ -196,7 +241,7 @@
     );
     out.error = rec.state.error;
     out.started = rec.state.started;
-    rec.close();
+    await closeAndWait(rec);
     return out;
   }
 
@@ -204,9 +249,12 @@
     return true;
   }
 
-  function saveListen(prefix, out, withTime) {
+  function saveListen(prefix, out, withTime, withHeard) {
     run[prefix + "_started"] = out.started;
     run[prefix + "_results"] = out.results;
+    if (withHeard) {
+      run[prefix + "_heard"] = out.heard;
+    }
     if (withTime && out.firstResultMs !== null) {
       run[prefix + "_first_result_ms"] = out.firstResultMs;
     }
@@ -221,12 +269,16 @@
     // from a phone that was still online would read as recognition working on the device.
     run.check0_offline = navigator.onLine === false;
     say("Listening. Say “ten eleven twelve”.");
-    saveListen("check0", await listen(anyResult), true);
+    // The same question again at the moment listening starts, which can be later.
+    const onstart = () => {
+      run.check0_offline_at_start = navigator.onLine === false;
+    };
+    saveListen("check0", await listen(anyResult, null, onstart), true);
   }
 
   async function check1() {
     say("Listening. Say “one two three”.");
-    saveListen("check1", await listen(anyResult), true);
+    saveListen("check1", await listen(anyResult, CHECK1_WORDS), true, true);
   }
 
   // Check 2: the tap posts to Harold, as a call does, and listening starts 2.5 s after it.
@@ -237,7 +289,7 @@
     fetch(SENTENCE_URL, { cache: "no-store" }).catch(() => {});
     await wait(Math.max(0, CALL_DELAY_MS - (performance.now() - tapped)));
     say("Say “four five six” now.");
-    saveListen("check2", await listen(anyResult), false);
+    saveListen("check2", await listen(anyResult, CHECK2_WORDS), false, true);
   }
 
   // Check 3: recognition is ended and started again five times, 2 s apart, with no tap
@@ -245,15 +297,25 @@
   async function check3() {
     say("Count aloud: one, two, three, and on…");
     run.check3_started = 0;
+    run.check3_heard = 0;
     run.check3_errors = [];
     let rec = open({});
     rec.start();
     await waitUntil(() => rec.state.started || rec.state.error !== null, START_WAIT_MS);
+    // The warm-up recognition does not count; each restart counts when it is closed.
+    let counting = false;
+    const countHeard = () => {
+      if (counting && rec.state.heard) {
+        run.check3_heard += 1;
+      }
+    };
     for (let n = 0; n < RESTARTS; n += 1) {
       const attempt = performance.now();
+      countHeard();
       rec.close();
       await wait(400);
       rec = open({});
+      counting = true;
       if (rec.start()) {
         await waitUntil(() => rec.state.started || rec.state.error !== null, START_WAIT_MS);
       }
@@ -264,7 +326,8 @@
       }
       await wait(Math.max(0, RESTART_EVERY_MS - (performance.now() - attempt)));
     }
-    rec.close();
+    countHeard();
+    await closeAndWait(rec);
   }
 
   // Check 4: three sentences, each read aloud and then 2 s of quiet. One continuous
@@ -273,13 +336,18 @@
     run.check4_results = false;
     run.check4_final_at_ms = [];
     run.check4_gap_ms = [];
+    run.check4_heard = 0;
     const events = [];
+    const heardAt = [];
     let lastInterim = null;
     const seenFinal = new Set();
     const rec = open({
       result: (event) => {
         const now = performance.now();
         run.check4_results = true;
+        if (hasWords(event, event.resultIndex)) {
+          heardAt.push(now);
+        }
         for (let i = event.resultIndex; i < event.results.length; i += 1) {
           if (event.results[i].isFinal && !seenFinal.has(i)) {
             seenFinal.add(i);
@@ -306,9 +374,12 @@
     if (rec.state.error) {
       run.check4_error = rec.state.error;
     }
-    rec.close();
+    await closeAndWait(rec);
     starts.forEach((begin, k) => {
       const end = k + 1 < starts.length ? starts[k + 1] : performance.now();
+      if (heardAt.some((at) => at >= begin && at < end)) {
+        run.check4_heard += 1;
+      }
       const final = events.find((event) => event.at >= begin && event.at < end);
       run.check4_final_at_ms.push(final ? Math.min(MAX_MS, Math.round(final.at - begin)) : null);
       run.check4_gap_ms.push(final ? Math.min(MAX_MS, Math.round(final.gap)) : null);
@@ -432,7 +503,7 @@
     if (rec.state.error) {
       run.check6_error = rec.state.error;
     }
-    rec.close();
+    await closeAndWait(rec);
   }
 
   // The steps, in order. A step's tap starts it; `checks` are the rows it fills in.
@@ -544,6 +615,8 @@
     }
     step.checks.forEach((check) => showCheck(check, "done"));
     say(step.checks.length ? "Done." : "");
+    // The next check starts no sooner than this after the last listening ended.
+    await wait(BETWEEN_CHECKS_MS);
     advance();
   }
 

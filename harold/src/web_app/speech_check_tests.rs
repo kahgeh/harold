@@ -19,11 +19,11 @@ const ROUTES: [(&str, &str); 2] = [("GET", "/speech-check"), ("POST", "/speech-c
 /// A whole run as the page posts it, every field present.
 const FULL_RUN: &str = r#"{
     "standalone": true,
-    "check0_offline": true, "check0_started": true, "check0_results": false, "check0_error": "network",
-    "check1_started": true, "check1_results": true, "check1_first_result_ms": 640,
-    "check2_started": true, "check2_results": true,
-    "check3_started": 4, "check3_errors": ["not-allowed"],
-    "check4_results": true,
+    "check0_offline": true, "check0_offline_at_start": true, "check0_started": true, "check0_results": false, "check0_error": "network",
+    "check1_started": true, "check1_results": true, "check1_heard": true, "check1_first_result_ms": 640,
+    "check2_started": true, "check2_results": true, "check2_heard": false,
+    "check3_started": 4, "check3_heard": 2, "check3_errors": ["not-allowed"],
+    "check4_results": true, "check4_heard": 2,
     "check4_final_at_ms": [3100, null, 3300], "check4_gap_ms": [900, null, 850],
     "check5_started": true, "check5_kept_running": false, "check5_playback_ok": true,
     "check5_words_heard": 3, "check5_error": "aborted",
@@ -129,6 +129,8 @@ fn a_whole_run_and_a_part_run_are_read() {
     assert!(run.check0_started && !run.check0_results);
     assert_eq!(run.check1_first_result_ms, Some(640));
     assert_eq!(run.check3_started, 4);
+    assert!(run.check0_offline_at_start && run.check1_heard && !run.check2_heard);
+    assert_eq!((run.check3_heard, run.check4_heard), (2, 2));
     assert_eq!(run.check4_final_at_ms, [Some(3100), None, Some(3300)]);
     assert!(parse_run(b"{}").is_ok(), "a run that stopped at once");
     assert!(parse_run(br#"{"standalone":false,"check0_error":"network"}"#).is_ok());
@@ -150,6 +152,10 @@ fn a_body_with_anything_but_booleans_numbers_and_error_names_is_refused() {
         r#"{"check1_first_result_ms":600001}"#,
         r#"{"check1_first_result_ms":{"a":1}}"#,
         r#"{"check3_started":6}"#,
+        r#"{"check3_heard":6}"#,
+        r#"{"check4_heard":4}"#,
+        r#"{"check1_heard":"yes"}"#,
+        r#"{"check0_offline_at_start":1}"#,
         r#"{"check3_started":-1}"#,
         r#"{"check3_errors":["network","network","network","network","network","network"]}"#,
         r#"{"check4_final_at_ms":[1,2,3,4]}"#,
@@ -193,12 +199,17 @@ async fn a_run_is_answered_204_and_logged_as_one_line_with_its_fields() {
     for field in [
         "standalone=true",
         "check0_offline=true",
+        "check0_offline_at_start=true",
         "check0_started=true",
         "check0_results=false",
         r#"check0_error="network""#,
         "check1_first_result_ms=640",
+        "check1_heard=true",
         "check2_results=true",
+        "check2_heard=false",
         "check3_started=4",
+        "check3_heard=2",
+        "check4_heard=2",
         r#"check3_errors="not-allowed""#,
         r#"check4_final_at_ms="3100,-,3300""#,
         r#"check4_gap_ms="900,-,850""#,
