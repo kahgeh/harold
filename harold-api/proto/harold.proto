@@ -10,7 +10,7 @@ service Harold {
   rpc SetMessagingPaused (SetMessagingPausedRequest) returns (SetMessagingPausedResponse);
   // An agent asks Harold to send text to the user's away device.
   rpc SendMessageToAwayDevice (SendMessageToAwayDeviceRequest) returns (SendMessageToAwayDeviceResponse);
-  // The chief asks Harold to say a line at the desk or send it as a voice note when away.
+  // The chief asks Harold to say a line at the desk, or to send it to the phone as text when away.
   rpc SpeakLine (SpeakLineRequest) returns (SpeakLineResponse);
   // tmx-agent-dash starts, ends and watches a call with the chief.
   rpc Call (CallRequest) returns (CallResponse);

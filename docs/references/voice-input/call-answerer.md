@@ -86,7 +86,7 @@ When `say` is empty and `hand_over` is set, Harold says "I've passed that to the
 
 ## The chief reports back
 
-A `🎙 hand-over Hn:` line is your request from a call. The chief does it, or hands it to a pod, and then says `harold speak "H1: <result>"`. During a call, Harold plays that line between turns, never over your speech or another sound, after the phrase "From the chief.". Harold drops the `Hn:` before it speaks or shows the line, in a call, at the desk, and in the thread, the push and iMessage, and keeps it in the call's facts, so the answerer can tell which hand-over the report answers. After the call, `harold speak` works as it always did: a voice note or a thread line, with a push. The report goes through the delivery queue, so it can wait 4 to 38 s behind another agent's update.
+A `🎙 hand-over Hn:` line is your request from a call. The chief does it, or hands it to a pod, and then says `harold speak "H1: <result>"`. During a call, Harold plays that line between turns, never over your speech or another sound, after the phrase "From the chief.". Harold drops the `Hn:` before it speaks or shows the line, in a call, at the desk, and in the thread, the push and iMessage, and keeps it in the call's facts, so the answerer can tell which hand-over the report answers. After the call, `harold speak` works as it does outside a call: Harold says the line at the desk, or sends it to the phone as text, with a push. The report goes through the delivery queue, so it can wait 4 to 38 s behind another agent's update.
 
 ## When the answerer fails
 

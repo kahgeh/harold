@@ -1136,7 +1136,7 @@ async fn the_answerer_answers_a_turn_and_nothing_is_typed_into_the_chief() {
         Some("is anything building")
     );
     assert_eq!(status.state, CallState::Listening);
-    // No chief turn to wait for: no update line and no local model.
+    // No chief turn to wait for: no update line and no model run.
     assert!(h.ports.state().update_prompts.is_empty());
     sleep(Duration::from_secs(120)).await;
     assert_eq!(h.played(), ["Nothing is building."]);

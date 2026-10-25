@@ -474,16 +474,6 @@ impl NotifyState {
         self.requested_message_marks.lock().unwrap().remove(pane_id)
     }
 
-    /// Put back a mark `notify` removed for a turn whose delivery then failed, with the
-    /// time it was set, so that the retry of the same turn finds it.
-    fn restore_requested_message_mark(&self, pane_id: &str, marked_at: Instant) {
-        self.requested_message_marks
-            .lock()
-            .unwrap()
-            .entry(pane_id.to_string())
-            .or_insert(marked_at);
-    }
-
     fn is_duplicate(&self, dedup_key: &str, now: Instant) -> bool {
         self.last_notify
             .lock()
@@ -715,17 +705,7 @@ fn notify_routed(
         }
         None => environment.deliver(&channel, turn, trace_id),
     };
-    let (outcome, source_agent) = match delivered {
-        Ok(delivered) => delivered,
-        Err(error) => {
-            // The event stays pending and this turn comes again: its mark must still be
-            // there then, or a retry made after the screen is locked would go to the phone.
-            if let Some(marked_at) = mark {
-                state.restore_requested_message_mark(&turn.pane_id, marked_at);
-            }
-            return Err(error);
-        }
-    };
+    let (outcome, source_agent) = delivered?;
     if let Some(source_agent) = source_agent {
         environment.record_reply_target(source_agent);
     }

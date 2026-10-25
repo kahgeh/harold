@@ -976,21 +976,14 @@ impl<B: CallPorts> PhoneCalls<B> {
     }
 
     /// Plays the chief's `line` on the phone, from a blocking thread, as
-    /// `CallControl::say_blocking` does. `None` for another agent's line: those are still
-    /// said at the desk.
+    /// `CallControl::say_blocking` does.
     pub(crate) fn say_blocking(&self, line: &str, by: Speaker) -> Option<bool> {
-        if by == Speaker::OtherAgent {
-            return None;
-        }
         self.calls.say_blocking(line, by)
     }
 
     /// The same from async code, as `CallControl::say` does.
     #[cfg(test)]
     pub(crate) async fn say(&self, line: &str, by: Speaker) -> Option<bool> {
-        if by == Speaker::OtherAgent {
-            return None;
-        }
         self.calls.say(line, by).await
     }
 

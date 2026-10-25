@@ -1191,8 +1191,9 @@ pub(crate) async fn send_message_to_away_device_within(
     Ok(())
 }
 
-/// Ask the daemon to say `args.text` or send it as a voice note. `Ok` means the daemon
-/// stored the line, not that it was heard. `Err` is the one line to print.
+/// Ask the daemon to say `args.text` at the desk, or to send it to the phone as text. `Ok`
+/// means the daemon stored the line, not that you heard or read it. `Err` is the one line to
+/// print.
 pub(crate) async fn speak(settings: &Settings, args: &AwayMessageArgs) -> Result<(), String> {
     speak_within(settings, args, CALL_DEADLINE).await
 }

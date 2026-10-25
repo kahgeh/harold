@@ -1520,7 +1520,12 @@ pub(crate) fn warn_unread_settings() {
     let Ok(merged) = merged_config() else {
         return;
     };
-    for key in unread_settings_in(&merged) {
+    warn_unread_settings_in(&merged);
+}
+
+/// The same for a `config` that the caller has already merged.
+fn warn_unread_settings_in(config: &Config) {
+    for key in unread_settings_in(config) {
         tracing::warn!(key, "setting no longer read");
     }
 }
@@ -1775,6 +1780,50 @@ mod tests {
         let all = "[ai]\nlocal_model = 'm'\nlocal_model_dir = '/d'\n[notify]\nskip_if_session_active = true\nskip_if_pane_active = false\n";
         assert_eq!(unread(all), super::UNREAD_SETTINGS);
         default_settings_with(all);
+    }
+
+    /// The log lines that `warn_unread_settings_in` writes for `local`, merged over the defaults.
+    fn unread_warnings(local: &str) -> String {
+        #[derive(Clone, Default)]
+        struct Lines(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Lines {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        crate::test_logs::keep_second_dispatcher();
+        let lines = Lines::default();
+        let writer = lines.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(move || writer.clone())
+            .with_ansi(false)
+            .without_time()
+            .with_max_level(tracing::Level::WARN)
+            .finish();
+        let default = include_str!("../config/default.toml");
+        let merged = Config::builder()
+            .add_source(File::from_str(default, FileFormat::Toml))
+            .add_source(File::from_str(local, FileFormat::Toml))
+            .build()
+            .unwrap();
+        tracing::subscriber::with_default(subscriber, || super::warn_unread_settings_in(&merged));
+        let bytes = lines.0.lock().unwrap().clone();
+        String::from_utf8(bytes).unwrap()
+    }
+
+    #[test]
+    fn the_unread_settings_warn_once_each_with_their_key() {
+        let all = "[ai]\nlocal_model = 'm'\nlocal_model_dir = '/d'\n[notify]\nskip_if_session_active = true\nskip_if_pane_active = false\n";
+        let text = unread_warnings(all);
+        assert_eq!(text.matches("setting no longer read").count(), 4, "{text}");
+        for key in super::UNREAD_SETTINGS {
+            assert_eq!(text.matches(&format!("key=\"{key}\"")).count(), 1, "{text}");
+        }
+        assert_eq!(unread_warnings(""), "");
     }
 
     #[test]

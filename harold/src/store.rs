@@ -83,7 +83,7 @@ pub struct AwayMessageRequested {
     pub text: String,
 }
 
-/// A line the chief asked Harold to say at the desk or send as a voice note.
+/// A line the chief asked Harold to say at the desk, or to send to the phone as text.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SpokenLineRequested {
     /// The source pane's id, such as `%47`.

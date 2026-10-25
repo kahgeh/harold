@@ -1154,17 +1154,12 @@ async fn a_phone_call_logs_its_start_and_end_with_no_content() {
 }
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
-async fn the_phone_takes_only_the_chiefs_lines() {
+async fn the_phone_plays_the_chiefs_line() {
     let phone = Phone::new();
     phone.auto_play(Duration::from_secs(1));
     phone.start().await;
     phone.speak().await;
 
-    assert_eq!(phone.calls.say("x", Speaker::OtherAgent).await, None);
-    let calls = Arc::clone(&phone.calls);
-    let blocking =
-        tokio::task::spawn_blocking(move || calls.say_blocking("x", Speaker::OtherAgent));
-    assert_eq!(blocking.await.unwrap(), None);
     assert_eq!(phone.say("y", Speaker::Chief).await.unwrap(), Some(true));
 
     let line = Said::Line {
