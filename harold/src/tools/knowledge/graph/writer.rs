@@ -368,6 +368,8 @@ impl Task {
         match result {
             Ok(applied) => {
                 self.set_phase(Phase::Ready);
+                // A catch-up may clear the records that waited; the gauge must show it.
+                self.publish_metrics(false).await;
                 Ok(applied)
             }
             Err(CatchUpError::Refused(refusal)) => {

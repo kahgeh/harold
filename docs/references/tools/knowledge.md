@@ -272,7 +272,7 @@ idle_minutes = 10                                # the default
 
 | Signal | Fields | When |
 |---|---|---|
-| `harold.knowledge.graph_waiting` (gauge) | none | The data and schema records with a sequence greater than the graph position. Published after each change while the graph is on |
+| `harold.knowledge.graph_waiting` (gauge) | none | The data and schema records with a sequence greater than the graph position. Published after each change, after a refused or unanswered change, and after a catch-up, while the graph is on |
 | `harold.knowledge.typed_relations` (gauge) | none | The typed relations in the graph |
 | `knowledge graph behind` (warn) | `sequence`, `reason`, `waiting` | TypeDB refuses a record |
 | `knowledge graph record voided` (warn) | `sequence`, `reason` | A record is voided |

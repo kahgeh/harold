@@ -80,7 +80,11 @@ pub(crate) async fn sync_vault(
             Ok(Some(_)) => synced.logged += 1,
             Ok(None) => {}
             // One vault note the graph cannot name must not stop the rest of the pass.
-            Err(GraphError::InvalidVaultNote | GraphError::InvalidReason) => {}
+            Err(
+                GraphError::InvalidVaultNote
+                | GraphError::InvalidReason
+                | GraphError::UnknownVaultNote,
+            ) => {}
             Err(error) => return Err(error),
         }
     }
