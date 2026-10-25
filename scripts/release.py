@@ -31,7 +31,7 @@ TESTS = (('cargo', 'test', '--workspace', '--locked'),
          ('python3', '-m', 'unittest', 'hooks.shared.harold_turn_complete_test'),
          ('python3', '-m', 'unittest', 'hooks.providers.test_turn_complete'),
          ('bash', 'scripts/check_features.sh'))
-BUILD_LIMIT = 45 * 60  # the workflow's timeout-minutes
+BUILD_LIMIT = 60 * 60  # the workflow's timeout-minutes
 FIND_LIMIT = 2 * 60
 POLL = 10
 VERSION_PATTERN = re.compile(r'v?(\d+)\.(\d+)\.(\d+)')
@@ -307,7 +307,7 @@ def wait_for_build(cwd, tag, release_url, published):
     print('Following the build: ' + found['url'], flush=True)
     conclusion = follow(cwd, found['databaseId'], start + BUILD_LIMIT)
     if conclusion is None:
-        raise Stopped(build_failed(tag, found['url'], 'did not finish within 45 minutes'))
+        raise Stopped(build_failed(tag, found['url'], f'did not finish within {BUILD_LIMIT // 60} minutes'))
     if conclusion != 'success':
         raise Stopped(build_failed(tag, found['url'], 'ended in {}'.format(conclusion)))
     try:

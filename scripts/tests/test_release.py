@@ -546,9 +546,9 @@ class BuildTests(ReleaseTestCase):
         self.github.outcome = 'failure'
         self.assert_failed_build('ended in failure', 'https://github.com/kahgeh/harold/actions/runs/2')
 
-    def test_a_build_past_45_minutes_is_a_failed_build(self):
+    def test_a_build_past_60_minutes_is_a_failed_build(self):
         self.github.polls = 10 ** 6
-        self.assert_failed_build('did not finish within 45 minutes',
+        self.assert_failed_build('did not finish within 60 minutes',
                                  'https://github.com/kahgeh/harold/actions/runs/2')
         self.assertGreaterEqual(self.clock.now, release.BUILD_LIMIT)
         self.assertLess(self.clock.now, release.BUILD_LIMIT + 2 * release.POLL)
