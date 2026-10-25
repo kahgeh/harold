@@ -103,6 +103,7 @@ impl QuestionService for FakeQuestions {
             waiting: 0,
             dismissed: Vec::new(),
             checked_at_ms: state.checked_at_ms,
+            local_specs_url: String::new(),
         }))
     }
     async fn answer_question(
@@ -314,6 +315,7 @@ pub(super) fn question(id: &str, version: u32) -> pb::ListedQuestion {
         ticked: Vec::new(),
         picks: Vec::new(),
         spec_state: 0,
+        spec_page: String::new(),
     }
 }
 
@@ -337,6 +339,7 @@ pub(super) fn instructions(id: &str, version: u32) -> pb::ListedQuestion {
         ticked: vec![2],
         picks: Vec::new(),
         spec_state: 0,
+        spec_page: String::new(),
     }
 }
 
@@ -1836,4 +1839,51 @@ async fn a_note_refused_for_a_changed_spec_opens_no_note_box_and_offers_no_releg
         assert!(!redrawn.contains("Relegate"), "{redrawn}");
     }
     assert!(service.fake.calls().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_card_links_to_its_spec_page_when_it_has_one_and_to_its_link_when_it_has_not() {
+    let service = FakeServer::start().await;
+    let mut paged = question("Q1", 1);
+    paged.spec_page = "/specs/harold/serve-specs".into();
+    let mut no_link = question("Q2", 1);
+    no_link.spec_page = "/specs/harold/other".into();
+    no_link.question.as_mut().unwrap().link = String::new();
+    // A page that is not a path on the app is not linked.
+    let mut hostile = question("Q3", 1);
+    hostile.spec_page = "//evil.example/x".into();
+    let plain = question("Q4", 1);
+    service.fake.set_list(vec![paged, no_link, hostile, plain]);
+    let directory = TestDirectory::new();
+    let server = TestServer::serve(directory.store().await, service.questions()).await;
+
+    let page = server.get("/").await.text().await.unwrap();
+
+    let card = |id: &str, next: &str| {
+        let from = page.find(&format!(r#"id="todo-{id}""#)).expect(id);
+        let to = page
+            .find(&format!(r#"id="todo-{next}""#))
+            .unwrap_or(page.len());
+        page[from..to].to_owned()
+    };
+    // The spec page opens in the app's own window.
+    let q1 = card("Q1", "Q2");
+    assert!(
+        q1.contains(r#"<a href="/specs/harold/serve-specs">Open the spec</a>"#),
+        "{q1}"
+    );
+    assert!(!q1.contains("example.com/spec"), "{q1}");
+    let q2 = card("Q2", "Q3");
+    assert!(
+        q2.contains(r#"<a href="/specs/harold/other">Open the spec</a>"#),
+        "{q2}"
+    );
+    let q3 = card("Q3", "Q4");
+    assert!(!q3.contains("evil.example"), "{q3}");
+    assert!(q3.contains("Read the spec: web-app-todos"), "{q3}");
+    let q4 = card("Q4", "none");
+    assert!(
+        q4.contains(r#"<a href="https://example.com/spec" target="_blank" rel="noopener noreferrer">Read the spec: web-app-todos</a>"#),
+        "{q4}"
+    );
 }

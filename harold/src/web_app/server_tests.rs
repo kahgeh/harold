@@ -125,6 +125,7 @@ fn settings(listen: &str) -> WebAppSettings {
         icon: None,
         require_pairing: false,
         pairing_file: None,
+        specs_listen: None,
     }
 }
 

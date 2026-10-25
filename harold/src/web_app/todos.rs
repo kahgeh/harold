@@ -362,9 +362,12 @@ struct Card {
 }
 
 struct CardLink {
-    /// Set only for an `http://` or `https://` address; anything else shows as text.
+    /// Set only for an `http://` or `https://` address, or the todo's spec page; anything
+    /// else shows as text.
     href: Option<String>,
     text: String,
+    /// The link opens in the app's own window: the spec page, which is part of the app.
+    same_window: bool,
 }
 
 struct DecisionView {
@@ -401,18 +404,28 @@ impl Card {
         let changed = has_changed_spec(listed);
         let refused_for_change = changed_refusals.get(&question.id) == Some(&listed.version);
         let is_question = question.steps.is_empty();
-        let link = (!question.link.is_empty()).then(|| {
-            let text = if question.spec.is_empty() {
-                "Open the link".to_owned()
-            } else {
-                format!("Read the spec: {}", question.spec)
-            };
-            let safe =
-                question.link.starts_with("https://") || question.link.starts_with("http://");
-            CardLink {
-                href: safe.then(|| question.link.clone()),
-                text,
-            }
+        let spec_page = (listed.spec_page.starts_with("/specs/")
+            && !listed.spec_page.starts_with("//"))
+        .then(|| CardLink {
+            href: Some(listed.spec_page.clone()),
+            text: "Open the spec".to_owned(),
+            same_window: true,
+        });
+        let link = spec_page.or_else(|| {
+            (!question.link.is_empty()).then(|| {
+                let text = if question.spec.is_empty() {
+                    "Open the link".to_owned()
+                } else {
+                    format!("Read the spec: {}", question.spec)
+                };
+                let safe =
+                    question.link.starts_with("https://") || question.link.starts_with("http://");
+                CardLink {
+                    href: safe.then(|| question.link.clone()),
+                    text,
+                    same_window: false,
+                }
+            })
         });
         let decisions: Vec<DecisionView> = question
             .decisions

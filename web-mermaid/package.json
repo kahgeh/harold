@@ -1,0 +1,19 @@
+{
+  "name": "harold-web-mermaid",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Builds the one Mermaid bundle the spec pages load. See scripts/build_web_mermaid.sh.",
+  "license": "MIT",
+  "type": "module",
+  "dependencies": {
+    "mermaid": "12.1.0"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2"
+  },
+  "overrides": {
+    "cytoscape": "3.34.3",
+    "dompurify": "3.4.17",
+    "es-toolkit": "1.52.0"
+  }
+}

@@ -7,7 +7,7 @@
 <p class="card-top">{{ card.id }} · {{ card.kind }} · {{ card.product }}</p>
 <h3>{{ card.heading }}</h3>
 {% if let Some(under) = card.under %}<p class="card-intro">{{ under }}</p>
-{% endif %}{% if let Some(link) = card.link %}{% if let Some(href) = link.href %}<p class="card-link"><a href="{{ href }}" target="_blank" rel="noopener noreferrer">{{ link.text }}</a></p>
+{% endif %}{% if let Some(link) = card.link %}{% if let Some(href) = link.href %}<p class="card-link"><a href="{{ href }}"{% if !link.same_window %} target="_blank" rel="noopener noreferrer"{% endif %}>{{ link.text }}</a></p>
 {% else %}<p class="card-link">{{ link.text }}</p>
 {% endif %}{% endif %}{% if card.is_question %}<form class="todo-form" data-signals__ifmissing="{t: { {{ card.sig }}: {mode: '{{ card.open_mode }}', len: {{ card.note.chars().count() }}} } }" data-attr:data-mode="$t.{{ card.sig }}.mode" data-on:submit="@post($t.{{ card.sig }}.mode === 'revise' ? '/todos/revise' : $t.{{ card.sig }}.mode === 'reject' ? '/todos/reject' : $t.{{ card.sig }}.mode === 'relegate' ? '/todos/relegate' : '/todos/answer', {contentType: 'form'})" data-on:change="evt.target.name !== 'note' && ($sent = '', @post('/todos/picks', {contentType: 'form'}))" data-on:input__debounce.500ms="evt.target.type === 'text' && @post('/todos/picks', {contentType: 'form'})">
 <input type="hidden" name="id" value="{{ card.id }}">

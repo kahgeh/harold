@@ -34,6 +34,8 @@ pub struct QuestionView {
     pub product: String,
     pub spec: String,
     pub sha: String,
+    /// The address `o` opens: the todo's spec page on the specs listener when it has one,
+    /// else the todo's `link`.
     pub link: String,
     pub intro: String,
     pub version: u32,

@@ -17,7 +17,8 @@
 //   ListQuestions    the waiting questions and instructions, the
 //                    count of questions waiting (instructions are not counted),
 //                    recently dismissed ids with their reasons, the time of the
-//                    chief's last check, and each todo's spec state.
+//                    chief's last check, each todo's spec state and spec page,
+//                    and the specs listener's address.
 //   AnswerQuestion   answers a question (picks or a note), relegates it to an idea
 //                    (RELEGATE: the picks so far and an optional note) or answers
 //                    instructions (DONE or IGNORE) at the version the dash saw.
@@ -30,7 +31,9 @@
 //
 // Refusals:
 //   InvalidArgument      message "invalid <field>" for a broken rule; nothing
-//                        is stored. `invalid spec_file` is a path that is not
+//                        is stored. `invalid link` is also a question with no
+//                        `spec_file` and no `link`: a question with a `spec_file`
+//                        may leave out `link`. `invalid spec_file` is a path that is not
 //                        absolute, does not end in `.md`, is 1,000 characters
 //                        or more, comes with no `sha`, or does not sit inside
 //                        the `.superpowers/pod/specs/` folder of a registered
@@ -133,6 +136,10 @@ message ListedQuestion {
   // A question only: the saved picks, one per picked decision.
   repeated Pick picks = 5;
   SpecState spec_state = 6;
+  // The path of the todo's spec page on Harold's web app and specs listener,
+  // `/specs/<product>/<id>`. Set when the todo's `spec_file` is a spec file in a
+  // registered product's `.superpowers/pod/specs/` folder; empty otherwise.
+  string spec_page = 7;
 }
 
 // Whether the todo's spec file still has the checksum the todo was asked with.
@@ -156,6 +163,9 @@ message ListQuestionsResponse {
   // When the chief last called MarkChecked, in milliseconds since the Unix epoch;
   // 0 before the first check.
   int64 checked_at_ms = 4;
+  // The address of the specs listener, such as `http://127.0.0.1:4331`, where `spec_page`
+  // opens on the Mac; empty when the listener is not open.
+  string local_specs_url = 5;
 }
 
 enum AnswerKind {

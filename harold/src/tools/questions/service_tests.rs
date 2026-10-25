@@ -1301,3 +1301,112 @@ async fn mark_checked_on_a_failing_store_is_unavailable() {
         .unwrap_err();
     assert_eq!(refused.code(), Code::Unavailable);
 }
+
+fn page_of(response: &pb::ListQuestionsResponse, id: &str) -> String {
+    response
+        .questions
+        .iter()
+        .find(|q| q.question.as_ref().unwrap().id == id)
+        .unwrap()
+        .spec_page
+        .clone()
+}
+
+#[tokio::test]
+async fn a_todo_whose_spec_file_is_in_a_specs_folder_gets_its_spec_page() {
+    let specs = Specs::new().await;
+    let path = specs.write("serve-specs.md", b"x");
+    let hidden = specs.write(".revisions.md", b"x");
+    let outside_folder = TempFolder::new();
+    std::fs::create_dir_all(&outside_folder.0).unwrap();
+    let outside = outside_folder.0.join("elsewhere.md");
+    std::fs::write(&outside, b"x").unwrap();
+    let alias = specs.file("alias.md");
+    std::os::unix::fs::symlink(&path, &alias).unwrap();
+    let leading_out = specs.file("link.md");
+    std::os::unix::fs::symlink(&outside, &leading_out).unwrap();
+    put(&specs.service, asked_with("Q1", b"x", &path))
+        .await
+        .unwrap();
+    put(&specs.service, asked_with("Q2", b"x", &alias))
+        .await
+        .unwrap();
+    put(&specs.service, asked_with("Q3", b"x", &hidden))
+        .await
+        .unwrap();
+    put(&specs.service, question("Q4", "other", "abc"))
+        .await
+        .unwrap();
+    // A file that does not exist yet passes at put but has no page.
+    put(
+        &specs.service,
+        asked_with("Q5", b"x", &specs.file("later.md")),
+    )
+    .await
+    .unwrap();
+
+    let response = list(&specs.service).await;
+
+    assert_eq!(page_of(&response, "Q1"), "/specs/harold/serve-specs");
+    assert_eq!(page_of(&response, "Q2"), "/specs/harold/alias");
+    assert_eq!(page_of(&response, "Q3"), "", "the id has a dot");
+    assert_eq!(page_of(&response, "Q4"), "", "no spec file");
+    assert_eq!(page_of(&response, "Q5"), "", "no such file");
+    // The path itself is still never returned.
+    assert!(
+        response
+            .questions
+            .iter()
+            .all(|q| q.question.as_ref().unwrap().spec_file.is_empty())
+    );
+}
+
+struct WithListener(&'static str);
+
+impl crate::tools::Products for WithListener {
+    fn products(&self) -> Result<Vec<(String, std::path::PathBuf)>, &'static str> {
+        Ok(Vec::new())
+    }
+
+    fn local_specs_url(&self) -> Option<String> {
+        (!self.0.is_empty()).then(|| self.0.to_owned())
+    }
+}
+
+#[tokio::test]
+async fn the_listing_names_the_specs_listener_only_when_it_is_open() {
+    let folder = TempFolder::new();
+    for (url, expected) in [("http://127.0.0.1:4331", "http://127.0.0.1:4331"), ("", "")] {
+        let service = QuestionToolService::new(
+            open_store(&folder).await,
+            Arc::new(Notify::new()),
+            Arc::new(WithListener(url)),
+        );
+        assert_eq!(list(&service).await.local_specs_url, expected);
+    }
+}
+
+#[tokio::test]
+async fn a_question_with_a_spec_file_may_leave_out_its_link_and_one_without_may_not() {
+    let specs = Specs::new().await;
+    let path = specs.write("a.md", b"x");
+    let mut no_link = asked_with("Q1", b"x", &path);
+    no_link.link = String::new();
+    put(&specs.service, no_link).await.unwrap();
+    let stored = list(&specs.service).await;
+    assert_eq!(stored.questions.len(), 1);
+    assert_eq!(stored.questions[0].question.as_ref().unwrap().link, "");
+
+    // A link it does give must still be a web address.
+    let mut bad_link = asked_with("Q2", b"x", &path);
+    bad_link.link = "ftp://example.com/x".into();
+    let refused = put(&specs.service, bad_link).await.unwrap_err();
+    assert_eq!(refused.message(), "invalid link");
+
+    // No spec file: the link is still required.
+    let mut neither = question("Q3", "other", "abc");
+    neither.link = String::new();
+    let refused = put(&specs.service, neither).await.unwrap_err();
+    assert_eq!(refused.code(), Code::InvalidArgument);
+    assert_eq!(refused.message(), "invalid link");
+}

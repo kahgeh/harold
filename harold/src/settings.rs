@@ -855,7 +855,13 @@ pub(crate) struct WebAppSettings {
     /// The file holding `HAROLD_PAIRING_CODE=<code>`, with a leading `~/` expanded;
     /// `~/bin/harold/config/pairing.env` when left out.
     pub pairing_file: Option<String>,
+    /// The loopback address and port of the specs listener, which serves the spec pages to
+    /// the browser on the Mac; `127.0.0.1:4331` when left out.
+    pub specs_listen: Option<String>,
 }
+
+/// Where the specs listener is unless `[web_app] specs_listen` says otherwise.
+pub(crate) const DEFAULT_SPECS_LISTEN: &str = "127.0.0.1:4331";
 
 /// Where the pairing code is kept unless `[web_app] pairing_file` says otherwise.
 const DEFAULT_PAIRING_FILE: &str = "~/bin/harold/config/pairing.env";
@@ -924,6 +930,16 @@ impl WebAppSettings {
     pub(crate) fn listen_addr(&self) -> Option<SocketAddr> {
         self.listen.parse().ok()
     }
+
+    /// The specs listener's address as written.
+    pub(crate) fn specs_listen(&self) -> &str {
+        self.specs_listen.as_deref().unwrap_or(DEFAULT_SPECS_LISTEN)
+    }
+
+    /// The specs listener's address. `Settings::validate` reports one that does not parse.
+    pub(crate) fn specs_listen_addr(&self) -> Option<SocketAddr> {
+        self.specs_listen().parse().ok()
+    }
 }
 
 fn web_app_errors(web_app: Option<&WebAppSettings>, chief_folder: Option<&str>) -> Vec<String> {
@@ -938,6 +954,17 @@ fn web_app_errors(web_app: Option<&WebAppSettings>, chief_folder: Option<&str>) 
         errors.push(
             "web_app.listen must be a loopback address and port such as 127.0.0.1:4330".into(),
         );
+    }
+    match web_app.specs_listen_addr() {
+        Some(addr) if addr.ip().is_loopback() => {
+            if web_app.listen_addr() == Some(addr) {
+                errors.push("web_app.specs_listen must differ from web_app.listen".into());
+            }
+        }
+        _ => errors.push(
+            "web_app.specs_listen must be a loopback address and port such as 127.0.0.1:4331"
+                .into(),
+        ),
     }
     if web_app.allowed_login.trim().is_empty() {
         errors.push("web_app.allowed_login must be your Tailscale login".into());
@@ -3061,6 +3088,30 @@ encryption_key_file = "/Users/x/.config/harold/knowledge-key"
             ));
             assert!(!errors.iter().any(|e| e == message), "{listen}: {errors:?}");
         }
+    }
+
+    #[test]
+    fn validate_reports_a_specs_listen_that_is_not_loopback_or_equals_listen() {
+        let loopback =
+            "web_app.specs_listen must be a loopback address and port such as 127.0.0.1:4331";
+        let differ = "web_app.specs_listen must differ from web_app.listen";
+        for specs in ["0.0.0.0:4331", "100.64.0.1:4331", "nonsense"] {
+            let errors = web_app_validate_errors(&format!(
+                "{WEB_APP_FOLDER}[web_app]\nlisten = \"127.0.0.1:4330\"\nallowed_login = \"a@b.c\"\nspecs_listen = \"{specs}\""
+            ));
+            assert!(errors.iter().any(|e| e == loopback), "{specs}: {errors:?}");
+        }
+        let errors = web_app_validate_errors(&format!(
+            "{WEB_APP_FOLDER}[web_app]\nlisten = \"127.0.0.1:4330\"\nallowed_login = \"a@b.c\"\nspecs_listen = \"127.0.0.1:4330\""
+        ));
+        assert!(errors.iter().any(|e| e == differ), "{errors:?}");
+        let errors = web_app_validate_errors(&format!(
+            "{WEB_APP_FOLDER}[web_app]\nlisten = \"127.0.0.1:4330\"\nallowed_login = \"a@b.c\""
+        ));
+        assert!(
+            !errors.iter().any(|e| e.contains("specs_listen")),
+            "{errors:?}"
+        );
     }
 
     #[test]

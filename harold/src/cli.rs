@@ -3039,6 +3039,7 @@ mod tests {
             ticked: vec![1, 3],
             picks: vec![],
             spec_state: 0,
+            spec_page: String::new(),
         };
         assert_eq!(list_line(&instructions), "I1 v2 harold steps 2/4");
         let question = questions::ListedQuestion {
@@ -3052,6 +3053,7 @@ mod tests {
             ticked: vec![],
             picks: vec![],
             spec_state: 0,
+            spec_page: String::new(),
         };
         assert_eq!(list_line(&question), "Q1 v1 harold dash picks 0/0");
     }
@@ -3127,6 +3129,7 @@ mod tests {
             ticked: vec![],
             picks: vec![questions::Pick::default(); 2],
             spec_state: 0,
+            spec_page: String::new(),
         };
         assert_eq!(list_line(&listed), "Q43 v1 harold watch-jobs picks 2/4");
     }

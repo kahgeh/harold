@@ -500,6 +500,7 @@ fn listed_question() -> ListedQuestion {
             text: "SECRET-PICK-TEXT".into(),
         }],
         spec_state: 0,
+        spec_page: String::new(),
     }
 }
 
@@ -526,6 +527,7 @@ fn listed_instructions() -> ListedQuestion {
         ticked: vec![1, 2],
         picks: vec![],
         spec_state: 0,
+        spec_page: String::new(),
     }
 }
 

@@ -98,6 +98,7 @@ command = "say"
 # allowed_login = "you@example.com" # your Tailscale login
 # app_name = "Chief M4"            # this Mac's name under the icon, 1 to 30 characters; default "Chief"
 # icon = "~/code/your-organisation/machines/<this Mac>/icon.png" # a square PNG, 180 to 1024 pixels a side, at most 1 MB; read at start
+# specs_listen = "127.0.0.1:4331"  # loopback only, not the same as listen; serves the spec pages to the browser on this Mac; opened only when [telemetry] pod_registry is set
 
 # The knowledge graph: typed relations between vault notes, held in TypeDB. Off unless enabled.
 # It needs [knowledge] vault. Install TypeDB server 3.14.1 yourself; Harold starts it.

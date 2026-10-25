@@ -23,6 +23,7 @@ pub(super) struct QuestionToolService<S> {
     /// Woken after every successful write, so the batch sender looks again.
     wake: Arc<Notify>,
     checker: Arc<SpecChecker>,
+    products: Arc<dyn Products>,
     /// The question versions whose changed or unknown spec has been logged: a line is logged
     /// once per version, however often the todos are listed.
     logged: Mutex<HashSet<(String, u32, bool)>>,
@@ -33,7 +34,8 @@ impl<S: QuestionStore> QuestionToolService<S> {
         Self {
             store,
             wake,
-            checker: Arc::new(SpecChecker::new(products)),
+            checker: Arc::new(SpecChecker::new(Arc::clone(&products))),
+            products,
             logged: Mutex::new(HashSet::new()),
         }
     }
@@ -46,6 +48,15 @@ impl<S: QuestionStore> QuestionToolService<S> {
         tokio::task::spawn_blocking(move || checker.states(&asked))
             .await
             .unwrap_or_else(|_| vec![State::Unknown(None); count])
+    }
+
+    /// The spec page of each spec file. The file system is read off the runtime's threads.
+    async fn spec_pages(&self, files: Vec<String>) -> Vec<String> {
+        let checker = Arc::clone(&self.checker);
+        let count = files.len();
+        tokio::task::spawn_blocking(move || checker.pages(&files))
+            .await
+            .unwrap_or_else(|_| vec![String::new(); count])
     }
 
     /// Logs a changed or unknown spec once per question version, and forgets the versions
@@ -244,6 +255,15 @@ impl<S: QuestionStore> QuestionService for QuestionToolService<S> {
             })
             .collect();
         let states = self.spec_states(asked).await;
+        let pages = self
+            .spec_pages(
+                listing
+                    .questions
+                    .iter()
+                    .map(|listed| listed.question.spec_file.clone())
+                    .collect(),
+            )
+            .await;
         let seen: Vec<(String, u32, State)> = listing
             .questions
             .iter()
@@ -258,13 +278,14 @@ impl<S: QuestionStore> QuestionService for QuestionToolService<S> {
         let questions: Vec<pb::ListedQuestion> = listing
             .questions
             .iter()
-            .zip(&states)
-            .map(|(listed, state)| pb::ListedQuestion {
+            .zip(states.iter().zip(pages))
+            .map(|(listed, (state, spec_page))| pb::ListedQuestion {
                 question: Some(schema::to_proto(&listed.question)),
                 version: listed.version,
                 ticked: listed.ticked.clone(),
                 picks: listed.picks.iter().map(pick_to_proto).collect(),
                 spec_state: spec_state_to_proto(*state) as i32,
+                spec_page,
             })
             .collect();
         let waiting = listing
@@ -283,6 +304,7 @@ impl<S: QuestionStore> QuestionService for QuestionToolService<S> {
             waiting,
             dismissed,
             checked_at_ms: listing.checked_at_ms,
+            local_specs_url: self.products.local_specs_url().unwrap_or_default(),
         }))
     }
 

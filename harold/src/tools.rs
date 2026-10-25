@@ -82,6 +82,12 @@ pub(crate) trait PaneFolder: Send + Sync {
 /// registry could not be read.
 pub(crate) trait Products: Send + Sync {
     fn products(&self) -> Result<Vec<(String, PathBuf)>, &'static str>;
+
+    /// The address of the specs listener, such as `http://127.0.0.1:4331`, where the spec pages
+    /// open on this Mac; none when the listener is not opened.
+    fn local_specs_url(&self) -> Option<String> {
+        None
+    }
 }
 
 /// One agent pane as the agent list shows it, copied out of Harold's snapshot.
@@ -210,6 +216,12 @@ pub(crate) async fn start(
     };
     let products = RegistryProducts {
         path: cfg.telemetry.pod_registry_path(),
+        // The listener opens only with a registry, and only with the web app.
+        specs_url: cfg
+            .web_app
+            .as_ref()
+            .filter(|_| cfg.telemetry.pod_registry.is_some())
+            .map(|web_app| format!("http://{}", web_app.specs_listen())),
     };
     let extras = Extras {
         watch_typing: Arc::new(TmuxTyping {
@@ -482,6 +494,7 @@ impl Pods for GaugePods {
 /// registry set there are no products.
 struct RegistryProducts {
     path: Option<PathBuf>,
+    specs_url: Option<String>,
 }
 
 impl Products for RegistryProducts {
@@ -494,6 +507,10 @@ impl Products for RegistryProducts {
             .into_iter()
             .map(|product| (product.name, product.repo))
             .collect())
+    }
+
+    fn local_specs_url(&self) -> Option<String> {
+        self.specs_url.clone()
     }
 }
 

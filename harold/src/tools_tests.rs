@@ -968,16 +968,29 @@ fn registry_products_reads_each_product_with_its_repo() {
     .unwrap();
 
     assert_eq!(
-        RegistryProducts { path: Some(file) }.products(),
+        RegistryProducts {
+            path: Some(file),
+            specs_url: None
+        }
+        .products(),
         Ok(vec![
             ("harold".into(), tmp.0.join("harold")),
             ("turso".into(), tmp.0.join("turso")),
         ])
     );
-    assert_eq!(RegistryProducts { path: None }.products(), Ok(vec![]));
+    let none = RegistryProducts {
+        path: None,
+        specs_url: Some("http://127.0.0.1:4331".into()),
+    };
+    assert_eq!(none.products(), Ok(vec![]));
+    assert_eq!(
+        none.local_specs_url().as_deref(),
+        Some("http://127.0.0.1:4331")
+    );
     assert_eq!(
         RegistryProducts {
-            path: Some(tmp.0.join("missing.toml"))
+            path: Some(tmp.0.join("missing.toml")),
+            specs_url: None
         }
         .products(),
         Err("registry_unreadable")

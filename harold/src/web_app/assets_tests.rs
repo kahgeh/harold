@@ -575,6 +575,53 @@ fn the_otel_bundle_is_named_after_its_bytes_and_built_from_the_locked_packages()
 }
 
 #[test]
+fn the_mermaid_bundle_is_named_after_its_bytes_and_built_from_the_locked_packages() {
+    let hash = hex::encode(Sha256::digest(super::pages::MERMAID_JS));
+    let package = include_str!("../../../web-mermaid/package.json");
+    assert!(
+        package.contains(r#""mermaid": "12.1.0""#),
+        "web-mermaid/package.json does not pin mermaid 12.1.0"
+    );
+    assert_eq!(
+        super::pages::MERMAID_JS_NAME,
+        format!("mermaid-12.1.0-{}.js", &hash[..8])
+    );
+    let bundle = std::str::from_utf8(super::pages::MERMAID_JS).unwrap();
+    assert!(
+        bundle.starts_with("/* Mermaid for the Harold spec pages"),
+        "the bundle lacks its header"
+    );
+    let lock = include_bytes!("../../../web-mermaid/package-lock.json");
+    let lock_sha = hex::encode(Sha256::digest(lock));
+    assert!(
+        bundle.contains(&format!("package-lock.json sha256 {lock_sha}")),
+        "the lockfile changed since the bundle was built: run scripts/build_web_mermaid.sh"
+    );
+    for module in ["child_process", "node:fs"] {
+        assert!(!bundle.contains(module), "the bundle holds {module}");
+    }
+    let folder = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("static/web_app");
+    let bundles: Vec<String> = std::fs::read_dir(folder)
+        .unwrap()
+        .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
+        .filter(|name| name.starts_with("mermaid-") && name.ends_with(".js"))
+        .collect();
+    assert_eq!(bundles, [super::pages::MERMAID_JS_NAME]);
+}
+
+#[test]
+fn the_specs_script_imports_the_mermaid_bundle_by_its_name() {
+    let script = include_str!("../../static/web_app/specs.js");
+    assert!(
+        script.contains(&format!(
+            r#"from "/static/{}""#,
+            super::pages::MERMAID_JS_NAME
+        )),
+        "specs.js does not import the bundle by its name"
+    );
+}
+
+#[test]
 fn the_telemetry_script_imports_the_bundle_skips_five_paths_and_cuts_urls_to_paths() {
     let script = include_str!("../../static/web_app/telemetry.js");
     assert!(

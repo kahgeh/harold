@@ -80,6 +80,27 @@ impl SpecChecker {
         }
     }
 
+    /// The path of the spec page of each spec file, `/specs/<product>/<id>`; empty for a file
+    /// that is not directly in a product's specs folder, or whose name is not an id. The
+    /// registry is read once for all.
+    pub(super) fn pages(&self, files: &[String]) -> Vec<String> {
+        let Ok(products) = self.products.products() else {
+            return vec![String::new(); files.len()];
+        };
+        let folders: Vec<(String, PathBuf)> = products
+            .into_iter()
+            .filter(|(_, repo)| repo.is_absolute())
+            .filter_map(|(name, repo)| {
+                let folder = SPECS_FOLDER.iter().fold(repo, |p, part| p.join(part));
+                Some((name, std::fs::canonicalize(folder).ok()?))
+            })
+            .collect();
+        files
+            .iter()
+            .map(|file| page_of(&folders, file).unwrap_or_default())
+            .collect()
+    }
+
     /// The state of each todo, as `(spec_file, sha)`. The registry is read once for all.
     pub(super) fn states(&self, asked: &[(String, String)]) -> Vec<State> {
         let roots = self.roots();
@@ -168,6 +189,46 @@ impl SpecChecker {
             })
             .collect())
     }
+}
+
+/// The spec page of `file`: its name is an id and it sits directly in one product's specs
+/// folder, once symlinks are resolved. The page shows the file under that name.
+fn page_of(folders: &[(String, PathBuf)], file: &str) -> Option<String> {
+    if file.is_empty() {
+        return None;
+    }
+    let path = Path::new(file);
+    let id = path.file_name()?.to_str()?.strip_suffix(".md")?;
+    let valid = !id.is_empty()
+        && id.chars().count() <= 100
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
+    if !valid {
+        return None;
+    }
+    // The folder the name is in, and the file it resolves to, must both be in the folder.
+    let folder = std::fs::canonicalize(path.parent()?).ok()?;
+    let resolved = std::fs::canonicalize(path).ok()?;
+    let (product, root) = folders.iter().find(|(_, root)| *root == folder)?;
+    if !resolved.starts_with(root) {
+        return None;
+    }
+    Some(format!("/specs/{}/{}", encode_segment(product), id))
+}
+
+/// Percent-encodes one path segment.
+fn encode_segment(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for byte in text.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                out.push(byte as char);
+            }
+            other => out.push_str(&format!("%{other:02X}")),
+        }
+    }
+    out
 }
 
 fn inside(resolved: &Path, roots: &[PathBuf]) -> bool {

@@ -220,7 +220,8 @@ fn question_fields_keep_their_numbers() {
             ("questions", 1),
             ("waiting", 2),
             ("dismissed", 3),
-            ("checked_at_ms", 4)
+            ("checked_at_ms", 4),
+            ("local_specs_url", 5)
         ])
     );
     assert_eq!(
@@ -230,7 +231,8 @@ fn question_fields_keep_their_numbers() {
             ("version", 2),
             ("ticked", 4),
             ("picks", 5),
-            ("spec_state", 6)
+            ("spec_state", 6),
+            ("spec_page", 7)
         ])
     );
     assert_eq!(
@@ -321,6 +323,9 @@ fn a_listed_question_from_an_older_server_has_an_unknown_spec_state_and_no_check
     assert_eq!(old.spec_state, SpecState::Unknown as i32);
     let none = ListQuestionsResponse::decode([0x10, 0x00].as_slice()).expect("decode");
     assert_eq!(none.checked_at_ms, 0);
+    // A server before the spec pages leaves out the page and the listener's address.
+    assert!(old.spec_page.is_empty());
+    assert!(none.local_specs_url.is_empty());
 }
 
 #[test]

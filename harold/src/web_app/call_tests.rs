@@ -994,6 +994,7 @@ async fn shutdown_ends_an_open_phone_call() {
         icon: None,
         require_pairing: false,
         pairing_file: None,
+        specs_listen: None,
     };
     let api: Arc<dyn PhoneCallApi> = calls.clone();
     let running = start(

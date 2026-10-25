@@ -1113,6 +1113,7 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
         .exporting()
         .then(|| cfg.telemetry.otlp_http_endpoint.clone())
         .flatten();
+    let pod_registry = cfg.telemetry.pod_registry_path();
     let web_app = web_app::start_if_set(
         cfg.web_app.as_ref(),
         Arc::clone(&store),
@@ -1126,6 +1127,7 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
             grpc: &cfg.grpc,
             browser_collector: browser_collector.as_deref(),
             knowledge: cfg.knowledge.enabled(),
+            pod_registry: pod_registry.as_deref(),
         },
     )
     .await;

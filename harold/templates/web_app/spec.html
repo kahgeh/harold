@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+{% if web_app %}<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="{{ app_name }}">
+{% endif %}<title>{{ title }}</title>
+{% if web_app %}<link rel="manifest" href="/static/manifest.webmanifest">
+{% if has_icon %}<link rel="apple-touch-icon" href="/static/icon.png">
+{% endif %}{% endif %}<link rel="stylesheet" href="/static/app.css">
+{% if share %}<script type="module" src="/static/datastar-1.0.2.js"></script>
+{% endif %}<script type="module" src="/static/specs.js"></script>
+</head>
+<body class="notes">
+<header class="bar top">
+<div class="row">
+{% if web_app %}<a href="/" id="to-thread" class="back-button"><svg viewBox="0 0 12 20" width="12" height="20" aria-hidden="true"><path d="M10 2L2 10l8 8" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>{{ app_name }}</a>
+{% endif %}<a href="/specs" id="to-specs" class="{% if web_app %}todos-button{% else %}back-button{% endif %}">Specs</a>
+</div>
+</header>
+<main class="notes-page vault-note spec-page">
+<p class="note-kind spec-top">{{ product }} · {{ id }} · sha {{ sha }}</p>
+<h3>{{ title }}</h3>
+{% if share %}<p class="spec-share"><button type="button" id="share-spec" class="share-button" data-on:click="@post('{{ share_path }}', {filterSignals: {include: /^none$/}})">Share</button></p>
+{% endif %}<div class="note-text">{{ html|safe }}</div>
+</main>
+</body>
+</html>

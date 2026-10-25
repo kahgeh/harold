@@ -110,18 +110,15 @@ pub(super) fn from_proto(q: pb::Question) -> Result<Question, String> {
     if q.decisions.is_empty() {
         return Err("decisions".into());
     }
-    let required = [
-        ("product", &q.product),
-        ("spec", &q.spec),
-        ("sha", &q.sha),
-        ("link", &q.link),
-    ];
+    // A question with a spec file may leave out the link: its spec page stands in for it.
+    let link_left_out = q.link.is_empty() && !q.spec_file.is_empty();
+    let required = [("product", &q.product), ("spec", &q.spec), ("sha", &q.sha)];
     for (name, value) in required {
         if value.trim().is_empty() || too_long(value) {
             return Err(name.into());
         }
     }
-    if !is_http(&q.link) {
+    if !link_left_out && (q.link.trim().is_empty() || too_long(&q.link) || !is_http(&q.link)) {
         return Err("link".into());
     }
     if too_long(&q.intro) {

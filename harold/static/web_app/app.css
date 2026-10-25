@@ -1096,3 +1096,43 @@ body:has(#alerts:not([hidden])) {
   padding: 4px 8px;
   border: 1px solid var(--surface-4);
 }
+
+/* The spec pages: a spec's product, id and checksum, its diagrams and its Share button. */
+
+.spec-top {
+  overflow-wrap: anywhere;
+}
+
+.spec-share {
+  margin: 0 0 12px;
+}
+
+.share-button {
+  min-height: var(--target);
+  padding: 0 20px;
+  border: 0;
+  border-radius: 24px;
+  background: var(--brand);
+  color: var(--on-brand);
+  font: inherit;
+  font-weight: 600;
+}
+
+.share-done {
+  color: var(--text-2);
+}
+
+.note-text pre.mermaid {
+  background: transparent;
+  text-align: center;
+}
+
+.note-text pre.mermaid svg {
+  max-width: 100%;
+  height: auto;
+}
+
+.note-text pre.mermaid.failed {
+  background: var(--surface-2);
+  text-align: left;
+}

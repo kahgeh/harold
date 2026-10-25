@@ -491,10 +491,11 @@ fn proto_answer_kind(kind: AnswerKind) -> ProtoAnswerKind {
 /// the block never indexes into empty data; it is not counted as waiting either.
 pub fn map_queue(response: ListQuestionsResponse) -> Queue {
     let listed = response.questions.len();
+    let local_specs_url = response.local_specs_url;
     let questions: Vec<QuestionView> = response
         .questions
         .into_iter()
-        .filter_map(map_listed_question)
+        .filter_map(|listed| map_listed_question(listed, &local_specs_url))
         .collect();
     let dropped = u32::try_from(listed - questions.len()).unwrap_or(u32::MAX);
     Queue {
@@ -513,7 +514,19 @@ pub fn map_queue(response: ListQuestionsResponse) -> Queue {
     }
 }
 
-fn map_listed_question(listed: ListedQuestion) -> Option<QuestionView> {
+/// What `o` opens for a todo: its spec page on the specs listener when it has a page and the
+/// listener is open, and otherwise its `link`.
+fn open_address(local_specs_url: &str, spec_page: &str, link: &str) -> String {
+    if !local_specs_url.is_empty() && spec_page.starts_with('/') {
+        return question_text(&format!(
+            "{}{spec_page}",
+            local_specs_url.trim_end_matches('/')
+        ));
+    }
+    question_text(link)
+}
+
+fn map_listed_question(listed: ListedQuestion, local_specs_url: &str) -> Option<QuestionView> {
     let question = listed.question?;
     let instructions = !question.steps.is_empty();
     if instructions == !question.decisions.is_empty()
@@ -529,7 +542,7 @@ fn map_listed_question(listed: ListedQuestion) -> Option<QuestionView> {
         product: question_text(&question.product),
         spec: question_text(&question.spec),
         sha: question_text(&question.sha),
-        link: question_text(&question.link),
+        link: open_address(local_specs_url, &listed.spec_page, &question.link),
         intro: question_text(&question.intro),
         version: listed.version,
         decisions: question.decisions.into_iter().map(map_decision).collect(),
@@ -1431,6 +1444,55 @@ mod question_tests {
             ask: ask.into(),
             options,
         }
+    }
+
+    #[test]
+    fn a_todo_opens_its_spec_page_on_the_specs_listener_and_otherwise_its_link() {
+        let mut paged = listed(
+            "Q1",
+            1,
+            vec![decision("Which?", vec![option("a", false, false)])],
+        );
+        paged.spec_page = "/specs/harold/serve-specs".into();
+        let mut no_listener = paged.clone();
+        no_listener.question.as_mut().unwrap().id = "Q2".into();
+        let mut no_page = paged.clone();
+        no_page.question.as_mut().unwrap().id = "Q3".into();
+        no_page.spec_page = String::new();
+        let mut no_link = paged.clone();
+        no_link.question.as_mut().unwrap().id = "Q4".into();
+        no_link.question.as_mut().unwrap().link = String::new();
+        let mut hostile = paged.clone();
+        hostile.question.as_mut().unwrap().id = "Q5".into();
+        hostile.spec_page = "evil".into();
+
+        let with_listener = map_queue(ListQuestionsResponse {
+            questions: vec![paged, no_page.clone(), no_link, hostile],
+            local_specs_url: "http://127.0.0.1:4331".into(),
+            ..Default::default()
+        });
+        let links: Vec<&str> = with_listener
+            .questions
+            .iter()
+            .map(|q| q.link.as_str())
+            .collect();
+        assert_eq!(
+            links,
+            [
+                "http://127.0.0.1:4331/specs/harold/serve-specs",
+                "https://example.com/spec",
+                "http://127.0.0.1:4331/specs/harold/serve-specs",
+                "https://example.com/spec",
+            ]
+        );
+        let without_listener = map_queue(ListQuestionsResponse {
+            questions: vec![no_listener],
+            ..Default::default()
+        });
+        assert_eq!(
+            without_listener.questions[0].link,
+            "https://example.com/spec"
+        );
     }
 
     #[test]

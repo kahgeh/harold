@@ -24,6 +24,17 @@ use crate::voice_input::{CallState, Missing, PhoneView, Said, Speaker};
 /// files only, nothing inline and nothing from another site.
 pub(crate) const CONTENT_SECURITY_POLICY: &str = "default-src 'none'; script-src 'self' 'unsafe-eval'; style-src 'self'; img-src 'self'; connect-src 'self'; manifest-src 'self'; worker-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'";
 
+/// The policy of a spec page: the app's own, with inline styles, because Mermaid writes a
+/// `<style>` into each diagram. Scripts stay Harold's own.
+pub(crate) const SPEC_CONTENT_SECURITY_POLICY: &str = "default-src 'none'; script-src 'self' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self'; connect-src 'self'; manifest-src 'self'; worker-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'";
+
+/// The name of the vendored Mermaid bundle, which `scripts/build_web_mermaid.sh` prints and
+/// `specs.js` imports. It changes whenever the bundle's bytes do.
+pub(crate) const MERMAID_JS_NAME: &str = "mermaid-12.1.0-88dc4138.js";
+pub(crate) const MERMAID_JS: &[u8] =
+    include_bytes!("../../static/web_app/mermaid-12.1.0-88dc4138.js");
+const SPECS_JS: &[u8] = include_bytes!("../../static/web_app/specs.js");
+
 /// The name of the vendored OpenTelemetry bundle, which `scripts/build_web_otel.sh` prints
 /// and `telemetry.js` imports. It changes whenever the bundle's bytes do.
 pub(crate) const OTEL_JS_NAME: &str = "otel-2.12.0-8513c042.js";
@@ -403,14 +414,61 @@ impl From<&PhoneView> for CallSection {
     }
 }
 
-/// Sets the content security policy on every response that passes through.
+/// Whether a request is for a spec page: `GET /specs/...`.
+fn is_spec_page(request: &Request) -> bool {
+    request.method() == axum::http::Method::GET && request.uri().path().starts_with("/specs/")
+}
+
+/// Sets the content security policy on every response that passes through: the spec pages'
+/// own on a spec page, and the app's on every other.
 pub(crate) async fn add_policy(request: Request, next: Next) -> Response {
+    let policy = if is_spec_page(&request) {
+        SPEC_CONTENT_SECURITY_POLICY
+    } else {
+        CONTENT_SECURITY_POLICY
+    };
     let mut response = next.run(request).await;
     response.headers_mut().insert(
         header::CONTENT_SECURITY_POLICY,
-        HeaderValue::from_static(CONTENT_SECURITY_POLICY),
+        HeaderValue::from_static(policy),
     );
     response
+}
+
+/// One of the files the spec pages load.
+pub(crate) struct StaticFile {
+    content_type: &'static str,
+    bytes: &'static [u8],
+    immutable: bool,
+}
+
+impl IntoResponse for StaticFile {
+    fn into_response(self) -> Response {
+        let mut response =
+            ([(header::CONTENT_TYPE, self.content_type)], self.bytes).into_response();
+        if self.immutable {
+            response
+                .headers_mut()
+                .insert(header::CACHE_CONTROL, HeaderValue::from_static(IMMUTABLE));
+        }
+        response
+    }
+}
+
+/// The three files a spec page loads, which the specs listener serves besides the pages:
+/// `app.css`, `specs.js` and the Mermaid bundle.
+pub(crate) fn spec_static(name: &str) -> Option<StaticFile> {
+    let (content_type, bytes, immutable) = match name {
+        "app.css" => ("text/css", APP_CSS, false),
+        "specs.js" => (JAVASCRIPT, SPECS_JS, false),
+        MERMAID_JS_NAME => (JAVASCRIPT, MERMAID_JS, true),
+        _ => return None,
+    };
+    Some(StaticFile {
+        content_type,
+        bytes,
+        immutable,
+    })
 }
 
 /// `GET /`: the thread page, with the newest `WINDOW_ROWS` rows. A store that cannot be
@@ -545,6 +603,9 @@ pub(crate) async fn get_static(
     State(state): State<AppState>,
     Path(name): Path<String>,
 ) -> Response {
+    if let Some(file) = spec_static(&name) {
+        return file.into_response();
+    }
     let (content_type, bytes): (&str, Vec<u8>) = match name.as_str() {
         "app.css" => ("text/css", APP_CSS.to_vec()),
         "alerts.js" => (JAVASCRIPT, ALERTS_JS.to_vec()),

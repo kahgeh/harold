@@ -67,6 +67,7 @@ pub(crate) mod pair;
 pub(crate) mod push;
 pub(crate) mod replies;
 pub(crate) mod route;
+pub(crate) mod specs;
 pub(crate) mod speech_check;
 pub(crate) mod todos;
 pub(crate) mod updates;
@@ -140,6 +141,9 @@ pub(crate) struct Agents<'a> {
     pub browser_collector: Option<&'a str>,
     /// Whether the knowledge tool is set: the Notes page and its link exist.
     pub knowledge: bool,
+    /// `[telemetry] pod_registry`: the products whose specs the spec pages show; none
+    /// without it.
+    pub pod_registry: Option<&'a Path>,
 }
 
 /// How long a page may go unheard before it stops counting as on screen. The page beats
@@ -358,6 +362,8 @@ pub(crate) struct AppState {
     /// The knowledge tool's service, reached through Harold's own gRPC address; `None`
     /// when `[knowledge]` is not set, and then there is no Notes link and no Notes route.
     pub notes: Option<notes::Notes>,
+    /// The registry's spec files, which the spec pages show.
+    pub specs: Arc<specs::Specs>,
     /// Bumped by each todo post, so every open page reads the todos again at once.
     pub todos_changed: Arc<watch::Sender<u64>>,
     /// The echo test's runs, sample and recent silent runs.
@@ -402,6 +408,7 @@ impl AppState {
             chief_session: None,
             questions: todos::Questions::lazy(&idle_grpc()),
             notes: None,
+            specs: Arc::new(specs::Specs::new(None)),
             todos_changed: Arc::new(watch::channel(0).0),
             echo_test: Arc::new(echo_test::EchoTest::new(
                 std::env::temp_dir().join("harold-echo-test-unused"),
@@ -455,6 +462,7 @@ pub(crate) fn idle_agents(grpc: &GrpcSettings) -> Agents<'_> {
         grpc,
         browser_collector: None,
         knowledge: false,
+        pod_registry: None,
     }
 }
 
@@ -519,6 +527,9 @@ pub(crate) fn router(state: AppState) -> Router {
         .route("/notes", get(notes::get_notes))
         .route("/notes/search", get(notes::get_search))
         .route("/notes/{*name}", get(notes::get_note))
+        .route("/specs", get(specs::get_list))
+        .route("/specs/{product}/{id}", get(specs::get_spec))
+        .route("/specs/{product}/{id}/share", post(specs::post_share))
         .route("/echo-test", get(echo_test::get_page))
         .route("/echo-test/sample", get(echo_test::get_sample))
         .route("/echo-test/runs", post(echo_test::post_run))
@@ -557,6 +568,52 @@ pub(crate) struct Running {
     /// The address the app listens on, which tests read for the port.
     #[cfg(test)]
     pub local_addr: std::net::SocketAddr,
+    /// The address the specs listener listens on; none when it is not open.
+    #[cfg(test)]
+    pub specs_addr: Option<std::net::SocketAddr>,
+}
+
+/// The specs listener, running.
+struct SpecsListener {
+    server: JoinHandle<Result<(), std::io::Error>>,
+    #[cfg(test)]
+    addr: std::net::SocketAddr,
+}
+
+/// Binds `[web_app] specs_listen` and serves the spec pages there until shutdown. None, with a
+/// warning, when it cannot bind: the web app then runs without the specs listener.
+async fn start_specs_listener(
+    settings: &WebAppSettings,
+    specs: Arc<specs::Specs>,
+    identity: Arc<WebAppIdentity>,
+    shutdown: watch::Receiver<()>,
+) -> Option<SpecsListener> {
+    let Some(addr) = settings.specs_listen_addr() else {
+        warn!("web_app.specs_listen is not an address and port");
+        return None;
+    };
+    let listener = match TcpListener::bind(addr).await {
+        Ok(listener) => listener,
+        Err(error) => {
+            warn!(error = %error, "specs listener unavailable");
+            return None;
+        }
+    };
+    let bound = listener.local_addr().ok()?;
+    let router = specs::specs_router(specs::SpecsState {
+        specs,
+        identity,
+        hosts: Arc::from(specs::listener_hosts(settings.specs_listen(), bound)),
+    });
+    let mut shutdown = shutdown;
+    let server = axum::serve(listener, router).with_graceful_shutdown(async move {
+        let _ = shutdown.changed().await;
+    });
+    Some(SpecsListener {
+        server: tokio::spawn(async move { server.await }),
+        #[cfg(test)]
+        addr: bound,
+    })
 }
 
 /// Binds `settings.listen_addr()`, makes or reads the key, serves until shutdown, and prunes
@@ -610,6 +667,9 @@ pub(crate) async fn start(
         chief_session: agents.chief_session.map(Arc::from),
         questions: todos::Questions::lazy(agents.grpc),
         notes: agents.knowledge.then(|| notes::Notes::lazy(agents.grpc)),
+        specs: Arc::new(specs::Specs::new(
+            agents.pod_registry.map(Path::to_path_buf),
+        )),
         todos_changed: Arc::new(watch::channel(0).0),
         echo_test: Arc::new(echo_test::EchoTest::new(
             echo_test::echo_test_path(store_path),
@@ -628,6 +688,21 @@ pub(crate) async fn start(
     let route: Arc<dyn AppRoute> =
         Arc::new(WebAppRoute::new(Arc::clone(&store), pusher).with_pages(Arc::clone(&state.pages)));
 
+    // The spec pages are shown on the Mac only with a pod registry.
+    let specs_listener = match agents.pod_registry {
+        Some(_) => {
+            start_specs_listener(
+                settings,
+                Arc::clone(&state.specs),
+                Arc::clone(&state.identity),
+                shutdown.clone(),
+            )
+            .await
+        }
+        None => None,
+    };
+    #[cfg(test)]
+    let specs_addr = specs_listener.as_ref().map(|listener| listener.addr);
     let pruning = tokio::spawn(prune_every_hour(store, shutdown.clone()));
     let mut server_shutdown = shutdown;
     let server = axum::serve(listener, router(state)).with_graceful_shutdown(async move {
@@ -645,6 +720,13 @@ pub(crate) async fn start(
             Ok(_) => {}
             Err(_) => server.abort(),
         }
+        if let Some(mut specs_listener) = specs_listener {
+            match tokio::time::timeout(SERVER_STOP_LIMIT, &mut specs_listener.server).await {
+                Ok(Ok(Err(error))) => error!(error = %error, "specs listener stopped"),
+                Ok(_) => {}
+                Err(_) => specs_listener.server.abort(),
+            }
+        }
     });
     Ok(Running {
         route,
@@ -652,6 +734,8 @@ pub(crate) async fn start(
         pairing,
         #[cfg(test)]
         local_addr,
+        #[cfg(test)]
+        specs_addr,
     })
 }
 
