@@ -134,6 +134,13 @@ fn registry(pod: &Pod, text: &str) -> PathBuf {
     path
 }
 
+/// A generous git limit: a full test run can keep one `git` call waiting for seconds.
+const TEST_GIT_LIMIT: Duration = Duration::from_secs(60);
+
+fn test_git() -> SystemGit {
+    SystemGit::with_limit(TEST_GIT_LIMIT)
+}
+
 fn stats(registry: PathBuf) -> (PodStats<SystemGit>, Arc<Mutex<PodSnapshot>>) {
     let snapshot = Arc::new(Mutex::new(PodSnapshot::default()));
     let tips = tips_file(&registry.parent().unwrap().join("data/store"));
@@ -141,7 +148,7 @@ fn stats(registry: PathBuf) -> (PodStats<SystemGit>, Arc<Mutex<PodSnapshot>>) {
         PodStats::new(
             registry,
             tips,
-            SystemGit,
+            test_git(),
             Arc::clone(&snapshot),
             UtcOffset::UTC,
         ),
@@ -206,7 +213,7 @@ async fn a_worktree_with_an_agent_pane_file_is_busy_and_others_are_not() {
     let a = pod.worktree(&repo, "a", true);
     pod.worktree(&repo, "b", false);
 
-    let slots = slots(&SystemGit, &pod.product(&repo, 3)).await.unwrap();
+    let slots = slots(&test_git(), &pod.product(&repo, 3)).await.unwrap();
 
     assert_eq!(slots.busy, 1);
     assert_eq!(slots.free, 2);
@@ -228,7 +235,7 @@ async fn free_slots_never_go_below_zero() {
     pod.worktree(&repo, "a", true);
     pod.worktree(&repo, "b", true);
 
-    let slots = slots(&SystemGit, &pod.product(&repo, 1)).await.unwrap();
+    let slots = slots(&test_git(), &pod.product(&repo, 1)).await.unwrap();
 
     assert_eq!((slots.busy, slots.free), (2, 0));
 }
@@ -237,8 +244,8 @@ async fn free_slots_never_go_below_zero() {
 
 /// Reads the product's history, then reads the move and saves the tip, as a poll does.
 async fn observe(tips: &mut Tips, product: &Product) -> Result<TipMove, &'static str> {
-    let history = read_history(&SystemGit, product).await?;
-    let moved = tips.moved(&SystemGit, product, &history).await?;
+    let history = read_history(&test_git(), product).await?;
+    let moved = tips.moved(&test_git(), product, &history).await?;
     tips.save(&product.name, &history.tip).unwrap();
     Ok(moved)
 }
@@ -1280,6 +1287,25 @@ fn remove_worktree(repo: &Path, path: &Path) {
     );
 }
 
+#[tokio::test]
+async fn a_git_call_over_its_limit_answers_none_and_production_keeps_five_seconds() {
+    let pod = Pod::new();
+    let repo = pod.repo("main");
+
+    let answer = SystemGit::with_limit(Duration::ZERO)
+        .run(&repo, &["rev-parse", "HEAD"])
+        .await;
+    assert!(answer.is_none());
+    assert!(
+        SystemGit::default()
+            .run(&repo, &["rev-parse", "HEAD"])
+            .await
+            .is_some()
+    );
+    assert_eq!(GIT_TIMEOUT, Duration::from_secs(5));
+    assert_eq!(SystemGit::default().limit, GIT_TIMEOUT);
+}
+
 const GONE_LINE: &str =
     "worktree removed without its commit on the base branch; spec not counted as merged";
 
@@ -1657,7 +1683,7 @@ impl Git for NoReflog {
                 stdout: String::new(),
             });
         }
-        SystemGit.run(repo, args).await
+        test_git().run(repo, args).await
     }
 }
 
@@ -1848,7 +1874,7 @@ impl Git for SilentMergeBase {
         if args.first() == Some(&"merge-base") && self.0.load(Ordering::SeqCst) {
             return None;
         }
-        SystemGit.run(repo, args).await
+        test_git().run(repo, args).await
     }
 }
 
@@ -1964,7 +1990,7 @@ async fn an_unwritable_tip_file_counts_nothing_until_it_can_be_written() {
     let mut stats = PodStats::new(
         one_product(&pod, &repo),
         blocker.join("tips"),
-        SystemGit,
+        test_git(),
         Arc::new(Mutex::new(PodSnapshot::default())),
         UtcOffset::UTC,
     );

@@ -130,7 +130,22 @@ pub(crate) trait Git: Send + Sync {
 }
 
 /// The `git` on the PATH. Harold runs only read-only commands with it.
-pub(crate) struct SystemGit;
+pub(crate) struct SystemGit {
+    /// How long one command may take.
+    limit: Duration,
+}
+
+impl SystemGit {
+    pub(crate) fn with_limit(limit: Duration) -> Self {
+        Self { limit }
+    }
+}
+
+impl Default for SystemGit {
+    fn default() -> Self {
+        Self::with_limit(GIT_TIMEOUT)
+    }
+}
 
 impl Git for SystemGit {
     fn run(&self, repo: &Path, args: &[&str]) -> impl Future<Output = Option<GitOutput>> + Send {
@@ -143,7 +158,7 @@ impl Git for SystemGit {
             .env("GIT_OPTIONAL_LOCKS", "0")
             .stdin(Stdio::null())
             .kill_on_drop(true);
-        with_timeout(GIT_TIMEOUT, async move {
+        with_timeout(self.limit, async move {
             let output = command.output().await.ok()?;
             Some(GitOutput {
                 success: output.status.success(),
@@ -1323,7 +1338,7 @@ pub(crate) fn start(
     let stats = PodStats::new(
         registry,
         tips_file,
-        SystemGit,
+        SystemGit::default(),
         gauge_snapshot(),
         telemetry::local_offset(),
     );
