@@ -3181,6 +3181,7 @@ mod tests {
     fn group_header_is_not_selectable_and_selection_marker_tracks_the_agent_row() {
         let mut app = user_layout();
         app.handle_key(crossterm::event::KeyCode::Char('g'));
+        app.handle_key(crossterm::event::KeyCode::Char('g'));
         assert_eq!(app.selected.as_ref().unwrap().pane_id, "%1");
         let buffer = rendered_buffer(&app, 140, 38, 100_000);
         let marker_line = buffer
@@ -4430,7 +4431,7 @@ mod tests {
                 "Esc",
                 "`n` / `N`",
                 "`o`",
-                "`g` / `G`",
+                "`gg` / `G`",
                 "`c` / `t`, `f`, `/`, `s`, `q`",
                 "Ctrl+L, Ctrl+Q, Ctrl+C",
             ]
@@ -4934,6 +4935,7 @@ mod tests {
         }
         app.hide_questions();
         app.handle_key(KeyCode::Esc);
+        app.handle_key(KeyCode::Char('g'));
         app.handle_key(KeyCode::Char('g'));
         app.observe_questions(q25_queue());
         assert_eq!(app.question_stop, Some(QStop::Action(2)));

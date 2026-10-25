@@ -264,6 +264,8 @@ pub struct App {
     /// `Some` when the cursor is on that row of the questions; `selected` then names the
     /// asker's row (the chief's) when it shows.
     pub question_stop: Option<QStop>,
+    /// A first `g` is waiting for a second one.
+    pending_g: bool,
     last_snapshot_received_at_ms: Option<i64>,
     runtime_status: Option<RuntimeStatus>,
     has_snapshot: bool,
@@ -375,6 +377,7 @@ impl App {
             questions: QuestionBlock::default(),
             now_line: None,
             question_stop: None,
+            pending_g: false,
             last_snapshot_received_at_ms: None,
             runtime_status: None,
             has_snapshot: matches!(connection, ConnectionState::Live | ConnectionState::Stale),
@@ -637,9 +640,12 @@ impl App {
         self.move_cursor(delta);
     }
 
-    fn move_to_boundary_clearing_notice(&mut self, last: bool) {
+    /// Puts the cursor on the header of the first or the last listed todo. An open todo
+    /// stays open.
+    fn move_to_boundary_todo(&mut self, last: bool) {
         self.questions.clear_notice();
-        self.move_to_boundary(last);
+        self.questions.show_boundary(last);
+        self.question_stop = Some(QStop::Header);
     }
 
     fn move_to_boundary(&mut self, last: bool) {
@@ -1061,6 +1067,7 @@ impl App {
     /// never typed and never taken as the bare letter.
     pub fn handle_key(&mut self, key: impl Into<KeyEvent>) -> Effect {
         let key = key.into();
+        let pending_g = std::mem::take(&mut self.pending_g);
         // The global keys act first, even while the question block holds or swallows keys.
         if is_global_key(&key) {
             return match key.code {
@@ -1113,8 +1120,9 @@ impl App {
             match key.code {
                 KeyCode::Char('j') | KeyCode::Down => self.move_cursor_clearing_notice(1),
                 KeyCode::Char('k') | KeyCode::Up => self.move_cursor_clearing_notice(-1),
-                KeyCode::Char('g') => self.move_to_boundary_clearing_notice(false),
-                KeyCode::Char('G') => self.move_to_boundary_clearing_notice(true),
+                KeyCode::Char('g') if pending_g => self.move_to_boundary_todo(false),
+                KeyCode::Char('g') => self.pending_g = true,
+                KeyCode::Char('G') => self.move_to_boundary_todo(true),
                 code => return self.handle_block_key(code, stop),
             }
             return Effect::None;
@@ -1142,7 +1150,8 @@ impl App {
             }
             KeyCode::Char('j') | KeyCode::Down => self.move_cursor(1),
             KeyCode::Char('k') | KeyCode::Up => self.move_cursor(-1),
-            KeyCode::Char('g') => self.move_to_boundary(false),
+            KeyCode::Char('g') if pending_g => self.move_to_boundary(false),
+            KeyCode::Char('g') => self.pending_g = true,
             KeyCode::Char('G') => self.move_to_boundary(true),
             KeyCode::Char('c') if self.chief_row_selected() => {
                 if let Some(action) = self.call_press() {
@@ -1972,6 +1981,7 @@ mod tests {
             None,
         );
 
+        app.handle_key(KeyCode::Char('g'));
         app.handle_key(KeyCode::Char('g'));
         assert_eq!(app.selected.as_ref().unwrap().pane_id, "%1");
         app.handle_key(KeyCode::Down);
@@ -3126,6 +3136,12 @@ mod tests {
         let mut app = call_app(CallState::Off);
         app.observe_questions(question_queue(&["Q1"]));
         app.handle_key(KeyCode::Char('g'));
+        assert_eq!(
+            app.cursor_stop(),
+            Some(agent("%3")),
+            "a single g does nothing"
+        );
+        app.handle_key(KeyCode::Char('g'));
         assert_eq!(app.cursor_stop(), Some(agent("%1")));
         app.handle_key(KeyCode::Char('G'));
         assert_eq!(app.cursor_stop(), Some(Stop::Question(QStop::Header)));
@@ -3133,11 +3149,48 @@ mod tests {
         assert_eq!(app.cursor_stop(), Some(agent("%3")));
         app.handle_key(KeyCode::Down);
         assert_eq!(app.cursor_stop(), Some(Stop::Question(QStop::Header)));
-        app.handle_key(KeyCode::Char('l'));
-        app.handle_key(KeyCode::Char('G'));
-        assert_eq!(app.cursor_stop(), Some(Stop::Question(QStop::Action(3))));
+    }
+
+    #[test]
+    fn g_then_j_moves_down_one_row_and_g_alone_moves_nothing() {
+        let mut app = call_app(CallState::Off);
         app.handle_key(KeyCode::Char('g'));
-        assert_eq!(app.cursor_stop(), Some(agent("%1")));
+        app.handle_key(KeyCode::Char('g'));
+        let first = app.cursor_stop();
+        app.handle_key(KeyCode::Char('g'));
+        assert_eq!(app.cursor_stop(), first);
+        app.handle_key(KeyCode::Char('j'));
+        assert_eq!(app.cursor_stop(), Some(agent("%2")));
+        app.handle_key(KeyCode::Char('j'));
+        app.handle_key(KeyCode::Char('g'));
+        app.handle_key(KeyCode::Char('j'));
+        assert_eq!(app.cursor_stop(), Some(agent("%3")), "j cleared the wait");
+        app.handle_key(KeyCode::Char('g'));
+        assert_eq!(app.cursor_stop(), Some(agent("%3")));
+    }
+
+    #[test]
+    fn gg_and_g_in_the_todos_go_to_the_first_and_last_todo_header() {
+        let mut app = call_app(CallState::Off);
+        app.observe_questions(question_queue(&["Q1", "Q2", "Q3"]));
+        app.handle_key(KeyCode::Char('G'));
+        app.handle_key(KeyCode::Char('l'));
+        assert!(app.questions.is_open());
+        app.handle_key(KeyCode::Char('N'));
+        app.handle_key(KeyCode::Char('N'));
+        assert_eq!(app.questions.shown().unwrap().0, "Q2");
+        app.questions.set_notice("note".into());
+        app.handle_key(KeyCode::Char('j'));
+        app.handle_key(KeyCode::Char('g'));
+        assert_eq!(app.questions.shown().unwrap().0, "Q2", "a single g waits");
+        app.handle_key(KeyCode::Char('g'));
+        assert_eq!(app.questions.shown().unwrap().0, "Q1");
+        assert_eq!(app.cursor_stop(), Some(Stop::Question(QStop::Header)));
+        assert!(app.questions.is_open(), "an open todo stays open");
+        app.handle_key(KeyCode::Char('G'));
+        assert_eq!(app.questions.shown().unwrap().0, "Q3");
+        assert_eq!(app.cursor_stop(), Some(Stop::Question(QStop::Header)));
+        assert!(app.questions.is_open());
     }
 
     #[test]
@@ -3197,6 +3250,7 @@ mod tests {
             // Landing on the rows leaves the selection where it was.
             let selected = app.selected.clone();
             app.handle_key(KeyCode::Char('g'));
+            app.handle_key(KeyCode::Char('g'));
             assert_eq!(app.cursor_stop(), Some(header.clone()));
             assert_eq!(app.selected, selected);
         }
@@ -3220,8 +3274,12 @@ mod tests {
         app.observe_questions(question_queue(&["Q1", "Q2", "Q3"]));
         assert_eq!(app.cursor_stop(), on);
         app.handle_key(KeyCode::Char('G'));
-        let last = app.cursor_stop();
-        assert_eq!(last, Some(Stop::Question(QStop::Other(2))));
+        assert_eq!(app.cursor_stop(), Some(Stop::Question(QStop::Header)));
+        assert_eq!(
+            app.questions.shown().unwrap().0,
+            "Q3",
+            "G shows the last todo"
+        );
     }
 
     #[test]

@@ -43,7 +43,7 @@ fn opening_reads_the_recent_list_at_once() {
 }
 
 #[test]
-fn j_and_k_move_within_the_rows_and_g_goes_to_the_ends() {
+fn j_and_k_move_within_the_rows_and_gg_and_g_go_to_the_ends() {
     let mut view = view_with(&["a", "b", "c"]);
     assert_eq!(view.handle_key(KeyCode::Char('j')), NotesKey::None);
     assert_eq!(view.cursor, 1);
@@ -53,6 +53,8 @@ fn j_and_k_move_within_the_rows_and_g_goes_to_the_ends() {
     view.handle_key(KeyCode::Char('k'));
     assert_eq!(view.cursor, 1);
     view.handle_key(KeyCode::Char('g'));
+    assert_eq!(view.cursor, 1, "a single g does nothing");
+    view.handle_key(KeyCode::Char('g'));
     assert_eq!(view.cursor, 0);
     view.handle_key(KeyCode::Char('G'));
     assert_eq!(view.cursor, 2);
@@ -60,6 +62,28 @@ fn j_and_k_move_within_the_rows_and_g_goes_to_the_ends() {
     assert_eq!(view.cursor, 1);
     view.handle_key(KeyCode::Down);
     assert_eq!(view.cursor, 2);
+}
+
+#[test]
+fn g_and_capital_g_type_after_slash_and_leave_the_cursor() {
+    let mut view = view_with(&["a", "b", "c"]);
+    view.handle_key(KeyCode::Char('j'));
+    view.handle_key(KeyCode::Char('/'));
+    view.handle_key(KeyCode::Char('g'));
+    view.handle_key(KeyCode::Char('g'));
+    view.handle_key(KeyCode::Char('G'));
+    assert_eq!(view.query, "ggG");
+    assert_eq!(view.cursor, 1);
+}
+
+#[test]
+fn a_key_between_two_g_clears_the_wait() {
+    let mut view = view_with(&["a", "b", "c"]);
+    view.handle_key(KeyCode::Char('G'));
+    view.handle_key(KeyCode::Char('g'));
+    view.handle_key(KeyCode::Char('k'));
+    view.handle_key(KeyCode::Char('g'));
+    assert_eq!(view.cursor, 1);
 }
 
 #[test]

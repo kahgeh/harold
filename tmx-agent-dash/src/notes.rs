@@ -112,6 +112,8 @@ pub struct NotesView {
     /// Whether `rows` answer a search, not the recent list.
     pub searched: bool,
     seq: u64,
+    /// A first `g` is waiting for a second one.
+    pending_g: bool,
 }
 
 impl NotesView {
@@ -126,6 +128,7 @@ impl NotesView {
             loading: true,
             searched: false,
             seq: 0,
+            pending_g: false,
         };
         let action = view.load(false);
         (view, action)
@@ -175,9 +178,11 @@ impl NotesView {
         NotesKey::Action(NotesAction::Open { name })
     }
 
-    /// Handles one key. Printable keys type a search, except `j`, `k`, `g` and `G` while
-    /// the cursor has the keys (`/` gives the keys to typing first).
+    /// Handles one key. Printable keys type a search, except `j`, `k`, `gg` and `G` while
+    /// the cursor has the keys (`/` gives the keys to typing first). A single `g` waits
+    /// for a second one, and any other key clears the wait.
     pub fn handle_key(&mut self, code: KeyCode) -> NotesKey {
+        let pending_g = std::mem::take(&mut self.pending_g);
         match (self.typing, code) {
             (_, KeyCode::Esc) => {
                 if self.query.is_empty() && !self.typing {
@@ -213,7 +218,11 @@ impl NotesView {
                 NotesKey::None
             }
             (false, KeyCode::Char('g')) => {
-                self.cursor = 0;
+                if pending_g {
+                    self.cursor = 0;
+                } else {
+                    self.pending_g = true;
+                }
                 NotesKey::None
             }
             (false, KeyCode::Char('G')) => {

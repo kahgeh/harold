@@ -2535,17 +2535,14 @@ mod tests {
     }
 
     /// `k` from the agent row to the question's header (the question's rows are at the
-    /// top of the list here, as no chief is named), `l` to open it, then `G` to the agent
-    /// row after them and `k` four times to `send`, for a question with two or more
-    /// options on each decision.
-    const TO_SEND: [KeyCode; 7] = [
+    /// top of the list here, as no chief is named), `l` to open it, then `j` three times to `send`, for a question with
+    /// one decision of two options.
+    const TO_SEND: [KeyCode; 5] = [
         KeyCode::Char('k'),
         KeyCode::Char('l'),
-        KeyCode::Char('G'),
-        KeyCode::Char('k'),
-        KeyCode::Char('k'),
-        KeyCode::Char('k'),
-        KeyCode::Char('k'),
+        KeyCode::Char('j'),
+        KeyCode::Char('j'),
+        KeyCode::Char('j'),
     ];
 
     /// The picked option key of each decision of the question in view.
@@ -2795,16 +2792,16 @@ mod tests {
         let probe = question_probe(Some(question("Q1", 2, 1)));
         {
             let mut state = probe.lock().unwrap();
-            // The stream's open and the five keys before Enter that read, `l`, `G` and three
-            // `k`, find version 2 as listed;
+            // The stream's open and the four keys before Enter that read, `l` and three
+            // `j`, find version 2 as listed;
             // the read before Enter finds version 3.
-            state.on_list = VecDeque::from(vec![Some(question("Q1", 2, 1)); 6]);
+            state.on_list = VecDeque::from(vec![Some(question("Q1", 2, 1)); 5]);
             state.on_list.push_back(Some(question("Q1", 3, 1)));
         }
         let mut keys = TO_SEND.to_vec();
         keys.push(KeyCode::Enter);
         let log = run_question_stream(&mut core, &probe, &keys).await;
-        assert_eq!(log, lists(7));
+        assert_eq!(log, lists(6));
         let state = probe.lock().unwrap();
         assert!(state.sent.is_empty(), "nothing was answered");
         assert!(!state.log.iter().any(|call| call.starts_with("answer")));
@@ -2828,7 +2825,7 @@ mod tests {
         let mut keys = TO_SEND.to_vec();
         keys.push(KeyCode::Enter);
         let log = run_question_stream(&mut core, &probe, &keys).await;
-        let mut expected = lists(7);
+        let mut expected = lists(6);
         expected.extend(["answer Q1 v3".to_string(), "list".to_string()]);
         assert_eq!(log, expected);
         let sent = probe.lock().unwrap().sent.clone();
@@ -2935,11 +2932,10 @@ mod tests {
             &[
                 KeyCode::Char('k'),
                 KeyCode::Char('l'),
-                KeyCode::Char('G'),
-                KeyCode::Char('k'),
-                KeyCode::Char('k'),
-                KeyCode::Char('k'),
-                KeyCode::Char('k'),
+                KeyCode::Char('j'),
+                KeyCode::Char('j'),
+                KeyCode::Char('j'),
+                KeyCode::Char('j'),
                 KeyCode::Enter,
             ],
         )
@@ -2964,7 +2960,8 @@ mod tests {
             .answers
             .push_back((SendResult::VersionChanged, Some(changed)));
         let mut keys = TO_SEND.to_vec();
-        keys.push(KeyCode::Enter);
+        // Two decisions: two more options before `send`.
+        keys.extend([KeyCode::Char('j'), KeyCode::Char('j'), KeyCode::Enter]);
         let log = run_question_stream(&mut core, &probe, &keys).await;
         assert!(log.contains(&"answer Q1 v1".to_string()));
         let view = core.app.questions.view().unwrap();
@@ -3078,9 +3075,13 @@ mod tests {
         for code in [
             KeyCode::Char('k'),
             KeyCode::Char('l'),
-            KeyCode::Char('G'),
-            KeyCode::Char('k'),
-            KeyCode::Char('k'),
+            KeyCode::Char('j'),
+            KeyCode::Char('j'),
+            KeyCode::Char('j'),
+            KeyCode::Char('j'),
+            KeyCode::Char('j'),
+            KeyCode::Char('j'),
+            KeyCode::Char('j'),
             KeyCode::Enter,
         ] {
             input_sender.try_send(key(code)).unwrap();
@@ -3230,9 +3231,13 @@ mod tests {
         let keys = [
             KeyCode::Char('k'),
             KeyCode::Char('l'),
-            KeyCode::Char('G'),
-            KeyCode::Char('k'),
-            KeyCode::Char('k'),
+            KeyCode::Char('j'),
+            KeyCode::Char('j'),
+            KeyCode::Char('j'),
+            KeyCode::Char('j'),
+            KeyCode::Char('j'),
+            KeyCode::Char('j'),
+            KeyCode::Char('j'),
             KeyCode::Enter,
             KeyCode::Char('a'),
             KeyCode::Char('b'),
@@ -3244,7 +3249,7 @@ mod tests {
         assert!(!core.app.questions.is_visible());
         let log = run_question_stream(&mut core, &probe, &[KeyCode::Char('d')]).await;
         // Read as each stream opens, and before each key on the question rows.
-        assert_eq!(log, lists(8 + 2));
+        assert_eq!(log, lists(15));
         assert_eq!(
             core.app.questions.view().unwrap().mode,
             crate::questions::Mode::Note {
@@ -3401,9 +3406,14 @@ mod tests {
         assert!(!core.app.questions.is_open(), "l was dropped");
         assert!(!core.drop_next_block_key);
 
-        // On the list, a key acts whatever the flag says: `g` goes to the question.
+        // On the list, a key acts whatever the flag says: `gg` goes to the question.
         let mut core = connected_core();
-        run_flagged(&mut core, &[KeyCode::Char('g').into()], false).await;
+        run_flagged(
+            &mut core,
+            &[KeyCode::Char('g').into(), KeyCode::Char('g').into()],
+            false,
+        )
+        .await;
         assert_eq!(
             core.app.question_stop,
             Some(QStop::Header),
@@ -3447,11 +3457,11 @@ mod tests {
         ]);
         // k puts the cursor on Q25's header and l opens it. Both decisions start on their
         // suggestions, a and b. j, j, j go to the option c of decision 1, and Space picks
-        // it. j goes to decision 2's first option, and Space picks a there. G goes to the
-        // agent row after the question's rows, and k four times to send; Enter sends.
+        // it. j goes to decision 2's first option, and Space picks a there. j, j, j go to
+        // send; Enter sends.
         //
         // After Q25 is recorded, the probe's queue drops it. The cursor goes to Q26's
-        // header, the question open, and `n` with one question listed does nothing. G, k, k
+        // header, the question open, and `n` with one question listed does nothing. j five times
         // go to Q26's revise row; Enter opens the note, the note is typed, and Enter
         // sends it.
         let mut keys = vec![
@@ -3463,17 +3473,16 @@ mod tests {
             KeyCode::Char(' '),
             KeyCode::Char('j'),
             KeyCode::Char(' '),
-            KeyCode::Char('G'),
-            KeyCode::Char('k'),
-            KeyCode::Char('k'),
-            KeyCode::Char('k'),
-            KeyCode::Char('k'),
-            KeyCode::Char('k'),
+            KeyCode::Char('j'),
+            KeyCode::Char('j'),
+            KeyCode::Char('j'),
             KeyCode::Enter,
             KeyCode::Char('n'),
-            KeyCode::Char('G'),
-            KeyCode::Char('k'),
-            KeyCode::Char('k'),
+            KeyCode::Char('j'),
+            KeyCode::Char('j'),
+            KeyCode::Char('j'),
+            KeyCode::Char('j'),
+            KeyCode::Char('j'),
             KeyCode::Enter,
         ];
         keys.extend("redo it".chars().map(KeyCode::Char));
@@ -3524,9 +3533,13 @@ mod tests {
             let keys = [
                 KeyCode::Char('k'),
                 KeyCode::Char('l'),
-                KeyCode::Char('G'),
-                KeyCode::Char('k'),
-                KeyCode::Char('k'),
+                KeyCode::Char('j'),
+                KeyCode::Char('j'),
+                KeyCode::Char('j'),
+                KeyCode::Char('j'),
+                KeyCode::Char('j'),
+                KeyCode::Char('j'),
+                KeyCode::Char('j'),
                 KeyCode::Enter,
                 KeyCode::Char('a'),
                 KeyCode::Char('b'),

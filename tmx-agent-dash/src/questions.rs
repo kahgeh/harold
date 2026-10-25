@@ -1018,6 +1018,15 @@ impl QuestionBlock {
         true
     }
 
+    /// Shows the first or the last listed todo, leaving the block open or closed as it is.
+    pub fn show_boundary(&mut self, last: bool) {
+        let listed = &self.queue.questions;
+        let boundary = if last { listed.last() } else { listed.first() };
+        if let Some(id) = boundary.map(|q| q.id.clone()) {
+            self.show(&id);
+        }
+    }
+
     fn note_key(&mut self, code: KeyCode, kind: NoteKind, mut text: String) -> BlockEffect {
         let Some(q) = self.question().cloned() else {
             return BlockEffect::None;
