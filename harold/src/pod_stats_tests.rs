@@ -1292,16 +1292,14 @@ async fn a_git_call_over_its_limit_answers_none_and_production_keeps_five_second
     let pod = Pod::new();
     let repo = pod.repo("main");
 
-    let answer = SystemGit::with_limit(Duration::ZERO)
-        .run(&repo, &["rev-parse", "HEAD"])
+    // A git alias that sleeps 2 s is the slow command; the limit is 200 ms.
+    let slow = ["-c", "alias.wait=!sleep 2", "wait"];
+    let answer = SystemGit::with_limit(Duration::from_millis(200))
+        .run(&repo, &slow)
         .await;
     assert!(answer.is_none());
-    assert!(
-        SystemGit::default()
-            .run(&repo, &["rev-parse", "HEAD"])
-            .await
-            .is_some()
-    );
+    let answer = test_git().run(&repo, &["rev-parse", "HEAD"]).await;
+    assert!(answer.is_some());
     assert_eq!(GIT_TIMEOUT, Duration::from_secs(5));
     assert_eq!(SystemGit::default().limit, GIT_TIMEOUT);
 }
