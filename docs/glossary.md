@@ -301,7 +301,7 @@ Words kept in the docs on purpose, one line each. They are plain English or a na
 - **"version"** stays for a release or schema version, and for an event's stream version.
 - **"waiting"**, **"held"** and **"header"** stay in their ordinary senses: "waiting" for time passing, "held back", an HTTP header. The senses the glossary names are reworded, except where one of the lines below says otherwise.
 - **"the server"** stays for the web app's HTTP server (`docs/references/away-app/README.md`) and an example question in the dash README.
-- **"away device"** stays only in the command and skill name `send-message-to-away-device` and the log line `spoken line sent to the away device`.
+- **"away device"** stays only in the command and skill name `send-message-to-away-device`.
 - **"dashboard"** stays for HyperDX dashboards (`docs/references/telemetry/README.md`) and the file path `tasks/tmux-agent-dashboard/`.
 - **"session"** stays where it is the provider's own word: a Claude Code or OpenCode session (`session.id`, `session.status`, `claude --plugin-dir` runs), a graphical login session, a HyperDX per-session metric, and the heading `In flight with another session` of the backlog file. A tmux session and a pod session are named by the glossary. Where the agent itself was meant, the docs say "agent".
 - **"process"** stays for an operating-system process (the agent process, a child process, a provider process). The glossary's "agent" is the pane's coding agent; "process inventory" and "incarnation" name the process-level facts.

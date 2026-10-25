@@ -708,8 +708,9 @@ fn dispatch_away_message(
 
 /// Say a stored spoken line at the desk or send it to the away device. `drop_reason` is
 /// asked first, with the line's pane id: when it gives a log line, the line is dropped.
-/// Then the screen lock decides: locked, the line goes to the away device unless messaging
-/// is paused; unlocked, it is said unless the voice is muted. Both are asked on every try,
+/// Then the screen lock decides: locked, the chief's line goes to the phone as text when the
+/// app route is on, and any other line is dropped; messaging paused drops all of them.
+/// Unlocked, it is said unless the voice is muted. Both are asked on every try,
 /// so a line whose send failed while away is said if the user is back for the retry. Log
 /// lines name the pane and never hold the text.
 #[cfg(test)]
@@ -1140,6 +1141,12 @@ fn remove_old_note_folder(folder: &std::path::Path) {
     }
 }
 
+/// Remove the old voice note folder in the temporary folder. `main` calls it once at
+/// start; the event handler does not, so a test of the handler never removes a real folder.
+pub(crate) fn remove_old_notes_at_start() {
+    remove_old_note_folder(&std::env::temp_dir().join(OLD_NOTE_FOLDER));
+}
+
 /// `run_event_handler_with_app` without the web app. Only tests call it now.
 #[cfg(test)]
 pub async fn run_event_handler(
@@ -1164,7 +1171,6 @@ pub async fn run_event_handler_with_app(
         production_dispatcher(Arc::new(SystemEnvironment), &snapshots, app, alerts.clone())
             .with_photos_dir(store.app_photos_dir()),
     );
-    remove_old_note_folder(&std::env::temp_dir().join(OLD_NOTE_FOLDER));
     info!("event handler starting");
     run_deliveries(store, dispatcher, Some(snapshots), alerts, shutdown).await;
     info!("event handler shutting down");

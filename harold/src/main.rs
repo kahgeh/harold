@@ -1131,6 +1131,7 @@ async fn async_main(mode: cli::Mode) -> Result<(), Box<dyn std::error::Error>> {
         },
     )
     .await;
+    projector::remove_old_notes_at_start();
     let event_handler_handle = tokio::spawn(projector::run_event_handler_with_app(
         Arc::clone(&store),
         snapshots.clone(),
