@@ -113,12 +113,31 @@ button[hidden] {
 
 /* black-translucent draws the time and icons in white, so the light strip gets a dark tint. */
 @media (prefers-color-scheme: light) {
+  :root {
+    --status-tint: color-mix(in srgb, var(--surface-1), black 60%);
+  }
+
   .top {
     background: linear-gradient(
       to bottom,
-      color-mix(in srgb, var(--surface-1), black 60%) 0 var(--status-strip),
+      var(--status-tint) 0 var(--status-strip),
       var(--surface-1) var(--status-strip)
     );
+  }
+
+  /* The pages with no .top header get the same tint over the whole safe area. */
+  body.pair-body::before,
+  body.echo-test::before,
+  body.in-call::before {
+    content: "";
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: env(safe-area-inset-top);
+    background: var(--status-tint);
+    pointer-events: none;
+    z-index: 20;
   }
 }
 

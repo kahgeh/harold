@@ -1021,7 +1021,7 @@ fn every_home_screen_page_runs_under_the_status_bar_and_the_light_strip_is_tinte
     let tint = &tint[..tint.find("\n}\n").expect("tint is closed")];
     for wanted in [
         ".top {",
-        "color-mix(in srgb, var(--surface-1), black 60%) 0 var(--status-strip),",
+        "var(--status-tint) 0 var(--status-strip),",
         "var(--surface-1) var(--status-strip)",
     ] {
         assert!(
@@ -1029,4 +1029,37 @@ fn every_home_screen_page_runs_under_the_status_bar_and_the_light_strip_is_tinte
             "the light-mode tint lacks {wanted:?}"
         );
     }
+}
+
+#[test]
+fn the_light_strip_covers_the_pages_without_a_header_with_the_same_tint() {
+    let css = include_str!("../../static/web_app/app.css");
+    let start = css
+        .find("@media (prefers-color-scheme: light) {")
+        .expect("app.css lacks the light-mode block");
+    let block = &css[start..];
+    let block = &block[..block.find("\n}\n").expect("block is closed")];
+    let tint = "color-mix(in srgb, var(--surface-1), black 60%)";
+    assert_eq!(css.matches(tint).count(), 1, "the tint is defined once");
+    assert!(block.contains(&format!("--status-tint: {tint};")));
+    let strip_start = block
+        .find("body.pair-body::before,")
+        .expect("the light block lacks the strip rule");
+    let strip = &block[strip_start..];
+    let strip = &strip[..strip.find('}').expect("strip rule is closed")];
+    for wanted in [
+        "body.echo-test::before,",
+        "body.in-call::before {",
+        "position: fixed;",
+        "height: env(safe-area-inset-top);",
+        "background: var(--status-tint);",
+        "pointer-events: none;",
+    ] {
+        assert!(strip.contains(wanted), "the strip rule lacks {wanted:?}");
+    }
+    let top = &block[block.find("  .top {").expect("the light block lacks .top")..];
+    assert!(
+        top[..top.find('}').expect("the .top rule is closed")]
+            .contains("var(--status-tint) 0 var(--status-strip)")
+    );
 }
