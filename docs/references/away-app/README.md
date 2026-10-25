@@ -109,6 +109,7 @@ allowed_login = "<your Tailscale login>"
 # icon = "~/code/your-organisation/machines/<this Mac>/icon.png"
 # pairing_file = "~/bin/harold/config/pairing.env"
 # require_pairing = true
+# specs_listen = "127.0.0.1:4331"
 ```
 
 | Key | Value |
@@ -118,6 +119,7 @@ allowed_login = "<your Tailscale login>"
 | `app_name` | Optional. The name under the home-screen icon and in the app's title, 1 to 30 characters on one line. Left out, it is `Chief`. iOS shows about 12 characters, so a short name such as `Chief M4` reads best. |
 | `icon` | Optional. The path of a square PNG, 180 to 1024 pixels a side and at most 1 MB. A leading `~/` is the home folder; otherwise the path must be absolute. Left out, the app has no icon of its own. Harold reads the file once, at start, so a change needs a restart. It does not resize the image; iOS scales a larger square down itself. |
 | `pairing_file` | Optional. The file holding `HAROLD_PAIRING_CODE=<code>`. A leading `~/` is the home folder. Left out, it is `~/bin/harold/config/pairing.env`. |
+| `specs_listen` | Optional. The loopback address and port of the [specs listener](#specs). It must differ from `listen`. Left out, it is `127.0.0.1:4331`. The listener opens only when `[telemetry] pod_registry` is set. |
 | `require_pairing` | Optional. `true` when left out: only a paired device may use the app. `false` switches the device check off, for a test Harold or for recovery, and Harold logs the WARN `web app allows any device` at every start-up. |
 
 Set `app_name` and `icon` in each Mac's own `local.toml`, so the two Macs' apps differ on the home screen. The file is served at `/static/icon.png` behind the login check, and the manifest and thread page take the name and icon from these keys.
@@ -125,7 +127,7 @@ Set `app_name` and `icon` in each Mac's own `local.toml`, so the two Macs' apps 
 The section also needs `[notify] chief` (the default `"chief-of-pods"` will do), because that entry decides which agent is the chief. The chief reaches the app only when its folder is on `[notify] web_app`.
 
 - **Absent:** Harold serves nothing, listens on no port, and every message reaches the phone as before.
-- **Invalid:** a `listen` that is not a loopback address and port, an empty `allowed_login`, no `notify.chief`, an `app_name` that is empty, over 30 characters or holds a control character, or an `icon` that cannot be read, is not a square PNG of 180 to 1024 pixels a side or is over 1 MB stops Harold at start with an error naming the key. `--check-config` fails too, but prints only `invalid configuration`; start Harold to see which key is wrong.
+- **Invalid:** a `listen` or a `specs_listen` that is not a loopback address and port, a `specs_listen` equal to `listen`, an empty `allowed_login`, no `notify.chief`, an `app_name` that is empty, over 30 characters or holds a control character, or an `icon` that cannot be read, is not a square PNG of 180 to 1024 pixels a side or is over 1 MB stops Harold at start with an error naming the key. `--check-config` fails too, but prints only `invalid configuration`; start Harold to see which key is wrong.
 - **Cannot start:** when Harold cannot listen on the address or read its key, it logs `web app unavailable` with the address or the key's path, and runs without the app. Messages then reach the phone through iMessage.
 
 ### Adding the app to the home screen
@@ -219,7 +221,7 @@ Any `service_not_allowed` means the installed app cannot dictate, and the mic st
 
 The todo page lists the chief's todos as cards in the question tool's order. Its header shows a small speech-bubble icon and a number when chief messages arrived while you were on the todo page; the number goes when you return to the thread page.
 
-- **A question** shows its id, product and intro, a link to the spec when it has one, and each decision with its options. `suggested` marks the suggested option, and a decision starts on your saved pick, else the suggested option. A free option shows a text box while picked. **Send** is enabled once every decision has a pick and every free pick has text. **Relegate to idea…** takes the question off your todos and asks the chief to keep it as an idea note (see below).
+- **A question** shows its id, product and intro, a link to the spec when it has one (**Open the spec**, to its [spec page](#specs), when the todo has a spec file in a product's specs folder; else the todo's `link`), and each decision with its options. `suggested` marks the suggested option, and a decision starts on your saved pick, else the suggested option. A free option shows a text box while picked. **Send** is enabled once every decision has a pick and every free pick has text. **Relegate to idea…** takes the question off your todos and asks the chief to keep it as an idea note (see below).
 - **The checked line** sits above the cards and says when the chief last checked every todo against its spec: `Checked by the chief at 14:05` in the Mac's local time (`yesterday at 14:05` or `on 22 Oct at 14:05` for an earlier day). More than 2 hours after the check, with a todo waiting, it turns red and reads `Not checked since 14:05`. Before any check it reads `Not checked yet`, in red. It changes on its own at the next todo read, with no reload, and is left out when there is no todo.
 - **A changed spec** shows the notice `Changed spec: the spec changed after this was asked. The chief will put it again.` on the card. Its **Send** is off, and **Revise…**, **Reject…** and **Relegate to idea…** are left out; on instructions **Done** and **Ignore** are off. The notice goes when the chief puts the todo again. If an answer is posted anyway, Harold refuses it (`spec_changed`) and the card shows the same notice.
 - **Instructions** show a title and numbered steps. Ticking a step stores the tick at once. **Done** and **Ignore** close them.
@@ -245,6 +247,27 @@ The web app reads the todos through the question tool's gRPC service on Harold's
 | `GET /notes/{name}` | The vault note `name`, a path under the vault without `.md`, such as `references/hyperdx`. A vault note named `search` is shadowed by the search route |
 
 The routes sit behind the web app's login, device, host and origin checks like every other route. The web app reads the vault notes through the knowledge tool's gRPC service on Harold's own address, as it reads the todos ([ADR 0007](../../adr/0007-the-web-app-reaches-todos-through-the-question-service.md)). A search carries `source = "app"` on the tool's `harold.knowledge.search` span; the words typed ride in the request's URL only as far as Harold's own address, and no log line holds them.
+
+## Specs
+
+The thread's header shows **Specs** beside **Notes**. It opens the specs page, and the back arrow comes back to the thread. The pages show the spec files of the products in the registry that `[telemetry] pod_registry` names, through the same `Products` port as the question tool ([ADR 0015](../../adr/0015-the-question-tool-reads-the-spec-files-the-chief-names.md)). They show nothing the files do not hold.
+
+- **The list** (`GET /specs`) shows each product's specs, newest first, with their titles. A machine with no registry reads `No specs on this machine`.
+- **A spec page** (`GET /specs/{product}/{id}`) shows the product, the id and the first 12 characters of the file's SHA-256 on its top line, so you can compare it with the SPEC line, then the rendered spec. The id is lowercase letters, digits and `-`. A fenced `mermaid` block, or a raw `<pre class="mermaid">` block, is drawn as a diagram, with the theme `neutral` in light mode and `dark` in dark mode. Mermaid runs with `securityLevel: 'strict'`. A diagram that fails to draw shows its source. Raw HTML shows as text, and a link keeps its `href` only for `http:`, `https:` or a relative address.
+- **Refusals.** An unknown product or id, an id with a dot or a `/`, a symlink out of the specs folder and a file over 1 MiB each answer `404` with a short page and no path. A registry that cannot be read answers `503`.
+- **Share.** The **Share** button posts `/specs/{product}/{id}/share`, behind the login, device and same-origin checks. Harold computes the checksum from the file at that moment, and puts the reply `Share spec <product>/<id> sha <12>` in the thread, as if you typed it. The button then reads `Asked the chief to share it`. The chief has the PnEM publish that spec as a private artifact, and sends you the link. Nothing leaves the machines unless you press the button.
+- **The content security policy.** A spec page carries the app's policy with `style-src 'self' 'unsafe-inline'`, because Mermaid writes a `<style>` into each diagram. Scripts stay `'self'`. Every other page keeps the app's policy.
+
+### The specs listener
+
+A second listener serves the browser on the Mac at `http://127.0.0.1:4331` (`[web_app] specs_listen`). The dash `o` opens a todo's spec page there. `tailscale serve` does not forward to it.
+
+- It answers only `GET /specs`, `GET /specs/{product}/{id}` and the three files `/static/app.css`, `/static/specs.js` and the Mermaid bundle. Every other path, `POST /specs/{product}/{id}/share` included, answers `404`. It has no **Share** button.
+- It has no login or pairing check, because a browser on the Mac sends no Tailscale login. It refuses a request whose `Host` is not its own loopback name (`127.0.0.1:4331` or `localhost:4331`) with `403`, which stops DNS rebinding.
+- Any local user or process can read every spec through it, as it can read the files. [ADR 0002](../../adr/0002-tool-services-trust-local-callers.md) trusts local callers. It answers no `POST`, so no local process can make the chief publish a spec through it. See [ADR 0016](../../adr/0016-harold-serves-the-specs-and-a-spec-leaves-the-machines-only-when-the-user-shares-it.md).
+- Harold opens it only when `pod_registry` is set, so a machine with no registry has no specs listener, and its `/specs` reads `No specs on this machine`. The todos on such a machine come from the chief on another Mac, so their links point at that Mac's pages.
+
+Harold logs `app spec shown` (INFO) with `listener` (`web_app` or `specs`), `result` (`ok`, `not_found`, `refused` or `unreadable`) and `ms`, and adds `product` and `id` only when the product is in the registry and the id passes the id pattern. It logs `app spec shared` (INFO) with `product`, `id` and `sha` when a **Share** reply is stored. No log line holds a path or a spec's text.
 
 ## What reaches the phone, and by which route
 

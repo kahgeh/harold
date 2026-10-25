@@ -175,6 +175,11 @@ This page lists the terms Harold's specs, code, logs, settings and docs use, eac
 | question version | The count that rises each time the chief puts a question again | "version" alone |
 | answers line | The line starting `ANSWERS` that Harold types into the chief's pane | "batch line" |
 | settle | The 3 seconds Harold waits after the newest answer before typing an answers line, for answers not sent at once | — |
+| spec page | Harold's page that shows one spec, at `/specs/<product>/<id>`, in the web app or on the specs listener. | "spec artifact", "spec link" for the page |
+| specs listener | Harold's second, loopback-only address, `127.0.0.1:4331` by default, that serves the spec pages to the browser on the Mac. | "local server", "localhost app" |
+| share a spec | Ask the chief, with the web app's **Share** button, to publish one spec as a private artifact. | "publish" for the button, "export" |
+| spec file | The file `<repo>/.superpowers/pod/specs/<id>.md` of a product in the registry, and a todo's `spec_file` field that names it. | "spec" alone for the file |
+| link | A todo's `link` field: a web address the chief gives for a todo with no spec file. | "spec page" for it |
 
 ## Tools
 

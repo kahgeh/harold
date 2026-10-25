@@ -28,10 +28,10 @@ The chief writes a question as JSON and passes it to `harold tool questions put`
 }
 ```
 
-Every field except `intro`, `impact`, `suggested` and `free` is required. The rules:
+Every field except `intro`, `impact`, `suggested`, `free` and, with a `spec_file`, `link` is required. The rules:
 
 - `id` is 1 to 32 characters from `A-Z`, `a-z`, `0-9` and `-`.
-- `product`, `spec`, `sha` and `link` are not blank. `link` starts with `https://` or `http://`.
+- `product`, `spec` and `sha` are not blank. `link` is not blank and starts with `https://` or `http://`, unless the question has a `spec_file`: then `link` may be left out, and when it is given it starts with `https://` or `http://`. For a todo with no `link`, the chief keeps the `spec_file` and the `sha` in its saved todo JSON.
 - Every text field is under 2,000 characters (1,999 at most).
 - There is at least one decision. Each decision has an `ask` and 1 to 9 options.
 - Option `key` and `label` are not blank. Keys are unique within a decision. At most one option is `suggested`.
@@ -83,6 +83,8 @@ Instructions are never a waiting question. They are left out of the `waiting` co
 | `SavePicks` | dash, web app | Replaces the saved picks of a waiting question (see [Saved picks](#saved-picks)). |
 | `ShowQuestion` | chief, CLI | Returns a stored question in any state with its question version, state, dismissal reason, saved picks and `spec_state`. An id that was never stored is `NotFound` `unknown_question`. It never returns `spec_file`. |
 | `MarkChecked` | chief | Records that the chief has just checked every todo against its spec. Returns `checked_at_ms`. |
+
+`ListQuestions` also returns each todo's `spec_page` and, for the whole listing, `local_specs_url`. `spec_page` is the path `/specs/<product>/<id>` of the todo's [spec page](../away-app/README.md#specs). It is set when the todo's `spec_file` is a file `<id>.md` directly in a registered product's specs folder, once symlinks are resolved, and `<id>` is lowercase letters, digits and `-`. It is empty otherwise. `local_specs_url`, such as `http://127.0.0.1:4331`, is the address of the specs listener, and is empty when the listener is not open. The web app card links to `spec_page` on the web app, and the dash `o` opens `local_specs_url` followed by `spec_page`, else the `link`.
 
 The `waiting` count in `ListQuestions` is the number of questions listed. Instructions are listed but not counted. Each listed item carries `ticked`: the step numbers ticked, counting from 1, empty for a question, and `picks`: the saved picks of a question, empty for instructions.
 
